@@ -7,6 +7,10 @@
 // Standard attention-based decoder with device-resident KV cache.
 
 #include "plugin_helpers.h"
+#include "runtime/backend/runtime_memory_backend.h"
+#include "runtime/domains/text/dynamic_memory/kv_cache_budget.h"
+#include "runtime/domains/text/dynamic_memory/runtime_kv_setup.h"
+#include "runtime/domains/text/dynamic_memory/runtime_memory_qualification.h"
 #include "runtime/models/llama/chat_templates.h"
 #include "runtime/models/llama/pipeline.h"
 #include "runtime/models/llama/tensor_names.h"
@@ -19,6 +23,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -32,9 +37,17 @@ namespace {
 
 struct KvCacheRuntimeSizing {
     int32_t runtime_rows{0};
+    int32_t logical_max_sequence{0};
     std::uint64_t row_bytes{0};
     std::uint64_t cache_bytes{0};
-    bool override_applied{false};
+    std::uint64_t free_bytes_after_engines{0};
+    std::uint64_t total_device_bytes{0};
+    std::uint64_t budget_bytes{0};
+    std::uint64_t memory_capacity_rows{0};
+    std::uint64_t safety_reserve_bytes{0};
+    KvCacheBudgetPolicy policy{KvCacheBudgetPolicy::kAuto};
+    double fraction{0.0};
+    bool dynamic_supported{false};
     bool clamped_to_bundle_max{false};
 };
 
@@ -59,6 +72,29 @@ struct DecoderProfileRoles {
     std::vector<DecoderProfileInfo> decode_profiles;
 };
 
+const RuntimeMemoryQualifiedTuple& qualified_runtime_memory_tuple() {
+    static const RuntimeMemoryQualifiedTuple tuple = [] {
+        RuntimeMemoryQualifiedTuple value;
+        value.model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0";
+        value.revision = "fe8a4ea1ffedaf415f4da2f062534de366a451e6";
+        value.config_sha256 = "486bedda3a6988332e60d9638a09ca4b260d34ebcf1b19e22cf3b140b63d8fe9";
+        value.target = "gb300-trt-11.2";
+        value.gpu_architecture = "sm103";
+        value.trt_runtime_version = "11.2.0.113";
+        value.cuda_runtime_version = "13.3";
+        value.cudnn_backend_version = "9.20.0";
+        value.cudnn_frontend_revision =
+            "7b9b711c22b6823e87150213ecd8449260db8610";
+        value.nvrtc_version = "13.3";
+        value.driver_version = "580.105.08";
+        value.model_context_limit = 2048;
+        value.prefill_chunk_limit = 512;
+        value.active_kv_profile_limits = {128, 512, 2048};
+        return value;
+    }();
+    return tuple;
+}
+
 int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
     if (dim < 0 || static_cast<std::size_t>(dim) >= shape.size())
         return -1;
@@ -69,13 +105,26 @@ int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
 }
 
 int32_t cache_row_dim_from_module(const TrtModule& module, const std::string& tensor_name) {
-    const int32_t static_dim = dim_at(module.tensor_shape(tensor_name), 1);
+    const auto width_from_shape = [](const std::vector<int64_t>& shape) {
+        if (shape.size() == 2)
+            return dim_at(shape, 1);
+        if (shape.size() == 4) {
+            const int32_t heads = dim_at(shape, 1);
+            const int32_t head_dim = dim_at(shape, 3);
+            if (heads > 0 && head_dim > 0 &&
+                heads <= std::numeric_limits<int32_t>::max() / head_dim) {
+                return heads * head_dim;
+            }
+        }
+        return -1;
+    };
+    const int32_t static_dim = width_from_shape(module.tensor_shape(tensor_name));
     if (static_dim > 0)
         return static_dim;
     const int32_t profile_count = module.optimization_profile_count();
     for (int32_t profile_idx = 0; profile_idx < profile_count; ++profile_idx) {
-        const int32_t profile_dim = dim_at(
-            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax), 1);
+        const int32_t profile_dim = width_from_shape(
+            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax));
         if (profile_dim > 0)
             return profile_dim;
     }
@@ -84,8 +133,7 @@ int32_t cache_row_dim_from_module(const TrtModule& module, const std::string& te
 }
 
 bool cache_input_is_dynamic(const TrtModule& module, const std::string& tensor_name) {
-    const auto shape = module.tensor_shape(tensor_name);
-    return !shape.empty() && shape[0] == -1;
+    return module.input_is_dynamic(tensor_name);
 }
 
 bool cache_input_supports_runtime_rows(const TrtModule& module, const std::string& tensor_name) {
@@ -94,11 +142,14 @@ bool cache_input_supports_runtime_rows(const TrtModule& module, const std::strin
     const int32_t num_profiles = module.optimization_profile_count();
     if (num_profiles <= 0)
         return false;
+    const int32_t sequence_axis = module.input_rank(tensor_name) == 4 ? 2 : 0;
     for (int32_t profile_idx = 0; profile_idx < num_profiles; ++profile_idx) {
-        const int32_t min_rows = dim_at(
-            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMin), 0);
-        const int32_t max_rows = dim_at(
-            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax), 0);
+        const int32_t min_rows =
+            dim_at(module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMin),
+                   sequence_axis);
+        const int32_t max_rows =
+            dim_at(module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax),
+                   sequence_axis);
         if (min_rows > 0 && max_rows > min_rows)
             return true;
     }
@@ -125,13 +176,17 @@ int32_t profile_token_max_length(const TrtModule& module, const std::string& tok
 
 int32_t profile_cache_rows(const TrtModule& module, const std::string& cache_name,
                            int32_t profile_idx, int32_t fallback_rows) {
-    const int32_t static_rows = dim_at(module.tensor_shape(cache_name), 0);
-    if (static_rows > 0)
-        return static_rows;
+    const int32_t sequence_axis = module.input_rank(cache_name) == 4 ? 2 : 0;
+    if (!module.input_is_dynamic(cache_name)) {
+        const int32_t static_rows = dim_at(module.tensor_shape(cache_name), sequence_axis);
+        if (static_rows > 0)
+            return static_rows;
+    }
 
     if (profile_idx >= 0 && profile_idx < module.optimization_profile_count()) {
-        const int32_t max_rows = dim_at(
-            module.input_profile_shape(cache_name, profile_idx, ProfileShapeSelector::kMax), 0);
+        const int32_t max_rows =
+            dim_at(module.input_profile_shape(cache_name, profile_idx, ProfileShapeSelector::kMax),
+                   sequence_axis);
         if (max_rows > 0)
             return max_rows;
     }
@@ -207,36 +262,44 @@ resolve_kv_cache_runtime_sizing(const PipelineContext& ctx, const TrtModule& mod
 
     const int32_t bundle_max_rows = ctx.config.max_cache_length;
     sizing.runtime_rows = bundle_max_rows;
+    sizing.logical_max_sequence = bundle_max_rows;
     sizing.cache_bytes = static_cast<std::uint64_t>(bundle_max_rows) * sizing.row_bytes;
+    sizing.budget_bytes = sizing.cache_bytes;
+    sizing.memory_capacity_rows = static_cast<std::uint64_t>(bundle_max_rows);
 
+    // Preserve the established LoadOptions/PipelineContext behavior. Automatic
+    // post-load sizing belongs exclusively to the versioned runtime_memory
+    // plugin interface below; legacy bundles use their built maximum unless
+    // the legacy byte override was explicitly supplied.
     if (ctx.kv_cache_size_bytes == 0)
         return sizing;
 
     if (!cache_input_supports_runtime_rows(module, kv_names.cache_k.front())) {
         throw std::runtime_error(
             "This bundle was not built with runtime-resizable KV cache support. "
-            "Rebuild with trtmc build --dynamic-kv-cache to use --kv-cache-size.");
+            "Use the model-only build flow for a runtime-memory-qualified model, "
+            "or omit the runtime KV override.");
     }
 
-    const std::uint64_t requested_rows_u64 = ctx.kv_cache_size_bytes / sizing.row_bytes;
-    if (requested_rows_u64 == 0) {
+    std::uint64_t runtime_rows = ctx.kv_cache_size_bytes / sizing.row_bytes;
+    if (runtime_rows == 0) {
         throw std::runtime_error("--kv-cache-size is smaller than one KV row (" +
                                  format_bytes(sizing.row_bytes) + ")");
     }
-
-    std::uint64_t runtime_rows_u64 = requested_rows_u64;
-    if (runtime_rows_u64 > static_cast<std::uint64_t>(bundle_max_rows)) {
-        runtime_rows_u64 = static_cast<std::uint64_t>(bundle_max_rows);
+    if (runtime_rows > static_cast<std::uint64_t>(bundle_max_rows)) {
+        runtime_rows = static_cast<std::uint64_t>(bundle_max_rows);
         sizing.clamped_to_bundle_max = true;
     }
-    if (runtime_rows_u64 > static_cast<std::uint64_t>(std::numeric_limits<int32_t>::max())) {
+    if (runtime_rows > static_cast<std::uint64_t>(std::numeric_limits<int32_t>::max()))
         throw std::runtime_error("Resolved KV cache rows exceed int32 runtime limits");
-    }
 
-    sizing.runtime_rows = static_cast<int32_t>(runtime_rows_u64);
-    sizing.cache_bytes = runtime_rows_u64 * sizing.row_bytes;
-    sizing.override_applied = true;
-
+    sizing.dynamic_supported = true;
+    sizing.policy = KvCacheBudgetPolicy::kBytes;
+    sizing.budget_bytes = ctx.kv_cache_size_bytes;
+    sizing.memory_capacity_rows = ctx.kv_cache_size_bytes / sizing.row_bytes;
+    sizing.runtime_rows = static_cast<int32_t>(runtime_rows);
+    sizing.logical_max_sequence = sizing.runtime_rows;
+    sizing.cache_bytes = runtime_rows * sizing.row_bytes;
     if (tri_cfg.enabled && sizing.runtime_rows < tri_cfg.kv_budget) {
         const auto minimum_bytes = static_cast<std::uint64_t>(tri_cfg.kv_budget) * sizing.row_bytes;
         throw std::runtime_error(
@@ -250,9 +313,47 @@ resolve_kv_cache_runtime_sizing(const PipelineContext& ctx, const TrtModule& mod
 
 } // namespace
 
-class DecoderPlugin final : public IPipelinePlugin {
+class DecoderPlugin final : public IPipelinePlugin, public IRuntimeMemoryPipelinePluginV1 {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
+        if (ctx.bundle.info.runtime_memory.present) {
+            throw std::runtime_error("Llama runtime_memory bundle requires plugin interface V1; "
+                                     "the loading core is incompatible with this model plugin");
+        }
+        return create_impl(ctx, nullptr);
+    }
+
+    std::unique_ptr<IPipeline>
+    create_runtime_memory(const PipelineContext& ctx,
+                          const RuntimeMemoryPluginOptionsV1& options) override {
+        if (options.struct_size < sizeof(RuntimeMemoryPluginOptionsV1) ||
+            options.api_version != kRuntimeMemoryPluginApiVersionV1) {
+            throw std::invalid_argument(
+                "Llama runtime-memory plugin options have an incompatible size or API version");
+        }
+        if (!ctx.bundle.info.runtime_memory.present) {
+            throw std::invalid_argument(
+                "Llama runtime-memory plugin interface requires a runtime_memory bundle");
+        }
+        if (ctx.bundle.info.runtime_memory.native_kv_plugin_abi != 2) {
+            throw std::runtime_error("Llama runtime-memory bundle requires native_kv_plugin_abi=2 "
+                                     "(history-only cache inputs with exact-Sq staging outputs)");
+        }
+        const auto* runtime_backend = dynamic_cast<IRuntimeMemoryBackendV1*>(ctx.backend);
+        if (runtime_backend == nullptr ||
+            runtime_backend->runtime_memory_api_version() != kRuntimeMemoryBackendApiVersionV1) {
+            throw std::runtime_error(
+                "Qualified runtime-memory bundle requires the standard TensorRT "
+                "runtime-memory backend v1");
+        }
+        const auto& expected = qualified_runtime_memory_tuple();
+        validate_runtime_memory_qualified_tuple(ctx.bundle.info.runtime_memory, expected);
+        return create_impl(ctx, &options);
+    }
+
+  private:
+    static std::unique_ptr<IPipeline>
+    create_impl(const PipelineContext& ctx, const RuntimeMemoryPluginOptionsV1* runtime_options) {
         load_ffi_kernels_from_bundle(ctx.bundle);
         apply_text_trace_from_registry(ctx.runtime_config);
 
@@ -264,6 +365,7 @@ class DecoderPlugin final : public IPipelinePlugin {
         const DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         LlamaTriAttentionConfig tri_cfg = llama_parse_triattention_bundle_config(
             ctx.config_json, ctx.config.max_cache_length, ctx.runtime_config);
+        const bool triattention_enabled = tri_cfg.enabled;
 
         TensorParallelRuntime tp_runtime;
         tp_runtime.config = parse_tensor_parallel_runtime_config(ctx.config_json);
@@ -273,34 +375,177 @@ class DecoderPlugin final : public IPipelinePlugin {
         const std::string engine_section = tp_runtime.config.enabled
                                                ? tp_engine_section_name(tp_runtime.group.rank)
                                                : std::string("engine_plan");
+        RuntimeDeviceMemorySnapshot pre_load_memory_snapshot;
+        const bool pre_load_memory_snapshot_available = ctx.bundle.info.runtime_memory.present;
+        if (pre_load_memory_snapshot_available) {
+            pre_load_memory_snapshot = query_runtime_device_memory_snapshot(
+                "before runtime-memory Llama engine deserialization");
+        }
         auto profile_modules =
-            load_decoder_profile_modules(ctx, engine_section, nullptr, &tp_runtime);
+            load_decoder_profile_modules(ctx, engine_section, nullptr, &tp_runtime, kv_names);
         if (profile_modules.modules.empty())
             throw std::runtime_error("No decoder engine profiles were loaded");
         TrtModule& metadata_module = *profile_modules.modules.front().module;
 
         const int32_t kv_dim = cache_row_dim_from_module(metadata_module, kv_names.cache_k.front());
-        const auto sizing = resolve_kv_cache_runtime_sizing(ctx, metadata_module, kv_names,
-                                                            cache_dtype, tri_cfg, kv_dim);
-
         const auto decode_profile_roles = detect_decoder_profile_roles(
             metadata_module, io.token_id, kv_names.cache_k.front(), ctx.config.max_cache_length);
 
-        std::unique_ptr<TrtModule> prefill_module;
-        auto decoders = build_decoder_contexts(std::move(profile_modules), sizing.runtime_rows,
-                                               decode_profile_roles, prefill_module);
-        cudaStream_t stream = decoders.front().module->stream();
+        // Load both halves of a split bundle before observing free memory.
+        // KV inputs are deferred by ModuleCreateOptions, so this measurement
+        // includes engines, contexts, workspaces, and prefill staging, but not
+        // a hidden profile-MAX KV allocation.
+        cudaStream_t stream = metadata_module.stream();
 
         int32_t prefill_profile_idx = decode_profile_roles.prefill_profile_idx;
         int32_t prefill_max_length = decode_profile_roles.prefill_max_length;
         std::string prefill_log_label;
+        std::unique_ptr<TrtModule> split_prefill_module;
         if (!tp_runtime.config.enabled) {
-            auto split_prefill_module =
+            split_prefill_module =
                 load_split_prefill_module(ctx, stream, io, kv_names, prefill_profile_idx,
                                           prefill_max_length, prefill_log_label);
-            if (split_prefill_module)
-                prefill_module = std::move(split_prefill_module);
         }
+
+        if (runtime_options != nullptr) {
+            if (triattention_enabled)
+                throw std::runtime_error(
+                    "Qualified contiguous runtime memory is incompatible with TriAttention");
+            if (tp_runtime.config.enabled)
+                throw std::runtime_error(
+                    "Qualified contiguous runtime memory does not support tensor parallelism");
+            if (!split_prefill_module)
+                throw std::runtime_error(
+                    "Qualified runtime-memory bundle is missing prefill_engine_plan");
+
+            const auto& contract = ctx.bundle.info.runtime_memory;
+            validate_runtime_memory_qualified_tuple(contract, qualified_runtime_memory_tuple());
+            if (contract.contract_version != 1 || contract.native_kv_plugin_abi != 2 ||
+                contract.kv_layout != "contiguous_runtime_v1" || contract.kv_dtype != "bfloat16" ||
+                !contract.runtime_owned) {
+                throw std::runtime_error(
+                    "Llama runtime cannot consume this runtime_memory contract");
+            }
+            if (cache_dtype != DType::kBFloat16)
+                throw std::runtime_error(
+                    "Qualified runtime-memory Llama bundle requires BF16 KV tensors");
+            if (ctx.config.num_kv_heads <= 0 || ctx.config.head_dim <= 0 ||
+                kv_dim != ctx.config.num_kv_heads * ctx.config.head_dim) {
+                throw std::runtime_error(
+                    "Qualified runtime-memory Llama engine has inconsistent KV dimensions");
+            }
+
+            RuntimeKvSetupRequest setup;
+            setup.layout.layer_count = static_cast<std::uint32_t>(ctx.config.num_layers);
+            setup.layout.kv_head_count = static_cast<std::uint32_t>(ctx.config.num_kv_heads);
+            setup.layout.head_dim = static_cast<std::uint32_t>(ctx.config.head_dim);
+            setup.layout.capacity_tokens = static_cast<std::uint64_t>(contract.model_context_limit);
+            setup.layout.prefill_chunk_limit =
+                static_cast<std::uint32_t>(contract.prefill_chunk_limit);
+            setup.layout.dtype = cache_dtype;
+            setup.layout.names.token_id = io.token_id;
+            setup.layout.names.position_id = kv_names.position_id;
+            setup.layout.names.history_length = kv_names.history_length;
+            setup.layout.names.cache_k = kv_names.cache_k;
+            setup.layout.names.cache_v = kv_names.cache_v;
+            setup.layout.names.cache_k_output = kv_names.present_k;
+            setup.layout.names.cache_v_output = kv_names.present_v;
+            setup.expected_active_kv_profile_limits.assign(
+                contract.active_kv_profile_limits.begin(), contract.active_kv_profile_limits.end());
+            setup.expected_kv_bytes_per_token = contract.kv_bytes_per_token;
+            setup.request_context_limit = runtime_options->max_sequence_length;
+            setup.stream = stream;
+            if (runtime_options->kv_cache_memory_policy == KvCacheMemoryPolicy::kBytes) {
+                setup.policy.kind = RuntimeKvPolicyKind::kBytes;
+                setup.policy.bytes = runtime_options->kv_cache_memory_bytes;
+            } else if (runtime_options->kv_cache_memory_policy == KvCacheMemoryPolicy::kFraction) {
+                setup.policy.kind = RuntimeKvPolicyKind::kFraction;
+                setup.policy.fraction = runtime_options->kv_cache_memory_fraction;
+            } else if (runtime_options->kv_cache_memory_policy == KvCacheMemoryPolicy::kAuto) {
+                setup.policy.kind = RuntimeKvPolicyKind::kAuto;
+                setup.policy.fraction = 0.90;
+            } else {
+                throw std::invalid_argument(
+                    "Llama runtime-memory plugin received an unknown KV memory policy");
+            }
+
+            const auto* decoder_plan = find_section(ctx.bundle, engine_section);
+            const auto* prefill_plan = find_section(ctx.bundle, "prefill_engine_plan");
+            setup.serialized_plan_bytes =
+                static_cast<std::uint64_t>(decoder_plan ? decoder_plan->size() : 0) +
+                static_cast<std::uint64_t>(prefill_plan ? prefill_plan->size() : 0);
+            setup.pre_load_memory_snapshot = pre_load_memory_snapshot;
+            setup.pre_load_memory_snapshot_available = pre_load_memory_snapshot_available;
+            setup.roles.push_back(RuntimeKvExecutionRole{
+                split_prefill_module.get(), RuntimeKvExecutionRoleKind::kPrefill,
+                static_cast<std::uint64_t>(contract.model_context_limit)});
+            for (const auto& profile : decode_profile_roles.decode_profiles) {
+                auto* entry = find_profile_module(profile_modules, profile.profile_idx);
+                if (entry == nullptr || !entry->module)
+                    throw std::runtime_error(
+                        "Qualified Llama bundle is missing a decode profile module");
+                setup.roles.push_back(
+                    RuntimeKvExecutionRole{entry->module.get(), RuntimeKvExecutionRoleKind::kDecode,
+                                           static_cast<std::uint64_t>(profile.kv_rows)});
+            }
+
+            auto runtime_state = create_runtime_kv_state(setup);
+            const int32_t runtime_rows = static_cast<int32_t>(runtime_state->capacity_tokens());
+            const int32_t effective_request_limit =
+                static_cast<int32_t>(runtime_state->receipt().effective_request_limit);
+            const std::string memory_receipt = runtime_state->receipt_json();
+            const RuntimeMemoryReceipt admission_receipt = runtime_state->receipt();
+
+            std::unique_ptr<TrtModule> ignored_prefill;
+            auto decoders = build_decoder_contexts(std::move(profile_modules), runtime_rows,
+                                                   decode_profile_roles, ignored_prefill);
+            auto state =
+                std::make_unique<LlamaKvCache>(ctx.config.num_layers, runtime_rows, kv_dim, stream,
+                                               cache_dtype, kv_names, std::move(runtime_state));
+            if (!state->ok())
+                throw std::runtime_error("Failed to create runtime-owned LlamaKvCache");
+
+            LlamaTextGenConfig tgc;
+            populate_text_gen_config(ctx, tgc, io, decoders.front(), ctx.runtime_config);
+            tgc.max_sequence_length = effective_request_limit;
+            tgc.runtime_sequence_admission = RuntimeSequenceAdmissionContext{
+                admission_receipt.model_context_limit,
+                admission_receipt.runtime_kv_capacity_tokens,
+                admission_receipt.request_context_limit,
+                admission_receipt.kv_bytes_per_token,
+                admission_receipt.kv_budget_bytes,
+                admission_receipt.kv_reserved_bytes,
+            };
+            tgc.prefill_max_length = contract.prefill_chunk_limit;
+            tgc.prefill_profile_index = prefill_profile_idx;
+            tgc.prefill_log_label = std::move(prefill_log_label);
+            tgc.num_layers = ctx.config.num_layers;
+            tgc.kv_dim = kv_dim;
+            tgc.present_k_pattern.clear();
+            tgc.present_v_pattern.clear();
+            // Correctness uses a history-only cache extent. T=1 uniquely
+            // identifies the H=0 cold sentinel; warm invocations require
+            // H>0 and T>=max(H,2), while current Sq rows remain separate
+            // staging outputs and H+Sq<=R. CUDA graph capture stays disabled
+            // until these profile-specific H/T shapes are qualified for replay.
+            tgc.disable_cuda_graph = true;
+            apply_chat_template_format(ctx.bundle, tgc);
+
+            std::cerr << "[trtmc.memory] " << memory_receipt << '\n';
+            return std::make_unique<LlamaTextGenerationPipeline>(
+                std::move(decoders), std::move(state), tgc, stream, std::move(tokenizer),
+                ctx.bundle.info.model_id, nullptr, std::move(split_prefill_module), nullptr,
+                tp_runtime.group.owner);
+        }
+
+        const auto sizing = resolve_kv_cache_runtime_sizing(ctx, metadata_module, kv_names,
+                                                            cache_dtype, tri_cfg, kv_dim);
+
+        std::unique_ptr<TrtModule> prefill_module;
+        auto decoders = build_decoder_contexts(std::move(profile_modules), sizing.runtime_rows,
+                                               decode_profile_roles, prefill_module);
+        if (split_prefill_module)
+            prefill_module = std::move(split_prefill_module);
 
         auto state =
             build_inference_state(ctx, sizing, tri_cfg, cache_dtype, kv_dim, kv_names, stream);
@@ -308,6 +553,8 @@ class DecoderPlugin final : public IPipelinePlugin {
 
         LlamaTextGenConfig tgc;
         populate_text_gen_config(ctx, tgc, io, decoders.front(), ctx.runtime_config);
+        tgc.max_sequence_length = sizing.logical_max_sequence;
+        tgc.kv_cache_compaction = triattention_enabled;
         apply_chat_template_format(ctx.bundle, tgc);
         // Wire batched prefill: the pipeline forwards the whole prompt
         // through `prefill_module` (TRT optimization profile 0) and copies
@@ -326,7 +573,6 @@ class DecoderPlugin final : public IPipelinePlugin {
             tp_runtime.group.owner);
     }
 
-  private:
     static std::unique_ptr<TrtModule>
     load_split_prefill_module(const PipelineContext& ctx, cudaStream_t stream, const IoMap& io,
                               const LlamaKvCacheNames& kv_names, int32_t& prefill_profile_idx,
@@ -335,7 +581,7 @@ class DecoderPlugin final : public IPipelinePlugin {
             return nullptr;
 
         auto split_prefill_modules =
-            load_decoder_profile_modules(ctx, "prefill_engine_plan", stream, nullptr);
+            load_decoder_profile_modules(ctx, "prefill_engine_plan", stream, nullptr, kv_names);
         if (split_prefill_modules.modules.empty())
             return nullptr;
 
@@ -367,7 +613,8 @@ class DecoderPlugin final : public IPipelinePlugin {
 
     static BackendProfileModules
     load_decoder_profile_modules(const PipelineContext& ctx, const std::string& section_name,
-                                 cudaStream_t stream, const TensorParallelRuntime* tp_runtime) {
+                                 cudaStream_t stream, const TensorParallelRuntime* tp_runtime,
+                                 const LlamaKvCacheNames& kv_names) {
         auto* plan = find_section(ctx.bundle, section_name);
         if (plan == nullptr || plan->empty())
             throw std::runtime_error(section_name + " section is missing");
@@ -375,8 +622,18 @@ class DecoderPlugin final : public IPipelinePlugin {
             throw std::runtime_error("No backend loaded");
 
         auto profile_rows = extract_json_int_array(ctx.config_json, "dynamic_kv_profile_rows", 16);
-        const int32_t profile_candidates =
+        int32_t profile_candidates =
             profile_rows.empty() ? 2 : static_cast<int32_t>(profile_rows.size() + 1);
+        if (ctx.bundle.info.runtime_memory.present) {
+            profile_candidates =
+                section_name == "prefill_engine_plan"
+                    ? 1
+                    : static_cast<int32_t>(
+                          ctx.bundle.info.runtime_memory.active_kv_profile_limits.size());
+            if (profile_candidates <= 0)
+                throw std::runtime_error(
+                    "Qualified runtime-memory bundle has no execution profiles");
+        }
         std::vector<int32_t> profile_indices;
         profile_indices.reserve(static_cast<std::size_t>(profile_candidates));
         for (int32_t i = 0; i < profile_candidates; ++i)
@@ -392,8 +649,37 @@ class DecoderPlugin final : public IPipelinePlugin {
         }
 
         const auto t0 = std::chrono::steady_clock::now();
-        auto modules =
-            ctx.backend->create_profile_modules(plan->data(), plan->size(), opts, profile_indices);
+        BackendProfileModules modules;
+        if (ctx.bundle.info.runtime_memory.present) {
+            auto* runtime_backend = dynamic_cast<IRuntimeMemoryBackendV1*>(ctx.backend);
+            if (runtime_backend == nullptr || runtime_backend->runtime_memory_api_version() !=
+                                                  kRuntimeMemoryBackendApiVersionV1) {
+                throw std::runtime_error(
+                    "Qualified runtime-memory bundle requires the standard TensorRT "
+                    "runtime-memory backend v1");
+            }
+            RuntimeMemoryModuleOptionsV1 memory_options;
+            memory_options.deferred_tensor_names.reserve(
+                kv_names.cache_k.size() + kv_names.cache_v.size() + kv_names.present_k.size() +
+                kv_names.present_v.size());
+            memory_options.deferred_tensor_names.insert(memory_options.deferred_tensor_names.end(),
+                                                        kv_names.cache_k.begin(),
+                                                        kv_names.cache_k.end());
+            memory_options.deferred_tensor_names.insert(memory_options.deferred_tensor_names.end(),
+                                                        kv_names.cache_v.begin(),
+                                                        kv_names.cache_v.end());
+            memory_options.deferred_tensor_names.insert(memory_options.deferred_tensor_names.end(),
+                                                        kv_names.present_k.begin(),
+                                                        kv_names.present_k.end());
+            memory_options.deferred_tensor_names.insert(memory_options.deferred_tensor_names.end(),
+                                                        kv_names.present_v.begin(),
+                                                        kv_names.present_v.end());
+            modules = runtime_backend->create_profile_modules_runtime_memory(
+                plan->data(), plan->size(), opts, profile_indices, memory_options);
+        } else {
+            modules = ctx.backend->create_profile_modules(plan->data(), plan->size(), opts,
+                                                          profile_indices);
+        }
         const auto t1 = std::chrono::steady_clock::now();
         const double load_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         log_trt_load_timing(section_name.c_str(), load_ms, plan->size());
@@ -408,6 +694,7 @@ class DecoderPlugin final : public IPipelinePlugin {
                                LlamaKvCacheNames& kv_names) {
         kv_names.position_id = io.position_id;
         kv_names.attention_mask = io.attention_mask;
+        kv_names.history_length = io.history_length;
         for (int32_t i = 0; i < ctx.config.num_layers; ++i) {
             kv_names.cache_k.push_back(llama_expand_layer_name(io.cache_k_pattern, i));
             kv_names.cache_v.push_back(llama_expand_layer_name(io.cache_v_pattern, i));
@@ -458,21 +745,32 @@ class DecoderPlugin final : public IPipelinePlugin {
                            std::unique_ptr<TrtModule>& prefill_module) {
         std::vector<LlamaTextGenerationPipeline::DecoderContext> decoders;
         decoders.reserve(profile_modules.modules.size());
+        bool covered_runtime_rows = false;
         for (const auto& profile : profile_roles.decode_profiles) {
-            if (profile.kv_rows > runtime_rows && !decoders.empty())
-                break;
             auto* found = find_profile_module(profile_modules, profile.profile_idx);
             if (found == nullptr || !found->module)
                 continue;
             found->module->set_timing_label("engine_plan:decode");
             decoders.push_back(LlamaTextGenerationPipeline::DecoderContext{
                 profile.kv_rows, std::move(found->module)});
+            // Keep the first profile whose MAX covers the runtime allocation.
+            // A non-bucket size such as 100 rows still needs the 128-row
+            // profile even though the external buffer itself contains 100 rows.
+            if (profile.kv_rows >= runtime_rows) {
+                covered_runtime_rows = true;
+                break;
+            }
         }
 
         extract_engine_plan_prefill_module(profile_modules, profile_roles, prefill_module);
 
         if (decoders.empty())
             throw std::runtime_error("No decoder profile available for engine_plan");
+        if (!covered_runtime_rows) {
+            throw std::runtime_error(
+                "No decoder optimization profile covers runtime KV cache rows=" +
+                std::to_string(runtime_rows));
+        }
         return decoders;
     }
 
@@ -504,16 +802,38 @@ class DecoderPlugin final : public IPipelinePlugin {
 
     static void log_kv_cache_sizing(const PipelineContext& ctx, const KvCacheRuntimeSizing& sizing,
                                     LlamaInferenceState* state) {
-        std::cerr << "[trtmc] KV cache rows=" << sizing.runtime_rows
-                  << " (bundle max=" << ctx.config.max_cache_length
-                  << ", row=" << format_bytes(sizing.row_bytes)
-                  << ", cache=" << format_bytes(sizing.cache_bytes) << ", state="
-                  << format_bytes(static_cast<std::uint64_t>(state->device_memory_bytes())) << ")";
-        if (sizing.override_applied) {
-            std::cerr << " [requested=" << format_bytes(ctx.kv_cache_size_bytes) << "]";
-            if (sizing.clamped_to_bundle_max)
-                std::cerr << " [clamped-to-bundle-max]";
+        if (!sizing.dynamic_supported) {
+            std::cerr << "[trtmc] KV cache policy=legacy-static"
+                      << " engine-cap=" << ctx.config.max_cache_length
+                      << " physical-kv-rows=" << sizing.runtime_rows
+                      << " runtime-max-sequence=" << sizing.logical_max_sequence
+                      << " row=" << format_bytes(sizing.row_bytes)
+                      << " allocated=" << format_bytes(sizing.cache_bytes) << " state="
+                      << format_bytes(static_cast<std::uint64_t>(state->device_memory_bytes()))
+                      << '\n';
+            return;
         }
+
+        std::cerr << "[trtmc] KV cache policy=" << kv_cache_budget_policy_name(sizing.policy)
+                  << " free-after-engines=" << format_bytes(sizing.free_bytes_after_engines)
+                  << " device-total=" << format_bytes(sizing.total_device_bytes)
+                  << " safety-reserve=" << format_bytes(sizing.safety_reserve_bytes)
+                  << " budget=" << format_bytes(sizing.budget_bytes);
+        if (sizing.policy == KvCacheBudgetPolicy::kAuto ||
+            sizing.policy == KvCacheBudgetPolicy::kFraction) {
+            std::cerr << " fraction=" << (sizing.fraction * 100.0) << "%";
+        } else {
+            std::cerr << " requested=" << format_bytes(ctx.kv_cache_size_bytes);
+        }
+        std::cerr << " row=" << format_bytes(sizing.row_bytes)
+                  << " memory-capacity=" << sizing.memory_capacity_rows
+                  << " engine-cap=" << ctx.config.max_cache_length
+                  << " physical-kv-rows=" << sizing.runtime_rows
+                  << " runtime-max-sequence=" << sizing.logical_max_sequence
+                  << " allocated=" << format_bytes(sizing.cache_bytes) << " state="
+                  << format_bytes(static_cast<std::uint64_t>(state->device_memory_bytes()));
+        if (sizing.clamped_to_bundle_max)
+            std::cerr << " [clamped-to-engine-cap]";
         std::cerr << '\n';
     }
 

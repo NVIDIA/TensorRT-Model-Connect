@@ -99,6 +99,7 @@ def _fake_native_build(build: Path) -> None:
         "trtmc_benchmark_worker",
         "libtrtmc_core.so",
         "libtrtmc_backend_trt.so",
+        "libtrtmc_trt_plugins.so",
         "models/example/libtrtmc_model_example.so",
     ):
         path = build / relative
@@ -143,6 +144,12 @@ def test_package_stages_a_model_owned_adapter_as_inert_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     recipe_module = _load_conan_recipe(monkeypatch)
+    relocated: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        recipe_module,
+        "_rewrite_elf_runpath",
+        lambda path, runpath: relocated.append((Path(path).name, runpath)),
+    )
     source = tmp_path / "source"
     builder = source / "python/tensorrt_model_connect/families/model_a/runtime_a"
     runtime = source / "src/runtime/models/model_a/runtime_a"
@@ -184,6 +191,22 @@ def test_package_stages_a_model_owned_adapter_as_inert_source(
     assert (sdk / "trtmc" / "pipeline.h").is_file()
     assert (module / "bin" / "trtmc").is_file()
     assert (module / "bin" / "trtmc_benchmark_worker").is_file()
+    assert (module / "bin" / "libtrtmc_trt_plugins.so").is_file()
+    assert (
+        "libtrtmc_trt_plugins.so",
+        "$ORIGIN:$ORIGIN/../../tensorrt_libs:"
+        "$ORIGIN/../../nvidia/cudnn/lib:$ORIGIN/../../nvidia/cu13/lib",
+    ) in relocated
+    assert {
+        "trtmc",
+        "trtmc_benchmark_worker",
+        "libtrtmc_core.so",
+        "libtrtmc_backend_trt.so",
+        "libtrtmc_trt_plugins.so",
+        "libtrtmc_model_example.so",
+    } == {name for name, _runpath in relocated}
+    assert all("/workspace/" not in runpath for _name, runpath in relocated)
+    assert all("/opt/" not in runpath for _name, runpath in relocated)
     benchmark_script = module.parent / "tensorrt_model_connect-0.1.0.data/scripts/trtmc-bench"
     assert benchmark_script.read_bytes().startswith(b"#!python\n")
     catalog = module / "benchmark" / "_catalog" / "example"

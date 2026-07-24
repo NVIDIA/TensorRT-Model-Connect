@@ -316,7 +316,8 @@ void test_resolve_session_beats_platform() {
     LayerContribution platform;
     platform.layer = Layer::PlatformProfile;
     platform.values["triattention"]["kv_budget"] = std::any{std::int32_t{10240}};
-    auto bundle = trtmc::config::resolve_cli_config("", {"triattention.kv_budget=8192"}, {platform});
+    auto bundle =
+        trtmc::config::resolve_cli_config("", {"triattention.kv_budget=8192"}, {platform});
     check(bundle.get<std::int32_t>("triattention", "kv_budget") == 8192,
           "resolve: session beats platform");
     check(bundle.source_of("triattention", "kv_budget") == Layer::SessionRequest,
@@ -350,6 +351,25 @@ void test_write_effective_config_next_to_places_file(std::string tmp_dir) {
     check(fs::exists(written), "write_effective: file exists");
     check(fs::path(written).filename() == "bundle.effective_config.json",
           "write_effective: sibling filename");
+}
+
+void test_write_effective_config_next_to_accepts_relative_bundle(std::string tmp_dir) {
+    namespace fs = std::filesystem;
+    trtmc::config::ConfigBundle bundle;
+    const fs::path original_cwd = fs::current_path();
+    const fs::path test_cwd = fs::path(tmp_dir) / "relative_bundle";
+    fs::create_directories(test_cwd);
+    fs::current_path(test_cwd);
+    try {
+        const std::string written =
+            trtmc::config::write_effective_config_next_to(bundle, "bundle.trtfb");
+        check(written == "bundle.effective_config.json", "relative bundle effective-config path");
+        check(fs::exists(test_cwd / written), "relative bundle effective config exists");
+    } catch (...) {
+        fs::current_path(original_cwd);
+        throw;
+    }
+    fs::current_path(original_cwd);
 }
 
 // ---- bundle defaults: block ------------------------------------------------
@@ -417,7 +437,7 @@ void test_resolve_pipeline_config_merges_bundle_and_session(std::string tmp_dir)
     std::ofstream(profile) << R"({"triattention": {"dump_scores_path": "/tmp/x"}})";
 
     auto res = trtmc::config::resolve_pipeline_config(header, profile.string(),
-                                                     {"triattention.kv_budget=8192"});
+                                                      {"triattention.kv_budget=8192"});
 
     // bundle_default + session contributions both land
     check(res.contributions.size() == 2, "resolve: two contributions");
@@ -525,6 +545,7 @@ int main() {
         trtmc_test::remove_all_safe(tmp.string());
         fs::create_directories(tmp);
         test_write_effective_config_next_to_places_file(tmp.string());
+        test_write_effective_config_next_to_accepts_relative_bundle(tmp.string());
     }
 
     SchemaRegistry::instance().clear_for_testing();

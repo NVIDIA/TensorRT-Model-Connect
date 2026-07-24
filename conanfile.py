@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 from conan import ConanFile
@@ -29,6 +33,74 @@ _ADAPTER_PACKAGE_EXCLUDES = (
     "tests/*",
     "**/tests/**",
 )
+
+_PACKAGE_SITE_PACKAGES_RUNPATHS = (
+    "$ORIGIN/../../tensorrt_libs",
+    "$ORIGIN/../../tvm_ffi/lib",
+    "$ORIGIN/../../nvidia/cudnn/lib",
+    "$ORIGIN/../../nvidia/cu13/lib",
+)
+_TRT_PLUGIN_INSTALL_RUNPATH = ":".join(
+    (
+        "$ORIGIN",
+        _PACKAGE_SITE_PACKAGES_RUNPATHS[0],
+        _PACKAGE_SITE_PACKAGES_RUNPATHS[2],
+        _PACKAGE_SITE_PACKAGES_RUNPATHS[3],
+    )
+)
+
+
+def _rewrite_elf_runpath(path: Path, runpath: str) -> None:
+    """Replace build-tree RUNPATH on a staged ELF with relocatable wheel paths."""
+
+    with path.open("rb") as stream:
+        elf_magic = stream.read(4)
+    if elf_magic != b"\x7fELF":
+        return
+    patchelf = shutil.which("patchelf")
+    if not patchelf:
+        raise ConanException(f"patchelf is required to relocate packaged ELF: {path}")
+    result = subprocess.run(
+        [patchelf, "--set-rpath", runpath, str(path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise ConanException(
+            f"failed to set relocatable RUNPATH on {path}: {detail}"
+        )
+    verified = subprocess.run(
+        [patchelf, "--print-rpath", str(path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if verified.returncode != 0 or verified.stdout.strip() != runpath:
+        detail = (verified.stderr or verified.stdout).strip()
+        raise ConanException(
+            f"failed to verify relocatable RUNPATH on {path}: {detail}"
+        )
+
+
+def _wheel_script_dependency_runpath() -> str:
+    tag = os.environ.get(
+        "WHEEL_PYVER",
+        f"py{sys.version_info.major}{sys.version_info.minor}",
+    )
+    match = re.fullmatch(r"py([0-9])([0-9]+)", tag)
+    if not match:
+        raise ConanException(f"cannot derive wheel site-packages path from WHEEL_PYVER={tag!r}")
+    python_dir = f"python{match.group(1)}.{match.group(2)}"
+    site_packages = f"$ORIGIN/../lib/{python_dir}/site-packages"
+    return ":".join(
+        (
+            "$ORIGIN",
+            f"{site_packages}/tvm_ffi/lib",
+            f"{site_packages}/nvidia/cu13/lib",
+        )
+    )
 
 
 def _model_owned_adapters(source_folder: str | Path) -> tuple[tuple[str, str, Path, Path], ...]:
@@ -231,6 +303,13 @@ class TensorRTModelConnectConan(ConanFile):
             dst=str(package_bin),
             keep_path=False,
         )
+        copy(
+            self,
+            "libtrtmc_trt_plugins.so*",
+            src=self.build_folder,
+            dst=str(package_bin),
+            keep_path=False,
+        )
         for model_plugin in sorted(
             (Path(self.build_folder) / "models").rglob("libtrtmc_model_*.so*")
         ):
@@ -287,6 +366,7 @@ class TensorRTModelConnectConan(ConanFile):
         package_cores = sorted(package_bin.glob("libtrtmc_core.so*"))
         script_cores = sorted(wheel_data_scripts.glob("libtrtmc_core.so*"))
         backends = sorted(package_bin.glob("libtrtmc_backend_trt*.so*"))
+        trt_plugins = sorted(package_bin.glob("libtrtmc_trt_plugins.so*"))
         model_plugins = sorted(package_bin.glob("libtrtmc_model_*.so*"))
         if not native.is_file():
             raise ConanException("TRTMC native executable was not staged into the wheel package")
@@ -303,8 +383,36 @@ class TensorRTModelConnectConan(ConanFile):
             raise ConanException("TRTMC core DSO was not staged beside the wheel script")
         if not backends:
             raise ConanException("TRTMC TensorRT backend DSO was not staged into the wheel package")
+        if not trt_plugins:
+            raise ConanException(
+                "TRTMC common TensorRT plugin DSO was not staged into the wheel package"
+            )
         if not model_plugins:
             raise ConanException("TRTMC model plugin DSOs were not staged into the wheel package")
+
+        package_core_runpath = ":".join(
+            (
+                "$ORIGIN",
+                _PACKAGE_SITE_PACKAGES_RUNPATHS[1],
+                _PACKAGE_SITE_PACKAGES_RUNPATHS[3],
+            )
+        )
+        backend_runpath = ":".join(("$ORIGIN", *_PACKAGE_SITE_PACKAGES_RUNPATHS))
+        model_plugin_runpath = ":".join(
+            ("$ORIGIN", _PACKAGE_SITE_PACKAGES_RUNPATHS[3])
+        )
+        for executable in (native, installed_script, benchmark_worker):
+            _rewrite_elf_runpath(executable, "$ORIGIN")
+        for core in package_cores:
+            _rewrite_elf_runpath(core, package_core_runpath)
+        for core in script_cores:
+            _rewrite_elf_runpath(core, _wheel_script_dependency_runpath())
+        for backend in backends:
+            _rewrite_elf_runpath(backend, backend_runpath)
+        for trt_plugin in trt_plugins:
+            _rewrite_elf_runpath(trt_plugin, _TRT_PLUGIN_INSTALL_RUNPATH)
+        for model_plugin in model_plugins:
+            _rewrite_elf_runpath(model_plugin, model_plugin_runpath)
 
         for executable in (native, installed_script, benchmark_worker, benchmark_script):
             mode = executable.stat().st_mode

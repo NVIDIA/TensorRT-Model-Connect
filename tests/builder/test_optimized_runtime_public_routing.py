@@ -346,7 +346,8 @@ def test_build_cli_does_not_expose_runtime_selection_or_target_flags() -> None:
     assert "--target" not in result.stdout
     assert "--runtime" not in result.stdout
     assert "optimized-runtime" not in result.stdout.lower()
-    assert "--max-cache-length" in result.stdout
+    assert "--max-cache-length" not in result.stdout
+    assert "--dynamic-kv-cache" not in result.stdout
 
 
 def test_optimized_factory_header_is_private() -> None:

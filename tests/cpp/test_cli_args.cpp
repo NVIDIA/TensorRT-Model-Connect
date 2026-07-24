@@ -104,8 +104,10 @@ void test_run_parses_common_flags() {
                        "/tmp/adapter",
                        "--lora-adapter-id",
                        "adapter-1",
-                       "--kv-cache-size",
+                       "--kv-cache-memory",
                        "2GiB",
+                       "--max-sequence-length",
+                       "32K",
                        "--backend-dir",
                        "/tmp/lib",
                        "--model-plugin-dir",
@@ -130,6 +132,9 @@ void test_run_parses_common_flags() {
     check(args.lora_adapter_path == "/tmp/adapter", "run LoRA adapter path");
     check(args.lora_adapter_id == "adapter-1", "run LoRA adapter ID");
     check(args.kv_cache_size_bytes == 2147483648ULL, "run kv cache size");
+    check(args.kv_cache_memory.mode == trtmc::cli::KvCacheMemoryMode::Bytes, "run kv cache mode");
+    check(args.kv_cache_memory.bytes == 2147483648ULL, "run kv cache memory bytes");
+    check(args.max_sequence_length == 32768ULL, "run max sequence length");
     check(args.backend_search_paths.size() == 1 && args.backend_search_paths[0] == "/tmp/lib",
           "run backend dir");
     check(args.model_plugin_search_paths.size() == 1 &&
@@ -169,6 +174,16 @@ void test_inspect_and_config_flags() {
     check(args.list_engines, "inspect list engines");
     check(args.config_path == "profile.json", "config path");
     check(args.set_tokens.size() == 1 && args.set_tokens[0] == "audio.seed=7", "set token");
+
+    auto memory = parse({"trtmc", "inspect", "bundle.trtfb", "--kv-cache-memory", "80%"});
+    check(memory.parse_error, "inspect rejects runtime KV policy");
+    check_message_contains(memory.error_message, "inspect is static",
+                           "inspect runtime KV policy message");
+
+    auto sequence = parse({"trtmc", "inspect", "bundle.trtfb", "--max-sequence-length", "32K"});
+    check(sequence.parse_error, "inspect rejects runtime sequence policy");
+    check_message_contains(sequence.error_message, "inspect is static",
+                           "inspect runtime sequence policy message");
 }
 
 void test_audio_and_solve_flags() {
@@ -270,10 +285,95 @@ void test_missing_prompt_is_distinct_from_empty_prompt() {
     check(!empty.parse_error, "empty prompt parse ok");
 }
 
-void test_bad_kv_cache_size_fails() {
+void test_runtime_kv_memory_modes() {
+    auto default_args = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello"});
+    check(default_args.kv_cache_memory.mode == trtmc::cli::KvCacheMemoryMode::Auto,
+          "default kv cache mode is auto");
+    check(!default_args.kv_cache_memory.explicitly_set, "default auto is implicit");
+    check(default_args.kv_cache_size_bytes == 0, "default auto compatibility bytes are zero");
+
+    auto explicit_auto =
+        parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--kv-cache-memory=auto"});
+    check(!explicit_auto.parse_error, "explicit kv cache auto parses");
+    check(explicit_auto.kv_cache_memory.mode == trtmc::cli::KvCacheMemoryMode::Auto,
+          "explicit kv cache auto mode");
+    check(explicit_auto.kv_cache_memory.explicitly_set, "explicit auto is recorded");
+
+    auto percentage =
+        parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--kv-cache-memory", "80.5%"});
+    check(!percentage.parse_error, "kv cache percentage parses");
+    check(percentage.kv_cache_memory.mode == trtmc::cli::KvCacheMemoryMode::Percent,
+          "kv cache percentage mode");
+    check(percentage.kv_cache_memory.percent > 80.49 && percentage.kv_cache_memory.percent < 80.51,
+          "kv cache percentage value");
+    check(percentage.kv_cache_size_bytes == 0, "kv cache percentage compatibility bytes are zero");
+
+    auto legacy =
+        parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--kv-cache-size", "4GiB"});
+    check(!legacy.parse_error, "legacy kv cache size parses");
+    check(legacy.kv_cache_memory.mode == trtmc::cli::KvCacheMemoryMode::Bytes,
+          "legacy kv cache size maps to byte mode");
+    check(legacy.kv_cache_size_bytes == 4294967296ULL,
+          "legacy kv cache size preserves compatibility bytes");
+}
+
+void test_bad_kv_cache_memory_fails() {
     auto args = parse({"trtmc", "run", "bundle.trtfb", "--kv-cache-size=abc"});
     check(args.parse_error, "bad kv cache parse error");
-    check(args.error_message.find("--kv-cache-size expects") == 0, "bad kv cache message");
+    check(args.error_message.find("--kv-cache-memory expects") == 0, "bad kv cache message");
+
+    for (const auto* value : {"0%", "-1%", "100.1%", "nan%", "inf%", "-1GiB", "1XB",
+                              "18446744073709551616B", "1e400GiB"}) {
+        auto bad = parse(
+            {"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--kv-cache-memory", value});
+        check(bad.parse_error, "invalid kv cache memory fails");
+        check(bad.error_message.find("--kv-cache-memory expects") == 0,
+              "invalid kv cache memory message");
+    }
+}
+
+void test_max_sequence_length_contract() {
+    auto decimal = parse(
+        {"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--max-sequence-length=131072"});
+    check(!decimal.parse_error, "decimal max sequence length parses");
+    check(decimal.max_sequence_length == 131072ULL, "decimal max sequence length value");
+    check(decimal.max_sequence_length_explicitly_set,
+          "decimal max sequence length records explicit request");
+
+    auto lowercase =
+        parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--max-sequence-length", "2m"});
+    check(!lowercase.parse_error, "lowercase max sequence suffix parses");
+    check(lowercase.max_sequence_length == 2097152ULL, "max sequence M suffix value");
+
+    auto explicit_auto =
+        parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--max-sequence-length=auto"});
+    check(!explicit_auto.parse_error, "explicit max sequence auto parses");
+    check(explicit_auto.max_sequence_length == 0, "explicit max sequence auto value");
+    check(explicit_auto.max_sequence_length_explicitly_set,
+          "explicit max sequence auto records explicit request");
+
+    for (const auto* value :
+         {"0", "-1", "1.5K", "32KB", "18446744073709551616", "18014398509481984M"}) {
+        auto bad = parse(
+            {"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--max-sequence-length", value});
+        check(bad.parse_error, "invalid max sequence length fails");
+        check(bad.error_message.find("--max-sequence-length expects") == 0,
+              "invalid max sequence length message");
+    }
+}
+
+void test_duplicate_runtime_memory_policies_fail() {
+    auto memory = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--kv-cache-memory",
+                         "80%", "--kv-cache-size", "4GiB"});
+    check(memory.parse_error, "duplicate KV memory policies fail");
+    check_message_contains(memory.error_message, "specified only once",
+                           "duplicate KV memory policy message");
+
+    auto sequence = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello",
+                           "--max-sequence-length", "32K", "--max_sequence_length=auto"});
+    check(sequence.parse_error, "duplicate max sequence policies fail");
+    check_message_contains(sequence.error_message, "specified only once",
+                           "duplicate max sequence policy message");
 }
 
 void test_invalid_generation_sampling_values_fail() {
@@ -396,7 +496,10 @@ int main() {
     test_unknown_flag_fails();
     test_missing_value_fails();
     test_missing_prompt_is_distinct_from_empty_prompt();
-    test_bad_kv_cache_size_fails();
+    test_runtime_kv_memory_modes();
+    test_bad_kv_cache_memory_fails();
+    test_max_sequence_length_contract();
+    test_duplicate_runtime_memory_policies_fail();
     test_invalid_generation_sampling_values_fail();
     test_generation_sampling_boundaries_parse();
     test_unexpected_positional_fails();

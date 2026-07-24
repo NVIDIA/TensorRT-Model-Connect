@@ -5,6 +5,8 @@
 
 #include "runtime/models/llama/pipeline.h"
 
+#include "runtime/backend/runtime_memory_backend.h"
+#include "runtime/domains/text/dynamic_memory/kv_cache_budget.h"
 #include "runtime/models/llama/chat_templates.h"
 #include "runtime/models/llama/kv_cache.h"
 #include "runtime/models/llama/tensor_names.h"
@@ -355,6 +357,8 @@ TextResult LlamaTextGenerationPipeline::generate(const std::string& prompt,
     auto sp = llama_sampling_params_from_config(cfg, eos);
     last_setup_ms_ = 0.0;
     auto timed = generate_from_ids(input_ids, max_new, sp, cfg);
+    state_->finalize_runtime_memory();
+    state_->sample_runtime_memory_high_water();
 
     // Decode only the NEW tokens (skip input)
     std::vector<int32_t> new_tokens(timed.token_ids.begin() +
@@ -374,7 +378,89 @@ LlamaTextGenerationPipeline::generate_ids(const std::vector<int32_t>& input_ids,
     int32_t max_new = cfg.max_new_tokens; // honour exact value (0 = no generation)
     int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
     auto sp = llama_sampling_params_from_config(cfg, eos);
-    return GenerationResult{generate_from_ids(input_ids, max_new, sp, cfg).token_ids};
+    auto timed = generate_from_ids(input_ids, max_new, sp, cfg);
+    state_->finalize_runtime_memory();
+    state_->sample_runtime_memory_high_water();
+    return GenerationResult{std::move(timed.token_ids)};
+}
+
+RuntimeMemoryQualificationResultV1 LlamaTextGenerationPipeline::qualify_runtime_memory(
+    const RuntimeMemoryQualificationRequestV1& request) {
+    if (!state_->runtime_owned_kv()) {
+        throw std::runtime_error(
+            "LlamaTextGenerationPipeline: qualification requires a runtime-memory bundle");
+    }
+    if (request.input_ids.empty()) {
+        throw RuntimeMemoryQualificationAdmissionError(
+            "LlamaTextGenerationPipeline: qualification input_ids must not be empty");
+    }
+    for (std::size_t index = 0; index < request.input_ids.size(); ++index) {
+        const auto token = request.input_ids[index];
+        if (token < 0 || token >= config_.vocab_size) {
+            throw RuntimeMemoryQualificationAdmissionError(
+                "LlamaTextGenerationPipeline: token ID at index " + std::to_string(index) +
+                " is outside [0, " + std::to_string(config_.vocab_size) + ")");
+        }
+    }
+
+    const int32_t logical_limit =
+        config_.max_sequence_length > 0 ? config_.max_sequence_length : state_->max_length();
+    try {
+        validate_sequence_admission_with_runtime_memory(
+            request.input_ids.size(), request.max_new_tokens, logical_limit,
+            config_.runtime_sequence_admission, "LlamaTextGenerationPipeline");
+    } catch (const std::exception& error) {
+        throw RuntimeMemoryQualificationAdmissionError(error.what());
+    }
+
+    reset_generation_context();
+    state_->set_prompt_length(static_cast<int32_t>(request.input_ids.size()));
+
+    RuntimeMemoryQualificationResultV1 result;
+    result.prompt_tokens = request.input_ids.size();
+    result.runtime_kv_capacity_tokens = state_->runtime_kv_capacity_tokens();
+    result.effective_request_limit = static_cast<std::uint64_t>(logical_limit);
+    result.prefill_chunk_limit = static_cast<std::uint32_t>(state_->prefill_chunk_limit());
+
+    std::vector<float> logits;
+    active_qualification_ = &result;
+    qualification_invocation_index_ = 0;
+    try {
+        run_prefill(request.input_ids, logits, /*gpu_sampling=*/false);
+        if (logits.size() != static_cast<std::size_t>(config_.vocab_size)) {
+            throw std::runtime_error(
+                "LlamaTextGenerationPipeline: qualification prefill returned an unexpected "
+                "logit count");
+        }
+        result.step_logits.push_back(logits);
+
+        result.selected_token_ids.reserve(static_cast<std::size_t>(request.max_new_tokens));
+        result.step_logits.reserve(static_cast<std::size_t>(request.max_new_tokens) + 1U);
+        for (int32_t step = 0; step < request.max_new_tokens; ++step) {
+            const int32_t token = argmax(logits);
+            result.selected_token_ids.push_back(token);
+            run_step(token, logits);
+            if (logits.size() != static_cast<std::size_t>(config_.vocab_size)) {
+                throw std::runtime_error(
+                    "LlamaTextGenerationPipeline: qualification decode returned an unexpected "
+                    "logit count");
+            }
+            result.step_logits.push_back(logits);
+            ++result.decode_launches;
+        }
+    } catch (...) {
+        active_qualification_ = nullptr;
+        throw;
+    }
+    active_qualification_ = nullptr;
+
+    result.prefill_launches = last_prefill_launches_;
+    result.final_kv_position = static_cast<std::uint64_t>(state_->position());
+    state_->finalize_runtime_memory();
+    state_->sample_runtime_memory_high_water();
+    result.runtime_memory_receipt_json = state_->runtime_memory_receipt_json();
+    finalize_runtime_memory_invocation_traces(result);
+    return result;
 }
 
 std::unique_ptr<LlamaISampler>
@@ -417,6 +503,13 @@ bool batched_prefill_supported(const TrtModule* prefill, const LlamaTextGenConfi
         return false;
     return dynamic_cast<LlamaKvCache*>(state) != nullptr;
 }
+
+TensorMap forward_selected_outputs(TrtModule& module, const TensorMap& inputs,
+                                   const std::vector<std::string>& names) {
+    if (auto* runtime_module = dynamic_cast<IRuntimeMemoryModuleV1*>(&module))
+        return runtime_module->forward_selected(inputs, names);
+    return module.forward(inputs);
+}
 } // namespace
 
 bool LlamaTextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>& input_ids,
@@ -430,6 +523,7 @@ bool LlamaTextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>
     // decode module(s), so we rebind the cache_k/cache_v inputs onto the
     // prefill execution context before running.
     kv->bind_cache_inputs(*prefill_);
+    state_bound_ = false;
 
     TensorMap inputs;
     Tensor tok_t;
@@ -439,7 +533,7 @@ bool LlamaTextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>
     inputs[config_.token_id_name] = tok_t;
     state_->prepare_step(inputs, sq);
 
-    TensorMap outputs = prefill_->forward(inputs);
+    TensorMap outputs = forward_selected_outputs(*prefill_, inputs, {config_.logits_output_name});
     auto logits_it = outputs.find(config_.logits_output_name);
     if (logits_it == outputs.end())
         return false;
@@ -468,6 +562,93 @@ bool LlamaTextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>
     return true;
 }
 
+bool LlamaTextGenerationPipeline::run_prefill_runtime_chunks(const std::vector<int32_t>& input_ids,
+                                                             std::vector<float>& logits,
+                                                             bool gpu_sampling) {
+    if (!state_->runtime_owned_kv())
+        return false;
+    if (prefill_ == nullptr)
+        throw std::runtime_error(
+            "LlamaTextGenerationPipeline: runtime-memory bundle is missing its prefill role");
+
+    const int32_t chunk_limit = state_->prefill_chunk_limit();
+    if (chunk_limit <= 0)
+        throw std::runtime_error(
+            "LlamaTextGenerationPipeline: invalid runtime prefill chunk limit");
+    if (config_.prefill_max_length > 0 && chunk_limit > config_.prefill_max_length) {
+        throw std::runtime_error(
+            "LlamaTextGenerationPipeline: runtime prefill chunk exceeds engine profile");
+    }
+
+    state_->bind_to(*prefill_);
+    state_bound_ = false;
+    std::size_t offset = 0;
+    int32_t launches = 0;
+    while (offset < input_ids.size()) {
+        const auto remaining = input_ids.size() - offset;
+        const int32_t sq = static_cast<int32_t>(std::min<std::size_t>(remaining, chunk_limit));
+        const bool last = offset + static_cast<std::size_t>(sq) == input_ids.size();
+        const auto history_tokens = static_cast<std::uint64_t>(state_->position());
+        const auto active_tokens = history_tokens + static_cast<std::uint64_t>(sq);
+        const auto bound_tokens = qualification_bound_tokens(history_tokens);
+        const auto transfer_before = qualification_transfer_snapshot(*prefill_);
+        const auto commit_before = qualification_commit_snapshot();
+
+        TensorMap inputs;
+        Tensor tokens;
+        tokens.data = const_cast<int32_t*>(input_ids.data() + offset);
+        tokens.shape = {static_cast<int64_t>(sq)};
+        tokens.dtype = DType::kInt32;
+        inputs[config_.token_id_name] = tokens;
+        state_->prepare_step(inputs, sq);
+
+        if (last && !gpu_sampling) {
+            const auto outputs =
+                forward_selected_outputs(*prefill_, inputs, {config_.logits_output_name});
+            const auto found = outputs.find(config_.logits_output_name);
+            if (found == outputs.end())
+                throw std::runtime_error(
+                    "LlamaTextGenerationPipeline: prefill role did not return logits");
+            const auto vocab = static_cast<std::size_t>(config_.vocab_size);
+            if (static_cast<std::size_t>(found->second.numel()) < vocab)
+                throw std::runtime_error(
+                    "LlamaTextGenerationPipeline: prefill logits are truncated");
+            logits.resize(vocab);
+            const auto row_offset = static_cast<std::size_t>(found->second.numel()) - vocab;
+            std::memcpy(logits.data(), static_cast<const float*>(found->second.data) + row_offset,
+                        vocab * sizeof(float));
+        } else {
+            prefill_->forward_async(inputs);
+            prefill_->sync();
+            if (last) {
+                d_logits_ptr_ =
+                    static_cast<const float*>(prefill_->device_ptr(config_.logits_output_name));
+            }
+        }
+
+        state_->advance(sq);
+        append_qualification_invocation("prefill", "engine_plan:prefill", *prefill_, offset,
+                                        offset + static_cast<std::size_t>(sq), history_tokens,
+                                        active_tokens, bound_tokens, transfer_before,
+                                        commit_before);
+        offset += static_cast<std::size_t>(sq);
+        ++launches;
+    }
+
+    const auto expected =
+        static_cast<int32_t>((input_ids.size() + static_cast<std::size_t>(chunk_limit) - 1) /
+                             static_cast<std::size_t>(chunk_limit));
+    if (launches != expected)
+        throw std::logic_error("LlamaTextGenerationPipeline: incorrect prefill launch count");
+    last_prefill_launches_ = static_cast<std::uint32_t>(launches);
+    if (config_.log_runtime_stats) {
+        std::cerr << "[trtmc] Chunked prefill: tokens=" << input_ids.size()
+                  << " chunk_limit=" << chunk_limit << " launches=" << launches << '\n';
+    }
+    state_->mark_prefill_complete();
+    return true;
+}
+
 void LlamaTextGenerationPipeline::prime_decoder_after_batched_prefill(
     const std::vector<int32_t>& input_ids) {
     if (input_ids.empty())
@@ -492,6 +673,13 @@ void LlamaTextGenerationPipeline::prime_decoder_after_batched_prefill(
 
 void LlamaTextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
                                               std::vector<float>& logits, bool gpu_sampling) {
+    if (!config_.kv_cache_compaction &&
+        input_ids.size() > static_cast<std::size_t>(state_->max_length())) {
+        throw std::runtime_error(
+            "LlamaTextGenerationPipeline: prompt length exceeds runtime KV cache capacity");
+    }
+    if (run_prefill_runtime_chunks(input_ids, logits, gpu_sampling))
+        return;
     // Fast path: batched prefill engine writes K/V for the whole prompt in
     // one forward and returns last-token logits on host.
     if (!gpu_sampling && run_prefill_batched(input_ids, logits)) {
@@ -566,8 +754,13 @@ void LlamaTextGenerationPipeline::run_prefill_block(const std::vector<int32_t>& 
     const auto sq = static_cast<int32_t>(input_ids.size());
     TrtModule& prefill = require_block_prefill(sq, prefill_override);
     LlamaKvCache& kv = require_block_kv_cache();
+    if (append_kv && kv.position() + sq > kv.max_length()) {
+        throw std::runtime_error(
+            "LlamaTextGenerationPipeline: prefill block exceeds runtime KV cache capacity");
+    }
 
     kv.bind_cache_inputs(prefill);
+    state_bound_ = false;
 
     TensorMap inputs;
     Tensor tok_t;
@@ -580,7 +773,8 @@ void LlamaTextGenerationPipeline::run_prefill_block(const std::vector<int32_t>& 
     else
         kv.prepare_step(inputs, sq);
 
-    copy_block_logits(prefill.forward(inputs), logits);
+    copy_block_logits(forward_selected_outputs(prefill, inputs, {config_.logits_output_name}),
+                      logits);
     if (append_kv)
         append_prefill_kv(kv, prefill, sq);
 }
@@ -604,6 +798,7 @@ void LlamaTextGenerationPipeline::reset_generation_context() {
     using Clock = std::chrono::steady_clock;
     const auto start = Clock::now();
     state_->reset();
+    last_prefill_launches_ = 0;
     state_bound_ = false;
     for (auto& decoder_ctx : decoders_)
         decoder_ctx.module->reset_execution_context();
@@ -756,6 +951,11 @@ LlamaTextGenerationPipeline::TimedGenResult LlamaTextGenerationPipeline::generat
     const std::vector<int32_t>& input_ids, int32_t max_new_tokens,
     const LlamaSamplingParams& params, const GenerateConfig& cfg) {
     using Clock = std::chrono::steady_clock;
+    const int32_t logical_max_sequence =
+        config_.max_sequence_length > 0 ? config_.max_sequence_length : state_->max_length();
+    validate_sequence_admission_with_runtime_memory(
+        input_ids.size(), max_new_tokens, logical_max_sequence, config_.runtime_sequence_admission,
+        "LlamaTextGenerationPipeline");
     if (max_new_tokens == 0 || input_ids.empty())
         return TimedGenResult{input_ids, 0.0, 0.0};
 
@@ -986,6 +1186,79 @@ int32_t LlamaTextGenerationPipeline::select_decoder_index(int32_t desired_rows) 
     return fallback_idx;
 }
 
+std::uint64_t
+LlamaTextGenerationPipeline::qualification_bound_tokens(std::uint64_t history_tokens) const {
+    const auto selected = state_->runtime_kv_bound_tokens(history_tokens);
+    if (selected == 0)
+        throw std::logic_error(
+            "LlamaTextGenerationPipeline: runtime state did not report a T bound");
+    return selected;
+}
+
+void LlamaTextGenerationPipeline::append_qualification_invocation(
+    const char* role, const char* plan_id, const TrtModule& module, std::uint64_t chunk_begin,
+    std::uint64_t chunk_end, std::uint64_t history_tokens, std::uint64_t active_tokens,
+    std::uint64_t bound_tokens, const RuntimeMemoryTransferSnapshotV1& transfer_before,
+    const RuntimeKvCommitSnapshot& commit_before) {
+    if (active_qualification_ == nullptr)
+        return;
+    const auto* ledger = dynamic_cast<const IRuntimeMemoryTransferLedgerV1*>(&module);
+    if (ledger == nullptr) {
+        throw std::logic_error(
+            "LlamaTextGenerationPipeline: runtime backend has no transfer ledger");
+    }
+    const auto transfer_delta =
+        runtime_memory_transfer_delta(transfer_before, ledger->runtime_memory_transfer_snapshot());
+    const auto commit_after = qualification_commit_snapshot();
+    if (commit_after.device_to_device_bytes < commit_before.device_to_device_bytes ||
+        commit_after.device_to_device_events < commit_before.device_to_device_events) {
+        throw std::logic_error("LlamaTextGenerationPipeline: runtime commit counters regressed");
+    }
+    RuntimeMemoryInvocationTraceV1 trace;
+    trace.invocation_index = qualification_invocation_index_++;
+    trace.role = role;
+    trace.plan_id = plan_id;
+    trace.profile_id = module.profile_idx();
+    trace.chunk_begin = chunk_begin;
+    trace.chunk_end = chunk_end;
+    trace.kv_base_address = state_->runtime_kv_base_address();
+    trace.history_tokens = history_tokens;
+    trace.active_tokens = active_tokens;
+    trace.bound_tokens = bound_tokens;
+    trace.context_device_memory_bytes = state_->runtime_context_device_memory_bytes();
+    trace.cuda_graph_status = module.cuda_graph_active() ? "active" : "uncaptured";
+    trace.kv_device_to_host_bytes = transfer_delta.runtime_kv_device_to_host_bytes;
+    trace.kv_append_bytes =
+        commit_after.device_to_device_bytes - commit_before.device_to_device_bytes;
+    trace.kv_append_events =
+        commit_after.device_to_device_events - commit_before.device_to_device_events;
+    trace.full_history_device_to_device_bytes = transfer_delta.runtime_kv_device_to_device_bytes;
+    active_qualification_->invocations.push_back(std::move(trace));
+}
+
+RuntimeMemoryTransferSnapshotV1
+LlamaTextGenerationPipeline::qualification_transfer_snapshot(const TrtModule& module) const {
+    if (active_qualification_ == nullptr)
+        return {};
+    const auto* ledger = dynamic_cast<const IRuntimeMemoryTransferLedgerV1*>(&module);
+    if (ledger == nullptr) {
+        throw std::logic_error(
+            "LlamaTextGenerationPipeline: runtime backend has no transfer ledger");
+    }
+    return ledger->runtime_memory_transfer_snapshot();
+}
+
+RuntimeKvCommitSnapshot LlamaTextGenerationPipeline::qualification_commit_snapshot() const {
+    if (active_qualification_ == nullptr)
+        return {};
+    const auto* cache = dynamic_cast<const LlamaKvCache*>(state_.get());
+    if (cache == nullptr || !cache->runtime_owned_kv()) {
+        throw std::logic_error("LlamaTextGenerationPipeline: runtime qualification has no "
+                               "contiguous KV commit ledger");
+    }
+    return cache->runtime_kv_commit_snapshot();
+}
+
 TrtModule& LlamaTextGenerationPipeline::bind_decoder_for_step() {
     const int32_t desired_rows = std::max(state_->preferred_cache_rows(), 1);
     const int32_t next_idx = select_decoder_index(desired_rows);
@@ -1009,6 +1282,8 @@ void LlamaTextGenerationPipeline::run_step(int32_t token_id, std::vector<float>&
     inputs[config_.token_id_name] = token_tensor;
 
     TrtModule& decoder = bind_decoder_for_step();
+    const auto transfer_before = qualification_transfer_snapshot(decoder);
+    const auto commit_before = qualification_commit_snapshot();
     state_->prepare_step(inputs);
 
     TensorMap outputs = decoder.forward(inputs);
@@ -1025,8 +1300,21 @@ void LlamaTextGenerationPipeline::run_step(int32_t token_id, std::vector<float>&
     std::memcpy(logits.data(), logits_tensor.data, num_logits * sizeof(float));
 
     state_->advance();
+    append_qualification_invocation(
+        "decode", "engine_plan:decode", decoder, static_cast<std::uint64_t>(position_before),
+        static_cast<std::uint64_t>(position_before + 1),
+        static_cast<std::uint64_t>(position_before),
+        static_cast<std::uint64_t>(position_before + 1), static_cast<std::uint64_t>(rows_before),
+        transfer_before, commit_before);
+    // At the exact model boundary there is no next invocation. Do not ask a
+    // runtime-owned state to size A=position+1 merely to populate optional
+    // observability; that would turn a successfully executed Mth token into
+    // an artificial M+1 admission failure.
+    const int32_t rows_after = resolve_runtime_memory_post_step_trace_rows(
+        state_->position(), state_->max_length(), rows_before,
+        [&] { return std::max(state_->preferred_cache_rows(), 1); });
     maybe_append_step_trace(position_before, token_id, active_decoder_index_, rows_before,
-                            std::max(state_->preferred_cache_rows(), 1), logits);
+                            rows_after, logits);
 }
 
 void LlamaTextGenerationPipeline::run_step_device(int32_t token_id) {

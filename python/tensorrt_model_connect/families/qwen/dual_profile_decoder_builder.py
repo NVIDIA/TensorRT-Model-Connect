@@ -293,25 +293,74 @@ def build_dual_profile_decoder_engine(
       bundles, where decode is served by a separate fixed-Sq=1 engine.
 
     Dynamic-KV cache bucket profiles are only meaningful in ``dual_profile``
-    mode. In either mode, cache_k/cache_v inputs are declared dynamic when
-    bucket profiles are requested so each profile can constrain their row count.
+    mode; split bundles use a single dynamic prefill profile here and keep the
+    bucketed fixed-Sq=1 profiles in their separate decode engine.
     """
     _supports_config(config, weights)
-    if profile_mode not in ("dual_profile", "prefill"):
+    runtime_memory_contract = config.raw.get(
+        "_runtime_memory_contract")
+    qualified_runtime_memory = isinstance(
+        runtime_memory_contract, dict)
+    if profile_mode not in ("dual_profile", "prefill", "decode"):
         raise ValueError(
-            "profile_mode must be 'dual_profile' or 'prefill', "
+            "profile_mode must be 'dual_profile', 'prefill', or 'decode', "
             f"got {profile_mode!r}")
+
+    if qualified_runtime_memory:
+        if precision != "bf16":
+            raise ValueError(
+                "qualified runtime-memory graph requires bf16")
+        if runtime_memory_contract.get("contract_version") != 1:
+            raise ValueError(
+                "unsupported qualified runtime-memory contract version")
+        if runtime_memory_contract.get("native_kv_plugin_abi") != 2:
+            raise ValueError(
+                "qualified runtime-memory graph requires plugin ABI 2")
+        if runtime_memory_contract.get("kv_dtype") != "bfloat16":
+            raise ValueError(
+                "qualified runtime-memory graph requires bfloat16 KV")
+        if runtime_memory_contract.get("runtime_owned") is not True:
+            raise ValueError(
+                "qualified runtime-memory graph requires runtime_owned=true")
+        if int(runtime_memory_contract["model_context_limit"]) != int(
+                max_cache_length):
+            raise ValueError(
+                "runtime-memory model_context_limit must match "
+                "max_cache_length")
+        if position_type != "rope" or partial_rotary_factor != 1.0:
+            raise NotImplementedError(
+                "qualified runtime-memory graph requires full RoPE")
+        if interleaved_rope or norm_type != "rmsnorm" or mlp_type != "swiglu":
+            raise NotImplementedError(
+                "qualified runtime-memory graph supports only the exact "
+                "Qwen3 RMSNorm/SwiGLU/rotate-half architecture")
+        if quant_ctx is not None or not scale_attn_weights:
+            raise NotImplementedError(
+                "qualified runtime-memory graph requires unquantized "
+                "scaled attention")
+        max_prefill_length = int(
+            runtime_memory_contract["prefill_chunk_limit"])
 
     if max_prefill_length is None:
         max_prefill_length = max_cache_length
     max_prefill_length = max(1, min(max_prefill_length, max_cache_length))
     opt_prefill_length = max(1, min(opt_prefill_length, max_prefill_length))
 
-    multi_bucket_decode = bool(dynamic_kv_profile_rows)
-    if multi_bucket_decode:
+    requested_decode_buckets = (
+        bool(dynamic_kv_profile_rows) or qualified_runtime_memory)
+    dynamic_cache_inputs = requested_decode_buckets
+    multi_bucket_decode = (
+        requested_decode_buckets and
+        profile_mode in ("dual_profile", "decode"))
+    if requested_decode_buckets:
         decode_buckets: list[int] = []
         seen = set()
-        for raw in dynamic_kv_profile_rows or []:
+        raw_buckets = (
+            runtime_memory_contract["active_kv_profile_limits"]
+            if qualified_runtime_memory
+            else dynamic_kv_profile_rows or []
+        )
+        for raw in raw_buckets:
             clamped = max(1, min(int(raw), max_cache_length))
             if clamped not in seen:
                 seen.add(clamped)
@@ -338,7 +387,16 @@ def build_dual_profile_decoder_engine(
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
-    trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+    if qualified_runtime_memory:
+        from tensorrt_model_connect.trt_plugins import (
+            enable_runtime_memory_features,
+        )
+        enable_runtime_memory_features(trt_config)
+    # A large hidden engine envelope can require multi-GiB build tactics even
+    # though the runtime KV allocation will be much smaller.  This is a
+    # builder ceiling, not a persistent runtime reservation.
+    workspace_bytes = (8 << 30) if dynamic_cache_inputs else (1 << 30)
+    trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes)
 
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
@@ -350,10 +408,18 @@ def build_dual_profile_decoder_engine(
     # ---- Inputs (dynamic Sq) ---------------------------------------------
     token_id = network.add_input("token_id", trt.int32, (-1,))
     position_id = network.add_input("position_id", trt.int32, (-1,))
-    attention_mask = network.add_input("attention_mask", trt.float32, (-1, -1))
+    attention_mask = None
+    history_length = None
+    if qualified_runtime_memory:
+        history_length = network.add_input(
+            "history_length", trt.int32, (1,))
+    else:
+        attention_mask = network.add_input(
+            "attention_mask", trt.float32, (-1, -1))
 
-    cache_shape: tuple[int, int]
-    if multi_bucket_decode:
+    if qualified_runtime_memory:
+        cache_shape = (-1, kv_attention_size)
+    elif dynamic_cache_inputs:
         cache_shape = (-1, kv_attention_size)
     else:
         cache_shape = (max_cache_length, kv_attention_size)
@@ -370,7 +436,10 @@ def build_dual_profile_decoder_engine(
         cache_v_inputs.append(cv)
 
     # Cast mask to compute dtype for elementwise broadcast.
-    if work_trt_dtype != trt.float32:
+    attention_mask_work = None
+    if qualified_runtime_memory:
+        pass
+    elif work_trt_dtype != trt.float32:
         attention_mask_work = network.add_cast(
             attention_mask, work_trt_dtype).get_output(0)
     else:
@@ -385,15 +454,28 @@ def build_dual_profile_decoder_engine(
         min_sq = opt_sq if fixed else 1
         prof.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
         prof.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
-        prof.set_shape(
-            "attention_mask",
-            (min_sq, max_cache_length + min_sq),
-            (opt_sq, max_cache_length + opt_sq),
-            (max_sq, max_cache_length + max_sq))
-        if multi_bucket_decode:
-            cmn = cache_rows_min if cache_rows_min is not None else 1
-            cop = cache_rows_opt if cache_rows_opt is not None else max_cache_length
-            cmx = cache_rows_max if cache_rows_max is not None else max_cache_length
+        cmn = cache_rows_min if cache_rows_min is not None else max_cache_length
+        cop = cache_rows_opt if cache_rows_opt is not None else max_cache_length
+        cmx = cache_rows_max if cache_rows_max is not None else max_cache_length
+        if not qualified_runtime_memory:
+            prof.set_shape(
+                "attention_mask",
+                (min_sq, cmn + min_sq),
+                (opt_sq, cop + opt_sq),
+                (max_sq, cmx + max_sq))
+        if qualified_runtime_memory:
+            for i in range(num_layers):
+                for name in (
+                    graph_ops.layer_tensor_name("cache_k", i),
+                    graph_ops.layer_tensor_name("cache_v", i),
+                ):
+                    prof.set_shape(
+                        name,
+                        (cmn, kv_attention_size),
+                        (cop, kv_attention_size),
+                        (cmx, kv_attention_size),
+                    )
+        elif dynamic_cache_inputs:
             for i in range(num_layers):
                 for name in (graph_ops.layer_tensor_name("cache_k", i),
                              graph_ops.layer_tensor_name("cache_v", i)):
@@ -405,9 +487,41 @@ def build_dual_profile_decoder_engine(
         trt_config.add_optimization_profile(prof)
 
     import os as _os_dbg
-    if profile_mode == "prefill":
+    if qualified_runtime_memory and profile_mode == "prefill":
+        prefill_opt_t = min(
+            max_cache_length,
+            max(opt_prefill_length, 1))
+        _add_profile(
+            opt_prefill_length, max_prefill_length, fixed=False,
+            cache_rows_min=1,
+            cache_rows_opt=prefill_opt_t,
+            cache_rows_max=max_cache_length)
+    elif qualified_runtime_memory and profile_mode == "decode":
+        for bucket in decode_buckets:
+            _add_profile(
+                1, 1, fixed=True,
+                cache_rows_min=1,
+                cache_rows_opt=bucket,
+                cache_rows_max=bucket)
+    elif qualified_runtime_memory:
+        prefill_opt_t = min(
+            max_cache_length,
+            max(opt_prefill_length, 1))
+        _add_profile(
+            opt_prefill_length, max_prefill_length, fixed=False,
+            cache_rows_min=1,
+            cache_rows_opt=prefill_opt_t,
+            cache_rows_max=max_cache_length)
+        for bucket in decode_buckets:
+            _add_profile(
+                1, 1, fixed=True,
+                cache_rows_min=1,
+                cache_rows_opt=bucket,
+                cache_rows_max=bucket)
+    elif profile_mode == "prefill":
         _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
-                     cache_rows_min=1, cache_rows_opt=max_cache_length,
+                     cache_rows_min=(1 if dynamic_cache_inputs else max_cache_length),
+                     cache_rows_opt=(1 if dynamic_cache_inputs else max_cache_length),
                      cache_rows_max=max_cache_length)
     elif _os_dbg.environ.get("TRTMC_DECODE_ONLY_DEBUG") == "1":
         # Diagnostic: build a one-profile engine with dynamic-shape inputs
@@ -427,11 +541,13 @@ def build_dual_profile_decoder_engine(
             else:
                 _add_profile(1, 1, fixed=True)
             _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
-                         cache_rows_min=1, cache_rows_opt=max_cache_length,
+                         cache_rows_min=(1 if dynamic_cache_inputs else max_cache_length),
+                         cache_rows_opt=(1 if dynamic_cache_inputs else max_cache_length),
                          cache_rows_max=max_cache_length)
         else:
             _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
-                         cache_rows_min=1, cache_rows_opt=max_cache_length,
+                         cache_rows_min=(1 if dynamic_cache_inputs else max_cache_length),
+                         cache_rows_opt=(1 if dynamic_cache_inputs else max_cache_length),
                          cache_rows_max=max_cache_length)
             if multi_bucket_decode:
                 for bucket in decode_buckets:
@@ -452,8 +568,20 @@ def build_dual_profile_decoder_engine(
     # native IRotaryEmbeddingLayer.
     cos_half_table: trt.ITensor | None = None
     sin_half_table: trt.ITensor | None = None
+    runtime_cos_sequence: trt.ITensor | None = None
+    runtime_sin_sequence: trt.ITensor | None = None
     q_position_scale_table: trt.ITensor | None = None
-    if position_type == "rope":
+    if qualified_runtime_memory:
+        runtime_cos_sequence, runtime_sin_sequence = (
+            graph_ops.add_runtime_rope_sequence(
+                network,
+                position_id,
+                rotary_embedding_dim=rotary_embedding_dim,
+                rope_theta=config.rope_theta,
+                target_dtype=work_trt_dtype,
+            )
+        )
+    elif position_type == "rope":
         kmax = max_cache_length + max_prefill_length
         graph_ops.validate_native_rope_dim(rotary_embedding_dim)
         yarn_kwargs = _yarn_rope_kwargs(config)
@@ -496,7 +624,9 @@ def build_dual_profile_decoder_engine(
     # ALiBi slopes + cache-slot positions for multi-row mask augmentation.
     alibi_slopes_tensor: trt.ITensor | None = None
     alibi_cache_positions_fp32: trt.ITensor | None = None
-    if position_type == "alibi":
+    if qualified_runtime_memory:
+        mask_4d = None
+    elif position_type == "alibi":
         alibi_slopes_np = graph_ops.compute_alibi_slopes(num_heads)
         # Slopes live as fp32 so the (key_pos - q_pos) math stays in fp32;
         # add_alibi_mask_4d casts the final bias to work_trt_dtype before adding
@@ -554,7 +684,9 @@ def build_dual_profile_decoder_engine(
 
     # Build the 4D additive mask once — shared across layers. ALiBi
     # variants augment the mask with per-head linear bias.
-    if position_type == "alibi":
+    if qualified_runtime_memory:
+        mask_4d = None
+    elif position_type == "alibi":
         mask_4d = graph_ops.add_alibi_mask_4d(
             network, attention_mask_work, position_id,
             alibi_slopes_tensor, alibi_cache_positions_fp32,
@@ -614,38 +746,74 @@ def build_dual_profile_decoder_engine(
         # Position embedding (RoPE only; learned was applied above and ALiBi
         # is added into the attention mask).
         if position_type == "rope":
-            q = graph_ops.add_apply_rope_native(
-                network, q, num_heads, head_dim,
-                cos_half_table, sin_half_table, position_id,
-                rotary_embedding_dim, interleaved_rope,
-                sequence_length=None)
-            k = graph_ops.add_apply_rope_native(
-                network, k, num_kv_heads, head_dim,
-                cos_half_table, sin_half_table, position_id,
-                rotary_embedding_dim, interleaved_rope,
-                sequence_length=None)
+            if qualified_runtime_memory:
+                q = graph_ops.add_apply_rope_native_sequence(
+                    network, q, num_heads, head_dim,
+                    runtime_cos_sequence, runtime_sin_sequence,
+                    rotary_embedding_dim, interleaved_rope,
+                    sequence_length=None)
+                k = graph_ops.add_apply_rope_native_sequence(
+                    network, k, num_kv_heads, head_dim,
+                    runtime_cos_sequence, runtime_sin_sequence,
+                    rotary_embedding_dim, interleaved_rope,
+                    sequence_length=None)
+            else:
+                q = graph_ops.add_apply_rope_native(
+                    network, q, num_heads, head_dim,
+                    cos_half_table, sin_half_table, position_id,
+                    rotary_embedding_dim, interleaved_rope,
+                    sequence_length=None)
+                k = graph_ops.add_apply_rope_native(
+                    network, k, num_kv_heads, head_dim,
+                    cos_half_table, sin_half_table, position_id,
+                    rotary_embedding_dim, interleaved_rope,
+                    sequence_length=None)
             if q_position_scale_table is not None:
                 q_scale = network.add_gather(q_position_scale_table, position_id, 0).get_output(0)
                 if q_scale.dtype != q.dtype:
                     q_scale = network.add_cast(q_scale, q.dtype).get_output(0)
                 q = network.add_elementwise(q, q_scale, trt.ElementWiseOperation.PROD).get_output(0)
 
-        # Present K / V (this step's raw K / V), shape (Sq, attn_size).
-        present_k_outs.append(k)
-        present_v_outs.append(v)
+        if qualified_runtime_memory:
+            context = graph_ops.add_native_contiguous_attention_v2(
+                network,
+                cache_k_inputs[layer_idx],
+                cache_v_inputs[layer_idx],
+                q, k, v,
+                history_length,
+                num_query_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                chunk_limit=int(
+                    runtime_memory_contract["prefill_chunk_limit"]),
+                tag=f"{prefix}.attn",
+            )
+            # Current token-major K/V remain ordinary exact-Sq engine
+            # outputs. The runtime appends only these rows after enqueue;
+            # persistent history is read-only inside the engine.
+            present_k_outs.append(k)
+            present_v_outs.append(v)
+        else:
+            # Present K / V (this step's raw K / V), shape (Sq, attn_size).
+            present_k_outs.append(k)
+            present_v_outs.append(v)
 
-        # Concatenate cached + current K / V along the sequence dim.
-        all_k_cat = network.add_concatenation([cache_k_inputs[layer_idx], k])
-        all_k_cat.axis = 0
-        all_v_cat = network.add_concatenation([cache_v_inputs[layer_idx], v])
-        all_v_cat.axis = 0
+            # Concatenate cached + current K / V along the sequence dim.
+            all_k_cat = network.add_concatenation(
+                [cache_k_inputs[layer_idx], k])
+            all_k_cat.axis = 0
+            all_v_cat = network.add_concatenation(
+                [cache_v_inputs[layer_idx], v])
+            all_v_cat.axis = 0
 
-        context = graph_ops.add_attention_from_rows(
-            network, q, all_k_cat.get_output(0), all_v_cat.get_output(0),
-            num_heads=num_heads, head_dim=head_dim,
-            num_kv_heads=num_kv_heads,
-            q_seq=None, kv_seq=None, causal=False, mask=mask_4d,
-            scale=attn_scale, tag=f"{prefix}.attn")
+            context = graph_ops.add_attention_from_rows(
+                network, q, all_k_cat.get_output(0),
+                all_v_cat.get_output(0),
+                num_heads=num_heads, head_dim=head_dim,
+                num_kv_heads=num_kv_heads,
+                q_seq=None, kv_seq=None, causal=False,
+                mask=mask_4d,
+                scale=attn_scale, tag=f"{prefix}.attn")
 
         attn_out = matmul(context, attention_size, hidden,
                           weights[f"{prefix}.w_o"], f"{prefix}.w_o")

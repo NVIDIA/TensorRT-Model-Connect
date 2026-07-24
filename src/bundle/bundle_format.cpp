@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -131,6 +132,126 @@ void parse_sections_table(const std::string& json, BundleSectionTable& sections_
     }
 }
 
+bool is_lower_hex(const std::string& value, std::size_t expected_size) {
+    return value.size() == expected_size &&
+           std::all_of(value.begin(), value.end(), [](unsigned char character) {
+               return std::isdigit(character) != 0 ||
+                      (character >= static_cast<unsigned char>('a') &&
+                       character <= static_cast<unsigned char>('f'));
+           });
+}
+
+[[noreturn]] void invalid_runtime_memory(const std::string& detail) {
+    throw std::runtime_error("Invalid runtime_memory contract: " + detail);
+}
+
+void parse_runtime_memory_contract(const std::string& json, BundleInfo& info) {
+    const std::string text = extract_json_object_text(json, "runtime_memory");
+    if (text.empty()) {
+        if (json.find("\"runtime_memory\"") != std::string::npos)
+            invalid_runtime_memory("runtime_memory must be an object");
+        return;
+    }
+
+    auto& contract = info.runtime_memory;
+    contract.present = true;
+    contract.contract_version = extract_json_int(text, "contract_version", 0);
+    contract.qualified_model_id = extract_json_string(text, "qualified_model_id", "");
+    contract.qualified_model_revision = extract_json_string(text, "qualified_model_revision", "");
+    contract.qualified_config_sha256 = extract_json_string(text, "qualified_config_sha256", "");
+    contract.qualified_target = extract_json_string(text, "qualified_target", "");
+    const std::string runtime_stack_text =
+        extract_json_object_text(text, "qualified_runtime_stack");
+    if (runtime_stack_text.empty())
+        invalid_runtime_memory("qualified_runtime_stack is required");
+    auto& runtime_stack = contract.qualified_runtime_stack;
+    runtime_stack.sm = extract_json_string(runtime_stack_text, "sm", "");
+    runtime_stack.tensorrt =
+        extract_json_string(runtime_stack_text, "tensorrt", "");
+    runtime_stack.cuda_runtime =
+        extract_json_string(runtime_stack_text, "cuda_runtime", "");
+    runtime_stack.cudnn_backend =
+        extract_json_string(runtime_stack_text, "cudnn_backend", "");
+    runtime_stack.cudnn_frontend_revision =
+        extract_json_string(runtime_stack_text, "cudnn_frontend_revision", "");
+    runtime_stack.nvrtc =
+        extract_json_string(runtime_stack_text, "nvrtc", "");
+    runtime_stack.driver =
+        extract_json_string(runtime_stack_text, "driver", "");
+    contract.native_kv_plugin_abi = extract_json_int(text, "native_kv_plugin_abi", 0);
+    contract.model_context_limit = extract_json_int(text, "model_context_limit", 0);
+    contract.prefill_chunk_limit = extract_json_int(text, "prefill_chunk_limit", 0);
+    contract.kv_layout = extract_json_string(text, "kv_layout", "");
+    contract.kv_dtype = extract_json_string(text, "kv_dtype", "");
+    const int64_t bytes_per_token = parse_int64_field(text, "kv_bytes_per_token");
+    if (bytes_per_token > 0)
+        contract.kv_bytes_per_token = static_cast<std::uint64_t>(bytes_per_token);
+    contract.active_kv_profile_limits =
+        extract_json_int_array(text, "active_kv_profile_limits", 64);
+    contract.runtime_owned = extract_json_bool(text, "runtime_owned", false);
+
+    if (contract.contract_version != 1)
+        invalid_runtime_memory("unsupported contract_version");
+    if (contract.qualified_model_id.empty())
+        invalid_runtime_memory("qualified_model_id is required");
+    if (!is_lower_hex(contract.qualified_model_revision, 40))
+        invalid_runtime_memory("qualified_model_revision must be a lowercase 40-character SHA");
+    if (!is_lower_hex(contract.qualified_config_sha256, 64))
+        invalid_runtime_memory("qualified_config_sha256 must be a lowercase SHA-256");
+    if (contract.qualified_target.empty())
+        invalid_runtime_memory("qualified_target is required");
+    if (runtime_stack.sm.empty() || runtime_stack.tensorrt.empty() ||
+        runtime_stack.cuda_runtime.empty() || runtime_stack.cudnn_backend.empty() ||
+        !is_lower_hex(runtime_stack.cudnn_frontend_revision, 40) ||
+        runtime_stack.nvrtc.empty() || runtime_stack.driver.empty()) {
+        invalid_runtime_memory(
+            "qualified_runtime_stack requires non-empty "
+            "SM/TensorRT/CUDA/cuDNN/Frontend/NVRTC/driver fields");
+    }
+    if (contract.native_kv_plugin_abi <= 0)
+        invalid_runtime_memory("native_kv_plugin_abi must be positive");
+    if (contract.model_context_limit <= 0)
+        invalid_runtime_memory("model_context_limit must be positive");
+    if (contract.prefill_chunk_limit <= 0 ||
+        contract.prefill_chunk_limit > contract.model_context_limit) {
+        invalid_runtime_memory("prefill_chunk_limit must be within model_context_limit");
+    }
+    if (contract.kv_layout.empty())
+        invalid_runtime_memory("kv_layout is required");
+    if (contract.kv_dtype != "bfloat16" && contract.kv_dtype != "float16" &&
+        contract.kv_dtype != "float32") {
+        invalid_runtime_memory("kv_dtype is unsupported");
+    }
+    if (contract.kv_bytes_per_token == 0)
+        invalid_runtime_memory("kv_bytes_per_token must be positive");
+    if (contract.active_kv_profile_limits.empty())
+        invalid_runtime_memory("active_kv_profile_limits is required");
+    if (!std::is_sorted(contract.active_kv_profile_limits.begin(),
+                        contract.active_kv_profile_limits.end()) ||
+        std::adjacent_find(contract.active_kv_profile_limits.begin(),
+                           contract.active_kv_profile_limits.end()) !=
+            contract.active_kv_profile_limits.end() ||
+        contract.active_kv_profile_limits.front() <= 0) {
+        invalid_runtime_memory("active_kv_profile_limits must be positive and strictly increasing");
+    }
+    if (contract.active_kv_profile_limits.back() != contract.model_context_limit) {
+        invalid_runtime_memory("active_kv_profile_limits must end at model_context_limit");
+    }
+    if (std::find(contract.active_kv_profile_limits.begin(),
+                  contract.active_kv_profile_limits.end(),
+                  contract.prefill_chunk_limit) == contract.active_kv_profile_limits.end()) {
+        invalid_runtime_memory("prefill_chunk_limit must be an active KV profile limit");
+    }
+    if (!contract.runtime_owned)
+        invalid_runtime_memory("runtime_owned must be true");
+    if (info.model_id != contract.qualified_model_id)
+        invalid_runtime_memory("qualified_model_id does not match bundle model_id");
+    if (info.max_cache_length != contract.model_context_limit)
+        invalid_runtime_memory("model_context_limit does not match max_cache_length");
+    if (contract.kv_dtype == "bfloat16" && info.precision != "bf16")
+        invalid_runtime_memory("bfloat16 KV contract requires bf16 bundle precision");
+}
+
 BundleInfo BundleInfoFromJson(const std::string& json, BundleSectionTable& sections_out) {
     BundleInfo info;
     info.model_id = extract_json_string(json, "model_id", "");
@@ -154,6 +275,7 @@ BundleInfo BundleInfoFromJson(const std::string& json, BundleSectionTable& secti
         info.tokenizer_add_special_tokens = (tokenizer_add_special != 0);
         info.tokenizer_add_special_tokens_present = true;
     }
+    parse_runtime_memory_contract(json, info);
 
     // Per-component diffusion batch caps (see design doc Decision C).
     // Absent => leave the default {1, 1, 1} so legacy bundles run unchanged.

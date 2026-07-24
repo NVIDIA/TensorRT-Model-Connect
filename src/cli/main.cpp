@@ -132,12 +132,30 @@ normalize_explicit_image_batch_seeds(const std::vector<std::uint64_t>& explicit_
     return out;
 }
 
-trtmc::LoadOptions make_load_options(const CliArgs& args) {
-    trtmc::LoadOptions options;
+trtmc::LoadOptionsV2 make_load_options(const CliArgs& args) {
+    trtmc::LoadOptionsV2 options;
     options.hf_python = args.hf_python;
     options.runtime_cache_path = args.runtime_cache;
     options.cuda_graphs = args.cuda_graphs;
-    options.kv_cache_size_bytes = args.kv_cache_size_bytes;
+    if (args.kv_cache_memory.explicitly_set) {
+        switch (args.kv_cache_memory.mode) {
+        case trtmc::cli::KvCacheMemoryMode::Auto:
+            options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kAuto;
+            break;
+        case trtmc::cli::KvCacheMemoryMode::Bytes:
+            options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kBytes;
+            options.kv_cache_memory_bytes = args.kv_cache_memory.bytes;
+            break;
+        case trtmc::cli::KvCacheMemoryMode::Percent:
+            options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kFraction;
+            break;
+        }
+    }
+    if (args.kv_cache_memory.mode == trtmc::cli::KvCacheMemoryMode::Percent) {
+        options.kv_cache_memory_fraction = args.kv_cache_memory.percent / 100.0;
+    }
+    options.max_sequence_length = args.max_sequence_length;
+    options.max_sequence_length_explicit = args.max_sequence_length_explicitly_set ? 1U : 0U;
     // Forward --config/--set into the factory so ConfigBundle resolution
     // actually sees them. Without this, every --set call silently no-ops
     // because pipeline_factory only reads from LoadOptions.
@@ -382,6 +400,18 @@ void write_text_sample_jsonl(std::ostream& out, int32_t id, const trtmc::TextRes
         out << result.token_ids[i];
     }
     out << "]}\n";
+}
+
+void print_request_complete_memory_receipt(const trtmc::IPipeline& pipeline) {
+    const auto* introspection =
+        dynamic_cast<const trtmc::IRuntimeMemoryIntrospectionV1*>(&pipeline);
+    if (introspection == nullptr || introspection->runtime_memory_api_version() != 1 ||
+        introspection->runtime_kv_capacity_tokens() == 0) {
+        return;
+    }
+    const auto receipt = introspection->runtime_memory_receipt_json();
+    if (!receipt.empty())
+        std::cerr << "[trtmc.memory] " << receipt << '\n';
 }
 
 int cmd_run(const CliArgs& args) {
@@ -701,6 +731,11 @@ int cmd_run(const CliArgs& args) {
         if (jsonl_file.is_open())
             std::cout << "Saved " << args.output_dir << " (" << samples << " samples)\n";
     }
+    // Dynamic-memory pipelines sampled their device-wide high-water after
+    // the complete request. Emit the refreshed receipt once, outside all
+    // token/prefill/decode loops, so CLI and the Python subprocess wrapper
+    // observe request-lifetime rather than load-only accounting.
+    print_request_complete_memory_receipt(*pipeline);
     return EXIT_SUCCESS;
 }
 
@@ -1441,7 +1476,38 @@ int cmd_inspect(const CliArgs& args) {
         std::cout << "Layers:             " << info.num_layers << '\n';
         std::cout << "Attention heads:    " << info.num_attention_heads << '\n';
         std::cout << "KV heads:           " << info.num_key_value_heads << '\n';
-        std::cout << "Max cache length:   " << info.max_cache_length << '\n';
+        if (info.runtime_memory.present) {
+            const auto& memory = info.runtime_memory;
+            std::cout << "Runtime KV contract version: " << memory.contract_version << '\n';
+            std::cout << "Qualified model ID: " << memory.qualified_model_id << '\n';
+            std::cout << "Qualified model revision: " << memory.qualified_model_revision << '\n';
+            std::cout << "Qualified config fingerprint: " << memory.qualified_config_sha256 << '\n';
+            std::cout << "Qualified target:   " << memory.qualified_target << '\n';
+            const auto& stack = memory.qualified_runtime_stack;
+            std::cout << "Qualified runtime stack: "
+                      << "SM=" << stack.sm << ", TensorRT=" << stack.tensorrt
+                      << ", CUDA=" << stack.cuda_runtime
+                      << ", cuDNN=" << stack.cudnn_backend
+                      << ", Frontend=" << stack.cudnn_frontend_revision
+                      << ", NVRTC=" << stack.nvrtc
+                      << ", driver=" << stack.driver << '\n';
+            std::cout << "Native KV plugin ABI: " << memory.native_kv_plugin_abi << '\n';
+            std::cout << "Model context limit: " << memory.model_context_limit << '\n';
+            std::cout << "Prefill chunk limit: " << memory.prefill_chunk_limit << '\n';
+            std::cout << "KV layout:          " << memory.kv_layout << '\n';
+            std::cout << "KV dtype:           " << memory.kv_dtype << '\n';
+            std::cout << "KV bytes per token: " << memory.kv_bytes_per_token << '\n';
+            std::cout << "Active KV profile limits: ";
+            for (std::size_t index = 0; index < memory.active_kv_profile_limits.size(); ++index) {
+                if (index != 0)
+                    std::cout << ", ";
+                std::cout << memory.active_kv_profile_limits[index];
+            }
+            std::cout << '\n';
+            std::cout << "Runtime-owned KV:   yes\n";
+        } else {
+            std::cout << "Max cache length:   " << info.max_cache_length << '\n';
+        }
         if (!info.runtime_strategy.empty())
             std::cout << "Runtime strategy:   " << info.runtime_strategy << '\n';
         // Diffusion batch envelope (PR 1 added the field to BundleInfo;

@@ -2611,6 +2611,110 @@ def add_apply_rope_native_sequence(
         network, rope.get_output(0), attention_size, sequence_length)
 
 
+def add_runtime_rope_sequence(
+    network: trt.INetworkDefinition,
+    position_id: trt.ITensor,
+    *,
+    rotary_embedding_dim: int,
+    rope_theta: float,
+    target_dtype: trt.DataType,
+) -> tuple[trt.ITensor, trt.ITensor]:
+    """Build only the current ``Sq`` RoPE rows from runtime position IDs.
+
+    Unlike a ``[model_context_limit, D/2]`` constant table, this graph stores
+    only ``D/2`` inverse frequencies. The cosine/sine tensors are allocated
+    for the active chunk at enqueue time.
+    """
+    rotary_embedding_dim = validate_native_rope_dim(
+        rotary_embedding_dim)
+    if rope_theta <= 0.0:
+        raise ValueError("rope_theta must be positive")
+    half = rotary_embedding_dim // 2
+    inv_freq = np.power(
+        float(rope_theta),
+        -np.arange(0, rotary_embedding_dim, 2, dtype=np.float32)
+        / float(rotary_embedding_dim),
+    ).reshape(1, half)
+    inv_freq_t = add_constant(
+        network, (1, half), inv_freq, dtype=np.float32)
+    positions = network.add_cast(
+        position_id, trt.float32).get_output(0)
+    positions_2d = network.add_shuffle(positions)
+    positions_2d.reshape_dims = (-1, 1)
+    angles = network.add_elementwise(
+        positions_2d.get_output(0),
+        inv_freq_t,
+        trt.ElementWiseOperation.PROD,
+    ).get_output(0)
+    cos = network.add_unary(
+        angles, trt.UnaryOperation.COS).get_output(0)
+    sin = network.add_unary(
+        angles, trt.UnaryOperation.SIN).get_output(0)
+    if target_dtype != trt.float32:
+        cos = network.add_cast(cos, target_dtype).get_output(0)
+        sin = network.add_cast(sin, target_dtype).get_output(0)
+    cos_3d = network.add_shuffle(cos)
+    cos_3d.reshape_dims = (1, -1, half)
+    sin_3d = network.add_shuffle(sin)
+    sin_3d.reshape_dims = (1, -1, half)
+    return cos_3d.get_output(0), sin_3d.get_output(0)
+
+
+def add_native_contiguous_attention_v2(
+    network: trt.INetworkDefinition,
+    cache_k_rows: trt.ITensor,
+    cache_v_rows: trt.ITensor,
+    q_rows: trt.ITensor,
+    k_rows: trt.ITensor,
+    v_rows: trt.ITensor,
+    history_length: trt.ITensor,
+    *,
+    num_query_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    chunk_limit: int,
+    tag: str,
+) -> trt.ITensor:
+    """Compute segmented attention over read-only history and current K/V."""
+    from tensorrt_model_connect.trt_plugins import (
+        create_native_contiguous_attention,
+    )
+
+    q_4d = reshape_rows_to_heads_4d(
+        network, q_rows, num_query_heads, head_dim,
+        sequence_length=None, tag=f"{tag}.q")
+    k_4d = reshape_rows_to_heads_4d(
+        network, k_rows, num_kv_heads, head_dim,
+        sequence_length=None, tag=f"{tag}.k")
+    v_4d = reshape_rows_to_heads_4d(
+        network, v_rows, num_kv_heads, head_dim,
+        sequence_length=None, tag=f"{tag}.v")
+    context_4d = create_native_contiguous_attention(
+        network,
+        [
+            cache_k_rows,
+            cache_v_rows,
+            q_4d,
+            k_4d,
+            v_4d,
+            history_length,
+        ],
+        layer_name=f"{tag}.NativeContiguousAttentionV2",
+        num_query_heads=num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        chunk_limit=chunk_limit,
+    )
+    context = reshape_heads_4d_to_rows(
+        network,
+        context_4d,
+        num_query_heads * head_dim,
+        sequence_length=None,
+        tag=f"{tag}.context",
+    )
+    return context
+
+
 def add_apply_rope_native_from_full_cache(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,

@@ -12,6 +12,19 @@
 
 namespace trtmc::cli {
 
+enum class KvCacheMemoryMode {
+    Auto,
+    Bytes,
+    Percent,
+};
+
+struct KvCacheMemorySpec {
+    KvCacheMemoryMode mode{KvCacheMemoryMode::Auto};
+    std::uint64_t bytes{0};
+    double percent{0.0};
+    bool explicitly_set{false};
+};
+
 struct CliArgs {
     std::string command;
     std::vector<std::string> build_args;
@@ -19,7 +32,13 @@ struct CliArgs {
     std::string prompt;
     bool prompt_provided{false};
     std::string hf_python;
+    KvCacheMemorySpec kv_cache_memory;
+    // Compatibility mirror for consumers that only support an explicit byte
+    // budget. It is populated when kv_cache_memory.mode == Bytes, otherwise 0.
     std::uint64_t kv_cache_size_bytes{0};
+    // Runtime per-request prompt + generated-token limit. 0 means auto.
+    std::uint64_t max_sequence_length{0};
+    bool max_sequence_length_explicitly_set{false};
     std::string image_path;
     std::string lora_adapter_path;
     std::string lora_adapter_id{"default"};
@@ -106,6 +125,8 @@ inline bool has_run_input_source(const CliArgs& args) {
 }
 
 std::optional<std::uint64_t> parse_byte_size(const std::string& text);
+// Parse a positive token count. K and M use binary multiples, so 32K is 32768.
+std::optional<std::uint64_t> parse_token_count(const std::string& text);
 // Parse a CSV of unsigned-64 integers (e.g. "0,1,2"). Returns nullopt when
 // any token fails to parse. Empty string returns an empty vector wrapped
 // in an optional (caller should treat empty CSV the same as no flag).

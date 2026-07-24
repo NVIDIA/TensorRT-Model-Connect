@@ -111,6 +111,43 @@ class MockTokenizer final : public trtmc::ITokenizer {
     }
 };
 
+class AdmissionOnlyRuntimeState final : public trtmc::LlamaInferenceState {
+  public:
+    void reset() override { ++reset_calls; }
+    void bind_to(trtmc::TrtModule& module) override {
+        (void)module;
+        ++bind_calls;
+    }
+    void prepare_step(trtmc::TensorMap& inputs, int32_t seq_len) override {
+        (void)inputs;
+        (void)seq_len;
+        ++prepare_calls;
+    }
+    void advance(int32_t n_tokens) override {
+        position_ += n_tokens;
+        ++advance_calls;
+    }
+    int32_t position() const override { return position_; }
+    int32_t max_length() const override { return 6; }
+    bool runtime_owned_kv() const override { return true; }
+    int32_t prefill_chunk_limit() const override { return 4; }
+    std::uint64_t runtime_kv_capacity_tokens() const override { return 6; }
+    std::string runtime_memory_receipt_json() const override { return R"({"kv_allocation_id":1})"; }
+    int32_t num_layers() const override { return 1; }
+    bool needs_attention_mask() const override { return false; }
+    std::size_t device_memory_bytes() const override { return 0; }
+    const char* state_type() const override { return "qualification-test"; }
+    bool ok() const override { return true; }
+
+    int reset_calls{0};
+    int bind_calls{0};
+    int prepare_calls{0};
+    int advance_calls{0};
+
+  private:
+    int32_t position_{0};
+};
+
 class SequenceSampler final : public trtmc::LlamaISampler {
   public:
     explicit SequenceSampler(std::vector<int32_t> tokens) : tokens_(std::move(tokens)) {}
@@ -239,7 +276,7 @@ static void test_generate_stops_at_eos() {
     trtmc::LlamaTextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
 
     trtmc::GenerateConfig gen_cfg;
-    gen_cfg.max_new_tokens = 10;
+    gen_cfg.max_new_tokens = 7;
 
     auto result = pipeline.generate_ids({1}, gen_cfg);
 
@@ -288,6 +325,47 @@ static void test_generate_max_tokens() {
     cudaStreamDestroy(stream);
 }
 
+static void test_compacting_cache_uses_logical_sequence_limit() {
+    auto engine = build_mock_decoder();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
+                                                         engine->createExecutionContext(), stream);
+    auto cache = std::make_unique<trtmc::LlamaKvCache>(1, 8, 4, stream);
+
+    trtmc::LlamaTextGenConfig cfg;
+    cfg.vocab_size = 4;
+    cfg.id_eos = 99;
+    cfg.has_position_input = false;
+    cfg.max_sequence_length = 12;
+    cfg.kv_cache_compaction = true;
+
+    trtmc::LlamaTextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
+
+    trtmc::GenerateConfig accepted;
+    accepted.max_new_tokens = 2;
+    auto result = pipeline.generate_ids(std::vector<int32_t>(9, 1), accepted);
+    check(result.token_ids.size() == 11,
+          "compacting cache allows logical sequence beyond physical KV rows");
+
+    trtmc::GenerateConfig rejected;
+    rejected.max_new_tokens = 4;
+    bool limit_enforced = false;
+    try {
+        (void)pipeline.generate_ids(std::vector<int32_t>(9, 1), rejected);
+    } catch (const std::runtime_error& error) {
+        limit_enforced = std::string(error.what()).find("exceeds runtime max sequence length 12") !=
+                         std::string::npos;
+    }
+    check(limit_enforced, "compacting cache still enforces logical sequence limit");
+
+    cudaStreamDestroy(stream);
+}
+
 static void test_argmax() {
     std::vector<float> logits = {0.1f, 0.5f, 0.3f, 0.8f, 0.2f};
     int32_t result = trtmc::LlamaTextGenerationPipeline::argmax(logits);
@@ -324,6 +402,92 @@ static void test_zero_max_tokens() {
 
     auto result = pipeline.generate_ids({1, 2, 3}, gen_cfg);
     check(result.token_ids.size() == 3, "zero max_new_tokens returns input unchanged");
+
+    cudaStreamDestroy(stream);
+}
+
+static void test_qualification_m_plus_one_rejects_before_attention() {
+    auto engine = build_mock_decoder();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
+                                                         engine->createExecutionContext(), stream);
+    auto state = std::make_unique<AdmissionOnlyRuntimeState>();
+    auto* state_observer = state.get();
+
+    trtmc::LlamaTextGenConfig cfg;
+    cfg.vocab_size = 4;
+    cfg.id_eos = 2;
+    cfg.has_position_input = false;
+    cfg.max_sequence_length = 6;
+    cfg.runtime_sequence_admission = trtmc::RuntimeSequenceAdmissionContext{
+        /*model_context_limit=*/8,
+        /*runtime_kv_capacity_tokens=*/6,
+        /*request_context_limit=*/0,
+        /*kv_bytes_per_token=*/16,
+        /*kv_budget_bytes=*/96,
+        /*kv_reserved_bytes=*/96,
+    };
+
+    trtmc::LlamaTextGenerationPipeline pipeline(std::move(module), std::move(state), cfg, stream);
+    auto* qualification = dynamic_cast<trtmc::IRuntimeMemoryQualificationV1*>(&pipeline);
+    check(qualification != nullptr, "qualification V1 is independently discoverable");
+    check(qualification != nullptr && qualification->runtime_memory_qualification_api_version() ==
+                                          trtmc::kRuntimeMemoryQualificationApiVersionV1,
+          "qualification V1 reports the expected version");
+    auto* introspection = dynamic_cast<trtmc::IRuntimeMemoryIntrospectionV1*>(&pipeline);
+    check(introspection != nullptr,
+          "runtime-memory introspection RTTI crosses the Llama model DSO boundary");
+    check(introspection != nullptr && introspection->runtime_memory_api_version() == 1 &&
+              introspection->runtime_kv_capacity_tokens() == 6,
+          "cross-DSO introspection reports the model-owned runtime state");
+    const char* c_abi_receipt = trtmc_pipeline_runtime_memory_receipt_json(&pipeline);
+    check(c_abi_receipt != nullptr &&
+              std::string(c_abi_receipt).find("\"kv_allocation_id\":1") != std::string::npos,
+          "core C ABI introspects a pipeline implemented by the Llama model DSO");
+
+    trtmc::RuntimeMemoryQualificationRequestV1 request;
+    request.input_ids.assign(9, 1);
+    request.max_new_tokens = 0;
+    bool typed_rejection = false;
+    try {
+        (void)qualification->qualify_runtime_memory(request);
+    } catch (const trtmc::RuntimeMemoryQualificationAdmissionError& error) {
+        typed_rejection = std::string(error.what()).find("semantic model context limit exceeded") !=
+                          std::string::npos;
+    }
+    check(typed_rejection, "M+1 uses the typed qualification admission error");
+    check(state_observer->reset_calls == 0, "M+1 rejects before resetting runtime state");
+    check(state_observer->bind_calls == 0, "M+1 rejects before binding an attention engine");
+    check(state_observer->prepare_calls == 0,
+          "M+1 rejects before preparing an attention invocation");
+    check(state_observer->advance_calls == 0, "M+1 rejects before advancing KV state");
+
+    trtmc::GenerateConfig generation_request;
+    generation_request.max_new_tokens = 0;
+    bool resource_rejection = false;
+    try {
+        (void)pipeline.generate_ids(std::vector<int32_t>(7, 1), generation_request);
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        resource_rejection =
+            message.find("runtime KV resource capacity exceeded") != std::string::npos &&
+            message.find("required_kv_bytes=112") != std::string::npos &&
+            message.find("kv_budget_bytes=96") != std::string::npos;
+    }
+    check(resource_rejection, "normal Llama generation reports physical runtime KV exhaustion");
+    check(state_observer->reset_calls == 0,
+          "resource rejection occurs before resetting runtime state");
+    check(state_observer->bind_calls == 0,
+          "resource rejection occurs before binding an attention engine");
+    check(state_observer->prepare_calls == 0,
+          "resource rejection occurs before preparing an attention invocation");
+    check(state_observer->advance_calls == 0,
+          "resource rejection occurs before advancing KV state");
 
     cudaStreamDestroy(stream);
 }
@@ -419,7 +583,7 @@ static void test_stop_on_boxed_answer() {
                                                 tokenizer, "mock", std::move(sampler));
 
     trtmc::GenerateConfig gen_cfg;
-    gen_cfg.max_new_tokens = 10;
+    gen_cfg.max_new_tokens = 7;
     gen_cfg.stop_on_boxed_answer = true;
     gen_cfg.stop_check_interval = 1;
 
@@ -437,7 +601,9 @@ int main() {
     test_pipeline_construction();
     test_generate_stops_at_eos();
     test_generate_max_tokens();
+    test_compacting_cache_uses_logical_sequence_limit();
     test_zero_max_tokens();
+    test_qualification_m_plus_one_rejects_before_attention();
     test_kv_reset_is_logical_and_masks_stale_rows();
     test_generation_reset_reuses_execution_context();
     test_stop_on_boxed_answer();

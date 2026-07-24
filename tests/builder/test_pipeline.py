@@ -75,6 +75,36 @@ class TestPipelineInit:
         pipe = Pipeline("/tmp/model.trtfb", binary="/usr/bin/trtmc")
         assert repr(pipe) == "Pipeline('/tmp/model.trtfb')"
 
+    @pytest.mark.dynamic_memory
+    def test_runtime_memory_constructor_options(self):
+        pipe = Pipeline(
+            "/tmp/model.trtfb",
+            binary="/usr/bin/trtmc",
+            kv_cache_memory="80%",
+            max_sequence_length=32768,
+        )
+        assert pipe.kv_cache_memory == "80%"
+        assert pipe.max_sequence_length == "32768"
+        assert pipe.last_memory_receipt is None
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("kv_cache_memory", 0),
+            ("kv_cache_memory", True),
+            ("max_sequence_length", 0),
+            ("max_sequence_length", False),
+        ],
+    )
+    @pytest.mark.dynamic_memory
+    def test_invalid_runtime_memory_constructor_options(self, field, value):
+        with pytest.raises((TypeError, ValueError)):
+            Pipeline(
+                "/tmp/model.trtfb",
+                binary="/usr/bin/trtmc",
+                **{field: value},
+            )
+
 
 # ---------------------------------------------------------------------------
 # Pipeline.__call__
@@ -108,6 +138,44 @@ class TestPipelineCall:
                 timeout=120.0,
             )
             assert output == "Hello world!"
+
+    @pytest.mark.dynamic_memory
+    def test_runtime_memory_flags_and_receipt(self):
+        pipe = Pipeline(
+            "/tmp/model.trtfb",
+            binary="/usr/bin/trtmc",
+            kv_cache_memory=8 * 1024,
+            max_sequence_length="32K",
+        )
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "answer\n"
+        mock_result.stderr = (
+            "diagnostic\n"
+            '[trtmc.memory] {"runtime_kv_capacity_tokens":32768,'
+            '"kv_reserved_bytes":8192,"resident_weight_bytes":null,'
+            '"peak_device_bytes":null,'
+            '"measurement_sources":{"resident_weight_bytes":null,'
+            '"peak_device_bytes":null}}\n'
+        )
+        with patch(
+            "tensorrt_model_connect.pipeline.subprocess.run",
+            return_value=mock_result,
+        ) as mock_run:
+            assert pipe("hello") == "answer"
+        cmd = mock_run.call_args.args[0]
+        assert cmd[cmd.index("--kv-cache-memory") + 1] == "8192B"
+        assert cmd[cmd.index("--max-sequence-length") + 1] == "32K"
+        assert pipe.last_memory_receipt == {
+            "runtime_kv_capacity_tokens": 32768,
+            "kv_reserved_bytes": 8192,
+            "resident_weight_bytes": None,
+            "peak_device_bytes": None,
+            "measurement_sources": {
+                "resident_weight_bytes": None,
+                "peak_device_bytes": None,
+            },
+        }
 
     def test_prompt_with_image(self):
         """Image argument is appended to the command."""

@@ -21,12 +21,24 @@ python3.12 -m venv .venv-trtmc
 pip install ./tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl
 
 trtmc version
-trtmc build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
-trtmc run /tmp/qwen3.trtfb \
+trtmc build Qwen/Qwen3-0.6B
+trtmc run qwen3-0.6b.trtfb \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
   --greedy
 ```
+
+For the exactly qualified `Qwen/Qwen3-0.6B` and
+`TinyLlama/TinyLlama-1.1B-Chat-v1.0` revisions, the model-only build
+automatically emits split prefill/decode engines with runtime-owned KV
+memory on the initial qualified target: GB300 (`sm103`) with TensorRT
+`11.2.0.113`. A recognized model on another target fails with the expected and
+actual target instead of silently producing a different kind of bundle.
+Runtime defaults to 90% of the safely usable free GPU memory measured after
+engine loading, capped by the model's context limit. Use
+`--kv-cache-memory 80%` or `--kv-cache-memory 8GiB` to override it, and
+optionally add the runtime-only `--max-sequence-length 4K` admission cap.
+Other checkpoints retain their existing build and runtime route.
 
 The wheel installs the native `trtmc` executable into the environment, the
 Python builder dependencies including TensorRT, and the TensorRT backend DSO.
@@ -60,8 +72,8 @@ pip install -e . -C py-only=true
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
-./build/trtmc build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
-./build/trtmc run /tmp/qwen3.trtfb \
+./build/trtmc build Qwen/Qwen3-0.6B
+./build/trtmc run qwen3-0.6b.trtfb \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
   --greedy

@@ -6,6 +6,7 @@
 #include "runtime/backend/backend_loader.h"
 
 #include "runtime/backend/prebound_backend.h"
+#include "runtime/backend/runtime_memory_backend.h"
 
 #include <cstdlib>
 #include <dlfcn.h>
@@ -23,6 +24,53 @@
 namespace trtmc {
 
 IPreboundBackend::~IPreboundBackend() = default;
+IRuntimeMemoryEngineIntrospectionV1::~IRuntimeMemoryEngineIntrospectionV1() = default;
+IRuntimeMemoryTransferLedgerV1::~IRuntimeMemoryTransferLedgerV1() = default;
+IRuntimeMemoryModuleV1::~IRuntimeMemoryModuleV1() = default;
+IRuntimeMemoryBackendV1::~IRuntimeMemoryBackendV1() = default;
+
+RuntimeMemoryTransferDeltaV1
+runtime_memory_transfer_delta(const RuntimeMemoryTransferSnapshotV1& before,
+                              const RuntimeMemoryTransferSnapshotV1& after) {
+    if (before.api_version != kRuntimeMemoryBackendApiVersionV1 ||
+        after.api_version != kRuntimeMemoryBackendApiVersionV1 ||
+        before.struct_size != sizeof(RuntimeMemoryTransferSnapshotV1) ||
+        after.struct_size != sizeof(RuntimeMemoryTransferSnapshotV1)) {
+        throw std::invalid_argument("runtime-memory transfer snapshot ABI mismatch");
+    }
+    if (after.event_sequence < before.event_sequence)
+        throw std::logic_error("runtime-memory transfer event sequence moved backwards");
+
+    std::unordered_map<std::string, RuntimeMemoryTransferCounterV1> baseline;
+    baseline.reserve(before.counters.size());
+    for (const auto& counter : before.counters)
+        baseline.emplace(counter.tensor_name, counter);
+
+    RuntimeMemoryTransferDeltaV1 delta;
+    for (const auto& current : after.counters) {
+        const auto found = baseline.find(current.tensor_name);
+        const RuntimeMemoryTransferCounterV1 empty{};
+        const auto& previous = found == baseline.end() ? empty : found->second;
+        if (current.device_to_host_bytes < previous.device_to_host_bytes ||
+            current.device_to_device_bytes < previous.device_to_device_bytes ||
+            current.device_to_host_events < previous.device_to_host_events ||
+            current.device_to_device_events < previous.device_to_device_events) {
+            throw std::logic_error("runtime-memory transfer counter moved backwards for " +
+                                   current.tensor_name);
+        }
+        if (!(current.runtime_kv_binding || previous.runtime_kv_binding))
+            continue;
+        delta.runtime_kv_device_to_host_bytes +=
+            current.device_to_host_bytes - previous.device_to_host_bytes;
+        delta.runtime_kv_device_to_device_bytes +=
+            current.device_to_device_bytes - previous.device_to_device_bytes;
+        delta.runtime_kv_device_to_host_events +=
+            current.device_to_host_events - previous.device_to_host_events;
+        delta.runtime_kv_device_to_device_events +=
+            current.device_to_device_events - previous.device_to_device_events;
+    }
+    return delta;
+}
 
 namespace {
 
@@ -203,6 +251,8 @@ CachedBackend create_backend(const std::string& requested_name, const std::strin
     metadata.backend_name = backend->name() ? backend->name() : "";
     metadata.trt_abi = optional_string_symbol(handle, "trtmc_backend_abi");
     metadata.trt_runtime_version = optional_string_symbol(handle, "trtmc_backend_runtime_version");
+    metadata.runtime_memory_stack_json =
+        optional_string_symbol(handle, "trtmc_backend_runtime_memory_stack_json_v1");
 
     return CachedBackend{handle, backend, std::move(metadata)};
 }

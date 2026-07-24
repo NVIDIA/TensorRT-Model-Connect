@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import struct
 import sys
@@ -46,6 +47,95 @@ _PROFILE_REEXEC_BOOTSTRAP = (
     "'tensorrt_model_connect.__main__', run_name='__main__', alter_sys=True)"
 )
 
+_LEGACY_DEFAULT_MAX_CACHE_LENGTH = 256
+
+
+def _default_bundle_output(model_ref: str) -> str:
+    """Return a deterministic bundle name for a model-only build command."""
+
+    normalized = str(model_ref or "").strip().rstrip("/\\")
+    model_name = Path(normalized).name if normalized else ""
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", model_name).strip("._-").lower()
+    if not slug:
+        slug = "model"
+    if slug.endswith(".trtfb"):
+        return slug
+    return f"{slug}.trtfb"
+
+
+def _resolve_native_llm_build_policy(
+    model_ref: str,
+    family_name: str,
+    *,
+    max_cache_length: int | None,
+    dynamic_kv_cache: bool | None,
+    decoder_engine_layout: str | None,
+    tensor_parallel_size: int = 1,
+    qualification=None,
+) -> tuple[int, bool, str]:
+    """Resolve hidden native build policy for the model-only CLI.
+
+    A runtime-owned bundle is selected only after exact model/revision/config/
+    target qualification. Its TensorRT profile envelope reaches the full model
+    limit; there is no separate product-visible 4K cap. Every other request
+    retains the established static defaults.
+    """
+
+    del model_ref
+    qualified_dynamic = qualification is not None
+    if qualified_dynamic:
+        if (
+            max_cache_length is not None
+            or dynamic_kv_cache is not None
+            or decoder_engine_layout not in (None, "split")
+            or int(tensor_parallel_size or 1) != 1
+        ):
+            raise ValueError(
+                "Qualified runtime-memory policy cannot be combined with "
+                "legacy build-time KV/profile overrides"
+            )
+        expected_family = str(family_name or "").strip().lower()
+        if expected_family != qualification.family:
+            raise ValueError(
+                "Qualified dynamic-memory family mismatch: "
+                f"expected {qualification.family}, got "
+                f"{expected_family or '<empty>'}"
+            )
+
+    resolved_max_cache_length = (
+        qualification.model_context_limit
+        if qualified_dynamic
+        else max_cache_length
+    )
+    semantic_context_limit: int | None = None
+    if qualified_dynamic:
+        semantic_context_limit = qualification.model_context_limit
+    if resolved_max_cache_length is None:
+        resolved_max_cache_length = _LEGACY_DEFAULT_MAX_CACHE_LENGTH
+
+    resolved_dynamic_kv_cache = (
+        qualified_dynamic
+        if dynamic_kv_cache is None
+        else bool(dynamic_kv_cache)
+    )
+    resolved_decoder_engine_layout = decoder_engine_layout or "split"
+
+    if semantic_context_limit is not None:
+        print(
+            "[trtmc build] Automatic sequence policy: "
+            f"model_context_limit={semantic_context_limit}, "
+            f"engine_context_limit={resolved_max_cache_length}, "
+            f"dynamic_kv_cache={str(resolved_dynamic_kv_cache).lower()}, "
+            f"decoder_layout={resolved_decoder_engine_layout}",
+            file=sys.stderr,
+        )
+
+    return (
+        int(resolved_max_cache_length),
+        resolved_dynamic_kv_cache,
+        resolved_decoder_engine_layout,
+    )
+
 
 def _optimized_cli_public_options(args: argparse.Namespace) -> dict:
     """Return the effective public CLI options for model-owned policy.
@@ -54,6 +144,10 @@ def _optimized_cli_public_options(args: argparse.Namespace) -> dict:
     model-owned adapter decides whether and how they map to its runtime.
     Preserve the established optimized-runtime precision default while native
     families continue to resolve an omitted precision from ``args``.
+    Model-only native builds use ``None`` sentinels for hidden automatic KV
+    policy.  Optimized-runtime capsules retain their established public
+    deployment tuple, so normalize the legacy cache default at this routing
+    boundary.
     """
 
     public_options = {
@@ -64,7 +158,64 @@ def _optimized_cli_public_options(args: argparse.Namespace) -> dict:
     }
     if public_options.get("precision") is None:
         public_options["precision"] = "fp32"
+    if (
+        "max_cache_length" in public_options
+        and public_options["max_cache_length"] is None
+    ):
+        public_options["max_cache_length"] = _LEGACY_DEFAULT_MAX_CACHE_LENGTH
+    if (
+        "dynamic_kv_cache" in public_options
+        and public_options["dynamic_kv_cache"] is None
+    ):
+        public_options["dynamic_kv_cache"] = False
     return public_options
+
+
+def _model_only_native_dynamic_qualification(args: argparse.Namespace):
+    """Resolve the exact native qualification for the model-only user flow."""
+
+    if getattr(args, "max_cache_length", None) is not None:
+        return None
+    if getattr(args, "dynamic_kv_cache", None) is not None:
+        return None
+    if getattr(args, "dynamic_kv_profile_rows", None) is not None:
+        return None
+    if getattr(args, "decoder_engine_layout", "split") != "split":
+        return None
+    if int(getattr(args, "tensor_parallel_size", 1) or 1) != 1:
+        return None
+    if getattr(args, "precision", None) is not None:
+        return None
+    if getattr(args, "quantize", None) is not None:
+        return None
+    if getattr(args, "fp32_layers", None):
+        return None
+    if getattr(args, "fp8", False) or getattr(args, "fp8_scales", None):
+        return None
+    if getattr(args, "rtx", False):
+        return None
+    if getattr(args, "triattention_stats", None):
+        return None
+    if getattr(args, "config", None) or getattr(args, "set_flags", None):
+        return None
+
+    from .dynamic_memory_contract import resolve_model_only_qualification
+    from .engine_builder import _resolve_model
+
+    return resolve_model_only_qualification(
+        args.model,
+        requested_revision=getattr(args, "model_revision", None),
+        resolve_model=_resolve_model,
+    )
+
+
+def _model_only_native_dynamic_family(
+    args: argparse.Namespace,
+) -> str | None:
+    """Compatibility helper returning the exact qualified native family."""
+
+    qualification = _model_only_native_dynamic_qualification(args)
+    return qualification.family if qualification is not None else None
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
@@ -72,44 +223,71 @@ def _cmd_build(args: argparse.Namespace) -> int:
         print("Error: model (HF repo ID or local directory) required",
               file=sys.stderr)
         return 1
-    if not args.output:
-        print("Error: -o / --output required", file=sys.stderr)
-        return 1
-
-    # Optimized dispatch resolves the model family internally and scans only
-    # that family's Builder folder. The current platform remains implicit; no
-    # public API or CLI option is added for runtime selection.
     try:
-        from .engine_builder import _try_build_optimized_runtime
-
-        model_revision = getattr(args, "model_revision", None)
-        revision_kwargs = (
-            {"model_revision": model_revision} if model_revision else {}
-        )
-        optimized = _try_build_optimized_runtime(
-            args.model,
-            args.output,
-            _optimized_cli_public_options(args),
-            **revision_kwargs,
+        native_dynamic_qualification = (
+            _model_only_native_dynamic_qualification(args)
         )
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
-        if getattr(args, "verbose", False):
-            import traceback
-
-            traceback.print_exc()
         return 1
-    if optimized is not None:
-        return 0
 
-    build_model_ref = args.model
+    if not getattr(args, "output", None):
+        args.output = _default_bundle_output(args.model)
+        print(
+            f"[trtmc build] Output: {args.output} (derived from model)",
+            file=sys.stderr,
+        )
+
+    model_revision = getattr(args, "model_revision", None)
+    revision_kwargs = (
+        {"model_revision": model_revision} if model_revision else {}
+    )
+    native_dynamic_family = (
+        native_dynamic_qualification.family
+        if native_dynamic_qualification is not None
+        else None
+    )
+    if native_dynamic_family:
+        print(
+            "[trtmc build] Model-only dynamic KV capability selected native "
+            f"builder: family={native_dynamic_family}",
+            file=sys.stderr,
+        )
+    else:
+        # Optimized dispatch resolves the model family internally and scans
+        # only that family's Builder folder. Explicit legacy build profiles
+        # retain this route; the no-KV-flag dynamic contract above is native.
+        try:
+            from .engine_builder import _try_build_optimized_runtime
+
+            optimized = _try_build_optimized_runtime(
+                args.model,
+                args.output,
+                _optimized_cli_public_options(args),
+                **revision_kwargs,
+            )
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            if getattr(args, "verbose", False):
+                import traceback
+
+                traceback.print_exc()
+            return 1
+        if optimized is not None:
+            return 0
+
+    build_model_ref = (
+        str(native_dynamic_qualification.model_dir)
+        if native_dynamic_qualification is not None
+        else args.model
+    )
 
     # Backend dispatch: default to auto-selection of the native TRT backend.
     method_name = getattr(args, 'method', 'auto')
     if method_name == 'auto':
         try:
             method_name, build_model_ref = _auto_select_build_backend(
-                args.model,
+                build_model_ref,
                 **revision_kwargs,
             )
         except Exception as e:
@@ -119,6 +297,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
                 traceback.print_exc()
             return 1
 
+    build_family = ""
     if not getattr(args, "_skip_profile_resolution", False):
         try:
             build_model_ref, build_family = _resolve_build_model_metadata(
@@ -142,6 +321,31 @@ def _cmd_build(args: argparse.Namespace) -> int:
         if reexec_rc is not None:
             return reexec_rc
 
+    (
+        max_cache_length,
+        dynamic_kv_cache,
+        decoder_engine_layout,
+    ) = _resolve_native_llm_build_policy(
+        build_model_ref,
+        build_family,
+        max_cache_length=getattr(args, "max_cache_length", None),
+        dynamic_kv_cache=getattr(args, "dynamic_kv_cache", None),
+        decoder_engine_layout=getattr(args, "decoder_engine_layout", None),
+        tensor_parallel_size=int(
+            getattr(args, "tensor_parallel_size", 1) or 1),
+        qualification=native_dynamic_qualification,
+    )
+    build_precision = (
+        native_dynamic_qualification.precision
+        if native_dynamic_qualification is not None
+        else args.precision
+    )
+    dynamic_kv_profile_rows = (
+        list(native_dynamic_qualification.active_kv_profile_limits)
+        if native_dynamic_qualification is not None
+        else getattr(args, "dynamic_kv_profile_rows", None)
+    )
+
     from .parallel_config import ParallelConfig
 
     tp_size = int(getattr(args, "tensor_parallel_size", 1) or 1)
@@ -160,7 +364,12 @@ def _cmd_build(args: argparse.Namespace) -> int:
     # Delegation was already resolved above. Enter the native builder directly
     # so a native CLI build does not rediscover and reprobe every installed
     # optimized-runtime capsule a second time.
-    from .engine_builder import _build_native_impl as build
+    if native_dynamic_qualification is not None:
+        from .engine_builder import (
+            _build_native_impl_qualified as build,
+        )
+    else:
+        from .engine_builder import _build_native_impl as build
     from .quantization import canonicalize_quant_format
 
     # FP8 quantization: --fp8-scales (pre-computed) or --fp8 (auto-calibrate)
@@ -200,16 +409,21 @@ def _cmd_build(args: argparse.Namespace) -> int:
             return 1
         family_build_options = _resolved_config_values(resolved_bundle)
 
+    qualification_kwargs = (
+        {"runtime_memory_qualification": native_dynamic_qualification}
+        if native_dynamic_qualification is not None
+        else {}
+    )
     try:
         build(
             model_id_or_path=build_model_ref,
             model_revision=getattr(args, "model_revision", None),
             output_path=args.output,
-            max_cache_length=args.max_cache_length,
-            decoder_engine_layout=getattr(args, "decoder_engine_layout", "split"),
-            dynamic_kv_cache=getattr(args, "dynamic_kv_cache", False),
-            dynamic_kv_profile_rows_override=getattr(args, "dynamic_kv_profile_rows", None),
-            precision=args.precision,
+            max_cache_length=max_cache_length,
+            decoder_engine_layout=decoder_engine_layout,
+            dynamic_kv_cache=dynamic_kv_cache,
+            dynamic_kv_profile_rows_override=dynamic_kv_profile_rows,
+            precision=build_precision,
             fp32_layers=getattr(args, "fp32_layers", None),
             quantize=quantize,
             quant_scales=args.quant_scales,
@@ -245,6 +459,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
                 }.items()
                 if value is not None
             },
+            **qualification_kwargs,
         )
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -518,13 +733,56 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
             ("Layers", "num_layers"),
             ("Attention heads", "num_attention_heads"),
             ("KV heads", "num_key_value_heads"),
-            ("Max cache length", "max_cache_length"),
             ("Precision", "precision"),
             ("Quantization", "quantization"),
             ("Engine backend", "engine_backend"),
         ]
         for label, key in fields:
             print(f"{label + ':':<20} {header.get(key, '')}")
+
+        runtime_memory = header.get("runtime_memory")
+        if isinstance(runtime_memory, dict):
+            static_memory_fields = (
+                ("Runtime KV contract version", "contract_version"),
+                ("Qualified model ID", "qualified_model_id"),
+                ("Qualified model revision", "qualified_model_revision"),
+                ("Qualified config fingerprint", "qualified_config_sha256"),
+                ("Qualified target", "qualified_target"),
+                ("Native KV plugin ABI", "native_kv_plugin_abi"),
+                ("Model context limit", "model_context_limit"),
+                ("Prefill chunk limit", "prefill_chunk_limit"),
+                ("KV layout", "kv_layout"),
+                ("KV dtype", "kv_dtype"),
+                ("KV bytes per token", "kv_bytes_per_token"),
+            )
+            for label, key in static_memory_fields:
+                print(f"{label + ':':<32} {runtime_memory.get(key, '')}")
+            runtime_stack = runtime_memory.get(
+                "qualified_runtime_stack", {}
+            )
+            if isinstance(runtime_stack, dict):
+                print(
+                    f"{'Qualified runtime stack:':<32} "
+                    f"SM={runtime_stack.get('sm', '')}, "
+                    f"TensorRT={runtime_stack.get('tensorrt', '')}, "
+                    f"CUDA={runtime_stack.get('cuda_runtime', '')}, "
+                    f"cuDNN={runtime_stack.get('cudnn_backend', '')}, "
+                    "Frontend="
+                    f"{runtime_stack.get('cudnn_frontend_revision', '')}, "
+                    f"NVRTC={runtime_stack.get('nvrtc', '')}, "
+                    f"driver={runtime_stack.get('driver', '')}"
+                )
+            limits = runtime_memory.get("active_kv_profile_limits", [])
+            print(
+                f"{'Active KV profile limits:':<32} "
+                + ", ".join(str(value) for value in limits)
+            )
+            print(f"{'Runtime-owned KV:':<32} yes")
+        else:
+            print(
+                f"{'Max cache length:':<20} "
+                f"{header.get('max_cache_length', '')}"
+            )
 
         sections = header.get("sections", {})
         if sections:
@@ -590,7 +848,7 @@ def main() -> None:
     )
     subparsers = parser.add_subparsers(dest="command")
 
-    # trtmc build <model> -o <out.trtfb>
+    # trtmc build <model>
     build_p = subparsers.add_parser("build", help="Build a .trtfb bundle")
     build_p.add_argument("model",
                          help="HF repo ID (for example, org/model-name) or local directory")
@@ -599,22 +857,32 @@ def main() -> None:
         default=None,
         help="Hugging Face model revision (commit, tag, or branch) to build",
     )
-    build_p.add_argument("-o", "--output", required=True,
-                         help="Output .trtfb file path")
+    build_p.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Output .trtfb file path (default: derived from model name)",
+    )
     build_p.add_argument("--trust-remote-code", action="store_true",
                          help="Allow Hugging Face model code that requires trust_remote_code")
-    build_p.add_argument("--max-cache-length", type=int, default=256,
-                         help="KV cache length (default: 256)")
+    build_p.add_argument(
+        "--max-cache-length",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     build_p.add_argument(
         "--decoder-engine-layout",
         choices=["split", "dual_profile"],
         default="split",
-        help="Decoder engine layout for supported LLMs: split builds separate "
-             "prefill/decode engines (default); dual_profile keeps one "
-             "low-VRAM engine with multiple optimization profiles",
+        help=argparse.SUPPRESS,
     )
-    build_p.add_argument("--dynamic-kv-cache", action="store_true",
-                         help="Build decoder bundles with runtime-resizable KV cache support")
+    build_p.add_argument(
+        "--dynamic-kv-cache",
+        action="store_true",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     # TP is a narrow build-only path, not a generic runtime-config namespace.
     build_p.add_argument(
         "--tensor-parallel-size",
@@ -628,8 +896,7 @@ def main() -> None:
         "--dynamic-kv-profile-rows",
         type=_parse_profile_rows,
         default=None,
-        help="Comma-separated dynamic-KV optimization profile upper bounds "
-             "(overrides the builder's default profile schedule)",
+        help=argparse.SUPPRESS,
     )
     build_p.add_argument("--image-height", type=int, default=None,
                          help="Diffusion image height override")
@@ -683,38 +950,36 @@ def main() -> None:
     build_p.add_argument("--rtx", action="store_true",
                          help="Build engine for TRT-RTX (portable, JIT-compiled at runtime)")
     build_p.add_argument("--triattention-stats", default=None,
-                         help="Path to upstream TriAttention calibration stats (.pt) to embed")
+                         help=argparse.SUPPRESS)
     build_p.add_argument("--triattention-kv-budget", type=int, default=None,
-                         help="Runtime KV budget for experimental TriAttention compaction")
+                         help=argparse.SUPPRESS)
     build_p.add_argument("--triattention-divide-length", type=int, default=128,
-                         help="Trigger TriAttention compaction when cache reaches "
-                              "kv_budget + divide_length (default: 128)")
+                         help=argparse.SUPPRESS)
     build_p.add_argument("--triattention-recent-window", type=int, default=128,
-                         help="Always keep this many recent tokens when TriAttention is enabled")
+                         help=argparse.SUPPRESS)
     build_p.add_argument("--triattention-score-aggregation",
                          choices=["mean", "max"], default="mean",
-                         help="How to aggregate TriAttention offset scores")
+                         help=argparse.SUPPRESS)
     build_p.add_argument("--triattention-count-prompt-tokens",
                          dest="triattention_count_prompt_tokens",
                          action="store_true", default=True,
-                         help="Count prompt tokens against the TriAttention KV budget")
+                         help=argparse.SUPPRESS)
     build_p.add_argument("--triattention-no-count-prompt-tokens",
                          dest="triattention_count_prompt_tokens",
                          action="store_false",
-                         help="Exclude prompt tokens from the TriAttention KV budget")
+                         help=argparse.SUPPRESS)
     build_p.add_argument("--triattention-protect-prefill",
                          dest="triattention_protect_prefill",
                          action="store_true", default=True,
-                         help="Prefer retaining prompt tokens during TriAttention compaction "
-                              "(default: enabled)")
+                         help=argparse.SUPPRESS)
     build_p.add_argument("--triattention-no-protect-prefill",
                          dest="triattention_protect_prefill",
                          action="store_false",
-                         help="Allow prompt tokens to be pruned during TriAttention compaction")
+                         help=argparse.SUPPRESS)
     build_p.add_argument("--triattention-disable-mlr", action="store_true",
-                         help="Disable TriAttention's magnitude-based additive term")
+                         help=argparse.SUPPRESS)
     build_p.add_argument("--triattention-disable-trig", action="store_true",
-                         help="Disable TriAttention's trig scoring term")
+                         help=argparse.SUPPRESS)
     build_p.add_argument(
         "--build-timing-json", default=None,
         help="Write structured build timing JSON to this path")

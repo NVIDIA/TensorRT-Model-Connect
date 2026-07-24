@@ -361,6 +361,31 @@ void test_public_pipeline_pool_fails_before_loading_optimized_runtime() {
     check(read_lines(events).empty(), "pool rejection does not load or initialize the runtime DSO");
 }
 
+void test_runtime_kv_policy_fails_before_loading_optimized_runtime() {
+    trtmc_test::TempDirGuard temporary;
+    const fs::path root(temporary.path());
+    const fs::path bundle = root / "dynamic-kv-policy.trtfb";
+    const fs::path events = root / "events.txt";
+    write_bundle(bundle, text_spec());
+    trtmc_test::EnvVarGuard event_guard("TRTMC_FAKE_OPTIMIZED_EVENTS", events.c_str());
+
+    trtmc::LoadOptionsV2 options;
+    options.runtime_cache_path = (root / "cache").string();
+    options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kFraction;
+    options.kv_cache_memory_fraction = 0.8;
+    bool rejected = false;
+    try {
+        (void)trtmc::load(bundle.string(), options);
+    } catch (const std::invalid_argument& error) {
+        rejected =
+            std::string(error.what()).find("does not declare runtime_memory contract version 1") !=
+            std::string::npos;
+    }
+    check(rejected, "bundle contract rejects unsupported dynamic KV policy");
+    check(read_lines(events).empty(),
+          "dynamic KV policy rejection does not load or initialize the runtime DSO");
+}
+
 void test_concurrent_repeated_loads_share_published_cache_and_dso() {
     trtmc_test::TempDirGuard temporary;
     const fs::path root(temporary.path());
@@ -573,6 +598,7 @@ int main(int argc, char** argv) {
     test_c_abi_create_loads_optimized_runtime_bundle();
     test_concurrent_repeated_loads_share_published_cache_and_dso();
     test_public_pipeline_pool_fails_before_loading_optimized_runtime();
+    test_runtime_kv_policy_fails_before_loading_optimized_runtime();
     test_non_text_pipeline_uses_same_host();
     test_descriptor_is_strict_and_fail_closed();
     test_artifact_integrity_and_cache_tamper_fail_closed();

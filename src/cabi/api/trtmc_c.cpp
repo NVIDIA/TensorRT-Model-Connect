@@ -13,7 +13,9 @@
 #include <cstring>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #ifndef TRTMC_VERSION_STRING
@@ -23,11 +25,17 @@
 namespace {
 
 thread_local std::string g_last_error;
+thread_local std::string g_runtime_memory_receipt;
 
 struct PipelineCreateArgs {
     std::string hf_python;
     std::string runtime_cache;
     bool cuda_graphs{false};
+    std::uint64_t kv_cache_size_bytes{0};
+    double kv_cache_memory_fraction{0.0};
+    std::uint64_t max_sequence_length{0};
+    bool runtime_kv_policy_requested{false};
+    bool max_sequence_length_explicit{false};
 };
 
 void set_last_error(const std::string& msg) {
@@ -46,6 +54,96 @@ PipelineCreateArgs parse_pipeline_options(const TrtmcPipelineOptions* options) {
         args.runtime_cache = options->runtime_cache;
     args.cuda_graphs = (options != nullptr && options->cuda_graphs != 0);
     return args;
+}
+
+PipelineCreateArgs parse_pipeline_options_v2(const TrtmcPipelineOptionsV2* options) {
+    if (options == nullptr)
+        throw std::invalid_argument("TrtmcPipelineOptionsV2 must not be null");
+    constexpr auto kRequiredSize = offsetof(TrtmcPipelineOptionsV2, max_sequence_length_explicit) +
+                                   sizeof(TrtmcPipelineOptionsV2::max_sequence_length_explicit);
+    if (options->struct_size < kRequiredSize) {
+        throw std::invalid_argument(
+            "TrtmcPipelineOptionsV2.struct_size is too small for API version 2");
+    }
+    if (options->api_version != TRTMC_PIPELINE_OPTIONS_V2_API_VERSION) {
+        throw std::invalid_argument("Unsupported TrtmcPipelineOptionsV2.api_version " +
+                                    std::to_string(options->api_version));
+    }
+
+    PipelineCreateArgs args;
+    if (options->hf_python != nullptr)
+        args.hf_python = options->hf_python;
+    if (options->runtime_cache != nullptr)
+        args.runtime_cache = options->runtime_cache;
+    args.cuda_graphs = options->cuda_graphs != 0;
+    args.max_sequence_length = options->max_sequence_length;
+    if (options->max_sequence_length_explicit != 0 && options->max_sequence_length_explicit != 1) {
+        throw std::invalid_argument(
+            "TrtmcPipelineOptionsV2.max_sequence_length_explicit must be zero or one");
+    }
+    args.max_sequence_length_explicit =
+        options->max_sequence_length != 0 || options->max_sequence_length_explicit != 0;
+    args.runtime_kv_policy_requested =
+        options->kv_cache_memory_policy != TRTMC_KV_CACHE_MEMORY_UNSPECIFIED ||
+        args.max_sequence_length_explicit;
+
+    switch (options->kv_cache_memory_policy) {
+    case TRTMC_KV_CACHE_MEMORY_UNSPECIFIED:
+    case TRTMC_KV_CACHE_MEMORY_AUTO:
+        if (options->kv_cache_memory_fraction != 0.0 || options->kv_cache_memory_bytes != 0) {
+            throw std::invalid_argument(
+                "KV auto/unspecified policy conflicts with fraction or byte values");
+        }
+        break;
+    case TRTMC_KV_CACHE_MEMORY_FRACTION:
+        if (!(options->kv_cache_memory_fraction > 0.0 &&
+              options->kv_cache_memory_fraction <= 1.0) ||
+            options->kv_cache_memory_bytes != 0) {
+            throw std::invalid_argument(
+                "KV fraction policy requires fraction in (0, 1] and zero bytes");
+        }
+        args.kv_cache_memory_fraction = options->kv_cache_memory_fraction;
+        break;
+    case TRTMC_KV_CACHE_MEMORY_BYTES:
+        if (options->kv_cache_memory_bytes == 0 || options->kv_cache_memory_fraction != 0.0) {
+            throw std::invalid_argument("KV byte policy requires positive bytes and zero fraction");
+        }
+        args.kv_cache_size_bytes = options->kv_cache_memory_bytes;
+        break;
+    default:
+        throw std::invalid_argument("Unknown KV cache memory policy " +
+                                    std::to_string(options->kv_cache_memory_policy));
+    }
+    return args;
+}
+
+std::unique_ptr<trtmc::IPipeline> create_pipeline_with_legacy_args(const std::string& path,
+                                                                   const PipelineCreateArgs& args) {
+    trtmc::LoadOptions options;
+    options.hf_python = args.hf_python;
+    options.runtime_cache_path = args.runtime_cache;
+    options.cuda_graphs = args.cuda_graphs;
+    return trtmc::PipelineFactory::from_bundle(path, options);
+}
+
+std::unique_ptr<trtmc::IPipeline> create_pipeline_with_v2_args(const std::string& path,
+                                                               const PipelineCreateArgs& args) {
+    trtmc::LoadOptionsV2 options;
+    options.hf_python = args.hf_python;
+    options.runtime_cache_path = args.runtime_cache;
+    options.cuda_graphs = args.cuda_graphs;
+    if (args.kv_cache_size_bytes != 0) {
+        options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kBytes;
+        options.kv_cache_memory_bytes = args.kv_cache_size_bytes;
+    } else if (args.kv_cache_memory_fraction != 0.0) {
+        options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kFraction;
+    } else if (args.runtime_kv_policy_requested) {
+        options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kAuto;
+    }
+    options.kv_cache_memory_fraction = args.kv_cache_memory_fraction;
+    options.max_sequence_length = args.max_sequence_length;
+    options.max_sequence_length_explicit = args.max_sequence_length_explicit ? 1U : 0U;
+    return trtmc::PipelineFactory::from_bundle(path, options);
 }
 
 // Convert a single C++ ImageResult into the C-ABI POD form. Allocates the
@@ -113,8 +211,7 @@ trtmc::IPipeline* trtmc_create_pipeline_ex(const char* bundle_path,
 
         auto t0 = std::chrono::steady_clock::now();
 
-        auto pipeline = trtmc::PipelineFactory::from_bundle(path, args.hf_python,
-                                                            args.runtime_cache, args.cuda_graphs);
+        auto pipeline = create_pipeline_with_legacy_args(path, args);
 
         auto t1 = std::chrono::steady_clock::now();
         std::cerr << "[trtmc] Runtime ready (strategy=" << pipeline->pipeline_type() << ") ["
@@ -127,6 +224,68 @@ trtmc::IPipeline* trtmc_create_pipeline_ex(const char* bundle_path,
         return nullptr;
     } catch (...) {
         set_last_error("Unknown error creating pipeline");
+        return nullptr;
+    }
+}
+
+void trtmc_pipeline_options_v2_init(TrtmcPipelineOptionsV2* options) {
+    if (options == nullptr)
+        return;
+    std::memset(options, 0, sizeof(*options));
+    options->struct_size = sizeof(*options);
+    options->api_version = TRTMC_PIPELINE_OPTIONS_V2_API_VERSION;
+    options->kv_cache_memory_policy = TRTMC_KV_CACHE_MEMORY_UNSPECIFIED;
+}
+
+trtmc::IPipeline* trtmc_create_pipeline_v2(const char* bundle_path,
+                                           const TrtmcPipelineOptionsV2* options) {
+    clear_last_error();
+    if (bundle_path == nullptr || bundle_path[0] == '\0') {
+        set_last_error("bundle_path must not be null or empty");
+        return nullptr;
+    }
+    try {
+        const std::string path(bundle_path);
+        if (!trtmc::IsBundle(path)) {
+            set_last_error("Not a valid .trtfb bundle: " + path);
+            return nullptr;
+        }
+        const auto args = parse_pipeline_options_v2(options);
+        return create_pipeline_with_v2_args(path, args).release();
+    } catch (const std::exception& error) {
+        set_last_error(error.what());
+        return nullptr;
+    } catch (...) {
+        set_last_error("Unknown error creating pipeline with V2 options");
+        return nullptr;
+    }
+}
+
+const char* trtmc_pipeline_runtime_memory_receipt_json(trtmc_pipeline_t handle) {
+    clear_last_error();
+    g_runtime_memory_receipt.clear();
+    if (handle == nullptr) {
+        set_last_error("pipeline handle must not be null");
+        return nullptr;
+    }
+    auto* introspection = dynamic_cast<trtmc::IRuntimeMemoryIntrospectionV1*>(handle);
+    if (introspection == nullptr || introspection->runtime_memory_api_version() != 1) {
+        set_last_error("pipeline does not expose runtime-memory introspection V1");
+        return nullptr;
+    }
+    try {
+        if (introspection->runtime_kv_capacity_tokens() == 0) {
+            set_last_error("pipeline is not backed by a runtime-memory bundle");
+            return nullptr;
+        }
+        g_runtime_memory_receipt = introspection->runtime_memory_receipt_json();
+        if (g_runtime_memory_receipt.empty()) {
+            set_last_error("runtime-memory pipeline returned an empty receipt");
+            return nullptr;
+        }
+        return g_runtime_memory_receipt.c_str();
+    } catch (const std::exception& error) {
+        set_last_error(error.what());
         return nullptr;
     }
 }

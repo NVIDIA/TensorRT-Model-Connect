@@ -11,6 +11,7 @@ import json
 import re
 import sys
 import time
+from contextvars import ContextVar
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +55,12 @@ except ImportError:
         from cuda import cudart  # type: ignore[no-redef]
     except ImportError:  # pragma: no cover - depends on build environment
         cudart = None  # type: ignore[assignment]
+
+
+_RUNTIME_MEMORY_QUALIFICATION = ContextVar(
+    "trtmc_runtime_memory_qualification",
+    default=None,
+)
 
 
 def _setup_trt_import(rtx: bool) -> None:
@@ -455,12 +462,19 @@ def _can_build_split_decoder_engines(
 
     The split layout relies on ``standard_decoder_builder`` honoring the
     internal ``_decoder_engine_role`` passthrough. Custom MoE, recurrent,
-    VL/embed-input, TriAttention, and dynamic-KV runtimes keep their existing
-    single-engine behavior until they opt into the same contract.
+    VL/embed-input, and TriAttention runtimes keep their existing single-engine
+    behavior until they opt into the same contract. Dynamic-KV split builds
+    require the stronger ``dynamic_kv_split_decoder`` family capability because
+    both the prefill and decode plans must accept the same runtime-owned cache
+    buffer shape.
     """
     if not _is_decoder_kv_runtime(plugin, runtime_strategy):
         return False
-    if dynamic_kv_cache or triattention_enabled:
+    if triattention_enabled:
+        return False
+    if dynamic_kv_cache and not family_has_capability(
+        config, "dynamic_kv_split_decoder"
+    ):
         return False
     if bool(getattr(plugin, "embed_input", False)):
         return False
@@ -479,6 +493,57 @@ def _load_plugin_weights(
     if _call_supports_kwarg(plugin.load_weights, "precision"):
         kwargs["precision"] = precision
     return plugin.load_weights(model_dir, config, **kwargs)
+
+
+def _prepare_runtime_memory_contract(
+    config: ModelConfig,
+    *,
+    qualification,
+    family_name: str,
+    precision: str,
+    max_cache_length: int,
+    decoder_engine_layout: str,
+    dynamic_kv_cache: bool,
+    profile_limits: list[int] | None,
+) -> dict | None:
+    """Validate and attach the graph's one transient qualification signal."""
+
+    if qualification is None:
+        config.raw.pop("_runtime_memory_contract", None)
+        return None
+    if family_name != qualification.family:
+        raise ValueError(
+            "Qualified dynamic-memory family mismatch during build: "
+            f"expected {qualification.family}, got {family_name}"
+        )
+    if not dynamic_kv_cache or decoder_engine_layout != "split":
+        raise ValueError(
+            "Qualified runtime-memory bundles require dynamic KV and "
+            "split decoder roles"
+        )
+    if max_cache_length != qualification.model_context_limit:
+        raise ValueError(
+            "Qualified runtime-memory engine envelope must equal the "
+            "model context limit"
+        )
+    if tuple(profile_limits or ()) != tuple(
+        qualification.active_kv_profile_limits
+    ):
+        raise ValueError(
+            "Qualified runtime-memory profile buckets do not match the "
+            "qualification record"
+        )
+    contract = qualification.runtime_memory_contract(
+        config=config,
+        precision=precision,
+    )
+    # Graph builders key only on this transient internal object. The persisted
+    # source of truth is BundleInfo.runtime_memory, not the embedded HF config.
+    config.raw["_runtime_memory_contract"] = {
+        **contract,
+        "precision": precision,
+    }
+    return contract
 
 
 def _is_hf_model_dir(path: Path) -> bool:
@@ -776,6 +841,7 @@ def build_bundle(
     decoder_engine_layout: str = "split",
     dynamic_kv_cache: bool = False,
     dynamic_kv_profile_rows_override: list[int] | None = None,
+    runtime_memory_qualification=None,
     precision: str | None = None,
     fp32_layers: list[int] | None = None,
     quantize: str | None = None,
@@ -875,6 +941,16 @@ def build_bundle(
 
     print(f"[trtmc build] Family: {plugin.name}", file=sys.stderr)
     precision = str(precision or "fp32").lower()
+    runtime_memory_contract = _prepare_runtime_memory_contract(
+        config,
+        qualification=runtime_memory_qualification,
+        family_name=plugin.name,
+        precision=precision,
+        max_cache_length=max_cache_length,
+        decoder_engine_layout=decoder_engine_layout,
+        dynamic_kv_cache=dynamic_kv_cache,
+        profile_limits=dynamic_kv_profile_rows_override,
+    )
 
     # 3. Load weights
     t1 = time.monotonic()
@@ -1242,7 +1318,11 @@ def build_bundle(
     trt_version = _get_trt_version()
     trt_abi = _trt_abi_from_version(trt_version)
     info = BundleInfo(
-        model_id=model_dir_path.name,
+        model_id=(
+            runtime_memory_qualification.qualified_model_id
+            if runtime_memory_qualification is not None
+            else model_dir_path.name
+        ),
         model_type=config.model_type,
         family=plugin.name,
         trt_version=trt_version,
@@ -1259,6 +1339,7 @@ def build_bundle(
         precision=precision,
         quantization=(quant_plan.quant_format if quant_plan else "none"),
         tokenizer_add_special_tokens=tokenizer_add_special_tokens,
+        runtime_memory=runtime_memory_contract,
     )
 
     if parallel.enabled:
@@ -1289,6 +1370,7 @@ def build_bundle(
 
     def make_runtime_config_json(source: bytes | None) -> bytes:
         cfg_dict = json.loads(source) if source is not None else dict(config.raw)
+        cfg_dict.pop("_runtime_memory_contract", None)
         runtime_strategy = getattr(plugin, "runtime_strategy", None)
         if runtime_strategy:
             cfg_dict["runtime_strategy"] = runtime_strategy
@@ -1744,6 +1826,7 @@ def _build_native_impl(
     """
     revision_kwargs = {"revision": model_revision} if model_revision else {}
     model_dir = _resolve_model(model_id_or_path, **revision_kwargs)
+    runtime_memory_qualification = _RUNTIME_MEMORY_QUALIFICATION.get()
     build_bundle._model_id_or_path_orig = model_id_or_path
     build_bundle._fp8_scales = fp8_scales
     build_bundle._save_fp8_scales = save_fp8_scales
@@ -1751,6 +1834,7 @@ def _build_native_impl(
                  decoder_engine_layout=decoder_engine_layout,
                  dynamic_kv_cache=dynamic_kv_cache,
                  dynamic_kv_profile_rows_override=dynamic_kv_profile_rows_override,
+                 runtime_memory_qualification=runtime_memory_qualification,
                  precision=precision,
                  fp32_layers=fp32_layers,
                  quantize=quantize,
@@ -1772,6 +1856,27 @@ def _build_native_impl(
                  diffusion_overrides=diffusion_overrides,
                  build_timing_path=build_timing_path,
                  max_batch_size=max_batch_size)
+
+
+def _build_native_impl_qualified(
+    *,
+    runtime_memory_qualification,
+    **kwargs,
+) -> None:
+    """Enter the unchanged native builder under an internal qualification."""
+
+    if runtime_memory_qualification is None:
+        raise ValueError("runtime_memory_qualification is required")
+    from .dynamic_memory_contract import validate_qualified_native_build
+
+    validate_qualified_native_build(runtime_memory_qualification)
+    token = _RUNTIME_MEMORY_QUALIFICATION.set(
+        runtime_memory_qualification
+    )
+    try:
+        _build_native_impl(**kwargs)
+    finally:
+        _RUNTIME_MEMORY_QUALIFICATION.reset(token)
 
 
 def _optimized_request_value(value):

@@ -11,6 +11,8 @@
 // plugin. Architecture-specific behavior remains in this model directory and
 // in the TRT engine emitted by the matching family builder.
 
+#include "runtime/domains/text/dynamic_memory/kv_cache_budget.h"
+#include "runtime/domains/text/dynamic_memory/runtime_memory_qualification.h"
 #include "runtime/models/llama/inference_state.h"
 #include "runtime/models/llama/sampler.h"
 #include "trtmc/pipeline.h"
@@ -25,6 +27,8 @@
 namespace trtmc {
 
 class LlamaKvCache;
+struct RuntimeMemoryTransferSnapshotV1;
+struct RuntimeKvCommitSnapshot;
 
 struct LlamaTextGenConfig {
     int32_t vocab_size{0};
@@ -39,6 +43,11 @@ struct LlamaTextGenConfig {
     bool disable_cuda_graph{false};
     bool prefer_gpu_greedy{false};
     bool log_runtime_stats{false};
+    // Logical request limit can differ from physical KV rows for compacting
+    // caches such as TriAttention.
+    int32_t max_sequence_length{0};
+    bool kv_cache_compaction{false};
+    RuntimeSequenceAdmissionContext runtime_sequence_admission;
 
     // Batched-prefill plumbing — populated when the bundle ships with a
     // dedicated prefill optimization profile. The runtime forwards the
@@ -64,7 +73,9 @@ struct LlamaTextGenConfig {
 void apply_text_trace_config_from_registry(const std::string& path, std::int32_t start_position,
                                            std::int32_t end_position, std::int32_t top_k);
 
-class LlamaTextGenerationPipeline final : public IPipeline {
+class LlamaTextGenerationPipeline final : public IPipeline,
+                                          public IRuntimeMemoryIntrospectionV1,
+                                          public IRuntimeMemoryQualificationV1 {
   public:
     struct DecoderContext {
         int32_t kv_rows{0};
@@ -93,6 +104,14 @@ class LlamaTextGenerationPipeline final : public IPipeline {
 
     const char* model_id() const override { return model_id_.c_str(); }
     const char* pipeline_type() const override { return "LlamaTextGenerationPipeline"; }
+    std::uint64_t runtime_kv_capacity_tokens() const override {
+        return state_->runtime_kv_capacity_tokens();
+    }
+    std::string runtime_memory_receipt_json() const override {
+        return state_->runtime_memory_receipt_json();
+    }
+    RuntimeMemoryQualificationResultV1
+    qualify_runtime_memory(const RuntimeMemoryQualificationRequestV1& request) override;
 
     // Token-ID-based generation (for unit tests and internal callers).
     struct GenerationResult {
@@ -121,6 +140,9 @@ class LlamaTextGenerationPipeline final : public IPipeline {
     int32_t active_decoder_index_{-1};
     bool state_bound_{false};
     double last_setup_ms_{0.0};
+    std::uint32_t last_prefill_launches_{0};
+    RuntimeMemoryQualificationResultV1* active_qualification_{nullptr};
+    std::uint64_t qualification_invocation_index_{0};
 
     // Internal: generate from token IDs with sampling parameters and timing.
     struct TimedGenResult {
@@ -179,6 +201,15 @@ class LlamaTextGenerationPipeline final : public IPipeline {
                             int32_t max_new_tokens, bool gpu_sampling, const GenerateConfig& cfg,
                             int32_t prompt_token_count);
     int32_t select_decoder_index(int32_t desired_rows) const;
+    std::uint64_t qualification_bound_tokens(std::uint64_t history_tokens) const;
+    void append_qualification_invocation(const char* role, const char* plan_id,
+                                         const TrtModule& module, std::uint64_t chunk_begin,
+                                         std::uint64_t chunk_end, std::uint64_t history_tokens,
+                                         std::uint64_t active_tokens, std::uint64_t bound_tokens,
+                                         const RuntimeMemoryTransferSnapshotV1& transfer_before,
+                                         const RuntimeKvCommitSnapshot& commit_before);
+    RuntimeMemoryTransferSnapshotV1 qualification_transfer_snapshot(const TrtModule& module) const;
+    RuntimeKvCommitSnapshot qualification_commit_snapshot() const;
     TrtModule& bind_decoder_for_step();
 
     std::unique_ptr<LlamaISampler> make_step_sampler(const LlamaSamplingParams& params);
@@ -190,6 +221,8 @@ class LlamaTextGenerationPipeline final : public IPipeline {
     // Returns true if the batched prefill engine handled the prompt; false
     // means caller must fall back to the per-token decode loop.
     bool run_prefill_batched(const std::vector<int32_t>& input_ids, std::vector<float>& logits);
+    bool run_prefill_runtime_chunks(const std::vector<int32_t>& input_ids,
+                                    std::vector<float>& logits, bool gpu_sampling);
     void prime_decoder_after_batched_prefill(const std::vector<int32_t>& input_ids);
     bool should_stop_on_answer(const std::vector<int32_t>& output, int32_t prompt_token_count,
                                const GenerateConfig& cfg, int32_t steps, int32_t stop_interval,

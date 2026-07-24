@@ -95,6 +95,22 @@ find_library(TRTMC_CUDART_LIBRARY
   PATH_SUFFIXES "" lib lib64
 )
 
+if(TRTMC_CUDART_LIBRARY)
+  # Native runtime-memory execution must not inherit a same-SONAME NVRTC from
+  # a later Torch dependency. Resolve NVRTC from the exact CUDA distribution
+  # that supplied CUDART, then make the core carry a real DT_NEEDED edge to it
+  # before any Torch libraries are appended below.
+  get_filename_component(
+    _trtmc_cudart_real_path "${TRTMC_CUDART_LIBRARY}" REALPATH)
+  get_filename_component(
+    _trtmc_cuda_runtime_library_dir "${_trtmc_cudart_real_path}" DIRECTORY)
+  find_library(TRTMC_COHERENT_NVRTC_LIBRARY
+    NAMES nvrtc libnvrtc.so.13 libnvrtc.so
+    PATHS "${_trtmc_cuda_runtime_library_dir}"
+    NO_DEFAULT_PATH
+  )
+endif()
+
 function(_trtmc_header_define_value OUT_VAR DEFINE_NAME)
   set(${OUT_VAR} "" PARENT_SCOPE)
   if(NOT TRTMC_TRT_INCLUDE_DIR OR NOT EXISTS "${TRTMC_TRT_INCLUDE_DIR}/NvInferVersion.h")
@@ -128,11 +144,14 @@ if(NOT TRTMC_TRT_BACKEND_ABI AND TRTMC_TRT_INCLUDE_DIR)
   endif()
 endif()
 
-if(NOT TRTMC_CUDA_INCLUDE_DIR OR NOT TRTMC_CUDART_LIBRARY)
+if(NOT TRTMC_CUDA_INCLUDE_DIR OR NOT TRTMC_CUDART_LIBRARY OR
+   NOT TRTMC_COHERENT_NVRTC_LIBRARY)
   message(FATAL_ERROR
-    "CUDA dev dependencies are required but not found.\n"
+    "Coherent CUDA dev/runtime dependencies are required but not found.\n"
     "  TRTMC_CUDA_INCLUDE_DIR=${TRTMC_CUDA_INCLUDE_DIR}\n"
-    "  TRTMC_CUDART_LIBRARY=${TRTMC_CUDART_LIBRARY}")
+    "  TRTMC_CUDART_LIBRARY=${TRTMC_CUDART_LIBRARY}\n"
+    "  TRTMC_COHERENT_NVRTC_LIBRARY=${TRTMC_COHERENT_NVRTC_LIBRARY}\n"
+    "CUDART and NVRTC must come from the same canonical library directory.")
 endif()
 
 set(_trtmc_can_build_trt_backend FALSE)
@@ -168,7 +187,7 @@ add_library(trtmc_core SHARED
   src/bundle/bundle_format.cpp
   src/bundle/bundle_view.cpp
   src/cabi/api/trtmc_c.cpp
-  # Core runtime infrastructure (TRT engine, CUDA, KV cache, decode)
+  # Model-agnostic runtime infrastructure (TRT engine and CUDA lifecycle)
   src/runtime/core/trt_common.cpp
   src/runtime/core/cuda_common.cpp
   src/runtime/backend/backend_loader.cpp
@@ -178,6 +197,12 @@ add_library(trtmc_core SHARED
   src/runtime/core/device_tensor.cpp
   src/runtime/core/pipeline_pool.cpp
   src/runtime/core/stb_impl.cpp
+  # Shared autoregressive text-generation dynamic-memory domain
+  src/runtime/domains/text/dynamic_memory/runtime_kv_allocation.cpp
+  src/runtime/domains/text/dynamic_memory/runtime_kv_setup.cpp
+  src/runtime/domains/text/dynamic_memory/runtime_kv_state.cpp
+  src/runtime/domains/text/dynamic_memory/runtime_memory_plan.cpp
+  src/runtime/domains/text/dynamic_memory/runtime_memory_qualification.cpp
   src/tokenizer/vocab_tokenizer.cpp
   src/tokenizer/ipa_tokenizer.cpp
   src/tokenizer/bpe_tokenizer.cpp
@@ -252,11 +277,18 @@ target_compile_definitions(trtmc_core PRIVATE TRTMC_HAS_TRT=0)
 target_include_directories(trtmc_core SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
 find_library(TRTMC_CUBLAS_LIBRARY NAMES cublas libcublas.so
   PATHS ${_trtmc_default_search_paths} PATH_SUFFIXES "" lib lib64)
-target_link_libraries(trtmc_core PRIVATE ${TRTMC_CUDART_LIBRARY}
+target_link_libraries(trtmc_core PRIVATE
+  ${TRTMC_CUDART_LIBRARY}
+  ${TRTMC_COHERENT_NVRTC_LIBRARY}
   $<$<BOOL:${TRTMC_CUBLAS_LIBRARY}>:${TRTMC_CUBLAS_LIBRARY}>)
+set_property(TARGET trtmc_core APPEND PROPERTY
+  BUILD_RPATH "${_trtmc_cuda_runtime_library_dir}")
+set_property(TARGET trtmc_core APPEND PROPERTY
+  INSTALL_RPATH "${_trtmc_cuda_runtime_library_dir}")
 message(STATUS "Core runtime: TensorRT-free (backend DSOs are dlopen-loaded)")
 message(STATUS "  CUDA include: ${TRTMC_CUDA_INCLUDE_DIR}")
 message(STATUS "  CUDART lib : ${TRTMC_CUDART_LIBRARY}")
+message(STATUS "  NVRTC lib  : ${TRTMC_COHERENT_NVRTC_LIBRARY}")
 if(_trtmc_can_build_trt_backend)
   message(STATUS "  Standard TRT backend SDK detected: ${TRTMC_TRT_LIBRARY}")
 else()
@@ -479,6 +511,13 @@ if(_trtmc_has_tvm_ffi AND _trtmc_can_build_trt_backend)
   message(STATUS "TVM-FFI plugin shared library: trtmc_tvm_ffi_plugin.so")
 endif()
 
+# Common TensorRT plugins used by runtime-owned native memory contracts.
+# Keeping these in a standalone DSO lets both the Python builder and the
+# standard TensorRT backend register the exact same creator implementation.
+if(_trtmc_can_build_trt_backend)
+  add_subdirectory(src/plugins/runtime_kv)
+endif()
+
 # --- Optional: vendored diffusion CUDA kernels as TVM-FFI modules ---
 # Off by default. Requires TVM-FFI. Each kernel builds as a standalone .so
 # that the diffusion TRT graph loads via graph_ops.add_tvm_ffi_kernel().
@@ -513,6 +552,9 @@ if(TRTMC_BUILD_BACKEND_TRT AND _trtmc_can_build_trt_backend)
   target_link_libraries(trtmc_backend_trt PRIVATE
     trtmc_core ${TRTMC_TRT_LIBRARY} ${TRTMC_CUDART_LIBRARY} ${CMAKE_DL_LIBS}
   )
+  if(TARGET trtmc_trt_plugins)
+    target_link_libraries(trtmc_backend_trt PRIVATE trtmc_trt_plugins)
+  endif()
   if(_trtmc_has_tvm_ffi)
     target_sources(trtmc_backend_trt PRIVATE
       src/plugins/tvm_ffi_kernel_plugin.cpp
@@ -639,6 +681,69 @@ enable_testing()
 add_custom_target(trtmc_cpp_tests)
 add_custom_target(trtmc_platform_cpp_tests)
 
+# Developer-only real-bundle qualification runner. This intentionally is not
+# installed and does not extend the public IPipeline/C ABI.
+add_executable(trtmc_dynamic_memory_qualify EXCLUDE_FROM_ALL
+  tests/qualification/native_dynamic_memory_qualify.cpp
+)
+target_link_libraries(trtmc_dynamic_memory_qualify PRIVATE
+  trtmc_core ${TRTMC_CUDART_LIBRARY})
+find_library(TRTMC_NVML_LIBRARY
+  NAMES nvidia-ml libnvidia-ml.so.1
+)
+if(TRTMC_NVML_LIBRARY)
+  target_compile_definitions(trtmc_dynamic_memory_qualify PRIVATE
+    TRTMC_HAS_NVML=1)
+  target_link_libraries(trtmc_dynamic_memory_qualify PRIVATE
+    ${TRTMC_NVML_LIBRARY})
+else()
+  target_compile_definitions(trtmc_dynamic_memory_qualify PRIVATE
+    TRTMC_HAS_NVML=0)
+endif()
+target_include_directories(trtmc_dynamic_memory_qualify PRIVATE
+  ${PROJECT_SOURCE_DIR}/src
+)
+target_include_directories(trtmc_dynamic_memory_qualify SYSTEM PRIVATE
+  ${TRTMC_CUDA_INCLUDE_DIR}
+  ${_trtmc_nlohmann_json_include}
+)
+set_target_properties(trtmc_dynamic_memory_qualify PROPERTIES
+  BUILD_RPATH "\$ORIGIN"
+  BUILD_RPATH_USE_ORIGIN TRUE
+)
+if(TARGET trtmc_backend_trt)
+  add_dependencies(trtmc_dynamic_memory_qualify trtmc_backend_trt)
+endif()
+if(TARGET trtmc_model_qwen)
+  add_dependencies(trtmc_dynamic_memory_qualify trtmc_model_qwen)
+endif()
+if(TARGET trtmc_model_llama)
+  add_dependencies(trtmc_dynamic_memory_qualify trtmc_model_llama)
+endif()
+
+# Qualification-only positive C++/C-ABI loader for UX-05.  It is never
+# installed and does not add or widen a public ABI.
+add_executable(trtmc_dynamic_memory_surfaces EXCLUDE_FROM_ALL
+  tests/qualification/native_dynamic_memory_surfaces.cpp
+)
+target_link_libraries(trtmc_dynamic_memory_surfaces PRIVATE trtmc_core)
+target_include_directories(trtmc_dynamic_memory_surfaces SYSTEM PRIVATE
+  ${_trtmc_nlohmann_json_include}
+)
+set_target_properties(trtmc_dynamic_memory_surfaces PROPERTIES
+  BUILD_RPATH "\$ORIGIN"
+  BUILD_RPATH_USE_ORIGIN TRUE
+)
+if(TARGET trtmc_backend_trt)
+  add_dependencies(trtmc_dynamic_memory_surfaces trtmc_backend_trt)
+endif()
+if(TARGET trtmc_model_qwen)
+  add_dependencies(trtmc_dynamic_memory_surfaces trtmc_model_qwen)
+endif()
+if(TARGET trtmc_model_llama)
+  add_dependencies(trtmc_dynamic_memory_surfaces trtmc_model_llama)
+endif()
+
 # Generic capsule test doubles. The good and wrong-identity DSOs intentionally
 # have the same filename in different directories so tests can prove that the
 # embedded DSO's declared identity is validated before its factory is called.
@@ -702,10 +807,11 @@ set_target_properties(trtmc_test_optimized_embedding PROPERTIES
 #   trtmc_add_test(test_name REQUIRES_TRT)  -- also links TensorRT test deps
 #   trtmc_add_test(test_name MODEL_OWNED)    -- excludes it from platform units
 #   trtmc_add_test(test_name REQUIRES_GPU)   -- excludes it from CPU platform units
+#   trtmc_add_test(test_name DYNAMIC_MEMORY) -- adds it to the focused manifest
 function(trtmc_add_test TEST_NAME)
   cmake_parse_arguments(
     ARG
-    "NO_SRC_INCLUDE;REQUIRES_TRT;REQUIRES_GPU;MODEL_OWNED"
+    "NO_SRC_INCLUDE;REQUIRES_TRT;REQUIRES_GPU;MODEL_OWNED;DYNAMIC_MEMORY"
     "SOURCE"
     "EXTRA_INCLUDES"
     ${ARGN}
@@ -752,6 +858,9 @@ function(trtmc_add_test TEST_NAME)
   else()
     add_dependencies(trtmc_platform_cpp_tests ${TEST_NAME})
     set_tests_properties(${TEST_NAME} PROPERTIES LABELS "platform")
+  endif()
+  if(ARG_DYNAMIC_MEMORY)
+    set_property(TEST ${TEST_NAME} APPEND PROPERTY LABELS "dynamic_memory")
   endif()
 endfunction()
 
@@ -811,7 +920,7 @@ endfunction()
 # --- Tests ---
 
 # Bundle / format
-trtmc_add_test(test_bundle_format)
+trtmc_add_test(test_bundle_format DYNAMIC_MEMORY)
 trtmc_add_test(test_bundle_materialization)
 trtmc_add_test(test_bundle_e2e          NO_SRC_INCLUDE)
 trtmc_add_test(test_bundle_view)
@@ -821,7 +930,7 @@ add_dependencies(test_model_plugin_loader trtmc_model_plugins)
 trtmc_add_test(test_backend_loader)
 trtmc_add_test(test_trt_version)
 
-trtmc_add_test(test_optimized_runtime_host)
+trtmc_add_test(test_optimized_runtime_host DYNAMIC_MEMORY)
 add_dependencies(test_optimized_runtime_host
   trtmc_test_optimized_runtime
   trtmc_test_wrong_optimized_runtime
@@ -849,21 +958,32 @@ if(_trtmc_python)
   set_tests_properties(test_optimized_runtime_bundle_contract PROPERTIES LABELS "platform")
 endif()
 # C ABI
-trtmc_add_test(test_c_abi_entry                NO_SRC_INCLUDE)
+trtmc_add_test(test_c_abi_entry                NO_SRC_INCLUDE DYNAMIC_MEMORY)
 # This regression drives the qwen runtime strategy and therefore requires a
 # real model plugin even though its source lives beside the shared C ABI tests.
-trtmc_add_test(test_c_abi_runtime_regression   NO_SRC_INCLUDE MODEL_OWNED)
+trtmc_add_test(test_c_abi_runtime_regression   NO_SRC_INCLUDE MODEL_OWNED DYNAMIC_MEMORY)
 trtmc_add_test(test_cabi_batch                 NO_SRC_INCLUDE)
 
 # Config / parsing
 trtmc_add_test(test_text_parsers)
 trtmc_add_test(test_json_helpers)
 trtmc_add_test(test_data_dir)
-trtmc_add_test(test_cli_args)
+trtmc_add_test(test_cli_args DYNAMIC_MEMORY)
 target_sources(test_cli_args PRIVATE src/cli/args.cpp)
 trtmc_add_test(test_config_schema_registry)
 trtmc_add_test(test_config_cli_support)
 trtmc_add_test(test_config_schemas_triattention)
+
+# Shared text-generation dynamic memory
+trtmc_add_test(test_kv_cache_budget DYNAMIC_MEMORY)
+trtmc_add_test(test_runtime_kv_allocation DYNAMIC_MEMORY)
+trtmc_add_test(test_runtime_kv_setup DYNAMIC_MEMORY)
+trtmc_add_test(test_runtime_memory_plan DYNAMIC_MEMORY)
+trtmc_add_test(test_runtime_memory_transfer_ledger DYNAMIC_MEMORY)
+trtmc_add_test(test_native_dynamic_memory_qualify_schema DYNAMIC_MEMORY)
+target_include_directories(test_native_dynamic_memory_qualify_schema SYSTEM PRIVATE
+  ${_trtmc_nlohmann_json_include}
+)
 
 # TRT runtime core
 trtmc_add_test(test_trt_logger REQUIRES_TRT)
@@ -874,9 +994,17 @@ trtmc_add_test(test_trt_runtime_lifetime REQUIRES_TRT REQUIRES_GPU)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_trt_runtime_lifetime PRIVATE trtmc_backend_trt)
 endif()
-trtmc_add_test(test_trt_module REQUIRES_TRT REQUIRES_GPU)
+trtmc_add_test(test_trt_module REQUIRES_TRT REQUIRES_GPU DYNAMIC_MEMORY)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_trt_module PRIVATE trtmc_backend_trt)
+endif()
+if(TARGET trtmc_backend_rtx)
+  trtmc_add_test(test_rtx_runtime_memory_compatibility DYNAMIC_MEMORY)
+  add_dependencies(test_rtx_runtime_memory_compatibility trtmc_backend_rtx)
+  target_link_libraries(test_rtx_runtime_memory_compatibility PRIVATE ${CMAKE_DL_LIBS})
+  target_compile_definitions(test_rtx_runtime_memory_compatibility PRIVATE
+    TRTMC_TEST_RTX_BACKEND_DSO="$<TARGET_FILE:trtmc_backend_rtx>"
+  )
 endif()
 
 # CUDA / device
@@ -929,6 +1057,56 @@ endif()
 
 # TVM-FFI plugin V2 (self-contained test with IPluginV2DynamicExt)
 trtmc_add_test(test_tvm_ffi_plugin_v2 NO_SRC_INCLUDE REQUIRES_TRT REQUIRES_GPU)
+
+# Qualified segmented runtime-KV attention plus the test-only rejected append
+# fixture.
+if(TARGET trtmc_trt_plugins)
+  trtmc_add_test(test_native_kv_append_plugin
+                 REQUIRES_TRT REQUIRES_GPU DYNAMIC_MEMORY)
+  target_link_libraries(test_native_kv_append_plugin
+                        PRIVATE trtmc_native_kv_append_fixture)
+  trtmc_add_test(test_native_contiguous_attention_plugin
+                 REQUIRES_TRT REQUIRES_GPU DYNAMIC_MEMORY)
+  target_link_libraries(test_native_contiguous_attention_plugin
+                        PRIVATE trtmc_trt_plugins)
+  trtmc_add_test(test_native_segmented_attention_long_context
+                 REQUIRES_TRT REQUIRES_GPU DYNAMIC_MEMORY)
+  target_link_libraries(test_native_segmented_attention_long_context
+                        PRIVATE trtmc_trt_plugins)
+  # This test intentionally dlopens only the backend. The common plugin DSO
+  # must arrive through the backend's DT_NEEDED dependency and
+  # register its creator before a plugin-bearing plan is deserialized.
+  add_executable(test_runtime_kv_plugin_backend_deserialization EXCLUDE_FROM_ALL
+    tests/cpp/test_runtime_kv_plugin_backend_deserialization.cpp)
+  add_dependencies(trtmc_cpp_tests
+                   test_runtime_kv_plugin_backend_deserialization)
+  add_dependencies(test_runtime_kv_plugin_backend_deserialization
+                   trtmc_backend_trt)
+  target_include_directories(
+    test_runtime_kv_plugin_backend_deserialization
+    PRIVATE ${PROJECT_SOURCE_DIR}/include)
+  target_include_directories(
+    test_runtime_kv_plugin_backend_deserialization SYSTEM PRIVATE
+    ${TRTMC_TRT_INCLUDE_DIR} ${TRTMC_CUDA_INCLUDE_DIR})
+  target_link_libraries(
+    test_runtime_kv_plugin_backend_deserialization PRIVATE
+    trtmc_core ${TRTMC_TRT_LIBRARY} ${TRTMC_CUDART_LIBRARY}
+    ${CMAKE_DL_LIBS})
+  target_compile_definitions(
+    test_runtime_kv_plugin_backend_deserialization PRIVATE
+    TRTMC_HAS_TRT=1)
+  add_test(
+    NAME test_runtime_kv_plugin_backend_deserialization
+    COMMAND test_runtime_kv_plugin_backend_deserialization
+            $<TARGET_FILE:trtmc_backend_trt>)
+  set_tests_properties(
+    test_runtime_kv_plugin_backend_deserialization
+    PROPERTIES LABELS "gpu;dynamic_memory")
+endif()
+
+# TensorRT 11.2 built-in IKVCacheUpdate dynamic-T qualification spike.
+trtmc_add_test(test_trt_dynamic_kv_cache_update
+               REQUIRES_TRT REQUIRES_GPU DYNAMIC_MEMORY)
 
 # TVM-FFI module loader (loads a CUDA FlashInfer .so when configured)
 trtmc_add_test(test_tvm_ffi_module_loader REQUIRES_TRT REQUIRES_GPU)

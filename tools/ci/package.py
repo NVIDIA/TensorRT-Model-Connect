@@ -53,6 +53,7 @@ class InstalledWheelValidator:
             importlib.resources.files("tensorrt_model_connect").joinpath("benchmark", "_catalog")
         )
         backends = sorted(native_dir.glob("libtrtmc_backend_trt*.so*"))
+        trt_plugins = sorted(native_dir.glob("libtrtmc_trt_plugins.so*"))
         if not native.is_file():
             raise CiError(f"packaged native trtmc executable is missing under {native_dir}")
         if not benchmark_worker.is_file():
@@ -64,6 +65,8 @@ class InstalledWheelValidator:
         benchmark_model = ManifestCatalog(benchmark_catalog).resolve("distilgpt2")
         if not backends:
             raise CiError(f"packaged TensorRT backend DSO is missing under {native_dir}")
+        if not trt_plugins:
+            raise CiError(f"packaged common TensorRT plugin DSO is missing under {native_dir}")
         print(f"installed_wheel={wheel}")
         print(f"imported_package={package_file}")
         print(f"installed_trtmc={script_path}")
@@ -74,6 +77,8 @@ class InstalledWheelValidator:
         print(f"packaged_benchmark_smoke_model={benchmark_model.name}")
         for backend in backends:
             print(f"packaged_backend={backend}")
+        for plugin in trt_plugins:
+            print(f"packaged_trt_plugin={plugin}")
 
     @staticmethod
     def require_elf(path: Path) -> None:
@@ -144,6 +149,11 @@ class WheelArchiveValidator:
             backends = [
                 name for name in names if "/bin/libtrtmc_backend" in name and name.endswith(".so")
             ]
+            trt_plugins = [
+                name
+                for name in names
+                if name.endswith("/bin/libtrtmc_trt_plugins.so")
+            ]
             metadata = archive.read(
                 next(name for name in names if name.endswith(".dist-info/METADATA"))
             ).decode()
@@ -167,6 +177,7 @@ class WheelArchiveValidator:
                 "native trtmc must be installed directly, not via console_scripts",
             ),
             (bool(backends), "packaged native TensorRT backend DSO is missing"),
+            (bool(trt_plugins), "packaged common TensorRT plugin DSO is missing"),
             (
                 "Requires-Dist: tensorrt==11.2.0.113" in metadata,
                 "pinned TensorRT 11.2.0.113 dependency metadata is missing",
@@ -174,6 +185,22 @@ class WheelArchiveValidator:
             (
                 "Requires-Dist: apache-tvm-ffi==0.1.12" in metadata,
                 "Apache TVM-FFI dependency metadata is missing",
+            ),
+            (
+                "Requires-Dist: cuda-python==13.3.1" in metadata,
+                "pinned CUDA Python 13.3.1 dependency metadata is missing",
+            ),
+            (
+                "Requires-Dist: nvidia-cuda-runtime==13.3.29" in metadata,
+                "pinned CUDA runtime 13.3.29 dependency metadata is missing",
+            ),
+            (
+                "Requires-Dist: nvidia-cuda-nvrtc==13.3.33" in metadata,
+                "pinned CUDA NVRTC 13.3.33 dependency metadata is missing",
+            ),
+            (
+                "Requires-Dist: nvidia-cudnn-cu13==9.20.0.48" in metadata,
+                "pinned cuDNN 9.20 runtime dependency metadata is missing",
             ),
             (f"-{self.platform}" in wheel_metadata, f"WHEEL metadata is missing {self.platform}"),
         )
@@ -203,6 +230,7 @@ class WheelArchiveValidator:
                 *package_cores,
                 *script_cores,
                 *backends,
+                *trt_plugins,
             ]
         ):
             print(f"  {entry}")
@@ -493,6 +521,108 @@ class WheelPackageManager:
         self.context.run([trtmc, "version"])
         self.context.run([trtmc, "--help"], capture_output=True)
         self.context.run([trtmc, "build", "--help"], capture_output=True)
+
+        site_packages = sorted((root / "lib").glob("python*/site-packages"))
+        if len(site_packages) != 1:
+            raise CiError(
+                f"expected one installed site-packages directory under {root}, "
+                f"found {site_packages}"
+            )
+        native_dir = site_packages[0] / "tensorrt_model_connect" / "bin"
+        installed_elfs = [
+            trtmc,
+            root / "bin/libtrtmc_core.so",
+            *sorted(native_dir.iterdir()),
+        ]
+        for installed_elf in installed_elfs:
+            if not installed_elf.is_file():
+                continue
+            with installed_elf.open("rb") as stream:
+                elf_magic = stream.read(4)
+            if elf_magic != b"\x7fELF":
+                continue
+            elf_dynamic = self.context.output(["readelf", "-d", installed_elf])
+            for leaked in ("/workspace/", "/opt/venv/", "/usr/local/cuda/"):
+                if leaked in elf_dynamic:
+                    raise CiError(
+                        f"installed ELF RUNPATH leaks {leaked}: {installed_elf}"
+                    )
+
+        plugin = native_dir / "libtrtmc_trt_plugins.so"
+        if not plugin.is_file():
+            raise CiError(f"installed common TensorRT plugin DSO is missing: {plugin}")
+        plugin_dynamic = self.context.output(["readelf", "-d", plugin])
+        for dependency in ("libcudnn.so.9", "libnvrtc.so.13"):
+            if f"Shared library: [{dependency}]" not in plugin_dynamic:
+                raise CiError(
+                    f"installed common TensorRT plugin does not require {dependency}"
+                )
+        for runpath in (
+            "$ORIGIN/../../tensorrt_libs",
+            "$ORIGIN/../../nvidia/cudnn/lib",
+            "$ORIGIN/../../nvidia/cu13/lib",
+        ):
+            if runpath not in plugin_dynamic:
+                raise CiError(
+                    f"installed common TensorRT plugin RUNPATH is missing {runpath}"
+                )
+        for leaked in ("/workspace/", "/opt/venv/", "/usr/local/cuda/"):
+            if leaked in plugin_dynamic:
+                raise CiError(
+                    "installed common TensorRT plugin RUNPATH leaks a build/system "
+                    f"library directory: {leaked}"
+                )
+
+        registration_smoke = "\n".join(
+            (
+                "import ctypes",
+                "import json",
+                "from pathlib import Path",
+                "import tensorrt as trt",
+                f"plugin = Path({str(plugin)!r})",
+                "maps = Path('/proc/self/maps')",
+                "before = maps.read_text(encoding='utf-8')",
+                "if 'libcudnn.so.9' in before:",
+                "    raise RuntimeError('cuDNN was preloaded before the plugin smoke')",
+                "plugin_library = ctypes.CDLL(str(plugin), mode=ctypes.RTLD_LOCAL)",
+                "plugin_library.trtmc_runtime_kv_plugin_abi_version.restype = ctypes.c_int32",
+                "if plugin_library.trtmc_runtime_kv_plugin_abi_version() != 2:",
+                "    raise RuntimeError('common runtime-KV plugin DSO ABI is not 2')",
+                "stack_fn = plugin_library.trtmc_runtime_kv_plugin_runtime_stack_json_v1",
+                "stack_fn.restype = ctypes.c_char_p",
+                "runtime_stack = json.loads(stack_fn().decode('utf-8'))",
+                "expected_stack = {'cuda_runtime': '13.3', 'nvrtc': '13.3'}",
+                "for field, expected in expected_stack.items():",
+                "    if runtime_stack.get(field) != expected:",
+                "        raise RuntimeError(",
+                "            f'common runtime-KV plugin {field} mismatch: '",
+                "            f'expected {expected}, got {runtime_stack.get(field)!r}'",
+                "        )",
+                "after = maps.read_text(encoding='utf-8')",
+                "for dependency in ('libcudnn.so.9', 'libnvrtc.so.13'):",
+                "    if dependency not in after:",
+                "        raise RuntimeError(f'{dependency} was not resolved by plugin RUNPATH')",
+                "registry = trt.get_plugin_registry()",
+                "if registry.get_creator('NativeContiguousAttention', '2', '') is None:",
+                "    raise RuntimeError('NativeContiguousAttention v2 was not registered')",
+                "if registry.get_creator('NativeKvAppend', '1', '') is not None:",
+                "    raise RuntimeError('test-only NativeKvAppend v1 leaked into production')",
+                "print(f'clean_plugin_registration={plugin} handle={plugin_library._handle}')",
+            )
+        )
+        self.context.run(
+            [
+                "/usr/bin/env",
+                "-i",
+                f"PATH={root / 'bin'}:/usr/bin:/bin",
+                f"HOME={root}",
+                "TMPDIR=/tmp",
+                root / "bin/python",
+                "-I",
+                "-c",
+                registration_smoke,
+            ]
+        )
 
     def _create_venv(self, path: Path, wheel: Path) -> None:
         self.context.run(["python", "-m", "venv", path])

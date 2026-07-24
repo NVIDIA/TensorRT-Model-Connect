@@ -300,6 +300,48 @@ class TestTensorNamingContract:
                                                                     (4, attention_size),
                                                                     (4, attention_size)]
 
+    def test_dynamic_kv_split_prefill_profile(self):
+        """Split prefill accepts a runtime-sized external KV buffer."""
+        from tensorrt_model_connect.config import ModelConfig
+        from tensorrt_model_connect.families.llama.standard_decoder_builder import (
+            build_standard_decoder_engine,
+        )
+
+        hidden, vocab, num_layers = 16, 32, 2
+        num_heads = 4
+        max_cache = 4
+        config = ModelConfig(
+            hidden_size=hidden,
+            vocab_size=vocab,
+            num_hidden_layers=num_layers,
+            num_attention_heads=num_heads,
+            num_key_value_heads=num_heads,
+            rms_norm_eps=1e-5,
+            rope_theta=10000.0,
+        )
+        config.raw["dynamic_kv_cache"] = True
+        config.raw["_dynamic_kv_profile_rows"] = [2, 4]
+        config.raw["_decoder_engine_role"] = "prefill"
+        weights = _make_weights(hidden, vocab, num_layers, hidden, 32)
+
+        plan = build_standard_decoder_engine(config, weights, max_cache)
+        engine = _deserialize_engine(plan)
+
+        assert engine is not None
+        assert engine.num_optimization_profiles == 1
+        assert tuple(engine.get_tensor_shape("token_id")) == (-1,)
+        assert tuple(engine.get_tensor_shape("cache_k_0")) == (-1, hidden)
+        assert engine.get_tensor_profile_shape("cache_k_0", 0) == [
+            (1, hidden),
+            (1, hidden),
+            (max_cache, hidden),
+        ]
+        assert engine.get_tensor_profile_shape("attention_mask", 0) == [
+            (1, 2),
+            (max_cache, max_cache + 1),
+            (max_cache, max_cache * 2),
+        ]
+
     def test_dynamic_kv_cache_rejects_alibi(self):
         from tensorrt_model_connect.config import ModelConfig
         from tensorrt_model_connect.families.llama.standard_decoder_builder import build_standard_decoder_engine

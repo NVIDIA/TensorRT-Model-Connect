@@ -35,6 +35,7 @@ struct IoMap {
     std::string cache_v_pattern{"cache_v_{i}"};
     std::string present_k_pattern{"present_k_{i}"};
     std::string present_v_pattern{"present_v_{i}"};
+    std::string history_length{"history_length"};
 };
 
 // Universal base config — the ~10 fields every pipeline needs.
@@ -77,7 +78,7 @@ struct PipelineContext {
     IBackend* backend;                     // Backend for creating ITrtModule instances
     const std::string& runtime_cache_path; // RTX: JIT kernel cache file path
     bool cuda_graphs;                      // RTX: whole-graph CUDA capture
-    std::uint64_t kv_cache_size_bytes{0};  // 0 = use bundle max_cache_length (TriAttention)
+    std::uint64_t kv_cache_size_bytes{0};
     // Resolved layered config (schema-driven). Nullable: plugins not yet
     // migrated to the registry ignore it; migrated plugins query their
     // namespace via ctx.runtime_config->get<T>("ns", "field"). The bundle
@@ -112,6 +113,37 @@ class IPipelinePlugin {
             pipelines.push_back(create(ctx));
         return pipelines;
     }
+};
+
+inline constexpr std::uint32_t kRuntimeMemoryPluginApiVersionV1 = 1;
+
+// POD policy transported only through the optional runtime-memory plugin
+// interface. PipelineContext stays at its original ABI size for legacy model
+// DSOs.
+struct RuntimeMemoryPluginOptionsV1 {
+    std::uint32_t struct_size{sizeof(RuntimeMemoryPluginOptionsV1)};
+    std::uint32_t api_version{kRuntimeMemoryPluginApiVersionV1};
+    KvCacheMemoryPolicy kv_cache_memory_policy{KvCacheMemoryPolicy::kAuto};
+    double kv_cache_memory_fraction{0.90};
+    std::uint64_t kv_cache_memory_bytes{0};
+    std::uint64_t max_sequence_length{0};
+    std::uint32_t max_sequence_length_explicit{0};
+};
+
+// Optional interface implemented only by model plugins that understand the
+// runtime_memory bundle contract. Keeping it separate from IPipelinePlugin
+// preserves the established plugin vtable for mixed-version installations.
+class IRuntimeMemoryPipelinePluginV1 {
+  public:
+    // Out-of-line key function anchors RTTI in the core DSO so dynamic_cast
+    // remains reliable across mixed model-plugin/core shared libraries.
+    virtual ~IRuntimeMemoryPipelinePluginV1();
+    virtual std::uint32_t runtime_memory_plugin_api_version() const {
+        return kRuntimeMemoryPluginApiVersionV1;
+    }
+    virtual std::unique_ptr<IPipeline>
+    create_runtime_memory(const PipelineContext& ctx,
+                          const RuntimeMemoryPluginOptionsV1& options) = 0;
 };
 
 } // namespace trtmc

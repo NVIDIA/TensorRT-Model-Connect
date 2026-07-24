@@ -12,6 +12,9 @@
 
 namespace trtmc {
 
+IRuntimeMemoryPipelinePluginV1::~IRuntimeMemoryPipelinePluginV1() = default;
+IRuntimeMemoryIntrospectionV1::~IRuntimeMemoryIntrospectionV1() = default;
+
 namespace {
 
 // Extract the first non-zero int from a list of JSON key aliases.
@@ -111,6 +114,7 @@ void parse_io_map(const std::string& config_text, BaseConfig& cfg) {
     get("cache_v", cfg.io_map.cache_v_pattern);
     get("present_k", cfg.io_map.present_k_pattern);
     get("present_v", cfg.io_map.present_v_pattern);
+    get("history_length", cfg.io_map.history_length);
 }
 
 } // namespace

@@ -26,54 +26,86 @@ import pytest
 
 
 class TestBuildArgs:
-    def test_build_with_all_args(self):
-        """Verify build command parses all arguments."""
-        test_args = [
-            "trtmc", "build", "example-org/example-model",
-            "-o", "/tmp/out.trtfb",
-            "--max-cache-length", "512",
-            "--verbose",
-        ]
-        with patch.object(sys, "argv", test_args):
-            parser = argparse.ArgumentParser(prog="trtmc")
-            subparsers = parser.add_subparsers(dest="command")
-            build_p = subparsers.add_parser("build")
-            build_p.add_argument("model")
-            build_p.add_argument("-o", "--output", required=True)
-            build_p.add_argument("--max-cache-length", type=int, default=256)
-            build_p.add_argument("--verbose", action="store_true")
+    def test_build_with_hidden_legacy_args(self, monkeypatch):
+        """The real parser retains explicit legacy profile compatibility."""
+        import tensorrt_model_connect.build_cli as cli
 
-            args = parser.parse_args(test_args[1:])
-            assert args.command == "build"
-            assert args.model == "example-org/example-model"
-            assert args.output == "/tmp/out.trtfb"
-            assert args.max_cache_length == 512
-            assert args.verbose is True
+        captured: dict[str, argparse.Namespace] = {}
+        monkeypatch.setattr(
+            cli,
+            "_cmd_build",
+            lambda args: captured.setdefault("args", args) and 0,
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "trtmc",
+                "build",
+                "example-org/example-model",
+                "-o",
+                "/tmp/out.trtfb",
+                "--max-cache-length",
+                "512",
+                "--verbose",
+            ],
+        )
 
-    def test_build_default_cache_length(self):
-        """Default max-cache-length is 256."""
-        parser = argparse.ArgumentParser()
-        subparsers = parser.add_subparsers(dest="command")
-        build_p = subparsers.add_parser("build")
-        build_p.add_argument("model")
-        build_p.add_argument("-o", "--output", required=True)
-        build_p.add_argument("--max-cache-length", type=int, default=256)
-        build_p.add_argument("--verbose", action="store_true")
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
 
-        args = parser.parse_args(["build", "model-dir", "-o", "out.trtfb"])
-        assert args.max_cache_length == 256
-        assert args.verbose is False
+        assert exc_info.value.code == 0
+        args = captured["args"]
+        assert args.command == "build"
+        assert args.model == "example-org/example-model"
+        assert args.output == "/tmp/out.trtfb"
+        assert args.max_cache_length == 512
+        assert args.verbose is True
 
-    def test_build_missing_output_exits(self):
-        """Missing -o flag should cause an error."""
-        parser = argparse.ArgumentParser()
-        subparsers = parser.add_subparsers(dest="command")
-        build_p = subparsers.add_parser("build")
-        build_p.add_argument("model")
-        build_p.add_argument("-o", "--output", required=True)
+    def test_model_only_build_parser_uses_automatic_policy(self, monkeypatch):
+        """The real parser leaves output and KV policy for automatic resolution."""
+        import tensorrt_model_connect.build_cli as cli
 
-        with pytest.raises(SystemExit):
-            parser.parse_args(["build", "model-dir"])
+        captured: dict[str, argparse.Namespace] = {}
+        monkeypatch.setattr(
+            cli,
+            "_cmd_build",
+            lambda args: captured.setdefault("args", args) and 0,
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["trtmc", "build", "example-org/long-context-model"],
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+
+        assert exc_info.value.code == 0
+        args = captured["args"]
+        assert args.output is None
+        assert args.max_cache_length is None
+        assert args.dynamic_kv_cache is None
+        assert args.dynamic_kv_profile_rows is None
+        assert args.decoder_engine_layout == "split"
+
+    def test_build_model_only_command_does_not_require_output(self, monkeypatch):
+        """The real parser accepts a build command without -o."""
+        import tensorrt_model_connect.build_cli as cli
+
+        captured: dict[str, argparse.Namespace] = {}
+        monkeypatch.setattr(
+            cli,
+            "_cmd_build",
+            lambda args: captured.setdefault("args", args) and 0,
+        )
+        monkeypatch.setattr(sys, "argv", ["trtmc", "build", "model-dir"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+
+        assert exc_info.value.code == 0
+        assert captured["args"].output is None
 
     def test_parse_dynamic_kv_profile_rows(self):
         """Comma-separated dynamic-KV profile rows parse into integer lists."""
@@ -179,13 +211,38 @@ class TestCmdBuildValidation:
         result = _cmd_build(args)
         assert result == 1
 
-    def test_missing_output(self):
-        """_cmd_build returns 1 when output is empty."""
-        from tensorrt_model_connect.build_cli import _cmd_build
-        args = argparse.Namespace(model="some-model", output="", quantize=None, quant_scales=None, quant_calibration_samples=512,
-                                  max_cache_length=256, verbose=False, _skip_profile_resolution=True)
-        result = _cmd_build(args)
-        assert result == 1
+    def test_missing_output_is_derived(self, monkeypatch, capsys):
+        """_cmd_build derives the bundle name before dispatch."""
+        import tensorrt_model_connect.build_cli as cli
+        import tensorrt_model_connect.engine_builder as engine_builder
+
+        captured: dict[str, str] = {}
+
+        def _optimized(_model, output, _options, **_kwargs):
+            captured["output"] = output
+            return object()
+
+        monkeypatch.setattr(cli, "_model_only_native_dynamic_family", lambda _args: None)
+        monkeypatch.setattr(engine_builder, "_try_build_optimized_runtime", _optimized)
+        args = argparse.Namespace(
+            model="example-org/Some-Model",
+            output="",
+            max_cache_length=None,
+            dynamic_kv_cache=None,
+            dynamic_kv_profile_rows=None,
+            decoder_engine_layout="split",
+            tensor_parallel_size=1,
+            quantize=None,
+            quant_scales=None,
+            quant_calibration_samples=512,
+            verbose=False,
+            _skip_profile_resolution=True,
+        )
+
+        assert cli._cmd_build(args) == 0
+        assert args.output == "some-model.trtfb"
+        assert captured["output"] == "some-model.trtfb"
+        assert "Output: some-model.trtfb (derived from model)" in capsys.readouterr().err
 
 
 class TestCmdInspect:
@@ -231,6 +288,72 @@ class TestCmdInspect:
         assert "test-model" in captured.out
         assert "example_family" in captured.out
         assert "engine_plan" in captured.out
+
+    @pytest.mark.dynamic_memory
+    def test_inspect_runtime_memory_bundle_reports_only_static_contract(
+        self, tmp_path, capsys
+    ):
+        import json
+        import struct
+
+        bundle_path = tmp_path / "dynamic.trtfb"
+        header = {
+            "model_id": "Qwen/Qwen3-0.6B",
+            "model_type": "qwen3",
+            "family": "qwen",
+            "max_cache_length": 40960,
+            "runtime_memory": {
+                "contract_version": 1,
+                "qualified_model_id": "Qwen/Qwen3-0.6B",
+                "qualified_model_revision": "a" * 40,
+                "qualified_config_sha256": "b" * 64,
+                "qualified_target": "gb300-trt-11.2",
+                "qualified_runtime_stack": {
+                    "sm": "sm103",
+                    "tensorrt": "11.2.0.113",
+                    "cuda_runtime": "13.3",
+                    "cudnn_backend": "9.20.0",
+                    "cudnn_frontend_revision": "c" * 40,
+                    "nvrtc": "13.3",
+                    "driver": "580.105.08",
+                },
+                "native_kv_plugin_abi": 2,
+                "model_context_limit": 40960,
+                "prefill_chunk_limit": 2048,
+                "kv_layout": "contiguous_runtime_v1",
+                "kv_dtype": "bfloat16",
+                "kv_bytes_per_token": 114688,
+                "active_kv_profile_limits": [
+                    128,
+                    512,
+                    2048,
+                    8192,
+                    32768,
+                    40960,
+                ],
+                "runtime_owned": True,
+            },
+            "sections": {},
+        }
+        payload = json.dumps(header).encode("utf-8")
+        bundle_path.write_bytes(
+            b"TRTFB\x00\x01\x00"
+            + struct.pack("<Q", len(payload))
+            + payload
+        )
+
+        from tensorrt_model_connect.build_cli import _cmd_inspect
+
+        assert _cmd_inspect(argparse.Namespace(bundle_path=str(bundle_path))) == 0
+        output = capsys.readouterr().out
+        assert "Runtime KV contract version:" in output
+        assert "Model context limit:" in output
+        assert "40960" in output
+        assert "KV bytes per token:" in output
+        assert "Active KV profile limits:" in output
+        assert "Max cache length:" not in output
+        assert "runtime_kv_capacity_tokens" not in output
+        assert "post_load_free_bytes" not in output
 
     def test_list_engine_sections_marks_split_decoder_roles(self, tmp_path):
         """Split decoder bundles should label decode and prefill plans distinctly."""

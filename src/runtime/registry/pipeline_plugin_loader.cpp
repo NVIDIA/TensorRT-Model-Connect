@@ -354,6 +354,13 @@ std::optional<std::string> legacy_runtime_strategy_alias_target(const std::strin
 
 void load_model_plugin_for_strategy(const std::string& strategy,
                                     const std::vector<std::string>& search_paths) {
+    // Preserve the documented ad-hoc/static registration path. It is also the
+    // compatibility seam for a legacy model plugin already linked into the
+    // process: never replace an explicitly registered strategy with a DSO
+    // discovered from the filesystem.
+    if (PipelineRegistry::instance().lookup(strategy) != nullptr)
+        return;
+
     const auto model_id = model_plugin_id_for_strategy(strategy);
     if (!model_id)
         throw std::runtime_error("No plugin registered for runtime_strategy: " + strategy);

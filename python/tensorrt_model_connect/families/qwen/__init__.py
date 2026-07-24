@@ -26,6 +26,8 @@ def _load_plugin_module():
 def __getattr__(name: str) -> Any:
     if name.startswith("__"):
         raise AttributeError(name)
+    if name in {"graph_blocks", "graph_ops"}:
+        return importlib.import_module(f"{__name__}.{name}")
     plugin_module = _load_plugin_module()
     if name == "plugin":
         return getattr(plugin_module, "plugin")

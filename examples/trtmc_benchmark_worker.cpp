@@ -26,6 +26,13 @@ namespace {
 using Json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
 
+std::uint64_t unix_time_nanoseconds() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+}
+
 struct Arguments {
     std::string request_path;
     std::string output_path;
@@ -85,12 +92,34 @@ Value optional_value(const Json& object, const std::string& key, Value fallback)
     return object.at(key).get<Value>();
 }
 
-trtmc::LoadOptions load_options(const Json& runtime) {
-    trtmc::LoadOptions options;
+trtmc::LoadOptionsV2 load_options(const Json& runtime) {
+    trtmc::LoadOptionsV2 options;
     options.hf_python = optional_value<std::string>(runtime, "hf_python", "");
     options.runtime_cache_path = optional_value<std::string>(runtime, "runtime_cache_path", "");
     options.cuda_graphs = optional_value<bool>(runtime, "cuda_graphs", false);
-    options.kv_cache_size_bytes = optional_value<std::uint64_t>(runtime, "kv_cache_size_bytes", 0);
+    const auto kv_cache_bytes = optional_value<std::uint64_t>(runtime, "kv_cache_size_bytes", 0);
+    const auto kv_cache_fraction = optional_value<double>(runtime, "kv_cache_memory_fraction", 0.0);
+    const bool runtime_policy_requested =
+        optional_value<bool>(runtime, "runtime_kv_policy_requested", false);
+    if (runtime_policy_requested) {
+        if (kv_cache_bytes != 0 && kv_cache_fraction != 0.0) {
+            throw std::runtime_error(
+                "runtime KV byte and fraction policies are mutually exclusive");
+        }
+        if (kv_cache_bytes != 0) {
+            options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kBytes;
+            options.kv_cache_memory_bytes = kv_cache_bytes;
+        } else if (kv_cache_fraction != 0.0) {
+            options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kFraction;
+            options.kv_cache_memory_fraction = kv_cache_fraction;
+        } else {
+            options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kAuto;
+        }
+    } else {
+        options.kv_cache_size_bytes = kv_cache_bytes;
+    }
+    options.max_sequence_length = optional_value<std::uint64_t>(runtime, "max_sequence_length", 0);
+    options.max_sequence_length_explicit = runtime.contains("max_sequence_length") ? 1U : 0U;
     options.config_path = optional_value<std::string>(runtime, "config_path", "");
     options.set_tokens = optional_value<std::vector<std::string>>(runtime, "set_tokens", {});
     if (runtime.contains("config")) {
@@ -154,6 +183,8 @@ double finite_sum(const std::vector<float>& values) {
 Json run_generate(trtmc::IPipeline& pipeline, const Json& request, int warmup, int iterations) {
     const std::string prompt = request.at("prompt").get<std::string>();
     const trtmc::GenerateConfig config = generate_config(request);
+    const bool capture_generated_token_ids =
+        optional_value<bool>(request, "capture_generated_token_ids", false);
     trtmc::io::LoadedImage input_image;
     if (request.contains("image_path")) {
         input_image = trtmc::io::read_image(request.at("image_path").get<std::string>());
@@ -176,13 +207,20 @@ Json run_generate(trtmc::IPipeline& pipeline, const Json& request, int warmup, i
     for (int index = 0; index < iterations; ++index) {
         const auto start = Clock::now();
         last = generate();
-        observations.push_back({
+        Json observation = {
             {"iteration", index},
             {"runtime_e2e_wall_ms", elapsed_milliseconds(start)},
             {"output_tokens", last.token_ids.size()},
             {"prefill_ms", last.prefill_ms},
             {"decode_ms", last.decode_ms},
-        });
+        };
+        // Keep the optional token-stream copy outside the timed region.  The
+        // qualification producer enables it to distinguish exact-token
+        // equivalence from the weaker fixed-length structural workload;
+        // ordinary benchmarks retain their compact result schema.
+        if (capture_generated_token_ids)
+            observation["generated_token_ids"] = last.token_ids;
+        observations.push_back(std::move(observation));
     }
     const std::size_t text_limit = 4096;
     return {
@@ -770,9 +808,14 @@ Json execute(const Json& request) {
         throw std::runtime_error("warmup must be non-negative and iterations must be positive");
     }
 
+    const auto load_started_ns = unix_time_nanoseconds();
     const auto load_start = Clock::now();
     auto pipeline = trtmc::load(bundle, load_options(runtime));
     const double load_ms = elapsed_milliseconds(load_start);
+    const auto load_finished_ns = unix_time_nanoseconds();
+    if (load_finished_ns <= load_started_ns) {
+        throw std::runtime_error("pipeline load wall-clock interval is invalid");
+    }
 
     using OperationRunner = Json (*)(trtmc::IPipeline&, const Json&, int, int);
     static const std::unordered_map<std::string, OperationRunner> runners = {
@@ -796,7 +839,7 @@ Json execute(const Json& request) {
     }
     Json operation_result = runner->second(*pipeline, request.at("request"), warmup, iterations);
 
-    return {
+    Json result = {
         {"schema_version", "trtmc.benchmark-worker-result/v1"},
         {"status", "completed"},
         {"case_name", request.at("case_name")},
@@ -806,11 +849,20 @@ Json execute(const Json& request) {
         {"operation", operation},
         {"timing_scope", "public_pipeline_call_wall"},
         {"load_ms", load_ms},
+        {"load_started_ns", load_started_ns},
+        {"load_finished_ns", load_finished_ns},
         {"warmup", warmup},
         {"iterations", iterations},
         {"observations", std::move(operation_result.at("observations"))},
         {"output_summary", std::move(operation_result.at("output_summary"))},
     };
+    if (const auto* introspection =
+            dynamic_cast<const trtmc::IRuntimeMemoryIntrospectionV1*>(pipeline.get())) {
+        const auto receipt_json = introspection->runtime_memory_receipt_json();
+        if (!receipt_json.empty())
+            result["runtime_memory_receipt"] = Json::parse(receipt_json);
+    }
+    return result;
 }
 
 } // namespace

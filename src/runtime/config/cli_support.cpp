@@ -511,9 +511,10 @@ LayeredFileValues load_layered_file(const std::string& path) {
     if (ext_low == ".json")
         return parse_layered_json(body);
     if (ext_low == ".yaml" || ext_low == ".yml") {
-        throw std::invalid_argument("--config " + path +
-                                    ": YAML is not supported by the C++ loader; convert to JSON or "
-                                    "load via a wrapper (tensorrt_model_connect/cli.py accepts YAML).");
+        throw std::invalid_argument(
+            "--config " + path +
+            ": YAML is not supported by the C++ loader; convert to JSON or "
+            "load via a wrapper (tensorrt_model_connect/cli.py accepts YAML).");
     }
     throw std::invalid_argument("--config " + path + ": unsupported extension '" + ext +
                                 "' (expected .json)");
@@ -744,7 +745,8 @@ std::string write_effective_config_next_to(const ConfigBundle& bundle,
     namespace fs = std::filesystem;
     fs::path p(artifact_path);
     p.replace_extension(suffix);
-    fs::create_directories(p.parent_path());
+    if (!p.parent_path().empty())
+        fs::create_directories(p.parent_path());
     std::ofstream out(p);
     if (!out)
         throw std::invalid_argument("cannot write effective_config to: " + p.string());

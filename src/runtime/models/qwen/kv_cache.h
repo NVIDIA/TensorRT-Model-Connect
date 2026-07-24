@@ -11,10 +11,12 @@
 // Manages per-layer K/V device tensors, position tracking, and attention mask
 // construction. Binds directly to a TrtModule via bind_to().
 
+#include "runtime/domains/text/dynamic_memory/runtime_kv_state.h"
 #include "runtime/models/qwen/inference_state.h"
 #include "trtmc/runtime/device_tensor.h"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -32,6 +34,7 @@ struct QwenKvCacheNames {
     std::vector<std::string> present_v;
     std::string position_id{"position_id"};
     std::string attention_mask{"attention_mask"};
+    std::string history_length{"history_length"};
 };
 
 class QwenKvCache : public QwenInferenceState {
@@ -41,7 +44,9 @@ class QwenKvCache : public QwenInferenceState {
     // cache_dtype controls the element type for K/V cache buffers (default FP32).
     // names provides explicit tensor names for engine I/O binding.
     QwenKvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim, cudaStream_t stream,
-                DType cache_dtype = DType::kFloat32, QwenKvCacheNames names = {});
+                DType cache_dtype = DType::kFloat32, QwenKvCacheNames names = {},
+                std::unique_ptr<RuntimeKvStateCore> runtime_state = nullptr);
+    ~QwenKvCache() override;
 
     // --- QwenInferenceState overrides ---
     void reset() override;
@@ -52,10 +57,30 @@ class QwenKvCache : public QwenInferenceState {
     int32_t max_length() const override { return max_length_; }
     int32_t preferred_cache_rows() const override;
     int32_t num_layers() const override { return num_layers_; }
-    bool needs_attention_mask() const override { return true; }
+    bool needs_attention_mask() const override { return runtime_state_ == nullptr; }
     std::size_t device_memory_bytes() const override;
-    const char* state_type() const override { return "dense_kv_cache"; }
+    const char* state_type() const override {
+        return runtime_state_ ? "contiguous_runtime_v1" : "dense_kv_cache";
+    }
     bool ok() const override;
+    bool runtime_owned_kv() const override { return runtime_state_ != nullptr; }
+    int32_t prefill_chunk_limit() const override;
+    std::uint64_t runtime_kv_capacity_tokens() const override;
+    std::uint64_t runtime_kv_bound_tokens(std::uint64_t history_tokens) const override {
+        return runtime_state_ ? runtime_state_->bound_tokens_for(history_tokens) : 0;
+    }
+    std::uint64_t runtime_kv_base_address() const override {
+        return runtime_state_ ? runtime_state_->allocation_base_address() : 0;
+    }
+    std::uint64_t runtime_context_device_memory_bytes() const override {
+        return runtime_state_ ? runtime_state_->last_context_device_memory_bytes() : 0;
+    }
+    void finalize_runtime_memory() override;
+    void sample_runtime_memory_high_water() noexcept override;
+    std::string runtime_memory_receipt_json() const override;
+    RuntimeKvCommitSnapshot runtime_kv_commit_snapshot() const {
+        return runtime_state_ ? runtime_state_->commit_snapshot() : RuntimeKvCommitSnapshot{};
+    }
 
     // --- QwenKvCache-specific methods (not on the interface) ---
 
@@ -100,6 +125,9 @@ class QwenKvCache : public QwenInferenceState {
     void write_batched_mask(TensorMap& inputs, int32_t seq_len);
     void write_bidirectional_mask(TensorMap& inputs, int32_t seq_len);
     void write_decode_mask(TensorMap& inputs);
+    void validate_runtime_staging_pointers(const std::vector<const void*>& present_k,
+                                           const std::vector<const void*>& present_v) const;
+    void commit_runtime_rows(int32_t seq_len);
 
     std::vector<DeviceTensor> cache_k_;   // [num_layers], shape [max_length, kv_dim]
     std::vector<DeviceTensor> cache_v_;   // [num_layers]
@@ -120,6 +148,9 @@ class QwenKvCache : public QwenInferenceState {
     std::size_t cache_element_size_{sizeof(float)};
     QwenKvCacheNames names_;
     TrtModule* bound_module_{nullptr};
+    std::unique_ptr<RuntimeKvStateCore> runtime_state_;
+    int32_t history_length_buf_{0};
+    int32_t pending_tokens_{0};
 };
 
 } // namespace trtmc

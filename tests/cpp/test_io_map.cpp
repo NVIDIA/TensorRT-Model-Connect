@@ -41,6 +41,7 @@ static void test_io_map_defaults() {
     check(io.cache_v_pattern == "cache_v_{i}", "default cache_v_pattern");
     check(io.present_k_pattern == "present_k_{i}", "default present_k_pattern");
     check(io.present_v_pattern == "present_v_{i}", "default present_v_pattern");
+    check(io.history_length == "history_length", "default history_length");
 }
 
 // --- BaseConfig io_map field default ---
@@ -49,6 +50,8 @@ static void test_base_config_io_map_default() {
     trtmc::BaseConfig cfg;
     check(cfg.io_map.logits == "logits", "base_config io_map.logits default");
     check(cfg.io_map.cache_k_pattern == "cache_k_{i}", "base_config io_map.cache_k default");
+    check(cfg.io_map.history_length == "history_length",
+          "base_config io_map.history_length default");
 }
 
 // --- parse_base_config io_map parsing ---
@@ -64,6 +67,7 @@ static void test_parse_io_map_absent() {
     auto cfg = trtmc::parse_base_config(config, 128);
     check(cfg.io_map.logits == "logits", "absent io_map: logits default");
     check(cfg.io_map.cache_k_pattern == "cache_k_{i}", "absent io_map: cache_k default");
+    check(cfg.io_map.history_length == "history_length", "absent io_map: history_length default");
 }
 
 static void test_parse_io_map_present() {
@@ -77,7 +81,8 @@ static void test_parse_io_map_present() {
             "cache_k": "cache_kv_{2i}",
             "cache_v": "cache_kv_{2i+1}",
             "present_k": "output{2i+1}",
-            "present_v": "output{2i+2}"
+            "present_v": "output{2i+2}",
+            "history_length": "past_length"
         }
     })";
     auto cfg = trtmc::parse_base_config(config, 128);
@@ -86,6 +91,7 @@ static void test_parse_io_map_present() {
     check(cfg.io_map.cache_v_pattern == "cache_kv_{2i+1}", "parsed io_map: cache_v");
     check(cfg.io_map.present_k_pattern == "output{2i+1}", "parsed io_map: present_k");
     check(cfg.io_map.present_v_pattern == "output{2i+2}", "parsed io_map: present_v");
+    check(cfg.io_map.history_length == "past_length", "parsed io_map: history_length");
     // token_id not overridden — should stay as default.
     check(cfg.io_map.token_id == "token_id", "parsed io_map: token_id default preserved");
 }
@@ -105,6 +111,7 @@ static void test_parse_io_map_partial() {
     check(cfg.io_map.logits == "my_logits", "partial io_map: logits overridden");
     check(cfg.io_map.cache_k_pattern == "cache_k_{i}", "partial io_map: cache_k default");
     check(cfg.io_map.present_v_pattern == "present_v_{i}", "partial io_map: present_v default");
+    check(cfg.io_map.history_length == "history_length", "partial io_map: history_length default");
 }
 
 int main() {

@@ -28,6 +28,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace trtmc {
 
@@ -83,6 +84,28 @@ class LlamaInferenceState {
     // Dynamic-KV runtimes can use this to choose an execution profile/context
     // before prepare_step() binds the state tensors.
     virtual int32_t preferred_cache_rows() const { return max_length(); }
+
+    // True only for the versioned native runtime-memory contract. Such state
+    // is updated in place by the qualified graph and never needs present-K/V
+    // copies or a dense causal mask.
+    virtual bool runtime_owned_kv() const { return false; }
+
+    // Maximum Sq for one qualified prefill invocation. Legacy states return
+    // their full logical capacity and retain the existing prefill behavior.
+    virtual int32_t prefill_chunk_limit() const { return max_length(); }
+
+    virtual std::uint64_t runtime_kv_capacity_tokens() const { return 0; }
+    virtual std::uint64_t runtime_kv_bound_tokens(std::uint64_t history_tokens) const {
+        (void)history_tokens;
+        return 0;
+    }
+    virtual std::uint64_t runtime_kv_base_address() const { return 0; }
+    virtual std::uint64_t runtime_context_device_memory_bytes() const { return 0; }
+    // Complete runtime-owned asynchronous state updates before a successful
+    // request result is returned. Legacy states have nothing to finalize.
+    virtual void finalize_runtime_memory() {}
+    virtual void sample_runtime_memory_high_water() noexcept {}
+    virtual std::string runtime_memory_receipt_json() const { return {}; }
 
     // Number of transformer/SSM layers.
     virtual int32_t num_layers() const = 0;

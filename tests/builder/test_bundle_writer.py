@@ -373,3 +373,81 @@ def test_max_batch_size_roundtrip_and_back_compat(tmp_path):
     write_bundle(legacy_path, legacy, [BundleSection("engine_plan", b"x")])
     legacy_header, _ = read_trtfb_bundle(legacy_path)
     assert "max_batch_size" not in legacy_header
+
+
+def _runtime_memory_contract() -> dict:
+    return {
+        "contract_version": 1,
+        "qualified_model_id": "example-org/long-context-model",
+        "qualified_model_revision":
+            "c1899de289a04d12100db370d81485cdf75e47ca",
+        "qualified_config_sha256":
+            "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+        "qualified_target": "gb300-trt-11.2",
+        "qualified_runtime_stack": {
+            "sm": "sm103",
+            "tensorrt": "11.2.0.113",
+            "cuda_runtime": "13.3",
+            "cudnn_backend": "9.20.0",
+            "cudnn_frontend_revision":
+                "7b9b711c22b6823e87150213ecd8449260db8610",
+            "nvrtc": "13.3",
+            "driver": "580.105.08",
+        },
+        "native_kv_plugin_abi": 2,
+        "model_context_limit": 40960,
+        "prefill_chunk_limit": 2048,
+        "kv_layout": "contiguous_runtime_v1",
+        "kv_dtype": "bfloat16",
+        "kv_bytes_per_token": 114688,
+        "active_kv_profile_limits": [
+            128, 512, 2048, 8192, 32768, 40960,
+        ],
+        "runtime_owned": True,
+    }
+
+
+@pytest.mark.dynamic_memory
+def test_runtime_memory_roundtrip_and_legacy_omission(tmp_path):
+    contract = _runtime_memory_contract()
+    dynamic_path = str(tmp_path / "dynamic.trtfb")
+    write_bundle(
+        dynamic_path,
+        BundleInfo(
+            model_id="example-org/long-context-model",
+            family="synthetic_decoder",
+            precision="bf16",
+            max_cache_length=40960,
+            runtime_memory=contract,
+        ),
+        [BundleSection("engine_plan", b"x")],
+    )
+    dynamic_header, _ = read_trtfb_bundle(dynamic_path)
+    assert dynamic_header["runtime_memory"] == contract
+
+    legacy_path = str(tmp_path / "legacy-runtime-memory.trtfb")
+    write_bundle(
+        legacy_path,
+        BundleInfo(model_id="legacy"),
+        [BundleSection("engine_plan", b"x")],
+    )
+    legacy_header, _ = read_trtfb_bundle(legacy_path)
+    assert "runtime_memory" not in legacy_header
+
+
+@pytest.mark.dynamic_memory
+def test_bundle_writer_rejects_invalid_runtime_memory_contract(tmp_path):
+    contract = _runtime_memory_contract()
+    contract["active_kv_profile_limits"] = [128, 512, 2048]
+
+    with pytest.raises(ValueError, match="must end at model_context_limit"):
+        write_bundle(
+            tmp_path / "invalid-runtime-memory.trtfb",
+            BundleInfo(
+                model_id="example-org/long-context-model",
+                precision="bf16",
+                max_cache_length=40960,
+                runtime_memory=contract,
+            ),
+            [BundleSection("engine_plan", b"x")],
+        )

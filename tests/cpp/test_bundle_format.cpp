@@ -220,6 +220,154 @@ static void test_inspect_returns_metadata() {
     trtmc_test::remove_all_safe(tmp);
 }
 
+static void test_inspect_is_header_only() {
+    const auto tmp = make_temp_dir();
+    const auto path = (tmp / "header-only-inspect.trtfb").string();
+    // Deliberately declare an engine payload that is not present. Header-only
+    // inspection must still succeed; a full bundle read would reject it.
+    write_minimal_bundle(path, R"({
+  "model_id": "header-only",
+  "sections": {
+    "engine_plan": {"offset": 1048576, "size": 1048576}
+  }
+})");
+
+    const auto info = trtmc::InspectBundle(path);
+    check(info.model_id == "header-only", "inspect reads header only");
+    check(info.sections.size() == 1, "inspect returns engine metadata only");
+
+    bool full_read_rejected = false;
+    try {
+        (void)trtmc::ReadBundleFile(path);
+    } catch (const std::runtime_error&) {
+        full_read_rejected = true;
+    }
+    check(full_read_rejected, "full read rejects the payload that inspect never touches");
+
+    trtmc_test::remove_all_safe(tmp);
+}
+
+static void test_runtime_memory_contract_parse_and_legacy_omission() {
+    const auto tmp = make_temp_dir();
+    const auto path = (tmp / "runtime-memory.trtfb").string();
+    const std::string json = R"({
+  "model_id": "Qwen/Qwen3-0.6B",
+  "precision": "bf16",
+  "max_cache_length": 40960,
+  "runtime_memory": {
+    "contract_version": 1,
+    "qualified_model_id": "Qwen/Qwen3-0.6B",
+    "qualified_model_revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+    "qualified_config_sha256": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+    "qualified_target": "gb300-trt-11.2",
+    "qualified_runtime_stack": {
+      "sm": "sm103",
+      "tensorrt": "11.2.0.113",
+      "cuda_runtime": "13.3",
+      "cudnn_backend": "9.20.0",
+      "cudnn_frontend_revision": "7b9b711c22b6823e87150213ecd8449260db8610",
+      "nvrtc": "13.3",
+      "driver": "580.105.08"
+    },
+    "native_kv_plugin_abi": 2,
+    "model_context_limit": 40960,
+    "prefill_chunk_limit": 2048,
+    "kv_layout": "contiguous_runtime_v1",
+    "kv_dtype": "bfloat16",
+    "kv_bytes_per_token": 114688,
+    "active_kv_profile_limits": [128, 512, 2048, 8192, 32768, 40960],
+    "runtime_owned": true
+  },
+  "sections": {}
+})";
+    write_minimal_bundle(path, json);
+
+    const auto info = trtmc::InspectBundle(path);
+    const auto& memory = info.runtime_memory;
+    check(memory.present, "runtime_memory present");
+    check(memory.contract_version == 1, "runtime_memory version");
+    check(memory.qualified_model_id == "Qwen/Qwen3-0.6B", "runtime_memory qualified model");
+    check(memory.qualified_model_revision == "c1899de289a04d12100db370d81485cdf75e47ca",
+          "runtime_memory qualified revision");
+    check(memory.qualified_config_sha256 ==
+              "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+          "runtime_memory config fingerprint");
+    check(memory.qualified_target == "gb300-trt-11.2", "runtime_memory target");
+    check(memory.qualified_runtime_stack.sm == "sm103" &&
+              memory.qualified_runtime_stack.tensorrt == "11.2.0.113" &&
+              memory.qualified_runtime_stack.cuda_runtime == "13.3" &&
+              memory.qualified_runtime_stack.cudnn_backend == "9.20.0" &&
+              memory.qualified_runtime_stack.cudnn_frontend_revision ==
+                  "7b9b711c22b6823e87150213ecd8449260db8610" &&
+              memory.qualified_runtime_stack.nvrtc == "13.3" &&
+              memory.qualified_runtime_stack.driver == "580.105.08",
+          "runtime_memory qualified stack");
+    check(memory.native_kv_plugin_abi == 2, "runtime_memory plugin ABI");
+    check(memory.model_context_limit == 40960, "runtime_memory M");
+    check(memory.prefill_chunk_limit == 2048, "runtime_memory C");
+    check(memory.kv_layout == "contiguous_runtime_v1", "runtime_memory layout");
+    check(memory.kv_dtype == "bfloat16", "runtime_memory dtype");
+    check(memory.kv_bytes_per_token == 114688, "runtime_memory B");
+    check(memory.active_kv_profile_limits ==
+              std::vector<int32_t>({128, 512, 2048, 8192, 32768, 40960}),
+          "runtime_memory buckets");
+    check(memory.runtime_owned, "runtime_memory runtime owned");
+
+    const auto legacy_path = (tmp / "legacy-runtime-memory.trtfb").string();
+    write_minimal_bundle(legacy_path,
+                         R"({"model_id":"legacy","max_cache_length":256,"sections":{}})");
+    const auto legacy = trtmc::InspectBundle(legacy_path);
+    check(!legacy.runtime_memory.present, "legacy runtime_memory omission remains static");
+    check(legacy.max_cache_length == 256, "legacy max_cache_length remains available");
+
+    trtmc_test::remove_all_safe(tmp);
+}
+
+static void test_invalid_runtime_memory_contract_is_rejected() {
+    const auto tmp = make_temp_dir();
+    const auto path = (tmp / "invalid-runtime-memory.trtfb").string();
+    write_minimal_bundle(path, R"({
+  "model_id": "Qwen/Qwen3-0.6B",
+  "precision": "bf16",
+  "max_cache_length": 40960,
+  "runtime_memory": {
+    "contract_version": 1,
+    "qualified_model_id": "Qwen/Qwen3-0.6B",
+    "qualified_model_revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+    "qualified_config_sha256": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+    "qualified_target": "gb300-trt-11.2",
+    "qualified_runtime_stack": {
+      "sm": "sm103",
+      "tensorrt": "11.2.0.113",
+      "cuda_runtime": "13.3",
+      "cudnn_backend": "9.20.0",
+      "cudnn_frontend_revision": "7b9b711c22b6823e87150213ecd8449260db8610",
+      "nvrtc": "13.3",
+      "driver": "580.105.08"
+    },
+    "native_kv_plugin_abi": 2,
+    "model_context_limit": 40960,
+    "prefill_chunk_limit": 2048,
+    "kv_layout": "contiguous_runtime_v1",
+    "kv_dtype": "bfloat16",
+    "kv_bytes_per_token": 114688,
+    "active_kv_profile_limits": [128, 512, 2048, 8192, 32768],
+    "runtime_owned": true
+  },
+  "sections": {}
+})");
+
+    bool rejected = false;
+    try {
+        (void)trtmc::InspectBundle(path);
+    } catch (const std::runtime_error& error) {
+        rejected = std::string(error.what()).find("runtime_memory") != std::string::npos;
+    }
+    check(rejected, "runtime_memory whose final bucket does not cover M is rejected");
+
+    trtmc_test::remove_all_safe(tmp);
+}
+
 static void test_tokenizer_add_special_tokens_header() {
     const auto tmp = make_temp_dir();
     const auto path = (tmp / "tokenizer_flag.trtfb").string();
@@ -354,6 +502,9 @@ int main() {
     test_is_bundle_valid();
     test_is_bundle_invalid();
     test_inspect_returns_metadata();
+    test_inspect_is_header_only();
+    test_runtime_memory_contract_parse_and_legacy_omission();
+    test_invalid_runtime_memory_contract_is_rejected();
     test_tokenizer_add_special_tokens_header();
     test_truncated_bundle_throws();
     test_max_batch_size_parse_and_back_compat();

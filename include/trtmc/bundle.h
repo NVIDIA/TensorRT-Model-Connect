@@ -25,6 +25,36 @@ struct MaxBatchSize {
     int32_t vae{1};
 };
 
+// Static, versioned capability/ABI contract for a runtime-owned native KV
+// buffer. `present == false` is the complete legacy behavior.
+struct QualifiedRuntimeStack {
+    std::string sm;
+    std::string tensorrt;
+    std::string cuda_runtime;
+    std::string cudnn_backend;
+    std::string cudnn_frontend_revision;
+    std::string nvrtc;
+    std::string driver;
+};
+
+struct RuntimeMemoryContract {
+    bool present{false};
+    int32_t contract_version{0};
+    std::string qualified_model_id;
+    std::string qualified_model_revision;
+    std::string qualified_config_sha256;
+    std::string qualified_target;
+    QualifiedRuntimeStack qualified_runtime_stack;
+    int32_t native_kv_plugin_abi{0};
+    int32_t model_context_limit{0};
+    int32_t prefill_chunk_limit{0};
+    std::string kv_layout;
+    std::string kv_dtype;
+    std::uint64_t kv_bytes_per_token{0};
+    std::vector<int32_t> active_kv_profile_limits;
+    bool runtime_owned{false};
+};
+
 struct BundleInfo {
     std::string model_id;
     std::string model_type;
@@ -45,6 +75,7 @@ struct BundleInfo {
     bool tokenizer_add_special_tokens_present{false};
     std::vector<BundleSectionInfo> sections;
     MaxBatchSize max_batch_size{};
+    RuntimeMemoryContract runtime_memory{};
 };
 
 // Read metadata without loading the engine.

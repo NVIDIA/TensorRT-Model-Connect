@@ -210,6 +210,38 @@ def test_native_worker_has_a_runner_for_every_advertised_operation() -> None:
         assert f'{{"{operation.name}", run_' in worker_source, operation.name
 
 
+@pytest.mark.dynamic_memory
+def test_native_worker_forwards_explicit_runtime_kv_sequence_policy() -> None:
+    worker_source = (
+        REPOSITORY_ROOT / "examples/trtmc_benchmark_worker.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        'optional_value<std::uint64_t>(runtime, "max_sequence_length", 0)'
+        in worker_source
+    )
+    assert "trtmc::LoadOptionsV2 load_options" in worker_source
+    assert "options.max_sequence_length_explicit" in worker_source
+    assert (
+        'optional_value<bool>(runtime, "runtime_kv_policy_requested", false)'
+        in worker_source
+    )
+    assert (
+        "options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kBytes"
+        in worker_source
+    )
+    assert (
+        "trtmc::KvCacheMemoryPolicy::kFraction"
+        in worker_source
+    )
+    assert "if (!receipt_json.empty())" in worker_source
+    assert "runtime-memory pipeline returned an empty receipt" not in worker_source
+    assert "const auto load_started_ns = unix_time_nanoseconds();" in worker_source
+    assert "const auto load_finished_ns = unix_time_nanoseconds();" in worker_source
+    assert '{"load_started_ns", load_started_ns}' in worker_source
+    assert '{"load_finished_ns", load_finished_ns}' in worker_source
+
+
 def test_default_catalog_falls_back_to_installed_package_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

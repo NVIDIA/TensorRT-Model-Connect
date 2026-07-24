@@ -9,6 +9,7 @@
 #include "runtime/backend/backend_loader.h"
 #include "runtime/backend/trt_version.h"
 #include "runtime/core/trt_common.h"
+#include "runtime/domains/text/dynamic_memory/runtime_memory_qualification.h"
 #include "runtime/providers/optimized_runtime_host.h"
 #include "runtime/registry/bundle_materialization.h"
 #include "trtmc/config/cli_support.h"
@@ -23,6 +24,7 @@
 #include "utils/json_helpers.h"
 
 #include <algorithm>
+#include <cmath>
 #include <exception>
 #include <iostream>
 #include <optional>
@@ -131,6 +133,138 @@ std::string resolve_runtime_strategy(const std::string& config_text) {
         strategy = *fallback;
     }
     return normalize_legacy_strategy(strategy, config_text);
+}
+
+void validate_load_options_v2(const LoadOptionsV2& options) {
+    if (options.struct_size < sizeof(LoadOptionsV2)) {
+        throw std::invalid_argument("LoadOptionsV2.struct_size is too small for API version 2");
+    }
+    if (options.api_version != kLoadOptionsV2ApiVersion) {
+        throw std::invalid_argument("LoadOptionsV2.api_version is not supported");
+    }
+    if (options.max_sequence_length_explicit > 1) {
+        throw std::invalid_argument(
+            "LoadOptionsV2.max_sequence_length_explicit must be zero or one");
+    }
+
+    const bool has_fraction = options.kv_cache_memory_fraction != 0.0;
+    const bool has_bytes = options.kv_cache_memory_bytes != 0;
+    switch (options.kv_cache_memory_policy) {
+    case KvCacheMemoryPolicy::kUnspecified:
+    case KvCacheMemoryPolicy::kAuto:
+        if (has_fraction || has_bytes) {
+            throw std::invalid_argument(
+                "Automatic or unspecified KV cache policy conflicts with fraction/byte values");
+        }
+        break;
+    case KvCacheMemoryPolicy::kFraction:
+        if (!(std::isfinite(options.kv_cache_memory_fraction) &&
+              options.kv_cache_memory_fraction > 0.0 && options.kv_cache_memory_fraction <= 1.0)) {
+            throw std::invalid_argument("KV cache memory fraction must be in (0, 1]");
+        }
+        if (has_bytes) {
+            throw std::invalid_argument("KV cache fraction policy requires zero bytes");
+        }
+        break;
+    case KvCacheMemoryPolicy::kBytes:
+        if (!has_bytes)
+            throw std::invalid_argument("KV cache byte policy requires positive bytes");
+        if (has_fraction) {
+            throw std::invalid_argument("KV cache byte policy requires zero fraction");
+        }
+        break;
+    default:
+        throw std::invalid_argument("Unknown KV cache memory policy");
+    }
+
+    const bool requests_new_policy =
+        options.kv_cache_memory_policy != KvCacheMemoryPolicy::kUnspecified ||
+        options.max_sequence_length != 0 || options.max_sequence_length_explicit != 0;
+    if (requests_new_policy && options.kv_cache_size_bytes != 0) {
+        throw std::invalid_argument(
+            "LoadOptionsV2 legacy kv_cache_size_bytes conflicts with runtime KV policy fields");
+    }
+}
+
+bool requests_runtime_kv_policy(const LoadOptionsV2& options) {
+    return options.kv_cache_memory_policy != KvCacheMemoryPolicy::kUnspecified ||
+           options.max_sequence_length != 0 || options.max_sequence_length_explicit != 0;
+}
+
+void validate_runtime_kv_policy_support(const BundleInfo& header, bool requested) {
+    if (!requested)
+        return;
+    if (header.runtime_memory.present && header.runtime_memory.contract_version == 1 &&
+        header.runtime_memory.runtime_owned) {
+        return;
+    }
+    throw std::invalid_argument("This bundle does not declare runtime_memory contract version 1; "
+                                "runtime KV memory and max-sequence policies cannot be applied");
+}
+
+LoadOptions legacy_load_options(const LoadOptionsV2& options) {
+    LoadOptions legacy;
+    legacy.hf_python = options.hf_python;
+    legacy.runtime_cache_path = options.runtime_cache_path;
+    legacy.cuda_graphs = options.cuda_graphs;
+    legacy.kv_cache_size_bytes = options.kv_cache_size_bytes;
+    legacy.config_path = options.config_path;
+    legacy.set_tokens = options.set_tokens;
+    legacy.backend_search_paths = options.backend_search_paths;
+    legacy.model_plugin_search_paths = options.model_plugin_search_paths;
+    return legacy;
+}
+
+RuntimeMemoryPluginOptionsV1 runtime_memory_plugin_options(const LoadOptions& legacy,
+                                                           const LoadOptionsV2* options) {
+    RuntimeMemoryPluginOptionsV1 policy;
+    if (options == nullptr) {
+        if (legacy.kv_cache_size_bytes != 0) {
+            policy.kv_cache_memory_policy = KvCacheMemoryPolicy::kBytes;
+            policy.kv_cache_memory_fraction = 0.0;
+            policy.kv_cache_memory_bytes = legacy.kv_cache_size_bytes;
+        }
+        return policy;
+    }
+    if (options->kv_cache_memory_policy == KvCacheMemoryPolicy::kUnspecified &&
+        legacy.kv_cache_size_bytes != 0) {
+        policy.kv_cache_memory_policy = KvCacheMemoryPolicy::kBytes;
+        policy.kv_cache_memory_fraction = 0.0;
+        policy.kv_cache_memory_bytes = legacy.kv_cache_size_bytes;
+        policy.max_sequence_length = options->max_sequence_length;
+        policy.max_sequence_length_explicit =
+            options->max_sequence_length != 0 ? 1U : options->max_sequence_length_explicit;
+        return policy;
+    }
+
+    policy.kv_cache_memory_policy =
+        options->kv_cache_memory_policy == KvCacheMemoryPolicy::kUnspecified
+            ? KvCacheMemoryPolicy::kAuto
+            : options->kv_cache_memory_policy;
+    policy.kv_cache_memory_fraction = policy.kv_cache_memory_policy == KvCacheMemoryPolicy::kAuto
+                                          ? 0.90
+                                          : options->kv_cache_memory_fraction;
+    policy.kv_cache_memory_bytes = options->kv_cache_memory_bytes;
+    policy.max_sequence_length = options->max_sequence_length;
+    policy.max_sequence_length_explicit =
+        options->max_sequence_length != 0 ? 1U : options->max_sequence_length_explicit;
+    return policy;
+}
+
+IRuntimeMemoryPipelinePluginV1& require_runtime_memory_plugin(IPipelinePlugin& plugin,
+                                                              const std::string& strategy) {
+    auto* runtime_plugin = dynamic_cast<IRuntimeMemoryPipelinePluginV1*>(&plugin);
+    if (runtime_plugin == nullptr) {
+        throw std::runtime_error("runtime_memory bundle strategy '" + strategy +
+                                 "' requires model plugin runtime-memory interface V1; "
+                                 "the loaded model DSO is incompatible with this core");
+    }
+    if (runtime_plugin->runtime_memory_plugin_api_version() != kRuntimeMemoryPluginApiVersionV1) {
+        throw std::runtime_error(
+            "runtime_memory bundle strategy '" + strategy +
+            "' reported an incompatible model plugin runtime-memory API version");
+    }
+    return *runtime_plugin;
 }
 
 IPipelinePlugin* lookup_plugin_or_throw(const std::string& strategy,
@@ -244,6 +378,23 @@ IBackend* load_backend_for_bundle(const BundleFile& bundle, const std::string& c
                               parse_trt_version(metadata.trt_runtime_version),
                               "selected backend TensorRT runtime");
 
+    if (bundle.info.runtime_memory.present) {
+        const auto actual = parse_runtime_memory_runtime_stack_json(
+            metadata.runtime_memory_stack_json);
+        validate_runtime_memory_runtime_stack(
+            bundle.info.runtime_memory.qualified_runtime_stack, actual);
+        std::cerr << "[trtmc.runtime_stack] schema=1 sm=sm"
+                  << actual.compute_capability_major
+                  << actual.compute_capability_minor
+                  << " tensorrt=" << actual.trt_runtime_version
+                  << " cuda_runtime=" << actual.cuda_runtime_version
+                  << " cudnn_backend=" << actual.cudnn_backend_version
+                  << " cudnn_frontend_revision="
+                  << actual.cudnn_frontend_revision
+                  << " nvrtc=" << actual.nvrtc_version
+                  << " driver=" << actual.driver_version << std::endl;
+    }
+
     if (required) {
         std::cerr << "[trtmc] TensorRT ABI resolved: bundle=" << trt_abi_string(*required)
                   << ", backend=" << loaded_backend_name;
@@ -272,71 +423,19 @@ try_resolve_runtime_config(const std::string& config_text, const std::string& bu
 
 } // namespace
 
-std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundle_path,
-                                                        const std::string& hf_python,
-                                                        const std::string& runtime_cache_path,
-                                                        bool cuda_graphs) {
-    LoadOptions optimized_options;
-    optimized_options.hf_python = hf_python;
-    optimized_options.runtime_cache_path = runtime_cache_path;
-    optimized_options.cuda_graphs = cuda_graphs;
+namespace {
+
+std::unique_ptr<IPipeline> from_bundle_with_options(const std::string& bundle_path,
+                                                    const LoadOptions& options,
+                                                    const LoadOptionsV2* versioned_options) {
     const BundleInfo header = ReadBundleHeader(bundle_path);
-    if (auto optimized_runtime_pipeline =
-            try_make_optimized_runtime_pipeline(bundle_path, header, optimized_options)) {
-        return optimized_runtime_pipeline;
+    const bool explicit_runtime_policy =
+        versioned_options != nullptr && requests_runtime_kv_policy(*versioned_options);
+    validate_runtime_kv_policy_support(header, explicit_runtime_policy);
+    if (header.runtime_memory.present && is_optimized_runtime_bundle(header)) {
+        throw std::invalid_argument(
+            "runtime_memory bundles are supported only by the native Model Connect runtime");
     }
-
-    auto materialized = detail::materialize_pipeline_bundle(bundle_path);
-    BundleFile bundle = std::move(materialized.bundle);
-    std::string config_text = std::move(materialized.config_text);
-    if (bundle.sections.empty())
-        throw std::runtime_error("Failed to read bundle: " + bundle_path);
-
-    // Parse runtime_strategy and normalize legacy strings.
-    std::string strategy = resolve_runtime_strategy(config_text);
-
-    auto* plugin = lookup_plugin_or_throw(strategy, {});
-
-    // Load backend DSO based on bundle metadata after strategy ownership is known.
-    std::string backend_name = extract_json_string(config_text, "engine_backend", "trt");
-    IBackend* backend = load_backend_for_bundle(bundle, config_text, bundle_path, backend_name, {});
-
-    // Parse base config and dispatch to plugin
-    BaseConfig base_cfg = parse_base_config(config_text, bundle.info.max_cache_length);
-    base_cfg.runtime_strategy = strategy; // use normalized strategy
-    if (!base_cfg.tokenizer_add_special_tokens_present &&
-        bundle.info.tokenizer_add_special_tokens_present) {
-        base_cfg.tokenizer_add_special_tokens = bundle.info.tokenizer_add_special_tokens;
-        base_cfg.tokenizer_add_special_tokens_present = true;
-    }
-
-    // Resolve the layered runtime config (BUNDLE_DEFAULT + SESSION_REQUEST).
-    // Best-effort: a malformed input prints to stderr and falls back to
-    // schema defaults so plugin construction isn't blocked.
-    std::optional<config::ConfigBundle> resolved =
-        try_resolve_runtime_config(config_text, bundle_path, /*config_path=*/"",
-                                   /*set_tokens=*/{});
-
-    PipelineContext ctx{bundle,
-                        base_cfg,
-                        config_text,
-                        hf_python,
-                        bundle_path,
-                        backend,
-                        runtime_cache_path,
-                        cuda_graphs,
-                        /*kv_cache_size_bytes=*/0,
-                        resolved ? &*resolved : nullptr};
-    auto pipeline = plugin->create(ctx);
-
-    std::cerr << "[trtmc] Pipeline loaded (strategy=" << strategy << ", backend=trt_new_runtime)"
-              << std::endl;
-    return pipeline;
-}
-
-std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundle_path,
-                                                        const LoadOptions& options) {
-    const BundleInfo header = ReadBundleHeader(bundle_path);
     if (auto optimized_runtime_pipeline =
             try_make_optimized_runtime_pipeline(bundle_path, header, options)) {
         return optimized_runtime_pipeline;
@@ -350,6 +449,12 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
     std::string strategy = resolve_runtime_strategy(config_text);
 
     auto* plugin = lookup_plugin_or_throw(strategy, options.model_plugin_search_paths);
+    IRuntimeMemoryPipelinePluginV1* runtime_plugin = nullptr;
+    RuntimeMemoryPluginOptionsV1 runtime_policy;
+    if (header.runtime_memory.present) {
+        runtime_plugin = &require_runtime_memory_plugin(*plugin, strategy);
+        runtime_policy = runtime_memory_plugin_options(options, versioned_options);
+    }
 
     std::string backend_name = extract_json_string(config_text, "engine_backend", "trt");
     IBackend* backend = load_backend_for_bundle(bundle, config_text, bundle_path, backend_name,
@@ -357,6 +462,11 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
 
     BaseConfig base_cfg = parse_base_config(config_text, bundle.info.max_cache_length);
     base_cfg.runtime_strategy = strategy;
+    if (!base_cfg.tokenizer_add_special_tokens_present &&
+        bundle.info.tokenizer_add_special_tokens_present) {
+        base_cfg.tokenizer_add_special_tokens = bundle.info.tokenizer_add_special_tokens;
+        base_cfg.tokenizer_add_special_tokens_present = true;
+    }
 
     std::optional<config::ConfigBundle> resolved = try_resolve_runtime_config(
         config_text, bundle_path, options.config_path, options.set_tokens);
@@ -369,13 +479,40 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
                         backend,
                         options.runtime_cache_path,
                         options.cuda_graphs,
-                        options.kv_cache_size_bytes,
+                        header.runtime_memory.present ? 0 : options.kv_cache_size_bytes,
                         resolved ? &*resolved : nullptr};
-    auto pipeline = plugin->create(ctx);
+    auto pipeline = runtime_plugin != nullptr
+                        ? runtime_plugin->create_runtime_memory(ctx, runtime_policy)
+                        : plugin->create(ctx);
 
     std::cerr << "[trtmc] Pipeline loaded (strategy=" << strategy << ", backend=trt_new_runtime)"
               << std::endl;
     return pipeline;
+}
+
+} // namespace
+
+std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundle_path,
+                                                        const std::string& hf_python,
+                                                        const std::string& runtime_cache_path,
+                                                        bool cuda_graphs) {
+    LoadOptions options;
+    options.hf_python = hf_python;
+    options.runtime_cache_path = runtime_cache_path;
+    options.cuda_graphs = cuda_graphs;
+    return from_bundle_with_options(bundle_path, options, nullptr);
+}
+
+std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundle_path,
+                                                        const LoadOptions& options) {
+    return from_bundle_with_options(bundle_path, options, nullptr);
+}
+
+std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundle_path,
+                                                        const LoadOptionsV2& options) {
+    validate_load_options_v2(options);
+    auto legacy = legacy_load_options(options);
+    return from_bundle_with_options(bundle_path, legacy, &options);
 }
 
 std::unique_ptr<PipelinePool> PipelineFactory::from_bundle_pool(const std::string& bundle_path,
@@ -385,6 +522,12 @@ std::unique_ptr<PipelinePool> PipelineFactory::from_bundle_pool(const std::strin
         throw std::invalid_argument("Pipeline pool size must be positive");
 
     const BundleInfo header = ReadBundleHeader(bundle_path);
+    if (header.runtime_memory.present) {
+        throw std::invalid_argument(
+            "PipelinePool does not yet support runtime-sized KV cache bundles; "
+            "the beta owns one post-load KV budget per pipeline. Use "
+            "PipelineFactory::from_bundle until pool-level budget partitioning is implemented.");
+    }
     if (is_optimized_runtime_bundle(header))
         throw std::invalid_argument(
             "PipelineFactory::from_bundle_pool does not support optimized-runtime bundles; use "
@@ -431,6 +574,10 @@ std::unique_ptr<IPipeline> load(const std::string& bundle_path, const std::strin
 }
 
 std::unique_ptr<IPipeline> load(const std::string& bundle_path, const LoadOptions& options) {
+    return PipelineFactory::from_bundle(bundle_path, options);
+}
+
+std::unique_ptr<IPipeline> load(const std::string& bundle_path, const LoadOptionsV2& options) {
     return PipelineFactory::from_bundle(bundle_path, options);
 }
 

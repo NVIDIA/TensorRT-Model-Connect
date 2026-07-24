@@ -16,6 +16,8 @@ import textwrap
 import time
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -1575,7 +1577,7 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
     assert "MODEL_OWNED\n        ${_trtmc_test_options}" in cmake
     for gpu_test in (
         "test_trt_runtime_lifetime REQUIRES_TRT REQUIRES_GPU",
-        "test_trt_module REQUIRES_TRT REQUIRES_GPU",
+            "test_trt_module REQUIRES_TRT REQUIRES_GPU DYNAMIC_MEMORY",
         "test_cuda_buffer REQUIRES_TRT REQUIRES_GPU",
         "test_cuda_stream REQUIRES_TRT REQUIRES_GPU",
         "test_cuda_graph REQUIRES_TRT REQUIRES_GPU",
@@ -1898,6 +1900,58 @@ def test_release_wheel_stages_core_runtime_and_uses_origin_rpath() -> None:
     assert "script_cores" in script
     assert 'if "$ORIGIN" not in dynamic' in script
     assert "installed trtmc RUNPATH leaks the CI build directory" in script
+
+
+@pytest.mark.dynamic_memory
+def test_release_wheel_runtime_kv_plugin_is_relocatable_and_loaded_clean() -> None:
+    cmake = (REPO_ROOT / "src/plugins/runtime_kv/CMakeLists.txt").read_text()
+    conanfile = (REPO_ROOT / "conanfile.py").read_text()
+    package = _ci_source("package.py")
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text()
+
+    for relative_path in (
+        "$ORIGIN/../../tensorrt_libs",
+        "$ORIGIN/../../nvidia/cudnn/lib",
+        "$ORIGIN/../../nvidia/cu13/lib",
+    ):
+        assert relative_path in cmake
+        assert relative_path in conanfile
+        assert relative_path in package
+    assert "_rewrite_elf_runpath(trt_plugin, _TRT_PLUGIN_INSTALL_RUNPATH)" in conanfile
+    assert "cuda-python==13.3.1" in pyproject
+    assert "nvidia-cuda-runtime==13.3.29" in pyproject
+    assert "nvidia-cuda-nvrtc==13.3.33" in pyproject
+    assert "nvidia-cudnn-cu13==9.20.0.48" in pyproject
+    assert "Requires-Dist: cuda-python==13.3.1" in package
+    assert "Requires-Dist: nvidia-cuda-runtime==13.3.29" in package
+    assert "Requires-Dist: nvidia-cuda-nvrtc==13.3.33" in package
+    assert "Requires-Dist: nvidia-cudnn-cu13==9.20.0.48" in package
+    assert '"/usr/bin/env"' in package and '"-i"' in package
+    assert "cuDNN was preloaded before the plugin smoke" in package
+    assert "NativeContiguousAttention" in package
+    assert "NativeKvAppend" in package
+    assert "get_creator('NativeContiguousAttention', '2', '')" in package
+    assert "test-only NativeKvAppend v1 leaked into production" in package
+    assert "trtmc_runtime_kv_plugin_abi_version() != 2" in package
+    assert "expected_stack = {'cuda_runtime': '13.3', 'nvrtc': '13.3'}" in package
+
+
+@pytest.mark.dynamic_memory
+def test_rtx_backend_does_not_advertise_standard_trt_runtime_memory() -> None:
+    backend = (REPO_ROOT / "src/runtime/backend/rtx_backend.cpp").read_text()
+    compatibility_test = (
+        REPO_ROOT / "tests/cpp/test_rtx_runtime_memory_compatibility.cpp"
+    ).read_text()
+    cmake = (REPO_ROOT / "CMakeLists.txt").read_text()
+
+    declaration = backend.split("class RtxBackend final", maxsplit=1)[1].split(
+        "{", maxsplit=1
+    )[0]
+    assert declaration.strip() == ": public IBackend"
+    assert "IRuntimeMemoryBackendV1" not in declaration
+    assert "dynamic_cast<trtmc::IRuntimeMemoryBackendV1*>" in compatibility_test
+    assert "if(TARGET trtmc_backend_rtx)" in cmake
+    assert "test_rtx_runtime_memory_compatibility" in cmake
 
 
 def test_ci_source_build_defaults_to_packaged_libtorch_mode() -> None:

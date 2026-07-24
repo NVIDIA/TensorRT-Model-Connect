@@ -7,6 +7,7 @@ runtime_plugins = ["plugin.cpp|register_qwen_plugin"]
 runtime_strategies = ["qwen_decoder_kv_cache"]
 runtime_tests = [
   "test_qwen_tensor_names|test_qwen_tensor_names.cpp|_|_|_",
+  "test_qwen_runtime_admission|test_qwen_runtime_admission.cpp|trtmc_model_qwen|_|DYNAMIC_MEMORY",
 ]
 [validation_profiles]
 decoder_debug = ["qwen_decoder_kv_cache"]

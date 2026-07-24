@@ -506,6 +506,19 @@ class IPipeline {
     virtual const char* pipeline_type() const = 0;
 };
 
+// Optional, independently versioned capability implemented by native
+// runtime-memory pipelines. Keeping this outside IPipeline preserves the
+// established pipeline vtable for legacy/model-provider DSOs.
+class IRuntimeMemoryIntrospectionV1 {
+  public:
+    // Out-of-line key function keeps RTTI/typeinfo owned by libtrtmc_core so
+    // dynamic_cast remains reliable across core, C ABI, and model DSOs.
+    virtual ~IRuntimeMemoryIntrospectionV1();
+    virtual std::uint32_t runtime_memory_api_version() const { return 1; }
+    virtual std::uint64_t runtime_kv_capacity_tokens() const = 0;
+    virtual std::string runtime_memory_receipt_json() const = 0;
+};
+
 // --- Factory ---
 // LoadOptions bundles every knob the factory understands. Users who only want
 // the defaults can still call the positional overload below.
@@ -520,10 +533,45 @@ struct LoadOptions {
     std::vector<std::string> model_plugin_search_paths; // Extra dirs for libtrtmc_model_*.so
 };
 
+inline constexpr std::uint32_t kLoadOptionsV2ApiVersion = 2;
+
+enum class KvCacheMemoryPolicy : std::uint32_t {
+    kUnspecified = 0,
+    kAuto = 1,
+    kFraction = 2,
+    kBytes = 3,
+};
+
+// Versioned C++ load surface for runtime-owned KV memory. LoadOptions remains
+// byte-for-byte unchanged so applications compiled against the original ABI
+// never expose a shorter object to a newer core.
+struct LoadOptionsV2 {
+    std::uint32_t struct_size{sizeof(LoadOptionsV2)};
+    std::uint32_t api_version{kLoadOptionsV2ApiVersion};
+
+    // Duplicated LoadOptions fields intentionally avoid embedding or extending
+    // the established public type.
+    std::string hf_python;
+    std::string runtime_cache_path;
+    bool cuda_graphs{false};
+    std::uint64_t kv_cache_size_bytes{0};
+    std::string config_path;
+    std::vector<std::string> set_tokens;
+    std::vector<std::string> backend_search_paths;
+    std::vector<std::string> model_plugin_search_paths;
+
+    KvCacheMemoryPolicy kv_cache_memory_policy{KvCacheMemoryPolicy::kUnspecified};
+    double kv_cache_memory_fraction{0.0};
+    std::uint64_t kv_cache_memory_bytes{0};
+    std::uint64_t max_sequence_length{0};
+    std::uint32_t max_sequence_length_explicit{0};
+};
+
 std::unique_ptr<IPipeline> load(const std::string& bundle_path, const std::string& hf_python = "",
                                 const std::string& runtime_cache_path = "",
                                 bool cuda_graphs = false);
 std::unique_ptr<IPipeline> load(const std::string& bundle_path, const LoadOptions& options);
+std::unique_ptr<IPipeline> load(const std::string& bundle_path, const LoadOptionsV2& options);
 
 } // namespace trtmc
 
@@ -537,6 +585,31 @@ struct TrtmcPipelineOptions {
     const char* image_path;    // nullptr = text-only
     const char* runtime_cache; // nullptr = no RTX cache
     int cuda_graphs;           // 0 = disabled
+};
+
+// Versioned pipeline construction surface. The original
+// TrtmcPipelineOptions/trtmc_create_pipeline_ex ABI remains unchanged.
+#define TRTMC_PIPELINE_OPTIONS_V2_API_VERSION 2U
+
+enum TrtmcKvCacheMemoryPolicy {
+    TRTMC_KV_CACHE_MEMORY_UNSPECIFIED = 0,
+    TRTMC_KV_CACHE_MEMORY_AUTO = 1,
+    TRTMC_KV_CACHE_MEMORY_FRACTION = 2,
+    TRTMC_KV_CACHE_MEMORY_BYTES = 3,
+};
+
+struct TrtmcPipelineOptionsV2 {
+    std::uint32_t struct_size;
+    std::uint32_t api_version;
+    const char* hf_python;     // nullptr = auto-detect
+    const char* image_path;    // nullptr = text-only
+    const char* runtime_cache; // nullptr = no RTX cache
+    int cuda_graphs;           // 0 = disabled
+    std::uint32_t kv_cache_memory_policy;
+    double kv_cache_memory_fraction;     // (0, 1] for FRACTION
+    std::uint64_t kv_cache_memory_bytes; // >0 for BYTES
+    std::uint64_t max_sequence_length;   // 0 = automatic
+    int max_sequence_length_explicit;    // non-zero distinguishes explicit auto
 };
 
 // --- C ABI error codes ---
@@ -574,6 +647,12 @@ typedef trtmc::IPipeline* trtmc_pipeline_t;
 trtmc::IPipeline* trtmc_create_pipeline(const char* bundle_path, int flags);
 trtmc::IPipeline* trtmc_create_pipeline_ex(const char* bundle_path,
                                            const TrtmcPipelineOptions* options);
+void trtmc_pipeline_options_v2_init(TrtmcPipelineOptionsV2* options);
+trtmc::IPipeline* trtmc_create_pipeline_v2(const char* bundle_path,
+                                           const TrtmcPipelineOptionsV2* options);
+// Returns a thread-local JSON string for a runtime-memory pipeline. Returns
+// nullptr and sets trtmc_last_error() when the handle is null or unsupported.
+const char* trtmc_pipeline_runtime_memory_receipt_json(trtmc_pipeline_t handle);
 const char* trtmc_last_error(void);
 const char* trtmc_version(void);
 int trtmc_has_trt(void);

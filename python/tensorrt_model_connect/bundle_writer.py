@@ -57,6 +57,9 @@ class BundleInfo:
     # the JSON header so older runtimes still load the bundle and treat the
     # engine as B=1. See design doc Decision C.
     max_batch_size: dict[str, int] | None = None
+    # Optional static capability/ABI contract for runtime-owned native KV.
+    # Omission preserves legacy bundle behavior.
+    runtime_memory: dict[str, Any] | None = None
 
 
 @dataclass
@@ -70,6 +73,33 @@ class _FileBundleSection:
     name: str
     source_path: Path
     expected_sha256: str | None
+
+
+def _runtime_memory_header(info: BundleInfo) -> dict[str, Any]:
+    if info.runtime_memory is None:
+        return {}
+    from .dynamic_memory_contract import validate_runtime_memory_contract
+
+    contract = validate_runtime_memory_contract(info.runtime_memory)
+    if info.model_id != contract["qualified_model_id"]:
+        raise ValueError(
+            "Bundle model_id must match runtime_memory.qualified_model_id"
+        )
+    if info.max_cache_length != contract["model_context_limit"]:
+        raise ValueError(
+            "Bundle max_cache_length must match "
+            "runtime_memory.model_context_limit"
+        )
+    expected_precision = {
+        "bfloat16": "bf16",
+        "float16": "fp16",
+        "float32": "fp32",
+    }[contract["kv_dtype"]]
+    if info.precision != expected_precision:
+        raise ValueError(
+            "Bundle precision does not match runtime_memory.kv_dtype"
+        )
+    return {"runtime_memory": contract}
 
 
 def _bundle_section_from_file(
@@ -236,6 +266,7 @@ def _write_file_backed_bundle(
         **({"io_map": info.io_map} if info.io_map else {}),
         **({"defaults": info.defaults} if info.defaults else {}),
         **({"max_batch_size": dict(info.max_batch_size)} if info.max_batch_size else {}),
+        **_runtime_memory_header(info),
         "sections": {s["name"]: {"offset": s["offset"], "size": s["size"]} for s in section_meta},
     }
     header_json = json.dumps(header, indent=2).encode("utf-8")
@@ -307,6 +338,7 @@ def write_bundle(
         **({"defaults": info.defaults} if info.defaults else {}),
         **({"max_batch_size": dict(info.max_batch_size)}
            if info.max_batch_size else {}),
+        **_runtime_memory_header(info),
         "sections": {
             s["name"]: {"offset": s["offset"], "size": s["size"]}
             for s in section_meta

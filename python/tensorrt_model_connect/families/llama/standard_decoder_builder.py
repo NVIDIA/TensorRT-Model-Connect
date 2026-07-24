@@ -110,37 +110,23 @@ def build_standard_decoder_engine(
     # the active engine layout while building.
     config.raw["_decoder_engine_layout_supported"] = True
     decoder_engine_role = str(config.raw.get("_decoder_engine_role", "dual_profile"))
-
-    # Dispatch to the dynamic-Sq builder for dual-profile and split-prefill
-    # engines. Quantized builds (``quant_ctx``) thread Q/DQ insertion through
-    # every projection matmul via
-    # ``QuantContext.maybe_quantized_matmul``, so they share the dispatch.
-    #
-    # The legacy single-profile graph below stays in place for paths the
-    # dual-profile builder does not yet cover:
-    #
-    #   - embed_input=True             (VL prefill replacement, Bark sub-engines)
-    #   - debug_layer_outputs=True     (per-layer hidden-state dumps)
-    #   - hidden_state_output=True     (speech / Bark hidden output)
-    #   - config.raw.dynamic_kv_cache  (TriAttention multi-bucket decode)
-    #
-    # ``TRTMC_NO_DUAL_PROFILE=1`` is an internal escape hatch (perf A/B,
-    # bisects against the legacy graph). It is *not* intended as a
-    # supported user-facing flag.
-    requested_fp32_layers = tuple(config.raw.get("_fp32_layers", ()))
-    _dual_profile_disabled_for = (
-        embed_input
-        or debug_layer_outputs
-        or hidden_state_output
-        or bool(requested_fp32_layers)
-        or bool(config.raw.get("dynamic_kv_cache", False))
-        or _os.environ.get("TRTMC_NO_DUAL_PROFILE") == "1"
-    )
-    if decoder_engine_role == "prefill" and _dual_profile_disabled_for:
-        raise NotImplementedError(
-            "split prefill engine is not supported for this standard decoder "
-            "configuration")
-    if not _dual_profile_disabled_for and decoder_engine_role in ("dual_profile", "prefill"):
+    runtime_memory_contract = config.raw.get(
+        "_runtime_memory_contract")
+    if isinstance(runtime_memory_contract, dict):
+        if any((
+            embed_input,
+            debug_layer_outputs,
+            hidden_state_output,
+        )):
+            raise NotImplementedError(
+                "qualified runtime-memory graph does not support alternate "
+                "decoder outputs or embedding inputs")
+        if decoder_engine_role not in (
+            "prefill", "decode", "dual_profile"
+        ):
+            raise ValueError(
+                "qualified runtime-memory decoder role must be prefill, "
+                "decode, or dual_profile")
         return build_dual_profile_decoder_engine(
             config, weights, max_cache_length,
             precision=precision,
@@ -155,6 +141,71 @@ def build_standard_decoder_engine(
             scale_attn_weights=scale_attn_weights,
             alibi_bias_scale=alibi_bias_scale,
             verbose=verbose,
+            dynamic_kv_profile_rows=list(
+                runtime_memory_contract[
+                    "active_kv_profile_limits"]),
+            profile_mode=decoder_engine_role,
+        )
+
+    # Dispatch to the dynamic-Sq builder for dual-profile and split-prefill
+    # engines. Quantized builds (``quant_ctx``) thread Q/DQ insertion through
+    # every projection matmul via
+    # ``QuantContext.maybe_quantized_matmul``, so they share the dispatch.
+    #
+    # The legacy single-profile graph below stays in place for paths the
+    # dual-profile builder does not yet cover:
+    #
+    #   - embed_input=True             (VL prefill replacement, Bark sub-engines)
+    #   - debug_layer_outputs=True     (per-layer hidden-state dumps)
+    #   - hidden_state_output=True     (speech / Bark hidden output)
+    #   - dynamic-KV decode           (multi-bucket, fixed Sq=1 graph)
+    #
+    # ``TRTMC_NO_DUAL_PROFILE=1`` is an internal escape hatch (perf A/B,
+    # bisects against the legacy graph). It is *not* intended as a
+    # supported user-facing flag.
+    dynamic_kv_cache = bool(config.raw.get("dynamic_kv_cache", False))
+    if dynamic_kv_cache and position_type == "alibi":
+        raise ValueError("dynamic_kv_cache is not supported for ALiBi decoder builds")
+
+    requested_fp32_layers = tuple(config.raw.get("_fp32_layers", ()))
+    _dual_profile_disabled_for = (
+        embed_input
+        or debug_layer_outputs
+        or hidden_state_output
+        or bool(requested_fp32_layers)
+        or _os.environ.get("TRTMC_NO_DUAL_PROFILE") == "1"
+    )
+    if decoder_engine_role == "prefill" and _dual_profile_disabled_for:
+        raise NotImplementedError(
+            "split prefill engine is not supported for this standard decoder "
+            "configuration")
+    use_batched_builder = (
+        decoder_engine_role == "prefill"
+        or (decoder_engine_role == "dual_profile" and not dynamic_kv_cache)
+    )
+    if not _dual_profile_disabled_for and use_batched_builder:
+        return build_dual_profile_decoder_engine(
+            config, weights, max_cache_length,
+            precision=precision,
+            quant_ctx=quant_ctx,
+            norm_type=norm_type,
+            mlp_type=mlp_type,
+            position_type=position_type,
+            activation=activation,
+            partial_rotary_factor=partial_rotary_factor,
+            interleaved_rope=interleaved_rope,
+            parallel_residual=parallel_residual,
+            scale_attn_weights=scale_attn_weights,
+            alibi_bias_scale=alibi_bias_scale,
+            verbose=verbose,
+            dynamic_kv_profile_rows=(
+                (
+                    config.raw.get("_dynamic_kv_profile_rows")
+                    or [max_cache_length]
+                )
+                if dynamic_kv_cache
+                else None
+            ),
             profile_mode=("prefill" if decoder_engine_role == "prefill" else "dual_profile"),
         )
 
@@ -179,7 +230,6 @@ def build_standard_decoder_engine(
     kv_attention_size = graph_blocks.infer_kv_attention_size(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     attention_window = max_cache_length + 1
-    dynamic_kv_cache = bool(config.raw.get("dynamic_kv_cache", False))
     dynamic_kv_opt_rows = int(config.raw.get("_dynamic_kv_opt_length", max_cache_length))
     dynamic_kv_opt_rows = max(1, min(dynamic_kv_opt_rows, max_cache_length))
     raw_profile_rows = config.raw.get("_dynamic_kv_profile_rows")
@@ -197,7 +247,11 @@ def build_standard_decoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
-    trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+    # Dynamic-KV model-only bundles use a hidden, family-certified engine
+    # envelope. Give TensorRT enough build-only tactic workspace for that
+    # envelope without exposing another user flag.
+    workspace_bytes = (8 << 30) if dynamic_kv_cache else (1 << 30)
+    trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes)
 
     # Precision configuration
     if precision == "fp16":
@@ -209,9 +263,6 @@ def build_standard_decoder_engine(
     else:
         work_np_dtype = np.float32
         work_trt_dtype = trt.float32
-
-    if dynamic_kv_cache and position_type == "alibi":
-        raise ValueError("dynamic_kv_cache is not supported for ALiBi decoder builds")
 
     # ---------------------------------------------------------------
     # Inputs

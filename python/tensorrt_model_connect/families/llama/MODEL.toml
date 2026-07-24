@@ -4,7 +4,11 @@
 id = "llama"
 plugin = "llama"
 module = "plugin"
-capabilities = ["split_decoder_roles", "debug_layer_outputs"]
+capabilities = [
+  "split_decoder_roles",
+  "dynamic_kv_split_decoder",
+  "debug_layer_outputs",
+]
 aliases = [
   "LLaMA",
   "llama",
@@ -16,3 +20,24 @@ debug_runner = "debug_runner.py|runner_from_bundle"
 debug_runtime_strategies = [
   "llama_decoder_kv_cache",
 ]
+
+[[dynamic_memory_qualification]]
+model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+revision = "fe8a4ea1ffedaf415f4da2f062534de366a451e6"
+config_sha256 = "486bedda3a6988332e60d9638a09ca4b260d34ebcf1b19e22cf3b140b63d8fe9"
+target = "gb300-trt-11.2"
+minimum_trt_version = "11.2.0.113"
+gpu_architecture = "sm103"
+cuda_runtime = "13.3"
+cudnn_backend = "9.20.0"
+cudnn_frontend_revision = "7b9b711c22b6823e87150213ecd8449260db8610"
+nvrtc = "13.3"
+driver = "580.105.08"
+precision = "bf16"
+native_kv_plugin_abi = 2
+model_context_limit = 2048
+prefill_chunk_limit = 512
+kv_layout = "contiguous_runtime_v1"
+kv_dtype = "bfloat16"
+active_kv_profile_limits = [128, 512, 2048]
+runtime_owned = true

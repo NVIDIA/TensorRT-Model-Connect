@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <charconv>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -63,10 +64,61 @@ bool parse_strict_float(const char* text, float& out) {
     return true;
 }
 
+std::optional<double> parse_percentage(const std::string& text) {
+    if (text.size() < 2 || text.back() != '%' || has_ascii_space(text.c_str()))
+        return std::nullopt;
+
+    const std::string number = text.substr(0, text.size() - 1);
+    std::size_t consumed = 0;
+    double value = 0.0;
+    try {
+        value = std::stod(number, &consumed);
+    } catch (...) {
+        return std::nullopt;
+    }
+    if (consumed != number.size() || !std::isfinite(value) || value <= 0.0 || value > 100.0)
+        return std::nullopt;
+    return value;
+}
+
+std::string lowercase_ascii(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return text;
+}
+
+std::optional<KvCacheMemorySpec> parse_kv_cache_memory(const std::string& text) {
+    if (lowercase_ascii(text) == "auto") {
+        KvCacheMemorySpec spec;
+        spec.explicitly_set = true;
+        return spec;
+    }
+
+    if (!text.empty() && text.back() == '%') {
+        const auto percent = parse_percentage(text);
+        if (!percent)
+            return std::nullopt;
+        KvCacheMemorySpec spec;
+        spec.mode = KvCacheMemoryMode::Percent;
+        spec.percent = *percent;
+        spec.explicitly_set = true;
+        return spec;
+    }
+
+    const auto bytes = parse_byte_size(text);
+    if (!bytes)
+        return std::nullopt;
+    KvCacheMemorySpec spec;
+    spec.mode = KvCacheMemoryMode::Bytes;
+    spec.bytes = *bytes;
+    spec.explicitly_set = true;
+    return spec;
+}
+
 } // namespace
 
 std::optional<std::uint64_t> parse_byte_size(const std::string& text) {
-    if (text.empty())
+    if (text.empty() || has_ascii_space(text.c_str()))
         return std::nullopt;
 
     std::size_t value_end = 0;
@@ -76,7 +128,7 @@ std::optional<std::uint64_t> parse_byte_size(const std::string& text) {
     } catch (...) {
         return std::nullopt;
     }
-    if (value <= 0.0)
+    if (!std::isfinite(value) || value <= 0.0)
         return std::nullopt;
 
     std::string suffix = text.substr(value_end);
@@ -112,6 +164,34 @@ std::optional<std::uint64_t> parse_byte_size(const std::string& text) {
         return std::nullopt;
     }
     return static_cast<std::uint64_t>(bytes + 0.5L);
+}
+
+std::optional<std::uint64_t> parse_token_count(const std::string& text) {
+    if (text.empty() || has_ascii_space(text.c_str()))
+        return std::nullopt;
+
+    std::uint64_t multiplier = 1;
+    std::size_t number_end = text.size();
+    const char suffix = static_cast<char>(std::toupper(static_cast<unsigned char>(text.back())));
+    if (suffix == 'K') {
+        multiplier = 1024ULL;
+        --number_end;
+    } else if (suffix == 'M') {
+        multiplier = 1024ULL * 1024ULL;
+        --number_end;
+    }
+    if (number_end == 0)
+        return std::nullopt;
+
+    std::uint64_t value = 0;
+    const char* begin = text.data();
+    const char* end = begin + number_end;
+    const auto result = std::from_chars(begin, end, value, 10);
+    if (result.ec != std::errc{} || result.ptr != end || value == 0 ||
+        value > std::numeric_limits<std::uint64_t>::max() / multiplier) {
+        return std::nullopt;
+    }
+    return value * multiplier;
 }
 
 std::optional<std::vector<std::uint64_t>> parse_seed_csv(const std::string& text) {
@@ -186,12 +266,13 @@ std::vector<std::string> read_prompts_file(const std::string& path, std::string&
 void print_usage() {
     std::cerr
         << "Usage:\n"
-           "  trtmc build           <hf-model-or-dir> -o <bundle.trtfb> [builder args...]\n"
+           "  trtmc build           <hf-model-or-dir> [builder args...]\n"
            "  trtmc run             <bundle.trtfb> --prompt \"text\" [--image PATH] "
            "[--max-new-tokens N] [--temperature F] [--top-p F] [--min-p F] "
            "[--top-k N] [--seed N] [--benchmark N] [--warmup N] [--hf-python PATH] "
            "[--lora-adapter DIR] [--lora-adapter-id ID] "
-           "[--kv-cache-size SIZE] [--chat-template] [--no-thinking] "
+           "[--kv-cache-memory auto|PERCENT%|SIZE] [--max-sequence-length auto|TOKENS] "
+           "[--chat-template] [--no-thinking] "
            "[--generation-mode MODE] [--block-length N] [--threshold F] "
            "[--num-samples N] [--num-steps N] [--guidance-scale S] [--cfg-scale S] "
            "[--sde-gamma S] [--initial-latents-raw PATH] [--condition-latents-raw PATH] "
@@ -237,6 +318,13 @@ void print_usage() {
            "                        Extra directory to search for libtrtmc_model_*.so\n"
            "  --runtime-cache PATH   TRT-RTX JIT kernel cache file (speeds up repeat runs)\n"
            "  --cuda-graphs          Enable TRT-RTX CUDA graph capture (reduces launch overhead)\n"
+           "  --kv-cache-memory VALUE\n"
+           "                        Runtime KV pool: auto (default), a percentage of safe\n"
+           "                        post-load memory (for example 80%), or a size such as 8GiB\n"
+           "  --kv-cache-size VALUE  Compatibility alias for --kv-cache-memory\n"
+           "  --max-sequence-length TOKENS\n"
+           "                        Runtime per-request prompt + output limit; accepts K/M\n"
+           "                        shorthand (for example 32K). Default: auto\n"
            "\n"
            "Build uses a sibling python3/python when installed in an environment bin "
            "directory, otherwise python3 from PATH.\n";
@@ -435,27 +523,93 @@ CliArgs parse_args(int argc, char** argv) {
             args.hf_python = argv[++i];
             continue;
         }
-        if (arg == "--kv-cache-size" || arg == "--kv_cache_size") {
+        if (arg == "--kv-cache-memory" || arg == "--kv_cache_memory" || arg == "--kv-cache-size" ||
+            arg == "--kv_cache_size") {
             if (!need_value(arg))
                 return args;
-            auto parsed = parse_byte_size(argv[++i]);
-            if (!parsed.has_value()) {
+            if (args.kv_cache_memory.explicitly_set) {
                 args.parse_error = true;
-                args.error_message = "--kv-cache-size expects a positive size like 90GB or 90GiB";
+                args.error_message = "KV cache memory policy may be specified only once";
                 return args;
             }
-            args.kv_cache_size_bytes = *parsed;
+            auto parsed = parse_kv_cache_memory(argv[++i]);
+            if (!parsed.has_value()) {
+                args.parse_error = true;
+                args.error_message =
+                    "--kv-cache-memory expects auto, a percentage in (0, 100] like 80%, "
+                    "or a positive size like 8GiB";
+                return args;
+            }
+            args.kv_cache_memory = *parsed;
+            args.kv_cache_size_bytes = parsed->mode == KvCacheMemoryMode::Bytes ? parsed->bytes : 0;
             continue;
         }
-        if (arg.rfind("--kv-cache-size=", 0) == 0 || arg.rfind("--kv_cache_size=", 0) == 0) {
-            const auto eq = arg.find('=');
-            auto parsed = parse_byte_size(arg.substr(eq + 1));
-            if (!parsed.has_value()) {
+        if (arg.rfind("--kv-cache-memory=", 0) == 0 || arg.rfind("--kv_cache_memory=", 0) == 0 ||
+            arg.rfind("--kv-cache-size=", 0) == 0 || arg.rfind("--kv_cache_size=", 0) == 0) {
+            if (args.kv_cache_memory.explicitly_set) {
                 args.parse_error = true;
-                args.error_message = "--kv-cache-size expects a positive size like 90GB or 90GiB";
+                args.error_message = "KV cache memory policy may be specified only once";
                 return args;
             }
-            args.kv_cache_size_bytes = *parsed;
+            const auto eq = arg.find('=');
+            auto parsed = parse_kv_cache_memory(arg.substr(eq + 1));
+            if (!parsed.has_value()) {
+                args.parse_error = true;
+                args.error_message =
+                    "--kv-cache-memory expects auto, a percentage in (0, 100] like 80%, "
+                    "or a positive size like 8GiB";
+                return args;
+            }
+            args.kv_cache_memory = *parsed;
+            args.kv_cache_size_bytes = parsed->mode == KvCacheMemoryMode::Bytes ? parsed->bytes : 0;
+            continue;
+        }
+        if (arg == "--max-sequence-length" || arg == "--max_sequence_length") {
+            if (!need_value(arg))
+                return args;
+            if (args.max_sequence_length_explicitly_set) {
+                args.parse_error = true;
+                args.error_message = "--max-sequence-length may be specified only once";
+                return args;
+            }
+            args.max_sequence_length_explicitly_set = true;
+            const std::string value = argv[++i];
+            if (lowercase_ascii(value) == "auto") {
+                args.max_sequence_length = 0;
+                continue;
+            }
+            const auto parsed = parse_token_count(value);
+            if (!parsed) {
+                args.parse_error = true;
+                args.error_message =
+                    "--max-sequence-length expects a positive token count like 32K or 131072";
+                return args;
+            }
+            args.max_sequence_length = *parsed;
+            continue;
+        }
+        if (arg.rfind("--max-sequence-length=", 0) == 0 ||
+            arg.rfind("--max_sequence_length=", 0) == 0) {
+            if (args.max_sequence_length_explicitly_set) {
+                args.parse_error = true;
+                args.error_message = "--max-sequence-length may be specified only once";
+                return args;
+            }
+            args.max_sequence_length_explicitly_set = true;
+            const auto eq = arg.find('=');
+            const std::string value = arg.substr(eq + 1);
+            if (lowercase_ascii(value) == "auto") {
+                args.max_sequence_length = 0;
+                continue;
+            }
+            const auto parsed = parse_token_count(value);
+            if (!parsed) {
+                args.parse_error = true;
+                args.error_message =
+                    "--max-sequence-length expects a positive token count like 32K or 131072";
+                return args;
+            }
+            args.max_sequence_length = *parsed;
             continue;
         }
         if (arg == "--image" && need_value(arg)) {
@@ -741,6 +895,12 @@ CliArgs parse_args(int argc, char** argv) {
         args.parse_error = true;
         args.error_message =
             "run requires bundle + --prompt, --prompts-file, or --initial-latents-raw";
+    }
+    if (args.command == "inspect" &&
+        (args.kv_cache_memory.explicitly_set || args.max_sequence_length_explicitly_set)) {
+        args.parse_error = true;
+        args.error_message = "inspect is static; runtime memory options are valid only for "
+                             "commands that load and execute a bundle";
     }
 
     return args;

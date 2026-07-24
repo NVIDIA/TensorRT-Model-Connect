@@ -20,6 +20,9 @@ struct BackendLoadMetadata {
     std::string backend_name;
     std::string trt_abi;
     std::string trt_runtime_version;
+    // Independently detected by the selected backend/plugin DSO. Empty for
+    // compatibility backends that do not implement native runtime-owned KV.
+    std::string runtime_memory_stack_json;
 };
 
 class BackendLoader {
