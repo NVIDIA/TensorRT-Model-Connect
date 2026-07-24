@@ -133,6 +133,9 @@ value={'schema_version':'trtmc.perf-baseline/v1','status':'completed','backend':
  'experts_implementation':a.experts_implementation,
  'compile_scope':'model.forward' if compiled else None,
  'compile_evidence':{'applied':True,'timed_callable_uses_compiled_target':True} if compiled else None,
+ 'measurement_policy':{'timing_scope':'public_operation_call_wall',
+                       'model_load_excluded':True,'warmup_excluded':True,
+                       'tokenization_included':True},
  'workload_digest':a.workload_digest,'samples_ms':[20.0+i/10 for i in range(a.iterations)],
  'output_summary':{'text':'ok','token_ids':[7,8],'output_tokens':2},'environment':{'gpu':'fake'}}
 a.output.parent.mkdir(parents=True, exist_ok=True); a.output.write_text(json.dumps(value))
@@ -150,6 +153,11 @@ def test_release_suite_covers_every_ready_family_operation() -> None:
 
     assert len(cases) == 78
     assert len({(case["family"], case["operation"]) for case in cases}) == 78
+    assert len({case["family"] for case in cases}) == 77
+    assert [case["operation"] for case in cases if case["family"] == "eagle_vlm"] == [
+        "embed",
+        "rerank",
+    ]
     by_id = {case["id"]: case for case in cases}
     assert by_id["deberta.encode"]["baseline"]["precision"] == "fp32"
     assert by_id["fnet.encode"]["baseline"]["padding"] == "max-length"
@@ -258,6 +266,29 @@ def test_exact_text_contract_is_explicit_and_still_strict() -> None:
     status, _ = perf_release._classify(case, candidate, baseline)
 
     assert status == "green"
+
+
+def test_timing_path_alignment_distinguishes_public_and_model_only_calls() -> None:
+    candidate = {"measurement_policy": {"timing_scope": "public_pipeline_call_wall"}}
+    public_baseline = {"measurement_policy": {"timing_scope": "public_operation_call_wall"}}
+    model_only_baseline = {"timing_scope": "task-model-call-wall"}
+    task_pipeline_baseline = {"timing_scope": "task-pipeline-call-wall"}
+
+    assert perf_release._timing_path(candidate, public_baseline) == {
+        "status": "aligned",
+        "candidate_scope": "public_pipeline_call_wall",
+        "baseline_scope": "public_operation_call_wall",
+    }
+    assert perf_release._timing_path(candidate, model_only_baseline) == {
+        "status": "needs-alignment",
+        "candidate_scope": "public_pipeline_call_wall",
+        "baseline_scope": "task-model-call-wall",
+    }
+    assert perf_release._timing_path(candidate, task_pipeline_baseline) == {
+        "status": "aligned",
+        "candidate_scope": "public_pipeline_call_wall",
+        "baseline_scope": "task-pipeline-call-wall",
+    }
 
 
 def test_ocr_text_contract_preserves_required_content_and_allows_format_variation() -> None:
@@ -375,8 +406,15 @@ def test_run_consolidates_results_and_records_replayable_commands(tmp_path: Path
     report = (output / "report.html").read_text(encoding="utf-8")
     assert ">gpt2<" in report
     assert "HF eager" in report
-    assert ">10.5<" not in report
-    assert ">20.0<" not in report
+    assert "77 families" in report
+    assert "78 family-operation comparisons" in report
+    assert "TRTMC p50 (ms)" in report
+    assert "Baseline p50 (ms)" in report
+    assert ">10.450<" in report
+    assert ">20.450<" in report
+    assert "Aligned" in report
+    assert "public pipeline" in report
+    assert "public operation" in report
     assert "Show raw commands" in report
     assert str(fake_trtmc) in report
     assert str(fake_baseline) in report

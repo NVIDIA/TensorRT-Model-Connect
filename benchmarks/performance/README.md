@@ -7,8 +7,10 @@ SPDX-License-Identifier: Apache-2.0
 
 This matrix compares the public TRTMC operation measured by `trtmc-bench` with the
 baseline named in each row of `release.yaml`. The release suite contains exactly one
-representative for every ready `(family, operation)` in the benchmark catalog. A catalog
-change therefore makes suite validation fail until the new row is reviewed.
+representative for every ready `(family, operation)` in the benchmark catalog. The current
+suite has 78 family-operation comparisons across 77 unique families because `eagle_vlm`
+exposes both `embed` and `rerank`. A catalog change makes suite validation fail until the
+new row is reviewed.
 
 ## Manual runs
 
@@ -42,9 +44,18 @@ artifacts/perf/results.json
 artifacts/perf/report.html
 ```
 
-`results.json` is internal evidence and contains raw samples. `report.html` intentionally
-contains only green/yellow/red/white categories. Temporary per-backend files are merged into
-`results.json` and removed after the run.
+`results.json` is internal evidence and contains raw samples. `report.html` shows the p50
+wall time calculated from those samples, the sample count, the recorded timing scope for both
+sides, and the green/yellow/red/white category. It does not expose the individual raw samples.
+Temporary per-backend files are merged into `results.json` and removed after the run.
+
+Timing-path status is separate from the traffic light:
+
+- `Aligned` means both sides measure the public operation or task-pipeline wall-time class.
+- `Needs alignment` means one side measures only a model call while the other measures a
+  public pipeline call. Its traffic light is provisional until the baseline is moved to the
+  same boundary and rerun.
+- `Unavailable` means one side did not produce timing evidence.
 
 Expand `Commands` for any row in `report.html` to see the original `trtmc-bench` and baseline
 commands exactly as they were executed. The report also shows the recorded working directory;
