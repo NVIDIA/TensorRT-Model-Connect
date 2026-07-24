@@ -285,7 +285,10 @@ class ModelProofInnerPipeline:
             }
             if set(admission) != admission_fields:
                 raise CiError("GPU memory admission has unexpected or missing fields")
-            if admission.get("source") != "nvidia-smi":
+            if admission.get("source") not in {
+                "nvidia-smi",
+                "linux-numa-meminfo",
+            }:
                 raise CiError("GPU memory admission has an invalid source")
             required_free_mib = admission.get("required_free_mib")
             if (
@@ -311,6 +314,12 @@ class ModelProofInnerPipeline:
                 or admission["observed_free_mib"] > admission["observed_total_mib"]
             ):
                 raise CiError("GPU memory admission has inconsistent memory values")
+            if (
+                admission["source"] == "linux-numa-meminfo"
+                and admission["observed_used_mib"] + admission["observed_free_mib"]
+                != admission["observed_total_mib"]
+            ):
+                raise CiError("GPU NUMA memory admission values do not reconcile")
             if admission["observed_free_mib"] < min_free_gpu_memory_mib:
                 raise CiError("GPU memory admission did not satisfy the required free memory")
             expected["gpu_memory_admission"] = {

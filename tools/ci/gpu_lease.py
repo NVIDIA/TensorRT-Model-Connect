@@ -103,6 +103,8 @@ class GpuLease:
         self.gpu_memory_admission: dict[str, object] | None = None
         self.last_observed_free_mib: dict[int, int] = {}
         self.last_observed_total_mib: dict[int, int] = {}
+        self.gpu_numa_nodes: dict[str, int] = {}
+        self.numa_fallback_warnings: set[str] = set()
 
     def acquire(
         self,
@@ -485,6 +487,27 @@ class GpuLease:
         settle_poll_interval = max(0.25, min(5.0, self.poll_interval))
         while time.monotonic() < settle_deadline:
             try:
+                has_compute_processes = self._gpu_has_compute_processes(
+                    self.gpu_id,
+                    timeout_seconds=max(0.001, settle_deadline - time.monotonic()),
+                )
+            except CiError:
+                if time.monotonic() >= settle_deadline:
+                    return False
+                raise
+            if has_compute_processes:
+                print(
+                    f"GPU {self.gpu_id} has an active compute process; "
+                    "memory admission requires an idle GPU"
+                )
+                time.sleep(
+                    min(
+                        settle_poll_interval,
+                        max(0.0, settle_deadline - time.monotonic()),
+                    )
+                )
+                continue
+            try:
                 snapshot = self._gpu_memory_snapshot(
                     self.gpu_id,
                     timeout_seconds=max(0.001, settle_deadline - time.monotonic()),
@@ -493,13 +516,34 @@ class GpuLease:
                 if time.monotonic() >= settle_deadline:
                     return False
                 raise
+            try:
+                has_compute_processes = self._gpu_has_compute_processes(
+                    self.gpu_id,
+                    timeout_seconds=max(0.001, settle_deadline - time.monotonic()),
+                )
+            except CiError:
+                if time.monotonic() >= settle_deadline:
+                    return False
+                raise
+            if has_compute_processes:
+                print(
+                    f"GPU {self.gpu_id} acquired a compute process while memory "
+                    "admission was being sampled"
+                )
+                time.sleep(
+                    min(
+                        settle_poll_interval,
+                        max(0.0, settle_deadline - time.monotonic()),
+                    )
+                )
+                continue
             if time.monotonic() >= settle_deadline:
                 return False
             self.last_observed_total_mib[self.gpu_id] = snapshot["total_mib"]
             self.last_observed_free_mib[self.gpu_id] = snapshot["free_mib"]
             if snapshot["free_mib"] >= self.min_free_gpu_memory_mib:
                 self.gpu_memory_admission = {
-                    "source": "nvidia-smi",
+                    "source": snapshot["source"],
                     "required_free_mib": self.min_free_gpu_memory_mib,
                     "observed_total_mib": snapshot["total_mib"],
                     "observed_used_mib": snapshot["used_mib"],
@@ -530,7 +574,8 @@ class GpuLease:
         gpu: int,
         *,
         timeout_seconds: float = 10.0,
-    ) -> dict[str, int]:
+    ) -> dict[str, object]:
+        started = time.monotonic()
         executable = self.context.executable("nvidia-smi")
         result = self.context.run(
             [
@@ -541,7 +586,7 @@ class GpuLease:
             limit=f"{min(10.0, timeout_seconds):.6f}s",
             capture_output=True,
         )
-        snapshots: dict[int, dict[str, int]] = {}
+        snapshots: dict[int, dict[str, object]] = {}
         for line in result.stdout.splitlines():
             fields = [field.strip() for field in line.split(",")]
             if len(fields) != 4 or any(not field.isdigit() for field in fields):
@@ -552,13 +597,266 @@ class GpuLease:
             if used_mib > total_mib or free_mib > total_mib:
                 raise CiError(f"nvidia-smi returned invalid GPU memory values for GPU {index}")
             snapshots[index] = {
+                "source": "nvidia-smi",
                 "total_mib": total_mib,
                 "used_mib": used_mib,
                 "free_mib": free_mib,
             }
         if gpu not in snapshots:
             raise CiError(f"nvidia-smi did not report configured GPU {gpu}")
-        return snapshots[gpu]
+        snapshot = snapshots[gpu]
+        if snapshot["free_mib"] >= self.min_free_gpu_memory_mib:
+            return snapshot
+        remaining = max(0.001, timeout_seconds - (time.monotonic() - started))
+        coherent = self._coherent_gpu_memory_snapshot(
+            gpu,
+            snapshot,
+            timeout_seconds=remaining,
+        )
+        return coherent or snapshot
+
+    def _coherent_gpu_memory_snapshot(
+        self,
+        gpu: int,
+        raw: dict[str, object],
+        *,
+        timeout_seconds: float,
+    ) -> dict[str, object] | None:
+        """Count only reclaimable clean file pages on an OS-managed GPU NUMA node."""
+        try:
+            identity = self._gpu_numa_identity(gpu, timeout_seconds=timeout_seconds)
+            if identity is None:
+                return None
+            pci_bus_id, reserved_mib, numa_node = identity
+            meminfo = self._node_meminfo(numa_node)
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            if not isinstance(page_size, int) or page_size <= 0 or page_size % 1024:
+                raise CiError("Linux reported an invalid base page size")
+            high_kib = self._node_high_watermark_kib(
+                numa_node,
+                page_size_kib=page_size // 1024,
+            )
+            total_kib = meminfo["MemTotal"]
+            expected_total_kib = (int(raw["total_mib"]) - reserved_mib) * 1024
+            if abs(total_kib - expected_total_kib) > page_size // 1024:
+                raise CiError(
+                    f"GPU {gpu} NUMA node {numa_node} total does not match "
+                    f"{pci_bus_id} FB memory"
+                )
+            clean_file_kib = max(
+                0,
+                meminfo["Active(file)"]
+                + meminfo["Inactive(file)"]
+                - meminfo["Dirty"]
+                - meminfo["Writeback"]
+                - meminfo["Mapped"]
+                - meminfo["Shmem"]
+                - meminfo["Unevictable"],
+            )
+            if high_kib >= total_kib:
+                raise CiError(f"GPU {gpu} NUMA memory watermark is inconsistent")
+            reclaimable_kib = min(
+                total_kib,
+                meminfo["MemFree"] + clean_file_kib,
+            )
+            available_kib = max(0, reclaimable_kib - high_kib)
+            if available_kib < 0 or available_kib > total_kib:
+                raise CiError(f"GPU {gpu} NUMA memory accounting is inconsistent")
+            total_mib = total_kib // 1024
+            free_mib = available_kib // 1024
+            used_mib = total_mib - free_mib
+            print(
+                f"GPU {gpu} raw nvidia-smi free memory is {raw['free_mib']} MiB; "
+                f"NUMA node {numa_node} has {clean_file_kib // 1024} MiB of "
+                f"reclaimable clean file cache and {free_mib} MiB of effective "
+                "capacity"
+            )
+            return {
+                "source": "linux-numa-meminfo",
+                "total_mib": total_mib,
+                "used_mib": used_mib,
+                "free_mib": free_mib,
+            }
+        except (CiError, OSError, ValueError) as error:
+            message = f"GPU {gpu} NUMA memory admission unavailable: {error}"
+            if message not in self.numa_fallback_warnings:
+                print(message)
+                self.numa_fallback_warnings.add(message)
+            return None
+
+    def _gpu_numa_identity(
+        self,
+        gpu: int,
+        *,
+        timeout_seconds: float,
+    ) -> tuple[str, int, int] | None:
+        started = time.monotonic()
+        executable = self.context.executable("nvidia-smi")
+        result = self.context.run(
+            [
+                executable,
+                "-i",
+                str(gpu),
+                "--query-gpu=pci.bus_id,memory.reserved",
+                "--format=csv,noheader,nounits",
+            ],
+            limit=f"{min(10.0, timeout_seconds):.6f}s",
+            capture_output=True,
+        )
+        rows = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if len(rows) != 1:
+            raise CiError(f"nvidia-smi returned invalid GPU identity rows for GPU {gpu}")
+        fields = [field.strip() for field in rows[0].split(",")]
+        if (
+            len(fields) != 2
+            or not re.fullmatch(r"[0-9A-Fa-f]{8}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}\.[0-7]", fields[0])
+            or not fields[1].isdigit()
+        ):
+            raise CiError(f"nvidia-smi returned an invalid GPU identity row: {rows[0]!r}")
+        pci_bus_id, reserved_text = fields
+        numa_node = self.gpu_numa_nodes.get(pci_bus_id)
+        if numa_node is None:
+            numa_node = self._gpu_numa_node(
+                gpu,
+                timeout_seconds=max(
+                    0.001,
+                    timeout_seconds - (time.monotonic() - started),
+                ),
+            )
+            if numa_node is None:
+                return None
+            self.gpu_numa_nodes[pci_bus_id] = numa_node
+        return pci_bus_id, int(reserved_text), numa_node
+
+    def _gpu_numa_node(
+        self,
+        gpu: int,
+        *,
+        timeout_seconds: float,
+    ) -> int | None:
+        executable = self.context.executable("nvidia-smi")
+        result = self.context.run(
+            [
+                executable,
+                "topo",
+                "--gpu-numa-id",
+                "-i",
+                str(gpu),
+            ],
+            limit=f"{min(10.0, timeout_seconds):.6f}s",
+            capture_output=True,
+        )
+        rows = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if len(rows) != 1:
+            raise CiError(f"nvidia-smi topology has no unique NUMA ID for GPU {gpu}")
+        value = rows[0]
+        if value in {"", "-", "N/A"}:
+            return None
+        if not value.isdigit():
+            raise CiError(f"nvidia-smi topology has an invalid NUMA ID for GPU {gpu}")
+        return int(value)
+
+    def _gpu_has_compute_processes(
+        self,
+        gpu: int,
+        *,
+        timeout_seconds: float,
+    ) -> bool:
+        executable = self.context.executable("nvidia-smi")
+        result = self.context.run(
+            [
+                executable,
+                "-i",
+                str(gpu),
+                "--query-compute-apps=pid",
+                "--format=csv,noheader,nounits",
+            ],
+            limit=f"{min(10.0, timeout_seconds):.6f}s",
+            capture_output=True,
+        )
+        rows = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if any(not row.isdigit() for row in rows):
+            raise CiError(f"nvidia-smi returned invalid compute process rows for GPU {gpu}")
+        return bool(rows)
+
+    @staticmethod
+    def _node_meminfo(node: int) -> dict[str, int]:
+        path = Path(f"/sys/devices/system/node/node{node}/meminfo")
+        if not path.is_file():
+            raise CiError(f"GPU NUMA node meminfo is unavailable: {path}")
+        cpulist = path.with_name("cpulist").read_text(encoding="utf-8").strip()
+        if cpulist:
+            raise CiError(f"GPU NUMA node {node} unexpectedly contains CPUs")
+        return GpuLease._parse_node_meminfo(node, path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _parse_node_meminfo(node: int, text: str) -> dict[str, int]:
+        required = {
+            "MemTotal",
+            "MemFree",
+            "Active(file)",
+            "Inactive(file)",
+            "Unevictable",
+            "Dirty",
+            "Writeback",
+            "Mapped",
+            "Shmem",
+        }
+        values: dict[str, int] = {}
+        prefix = f"Node {node} "
+        for line in text.splitlines():
+            if not line.startswith(prefix):
+                continue
+            body = line[len(prefix) :]
+            fields = body.split()
+            first_field = fields[0] if fields else ""
+            name = first_field.removesuffix(":")
+            if name not in required:
+                continue
+            if len(fields) != 3 or fields[2] != "kB" or not fields[0].endswith(":"):
+                raise CiError(f"GPU NUMA node {node} has invalid meminfo: {line!r}")
+            if name in values or not fields[1].isdigit():
+                raise CiError(f"GPU NUMA node {node} has invalid {name}")
+            values[name] = int(fields[1])
+        if set(values) != required:
+            missing = ", ".join(sorted(required - set(values)))
+            raise CiError(f"GPU NUMA node {node} meminfo is missing: {missing}")
+        if any(value < 0 or value > values["MemTotal"] for value in values.values()):
+            raise CiError(f"GPU NUMA node {node} meminfo values are inconsistent")
+        return values
+
+    @staticmethod
+    def _node_high_watermark_kib(node: int, *, page_size_kib: int) -> int:
+        return GpuLease._parse_node_high_watermark_kib(
+            node,
+            Path("/proc/zoneinfo").read_text(encoding="utf-8"),
+            page_size_kib=page_size_kib,
+        )
+
+    @staticmethod
+    def _parse_node_high_watermark_kib(
+        node: int,
+        text: str,
+        *,
+        page_size_kib: int,
+    ) -> int:
+        current_node: int | None = None
+        high_pages = 0
+        zones = 0
+        for line in text.splitlines():
+            match = re.fullmatch(r"Node ([0-9]+), zone\s+\S+", line)
+            if match:
+                current_node = int(match.group(1))
+                if current_node == node:
+                    zones += 1
+                continue
+            if current_node == node:
+                match = re.fullmatch(r"\s+high\s+([0-9]+)", line)
+                if match:
+                    high_pages += int(match.group(1))
+        if not zones or not high_pages:
+            raise CiError(f"GPU NUMA node {node} has no Linux high watermark")
+        return high_pages * page_size_kib
 
     def _capacity_timeout_detail(self) -> str:
         if not self.min_free_gpu_memory_mib:

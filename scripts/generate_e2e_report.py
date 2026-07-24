@@ -3087,7 +3087,10 @@ def validate_proof_context(
         else:
             if set(admission) != admission_fields:
                 issues.append("Proof GPU memory admission has unexpected or missing fields")
-            if admission.get("source") != "nvidia-smi":
+            if admission.get("source") not in {
+                "nvidia-smi",
+                "linux-numa-meminfo",
+            }:
                 issues.append("Proof GPU memory admission has an invalid source")
             required_free_mib = admission.get("required_free_mib")
             if (
@@ -3121,6 +3124,13 @@ def validate_proof_context(
                     > observations["observed_total_mib"]
                 ):
                     issues.append("Proof GPU memory admission values are inconsistent")
+                if (
+                    admission.get("source") == "linux-numa-meminfo"
+                    and observations["observed_used_mib"]
+                    + observations["observed_free_mib"]
+                    != observations["observed_total_mib"]
+                ):
+                    issues.append("Proof GPU NUMA memory admission values do not reconcile")
                 if observations["observed_free_mib"] < min_free_gpu_memory_mib:
                     issues.append(
                         "Proof GPU memory admission is below the selected requirement"
@@ -3137,7 +3147,10 @@ def validate_proof_context(
                     issues.append(
                         f"{label} GPU memory admission has unexpected or missing fields"
                     )
-                if payload_admission.get("source") != "nvidia-smi":
+                if payload_admission.get("source") not in {
+                    "nvidia-smi",
+                    "linux-numa-meminfo",
+                }:
                     issues.append(
                         f"{label} GPU memory admission has an invalid source"
                     )
@@ -3178,6 +3191,15 @@ def validate_proof_context(
                 ):
                     issues.append(
                         f"{label} GPU memory admission has inconsistent memory values"
+                    )
+                elif (
+                    payload_admission.get("source") == "linux-numa-meminfo"
+                    and payload_observations["observed_used_mib"]
+                    + payload_observations["observed_free_mib"]
+                    != payload_observations["observed_total_mib"]
+                ):
+                    issues.append(
+                        f"{label} GPU NUMA memory admission values do not reconcile"
                     )
             if payload_admission != admission:
                 issues.append(f"{label} GPU memory admission does not match final proof")

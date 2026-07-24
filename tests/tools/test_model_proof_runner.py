@@ -144,7 +144,17 @@ def _write_fake_nvidia_smi(fake_bin: Path) -> None:
             import time
 
             time.sleep(float(os.environ.get("FAKE_NVIDIA_SMI_DELAY_SECONDS", "0")))
-            output = os.environ.get("FAKE_NVIDIA_SMI_ROWS", "")
+            if "--query-compute-apps=pid" in sys.argv:
+                output = os.environ.get("FAKE_NVIDIA_SMI_COMPUTE_ROWS", "")
+            elif sys.argv[1:3] == ["topo", "--gpu-numa-id"]:
+                output = os.environ.get("FAKE_NVIDIA_SMI_TOPOLOGY", "")
+            elif any(
+                argument.startswith("--query-gpu=pci.bus_id")
+                for argument in sys.argv
+            ):
+                output = os.environ.get("FAKE_NVIDIA_SMI_IDENTITY_ROWS", "")
+            else:
+                output = os.environ.get("FAKE_NVIDIA_SMI_ROWS", "")
             if output:
                 print(output)
             exit_code = int(os.environ.get("FAKE_NVIDIA_SMI_EXIT_CODE", "0"))
@@ -850,6 +860,25 @@ def test_inner_gpu_lease_accepts_valid_memory_admission(tmp_path: Path) -> None:
         "observed_used_mib": 34208,
         "observed_free_mib": 250000,
     }
+
+
+def test_inner_gpu_lease_accepts_linux_numa_memory_admission(tmp_path: Path) -> None:
+    pipeline, evidence_path, evidence = _inner_gpu_lease_fixture(tmp_path)
+    admission = evidence["gpu_memory_admission"]
+    assert isinstance(admission, dict)
+    admission.update(
+        {
+            "source": "linux-numa-meminfo",
+            "observed_total_mib": 283136,
+            "observed_used_mib": 2675,
+            "observed_free_mib": 280461,
+        }
+    )
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+
+    lease = pipeline._validate_gpu_lease()
+
+    assert lease["gpu_memory_admission"] == admission
 
 
 @pytest.mark.parametrize("schema_version", [2, True])
@@ -2656,6 +2685,323 @@ def test_capacity_gated_exclusive_lease_skips_a_memory_busy_gpu(
         assert not _lock_is_busy(lease.lock_dir / f"gpu-{gpu}-slot-1.lock")
 
 
+def test_capacity_gate_counts_reclaimable_clean_file_cache_on_gpu_numa_node(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _fake_gpu_lease_context(
+        tmp_path,
+        "2, 284208, 91595, 192613\n3, 284208, 124790, 159418",
+    )
+    lease = GpuLease(
+        context,
+        "qwen3_omni",
+        "exclusive_gpu",
+        min_free_gpu_memory_mib=280000,
+    )
+    lease._gpu_numa_identity = (  # type: ignore[method-assign]
+        lambda gpu, *, timeout_seconds: ("00000008:06:00.0", 1072, 2)
+    )
+    lease._gpu_has_compute_processes = (  # type: ignore[method-assign]
+        lambda gpu, *, timeout_seconds: False
+    )
+    lease._node_meminfo = lambda node: {  # type: ignore[method-assign]
+        "MemTotal": 289931264,
+        "MemFree": 197234880,
+        "Active(file)": 14362240,
+        "Inactive(file)": 78329984,
+        "Unevictable": 0,
+        "Dirty": 320,
+        "Writeback": 0,
+        "Mapped": 225728,
+        "Shmem": 0,
+    }
+    lease._node_high_watermark_kib = (  # type: ignore[method-assign]
+        lambda node, *, page_size_kib: 39188 * page_size_kib
+    )
+    monkeypatch.setattr("tools.ci.gpu_lease.os.sysconf", lambda name: 65536)
+
+    try:
+        lease.acquire()
+
+        assert lease.gpu_id == 2
+        assert lease.evidence("a" * 40)["gpu_memory_admission"] == {
+            "source": "linux-numa-meminfo",
+            "required_free_mib": 280000,
+            "observed_total_mib": 283136,
+            "observed_used_mib": 2675,
+            "observed_free_mib": 280461,
+        }
+    finally:
+        lease.release()
+
+
+def test_gpu_numa_meminfo_parser_ignores_real_huge_page_counter_format() -> None:
+    meminfo = GpuLease._parse_node_meminfo(
+        2,
+        """\
+Node 2 MemTotal:       289931264 kB
+Node 2 MemFree:        197234880 kB
+Node 2 MemUsed:         92696384 kB
+Node 2 Active:          14362240 kB
+Node 2 Inactive:        78329984 kB
+Node 2 Active(anon):           0 kB
+Node 2 Inactive(anon):         0 kB
+Node 2 Active(file):    14362240 kB
+Node 2 Inactive(file):  78329984 kB
+Node 2 Unevictable:            0 kB
+Node 2 Mlocked:                0 kB
+Node 2 Dirty:                320 kB
+Node 2 Writeback:              0 kB
+Node 2 FilePages:       92692352 kB
+Node 2 Mapped:            225728 kB
+Node 2 AnonPages:              0 kB
+Node 2 Shmem:                  0 kB
+Node 2 KernelStack:            0 kB
+Node 2 PageTables:             0 kB
+Node 2 NFS_Unstable:           0 kB
+Node 2 Bounce:                 0 kB
+Node 2 WritebackTmp:           0 kB
+Node 2 KReclaimable:           0 kB
+Node 2 Slab:                   0 kB
+Node 2 SReclaimable:           0 kB
+Node 2 SUnreclaim:             0 kB
+Node 2 AnonHugePages:          0 kB
+Node 2 ShmemHugePages:         0 kB
+Node 2 ShmemPmdMapped:         0 kB
+Node 2 FileHugePages:          0 kB
+Node 2 FilePmdMapped:          0 kB
+Node 2 HugePages_Total:        0
+Node 2 HugePages_Free:         0
+Node 2 HugePages_Surp:         0
+""",
+    )
+
+    assert meminfo == {
+        "MemTotal": 289931264,
+        "MemFree": 197234880,
+        "Active(file)": 14362240,
+        "Inactive(file)": 78329984,
+        "Unevictable": 0,
+        "Dirty": 320,
+        "Writeback": 0,
+        "Mapped": 225728,
+        "Shmem": 0,
+    }
+
+
+def test_capacity_gate_rejects_raw_capacity_when_a_compute_process_appears(
+    tmp_path: Path,
+) -> None:
+    context = _fake_gpu_lease_context(
+        tmp_path,
+        "2, 284208, 3208, 281000",
+    )
+    lease = GpuLease(
+        context,
+        "qwen3_omni",
+        "exclusive_gpu",
+        min_free_gpu_memory_mib=280000,
+    )
+    lease.gpu_id = 2
+    process_states = iter((False, True))
+    lease._gpu_has_compute_processes = (  # type: ignore[method-assign]
+        lambda gpu, *, timeout_seconds: next(process_states, True)
+    )
+    lease._gpu_memory_snapshot = (  # type: ignore[method-assign]
+        lambda gpu, *, timeout_seconds: {
+            "source": "nvidia-smi",
+            "total_mib": 284208,
+            "used_mib": 3208,
+            "free_mib": 281000,
+        }
+    )
+
+    admitted = lease._candidate_has_capacity(
+        time.monotonic() + 0.05,
+        candidates_remaining=1,
+    )
+
+    assert not admitted
+    assert lease.gpu_memory_admission is None
+
+
+def test_capacity_gate_reserves_numa_high_watermark_from_reclaimable_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _fake_gpu_lease_context(
+        tmp_path,
+        "2, 284208, 5208, 279000",
+    )
+    lease = GpuLease(
+        context,
+        "qwen3_omni",
+        "exclusive_gpu",
+        min_free_gpu_memory_mib=280000,
+    )
+    lease._gpu_numa_identity = (  # type: ignore[method-assign]
+        lambda gpu, *, timeout_seconds: ("00000008:06:00.0", 1072, 2)
+    )
+    lease._gpu_has_compute_processes = (  # type: ignore[method-assign]
+        lambda gpu, *, timeout_seconds: False
+    )
+    lease._node_meminfo = lambda node: {  # type: ignore[method-assign]
+        "MemTotal": 289931264,
+        "MemFree": 280100 * 1024,
+        "Active(file)": 0,
+        "Inactive(file)": 0,
+        "Unevictable": 0,
+        "Dirty": 0,
+        "Writeback": 0,
+        "Mapped": 0,
+        "Shmem": 0,
+    }
+    lease._node_high_watermark_kib = (  # type: ignore[method-assign]
+        lambda node, *, page_size_kib: 39184 * page_size_kib
+    )
+    monkeypatch.setattr("tools.ci.gpu_lease.os.sysconf", lambda name: 65536)
+
+    snapshot = lease._gpu_memory_snapshot(2)
+
+    assert snapshot == {
+        "source": "linux-numa-meminfo",
+        "total_mib": 283136,
+        "used_mib": 5485,
+        "free_mib": 277651,
+    }
+    assert snapshot["free_mib"] < lease.min_free_gpu_memory_mib
+
+
+def test_capacity_gate_rejects_a_mismatched_gpu_numa_node(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _fake_gpu_lease_context(
+        tmp_path,
+        "2, 284208, 91595, 192613\n3, 284208, 124790, 159418",
+    )
+    lease = GpuLease(
+        context,
+        "qwen3_omni",
+        "exclusive_gpu",
+        min_free_gpu_memory_mib=280000,
+    )
+    lease._gpu_numa_identity = (  # type: ignore[method-assign]
+        lambda gpu, *, timeout_seconds: ("00000008:06:00.0", 1072, 0)
+    )
+    lease._gpu_has_compute_processes = (  # type: ignore[method-assign]
+        lambda gpu, *, timeout_seconds: False
+    )
+    lease._node_meminfo = lambda node: {  # type: ignore[method-assign]
+        "MemTotal": 501667072,
+        "MemFree": 432153600,
+        "Active(file)": 3178496,
+        "Inactive(file)": 10366784,
+        "Unevictable": 0,
+        "Dirty": 0,
+        "Writeback": 0,
+        "Mapped": 0,
+        "Shmem": 0,
+    }
+    lease._node_high_watermark_kib = (  # type: ignore[method-assign]
+        lambda node, *, page_size_kib: 168996 * page_size_kib
+    )
+    monkeypatch.setattr("tools.ci.gpu_lease.os.sysconf", lambda name: 65536)
+
+    snapshot = lease._gpu_memory_snapshot(2)
+
+    assert snapshot["source"] == "nvidia-smi"
+    assert snapshot["free_mib"] == 192613
+    assert any("total does not match" in warning for warning in lease.numa_fallback_warnings)
+
+
+def test_gpu_numa_identity_uses_bounded_direct_topology_query(
+    tmp_path: Path,
+) -> None:
+    context = _fake_gpu_lease_context(tmp_path, "2, 284208, 91595, 192613")
+    context.env["FAKE_NVIDIA_SMI_IDENTITY_ROWS"] = "00000008:06:00.0, 1072"
+    context.env["FAKE_NVIDIA_SMI_TOPOLOGY"] = "not-a-node"
+    lease = GpuLease(
+        context,
+        "qwen3_omni",
+        "exclusive_gpu",
+        min_free_gpu_memory_mib=280000,
+    )
+
+    with pytest.raises(CiError, match="invalid NUMA ID"):
+        lease._gpu_numa_identity(2, timeout_seconds=1)
+    assert lease.gpu_numa_nodes == {}
+
+    context.env["FAKE_NVIDIA_SMI_TOPOLOGY"] = "2"
+    assert lease._gpu_numa_identity(2, timeout_seconds=1) == (
+        "00000008:06:00.0",
+        1072,
+        2,
+    )
+    assert lease.gpu_numa_nodes == {"00000008:06:00.0": 2}
+
+
+def test_gpu_numa_query_obeys_probe_deadline(tmp_path: Path) -> None:
+    context = _fake_gpu_lease_context(tmp_path, "2, 284208, 91595, 192613")
+    context.env["FAKE_NVIDIA_SMI_DELAY_SECONDS"] = "2"
+    lease = GpuLease(
+        context,
+        "qwen3_omni",
+        "exclusive_gpu",
+        min_free_gpu_memory_mib=280000,
+    )
+    started = time.monotonic()
+
+    with pytest.raises(CiError):
+        lease._gpu_numa_node(2, timeout_seconds=0.05)
+
+    assert time.monotonic() - started < 1
+
+
+def test_gpu_compute_process_query_is_strict(tmp_path: Path) -> None:
+    context = _fake_gpu_lease_context(tmp_path, "2, 284208, 91595, 192613")
+    lease = GpuLease(
+        context,
+        "qwen3_omni",
+        "exclusive_gpu",
+        min_free_gpu_memory_mib=280000,
+    )
+
+    assert not lease._gpu_has_compute_processes(2, timeout_seconds=1)
+    context.env["FAKE_NVIDIA_SMI_COMPUTE_ROWS"] = "123\n456"
+    assert lease._gpu_has_compute_processes(2, timeout_seconds=1)
+    context.env["FAKE_NVIDIA_SMI_COMPUTE_ROWS"] = "No running processes found"
+    with pytest.raises(CiError, match="invalid compute process rows"):
+        lease._gpu_has_compute_processes(2, timeout_seconds=1)
+
+
+def test_gpu_numa_zoneinfo_parser_sums_high_watermarks() -> None:
+    zoneinfo = """\
+Node 2, zone      DMA
+        high     0
+Node 2, zone    DMA32
+        high     0
+Node 2, zone   Normal
+        high     0
+Node 2, zone  Movable
+        high     39188
+Node 2, zone   Device
+        high     0
+Node 3, zone  Movable
+        high     123
+"""
+
+    assert (
+        GpuLease._parse_node_high_watermark_kib(
+            2,
+            zoneinfo,
+            page_size_kib=64,
+        )
+        == 2508032
+    )
+
+
 def test_capacity_gated_lease_waits_for_memory_reclaim_without_requeueing(
     tmp_path: Path,
 ) -> None:
@@ -2673,8 +3019,18 @@ def test_capacity_gated_lease_waits_for_memory_reclaim_without_requeueing(
     prepared: list[int] = []
     snapshots = iter(
         (
-            {"total_mib": 284208, "used_mib": 184208, "free_mib": 100000},
-            {"total_mib": 284208, "used_mib": 34208, "free_mib": 250000},
+            {
+                "source": "nvidia-smi",
+                "total_mib": 284208,
+                "used_mib": 184208,
+                "free_mib": 100000,
+            },
+            {
+                "source": "nvidia-smi",
+                "total_mib": 284208,
+                "used_mib": 34208,
+                "free_mib": 250000,
+            },
         )
     )
     sampled: list[int] = []
@@ -2683,7 +3039,7 @@ def test_capacity_gated_lease_waits_for_memory_reclaim_without_requeueing(
         gpu: int,
         *,
         timeout_seconds: float = 10.0,
-    ) -> dict[str, int]:
+    ) -> dict[str, object]:
         assert gpu == 2
         assert timeout_seconds <= 1
         sampled.append(gpu)

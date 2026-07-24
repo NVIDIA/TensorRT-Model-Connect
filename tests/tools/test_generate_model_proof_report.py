@@ -1039,7 +1039,7 @@ def test_gpu_memory_admission_is_strictly_reconciled(
 ) -> None:
     root = _write_part(tmp_path / "parts", "alpha", "alpha-case")
     admission = {
-        "source": "nvidia-smi",
+        "source": "linux-numa-meminfo",
         "required_free_mib": 240000,
         "observed_total_mib": 284208,
         "observed_used_mib": 34208,

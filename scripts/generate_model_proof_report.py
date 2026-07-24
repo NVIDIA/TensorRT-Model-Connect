@@ -765,13 +765,13 @@ def compose(args: argparse.Namespace) -> int:
                     model_issues.append(
                         f"{model}: GPU memory admission has unexpected or missing fields"
                     )
-                _check_equal(
-                    model_issues,
-                    model,
-                    "GPU memory admission source",
-                    admission.get("source"),
+                if admission.get("source") not in {
                     "nvidia-smi",
-                )
+                    "linux-numa-meminfo",
+                }:
+                    model_issues.append(
+                        f"{model}: GPU memory admission has an invalid source"
+                    )
                 _check_equal(
                     model_issues,
                     model,
@@ -808,6 +808,13 @@ def compose(args: argparse.Namespace) -> int:
                     if used > total or free > total:
                         model_issues.append(
                             f"{model}: GPU memory admission values are inconsistent"
+                        )
+                    if (
+                        admission.get("source") == "linux-numa-meminfo"
+                        and used + free != total
+                    ):
+                        model_issues.append(
+                            f"{model}: GPU NUMA memory admission values do not reconcile"
                         )
                     if free < min_free_gpu_memory_mib:
                         model_issues.append(

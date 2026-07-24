@@ -2284,7 +2284,7 @@ class TestEvidenceCompleteness:
         )
         proof["min_free_gpu_memory_mib"] = 0
         admission = {
-            "source": "nvidia-smi",
+            "source": "linux-numa-meminfo",
             "required_free_mib": 240000,
             "observed_total_mib": 284208,
             "observed_used_mib": 34208,
