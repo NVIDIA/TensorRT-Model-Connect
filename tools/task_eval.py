@@ -8346,6 +8346,30 @@ def _manifest_tensor_parallel_size(build_args: dict[str, Any]) -> int | None:
     return None
 
 
+def _model_asset_path(model: dict[str, Any], value: str) -> Path:
+    asset = Path(value)
+    if asset.is_absolute():
+        return asset
+    manifest = Path(str(model.get("manifest", "") or ""))
+    if manifest:
+        if not manifest.is_absolute():
+            manifest = REPO_ROOT / manifest
+        model_dir = (
+            manifest.parent.parent
+            if manifest.parent.name == "manifests"
+            else manifest.parent
+        )
+        if asset.parts[:3] == ("tests", "e2e", "data"):
+            candidate = model_dir / "data" / asset.name
+        elif asset.parts and asset.parts[0] == "data":
+            candidate = model_dir / asset
+        else:
+            candidate = model_dir / "data" / asset
+        if candidate.is_file():
+            return candidate
+    return REPO_ROOT / "tests" / "e2e" / "data" / asset
+
+
 def build_bundle_command(
     model: dict[str, Any],
     *,
@@ -8404,7 +8428,7 @@ def build_bundle_command(
             cmd.extend([flag, str(value)])
     fp8_scales = model.get("fp8_scales")
     if fp8_scales:
-        scales_path = REPO_ROOT / "tests" / "e2e" / "data" / str(fp8_scales)
+        scales_path = _model_asset_path(model, str(fp8_scales))
         if scales_path.is_file():
             cmd.extend(["--fp8-scales", str(scales_path)])
     if extra_build_args:

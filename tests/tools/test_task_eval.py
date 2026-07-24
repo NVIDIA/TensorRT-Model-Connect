@@ -4303,6 +4303,27 @@ def test_flux_task_eval_build_command_preserves_diffusion_shape(tmp_path: Path) 
     assert command[command.index("--num-inference-steps") + 1] == "20"
 
 
+def test_flux_fp8_build_command_resolves_model_owned_scales(tmp_path: Path) -> None:
+    model = next(
+        model
+        for model in task_eval.load_manifest_records()
+        if model["name"] == "flux-2-dev-fp8"
+    )
+
+    command = task_eval.build_bundle_command(
+        model,
+        trtmc_binary="build/trtmc",
+        bundle_path=tmp_path / "flux-2-dev-fp8.trtfb",
+    )
+
+    scales = Path(command[command.index("--fp8-scales") + 1])
+    assert scales == (
+        task_eval.REPO_ROOT
+        / "tests/e2e/models/flux/data/flux2-fp8-scales.json"
+    )
+    assert scales.is_file()
+
+
 def test_eval_one_model_diffusion_uses_clip_parity_summary(
     tmp_path: Path, monkeypatch
 ) -> None:
