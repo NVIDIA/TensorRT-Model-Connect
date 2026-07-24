@@ -329,6 +329,9 @@ class TestHfAllowPatterns:
     def test_contains_tokenizer(self):
         assert "tokenizer.json" in _HF_ALLOW_PATTERNS
 
+    def test_contains_wordpiece_vocab(self):
+        assert "vocab.txt" in _HF_ALLOW_PATTERNS
+
     def test_contains_processor_config(self):
         assert "processor_config.json" in _HF_ALLOW_PATTERNS
 
@@ -364,6 +367,63 @@ class TestEnsureTokenizerJson:
         # Should not raise or modify
         _ensure_tokenizer_json(tmp_path)
         assert (tmp_path / "tokenizer.json").read_text() == "{}"
+
+    def test_rebuilds_undersized_wordpiece_from_complete_vocab(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        (tmp_path / "config.json").write_text(json.dumps({"vocab_size": 6}))
+        (tmp_path / "vocab.txt").write_text(
+            "[PAD]\n[UNK]\n[CLS]\n[SEP]\n[MASK]\nhello\n"
+        )
+        (tmp_path / "tokenizer.json").write_text(json.dumps({
+            "model": {
+                "type": "WordPiece",
+                "vocab": {
+                    "[PAD]": 0,
+                    "[UNK]": 1,
+                    "[CLS]": 2,
+                    "[SEP]": 3,
+                    "[MASK]": 4,
+                },
+            },
+        }))
+
+        class FakeTokenizer:
+            @staticmethod
+            def save_pretrained(path):
+                (Path(path) / "tokenizer.json").write_text(json.dumps({
+                    "model": {
+                        "type": "WordPiece",
+                        "vocab": {
+                            "[PAD]": 0,
+                            "[UNK]": 1,
+                            "[CLS]": 2,
+                            "[SEP]": 3,
+                            "[MASK]": 4,
+                            "hello": 5,
+                        },
+                    },
+                }))
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(path, use_fast=False):
+                assert Path(path) == tmp_path
+                assert use_fast is False
+                return FakeTokenizer()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+        )
+
+        _ensure_tokenizer_json(tmp_path)
+
+        tokenizer = json.loads((tmp_path / "tokenizer.json").read_text())
+        assert tokenizer["model"]["vocab"]["hello"] == 5
 
     def test_missing_fast_tokenizer_delegates_to_family_plugin(
         self,

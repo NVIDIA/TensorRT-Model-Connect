@@ -27,6 +27,7 @@ GENERIC_HF_ALLOW_PATTERNS: tuple[str, ...] = (
     "tokenizer.json",
     "tokenizer_config.json",
     "chat_template.jinja",
+    "vocab.txt",
     "vocab.json",
     "merges.txt",
     "special_tokens_map.json",

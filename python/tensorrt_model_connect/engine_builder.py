@@ -690,13 +690,55 @@ def _detect_tokenizer_special_frame(model_dir: Path) -> tuple[list[int], list[in
     return None
 
 
+def _wordpiece_tokenizer_needs_rebuild(model_dir: Path) -> bool:
+    """Return whether a cached WordPiece tokenizer is smaller than the model.
+
+    Some Hugging Face repositories, including ConvBERT, publish ``vocab.txt``
+    without ``tokenizer.json``.  A tokenizer generated before ``vocab.txt`` is
+    available can contain only the special tokens and then remain in the shared
+    snapshot cache.  Rebuild only when all inputs prove that this happened.
+    """
+    tokenizer_path = model_dir / "tokenizer.json"
+    vocab_path = model_dir / "vocab.txt"
+    config_path = model_dir / "config.json"
+    if not (tokenizer_path.exists() and vocab_path.exists() and config_path.exists()):
+        return False
+
+    try:
+        tokenizer = json.loads(tokenizer_path.read_text(encoding="utf-8"))
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        model = tokenizer.get("model", {})
+        vocab = model.get("vocab", {})
+        expected_vocab_size = int(config.get("vocab_size", 0))
+        if model.get("type") != "WordPiece":
+            return False
+        if not isinstance(vocab, dict) or not vocab or expected_vocab_size <= 0:
+            return False
+        tokenizer_id_space = max(int(token_id) for token_id in vocab.values()) + 1
+        source_id_space = len(vocab_path.read_text(encoding="utf-8").splitlines())
+        return (
+            tokenizer_id_space < expected_vocab_size
+            and source_id_space >= expected_vocab_size
+        )
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
 def _ensure_tokenizer_json(model_dir: Path, *, plugin=None) -> None:
     """If the model directory lacks tokenizer.json, generate it from the
     slow tokenizer using HF transformers. This ensures the C++ runtime can
     always load the tokenizer natively.
     """
-    if (model_dir / "tokenizer.json").exists():
+    tokenizer_path = model_dir / "tokenizer.json"
+    rebuild_wordpiece = _wordpiece_tokenizer_needs_rebuild(model_dir)
+    if tokenizer_path.exists() and not rebuild_wordpiece:
         return
+    if rebuild_wordpiece:
+        print(
+            "[trtmc build] Rebuilding undersized WordPiece tokenizer.json "
+            "from vocab.txt",
+            file=sys.stderr,
+        )
 
     slow_tokenizer_error: str | None = None
 
@@ -705,7 +747,7 @@ def _ensure_tokenizer_json(model_dir: Path, *, plugin=None) -> None:
         from transformers import AutoTokenizer
         tok = AutoTokenizer.from_pretrained(str(model_dir), use_fast=False)
         tok.save_pretrained(str(model_dir))
-        if (model_dir / "tokenizer.json").exists():
+        if tokenizer_path.exists():
             print("[trtmc build] Generated tokenizer.json from slow tokenizer",
                   file=sys.stderr)
             return
@@ -1167,7 +1209,18 @@ def build_bundle(
             print(f"[trtmc build]   {ename}: {len(eplan) / (1024 * 1024):.1f} MB",
                   file=sys.stderr)
 
-    # 5. Detect tokenizer special-tokens behavior from HF config
+    # 5. Ensure tokenizer.json before detecting its special-token frame.  A
+    # repaired tokenizer may use different special-token IDs than a stale one.
+    requires_tokenizer = bool(getattr(plugin, "requires_tokenizer", True))
+    if requires_tokenizer:
+        tokenizer_json_t0 = time.monotonic()
+        _ensure_tokenizer_json(model_dir_path, plugin=plugin)
+        _add_build_timing(
+            build_timing, "tokenizer_json_ensure_s",
+            time.monotonic() - tokenizer_json_t0)
+        _write_build_timing(build_timing)
+
+    # 5b. Detect tokenizer special-tokens behavior from HF config
     tokenizer_t0 = time.monotonic()
     tokenizer_special_frame = _detect_tokenizer_special_frame(model_dir_path)
     if tokenizer_special_frame is None:
@@ -1233,18 +1286,6 @@ def build_bundle(
         sections.append(
             BundleSection(triattention_cfg.stats_section, triattention_section)
         )
-
-    # If model lacks tokenizer.json (fast format), generate it from the
-    # slow tokenizer so the C++ runtime can always load via AutoTokenizer.
-    # Non-text families opt out explicitly through their plugin metadata.
-    requires_tokenizer = bool(getattr(plugin, "requires_tokenizer", True))
-    if requires_tokenizer:
-        tokenizer_json_t0 = time.monotonic()
-        _ensure_tokenizer_json(model_dir_path, plugin=plugin)
-        _add_build_timing(
-            build_timing, "tokenizer_json_ensure_s",
-            time.monotonic() - tokenizer_json_t0)
-        _write_build_timing(build_timing)
 
     def make_runtime_config_json(source: bytes | None) -> bytes:
         cfg_dict = json.loads(source) if source is not None else dict(config.raw)
