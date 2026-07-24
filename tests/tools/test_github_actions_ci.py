@@ -1118,7 +1118,12 @@ def test_nightly_warms_the_shared_cache_once_on_each_gpu_node() -> None:
 def test_nightly_strictly_warms_all_active_non_multi_device_cases() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     cache = text.split("\n  cache-warm:", maxsplit=1)[1].split("\n  package:", maxsplit=1)[0]
+    model_warm = cache.split(
+        "- name: Strictly warm every active single-GPU nightly model", maxsplit=1
+    )[1].split("- name: Strictly warm declared Nightly model references", maxsplit=1)[0]
     assert "Strictly warm every active single-GPU nightly model" in cache
+    assert '--user "$(id -u):$(id -g)"' in model_warm
+    assert model_warm.index("--user") < model_warm.index('"$TRTMC_CI_CONTAINER_NAME"')
     for argument in (
         "python -u scripts/warm_hf_cache.py",
         "--exclude-ci-tier multi_device",

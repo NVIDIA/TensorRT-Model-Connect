@@ -334,7 +334,9 @@ jobs:
         timeout-minutes: 120
         run: |
           set -euo pipefail
+          # Keep bind-mounted Hugging Face cache metadata owned by the host runner.
           docker exec \
+            --user "$(id -u):$(id -g)" \
             -w "$TRTMC_CI_WORKSPACE" \
             "$TRTMC_CI_CONTAINER_NAME" \
             env -u HF_HUB_OFFLINE python -u scripts/warm_hf_cache.py \
