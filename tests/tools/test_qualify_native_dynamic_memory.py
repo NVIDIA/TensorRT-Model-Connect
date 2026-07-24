@@ -118,6 +118,199 @@ def _write_test_runner_capture(
     )
 
 
+@pytest.mark.parametrize(
+    "selector",
+    (
+        "0",
+        "17",
+        "GPU-01234567-89ab-cdef-0123-456789abcdef",
+    ),
+)
+def test_runner_cuda_visible_device_accepts_one_physical_selector(
+    selector: str,
+) -> None:
+    assert qualify._validate_runner_cuda_visible_device(selector) == selector
+
+
+@pytest.mark.parametrize(
+    "selector",
+    (
+        "",
+        " 3",
+        "3 ",
+        "-1",
+        "cuda:3",
+        "3,4",
+        "GPU-01234567",
+        "GPU-01234567-89ab-cdef-0123-456789abcdeg",
+    ),
+)
+def test_runner_cuda_visible_device_rejects_invalid_or_multiple_selectors(
+    selector: str,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="one numeric physical GPU index or one full GPU UUID",
+    ):
+        qualify._validate_runner_cuda_visible_device(selector)
+
+
+def test_cli_requires_runner_cuda_visible_device(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(MODULE_PATH),
+            "--bundle",
+            str(tmp_path / "missing.trtfb"),
+            "--model",
+            TEST_SPEC.model_id,
+            "--output-dir",
+            str(tmp_path / "output"),
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert completed.returncode == 2
+    assert "--runner-cuda-visible-device" in completed.stderr
+    assert "required" in completed.stderr
+
+
+def test_cli_rejects_multiple_runner_cuda_visible_devices(
+    tmp_path: Path,
+) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(MODULE_PATH),
+            "--bundle",
+            str(tmp_path / "missing.trtfb"),
+            "--model",
+            TEST_SPEC.model_id,
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--runner-cuda-visible-device",
+            "2,3",
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert completed.returncode == 2
+    assert (
+        "one numeric physical GPU index or one full GPU UUID"
+        in completed.stderr
+    )
+
+
+def test_runner_child_environment_overrides_only_the_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2")
+    child_environment = qualify._runner_child_environment("3")
+
+    completed, child_pid = qualify._run_captured_command(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os; "
+                "print(os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>'))"
+            ),
+        ],
+        environment=child_environment,
+    )
+
+    assert child_pid > 0
+    assert completed.returncode == 0
+    assert completed.stdout.strip() == "3"
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "2"
+
+
+@pytest.mark.parametrize(
+    "runner_selector",
+    (
+        "3",
+        "GPU-fedcba98-7654-3210-fedc-ba9876543210",
+    ),
+)
+def test_sampler_anchor_resolves_the_child_selector_not_parent_environment(
+    runner_selector: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2")
+
+    def fake_run(
+        command: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=(
+                "2, 0000:02:00.0, "
+                "GPU-01234567-89ab-cdef-0123-456789abcdef\n"
+                "3, 0000:03:00.0, "
+                "GPU-fedcba98-7654-3210-fedc-ba9876543210\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(qualify.subprocess, "run", fake_run)
+
+    anchor = qualify._sampler_trust_anchor(
+        child_pid=456,
+        cuda_logical_device_index=0,
+        cuda_visible_device=runner_selector,
+    )
+
+    assert anchor.pid == 456
+    assert anchor.cuda_logical_device_index == 0
+    assert anchor.physical_device_index == 3
+    assert anchor.pci_bus_id == "0000:03:00.0"
+    assert (
+        anchor.gpu_uuid
+        == "GPU-fedcba98-7654-3210-fedc-ba9876543210"
+    )
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "2"
+
+
+def test_sampler_anchor_rejects_tampered_child_gpu_uuid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(
+        command: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=(
+                "3, 0000:03:00.0, "
+                "GPU-fedcba98-7654-3210-fedc-ba9876543210\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(qualify.subprocess, "run", fake_run)
+
+    with pytest.raises(
+        RuntimeError,
+        match="cannot resolve CUDA-visible GPU selector",
+    ):
+        qualify._sampler_trust_anchor(
+            child_pid=456,
+            cuda_logical_device_index=0,
+            cuda_visible_device=(
+                "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+            ),
+        )
+
+
 def test_deterministic_token_ids_are_prefix_stable_and_in_vocab() -> None:
     short = qualify.deterministic_token_ids(2_047, 32_000)
     long = qualify.deterministic_token_ids(2_049, 32_000)

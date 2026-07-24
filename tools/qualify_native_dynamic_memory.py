@@ -132,6 +132,10 @@ _COLD_WARM_OUTPUT_EQUIVALENCE_FIELDS = {
     "passed",
 }
 RUNNER_CAPTURE_SCHEMA = "trtmc.native-dynamic-memory-runner-capture/v1"
+_FULL_GPU_UUID_PATTERN = re.compile(
+    r"GPU-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
 
 
 @dataclass(frozen=True)
@@ -2203,9 +2207,12 @@ def _parse_runner_json(stdout: str) -> dict[str, Any]:
 
 def _run_captured_command(
     command: list[str],
+    *,
+    environment: Mapping[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], int]:
     process = subprocess.Popen(
         command,
+        env=(dict(environment) if environment is not None else None),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -2220,6 +2227,43 @@ def _run_captured_command(
         ),
         process.pid,
     )
+
+
+def _validate_runner_cuda_visible_device(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or not value
+        or (
+            re.fullmatch(r"[0-9]+", value) is None
+            and _FULL_GPU_UUID_PATTERN.fullmatch(value) is None
+        )
+    ):
+        raise ValueError(
+            "runner CUDA-visible device must be one numeric physical GPU "
+            "index or one full GPU UUID"
+        )
+    return value
+
+
+def _runner_cuda_visible_device_arg(value: str) -> str:
+    try:
+        return _validate_runner_cuda_visible_device(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _runner_child_environment(
+    cuda_visible_device: str,
+    *,
+    base_environment: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    selector = _validate_runner_cuda_visible_device(cuda_visible_device)
+    environment = dict(
+        os.environ if base_environment is None else base_environment
+    )
+    environment["CUDA_VISIBLE_DEVICES"] = selector
+    return environment
 
 
 def _normalize_pci_bus_id(value: str) -> str:
@@ -2239,6 +2283,7 @@ def _sampler_trust_anchor(
     *,
     child_pid: int,
     cuda_logical_device_index: int = 0,
+    cuda_visible_device: str | None = None,
 ) -> SamplerTrustAnchor:
     if type(child_pid) is not int or child_pid <= 0:
         raise RuntimeError("qualification producer has no child PID trust anchor")
@@ -2276,12 +2321,18 @@ def _sampler_trust_anchor(
     if not rows:
         raise RuntimeError("nvidia-smi reported no full GPU identities")
 
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
-    selectors = (
-        [part.strip() for part in visible.split(",") if part.strip()]
-        if visible is not None and visible.strip()
-        else [str(row[0]) for row in rows]
-    )
+    explicit_child_selector = cuda_visible_device is not None
+    if not explicit_child_selector:
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+        selectors = (
+            [part.strip() for part in visible.split(",") if part.strip()]
+            if visible is not None and visible.strip()
+            else [str(row[0]) for row in rows]
+        )
+    else:
+        selectors = [
+            _validate_runner_cuda_visible_device(cuda_visible_device)
+        ]
     if cuda_logical_device_index >= len(selectors):
         raise RuntimeError(
             "CUDA_VISIBLE_DEVICES does not expose the qualification logical GPU"
@@ -2295,13 +2346,16 @@ def _sampler_trust_anchor(
             None,
         )
     else:
-        uuid_selector = selector.removeprefix("GPU-")
-        candidates = [
-            row
-            for row in rows
-            if row[2] == selector
-            or row[2].removeprefix("GPU-").startswith(uuid_selector)
-        ]
+        if explicit_child_selector:
+            candidates = [row for row in rows if row[2] == selector]
+        else:
+            uuid_selector = selector.removeprefix("GPU-")
+            candidates = [
+                row
+                for row in rows
+                if row[2] == selector
+                or row[2].removeprefix("GPU-").startswith(uuid_selector)
+            ]
         if len(candidates) == 1:
             selected = candidates[0]
     if selected is None:
@@ -2463,6 +2517,7 @@ def run_trt_case(
     case: Case,
     context_limit: int,
     evidence_dir: Path,
+    runner_cuda_visible_device: str,
 ) -> tuple[
     dict[str, Any],
     np.ndarray | None,
@@ -2485,10 +2540,17 @@ def run_trt_case(
         json.dumps(command, indent=2) + "\n",
         encoding="utf-8",
     )
-    completed, child_pid = _run_captured_command(command)
+    runner_environment = _runner_child_environment(
+        runner_cuda_visible_device
+    )
+    completed, child_pid = _run_captured_command(
+        command,
+        environment=runner_environment,
+    )
     sampler_anchor = _sampler_trust_anchor(
         child_pid=child_pid,
         cuda_logical_device_index=0,
+        cuda_visible_device=runner_cuda_visible_device,
     )
     (evidence_dir / "runner.stdout.log").write_text(
         completed.stdout,
@@ -5902,6 +5964,17 @@ def main() -> int:
         default=[],
         help="Run one named matrix case (repeatable); default is all",
     )
+    parser.add_argument(
+        "--runner-cuda-visible-device",
+        required=True,
+        type=_runner_cuda_visible_device_arg,
+        metavar="SELECTOR",
+        help=(
+            "Expose exactly one numeric physical GPU index or full GPU UUID "
+            "to each qualification runner child. The producer keeps the "
+            "incoming CUDA_VISIBLE_DEVICES."
+        ),
+    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument(
         "--skip-hf", action="store_true", help="Run boundary/trace checks without claiming parity"
@@ -6044,6 +6117,12 @@ def main() -> int:
         "status": "running",
         "environment": {
             "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
+            "producer_CUDA_VISIBLE_DEVICES": os.environ.get(
+                "CUDA_VISIBLE_DEVICES"
+            ),
+            "runner_CUDA_VISIBLE_DEVICES": (
+                args.runner_cuda_visible_device
+            ),
             DEVELOPER_CHUNK_VARIANT_ENV: os.environ.get(DEVELOPER_CHUNK_VARIANT_ENV),
         },
         "cases": [],
@@ -6111,6 +6190,9 @@ def main() -> int:
                 case=case,
                 context_limit=spec.context_limit,
                 evidence_dir=runner_evidence_root / case.name / "base",
+                runner_cuda_visible_device=(
+                    args.runner_cuda_visible_device
+                ),
             )
             case_report["trace"] = trace
             sampler_anchors[f"{case.name}/base"] = base_sampler_anchor
@@ -6147,6 +6229,9 @@ def main() -> int:
                     case=case,
                     context_limit=spec.context_limit,
                     evidence_dir=(runner_evidence_root / case.name / "chunk-variant"),
+                    runner_cuda_visible_device=(
+                        args.runner_cuda_visible_device
+                    ),
                 )
                 assert variant_sampler_anchor is not None
                 sampler_anchors[

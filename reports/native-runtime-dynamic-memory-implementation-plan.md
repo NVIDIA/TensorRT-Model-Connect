@@ -1971,6 +1971,19 @@ excessive retention, or a larger unexplained residual fail closed. Full-GPU
 qualification is required; MIG is rejected until CUDA-instance-to-NVML-instance
 attribution is implemented.
 
+The Python producer performs TensorRT engine inspection before it launches a
+runner, so canonical qualification isolates those two processes on different
+physical GPUs. The producer is started with a single incoming
+`CUDA_VISIBLE_DEVICES=<producer>`; the required internal
+`--runner-cuda-visible-device <runner>` option accepts exactly one physical
+index or full GPU UUID and overrides that variable only in the C++ runner
+child. The producer's incoming selector and the runner selector are recorded
+separately. Every runner trace must still bind logical device zero to the
+expected physical index, PCI bus ID, full UUID, and child PID, and its complete
+NVML ledger must contain no producer process. This separation removes
+qualification-induced GPU occupancy without weakening the exclusive-compute
+or memory-reconciliation gates.
+
 The producer writes each runner command, deterministic token input, stdout,
 stderr, return code, raw logits, and raw trace before validation. Both
 per-case validation failures and post-case envelope/source/outcome failures
