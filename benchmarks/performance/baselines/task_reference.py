@@ -702,33 +702,118 @@ def _locateanything_config(arguments: argparse.Namespace, transformers_module: A
 def _locateanything_tokenizer(arguments: argparse.Namespace, torch_module: Any) -> Any:
     from transformers import AutoTokenizer
 
+    options = _processor_kwargs(arguments)
     try:
-        return AutoTokenizer.from_pretrained(arguments.model, **_processor_kwargs(arguments))
+        return AutoTokenizer.from_pretrained(arguments.model, **options)
     except (KeyError, TypeError, ValueError, OSError) as auto_error:
+        slow_failure: Exception | None = None
+        try:
+            return AutoTokenizer.from_pretrained(arguments.model, **options, use_fast=False)
+        except (KeyError, TypeError, ValueError, OSError) as error:
+            slow_failure = error
+
         from huggingface_hub import hf_hub_download
-        from tokenizers import Tokenizer
+        from tokenizers import (
+            AddedToken,
+            Regex,
+            Tokenizer,
+            decoders,
+            normalizers,
+            pre_tokenizers,
+            processors,
+        )
+        from tokenizers.models import BPE
 
         model_path = Path(arguments.model)
-        if model_path.is_dir():
-            tokenizer_json = model_path / "tokenizer.json"
-            tokenizer_config_path = model_path / "tokenizer_config.json"
-        else:
-            download_options = {
-                "repo_id": arguments.model,
-                "revision": arguments.revision,
-                "local_files_only": arguments.local_files_only,
-            }
-            tokenizer_json = Path(hf_hub_download(filename="tokenizer.json", **download_options))
+        download_options = {
+            "repo_id": arguments.model,
+            "revision": arguments.revision,
+            "local_files_only": arguments.local_files_only,
+        }
+
+        def tokenizer_asset(filename: str, *, required: bool) -> Path | None:
+            if model_path.is_dir():
+                path = model_path / filename
+                if path.is_file():
+                    return path
+                if required:
+                    raise FileNotFoundError(f"LocateAnything tokenizer asset is missing: {path}")
+                return None
             try:
-                tokenizer_config_path = Path(
-                    hf_hub_download(filename="tokenizer_config.json", **download_options)
-                )
+                return Path(hf_hub_download(filename=filename, **download_options))
             except (OSError, ValueError):
-                tokenizer_config_path = Path()
-        raw_tokenizer = Tokenizer.from_file(str(tokenizer_json))
+                if required:
+                    raise
+                return None
+
+        tokenizer_json = tokenizer_asset("tokenizer.json", required=False)
+        tokenizer_config_path = tokenizer_asset("tokenizer_config.json", required=False)
+        if tokenizer_json is not None:
+            raw_tokenizer = Tokenizer.from_file(str(tokenizer_json))
+            fallback_source = "tokenizer.json"
+        else:
+            vocab_path = tokenizer_asset("vocab.json", required=True)
+            merges_path = tokenizer_asset("merges.txt", required=True)
+            added_tokens_path = tokenizer_asset("added_tokens.json", required=True)
+            assert vocab_path is not None
+            assert merges_path is not None
+            assert added_tokens_path is not None
+            raw_tokenizer = Tokenizer(
+                BPE.from_file(str(vocab_path), str(merges_path))
+            )
+            raw_tokenizer.normalizer = normalizers.NFC()
+            qwen2_pattern = (
+                r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|"
+                r"\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
+            )
+            raw_tokenizer.pre_tokenizer = pre_tokenizers.Sequence(
+                [
+                    pre_tokenizers.Split(
+                        Regex(qwen2_pattern), behavior="isolated", invert=False
+                    ),
+                    pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False),
+                ]
+            )
+            raw_tokenizer.decoder = decoders.ByteLevel(
+                add_prefix_space=True, trim_offsets=True, use_regex=True
+            )
+            raw_tokenizer.post_processor = processors.TemplateProcessing(
+                single="$A", pair="$A $B", special_tokens=[]
+            )
+            added_tokens = json.loads(added_tokens_path.read_text(encoding="utf-8"))
+            if not isinstance(added_tokens, Mapping):
+                raise TypeError("LocateAnything added_tokens.json must be an object")
+            ordered_tokens = sorted(
+                ((str(content), int(token_id)) for content, token_id in added_tokens.items()),
+                key=lambda item: item[1],
+            )
+            raw_tokenizer.add_special_tokens(
+                [
+                    AddedToken(
+                        content,
+                        single_word=False,
+                        lstrip=False,
+                        rstrip=False,
+                        normalized=False,
+                        special=True,
+                    )
+                    for content, _token_id in ordered_tokens
+                ]
+            )
+            mismatched_ids = [
+                (content, token_id, raw_tokenizer.token_to_id(content))
+                for content, token_id in ordered_tokens
+                if raw_tokenizer.token_to_id(content) != token_id
+            ]
+            if mismatched_ids:
+                raise ValueError(
+                    "LocateAnything added-token IDs do not extend the BPE vocabulary: "
+                    f"{mismatched_ids[:3]}"
+                )
+            fallback_source = "vocab.json, merges.txt, and added_tokens.json"
         tokenizer_config = (
             json.loads(tokenizer_config_path.read_text(encoding="utf-8"))
-            if tokenizer_config_path.is_file()
+            if tokenizer_config_path is not None
             else {}
         )
 
@@ -770,7 +855,8 @@ def _locateanything_tokenizer(arguments: argparse.Namespace, torch_module: Any) 
                 ]
 
         print(
-            f"warning: AutoTokenizer failed ({auto_error}); using tokenizer.json",
+            "warning: AutoTokenizer failed "
+            f"({auto_error}); slow tokenizer failed ({slow_failure}); using {fallback_source}",
             file=sys.stderr,
         )
         return TokenizersWrapper()

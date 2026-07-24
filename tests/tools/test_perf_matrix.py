@@ -1144,6 +1144,7 @@ def test_vlm_adapter_routes_non_generic_families_to_owned_loaders() -> None:
 def test_locateanything_fallback_tokenizer_supports_batch_decode(
     tmp_path: Path, monkeypatch
 ) -> None:
+    import tokenizers
     import transformers
 
     runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
@@ -1161,9 +1162,11 @@ def test_locateanything_fallback_tokenizer_supports_batch_decode(
             return f"{','.join(str(token) for token in token_ids)}:{suffix}"
 
     auto_tokenizer = transformers.AutoTokenizer
-    fake_tokenizers = ModuleType("tokenizers")
-    fake_tokenizers.Tokenizer = Namespace(from_file=lambda _path: FakeRawTokenizer())
-    monkeypatch.setitem(sys.modules, "tokenizers", fake_tokenizers)
+    monkeypatch.setattr(
+        tokenizers.Tokenizer,
+        "from_file",
+        lambda _path: FakeRawTokenizer(),
+    )
     monkeypatch.setattr(auto_tokenizer, "from_pretrained", fail_auto_tokenizer)
     torch_module = Namespace(is_tensor=lambda _value: False)
     arguments = Namespace(
@@ -1180,6 +1183,84 @@ def test_locateanything_fallback_tokenizer_supports_batch_decode(
         "1,2:raw",
         "3:raw",
     ]
+
+
+def test_locateanything_tokenizer_retries_slow_backend_before_raw_json_fallback(
+    monkeypatch,
+) -> None:
+    import transformers
+
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    slow_tokenizer = object()
+    calls: list[dict[str, object]] = []
+
+    def load_tokenizer(_model: str, **kwargs):
+        calls.append(kwargs)
+        if kwargs.get("use_fast") is False:
+            return slow_tokenizer
+        raise OSError("tokenizer.json is not available")
+
+    auto_tokenizer = transformers.AutoTokenizer
+    fake_hub = ModuleType("huggingface_hub")
+    fake_hub.hf_hub_download = lambda **_kwargs: pytest.fail(
+        "raw tokenizer.json fallback should not run when the slow tokenizer loads"
+    )
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    monkeypatch.setattr(auto_tokenizer, "from_pretrained", load_tokenizer)
+    arguments = Namespace(
+        local_files_only=True,
+        model="nvidia/LocateAnything-3B",
+        revision="model-revision",
+        trust_remote_code=True,
+    )
+
+    tokenizer = runner["_locateanything_tokenizer"](
+        arguments, Namespace(is_tensor=lambda _value: False)
+    )
+
+    assert tokenizer is slow_tokenizer
+    assert len(calls) == 2
+    assert calls[0].get("use_fast") is None
+    assert calls[1]["use_fast"] is False
+
+
+def test_locateanything_tokenizer_builds_qwen_bpe_when_tokenizer_json_is_absent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import transformers
+
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    (tmp_path / "vocab.json").write_text(
+        json.dumps({"F": 0, "i": 1, "n": 2, "d": 3}), encoding="utf-8"
+    )
+    (tmp_path / "merges.txt").write_text("#version: 0.2\n", encoding="utf-8")
+    (tmp_path / "added_tokens.json").write_text(
+        json.dumps({"<special>": 4}), encoding="utf-8"
+    )
+    (tmp_path / "tokenizer_config.json").write_text(
+        '{"model_max_length": 512}', encoding="utf-8"
+    )
+
+    def fail_auto_tokenizer(*_args, **_kwargs):
+        raise OSError("tokenizer.json is not available")
+
+    monkeypatch.setattr(
+        transformers.AutoTokenizer, "from_pretrained", fail_auto_tokenizer
+    )
+    arguments = Namespace(
+        local_files_only=True,
+        model=str(tmp_path),
+        revision=None,
+        trust_remote_code=True,
+    )
+
+    tokenizer = runner["_locateanything_tokenizer"](
+        arguments, Namespace(is_tensor=lambda _value: False)
+    )
+
+    assert tokenizer.model_max_length == 512
+    assert tokenizer.encode("<special>Find") == [4, 0, 1, 2, 3]
+    assert tokenizer.decode([0, 1, 2, 3]) == "Find"
 
 
 def test_task_reference_resolves_revision_from_hugging_face_cache(monkeypatch) -> None:
