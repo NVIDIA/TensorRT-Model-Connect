@@ -444,6 +444,8 @@ def apply_overrides(case: ResolvedCase, overrides: Mapping[str, Any]) -> Resolve
         iterations=int(measurement_values["iterations"]),
         telemetry=str(measurement_values["telemetry"]),
         telemetry_interval_ms=int(measurement_values["telemetry_interval_ms"]),
+        timing_scope=str(measurement_values["timing_scope"]),
+        asset_loading_included=measurement_values["asset_loading_included"],
     )
     batch_size = request.get("batch_size", 1)
     if type(batch_size) is not int or batch_size <= 0:

@@ -12,6 +12,23 @@ suite has 78 family-operation comparisons across 77 unique families because `eag
 exposes both `embed` and `rerank`. A catalog change makes suite validation fail until the
 new row is reviewed.
 
+## Timing contract
+
+The reference implementation defines the measured boundary for each row. The suite records
+that boundary plus two explicit booleans: whether input preparation and external asset loading
+are timed. TRTMC then selects one of two matching scopes:
+
+- `public_pipeline_call_wall` measures the public pipeline call, including its preprocessing
+  and returned output.
+- `model_call_wall` starts at the first TensorRT module invocation and ends when the public
+  operation returns. This excludes pipeline preprocessing prepared before the model call.
+
+Timing alignment is fail-closed. Suite loading checks every row against the shared reference
+contract registry. Before any benchmark command executes, `trtmc-bench --dry-run` must resolve
+the requested TRTMC scope and asset-loading policy for every selected row. The baseline runner
+checks its implemented boundary before collecting samples, and final classification checks
+the recorded policy from both processes. A mismatch produces no performance light.
+
 ## Manual runs
 
 Run one row first:
@@ -37,6 +54,21 @@ matrix. An explicit `--case` takes precedence over the priority ceiling. `--only
 `--only baseline` are debugging modes. `--dry-run` resolves and records both commands without
 loading a model.
 
+To carry forward already-aligned evidence after a timing-contract correction, seed a new
+campaign from the earlier result:
+
+```bash
+python3 tools/perf_release.py benchmarks/performance/release.yaml \
+  --priority slow \
+  --reuse-aligned-from artifacts/previous/results.json \
+  --output artifacts/perf
+```
+
+This mode preflights the complete current matrix. It reuses a terminal row only when the
+resolved workload, measurement settings, non-timing baseline settings, TRTMC boundary, and
+reference boundary all still match. Every other row runs again. The new `results.json`
+records the source hash, reused row IDs, and the reason each non-reused row was rerun.
+
 The command writes only two persistent files:
 
 ```text
@@ -46,11 +78,10 @@ artifacts/perf/report.html
 
 `results.json` is internal evidence and contains raw samples. `report.html` shows the p50
 wall time calculated from those samples, the sample count, the green/yellow/red/white category,
-and a factual timing description for each side. The timing description states the measured
-call boundary and the work included and excluded; it does not infer whether two boundaries are
-aligned. A side without samples is labeled `No timing result`. The report does not expose the
-individual raw samples. Temporary per-backend files are merged into `results.json` and removed
-after the run.
+and the validated timing description for each side. The description states the exact measured
+call boundary and the work included and excluded. A side without samples is labeled
+`No timing result`. The report does not expose the individual raw samples. Temporary
+per-backend files are merged into `results.json` and removed after the run.
 
 Expand `Commands` for any row in `report.html` to see the original `trtmc-bench` and baseline
 commands exactly as they were executed. The report also shows the recorded working directory;
@@ -85,8 +116,8 @@ they are not added to `trtmc-bench`.
 The baseline process is deliberately separate from `trtmc-bench`. Text rows use the shared
 `hf-transformers` runner. Task rows use one of the explicit `task-reference` adapters for
 Diffusers, ASR, TTS, VLM, embedding, reranking, vision, time series, Qwen3-Omni, PersonaPlex,
-ELF, or Lance. Each task result records whether preprocessing is inside the timed call. Model
-loading and warmup are always outside measured samples.
+ELF, or Lance. Each task result records whether preprocessing and external asset loading are
+inside the timed call. Model loading and warmup are always outside measured samples.
 
 The complete slow matrix expects the same reference prerequisites as model E2E validation.
 Special upstream code locations are supplied without changing `release.yaml`:
@@ -105,9 +136,9 @@ campaign and fails immediately when a required profile is missing.
 ## Adding or changing a row
 
 Every setting that changes comparison semantics is visible in `release.yaml`: representative
-model, priority, measurement count, baseline mode, compile scope, precision/padding or MoE
-implementation exceptions, and optional request overrides. Seq2seq rows also declare how
-decoder-start/EOS framing maps
+model, priority, measurement count, baseline mode, timing scope, input/asset inclusion,
+compile scope, precision/padding or MoE implementation exceptions, and optional request
+overrides. Seq2seq rows also declare how decoder-start/EOS framing maps
 to the corresponding TRTMC public result. Generation defaults to exact token-ID equality;
 chat-response rows may explicitly require exact public-text equality instead. The exact
 manifest-derived request and the resolved

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 import json
 from argparse import Namespace
 from pathlib import Path
@@ -74,6 +75,9 @@ p.add_argument('--bundle-root', action='append')
 p.add_argument('--runtime-dir', action='append')
 p.add_argument('--set', action='append')
 a=p.parse_args()
+overrides={{value.split('=',1)[0]:json.loads(value.split('=',1)[1]) for value in a.set or []}}
+timing_scope=overrides.get('measurement.timing_scope','public_pipeline_call_wall')
+asset_loading=overrides.get('measurement.asset_loading_included',False)
 resolved={{
  'schema_version':'trtmc.benchmark-case/v1',
  'name':'default', 'testcase':'distilgpt2', 'operation':'generate',
@@ -83,7 +87,8 @@ resolved={{
             'temperature':0.0,'top_k':1,'top_p':1.0,'min_p':0.0,'seed':-1,
             'use_chat_template':False,'enable_thinking':True}},
  'runtime':{{'cuda_graphs':False}},
- 'measurement':{{'warmup':a.warmup,'iterations':a.iterations,'telemetry':'off','telemetry_interval_ms':1000}},
+ 'measurement':{{'warmup':a.warmup,'iterations':a.iterations,'telemetry':'off','telemetry_interval_ms':1000,
+                'timing_scope':timing_scope,'asset_loading_included':asset_loading}},
  'model':{{'name':'distilgpt2','hf_id':'distilbert/distilgpt2','family':'gpt2',
           'task_strategy':'text_generation_causal','runtime_strategy':'gpt2_decoder_kv_cache',
           'precision':'fp16','manifest':'gpt2/manifests/distilgpt2.json',
@@ -97,7 +102,10 @@ artifact=a.output/'001-distilgpt2-default'; artifact.mkdir()
 observations=[{{'iteration':i,'runtime_e2e_wall_ms':10.0+i/10,'output_tokens':2}} for i in range(a.iterations)]
 (artifact/'observations.jsonl').write_text(''.join(json.dumps(v)+'\\n' for v in observations))
 result={{'schema_version':'trtmc.benchmark-run/v1','run_id':'fake','status':'completed',
- 'measurement_policy':{{'timing_scope':'public_pipeline_call_wall'}},'environment':{{'gpu':'fake'}},
+ 'measurement_policy':{{'timing_scope':timing_scope,
+                       'input_preparation_included':timing_scope=='public_pipeline_call_wall',
+                       'asset_loading_included':asset_loading}},
+ 'environment':{{'gpu':'fake'}},
  'cells':[{{'status':'completed','name':'default','model':'distilgpt2','operation':'generate',
            'case_digest':'candidate-digest','artifact_dir':artifact.name,
            'metrics':{{'sample_count':a.iterations,'latency_ms':{{'p50':10.5}}}},
@@ -134,6 +142,7 @@ value={'schema_version':'trtmc.perf-baseline/v1','status':'completed','backend':
  'compile_scope':'model.forward' if compiled else None,
  'compile_evidence':{'applied':True,'timed_callable_uses_compiled_target':True} if compiled else None,
  'measurement_policy':{'timing_scope':'public_operation_call_wall',
+                       'input_preparation_included':True,'asset_loading_included':False,
                        'model_load_excluded':True,'warmup_excluded':True,
                        'tokenization_included':True},
  'workload_digest':a.workload_digest,'samples_ms':[20.0+i/10 for i in range(a.iterations)],
@@ -158,6 +167,20 @@ def test_release_suite_covers_every_ready_family_operation() -> None:
         "embed",
         "rerank",
     ]
+    assert Counter(perf_release._candidate_timing_scope(case) for case in cases) == {
+        "model_call_wall": 18,
+        "public_pipeline_call_wall": 60,
+    }
+    assert {
+        case["id"]
+        for case in cases
+        if case["baseline"]["asset_loading_included"]
+    } == {
+        "canary.transcribe",
+        "deepseek_ocr.generate",
+        "lance.generate",
+        "nemotron_speech_streaming.transcribe",
+    }
     by_id = {case["id"]: case for case in cases}
     assert by_id["deberta.encode"]["baseline"]["precision"] == "fp32"
     assert by_id["fnet.encode"]["baseline"]["padding"] == "max-length"
@@ -241,6 +264,27 @@ def test_compile_contract_cannot_silently_fall_back_to_eager() -> None:
     assert "mode" in comparison["reason"]
 
 
+def test_suite_timing_contract_drift_is_rejected_before_execution() -> None:
+    case = next(
+        value
+        for value in perf_release._cases(perf_release._read_yaml(SUITE))
+        if value["id"] == "bark.generate_audio"
+    )
+    drifted = {
+        **case,
+        "baseline": {
+            **case["baseline"],
+            "timing_scope": "task-pipeline-call-wall",
+        },
+    }
+
+    with pytest.raises(
+        perf_release.PerfReleaseError,
+        match=r"baseline\.timing_scope must be 'task-model-call-wall'",
+    ):
+        perf_release._validate_baseline(drifted)
+
+
 def test_exact_text_contract_is_explicit_and_still_strict() -> None:
     case = {
         "operation": "generate",
@@ -271,9 +315,10 @@ def test_exact_text_contract_is_explicit_and_still_strict() -> None:
 def test_timing_scope_details_state_measured_included_and_excluded_work() -> None:
     candidate = {
         "measurement_policy": {
-            "timing_scope": "public_pipeline_call_wall",
+            "timing_scope": "model_call_wall",
             "load_excluded": True,
             "warmup_excluded": True,
+            "asset_loading_included": False,
             "telemetry_in_timed_path": False,
         }
     }
@@ -284,14 +329,14 @@ def test_timing_scope_details_state_measured_included_and_excluded_work() -> Non
     }
 
     assert perf_release._timing_scope_details(candidate, "candidate") == {
-        "measured": "public pipeline call",
-        "included": "pipeline-internal preprocessing, inference/generation, returned output",
-        "excluded": "bundle/model load, warmup, request/asset loading, telemetry",
+        "measured": "first TensorRT module call through returned output",
+        "included": "module input transfer, model execution, inter-module work, output materialization",
+        "excluded": "bundle/model load, warmup, pipeline preprocessing, asset loading, telemetry",
     }
     assert perf_release._timing_scope_details(model_only_baseline, "baseline") == {
         "measured": "task model call",
-        "included": "adapter invoke through returned output; input preparation excluded",
-        "excluded": "model load, warmup",
+        "included": "prepared model invocation through returned summary",
+        "excluded": "model load, warmup, input preparation, asset loading",
     }
 
 
@@ -403,6 +448,8 @@ def test_run_consolidates_results_and_records_replayable_commands(tmp_path: Path
     results = json.loads((output / "results.json").read_text(encoding="utf-8"))
     rows = {row["id"]: row for row in results["cases"]}
     assert len(rows) == 78
+    assert results["timing_preflight"]["status"] == "aligned"
+    assert results["timing_preflight"]["case_count"] == 1
     assert rows["gpt2.generate"]["status"] == "green"
     assert rows["gpt2.generate"]["candidate"]["backend"] == "trtmc-bench"
     assert rows["gpt2.generate"]["baseline"]["mode"] == "torch-compile"
@@ -420,9 +467,10 @@ def test_run_consolidates_results_and_records_replayable_commands(tmp_path: Path
     assert "<td>green</td>" not in report
     assert "Needs alignment" not in report
     assert "Measured scope" in report
+    assert "Timing contracts were validated before execution for 1 comparisons" in report
     assert "Measured: public pipeline call" in report
     assert "Measured: public operation call" in report
-    assert "Includes: pipeline-internal preprocessing, inference/generation, returned output" in report
+    assert "Includes: pipeline-internal preprocessing, model execution, returned output" in report
     assert "Excludes: model load, compile setup, warmup" in report
     assert "Show raw commands" in report
     assert str(fake_trtmc) in report
@@ -432,6 +480,23 @@ def test_run_consolidates_results_and_records_replayable_commands(tmp_path: Path
     baseline_argv = rows["gpt2.generate"]["commands"]["baseline"]["argv"]
     request = baseline_argv[baseline_argv.index("--request-json") + 1]
     assert json.loads(request)["prompt"] == "Hello, I'm a language model"
+
+    case = next(
+        value
+        for value in perf_release._cases(perf_release._read_yaml(SUITE))
+        if value["id"] == "gpt2.generate"
+    )
+    resolved = {
+        **rows["gpt2.generate"]["resolved_settings"],
+        "operation": rows["gpt2.generate"]["operation"],
+    }
+    assert perf_release._reuse_mismatch(case, rows["gpt2.generate"], resolved) == ""
+    rows["gpt2.generate"]["candidate"]["measurement_policy"]["timing_scope"] = (
+        "model_call_wall"
+    )
+    assert "TRTMC timing boundary" in perf_release._reuse_mismatch(
+        case, rows["gpt2.generate"], resolved
+    )
 
 
 def test_task_reference_commands_record_external_checkout_paths(
@@ -496,7 +561,7 @@ def test_suite_has_explicit_eager_and_task_reference_rows() -> None:
         assert rows[case_id]["baseline"]["mode"] in {"hf-eager", "pytorch-eager"}
 
 
-def test_resolution_failure_is_recorded_per_case(tmp_path: Path, monkeypatch) -> None:
+def test_resolution_failure_stops_preflight_before_execution(tmp_path: Path, monkeypatch) -> None:
     case = perf_release._cases(perf_release._read_yaml(SUITE))[0]
     options = perf_release.RunOptions(
         output=tmp_path,
@@ -511,6 +576,7 @@ def test_resolution_failure_is_recorded_per_case(tmp_path: Path, monkeypatch) ->
         dry_run=False,
         ci=False,
         resume=False,
+        reuse_aligned_from=None,
         rerun_failed=False,
         local_files_only=False,
         timeout_seconds=1,
@@ -521,11 +587,11 @@ def test_resolution_failure_is_recorded_per_case(tmp_path: Path, monkeypatch) ->
 
     monkeypatch.setattr(perf_release, "_resolve_candidate", fail_resolution)
 
-    row = perf_release._run_one(case, options, tmp_path)
-
-    assert row["status"] == "failed"
-    assert row["reason"] == "profile unavailable"
-    assert row["commands"]["resolve"]["argv"][-1] == "--dry-run"
+    with pytest.raises(
+        perf_release.PerfReleaseError,
+        match="timing preflight failed before benchmark execution",
+    ):
+        perf_release._preflight_candidates([case], options)
 
 
 def test_explicit_case_takes_precedence_over_priority() -> None:
@@ -669,7 +735,16 @@ def test_task_reference_runner_measures_loaded_public_operation(
     assert result["adapter"] == "hf-transformers-asr"
     assert result["timing_scope"] == "task-model-call-wall"
     assert result["input_preparation_included"] is False
+    assert result["asset_loading_included"] is False
     assert result["model_load_included"] is False
+    assert result["measurement_policy"] == {
+        "timing_scope": "task-model-call-wall",
+        "input_preparation_included": False,
+        "asset_loading_included": False,
+        "model_load_excluded": True,
+        "warmup_excluded": True,
+        "output_materialization_included": True,
+    }
     assert result["measurement"] == {"warmup": 1, "iterations": 2}
     assert len(result["samples_ms"]) == 2
     assert result["reference_source"] == {
@@ -1389,7 +1464,7 @@ def test_sana_wm_adapter_runs_pinned_official_pipeline_with_resolved_inputs(
         "pinned-commit",
         "sana-wm-pytorch",
         "task-pipeline-call-wall",
-        False,
+        True,
     )
     command = captured["command"]
     assert command[command.index("--num_frames") + 1] == "321"

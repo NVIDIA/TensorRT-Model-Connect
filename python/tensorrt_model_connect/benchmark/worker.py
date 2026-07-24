@@ -88,8 +88,17 @@ def run_worker(case: ResolvedCase, case_dir: Path, worker: Path) -> dict[str, An
         raise BenchmarkError("worker result case_digest does not match the resolved case")
     if result.get("operation") not in {None, case.operation}:
         raise BenchmarkError("worker result operation does not match the resolved case")
-    if result.get("timing_scope") not in {None, "public_pipeline_call_wall"}:
-        raise BenchmarkError("worker result has an unsupported timing_scope")
+    if result.get("timing_scope") != case.measurement.timing_scope:
+        raise BenchmarkError(
+            "worker result timing_scope does not match measurement.timing_scope"
+        )
+    if (
+        result.get("asset_loading_included")
+        is not case.measurement.asset_loading_included
+    ):
+        raise BenchmarkError(
+            "worker result asset_loading_included does not match measurement policy"
+        )
     observations = result.get("observations")
     if not isinstance(observations, list) or len(observations) != case.measurement.iterations:
         raise BenchmarkError("worker observation count does not match measurement.iterations")

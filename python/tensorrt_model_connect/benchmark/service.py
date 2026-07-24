@@ -55,13 +55,29 @@ class BenchmarkService:
         except OSError as exc:
             raise BenchmarkError(f"cannot create output directory {output_dir}: {exc}") from exc
         started = _now()
+        timing_scopes = {case.measurement.timing_scope for case in resolved_cases}
+        asset_loading_values = {
+            case.measurement.asset_loading_included for case in resolved_cases
+        }
         result: dict[str, Any] = {
             "schema_version": "trtmc.benchmark-run/v1",
             "run_id": str(uuid.uuid4()),
             "status": "running",
             "started_at": started,
             "measurement_policy": {
-                "timing_scope": "public_pipeline_call_wall",
+                "timing_scope": (
+                    next(iter(timing_scopes)) if len(timing_scopes) == 1 else "per_case"
+                ),
+                "input_preparation_included": (
+                    next(iter(timing_scopes)) == "public_pipeline_call_wall"
+                    if len(timing_scopes) == 1
+                    else "per_case"
+                ),
+                "asset_loading_included": (
+                    next(iter(asset_loading_values))
+                    if len(asset_loading_values) == 1
+                    else "per_case"
+                ),
                 "load_excluded": True,
                 "warmup_excluded": True,
                 "task_quality_evaluated": False,
@@ -115,6 +131,10 @@ class BenchmarkService:
                 "output_summary": worker_result.get("output_summary", {}),
                 "pipeline_type": worker_result.get("pipeline_type"),
                 "load_ms": worker_result.get("load_ms"),
+                "timing_scope": worker_result.get("timing_scope"),
+                "asset_loading_included": worker_result.get(
+                    "asset_loading_included"
+                ),
             }
             discard_success_protocol_evidence(case_dir)
         except (BenchmarkError, OSError, subprocess.SubprocessError) as exc:

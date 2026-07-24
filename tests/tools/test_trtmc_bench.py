@@ -62,6 +62,8 @@ json.dump({
   'schema_version': 'trtmc.benchmark-worker-result/v1',
   'status': 'completed',
   'case_digest': r['case_digest'],
+  'timing_scope': r['measurement']['timing_scope'],
+  'asset_loading_included': r['measurement']['asset_loading_included'],
   'pipeline_type': 'fake',
   'load_ms': 10.0,
   'observations': o,
@@ -790,10 +792,17 @@ def test_text_generation_distinguishes_testcase_and_operation_defaults(
 
     overridden = benchmark_catalog.apply_overrides(
         case,
-        {"request.temperature": 0.5, "measurement.iterations": 7},
+        {
+            "request.temperature": 0.5,
+            "measurement.iterations": 7,
+            "measurement.timing_scope": "model_call_wall",
+            "measurement.asset_loading_included": False,
+        },
     )
     assert overridden.sources["request.temperature"] == "user override"
     assert overridden.sources["measurement.iterations"] == "user override"
+    assert overridden.measurement.timing_scope == "model_call_wall"
+    assert overridden.measurement.asset_loading_included is False
 
 
 def test_all_advertised_defaults_explain_every_request_field(tmp_path: Path) -> None:

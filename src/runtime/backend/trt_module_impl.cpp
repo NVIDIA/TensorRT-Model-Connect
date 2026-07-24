@@ -6,6 +6,7 @@
 #include "trt_module_impl.h"
 
 #include "runtime/core/trt_common.h"
+#include "trtmc/runtime/measurement.h"
 
 #include <algorithm>
 #include <cstring>
@@ -469,6 +470,7 @@ void TrtModuleImpl::enable_cuda_graph() {
 }
 
 void TrtModuleImpl::forward_async(const TensorMap& inputs) {
+    runtime_measurement::record_model_call_start();
     // Upload inputs H2D, updating shapes for dynamic engines
     for (const auto& [name, tensor] : inputs) {
         auto it = buffers_.find(name);
@@ -583,6 +585,7 @@ void TrtModuleImpl::sync() {
 // --- Forward device async (GPU → GPU, no sync) ---
 
 void TrtModuleImpl::forward_device_async(const DeviceTensorMap& inputs) {
+    runtime_measurement::record_model_call_start();
     // D2D copy input DeviceTensors into our buffers
     for (const auto& [name, dt_ptr] : inputs) {
         auto it = buffers_.find(name);

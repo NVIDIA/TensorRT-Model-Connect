@@ -500,6 +500,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "output_token_policy": arguments.output_token_policy,
         "measurement_policy": {
             "timing_scope": "public_operation_call_wall",
+            "input_preparation_included": True,
+            "asset_loading_included": False,
             "model_load_excluded": True,
             "compile_excluded": True,
             "warmup_excluded": True,

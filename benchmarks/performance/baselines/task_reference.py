@@ -28,6 +28,9 @@ REPOSITORY = Path(__file__).resolve().parents[3]
 for source_root in (REPOSITORY, REPOSITORY / "python"):
     if str(source_root) not in sys.path:
         sys.path.insert(0, str(source_root))
+
+from benchmarks.performance.baselines.timing_contracts import timing_contract  # noqa: E402
+
 SYSTEM_PROMPT_QWEN3_OMNI = (
     "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, "
     "capable of perceiving auditory and visual inputs, as well as generating "
@@ -87,6 +90,7 @@ class Session:
     framework: str
     timing_scope: str = "task-model-call-wall"
     input_preparation_included: bool = False
+    asset_loading_included: bool = False
     reference_dependencies: Mapping[str, str] | None = None
     reference_source: Mapping[str, str] | None = None
 
@@ -102,6 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--request-json", required=True)
     parser.add_argument("--runtime-json", default="{}")
     parser.add_argument("--adapter-options-json", default="{}")
+    parser.add_argument("--timing-contract-json", default="{}")
     parser.add_argument("--precision", required=True, choices=("fp16", "fp32", "bf16"))
     parser.add_argument("--mode", required=True, choices=("hf-eager", "pytorch-eager"))
     parser.add_argument("--padding", default="longest")
@@ -429,6 +434,15 @@ def _load_tts(
         revision = _resolved_revision(arguments, model)
         framework = "transformers"
         dependencies = None
+    if arguments.family == "magpie_tts":
+        return Session(
+            invoke,
+            revision,
+            framework,
+            timing_scope="task-pipeline-call-wall",
+            input_preparation_included=True,
+            reference_dependencies=dependencies,
+        )
     return Session(invoke, revision, framework, reference_dependencies=dependencies)
 
 
@@ -527,6 +541,15 @@ def _load_asr(
     framework = (
         "nemo" if arguments.family in {"canary", "nemotron_speech_streaming"} else "transformers"
     )
+    if arguments.family in {"canary", "nemotron_speech_streaming"}:
+        return Session(
+            invoke,
+            _resolved_revision(arguments, model),
+            framework,
+            timing_scope="task-pipeline-call-wall",
+            input_preparation_included=True,
+            asset_loading_included=True,
+        )
     return Session(invoke, _resolved_revision(arguments, model), framework)
 
 
@@ -597,6 +620,7 @@ def _load_deepseek_ocr(
         "transformers",
         timing_scope="task-pipeline-call-wall",
         input_preparation_included=True,
+        asset_loading_included=True,
     )
 
 
@@ -1785,7 +1809,7 @@ def _run_elf(
         summary,
         reference_revision,
         "elf-pytorch",
-        "task-pipeline-call-wall",
+        "task-model-call-wall",
         False,
     )
 
@@ -1996,7 +2020,7 @@ def _run_sana_wm(
         reference_revision,
         "sana-wm-pytorch",
         "task-pipeline-call-wall",
-        False,
+        True,
         {
             "repository": "https://github.com/NVlabs/Sana",
             "revision": reference_revision,
@@ -2037,6 +2061,26 @@ def run(arguments: argparse.Namespace) -> int:
     request = _json_object(arguments.request_json, "--request-json")
     arguments.resolved_runtime = _json_object(arguments.runtime_json, "--runtime-json")
     options = _json_object(arguments.adapter_options_json, "--adapter-options-json")
+    configured_timing = _json_object(
+        arguments.timing_contract_json, "--timing-contract-json"
+    )
+    declared_timing = timing_contract(
+        runner="task-reference",
+        family=arguments.family,
+    )
+    expected_timing = {
+        name: declared_timing[name]
+        for name in (
+            "timing_scope",
+            "input_preparation_included",
+            "asset_loading_included",
+        )
+    }
+    if configured_timing and configured_timing != expected_timing:
+        raise ValueError(
+            f"configured timing contract does not match {arguments.family} reference: "
+            f"configured={configured_timing}, reference={expected_timing}"
+        )
     load_started = time.perf_counter()
     load_seconds: float | None = None
     reference_source: dict[str, str] | None = None
@@ -2068,13 +2112,36 @@ def run(arguments: argparse.Namespace) -> int:
     else:
         session = LOADERS[arguments.adapter](arguments, request, options)
         load_seconds = time.perf_counter() - load_started
-        samples, output_summary = _measure(session, arguments.warmup, arguments.iterations)
         revision = session.resolved_revision
         framework = session.framework
         timing_scope = session.timing_scope
         input_included = session.input_preparation_included
+        asset_included = session.asset_loading_included
         reference_dependencies = session.reference_dependencies
         reference_source = session.reference_source
+        actual_timing = {
+            "timing_scope": timing_scope,
+            "input_preparation_included": input_included,
+            "asset_loading_included": asset_included,
+        }
+        if actual_timing != expected_timing:
+            raise RuntimeError(
+                f"{arguments.family} reference implementation timing drifted: "
+                f"actual={actual_timing}, declared={expected_timing}"
+            )
+        samples, output_summary = _measure(session, arguments.warmup, arguments.iterations)
+    if arguments.adapter in {"upstream-elf", "upstream-lance", "upstream-sana-wm"}:
+        asset_included = bool(expected_timing["asset_loading_included"])
+        actual_timing = {
+            "timing_scope": timing_scope,
+            "input_preparation_included": input_included,
+            "asset_loading_included": asset_included,
+        }
+        if actual_timing != expected_timing:
+            raise RuntimeError(
+                f"{arguments.family} reference implementation timing drifted: "
+                f"actual={actual_timing}, declared={expected_timing}"
+            )
     result = {
         "schema_version": "trtmc.perf-baseline/v1",
         "status": "completed",
@@ -2089,6 +2156,7 @@ def run(arguments: argparse.Namespace) -> int:
         "compile_evidence": None,
         "timing_scope": timing_scope,
         "input_preparation_included": input_included,
+        "asset_loading_included": asset_included,
         "model_load_included": False,
         "model_load_seconds": load_seconds,
         "model": arguments.model,
@@ -2097,6 +2165,14 @@ def run(arguments: argparse.Namespace) -> int:
         "measurement": {
             "warmup": arguments.warmup,
             "iterations": arguments.iterations,
+        },
+        "measurement_policy": {
+            "timing_scope": timing_scope,
+            "input_preparation_included": input_included,
+            "asset_loading_included": asset_included,
+            "model_load_excluded": True,
+            "warmup_excluded": True,
+            "output_materialization_included": True,
         },
         "samples_ms": samples,
         "metrics": {

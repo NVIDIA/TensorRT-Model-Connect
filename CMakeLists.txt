@@ -176,6 +176,7 @@ add_library(trtmc_core SHARED
   src/runtime/providers/optimized_runtime_host.cpp
   src/runtime/core/distributed_runtime.cpp
   src/runtime/core/device_tensor.cpp
+  src/runtime/core/measurement.cpp
   src/runtime/core/pipeline_pool.cpp
   src/runtime/core/stb_impl.cpp
   src/tokenizer/vocab_tokenizer.cpp
@@ -820,6 +821,7 @@ trtmc_add_test(test_model_plugin_loader MODEL_OWNED)
 add_dependencies(test_model_plugin_loader trtmc_model_plugins)
 trtmc_add_test(test_backend_loader)
 trtmc_add_test(test_trt_version)
+trtmc_add_test(test_runtime_measurement)
 
 trtmc_add_test(test_optimized_runtime_host)
 add_dependencies(test_optimized_runtime_host

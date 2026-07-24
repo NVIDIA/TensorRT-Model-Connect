@@ -66,6 +66,8 @@ class MeasurementSpec:
     iterations: int
     telemetry: str = "auto"
     telemetry_interval_ms: int = 1000
+    timing_scope: str = "public_pipeline_call_wall"
+    asset_loading_included: bool = False
 
     def __post_init__(self) -> None:
         if self.warmup < 0:
@@ -76,6 +78,17 @@ class MeasurementSpec:
             raise BenchmarkError("telemetry.gpu must be 'auto' or 'off'")
         if self.telemetry_interval_ms < 100:
             raise BenchmarkError("telemetry.interval_ms must be at least 100")
+        if self.timing_scope not in {"public_pipeline_call_wall", "model_call_wall"}:
+            raise BenchmarkError(
+                "measurement.timing_scope must be 'public_pipeline_call_wall' "
+                "or 'model_call_wall'"
+            )
+        if not isinstance(self.asset_loading_included, bool):
+            raise BenchmarkError("measurement.asset_loading_included must be a boolean")
+        if self.timing_scope == "model_call_wall" and self.asset_loading_included:
+            raise BenchmarkError(
+                "measurement.asset_loading_included cannot be true for model_call_wall"
+            )
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -83,6 +96,8 @@ class MeasurementSpec:
             "iterations": self.iterations,
             "telemetry": self.telemetry,
             "telemetry_interval_ms": self.telemetry_interval_ms,
+            "timing_scope": self.timing_scope,
+            "asset_loading_included": self.asset_loading_included,
         }
 
 
@@ -145,6 +160,8 @@ class ResolvedCase:
             "measurement": {
                 "warmup": self.measurement.warmup,
                 "iterations": self.measurement.iterations,
+                "timing_scope": self.measurement.timing_scope,
+                "asset_loading_included": self.measurement.asset_loading_included,
             },
         }
 

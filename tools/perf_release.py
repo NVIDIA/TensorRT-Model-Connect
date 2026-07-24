@@ -32,9 +32,11 @@ import yaml
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 PYTHON_SOURCE = REPOSITORY / "python"
-if str(PYTHON_SOURCE) not in sys.path:
-    sys.path.insert(0, str(PYTHON_SOURCE))
+for source_root in (REPOSITORY, PYTHON_SOURCE):
+    if str(source_root) not in sys.path:
+        sys.path.insert(0, str(source_root))
 
+from benchmarks.performance.baselines.timing_contracts import timing_contract  # noqa: E402
 from tensorrt_model_connect.benchmark.catalog import ManifestCatalog  # noqa: E402
 from tensorrt_model_connect.python_profiles import (  # noqa: E402
     default_execution_profiles,
@@ -91,6 +93,7 @@ class RunOptions:
     dry_run: bool
     ci: bool
     resume: bool
+    reuse_aligned_from: Path | None
     rerun_failed: bool
     local_files_only: bool
     timeout_seconds: int
@@ -111,6 +114,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--ci", action="store_true", help="fail after reporting unexpected rows")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--reuse-aligned-from",
+        type=Path,
+        help=(
+            "seed a new report from aligned terminal rows in an earlier results.json; "
+            "rows with changed timing contracts are run again"
+        ),
+    )
     parser.add_argument("--rerun-failed", action="store_true")
     parser.add_argument("--trtmc-bench", default=os.environ.get("TRTMC_BENCH", "trtmc-bench"))
     parser.add_argument(
@@ -327,6 +338,20 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
             raise PerfReleaseError(
                 f"case {case['id']} OCR output contract has an invalid edit-distance limit"
             )
+    expected_timing = timing_contract(
+        runner=str(baseline["runner"]),
+        family=str(case["family"]),
+    )
+    for name in (
+        "timing_scope",
+        "input_preparation_included",
+        "asset_loading_included",
+    ):
+        if baseline.get(name) != expected_timing[name]:
+            raise PerfReleaseError(
+                f"case {case['id']} baseline.{name} must be "
+                f"{expected_timing[name]!r} for its reference"
+            )
     mode = baseline.get("mode", "torch-compile")
     allowed_modes = (
         {"hf-eager", "pytorch-eager"}
@@ -504,6 +529,18 @@ def _load_resume(path: Path, suite_path: Path) -> dict[str, Any]:
     return value
 
 
+def _load_results(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PerfReleaseError(f"cannot read results {path}: {exc}") from exc
+    if value.get("schema_version") != RESULT_SCHEMA:
+        raise PerfReleaseError(f"cannot reuse non-{RESULT_SCHEMA} results")
+    if not isinstance(value.get("cases"), list):
+        raise PerfReleaseError(f"cannot reuse results without a cases list: {path}")
+    return value
+
+
 def _result_rows(results: MutableMapping[str, Any]) -> dict[str, MutableMapping[str, Any]]:
     return {str(row["id"]): row for row in results["cases"]}
 
@@ -532,6 +569,12 @@ def _candidate_base_argv(case: Mapping[str, Any], options: RunOptions) -> list[s
         str(measurement["iterations"]),
         "--telemetry",
         "off",
+        "--set",
+        "measurement.timing_scope="
+        + _yaml_cli_value(_candidate_timing_scope(case)),
+        "--set",
+        "measurement.asset_loading_included="
+        + _yaml_cli_value(bool(case["baseline"]["asset_loading_included"])),
     ]
     testcase = case.get("testcase")
     if testcase:
@@ -550,6 +593,15 @@ def _candidate_base_argv(case: Mapping[str, Any], options: RunOptions) -> list[s
     for name, value in sorted((request or {}).items()):
         argv.extend(["--set", f"request.{name}={_yaml_cli_value(value)}"])
     return argv
+
+
+def _candidate_timing_scope(case: Mapping[str, Any]) -> str:
+    return str(
+        timing_contract(
+            runner=str(case["baseline"]["runner"]),
+            family=str(case["family"]),
+        )["candidate_timing_scope"]
+    )
 
 
 def _command_environment() -> dict[str, str]:
@@ -583,8 +635,77 @@ def _resolve_candidate(
         case["operation"],
     ):
         raise PerfReleaseError(f"case {case['id']} does not match its resolved family-operation")
+    measurement = value.get("measurement", {})
+    expected_scope = _candidate_timing_scope(case)
+    if not isinstance(measurement, Mapping) or measurement.get("timing_scope") != expected_scope:
+        raise PerfReleaseError(
+            f"case {case['id']} TRTMC timing scope did not resolve to {expected_scope}"
+        )
+    expected_asset_loading = bool(case["baseline"]["asset_loading_included"])
+    if measurement.get("asset_loading_included") is not expected_asset_loading:
+        raise PerfReleaseError(
+            f"case {case['id']} TRTMC asset-loading scope did not resolve to "
+            f"{expected_asset_loading}"
+        )
+    request = value.get("request", {})
+    if expected_asset_loading and not any(
+        name in request for name in ("audio_path", "image_path")
+    ):
+        raise PerfReleaseError(
+            f"case {case['id']} includes asset loading but resolves no timed asset path"
+        )
     command.pop("stdout", None)
     return value, argv, command
+
+
+def _preflight_candidates(
+    cases: Sequence[Mapping[str, Any]],
+    options: RunOptions,
+) -> dict[str, tuple[dict[str, Any], list[str], dict[str, str]]]:
+    resolved: dict[str, tuple[dict[str, Any], list[str], dict[str, str]]] = {}
+    failures: list[str] = []
+    for case in cases:
+        case_id = str(case["id"])
+        print(f"[{case_id}] timing preflight", flush=True)
+        try:
+            resolved[case_id] = _resolve_candidate(case, options)
+        except (PerfReleaseError, OSError, ValueError, RuntimeError) as exc:
+            failures.append(f"{case_id}: {exc}")
+    if failures:
+        detail = "\n".join(f"  - {failure}" for failure in failures)
+        raise PerfReleaseError(
+            "candidate timing preflight failed before benchmark execution:\n" + detail
+        )
+    return resolved
+
+
+def _preflight_evidence(
+    cases: Sequence[Mapping[str, Any]],
+    preflight: Mapping[str, tuple[dict[str, Any], list[str], dict[str, str]]],
+) -> dict[str, Any]:
+    contracts = []
+    for case in cases:
+        expected = timing_contract(
+            runner=str(case["baseline"]["runner"]),
+            family=str(case["family"]),
+        )
+        resolved = preflight[str(case["id"])][0]
+        contracts.append(
+            {
+                "id": case["id"],
+                "reference_timing_scope": expected["timing_scope"],
+                "candidate_timing_scope": resolved["measurement"]["timing_scope"],
+                "input_preparation_included": expected["input_preparation_included"],
+                "asset_loading_included": expected["asset_loading_included"],
+                "status": "aligned",
+            }
+        )
+    return {
+        "checked_at": _now(),
+        "case_count": len(contracts),
+        "status": "aligned",
+        "contracts": contracts,
+    }
 
 
 def _workload_digest(resolved: Mapping[str, Any]) -> str:
@@ -745,6 +866,19 @@ def _task_reference_argv(
         json.dumps(resolved.get("runtime", {}), ensure_ascii=True, separators=(",", ":")),
         "--adapter-options-json",
         json.dumps(adapter_options, ensure_ascii=True, separators=(",", ":")),
+        "--timing-contract-json",
+        json.dumps(
+            {
+                name: baseline[name]
+                for name in (
+                    "timing_scope",
+                    "input_preparation_included",
+                    "asset_loading_included",
+                )
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ),
         "--precision",
         str(baseline.get("precision", model["precision"])),
         "--mode",
@@ -1013,6 +1147,9 @@ def _baseline_contract_mismatch(
     candidate: Mapping[str, Any],
     baseline: Mapping[str, Any],
 ) -> str:
+    timing_mismatch = _timing_contract_mismatch(case, candidate, baseline)
+    if timing_mismatch:
+        return timing_mismatch
     expected_mode = str(case["baseline"].get("mode", "torch-compile"))
     if baseline.get("mode") != expected_mode:
         return "baseline mode differs from the suite"
@@ -1044,13 +1181,6 @@ def _baseline_contract_mismatch(
     if case["baseline"].get("runner") == "task-reference":
         if baseline.get("resolved_revision") in {None, "", "unresolved"}:
             return "task reference model revision is unresolved"
-        if baseline.get("timing_scope") not in {
-            "task-model-call-wall",
-            "task-pipeline-call-wall",
-        }:
-            return "task reference timing scope is not recognized"
-        if not isinstance(baseline.get("input_preparation_included"), bool):
-            return "task reference input-preparation scope is missing"
         if baseline.get("model_load_included") is not False:
             return "task reference timing includes model loading"
         return ""
@@ -1061,6 +1191,42 @@ def _baseline_contract_mismatch(
         return "torch.compile evidence is missing"
     if not evidence.get("timed_callable_uses_compiled_target"):
         return "compiled target was not used while timing"
+    return ""
+
+
+def _timing_contract_mismatch(
+    case: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+) -> str:
+    if "timing_scope" not in case["baseline"]:
+        return ""
+    expected = timing_contract(
+        runner=str(case["baseline"]["runner"]),
+        family=str(case["family"]),
+    )
+    candidate_policy = candidate.get("measurement_policy", {})
+    if not isinstance(candidate_policy, Mapping):
+        return "TRTMC timing policy is missing"
+    candidate_fields = {
+        "timing_scope": "candidate_timing_scope",
+        "input_preparation_included": "input_preparation_included",
+        "asset_loading_included": "asset_loading_included",
+    }
+    for actual_name, expected_name in candidate_fields.items():
+        if candidate_policy.get(actual_name) != expected[expected_name]:
+            label = actual_name.replace("_", " ")
+            return f"TRTMC {label} differs from the reference contract"
+    baseline_policy = baseline.get("measurement_policy", {})
+    if not isinstance(baseline_policy, Mapping):
+        return "baseline timing policy is missing"
+    for name in (
+        "timing_scope",
+        "input_preparation_included",
+        "asset_loading_included",
+    ):
+        if baseline_policy.get(name) != expected[name]:
+            return f"baseline {name.replace('_', ' ')} differs from the suite"
     return ""
 
 
@@ -1155,13 +1321,13 @@ def _stable_even(value: str) -> bool:
     return int(hashlib.sha256(value.encode("utf-8")).hexdigest()[:2], 16) % 2 == 0
 
 
-def _run_one(case: Mapping[str, Any], options: RunOptions, work_root: Path) -> dict[str, Any]:
-    print(f"[{case['id']}] resolving", flush=True)
-    dry_argv = [*_candidate_base_argv(case, options), "--dry-run"]
-    try:
-        resolved, dry_argv, dry_command = _resolve_candidate(case, options)
-    except (PerfReleaseError, OSError, ValueError, RuntimeError) as exc:
-        return _resolution_failure_row(case, dry_argv, str(exc))
+def _run_one(
+    case: Mapping[str, Any],
+    options: RunOptions,
+    work_root: Path,
+    preflight: tuple[dict[str, Any], list[str], dict[str, str]],
+) -> dict[str, Any]:
+    resolved, _, dry_command = preflight
     digest = _workload_digest(resolved)
     row = _case_row(case, resolved, digest)
     row["commands"]["resolve"] = dry_command
@@ -1204,6 +1370,8 @@ def _slug(value: str) -> str:
 
 def _should_skip(row: Mapping[str, Any], options: RunOptions) -> bool:
     status = row.get("status")
+    if row.get("evidence_reuse") and status in {"green", "yellow", "red"}:
+        return True
     if not options.resume or status not in TERMINAL_STATUSES:
         return False
     return not options.rerun_failed or status not in {"failed", "contract-mismatch"}
@@ -1268,6 +1436,13 @@ def _timing_scope(result: Mapping[str, Any]) -> str | None:
     return str(scope) if scope else None
 
 
+def _timing_policy_value(result: Mapping[str, Any], name: str) -> Any:
+    policy = result.get("measurement_policy")
+    if isinstance(policy, Mapping) and name in policy:
+        return policy[name]
+    return result.get(name)
+
+
 def _timing_scope_details(result: Mapping[str, Any], side: str) -> dict[str, str]:
     scope = _timing_scope(result)
     if not scope:
@@ -1277,10 +1452,34 @@ def _timing_scope_details(result: Mapping[str, Any], side: str) -> dict[str, str
             "excluded": "—",
         }
     if side == "candidate" and scope == "public_pipeline_call_wall":
+        asset_included = _timing_policy_value(result, "asset_loading_included") is True
         return {
-            "measured": "public pipeline call",
-            "included": "pipeline-internal preprocessing, inference/generation, returned output",
-            "excluded": "bundle/model load, warmup, request/asset loading, telemetry",
+            "measured": (
+                "asset load and public pipeline call"
+                if asset_included
+                else "public pipeline call"
+            ),
+            "included": (
+                "asset loading, pipeline-internal preprocessing, model execution, returned output"
+                if asset_included
+                else "pipeline-internal preprocessing, model execution, returned output"
+            ),
+            "excluded": (
+                "bundle/model load, warmup, telemetry"
+                if asset_included
+                else "bundle/model load, warmup, asset loading, telemetry"
+            ),
+        }
+    if side == "candidate" and scope == "model_call_wall":
+        return {
+            "measured": "first TensorRT module call through returned output",
+            "included": (
+                "module input transfer, model execution, inter-module work, "
+                "output materialization"
+            ),
+            "excluded": (
+                "bundle/model load, warmup, pipeline preprocessing, asset loading, telemetry"
+            ),
         }
     if scope == "public_operation_call_wall":
         return {
@@ -1288,17 +1487,30 @@ def _timing_scope_details(result: Mapping[str, Any], side: str) -> dict[str, str
             "included": "tokenization, device transfers, model operation, output materialization",
             "excluded": "model load, compile setup, warmup",
         }
-    if scope in {"task-model-call-wall", "task-pipeline-call-wall"}:
-        input_scope = (
-            "input preparation included"
-            if result.get("input_preparation_included") is True
-            else "input preparation excluded"
-        )
-        measured = "task model call" if scope == "task-model-call-wall" else "task pipeline call"
+    if scope == "task-model-call-wall":
         return {
-            "measured": measured,
-            "included": f"adapter invoke through returned output; {input_scope}",
-            "excluded": "model load, warmup",
+            "measured": "task model call",
+            "included": "prepared model invocation through returned summary",
+            "excluded": "model load, warmup, input preparation, asset loading",
+        }
+    if scope == "task-pipeline-call-wall":
+        asset_included = _timing_policy_value(result, "asset_loading_included") is True
+        return {
+            "measured": (
+                "asset load and task pipeline call"
+                if asset_included
+                else "task pipeline call"
+            ),
+            "included": (
+                "asset loading, reference input preparation, model operation, returned summary"
+                if asset_included
+                else "reference input preparation, model operation, returned summary"
+            ),
+            "excluded": (
+                "model load, warmup"
+                if asset_included
+                else "model load, warmup, asset loading"
+            ),
         }
     return {
         "measured": scope,
@@ -1415,6 +1627,17 @@ def _report_html(results: Mapping[str, Any]) -> str:
         if repeated_families
         else ""
     )
+    preflight = results.get("timing_preflight", {})
+    preflight_count = (
+        int(preflight.get("case_count", 0)) if isinstance(preflight, Mapping) else 0
+    )
+    reuse = results.get("evidence_reuse", {})
+    reuse_note = ""
+    if isinstance(reuse, Mapping) and reuse.get("reused_case_count"):
+        reuse_note = (
+            f" {int(reuse['reused_case_count'])} already-aligned rows reused their "
+            "recorded samples; remaining rows were rerun."
+        )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TRTMC release performance matrix</title>
@@ -1430,7 +1653,8 @@ th{{background:#e5e7eb}} tr:nth-child(even){{background:#f9fafb}} code{{font-siz
 </style></head><body>
 <h1>TRTMC release performance matrix</h1>
 <p class="meta">Generated {generated}. {family_count} families across {len(rows)} family-operation comparisons.{repeated_note}</p>
-<p class="meta">Times are the p50 wall time from the recorded timed samples. The measured scope states the recorded timing boundary and the work included and excluded on each side; no alignment judgment is inferred.</p>
+<p class="meta">Timing contracts were validated before execution for {preflight_count} comparisons. A row is classified only when its recorded TRTMC and reference policies match that contract.{reuse_note}</p>
+<p class="meta">Times are the p50 wall time from the recorded timed samples. Measured scope states the exact recorded boundary and the work included and excluded on each side.</p>
 <p><strong>{summary}</strong></p>
 <div class="table-wrap"><table><thead><tr><th>Family</th><th>Operation</th><th>Model</th><th>Baseline</th><th>TRTMC p50 (ms)</th><th>Baseline p50 (ms)</th><th>Measured scope</th><th>Light</th><th>Note</th><th>Commands</th></tr></thead>
 <tbody>{"".join(body)}</tbody></table></div>
@@ -1446,12 +1670,136 @@ def _write_artifacts(output: Path, results: Mapping[str, Any]) -> None:
         legacy_replay.unlink()
 
 
+def _policy_for_reuse(result: Mapping[str, Any], side: str) -> dict[str, Any]:
+    scope = _timing_scope(result)
+    input_included = _timing_policy_value(result, "input_preparation_included")
+    if input_included is None:
+        if side == "candidate":
+            input_included = scope == "public_pipeline_call_wall"
+        elif scope == "public_operation_call_wall":
+            input_included = _timing_policy_value(result, "tokenization_included") is True
+    asset_included = _timing_policy_value(result, "asset_loading_included")
+    if asset_included is None:
+        asset_included = False
+    return {
+        "timing_scope": scope,
+        "input_preparation_included": input_included,
+        "asset_loading_included": asset_included,
+    }
+
+
+def _without_timing_contract(value: Mapping[str, Any]) -> dict[str, Any]:
+    ignored = {
+        "timing_scope",
+        "input_preparation_included",
+        "asset_loading_included",
+    }
+    return {name: item for name, item in value.items() if name not in ignored}
+
+
+def _reuse_mismatch(
+    case: Mapping[str, Any],
+    row: Mapping[str, Any],
+    resolved: Mapping[str, Any],
+) -> str:
+    if row.get("status") not in {"green", "yellow", "red"}:
+        return "earlier row is not a valid completed comparison"
+    identity = (row.get("family"), row.get("operation"), row.get("model"))
+    if identity != (case["family"], case["operation"], case["model"]):
+        return "case identity changed"
+    previous_contract = row.get("baseline_contract")
+    if not isinstance(previous_contract, Mapping) or _without_timing_contract(
+        previous_contract
+    ) != _without_timing_contract(case["baseline"]):
+        return "non-timing baseline contract changed"
+    recorded_measurement = row.get("resolved_settings", {}).get("measurement")
+    if recorded_measurement != case["measurement"]:
+        return "measurement settings changed"
+    candidate = row.get("candidate")
+    baseline = row.get("baseline")
+    if not isinstance(candidate, Mapping) or not isinstance(baseline, Mapping):
+        return "recorded candidate or baseline evidence is missing"
+    digest = _workload_digest(resolved)
+    if candidate.get("workload_digest") != digest or baseline.get("workload_digest") != digest:
+        return "resolved workload changed"
+    expected = timing_contract(
+        runner=str(case["baseline"]["runner"]),
+        family=str(case["family"]),
+    )
+    candidate_expected = {
+        "timing_scope": expected["candidate_timing_scope"],
+        "input_preparation_included": expected["input_preparation_included"],
+        "asset_loading_included": expected["asset_loading_included"],
+    }
+    if _policy_for_reuse(candidate, "candidate") != candidate_expected:
+        return "recorded TRTMC timing boundary differs from the reference contract"
+    baseline_expected = {
+        name: expected[name]
+        for name in (
+            "timing_scope",
+            "input_preparation_included",
+            "asset_loading_included",
+        )
+    }
+    if _policy_for_reuse(baseline, "baseline") != baseline_expected:
+        return "recorded baseline timing boundary differs from the reference contract"
+    return ""
+
+
+def _reuse_aligned_rows(
+    results: MutableMapping[str, Any],
+    source_path: Path,
+    cases: Sequence[Mapping[str, Any]],
+    preflight: Mapping[str, tuple[dict[str, Any], list[str], dict[str, str]]],
+) -> None:
+    source = _load_results(source_path)
+    source_rows = {
+        str(row.get("id")): row for row in source["cases"] if isinstance(row, Mapping)
+    }
+    target_rows = _result_rows(results)
+    reused_ids = []
+    rerun_reasons: dict[str, str] = {}
+    source_sha256 = _sha256_file(source_path)
+    for case in cases:
+        case_id = str(case["id"])
+        source_row = source_rows.get(case_id)
+        if source_row is None:
+            rerun_reasons[case_id] = "earlier result is missing"
+            continue
+        mismatch = _reuse_mismatch(case, source_row, preflight[case_id][0])
+        if mismatch:
+            rerun_reasons[case_id] = mismatch
+            continue
+        reused = deepcopy(source_row)
+        reused["baseline_contract"] = dict(case["baseline"])
+        reused["evidence_reuse"] = {
+            "source_results": str(source_path.resolve()),
+            "source_results_sha256": source_sha256,
+            "source_git_commit": source.get("git_commit"),
+            "source_finished_at": source.get("finished_at"),
+            "validated_at": _now(),
+            "reason": "recorded workload and timing boundaries match the current contract",
+        }
+        target_rows[case_id].clear()
+        target_rows[case_id].update(reused)
+        reused_ids.append(case_id)
+    results["evidence_reuse"] = {
+        "source_results": str(source_path.resolve()),
+        "source_results_sha256": source_sha256,
+        "reused_case_count": len(reused_ids),
+        "rerun_case_count": len(cases) - len(reused_ids),
+        "reused_case_ids": reused_ids,
+        "rerun_reasons": rerun_reasons,
+    }
+
+
 def _prepare_output(
     output: Path,
     suite_path: Path,
     suite: Mapping[str, Any],
     cases: Sequence[Mapping[str, Any]],
     options: RunOptions,
+    preflight: Mapping[str, tuple[dict[str, Any], list[str], dict[str, str]]],
 ) -> dict[str, Any]:
     output.mkdir(parents=True, exist_ok=True)
     result_path = output / "results.json"
@@ -1462,7 +1810,15 @@ def _prepare_output(
         raise PerfReleaseError(
             f"output directory is not empty; use --resume or choose another path: {output}"
         )
-    return _initial_results(suite_path, suite, cases)
+    results = _initial_results(suite_path, suite, cases)
+    if options.reuse_aligned_from is not None:
+        _reuse_aligned_rows(
+            results,
+            options.reuse_aligned_from.resolve(),
+            cases,
+            preflight,
+        )
+    return results
 
 
 def _ci_failed(results: Mapping[str, Any], selected_ids: set[str]) -> bool:
@@ -1475,6 +1831,8 @@ def _ci_failed(results: Mapping[str, Any], selected_ids: set[str]) -> bool:
 
 
 def run(arguments: argparse.Namespace) -> int:
+    if arguments.resume and arguments.reuse_aligned_from is not None:
+        raise PerfReleaseError("--resume and --reuse-aligned-from cannot be used together")
     suite_path = arguments.suite.resolve()
     suite = _read_yaml(suite_path)
     cases = _cases(suite)
@@ -1495,11 +1853,15 @@ def run(arguments: argparse.Namespace) -> int:
         dry_run=arguments.dry_run,
         ci=arguments.ci,
         resume=arguments.resume,
+        reuse_aligned_from=arguments.reuse_aligned_from,
         rerun_failed=arguments.rerun_failed,
         local_files_only=arguments.local_files_only,
         timeout_seconds=arguments.timeout_seconds,
     )
-    results = _prepare_output(options.output, suite_path, suite, cases, options)
+    preflight_cases = cases if options.reuse_aligned_from is not None else selected
+    preflight = _preflight_candidates(preflight_cases, options)
+    results = _prepare_output(options.output, suite_path, suite, cases, options, preflight)
+    results["timing_preflight"] = _preflight_evidence(preflight_cases, preflight)
     rows = _result_rows(results)
     work_root = options.output / ".work"
     work_root.mkdir(exist_ok=True)
@@ -1507,9 +1869,10 @@ def run(arguments: argparse.Namespace) -> int:
     for case in selected:
         existing = rows[str(case["id"])]
         if _should_skip(existing, options):
-            print(f"[{case['id']}] resume: keeping {existing['status']}", flush=True)
+            source = "aligned evidence" if existing.get("evidence_reuse") else "resume"
+            print(f"[{case['id']}] {source}: keeping {existing['status']}", flush=True)
             continue
-        row = _run_one(case, options, work_root)
+        row = _run_one(case, options, work_root, preflight[str(case["id"])])
         rows[str(case["id"])].clear()
         rows[str(case["id"])].update(row)
         _write_artifacts(options.output, results)
