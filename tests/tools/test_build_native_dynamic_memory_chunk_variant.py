@@ -888,6 +888,8 @@ def test_qualification_runner_requires_env_before_accepting_variant(
             str(tmp_path / "variant.trtfb"),
             "--chunk-variant-build-receipt",
             str(tmp_path / "variant.receipt.json"),
+            "--runner-cuda-visible-device",
+            "3",
             "--output-dir",
             str(tmp_path / "output"),
         ],
