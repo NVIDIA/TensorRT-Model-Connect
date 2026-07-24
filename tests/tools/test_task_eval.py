@@ -3265,6 +3265,48 @@ def test_ensure_bundle_replaces_dangling_shared_bundle_symlink(
     assert bundle.read_bytes() == b"new"
 
 
+def test_ensure_bundle_replaces_incompatible_tensorrt_abi(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle = tmp_path / "shared" / "model.trtfb"
+    bundle.parent.mkdir()
+    bundle.write_bytes(b"old")
+    commands: list[list[str]] = []
+
+    class Result:
+        returncode = 0
+        stdout = "TRT ABI:            11.0\nMax cache length:   256\n"
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        if command[1] == "inspect":
+            return Result()
+        output = Path(command[command.index("-o") + 1])
+        assert not output.exists()
+        output.write_bytes(b"new")
+        return Result()
+
+    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+    monkeypatch.setattr(task_eval, "runtime_tensorrt_abi", lambda: "11.2")
+
+    _, built = task_eval.ensure_bundle(
+        {
+            "name": "model",
+            "hf_id": "org/model",
+            "precision": "fp32",
+        },
+        bundle_path=bundle,
+        trtmc_binary="trtmc",
+        max_cache_length=256,
+        replace_existing=True,
+    )
+
+    assert built is True
+    assert bundle.read_bytes() == b"new"
+    assert [command[1] for command in commands] == ["inspect", "build"]
+
+
 def test_suite_build_cache_minimum_overrides_manifest_cache() -> None:
     suite = {"build": {"min_max_cache_length": 1024}}
     model = {"max_cache_length": 256}

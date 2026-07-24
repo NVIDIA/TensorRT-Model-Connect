@@ -29,7 +29,7 @@ import warnings
 from collections import Counter, defaultdict
 from itertools import product
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -8308,7 +8308,10 @@ def requested_build_max_cache_length(
     return max(model_cache, suite_cache, prompt_cache)
 
 
-def bundle_max_cache_length(bundle_path: Path, trtmc_binary: str) -> int | None:
+def bundle_inspection(
+    bundle_path: Path,
+    trtmc_binary: str,
+) -> dict[str, str]:
     try:
         proc = subprocess.run(
             [trtmc_binary, "inspect", str(bundle_path)],
@@ -8318,13 +8321,50 @@ def bundle_max_cache_length(bundle_path: Path, trtmc_binary: str) -> int | None:
             timeout=60,
         )
     except Exception:
-        return None
+        return {}
     if proc.returncode != 0:
+        return {}
+    values = {}
+    for label, value in re.findall(r"^([^:\n]+):\s+(.+?)\s*$", proc.stdout, re.MULTILINE):
+        values[label.strip()] = value.strip()
+    return values
+
+
+def bundle_max_cache_length(bundle_path: Path, trtmc_binary: str) -> int | None:
+    value = bundle_inspection(bundle_path, trtmc_binary).get("Max cache length")
+    try:
+        return int(value) if value is not None else None
+    except ValueError:
         return None
-    match = re.search(r"^Max cache length:\s+(\d+)\s*$", proc.stdout, re.MULTILINE)
-    if not match:
-        return None
-    return int(match.group(1))
+
+
+def runtime_tensorrt_abi() -> str:
+    try:
+        import tensorrt
+    except Exception:
+        return ""
+    parts = str(tensorrt.__version__).split(".")
+    return ".".join(parts[:2]) if len(parts) >= 2 else ""
+
+
+def _bundle_can_be_reused(
+    inspection: Mapping[str, str],
+    *,
+    max_cache_length: int | None,
+    allow_unknown: bool,
+) -> bool:
+    if not inspection:
+        return allow_unknown
+    raw_cache = inspection.get("Max cache length")
+    if max_cache_length is not None and raw_cache is not None:
+        try:
+            if int(raw_cache) < max_cache_length:
+                return False
+        except ValueError:
+            return False
+    bundle_abi = inspection.get("TRT ABI", "")
+    runtime_abi = runtime_tensorrt_abi()
+    return not bundle_abi or not runtime_abi or bundle_abi == runtime_abi
 
 
 def _remove_bundle_before_or_after_replacement(
@@ -8347,10 +8387,12 @@ def ensure_bundle(
     log_path: Path | None = None,
 ) -> tuple[Path, bool]:
     if bundle_path.is_file() and not force_build:
-        if max_cache_length is None:
-            return bundle_path, False
-        existing_cache = bundle_max_cache_length(bundle_path, trtmc_binary)
-        if existing_cache is None or existing_cache >= max_cache_length:
+        inspection = bundle_inspection(bundle_path, trtmc_binary)
+        if _bundle_can_be_reused(
+            inspection,
+            max_cache_length=max_cache_length,
+            allow_unknown=not replace_existing,
+        ):
             return bundle_path, False
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
     _remove_bundle_before_or_after_replacement(
