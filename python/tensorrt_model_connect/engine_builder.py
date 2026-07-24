@@ -34,7 +34,11 @@ from .families import (
     resolve_family_model_dir,
     resolve_nemo_archive_model_dir,
 )
-from .hf_snapshot import GENERIC_HF_ALLOW_PATTERNS, hf_snapshot_allow_patterns
+from .hf_snapshot import (
+    GENERIC_HF_ALLOW_PATTERNS,
+    hf_cache_snapshot_identity,
+    hf_snapshot_allow_patterns,
+)
 from .bundle_writer import BundleInfo, BundleSection, write_bundle
 from . import trt_compat
 from .triattention_export import (
@@ -544,6 +548,20 @@ def _prepare_runtime_memory_contract(
         "precision": precision,
     }
     return contract
+
+
+def _text_bundle_model_id(
+    model_dir: Path,
+    runtime_memory_qualification,
+) -> str:
+    """Choose the authoritative source identity for a text-model bundle."""
+
+    if runtime_memory_qualification is not None:
+        return runtime_memory_qualification.qualified_model_id
+    snapshot_identity = hf_cache_snapshot_identity(model_dir)
+    if snapshot_identity is not None:
+        return snapshot_identity[0]
+    return model_dir.name
 
 
 def _is_hf_model_dir(path: Path) -> bool:
@@ -1318,10 +1336,9 @@ def build_bundle(
     trt_version = _get_trt_version()
     trt_abi = _trt_abi_from_version(trt_version)
     info = BundleInfo(
-        model_id=(
-            runtime_memory_qualification.qualified_model_id
-            if runtime_memory_qualification is not None
-            else model_dir_path.name
+        model_id=_text_bundle_model_id(
+            model_dir_path,
+            runtime_memory_qualification,
         ),
         model_type=config.model_type,
         family=plugin.name,

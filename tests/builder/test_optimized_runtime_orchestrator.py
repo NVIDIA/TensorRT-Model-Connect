@@ -20,6 +20,7 @@ from tensorrt_model_connect.runtime_provider.provider_process import (
     ProbeResult,
 )
 from tensorrt_model_connect.runtime_provider.orchestrator import (
+    _model_source_identity,
     build_selected_implementation,
     discover_family_implementations,
     select_delegated_build,
@@ -57,6 +58,20 @@ def _read_bundle(path: Path) -> tuple[dict, dict[str, bytes]]:
             source.seek(payload_offset + metadata["offset"])
             sections[name] = source.read(metadata["size"])
     return header, sections
+
+
+def test_model_source_identity_keeps_orchestrator_revision_normalization(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot(
+        tmp_path,
+        revision="ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+    )
+
+    assert _model_source_identity(str(snapshot)) == (
+        "Example/Model",
+        "abcdef0123456789abcdef0123456789abcdef01",
+    )
 
 
 _ADAPTER = r"""import argparse

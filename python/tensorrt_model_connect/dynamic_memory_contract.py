@@ -18,6 +18,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .hf_snapshot import hf_cache_snapshot_identity
+
 
 class DynamicMemoryContractError(ValueError):
     """A candidate qualification or runtime-memory contract is invalid."""
@@ -746,7 +748,7 @@ def validate_qualified_native_build(
         declared.qualified_model_id,
         declared.qualified_model_revision,
     )
-    if _snapshot_identity(resolved.model_dir) != expected_identity:
+    if hf_cache_snapshot_identity(resolved.model_dir) != expected_identity:
         raise DynamicMemoryContractError(
             "Qualified native builds require the exact declared HF snapshot"
         )
@@ -766,26 +768,6 @@ def validate_qualified_native_build(
     return "developer_c_div_2"
 
 
-def _snapshot_identity(path: Path) -> tuple[str, str] | None:
-    """Recover ``org/repo`` and revision from an HF cache snapshot path."""
-
-    absolute = path.resolve()
-    parts = absolute.parts
-    for index, part in enumerate(parts):
-        if part != "snapshots" or index < 1 or index + 1 >= len(parts):
-            continue
-        if index + 2 != len(parts):
-            continue
-        cache_name = parts[index - 1]
-        if not cache_name.startswith("models--"):
-            continue
-        identity_parts = cache_name.removeprefix("models--").split("--", 1)
-        if len(identity_parts) != 2 or not all(identity_parts):
-            continue
-        return "/".join(identity_parts), parts[index + 1]
-    return None
-
-
 def qualification_for_model_ref(
     model_ref: str,
     *,
@@ -797,7 +779,7 @@ def qualification_for_model_ref(
     normalized_ref = str(model_ref or "").strip()
     local = Path(normalized_ref)
     identity = (
-        _snapshot_identity(local)
+        hf_cache_snapshot_identity(local)
         if local.is_dir()
         else None
     )
@@ -918,7 +900,7 @@ def resolve_model_only_qualification(
     local = Path(str(model_ref))
     if local.is_dir():
         resolved = Path(resolve_model(str(local)))
-        resolved_identity = _snapshot_identity(resolved)
+        resolved_identity = hf_cache_snapshot_identity(resolved)
         expected_identity = (
             qualification.qualified_model_id,
             qualification.qualified_model_revision,

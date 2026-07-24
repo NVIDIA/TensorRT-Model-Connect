@@ -11,6 +11,8 @@ reject an otherwise complete Model Connect cache.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from .families import family_hf_allow_patterns
 
 
@@ -44,3 +46,29 @@ def hf_snapshot_allow_patterns() -> list[str]:
         *family_hf_allow_patterns(),
         "*.nemo",
     ]
+
+
+def hf_cache_snapshot_identity(
+    path: str | Path,
+) -> tuple[str, str] | None:
+    """Return ``(org/repo, revision)`` for one canonical HF cache snapshot.
+
+    Hugging Face cache snapshots use
+    ``models--<org>--<repo>/snapshots/<revision>``.  Resolve symlinks before
+    inspecting the path so callers receive the identity of the actual snapshot
+    directory rather than an arbitrary local alias.
+    """
+
+    try:
+        resolved = Path(path).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if not resolved.is_dir() or resolved.parent.name != "snapshots":
+        return None
+    cache_name = resolved.parent.parent.name
+    if not cache_name.startswith("models--"):
+        return None
+    identity_parts = cache_name.removeprefix("models--").split("--", 1)
+    if len(identity_parts) != 2 or not all(identity_parts):
+        return None
+    return "/".join(identity_parts), resolved.name

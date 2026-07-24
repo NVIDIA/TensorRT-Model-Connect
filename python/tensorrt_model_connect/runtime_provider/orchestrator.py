@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from ..hf_snapshot import hf_cache_snapshot_identity
 from .provider_process import (
     _ACTIVE_CUDA_DEVICE_ENV,
     BuildAdapterError,
@@ -78,24 +79,11 @@ def discover_family_implementations(
 def _model_source_identity(model_ref: str) -> tuple[str, str] | None:
     """Return the model and revision encoded by a canonical HF cache snapshot."""
 
-    candidate = Path(model_ref).expanduser()
-    if not candidate.exists():
+    identity = hf_cache_snapshot_identity(model_ref)
+    if identity is None:
         return None
-    try:
-        resolved = candidate.resolve(strict=True)
-    except OSError:
-        return None
-    if not resolved.is_dir():
-        return None
-    if resolved.parent.name != "snapshots":
-        return None
-    repository = resolved.parent.parent.name
-    if not repository.startswith("models--"):
-        return None
-    components = repository[len("models--") :].split("--")
-    if len(components) != 2 or any(not component for component in components):
-        return None
-    return "/".join(components), resolved.name.lower()
+    model_id, revision = identity
+    return model_id, revision.lower()
 
 
 def select_delegated_build(
