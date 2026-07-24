@@ -363,6 +363,50 @@ def test_report_bounds_large_sample_commands_and_selects_disagreement(tmp_path):
     assert (tmp_path / "report.json").stat().st_size < 20_000
 
 
+def test_report_does_not_treat_shared_task_failure_as_disagreement(tmp_path):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    work_dir = case_dir / "validation" / "workload-a" / "model-a"
+    work_dir.mkdir(parents=True)
+    (work_dir / "prompts.jsonl").write_text(
+        json.dumps({"sample_id": "sample-0", "prompt": "hello"}) + "\n",
+        encoding="utf-8",
+    )
+    (work_dir / "trtfb_run.log").write_text(
+        "$ trtmc run model.trtfb --prompt hello\n",
+        encoding="utf-8",
+    )
+    (work_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "disagreements": [],
+                "hf": {"samples": [{"sample_id": "sample-0", "passed": False}]},
+                "trtfb": {
+                    "samples": [{"sample_id": "sample-0", "passed": False}]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (case_dir / "comparison.json").write_text(
+        json.dumps(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "status": "passed",
+                "raw_result": {"work_dir": str(work_dir)},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, _, report = trtmc_validate.write_report(tmp_path)
+
+    assert report["results"][0]["reproduce"]["representative"] == {
+        "sample_id": "sample-0",
+        "reason": "first_input",
+    }
+
+
 def test_run_metadata_records_source_and_exact_command(monkeypatch, tmp_path):
     monkeypatch.setenv("TRTMC_VALIDATION_SOURCE_REVISION", "abc123")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")

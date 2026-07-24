@@ -473,9 +473,8 @@ def _first_disagreement_id(work_dir: Path) -> str:
         if not path.is_file():
             continue
         data = json.loads(path.read_text(encoding="utf-8"))
-        explicit_id = _explicit_disagreement_id(data) if isinstance(data, dict) else ""
-        if explicit_id:
-            return explicit_id
+        if isinstance(data, dict) and isinstance(data.get("disagreements"), list):
+            return _explicit_disagreement_id(data)
         failed = _failed_sample_id(data)
         if failed:
             return failed
@@ -1141,8 +1140,9 @@ def _render_reproduction(result: Mapping[str, Any]) -> str:
     dataset_command, prepared_input_count = _dataset_reproduction(result)
     reference_total = _reproduction_count(result, "hf")
     trtmc_total = _reproduction_count(result, "trtmc")
+    input_label = "input" if prepared_input_count == 1 else "inputs"
     dataset_label = (
-        f"Full dataset ({prepared_input_count} prepared inputs)"
+        f"Full dataset ({prepared_input_count} prepared {input_label})"
         if prepared_input_count
         else "Full dataset"
     )
