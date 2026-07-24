@@ -537,10 +537,10 @@ class GpuLease:
                     )
                 )
                 continue
-            if time.monotonic() >= settle_deadline:
-                return False
             self.last_observed_total_mib[self.gpu_id] = snapshot["total_mib"]
             self.last_observed_free_mib[self.gpu_id] = snapshot["free_mib"]
+            if time.monotonic() >= settle_deadline:
+                return False
             if snapshot["free_mib"] >= self.min_free_gpu_memory_mib:
                 self.gpu_memory_admission = {
                     "source": snapshot["source"],
