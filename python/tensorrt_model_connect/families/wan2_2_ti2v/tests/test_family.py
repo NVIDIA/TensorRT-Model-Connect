@@ -271,10 +271,11 @@ def test_component_builder_emits_four_native_plans(
         "build_native_umt5_encoder_engine",
         lambda *_args, **_kwargs: b"text-plan",
     )
+    denoiser_calls = []
     monkeypatch.setattr(
         trt_builder,
         "build_dit_engine",
-        lambda *_args, **_kwargs: b"dit-plan",
+        lambda *_args, **kwargs: denoiser_calls.append(kwargs) or b"dit-plan",
     )
     monkeypatch.setattr(
         trt_builder,
@@ -297,6 +298,44 @@ def test_component_builder_emits_four_native_plans(
     assert components["vae_decoder"] == b"vae-recurrent"
     assert components["vae_decoder_first_frame"] == b"vae-first"
     assert components["tokenizer_json"] == tokenizer_payload
+    assert denoiser_calls[0]["profile"] is WAN22_TI2V_5B
+    assert denoiser_calls[0]["ffn_fp8_scales"] is None
+
+    trt_builder.build_wan22_components(
+        str(tmp_path),
+        config=_runtime_config(
+            video_width=672,
+            video_height=384,
+            video_num_frames=5,
+            num_inference_steps=15,
+        ),
+        weights=weights,
+    )
+    assert denoiser_calls[1]["profile"] is WAN22_TI2V_5B_L0
+    assert denoiser_calls[1]["ffn_fp8_scales"] is None
+
+    explicit_scales = {"precomputed": {"input_scale": 0.125}}
+    trt_builder.build_wan22_components(
+        str(tmp_path),
+        config=_runtime_config(),
+        weights=weights,
+        fp8_scales=explicit_scales,
+    )
+    assert denoiser_calls[2]["profile"] is WAN22_TI2V_5B
+    assert denoiser_calls[2]["ffn_fp8_scales"] is explicit_scales
+
+    with pytest.raises(ValueError, match="FP8 scales are qualified only"):
+        trt_builder.build_wan22_components(
+            str(tmp_path),
+            config=_runtime_config(
+                video_width=672,
+                video_height=384,
+                video_num_frames=5,
+                num_inference_steps=15,
+            ),
+            weights=weights,
+            fp8_scales=explicit_scales,
+        )
 
 
 def test_runtime_config_supports_only_qualified_profiles_and_seed_range() -> None:

@@ -396,21 +396,20 @@ ImageResult Wan22TI2VPipeline::decode_video(const std::vector<float>& latents,
         cache_inputs.push_back(input_cache_bank.device_address(index));
         cache_outputs.push_back(output_cache_bank.device_address(index));
     }
-    const auto cache_bindings = make_wan22_vae_cache_bindings(cache_inputs, cache_outputs, shape);
-
     {
-        auto initializer = load_module("vae_decoder_first_frame_plan", cache_bindings);
+        auto initializer =
+            load_module("vae_decoder_first_frame_plan",
+                        make_wan22_vae_cache_bindings(cache_inputs, cache_outputs, shape));
         validate_vae_module_contract(*initializer, kVaeFirstFrameOutputFrames, shape,
                                      "first-frame");
         try {
             input_cache_bank.zero_async(stream_);
+            output_cache_bank.zero_async(stream_);
             synchronize_stream("initializing recurrent VAE caches");
             append_video_chunk(result, video_frame_offset,
                                run_vae_latent(latents, latent_frame, 0, kVaeFirstFrameOutputFrames,
                                               shape, *initializer),
                                kVaeFirstFrameOutputFrames, shape);
-            input_cache_bank.copy_from_async(output_cache_bank, stream_);
-            synchronize_stream("preserving first-frame VAE cache state");
         } catch (...) {
             synchronize_stream_noexcept();
             throw;
@@ -418,8 +417,13 @@ ImageResult Wan22TI2VPipeline::decode_video(const std::vector<float>& latents,
         std::cerr << "[wan2.2-ti2v] VAE latent 1/" << shape.latent_frames << '\n';
     }
 
+    // The initializer leaves the first recurrent state in cache_outputs. Use
+    // it directly as the next input, then alternate the two banks instead of
+    // copying the complete cache state after every latent.
+    std::swap(cache_inputs, cache_outputs);
     {
-        auto recurrent = load_module("vae_decoder_plan", cache_bindings);
+        auto recurrent = load_module(
+            "vae_decoder_plan", make_wan22_vae_cache_bindings(cache_inputs, cache_outputs, shape));
         validate_vae_module_contract(*recurrent, kVaeStepOutputFrames, shape, "step");
         try {
             for (int32_t latent_index = 1; latent_index < shape.latent_frames; ++latent_index) {
@@ -428,8 +432,20 @@ ImageResult Wan22TI2VPipeline::decode_video(const std::vector<float>& latents,
                                                   kVaeStepOutputFrames, shape, *recurrent),
                                    kVaeStepOutputFrames, shape);
                 if (latent_index + 1 < shape.latent_frames) {
-                    input_cache_bank.copy_from_async(output_cache_bank, stream_);
-                    synchronize_stream("carrying recurrent VAE cache state");
+                    std::swap(cache_inputs, cache_outputs);
+                    for (int32_t index = 0; index < kVaeCacheCount; ++index) {
+                        const auto offset = static_cast<std::size_t>(index);
+                        const auto input_name = "cache_" + std::to_string(index);
+                        const auto output_name = "cache_out_" + std::to_string(index);
+                        recurrent->bind_external(input_name, cache_inputs[offset]);
+                        recurrent->bind_external(output_name, cache_outputs[offset]);
+                        if (recurrent->device_ptr(input_name) != cache_inputs[offset] ||
+                            recurrent->device_ptr(output_name) != cache_outputs[offset]) {
+                            throw std::runtime_error(
+                                "Wan2.2 recurrent VAE cache rebinding failed at index " +
+                                std::to_string(index));
+                        }
+                    }
                 }
                 std::cerr << "[wan2.2-ti2v] VAE latent " << (latent_index + 1) << '/'
                           << shape.latent_frames << '\n';

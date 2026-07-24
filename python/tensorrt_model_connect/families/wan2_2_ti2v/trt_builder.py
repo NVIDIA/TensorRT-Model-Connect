@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .model_config import select_generation_profile
+from .model_config import WAN22_TI2V_5B, select_generation_profile
 
 
 # Heavy TensorRT/NumPy/PyTorch conversion modules are loaded only when the
@@ -49,6 +49,7 @@ def build_wan22_components(
     weights: dict,
     precision: str = "bf16",
     verbose: bool = False,
+    fp8_scales: dict | None = None,
     **_kwargs,
 ) -> dict:
     """Build all four plans for one qualified checkpoint profile."""
@@ -56,6 +57,11 @@ def build_wan22_components(
     if precision.lower() not in {"bf16", "bfloat16"}:
         raise ValueError("Wan2.2-TI2V-5B requires BF16 DiT/T5 precision")
     generation_profile = select_generation_profile(config.raw)
+    if fp8_scales is not None and generation_profile != WAN22_TI2V_5B:
+        raise ValueError(
+            "Wan2.2 FFN FP8 scales are qualified only for the official "
+            "1280x704, 121-frame, 50-step profile"
+        )
 
     text_encoder = build_native_umt5_encoder_engine(
         weights["_text_encoder_checkpoint"],
@@ -64,6 +70,7 @@ def build_wan22_components(
     denoiser = build_dit_engine(
         model_dir,
         profile=generation_profile,
+        ffn_fp8_scales=fp8_scales,
         verbose=verbose,
     )
 

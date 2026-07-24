@@ -337,14 +337,73 @@ static void test_sha256_known_vectors() {
           "SHA-256 empty vector");
     trtmc::internal::Sha256 abc;
     abc.update("abc");
+    abc.update(nullptr, 0);
     check(abc.hex_digest() == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-          "SHA-256 abc vector");
+          "SHA-256 abc vector and zero-size null update");
     trtmc::internal::Sha256 multi_block_padding;
     multi_block_padding.update("abcdbcdecdefdefgefghfghighijhijk");
     multi_block_padding.update("ijkljklmklmnlmnomnopnopq");
     check(multi_block_padding.hex_digest() ==
               "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
           "SHA-256 incremental multi-block padding vector");
+}
+
+static void test_sha256_boundaries_and_chunking() {
+    struct ExpectedDigest {
+        std::size_t size;
+        const char* hex;
+    };
+    static constexpr ExpectedDigest expected[] = {
+        {0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+        {1, "0bfe935e70c321c7ca3afc75ce0d0ca2f98b5422e008bb31c00c6d7f1f1c0ad6"},
+        {55, "13eb4480c03a102020e430341f50315f7ab0e2eab3a84c8c630e019c8baa68a0"},
+        {56, "95879a336f9ac08995bd30220a50c60710b5e5712314c357dae0375596e7cdc7"},
+        {63, "0fd92b28d7de02f75f5c140ffe00bc834a2911c50841b1d734868d30d17013be"},
+        {64, "8509136a1d80b20158213ca1508c046646abdf827af2fc1f4023e557cb59ef61"},
+        {65, "28ae167bf703e3582d77be270a09fd3b8c250a3125adc3b3b30ee4a883685ab1"},
+        {127, "aeb49743ff155ac07a69cfad222e391d8ba711cd8336b4c7b38058cb9bcb5604"},
+        {128, "2fe61ce346d4861e8f5ddfdc9da12797a78660ddadbf2ab83e630c9f956a5742"},
+        {129, "f71a9a7856fa2f3b7176c0fce89e44eeed1f69076ffffbe864f51b7180458b33"},
+        {1024, "e219ea8e440569c6815638fde3d38d2c9028a6de36c21bb96b313cd0dc4e9474"},
+        {65537, "76bc99ec74df99033f031e2b96c6b07b9bafbb06769a670b94a6b7e5eb6d551c"},
+    };
+
+    std::vector<std::uint8_t> input(expected[std::size(expected) - 1].size);
+    std::uint32_t random_state = 0x12345678U;
+    for (auto& byte : input) {
+        random_state = random_state * 1664525U + 1013904223U;
+        byte = static_cast<std::uint8_t>(random_state >> 24U);
+    }
+
+    static constexpr std::size_t chunk_sizes[] = {1, 3, 7, 31, 64, 65, 127, 1024};
+    for (const auto& vector : expected) {
+        trtmc::internal::Sha256 one_shot;
+        one_shot.update(input.data(), vector.size);
+        check(one_shot.hex_digest() == vector.hex, "SHA-256 deterministic boundary vector");
+
+        for (const std::size_t chunk_size : chunk_sizes) {
+            trtmc::internal::Sha256 chunked;
+            for (std::size_t offset = 0; offset < vector.size; offset += chunk_size) {
+                const std::size_t count = std::min(chunk_size, vector.size - offset);
+                chunked.update(input.data() + offset, count);
+            }
+            check(chunked.hex_digest() == vector.hex,
+                  "SHA-256 fixed-size incremental chunk parity");
+        }
+
+        trtmc::internal::Sha256 random_chunks;
+        std::size_t offset = 0;
+        std::uint32_t chunk_state = 0x9e3779b9U;
+        while (offset < vector.size) {
+            chunk_state = chunk_state * 1103515245U + 12345U;
+            const std::size_t requested = 1 + ((chunk_state >> 16U) & 511U);
+            const std::size_t count = std::min(requested, vector.size - offset);
+            random_chunks.update(input.data() + offset, count);
+            offset += count;
+        }
+        check(random_chunks.hex_digest() == vector.hex,
+              "SHA-256 pseudo-random incremental chunk parity");
+    }
 }
 
 int main() {
@@ -359,6 +418,7 @@ int main() {
     test_max_batch_size_parse_and_back_compat();
     test_copy_section_streams_in_bounded_chunks();
     test_sha256_known_vectors();
+    test_sha256_boundaries_and_chunking();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";

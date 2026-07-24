@@ -98,6 +98,26 @@ bool test_backend_prebinding_contract() {
             output[0] != 1.0F || output[3] != 4.0F) {
             throw std::runtime_error("prebound execution produced the wrong output");
         }
+
+        // Wan2.2 alternates its recurrent VAE cache banks in place. Exercise
+        // the same input/output address swap on a live TensorRT context.
+        module->bind_external("x", output_buffer);
+        module->bind_external("y", input_buffer);
+        if (module->device_ptr("x") != output_buffer || module->device_ptr("y") != input_buffer)
+            throw std::runtime_error("external addresses were not rebound");
+        float rebound_input[4] = {5.0F, 6.0F, 7.0F, 8.0F};
+        if (cudaMemcpy(output_buffer, rebound_input, sizeof(rebound_input),
+                       cudaMemcpyHostToDevice) != cudaSuccess) {
+            throw std::runtime_error("rebound input copy failed");
+        }
+        module->forward_async({{"x", {rebound_input, {4}, trtmc::DType::kFloat32}}});
+        module->sync();
+        float rebound_output[4] = {};
+        if (cudaMemcpy(rebound_output, input_buffer, sizeof(rebound_output),
+                       cudaMemcpyDeviceToHost) != cudaSuccess ||
+            rebound_output[0] != 5.0F || rebound_output[3] != 8.0F) {
+            throw std::runtime_error("rebound execution produced the wrong output");
+        }
     } catch (const std::exception& error) {
         std::cerr << "FAIL: TensorRT prebinding execution: " << error.what() << '\n';
         ok = false;

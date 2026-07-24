@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 
 import numpy as np
@@ -29,6 +30,70 @@ trt = trt_compat.get_trt()
 def _numpy_state(model_dir: str) -> dict[str, np.ndarray]:
     state = convert_transformer_state_dict(load_native_transformer_state_dict(model_dir))
     return {name: tensor.detach().float().cpu().numpy() for name, tensor in state.items()}
+
+
+def _ffn_fp8_layer_names(profile: Wan22TI2VConfig) -> tuple[str, ...]:
+    return tuple(
+        name
+        for index in range(profile.num_layers)
+        for name in (
+            f"blocks.{index}.ffn.net.0.proj",
+            f"blocks.{index}.ffn.net.2",
+        )
+    )
+
+
+def _validated_ffn_fp8_scales(
+    weights: dict[str, np.ndarray],
+    profile: Wan22TI2VConfig,
+    scales: dict | None,
+) -> dict[str, dict[str, float]] | None:
+    """Validate a fail-closed FFN-only FP8 scale map.
+
+    Every FFN projection must be present and no non-FFN layer is accepted.
+    Weight scales may be omitted; in that case the checkpoint's exact
+    per-tensor absolute maximum is used.
+    """
+
+    if scales is None:
+        return None
+    if not isinstance(scales, dict):
+        raise TypeError("Wan2.2 FFN FP8 scales must be a dictionary")
+
+    expected = set(_ffn_fp8_layer_names(profile))
+    provided = set(scales)
+    missing = sorted(expected - provided)
+    unexpected = sorted(provided - expected)
+    if missing or unexpected:
+        raise ValueError(
+            "Wan2.2 FFN FP8 scales must cover exactly the two FFN projections "
+            f"in every block; missing={missing}, unexpected={unexpected}"
+        )
+
+    result: dict[str, dict[str, float]] = {}
+    for name in sorted(expected):
+        entry = scales[name]
+        if not isinstance(entry, dict):
+            raise TypeError(f"Wan2.2 FFN FP8 scale entry for {name} must be a dictionary")
+        input_scale = float(entry.get("input_scale", 0.0))
+        if not math.isfinite(input_scale) or input_scale <= 0.0:
+            raise ValueError(f"Wan2.2 FFN FP8 input_scale for {name} must be positive and finite")
+
+        weight = weights[f"{name}.weight"]
+        minimum_weight_scale = op.fp8_e4m3_weight_scale(weight)
+        weight_scale = float(entry.get("weight_scale", minimum_weight_scale))
+        if not math.isfinite(weight_scale) or weight_scale <= 0.0:
+            raise ValueError(f"Wan2.2 FFN FP8 weight_scale for {name} must be positive and finite")
+        if weight_scale < minimum_weight_scale * (1.0 - 1.0e-6):
+            raise ValueError(
+                f"Wan2.2 FFN FP8 weight_scale for {name} would overflow E4M3: "
+                f"provided={weight_scale}, minimum={minimum_weight_scale}"
+            )
+        result[name] = {
+            "input_scale": input_scale,
+            "weight_scale": weight_scale,
+        }
+    return result
 
 
 def _wan_rope(profile: Wan22TI2VConfig):
@@ -120,6 +185,7 @@ def build_dit_engine(
     model_dir: str,
     *,
     profile: Wan22TI2VConfig = WAN22_TI2V_5B,
+    ffn_fp8_scales: dict | None = None,
     verbose: bool = False,
 ) -> bytes:
     """Build a DiT plan for an explicitly qualified profile."""
@@ -127,6 +193,10 @@ def build_dit_engine(
     if profile not in SUPPORTED_GENERATION_PROFILES:
         raise ValueError("Wan2.2 DiT profile is not one of the qualified generation profiles")
     weights = _numpy_state(model_dir)
+    ffn_fp8_scales = _validated_ffn_fp8_scales(weights, profile, ffn_fp8_scales)
+    # TensorRT consumes raw pointers for explicit FP8 constants. Keep their
+    # NumPy owners alive until build_serialized_network() has returned.
+    fp8_weight_refs: list[np.ndarray] = []
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
@@ -227,23 +297,17 @@ def build_dit_engine(
             round_bf16=index == 0,
         )
         qkv_input = op.adaptive_norm(network, normalized, shift_sa, scale_sa)
-        q = op.linear(
+        q, k, v = op.fused_qkv_linear(
             network,
             qkv_input,
             weights[f"{prefix}.attn1.to_q.weight"],
             weights[f"{prefix}.attn1.to_q.bias"],
-        )
-        k = op.linear(
-            network,
-            qkv_input,
             weights[f"{prefix}.attn1.to_k.weight"],
             weights[f"{prefix}.attn1.to_k.bias"],
-        )
-        v = op.linear(
-            network,
-            qkv_input,
             weights[f"{prefix}.attn1.to_v.weight"],
             weights[f"{prefix}.attn1.to_v.bias"],
+            rows=profile.num_patches,
+            hidden_size=profile.dim,
         )
         q = op.rms_norm(
             network,
@@ -355,19 +419,43 @@ def build_dit_engine(
 
         normalized = op.layer_norm(network, hidden, profile.dim, profile.eps)
         ffn_input = op.adaptive_norm(network, normalized, shift_ff, scale_ff)
-        ffn = op.linear(
-            network,
-            ffn_input,
-            weights[f"{prefix}.ffn.net.0.proj.weight"],
-            weights[f"{prefix}.ffn.net.0.proj.bias"],
-        )
+        ffn_up_name = f"{prefix}.ffn.net.0.proj"
+        if ffn_fp8_scales is None:
+            ffn = op.linear(
+                network,
+                ffn_input,
+                weights[f"{ffn_up_name}.weight"],
+                weights[f"{ffn_up_name}.bias"],
+            )
+        else:
+            ffn = op.linear_fp8_e4m3(
+                network,
+                ffn_input,
+                weights[f"{ffn_up_name}.weight"],
+                weights[f"{ffn_up_name}.bias"],
+                input_scale=ffn_fp8_scales[ffn_up_name]["input_scale"],
+                weight_scale=ffn_fp8_scales[ffn_up_name]["weight_scale"],
+                weight_refs=fp8_weight_refs,
+            )
         ffn = op.gelu_tanh(network, ffn)
-        ffn = op.linear(
-            network,
-            ffn,
-            weights[f"{prefix}.ffn.net.2.weight"],
-            weights[f"{prefix}.ffn.net.2.bias"],
-        )
+        ffn_down_name = f"{prefix}.ffn.net.2"
+        if ffn_fp8_scales is None:
+            ffn = op.linear(
+                network,
+                ffn,
+                weights[f"{ffn_down_name}.weight"],
+                weights[f"{ffn_down_name}.bias"],
+            )
+        else:
+            ffn = op.linear_fp8_e4m3(
+                network,
+                ffn,
+                weights[f"{ffn_down_name}.weight"],
+                weights[f"{ffn_down_name}.bias"],
+                input_scale=ffn_fp8_scales[ffn_down_name]["input_scale"],
+                weight_scale=ffn_fp8_scales[ffn_down_name]["weight_scale"],
+                weight_refs=fp8_weight_refs,
+            )
         hidden = op.add_fp32_residual(network, hidden, ffn, gate_ff)
 
     final_table = weights["scale_shift_table"].reshape(1, 2 * profile.dim)
@@ -398,7 +486,8 @@ def build_dit_engine(
     print(
         f"[wan2.2-ti2v] building DiT: layers={profile.num_layers}, "
         f"patches={profile.num_patches}, "
-        f"latent={profile.latent_frames}x{profile.latent_height}x{profile.latent_width}",
+        f"latent={profile.latent_frames}x{profile.latent_height}x{profile.latent_width}, "
+        f"ffn_fp8={'enabled' if ffn_fp8_scales is not None else 'disabled'}",
         file=sys.stderr,
     )
     plan = builder.build_serialized_network(network, build_config)

@@ -54,6 +54,151 @@ def linear(network, x, weight, bias=None, *, bf16=True):
     return bf16_barrier(network, y) if bf16 else y
 
 
+def fused_qkv_linear(
+    network,
+    x,
+    q_weight,
+    q_bias,
+    k_weight,
+    k_bias,
+    v_weight,
+    v_bias,
+    *,
+    rows: int,
+    hidden_size: int,
+):
+    """Run self-attention Q/K/V as one BF16 linear and return Q, K, V rows."""
+
+    weights = tuple(
+        np.asarray(weight, dtype=np.float32) for weight in (q_weight, k_weight, v_weight)
+    )
+    biases = tuple(np.asarray(bias, dtype=np.float32) for bias in (q_bias, k_bias, v_bias))
+    expected_weight_shape = (hidden_size, hidden_size)
+    expected_bias_shape = (hidden_size,)
+    if any(weight.shape != expected_weight_shape for weight in weights):
+        raise ValueError(
+            "Q/K/V weights must all have shape "
+            f"{expected_weight_shape}; got {[weight.shape for weight in weights]}"
+        )
+    if any(bias.shape != expected_bias_shape for bias in biases):
+        raise ValueError(
+            "Q/K/V biases must all have shape "
+            f"{expected_bias_shape}; got {[bias.shape for bias in biases]}"
+        )
+
+    packed = linear(
+        network,
+        x,
+        np.concatenate(weights, axis=0),
+        np.concatenate(biases, axis=0),
+    )
+    return tuple(
+        network.add_slice(
+            packed,
+            (0, index * hidden_size),
+            (rows, hidden_size),
+            (1, 1),
+        ).get_output(0)
+        for index in range(3)
+    )
+
+
+def fp8_e4m3_weight_scale(weight) -> float:
+    """Return the smallest finite per-tensor E4M3 scale for ``weight``."""
+
+    maximum = float(np.max(np.abs(np.asarray(weight, dtype=np.float32))))
+    if not math.isfinite(maximum) or maximum <= 0.0:
+        raise ValueError("FP8 weight must have a positive finite absolute maximum")
+    return maximum / 448.0
+
+
+def _fp8_e4m3_tn(weight, scale: float):
+    """Pre-quantize PyTorch ``[out, in]`` weights in TRT's FP8 TN layout."""
+
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise ValueError("FP8 weight scale must be positive and finite")
+
+    minimum_scale = fp8_e4m3_weight_scale(weight)
+    if scale < minimum_scale * (1.0 - 1.0e-6):
+        raise ValueError(
+            f"FP8 weight scale would overflow E4M3: provided={scale}, minimum={minimum_scale}"
+        )
+
+    try:
+        import ml_dtypes
+    except ImportError as exc:
+        raise RuntimeError("Wan2.2 FFN FP8 builds require the ml_dtypes build dependency") from exc
+
+    # ``weight`` is already [out, in]. Keeping that storage and transposing
+    # operand B at the matmul is the TN form that TensorRT fuses on Blackwell.
+    scaled = np.ascontiguousarray(np.asarray(weight, dtype=np.float32) / scale)
+    scaled = np.clip(scaled, -448.0, 448.0)
+    return np.ascontiguousarray(scaled.astype(ml_dtypes.float8_e4m3fn))
+
+
+def linear_fp8_e4m3(
+    network,
+    x,
+    weight,
+    bias=None,
+    *,
+    input_scale: float,
+    weight_scale: float | None = None,
+    weight_refs: list[np.ndarray] | None = None,
+):
+    """FFN linear using native TensorRT E4M3 Q/DQ and an FP8 TN weight.
+
+    The output and bias boundary stay BF16, matching :func:`linear`. Only the
+    matmul operands are quantized. ``weight_refs`` keeps the NumPy-owned FP8
+    storage alive until TensorRT has finished serializing the network.
+    """
+
+    if not math.isfinite(input_scale) or input_scale <= 0.0:
+        raise ValueError("FP8 input scale must be positive and finite")
+    if weight_scale is None:
+        weight_scale = fp8_e4m3_weight_scale(weight)
+    fp8_weight = _fp8_e4m3_tn(weight, weight_scale)
+    if weight_refs is not None:
+        weight_refs.append(fp8_weight)
+
+    x = cast(network, x, trt.bfloat16)
+    input_scale_tensor = constant(network, np.asarray(input_scale, dtype=np.float32))
+    quantized_x = network.add_quantize(x, input_scale_tensor, trt.DataType.FP8)
+    dequantized_x = network.add_dequantize(
+        quantized_x.get_output(0),
+        input_scale_tensor,
+        trt.bfloat16,
+    )
+
+    out_features, in_features = np.asarray(weight).shape
+    fp8_weight_tensor = network.add_constant(
+        (out_features, in_features),
+        trt.Weights(
+            trt.DataType.FP8,
+            fp8_weight.ctypes.data,
+            fp8_weight.size,
+        ),
+    ).get_output(0)
+    weight_scale_tensor = constant(network, np.asarray(weight_scale, dtype=np.float32))
+    dequantized_weight = network.add_dequantize(
+        fp8_weight_tensor,
+        weight_scale_tensor,
+        trt.bfloat16,
+    )
+
+    y = network.add_matrix_multiply(
+        dequantized_x.get_output(0),
+        trt.MatrixOperation.NONE,
+        dequantized_weight.get_output(0),
+        trt.MatrixOperation.TRANSPOSE,
+    ).get_output(0)
+    if bias is not None:
+        bias_tensor = constant(network, np.asarray(bias, dtype=np.float32).reshape(1, -1))
+        bias_tensor = cast(network, bias_tensor, y.dtype)
+        y = network.add_elementwise(y, bias_tensor, trt.ElementWiseOperation.SUM).get_output(0)
+    return bf16_barrier(network, y)
+
+
 def layer_norm(network, x, hidden_size: int, eps: float, *, round_bf16: bool = False):
     x = cast(network, x, trt.float32)
     gamma = constant(network, np.ones((1, hidden_size), dtype=np.float32))

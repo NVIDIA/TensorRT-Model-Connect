@@ -15,6 +15,17 @@
 #include <string>
 #include <string_view>
 
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+#include <arm_neon.h>
+#define TRTMC_INTERNAL_HAS_ARM_SHA2_INTRINSICS 1
+#if defined(__linux__)
+#include <sys/auxv.h>
+#if defined(__has_include) && __has_include(<asm/hwcap.h>)
+#include <asm/hwcap.h>
+#endif
+#endif
+#endif
+
 namespace trtmc::internal {
 
 class Sha256 {
@@ -24,16 +35,30 @@ class Sha256 {
     void update(const void* data, std::size_t size) {
         const auto* bytes = static_cast<const std::uint8_t*>(data);
         total_size_ += size;
-        while (size != 0) {
+
+        if (block_size_ != 0 && size != 0) {
             const std::size_t count = std::min(size, block_.size() - block_size_);
             std::memcpy(block_.data() + block_size_, bytes, count);
             block_size_ += count;
             bytes += count;
             size -= count;
             if (block_size_ == block_.size()) {
-                transform(block_.data());
+                transform_blocks(block_.data(), 1);
                 block_size_ = 0;
             }
+        }
+
+        const std::size_t full_blocks = size / block_.size();
+        if (full_blocks != 0) {
+            transform_blocks(bytes, full_blocks);
+            const std::size_t consumed = full_blocks * block_.size();
+            bytes += consumed;
+            size -= consumed;
+        }
+
+        if (size != 0) {
+            std::memcpy(block_.data(), bytes, size);
+            block_size_ = size;
         }
     }
 
@@ -94,7 +119,7 @@ class Sha256 {
         return rotate_right(value, 17) ^ rotate_right(value, 19) ^ (value >> 10);
     }
 
-    void transform(const std::uint8_t* block) {
+    void transform_scalar(const std::uint8_t* block) {
         std::array<std::uint32_t, 64> words{};
         for (std::size_t i = 0; i < 16; ++i) {
             const std::size_t offset = i * 4;
@@ -139,11 +164,77 @@ class Sha256 {
         state_[7] += h;
     }
 
+#if defined(TRTMC_INTERNAL_HAS_ARM_SHA2_INTRINSICS)
+    static bool arm_sha2_available() {
+#if defined(TRTMC_SHA256_FORCE_SCALAR)
+        return false;
+#elif defined(__ARM_FEATURE_SHA2)
+        return true;
+#elif defined(__linux__) && defined(AT_HWCAP) && defined(HWCAP_SHA2)
+        static const bool available = (getauxval(AT_HWCAP) & HWCAP_SHA2) != 0;
+        return available;
+#else
+        return false;
+#endif
+    }
+
+    __attribute__((target("+crypto"), noinline)) void transform_arm_sha2(const std::uint8_t* blocks,
+                                                                         std::size_t block_count) {
+        uint32x4_t state_abcd = vld1q_u32(state_.data());
+        uint32x4_t state_efgh = vld1q_u32(state_.data() + 4);
+
+        while (block_count-- != 0) {
+            const uint32x4_t saved_abcd = state_abcd;
+            const uint32x4_t saved_efgh = state_efgh;
+            uint32x4_t messages[4];
+            for (std::size_t i = 0; i < 4; ++i) {
+                const uint8x16_t input = vld1q_u8(blocks + i * 16);
+                messages[i] = vreinterpretq_u32_u8(vrev32q_u8(input));
+            }
+
+            for (std::size_t group = 0; group < 16; ++group) {
+                const std::size_t index = group & 3U;
+                const uint32x4_t rounds =
+                    vaddq_u32(messages[index], vld1q_u32(kRoundConstants.data() + group * 4));
+                const uint32x4_t previous_abcd = state_abcd;
+                state_abcd = vsha256hq_u32(state_abcd, state_efgh, rounds);
+                state_efgh = vsha256h2q_u32(state_efgh, previous_abcd, rounds);
+
+                if (group < 12) {
+                    messages[index] = vsha256su0q_u32(messages[index], messages[(index + 1) & 3U]);
+                    messages[index] = vsha256su1q_u32(messages[index], messages[(index + 2) & 3U],
+                                                      messages[(index + 3) & 3U]);
+                }
+            }
+
+            state_abcd = vaddq_u32(state_abcd, saved_abcd);
+            state_efgh = vaddq_u32(state_efgh, saved_efgh);
+            blocks += block_.size();
+        }
+
+        vst1q_u32(state_.data(), state_abcd);
+        vst1q_u32(state_.data() + 4, state_efgh);
+    }
+#endif
+
+    void transform_blocks(const std::uint8_t* blocks, std::size_t block_count) {
+#if defined(TRTMC_INTERNAL_HAS_ARM_SHA2_INTRINSICS)
+        if (arm_sha2_available()) {
+            transform_arm_sha2(blocks, block_count);
+            return;
+        }
+#endif
+        while (block_count-- != 0) {
+            transform_scalar(blocks);
+            blocks += block_.size();
+        }
+    }
+
     std::array<std::uint8_t, 32> finalize() {
         block_[block_size_++] = 0x80U;
         if (block_size_ > 56) {
             std::fill(block_.begin() + static_cast<std::ptrdiff_t>(block_size_), block_.end(), 0);
-            transform(block_.data());
+            transform_blocks(block_.data(), 1);
             block_size_ = 0;
         }
         std::fill(block_.begin() + static_cast<std::ptrdiff_t>(block_size_), block_.begin() + 56,
@@ -151,7 +242,7 @@ class Sha256 {
         const std::uint64_t bit_length = total_size_ * 8U;
         for (std::size_t i = 0; i < 8; ++i)
             block_[63 - i] = static_cast<std::uint8_t>(bit_length >> (8U * i));
-        transform(block_.data());
+        transform_blocks(block_.data(), 1);
 
         std::array<std::uint8_t, 32> output{};
         for (std::size_t i = 0; i < state_.size(); ++i) {
@@ -171,3 +262,7 @@ class Sha256 {
 };
 
 } // namespace trtmc::internal
+
+#if defined(TRTMC_INTERNAL_HAS_ARM_SHA2_INTRINSICS)
+#undef TRTMC_INTERNAL_HAS_ARM_SHA2_INTRINSICS
+#endif
