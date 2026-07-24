@@ -39,5 +39,4 @@ function(trtmc_configure_registration_manifest manifest_var source_dir template_
   get_filename_component(_trtmc_generated_dir "${generated_source}" DIRECTORY)
   file(MAKE_DIRECTORY "${_trtmc_generated_dir}")
   configure_file("${template_path}" "${generated_source}" @ONLY)
-  set_source_files_properties("${generated_source}" PROPERTIES GENERATED TRUE)
 endfunction()

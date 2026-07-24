@@ -258,7 +258,6 @@ set(TRTMC_MODEL_PLUGIN_INDEX_SOURCE
   "${PROJECT_BINARY_DIR}/generated/model_plugin_index.cpp")
 configure_file("${CMAKE_CURRENT_LIST_DIR}/model_plugin_index.cpp.in"
   "${TRTMC_MODEL_PLUGIN_INDEX_SOURCE}" @ONLY)
-set_source_files_properties("${TRTMC_MODEL_PLUGIN_INDEX_SOURCE}" PROPERTIES GENERATED TRUE)
 
 set(TRTMC_MODEL_PLUGIN_REGISTRATION_SOURCES)
 foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
@@ -290,7 +289,6 @@ foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
   file(MAKE_DIRECTORY "${_trtmc_generated_model_reg_dir}")
   configure_file("${CMAKE_CURRENT_LIST_DIR}/register_model_plugin.cpp.in"
     "${_trtmc_generated_model_reg}" @ONLY)
-  set_source_files_properties("${_trtmc_generated_model_reg}" PROPERTIES GENERATED TRUE)
   set(TRTMC_MODEL_${_trtmc_model_var}_REGISTRATION_SOURCE "${_trtmc_generated_model_reg}")
   list(APPEND TRTMC_MODEL_PLUGIN_REGISTRATION_SOURCES "${_trtmc_generated_model_reg}")
 endforeach()

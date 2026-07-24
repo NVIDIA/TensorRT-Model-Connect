@@ -2365,9 +2365,9 @@ source and before generated receipts:
 
 | State | Files | Added | Deleted | Churn |
 |---|---:|---:|---:|---:|
-| Tracked diff | 174 | 70,847 | 730 | 71,577 |
+| Tracked diff | 176 | 70,868 | 733 | 71,601 |
 | Non-ignored untracked source | 0 | 0 | 0 | 0 |
-| Total review surface | 174 | 70,847 | 730 | 71,577 |
+| Total review surface | 176 | 70,868 | 733 | 71,601 |
 
 The final numbers include all tracked, staged, unstaged, and non-ignored
 untracked source. They exclude generated engine plans and hardware receipts

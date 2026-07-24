@@ -29,6 +29,27 @@ SPEC.loader.exec_module(capture)
 pytestmark = [pytest.mark.unit, pytest.mark.dynamic_memory]
 
 
+def test_clean_first_keeps_configure_time_registration_sources() -> None:
+    """Configure-time sources must not be registered as cleanable build outputs."""
+
+    forbidden_by_file = {
+        "cmake/trtmc_pipeline_plugins.cmake": (
+            'set_source_files_properties("${TRTMC_MODEL_PLUGIN_INDEX_SOURCE}" '
+            "PROPERTIES GENERATED TRUE)",
+            'set_source_files_properties("${_trtmc_generated_model_reg}" '
+            "PROPERTIES GENERATED TRUE)",
+        ),
+        "cmake/trtmc_registration_manifest.cmake": (
+            'set_source_files_properties("${generated_source}" '
+            "PROPERTIES GENERATED TRUE)",
+        ),
+    }
+    for relative_path, forbidden_entries in forbidden_by_file.items():
+        text = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        for forbidden in forbidden_entries:
+            assert forbidden not in text
+
+
 def test_commands_build_excluded_cpp_tests_before_ctest() -> None:
     commands = capture._commands(
         Path("/repo/build-dynkv"),
