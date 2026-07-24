@@ -17,6 +17,13 @@ def test_acceptance_build_reserves_gpu_for_stable_tactic_selection() -> None:
     assert manifest["e2e_parallel_resource"] == "exclusive_gpu"
 
 
+def test_large_acceptance_build_preserves_audited_full_precision() -> None:
+    manifest_path = Path(__file__).parent / "manifests" / "bark-large.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["precision"] == "fp32"
+
+
 def test_acceptance_build_uses_verified_gb300_timing_cache() -> None:
     model_dir = Path(__file__).parent
     manifest_path = model_dir / "manifests" / "bark-small.json"
