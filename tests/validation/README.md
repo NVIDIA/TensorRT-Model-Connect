@@ -42,6 +42,13 @@ commands, the per-model `comparison.json`, and the aggregate `report.html`.
 Dataset-backed comparison runs through `tools/trtmc_compare.py`; task-eval
 commands are not part of the validation result or its reproduction contract.
 
+The HTML artifact is named **TRTMC Reference Consistency Report** because it
+covers task accuracy as well as token, embedding, and numerical agreement.
+For large datasets it shows one full-dataset command and at most three
+representative commands per backend. The first disagreement is preferred when
+one exists. Complete per-sample commands remain in the run logs and are not
+copied into `comparison.json`, `report.json`, or the HTML report.
+
 The report keeps three statuses separate:
 
 - `execution`: whether the programs completed or errored;

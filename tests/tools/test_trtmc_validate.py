@@ -105,9 +105,12 @@ def test_print_result_only_exposes_raw_commands_and_result_locations(tmp_path, c
     trtmc_validate._print_result(
         {
             "reproduce": {
+                "dataset": {
+                    "command": "python tools/trtmc_validate.py model-a --limit 1000",
+                    "prepared_input_count": 1000,
+                },
                 "hf": ["python hf_reference.py --model model-a"],
                 "trtmc": ["trtmc run --model model-a"],
-                "validation": "python tools/trtmc_validate.py model-a",
             }
         },
         comparison,
@@ -117,10 +120,13 @@ def test_print_result_only_exposes_raw_commands_and_result_locations(tmp_path, c
     output = capsys.readouterr().out
     assert output == (
         "\n"
-        "Reproduce HF:\n"
+        "Reproduce full dataset:\n"
+        "  python tools/trtmc_validate.py model-a --limit 1000\n"
+        "\n"
+        "Reproduce representative HF:\n"
         "  python hf_reference.py --model model-a\n"
         "\n"
-        "Reproduce TRTMC:\n"
+        "Reproduce representative TRTMC:\n"
         "  trtmc run --model model-a\n"
         "\n"
         f"Compare result: {comparison}\n"
@@ -147,7 +153,7 @@ def test_print_result_does_not_mislabel_validation_wrapper_as_raw_command(tmp_pa
     )
 
     output = capsys.readouterr().out
-    assert output.count("unavailable; see comparison result") == 2
+    assert output.count("unavailable; see comparison result") == 3
     assert "python tools/trtmc_validate.py model-a" not in output
 
 
@@ -167,6 +173,10 @@ def test_write_report_links_each_comparison(tmp_path):
                 "reproduce": {
                     "hf": ["python hf.py"],
                     "trtmc": ["trtmc run"],
+                    "dataset": {
+                        "command": "python tools/trtmc_validate.py model-a",
+                        "prepared_input_count": 1000,
+                    },
                 },
             }
         ),
@@ -197,8 +207,11 @@ def test_write_report_links_each_comparison(tmp_path):
     assert "model-a/workload-a/comparison.json" in document
     assert "Agreement" in document
     assert "Completed" in document
+    assert "TRTMC Reference Consistency Report" in document
     assert "Vanilla reproduction" in document
-    assert "Reference 1 · TRTMC 1" in document
+    assert "Dataset · Reference 1/1 · TRTMC 1/1" in document
+    assert "Full dataset (1000 prepared inputs)" in document
+    assert "$ python tools/trtmc_validate.py model-a" in document
     assert "$ python hf.py" in document
     assert "$ trtmc run" in document
 
@@ -229,7 +242,16 @@ def test_write_report_does_not_render_validation_wrapper(tmp_path):
     assert "Not reached; see comparison.json." in document
     assert "task_eval.py" not in document
     migrated = json.loads((case_dir / "comparison.json").read_text(encoding="utf-8"))
-    assert set(migrated["reproduce"]) == {"hf", "trtmc"}
+    assert "validation" not in migrated["reproduce"]
+    assert set(migrated["reproduce"]) == {
+        "command_count",
+        "command_logs",
+        "commands_shown",
+        "dataset",
+        "hf",
+        "representative",
+        "trtmc",
+    }
 
 
 def test_write_report_recovers_json_logged_runner_command(tmp_path):
@@ -268,6 +290,77 @@ def test_write_report_recovers_json_logged_runner_command(tmp_path):
     assert "$ trtmc solve model.trtfb --field-input 1,2" in html_path.read_text(
         encoding="utf-8"
     )
+
+
+def test_report_bounds_large_sample_commands_and_selects_disagreement(tmp_path):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    work_dir = case_dir / "validation" / "workload-a" / "model-a"
+    work_dir.mkdir(parents=True)
+    sample_count = 10_000
+    (work_dir / "prompts.jsonl").write_text(
+        "".join(
+            json.dumps({"sample_id": f"sample-{index}", "prompt": f"prompt-{index}"})
+            + "\n"
+            for index in range(sample_count)
+        ),
+        encoding="utf-8",
+    )
+    (work_dir / "trtfb_run.log").write_text(
+        "".join(
+            f"$ trtmc run model.trtfb --prompt prompt-{index}\n"
+            for index in range(sample_count)
+        ),
+        encoding="utf-8",
+    )
+    (work_dir / "summary.json").write_text(
+        json.dumps({"disagreements": [{"sample_id": "sample-9999"}]}),
+        encoding="utf-8",
+    )
+    (case_dir / "comparison.json").write_text(
+        json.dumps(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "status": "failed",
+                "raw_result": {
+                    "status": "failed",
+                    "work_dir": str(work_dir),
+                },
+                "reproduce": {
+                    "dataset": {
+                        "command": (
+                            "python tools/trtmc_validate.py model-a --limit 10000"
+                        ),
+                        "prepared_input_count": sample_count,
+                    },
+                    "hf": [],
+                    "trtmc": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, html_path, report = trtmc_validate.write_report(tmp_path)
+
+    reproduction = report["results"][0]["reproduce"]
+    assert reproduction["command_count"]["trtmc"] == sample_count
+    assert reproduction["commands_shown"]["trtmc"] == 1
+    assert reproduction["trtmc"] == [
+        "trtmc run model.trtfb --prompt prompt-9999"
+    ]
+    assert reproduction["representative"] == {
+        "sample_id": "sample-9999",
+        "reason": "first_disagreement",
+    }
+    assert reproduction["command_logs"]["trtmc"] == ["trtfb_run.log"]
+    assert "prompt-5000" not in json.dumps(report)
+    document = html_path.read_text(encoding="utf-8")
+    assert "Showing 1 of 10000 commands" in document
+    assert "prompt-9999" in document
+    assert "prompt-5000" not in document
+    assert (case_dir / "comparison.json").stat().st_size < 20_000
+    assert (tmp_path / "report.json").stat().st_size < 20_000
 
 
 def test_run_metadata_records_source_and_exact_command(monkeypatch, tmp_path):

@@ -388,32 +388,179 @@ def _e2e_command(
     return command
 
 
-def _commands_from_logs(root: Path) -> dict[str, list[str]]:
-    commands = {"hf": [], "trtmc": []}
-    for path in sorted(root.rglob("*.log")):
-        kind = "hf" if "hf" in path.name.lower() else "trtmc"
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            value = _command_from_log_line(line)
-            if value and value not in commands[kind]:
-                commands[kind].append(value)
-    return commands
+MAX_REPRO_COMMANDS_PER_BACKEND = 3
+_FAILED_SAMPLE_STATUSES = {"disagreement", "fail", "failed", "mismatch"}
+_FAILED_SAMPLE_FIELDS = (
+    "agreement_match",
+    "exact_match",
+    "passed",
+    "top1_agreement",
+    "transcript_exact",
+)
+_SAMPLE_ID_FIELDS = ("sample_id", "case_id", "id", "name")
 
 
-def _command_from_log_line(line: str) -> str:
+def _command_record_from_log_line(line: str) -> tuple[str, str]:
     if line.startswith("$ "):
-        return line[2:].strip()
+        return line[2:].strip(), ""
     try:
         data = json.loads(line)
     except json.JSONDecodeError:
+        return "", ""
+    if not isinstance(data, dict):
+        return "", ""
+    command = data.get("command")
+    sample_id = next(
+        (str(data[name]) for name in _SAMPLE_ID_FIELDS if data.get(name) is not None),
+        "",
+    )
+    if isinstance(command, list) and command:
+        return shlex.join(str(token) for token in command), sample_id
+    if isinstance(command, str):
+        return command.strip(), sample_id
+    return "", ""
+
+
+def _command_from_log_line(line: str) -> str:
+    return _command_record_from_log_line(line)[0]
+
+
+def _sample_id(record: Mapping[str, Any]) -> str:
+    return next(
+        (str(record[name]) for name in _SAMPLE_ID_FIELDS if record.get(name) is not None),
+        "",
+    )
+
+
+def _explicit_disagreement_id(data: Mapping[str, Any]) -> str:
+    disagreements = data.get("disagreements", [])
+    if not isinstance(disagreements, list):
+        return ""
+    for item in disagreements:
+        if isinstance(item, dict) and _sample_id(item):
+            return _sample_id(item)
+    return ""
+
+
+def _record_is_disagreement(record: Mapping[str, Any]) -> bool:
+    status = str(record.get("status", "") or "").lower()
+    if status in _FAILED_SAMPLE_STATUSES:
+        return True
+    return any(record.get(name) is False for name in _FAILED_SAMPLE_FIELDS)
+
+
+def _failed_sample_id(data: Any) -> str:
+    if isinstance(data, list):
+        for item in data:
+            failed = _failed_sample_id(item)
+            if failed:
+                return failed
         return ""
     if not isinstance(data, dict):
         return ""
-    command = data.get("command")
-    if isinstance(command, list) and command:
-        return shlex.join(str(token) for token in command)
-    if isinstance(command, str):
-        return command.strip()
+    if _record_is_disagreement(data) and _sample_id(data):
+        return _sample_id(data)
+    for value in data.values():
+        failed = _failed_sample_id(value)
+        if failed:
+            return failed
     return ""
+
+
+def _first_disagreement_id(work_dir: Path) -> str:
+    for name in ("summary.json", "eval_result.json"):
+        path = work_dir / name
+        if not path.is_file():
+            continue
+        data = json.loads(path.read_text(encoding="utf-8"))
+        explicit_id = _explicit_disagreement_id(data) if isinstance(data, dict) else ""
+        if explicit_id:
+            return explicit_id
+        failed = _failed_sample_id(data)
+        if failed:
+            return failed
+    return ""
+
+
+def _prepared_sample_ids(work_dir: Path) -> list[str]:
+    prompts = work_dir / "prompts.jsonl"
+    if not prompts.is_file():
+        return []
+    sample_ids = []
+    with prompts.open(encoding="utf-8") as prompt_file:
+        for index, line in enumerate(prompt_file):
+            record = json.loads(line)
+            if isinstance(record, dict):
+                sample_ids.append(_sample_id(record) or f"sample-{index}")
+    return sample_ids
+
+
+def _sample_ids_match(candidate: str, target: str) -> bool:
+    return bool(
+        candidate
+        and target
+        and (
+            candidate == target
+            or candidate.startswith(f"{target}:")
+            or target.startswith(f"{candidate}:")
+        )
+    )
+
+
+def _summarize_command_log(
+    path: Path,
+    *,
+    sample_ids: Sequence[str],
+    target_sample_id: str,
+) -> tuple[int, str]:
+    count = 0
+    first = ""
+    selected = ""
+    with path.open(encoding="utf-8", errors="replace") as log_file:
+        for line in log_file:
+            command, logged_sample_id = _command_record_from_log_line(line)
+            if not command:
+                continue
+            indexed_sample_id = sample_ids[count] if count < len(sample_ids) else ""
+            command_sample_id = logged_sample_id or indexed_sample_id
+            count += 1
+            first = first or command
+            if _sample_ids_match(command_sample_id, target_sample_id):
+                selected = command
+    return count, selected or first
+
+
+def _commands_from_logs(root: Path) -> dict[str, Any]:
+    sample_ids = _prepared_sample_ids(root)
+    disagreement_id = _first_disagreement_id(root)
+    representative_id = disagreement_id or (sample_ids[0] if sample_ids else "")
+    commands: dict[str, list[str]] = {"hf": [], "trtmc": []}
+    counts = {"hf": 0, "trtmc": 0}
+    logs: dict[str, list[str]] = {"hf": [], "trtmc": []}
+    for path in sorted(root.rglob("*.log")):
+        kind = "hf" if "hf" in path.name.lower() else "trtmc"
+        count, representative = _summarize_command_log(
+            path,
+            sample_ids=sample_ids if path.name == "trtfb_run.log" else (),
+            target_sample_id=representative_id,
+        )
+        counts[kind] += count
+        if count:
+            logs[kind].append(str(path.relative_to(root)))
+        _append_unique(commands, kind, representative)
+    for kind in commands:
+        commands[kind] = commands[kind][:MAX_REPRO_COMMANDS_PER_BACKEND]
+    return {
+        **commands,
+        "command_count": counts,
+        "commands_shown": {kind: len(values) for kind, values in commands.items()},
+        "command_logs": logs,
+        "representative": {
+            "sample_id": representative_id,
+            "reason": "first_disagreement" if disagreement_id else "first_input",
+        },
+        "prepared_input_count": len(sample_ids),
+    }
 
 
 def _append_unique(commands: dict[str, list[str]], kind: str, command: str) -> None:
@@ -449,11 +596,22 @@ def _collect_e2e_result_commands(
         )
 
 
-def _commands_from_e2e_results(results: Sequence[Mapping[str, Any]]) -> dict[str, list[str]]:
+def _commands_from_e2e_results(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     commands = {"hf": [], "trtmc": []}
     for result in results:
         _collect_e2e_result_commands(commands, result)
-    return commands
+    counts = {kind: len(values) for kind, values in commands.items()}
+    commands = {
+        kind: values[:MAX_REPRO_COMMANDS_PER_BACKEND]
+        for kind, values in commands.items()
+    }
+    return {
+        **commands,
+        "command_count": counts,
+        "commands_shown": {kind: len(values) for kind, values in commands.items()},
+        "command_logs": {"hf": [], "trtmc": []},
+        "representative": {"sample_id": "", "reason": "first_input"},
+    }
 
 
 _PRIMARY_COMPARISON_METRICS = (
@@ -599,6 +757,74 @@ def _validation_details(
     return {"status": status_by_comparison[str(comparison["status"])]}
 
 
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item).strip()]
+
+
+def _normalized_command_count(
+    reproduce: Mapping[str, Any],
+    kind: str,
+    commands: Sequence[str],
+) -> int:
+    counts = reproduce.get("command_count", {})
+    configured = counts.get(kind) if isinstance(counts, dict) else None
+    try:
+        return max(int(configured), len(commands))
+    except (TypeError, ValueError):
+        return len(commands)
+
+
+def _normalized_command_logs(reproduce: Mapping[str, Any], kind: str) -> list[str]:
+    logs = reproduce.get("command_logs", {})
+    return _string_list(logs.get(kind, [])) if isinstance(logs, dict) else []
+
+
+def _normalize_reproduction(value: Any) -> dict[str, Any]:
+    reproduce = value if isinstance(value, dict) else {}
+    all_commands = {
+        kind: _string_list(reproduce.get(kind, []))
+        for kind in ("hf", "trtmc")
+    }
+    commands = {
+        kind: values[:MAX_REPRO_COMMANDS_PER_BACKEND]
+        for kind, values in all_commands.items()
+    }
+    dataset = reproduce.get("dataset", {})
+    if not isinstance(dataset, dict):
+        dataset = {"command": str(dataset)} if str(dataset).strip() else {}
+    representative = reproduce.get("representative", {})
+    if not isinstance(representative, dict):
+        representative = {}
+    return {
+        "dataset": dataset,
+        **commands,
+        "command_count": {
+            kind: _normalized_command_count(reproduce, kind, all_commands[kind])
+            for kind in commands
+        },
+        "commands_shown": {kind: len(values) for kind, values in commands.items()},
+        "command_logs": {
+            kind: _normalized_command_logs(reproduce, kind) for kind in commands
+        },
+        "representative": representative,
+    }
+
+
+def _add_dataset_reproduction(
+    reproduce: Mapping[str, Any],
+    command: str,
+) -> dict[str, Any]:
+    result = dict(reproduce)
+    prepared_input_count = int(result.pop("prepared_input_count", 0) or 0)
+    result["dataset"] = {
+        "command": command,
+        "prepared_input_count": prepared_input_count,
+    }
+    return result
+
+
 def _normalize_result(result: Mapping[str, Any]) -> dict[str, Any]:
     normalized = dict(result)
     raw_result = _raw_comparison(normalized)
@@ -611,19 +837,13 @@ def _normalize_result(result: Mapping[str, Any]) -> dict[str, Any]:
     validation = normalized.get("validation")
     if not isinstance(validation, dict):
         validation = _validation_details(execution, comparison)
-    reproduce = normalized.get("reproduce", {})
-    if not isinstance(reproduce, dict):
-        reproduce = {}
     normalized.update(
         {
             "schema_version": "trtmc.validation-result/v2",
             "execution": execution,
             "comparison": comparison,
             "validation": validation,
-            "reproduce": {
-                "hf": list(reproduce.get("hf", [])),
-                "trtmc": list(reproduce.get("trtmc", [])),
-            },
+            "reproduce": _normalize_reproduction(normalized.get("reproduce")),
         }
     )
     normalized.pop("returncode", None)
@@ -637,6 +857,7 @@ def _comparison_result(
     case_dir: Path,
     returncode: int,
     reference_environment: EnvironmentSelection,
+    dataset_command: str,
 ) -> dict[str, Any]:
     summary_path = case_dir / "validation" / binding.workload / "eval_summary.json"
     raw_result: dict[str, Any] = {}
@@ -662,7 +883,10 @@ def _comparison_result(
         "reference_environment": [
             {"name": name, "python": path} for name, path in reference_environment.names_and_paths
         ],
-        "reproduce": _commands_from_logs(work_dir),
+        "reproduce": _add_dataset_reproduction(
+            _commands_from_logs(work_dir),
+            dataset_command,
+        ),
         "raw_result": raw_result,
         "raw_result_path": str(summary_path),
         "execution_log": str(case_dir / "execution.log"),
@@ -676,6 +900,7 @@ def _e2e_result(
     case_dir: Path,
     returncode: int,
     reference_environment: EnvironmentSelection,
+    dataset_command: str,
 ) -> dict[str, Any]:
     result_paths = sorted((case_dir / "e2e").glob("*/result.json"))
     raw_results = [json.loads(path.read_text(encoding="utf-8")) for path in result_paths]
@@ -696,7 +921,10 @@ def _e2e_result(
         "reference_environment": [
             {"name": name, "python": path} for name, path in reference_environment.names_and_paths
         ],
-        "reproduce": _commands_from_e2e_results(raw_results),
+        "reproduce": _add_dataset_reproduction(
+            _commands_from_e2e_results(raw_results),
+            dataset_command,
+        ),
         "raw_result_paths": [str(path) for path in result_paths],
         "raw_results": raw_results,
         "execution_log": str(case_dir / "execution.log"),
@@ -722,6 +950,7 @@ def run_binding(
     environment = ensure_environments(profiles, str(arguments.hf_python))
     process_env = _source_environment()
     process_env.update(environment.overrides)
+    dataset_command = shlex.join([sys.executable, *sys.argv])
 
     if binding.workload == "e2e":
         command = _e2e_command(
@@ -736,6 +965,7 @@ def run_binding(
             case_dir=case_dir,
             returncode=returncode,
             reference_environment=environment,
+            dataset_command=dataset_command,
         )
     else:
         suite = suites[binding.workload]
@@ -757,6 +987,7 @@ def run_binding(
             case_dir=case_dir,
             returncode=returncode,
             reference_environment=environment,
+            dataset_command=dataset_command,
         )
 
     comparison = case_dir / "comparison.json"
@@ -813,16 +1044,16 @@ def _merge_commands_from_result_logs(result: dict[str, Any]) -> None:
     if not root.is_dir():
         return
     discovered = _commands_from_logs(root)
-    reproduce = result.setdefault("reproduce", {})
+    reproduce = result.get("reproduce", {})
     if not isinstance(reproduce, dict):
-        return
+        reproduce = {}
     for kind in ("hf", "trtmc"):
-        commands = reproduce.setdefault(kind, [])
-        if not isinstance(commands, list):
-            continue
-        for command in discovered[kind]:
-            if command not in commands:
-                commands.append(command)
+        existing = _string_list(reproduce.get(kind, []))
+        extra = [command for command in existing if command not in discovered[kind]]
+        discovered[kind] = (extra + discovered[kind])[:MAX_REPRO_COMMANDS_PER_BACKEND]
+        discovered["command_count"][kind] += len(extra)
+    discovered["dataset"] = reproduce.get("dataset", {})
+    result["reproduce"] = _normalize_reproduction(discovered)
 
 
 def _result_commands(result: Mapping[str, Any], kind: str) -> list[str]:
@@ -835,27 +1066,97 @@ def _result_commands(result: Mapping[str, Any], kind: str) -> list[str]:
     return [str(command) for command in commands if str(command).strip()]
 
 
-def _render_command_group(label: str, commands: Sequence[str]) -> str:
+def _render_command_group(
+    label: str,
+    commands: Sequence[str],
+    *,
+    total: int | None = None,
+    logs: Sequence[str] = (),
+) -> str:
     if not commands:
         body = '<span class="unavailable">Not reached; see comparison.json.</span>'
     else:
         shell = "\n".join(f"$ {command}" for command in commands)
         body = f"<pre><code>{html.escape(shell)}</code></pre>"
+    command_total = len(commands) if total is None else total
+    if command_total > len(commands):
+        locations = ", ".join(logs) or "comparison.json"
+        body += (
+            f'<div class="detail">Showing {len(commands)} of {command_total} commands. '
+            f"Full command log: {html.escape(locations)}.</div>"
+        )
     return f"<h4>{html.escape(label)}</h4>{body}"
+
+
+def _reproduction_count(result: Mapping[str, Any], kind: str) -> int:
+    reproduce = result.get("reproduce", {})
+    counts = reproduce.get("command_count", {}) if isinstance(reproduce, dict) else {}
+    commands = _result_commands(result, kind)
+    try:
+        return max(int(counts.get(kind)), len(commands)) if isinstance(counts, dict) else len(commands)
+    except (TypeError, ValueError):
+        return len(commands)
+
+
+def _reproduction_logs(result: Mapping[str, Any], kind: str) -> list[str]:
+    reproduce = result.get("reproduce", {})
+    logs = reproduce.get("command_logs", {}) if isinstance(reproduce, dict) else {}
+    return _string_list(logs.get(kind, [])) if isinstance(logs, dict) else []
+
+
+def _dataset_reproduction(result: Mapping[str, Any]) -> tuple[str, int]:
+    reproduce = result.get("reproduce", {})
+    dataset = reproduce.get("dataset", {}) if isinstance(reproduce, dict) else {}
+    if not isinstance(dataset, dict):
+        return "", 0
+    command = str(dataset.get("command", "") or "")
+    try:
+        prepared = int(dataset.get("prepared_input_count", 0) or 0)
+    except (TypeError, ValueError):
+        prepared = 0
+    return command, prepared
+
+
+def _representative_note(result: Mapping[str, Any]) -> str:
+    reproduce = result.get("reproduce", {})
+    representative = (
+        reproduce.get("representative", {}) if isinstance(reproduce, dict) else {}
+    )
+    if not isinstance(representative, dict):
+        return ""
+    sample_id = str(representative.get("sample_id", "") or "")
+    if not sample_id:
+        return ""
+    reason = str(representative.get("reason", "") or "").replace("_", " ")
+    return (
+        '<div class="detail">Representative sample: '
+        f"{html.escape(sample_id)}"
+        f" ({html.escape(reason)}).</div>"
+    )
 
 
 def _render_reproduction(result: Mapping[str, Any]) -> str:
     reference_commands = _result_commands(result, "hf")
     trtmc_commands = _result_commands(result, "trtmc")
+    dataset_command, prepared_input_count = _dataset_reproduction(result)
+    reference_total = _reproduction_count(result, "hf")
+    trtmc_total = _reproduction_count(result, "trtmc")
+    dataset_label = (
+        f"Full dataset ({prepared_input_count} prepared inputs)"
+        if prepared_input_count
+        else "Full dataset"
+    )
     summary = (
-        f"Reference {len(reference_commands)} · "
-        f"TRTMC {len(trtmc_commands)}"
+        f"Dataset · Reference {len(reference_commands)}/{reference_total} · "
+        f"TRTMC {len(trtmc_commands)}/{trtmc_total}"
     )
     return (
         f"<details><summary>{summary}</summary>"
         '<div class="commands">'
-        f"{_render_command_group('Reference', reference_commands)}"
-        f"{_render_command_group('TRTMC', trtmc_commands)}"
+        f"{_render_command_group(dataset_label, [dataset_command] if dataset_command else [])}"
+        f"{_render_command_group('Reference sample', reference_commands, total=reference_total, logs=_reproduction_logs(result, 'hf'))}"
+        f"{_render_command_group('TRTMC sample', trtmc_commands, total=trtmc_total, logs=_reproduction_logs(result, 'trtmc'))}"
+        f"{_representative_note(result)}"
         "</div></details>"
     )
 
@@ -1051,10 +1352,11 @@ def _report_document(
     provenance = _report_provenance(report.get("run", {}))
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<title>TRTMC Validation Report</title>
+<title>TRTMC Reference Consistency Report</title>
 <style>
 body {{ font: 14px system-ui, sans-serif; margin: 32px; color: #202124; }}
 h1 {{ margin-bottom: 4px; }}
+.purpose {{ color: #5f6368; margin-bottom: 8px; }}
 .summary {{ color: #5f6368; margin-bottom: 24px; }}
 table {{ border-collapse: collapse; width: 100%; }}
 th, td {{ border: 1px solid #dadce0; padding: 8px 10px; text-align: left; }}
@@ -1088,7 +1390,8 @@ pre {{ margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
 .metric.primary {{ font-size: 13px; }}
 .metric.primary span, .metric.primary strong {{ color: #202124; }}
 </style></head><body>
-<h1>TRTMC Validation Report</h1>
+<h1>TRTMC Reference Consistency Report</h1>
+<div class="purpose">Accuracy and output agreement against the model reference.</div>
 <div class="summary">{report["summary"]["cases"]} cases ·
 {comparison_counts["agreement"]} agreements ·
 {comparison_counts["disagreement"]} disagreements ·
@@ -1148,15 +1451,19 @@ def _print_result(result: Mapping[str, Any], comparison: Path, report: Path) -> 
     reproduce = result.get("reproduce", {})
     hf_commands = reproduce.get("hf", []) if isinstance(reproduce, dict) else []
     trtmc_commands = reproduce.get("trtmc", []) if isinstance(reproduce, dict) else []
+    dataset_command, _ = _dataset_reproduction(result)
     print()
-    print("Reproduce HF:")
+    print("Reproduce full dataset:")
+    print(f"  {dataset_command}" if dataset_command else "  unavailable; see comparison result")
+    print()
+    print("Reproduce representative HF:")
     if hf_commands:
         for command in hf_commands:
             print(f"  {command}")
     else:
         print("  unavailable; see comparison result")
     print()
-    print("Reproduce TRTMC:")
+    print("Reproduce representative TRTMC:")
     if trtmc_commands:
         for command in trtmc_commands:
             print(f"  {command}")
