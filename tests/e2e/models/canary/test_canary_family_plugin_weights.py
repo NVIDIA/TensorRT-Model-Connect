@@ -74,6 +74,27 @@ class TestCanaryPlugin:
             "fp32_layers": [3, 7],
         }
 
+    def test_norm_epsilon_falls_back_for_full_fp32_build(self):
+        plugin = importlib.import_module(
+            "tensorrt_model_connect.families.canary.plugin")
+        regular_eps = object()
+
+        selected = plugin._select_norm_eps(
+            regular_eps, None, np.float32)
+
+        assert selected is regular_eps
+
+    def test_norm_epsilon_uses_promoted_tensor_for_mixed_precision(self):
+        plugin = importlib.import_module(
+            "tensorrt_model_connect.families.canary.plugin")
+        regular_eps = object()
+        promoted_eps = object()
+
+        selected = plugin._select_norm_eps(
+            regular_eps, promoted_eps, np.float32)
+
+        assert selected is promoted_eps
+
     @staticmethod
     def _make_tp_weights(
         *,

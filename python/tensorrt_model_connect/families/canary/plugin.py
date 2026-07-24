@@ -1029,7 +1029,7 @@ class CanaryPlugin:
                 cross_k=layer_cross_k, cross_v=layer_cross_v,
                 attention_mask=layer_mask,
                 cross_attention_mask=layer_cross_mask,
-                eps=fp32_eps if layer_np_dtype == np.float32 else eps,
+                eps=_select_norm_eps(eps, fp32_eps, layer_np_dtype),
                 weights=weights, pfx=pfx,
                 hsz=h, nheads=dh, hdim=hd, ffn=df,
                 maxcache=max_cache_length, maxsrc=es, dtype=layer_np_dtype)
@@ -1148,6 +1148,13 @@ def network_add_elementwise_sum(net, a, b):
     return net.add_elementwise(a, b, trt.ElementWiseOperation.SUM).get_output(0)
 
 
+def _select_norm_eps(eps, fp32_eps, layer_np_dtype):
+    """Select the promoted epsilon only when one was actually created."""
+    if layer_np_dtype == np.float32 and fp32_eps is not None:
+        return fp32_eps
+    return eps
+
+
 def _build_encoder(
     config, weights, *, precision="fp32", verbose=False, fp32_layers=(),
 ):
@@ -1262,7 +1269,7 @@ def _build_encoder(
             dtype=layer_np_dtype)
         hs = _add_conformer_block(
             net, hs, weights, pfx, h, eh, hd, ef, k, es, rpe,
-            fp32_eps if layer_np_dtype == np.float32 else eps,
+            _select_norm_eps(eps, fp32_eps, layer_np_dtype),
             layer_mask,
             conv_norm_type=conv_norm_type, conv_context_size=conv_context_size,
             valid_mask=layer_valid_mask, dtype=layer_np_dtype)
