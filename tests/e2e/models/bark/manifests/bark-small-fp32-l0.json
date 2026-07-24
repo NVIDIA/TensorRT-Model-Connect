@@ -1,0 +1,29 @@
+{
+  "name": "bark-small-fp32-l0",
+  "hf_id": "suno/bark-small",
+  "bundle": "bark-small-fp32-l0.trtfb",
+  "family": "bark",
+  "runtime_strategy": "text_to_audio_bark",
+  "task_strategy": "text_to_audio",
+  "precision": "fp32",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "max_cache_length": 1024,
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "bark-small-fp32-l0",
+      "trace_id": "IT-E2E-BARKS-FP32-L0-01",
+      "reference_precision": "fp32",
+      "reference_family": "tts_bark",
+      "user_contract": "tts_audio",
+      "ci_tier": "l0_only",
+      "test_type": "audio",
+      "prompt": "Hello, this is a test of the audio generation system.",
+      "max_new_tokens": 0,
+      "determinism": {
+        "seed": 0
+      },
+      "notes": "PR L0 representative for Bark Large. Uses the smaller Bark checkpoint with the FP32 builder while preserving the audited Bark Small prompt, seed, reference, comparator, exact-token gates, and speech artifact thresholds."
+    }
+  ]
+}

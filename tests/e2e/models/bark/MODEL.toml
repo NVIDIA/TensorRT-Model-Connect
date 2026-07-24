@@ -6,6 +6,7 @@ plugin = "bark"
 test_manifests = [
   "manifests/bark-large-tp4.json",
   "manifests/bark-large.json",
+  "manifests/bark-small-fp32-l0.json",
   "manifests/bark-small-tp4.json",
   "manifests/bark-small.json",
 ]

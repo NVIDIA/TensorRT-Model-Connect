@@ -499,6 +499,7 @@ def test_runner_rejects_an_unknown_suite_before_starting_docker() -> None:
 @pytest.mark.parametrize(
     ("family", "expected_case"),
     (
+        ("bark", "bark-small-fp32-l0"),
         ("flux", "flux-schnell-l0"),
         ("personaplex", "personaplex-7b-l0"),
         ("canary", "canary-1b-v2"),
@@ -1006,6 +1007,15 @@ def test_inner_gpu_lease_rejects_top_level_minimum_mismatch(
 @pytest.mark.parametrize(
     ("family", "expected_cases"),
     (
+        (
+            "bark",
+            {
+                "bark-large",
+                "bark-small",
+                "bark-small-tts-probe01",
+                "bark-small-tts-probe02",
+            },
+        ),
         (
             "flux",
             {
