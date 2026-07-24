@@ -1756,6 +1756,17 @@ class TestUnitTiers:
         assert match.unit_tiers == ["tools"]
         assert match.rebuild_cpp is False
 
+    def test_release_performance_triggers_tools_tier(self, imap):
+        """Release benchmark orchestration runs tools tests without model proofs."""
+        match = test_impact.classify_file(
+            "benchmarks/performance/baselines/timing_contracts.py", imap
+        )
+
+        assert match.rule == "release_performance"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
     def test_e2e_selection_unit(self, imap):
         """E2E selection unit tests run tools-tier validation without E2E."""
         match = test_impact.classify_file("tests/test_e2e_selection.py", imap)

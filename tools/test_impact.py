@@ -1841,6 +1841,13 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestUnitTiers.test_benchmark_cli_assets_trigger_tools_tier",),
         ),
         ClassificationRule(
+            priority=457,
+            name="release_performance",
+            matcher=_path_startswith("benchmarks/performance/"),
+            resolver=_match_result("release_performance", _no_models, ["tools"], False),
+            covered_by=("TestUnitTiers.test_release_performance_triggers_tools_tier",),
+        ),
+        ClassificationRule(
             priority=460,
             name="cmake",
             matcher=lambda path, _imap: (
