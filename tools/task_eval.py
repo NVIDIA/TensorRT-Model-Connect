@@ -8327,6 +8327,14 @@ def bundle_max_cache_length(bundle_path: Path, trtmc_binary: str) -> int | None:
     return int(match.group(1))
 
 
+def _remove_bundle_before_or_after_replacement(
+    bundle_path: Path,
+    replace_existing: bool,
+) -> None:
+    if replace_existing and (bundle_path.exists() or bundle_path.is_symlink()):
+        bundle_path.unlink()
+
+
 def ensure_bundle(
     model: dict[str, Any],
     *,
@@ -8345,8 +8353,10 @@ def ensure_bundle(
         if existing_cache is None or existing_cache >= max_cache_length:
             return bundle_path, False
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
-    if replace_existing and bundle_path.exists():
-        bundle_path.unlink()
+    _remove_bundle_before_or_after_replacement(
+        bundle_path,
+        replace_existing,
+    )
     cmd = build_bundle_command(
         model,
         trtmc_binary=trtmc_binary,
@@ -8361,8 +8371,10 @@ def ensure_bundle(
         log_f.flush()
         proc = subprocess.run(cmd, check=False, text=True, stdout=log_f, stderr=subprocess.STDOUT)
     if proc.returncode != 0:
-        if replace_existing and bundle_path.exists():
-            bundle_path.unlink()
+        _remove_bundle_before_or_after_replacement(
+            bundle_path,
+            replace_existing,
+        )
         raise RuntimeError(
             f"Bundle build failed for {model['name']} rc={proc.returncode}; see {log_path}"
         )

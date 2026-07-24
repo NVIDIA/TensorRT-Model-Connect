@@ -3231,6 +3231,40 @@ def test_ensure_bundle_removes_partial_replacement_after_failed_build(
     assert not bundle.exists()
 
 
+def test_ensure_bundle_replaces_dangling_shared_bundle_symlink(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle = tmp_path / "shared" / "model.trtfb"
+    bundle.parent.mkdir()
+    bundle.symlink_to(tmp_path / "missing.trtfb")
+
+    class Result:
+        returncode = 0
+
+    def fake_run(command, **_kwargs):
+        output = Path(command[command.index("-o") + 1])
+        assert not output.is_symlink()
+        output.write_bytes(b"new")
+        return Result()
+
+    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+
+    task_eval.ensure_bundle(
+        {
+            "name": "model",
+            "hf_id": "org/model",
+            "precision": "fp32",
+        },
+        bundle_path=bundle,
+        trtmc_binary="trtmc",
+        replace_existing=True,
+    )
+
+    assert not bundle.is_symlink()
+    assert bundle.read_bytes() == b"new"
+
+
 def test_suite_build_cache_minimum_overrides_manifest_cache() -> None:
     suite = {"build": {"min_max_cache_length": 1024}}
     model = {"max_cache_length": 256}
