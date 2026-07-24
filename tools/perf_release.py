@@ -1304,10 +1304,12 @@ def _timing_scope_label(scope: str | None) -> str:
 
 
 def _timing_path_html(row: Mapping[str, Any]) -> str:
-    candidate = row.get("candidate")
-    baseline = row.get("baseline")
-    if not isinstance(candidate, Mapping) or not isinstance(baseline, Mapping):
-        return "—"
+    candidate = row.get("candidate", {})
+    baseline = row.get("baseline", {})
+    if not isinstance(candidate, Mapping):
+        candidate = {}
+    if not isinstance(baseline, Mapping):
+        baseline = {}
     path = _timing_path(candidate, baseline)
     status = str(path["status"])
     label = {

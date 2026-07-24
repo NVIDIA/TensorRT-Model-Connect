@@ -289,6 +289,11 @@ def test_timing_path_alignment_distinguishes_public_and_model_only_calls() -> No
         "candidate_scope": "public_pipeline_call_wall",
         "baseline_scope": "task-pipeline-call-wall",
     }
+    assert perf_release._timing_path(candidate, {}) == {
+        "status": "unavailable",
+        "candidate_scope": "public_pipeline_call_wall",
+        "baseline_scope": None,
+    }
 
 
 def test_ocr_text_contract_preserves_required_content_and_allows_format_variation() -> None:
