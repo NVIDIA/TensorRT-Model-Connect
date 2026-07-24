@@ -145,6 +145,12 @@ Configuration errors, command failures, incomplete measurements, and contract
 mismatches return a nonzero exit code. CI and manual execution use this same rule;
 there is no CI-specific execution mode.
 
+Suite, environment, storage, and candidate-worker provenance errors fail before
+model execution. A candidate or reference preflight failure that belongs to one
+matrix entry is instead recorded as a failed row, and `run` continues with the
+remaining ready entries. `check` reports the ready and failed entry counts and
+returns nonzero when any selected entry is not ready.
+
 ## Results and reproduction
 
 Each new run creates a unique directory below `storage.results_root`. The final

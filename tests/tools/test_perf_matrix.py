@@ -806,6 +806,78 @@ def test_check_runs_preflight_without_creating_results(
     assert not scratch_root.exists()
 
 
+def test_run_records_preflight_failure_and_finishes_campaign(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_trtmc = tmp_path / "trtmc-bench"
+    fake_worker = tmp_path / "trtmc_benchmark_worker"
+    fake_baseline = tmp_path / "hf_transformers.py"
+    results_root = tmp_path / "results"
+    scratch_root = tmp_path / "scratch"
+    environment = tmp_path / "gb300.yaml"
+    monkeypatch.setenv("TRTMC_PERF_SOURCE_REVISION", "tested-commit")
+    _write_fake_trtmc(fake_trtmc)
+    _write_fake_worker(fake_worker, "tested-commit")
+    _write_fake_baseline(fake_baseline)
+    _write_environment(
+        environment,
+        results_root=results_root,
+        scratch_root=scratch_root,
+        trtmc_bench=fake_trtmc,
+        trtmc_worker=fake_worker,
+        hf_transformers_runner=fake_baseline,
+    )
+
+    def fail_reference(cases, _options):
+        case_id = str(cases[0]["id"])
+        return (
+            {},
+            {
+                "status": "partial",
+                "entry_count": 0,
+                "failed_entry_count": 1,
+                "entries": [],
+                "failures": [],
+            },
+            {
+                case_id: {
+                    "stage": "reference-preflight",
+                    "reason": "profile unavailable",
+                    "argv": [str(fake_trtmc), "run", "--dry-run"],
+                }
+            },
+        )
+
+    monkeypatch.setattr(perf_matrix, "_preflight_selected", fail_reference)
+
+    exit_code = perf_matrix.main(
+        [
+            "run",
+            str(SUITE),
+            "--environment",
+            str(environment),
+            "--entry",
+            "gpt2.generate",
+        ]
+    )
+
+    assert exit_code == 1
+    output = next(path for path in results_root.iterdir() if path.is_dir())
+    results = json.loads((output / "results.json").read_text(encoding="utf-8"))
+    row = next(row for row in results["cases"] if row["id"] == "gpt2.generate")
+    assert results["status"] == "completed-with-errors"
+    assert results["timing_preflight"]["status"] == "partial"
+    assert row["status"] == "failed"
+    assert row["failure_stage"] == "reference-preflight"
+    assert row["reason"] == "profile unavailable"
+    assert row["commands"]["resolve"]["rendered"].endswith("run --dry-run")
+    assert sorted(path.name for path in output.iterdir()) == [
+        "report.html",
+        "results.json",
+    ]
+    assert not scratch_root.exists()
+
+
 def test_task_reference_commands_record_external_checkout_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -868,7 +940,9 @@ def test_suite_has_explicit_eager_and_task_reference_rows() -> None:
         assert rows[case_id]["baseline"]["mode"] in {"hf-eager", "pytorch-eager"}
 
 
-def test_resolution_failure_stops_preflight_before_execution(tmp_path: Path, monkeypatch) -> None:
+def test_resolution_failure_is_recorded_without_stopping_other_entries(
+    tmp_path: Path, monkeypatch
+) -> None:
     case = perf_matrix._cases(perf_matrix._read_yaml(SUITE))[0]
     options = perf_matrix.RunOptions(
         output=tmp_path,
@@ -890,11 +964,12 @@ def test_resolution_failure_stops_preflight_before_execution(tmp_path: Path, mon
 
     monkeypatch.setattr(perf_matrix, "_resolve_candidate", fail_resolution)
 
-    with pytest.raises(
-        perf_matrix.PerfMatrixError,
-        match="timing preflight failed before benchmark execution",
-    ):
-        perf_matrix._preflight_candidates([case], options)
+    preflight, failures = perf_matrix._preflight_candidates([case], options)
+
+    assert preflight == {}
+    assert failures[case["id"]]["stage"] == "candidate-preflight"
+    assert failures[case["id"]]["reason"] == "profile unavailable"
+    assert failures[case["id"]]["argv"][-1] == "--dry-run"
 
 
 def test_entry_is_the_only_run_selection() -> None:

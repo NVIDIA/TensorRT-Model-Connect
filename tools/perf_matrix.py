@@ -850,33 +850,38 @@ def _preflight_worker(options: RunOptions) -> dict[str, Any]:
 def _preflight_candidates(
     cases: Sequence[Mapping[str, Any]],
     options: RunOptions,
-) -> dict[str, tuple[dict[str, Any], list[str], dict[str, str]]]:
+) -> tuple[
+    dict[str, tuple[dict[str, Any], list[str], dict[str, str]]],
+    dict[str, dict[str, Any]],
+]:
     resolved: dict[str, tuple[dict[str, Any], list[str], dict[str, str]]] = {}
-    failures: list[str] = []
+    failures: dict[str, dict[str, Any]] = {}
     for case in cases:
         case_id = str(case["id"])
         print(f"[{case_id}] timing preflight", flush=True)
         try:
             resolved[case_id] = _resolve_candidate(case, options)
         except (PerfMatrixError, OSError, ValueError, RuntimeError) as exc:
-            failures.append(f"{case_id}: {exc}")
-    if failures:
-        detail = "\n".join(f"  - {failure}" for failure in failures)
-        raise PerfMatrixError(
-            "candidate timing preflight failed before benchmark execution:\n" + detail
-        )
-    return resolved
+            argv = [*_candidate_base_argv(case, options), "--dry-run"]
+            failures[case_id] = {
+                "stage": "candidate-preflight",
+                "reason": str(exc),
+                "argv": argv,
+            }
+    return resolved, failures
 
 
 def _preflight_references(
     cases: Sequence[Mapping[str, Any]],
     preflight: Mapping[str, tuple[dict[str, Any], list[str], dict[str, str]]],
     options: RunOptions,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     entries = []
-    failures = []
+    failures: dict[str, dict[str, Any]] = {}
     for case in cases:
         case_id = str(case["id"])
+        if case_id not in preflight:
+            continue
         resolved = preflight[case_id][0]
         output = options.scratch_root / "preflight" / _slug(case_id) / "baseline.json"
         try:
@@ -899,18 +904,41 @@ def _preflight_references(
                 }
             )
         except (PerfMatrixError, OSError, ValueError, RuntimeError) as exc:
-            failures.append(f"{case_id}: {exc}")
-    if failures:
-        detail = "\n".join(f"  - {failure}" for failure in failures)
-        raise PerfMatrixError(
-            "reference preflight failed before benchmark execution:\n" + detail
-        )
-    return {
-        "checked_at": _now(),
-        "entry_count": len(entries),
-        "status": "ready",
-        "entries": entries,
-    }
+            failures[case_id] = {
+                "stage": "reference-preflight",
+                "reason": str(exc),
+                "argv": preflight[case_id][1],
+            }
+    return (
+        {
+            "checked_at": _now(),
+            "entry_count": len(entries),
+            "failed_entry_count": len(failures),
+            "status": "partial" if failures else "ready",
+            "entries": entries,
+            "failures": [
+                {"id": case_id, **failure}
+                for case_id, failure in sorted(failures.items())
+            ],
+        },
+        failures,
+    )
+
+
+def _preflight_selected(
+    cases: Sequence[Mapping[str, Any]],
+    options: RunOptions,
+) -> tuple[
+    dict[str, tuple[dict[str, Any], list[str], dict[str, str]]],
+    dict[str, Any],
+    dict[str, dict[str, Any]],
+]:
+    preflight, failures = _preflight_candidates(cases, options)
+    references, reference_failures = _preflight_references(cases, preflight, options)
+    failures.update(reference_failures)
+    for case_id in reference_failures:
+        preflight.pop(case_id, None)
+    return preflight, references, failures
 
 
 def _preflight_evidence(
@@ -1604,19 +1632,25 @@ def _run_one(
 
 
 def _resolution_failure_row(
-    case: Mapping[str, Any], argv: Sequence[str], reason: str
+    case: Mapping[str, Any], failure: Mapping[str, Any]
 ) -> dict[str, Any]:
+    argv = failure.get("argv", [])
+    commands = {}
+    if isinstance(argv, Sequence) and not isinstance(argv, (str, bytes)):
+        commands["resolve"] = {
+            "argv": list(argv),
+            "rendered": shlex.join(str(value) for value in argv),
+        }
     return {
         "id": case["id"],
         "family": case["family"],
         "operation": case["operation"],
         "model": case["model"],
         "status": "failed",
-        "reason": reason,
+        "failure_stage": failure.get("stage", "preflight"),
+        "reason": str(failure.get("reason", "preflight failed")),
         "baseline_contract": dict(case["baseline"]),
-        "commands": {
-            "resolve": {"argv": list(argv), "rendered": shlex.join(argv)},
-        },
+        "commands": commands,
         "started_at": _now(),
         "finished_at": _now(),
     }
@@ -2026,6 +2060,7 @@ def _execute_campaign(
     options: RunOptions,
     results: MutableMapping[str, Any],
     preflight: Mapping[str, tuple[dict[str, Any], list[str], dict[str, str]]],
+    preflight_failures: Mapping[str, Mapping[str, Any]],
     reference_preflight: Mapping[str, Any],
     worker: Mapping[str, Any],
     storage_preflight: Mapping[str, Any],
@@ -2033,19 +2068,39 @@ def _execute_campaign(
     results["candidate_worker_preflight"] = dict(worker)
     results["storage_preflight"] = deepcopy(dict(storage_preflight))
     results["reference_preflight"] = deepcopy(dict(reference_preflight))
-    results["timing_preflight"] = _preflight_evidence(selected, preflight)
+    ready = [case for case in selected if str(case["id"]) in preflight]
+    timing_preflight = _preflight_evidence(ready, preflight)
+    timing_preflight["selected_case_count"] = len(selected)
+    timing_preflight["failed_case_count"] = len(preflight_failures)
+    if preflight_failures:
+        timing_preflight["status"] = "partial"
+    results["timing_preflight"] = timing_preflight
     rows = _result_rows(results)
     work_root = options.scratch_root / options.output.name
     work_root.mkdir(parents=True, exist_ok=True)
+    for case in selected:
+        case_id = str(case["id"])
+        failure = preflight_failures.get(case_id)
+        if failure is None or _should_skip(rows[case_id]):
+            continue
+        rows[case_id].clear()
+        rows[case_id].update(_resolution_failure_row(case, failure))
     _write_artifacts(options.output, results)
     for case in selected:
-        existing = rows[str(case["id"])]
+        case_id = str(case["id"])
+        existing = rows[case_id]
         if _should_skip(existing):
             print(f"[{case['id']}] resume: keeping {existing['status']}", flush=True)
             continue
-        row = _run_one(case, options, work_root, preflight[str(case["id"])])
-        rows[str(case["id"])].clear()
-        rows[str(case["id"])].update(row)
+        if case_id not in preflight:
+            print(
+                f"[{case_id}] skipped: {existing.get('reason', 'preflight failed')}",
+                flush=True,
+            )
+            continue
+        row = _run_one(case, options, work_root, preflight[case_id])
+        rows[case_id].clear()
+        rows[case_id].update(row)
         _write_artifacts(options.output, results)
     selected_ids = {str(case["id"]) for case in selected}
     results["finished_at"] = _now()
@@ -2088,16 +2143,18 @@ def _check(arguments: argparse.Namespace) -> int:
     )
     storage = _environment_preflight(environment, options)
     worker = _preflight_worker(options)
-    preflight = _preflight_candidates(selected, options)
-    references = _preflight_references(selected, preflight, options)
-    evidence = _preflight_evidence(selected, preflight)
+    preflight, references, failures = _preflight_selected(selected, options)
+    ready = [case for case in selected if str(case["id"]) in preflight]
+    evidence = _preflight_evidence(ready, preflight)
     print(f"Environment: {environment['name']} ({environment['source']})")
-    print(f"Entries: {evidence['case_count']}")
+    print(f"Entries: {len(selected)} selected, {evidence['case_count']} ready")
     print(f"Timing: {evidence['status']}")
     print(f"Worker: {worker['path']}")
     print(f"Reference profiles: {references['entry_count']}")
     print(f"Storage filesystems: {len(storage['filesystems'])}")
-    return 0
+    for case_id, failure in sorted(failures.items()):
+        print(f"[{case_id}] {failure['stage']}: {failure['reason']}", file=sys.stderr)
+    return 1 if failures else 0
 
 
 def _run_new(arguments: argparse.Namespace) -> int:
@@ -2106,8 +2163,7 @@ def _run_new(arguments: argparse.Namespace) -> int:
     preliminary_options = _run_options(environment, results_root)
     storage = _environment_preflight(environment, preliminary_options)
     worker = _preflight_worker(preliminary_options)
-    preflight = _preflight_candidates(selected, preliminary_options)
-    references = _preflight_references(selected, preflight, preliminary_options)
+    preflight, references, failures = _preflight_selected(selected, preliminary_options)
     run_id, output = _new_run_directory(results_root, suite)
     options = _run_options(environment, output)
     results = _initial_results(suite_path, suite, cases, selected, environment)
@@ -2117,6 +2173,7 @@ def _run_new(arguments: argparse.Namespace) -> int:
         options=options,
         results=results,
         preflight=preflight,
+        preflight_failures=failures,
         reference_preflight=references,
         worker=worker,
         storage_preflight=storage,
@@ -2161,13 +2218,13 @@ def _resume(arguments: argparse.Namespace) -> int:
     options = _run_options(environment, output)
     storage = _environment_preflight(environment, options)
     worker = _preflight_worker(options)
-    preflight = _preflight_candidates(selected, options)
-    references = _preflight_references(selected, preflight, options)
+    preflight, references, failures = _preflight_selected(selected, options)
     return _execute_campaign(
         selected=selected,
         options=options,
         results=results,
         preflight=preflight,
+        preflight_failures=failures,
         reference_preflight=references,
         worker=worker,
         storage_preflight=storage,
