@@ -665,6 +665,75 @@ def test_verify_results_accepts_complete_passing_result(tmp_path: Path) -> None:
     assert report["results"][0]["proof_kind"] == "reference"
 
 
+def test_verify_results_without_build_report_accepts_successful_build_command(
+    tmp_path: Path,
+) -> None:
+    repo_root = _make_repo(tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+    model_name = "decoder-small"
+    result_payload = _passing_result(model_name)
+    result_payload["commands"].insert(
+        0,
+        {
+            "label": "build",
+            "command": ["python", "-m", "builder", model_name],
+            "returncode": 0,
+        },
+    )
+    _write_result(artifacts_dir, model_name, result_payload)
+
+    result = _run(
+        "verify-results",
+        "--repo-root",
+        str(repo_root),
+        "--model",
+        model_name,
+        "--artifacts-dir",
+        str(artifacts_dir),
+    )
+
+    assert "PASS decoder-small" in result.stdout
+
+
+def test_verify_results_without_build_report_rejects_failed_recovery_command(
+    tmp_path: Path,
+) -> None:
+    repo_root = _make_repo(tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+    model_name = "decoder-small"
+    result_payload = _passing_result(model_name)
+    result_payload["commands"].insert(
+        0,
+        {
+            "label": "build_recovery_attempt_1",
+            "command": ["python", "-m", "builder", model_name],
+            "returncode": -signal.SIGSEGV,
+        },
+    )
+    _write_result(artifacts_dir, model_name, result_payload)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(TOOL),
+            "verify-results",
+            "--repo-root",
+            str(repo_root),
+            "--model",
+            model_name,
+            "--artifacts-dir",
+            str(artifacts_dir),
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    assert "FAIL decoder-small" in result.stdout
+    assert "returncode is -11, expected 0" in result.stderr
+
+
 def test_verify_results_accepts_recovery_matching_verified_build(
     tmp_path: Path,
 ) -> None:

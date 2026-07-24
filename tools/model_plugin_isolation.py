@@ -797,7 +797,7 @@ def _command_verification_errors(
         if not isinstance(command, dict):
             errors.append(f"commands[{index}] is not an object")
             continue
-        if command.get("label") in {
+        if build_record is not None and command.get("label") in {
             "build",
             "build_recovery_attempt_1",
         }:
