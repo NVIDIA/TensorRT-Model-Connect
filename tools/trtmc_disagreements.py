@@ -77,19 +77,136 @@ def _record_is_disagreement(record: Mapping[str, Any]) -> bool:
     }
 
 
-def _summary_disagreements(summary: Mapping[str, Any]) -> list[dict[str, Any]]:
-    explicit = summary.get("disagreements")
-    if isinstance(explicit, list):
-        return [item for item in explicit if isinstance(item, dict)]
+def _gate_metric(gate: str) -> tuple[str, str] | None:
+    if gate.startswith("min_"):
+        return gate.removeprefix("min_"), "min"
+    if gate.startswith("max_"):
+        return gate.removeprefix("max_"), "max"
+    return None
+
+
+def _numeric(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _failed_summary_gates(summary: Mapping[str, Any]) -> list[dict[str, Any]]:
+    if str(summary.get("status", "") or "").lower() not in {"fail", "failed"}:
+        return []
+    gates = summary.get("gates")
+    if not isinstance(gates, Mapping):
+        return []
+    failures = []
+    for gate, threshold in gates.items():
+        metric_and_direction = _gate_metric(str(gate))
+        if metric_and_direction is None:
+            continue
+        metric, direction = metric_and_direction
+        actual_number = _numeric(summary.get(metric))
+        threshold_number = _numeric(threshold)
+        if actual_number is None or threshold_number is None:
+            continue
+        failed = (
+            actual_number < threshold_number
+            if direction == "min"
+            else actual_number > threshold_number
+        )
+        if failed:
+            failures.append(
+                {
+                    "gate": str(gate),
+                    "metric": metric,
+                    "actual": summary.get(metric),
+                    "threshold": threshold,
+                    "direction": direction,
+                }
+            )
+    return failures
+
+
+def _summary_case_rows(summary: Mapping[str, Any]) -> list[dict[str, Any]]:
     for collection_name in ("samples", "cases", "pairs"):
         collection = summary.get(collection_name)
         if isinstance(collection, list):
-            return [
+            return [dict(item) for item in collection if isinstance(item, dict)]
+    return []
+
+
+def _worst_gate_case(
+    cases: Sequence[Mapping[str, Any]],
+    failure: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    metric = str(failure["metric"])
+    candidates = [
+        (case, _numeric(case.get(metric)))
+        for case in cases
+        if _numeric(case.get(metric)) is not None
+    ]
+    if not candidates:
+        return dict(cases[0]) if cases else None
+    selector = min if failure["direction"] == "min" else max
+    return dict(selector(candidates, key=lambda item: item[1])[0])
+
+
+def _summary_gate_disagreements(
+    summary: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    cases = _summary_case_rows(summary)
+    selected: dict[str, dict[str, Any]] = {}
+    for failure in _failed_summary_gates(summary):
+        case = _worst_gate_case(cases, failure)
+        if case is None:
+            continue
+        sample_id = _sample_id(case, f"sample-{len(selected)}")
+        public_failure = {
+            name: value
+            for name, value in failure.items()
+            if name != "direction"
+        }
+        if sample_id in selected:
+            selected[sample_id]["failed_gates"].append(public_failure)
+            continue
+        selected[sample_id] = {
+            **case,
+            "sample_id": sample_id,
+            "status": "failed",
+            "reason": "summary_gate_failure",
+            "failed_gates": [public_failure],
+        }
+    return list(selected.values())
+
+
+def _explicit_disagreements(summary: Mapping[str, Any]) -> list[dict[str, Any]]:
+    explicit = summary.get("disagreements")
+    if not isinstance(explicit, list):
+        return []
+    return [item for item in explicit if isinstance(item, dict)]
+
+
+def _recorded_disagreements(summary: Mapping[str, Any]) -> list[dict[str, Any]]:
+    for collection_name in ("samples", "cases", "pairs"):
+        collection = summary.get(collection_name)
+        if isinstance(collection, list):
+            disagreements = [
                 item
                 for item in collection
                 if isinstance(item, dict) and _record_is_disagreement(item)
             ]
+            if disagreements:
+                return disagreements
     return []
+
+
+def _summary_disagreements(summary: Mapping[str, Any]) -> list[dict[str, Any]]:
+    explicit = _explicit_disagreements(summary)
+    if explicit:
+        return explicit
+    recorded = _recorded_disagreements(summary)
+    if recorded:
+        return recorded
+    return _summary_gate_disagreements(summary)
 
 
 def _indexed_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:

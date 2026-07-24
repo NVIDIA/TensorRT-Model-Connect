@@ -556,9 +556,15 @@ def test_failed_sample_uses_recorded_trtmc_command_and_copies_media(tmp_path):
     (work_dir / "summary.json").write_text(
         json.dumps(
             {
-                "disagreements": [
-                    {"sample_id": "sample-9", "status": "failed"}
-                ]
+                "status": "failed",
+                "backend_mean_iou": 0.90,
+                "gates": {"min_backend_mean_iou": 0.95},
+                "cases": [
+                    {
+                        "sample_id": "sample-9",
+                        "backend_mean_iou": 0.90,
+                    }
+                ],
             }
         ),
         encoding="utf-8",
@@ -667,6 +673,37 @@ def test_failed_encoder_pair_expands_to_both_reproducible_samples():
     assert [row["sample_id"] for row in expanded] == [
         "sts-4-a",
         "sts-4-b",
+    ]
+
+
+def test_summary_gate_failure_selects_worst_sample_for_reproduction():
+    rows = trtmc_disagreements._summary_disagreements(
+        {
+            "status": "failed",
+            "backend_mean_iou": 0.92,
+            "gates": {"min_backend_mean_iou": 0.95},
+            "cases": [
+                {"sample_id": "sample-good", "backend_mean_iou": 0.97},
+                {"sample_id": "sample-worst", "backend_mean_iou": 0.90},
+            ],
+        }
+    )
+
+    assert rows == [
+        {
+            "sample_id": "sample-worst",
+            "backend_mean_iou": 0.90,
+            "status": "failed",
+            "reason": "summary_gate_failure",
+            "failed_gates": [
+                {
+                    "gate": "min_backend_mean_iou",
+                    "metric": "backend_mean_iou",
+                    "actual": 0.92,
+                    "threshold": 0.95,
+                }
+            ],
+        }
     ]
 
 
