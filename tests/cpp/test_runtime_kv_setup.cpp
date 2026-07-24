@@ -1,6 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
- * All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -13,6 +12,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -101,12 +101,10 @@ class HostAllocator final : public trtmc::IRuntimeDeviceAllocator {
     std::shared_ptr<int> releases_{std::make_shared<int>(0)};
 };
 
-class FakeRuntimeModule final : public trtmc::ITrtModule,
-                                public trtmc::IRuntimeMemoryModuleV1,
-                                public trtmc::IRuntimeMemoryEngineIntrospectionV1 {
+class FakeRuntimeModuleBase : public trtmc::ITrtModule, public trtmc::IRuntimeMemoryModuleV1 {
   public:
-    FakeRuntimeModule(std::uint64_t token_max, std::uint64_t cache_max, std::size_t context_base,
-                      std::size_t alignment = 256, int32_t device = 0)
+    FakeRuntimeModuleBase(std::uint64_t token_max, std::uint64_t cache_max,
+                          std::size_t context_base, std::size_t alignment = 256, int32_t device = 0)
         : token_max_(token_max), cache_max_(cache_max), context_base_(context_base),
           alignment_(alignment), device_(device) {}
 
@@ -163,12 +161,15 @@ class FakeRuntimeModule final : public trtmc::ITrtModule,
 
     void set_runtime_binding_shape(const trtmc::RuntimeMemoryShapeV1& shape) override {
         if (shape.name.rfind("cache_", 0) == 0)
-            last_bound_tokens_ = std::max(last_bound_tokens_, shape.bound_tokens);
+            last_bound_tokens_ = shape.bound_tokens;
     }
     void set_runtime_alias_pair_shape(const trtmc::RuntimeMemoryAliasShapeV1&) override {
         throw std::logic_error("alias path is not used by fused attention");
     }
-    void set_runtime_input_shape(const trtmc::RuntimeInputShapeV1&) override {}
+    void set_runtime_input_shape(const trtmc::RuntimeInputShapeV1& shape) override {
+        if (shape.name == "token_id" && shape.shape.size() == 1)
+            last_query_tokens_ = static_cast<std::uint64_t>(shape.shape.front());
+    }
     void bind_runtime_memory(const trtmc::RuntimeMemoryBindingV1& binding) override {
         if (binding.name.rfind("cache_", 0) == 0) {
             assert(binding.capacity_tokens == expected_cache_capacity_tokens);
@@ -188,16 +189,28 @@ class FakeRuntimeModule final : public trtmc::ITrtModule,
         throw std::logic_error("alias path is not used by fused attention");
     }
     trtmc::RuntimeMemoryContextRequirementV1 context_memory_requirement() override {
+        // Model the production module: ordinary dynamic I/O is absent at
+        // construction and becomes visible only after this context is planned.
+        engine_stats_.ordinary_device_input_bytes = 16;
+        engine_stats_.ordinary_device_output_bytes = 32;
+        engine_stats_.device_output_bytes = 32;
+        engine_stats_.host_output_staging_bytes = 64;
         trtmc::RuntimeMemoryContextRequirementV1 requirement;
         requirement.capacity_bytes =
-            context_base_ + static_cast<std::size_t>(last_bound_tokens_) * 64;
+            context_requirement_
+                ? context_requirement_(last_bound_tokens_, last_query_tokens_)
+                : context_base_ + static_cast<std::size_t>(last_bound_tokens_) * 64;
+        context_requirement_probes.emplace_back(last_bound_tokens_, last_query_tokens_);
         requirement.alignment = alignment_;
         requirement.device = device_;
         return requirement;
     }
     void bind_context_memory(const trtmc::RuntimeMemoryContextBlockV1& block) override {
         assert(block.pointer != nullptr);
-        assert(block.capacity_bytes >= context_base_ + last_bound_tokens_ * 64);
+        const auto required = context_requirement_
+                                  ? context_requirement_(last_bound_tokens_, last_query_tokens_)
+                                  : context_base_ + last_bound_tokens_ * 64;
+        assert(block.capacity_bytes >= required);
         context_bound = true;
     }
     bool runtime_memory_ready() const noexcept override {
@@ -207,7 +220,7 @@ class FakeRuntimeModule final : public trtmc::ITrtModule,
                                       const std::vector<std::string>&) override {
         return {};
     }
-    trtmc::RuntimeMemoryEngineStatsV1 runtime_memory_engine_stats() const noexcept override {
+    trtmc::RuntimeMemoryEngineStatsV1 runtime_memory_engine_stats() const noexcept {
         return engine_stats_;
     }
 
@@ -221,8 +234,11 @@ class FakeRuntimeModule final : public trtmc::ITrtModule,
         engine_stats_.streamable_weight_bytes = streamable_bytes;
         engine_stats_.weight_streaming_budget_bytes = streaming_budget_bytes;
         engine_stats_.weight_streaming_budget_available = streaming_budget_available;
-        engine_stats_.device_output_bytes = 32;
-        engine_stats_.host_output_staging_bytes = 64;
+    }
+
+    void set_context_requirement(
+        std::function<std::size_t(std::uint64_t, std::uint64_t)> context_requirement) {
+        context_requirement_ = std::move(context_requirement);
     }
 
     int binding_count{0};
@@ -235,6 +251,7 @@ class FakeRuntimeModule final : public trtmc::ITrtModule,
     std::size_t expected_cache_binding_bytes{1024};
     std::size_t expected_present_binding_bytes{1024};
     int expected_binding_count{4};
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> context_requirement_probes;
 
   private:
     std::uint64_t token_max_;
@@ -243,11 +260,24 @@ class FakeRuntimeModule final : public trtmc::ITrtModule,
     std::size_t alignment_;
     int32_t device_;
     std::uint64_t last_bound_tokens_{1};
+    std::uint64_t last_query_tokens_{1};
+    std::function<std::size_t(std::uint64_t, std::uint64_t)> context_requirement_;
     trtmc::RuntimeMemoryEngineStatsV1 engine_stats_;
 };
 
-trtmc::RuntimeKvSetupRequest make_request(FakeRuntimeModule& prefill, FakeRuntimeModule& decode4,
-                                          FakeRuntimeModule& decode16,
+class FakeRuntimeModule final : public FakeRuntimeModuleBase,
+                                public trtmc::IRuntimeMemoryEngineIntrospectionV1 {
+  public:
+    using FakeRuntimeModuleBase::FakeRuntimeModuleBase;
+
+    trtmc::RuntimeMemoryEngineStatsV1 runtime_memory_engine_stats() const noexcept override {
+        return FakeRuntimeModuleBase::runtime_memory_engine_stats();
+    }
+};
+
+trtmc::RuntimeKvSetupRequest make_request(FakeRuntimeModuleBase& prefill,
+                                          FakeRuntimeModuleBase& decode4,
+                                          FakeRuntimeModuleBase& decode16,
                                           const std::shared_ptr<HostAllocator>& allocator) {
     // Prefill is one engine. Decode profile contexts share a second engine.
     // The accounting path must not count that decoder engine twice.
@@ -372,7 +402,12 @@ void test_small_r_below_prefill_chunk_and_lifetime() {
         assert(state->receipt().pre_load_free_bytes == (5ULL << 18));
         assert(state->receipt().post_load_total_bytes_available);
         assert(state->receipt().post_load_device_used_bytes == (1ULL << 20));
+        assert(state->receipt().capacity_decision_snapshot_available);
+        assert(state->receipt().capacity_decision_free_bytes == (1ULL << 20) - (4096 + 64) - 2048);
+        assert(state->receipt().settled_snapshot_available);
+        assert(state->receipt().settled_free_bytes == (1ULL << 20) - (4096 + 64) - 2048 - 2048);
         assert(state->receipt().final_snapshot_available);
+        assert(state->receipt().final_free_bytes == state->receipt().capacity_decision_free_bytes);
         assert(state->receipt().engine_weight_bytes_available);
         assert(state->receipt().engine_weight_bytes == 1100);
         assert(state->receipt().resident_weight_bytes_available);
@@ -380,27 +415,39 @@ void test_small_r_below_prefill_chunk_and_lifetime() {
         assert(state->receipt().resident_weight_copy_count_available);
         assert(state->receipt().resident_weight_copy_count == 2);
         assert(state->receipt().external_device_output_bytes_available);
-        assert(state->receipt().external_device_output_bytes == 2144);
+        assert(state->receipt().ordinary_device_input_bytes_available);
+        assert(state->receipt().ordinary_device_input_bytes == 32);
+        assert(state->receipt().ordinary_device_output_bytes_available);
+        assert(state->receipt().ordinary_device_output_bytes == 64);
+        assert(state->receipt().external_device_output_bytes == 2048);
         assert(state->receipt().host_staging_bytes_available);
-        assert(state->receipt().host_staging_bytes == 192);
+        assert(state->receipt().host_staging_bytes == 128);
         assert(state->receipt().peak_device_bytes_available);
         assert(state->receipt().peak_device_bytes == 270592);
         assert(state->receipt().peak_device_sample_count == 1);
         assert(state->receipt().peak_sampled_at_load_completion);
         assert(!state->receipt().peak_sampled_at_request_completion);
         const auto receipt_json = state->receipt_json();
-        assert(receipt_json.find("\"receipt_schema_version\":2") != std::string::npos);
+        assert(receipt_json.find("\"receipt_schema_version\":3") != std::string::npos);
         assert(receipt_json.find("\"engine_weight_bytes\":"
                                  "\"tensorrt_engine_stat_total_weights_size\"") !=
                std::string::npos);
         assert(receipt_json.find("\"resident_weight_bytes\":1100") != std::string::npos);
         assert(receipt_json.find("\"resident_weight_copy_count\":2") != std::string::npos);
-        assert(receipt_json.find("\"external_device_output_bytes\":2144") != std::string::npos);
+        assert(receipt_json.find("\"ordinary_device_input_bytes\":32") != std::string::npos);
+        assert(receipt_json.find("\"ordinary_device_output_bytes\":64") != std::string::npos);
+        assert(receipt_json.find("\"external_device_output_bytes\":2048") != std::string::npos);
         assert(receipt_json.find("\"external_device_output_bytes\":"
-                                 "\"backend_outputs_plus_runtime_exact_sq_staging_ledger\"") !=
+                                 "\"runtime_exact_sq_staging_allocation_ledger\"") !=
                std::string::npos);
+        assert(receipt_json.find("\"capacity_decision_free_bytes\":"
+                                 "\"cuda_mem_get_info_after_tentative_context_and_output_"
+                                 "reservation\"") != std::string::npos);
+        assert(receipt_json.find("\"settled_free_bytes\":"
+                                 "\"cuda_mem_get_info_after_final_context_output_and_kv_"
+                                 "allocation\"") != std::string::npos);
         assert(receipt_json.find("\"final_free_bytes\":"
-                                 "\"cuda_mem_get_info_after_context_and_output_reservation\"") !=
+                                 "\"deprecated_alias_of_capacity_decision_free_bytes\"") !=
                std::string::npos);
         assert(receipt_json.find("\"peak_device_bytes\":270592") != std::string::npos);
         assert(receipt_json.find("\"peak_device_bytes_scope\":\"device_wide\"") !=
@@ -628,14 +675,18 @@ void test_final_fraction_shrink_reallocates_exact_overhead_below_c() {
     auto request = make_request(prefill, decode4, decode16, allocator);
     request.policy = trtmc::RuntimeKvPolicy{trtmc::RuntimeKvPolicyKind::kAuto, 1.0, 0};
     int observations = 0;
-    request.query_device_memory = [&observations](const char*) {
+    std::vector<std::string> phases;
+    request.query_device_memory = [&observations, &phases](const char* phase) {
         ++observations;
+        phases.emplace_back(phase);
         constexpr std::uint64_t total = 2ULL << 20;
         if (observations == 1)
             return trtmc::RuntimeDeviceMemorySnapshot{0, 1ULL << 20, total};
         if (observations == 2)
             return trtmc::RuntimeDeviceMemorySnapshot{0, 2048, total};
-        return trtmc::RuntimeDeviceMemorySnapshot{0, 1024, total};
+        // The smaller settled envelope may make substantially more memory
+        // visible, but that later reading must never increase the R=4 decision.
+        return trtmc::RuntimeDeviceMemorySnapshot{0, 1ULL << 20, total};
     };
 
     {
@@ -645,8 +696,18 @@ void test_final_fraction_shrink_reallocates_exact_overhead_below_c() {
         assert(state->staging_bytes() == 2048);
         assert(state->context_allocation_bytes() == 4160);
         assert(state->receipt().context_device_memory_bytes == 4160);
-        assert(state->receipt().external_device_output_bytes == 2144);
+        assert(state->receipt().external_device_output_bytes == 2048);
         assert(state->receipt().kv_reserved_bytes == 2048);
+        assert(state->receipt().capacity_decision_snapshot_available);
+        assert(state->receipt().capacity_decision_free_bytes == 2048);
+        assert(state->receipt().settled_snapshot_available);
+        assert(state->receipt().settled_free_bytes == (1ULL << 20));
+        assert(state->receipt().final_free_bytes == state->receipt().capacity_decision_free_bytes);
+        assert(phases == std::vector<std::string>({
+                             "before runtime KV planning",
+                             "after shared context and output allocation",
+                             "after runtime KV allocation",
+                         }));
         assert(allocator->requests.size() == 5);
         assert(allocator->requests[0].bytes == 9216);
         assert(allocator->requests[1].bytes == 4096);
@@ -664,6 +725,69 @@ void test_final_fraction_shrink_reallocates_exact_overhead_below_c() {
         assert(allocator->guards_intact());
     }
     assert(allocator->releases() == 5);
+    assert(allocator->live_bytes() == 0);
+    assert(allocator->guards_intact());
+}
+
+void test_final_fraction_shrink_reallocates_larger_context_from_f2_delta() {
+    auto allocator = std::make_shared<HostAllocator>();
+    FakeRuntimeModule prefill(8, 16, 64);
+    FakeRuntimeModule decode4(1, 4, 64);
+    FakeRuntimeModule decode16(1, 16, 64);
+    auto request = make_request(prefill, decode4, decode16, allocator);
+    request.policy = trtmc::RuntimeKvPolicy{trtmc::RuntimeKvPolicyKind::kAuto, 1.0, 0};
+
+    const auto discontinuous_context = [](std::uint64_t bound_tokens, std::uint64_t) {
+        // O(16)=64, while the final 5..15 history envelope requires a
+        // larger USER_MANAGED context block.
+        return static_cast<std::size_t>(bound_tokens > 4 && bound_tokens < 16 ? 576 : 64);
+    };
+    prefill.set_context_requirement(discontinuous_context);
+    decode4.set_context_requirement(discontinuous_context);
+    decode16.set_context_requirement(discontinuous_context);
+
+    int observations = 0;
+    request.query_device_memory = [&observations](const char*) {
+        ++observations;
+        constexpr std::uint64_t total = 2ULL << 20;
+        if (observations == 1)
+            return trtmc::RuntimeDeviceMemorySnapshot{0, 1ULL << 20, total};
+        if (observations == 2)
+            return trtmc::RuntimeDeviceMemorySnapshot{0, 6144, total};
+        // A settled observation is receipt-only and cannot increase R.
+        return trtmc::RuntimeDeviceMemorySnapshot{0, 1ULL << 20, total};
+    };
+
+    {
+        auto state = trtmc::create_runtime_kv_state(request);
+        // At F2, 12 rows fit before accounting for O(12)-O(16)=512.
+        // Charging that positive delta resolves exactly to 11 rows.
+        assert(state->capacity_tokens() == 11);
+        assert(state->context_allocation_bytes() == 576);
+        assert(state->staging_bytes() == 4096);
+        assert(state->receipt().context_device_memory_bytes == 576);
+        assert(state->receipt().kv_reserved_bytes == 5632);
+        assert(state->receipt().kv_budget_bytes == 5632);
+        assert(state->receipt().capacity_decision_free_bytes == 6144);
+        assert(state->receipt().settled_free_bytes == (1ULL << 20));
+
+        assert(allocator->requests.size() == 4);
+        assert(allocator->requests[0].bytes == 64);
+        assert(allocator->requests[1].bytes == 4096);
+        // The old 64-byte context is released before allocating the larger
+        // exact final envelope, so both contexts are never live together.
+        assert(allocator->requests[2].bytes == 576);
+        assert(allocator->requests[2].live_bytes_before == 4096);
+        assert(allocator->requests[3].bytes == 5632);
+        assert(allocator->requests[3].live_bytes_before == 4672);
+        assert(allocator->releases() == 1);
+        assert(allocator->live_bytes() == 10304);
+        assert(allocator->live_bytes() == state->receipt().context_device_memory_bytes +
+                                              state->staging_bytes() +
+                                              state->receipt().kv_reserved_bytes);
+        assert(allocator->guards_intact());
+    }
+    assert(allocator->releases() == 4);
     assert(allocator->live_bytes() == 0);
     assert(allocator->guards_intact());
 }
@@ -731,10 +855,93 @@ void test_high_water_observability_failure_does_not_fail_load() {
     auto state = trtmc::create_runtime_kv_state(request);
 
     assert(state->valid());
+    assert(!state->receipt().settled_snapshot_available);
+    assert(state->receipt_json().find("\"settled_free_bytes\":null") != std::string::npos);
+    assert(state->receipt_json().find("\"settled_snapshot_unavailable_reason\":"
+                                      "\"settled_cuda_mem_get_info_failed\"") != std::string::npos);
     assert(!state->receipt().peak_device_bytes_available);
     assert(state->receipt_json().find("\"peak_device_bytes_unavailable_reason\":"
                                       "\"load_completion_cuda_mem_get_info_failed\"") !=
            std::string::npos);
+}
+
+void test_settled_snapshot_does_not_require_a_peak_baseline() {
+    auto allocator = std::make_shared<HostAllocator>();
+    FakeRuntimeModule prefill(8, 16, 4096, 512);
+    FakeRuntimeModule decode4(1, 4, 2048);
+    FakeRuntimeModule decode16(1, 16, 8192);
+    auto request = make_request(prefill, decode4, decode16, allocator);
+    request.pre_load_memory_snapshot_available = false;
+
+    auto state = trtmc::create_runtime_kv_state(request);
+
+    assert(state->valid());
+    assert(state->receipt().settled_snapshot_available);
+    assert(state->receipt().settled_free_bytes > 0);
+    assert(!state->receipt().peak_device_bytes_available);
+    assert(state->receipt_json().find("\"peak_device_bytes_unavailable_reason\":"
+                                      "\"pre_load_cuda_memory_snapshot_unavailable\"") !=
+           std::string::npos);
+}
+
+void test_external_staging_accounting_does_not_require_engine_introspection() {
+    auto allocator = std::make_shared<HostAllocator>();
+    FakeRuntimeModuleBase prefill(8, 16, 4096, 512);
+    FakeRuntimeModuleBase decode4(1, 4, 2048);
+    FakeRuntimeModuleBase decode16(1, 16, 8192);
+    auto request = make_request(prefill, decode4, decode16, allocator);
+
+    auto state = trtmc::create_runtime_kv_state(request);
+
+    assert(state->receipt().external_device_output_bytes_available);
+    assert(state->receipt().external_device_output_bytes == 2048);
+    assert(!state->receipt().ordinary_device_input_bytes_available);
+    assert(!state->receipt().ordinary_device_output_bytes_available);
+    assert(!state->receipt().host_staging_bytes_available);
+    const auto receipt_json = state->receipt_json();
+    assert(receipt_json.find("\"external_device_output_bytes\":2048") != std::string::npos);
+    assert(receipt_json.find("\"ordinary_device_input_bytes\":null") != std::string::npos);
+    assert(receipt_json.find("\"ordinary_device_output_bytes\":null") != std::string::npos);
+    assert(receipt_json.find("\"host_staging_bytes\":null") != std::string::npos);
+}
+
+void test_context_envelope_sweeps_every_reachable_prefill_shape() {
+    auto allocator = std::make_shared<HostAllocator>();
+    FakeRuntimeModule prefill(/*token_max=*/8, /*cache_max=*/16, /*context_base=*/4096);
+    FakeRuntimeModule decode4(1, 4, 2048);
+    FakeRuntimeModule decode16(1, 16, 8192);
+    auto request = make_request(prefill, decode4, decode16, allocator);
+    request.policy = trtmc::RuntimeKvPolicy{trtmc::RuntimeKvPolicyKind::kBytes, 0.0, 8192};
+    request.query_device_memory = [](const char*) {
+        return trtmc::RuntimeDeviceMemorySnapshot{0, 1ULL << 20, 2ULL << 20};
+    };
+
+    constexpr std::size_t discontinuous_middle_shape_bytes = 65536;
+    prefill.set_context_requirement([](std::uint64_t bound_tokens, std::uint64_t query_tokens) {
+        if (bound_tokens == 16 && query_tokens == 3)
+            return discontinuous_middle_shape_bytes;
+        return static_cast<std::size_t>(4096 + bound_tokens * 64);
+    });
+
+    auto state = trtmc::create_runtime_kv_state(request);
+    assert(state->capacity_tokens() == 16);
+    assert(state->context_allocation_bytes() == discontinuous_middle_shape_bytes);
+    assert(state->receipt().context_device_memory_bytes == discontinuous_middle_shape_bytes);
+    assert(std::find(prefill.context_requirement_probes.begin(),
+                     prefill.context_requirement_probes.end(),
+                     std::pair<std::uint64_t, std::uint64_t>{16, 3}) !=
+           prefill.context_requirement_probes.end());
+
+    prefill.expected_history_tokens = 8;
+    prefill.expected_history_bound = 16;
+    prefill.expected_query_tokens = 3;
+    prefill.expected_cache_capacity_tokens = 16;
+    prefill.expected_present_capacity_tokens = 8;
+    prefill.expected_cache_binding_bytes = 4096;
+    prefill.expected_present_binding_bytes = 2048;
+    state->prepare_invocation(prefill, /*history_tokens=*/8, /*query_tokens=*/3,
+                              /*bound_tokens=*/16);
+    assert(state->last_context_device_memory_bytes() == discontinuous_middle_shape_bytes);
 }
 
 } // namespace
@@ -745,9 +952,13 @@ int main() {
     test_copy_failure_poison_is_fail_closed();
     test_delayed_copy_failure_poison_is_fail_closed();
     test_final_fraction_shrink_reallocates_exact_overhead_below_c();
+    test_final_fraction_shrink_reallocates_larger_context_from_f2_delta();
     test_streamed_weight_residency_is_not_invented();
     test_engine_profiles_must_match_bundle_contract();
     test_context_roles_must_share_selected_device();
     test_high_water_observability_failure_does_not_fail_load();
+    test_settled_snapshot_does_not_require_a_peak_baseline();
+    test_external_staging_accounting_does_not_require_engine_introspection();
+    test_context_envelope_sweeps_every_reachable_prefill_shape();
     return 0;
 }

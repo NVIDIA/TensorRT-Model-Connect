@@ -1,6 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
- * All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -415,9 +414,8 @@ bool CudnnAttentionExecutor::execute_history(
     std::size_t plan_workspace_capacity, cudaStream_t stream) noexcept {
     try {
         if (!impl_ || !impl_->history_prepared || query == nullptr || history_k == nullptr ||
-            history_v == nullptr || history_context == nullptr ||
-            history_log_sum_exp == nullptr || sequence_length_q == nullptr ||
-            sequence_length_history == nullptr ||
+            history_v == nullptr || history_context == nullptr || history_log_sum_exp == nullptr ||
+            sequence_length_q == nullptr || sequence_length_history == nullptr ||
             (impl_->history_prepared->workspace_bytes > 0 && plan_workspace == nullptr) ||
             impl_->history_prepared->workspace_bytes > plan_workspace_capacity ||
             cudnnSetStream(impl_->handle, stream) != CUDNN_STATUS_SUCCESS) {
@@ -445,9 +443,8 @@ bool CudnnAttentionExecutor::execute_current(
     std::size_t plan_workspace_capacity, cudaStream_t stream) noexcept {
     try {
         if (!impl_ || !impl_->current_prepared || query == nullptr || current_k == nullptr ||
-            current_v == nullptr || current_context == nullptr ||
-            current_log_sum_exp == nullptr || sequence_length_q == nullptr ||
-            sequence_length_current == nullptr ||
+            current_v == nullptr || current_context == nullptr || current_log_sum_exp == nullptr ||
+            sequence_length_q == nullptr || sequence_length_current == nullptr ||
             (impl_->current_prepared->workspace_bytes > 0 && plan_workspace == nullptr) ||
             impl_->current_prepared->workspace_bytes > plan_workspace_capacity ||
             cudnnSetStream(impl_->handle, stream) != CUDNN_STATUS_SUCCESS) {
@@ -470,8 +467,7 @@ bool CudnnAttentionExecutor::execute_current(
 
 bool CudnnAttentionExecutor::execute_segmented(
     const void* query, const void* history_k, const void* history_v, const void* current_k,
-    const void* current_v, void* history_context, void* current_context,
-    void* history_log_sum_exp,
+    const void* current_v, void* history_context, void* current_context, void* history_log_sum_exp,
     void* current_log_sum_exp, const int32_t* sequence_length_q,
     const int32_t* sequence_length_history, const int32_t* sequence_length_current,
     void* plan_workspace, std::size_t plan_workspace_capacity, cudaStream_t stream) noexcept {

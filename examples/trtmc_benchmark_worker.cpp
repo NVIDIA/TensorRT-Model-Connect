@@ -27,10 +27,9 @@ using Json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
 
 std::uint64_t unix_time_nanoseconds() {
-    return static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::system_clock::now().time_since_epoch())
-            .count());
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                          std::chrono::system_clock::now().time_since_epoch())
+                                          .count());
 }
 
 struct Arguments {

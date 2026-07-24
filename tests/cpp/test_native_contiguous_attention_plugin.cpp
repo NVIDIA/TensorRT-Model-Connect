@@ -1,14 +1,13 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
- * All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
 // Bounded qualification for segmented native attention. Persistent history is
 // a read-only dynamic token-major input. Current K/V are exact-Sq engine
 // outputs and regular plugin inputs; the runtime appends only those rows after
-// enqueue. The plugin combines noncausal history SDPA and lower-right causal
-// current SDPA from cuDNN log-sum-exp outputs.
+// enqueue. Sq=1 small/medium buckets use direct GQA-aware online softmax;
+// prefill and large decode buckets combine cuDNN log-sum-exp outputs.
 
 #include "plugins/runtime_kv/cudnn_attention.h"
 #include "plugins/runtime_kv/native_contiguous_attention_plugin.h"
@@ -324,6 +323,170 @@ bool bind(nvinfer1::IExecutionContext& context, char const* name, void* address)
     return result;
 }
 
+float stable_merge_reference(float history_value, float current_value, float history_lse,
+                             float current_lse) {
+    bool const history_valid = std::isfinite(history_lse);
+    bool const current_valid = std::isfinite(current_lse);
+    if (!history_valid && !current_valid) {
+        return 0.0F;
+    }
+    float const maximum = history_valid && current_valid
+                              ? std::max(history_lse, current_lse)
+                              : (history_valid ? history_lse : current_lse);
+    float const history_weight = history_valid ? std::exp(history_lse - maximum) : 0.0F;
+    float const current_weight = current_valid ? std::exp(current_lse - maximum) : 0.0F;
+    return (history_weight * history_value + current_weight * current_value) /
+           (history_weight + current_weight);
+}
+
+void run_adversarial_lse_merge_proof() {
+    constexpr int32_t kQueryRows = 2;
+    constexpr int32_t kPaddedRows = 4;
+    constexpr int32_t kHeads = 3;
+    constexpr int32_t kHeadDim = 8;
+    constexpr size_t kContextGuard = 32;
+    constexpr size_t kStatsGuard = 8;
+    size_t const source_elements = static_cast<size_t>(kHeads) * kPaddedRows * kHeadDim;
+    size_t const output_elements = static_cast<size_t>(kHeads) * kQueryRows * kHeadDim;
+    size_t const stats_elements = static_cast<size_t>(kHeads) * kPaddedRows;
+
+    std::vector<uint16_t> history_context(source_elements + 2 * kContextGuard, kGuard);
+    std::vector<uint16_t> current_context(source_elements + 2 * kContextGuard, kGuard);
+    std::vector<uint16_t> destination(output_elements + 2 * kContextGuard, kGuard);
+    std::vector<float> history_lse(stats_elements + 2 * kStatsGuard, 12345.25F);
+    std::vector<float> current_lse(stats_elements + 2 * kStatsGuard, 12345.25F);
+    std::vector<float> expected(output_elements);
+    float const negative_infinity = -std::numeric_limits<float>::infinity();
+
+    auto const stats_index = [](int32_t head, int32_t row) {
+        return kStatsGuard + static_cast<size_t>(head) * kPaddedRows + row;
+    };
+    auto const source_index = [](int32_t head, int32_t row, int32_t dim) {
+        return kContextGuard + (static_cast<size_t>(head) * kPaddedRows + row) * kHeadDim + dim;
+    };
+    auto const output_index = [](int32_t head, int32_t row, int32_t dim) {
+        return (static_cast<size_t>(head) * kQueryRows + row) * kHeadDim + dim;
+    };
+    auto set_case = [&](int32_t head, int32_t row, float h_lse, float c_lse, float h_value,
+                        float c_value) {
+        history_lse[stats_index(head, row)] = h_lse;
+        current_lse[stats_index(head, row)] = c_lse;
+        for (int32_t dim = 0; dim < kHeadDim; ++dim) {
+            history_context[source_index(head, row, dim)] = to_bf16(h_value);
+            current_context[source_index(head, row, dim)] = to_bf16(c_value);
+        }
+    };
+
+    // The low-weight context is intentionally enormous in the first two
+    // cases. With a raw exp(lse) implementation these overflow; max-shifted
+    // weights remain finite and retain the approximately exp(-80) term.
+    set_case(0, 0, 80.0F, 0.0F, 0.25F, 1.0E35F);
+    set_case(0, 1, 0.0F, 80.0F, -1.0E35F, -0.5F);
+    set_case(1, 0, 5.0F, negative_infinity, 1.5F, 30000.0F);
+    set_case(1, 1, negative_infinity, -3.0F, 30000.0F, -2.0F);
+    set_case(2, 0, negative_infinity, negative_infinity, 30000.0F, -30000.0F);
+    set_case(2, 1, std::log(3.0F), 0.0F, 2.0F, -4.0F);
+
+    for (int32_t head = 0; head < kHeads; ++head) {
+        for (int32_t row = 0; row < kQueryRows; ++row) {
+            for (int32_t dim = 0; dim < kHeadDim; ++dim) {
+                expected[output_index(head, row, dim)] = stable_merge_reference(
+                    from_bf16(history_context[source_index(head, row, dim)]),
+                    from_bf16(current_context[source_index(head, row, dim)]),
+                    history_lse[stats_index(head, row)], current_lse[stats_index(head, row)]);
+            }
+        }
+    }
+
+    auto const original_history_context = history_context;
+    auto const original_current_context = current_context;
+    auto const original_history_lse = history_lse;
+    auto const original_current_lse = current_lse;
+    uint16_t* device_history_context = nullptr;
+    uint16_t* device_current_context = nullptr;
+    uint16_t* device_destination = nullptr;
+    float* device_history_lse = nullptr;
+    float* device_current_lse = nullptr;
+    cudaStream_t stream = nullptr;
+    size_t const history_context_bytes = history_context.size() * sizeof(uint16_t);
+    size_t const current_context_bytes = current_context.size() * sizeof(uint16_t);
+    size_t const destination_bytes = destination.size() * sizeof(uint16_t);
+    size_t const history_lse_bytes = history_lse.size() * sizeof(float);
+    size_t const current_lse_bytes = current_lse.size() * sizeof(float);
+    if (!cuda_ok(cudaStreamCreate(&stream), "create adversarial LSE stream") ||
+        !cuda_ok(
+            cudaMalloc(reinterpret_cast<void**>(&device_history_context), history_context_bytes),
+            "allocate adversarial history context") ||
+        !cuda_ok(
+            cudaMalloc(reinterpret_cast<void**>(&device_current_context), current_context_bytes),
+            "allocate adversarial current context") ||
+        !cuda_ok(cudaMalloc(reinterpret_cast<void**>(&device_destination), destination_bytes),
+                 "allocate adversarial merge destination") ||
+        !cuda_ok(cudaMalloc(reinterpret_cast<void**>(&device_history_lse), history_lse_bytes),
+                 "allocate adversarial history LSE") ||
+        !cuda_ok(cudaMalloc(reinterpret_cast<void**>(&device_current_lse), current_lse_bytes),
+                 "allocate adversarial current LSE")) {
+        return;
+    }
+    cudaMemcpyAsync(device_history_context, history_context.data(), history_context_bytes,
+                    cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(device_current_context, current_context.data(), current_context_bytes,
+                    cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(device_destination, destination.data(), destination_bytes,
+                    cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(device_history_lse, history_lse.data(), history_lse_bytes,
+                    cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(device_current_lse, current_lse.data(), current_lse_bytes,
+                    cudaMemcpyHostToDevice, stream);
+    check(trtmc::runtime_kv::launch_segmented_context_merge_for_testing(
+              device_history_context + kContextGuard, device_current_context + kContextGuard,
+              device_history_lse + kStatsGuard, device_current_lse + kStatsGuard,
+              device_destination + kContextGuard, kQueryRows, kPaddedRows, kHeads, kHeadDim,
+              stream),
+          "launch exact production adversarial LSE merge");
+    cudaMemcpyAsync(destination.data(), device_destination, destination_bytes,
+                    cudaMemcpyDeviceToHost, stream);
+    cudaMemcpyAsync(history_context.data(), device_history_context, history_context_bytes,
+                    cudaMemcpyDeviceToHost, stream);
+    cudaMemcpyAsync(current_context.data(), device_current_context, current_context_bytes,
+                    cudaMemcpyDeviceToHost, stream);
+    cudaMemcpyAsync(history_lse.data(), device_history_lse, history_lse_bytes,
+                    cudaMemcpyDeviceToHost, stream);
+    cudaMemcpyAsync(current_lse.data(), device_current_lse, current_lse_bytes,
+                    cudaMemcpyDeviceToHost, stream);
+    cuda_ok(cudaStreamSynchronize(stream), "synchronize adversarial LSE merge");
+
+    bool all_finite = true;
+    float max_error = 0.0F;
+    for (size_t index = 0; index < output_elements; ++index) {
+        float const actual = from_bf16(destination[kContextGuard + index]);
+        all_finite &= std::isfinite(actual);
+        max_error = std::max(max_error, std::abs(actual - expected[index]));
+    }
+    check(all_finite, "adversarial max-shift LSE merge remains finite");
+    check(max_error <= 0.04F, "adversarial LSE weights match BF16 reference");
+    check(destination[kContextGuard + output_index(2, 0, 0)] == to_bf16(0.0F),
+          "both-invalid LSE segments produce zero");
+    check(std::all_of(destination.begin(), destination.begin() + kContextGuard,
+                      [](uint16_t value) { return value == kGuard; }) &&
+              std::all_of(destination.begin() +
+                              static_cast<std::ptrdiff_t>(kContextGuard + output_elements),
+                          destination.end(), [](uint16_t value) { return value == kGuard; }),
+          "adversarial merge destination red zones intact");
+    check(history_context == original_history_context &&
+              current_context == original_current_context,
+          "adversarial merge contexts and their red zones are read-only");
+    check(history_lse == original_history_lse && current_lse == original_current_lse,
+          "adversarial merge LSE inputs and their red zones are read-only");
+
+    cudaFree(device_current_lse);
+    cudaFree(device_history_lse);
+    cudaFree(device_destination);
+    cudaFree(device_current_context);
+    cudaFree(device_history_context);
+    cudaStreamDestroy(stream);
+}
+
 void run_sequence(nvinfer1::ICudaEngine& engine) {
     struct Step {
         int32_t query_rows;
@@ -623,6 +786,200 @@ void run_sequence(nvinfer1::ICudaEngine& engine) {
     cudaStreamDestroy(stream);
 }
 
+void run_padded_decode_numeric_proof(nvinfer1::ICudaEngine& engine) {
+    constexpr int32_t kP = kMaxT;
+    constexpr int32_t kHistoryLength = kP - 1;
+    constexpr int32_t kQueryRows = 1;
+    constexpr size_t kProofGuard = 256;
+    size_t const row_elements = static_cast<size_t>(kHkv) * kD;
+    size_t const cache_elements = static_cast<size_t>(kP) * row_elements;
+    size_t const query_elements = static_cast<size_t>(kHq) * kD;
+    size_t const current_elements = row_elements;
+
+    std::vector<uint16_t> history_k(cache_elements + kProofGuard, kGuard);
+    std::vector<uint16_t> history_v(cache_elements + kProofGuard, kGuard);
+    std::fill(history_k.begin(), history_k.begin() + static_cast<std::ptrdiff_t>(cache_elements),
+              to_bf16(0.0F));
+    std::fill(history_v.begin(), history_v.begin() + static_cast<std::ptrdiff_t>(cache_elements),
+              to_bf16(0.0F));
+    std::vector<uint16_t> query(query_elements, to_bf16(1.0F));
+    std::vector<uint16_t> current_k(current_elements, to_bf16(0.5F));
+    std::vector<uint16_t> current_v(current_elements);
+    std::vector<uint16_t> staged_k(current_elements + kProofGuard, kGuard);
+    std::vector<uint16_t> staged_v(current_elements + kProofGuard, kGuard);
+    std::vector<uint16_t> actual_context(query_elements + kProofGuard, kGuard);
+
+    for (int32_t head = 0; head < kHkv; ++head) {
+        for (int32_t row = 0; row < kHistoryLength; ++row) {
+            for (int32_t dim = 0; dim < kD; ++dim) {
+                history_v[token_offset(head, row, dim)] =
+                    to_bf16(0.125F * (head + 1) + 0.005F * row + 0.0005F * dim);
+            }
+        }
+        for (int32_t dim = 0; dim < kD; ++dim) {
+            // If row H were visible, its logit would exceed every valid
+            // history/current logit by hundreds and force the output to -512.
+            history_k[token_offset(head, kHistoryLength, dim)] = to_bf16(32.0F);
+            history_v[token_offset(head, kHistoryLength, dim)] = to_bf16(-512.0F);
+            current_v[token_offset(head, 0, dim)] = to_bf16(3.0F + 0.125F * head + 0.001F * dim);
+        }
+    }
+    auto const expected_context = reference_attention(query, history_k, history_v, current_k,
+                                                      current_v, kHistoryLength, kQueryRows);
+    auto const padding_visible_context =
+        reference_attention(query, history_k, history_v, current_k, current_v, kP, kQueryRows);
+
+    float max_current_effect = 0.0F;
+    for (int32_t query_head = 0; query_head < kHq; ++query_head) {
+        int32_t const kv_head = query_head / (kHq / kHkv);
+        for (int32_t dim = 0; dim < kD; ++dim) {
+            float history_only = 0.0F;
+            for (int32_t row = 0; row < kHistoryLength; ++row) {
+                history_only += from_bf16(history_v[token_offset(kv_head, row, dim)]);
+            }
+            history_only /= static_cast<float>(kHistoryLength);
+            max_current_effect = std::max(
+                max_current_effect,
+                std::abs(expected_context[query_offset(query_head, 0, dim, 1)] - history_only));
+        }
+    }
+    check(max_current_effect > 1.0F,
+          "padded decode reference has a numerically visible current token");
+
+    TrtPtr<nvinfer1::IExecutionContext> context{engine.createExecutionContext()};
+    check(context != nullptr, "create padded decode execution context");
+    if (!context) {
+        return;
+    }
+    uint16_t* device_history_k = nullptr;
+    uint16_t* device_history_v = nullptr;
+    uint16_t* device_query = nullptr;
+    uint16_t* device_current_k = nullptr;
+    uint16_t* device_current_v = nullptr;
+    int32_t* device_history_length = nullptr;
+    uint16_t* device_staged_k = nullptr;
+    uint16_t* device_staged_v = nullptr;
+    uint16_t* device_context = nullptr;
+    cudaStream_t stream = nullptr;
+    size_t const history_k_bytes = history_k.size() * sizeof(uint16_t);
+    size_t const history_v_bytes = history_v.size() * sizeof(uint16_t);
+    size_t const query_bytes = query.size() * sizeof(uint16_t);
+    size_t const current_k_bytes = current_k.size() * sizeof(uint16_t);
+    size_t const current_v_bytes = current_v.size() * sizeof(uint16_t);
+    size_t const staged_k_bytes = staged_k.size() * sizeof(uint16_t);
+    size_t const staged_v_bytes = staged_v.size() * sizeof(uint16_t);
+    size_t const context_bytes = actual_context.size() * sizeof(uint16_t);
+    if (!cuda_ok(cudaStreamCreate(&stream), "create padded decode stream") ||
+        !cuda_ok(cudaMalloc(reinterpret_cast<void**>(&device_history_k), history_k_bytes),
+                 "allocate padded K history") ||
+        !cuda_ok(cudaMalloc(reinterpret_cast<void**>(&device_history_v), history_v_bytes),
+                 "allocate padded V history") ||
+        !cuda_ok(cudaMalloc(reinterpret_cast<void**>(&device_query), query_bytes),
+                 "allocate padded decode query") ||
+        !cuda_ok(cudaMalloc(reinterpret_cast<void**>(&device_current_k), current_k_bytes),
+                 "allocate padded decode current K") ||
+        !cuda_ok(cudaMalloc(reinterpret_cast<void**>(&device_current_v), current_v_bytes),
+                 "allocate padded decode current V") ||
+        !cuda_ok(cudaMalloc(reinterpret_cast<void**>(&device_history_length), sizeof(int32_t)),
+                 "allocate padded decode H") ||
+        !cuda_ok(cudaMalloc(reinterpret_cast<void**>(&device_staged_k), staged_k_bytes),
+                 "allocate padded decode K staging") ||
+        !cuda_ok(cudaMalloc(reinterpret_cast<void**>(&device_staged_v), staged_v_bytes),
+                 "allocate padded decode V staging") ||
+        !cuda_ok(cudaMalloc(reinterpret_cast<void**>(&device_context), context_bytes),
+                 "allocate padded decode output")) {
+        return;
+    }
+    cudaMemcpyAsync(device_history_k, history_k.data(), history_k_bytes, cudaMemcpyHostToDevice,
+                    stream);
+    cudaMemcpyAsync(device_history_v, history_v.data(), history_v_bytes, cudaMemcpyHostToDevice,
+                    stream);
+    cudaMemcpyAsync(device_query, query.data(), query_bytes, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(device_current_k, current_k.data(), current_k_bytes, cudaMemcpyHostToDevice,
+                    stream);
+    cudaMemcpyAsync(device_current_v, current_v.data(), current_v_bytes, cudaMemcpyHostToDevice,
+                    stream);
+    cudaMemcpyAsync(device_history_length, &kHistoryLength, sizeof(int32_t), cudaMemcpyHostToDevice,
+                    stream);
+    cudaMemcpyAsync(device_staged_k, staged_k.data(), staged_k_bytes, cudaMemcpyHostToDevice,
+                    stream);
+    cudaMemcpyAsync(device_staged_v, staged_v.data(), staged_v_bytes, cudaMemcpyHostToDevice,
+                    stream);
+    cudaMemcpyAsync(device_context, actual_context.data(), context_bytes, cudaMemcpyHostToDevice,
+                    stream);
+
+    bind(*context, "history_k", device_history_k);
+    bind(*context, "history_v", device_history_v);
+    bind(*context, "query", device_query);
+    bind(*context, "current_k_rows_input", device_current_k);
+    bind(*context, "current_v_rows_input", device_current_v);
+    bind(*context, "history_length", device_history_length);
+    bind(*context, "current_k_rows", device_staged_k);
+    bind(*context, "current_v_rows", device_staged_v);
+    bind(*context, "context", device_context);
+    check(context->setInputShape("history_k", nvinfer1::Dims2{kP, kHkv * kD}) &&
+              context->setInputShape("history_v", nvinfer1::Dims2{kP, kHkv * kD}) &&
+              context->setInputShape("query", nvinfer1::Dims4{1, kHq, 1, kD}) &&
+              context->setInputShape("current_k_rows_input", nvinfer1::Dims2{1, kHkv * kD}) &&
+              context->setInputShape("current_v_rows_input", nvinfer1::Dims2{1, kHkv * kD}),
+          "set padded decode T=P,H=P-1,Sq=1 shapes");
+    check(context->allInputDimensionsSpecified(), "padded decode dimensions specified");
+    check(context->enqueueV3(stream), "execute padded decode numeric proof");
+    cudaMemcpyAsync(actual_context.data(), device_context, context_bytes, cudaMemcpyDeviceToHost,
+                    stream);
+    cudaMemcpyAsync(staged_k.data(), device_staged_k, staged_k_bytes, cudaMemcpyDeviceToHost,
+                    stream);
+    cudaMemcpyAsync(staged_v.data(), device_staged_v, staged_v_bytes, cudaMemcpyDeviceToHost,
+                    stream);
+    std::vector<uint16_t> actual_history_k(history_k.size());
+    std::vector<uint16_t> actual_history_v(history_v.size());
+    cudaMemcpyAsync(actual_history_k.data(), device_history_k, history_k_bytes,
+                    cudaMemcpyDeviceToHost, stream);
+    cudaMemcpyAsync(actual_history_v.data(), device_history_v, history_v_bytes,
+                    cudaMemcpyDeviceToHost, stream);
+    cuda_ok(cudaStreamSynchronize(stream), "synchronize padded decode numeric proof");
+
+    float max_error = 0.0F;
+    float min_padding_visible_distance = std::numeric_limits<float>::infinity();
+    bool finite = true;
+    for (size_t index = 0; index < query_elements; ++index) {
+        float const actual = from_bf16(actual_context[index]);
+        finite &= std::isfinite(actual);
+        max_error = std::max(max_error, std::abs(actual - expected_context[index]));
+        min_padding_visible_distance = std::min(min_padding_visible_distance,
+                                                std::abs(actual - padding_visible_context[index]));
+    }
+    check(finite, "padded decode context is finite");
+    check(max_error <= 0.015F,
+          "padded decode matches CPU reference containing only real H plus current");
+    check(min_padding_visible_distance > 100.0F,
+          "adversarial padding row is numerically invisible");
+    check(actual_history_k == history_k && actual_history_v == history_v,
+          "padded decode history and cache red zones are read-only");
+    check(std::equal(current_k.begin(), current_k.end(), staged_k.begin()) &&
+              std::equal(current_v.begin(), current_v.end(), staged_v.begin()),
+          "padded decode exact-Sq staging contains the current token");
+    check(std::all_of(staged_k.begin() + static_cast<std::ptrdiff_t>(current_elements),
+                      staged_k.end(), [](uint16_t value) { return value == kGuard; }) &&
+              std::all_of(staged_v.begin() + static_cast<std::ptrdiff_t>(current_elements),
+                          staged_v.end(), [](uint16_t value) { return value == kGuard; }),
+          "padded decode staging red zones intact");
+    check(std::all_of(actual_context.begin() + static_cast<std::ptrdiff_t>(query_elements),
+                      actual_context.end(), [](uint16_t value) { return value == kGuard; }),
+          "padded decode output red zone intact");
+
+    cudaFree(device_context);
+    cudaFree(device_staged_v);
+    cudaFree(device_staged_k);
+    cudaFree(device_history_length);
+    cudaFree(device_current_v);
+    cudaFree(device_current_k);
+    cudaFree(device_query);
+    cudaFree(device_history_v);
+    cudaFree(device_history_k);
+    cudaStreamDestroy(stream);
+}
+
 } // namespace
 
 int main() {
@@ -640,7 +997,9 @@ int main() {
         check(engine->getAliasedInputTensor("current_k_rows") == nullptr &&
                   engine->getAliasedInputTensor("current_v_rows") == nullptr,
               "staging outputs have no cache alias");
+        run_adversarial_lse_merge_proof();
         run_sequence(*engine);
+        run_padded_decode_numeric_proof(*engine);
     }
 
     if (failures != 0) {

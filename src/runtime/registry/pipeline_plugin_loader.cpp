@@ -5,6 +5,8 @@
 
 #include "trtmc/runtime/pipeline_plugin_loader.h"
 
+#include "runtime/backend/backend_loader.h"
+#include "runtime/registry/model_plugin_abi.h"
 #include "trtmc/runtime/pipeline_registry.h"
 
 #include <cstdlib>
@@ -32,6 +34,7 @@ struct ModelPluginCandidate {
     fs::path path;
     void* handle{nullptr};
     RegisterModelPluginFn register_fn{nullptr};
+    bool current_abi_verified{false};
 };
 
 std::vector<void*>& loaded_handles() {
@@ -42,6 +45,11 @@ std::vector<void*>& loaded_handles() {
 std::unordered_set<std::string>& loaded_model_ids() {
     static std::unordered_set<std::string> ids;
     return ids;
+}
+
+std::unordered_set<std::string>& current_abi_verified_strategies() {
+    static std::unordered_set<std::string> strategies;
+    return strategies;
 }
 
 std::string exe_dir() {
@@ -166,6 +174,98 @@ void close_model_plugin_candidate(ModelPluginCandidate& candidate) {
     candidate.handle = nullptr;
 }
 
+std::string model_plugin_abi_contract_mismatch(const ModelPluginDsoAbiContractV2& actual) {
+    const ModelPluginDsoAbiContractV2 expected = make_model_plugin_dso_abi_contract_v2();
+
+#define TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(field)                                                  \
+    if (actual.field != expected.field) {                                                          \
+        return std::string(#field) + " (core=" + std::to_string(expected.field) +                  \
+               ", model=" + std::to_string(actual.field) + ")";                                    \
+    }
+
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(struct_size)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(contract_version)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(interface_fingerprint)
+
+    if (const std::string shared_mismatch =
+            backend_dso_abi_contract_mismatch(actual.shared_cpp_contract);
+        !shared_mismatch.empty()) {
+        return "shared_cpp_contract." + shared_mismatch;
+    }
+    if (actual.shared_cpp_contract.capability_flags != 0)
+        return "shared_cpp_contract.capability_flags must be zero for a model plugin";
+
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(runtime_memory_plugin_api_version)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(io_map_size)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(io_map_alignment)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(base_config_size)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(base_config_alignment)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(pipeline_context_size)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(pipeline_context_alignment)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(runtime_memory_plugin_options_size)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(runtime_memory_plugin_options_alignment)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(pipeline_interface_size)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(pipeline_interface_alignment)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(pipeline_plugin_interface_size)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(pipeline_plugin_interface_alignment)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(runtime_memory_plugin_interface_size)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(runtime_memory_plugin_interface_alignment)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(pipeline_registry_size)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(pipeline_registry_alignment)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(bundle_info_size)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(bundle_info_alignment)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(bundle_file_size)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(bundle_file_alignment)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(config_bundle_size)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(config_bundle_alignment)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(schema_registry_size)
+    TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD(schema_registry_alignment)
+
+#undef TRTMC_CHECK_MODEL_PLUGIN_ABI_FIELD
+
+    return {};
+}
+
+enum class ModelPluginAbiStatus {
+    kCurrent,
+    kLegacyUnversioned,
+    kRejected,
+};
+
+ModelPluginAbiStatus validate_model_plugin_abi(const fs::path& candidate, void* handle,
+                                               ModelPluginAbiPolicy abi_policy,
+                                               std::vector<std::string>& errors) {
+    dlerror();
+    auto query = reinterpret_cast<ModelPluginDsoAbiQueryFnV2>(
+        dlsym(handle, kModelPluginDsoAbiQuerySymbolV2));
+    const char* query_error = dlerror();
+    if (query_error != nullptr || query == nullptr) {
+        if (abi_policy == ModelPluginAbiPolicy::kAllowLegacyUnversioned)
+            return ModelPluginAbiStatus::kLegacyUnversioned;
+        errors.push_back(candidate.string() + ": missing required " +
+                         kModelPluginDsoAbiQuerySymbolV2 +
+                         "; refusing stale model plugin before model-id/registration");
+        return ModelPluginAbiStatus::kRejected;
+    }
+
+    ModelPluginDsoAbiContractV2 contract{};
+    const std::int32_t status = query(&contract, sizeof(contract));
+    if (status != 0) {
+        errors.push_back(candidate.string() + ": " + kModelPluginDsoAbiQuerySymbolV2 +
+                         "() returned status " + std::to_string(status) +
+                         "; refusing model plugin before model-id/registration");
+        return ModelPluginAbiStatus::kRejected;
+    }
+
+    const std::string mismatch = model_plugin_abi_contract_mismatch(contract);
+    if (!mismatch.empty()) {
+        errors.push_back(candidate.string() + ": model-plugin/core ABI contract mismatch: " +
+                         mismatch + "; refusing model plugin before model-id/registration");
+        return ModelPluginAbiStatus::kRejected;
+    }
+    return ModelPluginAbiStatus::kCurrent;
+}
+
 bool model_plugin_id_matches(const fs::path& candidate, void* handle, const std::string& model_id,
                              std::vector<std::string>& errors) {
     dlerror();
@@ -187,6 +287,7 @@ bool model_plugin_id_matches(const fs::path& candidate, void* handle, const std:
 
 std::optional<ModelPluginCandidate> open_model_plugin_candidate(const fs::path& path,
                                                                 const std::string& model_id,
+                                                                ModelPluginAbiPolicy abi_policy,
                                                                 std::vector<std::string>& errors) {
     dlerror();
     void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
@@ -196,7 +297,13 @@ std::optional<ModelPluginCandidate> open_model_plugin_candidate(const fs::path& 
         return std::nullopt;
     }
 
-    ModelPluginCandidate candidate{path, handle, nullptr};
+    ModelPluginCandidate candidate{path, handle, nullptr, false};
+    const auto abi_status = validate_model_plugin_abi(path, handle, abi_policy, errors);
+    if (abi_status == ModelPluginAbiStatus::kRejected) {
+        close_model_plugin_candidate(candidate);
+        return std::nullopt;
+    }
+    candidate.current_abi_verified = abi_status == ModelPluginAbiStatus::kCurrent;
     if (!model_plugin_id_matches(path, handle, model_id, errors)) {
         close_model_plugin_candidate(candidate);
         return std::nullopt;
@@ -352,21 +459,37 @@ std::optional<std::string> legacy_runtime_strategy_alias_target(const std::strin
     return std::nullopt;
 }
 
-void load_model_plugin_for_strategy(const std::string& strategy,
-                                    const std::vector<std::string>& search_paths) {
+void load_model_plugin_for_strategy_with_abi_policy(const std::string& strategy,
+                                                    const std::vector<std::string>& search_paths,
+                                                    ModelPluginAbiPolicy abi_policy) {
     // Preserve the documented ad-hoc/static registration path. It is also the
     // compatibility seam for a legacy model plugin already linked into the
-    // process: never replace an explicitly registered strategy with a DSO
-    // discovered from the filesystem.
-    if (PipelineRegistry::instance().lookup(strategy) != nullptr)
-        return;
+    // process. A runtime-memory request may reuse it only when a prior DSO
+    // handshake proved that exact registered strategy current.
+    if (PipelineRegistry::instance().lookup(strategy) != nullptr) {
+        if (abi_policy == ModelPluginAbiPolicy::kAllowLegacyUnversioned ||
+            current_abi_verified_strategies().find(strategy) !=
+                current_abi_verified_strategies().end()) {
+            return;
+        }
+        throw std::runtime_error("runtime_memory strategy '" + strategy +
+                                 "' is already registered by a model plugin without a verified " +
+                                 kModelPluginDsoAbiQuerySymbolV2 +
+                                 " contract; refusing before runtime-memory plugin dispatch");
+    }
 
     const auto model_id = model_plugin_id_for_strategy(strategy);
     if (!model_id)
         throw std::runtime_error("No plugin registered for runtime_strategy: " + strategy);
 
-    if (loaded_model_ids().find(*model_id) != loaded_model_ids().end())
+    if (loaded_model_ids().find(*model_id) != loaded_model_ids().end()) {
+        if (abi_policy == ModelPluginAbiPolicy::kRequireCurrent) {
+            throw std::runtime_error(
+                "runtime_memory strategy '" + strategy +
+                "' was not registered by the already-loaded verified model DSO");
+        }
         return;
+    }
 
     const auto library_name = model_plugin_library_name(*model_id);
     const auto paths = model_plugin_search_paths(search_paths);
@@ -381,7 +504,7 @@ void load_model_plugin_for_strategy(const std::string& strategy,
         if (!std::filesystem::exists(candidate))
             continue;
 
-        auto plugin = open_model_plugin_candidate(candidate, *model_id, errors);
+        auto plugin = open_model_plugin_candidate(candidate, *model_id, abi_policy, errors);
         if (!plugin)
             continue;
 
@@ -390,10 +513,23 @@ void load_model_plugin_for_strategy(const std::string& strategy,
 
         loaded_handles().push_back(plugin->handle);
         loaded_model_ids().insert(*model_id);
+        if (plugin->current_abi_verified) {
+            const auto expected = expected_strategies_for_model(*model_id);
+            for (const auto& registered : expected) {
+                if (PipelineRegistry::instance().lookup(registered) != nullptr)
+                    current_abi_verified_strategies().insert(registered);
+            }
+        }
         return;
     }
 
     throw_load_error(*model_id, library_name, paths, errors);
+}
+
+void load_model_plugin_for_strategy(const std::string& strategy,
+                                    const std::vector<std::string>& search_paths) {
+    load_model_plugin_for_strategy_with_abi_policy(strategy, search_paths,
+                                                   ModelPluginAbiPolicy::kRequireCurrent);
 }
 
 } // namespace trtmc

@@ -1734,6 +1734,20 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestUnitTiers.test_unit_tier_builder",),
         ),
         ClassificationRule(
+            priority=425,
+            name="dynamic_memory_qualification_native",
+            matcher=_path_startswith("tests/qualification/"),
+            resolver=_match_result(
+                "dynamic_memory_qualification_native",
+                _no_models,
+                ["cpp"],
+                True,
+            ),
+            covered_by=(
+                "TestUnitTiers.test_dynamic_memory_qualification_native",
+            ),
+        ),
+        ClassificationRule(
             priority=430,
             name="unit_cpp",
             matcher=_path_startswith("tests/cpp/"),
@@ -1857,6 +1871,33 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             matcher=_path_in_impact_map(lambda imap: imap.e2e_data_file_to_models),
             resolver=_match_result("e2e_data_file", _e2e_data_file_models),
             covered_by=("TestE2EDataFiles.test_data_file_maps_to_manifest_users",),
+        ),
+        ClassificationRule(
+            priority=482,
+            name="dynamic_memory_qualification_tool",
+            matcher=_path_in(
+                {
+                    "tools/build_native_dynamic_memory_chunk_variant.py",
+                    "tools/capture_dynamic_memory_test_manifest.py",
+                    "tools/capture_native_dynamic_memory_perf.py",
+                    "tools/capture_native_dynamic_memory_process_isolation.py",
+                    "tools/qualify_native_dynamic_memory.py",
+                    "tools/qualify_native_dynamic_memory_nvrtc_regression.py",
+                    "tools/qualify_native_dynamic_memory_perf.py",
+                    "tools/qualify_native_dynamic_memory_policies.py",
+                    "tools/qualify_native_dynamic_memory_soak.py",
+                    "tools/qualify_native_dynamic_memory_surfaces.py",
+                }
+            ),
+            resolver=_match_result(
+                "dynamic_memory_qualification_tool",
+                _no_models,
+                ["tools"],
+                False,
+            ),
+            covered_by=(
+                "TestUnitTiers.test_dynamic_memory_qualification_tools",
+            ),
         ),
         ClassificationRule(
             priority=483,

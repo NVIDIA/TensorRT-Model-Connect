@@ -149,6 +149,7 @@ shared_builder_module python/tensorrt_model_connect/bundle_writer.py # shared Py
 shared_builder_module python/tensorrt_model_connect/checkpoint_mapper.py # stable WeightDict protocol surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/config.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/debug_runner.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/dynamic_memory_contract.py # shared qualified build-policy and bundle contract surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/engine_build_budget.py # shared build-budget policy surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/engine_builder.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/hf_snapshot.py # shared HF snapshot selection used by every builder and gated offline preflight; broad all-model impact is intentional
@@ -188,4 +189,5 @@ shared_builder_module python/tensorrt_model_connect/runtime_config/schemas/triat
 shared_builder_module python/tensorrt_model_connect/triattention_export.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/triattention_runtime.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/trt_compat.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/trt_plugins.py # shared TensorRT plugin discovery and load boundary; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/tokenizer_conversion.py # shared tokenizer conversion primitives used by family adapters; broad builder impact is intentional

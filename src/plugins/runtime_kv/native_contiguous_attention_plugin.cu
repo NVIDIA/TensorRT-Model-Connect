@@ -1,6 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
- * All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -19,6 +18,13 @@ namespace trtmc::runtime_kv {
 namespace {
 
 constexpr int32_t kAttentionThreads = 256;
+constexpr int32_t kAttentionWarps = kAttentionThreads / 32;
+constexpr int32_t kFusedDecodeTileRows = 128;
+// The direct Sq=1 path is deliberately a small/medium-history specialization.
+// Larger bound extents retain cuDNN SDPA so full-context decode does not trade
+// away parallelism merely to reduce launch overhead at the first buckets.
+constexpr int32_t kFusedDecodeHistoryRowsLimit = 512;
+constexpr std::size_t kFusedDecodeSharedMemoryLimit = 32U << 10;
 constexpr std::size_t kWorkspaceAlignment = 256;
 
 std::size_t align_up(std::size_t value, std::size_t alignment) noexcept {
@@ -88,9 +94,8 @@ __global__ void pack_padded_head_major(__nv_bfloat16 const* source, __nv_bfloat1
 
 __global__ void combine_segmented_context(
     __nv_bfloat16 const* history_context, __nv_bfloat16 const* current_context,
-    float const* history_log_sum_exp, float const* current_log_sum_exp,
-    __nv_bfloat16* destination, int32_t query_rows, int32_t padded_query_rows,
-    int32_t num_query_heads, int32_t head_dim) {
+    float const* history_log_sum_exp, float const* current_log_sum_exp, __nv_bfloat16* destination,
+    int32_t query_rows, int32_t padded_query_rows, int32_t num_query_heads, int32_t head_dim) {
     int64_t const element = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     int64_t const count = static_cast<int64_t>(num_query_heads) * query_rows * head_dim;
     if (element >= count) {
@@ -109,9 +114,9 @@ __global__ void combine_segmented_context(
     bool const current_valid = isfinite(current_lse);
     float value = 0.0F;
     if (history_valid || current_valid) {
-        float const global_lse =
-            history_valid && current_valid ? fmaxf(history_lse, current_lse)
-                                           : (history_valid ? history_lse : current_lse);
+        float const global_lse = history_valid && current_valid
+                                     ? fmaxf(history_lse, current_lse)
+                                     : (history_valid ? history_lse : current_lse);
         float const history_weight = history_valid ? expf(history_lse - global_lse) : 0.0F;
         float const current_weight = current_valid ? expf(current_lse - global_lse) : 0.0F;
         float const denominator = history_weight + current_weight;
@@ -122,11 +127,276 @@ __global__ void combine_segmented_context(
     destination[element] = __float2bfloat16_rn(value);
 }
 
-__global__ void single_token_segmented_context(
-    __nv_bfloat16 const* query, __nv_bfloat16 const* current_k, __nv_bfloat16 const* current_v,
-    __nv_bfloat16 const* history_context, float const* history_log_sum_exp,
-    int32_t const* request_valid, __nv_bfloat16* destination, int32_t num_query_heads,
-    int32_t num_kv_heads, int32_t head_dim, bool has_history) {
+__device__ float warp_sum(float value) {
+    for (int32_t offset = 16; offset > 0; offset /= 2) {
+        value += __shfl_down_sync(0xFFFFFFFFU, value, offset);
+    }
+    return value;
+}
+
+__device__ float warp_max(float value) {
+    for (int32_t offset = 16; offset > 0; offset /= 2) {
+        value = fmaxf(value, __shfl_down_sync(0xFFFFFFFFU, value, offset));
+    }
+    return value;
+}
+
+__device__ float block_sum(float value, float* warp_scratch) {
+    int32_t const lane = static_cast<int32_t>(threadIdx.x) & 31;
+    int32_t const warp = static_cast<int32_t>(threadIdx.x) / 32;
+    value = warp_sum(value);
+    if (lane == 0) {
+        warp_scratch[warp] = value;
+    }
+    __syncthreads();
+    value = warp == 0 && lane < kAttentionWarps ? warp_scratch[lane] : 0.0F;
+    if (warp == 0) {
+        value = warp_sum(value);
+    }
+    if (threadIdx.x == 0) {
+        warp_scratch[0] = value;
+    }
+    __syncthreads();
+    float const result = warp_scratch[0];
+    // Every thread must consume the shared result before the next reduction
+    // lets lane zero of each warp reuse the same scratch slots.
+    __syncthreads();
+    return result;
+}
+
+__device__ float block_max(float value, float* warp_scratch) {
+    int32_t const lane = static_cast<int32_t>(threadIdx.x) & 31;
+    int32_t const warp = static_cast<int32_t>(threadIdx.x) / 32;
+    value = warp_max(value);
+    if (lane == 0) {
+        warp_scratch[warp] = value;
+    }
+    __syncthreads();
+    value = warp == 0 && lane < kAttentionWarps ? warp_scratch[lane] : -INFINITY;
+    if (warp == 0) {
+        value = warp_max(value);
+    }
+    if (threadIdx.x == 0) {
+        warp_scratch[0] = value;
+    }
+    __syncthreads();
+    float const result = warp_scratch[0];
+    __syncthreads();
+    return result;
+}
+
+std::size_t fused_decode_shared_memory_bytes(int32_t num_query_heads, int32_t num_kv_heads,
+                                             int32_t head_dim) noexcept {
+    if (num_query_heads <= 0 || num_kv_heads <= 0 || num_query_heads % num_kv_heads != 0 ||
+        head_dim <= 0) {
+        return 0;
+    }
+    auto const query_group_size = static_cast<std::uint64_t>(num_query_heads / num_kv_heads);
+    auto const group_elements = query_group_size * static_cast<std::uint64_t>(head_dim);
+    // Query + FP32 output accumulator, tile scores, six per-query-head
+    // normalization/merge scalars, and one value per warp for reductions.
+    auto const floats = 2U * group_elements +
+                        query_group_size * static_cast<std::uint64_t>(kFusedDecodeTileRows) +
+                        6U * query_group_size + static_cast<std::uint64_t>(kAttentionWarps);
+    if (floats > std::numeric_limits<std::size_t>::max() / sizeof(float)) {
+        return 0;
+    }
+    return static_cast<std::size_t>(floats) * sizeof(float);
+}
+
+bool fused_decode_shape_supported(int32_t history_rows, int32_t num_query_heads,
+                                  int32_t num_kv_heads, int32_t head_dim) noexcept {
+    auto const shared_bytes =
+        fused_decode_shared_memory_bytes(num_query_heads, num_kv_heads, head_dim);
+    return history_rows > 0 && history_rows <= kFusedDecodeHistoryRowsLimit && shared_bytes > 0 &&
+           shared_bytes <= kFusedDecodeSharedMemoryLimit;
+}
+
+// GQA-aware direct Sq=1 attention for the latency-sensitive history buckets.
+// One block owns one KV head and all query heads in its group, so history K/V
+// are shared across the group rather than reread by one block per query head.
+// The online tiled softmax is O((H+1)*Hq*D), reads caller-owned cache rows in
+// place, and writes only the exact one-token context.
+__global__ void fused_single_token_attention(
+    __nv_bfloat16 const* history_k, __nv_bfloat16 const* history_v, __nv_bfloat16 const* query,
+    __nv_bfloat16 const* current_k, __nv_bfloat16 const* current_v,
+    int32_t const* history_length_ptr, __nv_bfloat16* destination, int32_t history_rows,
+    int32_t num_query_heads, int32_t num_kv_heads, int32_t head_dim, int32_t chunk_limit) {
+    extern __shared__ float shared[];
+    int32_t const query_group_size = num_query_heads / num_kv_heads;
+    int32_t const group_elements = query_group_size * head_dim;
+    float* shared_query = shared;
+    float* scores = shared_query + group_elements;
+    float* accumulator = scores + query_group_size * kFusedDecodeTileRows;
+    float* running_max = accumulator + group_elements;
+    float* running_sum = running_max + query_group_size;
+    float* tile_max = running_sum + query_group_size;
+    float* tile_sum = tile_max + query_group_size;
+    float* old_scale = tile_sum + query_group_size;
+    float* tile_scale = old_scale + query_group_size;
+    float* reduction = tile_scale + query_group_size;
+    __shared__ int32_t history_length;
+    __shared__ int32_t request_valid;
+
+    int32_t const kv_head = static_cast<int32_t>(blockIdx.x);
+    int32_t const thread = static_cast<int32_t>(threadIdx.x);
+    int32_t const warp = thread / 32;
+    int32_t const lane = thread & 31;
+    if (thread == 0) {
+        history_length = *history_length_ptr;
+        request_valid = valid_request(history_length, history_rows, 1, chunk_limit) ? 1 : 0;
+    }
+    __syncthreads();
+
+    if (request_valid == 0) {
+        for (int32_t element = thread; element < group_elements; element += kAttentionThreads) {
+            int32_t const local_query_head = element / head_dim;
+            int32_t const dim = element % head_dim;
+            int32_t const query_head = kv_head * query_group_size + local_query_head;
+            destination[static_cast<int64_t>(query_head) * head_dim + dim] =
+                __float2bfloat16_rn(0.0F);
+        }
+        return;
+    }
+
+    for (int32_t element = thread; element < group_elements; element += kAttentionThreads) {
+        int32_t const local_query_head = element / head_dim;
+        int32_t const dim = element % head_dim;
+        int32_t const query_head = kv_head * query_group_size + local_query_head;
+        shared_query[element] =
+            __bfloat162float(query[static_cast<int64_t>(query_head) * head_dim + dim]);
+        accumulator[element] = 0.0F;
+    }
+    if (thread < query_group_size) {
+        running_max[thread] = -INFINITY;
+        running_sum[thread] = 0.0F;
+    }
+    __syncthreads();
+
+    int32_t const total_rows = history_length + 1;
+    float const attention_scale = rsqrtf(static_cast<float>(head_dim));
+    for (int32_t tile_begin = 0; tile_begin < total_rows; tile_begin += kFusedDecodeTileRows) {
+        int32_t const tile_rows = min(kFusedDecodeTileRows, total_rows - tile_begin);
+
+        // Each warp owns complete dot products. Tasks are interleaved across
+        // query heads and rows, and all lanes participate even when D < 32.
+        for (int32_t task = warp; task < query_group_size * kFusedDecodeTileRows;
+             task += kAttentionWarps) {
+            int32_t const local_query_head = task / kFusedDecodeTileRows;
+            int32_t const tile_row = task % kFusedDecodeTileRows;
+            if (tile_row >= tile_rows) {
+                continue;
+            }
+            int32_t const logical_row = tile_begin + tile_row;
+            bool const is_current = logical_row == history_length;
+            float product = 0.0F;
+            for (int32_t dim = lane; dim < head_dim; dim += 32) {
+                int64_t const key_index =
+                    is_current
+                        ? static_cast<int64_t>(kv_head) * head_dim + dim
+                        : (static_cast<int64_t>(logical_row) * num_kv_heads + kv_head) * head_dim +
+                              dim;
+                auto const* key = is_current ? current_k : history_k;
+                product += shared_query[local_query_head * head_dim + dim] *
+                           __bfloat162float(key[key_index]);
+            }
+            product = warp_sum(product);
+            if (lane == 0) {
+                scores[local_query_head * kFusedDecodeTileRows + tile_row] =
+                    product * attention_scale;
+            }
+        }
+        __syncthreads();
+
+        for (int32_t local_query_head = 0; local_query_head < query_group_size;
+             ++local_query_head) {
+            float maximum = -INFINITY;
+            for (int32_t row = thread; row < tile_rows; row += kAttentionThreads) {
+                maximum = fmaxf(maximum, scores[local_query_head * kFusedDecodeTileRows + row]);
+            }
+            maximum = block_max(maximum, reduction);
+            float sum = 0.0F;
+            for (int32_t row = thread; row < tile_rows; row += kAttentionThreads) {
+                auto& score = scores[local_query_head * kFusedDecodeTileRows + row];
+                score = expf(score - maximum);
+                sum += score;
+            }
+            sum = block_sum(sum, reduction);
+            if (thread == 0) {
+                tile_max[local_query_head] = maximum;
+                tile_sum[local_query_head] = sum;
+            }
+        }
+        __syncthreads();
+
+        if (thread < query_group_size) {
+            bool const has_previous = isfinite(running_max[thread]);
+            float const merged_max =
+                has_previous ? fmaxf(running_max[thread], tile_max[thread]) : tile_max[thread];
+            old_scale[thread] = has_previous ? expf(running_max[thread] - merged_max) : 0.0F;
+            tile_scale[thread] = expf(tile_max[thread] - merged_max);
+            running_sum[thread] =
+                running_sum[thread] * old_scale[thread] + tile_sum[thread] * tile_scale[thread];
+            running_max[thread] = merged_max;
+        }
+        __syncthreads();
+
+        for (int32_t element = thread; element < group_elements; element += kAttentionThreads) {
+            int32_t const local_query_head = element / head_dim;
+            int32_t const dim = element % head_dim;
+            float tile_value = 0.0F;
+            for (int32_t tile_row = 0; tile_row < tile_rows; ++tile_row) {
+                int32_t const logical_row = tile_begin + tile_row;
+                bool const is_current = logical_row == history_length;
+                int64_t const value_index =
+                    is_current
+                        ? static_cast<int64_t>(kv_head) * head_dim + dim
+                        : (static_cast<int64_t>(logical_row) * num_kv_heads + kv_head) * head_dim +
+                              dim;
+                auto const* value = is_current ? current_v : history_v;
+                tile_value += scores[local_query_head * kFusedDecodeTileRows + tile_row] *
+                              __bfloat162float(value[value_index]);
+            }
+            accumulator[element] = accumulator[element] * old_scale[local_query_head] +
+                                   tile_value * tile_scale[local_query_head];
+        }
+        __syncthreads();
+    }
+
+    for (int32_t element = thread; element < group_elements; element += kAttentionThreads) {
+        int32_t const local_query_head = element / head_dim;
+        int32_t const dim = element % head_dim;
+        int32_t const query_head = kv_head * query_group_size + local_query_head;
+        destination[static_cast<int64_t>(query_head) * head_dim + dim] =
+            __float2bfloat16_rn(accumulator[element] / running_sum[local_query_head]);
+    }
+}
+
+bool launch_fused_single_token_attention(
+    __nv_bfloat16 const* history_k, __nv_bfloat16 const* history_v, __nv_bfloat16 const* query,
+    __nv_bfloat16 const* current_k, __nv_bfloat16 const* current_v, int32_t const* history_length,
+    __nv_bfloat16* destination, int32_t history_rows, int32_t num_query_heads, int32_t num_kv_heads,
+    int32_t head_dim, int32_t chunk_limit, cudaStream_t stream) noexcept {
+    auto const shared_bytes =
+        fused_decode_shared_memory_bytes(num_query_heads, num_kv_heads, head_dim);
+    if (history_k == nullptr || history_v == nullptr || query == nullptr || current_k == nullptr ||
+        current_v == nullptr || history_length == nullptr || destination == nullptr ||
+        !fused_decode_shape_supported(history_rows, num_query_heads, num_kv_heads, head_dim) ||
+        chunk_limit <= 0) {
+        return false;
+    }
+    fused_single_token_attention<<<num_kv_heads, kAttentionThreads, shared_bytes, stream>>>(
+        history_k, history_v, query, current_k, current_v, history_length, destination,
+        history_rows, num_query_heads, num_kv_heads, head_dim, chunk_limit);
+    return cudaPeekAtLastError() == cudaSuccess;
+}
+
+__global__ void
+single_token_segmented_context(__nv_bfloat16 const* query, __nv_bfloat16 const* current_k,
+                               __nv_bfloat16 const* current_v, __nv_bfloat16 const* history_context,
+                               float const* history_log_sum_exp, int32_t const* request_valid,
+                               __nv_bfloat16* destination, int32_t num_query_heads,
+                               int32_t num_kv_heads, int32_t head_dim, bool has_history) {
     __shared__ float partial[kAttentionThreads];
     int32_t const query_head = static_cast<int32_t>(blockIdx.x);
     if (query_head >= num_query_heads) {
@@ -171,8 +441,7 @@ __global__ void single_token_segmented_context(
         float const denominator = history_weight + current_weight;
         float const history_value =
             __bfloat162float(history_context[query_head * head_dim + threadIdx.x]);
-        float const current_value =
-            __bfloat162float(current_v[kv_head * head_dim + threadIdx.x]);
+        float const current_value = __bfloat162float(current_v[kv_head * head_dim + threadIdx.x]);
         destination[query_head * head_dim + threadIdx.x] = __float2bfloat16_rn(
             (history_weight * history_value + current_weight * current_value) / denominator);
     }
@@ -273,6 +542,33 @@ bool valid_runtime_shapes(nvinfer1::PluginTensorDesc const* inputs, int32_t nb_i
 }
 
 } // namespace
+
+bool launch_segmented_context_merge_for_testing(void const* history_context,
+                                                void const* current_context,
+                                                float const* history_log_sum_exp,
+                                                float const* current_log_sum_exp, void* destination,
+                                                int32_t query_rows, int32_t padded_query_rows,
+                                                int32_t num_query_heads, int32_t head_dim,
+                                                cudaStream_t stream) noexcept {
+    if (history_context == nullptr || current_context == nullptr ||
+        history_log_sum_exp == nullptr || current_log_sum_exp == nullptr ||
+        destination == nullptr || query_rows <= 0 || padded_query_rows < query_rows ||
+        num_query_heads <= 0 || head_dim <= 0) {
+        return false;
+    }
+    auto const elements = static_cast<std::int64_t>(num_query_heads) * query_rows * head_dim;
+    if (elements > std::numeric_limits<int32_t>::max()) {
+        return false;
+    }
+    int32_t const blocks =
+        static_cast<int32_t>((elements + kAttentionThreads - 1) / kAttentionThreads);
+    combine_segmented_context<<<blocks, kAttentionThreads, 0, stream>>>(
+        static_cast<__nv_bfloat16 const*>(history_context),
+        static_cast<__nv_bfloat16 const*>(current_context), history_log_sum_exp,
+        current_log_sum_exp, static_cast<__nv_bfloat16*>(destination), query_rows,
+        padded_query_rows, num_query_heads, head_dim);
+    return cudaPeekAtLastError() == cudaSuccess;
+}
 
 NativeContiguousAttentionPlugin::NativeContiguousAttentionPlugin(int32_t abi_version,
                                                                  int32_t num_query_heads,
@@ -402,9 +698,9 @@ nvinfer1::AsciiChar const* NativeContiguousAttentionPlugin::getMetadataString() 
            "normalization=log_sum_exp;"
            "cold_shape=T1;noncold_shape=Tge2;"
            "scalar_validation=H0_requires_T1_Hpositive_requires_Tge2;"
-           "decode=history_cudnn_plus_fused_current_merge;"
+           "decode=fused_direct_gqa_Ple512_else_history_cudnn_plus_fused_current_merge;"
            "cold_decode=fused_current_no_cudnn;"
-           "performance=cudnn_sdpa_9_20";
+           "performance=hybrid_fused_decode_online_softmax_and_cudnn_sdpa_9_20";
 }
 
 int32_t NativeContiguousAttentionPlugin::onShapeChange(nvinfer1::PluginTensorDesc const* inputs,
@@ -412,12 +708,18 @@ int32_t NativeContiguousAttentionPlugin::onShapeChange(nvinfer1::PluginTensorDes
                                                        nvinfer1::PluginTensorDesc const* outputs,
                                                        int32_t nb_outputs) noexcept {
     if (!valid_runtime_shapes(inputs, nb_inputs, outputs, nb_outputs, num_query_heads_,
-                              num_kv_heads_, head_dim_, chunk_limit_) ||
-        !native_cudnn_attention_available()) {
+                              num_kv_heads_, head_dim_, chunk_limit_)) {
         return -1;
     }
     const int32_t query_rows = inputs[2].dims.d[2];
     const int32_t padded_query_rows = query_rows == 1 ? 1 : chunk_limit_;
+    if (query_rows == 1 && fused_decode_shape_supported(inputs[0].dims.d[0], num_query_heads_,
+                                                        num_kv_heads_, head_dim_)) {
+        return 0;
+    }
+    if (!native_cudnn_attention_available()) {
+        return -1;
+    }
     if (!attention_) {
         attention_ = make_cudnn_attention_executor(CudnnAttentionConfig{
             num_query_heads_,
@@ -452,6 +754,21 @@ int32_t NativeContiguousAttentionPlugin::enqueue(nvinfer1::PluginTensorDesc cons
     int32_t const history_rows = input_desc[0].dims.d[0];
     int32_t const query_rows = input_desc[2].dims.d[2];
     int32_t const padded_query_rows = query_rows == 1 ? 1 : chunk_limit_;
+    auto const* history_length = static_cast<int32_t const*>(inputs[5]);
+    auto const* history_k = static_cast<__nv_bfloat16 const*>(inputs[0]);
+    auto const* history_v = static_cast<__nv_bfloat16 const*>(inputs[1]);
+    auto const* query = static_cast<__nv_bfloat16 const*>(inputs[2]);
+    auto const* current_k = static_cast<__nv_bfloat16 const*>(inputs[3]);
+    auto const* current_v = static_cast<__nv_bfloat16 const*>(inputs[4]);
+    auto* context = static_cast<__nv_bfloat16*>(outputs[0]);
+    if (query_rows == 1 &&
+        fused_decode_shape_supported(history_rows, num_query_heads_, num_kv_heads_, head_dim_)) {
+        return launch_fused_single_token_attention(
+                   history_k, history_v, query, current_k, current_v, history_length, context,
+                   history_rows, num_query_heads_, num_kv_heads_, head_dim_, chunk_limit_, stream)
+                   ? 0
+                   : -1;
+    }
     const auto workspace_bytes = cudnn_attention_workspace_size(
         CudnnAttentionConfig{
             num_query_heads_,
@@ -523,14 +840,6 @@ int32_t NativeContiguousAttentionPlugin::enqueue(nvinfer1::PluginTensorDesc cons
         return -1;
     }
 
-    auto const* history_length = static_cast<int32_t const*>(inputs[5]);
-    auto const* history_k = static_cast<__nv_bfloat16 const*>(inputs[0]);
-    auto const* history_v = static_cast<__nv_bfloat16 const*>(inputs[1]);
-    auto const* query = static_cast<__nv_bfloat16 const*>(inputs[2]);
-    auto const* current_k = static_cast<__nv_bfloat16 const*>(inputs[3]);
-    auto const* current_v = static_cast<__nv_bfloat16 const*>(inputs[4]);
-    auto* context = static_cast<__nv_bfloat16*>(outputs[0]);
-
     const auto query_elements =
         static_cast<std::int64_t>(num_query_heads_) * query_rows * head_dim_;
     const auto kv_elements = static_cast<std::int64_t>(num_kv_heads_) * query_rows * head_dim_;
@@ -559,10 +868,10 @@ int32_t NativeContiguousAttentionPlugin::enqueue(nvinfer1::PluginTensorDesc cons
     }
 
     auto const* history_query = single_token ? query : padded_query;
-    if (!cold && !attention_->execute_history(
-                     history_query, history_k, history_v, history_context, history_log_sum_exp,
-                     sequence_length_q, sequence_length_history, workspace_bytes_ptr + offset,
-                     workspace_bytes - offset, stream)) {
+    if (!cold && !attention_->execute_history(history_query, history_k, history_v, history_context,
+                                              history_log_sum_exp, sequence_length_q,
+                                              sequence_length_history, workspace_bytes_ptr + offset,
+                                              workspace_bytes - offset, stream)) {
         return -1;
     }
 
@@ -574,10 +883,9 @@ int32_t NativeContiguousAttentionPlugin::enqueue(nvinfer1::PluginTensorDesc cons
             return -1;
         }
     } else if (!attention_->execute_current(padded_query, padded_current_k, padded_current_v,
-                                            current_context, current_log_sum_exp,
-                                            sequence_length_q, sequence_length_current,
-                                            workspace_bytes_ptr + offset, workspace_bytes - offset,
-                                            stream)) {
+                                            current_context, current_log_sum_exp, sequence_length_q,
+                                            sequence_length_current, workspace_bytes_ptr + offset,
+                                            workspace_bytes - offset, stream)) {
         return -1;
     }
 
@@ -586,10 +894,11 @@ int32_t NativeContiguousAttentionPlugin::enqueue(nvinfer1::PluginTensorDesc cons
             copy_padded_context<<<query_blocks, kAttentionThreads, 0, stream>>>(
                 current_context, context, query_rows, padded_query_rows, num_query_heads_,
                 head_dim_);
-        } else {
-            combine_segmented_context<<<query_blocks, kAttentionThreads, 0, stream>>>(
-                history_context, current_context, history_log_sum_exp, current_log_sum_exp,
-                context, query_rows, padded_query_rows, num_query_heads_, head_dim_);
+        } else if (!launch_segmented_context_merge_for_testing(
+                       history_context, current_context, history_log_sum_exp, current_log_sum_exp,
+                       context, query_rows, padded_query_rows, num_query_heads_, head_dim_,
+                       stream)) {
+            return -1;
         }
         zero_context_if_invalid<<<query_blocks, kAttentionThreads, 0, stream>>>(
             request_valid, context, query_elements);

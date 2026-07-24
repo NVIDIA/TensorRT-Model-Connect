@@ -50,13 +50,27 @@ void allocate_host_output_staging(
         host_output_staging[name].resize(nbytes);
 }
 
+void replace_host_output_staging(
+    std::unordered_map<std::string, std::vector<uint8_t>>& host_output_staging,
+    const std::string& name, std::size_t nbytes) {
+    const auto found = host_output_staging.find(name);
+    if (found != host_output_staging.end() && found->second.size() == nbytes)
+        return;
+    if (nbytes == 0) {
+        host_output_staging.erase(name);
+        return;
+    }
+    std::vector<uint8_t> exact_staging(nbytes);
+    host_output_staging[name].swap(exact_staging);
+}
+
 bool is_power_of_two(std::size_t value) {
     return value != 0 && (value & (value - 1)) == 0;
 }
 
 void validate_versioned_struct(uint32_t struct_size, uint32_t expected_size, uint32_t api_version,
                                const char* type_name) {
-    if (api_version != kRuntimeMemoryBackendApiVersionV1) {
+    if (api_version != kRuntimeMemoryBackendApiVersionCurrent) {
         throw std::invalid_argument(std::string(type_name) + " has unsupported api_version " +
                                     std::to_string(api_version));
     }
@@ -797,9 +811,20 @@ RuntimeMemoryContextRequirementV1 TrtModuleImpl::context_memory_requirement() {
             throw std::logic_error("dynamic runtime input '" + name +
                                    "' has no explicit candidate shape");
         }
+        if (engine_->isShapeInferenceIO(name.c_str()) && entry.is_input) {
+            throw std::logic_error(
+                "ordinary shape-inference input '" + name +
+                "' requires value-aware planning, which the current runtime-memory API does not "
+                "provide");
+        }
+        if (engine_->isShapeInferenceIO(name.c_str()) && entry.d_ptr == nullptr) {
+            throw std::logic_error("shape-inference I/O tensor '" + name +
+                                   "' has no address before inferShapes");
+        }
     }
 
     synchronize_runtime_reconfiguration("context-memory query");
+    materialize_runtime_internal_inputs();
     int32_t missing_shapes = ctx_->inferShapes(0, nullptr);
     if (missing_shapes < 0)
         throw std::runtime_error("TensorRT inferShapes failed");
@@ -839,6 +864,7 @@ RuntimeMemoryContextRequirementV1 TrtModuleImpl::context_memory_requirement() {
         entry.runtime_shape_generation = runtime_input_shape_generation_;
     }
 
+    materialize_runtime_internal_outputs();
     const auto new_requirement = ctx_->updateDeviceMemorySizeForShapes();
     const bool same_generation =
         context_memory_queried_ && context_memory_generation_ == runtime_input_shape_generation_;
@@ -923,6 +949,14 @@ bool TrtModuleImpl::runtime_memory_ready() const noexcept {
             found->second.runtime_shape_generation != runtime_input_shape_generation_)
             return false;
     }
+    for (const auto& [name, entry] : buffers_) {
+        (void)name;
+        if (entry.is_runtime_internal_dynamic &&
+            (entry.d_ptr == nullptr ||
+             entry.runtime_buffer_generation != runtime_input_shape_generation_)) {
+            return false;
+        }
+    }
     for (const auto& [output_name, input_name] : runtime_alias_output_to_input_) {
         (void)input_name;
         if (bound_runtime_alias_outputs_.count(output_name) == 0)
@@ -962,6 +996,10 @@ RuntimeMemoryEngineStatsV1 TrtModuleImpl::runtime_memory_engine_stats() const no
 
     for (const auto& [name, entry] : buffers_) {
         (void)name;
+        if (entry.is_input && entry.is_runtime_internal_dynamic && !entry.is_external)
+            stats.ordinary_device_input_bytes += static_cast<std::uint64_t>(entry.nbytes);
+        if (!entry.is_input && entry.is_runtime_internal_dynamic && !entry.is_external)
+            stats.ordinary_device_output_bytes += static_cast<std::uint64_t>(entry.nbytes);
         if (!entry.is_input && !entry.is_external)
             stats.device_output_bytes += static_cast<std::uint64_t>(entry.nbytes);
     }
@@ -975,6 +1013,7 @@ RuntimeMemoryEngineStatsV1 TrtModuleImpl::runtime_memory_engine_stats() const no
 RuntimeMemoryTransferSnapshotV1 TrtModuleImpl::runtime_memory_transfer_snapshot() const {
     RuntimeMemoryTransferSnapshotV1 snapshot;
     snapshot.event_sequence = transfer_event_sequence_;
+    snapshot.execution_attempt_events = execution_attempt_events_;
     snapshot.counters.reserve(transfer_counters_.size());
     for (const auto& [name, counter] : transfer_counters_) {
         (void)name;
@@ -1157,6 +1196,44 @@ std::size_t TrtModuleImpl::compute_alloc_bytes(const nvinfer1::Dims& dims, DType
     return n * dtype_size(dtype);
 }
 
+std::size_t TrtModuleImpl::compute_shape_bytes(const std::vector<int64_t>& shape, DType dtype,
+                                               const std::string& tensor_name) {
+    std::size_t elements = 1;
+    for (const auto extent : shape) {
+        if (extent <= 0) {
+            throw std::logic_error("ordinary dynamic tensor '" + tensor_name +
+                                   "' has no concrete shape after inferShapes; "
+                                   "IOutputAllocator is required");
+        }
+        const auto positive_extent = static_cast<std::uint64_t>(extent);
+        if (positive_extent > std::numeric_limits<std::size_t>::max() ||
+            elements > std::numeric_limits<std::size_t>::max() /
+                           static_cast<std::size_t>(positive_extent)) {
+            throw std::overflow_error("ordinary dynamic tensor '" + tensor_name +
+                                      "' element count overflows size_t");
+        }
+        elements *= static_cast<std::size_t>(positive_extent);
+    }
+    const auto element_bytes = dtype_size(dtype);
+    if (element_bytes == 0 || elements > std::numeric_limits<std::size_t>::max() / element_bytes) {
+        throw std::overflow_error("ordinary dynamic tensor '" + tensor_name +
+                                  "' byte size overflows size_t");
+    }
+    return elements * element_bytes;
+}
+
+std::size_t TrtModuleImpl::compute_concrete_bytes(const nvinfer1::Dims& dims, DType dtype,
+                                                  std::vector<int64_t>& shape_out,
+                                                  const std::string& tensor_name) {
+    if (dims.nbDims < 0) {
+        throw std::logic_error("ordinary dynamic tensor '" + tensor_name +
+                               "' has no concrete shape after inferShapes; "
+                               "IOutputAllocator is required");
+    }
+    shape_out = dims_to_shape(dims);
+    return compute_shape_bytes(shape_out, dtype, tensor_name);
+}
+
 void TrtModuleImpl::detect_dynamic_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io) {
     has_dynamic_shapes_ = false;
     for (int32_t i = 0; i < num_io && !has_dynamic_shapes_; ++i) {
@@ -1198,10 +1275,12 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const s
     bool is_dynamic = has_dynamic_shapes_ && num_profiles > 0 && dims_are_dynamic(trt_shape);
 
     if (is_dynamic) {
-        alloc_dims =
-            engine->getProfileShape(name.c_str(), profile_idx_, nvinfer1::OptProfileSelector::kMAX);
         init_dims =
             engine->getProfileShape(name.c_str(), profile_idx_, nvinfer1::OptProfileSelector::kOPT);
+        alloc_dims = runtime_managed_context_
+                         ? init_dims
+                         : engine->getProfileShape(name.c_str(), profile_idx_,
+                                                   nvinfer1::OptProfileSelector::kMAX);
     }
 
     std::vector<int64_t> shape;
@@ -1224,6 +1303,12 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const s
         // entry can never be mistaken for runtime-owned storage.
         entry.is_external = true;
         entry.is_runtime_deferred = true;
+    } else if (runtime_managed_context_ && is_dynamic) {
+        // Runtime-memory modules materialize ordinary dynamic inputs only
+        // after the planner supplies a concrete shape. Do not reserve MAX.
+        entry.d_ptr = nullptr;
+        entry.nbytes = 0;
+        entry.is_runtime_internal_dynamic = true;
     } else if (nbytes > 0) {
         auto err = cudaMalloc(&entry.d_ptr, nbytes);
         if (err != cudaSuccess) {
@@ -1274,11 +1359,14 @@ void TrtModuleImpl::allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32
 
         auto dtype = from_trt_dtype(engine->getTensorDataType(name.c_str()));
 
-        // For dynamic engines, query the context for inferred output shape
-        // (based on the max input shapes set by the caller).
-        // For static engines, use the engine shape directly.
-        nvinfer1::Dims out_dims = has_dynamic_shapes_ ? ctx_->getTensorShape(name.c_str())
-                                                      : engine->getTensorShape(name.c_str());
+        const auto engine_dims = engine->getTensorShape(name.c_str());
+        const bool is_dynamic = engine_dims.nbDims < 0 || dims_are_dynamic(engine_dims);
+        // Legacy modules query against profile MAX. Runtime-memory modules
+        // retain the unresolved declaration until inferShapes() runs for the
+        // planner's concrete inputs.
+        nvinfer1::Dims out_dims = has_dynamic_shapes_ && !runtime_managed_context_
+                                      ? ctx_->getTensorShape(name.c_str())
+                                      : engine_dims;
 
         std::vector<int64_t> shape;
         std::size_t nbytes = compute_alloc_bytes(out_dims, dtype, shape);
@@ -1288,6 +1376,7 @@ void TrtModuleImpl::allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32
         entry.dtype = dtype;
         entry.nbytes = nbytes;
         entry.is_input = false;
+        entry.is_dynamic = is_dynamic;
 
         const auto external = initial_external_bindings_.find(name);
         if (external != initial_external_bindings_.end()) {
@@ -1296,6 +1385,10 @@ void TrtModuleImpl::allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32
         } else if (deferred_runtime_tensors_.find(name) != deferred_runtime_tensors_.end()) {
             entry.is_external = true;
             entry.is_runtime_deferred = true;
+        } else if (runtime_managed_context_ && is_dynamic) {
+            entry.d_ptr = nullptr;
+            entry.nbytes = 0;
+            entry.is_runtime_internal_dynamic = true;
         } else if (nbytes > 0) {
             auto err = cudaMalloc(&entry.d_ptr, nbytes);
             if (err != cudaSuccess) {
@@ -1316,9 +1409,92 @@ void TrtModuleImpl::allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32
         if (entry.d_ptr && !bind_tensor_address(name, entry))
             allocation_failed_ = true;
 
-        allocate_host_output_staging(host_output_staging_, name, nbytes, entry.is_external);
+        if (!entry.is_runtime_internal_dynamic)
+            allocate_host_output_staging(host_output_staging_, name, nbytes, entry.is_external);
 
         buffers_[name] = std::move(entry);
+    }
+}
+
+void TrtModuleImpl::materialize_runtime_internal_buffer(const std::string& name, BufferEntry& entry,
+                                                        const nvinfer1::Dims& concrete_dims) {
+    if (!runtime_managed_context_ || !entry.is_runtime_internal_dynamic || entry.is_external)
+        return;
+
+    std::vector<int64_t> concrete_shape;
+    const auto required_bytes =
+        compute_concrete_bytes(concrete_dims, entry.dtype, concrete_shape, name);
+
+    // Host materialization describes the current logical output, not the
+    // high-water capacity retained by the reusable device allocation.
+    if (!entry.is_input)
+        replace_host_output_staging(host_output_staging_, name, required_bytes);
+
+    if (entry.d_ptr != nullptr && required_bytes <= entry.nbytes) {
+        entry.shape = std::move(concrete_shape);
+        entry.runtime_buffer_generation = runtime_input_shape_generation_;
+        if (!bind_tensor_address(name, entry)) {
+            throw std::runtime_error("TensorRT rejected reused ordinary dynamic buffer for '" +
+                                     name + "'");
+        }
+        return;
+    }
+
+    synchronize_runtime_reconfiguration("ordinary dynamic I/O growth");
+    void* replacement = nullptr;
+    const auto allocation_status = cudaMalloc(&replacement, required_bytes);
+    if (allocation_status != cudaSuccess) {
+        throw std::runtime_error("Failed to allocate " + std::to_string(required_bytes) +
+                                 " concrete bytes for ordinary dynamic tensor '" + name +
+                                 "': " + cudaGetErrorString(allocation_status));
+    }
+
+    BufferEntry candidate = entry;
+    candidate.d_ptr = replacement;
+    candidate.shape = concrete_shape;
+    candidate.nbytes = required_bytes;
+    if (!bind_tensor_address(name, candidate)) {
+        const bool restored = ctx_->setTensorAddress(name.c_str(), entry.d_ptr);
+        const auto release_status = cudaFree(replacement);
+        if (!restored || release_status != cudaSuccess) {
+            runtime_binding_poisoned_ = true;
+            std::cerr << "[trt_module] Failed to roll back ordinary dynamic buffer growth for '"
+                      << name << "'\n";
+        }
+        throw std::runtime_error("TensorRT rejected concrete ordinary dynamic buffer for '" + name +
+                                 "'");
+    }
+
+    void* const previous = entry.d_ptr;
+    entry.d_ptr = replacement;
+    entry.shape = std::move(concrete_shape);
+    entry.nbytes = required_bytes;
+    entry.runtime_buffer_generation = runtime_input_shape_generation_;
+    if (use_cuda_graph_ && cuda_graph_)
+        cuda_graph_->reset();
+    if (previous != nullptr) {
+        const auto release_status = cudaFree(previous);
+        if (release_status != cudaSuccess) {
+            runtime_binding_poisoned_ = true;
+            throw std::runtime_error("Failed to release superseded ordinary dynamic buffer for '" +
+                                     name + "': " + cudaGetErrorString(release_status));
+        }
+    }
+}
+
+void TrtModuleImpl::materialize_runtime_internal_inputs() {
+    for (auto& [name, entry] : buffers_) {
+        if (!entry.is_input || !entry.is_runtime_internal_dynamic)
+            continue;
+        materialize_runtime_internal_buffer(name, entry, ctx_->getTensorShape(name.c_str()));
+    }
+}
+
+void TrtModuleImpl::materialize_runtime_internal_outputs() {
+    for (auto& [name, entry] : buffers_) {
+        if (entry.is_input || !entry.is_runtime_internal_dynamic)
+            continue;
+        materialize_runtime_internal_buffer(name, entry, ctx_->getTensorShape(name.c_str()));
     }
 }
 
@@ -1330,17 +1506,17 @@ void TrtModuleImpl::allocate_buffers(nvinfer1::ICudaEngine* engine) {
 
     detect_dynamic_shapes(engine, num_io);
 
-    // Pass 1: allocate input buffers (use profile-0 max shape for dynamic inputs).
+    // Pass 1: legacy modules allocate dynamic inputs at profile MAX. Opted-in
+    // runtime-memory modules defer ordinary dynamic I/O to shape planning.
     allocate_input_buffers(engine, num_io, num_profiles);
 
-    // Pass 2: allocate output buffers. For dynamic shapes, temporarily set
-    // inputs to max shapes, query inferred output shapes, then restore opt.
-    if (has_dynamic_shapes_ && num_profiles > 0)
+    // Pass 2: only the legacy path temporarily infers outputs at profile MAX.
+    if (!runtime_managed_context_ && has_dynamic_shapes_ && num_profiles > 0)
         set_dynamic_input_shapes(engine, num_io, nvinfer1::OptProfileSelector::kMAX);
 
     allocate_output_buffers(engine, num_io);
 
-    if (has_dynamic_shapes_ && num_profiles > 0)
+    if (!runtime_managed_context_ && has_dynamic_shapes_ && num_profiles > 0)
         set_dynamic_input_shapes(engine, num_io, nvinfer1::OptProfileSelector::kOPT);
 
     initial_external_bindings_.clear();
@@ -1396,7 +1572,15 @@ TrtModuleImpl::download_host_outputs(const std::unordered_set<std::string>* sele
 
         std::vector<int64_t> runtime_shape = entry.shape;
         std::size_t runtime_nbytes = entry.nbytes;
-        if (has_dynamic_shapes_ && ctx_ != nullptr) {
+        if (runtime_managed_context_ && entry.is_runtime_internal_dynamic) {
+            runtime_nbytes = compute_shape_bytes(entry.shape, entry.dtype, name);
+            const auto staging = host_output_staging_.find(name);
+            if (entry.d_ptr == nullptr || runtime_nbytes > entry.nbytes ||
+                staging == host_output_staging_.end() || staging->second.size() != runtime_nbytes) {
+                throw std::logic_error("ordinary dynamic output '" + name +
+                                       "' is not materialized at its concrete shape");
+            }
+        } else if (has_dynamic_shapes_ && ctx_ != nullptr) {
             std::vector<int64_t> inferred_shape;
             runtime_nbytes = compute_alloc_bytes(ctx_->getTensorShape(name.c_str()), entry.dtype,
                                                  inferred_shape);
@@ -1430,6 +1614,9 @@ void TrtModuleImpl::enable_cuda_graph() {
 }
 
 void TrtModuleImpl::forward_async(const TensorMap& inputs) {
+    if (runtime_managed_context_)
+        ensure_runtime_memory_ready();
+
     // Upload inputs H2D, updating shapes for dynamic engines
     for (const auto& [name, tensor] : inputs) {
         auto it = buffers_.find(name);
@@ -1439,9 +1626,31 @@ void TrtModuleImpl::forward_async(const TensorMap& inputs) {
         if (!entry.is_input || !entry.d_ptr)
             continue;
 
+        if (runtime_managed_context_ && entry.is_dynamic && tensor.shape != entry.shape) {
+            throw std::invalid_argument("runtime input '" + name +
+                                        "' does not match its planned concrete shape");
+        }
         update_dynamic_shape(name, entry, tensor.shape);
 
-        auto copy_bytes = std::min(tensor.nbytes(), entry.nbytes);
+        auto copy_bytes = tensor.nbytes();
+        if (runtime_managed_context_) {
+            if (tensor.dtype != entry.dtype)
+                throw std::invalid_argument("runtime input '" + name + "' dtype mismatch");
+            if (entry.is_dynamic) {
+                const auto expected_bytes = compute_shape_bytes(entry.shape, entry.dtype, name);
+                if (copy_bytes != expected_bytes) {
+                    throw std::invalid_argument("runtime input '" + name +
+                                                "' byte size does not match its planned shape");
+                }
+            }
+            if (copy_bytes > entry.nbytes) {
+                throw std::invalid_argument(
+                    "runtime input '" + name + "' requires " + std::to_string(copy_bytes) +
+                    " bytes but its materialized capacity is " + std::to_string(entry.nbytes));
+            }
+        } else {
+            copy_bytes = std::min(copy_bytes, entry.nbytes);
+        }
         if (copy_bytes > 0 && tensor.data) {
             cudaMemcpyAsync(entry.d_ptr, tensor.data, copy_bytes, cudaMemcpyHostToDevice, stream_);
         }
@@ -1459,6 +1668,9 @@ void TrtModuleImpl::execute_enqueue() {
         throw std::runtime_error("TensorRT module is not in a valid state for execution");
     }
     ensure_runtime_memory_ready();
+    if (execution_attempt_events_ == std::numeric_limits<std::uint64_t>::max())
+        throw std::overflow_error("TensorRT execution-attempt counter overflow");
+    ++execution_attempt_events_;
     record_timed_enqueue();
 }
 
@@ -1614,6 +1826,9 @@ void TrtModuleImpl::sync() {
 // --- Forward device async (GPU → GPU, no sync) ---
 
 void TrtModuleImpl::forward_device_async(const DeviceTensorMap& inputs) {
+    if (runtime_managed_context_)
+        ensure_runtime_memory_ready();
+
     // D2D copy input DeviceTensors into our buffers
     for (const auto& [name, dt_ptr] : inputs) {
         auto it = buffers_.find(name);
@@ -1623,10 +1838,32 @@ void TrtModuleImpl::forward_device_async(const DeviceTensorMap& inputs) {
         if (!entry.is_input || !entry.d_ptr)
             continue;
 
+        if (runtime_managed_context_ && entry.is_dynamic && dt_ptr->shape() != entry.shape) {
+            throw std::invalid_argument("runtime input '" + name +
+                                        "' does not match its planned concrete shape");
+        }
         update_dynamic_shape(name, entry, dt_ptr->shape());
 
+        auto copy_bytes = dt_ptr->nbytes();
+        if (runtime_managed_context_) {
+            if (dt_ptr->dtype() != entry.dtype)
+                throw std::invalid_argument("runtime input '" + name + "' dtype mismatch");
+            if (entry.is_dynamic) {
+                const auto expected_bytes = compute_shape_bytes(entry.shape, entry.dtype, name);
+                if (copy_bytes != expected_bytes) {
+                    throw std::invalid_argument("runtime input '" + name +
+                                                "' byte size does not match its planned shape");
+                }
+            }
+            if (copy_bytes > entry.nbytes) {
+                throw std::invalid_argument(
+                    "runtime input '" + name + "' requires " + std::to_string(copy_bytes) +
+                    " bytes but its materialized capacity is " + std::to_string(entry.nbytes));
+            }
+        } else {
+            copy_bytes = std::min(copy_bytes, entry.nbytes);
+        }
         if (dt_ptr->data() != entry.d_ptr) {
-            auto copy_bytes = std::min(dt_ptr->nbytes(), entry.nbytes);
             if (copy_bytes > 0) {
                 const auto copy_status = cudaMemcpyAsync(entry.d_ptr, dt_ptr->data(), copy_bytes,
                                                          cudaMemcpyDeviceToDevice, stream_);
@@ -1772,6 +2009,10 @@ void TrtModuleImpl::bind_external(const std::string& name, void* external_device
     if (entry.is_runtime_deferred) {
         throw std::logic_error("runtime-deferred tensor '" + name +
                                "' requires RuntimeMemoryBindingV1");
+    }
+    if (runtime_managed_context_ && entry.is_runtime_internal_dynamic) {
+        throw std::logic_error("ordinary dynamic tensor '" + name +
+                               "' is owned by runtime-memory shape planning");
     }
     if (runtime_managed_context_)
         synchronize_runtime_reconfiguration("external binding");

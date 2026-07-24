@@ -166,18 +166,13 @@ void parse_runtime_memory_contract(const std::string& json, BundleInfo& info) {
         invalid_runtime_memory("qualified_runtime_stack is required");
     auto& runtime_stack = contract.qualified_runtime_stack;
     runtime_stack.sm = extract_json_string(runtime_stack_text, "sm", "");
-    runtime_stack.tensorrt =
-        extract_json_string(runtime_stack_text, "tensorrt", "");
-    runtime_stack.cuda_runtime =
-        extract_json_string(runtime_stack_text, "cuda_runtime", "");
-    runtime_stack.cudnn_backend =
-        extract_json_string(runtime_stack_text, "cudnn_backend", "");
+    runtime_stack.tensorrt = extract_json_string(runtime_stack_text, "tensorrt", "");
+    runtime_stack.cuda_runtime = extract_json_string(runtime_stack_text, "cuda_runtime", "");
+    runtime_stack.cudnn_backend = extract_json_string(runtime_stack_text, "cudnn_backend", "");
     runtime_stack.cudnn_frontend_revision =
         extract_json_string(runtime_stack_text, "cudnn_frontend_revision", "");
-    runtime_stack.nvrtc =
-        extract_json_string(runtime_stack_text, "nvrtc", "");
-    runtime_stack.driver =
-        extract_json_string(runtime_stack_text, "driver", "");
+    runtime_stack.nvrtc = extract_json_string(runtime_stack_text, "nvrtc", "");
+    runtime_stack.driver = extract_json_string(runtime_stack_text, "driver", "");
     contract.native_kv_plugin_abi = extract_json_int(text, "native_kv_plugin_abi", 0);
     contract.model_context_limit = extract_json_int(text, "model_context_limit", 0);
     contract.prefill_chunk_limit = extract_json_int(text, "prefill_chunk_limit", 0);
@@ -202,11 +197,10 @@ void parse_runtime_memory_contract(const std::string& json, BundleInfo& info) {
         invalid_runtime_memory("qualified_target is required");
     if (runtime_stack.sm.empty() || runtime_stack.tensorrt.empty() ||
         runtime_stack.cuda_runtime.empty() || runtime_stack.cudnn_backend.empty() ||
-        !is_lower_hex(runtime_stack.cudnn_frontend_revision, 40) ||
-        runtime_stack.nvrtc.empty() || runtime_stack.driver.empty()) {
-        invalid_runtime_memory(
-            "qualified_runtime_stack requires non-empty "
-            "SM/TensorRT/CUDA/cuDNN/Frontend/NVRTC/driver fields");
+        !is_lower_hex(runtime_stack.cudnn_frontend_revision, 40) || runtime_stack.nvrtc.empty() ||
+        runtime_stack.driver.empty()) {
+        invalid_runtime_memory("qualified_runtime_stack requires non-empty "
+                               "SM/TensorRT/CUDA/cuDNN/Frontend/NVRTC/driver fields");
     }
     if (contract.native_kv_plugin_abi <= 0)
         invalid_runtime_memory("native_kv_plugin_abi must be positive");

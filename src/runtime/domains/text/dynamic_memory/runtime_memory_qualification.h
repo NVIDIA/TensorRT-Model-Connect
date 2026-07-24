@@ -1,6 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
- * All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -66,20 +65,67 @@ struct RuntimeMemoryRuntimeTarget {
 // pipelines. Production receives independently detected JSON from the
 // selected backend/common-plugin DSO; bundle metadata is never accepted as
 // evidence for the live runtime.
-RuntimeMemoryRuntimeTarget
-parse_runtime_memory_runtime_stack_json(const std::string& json_text);
-void validate_runtime_memory_runtime_stack(
-    const QualifiedRuntimeStack& expected,
-    const RuntimeMemoryRuntimeTarget& actual);
+RuntimeMemoryRuntimeTarget parse_runtime_memory_runtime_stack_json(const std::string& json_text);
+void validate_runtime_memory_runtime_stack(const QualifiedRuntimeStack& expected,
+                                           const RuntimeMemoryRuntimeTarget& actual);
 void validate_runtime_memory_runtime_target(const RuntimeMemoryQualifiedTuple& expected,
                                             const RuntimeMemoryRuntimeTarget& actual);
 
+struct RuntimeMemoryQualificationExecutionAttemptEvidence {
+    std::string source;
+    bool available{false};
+    std::uint64_t module_count{0};
+    std::uint64_t before{0};
+    std::uint64_t after{0};
+    std::uint64_t delta{0};
+};
+
 class RuntimeMemoryQualificationAdmissionError : public std::runtime_error {
   public:
-    explicit RuntimeMemoryQualificationAdmissionError(const std::string& message)
-        : std::runtime_error(message) {}
+    RuntimeMemoryQualificationAdmissionError(
+        const std::string& message,
+        RuntimeMemoryQualificationExecutionAttemptEvidence execution_attempt_evidence);
     ~RuntimeMemoryQualificationAdmissionError() override;
+
+    const std::string& execution_attempt_source() const noexcept {
+        return execution_attempt_evidence_.source;
+    }
+    bool execution_attempt_available() const noexcept {
+        return execution_attempt_evidence_.available;
+    }
+    std::uint64_t execution_attempt_module_count() const noexcept {
+        return execution_attempt_evidence_.module_count;
+    }
+    std::uint64_t execution_attempt_before() const noexcept {
+        return execution_attempt_evidence_.before;
+    }
+    std::uint64_t execution_attempt_after() const noexcept {
+        return execution_attempt_evidence_.after;
+    }
+    std::uint64_t execution_attempt_delta() const noexcept {
+        return execution_attempt_evidence_.delta;
+    }
+
+  private:
+    RuntimeMemoryQualificationExecutionAttemptEvidence execution_attempt_evidence_;
 };
+
+// A request-local baseline over every unique prefill/decode module owned by a
+// qualification pipeline. It is intentionally private to the native
+// qualification surface and retains per-module values so aggregate arithmetic
+// cannot hide one module's counter regression behind another module's advance.
+struct RuntimeMemoryQualificationExecutionAttemptBaseline {
+    std::vector<const ITrtModule*> modules;
+    std::vector<std::uint64_t> before_by_module;
+    std::uint64_t before{0};
+};
+
+RuntimeMemoryQualificationExecutionAttemptBaseline
+capture_runtime_memory_qualification_execution_attempts(
+    const std::vector<const ITrtModule*>& modules);
+RuntimeMemoryQualificationExecutionAttemptEvidence
+finish_runtime_memory_qualification_execution_attempts(
+    const RuntimeMemoryQualificationExecutionAttemptBaseline& baseline);
 
 struct RuntimeMemoryQualificationRequestV1 {
     std::vector<std::int32_t> input_ids;

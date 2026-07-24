@@ -23,6 +23,7 @@
 // through trtmc_last_error().
 // =============================================================================
 
+#include "cli/args.h"
 #include "test_helpers.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/pipeline_factory.h"
@@ -33,6 +34,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
@@ -40,8 +42,20 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <utility>
 #include <vector>
+
+#ifndef TRTMC_TEST_RUNTIME_LEGACY_INTERFACE_DSO
+#error "TRTMC_TEST_RUNTIME_LEGACY_INTERFACE_DSO must name the current-ABI legacy fixture"
+#endif
+#ifndef TRTMC_TEST_RUNTIME_WRONG_VERSION_DSO
+#error "TRTMC_TEST_RUNTIME_WRONG_VERSION_DSO must name the wrong-version fixture"
+#endif
+#ifndef TRTMC_TEST_RUNTIME_CAPTURING_DSO
+#error "TRTMC_TEST_RUNTIME_CAPTURING_DSO must name the capturing fixture"
+#endif
 
 namespace {
 
@@ -60,77 +74,20 @@ static_assert(alignof(TrtmcPipelineOptions) == 8,
               "TrtmcPipelineOptions legacy LP64 ABI alignment changed");
 #endif
 
-class LegacyOnlyPlugin final : public trtmc::IPipelinePlugin {
-  public:
-    std::unique_ptr<trtmc::IPipeline> create(const trtmc::PipelineContext&) override {
-        create_called = true;
-        return nullptr;
-    }
-
-    bool create_called{false};
-};
-
-class WrongRuntimeMemoryVersionPlugin final : public trtmc::IPipelinePlugin,
-                                              public trtmc::IRuntimeMemoryPipelinePluginV1 {
-  public:
-    std::unique_ptr<trtmc::IPipeline> create(const trtmc::PipelineContext&) override {
-        create_called = true;
-        return nullptr;
-    }
-
-    std::uint32_t runtime_memory_plugin_api_version() const override {
-        return trtmc::kRuntimeMemoryPluginApiVersionV1 + 1U;
-    }
-
-    std::unique_ptr<trtmc::IPipeline>
-    create_runtime_memory(const trtmc::PipelineContext&,
-                          const trtmc::RuntimeMemoryPluginOptionsV1&) override {
-        runtime_create_called = true;
-        return nullptr;
-    }
-
-    bool create_called{false};
-    bool runtime_create_called{false};
-};
-
-class CapturingPipeline final : public trtmc::IPipeline {
-  public:
-    const char* model_id() const override { return "runtime-memory-capture"; }
-    const char* pipeline_type() const override { return "runtime-memory-capture"; }
-};
-
-class CapturingRuntimeMemoryPlugin final : public trtmc::IPipelinePlugin,
-                                           public trtmc::IRuntimeMemoryPipelinePluginV1 {
-  public:
-    std::unique_ptr<trtmc::IPipeline> create(const trtmc::PipelineContext&) override {
-        legacy_create_called = true;
-        return std::make_unique<CapturingPipeline>();
-    }
-
-    std::unique_ptr<trtmc::IPipeline>
-    create_runtime_memory(const trtmc::PipelineContext&,
-                          const trtmc::RuntimeMemoryPluginOptionsV1& options) override {
-        ++runtime_create_calls;
-        captured_options = options;
-        return std::make_unique<CapturingPipeline>();
-    }
-
-    void reset_capture() {
-        legacy_create_called = false;
-        runtime_create_calls = 0;
-        captured_options = {};
-    }
-
-    bool legacy_create_called{false};
-    int runtime_create_calls{0};
-    trtmc::RuntimeMemoryPluginOptionsV1 captured_options;
-};
-
 void check(bool condition, const char* test_name) {
     if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
+}
+
+trtmc::cli::CliArgs parse_cli(std::initializer_list<std::string> arguments) {
+    std::vector<std::string> storage(arguments);
+    std::vector<char*> argv;
+    argv.reserve(storage.size());
+    for (auto& argument : storage)
+        argv.push_back(argument.data());
+    return trtmc::cli::parse_args(static_cast<int>(argv.size()), argv.data());
 }
 
 void write_u64_le(std::ofstream& out, uint64_t value) {
@@ -214,6 +171,95 @@ void write_invalid_engine_bundle(const std::filesystem::path& path) {
         {BundleSectionSpec{"config.json", config},
          BundleSectionSpec{"engine_plan", std::string(kInvalidPlan, sizeof(kInvalidPlan))}},
         "qwen");
+}
+
+std::string runtime_memory_fixture_contract() {
+    return R"({
+    "contract_version": 1,
+    "qualified_model_id": "qwen",
+    "qualified_model_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "qualified_config_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "qualified_target": "gb300-trt-11.2",
+    "qualified_runtime_stack": {"sm":"sm103","tensorrt":"11.2.0.113","cuda_runtime":"13.3","cudnn_backend":"9.20.0","cudnn_frontend_revision":"7b9b711c22b6823e87150213ecd8449260db8610","nvrtc":"13.3","driver":"580.105.08"},
+    "native_kv_plugin_abi": 2,
+    "model_context_limit": 32,
+    "prefill_chunk_limit": 16,
+    "kv_layout": "contiguous_runtime_v1",
+    "kv_dtype": "float16",
+    "kv_bytes_per_token": 256,
+    "active_kv_profile_limits": [16, 32],
+    "runtime_owned": true
+  })";
+}
+
+void write_runtime_memory_fixture_bundle(const std::filesystem::path& path) {
+    const std::string config = R"({
+  "runtime_strategy": "qwen_decoder_kv_cache",
+  "hidden_size": 64,
+  "num_attention_heads": 1,
+  "num_key_value_heads": 1
+})";
+    write_bundle_with_sections(path, {BundleSectionSpec{"config.json", config}}, "qwen",
+                               runtime_memory_fixture_contract());
+}
+
+template <typename Function>
+Function require_fixture_symbol(void* handle, const char* name) {
+    dlerror();
+    void* symbol = dlsym(handle, name);
+    const char* error = dlerror();
+    if (error != nullptr || symbol == nullptr)
+        throw std::runtime_error(std::string("missing runtime-memory fixture symbol ") + name);
+    return reinterpret_cast<Function>(symbol);
+}
+
+struct RuntimeMemoryFixtureApi {
+    using ResetFn = void (*)();
+    using CountFn = std::uint32_t (*)();
+    using U32Fn = std::uint32_t (*)();
+    using U64Fn = std::uint64_t (*)();
+    using DoubleFn = double (*)();
+
+    void* handle{nullptr};
+    ResetFn reset{nullptr};
+    CountFn legacy_create_calls{nullptr};
+    CountFn runtime_create_calls{nullptr};
+    U32Fn captured_policy{nullptr};
+    DoubleFn captured_fraction{nullptr};
+    U64Fn captured_bytes{nullptr};
+    U64Fn captured_context_kv_cache_size_bytes{nullptr};
+    U64Fn captured_max_sequence_length{nullptr};
+    U32Fn captured_max_sequence_length_explicit{nullptr};
+};
+
+RuntimeMemoryFixtureApi open_runtime_memory_fixture(const std::filesystem::path& dso) {
+    RuntimeMemoryFixtureApi api;
+    api.handle = dlopen(dso.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (api.handle == nullptr)
+        throw std::runtime_error(std::string("could not open runtime-memory fixture: ") +
+                                 dlerror());
+    api.reset = require_fixture_symbol<RuntimeMemoryFixtureApi::ResetFn>(
+        api.handle, "trtmc_test_runtime_plugin_reset");
+    api.legacy_create_calls = require_fixture_symbol<RuntimeMemoryFixtureApi::CountFn>(
+        api.handle, "trtmc_test_runtime_plugin_legacy_create_calls");
+    api.runtime_create_calls = require_fixture_symbol<RuntimeMemoryFixtureApi::CountFn>(
+        api.handle, "trtmc_test_runtime_plugin_runtime_create_calls");
+    api.captured_policy = require_fixture_symbol<RuntimeMemoryFixtureApi::U32Fn>(
+        api.handle, "trtmc_test_runtime_plugin_captured_policy");
+    api.captured_fraction = require_fixture_symbol<RuntimeMemoryFixtureApi::DoubleFn>(
+        api.handle, "trtmc_test_runtime_plugin_captured_fraction");
+    api.captured_bytes = require_fixture_symbol<RuntimeMemoryFixtureApi::U64Fn>(
+        api.handle, "trtmc_test_runtime_plugin_captured_bytes");
+    api.captured_context_kv_cache_size_bytes =
+        require_fixture_symbol<RuntimeMemoryFixtureApi::U64Fn>(
+            api.handle, "trtmc_test_runtime_plugin_captured_context_kv_cache_size_bytes");
+    api.captured_max_sequence_length = require_fixture_symbol<RuntimeMemoryFixtureApi::U64Fn>(
+        api.handle, "trtmc_test_runtime_plugin_captured_max_sequence_length");
+    api.captured_max_sequence_length_explicit =
+        require_fixture_symbol<RuntimeMemoryFixtureApi::U32Fn>(
+            api.handle, "trtmc_test_runtime_plugin_captured_max_sequence_length_explicit");
+    api.reset();
+    return api;
 }
 
 bool message_contains_any(const std::string& msg, std::initializer_list<const char*> needles) {
@@ -506,25 +552,9 @@ void test_runtime_kv_policy_rejects_unsupported_and_static_bundles() {
     check(pool_rejected, "dynamic KV beta rejects ambiguous per-lane pool budgeting");
 }
 
-void test_cpp_v2_and_mixed_plugin_versions_fail_before_backend_load() {
+void test_cpp_v2_options_fail_before_bundle_io() {
     trtmc_test::TempDirGuard dir;
     const auto root = std::filesystem::path(dir.path());
-    const std::string runtime_memory = R"({
-    "contract_version": 1,
-    "qualified_model_id": "mixed-version-test",
-    "qualified_model_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "qualified_config_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "qualified_target": "gb300-trt-11.2",
-    "qualified_runtime_stack": {"sm":"sm103","tensorrt":"11.2.0.113","cuda_runtime":"13.3","cudnn_backend":"9.20.0","cudnn_frontend_revision":"7b9b711c22b6823e87150213ecd8449260db8610","nvrtc":"13.3","driver":"580.105.08"},
-    "native_kv_plugin_abi": 2,
-    "model_context_limit": 32,
-    "prefill_chunk_limit": 16,
-    "kv_layout": "contiguous_runtime_v1",
-    "kv_dtype": "float16",
-    "kv_bytes_per_token": 256,
-    "active_kv_profile_limits": [16, 32],
-    "runtime_owned": true
-  })";
 
     trtmc::LoadOptionsV2 short_options;
     short_options.struct_size = sizeof(short_options.struct_size);
@@ -546,107 +576,160 @@ void test_cpp_v2_and_mixed_plugin_versions_fail_before_backend_load() {
         api_rejected = std::string(error.what()).find("api_version") != std::string::npos;
     }
     check(api_rejected, "C++ LoadOptionsV2 unknown API fails before bundle I/O");
-
-    LegacyOnlyPlugin legacy_plugin;
-    constexpr const char* kLegacyStrategy = "test_runtime_memory_legacy_plugin";
-    trtmc::PipelineRegistry::instance().register_plugin(kLegacyStrategy, &legacy_plugin);
-    const auto legacy_bundle = root / "legacy-plugin.trtfb";
-    const std::string legacy_config = std::string("{\"runtime_strategy\":\"") + kLegacyStrategy +
-                                      "\",\"hidden_size\":64,\"num_attention_heads\":1,"
-                                      "\"num_key_value_heads\":1}";
-    write_bundle_with_sections(legacy_bundle, {BundleSectionSpec{"config.json", legacy_config}},
-                               "mixed-version-test", runtime_memory);
-    bool legacy_rejected = false;
-    try {
-        (void)trtmc::load(legacy_bundle.string(), trtmc::LoadOptionsV2{});
-    } catch (const std::runtime_error& error) {
-        const std::string message = error.what();
-        legacy_rejected = message.find("requires model plugin runtime-memory interface V1") !=
-                              std::string::npos &&
-                          message.find("backend") == std::string::npos;
-    }
-    check(legacy_rejected, "new core rejects legacy plugin before backend deserialization");
-    check(!legacy_plugin.create_called,
-          "legacy plugin create is never invoked for runtime_memory bundle");
-
-    WrongRuntimeMemoryVersionPlugin wrong_plugin;
-    constexpr const char* kWrongStrategy = "test_runtime_memory_wrong_version_plugin";
-    trtmc::PipelineRegistry::instance().register_plugin(kWrongStrategy, &wrong_plugin);
-    const auto wrong_bundle = root / "wrong-plugin-version.trtfb";
-    const std::string wrong_config = std::string("{\"runtime_strategy\":\"") + kWrongStrategy +
-                                     "\",\"hidden_size\":64,\"num_attention_heads\":1,"
-                                     "\"num_key_value_heads\":1}";
-    write_bundle_with_sections(wrong_bundle, {BundleSectionSpec{"config.json", wrong_config}},
-                               "mixed-version-test", runtime_memory);
-    bool wrong_version_rejected = false;
-    try {
-        (void)trtmc::load(wrong_bundle.string(), trtmc::LoadOptionsV2{});
-    } catch (const std::runtime_error& error) {
-        wrong_version_rejected =
-            std::string(error.what())
-                .find("incompatible model plugin runtime-memory API version") != std::string::npos;
-    }
-    check(wrong_version_rejected, "new core rejects wrong runtime-memory plugin API version");
-    check(!wrong_plugin.create_called && !wrong_plugin.runtime_create_called,
-          "wrong-version plugin is rejected before either create entry point");
 }
 
-void test_legacy_cpp_and_c_surfaces_select_dynamic_implicit_auto() {
+void test_current_abi_runtime_plugin_interface_rejection(const std::filesystem::path& dso,
+                                                         bool wrong_version) {
+    setenv("TRTMC_MODEL_PLUGIN_STRICT", "1", 1);
+    unsetenv("TRTMC_MODEL_PLUGIN_DIR");
+
+    trtmc_test::TempDirGuard dir;
+    const auto bundle_path = std::filesystem::path(dir.path()) / "runtime-plugin-interface.trtfb";
+    write_runtime_memory_fixture_bundle(bundle_path);
+    auto fixture = open_runtime_memory_fixture(dso);
+
+    trtmc::LoadOptionsV2 options;
+    options.model_plugin_search_paths = {dso.parent_path().string()};
+    bool rejected = false;
+    try {
+        (void)trtmc::load(bundle_path.string(), options);
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        const std::string expected = wrong_version
+                                         ? "incompatible model plugin runtime-memory API version"
+                                         : "requires model plugin runtime-memory interface V1";
+        rejected = message.find(expected) != std::string::npos &&
+                   message.find("backend") == std::string::npos;
+    }
+    check(rejected, wrong_version
+                        ? "current-ABI DSO rejects wrong runtime-memory plugin API version"
+                        : "current-ABI DSO rejects missing runtime-memory plugin interface");
+    check(fixture.legacy_create_calls() == 0 && fixture.runtime_create_calls() == 0,
+          "runtime-memory interface rejection precedes both model create entry points");
+
+    dlclose(fixture.handle);
+    unsetenv("TRTMC_MODEL_PLUGIN_STRICT");
+}
+
+void test_legacy_cpp_and_c_surfaces_select_dynamic_implicit_auto(const std::filesystem::path& dso) {
+    setenv("TRTMC_MODEL_PLUGIN_STRICT", "1", 1);
+    unsetenv("TRTMC_MODEL_PLUGIN_DIR");
+
     trtmc_test::TempDirGuard dir;
     const auto bundle_path = std::filesystem::path(dir.path()) / "legacy-implicit-auto.trtfb";
-    constexpr const char* kStrategy = "test_runtime_memory_legacy_implicit_auto";
-    const std::string config = std::string("{\"runtime_strategy\":\"") + kStrategy +
-                               "\",\"hidden_size\":64,\"num_attention_heads\":1,"
-                               "\"num_key_value_heads\":1}";
-    const std::string runtime_memory = R"({
-    "contract_version": 1,
-    "qualified_model_id": "runtime-memory-capture",
-    "qualified_model_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "qualified_config_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "qualified_target": "gb300-trt-11.2",
-    "qualified_runtime_stack": {"sm":"sm103","tensorrt":"11.2.0.113","cuda_runtime":"13.3","cudnn_backend":"9.20.0","cudnn_frontend_revision":"7b9b711c22b6823e87150213ecd8449260db8610","nvrtc":"13.3","driver":"580.105.08"},
-    "native_kv_plugin_abi": 2,
-    "model_context_limit": 32,
-    "prefill_chunk_limit": 16,
-    "kv_layout": "contiguous_runtime_v1",
-    "kv_dtype": "float16",
-    "kv_bytes_per_token": 256,
-    "active_kv_profile_limits": [16, 32],
-    "runtime_owned": true
-  })";
-    write_bundle_with_sections(bundle_path, {BundleSectionSpec{"config.json", config}},
-                               "runtime-memory-capture", runtime_memory);
+    write_runtime_memory_fixture_bundle(bundle_path);
+    auto fixture = open_runtime_memory_fixture(dso);
 
-    static CapturingRuntimeMemoryPlugin plugin;
-    plugin.reset_capture();
-    trtmc::PipelineRegistry::instance().register_plugin(kStrategy, &plugin);
-
-    // Deliberately use every field in the original aggregate. This is both a
-    // source-compatibility guard and proof that the legacy C++ overload maps a
-    // runtime-memory bundle to the implicit automatic policy.
+    // Deliberately initialize every field in the original aggregate before
+    // selecting the independently built current-ABI fixture.
     trtmc::LoadOptions legacy_aggregate{"", "", false, 0, "", {}, {}, {}};
+    legacy_aggregate.model_plugin_search_paths = {dso.parent_path().string()};
     auto cpp_pipeline = trtmc::load(bundle_path.string(), legacy_aggregate);
     check(cpp_pipeline != nullptr, "legacy aggregate LoadOptions loads dynamic bundle");
-    check(!plugin.legacy_create_called && plugin.runtime_create_calls == 1,
+    check(fixture.legacy_create_calls() == 0 && fixture.runtime_create_calls() == 1,
           "legacy aggregate dispatches through runtime-memory plugin interface");
-    check(plugin.captured_options.kv_cache_memory_policy == trtmc::KvCacheMemoryPolicy::kAuto &&
-              plugin.captured_options.kv_cache_memory_fraction == 0.90 &&
-              plugin.captured_options.kv_cache_memory_bytes == 0,
+    check(fixture.captured_policy() ==
+                  static_cast<std::uint32_t>(trtmc::KvCacheMemoryPolicy::kAuto) &&
+              fixture.captured_fraction() == 0.90 && fixture.captured_bytes() == 0,
           "legacy aggregate receives implicit 90 percent auto policy");
 
-    plugin.reset_capture();
+    fixture.reset();
     TrtmcPipelineOptions old_c_options{};
     auto* c_pipeline = trtmc_create_pipeline_ex(bundle_path.string().c_str(), &old_c_options);
     check(c_pipeline != nullptr, "legacy trtmc_create_pipeline_ex loads dynamic bundle");
-    check(!plugin.legacy_create_called && plugin.runtime_create_calls == 1,
+    check(fixture.legacy_create_calls() == 0 && fixture.runtime_create_calls() == 1,
           "legacy C create_ex dispatches through runtime-memory plugin interface");
-    check(plugin.captured_options.kv_cache_memory_policy == trtmc::KvCacheMemoryPolicy::kAuto &&
-              plugin.captured_options.kv_cache_memory_fraction == 0.90 &&
-              plugin.captured_options.kv_cache_memory_bytes == 0 &&
-              plugin.captured_options.max_sequence_length == 0 &&
-              plugin.captured_options.max_sequence_length_explicit == 0,
+    check(fixture.captured_policy() ==
+                  static_cast<std::uint32_t>(trtmc::KvCacheMemoryPolicy::kAuto) &&
+              fixture.captured_fraction() == 0.90 && fixture.captured_bytes() == 0 &&
+              fixture.captured_max_sequence_length() == 0 &&
+              fixture.captured_max_sequence_length_explicit() == 0,
           "legacy C create_ex receives implicit 90 percent auto policy");
     delete c_pipeline;
+
+    dlclose(fixture.handle);
+    unsetenv("TRTMC_MODEL_PLUGIN_STRICT");
+}
+
+void test_cli_legacy_size_and_runtime_memory_policy_are_distinct(const std::filesystem::path& dso) {
+    setenv("TRTMC_MODEL_PLUGIN_STRICT", "1", 1);
+    unsetenv("TRTMC_MODEL_PLUGIN_DIR");
+
+    trtmc_test::TempDirGuard dir;
+    const auto root = std::filesystem::path(dir.path());
+    const auto static_bundle_path = root / "cli-static-legacy-size.trtfb";
+    const auto dynamic_bundle_path = root / "cli-dynamic-runtime-memory.trtfb";
+    const std::string config = R"({
+  "runtime_strategy": "qwen_decoder_kv_cache",
+  "hidden_size": 64,
+  "num_attention_heads": 1,
+  "num_key_value_heads": 1
+})";
+    write_bundle_with_sections(static_bundle_path, {BundleSectionSpec{"config.json", config}},
+                               "qwen");
+    write_bundle_with_sections(dynamic_bundle_path, {BundleSectionSpec{"config.json", config}},
+                               "qwen", runtime_memory_fixture_contract());
+    auto fixture = open_runtime_memory_fixture(dso);
+    const std::string plugin_dir = dso.parent_path().string();
+
+    const auto legacy_args =
+        parse_cli({"trtmc", "run", static_bundle_path.string(), "--prompt", "hello",
+                   "--kv-cache-size", "4GiB", "--model-plugin-dir", plugin_dir});
+    check(!legacy_args.parse_error, "legacy static-bundle CLI alias parses");
+    check(legacy_args.kv_cache_size_explicitly_set && !legacy_args.kv_cache_memory.explicitly_set,
+          "legacy CLI alias remains distinct from runtime policy");
+    const auto legacy_options = trtmc::cli::make_load_options(legacy_args);
+    check(legacy_options.kv_cache_size_bytes == 4ULL * 1024ULL * 1024ULL * 1024ULL &&
+              legacy_options.kv_cache_memory_policy == trtmc::KvCacheMemoryPolicy::kUnspecified &&
+              legacy_options.kv_cache_memory_bytes == 0,
+          "legacy CLI alias maps only to LoadOptionsV2 compatibility bytes");
+    auto static_pipeline = trtmc::load(static_bundle_path.string(), legacy_options);
+    check(static_pipeline != nullptr, "legacy CLI alias loads a static bundle");
+    check(fixture.legacy_create_calls() == 1 && fixture.runtime_create_calls() == 0 &&
+              fixture.captured_context_kv_cache_size_bytes() == 4ULL * 1024ULL * 1024ULL * 1024ULL,
+          "static pipeline receives legacy CLI byte budget through PipelineContext");
+
+    fixture.reset();
+    const auto dynamic_args =
+        parse_cli({"trtmc", "run", dynamic_bundle_path.string(), "--prompt", "hello",
+                   "--kv-cache-memory", "3GiB", "--model-plugin-dir", plugin_dir});
+    check(!dynamic_args.parse_error, "canonical dynamic-memory CLI option parses");
+    check(dynamic_args.kv_cache_memory.explicitly_set && !dynamic_args.kv_cache_size_explicitly_set,
+          "canonical dynamic-memory CLI option does not select legacy alias");
+    const auto dynamic_options = trtmc::cli::make_load_options(dynamic_args);
+    check(dynamic_options.kv_cache_size_bytes == 0 &&
+              dynamic_options.kv_cache_memory_policy == trtmc::KvCacheMemoryPolicy::kBytes &&
+              dynamic_options.kv_cache_memory_bytes == 3ULL * 1024ULL * 1024ULL * 1024ULL,
+          "canonical dynamic-memory spelling maps only to the new policy");
+    auto dynamic_pipeline = trtmc::load(dynamic_bundle_path.string(), dynamic_options);
+    check(dynamic_pipeline != nullptr, "canonical policy loads a runtime-memory bundle");
+    check(fixture.legacy_create_calls() == 0 && fixture.runtime_create_calls() == 1 &&
+              fixture.captured_policy() ==
+                  static_cast<std::uint32_t>(trtmc::KvCacheMemoryPolicy::kBytes) &&
+              fixture.captured_bytes() == 3ULL * 1024ULL * 1024ULL * 1024ULL &&
+              fixture.captured_context_kv_cache_size_bytes() == 0,
+          "dynamic pipeline receives canonical byte policy outside legacy context");
+
+    fixture.reset();
+    const auto invalid_static_args =
+        parse_cli({"trtmc", "run", static_bundle_path.string(), "--prompt", "hello",
+                   "--kv-cache-memory", "3GiB", "--model-plugin-dir", plugin_dir});
+    bool invalid_static_rejected = false;
+    try {
+        (void)trtmc::load(static_bundle_path.string(),
+                          trtmc::cli::make_load_options(invalid_static_args));
+    } catch (const std::invalid_argument& error) {
+        invalid_static_rejected =
+            std::string(error.what()).find("does not declare runtime_memory contract version 1") !=
+            std::string::npos;
+    }
+    check(invalid_static_rejected,
+          "canonical runtime-memory policy fails closed on a static bundle");
+    check(fixture.legacy_create_calls() == 0 && fixture.runtime_create_calls() == 0,
+          "static canonical-policy rejection precedes model plugin creation");
+
+    dlclose(fixture.handle);
+    unsetenv("TRTMC_MODEL_PLUGIN_STRICT");
 }
 
 void test_invalid_plan_bundle_repeatable() {
@@ -661,16 +744,78 @@ void test_invalid_plan_bundle_repeatable() {
     }
 }
 
+void run_isolated_fixture_scenario(const std::string& scenario) {
+    if (scenario == "--runtime-legacy-interface") {
+        test_current_abi_runtime_plugin_interface_rejection(TRTMC_TEST_RUNTIME_LEGACY_INTERFACE_DSO,
+                                                            false);
+        return;
+    }
+    if (scenario == "--runtime-wrong-version") {
+        test_current_abi_runtime_plugin_interface_rejection(TRTMC_TEST_RUNTIME_WRONG_VERSION_DSO,
+                                                            true);
+        return;
+    }
+    if (scenario == "--runtime-capturing") {
+        test_legacy_cpp_and_c_surfaces_select_dynamic_implicit_auto(
+            TRTMC_TEST_RUNTIME_CAPTURING_DSO);
+        return;
+    }
+    if (scenario == "--cli-kv-alias") {
+        test_cli_legacy_size_and_runtime_memory_policy_are_distinct(
+            TRTMC_TEST_RUNTIME_CAPTURING_DSO);
+        return;
+    }
+    throw std::invalid_argument("unknown isolated runtime-memory fixture scenario: " + scenario);
+}
+
+void expect_isolated_fixture_succeeds(const std::filesystem::path& executable, const char* scenario,
+                                      const char* test_name) {
+    const pid_t child = fork();
+    if (child < 0) {
+        check(false, test_name);
+        return;
+    }
+    if (child == 0) {
+        execl(executable.c_str(), executable.c_str(), scenario, nullptr);
+        _exit(127);
+    }
+    int status = 0;
+    const pid_t waited = waitpid(child, &status, 0);
+    check(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0, test_name);
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2) {
+        try {
+            run_isolated_fixture_scenario(argv[1]);
+        } catch (const std::exception& error) {
+            std::cerr << "isolated runtime-memory fixture failed: " << error.what() << '\n';
+            return 1;
+        }
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc != 1) {
+        std::cerr << "unexpected test arguments\n";
+        return 1;
+    }
+
     test_pipeline_options_v2_reject_invalid_policy_values();
     test_invalid_plan_bundle_reports_error();
     test_missing_engine_plan_bundle_reports_error();
     test_unknown_strategy_reports_new_runtime_unsupported_strategy_error();
     test_runtime_kv_policy_rejects_unsupported_and_static_bundles();
-    test_cpp_v2_and_mixed_plugin_versions_fail_before_backend_load();
-    test_legacy_cpp_and_c_surfaces_select_dynamic_implicit_auto();
+    test_cpp_v2_options_fail_before_bundle_io();
+    const auto executable = std::filesystem::canonical(argv[0]);
+    expect_isolated_fixture_succeeds(executable, "--runtime-legacy-interface",
+                                     "current-ABI legacy interface fixture passes");
+    expect_isolated_fixture_succeeds(executable, "--runtime-wrong-version",
+                                     "current-ABI wrong-version fixture passes");
+    expect_isolated_fixture_succeeds(executable, "--runtime-capturing",
+                                     "current-ABI capturing fixture passes");
+    expect_isolated_fixture_succeeds(executable, "--cli-kv-alias",
+                                     "CLI legacy KV alias compatibility fixture passes");
     test_invalid_plan_bundle_repeatable();
 
     if (failures > 0) {

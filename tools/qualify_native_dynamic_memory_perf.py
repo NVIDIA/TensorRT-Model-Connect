@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
-# All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Fail-closed static-versus-dynamic native-runtime performance gate.
@@ -36,6 +35,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import hashlib
+import importlib.util
 import json
 import math
 from pathlib import Path
@@ -47,6 +47,7 @@ from typing import Any, Mapping, Sequence
 
 RESULT_SCHEMA = "trtmc.benchmark-worker-result/v1"
 REPORT_SCHEMA = "trtmc.native-dynamic-memory-perf-qualification/v1"
+BUILD_SCHEMA = "trtmc.native-dynamic-memory-perf-build/v2"
 GENERATION_WORKLOAD_SCHEMA = (
     "trtmc.native-dynamic-memory-generation-workload/v1"
 )
@@ -154,6 +155,23 @@ _RUNTIME_LIBRARY_FILE_FIELDS = (
     "sha256",
     "size_bytes",
 )
+_BUILD_RUNTIME_KV_PLUGIN_FIELDS = (
+    "path",
+    "device",
+    "inode",
+    "size_bytes",
+    "mtime_ns",
+    "ctime_ns",
+    "sha256",
+)
+_RUNTIME_TRTMC_FIELDS = (
+    "model_id",
+    "model_family",
+    "core",
+    "trt_backend",
+    "runtime_kv_plugin",
+    "model",
+)
 _CUDA_CACHE_FIELDS = (
     "path",
     "path_source",
@@ -221,6 +239,10 @@ class CaseEvidence:
     runtime_attention_plans: tuple[Mapping[str, Any], ...]
     runtime_stack: Mapping[str, Any] | None
     runtime_libraries: Mapping[str, Any] | None
+    runtime_trtmc_libraries: Mapping[str, Any]
+    build_runtime_kv_plugin: Mapping[str, Any] | None
+    build_manifest: Mapping[str, Any]
+    build_receipt: Mapping[str, Any]
     cuda_jit_cache: Mapping[str, Any]
     generation_workload: Mapping[str, Any]
     tokenizer_contract: Mapping[str, Any]
@@ -260,6 +282,15 @@ class CaseEvidence:
                 if self.runtime_libraries is not None
                 else None
             ),
+            "runtime_trtmc_libraries": dict(
+                self.runtime_trtmc_libraries
+            ),
+            "build_runtime_kv_plugin": (
+                dict(self.build_runtime_kv_plugin)
+                if self.build_runtime_kv_plugin is not None
+                else None
+            ),
+            "build_manifest": dict(self.build_manifest),
             "cuda_jit_cache": dict(self.cuda_jit_cache),
             "generation_workload": dict(self.generation_workload),
             "tokenizer_contract": dict(self.tokenizer_contract),
@@ -569,6 +600,101 @@ def _validate_runtime_libraries(
             raise QualificationError(
                 f"{file_where}.basename disagrees with NVRTC {live_version}"
             )
+    return libraries
+
+
+def _validate_build_runtime_kv_plugin(
+    value: Any,
+    *,
+    where: str,
+    artifact_role: str,
+) -> Mapping[str, Any] | None:
+    if artifact_role == "exact-head-static-split":
+        if value is not None:
+            raise QualificationError(
+                f"{where} must be null for the static baseline"
+            )
+        return None
+    if artifact_role != "native-dynamic":
+        raise QualificationError(f"{where} has an unsupported artifact role")
+
+    return _validate_binary_identity(value, where=where)
+
+
+def _validate_binary_identity(
+    value: Any,
+    *,
+    where: str,
+    expected_path: Path | None = None,
+) -> Mapping[str, Any]:
+    identity = _object(value, where)
+    _exact_fields(identity, _BUILD_RUNTIME_KV_PLUGIN_FIELDS, where)
+    path = Path(_nonempty_string(identity, "path", where))
+    if not path.is_absolute():
+        raise QualificationError(f"{where}.path must be absolute")
+    try:
+        canonical = path.resolve(strict=True)
+        metadata = canonical.stat()
+    except OSError as exc:
+        raise QualificationError(f"{where}.path is not readable: {exc}") from exc
+    if canonical != path:
+        raise QualificationError(f"{where}.path must be canonical")
+    if expected_path is not None and canonical != expected_path.resolve():
+        raise QualificationError(f"{where}.path does not match expected file")
+    expected = {
+        "path": str(canonical),
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "size_bytes": metadata.st_size,
+        "mtime_ns": metadata.st_mtime_ns,
+        "ctime_ns": metadata.st_ctime_ns,
+        "sha256": _sha256(canonical),
+    }
+    if dict(identity) != expected:
+        raise QualificationError(
+            f"{where} does not match the captured binary identity"
+        )
+    return identity
+
+
+def _validate_runtime_trtmc_libraries(
+    value: Any,
+    *,
+    where: str,
+    model_id: str,
+) -> Mapping[str, Any]:
+    libraries = _object(value, where)
+    _exact_fields(libraries, _RUNTIME_TRTMC_FIELDS, where)
+    if libraries.get("model_id") != model_id:
+        raise QualificationError(f"{where}.model_id disagrees with result")
+    expected_family = {
+        "Qwen/Qwen3-0.6B": "qwen",
+        "TinyLlama/TinyLlama-1.1B-Chat-v1.0": "llama",
+    }.get(model_id)
+    if expected_family is None or libraries.get("model_family") != expected_family:
+        raise QualificationError(
+            f"{where}.model_family is not qualified for {model_id!r}"
+        )
+    for field in ("core", "trt_backend", "runtime_kv_plugin", "model"):
+        _validate_binary_identity(
+            _required(libraries, field, where),
+            where=f"{where}.{field}",
+        )
+    if Path(libraries["core"]["path"]).name != "libtrtmc_core.so":
+        raise QualificationError(f"{where}.core is not libtrtmc_core.so")
+    if (
+        re.fullmatch(
+            r"libtrtmc_backend_trt(?:_[0-9]+_[0-9]+)?\.so",
+            Path(libraries["trt_backend"]["path"]).name,
+        )
+        is None
+    ):
+        raise QualificationError(f"{where}.trt_backend has an invalid basename")
+    expected_model_dso = f"libtrtmc_model_{expected_family}.so"
+    if Path(libraries["model"]["path"]).name != expected_model_dso:
+        raise QualificationError(
+            f"{where}.model must be {expected_model_dso}"
+        )
     return libraries
 
 
@@ -883,7 +1009,239 @@ def _validate_evidence_hash(
         )
 
 
-def _read_case(path: Path, label: str, expected_role: str) -> CaseEvidence:
+def _load_capture_module() -> Any:
+    path = Path(__file__).with_name("capture_native_dynamic_memory_perf.py")
+    spec = importlib.util.spec_from_file_location(
+        "_trtmc_dynamic_memory_perf_capture_replay", path
+    )
+    if spec is None or spec.loader is None:
+        raise QualificationError(f"cannot load performance receipt validator: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _reopen_file_hash(
+    evidence: Mapping[str, Any],
+    *,
+    path_field: str,
+    sha_field: str,
+    where: str,
+) -> Path:
+    raw_path = _nonempty_string(evidence, path_field, where)
+    path = Path(raw_path)
+    if not path.is_absolute():
+        raise QualificationError(f"{where}.{path_field} must be absolute")
+    try:
+        canonical = path.resolve(strict=True)
+    except OSError as exc:
+        raise QualificationError(
+            f"{where}.{path_field} is not readable: {exc}"
+        ) from exc
+    if canonical != path or not canonical.is_file():
+        raise QualificationError(
+            f"{where}.{path_field} must be a canonical file"
+        )
+    digest = _sha_field(evidence, sha_field, where)
+    if _sha256(canonical) != digest:
+        raise QualificationError(
+            f"{where}.{sha_field} no longer matches {path_field}"
+        )
+    return canonical
+
+
+def _validate_qualification_evidence(
+    result: Mapping[str, Any],
+    *,
+    label: str,
+    expected_role: str,
+    expected_bundle: Path,
+    model_id: str,
+    provenance: Mapping[str, Any],
+    runtime_trtmc_libraries: Mapping[str, Any],
+    build_runtime_kv_plugin: Mapping[str, Any] | None,
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    where = f"{label}.qualification_evidence"
+    evidence = _object(_required(result, "qualification_evidence", label), where)
+    receipt_path = _reopen_file_hash(
+        evidence,
+        path_field="build_receipt",
+        sha_field="build_receipt_sha256",
+        where=where,
+    )
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise QualificationError(
+            f"{where}.build_receipt cannot be parsed: {exc}"
+        ) from exc
+    receipt = _object(receipt, f"{where}.build_receipt")
+    if receipt.get("schema_version") != BUILD_SCHEMA:
+        raise QualificationError(
+            f"{where}.build_receipt must use {BUILD_SCHEMA}"
+        )
+    if receipt.get("model_id") != model_id:
+        raise QualificationError(
+            f"{where}.build_receipt model_id disagrees with result"
+        )
+    source_state = _object(
+        _required(evidence, "source_state_pre", where),
+        f"{where}.source_state_pre",
+    )
+    toolchain = _object(
+        _required(evidence, "toolchain", where), f"{where}.toolchain"
+    )
+    _exact_fields(
+        toolchain,
+        (
+            "worker",
+            "plugin_library",
+            "runtime_trtmc_libraries",
+            "build_manifest",
+            "capture_tool",
+            "capture_tool_sha256",
+        ),
+        f"{where}.toolchain",
+    )
+    worker_identity = _validate_binary_identity(
+        _required(toolchain, "worker", f"{where}.toolchain"),
+        where=f"{where}.toolchain.worker",
+    )
+    plugin_identity = _validate_binary_identity(
+        _required(toolchain, "plugin_library", f"{where}.toolchain"),
+        where=f"{where}.toolchain.plugin_library",
+    )
+    if toolchain.get("runtime_trtmc_libraries") != runtime_trtmc_libraries:
+        raise QualificationError(
+            f"{where}.toolchain runtime TRTMC DSOs disagree with result"
+        )
+    build_manifest = _object(
+        _required(evidence, "build_manifest", where),
+        f"{where}.build_manifest",
+    )
+    if toolchain.get("build_manifest") != build_manifest:
+        raise QualificationError(
+            f"{where}.toolchain build manifest binding disagrees"
+        )
+    if receipt.get("build_manifest") != build_manifest:
+        raise QualificationError(
+            f"{where}.build_receipt build manifest binding disagrees"
+        )
+    if evidence.get("runtime_trtmc_libraries") != runtime_trtmc_libraries:
+        raise QualificationError(
+            f"{where}.runtime_trtmc_libraries disagree with result"
+        )
+    if evidence.get("build_runtime_kv_plugin") != build_runtime_kv_plugin:
+        raise QualificationError(
+            f"{where}.build_runtime_kv_plugin disagrees with result"
+        )
+    if provenance.get("toolchain_sha256") != _canonical_sha(toolchain):
+        raise QualificationError(
+            f"{label}.qualification_provenance.toolchain_sha256 is invalid"
+        )
+    _reopen_file_hash(
+        toolchain,
+        path_field="capture_tool",
+        sha_field="capture_tool_sha256",
+        where=f"{where}.toolchain",
+    )
+    environment = _object(
+        _required(evidence, "environment", where),
+        f"{where}.environment",
+    )
+    if provenance.get("benchmark_environment_sha256") != _canonical_sha(
+        environment
+    ):
+        raise QualificationError(
+            f"{label}.qualification_provenance benchmark environment hash "
+            "is invalid"
+        )
+    if provenance.get("build_manifest_sha256") != _canonical_sha(
+        build_manifest
+    ):
+        raise QualificationError(
+            f"{label}.qualification_provenance.build_manifest_sha256 is invalid"
+        )
+    for field in ("worker_stdout", "worker_stderr", "request_file"):
+        _reopen_file_hash(
+            evidence,
+            path_field=field,
+            sha_field=f"{field}_sha256",
+            where=where,
+        )
+    worker_command = _required(evidence, "worker_command", where)
+    if (
+        not isinstance(worker_command, list)
+        or len(worker_command) != 5
+        or worker_command[0] != worker_identity["path"]
+        or worker_command[1] != "--request"
+        or worker_command[3] != "--output"
+        or evidence.get("worker_command_sha256")
+        != _canonical_sha(worker_command)
+    ):
+        raise QualificationError(f"{where}.worker_command is not canonical")
+    if Path(worker_command[2]).resolve() != Path(evidence["request_file"]):
+        raise QualificationError(
+            f"{where}.worker_command request does not match request_file"
+        )
+
+    capture = _load_capture_module()
+    try:
+        _, manifest_artifacts = capture._validate_build_receipt(
+            receipt,
+            bundle=expected_bundle.resolve(),
+            role=expected_role,
+            source_state=source_state,
+            plugin_library=Path(plugin_identity["path"]),
+        )
+    except Exception as exc:
+        if exc.__class__.__name__ != "CaptureError":
+            raise
+        raise QualificationError(
+            f"{where}.build_receipt replay failed: {exc}"
+        ) from exc
+    model_key = (
+        "model_qwen"
+        if runtime_trtmc_libraries["model_family"] == "qwen"
+        else "model_llama"
+    )
+    for manifest_key, runtime_key in (
+        ("benchmark_worker", None),
+        ("core", "core"),
+        ("trt_backend", "trt_backend"),
+        ("runtime_kv_plugin", "runtime_kv_plugin"),
+        (model_key, "model"),
+    ):
+        actual = (
+            worker_identity
+            if runtime_key is None
+            else runtime_trtmc_libraries[runtime_key]
+        )
+        if manifest_artifacts.get(manifest_key) != actual:
+            raise QualificationError(
+                f"{where} {manifest_key} does not match build manifest"
+            )
+    if runtime_trtmc_libraries["runtime_kv_plugin"] != plugin_identity:
+        raise QualificationError(
+            f"{where} worker plugin differs from toolchain plugin"
+        )
+    if (
+        expected_role == "native-dynamic"
+        and build_runtime_kv_plugin != plugin_identity
+    ):
+        raise QualificationError(
+            f"{where} build and worker runtime-KV plugins differ"
+        )
+    return evidence, receipt
+
+
+def _read_case(
+    path: Path,
+    label: str,
+    expected_role: str,
+    expected_bundle: Path,
+) -> CaseEvidence:
     resolved = path.expanduser().resolve()
     try:
         raw = resolved.read_bytes()
@@ -951,6 +1309,9 @@ def _read_case(path: Path, label: str, expected_role: str) -> CaseEvidence:
         "runtime_attention_plans_sha256",
         "runtime_stack_sha256",
         "runtime_libraries_sha256",
+        "runtime_trtmc_libraries_sha256",
+        "build_runtime_kv_plugin_sha256",
+        "build_manifest_sha256",
         "cuda_jit_cache_sha256",
         "generation_workload_sha256",
         "tokenizer_contract_sha256",
@@ -1019,6 +1380,24 @@ def _read_case(path: Path, label: str, expected_role: str) -> CaseEvidence:
         artifact_role=expected_role,
         runtime_stack=runtime_stack,
     )
+    runtime_trtmc_value = _required(
+        result, "runtime_trtmc_libraries", label
+    )
+    runtime_trtmc_libraries = _validate_runtime_trtmc_libraries(
+        runtime_trtmc_value,
+        where=f"{label}.runtime_trtmc_libraries",
+        model_id=model_id,
+    )
+    build_plugin_value = _required(
+        result,
+        "build_runtime_kv_plugin",
+        label,
+    )
+    build_runtime_kv_plugin = _validate_build_runtime_kv_plugin(
+        build_plugin_value,
+        where=f"{label}.build_runtime_kv_plugin",
+        artifact_role=expected_role,
+    )
     cache_value = _required(result, "cuda_jit_cache", label)
     cuda_jit_cache = _validate_cuda_jit_cache(
         cache_value, where=f"{label}.cuda_jit_cache"
@@ -1040,6 +1419,14 @@ def _read_case(path: Path, label: str, expected_role: str) -> CaseEvidence:
         (plans_value, "runtime_attention_plans_sha256"),
         (stack_value, "runtime_stack_sha256"),
         (libraries_value, "runtime_libraries_sha256"),
+        (
+            runtime_trtmc_value,
+            "runtime_trtmc_libraries_sha256",
+        ),
+        (
+            build_plugin_value,
+            "build_runtime_kv_plugin_sha256",
+        ),
         (cache_value, "cuda_jit_cache_sha256"),
         (workload_value, "generation_workload_sha256"),
         (tokenizer_value, "tokenizer_contract_sha256"),
@@ -1064,6 +1451,23 @@ def _read_case(path: Path, label: str, expected_role: str) -> CaseEvidence:
                 "with runtime_stack.cudnn_backend"
             )
 
+    qualification_evidence, build_receipt = (
+        _validate_qualification_evidence(
+            result,
+            label=label,
+            expected_role=expected_role,
+            expected_bundle=expected_bundle,
+            model_id=model_id,
+            provenance=provenance,
+            runtime_trtmc_libraries=runtime_trtmc_libraries,
+            build_runtime_kv_plugin=build_runtime_kv_plugin,
+        )
+    )
+    build_manifest = _object(
+        _required(qualification_evidence, "build_manifest", f"{label}.qualification_evidence"),
+        f"{label}.qualification_evidence.build_manifest",
+    )
+
     return CaseEvidence(
         label=label,
         path=resolved,
@@ -1079,6 +1483,10 @@ def _read_case(path: Path, label: str, expected_role: str) -> CaseEvidence:
         runtime_attention_plans=runtime_attention_plans,
         runtime_stack=runtime_stack,
         runtime_libraries=runtime_libraries,
+        runtime_trtmc_libraries=runtime_trtmc_libraries,
+        build_runtime_kv_plugin=build_runtime_kv_plugin,
+        build_manifest=build_manifest,
+        build_receipt=build_receipt,
         cuda_jit_cache=cuda_jit_cache,
         generation_workload=generation_workload,
         tokenizer_contract=tokenizer_contract,
@@ -1129,23 +1537,37 @@ def qualify(
 ) -> dict[str, Any]:
     """Validate all evidence and return a machine-readable gate report."""
 
+    resolved_static_bundle = static_bundle.expanduser().resolve()
+    resolved_dynamic_bundle = dynamic_bundle.expanduser().resolve()
     cases = {
         "static_short": _read_case(
-            static_short, "static-short", "exact-head-static-split"
+            static_short,
+            "static-short",
+            "exact-head-static-split",
+            resolved_static_bundle,
         ),
         "dynamic_short": _read_case(
-            dynamic_short, "dynamic-short", "native-dynamic"
+            dynamic_short,
+            "dynamic-short",
+            "native-dynamic",
+            resolved_dynamic_bundle,
         ),
         "static_medium": _read_case(
-            static_medium, "static-medium", "exact-head-static-split"
+            static_medium,
+            "static-medium",
+            "exact-head-static-split",
+            resolved_static_bundle,
         ),
         "dynamic_medium": _read_case(
-            dynamic_medium, "dynamic-medium", "native-dynamic"
+            dynamic_medium,
+            "dynamic-medium",
+            "native-dynamic",
+            resolved_dynamic_bundle,
         ),
     }
     bundles = {
-        "static": _bundle_identity(static_bundle, "static-bundle"),
-        "dynamic": _bundle_identity(dynamic_bundle, "dynamic-bundle"),
+        "static": _bundle_identity(resolved_static_bundle, "static-bundle"),
+        "dynamic": _bundle_identity(resolved_dynamic_bundle, "dynamic-bundle"),
     }
     values = list(cases.values())
     static_cases = (cases["static_short"], cases["static_medium"])
@@ -1254,6 +1676,30 @@ def qualify(
         "no_reused_artifacts": all(
             case.provenance["artifact_reused"] is False for case in values
         ),
+        "one_dynamic_build_runtime_kv_plugin": (
+            len(
+                {
+                    _canonical_sha(case.build_runtime_kv_plugin)
+                    for case in dynamic_cases
+                }
+            )
+            == 1
+        ),
+        "static_build_has_no_runtime_kv_plugin": all(
+            case.build_runtime_kv_plugin is None for case in static_cases
+        ),
+        "one_exact_head_build_manifest": (
+            len({_canonical_sha(case.build_manifest) for case in values}) == 1
+        ),
+        "build_receipt_paths_match_cli_bundles": all(
+            Path(str(case.build_receipt["bundle"])).resolve()
+            == (
+                resolved_static_bundle
+                if case in static_cases
+                else resolved_dynamic_bundle
+            )
+            for case in values
+        ),
         "one_tokenizer_contract": (
             len(
                 {
@@ -1282,6 +1728,15 @@ def qualify(
         "dynamic_runtime_libraries_match_across_prompts": (
             dynamic_cases[0].runtime_libraries
             == dynamic_cases[1].runtime_libraries
+        ),
+        "runtime_trtmc_libraries_match_all_cases": (
+            len(
+                {
+                    _canonical_sha(case.runtime_trtmc_libraries)
+                    for case in values
+                }
+            )
+            == 1
         ),
         "static_runtime_stack_absent": all(
             case.runtime_stack is None for case in static_cases

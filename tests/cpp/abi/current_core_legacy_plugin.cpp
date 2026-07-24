@@ -1,11 +1,12 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include "trtmc/pipeline.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
@@ -101,6 +102,13 @@ void* require_symbol(void* handle, const char* name) {
 } // namespace
 
 int main() {
+    // This executable must exercise only the independently compiled stale
+    // fixture.  Without strict loading the production search fallbacks can
+    // continue after rejecting that DSO and load the current in-tree Qwen
+    // plugin, turning the negative ABI test into a false success path.
+    setenv("TRTMC_MODEL_PLUGIN_STRICT", "1", 1);
+    unsetenv("TRTMC_MODEL_PLUGIN_DIR");
+
     TempDirectory temp;
     const auto dynamic_bundle = temp.path() / "dynamic.trtfb";
     const auto static_bundle = temp.path() / "static.trtfb";
@@ -130,35 +138,34 @@ int main() {
     options.model_plugin_search_paths = {plugin_dso.parent_path().string()};
     options.backend_search_paths = {backend_dso.parent_path().string()};
 
-    bool rejected_before_backend = false;
-    try {
-        (void)trtmc::load(dynamic_bundle.string(), options);
-    } catch (const std::runtime_error& error) {
-        const std::string message = error.what();
-        rejected_before_backend =
-            message.find("requires model plugin runtime-memory interface V1") !=
-                std::string::npos &&
-            message.find("Backend") == std::string::npos;
-    }
-    check(rejected_before_backend,
-          "new core rejects legacy plugin for runtime_memory before backend dispatch");
-
-    void* backend_before = dlopen(backend_dso.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
-    check(backend_before == nullptr, "dynamic rejection occurs before backend DSO load");
-    if (backend_before != nullptr)
-        dlclose(backend_before);
-
-    void* plugin_handle = dlopen(plugin_dso.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
-    check(plugin_handle != nullptr, "current model loader loaded the legacy plugin DSO");
+    void* plugin_handle = dlopen(plugin_dso.c_str(), RTLD_NOW | RTLD_LOCAL);
+    check(plugin_handle != nullptr, "test preloads legacy plugin fixture for counter inspection");
     if (plugin_handle == nullptr)
         return 1;
     auto count = reinterpret_cast<CountFn>(
         require_symbol(plugin_handle, "trtmc_test_legacy_plugin_create_calls"));
     auto reset =
         reinterpret_cast<ResetFn>(require_symbol(plugin_handle, "trtmc_test_legacy_plugin_reset"));
-    check(count() == 0, "dynamic fail-closed path did not call legacy create");
-
     reset();
+
+    bool rejected_before_backend = false;
+    try {
+        (void)trtmc::load(dynamic_bundle.string(), options);
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        rejected_before_backend =
+            message.find("trtmc_model_plugin_query_abi_contract_v2") != std::string::npos &&
+            message.find("before model-id/registration") != std::string::npos &&
+            message.find("Backend") == std::string::npos;
+    }
+    check(rejected_before_backend, "new core rejects stale legacy plugin before backend dispatch");
+    check(count() == 0, "dynamic rejection did not call stale plugin factory");
+
+    void* backend_before = dlopen(backend_dso.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+    check(backend_before == nullptr, "dynamic rejection occurs before backend DSO load");
+    if (backend_before != nullptr)
+        dlclose(backend_before);
+
     trtmc::LoadOptions legacy_options;
     legacy_options.model_plugin_search_paths = {plugin_dso.parent_path().string()};
     legacy_options.backend_search_paths = {backend_dso.parent_path().string()};
@@ -170,16 +177,32 @@ int main() {
         std::cerr << "static compatibility path threw: " << error.what() << '\n';
         static_succeeded = false;
     }
-    check(static_succeeded, "static bundle follows legacy create path successfully");
-    check(count() == 1, "static bundle called independently compiled legacy create exactly once");
+    check(static_succeeded, "static bundle retains the legacy model-plugin path");
+    check(count() == 1, "static bundle called the legacy plugin factory exactly once");
 
     void* backend_after = dlopen(backend_dso.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
-    check(backend_after != nullptr, "static factory path loaded the test backend DSO");
+    check(backend_after != nullptr, "static legacy path loaded the test backend DSO");
     if (backend_after != nullptr)
         dlclose(backend_after);
+
+    bool registered_legacy_rejected = false;
+    try {
+        (void)trtmc::load(dynamic_bundle.string(), options);
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        registered_legacy_rejected =
+            message.find("already registered") != std::string::npos &&
+            message.find("without a verified") != std::string::npos &&
+            message.find("before runtime-memory plugin dispatch") != std::string::npos;
+    }
+    check(registered_legacy_rejected,
+          "a prior static legacy load cannot satisfy a later dynamic request");
+    check(count() == 1, "dynamic retry did not call the legacy plugin factory");
+
     dlclose(plugin_handle);
+    unsetenv("TRTMC_MODEL_PLUGIN_STRICT");
 
     if (failures == 0)
-        std::cout << "legacy plugin/current core DSO compatibility: PASS\n";
+        std::cout << "legacy static compatibility and dynamic fail-closed ABI gate: PASS\n";
     return failures == 0 ? 0 : 1;
 }

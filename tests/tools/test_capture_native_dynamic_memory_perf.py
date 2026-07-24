@@ -1,9 +1,10 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
-# All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
 
+import _ctypes
+import _ssl
 import importlib.util
 import json
 from pathlib import Path
@@ -14,6 +15,12 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+
+from tests.tools.dynamic_memory_manifest_fixture import (
+    complete_command_receipts,
+    load_manifest_module,
+    seed_manifest_test_modules,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -28,11 +35,22 @@ SPEC.loader.exec_module(capture)
 
 pytestmark = [pytest.mark.unit, pytest.mark.dynamic_memory]
 
+
+@pytest.fixture(autouse=True)
+def _isolate_runtime_kv_plugin_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep explicit-plugin tests independent of the manifest runner."""
+
+    monkeypatch.delenv(capture.RUNTIME_KV_PLUGIN_ENV, raising=False)
+
+
 PLAN_T512 = (
     "[trtmc.runtime_kv.plan] schema=1 device=0 role=history "
     "hq=16 hkv=8 d=128 C=128 Sq=1 T=512 stats=lse heur=A "
     "plan=eng10_k24=7 workspace_bytes=0 cudnn_version=92000"
 )
+MODEL_ID = "Qwen/Qwen3-0.6B"
 PLAN_T1024 = (
     "[trtmc.runtime_kv.plan] schema=1 device=0 role=history "
     "hq=16 hkv=8 d=128 C=128 Sq=1 T=1024 stats=lse heur=A "
@@ -47,7 +65,7 @@ RUNTIME_STACK = (
 )
 
 
-def _bundle_bytes(model_id: str = "example/model") -> bytes:
+def _bundle_bytes(model_id: str = MODEL_ID) -> bytes:
     tokenizer = b'{"model":{"type":"BPE"}}'
     config = b"{}"
     sections = {
@@ -90,22 +108,150 @@ def _init_repo(path: Path) -> None:
         check=True,
     )
     (path / "tracked.txt").write_text("tracked\n", encoding="utf-8")
-    subprocess.run(["git", "add", "tracked.txt"], cwd=path, check=True)
+    seed_manifest_test_modules(path)
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True)
     subprocess.run(["git", "commit", "-qm", "initial"], cwd=path, check=True)
 
 
-def _run_fresh_build(repo: Path) -> tuple[Path, Path]:
+def _write_fake_trtmc(executable: Path, bundle: Path) -> None:
+    payload = _bundle_bytes().hex()
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.write_text(
+        (
+            "#!/usr/bin/env python3\n"
+            "import ctypes\n"
+            "import os\n"
+            "from pathlib import Path\n"
+            "import time\n"
+            f"_runtime_plugin = ctypes.CDLL(os.environ[{capture.RUNTIME_KV_PLUGIN_ENV!r}])\n"
+            "time.sleep(0.1)\n"
+            f"Path({str(bundle)!r}).write_bytes(bytes.fromhex({payload!r}))\n"
+        ),
+        encoding="utf-8",
+    )
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+
+
+def _manifest_identity(
+    path: Path, *, artifact_key: str, relative_path: str
+) -> dict:
+    metadata = path.stat()
+    return {
+        "artifact_key": artifact_key,
+        "relative_path": relative_path,
+        "path": str(path.resolve()),
+        "st_dev": metadata.st_dev,
+        "st_ino": metadata.st_ino,
+        "size_bytes": metadata.st_size,
+        "mtime_ns": metadata.st_mtime_ns,
+        "ctime_ns": metadata.st_ctime_ns,
+        "mode": stat.S_IMODE(metadata.st_mode),
+        "sha256": capture._sha256(path),
+    }
+
+
+def _write_test_build_manifest(
+    repo: Path,
+    build_dir: Path,
+    source_state: dict,
+) -> Path:
+    relative_paths = {
+        "trtmc": "trtmc",
+        "benchmark_worker": "trtmc_benchmark_worker",
+        "core": "libtrtmc_core.so",
+        "trt_backend": "libtrtmc_backend_trt.so",
+        "runtime_kv_plugin": "libtrtmc_trt_plugins.so",
+        "model_qwen": "models/qwen/libtrtmc_model_qwen.so",
+        "model_llama": "models/llama/libtrtmc_model_llama.so",
+        "qualify": "trtmc_dynamic_memory_qualify",
+        "surfaces": "trtmc_dynamic_memory_surfaces",
+        "nvrtc_optional_output_regression": (
+            "trtmc_nvrtc_optional_output_regression"
+        ),
+    }
+    for key, relative in relative_paths.items():
+        artifact = build_dir / relative
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        if not artifact.exists():
+            artifact.write_bytes(f"test-{key}".encode())
+    cache = build_dir / "CMakeCache.txt"
+    cache.write_text(
+        (
+            f"CMAKE_HOME_DIRECTORY:INTERNAL={repo.resolve()}\n"
+            "TRTMC_TRT_BACKEND_ABI:STRING=11_2\n"
+        ),
+        encoding="utf-8",
+    )
+    cache_identity = _manifest_identity(
+        cache, artifact_key="cmake_cache", relative_path="CMakeCache.txt"
+    )
+    cache_identity["configured_source"] = str(repo.resolve())
+    active_backend = build_dir / "libtrtmc_backend_trt_11_2.so"
+    active_backend.symlink_to("libtrtmc_backend_trt.so")
+    artifact_paths = dict(relative_paths)
+    artifact_paths["trt_backend"] = "libtrtmc_backend_trt_11_2.so"
+    artifacts = {
+        key: _manifest_identity(
+            build_dir / relative,
+            artifact_key=key,
+            relative_path=relative,
+        )
+        for key, relative in artifact_paths.items()
+    }
+    manifest_module = load_manifest_module(REPO_ROOT)
+    commands = complete_command_receipts(
+        manifest_module,
+        repo_root=repo,
+        build_dir=build_dir,
+        output_dir=build_dir,
+        python=Path(sys.executable),
+    )
+    manifest = {
+        "schema_version": capture.BUILD_MANIFEST_SCHEMA,
+        "repo_root": str(repo.resolve()),
+        "build_dir": str(build_dir.resolve()),
+        "python": sys.executable,
+        "source_state_pre": source_state,
+        "commands": commands,
+        "passed": True,
+        "source_state_post": source_state,
+        "source_state_unchanged": True,
+        "cmake_cache": cache_identity,
+        "build_artifacts": artifacts,
+        "build_artifacts_sha256": capture._canonical_sha(artifacts),
+        "clean_build_command_sha256": capture._canonical_sha(commands[0]),
+    }
+    path = build_dir / "build-manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return path
+
+
+def _run_fresh_build(
+    repo: Path, *, worker_source: str | None = None
+) -> tuple[Path, Path]:
     bundle = repo / "artifacts" / "fresh.trtfb"
     receipt = repo / "artifacts" / "fresh-build.json"
     source_dir = repo / "artifacts" / "fresh-source"
-    payload = _bundle_bytes().hex()
+    plugin = repo / "artifacts" / capture.RUNTIME_KV_PLUGIN_DSO
+    plugin.parent.mkdir(parents=True, exist_ok=True)
+    plugin.write_bytes(Path(_ssl.__file__).read_bytes())
+    trtmc = repo / "artifacts" / "trtmc"
+    _write_fake_trtmc(trtmc, bundle)
+    worker = repo / "artifacts" / "trtmc_benchmark_worker"
+    worker.write_text(
+        worker_source or "#!/bin/sh\nexit 0\n", encoding="utf-8"
+    )
+    worker.chmod(worker.stat().st_mode | stat.S_IXUSR)
+    source_state = capture._source_state(
+        repo, source_dir, label="manifest-source"
+    )
+    build_manifest = _write_test_build_manifest(
+        repo, repo / "artifacts", source_state
+    )
     command = [
-        sys.executable,
-        "-c",
-        (
-            "from pathlib import Path;"
-            f"Path({str(bundle)!r}).write_bytes(bytes.fromhex({payload!r}))"
-        ),
+        str(trtmc),
+        "build",
+        MODEL_ID,
     ]
     args = SimpleNamespace(
         repo_root=repo,
@@ -116,15 +262,45 @@ def _run_fresh_build(repo: Path) -> tuple[Path, Path]:
         stderr_output=repo / "artifacts" / "fresh.stderr",
         cwd=repo,
         role="native-dynamic",
-        model_id="example/model",
+        model_id=MODEL_ID,
         model_revision="revision",
         precision="bf16",
         target="sm103|TensorRT 11.2.0.113",
         bundle_build_id="fresh-build",
+        plugin_library=plugin,
+        build_manifest=build_manifest,
         command=command,
     )
     assert capture._cmd_build(args) == 0
     return bundle, receipt
+
+
+def _fresh_build_args(
+    repo: Path,
+    *,
+    bundle: Path,
+    receipt: Path,
+    trtmc: Path,
+    plugin_library: Path | None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        repo_root=repo,
+        bundle=bundle,
+        receipt=receipt,
+        source_artifact_dir=repo / "artifacts" / f"{receipt.stem}-source",
+        stdout_output=repo / "artifacts" / f"{receipt.stem}.stdout",
+        stderr_output=repo / "artifacts" / f"{receipt.stem}.stderr",
+        cwd=repo,
+        role="native-dynamic",
+        model_id=MODEL_ID,
+        model_revision="revision",
+        precision="bf16",
+        target="sm103|TensorRT 11.2.0.113",
+        bundle_build_id=receipt.stem,
+        plugin_library=plugin_library,
+        build_manifest=None,
+        command=[str(trtmc), "build", MODEL_ID],
+    )
 
 
 def _accounting() -> dict:
@@ -149,6 +325,31 @@ def _fake_runtime_libraries(repo: Path) -> tuple[Path, Path]:
     return nvrtc, builtins
 
 
+def _mapping_record(path: Path) -> dict:
+    canonical = path.resolve()
+    metadata = canonical.stat()
+    return {
+        "path": str(canonical),
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "deleted": False,
+    }
+
+
+def _worker_mapping_records(
+    repo: Path, runtime_libraries: tuple[Path, Path]
+) -> tuple[dict, ...]:
+    build = repo / "artifacts"
+    paths = (
+        *runtime_libraries,
+        build / "libtrtmc_core.so",
+        build / "libtrtmc_backend_trt.so",
+        build / capture.RUNTIME_KV_PLUGIN_DSO,
+        build / "models/qwen/libtrtmc_model_qwen.so",
+    )
+    return tuple(_mapping_record(path) for path in paths)
+
+
 def _fixed_generation_request(max_new_tokens: int = 2) -> dict:
     return {
         "prompt": "hello",
@@ -164,6 +365,57 @@ def _fixed_generation_request(max_new_tokens: int = 2) -> dict:
         "stop_on_boxed_answer": False,
         "capture_generated_token_ids": True,
     }
+
+
+def _benchmark_worker_source(serialized_plan_bytes: int) -> str:
+    return f"""#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
+payload = {{
+    "schema_version": "trtmc.benchmark-worker-result/v1",
+    "status": "completed",
+    "case_name": "case",
+    "case_digest": "digest",
+    "model_id": "{MODEL_ID}",
+    "pipeline_type": "Example",
+    "operation": "generate",
+    "timing_scope": "public_pipeline_call_wall",
+    "load_ms": 1.0,
+    "warmup": 1,
+    "iterations": 1,
+    "observations": [{{
+        "iteration": 0,
+        "runtime_e2e_wall_ms": 3.0,
+        "prefill_ms": 1.0,
+        "decode_ms": 2.0,
+        "output_tokens": 1,
+        "generated_token_ids": [1]
+    }}],
+    "output_summary": {{"token_ids": [1]}},
+    "runtime_memory_receipt": {{
+        "serialized_plan_bytes": {serialized_plan_bytes},
+        "resident_weight_bytes": 2000,
+        "resident_weight_copy_count": 2,
+        "weight_streaming_active": False,
+        "measurement_sources": {{
+            "serialized_plan_bytes": "bundle_engine_section_sizes",
+            "resident_weight_bytes": "tensorrt_total_weights_size_weight_streaming_disabled",
+            "resident_weight_copy_count": "deduplicated_tensorrt_engine_identity"
+        }}
+    }}
+}}
+open(args["--output"], "w", encoding="utf-8").write(json.dumps(payload))
+cache_path = os.environ.get("CUDA_CACHE_PATH")
+if cache_path:
+    cache = Path(cache_path)
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "jit.bin").write_bytes(b"jit")
+print({PLAN_T512!r}, file=sys.stderr)
+print({RUNTIME_STACK!r}, file=sys.stderr)
+"""
 
 
 def test_native_worker_records_each_measured_generated_token_stream() -> None:
@@ -242,6 +494,12 @@ def test_build_executes_command_and_proves_fresh_source_bound_artifact(
     assert receipt["fresh_build"] is True
     assert receipt["artifact_reused"] is False
     assert receipt["bundle_sha256"] == capture._sha256(bundle)
+    plugin = repo / "artifacts" / capture.RUNTIME_KV_PLUGIN_DSO
+    assert receipt["runtime_kv_plugin"] == capture._file_identity(
+        plugin,
+        label="test plugin",
+    )
+    assert Path(receipt["runtime_kv_plugin"]["path"]).is_absolute()
     assert (
         receipt["prebuild_source_state_sha256"]
         == receipt["postbuild_source_state_sha256"]
@@ -250,24 +508,254 @@ def test_build_executes_command_and_proves_fresh_source_bound_artifact(
     assert receipt["source_state_post"]["exact_head_gate_satisfied"] is True
 
 
-def test_build_preserves_dirty_source_as_diagnostic_evidence(
+@pytest.mark.parametrize("layout", ("adjacent", "packaged"))
+def test_no_flag_trtmc_build_selects_its_source_bound_plugin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    layout: str,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    bundle = repo / "artifacts" / f"{layout}.trtfb"
+    receipt_path = repo / "artifacts" / f"{layout}.receipt.json"
+    if layout == "adjacent":
+        trtmc = repo / "build-dynkv" / "trtmc"
+        plugin = trtmc.parent / capture.RUNTIME_KV_PLUGIN_DSO
+    else:
+        trtmc = repo / "venv" / "bin" / "trtmc"
+        plugin = (
+            repo
+            / "venv"
+            / "lib"
+            / "python3.12"
+            / "site-packages"
+            / "tensorrt_model_connect"
+            / "bin"
+            / capture.RUNTIME_KV_PLUGIN_DSO
+        )
+    _write_fake_trtmc(trtmc, bundle)
+    plugin.parent.mkdir(parents=True, exist_ok=True)
+    plugin.write_bytes(Path(_ssl.__file__).read_bytes())
+    monkeypatch.delenv(capture.RUNTIME_KV_PLUGIN_ENV, raising=False)
+
+    args = _fresh_build_args(
+        repo,
+        bundle=bundle,
+        receipt=receipt_path,
+        trtmc=trtmc,
+        plugin_library=None,
+    )
+    assert args.command == [str(trtmc), "build", MODEL_ID]
+    args.build_manifest = repo / "artifacts" / "selection-manifest.json"
+    source_state = capture._source_state(
+        repo, args.source_artifact_dir, label="selection-manifest"
+    )
+    manifest_binding = {
+        "path": str(args.build_manifest.resolve()),
+        "sha256": "1" * 64,
+        "schema_version": capture.BUILD_MANIFEST_SCHEMA,
+        "git_head": source_state["git_head"],
+        "source_state_sha256": source_state["source_state_sha256"],
+        "build_artifacts_sha256": "2" * 64,
+    }
+    monkeypatch.setattr(
+        capture,
+        "_read_build_manifest",
+        lambda _path: (
+            manifest_binding,
+            {
+                "trtmc": capture._file_identity(
+                    trtmc, label="selection trtmc"
+                ),
+                "runtime_kv_plugin": capture._file_identity(
+                    plugin, label="selection plugin"
+                ),
+            },
+        ),
+    )
+    assert capture._cmd_build(args) == 0
+
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["runtime_kv_plugin"] == capture._file_identity(
+        plugin,
+        label=f"{layout} plugin",
+    )
+
+
+def test_dynamic_build_rejects_non_trtmc_command_even_with_a_plugin(
+    tmp_path: Path,
+) -> None:
+    plugin = tmp_path / "plugin.so"
+    plugin.write_bytes(Path(_ssl.__file__).read_bytes())
+
+    with pytest.raises(
+        capture.CaptureError,
+        match="must execute `trtmc build",
+    ):
+        capture._select_build_plugin(
+            command=[sys.executable, "-c", "pass"],
+            cwd=tmp_path,
+            explicit_plugin=plugin,
+        )
+
+
+@pytest.mark.parametrize(
+    "command_suffix",
+    (
+        ["--max-sequence-length", "4096"],
+        ["--kv-cache-size", "8GiB"],
+        ["--output", "other.trtfb"],
+    ),
+)
+def test_dynamic_build_rejects_every_extra_model_build_flag(
+    tmp_path: Path,
+    command_suffix: list[str],
+) -> None:
+    trtmc = tmp_path / "trtmc"
+    trtmc.write_text("#!/bin/sh\n", encoding="utf-8")
+    trtmc.chmod(trtmc.stat().st_mode | stat.S_IXUSR)
+
+    with pytest.raises(capture.CaptureError, match="argv must be exactly"):
+        capture._resolve_command_executable(
+            [str(trtmc), "build", MODEL_ID, *command_suffix],
+            tmp_path,
+            model_id=MODEL_ID,
+        )
+
+
+def test_dynamic_build_rejects_command_model_metadata_mismatch(
+    tmp_path: Path,
+) -> None:
+    trtmc = tmp_path / "trtmc"
+    trtmc.write_text("#!/bin/sh\n", encoding="utf-8")
+    trtmc.chmod(trtmc.stat().st_mode | stat.S_IXUSR)
+
+    with pytest.raises(capture.CaptureError, match="argv must be exactly"):
+        capture._resolve_command_executable(
+            [
+                str(trtmc),
+                "build",
+                "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            ],
+            tmp_path,
+            model_id=MODEL_ID,
+        )
+
+
+def test_plugin_mapping_rejects_duplicate_renamed_and_deleted_dsos(
+    tmp_path: Path,
+) -> None:
+    selected = tmp_path / capture.RUNTIME_KV_PLUGIN_DSO
+    selected.write_bytes(b"selected")
+    identity = capture._file_identity(selected, label="selected plugin")
+    selected_record = _mapping_record(selected)
+    duplicate_dir = tmp_path / "duplicate"
+    duplicate_dir.mkdir()
+    duplicate = duplicate_dir / capture.RUNTIME_KV_PLUGIN_DSO
+    duplicate.write_bytes(b"duplicate")
+    with pytest.raises(capture.CaptureError, match="exactly one"):
+        capture._validate_exact_plugin_mapping(
+            (selected_record, _mapping_record(duplicate)),
+            selected=identity,
+            where="test",
+        )
+
+    renamed = duplicate_dir / "arbitrary-runtime-extension.so"
+    renamed.write_bytes(capture.RUNTIME_KV_PLUGIN_ABI_SYMBOL)
+    with pytest.raises(capture.CaptureError, match="exactly one"):
+        capture._validate_exact_plugin_mapping(
+            (selected_record, _mapping_record(renamed)),
+            selected=identity,
+            where="test",
+        )
+
+    deleted_record = {**selected_record, "deleted": True}
+    with pytest.raises(capture.CaptureError, match="was deleted"):
+        capture._validate_exact_plugin_mapping(
+            (deleted_record,),
+            selected=identity,
+            where="test",
+        )
+
+
+def test_pinned_execution_uses_open_inode_after_path_swap(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "worker"
+    executable.write_text(
+        "#!/bin/sh\nprintf original\n",
+        encoding="utf-8",
+    )
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    with capture._PinnedFile(executable, label="test executable") as pinned:
+        executable.unlink()
+        executable.write_text(
+            "#!/bin/sh\nprintf replacement\n",
+            encoding="utf-8",
+        )
+        executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+        completed = subprocess.run(
+            capture._pinned_execution_command(pinned, ()),
+            check=True,
+            pass_fds=(pinned.fd,),
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        assert completed.stdout == "original"
+        with pytest.raises(capture.CaptureError, match="changed"):
+            pinned.verify()
+
+
+def test_pinned_elf_symbol_scan_has_no_path_or_basename_filter() -> None:
+    extension = Path(_ctypes.__file__)
+    with capture._PinnedFile(
+        extension,
+        label="arbitrary mapped extension",
+    ) as pinned:
+        assert pinned.exports_dynamic_symbol(b"PyInit__ctypes")
+        assert not pinned.exports_dynamic_symbol(
+            b"trtmc_symbol_that_does_not_exist"
+        )
+
+
+def test_build_receipt_reopens_plugin_and_rejects_dso_drift(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    bundle, receipt_path = _run_fresh_build(repo)
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    plugin = repo / "artifacts" / capture.RUNTIME_KV_PLUGIN_DSO
+    plugin.write_bytes(plugin.read_bytes() + b"tampered")
+
+    with pytest.raises(
+        capture.CaptureError,
+        match=(
+            "artifact identity changed|size_bytes no longer matches|"
+            "sha256 no longer matches"
+        ),
+    ):
+        capture._validate_build_receipt(
+            receipt,
+            bundle=bundle,
+            role="native-dynamic",
+            source_state=receipt["source_state_post"],
+            plugin_library=plugin,
+        )
+
+
+def test_qualification_build_rejects_dirty_source_manifest(
     tmp_path: Path,
 ) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
     (repo / "tracked.txt").write_text("dirty\n", encoding="utf-8")
 
-    _, receipt_path = _run_fresh_build(repo)
-    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-
-    assert receipt["source_state_pre"]["git_dirty"] is True
-    assert receipt["source_state_post"]["git_dirty"] is True
-    assert (
-        receipt["source_state_pre"]["exact_head_gate_satisfied"] is False
-    )
-    assert (
-        receipt["source_state_post"]["exact_head_gate_satisfied"] is False
-    )
+    with pytest.raises(
+        capture.CaptureError,
+        match="clean exact HEAD|exact-head build manifest",
+    ):
+        _run_fresh_build(repo)
 
 
 def test_build_rejects_preexisting_bundle(tmp_path: Path) -> None:
@@ -283,7 +771,7 @@ def test_build_rejects_preexisting_bundle(tmp_path: Path) -> None:
         stderr_output=repo / "artifacts" / "second.stderr",
         cwd=repo,
         role="native-dynamic",
-        model_id="example/model",
+        model_id=MODEL_ID,
         model_revision="revision",
         precision="bf16",
         target="target",
@@ -299,7 +787,9 @@ def test_benchmark_runs_real_worker_and_enriches_dynamic_receipt(
 ) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
-    bundle, build_receipt = _run_fresh_build(repo)
+    bundle, build_receipt = _run_fresh_build(
+        repo, worker_source=_benchmark_worker_source(9)
+    )
     request = repo / "artifacts" / "request.json"
     request.write_text(
         json.dumps(
@@ -327,61 +817,10 @@ def test_benchmark_runs_real_worker_and_enriches_dynamic_receipt(
         ),
         encoding="utf-8",
     )
-    plugin = repo / "artifacts" / "plugin.so"
-    plugin.write_bytes(b"plugin")
+    plugin = repo / "artifacts" / capture.RUNTIME_KV_PLUGIN_DSO
     output = repo / "artifacts" / "result.json"
     stderr = repo / "artifacts" / "result.stderr"
-    worker = repo / "artifacts" / "worker.py"
-    worker.write_text(
-        """#!/usr/bin/env python3
-import json
-import os
-from pathlib import Path
-import sys
-args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
-payload = {
-    "schema_version": "trtmc.benchmark-worker-result/v1",
-    "status": "completed",
-    "case_name": "case",
-    "case_digest": "digest",
-    "model_id": "example/model",
-    "pipeline_type": "Example",
-    "operation": "generate",
-    "timing_scope": "public_pipeline_call_wall",
-    "load_ms": 1.0,
-    "warmup": 1,
-    "iterations": 1,
-    "observations": [{
-        "iteration": 0,
-        "runtime_e2e_wall_ms": 3.0,
-        "prefill_ms": 1.0,
-        "decode_ms": 2.0,
-        "output_tokens": 1,
-        "generated_token_ids": [1]
-    }],
-    "output_summary": {"token_ids": [1]},
-    "runtime_memory_receipt": {
-        "serialized_plan_bytes": 9,
-        "resident_weight_bytes": 2000,
-        "resident_weight_copy_count": 2,
-        "weight_streaming_active": False,
-        "measurement_sources": {
-            "serialized_plan_bytes": "bundle_engine_section_sizes",
-            "resident_weight_bytes": "tensorrt_total_weights_size_weight_streaming_disabled",
-            "resident_weight_copy_count": "deduplicated_tensorrt_engine_identity"
-        }
-    }
-}
-open(args["--output"], "w", encoding="utf-8").write(json.dumps(payload))
-cache = Path(os.environ["CUDA_CACHE_PATH"])
-cache.mkdir(parents=True, exist_ok=True)
-(cache / "jit.bin").write_bytes(b"jit")
-"""
-        + f"print({PLAN_T512!r}, file=sys.stderr)\n"
-        + f"print({RUNTIME_STACK!r}, file=sys.stderr)\n",
-        encoding="utf-8",
-    )
-    worker.chmod(worker.stat().st_mode | stat.S_IXUSR)
+    worker = repo / "artifacts" / "trtmc_benchmark_worker"
     cache_path = repo / "artifacts" / "cuda-cache"
     monkeypatch.setenv("CUDA_CACHE_PATH", str(cache_path))
     monkeypatch.setenv("CUDA_CACHE_DISABLE", "0")
@@ -394,8 +833,8 @@ cache.mkdir(parents=True, exist_ok=True)
     runtime_libraries = _fake_runtime_libraries(repo)
     monkeypatch.setattr(
         capture,
-        "_mapped_library_paths",
-        lambda _pid: runtime_libraries,
+        "_mapped_library_records",
+        lambda _pid: _worker_mapping_records(repo, runtime_libraries),
     )
     args = SimpleNamespace(
         repo_root=repo,
@@ -427,6 +866,16 @@ cache.mkdir(parents=True, exist_ok=True)
     ]
     assert result["runtime_stack"] == capture._parse_runtime_stack(
         RUNTIME_STACK, artifact_role="native-dynamic"
+    )
+    assert result["build_runtime_kv_plugin"] == capture._file_identity(
+        plugin,
+        label="build runtime-KV plugin",
+    )
+    assert (
+        result["qualification_provenance"][
+            "build_runtime_kv_plugin_sha256"
+        ]
+        == capture._canonical_sha(result["build_runtime_kv_plugin"])
     )
     cache = result["qualification_evidence"]["cuda_jit_cache"]
     assert cache["path"] == str(cache_path.resolve())
@@ -503,7 +952,9 @@ def test_dynamic_benchmark_rejects_disagreeing_runtime_accounting(
 ) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
-    bundle, build_receipt = _run_fresh_build(repo)
+    bundle, build_receipt = _run_fresh_build(
+        repo, worker_source=_benchmark_worker_source(10)
+    )
     request = repo / "artifacts" / "request.json"
     request.write_text(
         json.dumps(
@@ -530,40 +981,8 @@ def test_dynamic_benchmark_rejects_disagreeing_runtime_accounting(
         ),
         encoding="utf-8",
     )
-    plugin = repo / "artifacts" / "plugin.so"
-    plugin.write_bytes(b"plugin")
-    worker = repo / "artifacts" / "worker.py"
-    worker.write_text(
-        """#!/usr/bin/env python3
-import json
-import sys
-args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
-json.dump({
-    "schema_version": "trtmc.benchmark-worker-result/v1",
-    "status": "completed",
-    "observations": [{
-        "output_tokens": 1,
-        "generated_token_ids": [1]
-    }],
-    "output_summary": {"token_ids": [1]},
-    "runtime_memory_receipt": {
-        "serialized_plan_bytes": 10,
-        "resident_weight_bytes": 2000,
-        "resident_weight_copy_count": 2,
-        "weight_streaming_active": False,
-        "measurement_sources": {
-            "serialized_plan_bytes": "bundle_engine_section_sizes",
-            "resident_weight_bytes": "tensorrt_total_weights_size_weight_streaming_disabled",
-            "resident_weight_copy_count": "deduplicated_tensorrt_engine_identity"
-        }
-    }
-}, open(args["--output"], "w", encoding="utf-8"))
-"""
-        + f"print({PLAN_T512!r}, file=sys.stderr)\n"
-        + f"print({RUNTIME_STACK!r}, file=sys.stderr)\n",
-        encoding="utf-8",
-    )
-    worker.chmod(worker.stat().st_mode | stat.S_IXUSR)
+    plugin = repo / "artifacts" / capture.RUNTIME_KV_PLUGIN_DSO
+    worker = repo / "artifacts" / "trtmc_benchmark_worker"
     monkeypatch.setenv(
         "CUDA_CACHE_PATH", str(repo / "artifacts" / "cuda-cache")
     )
@@ -571,8 +990,8 @@ json.dump({
     runtime_libraries = _fake_runtime_libraries(repo)
     monkeypatch.setattr(
         capture,
-        "_mapped_library_paths",
-        lambda _pid: runtime_libraries,
+        "_mapped_library_records",
+        lambda _pid: _worker_mapping_records(repo, runtime_libraries),
     )
     args = SimpleNamespace(
         repo_root=repo,
@@ -726,7 +1145,7 @@ def test_runtime_library_provenance_requires_one_coherent_pair(
     )
 
     result = capture._runtime_library_provenance(
-        (nvrtc, builtins),
+        (_mapping_record(nvrtc), _mapping_record(builtins)),
         artifact_role="native-dynamic",
         runtime_stack=stack,
     )
@@ -739,7 +1158,10 @@ def test_runtime_library_provenance_requires_one_coherent_pair(
     duplicate.write_bytes(b"other")
     with pytest.raises(capture.CaptureError, match="exactly one nvrtc"):
         capture._runtime_library_provenance(
-            (nvrtc, duplicate, builtins),
+            tuple(
+                _mapping_record(path)
+                for path in (nvrtc, duplicate, builtins)
+            ),
             artifact_role="native-dynamic",
             runtime_stack=stack,
         )
@@ -750,7 +1172,7 @@ def test_runtime_library_provenance_requires_one_coherent_pair(
     other_builtins.write_bytes(b"other-builtins")
     with pytest.raises(capture.CaptureError, match="one directory"):
         capture._runtime_library_provenance(
-            (nvrtc, other_builtins),
+            (_mapping_record(nvrtc), _mapping_record(other_builtins)),
             artifact_role="native-dynamic",
             runtime_stack=stack,
         )

@@ -42,7 +42,9 @@ Other checkpoints retain their existing build and runtime route.
 
 The wheel installs the native `trtmc` executable into the environment, the
 Python builder dependencies including TensorRT, and the TensorRT backend DSO.
-CUDA driver/runtime libraries still come from the host system.
+The host provides the NVIDIA driver; the CUDA runtime, NVRTC, and cuDNN
+userspace libraries come from the wheel's pinned Python dependencies and are
+resolved through wheel-relative runtime search paths.
 
 To build and run native Wan2.2 TI2V-5B at 720p, follow the
 [two-command Wan2.2 Quick Start](website/docs/getting-started/quick-start.md).

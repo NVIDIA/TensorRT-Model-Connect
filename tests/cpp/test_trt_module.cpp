@@ -82,6 +82,21 @@ class TrtModuleImplTestPeer {
     static void inject_execution_failure(TrtModuleImpl& module, const std::string& operation) {
         module.require_execution_success(false, operation);
     }
+
+    static std::size_t buffer_capacity(const TrtModuleImpl& module, const std::string& name) {
+        const auto found = module.buffers_.find(name);
+        return found == module.buffers_.end() ? 0 : found->second.nbytes;
+    }
+
+    static std::size_t host_output_staging_size(const TrtModuleImpl& module,
+                                                const std::string& name) {
+        const auto found = module.host_output_staging_.find(name);
+        return found == module.host_output_staging_.end() ? 0 : found->second.size();
+    }
+
+    static bool cuda_graph_ready(const TrtModuleImpl& module) {
+        return module.cuda_graph_ != nullptr && module.cuda_graph_->ready();
+    }
 };
 
 } // namespace trtmc
@@ -193,6 +208,57 @@ static trtmc::TrtUniquePtr<nvinfer1::IHostMemory> build_dynamic_identity_plan() 
     out->setName("y");
     network->markOutput(*out);
 
+    return trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(
+        builder->buildSerializedNetwork(*network, *config));
+}
+
+static trtmc::TrtUniquePtr<nvinfer1::IHostMemory> build_shape_inference_io_plan() {
+    auto builder = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+    if (!builder)
+        return nullptr;
+
+    uint32_t flags = 0;
+#if NV_TENSORRT_MAJOR < 10
+    flags = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+#endif
+    auto network =
+        trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(flags));
+    auto config = trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
+    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
+
+    auto* input = network->addInput("x", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{1, {4}});
+    auto* shape = network->addInput("shape", nvinfer1::DataType::kINT32, nvinfer1::Dims{1, {1}});
+    if (!input || !shape)
+        return nullptr;
+    auto* shuffle = network->addShuffle(*input);
+    if (!shuffle)
+        return nullptr;
+    shuffle->setInput(1, *shape);
+    auto* output = shuffle->getOutput(0);
+    output->setName("y");
+    network->markOutput(*output);
+
+    auto profile = builder->createOptimizationProfile();
+    if (!profile)
+        return nullptr;
+#if NV_TENSORRT_MAJOR >= 11
+    const int64_t shape_value[1] = {4};
+    for (const auto selector :
+         {nvinfer1::OptProfileSelector::kMIN, nvinfer1::OptProfileSelector::kOPT,
+          nvinfer1::OptProfileSelector::kMAX}) {
+        if (!profile->setShapeValuesV2("shape", selector, shape_value, 1))
+            return nullptr;
+    }
+#else
+    const int32_t shape_value[1] = {4};
+    for (const auto selector :
+         {nvinfer1::OptProfileSelector::kMIN, nvinfer1::OptProfileSelector::kOPT,
+          nvinfer1::OptProfileSelector::kMAX}) {
+        if (!profile->setShapeValues("shape", selector, shape_value, 1))
+            return nullptr;
+    }
+#endif
+    config->addOptimizationProfile(profile);
     return trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(
         builder->buildSerializedNetwork(*network, *config));
 }
@@ -432,14 +498,56 @@ static void test_runtime_memory_backend_v1() {
     check(runtime_backend != nullptr, "runtime memory: backend capability is discoverable");
     if (!runtime_backend)
         return;
-    check(runtime_backend->runtime_memory_api_version() == trtmc::kRuntimeMemoryBackendApiVersionV1,
+    check(runtime_backend->runtime_memory_api_version() ==
+              trtmc::kRuntimeMemoryBackendApiVersionCurrent,
           "runtime memory: backend API version is v1");
+
+    auto shape_inference_plan = build_shape_inference_io_plan();
+    check(shape_inference_plan != nullptr,
+          "runtime memory: shape-inference-I/O negative-test plan built");
+    if (shape_inference_plan) {
+        trtmc::RuntimeMemoryModuleOptionsV1 shape_inference_options;
+        shape_inference_options.deferred_tensor_names = {"x"};
+        auto shape_inference_module = runtime_backend->create_module_runtime_memory(
+            shape_inference_plan->data(), shape_inference_plan->size(), {},
+            shape_inference_options);
+        auto* shape_inference_runtime =
+            dynamic_cast<trtmc::IRuntimeMemoryModuleV1*>(shape_inference_module.get());
+        check(shape_inference_runtime != nullptr,
+              "runtime memory: shape-inference-I/O module exposes planning API");
+        if (shape_inference_runtime) {
+            trtmc::RuntimeMemoryShapeV1 data_shape;
+            data_shape.name = "x";
+            data_shape.shape = {4};
+            data_shape.dtype = trtmc::DType::kFloat32;
+            shape_inference_runtime->set_runtime_binding_shape(data_shape);
+            bool shape_input_rejected = false;
+            try {
+                (void)shape_inference_runtime->context_memory_requirement();
+            } catch (const std::logic_error& error) {
+                shape_input_rejected =
+                    std::string(error.what()).find("value-aware planning") != std::string::npos;
+            }
+            check(shape_input_rejected,
+                  "runtime memory: shape-inference input without value planning fails closed");
+        }
+    }
 
     auto legacy_module = backend->create_module(plan->data(), plan->size(), {});
     check(dynamic_cast<trtmc::IRuntimeMemoryModuleV1*>(legacy_module.get()) == nullptr,
           "runtime memory: legacy and RTX-shared module type has no dynamic capability");
     check(dynamic_cast<trtmc::IRuntimeMemoryEngineIntrospectionV1*>(legacy_module.get()) == nullptr,
           "runtime memory: engine accounting is private to qualified modules");
+    auto* legacy_impl = dynamic_cast<trtmc::TrtModuleImpl*>(legacy_module.get());
+    check(legacy_impl != nullptr, "runtime memory: legacy module implementation is inspectable");
+    if (!legacy_impl)
+        return;
+    check(trtmc::TrtModuleImplTestPeer::buffer_capacity(*legacy_impl, "x") ==
+              3U * 4U * sizeof(float),
+          "runtime memory: legacy dynamic input remains profile-MAX allocated");
+    check(trtmc::TrtModuleImplTestPeer::buffer_capacity(*legacy_impl, "y") ==
+              3U * 4U * sizeof(float),
+          "runtime memory: legacy dynamic output remains profile-MAX allocated");
 
     trtmc::RuntimeMemoryModuleOptionsV1 invalid_alias_options;
     trtmc::RuntimeMemoryAliasPairV1 invalid_alias;
@@ -484,7 +592,7 @@ static void test_runtime_memory_backend_v1() {
         const auto engine_stats = engine_introspection->runtime_memory_engine_stats();
         check(engine_stats.struct_size == sizeof(trtmc::RuntimeMemoryEngineStatsV1),
               "runtime memory: engine accounting struct size is v1");
-        check(engine_stats.api_version == trtmc::kRuntimeMemoryBackendApiVersionV1,
+        check(engine_stats.api_version == trtmc::kRuntimeMemoryBackendApiVersionCurrent,
               "runtime memory: engine accounting API version is v1");
         check(engine_stats.engine_identity != 0,
               "runtime memory: engine accounting has a dedupe identity");
@@ -616,10 +724,24 @@ static void test_runtime_memory_backend_v1() {
     auto candidate_module = runtime_backend->create_module_runtime_memory(
         plan->data(), plan->size(), {}, output_only_options);
     auto* candidate_runtime = dynamic_cast<trtmc::IRuntimeMemoryModuleV1*>(candidate_module.get());
+    auto* candidate_impl = dynamic_cast<trtmc::TrtModuleImpl*>(candidate_module.get());
+    auto* candidate_introspection =
+        dynamic_cast<trtmc::IRuntimeMemoryEngineIntrospectionV1*>(candidate_module.get());
+    auto* candidate_ledger =
+        dynamic_cast<trtmc::IRuntimeMemoryTransferLedgerV1*>(candidate_module.get());
     check(candidate_runtime != nullptr,
           "runtime memory: candidate module exposes private shape API");
-    if (!candidate_runtime)
+    check(candidate_impl != nullptr && candidate_introspection != nullptr &&
+              candidate_ledger != nullptr,
+          "runtime memory: candidate module exposes implementation ledgers");
+    if (!candidate_runtime || !candidate_impl || !candidate_introspection || !candidate_ledger)
         return;
+    check(candidate_module->device_ptr("x") == nullptr,
+          "runtime memory: ordinary dynamic input is not allocated during construction");
+    check(trtmc::TrtModuleImplTestPeer::buffer_capacity(*candidate_impl, "x") == 0,
+          "runtime memory: ordinary dynamic input construction capacity is zero");
+    check(candidate_introspection->runtime_memory_engine_stats().ordinary_device_input_bytes == 0,
+          "runtime memory: unmaterialized ordinary input accounting is zero");
 
     trtmc::RuntimeInputShapeV1 ordinary_input_shape;
     ordinary_input_shape.name = "x";
@@ -629,6 +751,15 @@ static void test_runtime_memory_backend_v1() {
     std::vector<trtmc::ITrtModule*> candidate_modules{candidate_module.get()};
     const auto candidate_requirement =
         runtime_backend->shared_context_memory_requirement(candidate_modules);
+    void* const initial_candidate_input = candidate_module->device_ptr("x");
+    check(initial_candidate_input != nullptr,
+          "runtime memory: ordinary input materializes after concrete-shape inference");
+    check(trtmc::TrtModuleImplTestPeer::buffer_capacity(*candidate_impl, "x") ==
+              2U * 4U * sizeof(float),
+          "runtime memory: ordinary input materializes exact 2x4 bytes");
+    check(candidate_introspection->runtime_memory_engine_stats().ordinary_device_input_bytes ==
+              2U * 4U * sizeof(float),
+          "runtime memory: ordinary input exact capacity is accounted");
     trtmc::RuntimeMemoryContextBlockV1 candidate_block;
     candidate_block.capacity_bytes = candidate_requirement.capacity_bytes;
     candidate_block.alignment = candidate_requirement.alignment;
@@ -646,10 +777,32 @@ static void test_runtime_memory_backend_v1() {
         return;
     candidate_runtime->bind_runtime_memory(
         make_runtime_binding("y", candidate_output, device, 2, 2, 3));
+    const auto attempts_before_rejection =
+        candidate_ledger->runtime_memory_transfer_snapshot().execution_attempt_events;
+    float oversized_values[12] = {};
+    trtmc::Tensor oversized_input{oversized_values, {3, 4}, trtmc::DType::kFloat32};
+    bool oversized_input_rejected = false;
+    try {
+        candidate_module->forward_async({{"x", oversized_input}});
+    } catch (const std::invalid_argument&) {
+        oversized_input_rejected = true;
+    }
+    check(oversized_input_rejected,
+          "runtime memory: input beyond planned materialized shape fails closed");
+    check(candidate_ledger->runtime_memory_transfer_snapshot().execution_attempt_events ==
+              attempts_before_rejection,
+          "runtime memory: validation rejection is not an execution attempt");
+
     float candidate_values[8] = {21.0F, 22.0F, 23.0F, 24.0F, 25.0F, 26.0F, 27.0F, 28.0F};
     trtmc::Tensor candidate_input{candidate_values, {2, 4}, trtmc::DType::kFloat32};
+    candidate_module->enable_cuda_graph();
     candidate_module->forward_async({{"x", candidate_input}});
     candidate_module->sync();
+    check(candidate_ledger->runtime_memory_transfer_snapshot().execution_attempt_events ==
+              attempts_before_rejection + 1,
+          "runtime memory: successful enqueue increments execution attempts monotonically");
+    check(trtmc::TrtModuleImplTestPeer::cuda_graph_ready(*candidate_impl),
+          "runtime memory: concrete ordinary input execution captures a CUDA graph");
     float candidate_result[8] = {};
     cudaMemcpy(candidate_result, candidate_output.get(), sizeof(candidate_result),
                cudaMemcpyDeviceToHost);
@@ -662,6 +815,8 @@ static void test_runtime_memory_backend_v1() {
     candidate_runtime->set_runtime_input_shape(ordinary_input_shape);
     check(!candidate_runtime->runtime_memory_ready(),
           "runtime memory: input shape change invalidates prior output generation");
+    check(!trtmc::TrtModuleImplTestPeer::cuda_graph_ready(*candidate_impl),
+          "runtime memory: input shape change invalidates the captured CUDA graph");
     bool stale_output_rejected = false;
     try {
         (void)candidate_runtime->context_memory_requirement();
@@ -672,6 +827,12 @@ static void test_runtime_memory_backend_v1() {
 
     candidate_runtime->set_runtime_binding_shape(make_runtime_shape("y", 3, 3, 3));
     const auto resized_requirement = candidate_runtime->context_memory_requirement();
+    void* const grown_candidate_input = candidate_module->device_ptr("x");
+    check(grown_candidate_input != nullptr && grown_candidate_input != initial_candidate_input,
+          "runtime memory: ordinary input growth rebinds a new device address");
+    check(trtmc::TrtModuleImplTestPeer::buffer_capacity(*candidate_impl, "x") ==
+              3U * 4U * sizeof(float),
+          "runtime memory: ordinary input grows to exact 3x4 capacity");
     trtmc::RuntimeMemoryContextBlockV1 resized_block;
     resized_block.capacity_bytes = resized_requirement.capacity_bytes;
     resized_block.alignment = resized_requirement.alignment;
@@ -691,6 +852,163 @@ static void test_runtime_memory_backend_v1() {
         make_runtime_binding("y", resized_output, device, 3, 3, 3));
     check(candidate_runtime->runtime_memory_ready(),
           "runtime memory: output replan and rebind complete the new generation");
+
+    ordinary_input_shape.shape = {2, 4};
+    candidate_runtime->set_runtime_input_shape(ordinary_input_shape);
+    candidate_runtime->set_runtime_binding_shape(make_runtime_shape("y", 2, 2, 3));
+    const auto reused_requirement = candidate_runtime->context_memory_requirement();
+    check(candidate_module->device_ptr("x") == grown_candidate_input,
+          "runtime memory: smaller ordinary input reuses its materialized address");
+    check(trtmc::TrtModuleImplTestPeer::buffer_capacity(*candidate_impl, "x") ==
+              3U * 4U * sizeof(float),
+          "runtime memory: reused ordinary input retains high-water device capacity");
+    trtmc::RuntimeMemoryContextBlockV1 reused_block;
+    reused_block.capacity_bytes = reused_requirement.capacity_bytes;
+    reused_block.alignment = reused_requirement.alignment;
+    reused_block.device = reused_requirement.device;
+    if (reused_block.capacity_bytes > 0) {
+        reused_block.lifetime = allocate_cuda_owner(reused_block.capacity_bytes);
+        reused_block.pointer = reused_block.lifetime.get();
+    }
+    candidate_runtime->bind_context_memory(reused_block);
+    candidate_runtime->bind_runtime_memory(
+        make_runtime_binding("y", resized_output, device, 2, 2, 3));
+    check(candidate_runtime->runtime_memory_ready(),
+          "runtime memory: reused ordinary input is generation-ready");
+
+    trtmc::RuntimeMemoryModuleOptionsV1 input_only_options;
+    input_only_options.deferred_tensor_names = {"x"};
+    auto ordinary_output_module = runtime_backend->create_module_runtime_memory(
+        plan->data(), plan->size(), {}, input_only_options);
+    auto* ordinary_output_runtime =
+        dynamic_cast<trtmc::IRuntimeMemoryModuleV1*>(ordinary_output_module.get());
+    auto* ordinary_output_impl = dynamic_cast<trtmc::TrtModuleImpl*>(ordinary_output_module.get());
+    auto* ordinary_output_introspection =
+        dynamic_cast<trtmc::IRuntimeMemoryEngineIntrospectionV1*>(ordinary_output_module.get());
+    check(ordinary_output_runtime != nullptr && ordinary_output_impl != nullptr &&
+              ordinary_output_introspection != nullptr,
+          "runtime memory: ordinary output module exposes runtime capabilities");
+    if (!ordinary_output_runtime || !ordinary_output_impl || !ordinary_output_introspection)
+        return;
+    check(ordinary_output_module->device_ptr("y") == nullptr,
+          "runtime memory: ordinary dynamic output is not allocated during construction");
+    check(trtmc::TrtModuleImplTestPeer::buffer_capacity(*ordinary_output_impl, "y") == 0,
+          "runtime memory: ordinary dynamic output construction capacity is zero");
+    check(trtmc::TrtModuleImplTestPeer::host_output_staging_size(*ordinary_output_impl, "y") == 0,
+          "runtime memory: ordinary dynamic output has no construction-time host staging");
+
+    ordinary_output_runtime->set_runtime_binding_shape(make_runtime_shape("x", 2, 2, 3));
+    const auto ordinary_output_requirement = ordinary_output_runtime->context_memory_requirement();
+    void* const exact_output_pointer = ordinary_output_module->device_ptr("y");
+    check(exact_output_pointer != nullptr,
+          "runtime memory: ordinary output materializes after inferShapes");
+    check(trtmc::TrtModuleImplTestPeer::buffer_capacity(*ordinary_output_impl, "y") ==
+              2U * 4U * sizeof(float),
+          "runtime memory: ordinary output device allocation is exact for 2x4");
+    check(trtmc::TrtModuleImplTestPeer::host_output_staging_size(*ordinary_output_impl, "y") ==
+              2U * 4U * sizeof(float),
+          "runtime memory: ordinary output host staging is exact for 2x4");
+    const auto exact_output_stats = ordinary_output_introspection->runtime_memory_engine_stats();
+    check(exact_output_stats.ordinary_device_input_bytes == 0,
+          "runtime memory: deferred input is absent from ordinary input accounting");
+    check(exact_output_stats.ordinary_device_output_bytes == 2U * 4U * sizeof(float),
+          "runtime memory: exact ordinary output device bytes are accounted");
+
+    trtmc::RuntimeMemoryContextBlockV1 ordinary_output_block;
+    ordinary_output_block.capacity_bytes = ordinary_output_requirement.capacity_bytes;
+    ordinary_output_block.alignment = ordinary_output_requirement.alignment;
+    ordinary_output_block.device = ordinary_output_requirement.device;
+    if (ordinary_output_block.capacity_bytes > 0) {
+        ordinary_output_block.lifetime = allocate_cuda_owner(ordinary_output_block.capacity_bytes);
+        ordinary_output_block.pointer = ordinary_output_block.lifetime.get();
+    }
+    ordinary_output_runtime->bind_context_memory(ordinary_output_block);
+    auto ordinary_input_owner = allocate_cuda_owner(3U * 4U * sizeof(float));
+    check(ordinary_input_owner != nullptr,
+          "runtime memory: deferred input owner for ordinary output test allocated");
+    if (!ordinary_input_owner)
+        return;
+    ordinary_output_runtime->bind_runtime_memory(
+        make_runtime_binding("x", ordinary_input_owner, device, 2, 2, 3));
+    cudaMemcpy(ordinary_input_owner.get(), candidate_values, sizeof(candidate_values),
+               cudaMemcpyHostToDevice);
+    const auto ordinary_outputs = ordinary_output_module->forward({});
+    const auto ordinary_y = ordinary_outputs.find("y");
+    check(ordinary_y != ordinary_outputs.end() &&
+              ordinary_y->second.shape == std::vector<int64_t>({2, 4}),
+          "runtime memory: downloaded ordinary output reports exact inferred shape");
+    if (ordinary_y != ordinary_outputs.end()) {
+        const auto* output_values = static_cast<const float*>(ordinary_y->second.data);
+        check(output_values[0] == candidate_values[0] && output_values[7] == candidate_values[7],
+              "runtime memory: exact ordinary output staging preserves all values");
+    }
+
+    ordinary_output_runtime->set_runtime_binding_shape(make_runtime_shape("x", 3, 3, 3));
+    const auto grown_output_requirement = ordinary_output_runtime->context_memory_requirement();
+    void* const grown_output_pointer = ordinary_output_module->device_ptr("y");
+    check(grown_output_pointer != nullptr && grown_output_pointer != exact_output_pointer,
+          "runtime memory: ordinary output growth rebinds a new address");
+    check(trtmc::TrtModuleImplTestPeer::buffer_capacity(*ordinary_output_impl, "y") ==
+              3U * 4U * sizeof(float),
+          "runtime memory: ordinary output grows to exact 3x4 capacity");
+    check(trtmc::TrtModuleImplTestPeer::host_output_staging_size(*ordinary_output_impl, "y") ==
+              3U * 4U * sizeof(float),
+          "runtime memory: ordinary output host staging grows to exact 3x4 bytes");
+
+    trtmc::RuntimeMemoryContextBlockV1 grown_output_block;
+    grown_output_block.capacity_bytes = grown_output_requirement.capacity_bytes;
+    grown_output_block.alignment = grown_output_requirement.alignment;
+    grown_output_block.device = grown_output_requirement.device;
+    if (grown_output_block.capacity_bytes > 0) {
+        grown_output_block.lifetime = allocate_cuda_owner(grown_output_block.capacity_bytes);
+        grown_output_block.pointer = grown_output_block.lifetime.get();
+    }
+    ordinary_output_runtime->bind_context_memory(grown_output_block);
+    ordinary_output_runtime->bind_runtime_memory(
+        make_runtime_binding("x", ordinary_input_owner, device, 3, 3, 3));
+
+    ordinary_output_runtime->set_runtime_binding_shape(make_runtime_shape("x", 0, 1, 3));
+    const auto reused_output_requirement = ordinary_output_runtime->context_memory_requirement();
+    check(ordinary_output_module->device_ptr("y") == grown_output_pointer,
+          "runtime memory: smaller ordinary output reuses its grown device address");
+    check(trtmc::TrtModuleImplTestPeer::buffer_capacity(*ordinary_output_impl, "y") ==
+              3U * 4U * sizeof(float),
+          "runtime memory: reused ordinary output retains high-water device capacity");
+    check(trtmc::TrtModuleImplTestPeer::host_output_staging_size(*ordinary_output_impl, "y") ==
+              1U * 4U * sizeof(float),
+          "runtime memory: reused ordinary output host staging shrinks to exact shape");
+    check(ordinary_output_module->tensor_shape("y") == std::vector<int64_t>({1, 4}),
+          "runtime memory: ordinary output shape tracks the latest inferShapes result");
+    const auto reused_output_stats = ordinary_output_introspection->runtime_memory_engine_stats();
+    check(reused_output_stats.ordinary_device_output_bytes == 3U * 4U * sizeof(float),
+          "runtime memory: ordinary output accounting reports retained device capacity");
+    check(reused_output_stats.host_output_staging_bytes == 1U * 4U * sizeof(float),
+          "runtime memory: ordinary output accounting reports exact host staging");
+
+    trtmc::RuntimeMemoryContextBlockV1 reused_output_block;
+    reused_output_block.capacity_bytes = reused_output_requirement.capacity_bytes;
+    reused_output_block.alignment = reused_output_requirement.alignment;
+    reused_output_block.device = reused_output_requirement.device;
+    if (reused_output_block.capacity_bytes > 0) {
+        reused_output_block.lifetime = allocate_cuda_owner(reused_output_block.capacity_bytes);
+        reused_output_block.pointer = reused_output_block.lifetime.get();
+    }
+    ordinary_output_runtime->bind_context_memory(reused_output_block);
+    ordinary_output_runtime->bind_runtime_memory(
+        make_runtime_binding("x", ordinary_input_owner, device, 0, 1, 3));
+    float one_row_values[4] = {31.0F, 32.0F, 33.0F, 34.0F};
+    cudaMemcpy(ordinary_input_owner.get(), one_row_values, sizeof(one_row_values),
+               cudaMemcpyHostToDevice);
+    const auto one_row_outputs = ordinary_output_module->forward({});
+    const auto one_row_y = one_row_outputs.find("y");
+    check(one_row_y != one_row_outputs.end() &&
+              one_row_y->second.shape == std::vector<int64_t>({1, 4}),
+          "runtime memory: shrunk ordinary output downloads one exact row");
+    if (one_row_y != one_row_outputs.end()) {
+        const auto* output_values = static_cast<const float*>(one_row_y->second.data);
+        check(output_values[0] == one_row_values[0] && output_values[3] == one_row_values[3],
+              "runtime memory: shrunk ordinary output contains exact row values");
+    }
 }
 
 static void test_bind_external() {

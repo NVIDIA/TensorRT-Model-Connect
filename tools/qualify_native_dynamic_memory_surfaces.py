@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
-# All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Prove equivalent runtime-memory policy resolution across public surfaces."""
@@ -28,10 +27,12 @@ from tensorrt_model_connect.pipeline import (  # noqa: E402
 
 
 RECEIPT_EQUIVALENCE_FIELDS = (
+    "receipt_schema_version",
     "contract_version",
     "policy",
     "policy_fraction",
     "requested_kv_bytes",
+    "kv_budget_bytes",
     "safety_reserve_bytes",
     "model_context_limit",
     "prefill_chunk_limit",
@@ -45,6 +46,8 @@ RECEIPT_EQUIVALENCE_FIELDS = (
     "engine_weight_bytes",
     "weight_streaming_active",
     "context_device_memory_bytes",
+    "ordinary_device_input_bytes",
+    "ordinary_device_output_bytes",
     "external_device_output_bytes",
     "host_staging_bytes",
     "graph_private_device_bytes",
@@ -54,6 +57,132 @@ RECEIPT_EQUIVALENCE_FIELDS = (
     "backend_owned_cache_input_bytes",
     "backend_owned_cache_output_bytes",
 )
+
+POSITIVE_POLICY_CASE_NAMES = frozenset(
+    {
+        "bytes_plus_u",
+        "explicit_auto_plus_u",
+        "fraction_plus_u",
+        "u_only",
+    }
+)
+NEGATIVE_POLICY_ERRORS = {
+    "over_model_context": "model_context_limit_exceeded",
+    "conflicting_policy_fields": "conflicting_memory_policy",
+}
+
+
+def _schema_v3_receipt_errors(
+    receipt: dict[str, Any],
+    *,
+    expected_policy: str = "bytes",
+    expected_fraction: float = 0.0,
+    expected_requested_bytes: int = 2_048,
+) -> list[str]:
+    """Validate per-process schema-v3 invariants without comparing free memory."""
+
+    errors: list[str] = []
+
+    def typed_int(field: str, *, positive: bool = False) -> int | None:
+        value = receipt.get(field)
+        if type(value) is not int or (value <= 0 if positive else value < 0):
+            qualifier = "positive" if positive else "nonnegative"
+            errors.append(f"{field} must be a typed {qualifier} integer")
+            return None
+        return value
+
+    if (
+        type(receipt.get("receipt_schema_version")) is not int
+        or receipt.get("receipt_schema_version") != 3
+    ):
+        errors.append("receipt_schema_version must be integer 3")
+
+    capacity_free = typed_int("capacity_decision_free_bytes", positive=True)
+    capacity_total = typed_int("capacity_decision_total_bytes", positive=True)
+    capacity_used = typed_int("capacity_decision_device_used_bytes")
+    settled_free = typed_int("settled_free_bytes", positive=True)
+    settled_total = typed_int("settled_total_bytes", positive=True)
+    settled_used = typed_int("settled_device_used_bytes")
+    final_free = typed_int("final_free_bytes", positive=True)
+    final_total = typed_int("final_total_bytes", positive=True)
+    final_used = typed_int("final_device_used_bytes")
+    for field in (
+        "ordinary_device_input_bytes",
+        "ordinary_device_output_bytes",
+        "external_device_output_bytes",
+    ):
+        typed_int(field)
+    kv_budget = typed_int("kv_budget_bytes", positive=True)
+    requested_bytes = typed_int(
+        "requested_kv_bytes",
+        positive=expected_policy == "bytes",
+    )
+    capacity_tokens = typed_int("runtime_kv_capacity_tokens", positive=True)
+    bytes_per_token = typed_int("kv_bytes_per_token", positive=True)
+    kv_reserved = typed_int("kv_reserved_bytes", positive=True)
+
+    if (
+        capacity_free is not None
+        and capacity_total is not None
+        and capacity_used is not None
+        and (capacity_free > capacity_total or capacity_used != capacity_total - capacity_free)
+    ):
+        errors.append("capacity-decision snapshot accounting is inconsistent")
+    if (
+        settled_free is not None
+        and settled_total is not None
+        and settled_used is not None
+        and (
+            settled_free > settled_total
+            or settled_used != settled_total - settled_free
+            or (capacity_total is not None and settled_total != capacity_total)
+        )
+    ):
+        errors.append("settled snapshot accounting is inconsistent")
+    if "settled_snapshot_unavailable_reason" not in receipt:
+        errors.append("settled_snapshot_unavailable_reason must be present")
+    elif receipt.get("settled_snapshot_unavailable_reason") is not None:
+        errors.append("settled snapshot is unavailable")
+    if (
+        capacity_free is not None
+        and capacity_total is not None
+        and capacity_used is not None
+        and (
+            final_free != capacity_free
+            or final_total != capacity_total
+            or final_used != capacity_used
+        )
+    ):
+        errors.append("deprecated final snapshot must exactly alias capacity decision")
+    if receipt.get("policy") != expected_policy:
+        errors.append(
+            "surface qualification policy mismatch: "
+            f"expected {expected_policy}, got {receipt.get('policy')}"
+        )
+    if (
+        type(receipt.get("policy_fraction")) not in {int, float}
+        or float(receipt.get("policy_fraction", -1.0)) != expected_fraction
+    ):
+        errors.append("policy_fraction does not match the requested policy")
+    if requested_bytes is not None and requested_bytes != expected_requested_bytes:
+        errors.append("requested_kv_bytes does not match the requested policy")
+    if (
+        expected_policy == "bytes"
+        and kv_budget is not None
+        and requested_bytes is not None
+        and kv_budget != requested_bytes
+    ):
+        errors.append("bytes policy budget must equal requested bytes")
+    if (
+        capacity_tokens is not None
+        and bytes_per_token is not None
+        and kv_reserved is not None
+        and kv_reserved != capacity_tokens * bytes_per_token
+    ):
+        errors.append("KV reservation must equal R times bytes per token")
+    if kv_reserved is not None and kv_budget is not None and kv_reserved > kv_budget:
+        errors.append("KV reservation exceeds bytes-policy budget")
+    return errors
 
 
 def _sha256(path: Path) -> str:
@@ -74,9 +203,7 @@ def _bundle_identity(path: Path) -> dict[str, Any]:
     }
 
 
-def _source_state_snapshot(
-    artifact_dir: Path, *, label: str
-) -> dict[str, Any]:
+def _source_state_snapshot(artifact_dir: Path, *, label: str) -> dict[str, Any]:
     artifact_dir = artifact_dir.resolve()
     try:
         relative = artifact_dir.relative_to(REPO_ROOT)
@@ -84,11 +211,7 @@ def _source_state_snapshot(
         relative = None
     if relative is not None:
         top_level = relative.parts[0] if relative.parts else ""
-        if not (
-            top_level == "artifacts"
-            or top_level == "build"
-            or top_level.startswith("build-")
-        ):
+        if not (top_level == "artifacts" or top_level == "build" or top_level.startswith("build-")):
             raise ValueError(
                 "qualification output inside the repository must be under "
                 "artifacts/, build/, or build-* so source snapshots exclude it"
@@ -112,8 +235,7 @@ def apply_source_state_gate(
         isinstance(pre_sha, str)
         and pre_sha
         and pre_sha == post_sha
-        and source_state_pre.get("git_head")
-        == source_state_post.get("git_head")
+        and source_state_pre.get("git_head") == source_state_post.get("git_head")
     )
     report["source_state_pre"] = source_state_pre
     report["source_state_post"] = source_state_post
@@ -148,6 +270,11 @@ def _request_peak_is_complete(receipt: dict[str, Any]) -> bool:
 
 def compare_surface_receipts(
     surfaces: list[dict[str, Any]],
+    *,
+    expected_capacity: int = 512,
+    expected_policy: str = "bytes",
+    expected_fraction: float = 0.0,
+    expected_requested_bytes: int = 2_048,
 ) -> tuple[dict[str, Any], bool]:
     if not surfaces:
         raise ValueError("surface comparison requires at least one result")
@@ -157,29 +284,43 @@ def compare_surface_receipts(
     all_passed = True
     for surface in surfaces:
         receipt = surface["runtime_memory_receipt"]
+        equivalence_fields = tuple(
+            field
+            for field in RECEIPT_EQUIVALENCE_FIELDS
+            if expected_policy == "bytes" or field != "kv_budget_bytes"
+        )
         mismatches = {
             field: {
                 "reference": reference_receipt.get(field),
                 "candidate": receipt.get(field),
             }
-            for field in RECEIPT_EQUIVALENCE_FIELDS
+            for field in equivalence_fields
             if receipt.get(field) != reference_receipt.get(field)
         }
         accepted = surface.get("status") == "accepted"
-        expected_capacity = (
-            int(receipt.get("runtime_kv_capacity_tokens", 0)) == 512
+        capacity_matches = (
+            int(receipt.get("runtime_kv_capacity_tokens", 0)) == expected_capacity
         )
         request_peak_complete = _request_peak_is_complete(receipt)
+        schema_v3_errors = _schema_v3_receipt_errors(
+            receipt,
+            expected_policy=expected_policy,
+            expected_fraction=expected_fraction,
+            expected_requested_bytes=expected_requested_bytes,
+        )
         passed = (
             accepted
-            and expected_capacity
+            and capacity_matches
             and request_peak_complete
+            and not schema_v3_errors
             and not mismatches
         )
         comparisons[surface["surface"]] = {
             "accepted": accepted,
-            "resolved_R_is_512": expected_capacity,
+            f"resolved_R_is_{expected_capacity}": capacity_matches,
             "request_complete_peak": request_peak_complete,
+            "schema_v3_complete": not schema_v3_errors,
+            "schema_v3_errors": schema_v3_errors,
             "receipt_mismatches": mismatches,
             "passed": passed,
         }
@@ -187,12 +328,219 @@ def compare_surface_receipts(
     return comparisons, all_passed
 
 
+def positive_policy_cases(kv_bytes: int) -> tuple[dict[str, Any], ...]:
+    if type(kv_bytes) is not int or kv_bytes <= 0:
+        raise ValueError("positive policy matrix requires positive KV bytes")
+    return (
+        {
+            "name": "bytes_plus_u",
+            "helper_policy": "bytes",
+            "helper_bytes": kv_bytes,
+            "helper_fraction": None,
+            "cli_memory": f"{kv_bytes}B",
+            "python_memory": kv_bytes,
+            "expected_policy": "bytes",
+            "expected_fraction": 0.0,
+            "expected_requested_bytes": kv_bytes,
+            "max_sequence_length": 512,
+        },
+        {
+            "name": "explicit_auto_plus_u",
+            "helper_policy": "auto",
+            "helper_bytes": None,
+            "helper_fraction": None,
+            "cli_memory": "auto",
+            "python_memory": "auto",
+            "expected_policy": "auto",
+            "expected_fraction": 0.90,
+            "expected_requested_bytes": 0,
+            "max_sequence_length": 512,
+        },
+        {
+            "name": "fraction_plus_u",
+            "helper_policy": "fraction",
+            "helper_bytes": None,
+            "helper_fraction": 1.0,
+            "cli_memory": "100%",
+            "python_memory": "100%",
+            "expected_policy": "fraction",
+            "expected_fraction": 1.0,
+            "expected_requested_bytes": 0,
+            "max_sequence_length": 512,
+        },
+        {
+            "name": "u_only",
+            "helper_policy": "u_only",
+            "helper_bytes": None,
+            "helper_fraction": None,
+            "cli_memory": None,
+            "python_memory": None,
+            "expected_policy": "auto",
+            "expected_fraction": 0.90,
+            "expected_requested_bytes": 0,
+            "max_sequence_length": 512,
+        },
+    )
+
+
+def negative_policy_cases(
+    *,
+    model_context_limit: int,
+    kv_bytes: int,
+) -> tuple[dict[str, Any], ...]:
+    if (
+        type(model_context_limit) is not int
+        or model_context_limit <= 0
+        or type(kv_bytes) is not int
+        or kv_bytes <= 0
+    ):
+        raise ValueError("negative policy matrix inputs must be positive integers")
+    return (
+        {
+            "name": "over_model_context",
+            "normalized_error": NEGATIVE_POLICY_ERRORS["over_model_context"],
+            "helper_policy": "auto",
+            "helper_bytes": None,
+            "helper_fraction": None,
+            "cli_memory_values": ["auto"],
+            "python_memory": "auto",
+            "max_sequence_length": model_context_limit + 1,
+            "error_needles": {
+                "cli": ("exceeds the model context limit",),
+                "cpp": ("exceeds the model context limit",),
+                "cabi": ("exceeds the model context limit",),
+                "python": ("exceeds the model context limit",),
+            },
+        },
+        {
+            "name": "conflicting_policy_fields",
+            "normalized_error": NEGATIVE_POLICY_ERRORS[
+                "conflicting_policy_fields"
+            ],
+            "helper_policy": "conflict",
+            "helper_bytes": kv_bytes,
+            "helper_fraction": 1.0,
+            "cli_memory_values": ["100%", f"{kv_bytes}B"],
+            # Python deliberately encodes two mutually exclusive choices in
+            # its one policy parameter.  Its typed API makes two independent
+            # fields unrepresentable, and the delegated CLI must reject the
+            # combined value before pipeline construction.
+            "python_memory": f"100%,{kv_bytes}B",
+            "max_sequence_length": 512,
+            "error_needles": {
+                "cli": ("may be specified only once",),
+                "cpp": ("zero fraction",),
+                "cabi": ("zero fraction",),
+                "python": (
+                    "--kv-cache-memory expects auto",
+                    "trtmc run failed",
+                ),
+            },
+        },
+    )
+
+
+def _normalized_rejection_error(
+    *,
+    surface: str,
+    message: str,
+    case: dict[str, Any],
+) -> str | None:
+    needles = case["error_needles"][surface]
+    if not all(needle in message for needle in needles):
+        return None
+    normalized = case.get("normalized_error")
+    return normalized if isinstance(normalized, str) and normalized else None
+
+
+def validate_rejection_matrix(
+    cases: dict[str, list[dict[str, Any]]],
+) -> tuple[dict[str, Any], bool]:
+    expected_surfaces = {"cli", "cpp", "cabi", "python"}
+    validations: dict[str, Any] = {}
+    all_passed = True
+    for case_name, results in cases.items():
+        expected_error = NEGATIVE_POLICY_ERRORS.get(case_name)
+        surfaces = {result.get("surface") for result in results}
+        rows: dict[str, Any] = {}
+        case_passed = (
+            expected_error is not None
+            and surfaces == expected_surfaces
+            and len(results) == 4
+        )
+        normalized_errors = {
+            result.get("normalized_error")
+            for result in results
+            if isinstance(result.get("normalized_error"), str)
+        }
+        case_passed = case_passed and normalized_errors == {expected_error}
+        for result in results:
+            surface = str(result.get("surface"))
+            passed = bool(
+                result.get("status") == "rejected"
+                and result.get("returncode", 0) != 0
+                and result.get("normalized_error") == expected_error
+                and result.get("runtime_memory_receipt_present") is False
+                and result.get("request_started") is False
+                and result.get("attention_launch_observed") is False
+                and isinstance(result.get("message"), str)
+                and bool(result["message"])
+            )
+            rows[surface] = {
+                "rejected": result.get("status") == "rejected",
+                "normalized_error": result.get("normalized_error"),
+                "runtime_memory_receipt_absent": (
+                    result.get("runtime_memory_receipt_present") is False
+                ),
+                "request_not_started": result.get("request_started") is False,
+                "attention_launch_count": 0
+                if result.get("attention_launch_observed") is False
+                else 1,
+                "passed": passed,
+            }
+            case_passed = case_passed and passed
+        validations[case_name] = {
+            "surfaces": rows,
+            "expected_normalized_error": expected_error,
+            "normalized_error_consistent": normalized_errors == {expected_error},
+            "passed": case_passed,
+        }
+        all_passed = all_passed and case_passed
+    return validations, all_passed
+
+
+def qualification_gate(
+    *,
+    policy_matrix: dict[str, Any],
+    positive_surfaces_passed: bool,
+    rejection_matrix: dict[str, Any],
+    negative_surfaces_passed: bool,
+    bundle_unchanged: bool,
+) -> dict[str, bool]:
+    positive_complete = set(policy_matrix) == POSITIVE_POLICY_CASE_NAMES
+    negative_complete = set(rejection_matrix) == set(NEGATIVE_POLICY_ERRORS)
+    return {
+        "positive_policy_matrix_complete": positive_complete,
+        "negative_policy_matrix_complete": negative_complete,
+        "positive_surfaces_passed": positive_surfaces_passed,
+        "negative_surfaces_passed": negative_surfaces_passed,
+        "bundle_unchanged": bundle_unchanged,
+        "passed": bool(
+            positive_complete
+            and negative_complete
+            and positive_surfaces_passed
+            and negative_surfaces_passed
+            and bundle_unchanged
+        ),
+    }
+
+
 def _run_helper(
     *,
     surface: str,
     helper: Path,
     bundle: Path,
-    kv_bytes: int,
+    policy_case: dict[str, Any],
     backend_dirs: list[Path],
     model_plugin_dirs: list[Path],
     hf_python: str | None,
@@ -204,15 +552,21 @@ def _run_helper(
         surface,
         "--bundle",
         str(bundle),
-        "--kv-cache-bytes",
-        str(kv_bytes),
+        "--policy",
+        str(policy_case["helper_policy"]),
         "--max-sequence-length",
-        "512",
+        str(policy_case["max_sequence_length"]),
         "--prompt",
         "Hello",
         "--max-new-tokens",
         "2",
     ]
+    if policy_case["helper_bytes"] is not None:
+        command.extend(["--kv-cache-bytes", str(policy_case["helper_bytes"])])
+    if policy_case["helper_fraction"] is not None:
+        command.extend(
+            ["--kv-cache-fraction", str(policy_case["helper_fraction"])]
+        )
     if hf_python:
         command.extend(["--hf-python", hf_python])
     for directory in backend_dirs:
@@ -227,16 +581,15 @@ def _run_helper(
         stderr=subprocess.PIPE,
     )
     payload = _parse_final_json(completed.stdout)
-    (output_dir / f"{surface}.stdout.log").write_text(
+    label = str(policy_case["name"])
+    (output_dir / f"{label}.{surface}.stdout.log").write_text(
         completed.stdout, encoding="utf-8"
     )
-    (output_dir / f"{surface}.stderr.log").write_text(
+    (output_dir / f"{label}.{surface}.stderr.log").write_text(
         completed.stderr, encoding="utf-8"
     )
     if completed.returncode != 0 or payload.get("status") != "accepted":
-        raise RuntimeError(
-            f"{surface}: helper failed ({completed.returncode}): {payload}"
-        )
+        raise RuntimeError(f"{surface}: helper failed ({completed.returncode}): {payload}")
     payload["command"] = command
     return payload
 
@@ -245,7 +598,7 @@ def _run_cli(
     *,
     binary: Path,
     bundle: Path,
-    kv_bytes: int,
+    policy_case: dict[str, Any],
     backend_dirs: list[Path],
     model_plugin_dirs: list[Path],
     hf_python: str | None,
@@ -260,11 +613,11 @@ def _run_cli(
         "--max-new-tokens",
         "2",
         "--greedy",
-        "--kv-cache-memory",
-        f"{kv_bytes}B",
         "--max-sequence-length",
-        "512",
+        str(policy_case["max_sequence_length"]),
     ]
+    if policy_case["cli_memory"] is not None:
+        command.extend(["--kv-cache-memory", str(policy_case["cli_memory"])])
     if hf_python:
         command.extend(["--hf-python", hf_python])
     for directory in backend_dirs:
@@ -279,16 +632,16 @@ def _run_cli(
         stderr=subprocess.PIPE,
     )
     receipt = _memory_receipt_from_stderr(completed.stderr)
-    (output_dir / "cli.stdout.log").write_text(
+    label = str(policy_case["name"])
+    (output_dir / f"{label}.cli.stdout.log").write_text(
         completed.stdout, encoding="utf-8"
     )
-    (output_dir / "cli.stderr.log").write_text(
+    (output_dir / f"{label}.cli.stderr.log").write_text(
         completed.stderr, encoding="utf-8"
     )
     if completed.returncode != 0 or receipt is None:
         raise RuntimeError(
-            f"CLI surface failed ({completed.returncode}): "
-            f"{completed.stderr[-4000:]}"
+            f"CLI surface failed ({completed.returncode}): {completed.stderr[-4000:]}"
         )
     return {
         "status": "accepted",
@@ -303,7 +656,7 @@ def _run_python(
     *,
     binary: Path,
     bundle: Path,
-    kv_bytes: int,
+    policy_case: dict[str, Any],
     model_plugin_dirs: list[Path],
     hf_python: str | None,
 ) -> dict[str, Any]:
@@ -317,8 +670,8 @@ def _run_python(
             str(bundle),
             binary=str(binary),
             hf_python=hf_python,
-            kv_cache_memory=kv_bytes,
-            max_sequence_length=512,
+            kv_cache_memory=policy_case["python_memory"],
+            max_sequence_length=policy_case["max_sequence_length"],
         )
         generated = pipeline("Hello", max_new_tokens=2)
         receipt = pipeline.last_memory_receipt
@@ -337,10 +690,210 @@ def _run_python(
         "api_call": {
             "bundle": str(bundle),
             "binary": str(binary),
-            "kv_cache_memory": kv_bytes,
-            "max_sequence_length": 512,
+            "kv_cache_memory": policy_case["python_memory"],
+            "max_sequence_length": policy_case["max_sequence_length"],
             "prompt": "Hello",
             "max_new_tokens": 2,
+        },
+    }
+
+
+def _run_helper_rejection(
+    *,
+    surface: str,
+    helper: Path,
+    bundle: Path,
+    case: dict[str, Any],
+    backend_dirs: list[Path],
+    model_plugin_dirs: list[Path],
+    hf_python: str | None,
+    output_dir: Path,
+) -> dict[str, Any]:
+    command = [
+        str(helper),
+        "--surface",
+        surface,
+        "--bundle",
+        str(bundle),
+        "--policy",
+        str(case["helper_policy"]),
+        "--max-sequence-length",
+        str(case["max_sequence_length"]),
+    ]
+    if case["helper_bytes"] is not None:
+        command.extend(["--kv-cache-bytes", str(case["helper_bytes"])])
+    if case["helper_fraction"] is not None:
+        command.extend(["--kv-cache-fraction", str(case["helper_fraction"])])
+    if hf_python:
+        command.extend(["--hf-python", hf_python])
+    for directory in backend_dirs:
+        command.extend(["--backend-dir", str(directory)])
+    for directory in model_plugin_dirs:
+        command.extend(["--model-plugin-dir", str(directory)])
+    completed = subprocess.run(
+        command,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    payload = _parse_final_json(completed.stdout)
+    label = str(case["name"])
+    (output_dir / f"{label}.{surface}.stdout.log").write_text(
+        completed.stdout, encoding="utf-8"
+    )
+    (output_dir / f"{label}.{surface}.stderr.log").write_text(
+        completed.stderr, encoding="utf-8"
+    )
+    message = str(payload.get("message", ""))
+    rejected = completed.returncode != 0 and payload.get("status") == "error"
+    normalized_error = _normalized_rejection_error(
+        surface=surface,
+        message=message,
+        case=case,
+    )
+    return {
+        "surface": surface,
+        "status": "rejected" if rejected else "accepted",
+        "normalized_error": normalized_error,
+        "message": message,
+        "returncode": completed.returncode,
+        "runtime_memory_receipt_present": (
+            payload.get("runtime_memory_receipt") is not None
+        ),
+        "request_started": payload.get("request_started") is not False,
+        "attention_launch_observed": payload.get("attention_launch_observed")
+        is not False,
+        "command": command,
+    }
+
+
+def _run_cli_rejection(
+    *,
+    binary: Path,
+    bundle: Path,
+    case: dict[str, Any],
+    backend_dirs: list[Path],
+    model_plugin_dirs: list[Path],
+    hf_python: str | None,
+    output_dir: Path,
+) -> dict[str, Any]:
+    command = [
+        str(binary),
+        "run",
+        str(bundle),
+        "--prompt",
+        "Hello",
+        "--max-new-tokens",
+        "2",
+        "--greedy",
+        "--max-sequence-length",
+        str(case["max_sequence_length"]),
+    ]
+    for value in case["cli_memory_values"]:
+        command.extend(["--kv-cache-memory", str(value)])
+    if hf_python:
+        command.extend(["--hf-python", hf_python])
+    for directory in backend_dirs:
+        command.extend(["--backend-dir", str(directory)])
+    for directory in model_plugin_dirs:
+        command.extend(["--model-plugin-dir", str(directory)])
+    completed = subprocess.run(
+        command,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    label = str(case["name"])
+    (output_dir / f"{label}.cli.stdout.log").write_text(
+        completed.stdout, encoding="utf-8"
+    )
+    (output_dir / f"{label}.cli.stderr.log").write_text(
+        completed.stderr, encoding="utf-8"
+    )
+    normalized_error = _normalized_rejection_error(
+        surface="cli",
+        message=completed.stderr,
+        case=case,
+    )
+    receipt = _memory_receipt_from_stderr(completed.stderr)
+    pre_request_rejection_proven = bool(
+        completed.returncode != 0
+        and normalized_error is not None
+        and receipt is None
+        and not completed.stdout.strip()
+    )
+    request_started = not pre_request_rejection_proven
+    return {
+        "surface": "cli",
+        "status": "rejected" if completed.returncode != 0 else "accepted",
+        "normalized_error": normalized_error,
+        "message": completed.stderr.strip(),
+        "returncode": completed.returncode,
+        "runtime_memory_receipt_present": receipt is not None,
+        "request_started": request_started,
+        "attention_launch_observed": request_started,
+        "command": command,
+    }
+
+
+def _run_python_rejection(
+    *,
+    binary: Path,
+    bundle: Path,
+    case: dict[str, Any],
+    model_plugin_dirs: list[Path],
+    hf_python: str | None,
+) -> dict[str, Any]:
+    old_plugin_path = os.environ.get("TRTMC_MODEL_PLUGIN_DIR")
+    pipeline: Pipeline | None = None
+    message = ""
+    rejected = False
+    try:
+        if model_plugin_dirs:
+            os.environ["TRTMC_MODEL_PLUGIN_DIR"] = os.pathsep.join(
+                str(path) for path in model_plugin_dirs
+            )
+        try:
+            pipeline = Pipeline(
+                str(bundle),
+                binary=str(binary),
+                hf_python=hf_python,
+                kv_cache_memory=case["python_memory"],
+                max_sequence_length=case["max_sequence_length"],
+            )
+            pipeline("Hello", max_new_tokens=2)
+        except Exception as error:
+            message = str(error)
+            rejected = True
+    finally:
+        if old_plugin_path is None:
+            os.environ.pop("TRTMC_MODEL_PLUGIN_DIR", None)
+        else:
+            os.environ["TRTMC_MODEL_PLUGIN_DIR"] = old_plugin_path
+    normalized_error = _normalized_rejection_error(
+        surface="python",
+        message=message,
+        case=case,
+    )
+    receipt = pipeline.last_memory_receipt if pipeline is not None else None
+    pre_request_rejection_proven = bool(
+        rejected and normalized_error is not None and receipt is None
+    )
+    request_started = not pre_request_rejection_proven
+    return {
+        "surface": "python",
+        "status": "rejected" if rejected else "accepted",
+        "normalized_error": normalized_error,
+        "message": message,
+        "returncode": 1 if rejected else 0,
+        "runtime_memory_receipt_present": receipt is not None,
+        "request_started": request_started,
+        "attention_launch_observed": request_started,
+        "api_call": {
+            "kv_cache_memory": case["python_memory"],
+            "max_sequence_length": case["max_sequence_length"],
         },
     }
 
@@ -352,9 +905,7 @@ def main() -> int:
     parser.add_argument("--helper", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--backend-dir", type=Path, action="append", default=[])
-    parser.add_argument(
-        "--model-plugin-dir", type=Path, action="append", default=[]
-    )
+    parser.add_argument("--model-plugin-dir", type=Path, action="append", default=[])
     parser.add_argument("--hf-python")
     args = parser.parse_args()
 
@@ -365,9 +916,7 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     source_state_pre = _source_state_snapshot(output_dir, label="pre")
     backend_dirs = [path.resolve() for path in args.backend_dir]
-    model_plugin_dirs = [
-        path.resolve() for path in args.model_plugin_dir
-    ]
+    model_plugin_dirs = [path.resolve() for path in args.model_plugin_dir]
 
     header = boundary._read_bundle_header(bundle)
     spec = boundary._resolve_spec(header)
@@ -375,47 +924,130 @@ def main() -> int:
     kv_bytes = 512 * bytes_per_token
     bundle_before = _bundle_identity(bundle)
 
-    surfaces = [
-        _run_cli(
-            binary=binary,
-            bundle=bundle,
-            kv_bytes=kv_bytes,
-            backend_dirs=backend_dirs,
-            model_plugin_dirs=model_plugin_dirs,
-            hf_python=args.hf_python,
-            output_dir=output_dir,
-        ),
-        _run_helper(
-            surface="cpp",
-            helper=helper,
-            bundle=bundle,
-            kv_bytes=kv_bytes,
-            backend_dirs=backend_dirs,
-            model_plugin_dirs=model_plugin_dirs,
-            hf_python=args.hf_python,
-            output_dir=output_dir,
-        ),
-        _run_helper(
-            surface="cabi",
-            helper=helper,
-            bundle=bundle,
-            kv_bytes=kv_bytes,
-            backend_dirs=backend_dirs,
-            model_plugin_dirs=model_plugin_dirs,
-            hf_python=args.hf_python,
-            output_dir=output_dir,
-        ),
-        _run_python(
-            binary=binary,
-            bundle=bundle,
-            kv_bytes=kv_bytes,
-            model_plugin_dirs=model_plugin_dirs,
-            hf_python=args.hf_python,
-        ),
-    ]
-    comparisons, surfaces_passed = compare_surface_receipts(surfaces)
+    policy_matrix: dict[str, Any] = {}
+    surfaces_passed = True
+    for policy_case in positive_policy_cases(kv_bytes):
+        case_surfaces = [
+            _run_cli(
+                binary=binary,
+                bundle=bundle,
+                policy_case=policy_case,
+                backend_dirs=backend_dirs,
+                model_plugin_dirs=model_plugin_dirs,
+                hf_python=args.hf_python,
+                output_dir=output_dir,
+            ),
+            _run_helper(
+                surface="cpp",
+                helper=helper,
+                bundle=bundle,
+                policy_case=policy_case,
+                backend_dirs=backend_dirs,
+                model_plugin_dirs=model_plugin_dirs,
+                hf_python=args.hf_python,
+                output_dir=output_dir,
+            ),
+            _run_helper(
+                surface="cabi",
+                helper=helper,
+                bundle=bundle,
+                policy_case=policy_case,
+                backend_dirs=backend_dirs,
+                model_plugin_dirs=model_plugin_dirs,
+                hf_python=args.hf_python,
+                output_dir=output_dir,
+            ),
+            _run_python(
+                binary=binary,
+                bundle=bundle,
+                policy_case=policy_case,
+                model_plugin_dirs=model_plugin_dirs,
+                hf_python=args.hf_python,
+            ),
+        ]
+        comparisons, case_passed = compare_surface_receipts(
+            case_surfaces,
+            expected_capacity=int(policy_case["max_sequence_length"]),
+            expected_policy=str(policy_case["expected_policy"]),
+            expected_fraction=float(policy_case["expected_fraction"]),
+            expected_requested_bytes=int(
+                policy_case["expected_requested_bytes"]
+            ),
+        )
+        policy_matrix[str(policy_case["name"])] = {
+            "policy": policy_case,
+            "surfaces": case_surfaces,
+            "comparisons": comparisons,
+            "passed": case_passed,
+        }
+        surfaces_passed = surfaces_passed and case_passed
+
+    rejection_results: dict[str, list[dict[str, Any]]] = {}
+    rejection_cases = negative_policy_cases(
+        model_context_limit=spec.context_limit,
+        kv_bytes=kv_bytes,
+    )
+    for case in rejection_cases:
+        rejection_results[str(case["name"])] = [
+            _run_cli_rejection(
+                binary=binary,
+                bundle=bundle,
+                case=case,
+                backend_dirs=backend_dirs,
+                model_plugin_dirs=model_plugin_dirs,
+                hf_python=args.hf_python,
+                output_dir=output_dir,
+            ),
+            _run_helper_rejection(
+                surface="cpp",
+                helper=helper,
+                bundle=bundle,
+                case=case,
+                backend_dirs=backend_dirs,
+                model_plugin_dirs=model_plugin_dirs,
+                hf_python=args.hf_python,
+                output_dir=output_dir,
+            ),
+            _run_helper_rejection(
+                surface="cabi",
+                helper=helper,
+                bundle=bundle,
+                case=case,
+                backend_dirs=backend_dirs,
+                model_plugin_dirs=model_plugin_dirs,
+                hf_python=args.hf_python,
+                output_dir=output_dir,
+            ),
+            _run_python_rejection(
+                binary=binary,
+                bundle=bundle,
+                case=case,
+                model_plugin_dirs=model_plugin_dirs,
+                hf_python=args.hf_python,
+            ),
+        ]
+    rejection_validations, rejection_surfaces_passed = (
+        validate_rejection_matrix(rejection_results)
+    )
+    rejection_matrix = {
+        str(case["name"]): {
+            "policy": case,
+            "surfaces": rejection_results[str(case["name"])],
+            "validation": rejection_validations[str(case["name"])],
+            "passed": rejection_validations[str(case["name"])]["passed"],
+        }
+        for case in rejection_cases
+    }
+
     bundle_after = _bundle_identity(bundle)
     bundle_unchanged = bundle_before == bundle_after
+    gate = qualification_gate(
+        policy_matrix=policy_matrix,
+        positive_surfaces_passed=surfaces_passed,
+        rejection_matrix=rejection_matrix,
+        negative_surfaces_passed=rejection_surfaces_passed,
+        bundle_unchanged=bundle_unchanged,
+    )
     report = {
         "schema_version": 1,
         "gate": "UX-05",
@@ -425,23 +1057,17 @@ def main() -> int:
         "environment": {
             "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
         },
-        "policy": {
-            "kind": "bytes",
-            "kv_cache_bytes": kv_bytes,
-            "max_sequence_length": 512,
-        },
+        "policy_matrix": policy_matrix,
+        "rejection_matrix": rejection_matrix,
         "request": {"prompt": "Hello", "max_new_tokens": 2},
         "c_abi_scope_note": (
             "The current versioned C ABI returns IPipeline*; the qualification "
             "uses that documented handle for the positive text request."
         ),
         "receipt_equivalence_fields": list(RECEIPT_EQUIVALENCE_FIELDS),
-        "surfaces": surfaces,
-        "comparisons": comparisons,
+        **gate,
         "bundle_before": bundle_before,
         "bundle_after": bundle_after,
-        "bundle_unchanged": bundle_unchanged,
-        "passed": bool(surfaces_passed and bundle_unchanged),
     }
     source_state_post = _source_state_snapshot(output_dir, label="post")
     apply_source_state_gate(report, source_state_pre, source_state_post)
@@ -456,7 +1082,8 @@ def main() -> int:
                 "passed": report["passed"],
                 "report": str(report_path),
                 "bundle_sha256": bundle_before["sha256"],
-                "surfaces": [surface["surface"] for surface in surfaces],
+                "policy_cases": sorted(policy_matrix),
+                "rejection_cases": sorted(rejection_matrix),
             },
             sort_keys=True,
         )

@@ -1,6 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
- * All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -53,15 +52,15 @@ class CudnnAttentionExecutor {
 
     bool execute_history(const void* query, const void* history_k, const void* history_v,
                          void* history_context, void* history_log_sum_exp,
-                         const int32_t* sequence_length_q,
-                         const int32_t* sequence_length_history, void* plan_workspace,
-                         std::size_t plan_workspace_capacity, cudaStream_t stream) noexcept;
+                         const int32_t* sequence_length_q, const int32_t* sequence_length_history,
+                         void* plan_workspace, std::size_t plan_workspace_capacity,
+                         cudaStream_t stream) noexcept;
 
     bool execute_current(const void* query, const void* current_k, const void* current_v,
                          void* current_context, void* current_log_sum_exp,
-                         const int32_t* sequence_length_q,
-                         const int32_t* sequence_length_current, void* plan_workspace,
-                         std::size_t plan_workspace_capacity, cudaStream_t stream) noexcept;
+                         const int32_t* sequence_length_q, const int32_t* sequence_length_current,
+                         void* plan_workspace, std::size_t plan_workspace_capacity,
+                         cudaStream_t stream) noexcept;
 
     // Execute two normalized SDPA segments. The history graph is noncausal
     // over token-major [T,Hkv*D] cache rows; the current graph is lower-right

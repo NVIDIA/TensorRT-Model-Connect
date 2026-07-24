@@ -95,7 +95,11 @@ find_library(TRTMC_CUDART_LIBRARY
   PATH_SUFFIXES "" lib lib64
 )
 
-if(TRTMC_CUDART_LIBRARY)
+set(_trtmc_cudart_real_path "")
+set(_trtmc_cuda_runtime_library_dir "")
+if(TRTMC_CUDART_LIBRARY AND
+   EXISTS "${TRTMC_CUDART_LIBRARY}" AND
+   NOT IS_DIRECTORY "${TRTMC_CUDART_LIBRARY}")
   # Native runtime-memory execution must not inherit a same-SONAME NVRTC from
   # a later Torch dependency. Resolve NVRTC from the exact CUDA distribution
   # that supplied CUDART, then make the core carry a real DT_NEEDED edge to it
@@ -104,6 +108,10 @@ if(TRTMC_CUDART_LIBRARY)
     _trtmc_cudart_real_path "${TRTMC_CUDART_LIBRARY}" REALPATH)
   get_filename_component(
     _trtmc_cuda_runtime_library_dir "${_trtmc_cudart_real_path}" DIRECTORY)
+  # Cache the canonical path so a symlinked CUDA_HOME cannot change the
+  # dependency after configure without forcing a fresh coherence check.
+  set(TRTMC_CUDART_LIBRARY "${_trtmc_cudart_real_path}" CACHE FILEPATH
+    "Canonical CUDA runtime library used by TensorRT Model Connect" FORCE)
   find_library(TRTMC_COHERENT_NVRTC_LIBRARY
     NAMES nvrtc libnvrtc.so.13 libnvrtc.so
     PATHS "${_trtmc_cuda_runtime_library_dir}"
@@ -144,19 +152,62 @@ if(NOT TRTMC_TRT_BACKEND_ABI AND TRTMC_TRT_INCLUDE_DIR)
   endif()
 endif()
 
-if(NOT TRTMC_CUDA_INCLUDE_DIR OR NOT TRTMC_CUDART_LIBRARY OR
-   NOT TRTMC_COHERENT_NVRTC_LIBRARY)
+set(_trtmc_can_build_trt_backend FALSE)
+if(TRTMC_ENABLE_TRT AND TRTMC_TRT_INCLUDE_DIR AND TRTMC_TRT_LIBRARY)
+  set(_trtmc_can_build_trt_backend TRUE)
+endif()
+
+# A coherent, eagerly loaded NVRTC is a native TensorRT runtime requirement,
+# not a requirement for the TensorRT-free core configuration.  Keep core-only
+# and TRT-disabled builds working with the CUDA runtime alone; fail closed
+# before creating any TensorRT backend/plugin when its matching NVRTC is not
+# available beside CUDART.
+set(_trtmc_requires_coherent_nvrtc FALSE)
+if(_trtmc_can_build_trt_backend)
+  set(_trtmc_requires_coherent_nvrtc TRUE)
+endif()
+
+set(_trtmc_coherent_nvrtc_error "")
+if(_trtmc_requires_coherent_nvrtc)
+  if(NOT TRTMC_COHERENT_NVRTC_LIBRARY)
+    set(_trtmc_coherent_nvrtc_error
+      "TensorRT is enabled but NVRTC was not found beside canonical CUDART.")
+  elseif(NOT EXISTS "${TRTMC_COHERENT_NVRTC_LIBRARY}" OR
+         IS_DIRECTORY "${TRTMC_COHERENT_NVRTC_LIBRARY}")
+    set(_trtmc_coherent_nvrtc_error
+      "TensorRT is enabled but the selected NVRTC path does not name an existing library.")
+  else()
+    get_filename_component(
+      _trtmc_nvrtc_real_path "${TRTMC_COHERENT_NVRTC_LIBRARY}" REALPATH)
+    get_filename_component(
+      _trtmc_nvrtc_real_dir "${_trtmc_nvrtc_real_path}" DIRECTORY)
+    if(NOT _trtmc_nvrtc_real_dir STREQUAL
+       _trtmc_cuda_runtime_library_dir)
+      set(_trtmc_coherent_nvrtc_error
+        "TensorRT is enabled but canonical CUDART and NVRTC are from different library directories.")
+    else()
+      # A caller-provided cache entry is accepted only after the canonical
+      # parent check above. Downstream targets consume the canonical DSO path.
+      set(TRTMC_COHERENT_NVRTC_LIBRARY "${_trtmc_nvrtc_real_path}"
+        CACHE FILEPATH
+        "Canonical NVRTC library paired with TRTMC_CUDART_LIBRARY" FORCE)
+    endif()
+  endif()
+endif()
+
+if(NOT TRTMC_CUDA_INCLUDE_DIR OR
+   NOT TRTMC_CUDART_LIBRARY OR
+   NOT EXISTS "${TRTMC_CUDART_LIBRARY}" OR
+   IS_DIRECTORY "${TRTMC_CUDART_LIBRARY}" OR
+   _trtmc_coherent_nvrtc_error)
   message(FATAL_ERROR
     "Coherent CUDA dev/runtime dependencies are required but not found.\n"
     "  TRTMC_CUDA_INCLUDE_DIR=${TRTMC_CUDA_INCLUDE_DIR}\n"
     "  TRTMC_CUDART_LIBRARY=${TRTMC_CUDART_LIBRARY}\n"
     "  TRTMC_COHERENT_NVRTC_LIBRARY=${TRTMC_COHERENT_NVRTC_LIBRARY}\n"
-    "CUDART and NVRTC must come from the same canonical library directory.")
-endif()
-
-set(_trtmc_can_build_trt_backend FALSE)
-if(TRTMC_ENABLE_TRT AND TRTMC_TRT_INCLUDE_DIR AND TRTMC_TRT_LIBRARY)
-  set(_trtmc_can_build_trt_backend TRUE)
+    "  coherence_error=${_trtmc_coherent_nvrtc_error}\n"
+    "Enabled TensorRT components require CUDART and NVRTC from the same "
+    "canonical library directory.")
 endif()
 
 # --- nlohmann/json for BPE tokenizer JSON parsing ---
@@ -279,8 +330,12 @@ find_library(TRTMC_CUBLAS_LIBRARY NAMES cublas libcublas.so
   PATHS ${_trtmc_default_search_paths} PATH_SUFFIXES "" lib lib64)
 target_link_libraries(trtmc_core PRIVATE
   ${TRTMC_CUDART_LIBRARY}
-  ${TRTMC_COHERENT_NVRTC_LIBRARY}
   $<$<BOOL:${TRTMC_CUBLAS_LIBRARY}>:${TRTMC_CUBLAS_LIBRARY}>)
+if(_trtmc_requires_coherent_nvrtc)
+  # Load the exact CUDA-distribution NVRTC before any optional Torch DSO can
+  # introduce another library with the same SONAME.
+  target_link_libraries(trtmc_core PRIVATE ${TRTMC_COHERENT_NVRTC_LIBRARY})
+endif()
 set_property(TARGET trtmc_core APPEND PROPERTY
   BUILD_RPATH "${_trtmc_cuda_runtime_library_dir}")
 set_property(TARGET trtmc_core APPEND PROPERTY
@@ -288,7 +343,11 @@ set_property(TARGET trtmc_core APPEND PROPERTY
 message(STATUS "Core runtime: TensorRT-free (backend DSOs are dlopen-loaded)")
 message(STATUS "  CUDA include: ${TRTMC_CUDA_INCLUDE_DIR}")
 message(STATUS "  CUDART lib : ${TRTMC_CUDART_LIBRARY}")
-message(STATUS "  NVRTC lib  : ${TRTMC_COHERENT_NVRTC_LIBRARY}")
+if(_trtmc_requires_coherent_nvrtc)
+  message(STATUS "  NVRTC lib  : ${TRTMC_COHERENT_NVRTC_LIBRARY}")
+else()
+  message(STATUS "  NVRTC lib  : not required for this core-only configuration")
+endif()
 if(_trtmc_can_build_trt_backend)
   message(STATUS "  Standard TRT backend SDK detected: ${TRTMC_TRT_LIBRARY}")
 else()
@@ -576,10 +635,12 @@ if(TRTMC_BUILD_BACKEND_TRT AND _trtmc_can_build_trt_backend)
   )
   if(TRTMC_TRT_BACKEND_ABI)
     add_custom_command(TARGET trtmc_backend_trt POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_FILE:trtmc_backend_trt>
+      COMMAND ${CMAKE_COMMAND} -E rm -f
         "${CMAKE_BINARY_DIR}/libtrtmc_backend_trt_${TRTMC_TRT_BACKEND_ABI}.so"
-      COMMENT "Writing TensorRT ABI backend alias libtrtmc_backend_trt_${TRTMC_TRT_BACKEND_ABI}.so"
+      COMMAND ${CMAKE_COMMAND} -E create_symlink
+        "$<TARGET_FILE_NAME:trtmc_backend_trt>"
+        "${CMAKE_BINARY_DIR}/libtrtmc_backend_trt_${TRTMC_TRT_BACKEND_ABI}.so"
+      COMMENT "Linking TensorRT ABI backend alias libtrtmc_backend_trt_${TRTMC_TRT_BACKEND_ABI}.so"
     )
   endif()
   # Also add nlohmann_json include for trt_module_impl (uses DType from tensor.h)
@@ -720,6 +781,15 @@ endif()
 if(TARGET trtmc_model_llama)
   add_dependencies(trtmc_dynamic_memory_qualify trtmc_model_llama)
 endif()
+# Keep the fixed nine-command qualification manifest unchanged while still
+# forcing the release-only CUDA-13.0 NVRTC regression probe to be rebuilt from
+# the same clean source snapshot as the main qualifier.  The manifest hashes
+# the resulting executable independently.
+if(TARGET trtmc_nvrtc_optional_output_regression)
+  add_dependencies(
+    trtmc_dynamic_memory_qualify
+    trtmc_nvrtc_optional_output_regression)
+endif()
 
 # Qualification-only positive C++/C-ABI loader for UX-05.  It is never
 # installed and does not add or widen a public ABI.
@@ -821,6 +891,7 @@ add_library(trtmc_test_abi_backend SHARED EXCLUDE_FROM_ALL
 )
 target_include_directories(trtmc_test_abi_backend PRIVATE
   ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src
 )
 target_include_directories(trtmc_test_abi_backend SYSTEM PRIVATE
   ${TRTMC_CUDA_INCLUDE_DIR}
@@ -829,6 +900,125 @@ target_link_libraries(trtmc_test_abi_backend PRIVATE ${TRTMC_CUDART_LIBRARY})
 set_target_properties(trtmc_test_abi_backend PROPERTIES
   OUTPUT_NAME trtmc_backend_abi_fixture
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/abi/backend"
+)
+
+add_library(trtmc_test_stale_v1_backend SHARED EXCLUDE_FROM_ALL
+  tests/cpp/abi/stale_v1_backend.cpp
+)
+set_target_properties(trtmc_test_stale_v1_backend PROPERTIES
+  OUTPUT_NAME trtmc_backend_stale_v1_fixture
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/abi/stale-v1-backend"
+)
+
+add_library(trtmc_test_stale_fingerprint_backend SHARED EXCLUDE_FROM_ALL
+  tests/cpp/abi/stale_fingerprint_backend.cpp
+)
+target_include_directories(trtmc_test_stale_fingerprint_backend PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src
+)
+target_include_directories(trtmc_test_stale_fingerprint_backend SYSTEM PRIVATE
+  ${TRTMC_CUDA_INCLUDE_DIR}
+)
+target_link_libraries(trtmc_test_stale_fingerprint_backend PRIVATE
+  ${TRTMC_CUDART_LIBRARY}
+)
+set_target_properties(trtmc_test_stale_fingerprint_backend PROPERTIES
+  OUTPUT_NAME trtmc_backend_stale_fingerprint_fixture
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/abi/stale-fingerprint-backend"
+)
+
+add_library(trtmc_test_stale_model_plugin SHARED EXCLUDE_FROM_ALL
+  tests/cpp/abi/stale_model_plugin.cpp
+)
+target_include_directories(trtmc_test_stale_model_plugin PRIVATE
+  ${PROJECT_SOURCE_DIR}/tests/cpp/abi
+)
+target_link_libraries(trtmc_test_stale_model_plugin PRIVATE trtmc_core)
+set_target_properties(trtmc_test_stale_model_plugin PROPERTIES
+  OUTPUT_NAME trtmc_model_qwen
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/abi/stale-model-plugin"
+)
+
+add_library(trtmc_test_paired_model_plugin SHARED EXCLUDE_FROM_ALL
+  tests/cpp/abi/paired_model_plugin.cpp
+)
+target_include_directories(trtmc_test_paired_model_plugin PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src
+)
+target_include_directories(trtmc_test_paired_model_plugin SYSTEM PRIVATE
+  ${TRTMC_CUDA_INCLUDE_DIR}
+)
+target_link_libraries(trtmc_test_paired_model_plugin PRIVATE
+  trtmc_core
+  ${TRTMC_CUDART_LIBRARY}
+)
+set_target_properties(trtmc_test_paired_model_plugin PROPERTIES
+  OUTPUT_NAME trtmc_model_qwen
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/abi/paired-model-plugin"
+)
+
+function(trtmc_add_runtime_memory_model_plugin_fixture TARGET_NAME MODE OUTPUT_DIR)
+  add_library(${TARGET_NAME} SHARED EXCLUDE_FROM_ALL
+    tests/cpp/abi/runtime_memory_model_plugin.cpp
+  )
+  target_include_directories(${TARGET_NAME} PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/src
+  )
+  target_include_directories(${TARGET_NAME} SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_compile_definitions(${TARGET_NAME} PRIVATE
+    TRTMC_TEST_RUNTIME_PLUGIN_MODE=${MODE}
+  )
+  target_link_libraries(${TARGET_NAME} PRIVATE
+    trtmc_core
+    ${TRTMC_CUDART_LIBRARY}
+  )
+  set_target_properties(${TARGET_NAME} PROPERTIES
+    OUTPUT_NAME trtmc_model_qwen
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/abi/${OUTPUT_DIR}"
+  )
+endfunction()
+
+trtmc_add_runtime_memory_model_plugin_fixture(
+  trtmc_test_runtime_memory_legacy_interface_plugin
+  1
+  runtime-memory-legacy-interface
+)
+trtmc_add_runtime_memory_model_plugin_fixture(
+  trtmc_test_runtime_memory_wrong_version_plugin
+  2
+  runtime-memory-wrong-version
+)
+trtmc_add_runtime_memory_model_plugin_fixture(
+  trtmc_test_runtime_memory_capturing_plugin
+  3
+  runtime-memory-capturing
+)
+
+add_library(trtmc_test_stale_model_fingerprint SHARED EXCLUDE_FROM_ALL
+  tests/cpp/abi/paired_model_plugin.cpp
+)
+target_include_directories(trtmc_test_stale_model_fingerprint PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src
+)
+target_include_directories(trtmc_test_stale_model_fingerprint SYSTEM PRIVATE
+  ${TRTMC_CUDA_INCLUDE_DIR}
+)
+target_compile_definitions(trtmc_test_stale_model_fingerprint PRIVATE
+  TRTMC_TEST_MODEL_PLUGIN_BAD_FINGERPRINT=1
+)
+target_link_libraries(trtmc_test_stale_model_fingerprint PRIVATE
+  trtmc_core
+  ${TRTMC_CUDART_LIBRARY}
+)
+set_target_properties(trtmc_test_stale_model_fingerprint PROPERTIES
+  OUTPUT_NAME trtmc_model_qwen
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/abi/stale-model-fingerprint"
 )
 
 add_library(trtmc_test_abi_current_model_plugin SHARED EXCLUDE_FROM_ALL
@@ -968,7 +1158,30 @@ trtmc_add_test(test_bundle_view)
 trtmc_add_test(test_pipeline_registry)
 trtmc_add_test(test_model_plugin_loader MODEL_OWNED)
 add_dependencies(test_model_plugin_loader trtmc_model_plugins)
-trtmc_add_test(test_backend_loader)
+trtmc_add_test(test_model_plugin_abi DYNAMIC_MEMORY)
+target_link_libraries(test_model_plugin_abi PRIVATE ${CMAKE_DL_LIBS})
+add_dependencies(test_model_plugin_abi
+  trtmc_test_stale_model_plugin
+  trtmc_test_paired_model_plugin
+  trtmc_test_stale_model_fingerprint
+)
+target_compile_definitions(test_model_plugin_abi PRIVATE
+  TRTMC_TEST_STALE_MODEL_PLUGIN_DSO="$<TARGET_FILE:trtmc_test_stale_model_plugin>"
+  TRTMC_TEST_PAIRED_MODEL_PLUGIN_DSO="$<TARGET_FILE:trtmc_test_paired_model_plugin>"
+  TRTMC_TEST_STALE_MODEL_FINGERPRINT_DSO="$<TARGET_FILE:trtmc_test_stale_model_fingerprint>"
+)
+trtmc_add_test(test_backend_loader DYNAMIC_MEMORY)
+target_link_libraries(test_backend_loader PRIVATE ${CMAKE_DL_LIBS})
+add_dependencies(test_backend_loader
+  trtmc_test_abi_backend
+  trtmc_test_stale_v1_backend
+  trtmc_test_stale_fingerprint_backend
+)
+target_compile_definitions(test_backend_loader PRIVATE
+  TRTMC_TEST_ABI_BACKEND_DSO="$<TARGET_FILE:trtmc_test_abi_backend>"
+  TRTMC_TEST_STALE_V1_BACKEND_DSO="$<TARGET_FILE:trtmc_test_stale_v1_backend>"
+  TRTMC_TEST_STALE_FINGERPRINT_BACKEND_DSO="$<TARGET_FILE:trtmc_test_stale_fingerprint_backend>"
+)
 trtmc_add_test(test_trt_version)
 
 trtmc_add_test(test_optimized_runtime_host DYNAMIC_MEMORY)
@@ -1003,6 +1216,21 @@ trtmc_add_test(test_c_abi_entry                NO_SRC_INCLUDE DYNAMIC_MEMORY)
 # This regression drives the qwen runtime strategy and therefore requires a
 # real model plugin even though its source lives beside the shared C ABI tests.
 trtmc_add_test(test_c_abi_runtime_regression   NO_SRC_INCLUDE MODEL_OWNED DYNAMIC_MEMORY)
+target_sources(test_c_abi_runtime_regression PRIVATE src/cli/args.cpp)
+target_include_directories(test_c_abi_runtime_regression PRIVATE
+  ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test_c_abi_runtime_regression PRIVATE ${CMAKE_DL_LIBS})
+add_dependencies(test_c_abi_runtime_regression
+  trtmc_test_runtime_memory_legacy_interface_plugin
+  trtmc_test_runtime_memory_wrong_version_plugin
+  trtmc_test_runtime_memory_capturing_plugin
+)
+target_compile_definitions(test_c_abi_runtime_regression PRIVATE
+  TRTMC_TEST_RUNTIME_LEGACY_INTERFACE_DSO="$<TARGET_FILE:trtmc_test_runtime_memory_legacy_interface_plugin>"
+  TRTMC_TEST_RUNTIME_WRONG_VERSION_DSO="$<TARGET_FILE:trtmc_test_runtime_memory_wrong_version_plugin>"
+  TRTMC_TEST_RUNTIME_CAPTURING_DSO="$<TARGET_FILE:trtmc_test_runtime_memory_capturing_plugin>"
+)
 trtmc_add_test(test_cabi_batch                 NO_SRC_INCLUDE)
 
 # Mixed-version ABI/DSO compatibility.  These are deliberately separate
@@ -1176,7 +1404,7 @@ if(TARGET trtmc_trt_plugins)
                    trtmc_backend_trt)
   target_include_directories(
     test_runtime_kv_plugin_backend_deserialization
-    PRIVATE ${PROJECT_SOURCE_DIR}/include)
+    PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
   target_include_directories(
     test_runtime_kv_plugin_backend_deserialization SYSTEM PRIVATE
     ${TRTMC_TRT_INCLUDE_DIR} ${TRTMC_CUDA_INCLUDE_DIR})

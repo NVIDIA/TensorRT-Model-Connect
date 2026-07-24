@@ -268,8 +268,9 @@ IRuntimeMemoryPipelinePluginV1& require_runtime_memory_plugin(IPipelinePlugin& p
 }
 
 IPipelinePlugin* lookup_plugin_or_throw(const std::string& strategy,
-                                        const std::vector<std::string>& model_plugin_paths) {
-    load_model_plugin_for_strategy(strategy, model_plugin_paths);
+                                        const std::vector<std::string>& model_plugin_paths,
+                                        ModelPluginAbiPolicy abi_policy) {
+    load_model_plugin_for_strategy_with_abi_policy(strategy, model_plugin_paths, abi_policy);
     auto* plugin = PipelineRegistry::instance().lookup(strategy);
     if (plugin != nullptr)
         return plugin;
@@ -379,20 +380,17 @@ IBackend* load_backend_for_bundle(const BundleFile& bundle, const std::string& c
                               "selected backend TensorRT runtime");
 
     if (bundle.info.runtime_memory.present) {
-        const auto actual = parse_runtime_memory_runtime_stack_json(
-            metadata.runtime_memory_stack_json);
-        validate_runtime_memory_runtime_stack(
-            bundle.info.runtime_memory.qualified_runtime_stack, actual);
-        std::cerr << "[trtmc.runtime_stack] schema=1 sm=sm"
-                  << actual.compute_capability_major
-                  << actual.compute_capability_minor
-                  << " tensorrt=" << actual.trt_runtime_version
+        const auto actual =
+            parse_runtime_memory_runtime_stack_json(metadata.runtime_memory_stack_json);
+        validate_runtime_memory_runtime_stack(bundle.info.runtime_memory.qualified_runtime_stack,
+                                              actual);
+        std::cerr << "[trtmc.runtime_stack] schema=1 sm=sm" << actual.compute_capability_major
+                  << actual.compute_capability_minor << " tensorrt=" << actual.trt_runtime_version
                   << " cuda_runtime=" << actual.cuda_runtime_version
                   << " cudnn_backend=" << actual.cudnn_backend_version
-                  << " cudnn_frontend_revision="
-                  << actual.cudnn_frontend_revision
-                  << " nvrtc=" << actual.nvrtc_version
-                  << " driver=" << actual.driver_version << std::endl;
+                  << " cudnn_frontend_revision=" << actual.cudnn_frontend_revision
+                  << " nvrtc=" << actual.nvrtc_version << " driver=" << actual.driver_version
+                  << std::endl;
     }
 
     if (required) {
@@ -448,7 +446,10 @@ std::unique_ptr<IPipeline> from_bundle_with_options(const std::string& bundle_pa
 
     std::string strategy = resolve_runtime_strategy(config_text);
 
-    auto* plugin = lookup_plugin_or_throw(strategy, options.model_plugin_search_paths);
+    auto* plugin = lookup_plugin_or_throw(strategy, options.model_plugin_search_paths,
+                                          header.runtime_memory.present
+                                              ? ModelPluginAbiPolicy::kRequireCurrent
+                                              : ModelPluginAbiPolicy::kAllowLegacyUnversioned);
     IRuntimeMemoryPipelinePluginV1* runtime_plugin = nullptr;
     RuntimeMemoryPluginOptionsV1 runtime_policy;
     if (header.runtime_memory.present) {
@@ -540,7 +541,8 @@ std::unique_ptr<PipelinePool> PipelineFactory::from_bundle_pool(const std::strin
         throw std::runtime_error("Failed to read bundle: " + bundle_path);
 
     std::string strategy = resolve_runtime_strategy(config_text);
-    auto* plugin = lookup_plugin_or_throw(strategy, options.model_plugin_search_paths);
+    auto* plugin = lookup_plugin_or_throw(strategy, options.model_plugin_search_paths,
+                                          ModelPluginAbiPolicy::kAllowLegacyUnversioned);
     std::string backend_name = extract_json_string(config_text, "engine_backend", "trt");
     IBackend* backend = load_backend_for_bundle(bundle, config_text, bundle_path, backend_name,
                                                 options.backend_search_paths);

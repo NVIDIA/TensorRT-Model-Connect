@@ -28,6 +28,7 @@ _RUNTIME_STACK_KEYS = {
     "driver",
 }
 _loaded_library: ctypes.CDLL | None = None
+_loaded_library_path: Path | None = None
 
 
 def enable_runtime_memory_features(
@@ -50,14 +51,12 @@ def enable_runtime_memory_features(
     )
     if feature is None:
         raise RuntimeError(
-            "qualified runtime-memory graph requires TensorRT "
-            f"PreviewFeature.{feature_name}"
+            f"qualified runtime-memory graph requires TensorRT PreviewFeature.{feature_name}"
         )
     builder_config.set_preview_feature(feature, True)
     if not builder_config.get_preview_feature(feature):
         raise RuntimeError(
-            "TensorRT refused to enable required runtime-memory "
-            f"preview feature {feature_name}"
+            f"TensorRT refused to enable required runtime-memory preview feature {feature_name}"
         )
     return feature
 
@@ -84,9 +83,7 @@ def _plugin_candidates() -> list[Path]:
     # explicit/package locations.
     try:
         repo_root = package_dir.parents[1]
-        candidates.extend(
-            sorted(repo_root.glob(f"build*/{_PLUGIN_DSO}"))
-        )
+        candidates.extend(sorted(repo_root.glob(f"build*/{_PLUGIN_DSO}")))
     except IndexError:
         pass
 
@@ -100,38 +97,68 @@ def _plugin_candidates() -> list[Path]:
     return unique
 
 
+def _select_runtime_kv_plugin() -> Path:
+    """Select one plugin DSO without guessing between source build trees."""
+
+    if "TRTMC_TRT_PLUGIN_LIBRARY" in os.environ:
+        override = os.environ["TRTMC_TRT_PLUGIN_LIBRARY"]
+        if not override:
+            raise RuntimeError(
+                "TRTMC_TRT_PLUGIN_LIBRARY was explicitly set but is empty"
+            )
+        candidate = Path(override).expanduser().resolve()
+        if not candidate.is_file():
+            raise RuntimeError(
+                f"TRTMC_TRT_PLUGIN_LIBRARY does not name an existing file: {candidate}"
+            )
+        return candidate
+
+    candidates = _plugin_candidates()
+    existing = [candidate for candidate in candidates if candidate.is_file()]
+    if not existing:
+        raise RuntimeError(
+            f"Unable to locate {_PLUGIN_DSO}; checked: "
+            + ", ".join(str(candidate) for candidate in candidates)
+        )
+    if len(existing) != 1:
+        raise RuntimeError(
+            "Multiple TensorRT runtime-KV plugin libraries are available; "
+            "selection would not be source-bound. Run the adjacent `trtmc "
+            "build` entrypoint or set TRTMC_TRT_PLUGIN_LIBRARY explicitly: "
+            + ", ".join(str(candidate) for candidate in existing)
+        )
+    return existing[0]
+
+
 def load_runtime_kv_plugins() -> ctypes.CDLL:
     """Load the common DSO globally and verify its ABI-v2 handshake."""
 
-    global _loaded_library
+    global _loaded_library, _loaded_library_path
     if _loaded_library is not None:
         return _loaded_library
 
-    attempted: list[str] = []
-    for candidate in _plugin_candidates():
-        attempted.append(str(candidate))
-        if not candidate.is_file():
-            continue
-        library = ctypes.CDLL(
-            str(candidate),
-            mode=ctypes.RTLD_GLOBAL,
-        )
-        abi = library.trtmc_runtime_kv_plugin_abi_version
-        abi.argtypes = []
-        abi.restype = ctypes.c_int32
-        actual = int(abi())
-        if actual != 2:
-            raise RuntimeError(
-                "TensorRT runtime-KV plugin ABI mismatch: "
-                f"expected 2, got {actual} from {candidate}"
-            )
-        _loaded_library = library
-        return library
-
-    raise RuntimeError(
-        f"Unable to locate {_PLUGIN_DSO}; checked: "
-        + ", ".join(attempted)
+    candidate = _select_runtime_kv_plugin()
+    library = ctypes.CDLL(
+        str(candidate),
+        mode=ctypes.RTLD_GLOBAL,
     )
+    abi = library.trtmc_runtime_kv_plugin_abi_version
+    abi.argtypes = []
+    abi.restype = ctypes.c_int32
+    actual = int(abi())
+    if actual != 2:
+        raise RuntimeError(
+            f"TensorRT runtime-KV plugin ABI mismatch: expected 2, got {actual} from {candidate}"
+        )
+    _loaded_library = library
+    _loaded_library_path = candidate
+    return library
+
+
+def loaded_runtime_kv_plugin_path() -> Path | None:
+    """Return the canonical DSO actually loaded by this process, if any."""
+
+    return _loaded_library_path
 
 
 def query_runtime_kv_plugin_stack() -> dict[str, str]:
@@ -147,16 +174,13 @@ def query_runtime_kv_plugin_stack() -> dict[str, str]:
         query = library.trtmc_runtime_kv_plugin_runtime_stack_json_v1
     except AttributeError as error:
         raise RuntimeError(
-            "TensorRT runtime-KV plugin does not export runtime-stack "
-            "introspection V1"
+            "TensorRT runtime-KV plugin does not export runtime-stack introspection V1"
         ) from error
     query.argtypes = []
     query.restype = ctypes.c_char_p
     raw = query()
     if raw is None:
-        raise RuntimeError(
-            "TensorRT runtime-KV plugin returned no runtime-stack evidence"
-        )
+        raise RuntimeError("TensorRT runtime-KV plugin returned no runtime-stack evidence")
     try:
         value = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -165,14 +189,10 @@ def query_runtime_kv_plugin_stack() -> dict[str, str]:
         ) from error
     if not isinstance(value, dict) or set(value) != _RUNTIME_STACK_KEYS:
         raise RuntimeError(
-            "TensorRT runtime-KV plugin returned an incompatible "
-            "runtime-stack schema"
+            "TensorRT runtime-KV plugin returned an incompatible runtime-stack schema"
         )
-    if any(not isinstance(value[key], str) or not value[key]
-           for key in _RUNTIME_STACK_KEYS):
-        raise RuntimeError(
-            "TensorRT runtime-KV plugin runtime-stack evidence is incomplete"
-        )
+    if any(not isinstance(value[key], str) or not value[key] for key in _RUNTIME_STACK_KEYS):
+        raise RuntimeError("TensorRT runtime-KV plugin runtime-stack evidence is incomplete")
     return {key: value[key] for key in _RUNTIME_STACK_KEYS}
 
 
@@ -183,13 +203,10 @@ def _require_runtime_kv_capabilities(
     """Fail closed when a qualified plugin DSO lacks a performance path."""
 
     try:
-        capabilities = (
-            library.trtmc_runtime_kv_plugin_capabilities
-        )
+        capabilities = library.trtmc_runtime_kv_plugin_capabilities
     except AttributeError as error:
         raise RuntimeError(
-            "TensorRT runtime-KV plugin does not export its "
-            "performance capabilities"
+            "TensorRT runtime-KV plugin does not export its performance capabilities"
         ) from error
     capabilities.argtypes = []
     capabilities.restype = ctypes.c_uint64
@@ -221,13 +238,9 @@ def create_native_contiguous_attention(
         _RUNTIME_KV_CAPABILITY_CUDNN_SDPA,
     )
     trt = trt_compat.get_trt()
-    creator = trt.get_plugin_registry().get_creator(
-        "NativeContiguousAttention", "2", ""
-    )
+    creator = trt.get_plugin_registry().get_creator("NativeContiguousAttention", "2", "")
     if creator is None:
-        raise RuntimeError(
-            "NativeContiguousAttention v2 creator was not registered"
-        )
+        raise RuntimeError("NativeContiguousAttention v2 creator was not registered")
 
     values = {
         "abi_version": 2,
@@ -236,10 +249,7 @@ def create_native_contiguous_attention(
         "head_dim": int(head_dim),
         "chunk_limit": int(chunk_limit),
     }
-    storage = {
-        name: np.asarray([value], dtype=np.int32)
-        for name, value in values.items()
-    }
+    storage = {name: np.asarray([value], dtype=np.int32) for name, value in values.items()}
     fields = [
         trt.PluginField(
             name,
@@ -254,13 +264,9 @@ def create_native_contiguous_attention(
         trt.TensorRTPhase.BUILD,
     )
     if plugin is None:
-        raise RuntimeError(
-            f"NativeContiguousAttention v2 creation failed for {layer_name}"
-        )
+        raise RuntimeError(f"NativeContiguousAttention v2 creation failed for {layer_name}")
     layer = network.add_plugin_v3(inputs, [], plugin)
     if layer is None:
-        raise RuntimeError(
-            f"TensorRT rejected NativeContiguousAttention for {layer_name}"
-        )
+        raise RuntimeError(f"TensorRT rejected NativeContiguousAttention for {layer_name}")
     layer.name = layer_name
     return layer.get_output(0)

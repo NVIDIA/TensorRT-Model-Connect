@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
-# All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Prove one dynamic-memory bundle is token/logit invariant across policies.
@@ -17,7 +16,6 @@ import argparse
 import hashlib
 import json
 import os
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,7 +32,58 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 @dataclass(frozen=True)
 class PolicyCase:
     name: str
-    arguments: tuple[str, ...]
+    kind: str
+    requested_value: int | float | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind == "auto":
+            if self.requested_value is not None:
+                raise ValueError("auto policy must not have a requested value")
+            return
+        if self.kind == "fraction":
+            if (
+                type(self.requested_value) is not float
+                or not 0.0 < self.requested_value <= 1.0
+            ):
+                raise ValueError("fraction policy requires a float in (0, 1]")
+            return
+        if self.kind in {"bytes", "max_sequence_length"}:
+            if (
+                type(self.requested_value) is not int
+                or self.requested_value <= 0
+            ):
+                raise ValueError(
+                    f"{self.kind} policy requires a positive integer"
+                )
+            return
+        raise ValueError(f"unknown runtime-memory policy kind: {self.kind!r}")
+
+    @property
+    def arguments(self) -> tuple[str, ...]:
+        if self.kind == "auto":
+            return ()
+        assert self.requested_value is not None
+        flag = {
+            "fraction": "--kv-cache-fraction",
+            "bytes": "--kv-cache-bytes",
+            "max_sequence_length": "--max-sequence-length",
+        }[self.kind]
+        return (flag, str(self.requested_value))
+
+    @property
+    def expected_lifetime_policy(self) -> dict[str, Any]:
+        if self.kind == "auto":
+            return {"kind": "auto"}
+        assert self.requested_value is not None
+        value_name = {
+            "fraction": "requested_fraction",
+            "bytes": "requested_bytes",
+            "max_sequence_length": "requested_tokens",
+        }[self.kind]
+        return {
+            "kind": self.kind,
+            value_name: self.requested_value,
+        }
 
 
 def compare_policy_outputs(
@@ -138,20 +187,16 @@ def apply_source_state_gate(
     return unchanged
 
 
-def _run_policy(
+def _policy_command(
     *,
     policy: PolicyCase,
     runner: Path,
     bundle: Path,
-    tokens: np.ndarray,
-    model_spec: boundary.ModelSpec,
-    output_dir: Path,
+    token_file: Path,
+    logits_file: Path,
     backend_dirs: list[Path],
     model_plugin_dirs: list[Path],
-) -> tuple[dict[str, Any], np.ndarray]:
-    token_file = output_dir / f"{policy.name}.tokens.txt"
-    logits_file = output_dir / f"{policy.name}.logits.bin"
-    boundary._write_tokens(token_file, tokens)
+) -> list[str]:
     command = [
         str(runner),
         "--bundle",
@@ -162,46 +207,121 @@ def _run_policy(
         str(logits_file),
         "--max-new-tokens",
         "2",
+        "--warmup-load-cycle",
         *policy.arguments,
     ]
     for directory in backend_dirs:
         command.extend(["--backend-dir", str(directory)])
     for directory in model_plugin_dirs:
         command.extend(["--model-plugin-dir", str(directory)])
+    return command
 
-    completed = subprocess.run(
-        command,
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+
+def _run_policy(
+    *,
+    policy: PolicyCase,
+    runner: Path,
+    bundle: Path,
+    tokens: np.ndarray,
+    model_spec: boundary.ModelSpec,
+    output_dir: Path,
+    backend_dirs: list[Path],
+    model_plugin_dirs: list[Path],
+) -> tuple[
+    dict[str, Any],
+    np.ndarray,
+    boundary.SamplerTrustAnchor,
+]:
+    evidence_dir = output_dir / "runner-evidence" / policy.name
+    evidence_dir.mkdir(parents=True, exist_ok=False)
+    token_file = evidence_dir / "tokens.txt"
+    logits_file = evidence_dir / "runner-logits.bin"
+    boundary._write_tokens(token_file, tokens)
+    command = _policy_command(
+        policy=policy,
+        runner=runner,
+        bundle=bundle,
+        token_file=token_file,
+        logits_file=logits_file,
+        backend_dirs=backend_dirs,
+        model_plugin_dirs=model_plugin_dirs,
     )
-    stdout_path = output_dir / f"{policy.name}.runner.stdout.log"
-    stderr_path = output_dir / f"{policy.name}.runner.stderr.log"
+
+    (evidence_dir / "command.json").write_text(
+        json.dumps(command, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    completed, child_pid = boundary._run_captured_command(command)
+    sampler_anchor = boundary._sampler_trust_anchor(
+        child_pid=child_pid,
+        cuda_logical_device_index=0,
+    )
+    stdout_path = evidence_dir / "runner.stdout.log"
+    stderr_path = evidence_dir / "runner.stderr.log"
     stdout_path.write_text(completed.stdout, encoding="utf-8")
     stderr_path.write_text(completed.stderr, encoding="utf-8")
+    (evidence_dir / "returncode.txt").write_text(
+        f"{completed.returncode}\n",
+        encoding="utf-8",
+    )
     trace = boundary._parse_runner_json(completed.stdout)
     if completed.returncode != 0 or trace.get("status") != "ok":
         raise RuntimeError(
             f"{policy.name}: runner failed ({completed.returncode}); "
             f"trace={trace}; stderr={completed.stderr[-4000:]}"
         )
-    logits = boundary.read_logits_artifact(logits_file)
+    (evidence_dir / "runner-trace.json").write_text(
+        json.dumps(trace, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    boundary._write_runner_capture_manifest(
+        evidence_dir,
+        child_pid=child_pid,
+        sampler_anchor=sampler_anchor,
+        include_logits=True,
+    )
     runtime_capacity = int(
         trace["runtime_memory_receipt"]["runtime_kv_capacity_tokens"]
     )
-    boundary._validate_trace(
-        boundary.Case(policy.name, 127, 2),
-        model_spec,
-        trace,
-        logits,
-        expected_effective_request_limit=runtime_capacity,
-        require_nvml_reconciliation=True,
+    qualification_case = boundary.Case(policy.name, 127, 2)
+    trusted_geometry = boundary.trusted_runtime_geometry(model_spec)
+    replay = boundary.replay_runner_capture(
+        evidence_dir,
+        expected_command=command,
+        expected_tokens=tokens,
+        expected_returncode=0,
+        expected_trace=trace,
+        case=qualification_case,
+        model_spec=model_spec,
+        trusted_geometry=trusted_geometry,
+        expected_sampler=sampler_anchor,
+        expected_lifetime_policy=policy.expected_lifetime_policy,
     )
+    logits = replay["logits"]
+    validation_evidence = replay["validation_evidence"]
+    if not isinstance(logits, np.ndarray):
+        raise RuntimeError(f"{policy.name}: replay returned no logits")
+    if validation_evidence is None:
+        raise RuntimeError(
+            f"{policy.name}: trace validation did not return memory evidence"
+        )
+    warmup_evidence = validation_evidence["warmup_evidence"]
+    if not boundary._persisted_case_warmup_evidence_passed(
+        warmup_evidence,
+        trace=trace,
+        case=qualification_case,
+        trusted_geometry=trusted_geometry,
+        expected_sampler=sampler_anchor,
+        expected_lifetime_policy=policy.expected_lifetime_policy,
+    ):
+        raise RuntimeError(
+            f"{policy.name}: persisted cold/measured memory evidence is incomplete"
+        )
     return (
         {
             "name": policy.name,
             "command": command,
+            "expected_lifetime_policy": policy.expected_lifetime_policy,
             "returncode": completed.returncode,
             "runtime_kv_capacity_tokens": runtime_capacity,
             "effective_request_limit": trace["effective_request_limit"],
@@ -211,13 +331,20 @@ def _run_policy(
             "logits_sha256": _sha256(logits_file),
             "trace": trace,
             "actual_shape_context_sweep": boundary.context_shape_sweep(trace),
-            "peak_memory_reconciliation": (
-                boundary.reconcile_device_peak_with_nvml(trace)
-            ),
+            "cold_start_evidence": validation_evidence[
+                "cold_start_evidence"
+            ],
+            "warmup_evidence": warmup_evidence,
+            "memory_evidence_passed": True,
+            "peak_memory_reconciliation": validation_evidence[
+                "peak_memory_reconciliation"
+            ],
             "runner_stderr": str(stderr_path),
             "runner_stdout": str(stdout_path),
+            "runner_evidence": str(evidence_dir),
         },
         logits,
+        sampler_anchor,
     )
 
 
@@ -249,38 +376,42 @@ def main() -> int:
     tokens = boundary.deterministic_token_ids(127, vocab_size)
 
     policies = (
-        PolicyCase("auto", ()),
-        PolicyCase("fraction-80pct", ("--kv-cache-fraction", "0.8")),
+        PolicyCase("auto", "auto"),
+        PolicyCase("fraction-80pct", "fraction", 0.8),
         PolicyCase(
             "bytes-512-rows",
-            ("--kv-cache-bytes", str(small_capacity * bytes_per_token)),
+            "bytes",
+            small_capacity * bytes_per_token,
         ),
         PolicyCase(
             "max-sequence-512",
-            ("--max-sequence-length", str(small_capacity)),
+            "max_sequence_length",
+            small_capacity,
         ),
     )
     bundle_before = _bundle_identity(bundle)
     cases: list[dict[str, Any]] = []
     logits_by_policy: dict[str, np.ndarray] = {}
+    sampler_anchors: dict[str, boundary.SamplerTrustAnchor] = {}
+    backend_dirs = [path.resolve() for path in args.backend_dir]
+    model_plugin_dirs = [
+        path.resolve() for path in args.model_plugin_dir
+    ]
     for policy in policies:
         print(f"[policy-equivalence] {policy.name}", file=sys.stderr, flush=True)
-        case_report, logits = _run_policy(
+        case_report, logits, sampler_anchor = _run_policy(
             policy=policy,
             runner=runner,
             bundle=bundle,
             tokens=tokens,
             model_spec=spec,
             output_dir=output_dir,
-            backend_dirs=[path.resolve() for path in args.backend_dir],
-            model_plugin_dirs=[
-                path.resolve() for path in args.model_plugin_dir
-            ],
+            backend_dirs=backend_dirs,
+            model_plugin_dirs=model_plugin_dirs,
         )
         cases.append(case_report)
         logits_by_policy[policy.name] = logits
-
-    comparisons, all_equal = compare_policy_outputs(cases, logits_by_policy)
+        sampler_anchors[policy.name] = sampler_anchor
 
     bundle_after = _bundle_identity(bundle)
     bundle_unchanged = bundle_before == bundle_after
@@ -288,6 +419,78 @@ def main() -> int:
         {int(case["runtime_kv_capacity_tokens"]) for case in cases}
     )
     capacity_sweep_passed = len(observed_capacities) >= 2
+    trusted_geometry = boundary.trusted_runtime_geometry(spec)
+    replayed_logits: dict[str, np.ndarray] = {}
+    replay_states: dict[str, str] = {}
+    all_memory_evidence_passed = len(cases) == len(policies)
+    for policy, case in zip(policies, cases):
+        try:
+            if (
+                case.get("name") != policy.name
+                or case.get("expected_lifetime_policy")
+                != policy.expected_lifetime_policy
+                or case.get("memory_evidence_passed") is not True
+            ):
+                raise RuntimeError(
+                    f"{policy.name}: report does not bind the fixed policy matrix"
+                )
+            evidence_dir = (
+                output_dir / "runner-evidence" / policy.name
+            ).resolve()
+            if case.get("runner_evidence") != str(evidence_dir):
+                raise RuntimeError(
+                    f"{policy.name}: report does not bind its trusted raw capture"
+                )
+            replay = boundary.replay_runner_capture(
+                evidence_dir,
+                expected_command=_policy_command(
+                    policy=policy,
+                    runner=runner,
+                    bundle=bundle,
+                    token_file=evidence_dir / "tokens.txt",
+                    logits_file=evidence_dir / "runner-logits.bin",
+                    backend_dirs=backend_dirs,
+                    model_plugin_dirs=model_plugin_dirs,
+                ),
+                expected_tokens=tokens,
+                expected_returncode=0,
+                expected_trace=case.get("trace"),
+                case=boundary.Case(policy.name, 127, 2),
+                model_spec=spec,
+                trusted_geometry=trusted_geometry,
+                expected_sampler=sampler_anchors[policy.name],
+                expected_lifetime_policy=policy.expected_lifetime_policy,
+            )
+            logits = replay.get("logits")
+            validation = replay.get("validation_evidence")
+            if (
+                not isinstance(logits, np.ndarray)
+                or not isinstance(validation, dict)
+                or case.get("warmup_evidence")
+                != validation.get("warmup_evidence")
+                or not boundary._persisted_case_warmup_evidence_passed(
+                    case.get("warmup_evidence"),
+                    trace=case.get("trace"),
+                    case=boundary.Case(policy.name, 127, 2),
+                    trusted_geometry=trusted_geometry,
+                    expected_sampler=sampler_anchors[policy.name],
+                    expected_lifetime_policy=(
+                        policy.expected_lifetime_policy
+                    ),
+                )
+            ):
+                raise RuntimeError(
+                    f"{policy.name}: replayed policy evidence is incomplete"
+                )
+            replayed_logits[policy.name] = logits
+            replay_states[policy.name] = "passed"
+        except (KeyError, RuntimeError, TypeError, ValueError, OSError):
+            replay_states[policy.name] = "failed"
+            all_memory_evidence_passed = False
+    comparisons, all_equal = compare_policy_outputs(
+        cases,
+        replayed_logits if all_memory_evidence_passed else logits_by_policy,
+    )
     report = {
         "schema_version": 1,
         "gate": "UX-04",
@@ -305,9 +508,19 @@ def main() -> int:
         "input_token_sha256": hashlib.sha256(tokens.tobytes()).hexdigest(),
         "observed_runtime_capacities": observed_capacities,
         "capacity_sweep_passed": capacity_sweep_passed,
+        "all_memory_evidence_passed": all_memory_evidence_passed,
+        "raw_runner_replay": {
+            "passed": all_memory_evidence_passed,
+            "case_states": replay_states,
+        },
         "cases": cases,
         "comparisons": comparisons,
-        "passed": bool(all_equal and bundle_unchanged and capacity_sweep_passed),
+        "passed": bool(
+            all_equal
+            and bundle_unchanged
+            and capacity_sweep_passed
+            and all_memory_evidence_passed
+        ),
     }
     source_state_post = _source_state_snapshot(output_dir, label="post")
     apply_source_state_gate(report, source_state_pre, source_state_post)

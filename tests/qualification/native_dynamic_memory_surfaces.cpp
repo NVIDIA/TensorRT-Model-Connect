@@ -1,16 +1,17 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
- * All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Qualification-only positive loader for UX-05.  It deliberately exercises
-// the existing public C++ and versioned C-ABI construction surfaces without
-// adding a product ABI.  The current C ABI returns IPipeline*, so the C-ABI
-// path uses that documented handle to issue the same text request.
+// Qualification-only helper for UX-05.  It deliberately exercises positive
+// requests and pre-request policy rejection through the existing public C++
+// and versioned C-ABI construction surfaces without adding a product ABI.
+// The current C ABI returns IPipeline*, so the C-ABI path uses that documented
+// handle to issue the same text request.
 
 #include "trtmc/pipeline.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -31,19 +32,34 @@ struct Arguments {
     std::string bundle;
     std::string prompt{"Hello"};
     std::string hf_python;
+    std::string policy{"bytes"};
     std::uint64_t kv_cache_bytes{0};
+    double kv_cache_fraction{0.0};
     std::uint64_t max_sequence_length{0};
     std::int32_t max_new_tokens{2};
     std::vector<std::string> backend_dirs;
     std::vector<std::string> model_plugin_dirs;
 };
 
+bool g_request_started = false;
+
 [[noreturn]] void usage_error(const std::string& message) {
     throw std::invalid_argument(message +
                                 "\nusage: trtmc_dynamic_memory_surfaces --surface cpp|cabi "
-                                "--bundle MODEL.trtfb --kv-cache-bytes N --max-sequence-length N "
+                                "--bundle MODEL.trtfb --policy "
+                                "auto|fraction|bytes|u_only|conflict "
+                                "[--kv-cache-bytes N] [--kv-cache-fraction F] "
+                                "--max-sequence-length N "
                                 "[--prompt TEXT] [--max-new-tokens N] [--hf-python PATH] "
                                 "[--backend-dir DIR] [--model-plugin-dir DIR]");
+}
+
+double parse_fraction(const std::string& text) {
+    std::size_t consumed = 0;
+    const auto value = std::stod(text, &consumed);
+    if (consumed != text.size() || !std::isfinite(value))
+        usage_error("--kv-cache-fraction must be a finite number");
+    return value;
 }
 
 std::uint64_t parse_u64(const std::string& text, const char* name) {
@@ -71,8 +87,12 @@ Arguments parse_arguments(int argc, char** argv) {
             out.prompt = require_value();
         else if (flag == "--hf-python")
             out.hf_python = require_value();
+        else if (flag == "--policy")
+            out.policy = require_value();
         else if (flag == "--kv-cache-bytes")
             out.kv_cache_bytes = parse_u64(require_value(), "--kv-cache-bytes");
+        else if (flag == "--kv-cache-fraction")
+            out.kv_cache_fraction = parse_fraction(require_value());
         else if (flag == "--max-sequence-length")
             out.max_sequence_length = parse_u64(require_value(), "--max-sequence-length");
         else if (flag == "--max-new-tokens") {
@@ -90,9 +110,16 @@ Arguments parse_arguments(int argc, char** argv) {
     }
     if (out.surface != "cpp" && out.surface != "cabi")
         usage_error("--surface must be cpp or cabi");
-    if (out.bundle.empty() || out.kv_cache_bytes == 0 || out.max_sequence_length == 0) {
-        usage_error("--bundle, --kv-cache-bytes, and --max-sequence-length are required");
-    }
+    if (out.bundle.empty() || out.max_sequence_length == 0)
+        usage_error("--bundle and --max-sequence-length are required");
+    if (out.policy != "auto" && out.policy != "fraction" && out.policy != "bytes" &&
+        out.policy != "u_only" && out.policy != "conflict")
+        usage_error("--policy has an unsupported value");
+    if ((out.policy == "bytes" || out.policy == "conflict") && out.kv_cache_bytes == 0)
+        usage_error("bytes/conflict policy requires --kv-cache-bytes");
+    if ((out.policy == "fraction" || out.policy == "conflict") &&
+        !(out.kv_cache_fraction > 0.0 && out.kv_cache_fraction <= 1.0))
+        usage_error("fraction/conflict policy requires --kv-cache-fraction in (0, 1]");
     return out;
 }
 
@@ -112,7 +139,42 @@ trtmc::TextResult run_request(trtmc::IPipeline& pipeline, const Arguments& args)
     config.temperature = 0.0F;
     config.top_k = 1;
     config.use_chat_template = false;
+    g_request_started = true;
     return pipeline.generate(args.prompt, config);
+}
+
+void configure_cpp_policy(trtmc::LoadOptionsV2& options, const Arguments& args) {
+    if (args.policy == "auto") {
+        options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kAuto;
+    } else if (args.policy == "fraction") {
+        options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kFraction;
+        options.kv_cache_memory_fraction = args.kv_cache_fraction;
+    } else if (args.policy == "bytes") {
+        options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kBytes;
+        options.kv_cache_memory_bytes = args.kv_cache_bytes;
+    } else if (args.policy == "conflict") {
+        // Deliberately reach the public options validator with mutually
+        // exclusive typed fields populated.
+        options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kBytes;
+        options.kv_cache_memory_bytes = args.kv_cache_bytes;
+        options.kv_cache_memory_fraction = args.kv_cache_fraction;
+    }
+}
+
+void configure_cabi_policy(TrtmcPipelineOptionsV2& options, const Arguments& args) {
+    if (args.policy == "auto") {
+        options.kv_cache_memory_policy = TRTMC_KV_CACHE_MEMORY_AUTO;
+    } else if (args.policy == "fraction") {
+        options.kv_cache_memory_policy = TRTMC_KV_CACHE_MEMORY_FRACTION;
+        options.kv_cache_memory_fraction = args.kv_cache_fraction;
+    } else if (args.policy == "bytes") {
+        options.kv_cache_memory_policy = TRTMC_KV_CACHE_MEMORY_BYTES;
+        options.kv_cache_memory_bytes = args.kv_cache_bytes;
+    } else if (args.policy == "conflict") {
+        options.kv_cache_memory_policy = TRTMC_KV_CACHE_MEMORY_BYTES;
+        options.kv_cache_memory_bytes = args.kv_cache_bytes;
+        options.kv_cache_memory_fraction = args.kv_cache_fraction;
+    }
 }
 
 json success(const char* surface, trtmc::IPipeline& pipeline, const trtmc::TextResult& result,
@@ -133,8 +195,7 @@ json success(const char* surface, trtmc::IPipeline& pipeline, const trtmc::TextR
 json run_cpp(const Arguments& args) {
     trtmc::LoadOptionsV2 options;
     options.hf_python = args.hf_python;
-    options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kBytes;
-    options.kv_cache_memory_bytes = args.kv_cache_bytes;
+    configure_cpp_policy(options, args);
     options.max_sequence_length = args.max_sequence_length;
     options.max_sequence_length_explicit = 1;
     options.backend_search_paths = args.backend_dirs;
@@ -158,8 +219,7 @@ json run_cabi(const Arguments& args) {
     TrtmcPipelineOptionsV2 options;
     trtmc_pipeline_options_v2_init(&options);
     options.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
-    options.kv_cache_memory_policy = TRTMC_KV_CACHE_MEMORY_BYTES;
-    options.kv_cache_memory_bytes = args.kv_cache_bytes;
+    configure_cabi_policy(options, args);
     options.max_sequence_length = args.max_sequence_length;
     options.max_sequence_length_explicit = 1;
     std::unique_ptr<trtmc::IPipeline> pipeline(
@@ -190,6 +250,11 @@ int main(int argc, char** argv) {
                          {"status", "error"},
                          {"surface", surface},
                          {"message", error.what()},
+                         {"request_started", g_request_started},
+                         // Conservatively treat any attempted request as a
+                         // possible attention launch.  Pre-request policy
+                         // rejection must therefore keep both fields false.
+                         {"attention_launch_observed", g_request_started},
                      }
                          .dump()
                   << '\n';

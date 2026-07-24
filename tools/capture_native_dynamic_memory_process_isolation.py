@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
-# All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Produce source-bound cold/warm and cross-GPU process-isolation evidence.
@@ -36,6 +35,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -179,25 +179,143 @@ def _sha256(path: Path) -> str:
 def _file_identity(
     path: Path, *, require_nonempty: bool = True
 ) -> dict[str, Any]:
-    path = path.expanduser().resolve()
-    if not path.is_file():
-        raise IsolationError(f"required file does not exist: {path}")
-    size = path.stat().st_size
-    if require_nonempty and size <= 0:
-        raise IsolationError(f"required file is empty: {path}")
+    try:
+        canonical = path.expanduser().resolve(strict=True)
+        fd = os.open(canonical, os.O_RDONLY | os.O_CLOEXEC)
+    except OSError as exc:
+        raise IsolationError(
+            f"required file does not exist: {path}: {exc}"
+        ) from exc
+    try:
+        before = os.fstat(fd)
+        digest = hashlib.sha256()
+        offset = 0
+        while True:
+            chunk = os.pread(fd, 8 * 1024 * 1024, offset)
+            if not chunk:
+                break
+            digest.update(chunk)
+            offset += len(chunk)
+        after = os.fstat(fd)
+        endpoint = canonical.stat()
+    except OSError as exc:
+        raise IsolationError(
+            f"required file cannot be identified: {canonical}: {exc}"
+        ) from exc
+    finally:
+        os.close(fd)
+    stable = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(
+        getattr(before, field) != getattr(after, field)
+        or getattr(before, field) != getattr(endpoint, field)
+        for field in stable
+    ):
+        raise IsolationError(
+            f"required file changed while being identified: {canonical}"
+        )
+    if not stat.S_ISREG(before.st_mode):
+        raise IsolationError(f"required file is not regular: {canonical}")
+    if require_nonempty and before.st_size <= 0:
+        raise IsolationError(f"required file is empty: {canonical}")
     return {
-        "path": str(path),
-        "size_bytes": size,
-        "sha256": _sha256(path),
+        "path": str(canonical),
+        "device": before.st_dev,
+        "inode": before.st_ino,
+        "size_bytes": before.st_size,
+        "mtime_ns": before.st_mtime_ns,
+        "ctime_ns": before.st_ctime_ns,
+        "sha256": digest.hexdigest(),
     }
 
 
 def _file_identity_matches(value: Mapping[str, Any]) -> bool:
     try:
-        current = _file_identity(Path(str(value.get("path", ""))))
+        current = _file_identity(
+            Path(str(value.get("path", ""))),
+            require_nonempty=False,
+        )
     except (IsolationError, OSError):
         return False
     return current == value
+
+
+def _canonical_capture_tool_binding(
+    *,
+    repo_root: Path,
+    requested_path: Path,
+    source_state: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind the only allowed capture producer to one clean tracked HEAD blob."""
+
+    repo_root = repo_root.expanduser().resolve()
+    canonical = (
+        repo_root / "tools" / "capture_native_dynamic_memory_perf.py"
+    ).resolve()
+    requested = requested_path.expanduser().resolve()
+    if requested != canonical:
+        raise IsolationError(
+            "--capture-tool must be the canonical current-source producer: "
+            f"{canonical}"
+        )
+    if (
+        source_state.get("git_dirty") is not False
+        or source_state.get("exact_head_gate_satisfied") is not True
+    ):
+        raise IsolationError(
+            "canonical capture tool requires a clean exact source HEAD"
+        )
+    head = _nonempty_string(
+        source_state.get("git_head"),
+        "source_state.git_head",
+    )
+    if re.fullmatch(r"[0-9a-f]{40,64}", head) is None:
+        raise IsolationError(
+            "source_state.git_head must be a full lowercase Git object ID"
+        )
+    try:
+        relative = canonical.relative_to(repo_root).as_posix()
+    except ValueError as exc:
+        raise IsolationError(
+            "canonical capture tool resolves outside the qualification "
+            "repository"
+        ) from exc
+    git = ["git", "-c", f"safe.directory={repo_root}"]
+    tracked = subprocess.run(
+        [*git, "ls-files", "--error-unmatch", "--", relative],
+        cwd=repo_root,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if tracked.returncode != 0 or tracked.stdout.strip() != relative:
+        raise IsolationError(
+            "canonical capture tool is not tracked by the qualification HEAD"
+        )
+    blob = subprocess.run(
+        [*git, "show", f"{head}:{relative}"],
+        cwd=repo_root,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if blob.returncode != 0:
+        raise IsolationError(
+            "canonical capture tool cannot be read from the qualification HEAD"
+        )
+    identity = _file_identity(canonical)
+    blob_sha256 = hashlib.sha256(blob.stdout).hexdigest()
+    if identity["sha256"] != blob_sha256:
+        raise IsolationError(
+            "canonical capture tool bytes differ from the qualification HEAD"
+        )
+    return {
+        "identity": identity,
+        "repo_relative_path": relative,
+        "git_head": head,
+        "source_state_sha256": source_state["source_state_sha256"],
+        "head_blob_sha256": blob_sha256,
+    }
 
 
 def _read_object(path: Path, where: str) -> dict[str, Any]:
@@ -680,6 +798,132 @@ def _validate_correctness_report(
     )
     if report.get("source_state_unchanged") is not True:
         raise IsolationError("correctness source_state_unchanged is not true")
+    if report.get("promotion_eligible") is not True:
+        raise IsolationError(
+            "correctness report is not promotion eligible"
+        )
+    qualification_gates = _object(
+        report.get("qualification_gates"),
+        "correctness report.qualification_gates",
+    )
+    if (
+        qualification_gates.get(
+            "base_artifact_binding_passed"
+        )
+        is not True
+    ):
+        raise IsolationError(
+            "correctness report did not persist the base artifact binding "
+            "gate"
+        )
+    if (
+        qualification_gates.get(
+            "runtime_kv_plugin_binding_passed"
+        )
+        is not True
+    ):
+        raise IsolationError(
+            "correctness report did not persist the runtime-KV plugin "
+            "binding gate"
+        )
+    runner_path = _referenced_path(
+        report.get("runner"),
+        report_path=path,
+        where="correctness report.runner",
+    )
+    base_artifact_binding = _object(
+        report.get("base_artifact_binding"),
+        "correctness report.base_artifact_binding",
+    )
+    if not boundary._base_artifact_binding_passed(
+        base_artifact_binding,
+        bundle=bundle_path,
+        runner=runner_path,
+        spec=spec,
+        source_state=source_state,
+    ):
+        raise IsolationError(
+            "correctness base artifact binding did not replay"
+        )
+    runtime_kv_plugin_binding = _object(
+        report.get("runtime_kv_plugin_binding"),
+        "correctness report.runtime_kv_plugin_binding",
+    )
+    if not boundary._persisted_runtime_kv_plugin_binding_passed(
+        runtime_kv_plugin_binding,
+        base_artifact_binding=base_artifact_binding,
+    ):
+        raise IsolationError(
+            "correctness runtime-KV plugin binding did not replay"
+        )
+    try:
+        base_artifact_files = [
+            _file_identity(
+                Path(
+                    str(
+                        base_artifact_binding["build_manifest"][
+                            "path"
+                        ]
+                    )
+                )
+            ),
+            _file_identity(
+                Path(
+                    str(
+                        base_artifact_binding[
+                            "base_build_receipt"
+                        ]["path"]
+                    )
+                )
+            ),
+            _file_identity(runner_path),
+            _file_identity(
+                Path(
+                    str(
+                        base_artifact_binding["benchmark_worker"][
+                            "path"
+                        ]
+                    )
+                )
+            ),
+            _file_identity(
+                Path(
+                    str(base_artifact_binding["core"]["path"])
+                )
+            ),
+            _file_identity(
+                Path(
+                    str(
+                        base_artifact_binding["trt_backend"][
+                            "active_versioned_path"
+                        ]
+                    )
+                )
+            ),
+            _file_identity(
+                Path(
+                    str(
+                        base_artifact_binding["model_plugin"][
+                            "identity"
+                        ]["path"]
+                    )
+                )
+            ),
+            _file_identity(
+                Path(
+                    str(
+                        base_artifact_binding[
+                            "runtime_kv_plugin"
+                        ]["path"]
+                    )
+                )
+            ),
+        ]
+    except (KeyError, TypeError) as exc:
+        raise IsolationError(
+            "correctness base artifact binding has incomplete file "
+            f"identities: {exc}"
+        ) from exc
 
     hf_reference = _object(
         report.get("hf_reference"), "correctness report.hf_reference"
@@ -833,6 +1077,11 @@ def _validate_correctness_report(
         "runtime_stack_sha256": _canonical_sha(runtime_stack),
         "runner_stderr_logs": log_identities,
         "logit_artifacts": logit_identities,
+        "base_artifact_binding": dict(base_artifact_binding),
+        "runtime_kv_plugin_binding": dict(
+            runtime_kv_plugin_binding
+        ),
+        "base_artifact_files": base_artifact_files,
         "qualified_engine_graph": qualified_engine_graph,
         "context_memory_envelope": {
             "status": memory_envelope["status"],
@@ -842,12 +1091,263 @@ def _validate_correctness_report(
     }
 
 
+def _runtime_trtmc_from_correctness(
+    correctness: Mapping[str, Any],
+) -> dict[str, Any]:
+    base = _object(
+        correctness.get("base_artifact_binding"),
+        "correctness base artifact binding",
+    )
+    model_id = _nonempty_string(
+        correctness.get("model_id"),
+        "correctness model_id",
+    )
+    family = {
+        "Qwen/Qwen3-0.6B": "qwen",
+        "TinyLlama/TinyLlama-1.1B-Chat-v1.0": "llama",
+    }.get(model_id)
+    if family is None:
+        raise IsolationError(
+            f"correctness model has no runtime DSO family: {model_id!r}"
+        )
+    try:
+        return {
+            "model_id": model_id,
+            "model_family": family,
+            "core": dict(base["core"]),
+            "trt_backend": dict(base["trt_backend"]["identity"]),
+            "runtime_kv_plugin": dict(base["runtime_kv_plugin"]),
+            "model": dict(base["model_plugin"]["identity"]),
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        raise IsolationError(
+            "correctness base artifact binding has no complete runtime DSO "
+            f"identity set: {exc}"
+        ) from exc
+
+
+def _validate_aggregate_base_alignment(
+    *,
+    inputs: Mapping[str, Any],
+    correctness: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Require aggregate argv files to be the correctness manifest inodes."""
+
+    base = _object(
+        correctness.get("base_artifact_binding"),
+        "correctness base artifact binding",
+    )
+    expected = {
+        "bundle": base.get("bundle"),
+        "build_receipt": base.get("base_build_receipt"),
+        "worker": base.get("benchmark_worker"),
+        "plugin_library": base.get("runtime_kv_plugin"),
+    }
+    for name, identity in expected.items():
+        if inputs.get(name) != identity:
+            raise IsolationError(
+                f"aggregate {name} exact identity differs from correctness "
+                "base artifacts"
+            )
+    return _runtime_trtmc_from_correctness(correctness)
+
+
+def _replay_dynamic_capture_provenance(
+    *,
+    result_path: Path,
+    label: str,
+    expected_bundle: Path,
+    expected_source_state: Mapping[str, Any],
+    expected_model_id: str,
+    expected_build_receipt: Mapping[str, Any],
+    expected_worker: Mapping[str, Any],
+    expected_plugin: Mapping[str, Any],
+    expected_runtime_trtmc: Mapping[str, Any],
+    expected_build_manifest: Mapping[str, Any],
+    expected_capture_tool: Mapping[str, Any],
+    expected_request: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Replay one dynamic capture's complete source/binary provenance."""
+
+    result = _read_object(result_path, label)
+    if (
+        result.get("schema_version") != CAPTURE_RESULT_SCHEMA
+        or result.get("status") != "completed"
+        or result.get("model_id") != expected_model_id
+    ):
+        raise IsolationError(f"{label}: capture result identity is invalid")
+    provenance = _object(
+        result.get("qualification_provenance"),
+        f"{label}.qualification_provenance",
+    )
+    try:
+        runtime_trtmc = performance._validate_runtime_trtmc_libraries(
+            result.get("runtime_trtmc_libraries"),
+            where=f"{label}.runtime_trtmc_libraries",
+            model_id=expected_model_id,
+        )
+        build_plugin = performance._validate_build_runtime_kv_plugin(
+            result.get("build_runtime_kv_plugin"),
+            where=f"{label}.build_runtime_kv_plugin",
+            artifact_role="native-dynamic",
+        )
+        validated_evidence, _ = (
+            performance._validate_qualification_evidence(
+                result,
+                label=label,
+                expected_role="native-dynamic",
+                expected_bundle=expected_bundle,
+                model_id=expected_model_id,
+                provenance=provenance,
+                runtime_trtmc_libraries=runtime_trtmc,
+                build_runtime_kv_plugin=build_plugin,
+            )
+        )
+    except (performance.QualificationError, OSError, ValueError) as exc:
+        raise IsolationError(
+            f"{label}: dynamic capture provenance replay failed: {exc}"
+        ) from exc
+
+    if (
+        provenance.get("runtime_trtmc_libraries_sha256")
+        != _canonical_sha(runtime_trtmc)
+        or provenance.get("build_runtime_kv_plugin_sha256")
+        != _canonical_sha(build_plugin)
+    ):
+        raise IsolationError(
+            f"{label}: runtime TRTMC/build-plugin provenance hash mismatch"
+        )
+    _validate_source_snapshot(
+        validated_evidence.get("source_state_pre"),
+        expected=expected_source_state,
+        where=f"{label}.qualification_evidence.source_state_pre",
+    )
+    _validate_source_snapshot(
+        validated_evidence.get("source_state_post"),
+        expected=expected_source_state,
+        where=f"{label}.qualification_evidence.source_state_post",
+    )
+    if validated_evidence.get("source_state_unchanged") is not True:
+        raise IsolationError(
+            f"{label}: qualification evidence source state changed"
+        )
+
+    receipt_path = Path(
+        str(validated_evidence.get("build_receipt", ""))
+    )
+    receipt_identity = _file_identity(receipt_path)
+    if receipt_identity != expected_build_receipt:
+        raise IsolationError(
+            f"{label}: build receipt exact identity differs from aggregate"
+        )
+    toolchain = _object(
+        validated_evidence.get("toolchain"),
+        f"{label}.qualification_evidence.toolchain",
+    )
+    if toolchain.get("worker") != expected_worker:
+        raise IsolationError(
+            f"{label}: worker exact identity differs from aggregate"
+        )
+    if toolchain.get("plugin_library") != expected_plugin:
+        raise IsolationError(
+            f"{label}: plugin exact identity differs from aggregate"
+        )
+    capture_identity = _object(
+        expected_capture_tool.get("identity"),
+        "canonical capture tool identity",
+    )
+    if (
+        toolchain.get("capture_tool") != capture_identity.get("path")
+        or toolchain.get("capture_tool_sha256")
+        != capture_identity.get("sha256")
+        or _file_identity(Path(str(capture_identity["path"])))
+        != capture_identity
+    ):
+        raise IsolationError(
+            f"{label}: capture tool is not the canonical source-bound inode"
+        )
+    if toolchain.get("runtime_trtmc_libraries") != expected_runtime_trtmc:
+        raise IsolationError(
+            f"{label}: toolchain runtime TRTMC DSOs differ from correctness"
+        )
+    if runtime_trtmc != expected_runtime_trtmc:
+        raise IsolationError(
+            f"{label}: runtime TRTMC DSOs differ from correctness"
+        )
+    if build_plugin != expected_plugin:
+        raise IsolationError(
+            f"{label}: build runtime-KV plugin differs from aggregate"
+        )
+    if (
+        validated_evidence.get("build_runtime_kv_plugin")
+        != expected_plugin
+        or validated_evidence.get("runtime_trtmc_libraries")
+        != expected_runtime_trtmc
+        or validated_evidence.get("build_manifest")
+        != expected_build_manifest
+        or toolchain.get("build_manifest") != expected_build_manifest
+    ):
+        raise IsolationError(
+            f"{label}: build/runtime provenance differs from correctness"
+        )
+
+    request_identity = _file_identity(
+        Path(str(validated_evidence.get("request_file", "")))
+    )
+    if (
+        expected_request is not None
+        and request_identity != expected_request
+    ):
+        raise IsolationError(
+            f"{label}: request exact identity differs from aggregate"
+        )
+    evidence_files = [
+        receipt_identity,
+        request_identity,
+        _file_identity(
+            Path(str(validated_evidence.get("worker_stdout", ""))),
+            require_nonempty=False,
+        ),
+        _file_identity(
+            Path(str(validated_evidence.get("worker_stderr", ""))),
+            require_nonempty=False,
+        ),
+        dict(capture_identity),
+    ]
+    return {
+        "build_receipt": receipt_identity,
+        "worker": dict(expected_worker),
+        "plugin_library": dict(expected_plugin),
+        "capture_tool": dict(expected_capture_tool),
+        "build_manifest": dict(expected_build_manifest),
+        "runtime_trtmc_libraries": dict(expected_runtime_trtmc),
+        "build_runtime_kv_plugin": dict(expected_plugin),
+        "request": request_identity,
+        "evidence_files": evidence_files,
+        "sha256": _canonical_sha(
+            {
+                "build_receipt": receipt_identity,
+                "worker": expected_worker,
+                "plugin_library": expected_plugin,
+                "capture_tool": expected_capture_tool,
+                "build_manifest": expected_build_manifest,
+                "runtime_trtmc_libraries": expected_runtime_trtmc,
+                "build_runtime_kv_plugin": expected_plugin,
+                "request": request_identity,
+            }
+        ),
+    }
+
+
 def _validate_performance_report(
     path: Path,
     *,
     bundle_identity: Mapping[str, Any],
     source_state: Mapping[str, Any],
     correctness: Mapping[str, Any],
+    aggregate_inputs: Mapping[str, Any],
+    capture_tool_binding: Mapping[str, Any],
+    expected_runtime_trtmc: Mapping[str, Any],
 ) -> dict[str, Any]:
     report = _read_object(path, "performance report")
     if report.get("schema_version") != PERFORMANCE_REPORT_SCHEMA:
@@ -920,6 +1420,7 @@ def _validate_performance_report(
 
     dynamic_libraries: dict[str, Mapping[str, Any]] = {}
     capture_identities: dict[str, dict[str, Any]] = {}
+    dynamic_capture_provenance: dict[str, dict[str, Any]] = {}
     for case_name in sorted(expected_cases):
         summary = _object(cases[case_name], f"performance case {case_name}")
         if summary.get("model_id") != correctness["model_id"]:
@@ -975,6 +1476,25 @@ def _validate_performance_report(
             dynamic_libraries[_canonical_sha(runtime_libraries)] = (
                 runtime_libraries
             )
+            dynamic_capture_provenance[case_name] = (
+                _replay_dynamic_capture_provenance(
+                    result_path=case_paths[case_name],
+                    label=f"performance {case_name}",
+                    expected_bundle=Path(str(bundle_identity["path"])),
+                    expected_source_state=source_state,
+                    expected_model_id=correctness["model_id"],
+                    expected_build_receipt=aggregate_inputs[
+                        "build_receipt"
+                    ],
+                    expected_worker=aggregate_inputs["worker"],
+                    expected_plugin=aggregate_inputs["plugin_library"],
+                    expected_runtime_trtmc=expected_runtime_trtmc,
+                    expected_build_manifest=correctness[
+                        "base_artifact_binding"
+                    ]["build_manifest"],
+                    expected_capture_tool=capture_tool_binding,
+                )
+            )
     if len(dynamic_libraries) != 1:
         raise IsolationError(
             "performance dynamic cases used different runtime libraries"
@@ -1010,6 +1530,7 @@ def _validate_performance_report(
         "runtime_libraries_sha256": _canonical_sha(runtime_libraries),
         "runtime_library_files": runtime_library_files,
         "captures": capture_identities,
+        "dynamic_capture_provenance": dynamic_capture_provenance,
         "split_08_09": measurements,
     }
 
@@ -1198,10 +1719,39 @@ class _ActiveCapture:
     stderr_stream: TextIO
 
 
+_PINNED_CAPTURE_TRAMPOLINE = """
+import os
+import sys
+import types
+
+fd = int(sys.argv[1])
+canonical = sys.argv[2]
+chunks = []
+offset = 0
+while True:
+    chunk = os.pread(fd, 1024 * 1024, offset)
+    if not chunk:
+        break
+    chunks.append(chunk)
+    offset += len(chunk)
+sys.argv = [canonical, *sys.argv[3:]]
+sys.path[0] = os.path.dirname(canonical)
+module = types.ModuleType("__main__")
+module.__file__ = canonical
+module.__package__ = None
+module.__cached__ = None
+module.__spec__ = None
+module.__loader__ = None
+sys.modules["__main__"] = module
+exec(compile(b"".join(chunks), canonical, "exec"), module.__dict__)
+""".strip()
+
+
 def _capture_argv(
     *,
     python: Path,
     capture_tool: Path,
+    capture_tool_fd: int,
     repo_root: Path,
     bundle: Path,
     build_receipt: Path,
@@ -1214,6 +1764,9 @@ def _capture_argv(
 ) -> list[str]:
     return [
         str(python),
+        "-c",
+        _PINNED_CAPTURE_TRAMPOLINE,
+        str(capture_tool_fd),
         str(capture_tool),
         "--repo-root",
         str(repo_root),
@@ -1249,6 +1802,7 @@ def _start_capture(
     output_dir: Path,
     python: Path,
     capture_tool: Path,
+    capture_tool_fd: int,
     repo_root: Path,
     bundle: Path,
     build_receipt: Path,
@@ -1266,6 +1820,7 @@ def _start_capture(
     argv = _capture_argv(
         python=python,
         capture_tool=capture_tool,
+        capture_tool_fd=capture_tool_fd,
         repo_root=repo_root,
         bundle=bundle,
         build_receipt=build_receipt,
@@ -1288,6 +1843,7 @@ def _start_capture(
             stdout=stdout_stream,
             stderr=stderr_stream,
             text=True,
+            pass_fds=(capture_tool_fd,),
         )
     except BaseException:
         stdout_stream.close()
@@ -1350,6 +1906,83 @@ def _finish_capture(active: _ActiveCapture) -> dict[str, Any]:
         "artifact_manifest": manifest,
         "artifact_manifest_sha256": _canonical_sha(manifest),
     }
+
+
+def _run_capture_matrix(
+    *,
+    gpu_a: Mapping[str, str],
+    gpu_b: Mapping[str, str],
+    cache_paths: Mapping[str, Path],
+    output_dir: Path,
+    python: Path,
+    capture_tool: Path,
+    capture_tool_binding: Mapping[str, Any],
+    repo_root: Path,
+    bundle: Path,
+    build_receipt: Path,
+    request: Path,
+    worker: Path,
+    plugin_library: Path,
+    comparison_sequence_limit: int,
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Execute all children through one pinned canonical capture-tool inode."""
+
+    capture_module = boundary._load_perf_provenance_module()
+    expected_identity = capture_tool_binding["identity"]
+    executions: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+    try:
+        with capture_module._PinnedFile(
+            capture_tool,
+            label="canonical process-isolation capture tool",
+        ) as pinned:
+            if pinned.identity != expected_identity:
+                raise IsolationError(
+                    "canonical capture tool changed before it could be pinned"
+                )
+
+            def start(label: str, gpu: Mapping[str, str]) -> _ActiveCapture:
+                return _start_capture(
+                    label=label,
+                    gpu=gpu["selector"],
+                    cache_path=cache_paths[label],
+                    output_dir=output_dir,
+                    python=python,
+                    capture_tool=capture_tool,
+                    capture_tool_fd=pinned.fd,
+                    repo_root=repo_root,
+                    bundle=bundle,
+                    build_receipt=build_receipt,
+                    request=request,
+                    worker=worker,
+                    plugin_library=plugin_library,
+                    comparison_sequence_limit=comparison_sequence_limit,
+                )
+
+            for label in ("gpu-a-cold", "gpu-a-warm"):
+                executions[label] = _finish_capture(start(label, gpu_a))
+
+            active_a = start("gpu-a-concurrent", gpu_a)
+            try:
+                active_b = start("gpu-b-concurrent", gpu_b)
+            except BaseException:
+                executions["gpu-a-concurrent"] = _finish_capture(active_a)
+                raise
+            executions["gpu-a-concurrent"] = _finish_capture(active_a)
+            executions["gpu-b-concurrent"] = _finish_capture(active_b)
+            if pinned.verify() != expected_identity:
+                raise IsolationError(
+                    "canonical capture tool changed during child execution"
+                )
+    except (OSError, subprocess.SubprocessError) as exc:
+        errors.append(f"cannot execute capture benchmark: {exc}")
+    except Exception as exc:
+        if exc.__class__.__name__ != "CaptureError":
+            raise
+        raise IsolationError(
+            f"canonical capture tool provenance failed: {exc}"
+        ) from exc
+    return executions, errors
 
 
 def _overlap_ns(
@@ -1436,12 +2069,20 @@ def _validate_child_result(
     expected_gpu: Mapping[str, str],
     expected_cache: Path,
     expected_cache_state: str,
+    expected_bundle: Path,
     expected_bundle_sha256: str,
     expected_source_state: Mapping[str, Any],
     expected_model_id: str,
     expected_model_revision: str,
     expected_runtime_stack: Mapping[str, Any],
     expected_runtime_libraries: Mapping[str, Any],
+    expected_runtime_trtmc: Mapping[str, Any],
+    expected_build_receipt: Mapping[str, Any],
+    expected_worker: Mapping[str, Any],
+    expected_plugin: Mapping[str, Any],
+    expected_build_manifest: Mapping[str, Any],
+    expected_capture_tool: Mapping[str, Any],
+    expected_request: Mapping[str, Any],
     request_document: Mapping[str, Any],
 ) -> dict[str, Any]:
     if execution.get("returncode") != 0:
@@ -1452,8 +2093,11 @@ def _validate_child_result(
     if not isinstance(result_identity, Mapping):
         raise IsolationError(f"{label}: capture benchmark wrote no result")
     result_path = Path(str(result_identity.get("path", "")))
-    if result_identity.get("sha256") != _sha256(result_path):
-        raise IsolationError(f"{label}: capture result hash mismatch")
+    if dict(result_identity) != _file_identity(
+        result_path,
+        require_nonempty=False,
+    ):
+        raise IsolationError(f"{label}: capture result exact identity mismatch")
     result = _read_object(result_path, f"{label} capture result")
     if result.get("schema_version") != CAPTURE_RESULT_SCHEMA:
         raise IsolationError(f"{label}: unexpected capture result schema")
@@ -1505,6 +2149,20 @@ def _validate_child_result(
         raise IsolationError(f"{label}: child bundle identity mismatch")
     if provenance.get("model_revision") != expected_model_revision:
         raise IsolationError(f"{label}: child model revision mismatch")
+    provenance_binding = _replay_dynamic_capture_provenance(
+        result_path=result_path,
+        label=f"{label} child",
+        expected_bundle=expected_bundle,
+        expected_source_state=expected_source_state,
+        expected_model_id=expected_model_id,
+        expected_build_receipt=expected_build_receipt,
+        expected_worker=expected_worker,
+        expected_plugin=expected_plugin,
+        expected_runtime_trtmc=expected_runtime_trtmc,
+        expected_build_manifest=expected_build_manifest,
+        expected_capture_tool=expected_capture_tool,
+        expected_request=expected_request,
+    )
 
     runtime_stack = result.get("runtime_stack")
     if not isinstance(runtime_stack, dict) or not runtime_stack:
@@ -1609,6 +2267,7 @@ def _validate_child_result(
         "runtime_libraries_sha256": provenance.get(
             "runtime_libraries_sha256"
         ),
+        "provenance_binding": provenance_binding,
         "output_summary": output_summary,
         "output_summary_sha256": _canonical_sha(output_summary),
         "token_ids": token_ids,
@@ -1714,16 +2373,33 @@ def run_qualification(args: argparse.Namespace) -> dict[str, Any]:
     source_state_pre = _source_state_snapshot(
         repo_root, output_dir, label="aggregate-pre"
     )
+    capture_tool_binding = _canonical_capture_tool_binding(
+        repo_root=repo_root,
+        requested_path=capture_tool,
+        source_state=source_state_pre,
+    )
+    if capture_tool_binding["identity"] != input_artifacts["capture_tool"]:
+        raise IsolationError(
+            "canonical capture tool changed before source binding completed"
+        )
+    input_artifacts["capture_tool_source_binding"] = capture_tool_binding
     correctness_evidence = _validate_correctness_report(
         correctness_report,
         bundle_identity=input_artifacts["bundle"],
         source_state=source_state_pre,
+    )
+    expected_runtime_trtmc = _validate_aggregate_base_alignment(
+        inputs=input_artifacts,
+        correctness=correctness_evidence,
     )
     performance_evidence = _validate_performance_report(
         performance_report,
         bundle_identity=input_artifacts["bundle"],
         source_state=source_state_pre,
         correctness=correctness_evidence,
+        aggregate_inputs=input_artifacts,
+        capture_tool_binding=capture_tool_binding,
+        expected_runtime_trtmc=expected_runtime_trtmc,
     )
     if (
         correctness_evidence["report"]
@@ -1743,65 +2419,22 @@ def run_qualification(args: argparse.Namespace) -> dict[str, Any]:
     if any(os.path.lexists(path) for path in set(cache_paths.values())):
         raise IsolationError("private CUDA cache paths must start absent")
 
-    executions: dict[str, dict[str, Any]] = {}
-    orchestration_errors: list[str] = []
-    try:
-        for label in ("gpu-a-cold", "gpu-a-warm"):
-            active = _start_capture(
-                label=label,
-                gpu=gpu_a["selector"],
-                cache_path=cache_paths[label],
-                output_dir=output_dir,
-                python=python,
-                capture_tool=capture_tool,
-                repo_root=repo_root,
-                bundle=bundle,
-                build_receipt=build_receipt,
-                request=request,
-                worker=worker,
-                plugin_library=plugin_library,
-                comparison_sequence_limit=args.comparison_sequence_limit,
-            )
-            executions[label] = _finish_capture(active)
-
-        active_a = _start_capture(
-            label="gpu-a-concurrent",
-            gpu=gpu_a["selector"],
-            cache_path=cache_paths["gpu-a-concurrent"],
-            output_dir=output_dir,
-            python=python,
-            capture_tool=capture_tool,
-            repo_root=repo_root,
-            bundle=bundle,
-            build_receipt=build_receipt,
-            request=request,
-            worker=worker,
-            plugin_library=plugin_library,
-            comparison_sequence_limit=args.comparison_sequence_limit,
-        )
-        try:
-            active_b = _start_capture(
-                label="gpu-b-concurrent",
-                gpu=gpu_b["selector"],
-                cache_path=cache_paths["gpu-b-concurrent"],
-                output_dir=output_dir,
-                python=python,
-                capture_tool=capture_tool,
-                repo_root=repo_root,
-                bundle=bundle,
-                build_receipt=build_receipt,
-                request=request,
-                worker=worker,
-                plugin_library=plugin_library,
-                comparison_sequence_limit=args.comparison_sequence_limit,
-            )
-        except BaseException:
-            executions["gpu-a-concurrent"] = _finish_capture(active_a)
-            raise
-        executions["gpu-a-concurrent"] = _finish_capture(active_a)
-        executions["gpu-b-concurrent"] = _finish_capture(active_b)
-    except (OSError, subprocess.SubprocessError) as exc:
-        orchestration_errors.append(f"cannot execute capture benchmark: {exc}")
+    executions, orchestration_errors = _run_capture_matrix(
+        gpu_a=gpu_a,
+        gpu_b=gpu_b,
+        cache_paths=cache_paths,
+        output_dir=output_dir,
+        python=python,
+        capture_tool=capture_tool,
+        capture_tool_binding=capture_tool_binding,
+        repo_root=repo_root,
+        bundle=bundle,
+        build_receipt=build_receipt,
+        request=request,
+        worker=worker,
+        plugin_library=plugin_library,
+        comparison_sequence_limit=args.comparison_sequence_limit,
+    )
 
     child_results: dict[str, dict[str, Any]] = {}
     validation_errors: list[str] = []
@@ -1829,6 +2462,7 @@ def run_qualification(args: argparse.Namespace) -> dict[str, Any]:
                 expected_gpu=expected_gpus[label],
                 expected_cache=cache_paths[label],
                 expected_cache_state=expected_states[label],
+                expected_bundle=bundle,
                 expected_bundle_sha256=input_artifacts["bundle"]["sha256"],
                 expected_source_state=source_state_pre,
                 expected_model_id=correctness_evidence["model_id"],
@@ -1841,6 +2475,17 @@ def run_qualification(args: argparse.Namespace) -> dict[str, Any]:
                 expected_runtime_libraries=performance_evidence[
                     "runtime_libraries"
                 ],
+                expected_runtime_trtmc=expected_runtime_trtmc,
+                expected_build_receipt=input_artifacts[
+                    "build_receipt"
+                ],
+                expected_worker=input_artifacts["worker"],
+                expected_plugin=input_artifacts["plugin_library"],
+                expected_build_manifest=correctness_evidence[
+                    "base_artifact_binding"
+                ]["build_manifest"],
+                expected_capture_tool=capture_tool_binding,
+                expected_request=input_artifacts["request"],
                 request_document=request_document,
             )
         except (IsolationError, OSError, ValueError) as exc:
@@ -1867,6 +2512,13 @@ def run_qualification(args: argparse.Namespace) -> dict[str, Any]:
             == 1,
             "runtime_libraries": len(
                 {item["runtime_libraries_sha256"] for item in values}
+            )
+            == 1,
+            "full_binary_provenance": len(
+                {
+                    item["provenance_binding"]["sha256"]
+                    for item in values
+                }
             )
             == 1,
             "output_summary": len(
@@ -1912,6 +2564,7 @@ def run_qualification(args: argparse.Namespace) -> dict[str, Any]:
             "model_revision": False,
             "runtime_stack": False,
             "runtime_libraries": False,
+            "full_binary_provenance": False,
             "output_summary": False,
             "token_ids": False,
             "all_child_source_states_unchanged": False,
@@ -1971,8 +2624,18 @@ def run_qualification(args: argparse.Namespace) -> dict[str, Any]:
         and source_state_pre.get("source_state_sha256")
         == source_state_post.get("source_state_sha256")
     )
+    input_file_identities = [
+        identity
+        for name, identity in input_artifacts.items()
+        if name != "capture_tool_source_binding"
+    ]
+    input_files_unchanged = all(
+        _file_identity_matches(identity)
+        for identity in input_file_identities
+    )
     companion_file_identities = [
         correctness_evidence["report"],
+        *correctness_evidence["base_artifact_files"],
         *correctness_evidence["runner_stderr_logs"],
         *correctness_evidence["logit_artifacts"],
         *correctness_evidence["qualified_engine_graph"][
@@ -1981,6 +2644,20 @@ def run_qualification(args: argparse.Namespace) -> dict[str, Any]:
         performance_evidence["report"],
         *performance_evidence["captures"].values(),
         *performance_evidence["runtime_library_files"],
+        *[
+            identity
+            for replay in performance_evidence[
+                "dynamic_capture_provenance"
+            ].values()
+            for identity in replay["evidence_files"]
+        ],
+        *[
+            identity
+            for child in child_results.values()
+            for identity in child["provenance_binding"][
+                "evidence_files"
+            ]
+        ],
     ]
     companion_files_unchanged = all(
         _file_identity_matches(identity)
@@ -2008,6 +2685,18 @@ def run_qualification(args: argparse.Namespace) -> dict[str, Any]:
                         "qualified_engine_graph"
                     ]["gates"].values()
                 )
+            ),
+            "correctness_base_artifact_binding_replayed": (
+                correctness_evidence["base_artifact_binding"].get(
+                    "schema_version"
+                )
+                == boundary.BASE_ARTIFACT_BINDING_SCHEMA
+            ),
+            "correctness_runtime_kv_plugin_binding_replayed": (
+                correctness_evidence[
+                    "runtime_kv_plugin_binding"
+                ].get("schema_version")
+                == boundary.RUNTIME_KV_PLUGIN_BINDING_SCHEMA
             ),
             "performance_split_08_09_passed": all(
                 values["decode_throughput_ratio"] >= 0.95
@@ -2049,6 +2738,7 @@ def run_qualification(args: argparse.Namespace) -> dict[str, Any]:
             and gpu_a["pci_bus_id"] != gpu_b["pci_bus_id"]
         ),
         "source_state_unchanged": source_state_unchanged,
+        "aggregate_input_artifacts_unchanged": input_files_unchanged,
     }
     errors = [*orchestration_errors, *validation_errors]
     status = "passed" if not errors and _all_true(gates) else "failed"

@@ -1,5 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
-# All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
@@ -8,12 +7,21 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
 import sys
 
 import pytest
+
+from tests.tools.dynamic_memory_manifest_fixture import (
+    seed_manifest_test_modules,
+)
+from tests.tools.test_qualify_native_dynamic_memory import (
+    _write_base_build_receipt,
+    _write_exact_build_manifest,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -71,7 +79,19 @@ def _init_repo(path: Path) -> None:
         check=True,
     )
     (path / "tracked.txt").write_text("stable\n", encoding="utf-8")
-    subprocess.run(["git", "add", "tracked.txt"], cwd=path, check=True)
+    capture_tool = (
+        path / "tools" / "capture_native_dynamic_memory_perf.py"
+    )
+    capture_tool.parent.mkdir(parents=True)
+    capture_tool.write_text(_fake_capture_source(), encoding="utf-8")
+    capture_tool.with_name(
+        "capture_dynamic_memory_test_manifest.py"
+    ).write_text(
+        "PINNED_BENCHMARK_SIBLING_MARKER = 'canonical-sibling'\n",
+        encoding="utf-8",
+    )
+    seed_manifest_test_modules(path)
+    subprocess.run(["git", "add", "."], cwd=path, check=True)
     subprocess.run(["git", "commit", "-qm", "initial"], cwd=path, check=True)
 
 
@@ -105,6 +125,22 @@ def canonical(value):
         value, ensure_ascii=True, separators=(",", ":"), sort_keys=True
     ).encode("utf-8")).hexdigest()
 
+def sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+def identity(path):
+    path = path.resolve(strict=True)
+    metadata = path.stat()
+    return {
+        "path": str(path),
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "size_bytes": metadata.st_size,
+        "mtime_ns": metadata.st_mtime_ns,
+        "ctime_ns": metadata.st_ctime_ns,
+        "sha256": sha256(path),
+    }
+
 def argument(name):
     return sys.argv[sys.argv.index(name) + 1]
 
@@ -112,11 +148,28 @@ repo = Path(argument("--repo-root"))
 output = Path(argument("--output"))
 worker_stderr = Path(argument("--stderr-output"))
 bundle = Path(argument("--bundle"))
-request = json.loads(Path(argument("--request")).read_text(encoding="utf-8"))
-build = json.loads(Path(argument("--build-receipt")).read_text(encoding="utf-8"))
+request_path = Path(argument("--request")).resolve()
+build_path = Path(argument("--build-receipt")).resolve()
+worker_path = Path(argument("--worker")).resolve()
+plugin_path = Path(argument("--plugin-library")).resolve()
+request = json.loads(request_path.read_text(encoding="utf-8"))
+build = json.loads(build_path.read_text(encoding="utf-8"))
 label = output.parent.name
 behavior = request.get("test_behavior", "")
 cache_path = Path(os.environ["CUDA_CACHE_PATH"])
+manifest_path = Path(__file__).with_name(
+    "capture_dynamic_memory_test_manifest.py"
+)
+sibling_namespace = {}
+exec(
+    compile(manifest_path.read_bytes(), str(manifest_path), "exec"),
+    sibling_namespace,
+)
+if (
+    sibling_namespace["PINNED_BENCHMARK_SIBLING_MARKER"]
+    != "canonical-sibling"
+):
+    raise RuntimeError("wrong sibling benchmark module")
 
 def snapshot(path):
     captured = time.time_ns()
@@ -178,8 +231,9 @@ token_ids = [11, 22, 33]
 if behavior == "token_mismatch" and label == "gpu-b-concurrent":
     token_ids = [11, 22, 44]
 
-runtime_stack = build["runtime_stack"]
-runtime_libraries = build["runtime_libraries"]
+runtime_stack = request["test_runtime_stack"]
+runtime_libraries = request["test_runtime_libraries"]
+runtime_trtmc = request["test_runtime_trtmc_libraries"]
 if behavior == "runtime_stack_mismatch" and label == "gpu-b-concurrent":
     runtime_stack = dict(runtime_stack)
     runtime_stack["driver"] = "580.105.09"
@@ -198,7 +252,8 @@ cache = {
     "before": before,
     "after": after,
 }
-source_sha = build["source_state_sha256"]
+source_state = build["source_state_pre"]
+source_sha = source_state["source_state_sha256"]
 source_unchanged = not (
     behavior == "child_source_changed" and label == "gpu-a-warm"
 )
@@ -208,6 +263,36 @@ output_summary = {
     "token_ids": token_ids,
 }
 iterations = request["measurement"]["iterations"]
+worker_identity = identity(worker_path)
+plugin_identity = identity(plugin_path)
+capture_tool = Path(__file__).resolve()
+build_manifest = build["build_manifest"]
+toolchain = {
+    "worker": worker_identity,
+    "plugin_library": plugin_identity,
+    "runtime_trtmc_libraries": runtime_trtmc,
+    "build_manifest": build_manifest,
+    "capture_tool": str(capture_tool),
+    "capture_tool_sha256": sha256(capture_tool),
+}
+environment = {
+    "cuda_visible_devices": visible,
+    "cuda_logical_device": 0,
+    "cuda_device_uuid": uuid,
+    "cuda_pci_bus_id": pci,
+    "cuda_compute_capability": "sm103",
+}
+worker_stdout = output.parent / "worker.stdout.log"
+worker_stdout.write_text("", encoding="utf-8")
+worker_stderr.write_text("worker diagnostic\n", encoding="utf-8")
+raw_output = output.parent / "worker.raw.json"
+worker_command = [
+    str(worker_path),
+    "--request",
+    str(request_path),
+    "--output",
+    str(raw_output),
+]
 payload = {
     "schema_version": "trtmc.benchmark-worker-result/v1",
     "status": "completed",
@@ -249,6 +334,8 @@ payload = {
     }],
     "runtime_stack": runtime_stack,
     "runtime_libraries": runtime_libraries,
+    "runtime_trtmc_libraries": runtime_trtmc,
+    "build_runtime_kv_plugin": plugin_identity,
     "cuda_jit_cache": cache,
     "qualification_provenance": {
         "git_head": build["git_head"],
@@ -260,24 +347,60 @@ payload = {
         "request_sha256": "3" * 64,
         "model_revision": build["model_revision"],
         "artifact_role": "native-dynamic",
+        "toolchain_sha256": canonical(toolchain),
+        "benchmark_environment_sha256": canonical(environment),
         "runtime_stack_sha256": canonical(runtime_stack),
         "runtime_libraries_sha256": canonical(runtime_libraries),
+        "runtime_trtmc_libraries_sha256": canonical(runtime_trtmc),
+        "build_runtime_kv_plugin_sha256": canonical(plugin_identity),
+        "build_manifest_sha256": canonical(build_manifest),
         "cuda_jit_cache_sha256": canonical(cache),
     },
     "qualification_evidence": {
+        "build_receipt": str(build_path),
+        "build_receipt_sha256": sha256(build_path),
+        "request_file": str(request_path),
+        "request_file_sha256": sha256(request_path),
+        "worker_command": worker_command,
+        "worker_command_sha256": canonical(worker_command),
+        "toolchain": toolchain,
+        "build_manifest": build_manifest,
+        "runtime_trtmc_libraries": runtime_trtmc,
+        "build_runtime_kv_plugin": plugin_identity,
+        "source_state_pre": source_state,
+        "source_state_post": source_state,
         "source_state_unchanged": source_unchanged,
-        "environment": {
-            "cuda_visible_devices": visible,
-            "cuda_logical_device": 0,
-            "cuda_device_uuid": uuid,
-            "cuda_pci_bus_id": pci,
-            "cuda_compute_capability": "sm103",
-        },
+        "worker_stdout": str(worker_stdout.resolve()),
+        "worker_stdout_sha256": sha256(worker_stdout),
+        "worker_stderr": str(worker_stderr.resolve()),
+        "worker_stderr_sha256": sha256(worker_stderr),
+        "environment": environment,
     },
 }
+if label == "gpu-a-warm":
+    if behavior == "missing_child_build_receipt":
+        payload["qualification_evidence"].pop("build_receipt")
+    elif behavior == "missing_child_runtime_trtmc":
+        payload.pop("runtime_trtmc_libraries")
+    elif behavior == "missing_child_build_plugin":
+        payload.pop("build_runtime_kv_plugin")
+    elif behavior == "swap_child_worker_plugin":
+        child_toolchain = payload["qualification_evidence"]["toolchain"]
+        child_toolchain["worker"], child_toolchain["plugin_library"] = (
+            child_toolchain["plugin_library"],
+            child_toolchain["worker"],
+        )
+        payload["qualification_provenance"]["toolchain_sha256"] = canonical(
+            child_toolchain
+        )
+    elif behavior == "swap_capture_tool_inode":
+        replacement = capture_tool.with_name(
+            "capture_native_dynamic_memory_perf.py.replacement"
+        )
+        replacement.write_bytes(capture_tool.read_bytes())
+        os.replace(replacement, capture_tool)
 output.parent.mkdir(parents=True, exist_ok=True)
 output.write_text(json.dumps(payload), encoding="utf-8")
-worker_stderr.write_text("worker diagnostic\n", encoding="utf-8")
 print(json.dumps({"status": "completed", "output": str(output)}))
 print("capture diagnostic", file=sys.stderr)
 '''
@@ -505,12 +628,61 @@ def _qualified_engine_graph(
 def _write_correctness_report(
     inputs: Path,
     *,
+    repo: Path,
     bundle: Path,
     source: dict,
 ) -> Path:
     evidence_dir = inputs / "correctness"
     evidence_dir.mkdir()
     spec = isolation.boundary.SPECS[MODEL_ID]
+    provenance_root = inputs / "correctness-base-provenance"
+    manifest, _ = _write_exact_build_manifest(
+        provenance_root,
+        source_state=source,
+        repo_root=repo,
+    )
+    bundle_header = isolation.boundary._read_bundle_header(bundle)
+    base_build_receipt = _write_base_build_receipt(
+        provenance_root,
+        manifest_path=manifest,
+        bundle=bundle,
+        header=bundle_header,
+        source_state=source,
+    )
+    runner = (
+        provenance_root
+        / "build"
+        / "trtmc_dynamic_memory_qualify"
+    )
+    base_artifact_binding = (
+        isolation.boundary._validate_base_artifact_binding(
+            build_manifest_path=manifest,
+            base_build_receipt_path=base_build_receipt,
+            bundle=bundle,
+            runner=runner,
+            spec=spec,
+            source_state=source,
+        )
+    )
+    selected_plugin = base_artifact_binding["runtime_kv_plugin"]
+    runtime_kv_plugin_binding = {
+        "schema_version": (
+            isolation.boundary.RUNTIME_KV_PLUGIN_BINDING_SCHEMA
+        ),
+        "environment": isolation.boundary.RUNTIME_KV_PLUGIN_ENV,
+        "environment_was_set": False,
+        "preload_mapping": None,
+        "selected": selected_plugin,
+        "loaded_mapping": {
+            "path": selected_plugin["path"],
+            "device": selected_plugin["device"],
+            "inode": selected_plugin["inode"],
+            "deleted": False,
+            "identity_sha256": isolation._canonical_sha(
+                selected_plugin
+            ),
+        },
+    }
     cases = []
     for case_spec in isolation.boundary._cases_for(spec):
         safe_name = case_spec.name.replace("/", "-")
@@ -563,9 +735,17 @@ def _write_correctness_report(
     report = {
         "schema_version": 1,
         "passed": True,
+        "promotion_eligible": True,
         "model_id": MODEL_ID,
         "bundle": str(bundle),
         "bundle_sha256": isolation._sha256(bundle),
+        "runner": str(runner),
+        "base_artifact_binding": base_artifact_binding,
+        "runtime_kv_plugin_binding": runtime_kv_plugin_binding,
+        "qualification_gates": {
+            "base_artifact_binding_passed": True,
+            "runtime_kv_plugin_binding_passed": True,
+        },
         "model_context_limit": spec.context_limit,
         "prefill_chunk_limit": spec.chunk_limit,
         "hf_reference": {
@@ -612,12 +792,18 @@ def _performance_provenance(
     role: str,
     runtime_stack: dict | None,
     runtime_libraries: dict | None,
+    runtime_trtmc: dict | None = None,
+    build_plugin: dict | None = None,
+    toolchain: dict | None = None,
+    environment: dict | None = None,
+    build_manifest: dict | None = None,
 ) -> dict:
-    return {
+    provenance = {
         "git_head": source["git_head"],
         "source_state_sha256": source["source_state_sha256"],
         "source_state_pre_sha256": source["source_state_sha256"],
         "source_state_post_sha256": source["source_state_sha256"],
+        "source_state_unchanged": True,
         "prebuild_source_state_sha256": source["source_state_sha256"],
         "postbuild_source_state_sha256": source["source_state_sha256"],
         "bundle_sha256": isolation._sha256(bundle),
@@ -638,6 +824,32 @@ def _performance_provenance(
         ),
         "cuda_jit_cache_sha256": "7" * 64,
     }
+    if role == "native-dynamic":
+        assert runtime_trtmc is not None
+        assert build_plugin is not None
+        assert toolchain is not None
+        assert environment is not None
+        assert build_manifest is not None
+        provenance.update(
+            {
+                "toolchain_sha256": isolation._canonical_sha(
+                    toolchain
+                ),
+                "benchmark_environment_sha256": (
+                    isolation._canonical_sha(environment)
+                ),
+                "runtime_trtmc_libraries_sha256": (
+                    isolation._canonical_sha(runtime_trtmc)
+                ),
+                "build_runtime_kv_plugin_sha256": (
+                    isolation._canonical_sha(build_plugin)
+                ),
+                "build_manifest_sha256": isolation._canonical_sha(
+                    build_manifest
+                ),
+            }
+        )
+    return provenance
 
 
 def _write_performance_report(
@@ -646,11 +858,30 @@ def _write_performance_report(
     dynamic_bundle: Path,
     source: dict,
     runtime_libraries: dict,
+    runtime_trtmc: dict,
+    build_receipt: Path,
+    worker: Path,
+    plugin: Path,
+    capture_tool: Path,
+    request: Path,
 ) -> Path:
     evidence_dir = inputs / "performance"
     evidence_dir.mkdir()
     static_bundle = evidence_dir / "static.trtfb"
     static_bundle.write_bytes(b"static-bundle")
+    build_document = json.loads(
+        build_receipt.read_text(encoding="utf-8")
+    )
+    worker_identity = isolation._file_identity(worker)
+    plugin_identity = isolation._file_identity(plugin)
+    toolchain = {
+        "worker": worker_identity,
+        "plugin_library": plugin_identity,
+        "runtime_trtmc_libraries": runtime_trtmc,
+        "build_manifest": build_document["build_manifest"],
+        "capture_tool": str(capture_tool.resolve()),
+        "capture_tool_sha256": isolation._sha256(capture_tool),
+    }
     cases = {}
     for case_name in (
         "static_short",
@@ -663,12 +894,26 @@ def _write_performance_report(
         role = "native-dynamic" if dynamic else "exact-head-static-split"
         stack = RUNTIME_STACK if dynamic else None
         libraries = runtime_libraries if dynamic else None
+        environment = (
+            {"fixture": "performance-dynamic", "case": case_name}
+            if dynamic
+            else None
+        )
         provenance = _performance_provenance(
             source=source,
             bundle=bundle,
             role=role,
             runtime_stack=stack,
             runtime_libraries=libraries,
+            runtime_trtmc=runtime_trtmc if dynamic else None,
+            build_plugin=plugin_identity if dynamic else None,
+            toolchain=toolchain if dynamic else None,
+            environment=environment,
+            build_manifest=(
+                build_document["build_manifest"]
+                if dynamic
+                else None
+            ),
         )
         capture = {
             "schema_version": isolation.CAPTURE_RESULT_SCHEMA,
@@ -678,6 +923,66 @@ def _write_performance_report(
             "runtime_libraries": libraries,
             "qualification_provenance": provenance,
         }
+        if dynamic:
+            case_request = evidence_dir / f"{case_name}.request.json"
+            case_request_document = json.loads(
+                request.read_text(encoding="utf-8")
+            )
+            case_request_document["case_name"] = case_name
+            case_request.write_text(
+                json.dumps(case_request_document),
+                encoding="utf-8",
+            )
+            worker_stdout = evidence_dir / f"{case_name}.worker.stdout"
+            worker_stderr = evidence_dir / f"{case_name}.worker.stderr"
+            worker_stdout.write_text("", encoding="utf-8")
+            worker_stderr.write_text("diagnostic\n", encoding="utf-8")
+            raw_output = evidence_dir / f"{case_name}.raw.json"
+            worker_command = [
+                str(worker.resolve()),
+                "--request",
+                str(case_request.resolve()),
+                "--output",
+                str(raw_output.resolve()),
+            ]
+            capture.update(
+                {
+                    "runtime_trtmc_libraries": runtime_trtmc,
+                    "build_runtime_kv_plugin": plugin_identity,
+                    "qualification_evidence": {
+                        "build_receipt": str(build_receipt.resolve()),
+                        "build_receipt_sha256": isolation._sha256(
+                            build_receipt
+                        ),
+                        "request_file": str(case_request.resolve()),
+                        "request_file_sha256": isolation._sha256(
+                            case_request
+                        ),
+                        "worker_command": worker_command,
+                        "worker_command_sha256": (
+                            isolation._canonical_sha(worker_command)
+                        ),
+                        "toolchain": toolchain,
+                        "environment": environment,
+                        "build_manifest": build_document[
+                            "build_manifest"
+                        ],
+                        "runtime_trtmc_libraries": runtime_trtmc,
+                        "build_runtime_kv_plugin": plugin_identity,
+                        "source_state_pre": source,
+                        "source_state_post": source,
+                        "source_state_unchanged": True,
+                        "worker_stdout": str(worker_stdout.resolve()),
+                        "worker_stdout_sha256": isolation._sha256(
+                            worker_stdout
+                        ),
+                        "worker_stderr": str(worker_stderr.resolve()),
+                        "worker_stderr_sha256": isolation._sha256(
+                            worker_stderr
+                        ),
+                    },
+                }
+            )
         capture_path = evidence_dir / f"{case_name}.json"
         capture_path.write_text(json.dumps(capture), encoding="utf-8")
         cases[case_name] = {
@@ -753,12 +1058,9 @@ def _prepare(
         bundle,
         isolation.boundary.SPECS[MODEL_ID],
     )
-    worker = inputs / "worker"
-    worker.write_bytes(b"worker")
-    plugin = inputs / "plugin.so"
-    plugin.write_bytes(b"plugin")
-    fake_capture = inputs / "fake_capture.py"
-    fake_capture.write_text(_fake_capture_source(), encoding="utf-8")
+    fake_capture = (
+        repo / "tools" / "capture_native_dynamic_memory_perf.py"
+    )
     request = inputs / "request.json"
     request.write_text(
         json.dumps(
@@ -791,27 +1093,43 @@ def _prepare(
         repo, precompute, label="test-precompute"
     )
     runtime_libraries = _runtime_libraries(inputs)
-    build_receipt = inputs / "build-receipt.json"
-    build_receipt.write_text(
-        json.dumps(
-            {
-                "git_head": source["git_head"],
-                "source_state_sha256": source["source_state_sha256"],
-                "model_revision": MODEL_REVISION,
-                "runtime_stack": RUNTIME_STACK,
-                "runtime_libraries": runtime_libraries,
-            }
-        ),
-        encoding="utf-8",
-    )
     correctness_report = _write_correctness_report(
-        inputs, bundle=bundle, source=source
+        inputs,
+        repo=repo,
+        bundle=bundle,
+        source=source,
     )
+    correctness = json.loads(
+        correctness_report.read_text(encoding="utf-8")
+    )
+    base = correctness["base_artifact_binding"]
+    build_receipt = Path(base["base_build_receipt"]["path"])
+    worker = Path(base["benchmark_worker"]["path"])
+    plugin = Path(base["runtime_kv_plugin"]["path"])
+    runtime_trtmc = {
+        "model_id": MODEL_ID,
+        "model_family": "qwen",
+        "core": base["core"],
+        "trt_backend": base["trt_backend"]["identity"],
+        "runtime_kv_plugin": base["runtime_kv_plugin"],
+        "model": base["model_plugin"]["identity"],
+    }
+    request_document = json.loads(request.read_text(encoding="utf-8"))
+    request_document["test_runtime_stack"] = RUNTIME_STACK
+    request_document["test_runtime_libraries"] = runtime_libraries
+    request_document["test_runtime_trtmc_libraries"] = runtime_trtmc
+    request.write_text(json.dumps(request_document), encoding="utf-8")
     performance_report = _write_performance_report(
         inputs,
         dynamic_bundle=bundle,
         source=source,
         runtime_libraries=runtime_libraries,
+        runtime_trtmc=runtime_trtmc,
+        build_receipt=build_receipt,
+        worker=worker,
+        plugin=plugin,
+        capture_tool=fake_capture,
+        request=request,
     )
     monkeypatch.setattr(
         isolation.performance,
@@ -845,6 +1163,89 @@ def _rewrite_json(path: Path, update) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
+def _dynamic_capture_path(
+    performance_report: Path, case: str = "dynamic_short"
+) -> Path:
+    report = json.loads(performance_report.read_text(encoding="utf-8"))
+    return Path(report["cases"][case]["path"])
+
+
+def test_pinned_capture_trampoline_preserves_benchmark_sibling_lookup(
+    tmp_path: Path,
+) -> None:
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    capture_tool = tools / "capture_native_dynamic_memory_perf.py"
+    sibling = tools / "capture_dynamic_memory_test_manifest.py"
+    sibling.write_text("MARKER = 'canonical-sibling'\n", encoding="utf-8")
+    capture_tool.write_text(
+        """
+import json
+from pathlib import Path
+import sys
+
+namespace = {}
+exec(
+    Path(__file__).with_name(
+        "capture_dynamic_memory_test_manifest.py"
+    ).read_text(encoding="utf-8"),
+    namespace,
+)
+output = Path(sys.argv[sys.argv.index("--output") + 1])
+output.write_text(
+    json.dumps(
+        {
+            "file": __file__,
+            "argv0": sys.argv[0],
+            "marker": namespace["MARKER"],
+            "benchmark": "benchmark" in sys.argv,
+        }
+    ),
+    encoding="utf-8",
+)
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    result = tmp_path / "result.json"
+    fd = os.open(capture_tool, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        argv = isolation._capture_argv(
+            python=Path(sys.executable),
+            capture_tool=capture_tool.resolve(),
+            capture_tool_fd=fd,
+            repo_root=tmp_path,
+            bundle=tmp_path / "bundle",
+            build_receipt=tmp_path / "build.json",
+            request=tmp_path / "request.json",
+            worker=tmp_path / "worker",
+            plugin_library=tmp_path / "plugin.so",
+            comparison_sequence_limit=128,
+            result_path=result,
+            worker_stderr_path=tmp_path / "worker.stderr",
+        )
+        completed = subprocess.run(
+            argv,
+            cwd=tmp_path,
+            pass_fds=(fd,),
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    finally:
+        os.close(fd)
+
+    assert completed.returncode == 0, completed.stderr
+    observed = json.loads(result.read_text(encoding="utf-8"))
+    assert observed == {
+        "file": str(capture_tool.resolve()),
+        "argv0": str(capture_tool.resolve()),
+        "marker": "canonical-sibling",
+        "benchmark": True,
+    }
+
+
 def test_produces_cold_warm_and_concurrent_isolation_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -853,6 +1254,9 @@ def test_produces_cold_warm_and_concurrent_isolation_receipt(
 
     assert report["status"] == "passed"
     assert report["source_state_unchanged"] is True
+    assert report["inputs"]["capture_tool"] == report["inputs"][
+        "capture_tool_source_binding"
+    ]["identity"]
     assert set(report["executions"]) == set(isolation._RUN_LABELS)
     assert report["concurrency"]["worker_overlap_ns"] > 0
     assert report["concurrency"]["engine_load_overlap_ns"] > 0
@@ -933,6 +1337,69 @@ def test_produces_cold_warm_and_concurrent_isolation_receipt(
         assert execution["environment_sha256"] == isolation._canonical_sha(
             execution["environment"]
         )
+        assert execution["argv"][1:3] == [
+            "-c",
+            isolation._PINNED_CAPTURE_TRAMPOLINE,
+        ]
+        assert Path(execution["argv"][4]) == args.capture_tool.resolve()
+
+
+def test_rejects_external_capture_tool_even_when_bytes_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = _prepare(tmp_path, monkeypatch)
+    external = tmp_path / "external-capture.py"
+    external.write_bytes(args.capture_tool.read_bytes())
+    args.capture_tool = external
+
+    with pytest.raises(
+        isolation.IsolationError,
+        match="canonical current-source producer",
+    ):
+        isolation.run_qualification(args)
+
+
+@pytest.mark.parametrize(
+    ("argument_name", "expected_label"),
+    [
+        ("build_receipt", "build_receipt"),
+        ("worker", "worker"),
+        ("plugin_library", "plugin_library"),
+    ],
+)
+def test_rejects_aggregate_same_bytes_on_different_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    argument_name: str,
+    expected_label: str,
+) -> None:
+    args = _prepare(tmp_path, monkeypatch)
+    original = Path(getattr(args, argument_name))
+    replacement = tmp_path / f"replacement-{original.name}"
+    replacement.write_bytes(original.read_bytes())
+    setattr(args, argument_name, replacement)
+
+    with pytest.raises(
+        isolation.IsolationError,
+        match=(
+            f"aggregate {expected_label} exact identity differs from "
+            "correctness base artifacts"
+        ),
+    ):
+        isolation.run_qualification(args)
+
+
+def test_rejects_missing_aggregate_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = _prepare(tmp_path, monkeypatch)
+    args.worker = tmp_path / "missing-worker"
+
+    with pytest.raises(
+        isolation.IsolationError,
+        match="required file does not exist",
+    ):
+        isolation.run_qualification(args)
 
 
 def test_rejects_preexisting_output_directory(
@@ -956,6 +1423,66 @@ def test_requires_complete_hf_correctness_matrix(
 
     with pytest.raises(
         isolation.IsolationError, match="complete canonical case matrix"
+    ):
+        isolation.run_qualification(args)
+
+
+def test_requires_persisted_base_artifact_binding_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = _prepare(tmp_path, monkeypatch)
+    _rewrite_json(
+        args.correctness_report,
+        lambda report: report["qualification_gates"].update(
+            {"base_artifact_binding_passed": False}
+        ),
+    )
+
+    with pytest.raises(
+        isolation.IsolationError,
+        match="did not persist the base artifact binding gate",
+    ):
+        isolation.run_qualification(args)
+
+
+def test_replays_correctness_base_artifact_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = _prepare(tmp_path, monkeypatch)
+
+    def select_wrong_model_dso(report: dict) -> None:
+        report["base_artifact_binding"]["model_plugin"][
+            "artifact_key"
+        ] = "model_llama"
+
+    _rewrite_json(
+        args.correctness_report,
+        select_wrong_model_dso,
+    )
+    with pytest.raises(
+        isolation.IsolationError,
+        match="base artifact binding did not replay",
+    ):
+        isolation.run_qualification(args)
+
+
+def test_replays_correctness_runtime_plugin_loaded_mapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = _prepare(tmp_path, monkeypatch)
+
+    def change_loaded_inode(report: dict) -> None:
+        report["runtime_kv_plugin_binding"]["loaded_mapping"][
+            "inode"
+        ] += 1
+
+    _rewrite_json(
+        args.correctness_report,
+        change_loaded_inode,
+    )
+    with pytest.raises(
+        isolation.IsolationError,
+        match="runtime-KV plugin binding did not replay",
     ):
         isolation.run_qualification(args)
 
@@ -1257,6 +1784,81 @@ def test_rejects_failed_or_unbound_performance_receipt(
 
 
 @pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing-build-receipt",
+        "wrong-build-receipt-sha",
+        "same-bytes-new-receipt-inode",
+        "swap-worker-plugin",
+        "swap-runtime-plugin",
+        "swap-build-plugin",
+    ],
+)
+def test_replays_complete_dynamic_performance_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    args = _prepare(tmp_path, monkeypatch)
+    capture_path = _dynamic_capture_path(args.performance_report)
+    capture = json.loads(capture_path.read_text(encoding="utf-8"))
+    evidence = capture["qualification_evidence"]
+    provenance = capture["qualification_provenance"]
+    if mutation == "missing-build-receipt":
+        evidence.pop("build_receipt")
+    elif mutation == "wrong-build-receipt-sha":
+        evidence["build_receipt_sha256"] = "0" * 64
+    elif mutation == "same-bytes-new-receipt-inode":
+        original = Path(evidence["build_receipt"])
+        replacement = tmp_path / "equal-build-receipt.json"
+        replacement.write_bytes(original.read_bytes())
+        evidence["build_receipt"] = str(replacement.resolve())
+        evidence["build_receipt_sha256"] = isolation._sha256(
+            replacement
+        )
+    elif mutation == "swap-worker-plugin":
+        toolchain = evidence["toolchain"]
+        toolchain["worker"], toolchain["plugin_library"] = (
+            toolchain["plugin_library"],
+            toolchain["worker"],
+        )
+        provenance["toolchain_sha256"] = isolation._canonical_sha(
+            toolchain
+        )
+    elif mutation == "swap-runtime-plugin":
+        runtime_trtmc = json.loads(
+            json.dumps(capture["runtime_trtmc_libraries"])
+        )
+        runtime_trtmc["runtime_kv_plugin"] = runtime_trtmc["core"]
+        capture["runtime_trtmc_libraries"] = runtime_trtmc
+        evidence["runtime_trtmc_libraries"] = runtime_trtmc
+        evidence["toolchain"]["runtime_trtmc_libraries"] = runtime_trtmc
+        provenance["runtime_trtmc_libraries_sha256"] = (
+            isolation._canonical_sha(runtime_trtmc)
+        )
+        provenance["toolchain_sha256"] = isolation._canonical_sha(
+            evidence["toolchain"]
+        )
+    else:
+        wrong_plugin = evidence["toolchain"]["worker"]
+        capture["build_runtime_kv_plugin"] = wrong_plugin
+        evidence["build_runtime_kv_plugin"] = wrong_plugin
+        provenance["build_runtime_kv_plugin_sha256"] = (
+            isolation._canonical_sha(wrong_plugin)
+        )
+    capture_path.write_text(json.dumps(capture), encoding="utf-8")
+
+    with pytest.raises(
+        isolation.IsolationError,
+        match=(
+            "dynamic capture provenance replay failed|"
+            "build receipt exact identity differs from aggregate"
+        ),
+    ):
+        isolation.run_qualification(args)
+
+
+@pytest.mark.parametrize(
     ("behavior", "failed_gate"),
     [
         ("token_mismatch", ("shared_child_evidence", "token_ids")),
@@ -1371,6 +1973,56 @@ def test_child_runtime_tuple_must_match_companion_receipts(
     assert any(
         error in observed_error for observed_error in report["errors"]
     )
+
+
+@pytest.mark.parametrize(
+    ("behavior", "error"),
+    [
+        (
+            "missing_child_build_receipt",
+            "dynamic capture provenance replay failed",
+        ),
+        (
+            "swap_child_worker_plugin",
+            "dynamic capture provenance replay failed",
+        ),
+        (
+            "missing_child_runtime_trtmc",
+            "dynamic capture provenance replay failed",
+        ),
+        (
+            "missing_child_build_plugin",
+            "dynamic capture provenance replay failed",
+        ),
+    ],
+)
+def test_replays_complete_child_binary_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    behavior: str,
+    error: str,
+) -> None:
+    args = _prepare(tmp_path, monkeypatch, behavior=behavior)
+    report = isolation.run_qualification(args)
+
+    assert report["status"] == "failed"
+    assert any(error in observed for observed in report["errors"])
+
+
+def test_capture_tool_endpoint_swap_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = _prepare(
+        tmp_path,
+        monkeypatch,
+        behavior="swap_capture_tool_inode",
+    )
+
+    with pytest.raises(
+        isolation.IsolationError,
+        match="canonical capture tool provenance failed",
+    ):
+        isolation.run_qualification(args)
 
 
 def test_requires_two_distinct_physical_gpu_identities(

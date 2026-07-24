@@ -83,8 +83,7 @@ const RuntimeMemoryQualifiedTuple& qualified_runtime_memory_tuple() {
         value.trt_runtime_version = "11.2.0.113";
         value.cuda_runtime_version = "13.3";
         value.cudnn_backend_version = "9.20.0";
-        value.cudnn_frontend_revision =
-            "7b9b711c22b6823e87150213ecd8449260db8610";
+        value.cudnn_frontend_revision = "7b9b711c22b6823e87150213ecd8449260db8610";
         value.nvrtc_version = "13.3";
         value.driver_version = "580.105.08";
         value.model_context_limit = 2048;
@@ -340,8 +339,8 @@ class DecoderPlugin final : public IPipelinePlugin, public IRuntimeMemoryPipelin
                                      "(history-only cache inputs with exact-Sq staging outputs)");
         }
         const auto* runtime_backend = dynamic_cast<IRuntimeMemoryBackendV1*>(ctx.backend);
-        if (runtime_backend == nullptr ||
-            runtime_backend->runtime_memory_api_version() != kRuntimeMemoryBackendApiVersionV1) {
+        if (runtime_backend == nullptr || runtime_backend->runtime_memory_api_version() !=
+                                              kRuntimeMemoryBackendApiVersionCurrent) {
             throw std::runtime_error(
                 "Qualified runtime-memory bundle requires the standard TensorRT "
                 "runtime-memory backend v1");
@@ -653,7 +652,7 @@ class DecoderPlugin final : public IPipelinePlugin, public IRuntimeMemoryPipelin
         if (ctx.bundle.info.runtime_memory.present) {
             auto* runtime_backend = dynamic_cast<IRuntimeMemoryBackendV1*>(ctx.backend);
             if (runtime_backend == nullptr || runtime_backend->runtime_memory_api_version() !=
-                                                  kRuntimeMemoryBackendApiVersionV1) {
+                                                  kRuntimeMemoryBackendApiVersionCurrent) {
                 throw std::runtime_error(
                     "Qualified runtime-memory bundle requires the standard TensorRT "
                     "runtime-memory backend v1");

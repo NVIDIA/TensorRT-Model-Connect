@@ -1,6 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
- * All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -16,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace trtmc {
@@ -190,7 +190,8 @@ struct RuntimeReceiptEngineAccounting {
     std::uint64_t engine_weight_bytes{0};
     std::uint64_t resident_weight_bytes{0};
     std::uint32_t resident_weight_copy_count{0};
-    std::uint64_t device_output_bytes{0};
+    std::uint64_t ordinary_device_input_bytes{0};
+    std::uint64_t ordinary_device_output_bytes{0};
     std::uint64_t host_output_staging_bytes{0};
     bool engine_weight_bytes_available{false};
     bool resident_weight_bytes_available{false};
@@ -209,8 +210,11 @@ query_engine_accounting(const std::vector<RuntimeKvExecutionRole>& roles) {
     bool all_engine_identities_available = true;
     bool all_resident_weights_available = true;
     bool any_cuda_graph_active = false;
+    std::unordered_set<const ITrtModule*> accounted_modules;
 
     for (const auto& role : roles) {
+        if (!accounted_modules.insert(role.module).second)
+            continue;
         const auto* introspection =
             dynamic_cast<const IRuntimeMemoryEngineIntrospectionV1*>(role.module);
         if (introspection == nullptr) {
@@ -225,9 +229,12 @@ query_engine_accounting(const std::vector<RuntimeKvExecutionRole>& roles) {
             stats.api_version != kRuntimeMemoryBackendApiVersionV1) {
             throw std::runtime_error("Runtime-memory engine accounting has an incompatible ABI");
         }
-        accounting.device_output_bytes =
-            checked_add(accounting.device_output_bytes, stats.device_output_bytes,
-                        "Runtime device output accounting");
+        accounting.ordinary_device_input_bytes =
+            checked_add(accounting.ordinary_device_input_bytes, stats.ordinary_device_input_bytes,
+                        "Runtime ordinary device input accounting");
+        accounting.ordinary_device_output_bytes =
+            checked_add(accounting.ordinary_device_output_bytes, stats.ordinary_device_output_bytes,
+                        "Runtime ordinary device output accounting");
         accounting.host_output_staging_bytes =
             checked_add(accounting.host_output_staging_bytes, stats.host_output_staging_bytes,
                         "Runtime host staging accounting");
@@ -339,6 +346,46 @@ struct ContextEnvelope {
     int32_t device{-1};
 };
 
+std::uint64_t history_bound_for_capacity(const RuntimeKvSetupRequest& request,
+                                         std::uint64_t capacity, std::uint64_t history_tokens) {
+    if (history_tokens == 0)
+        return 1;
+    const auto found =
+        std::lower_bound(request.expected_active_kv_profile_limits.begin(),
+                         request.expected_active_kv_profile_limits.end(), history_tokens);
+    if (found == request.expected_active_kv_profile_limits.end()) {
+        throw std::runtime_error("No history-bound profile covers runtime KV history " +
+                                 std::to_string(history_tokens));
+    }
+    return std::min(*found, capacity);
+}
+
+void include_context_requirement(ContextEnvelope& envelope, const RuntimeKvExecutionRole& role,
+                                 const RuntimeKvGraphLayout& layout, std::uint64_t history_tokens,
+                                 std::uint64_t query_tokens, std::uint64_t bound_tokens) {
+    const auto requirement = plan_runtime_kv_invocation(*role.module, layout, history_tokens,
+                                                        query_tokens, bound_tokens);
+    if (requirement.struct_size != sizeof(RuntimeMemoryContextRequirementV1) ||
+        requirement.api_version != kRuntimeMemoryBackendApiVersionV1) {
+        throw std::runtime_error("Runtime KV context requirement has an incompatible ABI");
+    }
+    if (requirement.device < 0) {
+        throw std::runtime_error("Runtime KV context requirement has an invalid CUDA device");
+    }
+    if (requirement.alignment == 0 || (requirement.alignment & (requirement.alignment - 1)) != 0) {
+        throw std::runtime_error("Runtime KV context requirement has an invalid alignment");
+    }
+    if (envelope.device < 0) {
+        envelope.device = requirement.device;
+    } else if (envelope.device != requirement.device) {
+        throw std::runtime_error("Runtime KV execution roles reside on different CUDA devices");
+    }
+    envelope.alignment = std::max(envelope.alignment, requirement.alignment);
+    envelope.overhead.context_device_memory_bytes =
+        std::max(envelope.overhead.context_device_memory_bytes,
+                 static_cast<std::uint64_t>(requirement.capacity_bytes));
+}
+
 ContextEnvelope query_context_envelope(const RuntimeKvSetupRequest& request,
                                        std::uint64_t capacity) {
     auto layout = request.layout;
@@ -347,42 +394,66 @@ ContextEnvelope query_context_envelope(const RuntimeKvSetupRequest& request,
 
     ContextEnvelope envelope;
     envelope.overhead.external_device_output_bytes = staging_bytes(request, capacity);
-    for (const auto* role : enabled_roles(request, capacity)) {
-        std::uint64_t bound_tokens = capacity;
-        std::uint64_t query_tokens = 1;
-        if (role->kind == RuntimeKvExecutionRoleKind::kPrefill) {
-            query_tokens = std::min<std::uint64_t>(layout.prefill_chunk_limit, bound_tokens);
-            if (query_tokens == capacity)
-                bound_tokens = 1;
-        } else {
-            bound_tokens = std::min(bound_tokens, role->profile_limit);
+    const auto roles = enabled_roles(request, capacity);
+    for (const auto* role_ptr : roles) {
+        const auto& role = *role_ptr;
+        if (role.kind == RuntimeKvExecutionRoleKind::kPrefill) {
+            // TensorRT does not guarantee that USER_MANAGED context memory is
+            // monotonic between a profile's endpoints. Probe every Sq for
+            // every history bucket reachable by the native chunk scheduler,
+            // then retain the true maximum. H itself is a scalar value; the
+            // TensorRT shape is determined by Sq and the padded history T.
+            const auto cold_query_limit =
+                std::min<std::uint64_t>(layout.prefill_chunk_limit, capacity);
+            for (std::uint64_t query_tokens = 1; query_tokens <= cold_query_limit; ++query_tokens) {
+                include_context_requirement(envelope, role, layout, /*history_tokens=*/0,
+                                            query_tokens, /*bound_tokens=*/1);
+            }
+
+            std::set<std::uint64_t> probed_history_bounds;
+            const auto chunk = layout.prefill_chunk_limit;
+            for (std::uint64_t history_tokens = chunk; history_tokens < capacity;) {
+                const auto bound_tokens =
+                    history_bound_for_capacity(request, capacity, history_tokens);
+                if (probed_history_bounds.insert(bound_tokens).second) {
+                    const auto query_limit =
+                        std::min<std::uint64_t>(chunk, capacity - history_tokens);
+                    for (std::uint64_t query_tokens = 1; query_tokens <= query_limit;
+                         ++query_tokens) {
+                        include_context_requirement(envelope, role, layout, history_tokens,
+                                                    query_tokens, bound_tokens);
+                    }
+                }
+                if (chunk > capacity - history_tokens)
+                    break;
+                history_tokens += chunk;
+            }
+            continue;
         }
-        const auto history_tokens = role->kind == RuntimeKvExecutionRoleKind::kPrefill
-                                        ? capacity - query_tokens
-                                        : bound_tokens - query_tokens;
-        const auto requirement = plan_runtime_kv_invocation(*role->module, layout, history_tokens,
-                                                            query_tokens, bound_tokens);
-        if (requirement.struct_size != sizeof(RuntimeMemoryContextRequirementV1) ||
-            requirement.api_version != kRuntimeMemoryBackendApiVersionV1) {
-            throw std::runtime_error("Runtime KV context requirement has an incompatible ABI");
+
+        const auto bound_tokens = std::min(capacity, role.profile_limit);
+        // The smallest decode role is also the cold-sentinel fallback.
+        if (role.profile_limit == request.expected_active_kv_profile_limits.front()) {
+            include_context_requirement(envelope, role, layout, /*history_tokens=*/0,
+                                        /*query_tokens=*/1, /*bound_tokens=*/1);
         }
-        if (requirement.device < 0) {
-            throw std::runtime_error("Runtime KV context requirement has an invalid CUDA device");
+        const auto found =
+            std::lower_bound(request.expected_active_kv_profile_limits.begin(),
+                             request.expected_active_kv_profile_limits.end(), role.profile_limit);
+        const auto previous_limit =
+            found == request.expected_active_kv_profile_limits.begin() ? 0 : *(found - 1);
+        const auto history_tokens = previous_limit + 1;
+        if (history_tokens < capacity) {
+            include_context_requirement(envelope, role, layout, history_tokens,
+                                        /*query_tokens=*/1, bound_tokens);
         }
-        if (requirement.alignment == 0 ||
-            (requirement.alignment & (requirement.alignment - 1)) != 0) {
-            throw std::runtime_error("Runtime KV context requirement has an invalid alignment");
-        }
-        if (envelope.device < 0) {
-            envelope.device = requirement.device;
-        } else if (envelope.device != requirement.device) {
-            throw std::runtime_error("Runtime KV execution roles reside on different CUDA devices");
-        }
-        envelope.alignment = std::max(envelope.alignment, requirement.alignment);
-        envelope.overhead.context_device_memory_bytes =
-            std::max(envelope.overhead.context_device_memory_bytes,
-                     static_cast<std::uint64_t>(requirement.capacity_bytes));
     }
+    // Shape planning above materializes ordinary dynamic I/O. Sum every
+    // actual module/context allocation once, including high-water capacities
+    // retained by a role that a later decreasing solve no longer enables.
+    const auto module_accounting = query_engine_accounting(request.roles);
+    envelope.overhead.ordinary_device_input_bytes = module_accounting.ordinary_device_input_bytes;
+    envelope.overhead.ordinary_device_output_bytes = module_accounting.ordinary_device_output_bytes;
     return envelope;
 }
 
@@ -502,25 +573,29 @@ std::unique_ptr<RuntimeKvStateCore> create_runtime_kv_state(const RuntimeKvSetup
         throw std::runtime_error("Runtime KV staging size does not match the resolved memory plan");
     }
 
-    const auto final_snapshot = query_device_memory("after shared context and output allocation");
-    if (final_snapshot.device != post_load.device) {
+    const auto capacity_decision_snapshot =
+        query_device_memory("after shared context and output allocation");
+    if (capacity_decision_snapshot.device != post_load.device) {
         throw std::runtime_error("CUDA device changed during runtime KV memory setup");
     }
-    if (final_snapshot.free_bytes == 0 || final_snapshot.total_bytes == 0 ||
-        final_snapshot.free_bytes > final_snapshot.total_bytes) {
-        throw std::runtime_error("Runtime KV setup received an invalid final memory snapshot");
+    if (capacity_decision_snapshot.free_bytes == 0 || capacity_decision_snapshot.total_bytes == 0 ||
+        capacity_decision_snapshot.free_bytes > capacity_decision_snapshot.total_bytes ||
+        capacity_decision_snapshot.total_bytes != post_load.total_bytes) {
+        throw std::runtime_error(
+            "Runtime KV setup received an invalid capacity-decision memory snapshot");
     }
-    plan_request.final_free_bytes = final_snapshot.free_bytes;
+    plan_request.capacity_decision_free_bytes = capacity_decision_snapshot.free_bytes;
+    plan_request.capacity_decision_upper_bound_tokens = plan.runtime_kv_capacity_tokens;
+    plan_request.capacity_decision_resident_overhead = context_envelope.overhead;
     auto final_plan = solve_runtime_memory_plan(plan_request, query);
     const auto final_envelope =
         query_context_envelope(request, final_plan.runtime_kv_capacity_tokens);
     if (final_plan.runtime_kv_capacity_tokens > plan.runtime_kv_capacity_tokens) {
         throw std::runtime_error("Runtime KV final memory solve attempted to increase capacity");
     }
-    if (final_envelope.device != context_block.device ||
-        final_envelope.overhead.context_device_memory_bytes > context_block.capacity_bytes) {
-        throw std::runtime_error("A smaller runtime KV plan requires more context memory than the "
-                                 "reserved shared block");
+    if (final_envelope.device != context_block.device) {
+        throw std::runtime_error(
+            "Runtime KV final context envelope moved to a different CUDA device");
     }
     if (final_envelope.overhead.external_device_output_bytes > staging->total_bytes()) {
         throw std::runtime_error("Runtime KV final memory solve attempted to increase staging");
@@ -535,8 +610,9 @@ std::unique_ptr<RuntimeKvStateCore> create_runtime_kv_state(const RuntimeKvSetup
         staging->total_bytes() != final_envelope.overhead.external_device_output_bytes;
     if (resize_context || resize_staging) {
         // The second, post-overhead observation may only decrease R. Release
-        // every oversized O(R) reservation first so cudaMallocAsync cannot
-        // transiently retain both the initial and final envelopes.
+        // every replaced O(R) reservation first so cudaMallocAsync cannot
+        // transiently retain both the initial and final envelopes. A lower R
+        // can require a larger context block at a tactic discontinuity.
         if (resize_context)
             context_block = RuntimeMemoryContextBlockV1{};
         if (resize_staging)
@@ -587,9 +663,17 @@ std::unique_ptr<RuntimeKvStateCore> create_runtime_kv_state(const RuntimeKvSetup
     receipt.post_load_total_bytes = post_load.total_bytes;
     receipt.post_load_device_used_bytes = post_load.total_bytes - post_load.free_bytes;
     receipt.post_load_total_bytes_available = true;
-    receipt.final_free_bytes = final_snapshot.free_bytes;
-    receipt.final_total_bytes = final_snapshot.total_bytes;
-    receipt.final_device_used_bytes = final_snapshot.total_bytes - final_snapshot.free_bytes;
+    receipt.capacity_decision_free_bytes = capacity_decision_snapshot.free_bytes;
+    receipt.capacity_decision_total_bytes = capacity_decision_snapshot.total_bytes;
+    receipt.capacity_decision_device_used_bytes =
+        capacity_decision_snapshot.total_bytes - capacity_decision_snapshot.free_bytes;
+    receipt.capacity_decision_snapshot_available = true;
+    // Schema-v2 compatibility: final_* was historically the snapshot used to
+    // make the final capacity decision. Keep that binding explicit while
+    // schema-v3 consumers use settled_* for actual post-allocation residency.
+    receipt.final_free_bytes = receipt.capacity_decision_free_bytes;
+    receipt.final_total_bytes = receipt.capacity_decision_total_bytes;
+    receipt.final_device_used_bytes = receipt.capacity_decision_device_used_bytes;
     receipt.final_snapshot_available = true;
     receipt.context_device_memory_bytes = final_plan.overhead.context_device_memory_bytes;
     const auto engine_accounting = query_engine_accounting(request.roles);
@@ -601,36 +685,50 @@ std::unique_ptr<RuntimeKvStateCore> create_runtime_kv_state(const RuntimeKvSetup
     receipt.resident_weight_copy_count_available =
         engine_accounting.resident_weight_copy_count_available;
     receipt.weight_streaming_active = engine_accounting.weight_streaming_active;
-    receipt.external_device_output_bytes =
-        checked_add(engine_accounting.device_output_bytes, staging->total_bytes(),
-                    "Runtime external device output accounting");
-    receipt.host_staging_bytes = engine_accounting.host_output_staging_bytes;
-    receipt.external_device_output_bytes_available =
+    receipt.ordinary_device_input_bytes = engine_accounting.ordinary_device_input_bytes;
+    receipt.ordinary_device_output_bytes = engine_accounting.ordinary_device_output_bytes;
+    receipt.ordinary_device_input_bytes_available =
         engine_accounting.module_allocation_bytes_available;
+    receipt.ordinary_device_output_bytes_available =
+        engine_accounting.module_allocation_bytes_available;
+    receipt.external_device_output_bytes = staging->total_bytes();
+    receipt.host_staging_bytes = engine_accounting.host_output_staging_bytes;
+    receipt.external_device_output_bytes_available = true;
     receipt.host_staging_bytes_available = engine_accounting.module_allocation_bytes_available;
     receipt.graph_private_device_bytes = 0;
     receipt.graph_private_device_bytes_available =
         engine_accounting.cuda_graph_private_bytes_available;
-    if (!receipt.pre_load_snapshot_available) {
-        receipt.mark_peak_device_sampling_failed("pre_load_cuda_memory_snapshot_unavailable");
-    } else {
-        try {
-            const auto load_complete = query_device_memory("after runtime KV allocation");
-            if (load_complete.device != post_load.device || load_complete.free_bytes == 0 ||
-                load_complete.total_bytes == 0 ||
-                load_complete.free_bytes > load_complete.total_bytes ||
-                load_complete.total_bytes != receipt.pre_load_total_bytes) {
+    try {
+        const auto load_complete = query_device_memory("after runtime KV allocation");
+        if (load_complete.device != post_load.device || load_complete.free_bytes == 0 ||
+            load_complete.total_bytes == 0 ||
+            load_complete.free_bytes > load_complete.total_bytes ||
+            load_complete.total_bytes != post_load.total_bytes) {
+            receipt.settled_snapshot_available = false;
+            receipt.settled_snapshot_unavailable_reason = "settled_cuda_memory_snapshot_invalid";
+            receipt.mark_peak_device_sampling_failed(
+                "load_completion_cuda_memory_snapshot_invalid");
+        } else {
+            receipt.settled_free_bytes = load_complete.free_bytes;
+            receipt.settled_total_bytes = load_complete.total_bytes;
+            receipt.settled_device_used_bytes =
+                load_complete.total_bytes - load_complete.free_bytes;
+            receipt.settled_snapshot_available = true;
+            receipt.settled_snapshot_unavailable_reason.clear();
+            if (!receipt.pre_load_snapshot_available) {
                 receipt.mark_peak_device_sampling_failed(
-                    "load_completion_cuda_memory_snapshot_invalid");
+                    "pre_load_cuda_memory_snapshot_unavailable");
             } else {
                 receipt.observe_peak_device_memory(
                     load_complete.free_bytes, RuntimeMemoryPeakSampleBoundary::kLoadCompletion);
             }
-        } catch (...) {
-            // The cache is already valid. Preserve inference correctness and
-            // make the missing observability explicit in the receipt.
-            receipt.mark_peak_device_sampling_failed("load_completion_cuda_mem_get_info_failed");
         }
+    } catch (...) {
+        // The cache is already valid. Preserve inference correctness and make
+        // the missing settled/high-water observability explicit in the receipt.
+        receipt.settled_snapshot_available = false;
+        receipt.settled_snapshot_unavailable_reason = "settled_cuda_mem_get_info_failed";
+        receipt.mark_peak_device_sampling_failed("load_completion_cuda_mem_get_info_failed");
     }
     return std::make_unique<RuntimeKvStateCore>(
         std::move(layout), std::move(allocation), std::move(staging), std::move(context_block),

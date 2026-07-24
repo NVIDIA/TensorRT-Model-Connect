@@ -1,6 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
- * All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -19,11 +18,119 @@
 #include <nvrtc.h>
 #include <sstream>
 #include <string_view>
+#include <unordered_set>
+#include <utility>
 
 namespace trtmc {
 
+namespace {
+
+constexpr std::string_view kExecutionAttemptEvidenceSource =
+    "runtime_memory_transfer_snapshot_v1.execution_attempt_events";
+
+std::uint64_t checked_execution_attempt_sum(std::uint64_t total, std::uint64_t value) {
+    if (value > std::numeric_limits<std::uint64_t>::max() - total) {
+        throw std::runtime_error("Qualification execution-attempt ledger aggregate overflowed");
+    }
+    return total + value;
+}
+
+RuntimeMemoryTransferSnapshotV1 require_execution_attempt_snapshot(const ITrtModule& module,
+                                                                   std::size_t module_index) {
+    const auto* ledger = dynamic_cast<const IRuntimeMemoryTransferLedgerV1*>(&module);
+    if (ledger == nullptr) {
+        throw std::runtime_error("Qualification execution-attempt ledger unavailable for module " +
+                                 std::to_string(module_index));
+    }
+    auto snapshot = ledger->runtime_memory_transfer_snapshot();
+    if (snapshot.struct_size < sizeof(RuntimeMemoryTransferSnapshotV1) ||
+        snapshot.api_version != kRuntimeMemoryBackendApiVersionCurrent) {
+        throw std::runtime_error(
+            "Qualification execution-attempt ledger has incompatible ABI for module " +
+            std::to_string(module_index));
+    }
+    return snapshot;
+}
+
+} // namespace
+
+RuntimeMemoryQualificationAdmissionError::RuntimeMemoryQualificationAdmissionError(
+    const std::string& message,
+    RuntimeMemoryQualificationExecutionAttemptEvidence execution_attempt_evidence)
+    : std::runtime_error(message),
+      execution_attempt_evidence_(std::move(execution_attempt_evidence)) {
+    if (execution_attempt_evidence_.source != kExecutionAttemptEvidenceSource ||
+        !execution_attempt_evidence_.available || execution_attempt_evidence_.module_count == 0 ||
+        execution_attempt_evidence_.after < execution_attempt_evidence_.before ||
+        execution_attempt_evidence_.delta !=
+            execution_attempt_evidence_.after - execution_attempt_evidence_.before) {
+        throw std::invalid_argument(
+            "Qualification admission error requires complete execution-attempt evidence");
+    }
+}
+
 RuntimeMemoryQualificationAdmissionError::~RuntimeMemoryQualificationAdmissionError() = default;
 IRuntimeMemoryQualificationV1::~IRuntimeMemoryQualificationV1() = default;
+
+RuntimeMemoryQualificationExecutionAttemptBaseline
+capture_runtime_memory_qualification_execution_attempts(
+    const std::vector<const ITrtModule*>& modules) {
+    RuntimeMemoryQualificationExecutionAttemptBaseline baseline;
+    baseline.modules.reserve(modules.size());
+    baseline.before_by_module.reserve(modules.size());
+
+    std::unordered_set<const ITrtModule*> seen;
+    seen.reserve(modules.size());
+    for (const auto* module : modules) {
+        if (module == nullptr) {
+            throw std::runtime_error("Qualification execution-attempt ledger has a null module");
+        }
+        if (!seen.insert(module).second)
+            continue;
+
+        const auto snapshot = require_execution_attempt_snapshot(*module, baseline.modules.size());
+        baseline.before =
+            checked_execution_attempt_sum(baseline.before, snapshot.execution_attempt_events);
+        baseline.modules.push_back(module);
+        baseline.before_by_module.push_back(snapshot.execution_attempt_events);
+    }
+    if (baseline.modules.empty()) {
+        throw std::runtime_error(
+            "Qualification execution-attempt ledger has no prefill/decode modules");
+    }
+    return baseline;
+}
+
+RuntimeMemoryQualificationExecutionAttemptEvidence
+finish_runtime_memory_qualification_execution_attempts(
+    const RuntimeMemoryQualificationExecutionAttemptBaseline& baseline) {
+    if (baseline.modules.empty() || baseline.modules.size() != baseline.before_by_module.size()) {
+        throw std::runtime_error("Qualification execution-attempt ledger baseline is incomplete");
+    }
+
+    std::uint64_t after = 0;
+    for (std::size_t index = 0; index < baseline.modules.size(); ++index) {
+        const auto snapshot = require_execution_attempt_snapshot(*baseline.modules[index], index);
+        if (snapshot.execution_attempt_events < baseline.before_by_module[index]) {
+            throw std::runtime_error(
+                "Qualification execution-attempt ledger regressed for module " +
+                std::to_string(index));
+        }
+        after = checked_execution_attempt_sum(after, snapshot.execution_attempt_events);
+    }
+    if (after < baseline.before) {
+        throw std::runtime_error("Qualification execution-attempt ledger aggregate regressed");
+    }
+
+    RuntimeMemoryQualificationExecutionAttemptEvidence evidence;
+    evidence.source = std::string(kExecutionAttemptEvidenceSource);
+    evidence.available = true;
+    evidence.module_count = baseline.modules.size();
+    evidence.before = baseline.before;
+    evidence.after = after;
+    evidence.delta = after - baseline.before;
+    return evidence;
+}
 
 std::string runtime_memory_execution_plan_identity(const std::string& bundle_section_name,
                                                    const ITrtModule& module) {
@@ -36,7 +143,7 @@ std::string runtime_memory_execution_plan_identity(const std::string& bundle_sec
     }
     const auto stats = introspection->runtime_memory_engine_stats();
     if (stats.struct_size < sizeof(RuntimeMemoryEngineStatsV1) ||
-        stats.api_version != kRuntimeMemoryBackendApiVersionV1 || stats.engine_identity == 0) {
+        stats.api_version != kRuntimeMemoryBackendApiVersionCurrent || stats.engine_identity == 0) {
         throw std::logic_error(
             "qualification execution plan has no valid deserialized-engine identity");
     }
@@ -82,8 +189,7 @@ std::string linked_nvrtc_version() {
     int minor = 0;
     const nvrtcResult status = nvrtcVersion(&major, &minor);
     if (status != NVRTC_SUCCESS || major <= 0 || minor < 0) {
-        throw std::runtime_error(
-            "Core NVRTC load-order anchor could not query its linked runtime");
+        throw std::runtime_error("Core NVRTC load-order anchor could not query its linked runtime");
     }
     return std::to_string(major) + "." + std::to_string(minor);
 }
@@ -105,9 +211,8 @@ bool matches_developer_chunk_variant(const RuntimeMemoryContract& contract,
     auto variant_buckets = expected.active_kv_profile_limits;
     variant_buckets.push_back(variant_chunk);
     std::sort(variant_buckets.begin(), variant_buckets.end());
-    variant_buckets.erase(
-        std::unique(variant_buckets.begin(), variant_buckets.end()),
-        variant_buckets.end());
+    variant_buckets.erase(std::unique(variant_buckets.begin(), variant_buckets.end()),
+                          variant_buckets.end());
     return contract.prefill_chunk_limit == variant_chunk &&
            contract.active_kv_profile_limits == variant_buckets;
 }
@@ -138,16 +243,14 @@ void validate_runtime_memory_qualified_tuple(const RuntimeMemoryContract& contra
         contract.prefill_chunk_limit == expected.prefill_chunk_limit &&
         contract.active_kv_profile_limits == expected.active_kv_profile_limits;
     if (invariant_mismatch ||
-        (!default_profiles &&
-         !matches_developer_chunk_variant(contract, expected))) {
+        (!default_profiles && !matches_developer_chunk_variant(contract, expected))) {
         throw std::runtime_error("runtime_memory contract does not match the exact qualified "
                                  "model/revision/config/target tuple for " +
                                  expected.model_id);
     }
 }
 
-RuntimeMemoryRuntimeTarget
-parse_runtime_memory_runtime_stack_json(const std::string& json_text) {
+RuntimeMemoryRuntimeTarget parse_runtime_memory_runtime_stack_json(const std::string& json_text) {
     if (json_text.empty())
         throw std::runtime_error(
             "Selected TensorRT backend does not expose runtime-stack evidence V1");
@@ -156,9 +259,8 @@ parse_runtime_memory_runtime_stack_json(const std::string& json_text) {
     try {
         value = nlohmann::json::parse(json_text);
     } catch (const nlohmann::json::exception& error) {
-        throw std::runtime_error(
-            "Selected TensorRT backend returned invalid runtime-stack JSON: " +
-            std::string(error.what()));
+        throw std::runtime_error("Selected TensorRT backend returned invalid runtime-stack JSON: " +
+                                 std::string(error.what()));
     }
     if (!value.is_object() || value.size() != 7) {
         throw std::runtime_error(
@@ -179,38 +281,31 @@ parse_runtime_memory_runtime_stack_json(const std::string& json_text) {
     actual.trt_runtime_version = required_json_string(value, "tensorrt");
     actual.cuda_runtime_version = required_json_string(value, "cuda_runtime");
     actual.cudnn_backend_version = required_json_string(value, "cudnn_backend");
-    actual.cudnn_frontend_revision =
-        required_json_string(value, "cudnn_frontend_revision");
+    actual.cudnn_frontend_revision = required_json_string(value, "cudnn_frontend_revision");
     actual.nvrtc_version = required_json_string(value, "nvrtc");
     actual.driver_version = required_json_string(value, "driver");
     const auto anchored_nvrtc = linked_nvrtc_version();
     if (actual.nvrtc_version != anchored_nvrtc) {
-        throw std::runtime_error(
-            "Selected TensorRT backend/plugin NVRTC disagrees with the "
-            "core load-order anchor: core=" +
-            anchored_nvrtc + ", backend=" + actual.nvrtc_version);
+        throw std::runtime_error("Selected TensorRT backend/plugin NVRTC disagrees with the "
+                                 "core load-order anchor: core=" +
+                                 anchored_nvrtc + ", backend=" + actual.nvrtc_version);
     }
     return actual;
 }
 
-void validate_runtime_memory_runtime_stack(
-    const QualifiedRuntimeStack& expected,
-    const RuntimeMemoryRuntimeTarget& actual) {
+void validate_runtime_memory_runtime_stack(const QualifiedRuntimeStack& expected,
+                                           const RuntimeMemoryRuntimeTarget& actual) {
     const auto actual_gpu =
         format_compute_capability(actual.compute_capability_major, actual.compute_capability_minor);
     require_exact_stack_field("GPU SM", expected.sm, actual_gpu);
-    require_exact_stack_field("TensorRT runtime", expected.tensorrt,
-                              actual.trt_runtime_version);
-    require_exact_stack_field("CUDA runtime", expected.cuda_runtime,
-                              actual.cuda_runtime_version);
+    require_exact_stack_field("TensorRT runtime", expected.tensorrt, actual.trt_runtime_version);
+    require_exact_stack_field("CUDA runtime", expected.cuda_runtime, actual.cuda_runtime_version);
     require_exact_stack_field("cuDNN backend", expected.cudnn_backend,
                               actual.cudnn_backend_version);
-    require_exact_stack_field("cuDNN Frontend revision",
-                              expected.cudnn_frontend_revision,
+    require_exact_stack_field("cuDNN Frontend revision", expected.cudnn_frontend_revision,
                               actual.cudnn_frontend_revision);
     require_exact_stack_field("NVRTC", expected.nvrtc, actual.nvrtc_version);
-    require_exact_stack_field("NVIDIA driver", expected.driver,
-                              actual.driver_version);
+    require_exact_stack_field("NVIDIA driver", expected.driver, actual.driver_version);
 }
 
 void validate_runtime_memory_runtime_target(const RuntimeMemoryQualifiedTuple& expected,

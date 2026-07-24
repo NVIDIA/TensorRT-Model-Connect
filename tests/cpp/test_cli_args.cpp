@@ -131,7 +131,9 @@ void test_run_parses_common_flags() {
     check(args.no_thinking, "run no thinking");
     check(args.lora_adapter_path == "/tmp/adapter", "run LoRA adapter path");
     check(args.lora_adapter_id == "adapter-1", "run LoRA adapter ID");
-    check(args.kv_cache_size_bytes == 2147483648ULL, "run kv cache size");
+    check(args.kv_cache_size_bytes == 0, "canonical kv memory does not populate legacy bytes");
+    check(!args.kv_cache_size_explicitly_set,
+          "canonical kv memory does not mark legacy size explicit");
     check(args.kv_cache_memory.mode == trtmc::cli::KvCacheMemoryMode::Bytes, "run kv cache mode");
     check(args.kv_cache_memory.bytes == 2147483648ULL, "run kv cache memory bytes");
     check(args.max_sequence_length == 32768ULL, "run max sequence length");
@@ -291,6 +293,7 @@ void test_runtime_kv_memory_modes() {
           "default kv cache mode is auto");
     check(!default_args.kv_cache_memory.explicitly_set, "default auto is implicit");
     check(default_args.kv_cache_size_bytes == 0, "default auto compatibility bytes are zero");
+    check(!default_args.kv_cache_size_explicitly_set, "default legacy kv cache size is implicit");
 
     auto explicit_auto =
         parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--kv-cache-memory=auto"});
@@ -311,16 +314,34 @@ void test_runtime_kv_memory_modes() {
     auto legacy =
         parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--kv-cache-size", "4GiB"});
     check(!legacy.parse_error, "legacy kv cache size parses");
-    check(legacy.kv_cache_memory.mode == trtmc::cli::KvCacheMemoryMode::Bytes,
-          "legacy kv cache size maps to byte mode");
+    check(legacy.kv_cache_memory.mode == trtmc::cli::KvCacheMemoryMode::Auto &&
+              !legacy.kv_cache_memory.explicitly_set,
+          "legacy kv cache size does not select runtime policy");
     check(legacy.kv_cache_size_bytes == 4294967296ULL,
           "legacy kv cache size preserves compatibility bytes");
+    check(legacy.kv_cache_size_explicitly_set,
+          "legacy kv cache size records compatibility request");
+
+    auto underscore_legacy =
+        parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--kv_cache_size=2GiB"});
+    check(!underscore_legacy.parse_error, "underscore legacy kv cache size parses");
+    check(underscore_legacy.kv_cache_size_bytes == 2147483648ULL &&
+              underscore_legacy.kv_cache_size_explicitly_set,
+          "underscore legacy kv cache size remains a legacy byte budget");
 }
 
 void test_bad_kv_cache_memory_fails() {
     auto args = parse({"trtmc", "run", "bundle.trtfb", "--kv-cache-size=abc"});
     check(args.parse_error, "bad kv cache parse error");
-    check(args.error_message.find("--kv-cache-memory expects") == 0, "bad kv cache message");
+    check(args.error_message.find("--kv-cache-size expects") == 0, "bad legacy kv cache message");
+
+    for (const auto* value : {"auto", "80%"}) {
+        auto bad_legacy =
+            parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--kv-cache-size", value});
+        check(bad_legacy.parse_error, "legacy kv cache rejects new policy syntax");
+        check(bad_legacy.error_message.find("--kv-cache-size expects") == 0,
+              "legacy kv cache syntax error names legacy option");
+    }
 
     for (const auto* value : {"0%", "-1%", "100.1%", "nan%", "inf%", "-1GiB", "1XB",
                               "18446744073709551616B", "1e400GiB"}) {
@@ -368,6 +389,20 @@ void test_duplicate_runtime_memory_policies_fail() {
     check(memory.parse_error, "duplicate KV memory policies fail");
     check_message_contains(memory.error_message, "specified only once",
                            "duplicate KV memory policy message");
+    check_message_contains(memory.error_message, "mutually exclusive",
+                           "mixed legacy and canonical KV policy message");
+
+    auto duplicate_legacy = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello",
+                                   "--kv-cache-size", "4GiB", "--kv_cache_size=2GiB"});
+    check(duplicate_legacy.parse_error, "duplicate legacy KV sizes fail");
+    check_message_contains(duplicate_legacy.error_message, "specified only once",
+                           "duplicate legacy KV size message");
+
+    auto duplicate_canonical = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello",
+                                      "--kv-cache-memory", "80%", "--kv_cache_memory=auto"});
+    check(duplicate_canonical.parse_error, "duplicate canonical KV policies fail");
+    check_message_contains(duplicate_canonical.error_message, "specified only once",
+                           "duplicate canonical KV policy message");
 
     auto sequence = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello",
                            "--max-sequence-length", "32K", "--max_sequence_length=auto"});

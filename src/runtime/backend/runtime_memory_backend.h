@@ -15,7 +15,19 @@
 
 namespace trtmc {
 
-inline constexpr uint32_t kRuntimeMemoryBackendApiVersionV1 = 1;
+// Version 1 shipped STL-bearing snapshots without a backend/core DSO
+// handshake.  The current value is 2 because the snapshot/stats layouts grew
+// and must never be exchanged with a stale V1 backend.
+inline constexpr uint32_t kRuntimeMemoryBackendApiVersionLegacyV1 = 1;
+inline constexpr uint32_t kRuntimeMemoryBackendApiVersionV2 = 2;
+inline constexpr uint32_t kRuntimeMemoryBackendApiVersionCurrent =
+    kRuntimeMemoryBackendApiVersionV2;
+// Historical source spelling retained for the V1-suffixed C++ type names.
+// It denotes the current wire version; use LegacyV1 only in rejection tests.
+inline constexpr uint32_t kRuntimeMemoryBackendApiVersionV1 =
+    kRuntimeMemoryBackendApiVersionCurrent;
+inline constexpr std::uint64_t kRuntimeMemoryBackendLayoutFingerprintV2 =
+    0x52544d454d414232ULL; // "RTMEMAB2"
 inline constexpr std::size_t kRuntimeMemoryCudaAlignmentV1 = 256;
 
 // Describes one caller-owned TensorRT I/O allocation. A descriptor is accepted
@@ -28,7 +40,7 @@ inline constexpr std::size_t kRuntimeMemoryCudaAlignmentV1 = 256;
 // capacity_tokens.
 struct RuntimeMemoryBindingV1 {
     uint32_t struct_size{sizeof(RuntimeMemoryBindingV1)};
-    uint32_t api_version{kRuntimeMemoryBackendApiVersionV1};
+    uint32_t api_version{kRuntimeMemoryBackendApiVersionCurrent};
     std::string name;
     void* pointer{nullptr};
     std::size_t capacity_bytes{0};
@@ -49,7 +61,7 @@ struct RuntimeMemoryBindingV1 {
 // allocating the KV slab.
 struct RuntimeMemoryShapeV1 {
     uint32_t struct_size{sizeof(RuntimeMemoryShapeV1)};
-    uint32_t api_version{kRuntimeMemoryBackendApiVersionV1};
+    uint32_t api_version{kRuntimeMemoryBackendApiVersionCurrent};
     std::string name;
     std::vector<int64_t> shape;
     DType dtype{DType::kFloat32};
@@ -61,7 +73,7 @@ struct RuntimeMemoryShapeV1 {
 
 struct RuntimeMemoryAliasShapeV1 {
     uint32_t struct_size{sizeof(RuntimeMemoryAliasShapeV1)};
-    uint32_t api_version{kRuntimeMemoryBackendApiVersionV1};
+    uint32_t api_version{kRuntimeMemoryBackendApiVersionCurrent};
     RuntimeMemoryShapeV1 input;
     RuntimeMemoryShapeV1 output;
 };
@@ -70,7 +82,7 @@ struct RuntimeMemoryAliasShapeV1 {
 // candidate shape used by context-memory planning. This performs no data copy.
 struct RuntimeInputShapeV1 {
     uint32_t struct_size{sizeof(RuntimeInputShapeV1)};
-    uint32_t api_version{kRuntimeMemoryBackendApiVersionV1};
+    uint32_t api_version{kRuntimeMemoryBackendApiVersionCurrent};
     std::string name;
     std::vector<int64_t> shape;
 };
@@ -79,7 +91,7 @@ struct RuntimeInputShapeV1 {
 // ICudaEngine::getAliasedInputTensor() after deserialization.
 struct RuntimeMemoryAliasPairV1 {
     uint32_t struct_size{sizeof(RuntimeMemoryAliasPairV1)};
-    uint32_t api_version{kRuntimeMemoryBackendApiVersionV1};
+    uint32_t api_version{kRuntimeMemoryBackendApiVersionCurrent};
     std::string input_name;
     std::string output_name;
 };
@@ -89,23 +101,25 @@ struct RuntimeMemoryAliasPairV1 {
 // sequence bounds.
 struct RuntimeMemoryAliasBindingV1 {
     uint32_t struct_size{sizeof(RuntimeMemoryAliasBindingV1)};
-    uint32_t api_version{kRuntimeMemoryBackendApiVersionV1};
+    uint32_t api_version{kRuntimeMemoryBackendApiVersionCurrent};
     RuntimeMemoryBindingV1 input;
     RuntimeMemoryBindingV1 output;
 };
 
 struct RuntimeMemoryModuleOptionsV1 {
     uint32_t struct_size{sizeof(RuntimeMemoryModuleOptionsV1)};
-    uint32_t api_version{kRuntimeMemoryBackendApiVersionV1};
-    // API v1 defers only tensors named here (plus alias endpoints). Ordinary
-    // TensorRT I/O keeps the legacy internal profile-sized allocation policy.
+    uint32_t api_version{kRuntimeMemoryBackendApiVersionCurrent};
+    // The current API defers only tensors named here (plus alias endpoints).
+    // Ordinary dynamic TensorRT I/O is internally materialized at its concrete
+    // planned shape; static I/O and non-runtime-memory modules keep the legacy
+    // policy.
     std::vector<std::string> deferred_tensor_names;
     std::vector<RuntimeMemoryAliasPairV1> alias_pairs;
 };
 
 struct RuntimeMemoryContextRequirementV1 {
     uint32_t struct_size{sizeof(RuntimeMemoryContextRequirementV1)};
-    uint32_t api_version{kRuntimeMemoryBackendApiVersionV1};
+    uint32_t api_version{kRuntimeMemoryBackendApiVersionCurrent};
     std::size_t capacity_bytes{0};
     std::size_t alignment{kRuntimeMemoryCudaAlignmentV1};
     int32_t device{-1};
@@ -116,7 +130,7 @@ struct RuntimeMemoryContextRequirementV1 {
 // that serialization remains the pipeline's responsibility.
 struct RuntimeMemoryContextBlockV1 {
     uint32_t struct_size{sizeof(RuntimeMemoryContextBlockV1)};
-    uint32_t api_version{kRuntimeMemoryBackendApiVersionV1};
+    uint32_t api_version{kRuntimeMemoryBackendApiVersionCurrent};
     void* pointer{nullptr};
     std::size_t capacity_bytes{0};
     std::size_t alignment{kRuntimeMemoryCudaAlignmentV1};
@@ -135,11 +149,17 @@ struct RuntimeMemoryContextBlockV1 {
 // weight accounting unavailable for an actively streamed engine.
 struct RuntimeMemoryEngineStatsV1 {
     uint32_t struct_size{sizeof(RuntimeMemoryEngineStatsV1)};
-    uint32_t api_version{kRuntimeMemoryBackendApiVersionV1};
+    uint32_t api_version{kRuntimeMemoryBackendApiVersionCurrent};
     std::uintptr_t engine_identity{0};
     std::uint64_t total_weight_bytes{0};
     std::uint64_t streamable_weight_bytes{0};
     std::uint64_t weight_streaming_budget_bytes{0};
+    // High-water capacities for internally owned ordinary dynamic I/O.
+    // Static I/O is part of the post-load baseline; deferred tensors are
+    // caller-owned and excluded.
+    std::uint64_t ordinary_device_input_bytes{0};
+    std::uint64_t ordinary_device_output_bytes{0};
+    // Compatibility aggregate for all non-external backend output buffers.
     std::uint64_t device_output_bytes{0};
     std::uint64_t host_output_staging_bytes{0};
     bool total_weight_bytes_available{false};
@@ -162,8 +182,9 @@ struct RuntimeMemoryTransferCounterV1 {
 
 struct RuntimeMemoryTransferSnapshotV1 {
     uint32_t struct_size{sizeof(RuntimeMemoryTransferSnapshotV1)};
-    uint32_t api_version{kRuntimeMemoryBackendApiVersionV1};
+    uint32_t api_version{kRuntimeMemoryBackendApiVersionCurrent};
     std::uint64_t event_sequence{0};
+    std::uint64_t execution_attempt_events{0};
     std::vector<RuntimeMemoryTransferCounterV1> counters;
 };
 
@@ -222,7 +243,7 @@ class IRuntimeMemoryBackendV1 {
     virtual ~IRuntimeMemoryBackendV1();
 
     virtual uint32_t runtime_memory_api_version() const noexcept {
-        return kRuntimeMemoryBackendApiVersionV1;
+        return kRuntimeMemoryBackendApiVersionCurrent;
     }
 
     virtual std::unique_ptr<ITrtModule>
@@ -242,5 +263,28 @@ class IRuntimeMemoryBackendV1 {
     virtual void bind_shared_context_memory(const std::vector<ITrtModule*>& modules,
                                             const RuntimeMemoryContextBlockV1& block) = 0;
 };
+
+inline BackendDsoAbiContractV2
+make_runtime_memory_backend_dso_abi_contract_v2(std::uint64_t capability_flags) noexcept {
+    BackendDsoAbiContractV2 contract = make_backend_dso_abi_contract_v2();
+    contract.runtime_memory_layout_fingerprint = kRuntimeMemoryBackendLayoutFingerprintV2;
+    contract.capability_flags = capability_flags;
+    contract.runtime_memory_api_version = kRuntimeMemoryBackendApiVersionCurrent;
+    contract.runtime_memory_binding_size = sizeof(RuntimeMemoryBindingV1);
+    contract.runtime_memory_shape_size = sizeof(RuntimeMemoryShapeV1);
+    contract.runtime_memory_alias_shape_size = sizeof(RuntimeMemoryAliasShapeV1);
+    contract.runtime_input_shape_size = sizeof(RuntimeInputShapeV1);
+    contract.runtime_memory_alias_pair_size = sizeof(RuntimeMemoryAliasPairV1);
+    contract.runtime_memory_alias_binding_size = sizeof(RuntimeMemoryAliasBindingV1);
+    contract.runtime_memory_module_options_size = sizeof(RuntimeMemoryModuleOptionsV1);
+    contract.runtime_memory_context_requirement_size = sizeof(RuntimeMemoryContextRequirementV1);
+    contract.runtime_memory_context_block_size = sizeof(RuntimeMemoryContextBlockV1);
+    contract.runtime_memory_engine_stats_size = sizeof(RuntimeMemoryEngineStatsV1);
+    contract.runtime_memory_transfer_counter_size = sizeof(RuntimeMemoryTransferCounterV1);
+    contract.runtime_memory_transfer_snapshot_size = sizeof(RuntimeMemoryTransferSnapshotV1);
+    contract.runtime_memory_module_interface_size = sizeof(IRuntimeMemoryModuleV1);
+    contract.runtime_memory_backend_interface_size = sizeof(IRuntimeMemoryBackendV1);
+    return contract;
+}
 
 } // namespace trtmc

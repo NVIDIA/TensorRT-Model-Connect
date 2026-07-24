@@ -414,8 +414,15 @@ static void test_qualification_m_plus_one_rejects_before_attention() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                         engine->createExecutionContext(), stream);
+    auto module = std::make_unique<trtmc::RuntimeMemoryTrtModuleImpl>(
+        engine.get(), engine->createExecutionContext(), stream);
+    int32_t prior_token_id = 1;
+    std::vector<float> prior_attention_mask(8, 0.0F);
+    trtmc::TensorMap prior_inputs;
+    prior_inputs["token_id"] = trtmc::Tensor{&prior_token_id, {1}, trtmc::DType::kInt32};
+    prior_inputs["attention_mask"] =
+        trtmc::Tensor{prior_attention_mask.data(), {8}, trtmc::DType::kFloat32};
+    (void)module->forward(prior_inputs);
     auto state = std::make_unique<AdmissionOnlyRuntimeState>();
     auto* state_observer = state.get();
 
@@ -454,13 +461,22 @@ static void test_qualification_m_plus_one_rejects_before_attention() {
     request.input_ids.assign(9, 1);
     request.max_new_tokens = 0;
     bool typed_rejection = false;
+    bool clean_execution_ledger = false;
     try {
         (void)qualification->qualify_runtime_memory(request);
     } catch (const trtmc::RuntimeMemoryQualificationAdmissionError& error) {
         typed_rejection = std::string(error.what()).find("semantic model context limit exceeded") !=
                           std::string::npos;
+        clean_execution_ledger =
+            error.execution_attempt_source() ==
+                "runtime_memory_transfer_snapshot_v1.execution_attempt_events" &&
+            error.execution_attempt_available() && error.execution_attempt_module_count() == 1 &&
+            error.execution_attempt_before() == 1 && error.execution_attempt_after() == 1 &&
+            error.execution_attempt_delta() == 0;
     }
     check(typed_rejection, "M+1 uses the typed qualification admission error");
+    check(clean_execution_ledger,
+          "M+1 uses request-local delta zero after a prior real backend execution");
     check(state_observer->reset_calls == 0, "M+1 rejects before resetting runtime state");
     check(state_observer->bind_calls == 0, "M+1 rejects before binding an attention engine");
     check(state_observer->prepare_calls == 0,

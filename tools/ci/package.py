@@ -804,7 +804,7 @@ class WheelPackageManager:
         completion = receipts[-1]
 
         expected = {
-            "receipt_schema_version": 2,
+            "receipt_schema_version": 3,
             "contract_version": 1,
             "policy": "auto",
             "requested_kv_bytes": 0,
@@ -842,6 +842,34 @@ class WheelPackageManager:
         reserved = positive_integer("kv_reserved_bytes")
         committed = positive_integer("kv_committed_bytes")
         allocation_id = positive_integer("kv_allocation_id")
+        capacity_decision_free = positive_integer("capacity_decision_free_bytes")
+        capacity_decision_total = positive_integer("capacity_decision_total_bytes")
+        capacity_decision_used = positive_integer("capacity_decision_device_used_bytes")
+        settled_free = positive_integer("settled_free_bytes")
+        settled_total = positive_integer("settled_total_bytes")
+        settled_used = positive_integer("settled_device_used_bytes")
+        if capacity_decision_free >= capacity_decision_total:
+            raise CiError("capacity-decision free memory must be smaller than device total")
+        if capacity_decision_total - capacity_decision_free != capacity_decision_used:
+            raise CiError("capacity-decision device-used memory is inconsistent")
+        if settled_total != capacity_decision_total:
+            raise CiError("settled and capacity-decision snapshots disagree on device total")
+        if settled_free >= settled_total:
+            raise CiError("settled free memory must be smaller than device total")
+        if settled_total - settled_free != settled_used:
+            raise CiError("settled device-used memory is inconsistent")
+        if completion.get("settled_snapshot_unavailable_reason") is not None:
+            raise CiError("qualified runtime-memory receipt is missing its settled snapshot")
+        for legacy_name, decision_value in (
+            ("final_free_bytes", capacity_decision_free),
+            ("final_total_bytes", capacity_decision_total),
+            ("final_device_used_bytes", capacity_decision_used),
+        ):
+            if completion.get(legacy_name) != decision_value:
+                raise CiError(
+                    f"runtime-memory receipt {legacy_name} must remain the "
+                    "capacity-decision compatibility alias"
+                )
         if chunk_limit > model_limit:
             raise CiError("prefill chunk limit exceeds the model context limit")
         if capacity > model_limit:

@@ -332,7 +332,7 @@ class TrtBackend final : public IBackend, public IPreboundBackend, public IRunti
   private:
     static void
     validate_runtime_memory_options(const RuntimeMemoryModuleOptionsV1& memory_options) {
-        if (memory_options.api_version != kRuntimeMemoryBackendApiVersionV1) {
+        if (memory_options.api_version != kRuntimeMemoryBackendApiVersionCurrent) {
             throw std::invalid_argument("[trtmc] Unsupported runtime-memory module api_version");
         }
         if (memory_options.struct_size < sizeof(RuntimeMemoryModuleOptionsV1)) {
@@ -353,7 +353,7 @@ class TrtBackend final : public IBackend, public IPreboundBackend, public IRunti
         }
         std::unordered_set<std::string> alias_endpoints;
         for (const auto& pair : memory_options.alias_pairs) {
-            if (pair.api_version != kRuntimeMemoryBackendApiVersionV1 ||
+            if (pair.api_version != kRuntimeMemoryBackendApiVersionCurrent ||
                 pair.struct_size < sizeof(RuntimeMemoryAliasPairV1)) {
                 throw std::invalid_argument("[trtmc] Invalid runtime-memory alias-pair descriptor");
             }
@@ -433,6 +433,16 @@ class TrtBackend final : public IBackend, public IPreboundBackend, public IRunti
 };
 
 } // namespace trtmc
+
+extern "C" std::int32_t
+trtmc_backend_query_abi_contract_v2(trtmc::BackendDsoAbiContractV2* contract,
+                                    std::size_t contract_size) noexcept {
+    if (contract == nullptr || contract_size < sizeof(*contract))
+        return -1;
+    *contract = trtmc::make_runtime_memory_backend_dso_abi_contract_v2(
+        trtmc::kBackendDsoCapabilityRuntimeMemoryV2);
+    return 0;
+}
 
 extern "C" trtmc::IBackend* trtmc_create_backend() {
     try {

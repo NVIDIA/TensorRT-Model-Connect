@@ -102,6 +102,7 @@ class TrtModuleImpl : public ITrtModule {
         bool is_external{false};
         bool is_dynamic{false};
         bool is_runtime_deferred{false};
+        bool is_runtime_internal_dynamic{false};
         bool runtime_descriptor_bound{false};
         bool runtime_shape_declared{false};
         bool runtime_input_shape_explicit{false};
@@ -110,6 +111,7 @@ class TrtModuleImpl : public ITrtModule {
         uint64_t capacity_tokens{0};
         int32_t sequence_axis{-1};
         uint64_t runtime_shape_generation{0};
+        uint64_t runtime_buffer_generation{0};
         std::shared_ptr<void> lifetime;
     };
     struct TimingEvent {
@@ -157,6 +159,7 @@ class TrtModuleImpl : public ITrtModule {
     std::string timing_label_{"engine"};
     std::vector<TimingEvent> timing_events_;
     std::uint64_t transfer_event_sequence_{0};
+    std::uint64_t execution_attempt_events_{0};
     std::unordered_map<std::string, RuntimeMemoryTransferCounterV1> transfer_counters_;
 
     void allocate_buffers(nvinfer1::ICudaEngine* engine);
@@ -171,6 +174,10 @@ class TrtModuleImpl : public ITrtModule {
     void allocate_single_input(nvinfer1::ICudaEngine* engine, const std::string& name,
                                int32_t num_profiles);
     void allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io);
+    void materialize_runtime_internal_inputs();
+    void materialize_runtime_internal_outputs();
+    void materialize_runtime_internal_buffer(const std::string& name, BufferEntry& entry,
+                                             const nvinfer1::Dims& concrete_dims);
     TensorMap download_host_outputs(const std::unordered_set<std::string>* selected_output_names);
     void set_dynamic_input_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io,
                                   nvinfer1::OptProfileSelector selector);
@@ -201,6 +208,11 @@ class TrtModuleImpl : public ITrtModule {
     static std::vector<int64_t> dims_to_shape(const nvinfer1::Dims& dims);
     static std::size_t compute_alloc_bytes(const nvinfer1::Dims& dims, DType dtype,
                                            std::vector<int64_t>& shape_out);
+    static std::size_t compute_concrete_bytes(const nvinfer1::Dims& dims, DType dtype,
+                                              std::vector<int64_t>& shape_out,
+                                              const std::string& tensor_name);
+    static std::size_t compute_shape_bytes(const std::vector<int64_t>& shape, DType dtype,
+                                           const std::string& tensor_name);
     static std::size_t compute_capacity_bytes(const RuntimeMemoryBindingV1& binding);
     static DType from_trt_dtype(nvinfer1::DataType dt);
 };

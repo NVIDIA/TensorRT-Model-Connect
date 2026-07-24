@@ -212,3 +212,42 @@ else()
     "Runtime KV TensorRT plugin: cuDNN 9.20 SDPA unavailable; "
     "qualified NativeContiguousAttention creation will fail closed")
 endif()
+
+# Release-qualification-only replay for the historical Sq=1 optional-output
+# NVRTC failure.  It is not installed and is intentionally not linked into
+# the production plugin.  The Python producer launches this binary with a
+# pinned CUDA-13.0 NVRTC/builtins pair and validates its live process maps.
+if(TRTMC_BUILD_TESTS AND _trtmc_runtime_kv_cudnn_sdpa)
+  add_executable(
+    trtmc_nvrtc_optional_output_regression EXCLUDE_FROM_ALL
+    ${PROJECT_SOURCE_DIR}/tests/qualification/native_dynamic_memory_nvrtc_optional_output.cpp
+  )
+  target_include_directories(
+    trtmc_nvrtc_optional_output_regression SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+    ${TRTMC_CUDNN_INCLUDE_DIR}
+    ${_trtmc_cudnn_frontend_include}
+    ${_trtmc_nlohmann_json_include}
+  )
+  target_link_libraries(
+    trtmc_nvrtc_optional_output_regression PRIVATE
+    ${TRTMC_CUDNN_LIBRARY}
+    ${TRTMC_NVRTC_LIBRARY}
+    ${TRTMC_CUDART_LIBRARY}
+    ${CMAKE_DL_LIBS}
+  )
+  target_compile_definitions(
+    trtmc_nvrtc_optional_output_regression PRIVATE
+    TRTMC_CUDNN_FRONTEND_REVISION="7b9b711c22b6823e87150213ecd8449260db8610"
+  )
+  target_compile_options(
+    trtmc_nvrtc_optional_output_regression PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  set_target_properties(
+    trtmc_nvrtc_optional_output_regression PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    BUILD_RPATH
+      "${_trtmc_cuda_runtime_library_dir};${_trtmc_cudnn_library_dir}"
+  )
+endif()

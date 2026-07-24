@@ -1678,12 +1678,45 @@ class TestUnitTiers:
         assert match.models == []
         assert "cpp" in match.unit_tiers
 
+    def test_dynamic_memory_qualification_native(self, imap):
+        """Native qualification sources require the C++ validation tier."""
+        for path in (
+            "tests/qualification/native_dynamic_memory_qualify.cpp",
+            "tests/qualification/native_dynamic_memory_qualify_schema.h",
+            "tests/qualification/native_dynamic_memory_surfaces.cpp",
+        ):
+            match = test_impact.classify_file(path, imap)
+            assert match.rule == "dynamic_memory_qualification_native"
+            assert match.models == []
+            assert match.unit_tiers == ["cpp"]
+            assert match.rebuild_cpp is True
+
     def test_unit_tier_tools(self, imap):
         """tests/tools/ -> unit tier 'tools', no E2E."""
         match = test_impact.classify_file("tests/tools/test_diff_logits.py", imap)
         assert match.rule == "unit_tools"
         assert match.models == []
         assert "tools" in match.unit_tiers
+
+    def test_dynamic_memory_qualification_tools(self, imap):
+        """Dynamic-memory producers always run their tools-tier contracts."""
+        for path in (
+            "tools/build_native_dynamic_memory_chunk_variant.py",
+            "tools/capture_dynamic_memory_test_manifest.py",
+            "tools/capture_native_dynamic_memory_perf.py",
+            "tools/capture_native_dynamic_memory_process_isolation.py",
+            "tools/qualify_native_dynamic_memory.py",
+            "tools/qualify_native_dynamic_memory_nvrtc_regression.py",
+            "tools/qualify_native_dynamic_memory_perf.py",
+            "tools/qualify_native_dynamic_memory_policies.py",
+            "tools/qualify_native_dynamic_memory_soak.py",
+            "tools/qualify_native_dynamic_memory_surfaces.py",
+        ):
+            match = test_impact.classify_file(path, imap)
+            assert match.rule == "dynamic_memory_qualification_tool"
+            assert match.models == []
+            assert match.unit_tiers == ["tools"]
+            assert match.rebuild_cpp is False
 
     def test_elf_flow_prepare_model_dir_is_family_owned(self, imap):
         """ELF model-dir preparation belongs to the elf_flow family boundary."""

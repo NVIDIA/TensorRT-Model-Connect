@@ -18,12 +18,21 @@ struct BackendLoadMetadata {
     std::string requested_name;
     std::string dso_name;
     std::string backend_name;
+    std::uint32_t backend_abi_contract_version{0};
+    std::uint32_t runtime_memory_backend_api_version{0};
+    std::uint64_t backend_capability_flags{0};
+    std::uint64_t backend_interface_fingerprint{0};
+    std::uint64_t runtime_memory_layout_fingerprint{0};
     std::string trt_abi;
     std::string trt_runtime_version;
     // Independently detected by the selected backend/plugin DSO. Empty for
     // compatibility backends that do not implement native runtime-owned KV.
     std::string runtime_memory_stack_json;
 };
+
+// Shared by the backend loader and the model-plugin ABI gate. Returns an
+// empty string only when every core/backend build and layout field matches.
+std::string backend_dso_abi_contract_mismatch(const BackendDsoAbiContractV2& actual);
 
 class BackendLoader {
   public:

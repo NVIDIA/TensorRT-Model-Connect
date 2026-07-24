@@ -1,11 +1,11 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
- * All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
 // Long-history build/execute qualification for the selected segmented
-// attention graph. The dimensions match the Qwen prototype target.
+// attention graph, including the fused-direct/cuDNN Sq=1 boundary. The
+// dimensions match the Qwen and TinyLlama prototype targets.
 
 #include "plugins/runtime_kv/cudnn_attention.h"
 #include "plugins/runtime_kv/native_contiguous_attention_plugin.h"
@@ -18,6 +18,7 @@
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -30,6 +31,7 @@ constexpr int32_t kD = 128;
 constexpr int32_t kC = 16;
 constexpr int32_t kOptT = 32768;
 constexpr int32_t kMaxT = 40960;
+constexpr uint16_t kGuard = 0x55AAU;
 
 int failures = 0;
 
@@ -379,15 +381,21 @@ void run_production_chunk_cases(nvinfer1::ICudaEngine& engine, BuildShape const&
         {2, 2, 2},
         {shape.max_history_rows, 2, 2},
     };
+    // Cover both sides of every fused-direct tile/profile boundary with the
+    // production Qwen and Tiny GQA geometries. T==2 is the required padded
+    // extent for H==1; all other cases bind T==H.
+    for (int32_t history_length : {1, 127, 128, 511, 512, 513}) {
+        int32_t const tensor_rows = std::max(history_length, 2);
+        if (tensor_rows <= shape.max_history_rows) {
+            cases.push_back({tensor_rows, history_length, 1});
+        }
+    }
     if (shape.query_heads == 16 && shape.max_history_rows >= 1025) {
         // The former max/sum-exp optional-output graph selected an NVRTC plan
         // that failed only for Sq=1 at T<=1024. Keep both sides of that exact
         // boundary in the production Qwen geometry.
-        cases.push_back({512, 511, 1});
         cases.push_back({1024, 1023, 1});
         cases.push_back({1025, 1024, 1});
-    } else if (shape.max_history_rows >= 512) {
-        cases.push_back({512, 511, 1});
     }
     constexpr int32_t kProbeSq = 2;
 
@@ -403,8 +411,29 @@ void run_production_chunk_cases(nvinfer1::ICudaEngine& engine, BuildShape const&
     size_t const query_elements =
         static_cast<size_t>(shape.query_heads) * kProbeSq * shape.head_dim;
     size_t const current_elements = static_cast<size_t>(shape.kv_heads) * kProbeSq * shape.head_dim;
-    std::vector<uint16_t> host_context(query_elements);
-    std::vector<uint16_t> host_current_v(current_elements, to_bf16(0.125F));
+    constexpr size_t kGuardElements = 256;
+    std::vector<uint16_t> host_history_k(history_elements + kGuardElements, kGuard);
+    std::vector<uint16_t> host_history_v(history_elements + kGuardElements, kGuard);
+    std::vector<uint16_t> returned_history_k(host_history_k.size());
+    std::vector<uint16_t> returned_history_v(host_history_v.size());
+    std::vector<uint16_t> host_query(query_elements);
+    std::vector<uint16_t> host_current_k(current_elements);
+    std::vector<uint16_t> host_current_v(current_elements);
+    std::vector<uint16_t> host_context(query_elements + kGuardElements, kGuard);
+    for (int32_t row = 0; row < shape.max_history_rows; ++row) {
+        for (int32_t head = 0; head < shape.kv_heads; ++head) {
+            for (int32_t dim = 0; dim < shape.head_dim; ++dim) {
+                size_t const index =
+                    (static_cast<size_t>(row) * shape.kv_heads + head) * shape.head_dim + dim;
+                host_history_k[index] =
+                    to_bf16(0.002F * static_cast<float>((row + 3 * head + dim) % 19 - 9));
+                host_history_v[index] =
+                    to_bf16(0.01F * static_cast<float>((2 * row + head + dim) % 23 - 11));
+            }
+        }
+    }
+    auto const original_history_k = host_history_k;
+    auto const original_history_v = host_history_v;
 
     void* history_k = nullptr;
     void* history_v = nullptr;
@@ -418,9 +447,10 @@ void run_production_chunk_cases(nvinfer1::ICudaEngine& engine, BuildShape const&
     size_t expected_decode_context_bytes = 0;
     size_t expected_prefill_context_bytes = 0;
     cudaStream_t stream = nullptr;
-    size_t const history_bytes = history_elements * sizeof(uint16_t);
+    size_t const history_bytes = host_history_k.size() * sizeof(uint16_t);
     size_t const query_bytes = query_elements * sizeof(uint16_t);
     size_t const current_bytes = current_elements * sizeof(uint16_t);
+    size_t const output_bytes = host_context.size() * sizeof(uint16_t);
     if (!cuda_ok(cudaStreamCreate(&stream), "create production-C stream") ||
         !cuda_ok(cudaMalloc(&history_k, history_bytes), "allocate production-C K history") ||
         !cuda_ok(cudaMalloc(&history_v, history_bytes), "allocate production-C V history") ||
@@ -428,14 +458,12 @@ void run_production_chunk_cases(nvinfer1::ICudaEngine& engine, BuildShape const&
         !cuda_ok(cudaMalloc(&current_k, current_bytes), "allocate production-C current K") ||
         !cuda_ok(cudaMalloc(&current_v, current_bytes), "allocate production-C current V") ||
         !cuda_ok(cudaMalloc(&history_length, sizeof(int32_t)), "allocate production-C H") ||
-        !cuda_ok(cudaMalloc(&output, query_bytes), "allocate production-C output")) {
+        !cuda_ok(cudaMalloc(&output, output_bytes), "allocate production-C output")) {
         return;
     }
-    cudaMemsetAsync(history_k, 0, history_bytes, stream);
-    cudaMemsetAsync(history_v, 0, history_bytes, stream);
-    cudaMemsetAsync(query, 0, query_bytes, stream);
-    cudaMemsetAsync(current_k, 0, current_bytes, stream);
-    cudaMemcpyAsync(current_v, host_current_v.data(), current_bytes, cudaMemcpyHostToDevice,
+    cudaMemcpyAsync(history_k, host_history_k.data(), history_bytes, cudaMemcpyHostToDevice,
+                    stream);
+    cudaMemcpyAsync(history_v, host_history_v.data(), history_bytes, cudaMemcpyHostToDevice,
                     stream);
     bind(*context, "history_k", history_k);
     bind(*context, "history_v", history_v);
@@ -452,9 +480,8 @@ void run_production_chunk_cases(nvinfer1::ICudaEngine& engine, BuildShape const&
                 context->setInputShape(
                     "history_v",
                     nvinfer1::Dims2{item.tensor_rows, shape.kv_heads * shape.head_dim}) &&
-                context->setInputShape(
-                    "query",
-                    nvinfer1::Dims4{1, shape.query_heads, item.query_rows, shape.head_dim}) &&
+                context->setInputShape("query", nvinfer1::Dims4{1, shape.query_heads,
+                                                                item.query_rows, shape.head_dim}) &&
                 context->setInputShape(
                     "current_k",
                     nvinfer1::Dims4{1, shape.kv_heads, item.query_rows, shape.head_dim}) &&
@@ -484,22 +511,114 @@ void run_production_chunk_cases(nvinfer1::ICudaEngine& engine, BuildShape const&
             context_capacity = required_context;
         }
         context->setDeviceMemoryV2(context_memory, static_cast<int64_t>(context_capacity));
+
+        std::fill(host_query.begin(), host_query.end(), 0U);
+        std::fill(host_current_k.begin(), host_current_k.end(), 0U);
+        std::fill(host_current_v.begin(), host_current_v.end(), 0U);
+        for (int32_t head = 0; head < shape.query_heads; ++head) {
+            for (int32_t row = 0; row < item.query_rows; ++row) {
+                for (int32_t dim = 0; dim < shape.head_dim; ++dim) {
+                    size_t const index =
+                        (static_cast<size_t>(head) * item.query_rows + row) * shape.head_dim + dim;
+                    host_query[index] =
+                        to_bf16(0.006F * static_cast<float>((head + 2 * row + dim) % 17 - 8));
+                }
+            }
+        }
+        for (int32_t head = 0; head < shape.kv_heads; ++head) {
+            for (int32_t row = 0; row < item.query_rows; ++row) {
+                for (int32_t dim = 0; dim < shape.head_dim; ++dim) {
+                    size_t const index =
+                        (static_cast<size_t>(head) * item.query_rows + row) * shape.head_dim + dim;
+                    host_current_k[index] =
+                        to_bf16(0.004F * static_cast<float>((3 * head + row + dim) % 13 - 6));
+                    host_current_v[index] =
+                        to_bf16(0.012F * static_cast<float>((head + 3 * row + dim) % 21 - 10));
+                }
+            }
+        }
+        size_t const active_query_elements =
+            static_cast<size_t>(shape.query_heads) * item.query_rows * shape.head_dim;
+        size_t const active_current_elements =
+            static_cast<size_t>(shape.kv_heads) * item.query_rows * shape.head_dim;
+        cudaMemcpyAsync(query, host_query.data(), active_query_elements * sizeof(uint16_t),
+                        cudaMemcpyHostToDevice, stream);
+        cudaMemcpyAsync(current_k, host_current_k.data(),
+                        active_current_elements * sizeof(uint16_t), cudaMemcpyHostToDevice, stream);
+        cudaMemcpyAsync(current_v, host_current_v.data(),
+                        active_current_elements * sizeof(uint16_t), cudaMemcpyHostToDevice, stream);
+        std::fill(host_context.begin(), host_context.end(), kGuard);
+        cudaMemcpyAsync(output, host_context.data(), output_bytes, cudaMemcpyHostToDevice, stream);
         cudaMemcpyAsync(history_length, &item.history_length, sizeof(int32_t),
                         cudaMemcpyHostToDevice, stream);
         check(context->enqueueV3(stream), "execute production-C probe");
-        size_t const active_query_elements =
-            static_cast<size_t>(shape.query_heads) * item.query_rows * shape.head_dim;
-        cudaMemcpyAsync(host_context.data(), output, active_query_elements * sizeof(uint16_t),
-                        cudaMemcpyDeviceToHost, stream);
+        cudaMemcpyAsync(host_context.data(), output, output_bytes, cudaMemcpyDeviceToHost, stream);
         cuda_ok(cudaStreamSynchronize(stream), "synchronize production-C probe");
         check(std::all_of(host_context.begin(),
-                          host_context.begin() +
-                              static_cast<std::ptrdiff_t>(active_query_elements),
+                          host_context.begin() + static_cast<std::ptrdiff_t>(active_query_elements),
                           [](uint16_t value) { return std::isfinite(from_bf16(value)); }),
               "production-C output is finite");
+        check(std::all_of(host_context.begin() + static_cast<std::ptrdiff_t>(active_query_elements),
+                          host_context.end(), [](uint16_t value) { return value == kGuard; }),
+              "production-C exact-Sq output red zone is intact");
 
-        int32_t const padded_query_rows =
-            item.query_rows == 1 ? 1 : shape.chunk_limit;
+        if (item.query_rows == 1) {
+            std::vector<float> logits(static_cast<size_t>(item.history_length) + 1U);
+            float max_error = 0.0F;
+            int32_t const query_group_size = shape.query_heads / shape.kv_heads;
+            float const scale = 1.0F / std::sqrt(static_cast<float>(shape.head_dim));
+            for (int32_t query_head = 0; query_head < shape.query_heads; ++query_head) {
+                int32_t const kv_head = query_head / query_group_size;
+                float maximum = -std::numeric_limits<float>::infinity();
+                for (int32_t row = 0; row <= item.history_length; ++row) {
+                    float dot = 0.0F;
+                    for (int32_t dim = 0; dim < shape.head_dim; ++dim) {
+                        size_t const query_index =
+                            static_cast<size_t>(query_head) * shape.head_dim + dim;
+                        size_t const key_index =
+                            row == item.history_length
+                                ? static_cast<size_t>(kv_head) * shape.head_dim + dim
+                                : (static_cast<size_t>(row) * shape.kv_heads + kv_head) *
+                                          shape.head_dim +
+                                      dim;
+                        auto const& key =
+                            row == item.history_length ? host_current_k : host_history_k;
+                        dot += from_bf16(host_query[query_index]) * from_bf16(key[key_index]);
+                    }
+                    logits[static_cast<size_t>(row)] = dot * scale;
+                    maximum = std::max(maximum, dot * scale);
+                }
+                float denominator = 0.0F;
+                for (float& logit : logits) {
+                    logit = std::exp(logit - maximum);
+                    denominator += logit;
+                }
+                for (int32_t dim = 0; dim < shape.head_dim; ++dim) {
+                    float expected = 0.0F;
+                    for (int32_t row = 0; row <= item.history_length; ++row) {
+                        size_t const value_index =
+                            row == item.history_length
+                                ? static_cast<size_t>(kv_head) * shape.head_dim + dim
+                                : (static_cast<size_t>(row) * shape.kv_heads + kv_head) *
+                                          shape.head_dim +
+                                      dim;
+                        auto const& value =
+                            row == item.history_length ? host_current_v : host_history_v;
+                        expected +=
+                            logits[static_cast<size_t>(row)] * from_bf16(value[value_index]);
+                    }
+                    expected /= denominator;
+                    size_t const output_index =
+                        static_cast<size_t>(query_head) * shape.head_dim + dim;
+                    max_error = std::max(
+                        max_error, std::abs(from_bf16(host_context[output_index]) - expected));
+                }
+            }
+            check(max_error <= 0.015F,
+                  "production direct/fallback decode matches stable full reference");
+        }
+
+        int32_t const padded_query_rows = item.query_rows == 1 ? 1 : shape.chunk_limit;
         size_t const plugin_workspace = trtmc::runtime_kv::cudnn_attention_workspace_size(
             {
                 shape.query_heads,
@@ -513,6 +632,16 @@ void run_production_chunk_cases(nvinfer1::ICudaEngine& engine, BuildShape const&
                   << " Sq=" << item.query_rows << " plugin_workspace_bytes=" << plugin_workspace
                   << " context_bytes=" << required_context << '\n';
     }
+
+    cudaMemcpyAsync(returned_history_k.data(), history_k, history_bytes, cudaMemcpyDeviceToHost,
+                    stream);
+    cudaMemcpyAsync(returned_history_v.data(), history_v, history_bytes, cudaMemcpyDeviceToHost,
+                    stream);
+    cuda_ok(cudaStreamSynchronize(stream), "synchronize production history red zones");
+    check(returned_history_k == original_history_k,
+          "production fused/fallback decode leaves K history and red zone read-only");
+    check(returned_history_v == original_history_v,
+          "production fused/fallback decode leaves V history and red zone read-only");
 
     if (context_memory != nullptr) {
         cudaFree(context_memory);

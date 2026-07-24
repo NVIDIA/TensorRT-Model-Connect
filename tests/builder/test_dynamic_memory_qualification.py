@@ -43,13 +43,122 @@ QUALIFIED_STACK = {
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_inspect_qwen_runtime_memory_bundle_reports_only_static_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import argparse
+    import ctypes
+    import json
+    import struct
+    import subprocess
+    import sys
+
+    import tensorrt_model_connect.trt_compat as trt_compat
+    from tensorrt_model_connect.build_cli import _cmd_inspect
+
+    bundle_path = tmp_path / "dynamic.trtfb"
+    header = {
+        "model_id": QWEN_ID,
+        "model_type": "qwen3",
+        "family": "qwen",
+        "max_cache_length": 40960,
+        "runtime_memory": {
+            "contract_version": 1,
+            "qualified_model_id": QWEN_ID,
+            "qualified_model_revision": "a" * 40,
+            "qualified_config_sha256": "b" * 64,
+            "qualified_target": "gb300-trt-11.2",
+            "qualified_runtime_stack": {
+                "sm": "sm103",
+                "tensorrt": "11.2.0.113",
+                "cuda_runtime": "13.3",
+                "cudnn_backend": "9.20.0",
+                "cudnn_frontend_revision": "c" * 40,
+                "nvrtc": "13.3",
+                "driver": "580.105.08",
+            },
+            "native_kv_plugin_abi": 2,
+            "model_context_limit": 40960,
+            "prefill_chunk_limit": 1024,
+            "kv_layout": "contiguous_runtime_v1",
+            "kv_dtype": "bfloat16",
+            "kv_bytes_per_token": 114688,
+            "active_kv_profile_limits": [
+                128,
+                256,
+                512,
+                1024,
+                2048,
+                8192,
+                32768,
+                40960,
+            ],
+            "runtime_owned": True,
+        },
+        "sections": {},
+    }
+    payload = json.dumps(header).encode("utf-8")
+    bundle_path.write_bytes(
+        b"TRTFB\x00\x01\x00" + struct.pack("<Q", len(payload)) + payload
+    )
+
+    def unexpected_runtime_touch(*_args, **_kwargs):
+        pytest.fail(
+            "static bundle inspection must not initialize CUDA or load a backend"
+        )
+
+    monkeypatch.setattr(trt_compat, "load_module", unexpected_runtime_touch)
+    monkeypatch.setattr(ctypes, "CDLL", unexpected_runtime_touch)
+    monkeypatch.setattr(subprocess, "run", unexpected_runtime_touch)
+    monkeypatch.setattr(subprocess, "Popen", unexpected_runtime_touch)
+    monkeypatch.setitem(sys.modules, "tensorrt", None)
+    monkeypatch.setitem(sys.modules, "tensorrt_rtx", None)
+    monkeypatch.setitem(sys.modules, "cuda", None)
+
+    assert _cmd_inspect(argparse.Namespace(bundle_path=str(bundle_path))) == 0
+    output = capsys.readouterr().out
+    expected_static_fields = {
+        "Runtime KV contract version": "1",
+        "Qualified model ID": QWEN_ID,
+        "Qualified model revision": "a" * 40,
+        "Qualified config fingerprint": "b" * 64,
+        "Model context limit": "40960",
+        "Prefill chunk limit": "1024",
+        "KV layout": "contiguous_runtime_v1",
+        "KV bytes per token": "114688",
+    }
+    for label, value in expected_static_fields.items():
+        assert f"{label + ':':<32} {value}" in output
+    assert (
+        f"{'Active KV profile limits:':<32} "
+        "128, 256, 512, 1024, 2048, 8192, 32768, 40960"
+    ) in output
+    assert "Max cache length:" not in output
+    assert "runtime_kv_capacity_tokens" not in output
+    assert "post_load_free_bytes" not in output
+
+
 def _target(
     trt_version: str = "11.2.0.113",
     gpu_architecture: str = "sm103",
+    cuda_runtime: str = QUALIFIED_STACK["cuda_runtime"],
+    cudnn_backend: str = QUALIFIED_STACK["cudnn_backend"],
+    cudnn_frontend_revision: str = QUALIFIED_STACK[
+        "cudnn_frontend_revision"
+    ],
+    nvrtc: str = QUALIFIED_STACK["nvrtc"],
+    driver: str = QUALIFIED_STACK["driver"],
 ) -> BuildTarget:
     return BuildTarget(
         trt_version=trt_version,
         gpu_architecture=gpu_architecture,
+        cuda_runtime=cuda_runtime,
+        cudnn_backend=cudnn_backend,
+        cudnn_frontend_revision=cudnn_frontend_revision,
+        nvrtc=nvrtc,
+        driver=driver,
     )
 
 
@@ -174,25 +283,16 @@ def test_build_target_probe_preserves_live_gb300_sm103_fact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import tensorrt_model_connect.dynamic_memory_contract as contract_module
-    import tensorrt_model_connect.runtime_provider.target as target_module
-    import tensorrt_model_connect.trt_compat as trt_compat
+    import tensorrt_model_connect.trt_plugins as trt_plugins
 
     monkeypatch.setattr(
-        target_module,
-        "_probe_current_target_with_device",
-        lambda: (
-            {
-                "target_id": "current-discrete-sm103",
-                "gpu_architecture": "sm103",
-                "gpu_name": "NVIDIA GB300",
-            },
-            0,
-        ),
-    )
-    monkeypatch.setattr(
-        trt_compat,
-        "tensorrt_version",
-        lambda: "11.2.0.113",
+        trt_plugins,
+        "query_runtime_kv_plugin_stack",
+        lambda: {
+            "sm": "sm103",
+            "tensorrt": "11.2.0.113",
+            **QUALIFIED_STACK,
+        },
     )
     assert contract_module.probe_build_target() == _target()
 
@@ -277,6 +377,50 @@ def test_hf_snapshot_path_canonicalizes_to_the_same_identity(
     assert calls == [str(snapshot)]
 
 
+@pytest.mark.parametrize("use_symlink", (False, True))
+def test_recognized_local_snapshot_resolver_revision_mismatch_is_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    use_symlink: bool,
+) -> None:
+    import tensorrt_model_connect.dynamic_memory_contract as contract_module
+
+    expected = (
+        tmp_path
+        / "models--Qwen--Qwen3-0.6B"
+        / "snapshots"
+        / QWEN_REVISION
+    )
+    expected.mkdir(parents=True)
+    model_ref = expected
+    if use_symlink:
+        model_ref = tmp_path / "qualified-model"
+        model_ref.symlink_to(expected, target_is_directory=True)
+
+    wrong = (
+        tmp_path
+        / "models--Qwen--Qwen3-0.6B"
+        / "snapshots"
+        / ("0" * 40)
+    )
+    wrong.mkdir(parents=True)
+    monkeypatch.setattr(
+        contract_module,
+        "probe_build_target",
+        _target,
+    )
+
+    with pytest.raises(
+        DynamicMemoryContractError,
+        match="local model resolved to a different HF snapshot",
+    ):
+        resolve_model_only_qualification(
+            str(model_ref),
+            requested_revision=None,
+            resolve_model=lambda *_args, **_kwargs: str(wrong),
+        )
+
+
 def test_unknown_local_identity_fails_closed_without_resolution(
     tmp_path: Path,
 ) -> None:
@@ -303,7 +447,7 @@ def test_unknown_local_identity_fails_closed_without_resolution(
     ("model_ref", "revision"),
     (
         ("Qwen/Qwen3-1.7B", None),
-        (QWEN_ID, "0" * 40),
+        ("Qwen/Qwen3-1.7B", "0" * 40),
         ("TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T", None),
     ),
 )
@@ -318,6 +462,93 @@ def test_family_or_name_similarity_never_inherits_qualification(
         )
         is None
     )
+
+
+def test_canonical_model_id_revision_mismatch_is_explicit() -> None:
+    wrong_revision = "0" * 40
+    with pytest.raises(
+        DynamicMemoryContractError,
+        match=(
+            "Recognized runtime-memory-qualified model revision mismatch.*"
+            f"{wrong_revision}"
+        ),
+    ):
+        qualification_for_model_ref(
+            QWEN_ID,
+            requested_revision=wrong_revision,
+        )
+
+
+def test_recognized_hf_snapshot_revision_mismatch_is_explicit(
+    tmp_path: Path,
+) -> None:
+    wrong_revision = "0" * 40
+    snapshot = (
+        tmp_path
+        / "models--Qwen--Qwen3-0.6B"
+        / "snapshots"
+        / wrong_revision
+    )
+    snapshot.mkdir(parents=True)
+
+    with pytest.raises(
+        DynamicMemoryContractError,
+        match=(
+            "Recognized runtime-memory-qualified model revision mismatch.*"
+            f"{wrong_revision}"
+        ),
+    ):
+        qualification_for_model_ref(str(snapshot))
+
+
+def test_recognized_hf_snapshot_conflicting_requested_revision_is_explicit(
+    tmp_path: Path,
+) -> None:
+    requested_revision = "0" * 40
+    snapshot = (
+        tmp_path
+        / "models--TinyLlama--TinyLlama-1.1B-Chat-v1.0"
+        / "snapshots"
+        / TINY_REVISION
+    )
+    snapshot.mkdir(parents=True)
+
+    with pytest.raises(
+        DynamicMemoryContractError,
+        match="snapshot revision conflicts.*explicitly requested revision",
+    ):
+        qualification_for_model_ref(
+            str(snapshot),
+            requested_revision=requested_revision,
+        )
+
+
+def test_unknown_model_never_probes_the_runtime_plugin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tensorrt_model_connect.dynamic_memory_contract as contract_module
+
+    probe_calls = 0
+
+    def fail_if_probed() -> BuildTarget:
+        nonlocal probe_calls
+        probe_calls += 1
+        raise AssertionError("unknown models must not probe the plugin")
+
+    monkeypatch.setattr(contract_module, "probe_build_target", fail_if_probed)
+    resolved_calls: list[str] = []
+    assert (
+        resolve_model_only_qualification(
+            "Qwen/Qwen3-1.7B",
+            requested_revision="0" * 40,
+            resolve_model=lambda model, **_kwargs: (
+                resolved_calls.append(model) or model
+            ),
+        )
+        is None
+    )
+    assert probe_calls == 0
+    assert resolved_calls == []
 
 
 def test_recognized_identity_with_config_drift_is_invalid(
@@ -369,6 +600,52 @@ def test_recognized_model_target_miss_fails_explicitly_without_download(
             ),
         )
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("target_field", "stack_field", "wrong_value"),
+    (
+        ("trt_version", "tensorrt", "11.2.0.114"),
+        ("gpu_architecture", "sm", "sm100"),
+        ("cuda_runtime", "cuda_runtime", "13.2"),
+        ("cudnn_backend", "cudnn_backend", "9.19.0"),
+        (
+            "cudnn_frontend_revision",
+            "cudnn_frontend_revision",
+            "0" * 40,
+        ),
+        ("nvrtc", "nvrtc", "13.2"),
+        ("driver", "driver", "580.105.07"),
+    ),
+)
+def test_recognized_model_rejects_every_live_stack_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    target_field: str,
+    stack_field: str,
+    wrong_value: str,
+) -> None:
+    import tensorrt_model_connect.dynamic_memory_contract as contract_module
+
+    values = {
+        "trt_version": "11.2.0.113",
+        "gpu_architecture": "sm103",
+        **QUALIFIED_STACK,
+    }
+    values[target_field] = wrong_value
+    monkeypatch.setattr(
+        contract_module,
+        "probe_build_target",
+        lambda: _target(**values),
+    )
+    with pytest.raises(
+        DynamicMemoryContractError,
+        match=rf"build target is not qualified.*{stack_field}",
+    ):
+        resolve_model_only_qualification(
+            QWEN_ID,
+            requested_revision=None,
+            resolve_model=lambda model, **_kwargs: model,
+        )
 
 
 def test_recognized_model_target_probe_failure_is_explicit(

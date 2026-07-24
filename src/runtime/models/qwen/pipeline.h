@@ -200,6 +200,8 @@ class QwenTextGenerationPipeline final : public IPipeline,
                             int32_t prompt_token_count);
     int32_t select_decoder_index(int32_t desired_rows) const;
     std::uint64_t qualification_bound_tokens(std::uint64_t history_tokens) const;
+    RuntimeMemoryQualificationExecutionAttemptBaseline
+    qualification_execution_attempt_baseline() const;
     void append_qualification_invocation(const char* role, const char* plan_section_name,
                                          const TrtModule& module, std::uint64_t chunk_begin,
                                          std::uint64_t chunk_end, std::uint64_t history_tokens,

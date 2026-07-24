@@ -5,6 +5,8 @@
 
 #include "cli/args.h"
 
+#include "trtmc/pipeline.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -15,6 +17,7 @@
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 
 namespace trtmc::cli {
 
@@ -321,7 +324,8 @@ void print_usage() {
            "  --kv-cache-memory VALUE\n"
            "                        Runtime KV pool: auto (default), a percentage of safe\n"
            "                        post-load memory (for example 80%), or a size such as 8GiB\n"
-           "  --kv-cache-size VALUE  Compatibility alias for --kv-cache-memory\n"
+           "  --kv-cache-size SIZE   Legacy byte-budget option for static bundles; do not\n"
+           "                         combine with --kv-cache-memory\n"
            "  --max-sequence-length TOKENS\n"
            "                        Runtime per-request prompt + output limit; accepts K/M\n"
            "                        shorthand (for example 32K). Default: auto\n"
@@ -523,13 +527,14 @@ CliArgs parse_args(int argc, char** argv) {
             args.hf_python = argv[++i];
             continue;
         }
-        if (arg == "--kv-cache-memory" || arg == "--kv_cache_memory" || arg == "--kv-cache-size" ||
-            arg == "--kv_cache_size") {
+        if (arg == "--kv-cache-memory" || arg == "--kv_cache_memory") {
             if (!need_value(arg))
                 return args;
-            if (args.kv_cache_memory.explicitly_set) {
+            if (args.kv_cache_memory.explicitly_set || args.kv_cache_size_explicitly_set) {
                 args.parse_error = true;
-                args.error_message = "KV cache memory policy may be specified only once";
+                args.error_message =
+                    "--kv-cache-memory and legacy --kv-cache-size are mutually exclusive and "
+                    "each may be specified only once";
                 return args;
             }
             auto parsed = parse_kv_cache_memory(argv[++i]);
@@ -541,14 +546,14 @@ CliArgs parse_args(int argc, char** argv) {
                 return args;
             }
             args.kv_cache_memory = *parsed;
-            args.kv_cache_size_bytes = parsed->mode == KvCacheMemoryMode::Bytes ? parsed->bytes : 0;
             continue;
         }
-        if (arg.rfind("--kv-cache-memory=", 0) == 0 || arg.rfind("--kv_cache_memory=", 0) == 0 ||
-            arg.rfind("--kv-cache-size=", 0) == 0 || arg.rfind("--kv_cache_size=", 0) == 0) {
-            if (args.kv_cache_memory.explicitly_set) {
+        if (arg.rfind("--kv-cache-memory=", 0) == 0 || arg.rfind("--kv_cache_memory=", 0) == 0) {
+            if (args.kv_cache_memory.explicitly_set || args.kv_cache_size_explicitly_set) {
                 args.parse_error = true;
-                args.error_message = "KV cache memory policy may be specified only once";
+                args.error_message =
+                    "--kv-cache-memory and legacy --kv-cache-size are mutually exclusive and "
+                    "each may be specified only once";
                 return args;
             }
             const auto eq = arg.find('=');
@@ -561,7 +566,45 @@ CliArgs parse_args(int argc, char** argv) {
                 return args;
             }
             args.kv_cache_memory = *parsed;
-            args.kv_cache_size_bytes = parsed->mode == KvCacheMemoryMode::Bytes ? parsed->bytes : 0;
+            continue;
+        }
+        if (arg == "--kv-cache-size" || arg == "--kv_cache_size") {
+            if (!need_value(arg))
+                return args;
+            if (args.kv_cache_memory.explicitly_set || args.kv_cache_size_explicitly_set) {
+                args.parse_error = true;
+                args.error_message =
+                    "--kv-cache-memory and legacy --kv-cache-size are mutually exclusive and "
+                    "each may be specified only once";
+                return args;
+            }
+            const auto parsed = parse_byte_size(argv[++i]);
+            if (!parsed.has_value()) {
+                args.parse_error = true;
+                args.error_message = "--kv-cache-size expects a positive size like 90GB or 90GiB";
+                return args;
+            }
+            args.kv_cache_size_bytes = *parsed;
+            args.kv_cache_size_explicitly_set = true;
+            continue;
+        }
+        if (arg.rfind("--kv-cache-size=", 0) == 0 || arg.rfind("--kv_cache_size=", 0) == 0) {
+            if (args.kv_cache_memory.explicitly_set || args.kv_cache_size_explicitly_set) {
+                args.parse_error = true;
+                args.error_message =
+                    "--kv-cache-memory and legacy --kv-cache-size are mutually exclusive and "
+                    "each may be specified only once";
+                return args;
+            }
+            const auto eq = arg.find('=');
+            const auto parsed = parse_byte_size(arg.substr(eq + 1));
+            if (!parsed.has_value()) {
+                args.parse_error = true;
+                args.error_message = "--kv-cache-size expects a positive size like 90GB or 90GiB";
+                return args;
+            }
+            args.kv_cache_size_bytes = *parsed;
+            args.kv_cache_size_explicitly_set = true;
             continue;
         }
         if (arg == "--max-sequence-length" || arg == "--max_sequence_length") {
@@ -897,13 +940,52 @@ CliArgs parse_args(int argc, char** argv) {
             "run requires bundle + --prompt, --prompts-file, or --initial-latents-raw";
     }
     if (args.command == "inspect" &&
-        (args.kv_cache_memory.explicitly_set || args.max_sequence_length_explicitly_set)) {
+        (args.kv_cache_memory.explicitly_set || args.kv_cache_size_explicitly_set ||
+         args.max_sequence_length_explicitly_set)) {
         args.parse_error = true;
         args.error_message = "inspect is static; runtime memory options are valid only for "
                              "commands that load and execute a bundle";
     }
 
     return args;
+}
+
+trtmc::LoadOptionsV2 make_load_options(const CliArgs& args) {
+    if (args.kv_cache_memory.explicitly_set && args.kv_cache_size_explicitly_set) {
+        throw std::invalid_argument(
+            "--kv-cache-memory and legacy --kv-cache-size are mutually exclusive");
+    }
+    if (args.kv_cache_size_explicitly_set && args.kv_cache_size_bytes == 0) {
+        throw std::invalid_argument("legacy --kv-cache-size requires a positive byte budget");
+    }
+
+    trtmc::LoadOptionsV2 options;
+    options.hf_python = args.hf_python;
+    options.runtime_cache_path = args.runtime_cache;
+    options.cuda_graphs = args.cuda_graphs;
+    options.kv_cache_size_bytes = args.kv_cache_size_bytes;
+    if (args.kv_cache_memory.explicitly_set) {
+        switch (args.kv_cache_memory.mode) {
+        case KvCacheMemoryMode::Auto:
+            options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kAuto;
+            break;
+        case KvCacheMemoryMode::Bytes:
+            options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kBytes;
+            options.kv_cache_memory_bytes = args.kv_cache_memory.bytes;
+            break;
+        case KvCacheMemoryMode::Percent:
+            options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kFraction;
+            options.kv_cache_memory_fraction = args.kv_cache_memory.percent / 100.0;
+            break;
+        }
+    }
+    options.max_sequence_length = args.max_sequence_length;
+    options.max_sequence_length_explicit = args.max_sequence_length_explicitly_set ? 1U : 0U;
+    options.config_path = args.config_path;
+    options.set_tokens = args.set_tokens;
+    options.backend_search_paths = args.backend_search_paths;
+    options.model_plugin_search_paths = args.model_plugin_search_paths;
+    return options;
 }
 
 } // namespace trtmc::cli

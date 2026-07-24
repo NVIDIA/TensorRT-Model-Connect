@@ -32,8 +32,8 @@ IRuntimeMemoryBackendV1::~IRuntimeMemoryBackendV1() = default;
 RuntimeMemoryTransferDeltaV1
 runtime_memory_transfer_delta(const RuntimeMemoryTransferSnapshotV1& before,
                               const RuntimeMemoryTransferSnapshotV1& after) {
-    if (before.api_version != kRuntimeMemoryBackendApiVersionV1 ||
-        after.api_version != kRuntimeMemoryBackendApiVersionV1 ||
+    if (before.api_version != kRuntimeMemoryBackendApiVersionCurrent ||
+        after.api_version != kRuntimeMemoryBackendApiVersionCurrent ||
         before.struct_size != sizeof(RuntimeMemoryTransferSnapshotV1) ||
         after.struct_size != sizeof(RuntimeMemoryTransferSnapshotV1)) {
         throw std::invalid_argument("runtime-memory transfer snapshot ABI mismatch");
@@ -231,8 +231,119 @@ const char* optional_string_symbol(void* handle, const char* symbol) {
     return value ? value : "";
 }
 
+std::string backend_abi_contract_mismatch_impl(const BackendDsoAbiContractV2& actual) {
+    const BackendDsoAbiContractV2 expected = make_runtime_memory_backend_dso_abi_contract_v2(0);
+
+#define TRTMC_CHECK_BACKEND_ABI_FIELD(field)                                                       \
+    if (actual.field != expected.field) {                                                          \
+        return std::string(#field) + " (core=" + std::to_string(expected.field) +                  \
+               ", backend=" + std::to_string(actual.field) + ")";                                  \
+    }
+
+    // struct_size is checked first so a future query implementation may fill
+    // only its own shorter prefix without the loader interpreting missing
+    // fields as a compatible current contract.
+    TRTMC_CHECK_BACKEND_ABI_FIELD(struct_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(contract_version)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(interface_fingerprint)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(runtime_memory_layout_fingerprint)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(cxx_standard)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(compiler_id)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(compiler_version)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(cxx_abi_version)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(stdlib_id)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(stdlib_version)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(cxx11_string_abi)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(pointer_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(size_t_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(std_string_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(std_string_alignment)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(std_vector_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(std_vector_alignment)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(std_shared_ptr_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(std_shared_ptr_alignment)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(std_unique_ptr_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(std_unique_ptr_alignment)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(dtype_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(tensor_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(tensor_alignment)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(tensor_map_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(tensor_map_alignment)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(device_tensor_map_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(device_tensor_map_alignment)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(tensor_info_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(tensor_info_alignment)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(module_create_options_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(module_create_options_alignment)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(backend_dual_profile_modules_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(backend_profile_module_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(backend_profile_modules_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(backend_context_modules_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(i_trt_module_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(i_trt_module_alignment)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(i_backend_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(i_backend_alignment)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(runtime_memory_api_version)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(runtime_memory_binding_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(runtime_memory_shape_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(runtime_memory_alias_shape_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(runtime_input_shape_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(runtime_memory_alias_pair_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(runtime_memory_alias_binding_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(runtime_memory_module_options_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(runtime_memory_context_requirement_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(runtime_memory_context_block_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(runtime_memory_engine_stats_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(runtime_memory_transfer_counter_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(runtime_memory_transfer_snapshot_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(runtime_memory_module_interface_size)
+    TRTMC_CHECK_BACKEND_ABI_FIELD(runtime_memory_backend_interface_size)
+
+#undef TRTMC_CHECK_BACKEND_ABI_FIELD
+
+    if ((actual.capability_flags & ~kBackendDsoKnownCapabilitiesV2) != 0) {
+        return "capability_flags contains unknown bits (backend=" +
+               std::to_string(actual.capability_flags) + ")";
+    }
+    return {};
+}
+
+BackendDsoAbiContractV2 query_backend_abi_contract(const std::string& dso_name, void* handle) {
+    dlerror();
+    auto query =
+        reinterpret_cast<BackendDsoAbiQueryFnV2>(dlsym(handle, kBackendDsoAbiQuerySymbolV2));
+    const char* query_error = dlerror();
+    if (query_error != nullptr || query == nullptr) {
+        const std::string detail =
+            query_error == nullptr ? "symbol not found" : std::string(query_error);
+        dlclose(handle);
+        throw std::runtime_error(dso_name + " loaded but missing required " +
+                                 kBackendDsoAbiQuerySymbolV2 + " symbol (" + detail +
+                                 "); refusing stale backend before trtmc_create_backend()");
+    }
+
+    BackendDsoAbiContractV2 contract{};
+    const std::int32_t status = query(&contract, sizeof(contract));
+    if (status != 0) {
+        dlclose(handle);
+        throw std::runtime_error(dso_name + ": " + kBackendDsoAbiQuerySymbolV2 +
+                                 "() returned status " + std::to_string(status) +
+                                 "; refusing backend before trtmc_create_backend()");
+    }
+
+    const std::string mismatch = backend_dso_abi_contract_mismatch(contract);
+    if (!mismatch.empty()) {
+        dlclose(handle);
+        throw std::runtime_error(dso_name + " backend/core ABI contract mismatch: " + mismatch +
+                                 "; refusing backend before trtmc_create_backend()");
+    }
+    return contract;
+}
+
 CachedBackend create_backend(const std::string& requested_name, const std::string& dso_name,
                              void* handle) {
+    const BackendDsoAbiContractV2 abi_contract = query_backend_abi_contract(dso_name, handle);
+
     auto create_fn = reinterpret_cast<IBackend* (*)()>(dlsym(handle, "trtmc_create_backend"));
     if (!create_fn) {
         dlclose(handle);
@@ -249,6 +360,11 @@ CachedBackend create_backend(const std::string& requested_name, const std::strin
     metadata.requested_name = requested_name;
     metadata.dso_name = dso_name;
     metadata.backend_name = backend->name() ? backend->name() : "";
+    metadata.backend_abi_contract_version = abi_contract.contract_version;
+    metadata.runtime_memory_backend_api_version = abi_contract.runtime_memory_api_version;
+    metadata.backend_capability_flags = abi_contract.capability_flags;
+    metadata.backend_interface_fingerprint = abi_contract.interface_fingerprint;
+    metadata.runtime_memory_layout_fingerprint = abi_contract.runtime_memory_layout_fingerprint;
     metadata.trt_abi = optional_string_symbol(handle, "trtmc_backend_abi");
     metadata.trt_runtime_version = optional_string_symbol(handle, "trtmc_backend_runtime_version");
     metadata.runtime_memory_stack_json =
@@ -340,6 +456,10 @@ std::string join_backend_names(const std::vector<std::string>& backend_names) {
 }
 
 } // namespace
+
+std::string backend_dso_abi_contract_mismatch(const BackendDsoAbiContractV2& actual) {
+    return backend_abi_contract_mismatch_impl(actual);
+}
 
 IBackend* BackendLoader::load(const std::string& backend_name) {
     return load(backend_name, {});

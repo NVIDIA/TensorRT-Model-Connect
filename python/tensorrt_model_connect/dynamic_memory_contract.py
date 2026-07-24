@@ -29,6 +29,25 @@ class BuildTarget:
 
     trt_version: str
     gpu_architecture: str
+    cuda_runtime: str
+    cudnn_backend: str
+    cudnn_frontend_revision: str
+    nvrtc: str
+    driver: str
+
+    def runtime_stack(self) -> dict[str, str]:
+        """Return the independently detected stack using contract field names."""
+
+        return {
+            "sm": self.gpu_architecture.strip().lower(),
+            "tensorrt": self.trt_version.strip(),
+            "cuda_runtime": self.cuda_runtime.strip(),
+            "cudnn_backend": self.cudnn_backend.strip(),
+            "cudnn_frontend_revision":
+                self.cudnn_frontend_revision.strip().lower(),
+            "nvrtc": self.nvrtc.strip(),
+            "driver": self.driver.strip(),
+        }
 
 
 @dataclass(frozen=True)
@@ -57,11 +76,20 @@ class DynamicMemoryQualification:
     runtime_owned: bool
 
     def matches_target(self, target: BuildTarget) -> bool:
-        return (
-            target.gpu_architecture.strip().lower()
-            == self.gpu_architecture
-            and target.trt_version.strip() == self.minimum_trt_version
-        )
+        return target.runtime_stack() == self.qualified_runtime_stack()
+
+    def qualified_runtime_stack(self) -> dict[str, str]:
+        """Return the exact live stack required by this qualification."""
+
+        return {
+            "sm": self.gpu_architecture,
+            "tensorrt": self.minimum_trt_version,
+            "cuda_runtime": self.cuda_runtime,
+            "cudnn_backend": self.cudnn_backend,
+            "cudnn_frontend_revision": self.cudnn_frontend_revision,
+            "nvrtc": self.nvrtc,
+            "driver": self.driver,
+        }
 
     def runtime_memory_contract(
         self,
@@ -741,7 +769,7 @@ def validate_qualified_native_build(
 def _snapshot_identity(path: Path) -> tuple[str, str] | None:
     """Recover ``org/repo`` and revision from an HF cache snapshot path."""
 
-    absolute = path.absolute()
+    absolute = path.resolve()
     parts = absolute.parts
     for index, part in enumerate(parts):
         if part != "snapshots" or index < 1 or index + 1 >= len(parts):
@@ -779,27 +807,46 @@ def qualification_for_model_ref(
     else:
         model_id, revision = identity
         if requested_revision and requested_revision != revision:
+            if any(
+                record.qualified_model_id == model_id
+                for record in records
+            ):
+                raise DynamicMemoryContractError(
+                    "Recognized runtime-memory-qualified HF snapshot revision "
+                    "conflicts with the explicitly requested revision: "
+                    f"snapshot {revision!r}, requested {requested_revision!r}"
+                )
             return None
 
     for record in records:
         if record.qualified_model_id != model_id:
             continue
         if revision and record.qualified_model_revision != revision:
-            return None
+            raise DynamicMemoryContractError(
+                "Recognized runtime-memory-qualified model revision mismatch: "
+                f"{model_id} requires {record.qualified_model_revision}, "
+                f"got {revision}"
+            )
         return record
     return None
 
 
 def probe_build_target() -> BuildTarget:
-    """Probe the actual TensorRT and active-device architecture."""
+    """Probe the complete live stack from the native runtime-KV plugin."""
 
-    from . import trt_compat
-    from .runtime_provider.target import _probe_current_target_with_device
+    # Keep this import local: trt_plugins imports trt_compat and is also used by
+    # the qualified builders after this candidate gate has succeeded.
+    from .trt_plugins import query_runtime_kv_plugin_stack
 
-    facts, _device = _probe_current_target_with_device()
+    stack = query_runtime_kv_plugin_stack()
     return BuildTarget(
-        trt_version=trt_compat.tensorrt_version() or "",
-        gpu_architecture=str(facts.get("gpu_architecture", "") or ""),
+        trt_version=stack["tensorrt"],
+        gpu_architecture=stack["sm"],
+        cuda_runtime=stack["cuda_runtime"],
+        cudnn_backend=stack["cudnn_backend"],
+        cudnn_frontend_revision=stack["cudnn_frontend_revision"],
+        nvrtc=stack["nvrtc"],
+        driver=stack["driver"],
     )
 
 
@@ -855,13 +902,17 @@ def resolve_model_only_qualification(
             "TensorRT/GPU target could not be verified"
         ) from exc
     if not qualification.matches_target(target):
+        expected_stack = qualification.qualified_runtime_stack()
+        actual_stack = target.runtime_stack()
+        mismatches = [
+            name
+            for name in expected_stack
+            if expected_stack[name] != actual_stack[name]
+        ]
         raise DynamicMemoryContractError(
             "Recognized runtime-memory-qualified model, but this build target "
-            "is not qualified: expected "
-            f"TensorRT {qualification.minimum_trt_version} on "
-            f"{qualification.gpu_architecture}, got TensorRT "
-            f"{target.trt_version or '<unknown>'} on "
-            f"{target.gpu_architecture or '<unknown>'}"
+            "is not qualified: mismatched runtime-stack field(s) "
+            f"{mismatches}; expected {expected_stack}, got {actual_stack}"
         )
 
     local = Path(str(model_ref))
@@ -873,7 +924,11 @@ def resolve_model_only_qualification(
             qualification.qualified_model_revision,
         )
         if resolved_identity != expected_identity:
-            return None
+            raise DynamicMemoryContractError(
+                "Recognized runtime-memory-qualified local model resolved to "
+                "a different HF snapshot: "
+                f"expected {expected_identity}, got {resolved_identity}"
+            )
     else:
         resolved = Path(
             resolve_model(

@@ -160,7 +160,18 @@ For the two selected model-only paths, the builder must:
 
 The revision is an internal qualification choice, not a new user flag. A local
 snapshot or embedding-API revision only enters this dynamic path when it
-matches the same qualification record.
+matches the same qualification record. Once the canonical model ID or its HF
+snapshot identity is recognized, an explicit revision mismatch is an error; it
+must not silently fall back to the legacy build. Unknown model IDs and merely
+similar names remain unqualified and may follow the ordinary builder path.
+
+For a recognized model, target qualification is also fail-closed against the
+native runtime-KV plugin's independently detected complete live tuple:
+`sm`, exact TensorRT build, CUDA runtime, cuDNN backend, cuDNN Frontend
+revision, NVRTC, and driver. Failure to load/probe that evidence or a mismatch
+in any field rejects the qualified build. Unknown models return before loading
+the plugin, so this gate does not add a CUDA/plugin side effect to the generic
+builder path.
 
 The public build result must not contain a product-visible 4,096-token
 capability. Developer-only overrides may exist for builder bisects, but they
@@ -229,6 +240,8 @@ runtime_kv_capacity_tokens
 effective_request_limit
 context_device_memory_bytes
 kv_allocation_id
+capacity_decision_free_bytes
+settled_free_bytes
 ```
 
 Neither surface may use one ambiguous `max_cache_length` value to represent
@@ -670,9 +683,9 @@ query free memory after fixed engine/plugin allocations
         |
 derive a tentative R from policy, M, and U
         |
-set worst-case supported Sq/T shapes for that candidate
+enumerate every Sq/T shape reachable by the native chunk/decode scheduler
         |
-query the actual-shape context block and external device buffers
+query every actual-shape context requirement and retain the true maximum
         |
 solve R again after reserving that non-KV memory
         |
@@ -702,8 +715,8 @@ For a percentage `a`, start with:
 r0 = min(M, U if specified, floor(a * max(0, F - S) / B))
 ```
 
-For each candidate `rn`, query TensorRT at the candidate's largest enabled
-prefill/decode shapes and compute:
+For each candidate `rn`, query TensorRT across the complete finite set of
+prefill/decode shapes reachable by the native scheduler and compute:
 
 ```text
 rn+1 = min(
@@ -720,9 +733,25 @@ iteration count, evaluate the remaining lower bucket boundaries and choose the
 largest plan whose measured allocation fits. Never increase `R` during this
 solve.
 
+The context envelope must not assume that
+`updateDeviceMemorySizeForShapes()` is monotonic between TensorRT profile
+endpoints. For prefill, probe every `Sq` from one through the current chunk
+extent for the cold `T=1` shape and for each distinct history bucket reachable
+after native chunk scheduling. For decode, probe the cold sentinel and every
+enabled bucket, including a final bucket clipped to `R`. Deduplicate identical
+`Sq/T` pairs, but do not replace the sweep with only MIN/OPT/MAX or largest
+endpoint queries. The allocated shared block is the maximum returned by that
+sweep; a later invocation still re-queries its exact shape and fails closed if
+the backend violates the proven envelope.
+
 Default `a` is `0.90`. The percentage applies to safely usable memory after
 non-KV runtime overhead, not to total device memory and not to the
 pre-engine-load free-memory reading.
+Treat the accepted binary64 value of `a` as an exact integer ratio and perform
+the multiply-and-floor with integer arithmetic; a rounded floating-point
+product must never allocate even one byte above that ratio. Serialize
+`policy_fraction` with enough significant digits to round-trip the original
+binary64 value exactly.
 
 Explicit bytes:
 
@@ -764,6 +793,21 @@ blocks to the final envelope, synchronize, and keep the already-decreased
 `R`. Do not retain a hidden `C*B` staging allocation while reporting
 `min(C,R)*B`, and do not use newly freed bytes to increase `R` again.
 
+Receipt schema v3 gives the two synchronized snapshots distinct meanings:
+
+- `capacity_decision_*` is sampled after the tentative context/output
+  reservation and is the only second snapshot used to derive the final `R`
+  and `kv_budget_bytes`;
+- `settled_*` reuses the synchronized `after runtime KV allocation` boundary
+  after any smaller context/staging replacement and the final KV slab are all
+  resident. It reports actual settled residency and never feeds another solve;
+- schema-v2 `final_*` remains only as an explicitly deprecated alias of
+  `capacity_decision_*`, preserving evidence compatibility without presenting
+  it as settled state.
+
+If settled sampling fails, product inference may continue with `settled_*`
+set to `null` and a typed unavailable reason, but qualification fails closed.
+
 The first beta allocates this contiguous buffer once at model load for stable
 addresses and predictable latency. The buffer is reused across sequential
 requests and cleared logically by resetting cache length; it is released on
@@ -787,11 +831,28 @@ For an opted-in context, use this exact order:
 2. create the context with `kUSER_MANAGED`;
 3. call `setOptimizationProfileAsync(profile, execution_stream)`;
 4. set all input shapes;
-5. set addresses for every shape-inference I/O tensor;
-6. require `inferShapes()` to report no missing shape inputs;
-7. call `updateDeviceMemorySizeForShapes()`;
-8. allocate or reuse one correctly aligned context device-memory block;
-9. call `setDeviceMemoryV2(pointer, bytes)`.
+5. allocate or reuse ordinary dynamic execution-input buffers at their
+   concrete planned bytes and bind their addresses;
+6. set addresses for every supported shape-inference I/O tensor; API v1 fails
+   closed on shape-inference inputs because it has no value-aware planning
+   descriptor and must not infer from an uninitialized placeholder;
+7. require `inferShapes()` to report no missing shape inputs;
+8. allocate or reuse ordinary dynamic output buffers at the concrete inferred
+   bytes, and replace each host output staging allocation with its exact
+   logical byte size;
+9. call `updateDeviceMemorySizeForShapes()`;
+10. allocate or reuse one correctly aligned context device-memory block;
+11. call `setDeviceMemoryV2(pointer, bytes)`.
+
+An ordinary dynamic device allocation begins at zero bytes. Growth
+synchronizes in-flight execution, binds the replacement address
+transactionally, releases the superseded allocation, and invalidates any CUDA
+graph captured with the prior address. A smaller shape may reuse device
+high-water capacity, but output metadata and host staging must still shrink to
+the exact inferred shape. Any output that remains non-concrete after
+`inferShapes()` fails closed until an `IOutputAllocator` policy is implemented.
+Forward paths reject shape, dtype, or byte counts beyond the planned
+materialization; they never truncate with a `min()` copy.
 
 Because the native text-generation pipeline serializes prefill and decode,
 their contexts may share one context block sized to the largest currently
@@ -809,6 +870,13 @@ Dynamic outputs use one of three policies:
 The backend must stop allocating all dynamic inputs and outputs at profile MAX.
 An output allocator must not own KV memory, and it must not change an address
 during CUDA graph replay.
+
+The runtime-memory accounting ledger reports ordinary dynamic input and output
+device capacities separately. Only allocations materialized after the
+post-load snapshot enter the solver's ordinary-I/O overhead, summed once per
+actual module/context rather than deduplicated by engine identity. Static I/O
+remains in the post-load baseline. Caller-owned current-K/V staging remains
+separate from both ordinary-I/O fields.
 
 ### 5.9 CUDA graphs
 
@@ -958,13 +1026,27 @@ required by its consumer, and the Qwen dynamic prefill plan retained a second
 copy of the tied 151,936-by-1,024 vocabulary matrix, causing an approximately
 11.4% MEM-13 packaging regression.
 
-The next candidate fixes the producer schema, records independently
+The current review candidate fixes the producer schema, records independently
 attributable CUDA/NVML scopes at every synchronized boundary, preserves all
 runner evidence on failure, and reuses the Qwen embedding tensor for the LM
-head only after shape, dtype, and bit-exact transpose validation. Focused unit,
-schema, and real TensorRT graph tests pass, but this source state has not yet
-completed the full 40,960/2,048 formal matrix. Therefore the current answer is
-still “implementation candidate,” not “qualified full-context support.”
+head only after shape, dtype, and bit-exact transpose validation. It also
+fail-closes the core/backend/model-plugin ABI boundary, binds the fixed test
+manifest to exact mapped build artifacts, and adds a GQA-aware direct
+`Sq=1, P<=512` decode kernel while retaining the standard-LSE cuDNN path for
+larger history profiles and all prefill work. The integrated dirty review
+source passes 162/162 CTests, all 24 dynamic-memory CTests, all 549 selected
+dynamic-memory pytest nodes, and both real TensorRT graph tests. CUDA
+memcheck/racecheck report no errors or hazards for the direct decode path; its
+same-GPU component microbenchmark improves from a 40.3789 microsecond median
+to 11.6749 microseconds. The independent CUDA-13.0 NVRTC negative replay also
+passes every component gate while remaining explicitly non-promotable because
+the source is dirty.
+
+These component and diagnostic results do not replace the source-bound model
+matrix. This source state has not yet completed the clean exact-HEAD
+40,960/2,048 correctness, pressure, soak, surface, isolation, and end-to-end
+performance receipts. Therefore the current answer remains “implementation
+candidate,” not “qualified full-context support.”
 
 One final clean HEAD must regenerate both dynamic bundles, both exact-head
 static baselines, both `C/2` variants, every
@@ -1391,15 +1473,36 @@ The manifest producer must explicitly build `trtmc_cpp_tests`,
 generic `cmake --build` alone is not proof that those non-default or stale
 qualification binaries match the frozen source snapshot.
 
+The v2 manifest is a fixed, ordered nine-command contract. Its validator
+reopens every stdout/stderr log and both pytest JUnit files, recomputes the
+collected manifests, and rejects an omitted, reordered, or altered command.
+It also binds full device/inode/time/size/SHA identities for the CLI, worker,
+core, active TensorRT backend, runtime-KV plugin, both model DSOs, and both
+qualification binaries. The active versioned TensorRT backend name must be a
+symlink to the generic backend inode; an independently copied alias is not an
+exact-head artifact.
+
 The performance gate must never consume hand-authored timing JSON directly.
 `capture_native_dynamic_memory_perf.py build` executes the actual build argv,
 requires an absent output path, and records identical pre/post source-state
-digests. Its `benchmark` action executes the real C++ worker, independently
-deserializes every engine section through TensorRT, and adds SHA-bound plan,
-resident-weight, copy-count, and streaming evidence. For a dynamic bundle it
-also requires those independent measurements to equal the pipeline's runtime
-receipt. The static baseline uses the same independent engine inspection
-because it deliberately has no dynamic-memory introspection interface.
+digests. For a dynamic build it accepts only `trtmc build`, binds the one
+adjacent or packaged runtime-KV plugin without adding a product build flag,
+observes that exact DSO in the `trtmc`/builder process tree, and records its
+canonical absolute path, size, and SHA-256. Both the benchmark producer and
+the final performance validator reopen that DSO and recompute its identity.
+The `benchmark` action executes the real C++ worker, independently deserializes
+every engine section through TensorRT, and adds SHA-bound plan, resident-weight,
+copy-count, and streaming evidence. For a dynamic bundle it also requires
+those independent measurements to equal the pipeline's runtime receipt. The
+static baseline uses the same independent engine inspection because it
+deliberately has no dynamic-memory introspection interface.
+
+Qualification launches the CLI and worker through their already-open file
+descriptors and passes the already-open plugin descriptor into the child.
+It records the process mappings while they are live, pins every mapped TRTMC
+or ELF DSO, and scans defined ELF dynamic symbols without a directory or
+basename allowlist. Path-swap, deleted-map, duplicate-name, renamed-plugin,
+wrong-model, and stale-backend evidence all fail closed.
 
 ## 8. Implementation phases
 
@@ -1634,13 +1737,42 @@ For long prompts:
 The developer-only `C/2` comparison has no hand-authored bundle escape hatch.
 `build_native_dynamic_memory_chunk_variant.py` derives the one legal `C/2`
 contract from the exact qualified tuple, performs a fresh build, and records
-the producer, command timing, bundle path/size/SHA, contract, and unchanged
-pre/post source state. `qualify_native_dynamic_memory.py` requires
+the producer, command timing, bundle path/size/SHA, contract, unchanged
+pre/post source state, and the actual loaded and mapped runtime-KV plugin's
+canonical path/size/SHA. `qualify_native_dynamic_memory.py` reopens the plugin
+and recomputes that identity; it also requires
 `--chunk-variant-bundle` and `--chunk-variant-build-receipt` together and
 fails closed unless that receipt identifies the supplied bundle and the same
 source SHA/HEAD as the base qualification. Supplying either argument without
 the other, reusing a different-source receipt, or changing the variant bundle
-after the build is an error.
+after the build is an error. Canonical correctness promotion requires both
+the replayed `C/2` engine-graph evidence and the reopened producer receipt;
+omitting the pair can produce diagnostic evidence but can never set
+`passed=true`.
+
+The canonical base bundle has the same fail-closed provenance requirement.
+`qualify_native_dynamic_memory.py` consumes `--build-manifest` together with
+`--base-build-receipt`; omission leaves the run diagnostic-only. It replays
+the exact `trtmc.dynamic-memory-test-manifest/v2` validator and the fresh
+native-dynamic build-receipt validator instead of trusting copied hashes.
+The resulting
+`trtmc.native-dynamic-memory-base-artifact-binding/v1` evidence binds the
+current clean `git_head` and `source_state_sha256` to the supplied base bundle,
+qualifier runner, benchmark worker, core DSO, active versioned TensorRT
+backend alias and inode, selected Qwen or Llama model DSO, and runtime-KV
+plugin. Promotion reopens this evidence after the qualification matrix;
+missing, stale, cross-model, dirty-source, replaced-inode, or mismatched
+manifest/receipt evidence forces both `passed=false` and
+`promotion_eligible=false` while preserving otherwise valid diagnostic
+results. Before importing the Python TensorRT plugin loader, the qualifier
+binds `TRTMC_TRT_PLUGIN_LIBRARY` to that exact manifest identity and rejects a
+different explicit environment selection or competing preloaded ABI DSO.
+Immediately after runtime-stack query and engine inspection it resamples
+`/proc/self/maps`, requires one non-deleted mapping with the same canonical
+path/device/inode, reopens the selected file identity, and persists
+`trtmc.native-dynamic-memory-runtime-kv-plugin-binding/v1`.
+`runtime_kv_plugin_binding_passed` is independently replayed by both canonical
+correctness promotion and the process-isolation aggregate.
 
 ### 9.3 Memory tests
 
@@ -1652,7 +1784,15 @@ serialized_plan_bytes
 resident_weight_bytes
 resident_weight_copy_count
 engine_weight_bytes
+capacity_decision_free_bytes
+capacity_decision_total_bytes
+capacity_decision_device_used_bytes
+settled_free_bytes
+settled_total_bytes
+settled_device_used_bytes
 context_device_memory_bytes
+ordinary_device_input_bytes
+ordinary_device_output_bytes
 external_device_output_bytes
 host_staging_bytes
 graph_private_device_bytes
@@ -1668,12 +1808,25 @@ runner scratch, and plugin workspace. Do not claim exact sub-breakdowns that
 TensorRT does not expose. External outputs, host staging, graph-private
 allocations, and application-owned KV remain separately measurable.
 
-`external_device_output_bytes` includes the runtime-owned current-K/V staging
-capacity, `min(C,R) * B`. The concrete output bindings and trace report only
-`Sq * B` active/write bytes for an invocation. The load-time receipt may not
-yet have a request-completion high-water sample; qualification requires a
-non-null `peak_device_bytes` after at least one successful request, with its
-sample count, boundary, scope, and source recorded.
+The capacity-decision snapshot binds the automatic fraction formula and the
+resolved `R`; the settled snapshot binds actual memory after the final
+context, output, and KV allocations. The latter may show more free memory
+after a downward envelope replacement, but it cannot increase `R`. The
+deprecated `final_*` fields equal `capacity_decision_*` byte-for-byte and must
+not be interpreted as settled residency.
+
+`ordinary_device_input_bytes` and `ordinary_device_output_bytes` are the
+per-module/context high-water device capacities materialized for ordinary
+dynamic TensorRT I/O after the post-load snapshot. They exclude static I/O,
+deferred KV/present bindings, and context device memory.
+`external_device_output_bytes` includes only the runtime-owned current-K/V
+staging capacity, `min(C,R) * B`, and remains exactly measurable even when
+engine introspection is unavailable. The concrete output bindings and trace
+report only `Sq * B` active/write bytes for an invocation. The load-time
+receipt may not yet have a request-completion high-water sample;
+qualification requires a non-null `peak_device_bytes` after at least one
+successful request, with its sample count, boundary, scope, and source
+recorded.
 
 Required gates:
 
@@ -1749,9 +1902,27 @@ The final field means that TensorRT owns no persistent or full-history cache
 output. It does not exclude the separately reported, runtime-owned bounded
 current-row staging allocation.
 
-NVML peak is supporting evidence, not the sole memory source. The
-developer-only qualification runner installs the internal runtime-device
-observer for exactly one load lifetime. Each synchronized boundary records:
+NVML peak is supporting evidence, not the sole memory source. For every
+non-admission correctness or policy case, the developer-only qualification
+runner executes exactly two load lifetimes in one process and installs the
+internal runtime-device observer for both:
+
+1. one explicitly labelled cold-start lifetime; and
+2. one measured lifetime after the cold-start pipeline has been destroyed.
+
+The two lifetimes use the same typed runtime policy and the same request.
+Prompt length, prefill/decode launch counts, final KV position, selected token
+IDs, step top-1 IDs, and the complete float32 logits must be bitwise identical.
+The runner writes distinct cold and measured complete-float32 artifacts. The
+Python producer independently reads both payloads, verifies their headers and
+paths, compares every payload byte, derives the top-1 and selected-token IDs,
+and records both SHA-256 digests. Runner-reported equality booleans are
+diagnostic corroboration, not the promotion gate. The measured logits are
+compared with HF only after that cold-versus-measured gate passes.
+Admission-rejection cases run neither lifetime, emit an empty invocation/token
+ledger plus `attention_started=false`, and must still reject before attention.
+
+Each synchronized boundary records:
 
 ```text
 D = signed cudaMemGetInfo device-used change
@@ -1762,17 +1933,43 @@ U = D - P - X
 
 The runner records the complete visible compute-process ledger, current and
 all-process bytes, NVML v2 device total/reserved/free/used values, and a second
-CUDA free/total sample after the NVML calls. Qualification requires exactly
+CUDA free/total sample after the NVML calls. Each lifetime requires exactly
 one pre-engine baseline, exactly one post-KV-allocation boundary, and exactly
-one successful-request-completion boundary. The device-wide peak
-reconstructed from those synchronized rows must equal the structured receipt
-byte-for-byte. At every boundary, both the unexplained residual `U` and the
-NVML device delta not represented by the visible process ledger must remain
-within `max(64 MiB, 2%)`; the CUDA/NVML sampling bracket must meet the same
-bound. Missing attribution fields, duplicated boundaries, unstable brackets,
-or a larger unexplained residual fail closed. Full-GPU qualification is
-required; MIG is rejected until CUDA-instance-to-NVML-instance attribution is
-implemented.
+one successful-request-completion boundary. Sampler PID, logical/physical GPU,
+PCI bus ID, and GPU UUID are typed and bound to every phase sample; the current
+PID must appear exactly once in every complete NVML process ledger. The
+before-load and after-request endpoints reconcile with the first and last
+synchronized phase samples within the same 64 MiB bound. The receipt's
+pre-load and post-load samples, capacity-decision sample, and settled
+post-KV-allocation sample bind their exact synchronized phase rows. The
+device-wide peak
+reconstructed from those synchronized rows must equal that lifetime's
+structured receipt byte-for-byte. At every cold and measured boundary, both
+the unexplained residual `U` and the CUDA/NVML sampling bracket must remain
+within `max(64 MiB, 2%)`. The NVML device delta not represented by the visible
+process ledger meets that same bound except for the explicitly cross-bound
+cold driver/JIT allocation and its later release described below. A cold-start
+observation is not made non-gating merely by labelling it warm-up.
+
+The cold-start unload boundary must reconcile independently. One-time
+process-global TensorRT/CUDA initialization retained into the measured
+baseline is capped at `max(512 MiB, 5% of resident_weight_bytes)`, recorded
+explicitly, and included in the measured lifetime's pre-engine baseline. This
+floor is evidence-based rather than an allocation request: three isolated
+TinyLlama processes retained exactly 400,556,032 process bytes and isolated
+Qwen retained 513,802,240 bytes after its first load/unload. A cold-only
+driver/JIT allocation that NVML device accounting does not charge to the
+process ledger is allowed only when the visible other-compute-process ledger
+is empty, its signed delta persists from both cold peak boundaries through
+cold unload, and it is at most 2 GiB. The measured lifetime may retain at most
+64 MiB of process memory after unload; a negative unlisted delta is accepted
+only as an explicitly bounded release of that previously proven cold driver
+allocation. The cold unload and measured pre-load samples must otherwise
+reconcile under the same `max(64 MiB, 2%)` attribution rule. Missing
+attribution fields, duplicated boundaries, unstable brackets, output drift,
+excessive retention, or a larger unexplained residual fail closed. Full-GPU
+qualification is required; MIG is rejected until CUDA-instance-to-NVML-instance
+attribution is implemented.
 
 The producer writes each runner command, deterministic token input, stdout,
 stderr, return code, raw logits, and raw trace before validation. Both
@@ -1790,6 +1987,22 @@ device-wide delta that is not present in the current process is recorded
 explicitly as external pressure and is not attributed to the pipeline. The
 receipt must include both deltas, their signed difference, and the guard and
 hard-gate bases; omitted attribution fields fail closed.
+
+The reservation is first placed immediately before planning, but convergence
+is decided only after the runtime has allocated its selected context and
+output memory. A two-sided controller then allocates aligned tail chunks when
+free memory is high or releases one complete aligned tail when it is low. It
+has at most 64 correction attempts, rejects a repeated/no-progress state, and
+must land in the exact half-open 2 MiB window selected for the target
+capacity. The contiguous KV guard stays live through the runtime's actual
+capacity-decision CUDA snapshot and is released only by the post-snapshot
+observer. The receipt's `capacity_decision_free_bytes` (and deprecated
+`final_free_bytes` alias) must equal that snapshot byte-for-byte, and an
+independent validator recomputes `R` with the runtime binary64-fraction
+formula. The later settled sample records the final context/output/KV
+residency after guard release and cannot change `R`. A preplanning sample, a
+controller sample, or a receipt that merely approximates the
+capacity-decision snapshot is not sufficient.
 
 ### 9.4 Split execution tests
 
@@ -1879,6 +2092,41 @@ are not model build options. Its build action:
 3. executes the exact argv itself;
 4. requires the source snapshot to be unchanged afterward;
 5. records command, log, bundle, source, and tool hashes.
+
+The historical optional-output failure also has an executable, fail-closed
+diagnostic. It deliberately retains the qualified product stack
+(CUDA runtime 13.3, cuDNN 9.20, Frontend 1.21, and the primary GB300 driver)
+while pinning only the Python CUDA 13.0 NVRTC and matching builtins pair:
+
+```bash
+python tools/qualify_native_dynamic_memory_nvrtc_regression.py \
+  --probe build-dynkv/trtmc_nvrtc_optional_output_regression \
+  --nvrtc \
+    /opt/venv/lib/python3.12/site-packages/nvidia/cu13/lib/libnvrtc.so.13 \
+  --nvrtc-builtins \
+    /opt/venv/lib/python3.12/site-packages/nvidia/cu13/lib/libnvrtc-builtins.so.13.0 \
+  --output \
+    artifacts/dynamic-memory-qualification/<source-snapshot-id>/nvrtc-13.0/qualification-receipt.json
+```
+
+This is a root-cause negative replay, not a supported CUDA 13.0 production
+tuple. The producer uses two fresh processes and two private, initially empty
+CUDA caches. It independently verifies that the exact Qwen `Sq=1, T=512`
+legacy graph requests `Max/O/Sum_exp`, selects `eng3_k24=7`, fails with the
+expected NVRTC compilation error, and never selects a fallback. The second
+process proves that the standard `O/Stats` LSE graph contains none of those
+legacy outputs, builds, executes, synchronizes, and returns finite results.
+Before releasing either process, the producer reopens `/proc/<pid>/maps`,
+rejects competing or deleted CUDA/cuDNN/NVRTC mappings, and records the
+device/inode/path/SHA-256 identity of every mapped runtime component. It also
+binds both parsed cuDNN graph artifacts, the probe binary, driver evidence,
+logs, and pre/post source snapshots.
+
+`passed=true` means that this isolated diagnostic contract passed.
+`promotion_eligible=true` additionally requires one unchanged clean exact
+HEAD. A passing dirty-source diagnostic remains useful for review but cannot
+promote a release, does not authorize the legacy fallback, and does not
+advertise CUDA 13.0 as a supported runtime.
 
 For each static/dynamic short/medium case, the benchmark action:
 
@@ -2112,13 +2360,14 @@ negative proofs, ABI/DSO compatibility, exact long-context qualification, soak
 and provenance tooling were made release gates. Do not use that estimate to
 describe the review snapshot.
 
-Current candidate inventory against `github/main`, before generated receipts:
+Current candidate inventory against `github/main`, after staging the audited
+source and before generated receipts:
 
 | State | Files | Added | Deleted | Churn |
 |---|---:|---:|---:|---:|
-| Tracked diff | 145 | 43,551 | 687 | 44,238 |
-| Non-ignored untracked source | 9 | 1,397 | 0 | 1,397 |
-| Total review surface | 154 | 44,948 | 687 | 45,635 |
+| Tracked diff | 174 | 70,847 | 730 | 71,577 |
+| Non-ignored untracked source | 0 | 0 | 0 | 0 |
+| Total review surface | 174 | 70,847 | 730 | 71,577 |
 
 The final numbers include all tracked, staged, unstaged, and non-ignored
 untracked source. They exclude generated engine plans and hardware receipts
@@ -2190,6 +2439,9 @@ general feature:
   model-owned tensor and generation behavior;
 - production registers only `NativeContiguousAttention` ABI 2;
   `NativeKvAppend` is an uninstalled test fixture;
+- the V2 backend/model-plugin handshake intentionally rejects legacy
+  out-of-tree DSOs; those DSOs must be rebuilt against the matching SDK before
+  this prototype can be promoted;
 - all EdgeLLM adapter/runtime/test trees remain outside the diff.
 
 One frozen release-candidate source state must produce all of these green
@@ -2207,7 +2459,7 @@ python tools/capture_dynamic_memory_test_manifest.py \
 That producer owns and executes this fixed command set:
 
 ```bash
-cmake --build build-dynkv -j
+cmake --build build-dynkv --clean-first -j
 cmake --build build-dynkv -j --target \
   trtmc_cpp_tests \
   trtmc_dynamic_memory_qualify \
@@ -2226,6 +2478,19 @@ python -m pytest -q -m dynamic_memory \
 python -m pytest -q tests/e2e/test_native_dynamic_memory_graph.py \
   --junitxml=<receipt-dir>/pytest_graph_e2e.junit.xml
 ```
+
+This remains a fixed nine-command set. The second build command constructs
+`trtmc_nvrtc_optional_output_regression` transitively through
+`trtmc_dynamic_memory_qualify`; the diagnostic is not a tenth command. The v2
+test manifest reopens the probe together with every other build artifact and
+records its canonical path, build-relative path, size, mode, device, inode,
+mtime, and SHA-256. Every pytest command is also bound to the benchmark worker
+and `libtrtmc_trt_plugins.so` from that same build directory. Therefore the
+CUDA-13.0 negative replay in Section 10.1 must consume the probe recorded by
+this exact manifest and must produce its own source-stable
+`qualification-receipt.json`. Its `passed` component result is not promotion
+evidence unless both receipts independently satisfy their clean exact-HEAD
+gates.
 
 The producer matches every collected `dynamic_memory` node ID to its JUnit
 outcome and fails on a missing, failed, errored, or skipped selected test. A

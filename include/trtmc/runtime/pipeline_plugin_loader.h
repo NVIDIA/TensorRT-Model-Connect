@@ -26,6 +26,16 @@ struct LegacyStrategyAlias {
     const char* target_strategy;
 };
 
+enum class ModelPluginAbiPolicy {
+    // Runtime-memory bundles exchange newer C++ interfaces and must prove the
+    // complete core/model DSO build contract before any model entrypoint.
+    kRequireCurrent,
+    // Legacy static bundles retain the established pre-handshake plugin path
+    // when the query symbol is absent.  A present-but-invalid query is never
+    // downgraded to this compatibility path.
+    kAllowLegacyUnversioned,
+};
+
 // Generated from src/runtime/models/*/MODEL.toml at configure time.
 const std::vector<ModelPluginInfo>& runtime_model_plugin_index();
 const std::vector<LegacyStrategyAlias>& legacy_runtime_strategy_alias_index();
@@ -43,5 +53,12 @@ std::optional<std::string> legacy_runtime_strategy_alias_target(const std::strin
 // are used, so an installed or stale build-tree DSO cannot satisfy a CI proof.
 void load_model_plugin_for_strategy(const std::string& strategy,
                                     const std::vector<std::string>& search_paths = {});
+
+// Bundle-aware loader used by PipelineFactory and the CLI schema preloader.
+// The original two-argument function remains ABI-stable and defaults to the
+// fail-closed current contract.
+void load_model_plugin_for_strategy_with_abi_policy(const std::string& strategy,
+                                                    const std::vector<std::string>& search_paths,
+                                                    ModelPluginAbiPolicy abi_policy);
 
 } // namespace trtmc

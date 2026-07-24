@@ -1,6 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
- * All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -27,16 +26,13 @@ void check(bool condition, const char* message) {
 
 class ScopedEnvironment {
   public:
-    ScopedEnvironment(std::string name, std::optional<std::string> value)
-        : name_(std::move(name)) {
+    ScopedEnvironment(std::string name, std::optional<std::string> value) : name_(std::move(name)) {
         if (const char* existing = std::getenv(name_.c_str()))
             previous_ = std::string(existing);
         apply(value);
     }
 
-    ~ScopedEnvironment() {
-        apply(previous_);
-    }
+    ~ScopedEnvironment() { apply(previous_); }
 
     ScopedEnvironment(const ScopedEnvironment&) = delete;
     ScopedEnvironment& operator=(const ScopedEnvironment&) = delete;
@@ -89,8 +85,7 @@ void test_exact_qualified_tuple_rejects_tampered_bundle_identity() {
     expected.trt_runtime_version = "11.2.0.113";
     expected.cuda_runtime_version = "13.3";
     expected.cudnn_backend_version = "9.20.0";
-    expected.cudnn_frontend_revision =
-        "7b9b711c22b6823e87150213ecd8449260db8610";
+    expected.cudnn_frontend_revision = "7b9b711c22b6823e87150213ecd8449260db8610";
     expected.nvrtc_version = "13.3";
     expected.driver_version = "580.105.08";
     expected.model_context_limit = 40960;
@@ -105,12 +100,9 @@ void test_exact_qualified_tuple_rejects_tampered_bundle_identity() {
     contract.qualified_target = expected.target;
     contract.qualified_runtime_stack.sm = expected.gpu_architecture;
     contract.qualified_runtime_stack.tensorrt = expected.trt_runtime_version;
-    contract.qualified_runtime_stack.cuda_runtime =
-        expected.cuda_runtime_version;
-    contract.qualified_runtime_stack.cudnn_backend =
-        expected.cudnn_backend_version;
-    contract.qualified_runtime_stack.cudnn_frontend_revision =
-        expected.cudnn_frontend_revision;
+    contract.qualified_runtime_stack.cuda_runtime = expected.cuda_runtime_version;
+    contract.qualified_runtime_stack.cudnn_backend = expected.cudnn_backend_version;
+    contract.qualified_runtime_stack.cudnn_frontend_revision = expected.cudnn_frontend_revision;
     contract.qualified_runtime_stack.nvrtc = expected.nvrtc_version;
     contract.qualified_runtime_stack.driver = expected.driver_version;
     contract.contract_version = expected.contract_version;
@@ -160,8 +152,7 @@ void test_developer_c_div_2_tuple_requires_exact_opt_in_and_buckets() {
     expected.trt_runtime_version = "11.2.0.113";
     expected.cuda_runtime_version = "13.3";
     expected.cudnn_backend_version = "9.20.0";
-    expected.cudnn_frontend_revision =
-        "7b9b711c22b6823e87150213ecd8449260db8610";
+    expected.cudnn_frontend_revision = "7b9b711c22b6823e87150213ecd8449260db8610";
     expected.nvrtc_version = "13.3";
     expected.driver_version = "580.105.08";
     expected.model_context_limit = 40960;
@@ -176,12 +167,9 @@ void test_developer_c_div_2_tuple_requires_exact_opt_in_and_buckets() {
     contract.qualified_target = expected.target;
     contract.qualified_runtime_stack.sm = expected.gpu_architecture;
     contract.qualified_runtime_stack.tensorrt = expected.trt_runtime_version;
-    contract.qualified_runtime_stack.cuda_runtime =
-        expected.cuda_runtime_version;
-    contract.qualified_runtime_stack.cudnn_backend =
-        expected.cudnn_backend_version;
-    contract.qualified_runtime_stack.cudnn_frontend_revision =
-        expected.cudnn_frontend_revision;
+    contract.qualified_runtime_stack.cuda_runtime = expected.cuda_runtime_version;
+    contract.qualified_runtime_stack.cudnn_backend = expected.cudnn_backend_version;
+    contract.qualified_runtime_stack.cudnn_frontend_revision = expected.cudnn_frontend_revision;
     contract.qualified_runtime_stack.nvrtc = expected.nvrtc_version;
     contract.qualified_runtime_stack.driver = expected.driver_version;
     contract.contract_version = expected.contract_version;
@@ -249,8 +237,7 @@ void test_exact_runtime_target_rejects_gpu_and_trt_drift() {
     expected.trt_runtime_version = "11.2.0.113";
     expected.cuda_runtime_version = "13.3";
     expected.cudnn_backend_version = "9.20.0";
-    expected.cudnn_frontend_revision =
-        "7b9b711c22b6823e87150213ecd8449260db8610";
+    expected.cudnn_frontend_revision = "7b9b711c22b6823e87150213ecd8449260db8610";
     expected.nvrtc_version = "13.3";
     expected.driver_version = "580.105.08";
 
@@ -261,8 +248,7 @@ void test_exact_runtime_target_rejects_gpu_and_trt_drift() {
     actual.trt_runtime_version = "11.2.0.113";
     actual.cuda_runtime_version = "13.3";
     actual.cudnn_backend_version = "9.20.0";
-    actual.cudnn_frontend_revision =
-        "7b9b711c22b6823e87150213ecd8449260db8610";
+    actual.cudnn_frontend_revision = "7b9b711c22b6823e87150213ecd8449260db8610";
     actual.nvrtc_version = "13.3";
     actual.driver_version = "580.105.08";
     trtmc::validate_runtime_memory_runtime_target(expected, actual);
@@ -314,19 +300,21 @@ void test_exact_runtime_target_rejects_gpu_and_trt_drift() {
         void (*mutate)(trtmc::RuntimeMemoryRuntimeTarget&);
     };
     for (const auto& mutation : {
-             StackMutation{"CUDA runtime", +[](trtmc::RuntimeMemoryRuntimeTarget& value) {
+             StackMutation{"CUDA runtime",
+                           +[](trtmc::RuntimeMemoryRuntimeTarget& value) {
                                value.cuda_runtime_version = "13.1";
                            }},
-             StackMutation{"cuDNN backend", +[](trtmc::RuntimeMemoryRuntimeTarget& value) {
+             StackMutation{"cuDNN backend",
+                           +[](trtmc::RuntimeMemoryRuntimeTarget& value) {
                                value.cudnn_backend_version = "9.20.1";
                            }},
              StackMutation{"cuDNN Frontend revision",
                            +[](trtmc::RuntimeMemoryRuntimeTarget& value) {
                                value.cudnn_frontend_revision = "unqualified";
                            }},
-             StackMutation{"NVRTC", +[](trtmc::RuntimeMemoryRuntimeTarget& value) {
-                               value.nvrtc_version = "13.0";
-                           }},
+             StackMutation{
+                 "NVRTC",
+                 +[](trtmc::RuntimeMemoryRuntimeTarget& value) { value.nvrtc_version = "13.0"; }},
              StackMutation{"NVIDIA driver",
                            +[](trtmc::RuntimeMemoryRuntimeTarget& value) {
                                value.driver_version = "580.105.09";
@@ -338,8 +326,7 @@ void test_exact_runtime_target_rejects_gpu_and_trt_drift() {
         try {
             trtmc::validate_runtime_memory_runtime_target(expected, mismatched);
         } catch (const std::runtime_error& error) {
-            rejected = std::string(error.what()).find(mutation.expected_name) !=
-                       std::string::npos;
+            rejected = std::string(error.what()).find(mutation.expected_name) != std::string::npos;
         }
         check(rejected, "runtime stack guard rejects ancillary library/driver drift");
     }
@@ -349,11 +336,9 @@ void test_backend_stack_json_is_independent_and_fail_closed() {
     const std::string valid =
         R"({"sm":"sm103","tensorrt":"11.2.0.113","cuda_runtime":"13.3","cudnn_backend":"9.20.0","cudnn_frontend_revision":"7b9b711c22b6823e87150213ecd8449260db8610","nvrtc":"13.3","driver":"580.105.08"})";
     const auto actual = trtmc::parse_runtime_memory_runtime_stack_json(valid);
-    check(actual.compute_capability_major == 10 &&
-              actual.compute_capability_minor == 3,
+    check(actual.compute_capability_major == 10 && actual.compute_capability_minor == 3,
           "backend runtime stack parses independently detected SM");
-    check(actual.cudnn_frontend_revision ==
-              "7b9b711c22b6823e87150213ecd8449260db8610",
+    check(actual.cudnn_frontend_revision == "7b9b711c22b6823e87150213ecd8449260db8610",
           "backend runtime stack preserves compiled Frontend revision");
 
     const std::vector<std::string> invalid_values = {

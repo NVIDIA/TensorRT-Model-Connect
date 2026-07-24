@@ -38,7 +38,7 @@ def _memory_receipt(*, request_complete: bool) -> dict[str, Any]:
     if request_complete:
         boundaries.append("after_successful_request_completion")
     return {
-        "receipt_schema_version": 2,
+        "receipt_schema_version": 3,
         "contract_version": 1,
         "policy": "auto",
         "policy_fraction": 0.9,
@@ -52,6 +52,16 @@ def _memory_receipt(*, request_complete: bool) -> dict[str, Any]:
         "kv_reserved_bytes": 1024,
         "kv_committed_bytes": 1024,
         "kv_allocation_id": 7,
+        "capacity_decision_free_bytes": 4096,
+        "capacity_decision_total_bytes": 16384,
+        "capacity_decision_device_used_bytes": 12288,
+        "settled_free_bytes": 3072,
+        "settled_total_bytes": 16384,
+        "settled_device_used_bytes": 13312,
+        "settled_snapshot_unavailable_reason": None,
+        "final_free_bytes": 4096,
+        "final_total_bytes": 16384,
+        "final_device_used_bytes": 12288,
         "backend_owned_cache_input_bytes": 0,
         "backend_owned_cache_output_bytes": 0,
         "peak_device_sample_boundaries": boundaries,
@@ -265,6 +275,17 @@ def test_memory_parser_rejects_malformed_json() -> None:
         ("policy_fraction", 0.8, "policy_fraction must be 0.9"),
         ("kv_reserved_bytes", 512, "byte accounting is inconsistent"),
         ("backend_owned_cache_input_bytes", 1, "backend_owned_cache_input_bytes must be"),
+        ("settled_free_bytes", None, "settled_free_bytes must be a positive integer"),
+        (
+            "settled_snapshot_unavailable_reason",
+            "sampling failed",
+            "missing its settled snapshot",
+        ),
+        (
+            "final_free_bytes",
+            1,
+            "capacity-decision compatibility alias",
+        ),
     ],
 )
 def test_memory_parser_rejects_invalid_completion_invariants(

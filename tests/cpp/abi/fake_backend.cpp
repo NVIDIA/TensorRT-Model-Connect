@@ -1,9 +1,9 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "trtmc/runtime/trt_backend.h"
+#include "runtime/backend/runtime_memory_backend.h"
 
 #include <memory>
 #include <vector>
@@ -38,6 +38,15 @@ class AbiFixtureBackend final : public trtmc::IBackend {
 };
 
 } // namespace
+
+extern "C" std::int32_t
+trtmc_backend_query_abi_contract_v2(trtmc::BackendDsoAbiContractV2* contract,
+                                    std::size_t contract_size) noexcept {
+    if (contract == nullptr || contract_size < sizeof(*contract))
+        return -1;
+    *contract = trtmc::make_runtime_memory_backend_dso_abi_contract_v2(0);
+    return 0;
+}
 
 extern "C" trtmc::IBackend* trtmc_create_backend() {
     return new AbiFixtureBackend();

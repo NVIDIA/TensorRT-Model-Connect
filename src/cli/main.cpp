@@ -67,6 +67,7 @@
 namespace {
 
 using trtmc::cli::CliArgs;
+using trtmc::cli::make_load_options;
 using trtmc::cli::parse_args;
 using trtmc::cli::print_usage;
 
@@ -132,40 +133,6 @@ normalize_explicit_image_batch_seeds(const std::vector<std::uint64_t>& explicit_
     return out;
 }
 
-trtmc::LoadOptionsV2 make_load_options(const CliArgs& args) {
-    trtmc::LoadOptionsV2 options;
-    options.hf_python = args.hf_python;
-    options.runtime_cache_path = args.runtime_cache;
-    options.cuda_graphs = args.cuda_graphs;
-    if (args.kv_cache_memory.explicitly_set) {
-        switch (args.kv_cache_memory.mode) {
-        case trtmc::cli::KvCacheMemoryMode::Auto:
-            options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kAuto;
-            break;
-        case trtmc::cli::KvCacheMemoryMode::Bytes:
-            options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kBytes;
-            options.kv_cache_memory_bytes = args.kv_cache_memory.bytes;
-            break;
-        case trtmc::cli::KvCacheMemoryMode::Percent:
-            options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kFraction;
-            break;
-        }
-    }
-    if (args.kv_cache_memory.mode == trtmc::cli::KvCacheMemoryMode::Percent) {
-        options.kv_cache_memory_fraction = args.kv_cache_memory.percent / 100.0;
-    }
-    options.max_sequence_length = args.max_sequence_length;
-    options.max_sequence_length_explicit = args.max_sequence_length_explicitly_set ? 1U : 0U;
-    // Forward --config/--set into the factory so ConfigBundle resolution
-    // actually sees them. Without this, every --set call silently no-ops
-    // because pipeline_factory only reads from LoadOptions.
-    options.config_path = args.config_path;
-    options.set_tokens = args.set_tokens;
-    options.backend_search_paths = args.backend_search_paths;
-    options.model_plugin_search_paths = args.model_plugin_search_paths;
-    return options;
-}
-
 void preload_cli_config_schema_owner(const CliArgs& args) {
     if (args.bundle_path.empty())
         return;
@@ -183,7 +150,10 @@ void preload_cli_config_schema_owner(const CliArgs& args) {
     if (auto alias = trtmc::legacy_runtime_strategy_alias_target(strategy, ""))
         strategy = *alias;
 
-    trtmc::load_model_plugin_for_strategy(strategy, args.model_plugin_search_paths);
+    trtmc::load_model_plugin_for_strategy_with_abi_policy(
+        strategy, args.model_plugin_search_paths,
+        info.runtime_memory.present ? trtmc::ModelPluginAbiPolicy::kRequireCurrent
+                                    : trtmc::ModelPluginAbiPolicy::kAllowLegacyUnversioned);
 }
 
 std::filesystem::path current_executable_path() {
@@ -253,6 +223,36 @@ std::string build_pythonpath() {
     return pythonpath;
 }
 
+bool configure_builder_plugin_library() {
+    const char* existing = std::getenv("TRTMC_TRT_PLUGIN_LIBRARY");
+    // Presence is an explicit user/qualification choice, including an empty
+    // or otherwise invalid value.  Preserve it so the Python selector can
+    // reject it instead of silently falling back to another build tree.
+    if (existing != nullptr)
+        return true;
+
+    const auto current_exe = current_executable_path();
+    if (current_exe.empty())
+        return true;
+
+    std::error_code exe_ec;
+    const auto exe_path = std::filesystem::weakly_canonical(current_exe, exe_ec);
+    if (exe_ec || exe_path.empty())
+        return true;
+
+    const auto candidate = exe_path.parent_path() / "libtrtmc_trt_plugins.so";
+    std::error_code file_ec;
+    if (!std::filesystem::is_regular_file(candidate, file_ec))
+        return true;
+
+    if (setenv("TRTMC_TRT_PLUGIN_LIBRARY", candidate.c_str(), 1) == 0)
+        return true;
+
+    std::cerr << "Error: failed to select the TensorRT plugin library adjacent to " << exe_path
+              << ": " << std::strerror(errno) << '\n';
+    return false;
+}
+
 int run_python_module(const std::vector<std::string>& argv) {
     if (argv.empty()) {
         std::cerr << "Error: empty Python command\n";
@@ -275,6 +275,8 @@ int run_python_module(const std::vector<std::string>& argv) {
         const std::string pythonpath = build_pythonpath();
         if (!pythonpath.empty())
             setenv("PYTHONPATH", pythonpath.c_str(), 1);
+        if (!configure_builder_plugin_library())
+            _exit(127);
         execvp(exec_argv[0], exec_argv.data());
         std::cerr << "Error: failed to execute " << argv[0] << ": " << std::strerror(errno) << '\n';
         _exit(127);
@@ -1486,10 +1488,8 @@ int cmd_inspect(const CliArgs& args) {
             const auto& stack = memory.qualified_runtime_stack;
             std::cout << "Qualified runtime stack: "
                       << "SM=" << stack.sm << ", TensorRT=" << stack.tensorrt
-                      << ", CUDA=" << stack.cuda_runtime
-                      << ", cuDNN=" << stack.cudnn_backend
-                      << ", Frontend=" << stack.cudnn_frontend_revision
-                      << ", NVRTC=" << stack.nvrtc
+                      << ", CUDA=" << stack.cuda_runtime << ", cuDNN=" << stack.cudnn_backend
+                      << ", Frontend=" << stack.cudnn_frontend_revision << ", NVRTC=" << stack.nvrtc
                       << ", driver=" << stack.driver << '\n';
             std::cout << "Native KV plugin ABI: " << memory.native_kv_plugin_abi << '\n';
             std::cout << "Model context limit: " << memory.model_context_limit << '\n';
@@ -1544,6 +1544,19 @@ int apply_cli_config(const CliArgs& args) {
         return EXIT_SUCCESS;
     if (args.config_path.empty() && args.set_tokens.empty())
         return EXIT_SUCCESS;
+    if ((args.kv_cache_memory.explicitly_set || args.max_sequence_length_explicitly_set) &&
+        !args.bundle_path.empty() && trtmc::IsBundle(args.bundle_path)) {
+        const auto info = trtmc::InspectBundle(args.bundle_path);
+        if (!info.runtime_memory.present || info.runtime_memory.contract_version != 1 ||
+            !info.runtime_memory.runtime_owned) {
+            // Config-schema discovery dlopens the model provider. Keep the
+            // runtime-policy contract rejection ahead of that preload just as
+            // PipelineFactory does on the ordinary no-config path.
+            std::cerr << "Error: This bundle does not declare runtime_memory contract version 1; "
+                         "runtime KV memory and max-sequence policies cannot be applied\n";
+            return EXIT_FAILURE;
+        }
+    }
     preload_cli_config_schema_owner(args);
     if (trtmc::config::SchemaRegistry::instance().registered_namespaces().empty()) {
         std::cerr << "[trtmc] --config/--set accepted but no config schemas are "

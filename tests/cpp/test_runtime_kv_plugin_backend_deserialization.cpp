@@ -1,6 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
- * All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -9,6 +8,7 @@
 // directly. The backend's DT_NEEDED edge must load the common plugin DSO and
 // run its static registrars before engine deserialization.
 
+#include "runtime/backend/runtime_memory_backend.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/trt_backend.h"
 
@@ -148,27 +148,42 @@ int main(int argc, char** argv) {
         std::cerr << "FAIL: could not dlopen backend: " << dlerror() << '\n';
         return 1;
     }
+    auto query_backend_abi = reinterpret_cast<trtmc::BackendDsoAbiQueryFnV2>(
+        dlsym(backend_handle, trtmc::kBackendDsoAbiQuerySymbolV2));
     auto create_backend =
         reinterpret_cast<trtmc::IBackend* (*)()>(dlsym(backend_handle, "trtmc_create_backend"));
     auto destroy_backend = reinterpret_cast<void (*)(trtmc::IBackend*)>(
         dlsym(backend_handle, "trtmc_destroy_backend"));
     auto runtime_stack = reinterpret_cast<const char* (*)()>(
         dlsym(backend_handle, "trtmc_backend_runtime_memory_stack_json_v1"));
-    if (!create_backend || !destroy_backend || !runtime_stack) {
+    if (!query_backend_abi || !create_backend || !destroy_backend || !runtime_stack) {
         std::cerr << "FAIL: backend C ABI symbols are missing\n";
+        dlclose(backend_handle);
+        return 1;
+    }
+    trtmc::BackendDsoAbiContractV2 backend_abi{};
+    const auto expected_backend_abi = trtmc::make_runtime_memory_backend_dso_abi_contract_v2(
+        trtmc::kBackendDsoCapabilityRuntimeMemoryV2);
+    if (query_backend_abi(&backend_abi, sizeof(backend_abi)) != 0 ||
+        backend_abi.struct_size != expected_backend_abi.struct_size ||
+        backend_abi.contract_version != expected_backend_abi.contract_version ||
+        backend_abi.interface_fingerprint != expected_backend_abi.interface_fingerprint ||
+        backend_abi.runtime_memory_layout_fingerprint !=
+            expected_backend_abi.runtime_memory_layout_fingerprint ||
+        backend_abi.runtime_memory_api_version != trtmc::kRuntimeMemoryBackendApiVersionCurrent ||
+        backend_abi.capability_flags != trtmc::kBackendDsoCapabilityRuntimeMemoryV2) {
+        std::cerr << "FAIL: backend/core ABI contract is incompatible\n";
         dlclose(backend_handle);
         return 1;
     }
     const char* stack_text = runtime_stack();
     const std::string stack = stack_text != nullptr ? stack_text : "";
     for (const char* field :
-         {"\"sm\":\"sm", "\"tensorrt\":\"", "\"cuda_runtime\":\"",
-          "\"cudnn_backend\":\"", "\"cudnn_frontend_revision\":\"",
-          "\"nvrtc\":\"", "\"driver\":\""}) {
+         {"\"sm\":\"sm", "\"tensorrt\":\"", "\"cuda_runtime\":\"", "\"cudnn_backend\":\"",
+          "\"cudnn_frontend_revision\":\"", "\"nvrtc\":\"", "\"driver\":\""}) {
         if (stack.find(field) == std::string::npos ||
             stack.find("\":\"unavailable\"") != std::string::npos) {
-            std::cerr << "FAIL: backend runtime-stack evidence is incomplete: "
-                      << stack << '\n';
+            std::cerr << "FAIL: backend runtime-stack evidence is incomplete: " << stack << '\n';
             dlclose(backend_handle);
             return 1;
         }

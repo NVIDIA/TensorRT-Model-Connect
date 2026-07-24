@@ -1,6 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
- * All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -21,6 +20,17 @@ inline constexpr int32_t kNativeContiguousAttentionPluginAbi = 2;
 inline constexpr int32_t kNativeContiguousAttentionInputCount = 6;
 inline constexpr int32_t kNativeContiguousAttentionOutputCount = 1;
 
+// Private test seam for the exact production LSE merge kernel. This header is
+// source-private (not installed), and production enqueue uses the same
+// launcher, so adversarial numerical tests cannot drift to a copied formula.
+bool launch_segmented_context_merge_for_testing(void const* history_context,
+                                                void const* current_context,
+                                                float const* history_log_sum_exp,
+                                                float const* current_log_sum_exp, void* destination,
+                                                int32_t query_rows, int32_t padded_query_rows,
+                                                int32_t num_query_heads, int32_t head_dim,
+                                                cudaStream_t stream) noexcept;
+
 // ABI v2 tensor order:
 //   history K/V:       [T, Hkv*D] BF16 token-major, read-only
 //   new Q:             [1, Hq, Sq, D] BF16 head-major
@@ -29,8 +39,10 @@ inline constexpr int32_t kNativeContiguousAttentionOutputCount = 1;
 //                      H>0 requires 2<=T and H<=T.
 //   context:           [1, Hq, Sq, D] BF16
 //
-// The plugin performs two normalized SDPA segments (history noncausal and
-// current lower-right causal) and combines them from log-sum-exp statistics.
+// Prefill and large-bound decode perform two normalized SDPA segments
+// (history noncausal and current lower-right causal) and combine them from
+// log-sum-exp statistics. Latency-sensitive Sq=1 buckets use an equivalent
+// direct GQA-aware online-softmax kernel over the two read-only segments.
 // It never mutates history. The engine exposes current K/V as
 // exact-Sq staging outputs; the native runtime appends only those rows after
 // enqueue.

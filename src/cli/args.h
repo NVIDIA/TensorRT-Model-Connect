@@ -10,6 +10,10 @@
 #include <string>
 #include <vector>
 
+namespace trtmc {
+struct LoadOptionsV2;
+}
+
 namespace trtmc::cli {
 
 enum class KvCacheMemoryMode {
@@ -33,9 +37,12 @@ struct CliArgs {
     bool prompt_provided{false};
     std::string hf_python;
     KvCacheMemorySpec kv_cache_memory;
-    // Compatibility mirror for consumers that only support an explicit byte
-    // budget. It is populated when kv_cache_memory.mode == Bytes, otherwise 0.
+    // Legacy byte-budget surface populated only by --kv-cache-size or
+    // --kv_cache_size. Keeping it distinct from kv_cache_memory lets static
+    // bundles retain their original LoadOptions behavior while the canonical
+    // --kv-cache-memory spelling selects the runtime-memory contract.
     std::uint64_t kv_cache_size_bytes{0};
+    bool kv_cache_size_explicitly_set{false};
     // Runtime per-request prompt + generated-token limit. 0 means auto.
     std::uint64_t max_sequence_length{0};
     bool max_sequence_length_explicitly_set{false};
@@ -137,5 +144,6 @@ std::optional<std::vector<std::uint64_t>> parse_seed_csv(const std::string& text
 std::vector<std::string> read_prompts_file(const std::string& path, std::string& error);
 void print_usage();
 CliArgs parse_args(int argc, char** argv);
+trtmc::LoadOptionsV2 make_load_options(const CliArgs& args);
 
 } // namespace trtmc::cli

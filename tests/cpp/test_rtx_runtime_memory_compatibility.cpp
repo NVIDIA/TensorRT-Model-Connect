@@ -23,10 +23,25 @@ int main() {
 
     using CreateFn = trtmc::IBackend* (*)();
     using DestroyFn = void (*)(trtmc::IBackend*);
+    auto* query = reinterpret_cast<trtmc::BackendDsoAbiQueryFnV2>(
+        dlsym(library, trtmc::kBackendDsoAbiQuerySymbolV2));
     auto* create = reinterpret_cast<CreateFn>(dlsym(library, "trtmc_create_backend"));
     auto* destroy = reinterpret_cast<DestroyFn>(dlsym(library, "trtmc_destroy_backend"));
-    if (create == nullptr || destroy == nullptr) {
+    if (query == nullptr || create == nullptr || destroy == nullptr) {
         std::cerr << "FAIL: RTX backend factory symbols are missing\n";
+        dlclose(library);
+        return 1;
+    }
+
+    trtmc::BackendDsoAbiContractV2 contract{};
+    const auto expected = trtmc::make_runtime_memory_backend_dso_abi_contract_v2(0);
+    if (query(&contract, sizeof(contract)) != 0 || contract.struct_size != expected.struct_size ||
+        contract.contract_version != expected.contract_version ||
+        contract.interface_fingerprint != expected.interface_fingerprint ||
+        contract.runtime_memory_layout_fingerprint != expected.runtime_memory_layout_fingerprint ||
+        contract.runtime_memory_api_version != trtmc::kRuntimeMemoryBackendApiVersionCurrent ||
+        contract.capability_flags != 0) {
+        std::cerr << "FAIL: RTX backend/core ABI contract is incompatible\n";
         dlclose(library);
         return 1;
     }

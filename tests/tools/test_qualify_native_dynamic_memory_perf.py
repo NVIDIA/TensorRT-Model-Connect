@@ -1,5 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
-# All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
@@ -8,9 +7,15 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import stat
 import sys
 
 import pytest
+
+from tests.tools.dynamic_memory_manifest_fixture import (
+    complete_command_receipts,
+    load_manifest_module,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -26,8 +31,6 @@ SPEC.loader.exec_module(perf)
 pytestmark = [pytest.mark.unit, pytest.mark.dynamic_memory]
 SOURCE_SHA = "1" * 64
 GIT_HEAD = "2" * 40
-TOOLCHAIN_SHA = "3" * 64
-ENVIRONMENT_SHA = "4" * 64
 SHORT_REQUEST_SHA = "5" * 64
 MEDIUM_REQUEST_SHA = "6" * 64
 RUNTIME_STACK = {
@@ -128,6 +131,237 @@ def _runtime_libraries(root: Path) -> dict:
     }
 
 
+def _binary_identity(path: Path) -> dict:
+    metadata = path.stat()
+    return {
+        "path": str(path.resolve()),
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "size_bytes": metadata.st_size,
+        "mtime_ns": metadata.st_mtime_ns,
+        "ctime_ns": metadata.st_ctime_ns,
+        "sha256": _sha256(path),
+    }
+
+
+def _manifest_artifact_identity(
+    path: Path, *, artifact_key: str, relative_path: str
+) -> dict:
+    metadata = path.stat()
+    return {
+        "artifact_key": artifact_key,
+        "relative_path": relative_path,
+        "path": str(path.resolve()),
+        "st_dev": metadata.st_dev,
+        "st_ino": metadata.st_ino,
+        "size_bytes": metadata.st_size,
+        "mtime_ns": metadata.st_mtime_ns,
+        "ctime_ns": metadata.st_ctime_ns,
+        "mode": stat.S_IMODE(metadata.st_mode),
+        "sha256": _sha256(path),
+    }
+
+
+def _qualification_context(
+    root: Path, *, static_bundle: Path, dynamic_bundle: Path
+) -> dict:
+    build = root / "build"
+    build.mkdir(parents=True, exist_ok=True)
+    relative_paths = {
+        "trtmc": "trtmc",
+        "benchmark_worker": "trtmc_benchmark_worker",
+        "core": "libtrtmc_core.so",
+        "trt_backend": "libtrtmc_backend_trt.so",
+        "runtime_kv_plugin": "libtrtmc_trt_plugins.so",
+        "model_qwen": "models/qwen/libtrtmc_model_qwen.so",
+        "model_llama": "models/llama/libtrtmc_model_llama.so",
+        "qualify": "trtmc_dynamic_memory_qualify",
+        "nvrtc_optional_output_regression": (
+            "trtmc_nvrtc_optional_output_regression"
+        ),
+        "surfaces": "trtmc_dynamic_memory_surfaces",
+    }
+    for key, relative in relative_paths.items():
+        artifact = build / relative
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(f"qualification-{key}".encode())
+        if key in (
+            "trtmc",
+            "benchmark_worker",
+            "qualify",
+            "nvrtc_optional_output_regression",
+            "surfaces",
+        ):
+            artifact.chmod(artifact.stat().st_mode | stat.S_IXUSR)
+    cache = build / "CMakeCache.txt"
+    cache.write_text(
+        (
+            f"CMAKE_HOME_DIRECTORY:INTERNAL={root.resolve()}\n"
+            "TRTMC_TRT_BACKEND_ABI:STRING=11_2\n"
+        ),
+        encoding="utf-8",
+    )
+    cmake_cache = _manifest_artifact_identity(
+        cache, artifact_key="cmake_cache", relative_path="CMakeCache.txt"
+    )
+    cmake_cache["configured_source"] = str(root.resolve())
+    active_backend = build / "libtrtmc_backend_trt_11_2.so"
+    active_backend.symlink_to("libtrtmc_backend_trt.so")
+    artifact_paths = dict(relative_paths)
+    artifact_paths["trt_backend"] = "libtrtmc_backend_trt_11_2.so"
+    artifacts = {
+        key: _manifest_artifact_identity(
+            build / relative,
+            artifact_key=key,
+            relative_path=relative,
+        )
+        for key, relative in artifact_paths.items()
+    }
+    manifest_module = load_manifest_module(REPO_ROOT)
+    commands = complete_command_receipts(
+        manifest_module,
+        repo_root=root,
+        build_dir=build,
+        output_dir=build,
+        python=Path(sys.executable),
+    )
+    source_state = {
+        "git_head": GIT_HEAD,
+        "source_state_sha256": SOURCE_SHA,
+        "git_dirty": False,
+        "exact_head_gate_satisfied": True,
+    }
+    manifest = {
+        "schema_version": "trtmc.dynamic-memory-test-manifest/v2",
+        "repo_root": str(root.resolve()),
+        "build_dir": str(build.resolve()),
+        "python": sys.executable,
+        "source_state_pre": source_state,
+        "commands": commands,
+        "passed": True,
+        "source_state_post": source_state,
+        "source_state_unchanged": True,
+        "cmake_cache": cmake_cache,
+        "build_artifacts": artifacts,
+        "build_artifacts_sha256": perf._canonical_sha(artifacts),
+        "clean_build_command_sha256": perf._canonical_sha(commands[0]),
+    }
+    manifest_path = build / "build-manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    manifest_binding = {
+        "path": str(manifest_path.resolve()),
+        "sha256": _sha256(manifest_path),
+        "schema_version": "trtmc.dynamic-memory-test-manifest/v2",
+        "git_head": GIT_HEAD,
+        "source_state_sha256": SOURCE_SHA,
+        "build_artifacts_sha256": manifest["build_artifacts_sha256"],
+    }
+    runtime_trtmc = {
+        "model_id": "Qwen/Qwen3-0.6B",
+        "model_family": "qwen",
+        "core": _binary_identity(build / relative_paths["core"]),
+        "trt_backend": _binary_identity(
+            build / artifact_paths["trt_backend"]
+        ),
+        "runtime_kv_plugin": _binary_identity(
+            build / relative_paths["runtime_kv_plugin"]
+        ),
+        "model": _binary_identity(build / relative_paths["model_qwen"]),
+    }
+    worker_identity = _binary_identity(
+        build / relative_paths["benchmark_worker"]
+    )
+    plugin_identity = runtime_trtmc["runtime_kv_plugin"]
+    toolchain = {
+        "worker": worker_identity,
+        "plugin_library": plugin_identity,
+        "runtime_trtmc_libraries": runtime_trtmc,
+        "build_manifest": manifest_binding,
+        "capture_tool": str(MODULE_PATH.resolve()),
+        "capture_tool_sha256": _sha256(MODULE_PATH),
+    }
+    environment = {"target": "unit-test", "gpu": "synthetic"}
+
+    receipts: dict[str, Path] = {}
+    for role, bundle in (
+        ("exact-head-static-split", static_bundle),
+        ("native-dynamic", dynamic_bundle),
+    ):
+        stdout = build / f"{role}.stdout"
+        stderr = build / f"{role}.stderr"
+        stdout.write_text("build ok\n", encoding="utf-8")
+        stderr.write_text("", encoding="utf-8")
+        command = [
+            str((build / "trtmc").resolve()),
+            "build",
+            "Qwen/Qwen3-0.6B",
+        ]
+        plugin = plugin_identity if role == "native-dynamic" else None
+        mapping = (
+            {
+                "path": plugin_identity["path"],
+                "device": plugin_identity["device"],
+                "inode": plugin_identity["inode"],
+                "deleted": False,
+                "identity_sha256": perf._canonical_sha(plugin_identity),
+            }
+            if plugin is not None
+            else None
+        )
+        bundle_mtime = bundle.stat().st_mtime_ns
+        receipt = {
+            "schema_version": "trtmc.native-dynamic-memory-perf-build/v2",
+            "artifact_role": role,
+            "model_id": "Qwen/Qwen3-0.6B",
+            "model_revision": "revision-pinned",
+            "precision": "bf16",
+            "target": "sm103",
+            "bundle_build_id": (
+                "static-build"
+                if role == "exact-head-static-split"
+                else "dynamic-build"
+            ),
+            "fresh_build": True,
+            "artifact_reused": False,
+            "bundle": str(bundle.resolve()),
+            "bundle_sha256": _sha256(bundle),
+            "bundle_bytes": bundle.stat().st_size,
+            "bundle_mtime_ns": bundle_mtime,
+            "build_started_ns": bundle_mtime - 1,
+            "build_finished_ns": bundle_mtime + 1,
+            "command": command,
+            "command_sha256": perf._canonical_sha(command),
+            "resolved_command": command,
+            "resolved_command_sha256": perf._canonical_sha(command),
+            "trtmc_executable": _binary_identity(build / "trtmc"),
+            "cwd": str(root.resolve()),
+            "stdout": str(stdout.resolve()),
+            "stdout_sha256": _sha256(stdout),
+            "stderr": str(stderr.resolve()),
+            "stderr_sha256": _sha256(stderr),
+            "git_head": GIT_HEAD,
+            "prebuild_source_state_sha256": SOURCE_SHA,
+            "postbuild_source_state_sha256": SOURCE_SHA,
+            "source_state_pre": source_state,
+            "source_state_post": source_state,
+            "build_manifest": manifest_binding,
+            "runtime_kv_plugin": plugin,
+            "runtime_kv_plugin_mapping": mapping,
+        }
+        receipt_path = build / f"{role}-receipt.json"
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        receipts[role] = receipt_path
+    return {
+        "build_manifest": manifest_binding,
+        "runtime_trtmc_libraries": runtime_trtmc,
+        "plugin_identity": plugin_identity,
+        "toolchain": toolchain,
+        "environment": environment,
+        "receipts": receipts,
+        "source_state": source_state,
+    }
+
+
 def _write_result(
     path: Path,
     *,
@@ -143,6 +377,7 @@ def _write_result(
     weight_streaming_active: bool = False,
     fresh_build: bool = True,
     artifact_reused: bool = False,
+    qualification_context: dict,
 ) -> dict:
     request_sha = (
         SHORT_REQUEST_SHA if prompt_kind == "short" else MEDIUM_REQUEST_SHA
@@ -158,6 +393,16 @@ def _write_result(
         if role == "exact-head-static-split"
         else _runtime_libraries(path.parent)
     )
+    build_runtime_kv_plugin = (
+        None
+        if role == "exact-head-static-split"
+        else qualification_context["plugin_identity"]
+    )
+    runtime_trtmc_libraries = qualification_context[
+        "runtime_trtmc_libraries"
+    ]
+    build_manifest = qualification_context["build_manifest"]
+    toolchain = qualification_context["toolchain"]
     cuda_jit_cache = _cuda_jit_cache()
     generated_stream = list(range(output_tokens))
     structural_identity = {
@@ -205,7 +450,7 @@ def _write_result(
         "case_digest": hashlib.sha256(
             f"{role}-{prompt_kind}".encode()
         ).hexdigest(),
-        "model_id": "example/model",
+        "model_id": "Qwen/Qwen3-0.6B",
         "operation": "generate",
         "timing_scope": "public_pipeline_call_wall",
         "warmup": 2,
@@ -242,8 +487,10 @@ def _write_result(
             "model_revision": "revision-pinned",
             "precision": "bf16",
             "target": "sm103",
-            "toolchain_sha256": TOOLCHAIN_SHA,
-            "benchmark_environment_sha256": ENVIRONMENT_SHA,
+            "toolchain_sha256": perf._canonical_sha(toolchain),
+            "benchmark_environment_sha256": perf._canonical_sha(
+                qualification_context["environment"]
+            ),
             "bundle_build_id": (
                 "static-build"
                 if role == "exact-head-static-split"
@@ -259,6 +506,13 @@ def _write_result(
             "runtime_libraries_sha256": perf._canonical_sha(
                 runtime_libraries
             ),
+            "runtime_trtmc_libraries_sha256": perf._canonical_sha(
+                runtime_trtmc_libraries
+            ),
+            "build_runtime_kv_plugin_sha256": perf._canonical_sha(
+                build_runtime_kv_plugin
+            ),
+            "build_manifest_sha256": perf._canonical_sha(build_manifest),
             "cuda_jit_cache_sha256": perf._canonical_sha(cuda_jit_cache),
             "generation_workload_sha256": perf._canonical_sha(
                 generation_workload
@@ -277,9 +531,46 @@ def _write_result(
         "runtime_attention_plans": runtime_attention_plans,
         "runtime_stack": runtime_stack,
         "runtime_libraries": runtime_libraries,
+        "runtime_trtmc_libraries": runtime_trtmc_libraries,
+        "build_runtime_kv_plugin": build_runtime_kv_plugin,
         "cuda_jit_cache": cuda_jit_cache,
         "generation_workload": generation_workload,
         "tokenizer_contract": dict(TOKENIZER_CONTRACT),
+    }
+    request_file = path.with_suffix(".request.json")
+    request_file.write_text(
+        json.dumps({"prompt_kind": prompt_kind}), encoding="utf-8"
+    )
+    worker_stdout = path.with_suffix(".worker.stdout")
+    worker_stderr = path.with_suffix(".worker.stderr")
+    worker_stdout.write_text("worker ok\n", encoding="utf-8")
+    worker_stderr.write_text("", encoding="utf-8")
+    raw_output = path.with_suffix(".raw")
+    worker_command = [
+        toolchain["worker"]["path"],
+        "--request",
+        str(request_file.resolve()),
+        "--output",
+        str(raw_output.resolve()),
+    ]
+    build_receipt = qualification_context["receipts"][role]
+    payload["qualification_evidence"] = {
+        "build_receipt": str(build_receipt.resolve()),
+        "build_receipt_sha256": _sha256(build_receipt),
+        "request_file": str(request_file.resolve()),
+        "request_file_sha256": _sha256(request_file),
+        "worker_command": worker_command,
+        "worker_command_sha256": perf._canonical_sha(worker_command),
+        "toolchain": toolchain,
+        "environment": qualification_context["environment"],
+        "runtime_trtmc_libraries": runtime_trtmc_libraries,
+        "build_runtime_kv_plugin": build_runtime_kv_plugin,
+        "build_manifest": build_manifest,
+        "source_state_pre": qualification_context["source_state"],
+        "worker_stderr": str(worker_stderr.resolve()),
+        "worker_stderr_sha256": _sha256(worker_stderr),
+        "worker_stdout": str(worker_stdout.resolve()),
+        "worker_stdout_sha256": _sha256(worker_stdout),
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
     return payload
@@ -291,6 +582,11 @@ def _evidence(tmp_path: Path) -> dict[str, Path]:
     dynamic_bundle = tmp_path / "dynamic.trtfb"
     static_bundle.write_bytes(b"s" * 1_000)
     dynamic_bundle.write_bytes(b"d" * 1_040)
+    qualification_context = _qualification_context(
+        tmp_path,
+        static_bundle=static_bundle,
+        dynamic_bundle=dynamic_bundle,
+    )
     paths = {
         "static_bundle": static_bundle,
         "dynamic_bundle": dynamic_bundle,
@@ -314,6 +610,7 @@ def _evidence(tmp_path: Path) -> dict[str, Path]:
                 resident_weight_bytes=(
                     2_000 if kind == "static" else 2_080
                 ),
+                qualification_context=qualification_context,
             )
             paths[f"{kind}_{prompt_kind}"] = path
     return paths
@@ -522,6 +819,10 @@ def test_declared_source_change_cannot_pass(tmp_path: Path) -> None:
             "runtime_libraries",
             "missing field: dynamic-short.runtime_libraries",
         ),
+        (
+            "build_runtime_kv_plugin",
+            "missing field: dynamic-short.build_runtime_kv_plugin",
+        ),
         ("cuda_jit_cache", "missing field: dynamic-short.cuda_jit_cache"),
         (
             "generation_workload",
@@ -549,6 +850,7 @@ def test_requires_capture_produced_runtime_evidence(
         "runtime_attention_plans_sha256",
         "runtime_stack_sha256",
         "runtime_libraries_sha256",
+        "build_runtime_kv_plugin_sha256",
         "cuda_jit_cache_sha256",
         "generation_workload_sha256",
         "tokenizer_contract_sha256",
@@ -615,6 +917,12 @@ def test_rejects_runtime_evidence_hash_mismatch(tmp_path: Path) -> None:
             "runtime_libraries",
             {},
             "must be null for a static baseline",
+        ),
+        (
+            "static_short",
+            "build_runtime_kv_plugin",
+            {},
+            "must be null for the static baseline",
         ),
     ],
 )
@@ -692,6 +1000,105 @@ def test_requires_runtime_library_paths_and_hashes_to_match_files(
     with pytest.raises(
         perf.QualificationError,
         match="runtime_libraries.nvrtc does not match the captured file",
+    ):
+        _qualify(paths)
+
+
+def test_requires_build_plugin_path_size_and_hash_to_match_file(
+    tmp_path: Path,
+) -> None:
+    paths = _evidence(tmp_path)
+    payload = json.loads(
+        paths["dynamic_short"].read_text(encoding="utf-8")
+    )
+    plugin = Path(payload["build_runtime_kv_plugin"]["path"])
+    plugin.write_bytes(plugin.read_bytes() + b"tampered")
+
+    with pytest.raises(
+        perf.QualificationError,
+        match=(
+            "runtime_kv_plugin does not match the captured binary identity|"
+            "artifact identity changed"
+        ),
+    ):
+        _qualify(paths)
+
+
+def test_reopens_and_rejects_tampered_build_receipt(
+    tmp_path: Path,
+) -> None:
+    paths = _evidence(tmp_path)
+    payload = json.loads(
+        paths["dynamic_short"].read_text(encoding="utf-8")
+    )
+    receipt = Path(
+        payload["qualification_evidence"]["build_receipt"]
+    )
+    receipt.write_text(receipt.read_text() + "\n", encoding="utf-8")
+
+    with pytest.raises(
+        perf.QualificationError,
+        match="build_receipt_sha256 no longer matches",
+    ):
+        _qualify(paths)
+
+
+def test_replayed_v2_build_receipt_rejects_extra_field(
+    tmp_path: Path,
+) -> None:
+    paths = _evidence(tmp_path)
+    result_path = paths["dynamic_short"]
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    receipt = Path(payload["qualification_evidence"]["build_receipt"])
+    receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
+    receipt_payload["legacy_override"] = True
+    receipt.write_text(json.dumps(receipt_payload), encoding="utf-8")
+    payload["qualification_evidence"]["build_receipt_sha256"] = _sha256(
+        receipt
+    )
+    result_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        perf.QualificationError,
+        match="exact v2 field set",
+    ):
+        _qualify(paths)
+
+
+def test_build_receipt_bundle_path_cannot_be_substituted_by_equal_copy(
+    tmp_path: Path,
+) -> None:
+    paths = _evidence(tmp_path)
+    copied = tmp_path / "copied-dynamic.trtfb"
+    copied.write_bytes(paths["dynamic_bundle"].read_bytes())
+
+    with pytest.raises(
+        perf.QualificationError,
+        match="bundle path does not match",
+    ):
+        perf._read_case(
+            paths["dynamic_short"],
+            "dynamic-short",
+            "native-dynamic",
+            copied,
+        )
+
+
+def test_runtime_model_dso_identity_is_reopened(
+    tmp_path: Path,
+) -> None:
+    paths = _evidence(tmp_path)
+    payload = json.loads(
+        paths["static_short"].read_text(encoding="utf-8")
+    )
+    model_dso = Path(
+        payload["runtime_trtmc_libraries"]["model"]["path"]
+    )
+    model_dso.write_bytes(model_dso.read_bytes() + b"stale")
+
+    with pytest.raises(
+        perf.QualificationError,
+        match="model does not match the captured binary identity",
     ):
         _qualify(paths)
 
@@ -897,15 +1304,12 @@ def test_fails_mem13_size_thresholds(
     assert not report["gates"]["packaging"][gate]
 
 
-def test_fails_weight_copy_streaming_and_bundle_size_gates(
+def test_fails_weight_copy_and_streaming_gates(
     tmp_path: Path,
 ) -> None:
     paths = _evidence(tmp_path)
-    paths["dynamic_bundle"].write_bytes(b"d" * 1_051)
-    dynamic_sha = _sha256(paths["dynamic_bundle"])
     for prompt_kind in ("short", "medium"):
         def break_receipt(payload: dict) -> None:
-            payload["qualification_provenance"]["bundle_sha256"] = dynamic_sha
             payload["runtime_memory_receipt"][
                 "resident_weight_copy_count"
             ] = 3
@@ -917,9 +1321,21 @@ def test_fails_weight_copy_streaming_and_bundle_size_gates(
 
     assert report["status"] == "failed"
     packaging = report["gates"]["packaging"]
-    assert not packaging["bundle_bytes_lte_105_percent_static"]
     assert not packaging["resident_weight_copy_count_lte_2"]["dynamic"]
     assert not packaging["weight_streaming_disabled"]["dynamic"]
+
+
+def test_rejects_bundle_changed_after_fresh_build_receipt(
+    tmp_path: Path,
+) -> None:
+    paths = _evidence(tmp_path)
+    paths["dynamic_bundle"].write_bytes(b"d" * 1_051)
+
+    with pytest.raises(
+        perf.QualificationError,
+        match="build_receipt replay failed: bundle SHA",
+    ):
+        _qualify(paths)
 
 
 def test_fails_closed_on_old_worker_result_with_named_missing_field(

@@ -390,16 +390,22 @@ RuntimeMemoryQualificationResultV1 QwenTextGenerationPipeline::qualify_runtime_m
         throw std::runtime_error(
             "QwenTextGenerationPipeline: qualification requires a runtime-memory bundle");
     }
+    const auto execution_attempt_baseline = qualification_execution_attempt_baseline();
+    const auto admission_error = [&](const std::string& message) {
+        return RuntimeMemoryQualificationAdmissionError(
+            message,
+            finish_runtime_memory_qualification_execution_attempts(execution_attempt_baseline));
+    };
     if (request.input_ids.empty()) {
-        throw RuntimeMemoryQualificationAdmissionError(
+        throw admission_error(
             "QwenTextGenerationPipeline: qualification input_ids must not be empty");
     }
     for (std::size_t index = 0; index < request.input_ids.size(); ++index) {
         const auto token = request.input_ids[index];
         if (token < 0 || token >= config_.vocab_size) {
-            throw RuntimeMemoryQualificationAdmissionError(
-                "QwenTextGenerationPipeline: token ID at index " + std::to_string(index) +
-                " is outside [0, " + std::to_string(config_.vocab_size) + ")");
+            throw admission_error("QwenTextGenerationPipeline: token ID at index " +
+                                  std::to_string(index) + " is outside [0, " +
+                                  std::to_string(config_.vocab_size) + ")");
         }
     }
 
@@ -410,7 +416,7 @@ RuntimeMemoryQualificationResultV1 QwenTextGenerationPipeline::qualify_runtime_m
             request.input_ids.size(), request.max_new_tokens, logical_limit,
             config_.runtime_sequence_admission, "QwenTextGenerationPipeline");
     } catch (const std::exception& error) {
-        throw RuntimeMemoryQualificationAdmissionError(error.what());
+        throw admission_error(error.what());
     }
 
     reset_generation_context();
@@ -1191,6 +1197,20 @@ QwenTextGenerationPipeline::qualification_bound_tokens(std::uint64_t history_tok
         throw std::logic_error(
             "QwenTextGenerationPipeline: runtime state did not report a T bound");
     return selected;
+}
+
+RuntimeMemoryQualificationExecutionAttemptBaseline
+QwenTextGenerationPipeline::qualification_execution_attempt_baseline() const {
+    std::vector<const ITrtModule*> modules;
+    modules.reserve(decoders_.size() + (prefill_ != nullptr ? 1U : 0U) +
+                    (linear_spec_lora_prefill_ != nullptr ? 1U : 0U));
+    for (const auto& decoder : decoders_)
+        modules.push_back(decoder.module.get());
+    if (prefill_ != nullptr)
+        modules.push_back(prefill_.get());
+    if (linear_spec_lora_prefill_ != nullptr)
+        modules.push_back(linear_spec_lora_prefill_.get());
+    return capture_runtime_memory_qualification_execution_attempts(modules);
 }
 
 void QwenTextGenerationPipeline::append_qualification_invocation(
