@@ -2804,9 +2804,8 @@ def test_capacity_gate_rejects_raw_capacity_when_a_compute_process_appears(
         min_free_gpu_memory_mib=280000,
     )
     lease.gpu_id = 2
-    process_states = iter((False, True))
     lease._gpu_has_compute_processes = (  # type: ignore[method-assign]
-        lambda gpu, *, timeout_seconds: next(process_states, True)
+        lambda gpu, *, timeout_seconds: True
     )
     lease._gpu_memory_snapshot = (  # type: ignore[method-assign]
         lambda gpu, *, timeout_seconds: {

@@ -487,27 +487,6 @@ class GpuLease:
         settle_poll_interval = max(0.25, min(5.0, self.poll_interval))
         while time.monotonic() < settle_deadline:
             try:
-                has_compute_processes = self._gpu_has_compute_processes(
-                    self.gpu_id,
-                    timeout_seconds=max(0.001, settle_deadline - time.monotonic()),
-                )
-            except CiError:
-                if time.monotonic() >= settle_deadline:
-                    return False
-                raise
-            if has_compute_processes:
-                print(
-                    f"GPU {self.gpu_id} has an active compute process; "
-                    "memory admission requires an idle GPU"
-                )
-                time.sleep(
-                    min(
-                        settle_poll_interval,
-                        max(0.0, settle_deadline - time.monotonic()),
-                    )
-                )
-                continue
-            try:
                 snapshot = self._gpu_memory_snapshot(
                     self.gpu_id,
                     timeout_seconds=max(0.001, settle_deadline - time.monotonic()),
@@ -516,32 +495,37 @@ class GpuLease:
                 if time.monotonic() >= settle_deadline:
                     return False
                 raise
-            try:
-                has_compute_processes = self._gpu_has_compute_processes(
-                    self.gpu_id,
-                    timeout_seconds=max(0.001, settle_deadline - time.monotonic()),
-                )
-            except CiError:
-                if time.monotonic() >= settle_deadline:
-                    return False
-                raise
-            if has_compute_processes:
-                print(
-                    f"GPU {self.gpu_id} acquired a compute process while memory "
-                    "admission was being sampled"
-                )
-                time.sleep(
-                    min(
-                        settle_poll_interval,
-                        max(0.0, settle_deadline - time.monotonic()),
-                    )
-                )
-                continue
             self.last_observed_total_mib[self.gpu_id] = snapshot["total_mib"]
             self.last_observed_free_mib[self.gpu_id] = snapshot["free_mib"]
             if time.monotonic() >= settle_deadline:
                 return False
             if snapshot["free_mib"] >= self.min_free_gpu_memory_mib:
+                try:
+                    has_compute_processes = self._gpu_has_compute_processes(
+                        self.gpu_id,
+                        timeout_seconds=max(
+                            0.001,
+                            settle_deadline - time.monotonic(),
+                        ),
+                    )
+                except CiError:
+                    if time.monotonic() >= settle_deadline:
+                        return False
+                    raise
+                if has_compute_processes:
+                    print(
+                        f"GPU {self.gpu_id} has an active compute process; "
+                        "memory admission requires an idle GPU"
+                    )
+                    time.sleep(
+                        min(
+                            settle_poll_interval,
+                            max(0.0, settle_deadline - time.monotonic()),
+                        )
+                    )
+                    continue
+                if time.monotonic() >= settle_deadline:
+                    return False
                 self.gpu_memory_admission = {
                     "source": snapshot["source"],
                     "required_free_mib": self.min_free_gpu_memory_mib,
