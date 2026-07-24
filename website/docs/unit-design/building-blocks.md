@@ -2,17 +2,21 @@
 title: Building Blocks
 ---
 
-import useBaseUrl from '@docusaurus/useBaseUrl';
-
-
 This page maps the abstract building blocks in TensorRT-Model-Connect to the code that implements them.
 
-<figure className="trtmc-diagram trtmc-diagram--wide">
-  <div className="trtmc-diagram__media">
-    <img src={useBaseUrl('/img/diagrams/trtmc-building-blocks.svg')} alt="TensorRT-Model-Connect code building blocks" />
-  </div>
-  <figcaption>Most source changes belong to one of three ownership zones: builder, bundle boundary, or runtime.</figcaption>
-</figure>
+```mermaid
+flowchart LR
+  Family["Python family package"] --> Bundle[".trtfb bundle"]
+  Bundle --> Loader["generated strategy-to-DSO index"]
+  Loader --> ModelDSO["model-owned runtime DSO"]
+  ModelDSO --> Pipeline["IPipeline implementation"]
+  Backend["TensorRT backend DSO"] --> Pipeline
+  Pipeline --> API["C++ API / CLI / C ABI"]
+```
+
+Most model additions span the Python family, bundle metadata, model-owned
+runtime DSO, and E2E descriptor. Shared infrastructure supplies the contracts
+and loading path.
 
 ## Beginner Map
 
@@ -24,7 +28,7 @@ Start with these seven blocks before reading the full source-level map:
 | Build adapter | `FamilyPlugin` | Which Python code understands this model family? |
 | Engine artifact | TensorRT engine plan | What optimized GPU execution bytes did we build? |
 | Bundle contract | `.trtfb` | What exactly crosses from Python build time to C++ run time? |
-| Runtime dispatch | `runtime_strategy` | Which C++ runtime behavior should load this bundle? |
+| Runtime dispatch | `runtime_strategy` | Which model-owned DSO and plugin should load this bundle? |
 | Runtime construction | `IPipelinePlugin` | Which plugin creates the concrete pipeline? |
 | User API | `IPipeline` | Which task method does the application call? |
 
@@ -34,8 +38,8 @@ The full map below expands those seven blocks into the concrete helper units use
 
 | Layer | Owns | Typical edit |
 | --- | --- | --- |
-| Beginner/core path | `FamilyPlugin`, `.trtfb`, `runtime_strategy`, `IPipeline` | Add a similar model family or debug one bundle. |
-| Extension path | New graph builder, runtime plugin, config schema, or test manifest | Add a new request-time behavior or modality. |
+| Beginner/core path | `FamilyPlugin`, `.trtfb`, model-owned `runtime_strategy`, `IPipeline` | Trace or debug one supported model. |
+| Model extension path | Python family package, C++ model DSO, config schema, and E2E descriptor | Add a supported model or model-owned behavior. |
 | Infrastructure path | Backend DSOs, registration generation, CMake targets | Change loading, ABI isolation, or build ownership. |
 
 ## End-to-end building-block map
@@ -61,13 +65,15 @@ flowchart TB
   subgraph Cpp["C++ runtime abstractions"]
     API["IPipeline + result types"]
     Factory["PipelineFactory"]
+    Loader["PipelinePluginLoader"]
+    ModelDSO["model-owned DSO"]
     Registry["PipelineRegistry"]
     Plugin["IPipelinePlugin"]
     Backend["IBackend"]
     Module["ITrtModule"]
     Pipeline["Concrete pipeline"]
-    State["IInferenceState"]
-    Sampler["ISampler"]
+    State["model-owned inference state"]
+    Sampler["model-owned sampler"]
     Tensor["Tensor / DeviceTensor"]
     ConfigBundle["ConfigBundle"]
   end
@@ -83,8 +89,10 @@ flowchart TB
   Trtfb --> Section
   Trtfb --> ConfigJson
   Trtfb --> Factory
-  Factory --> Registry
   Factory --> ConfigBundle
+  Factory --> Loader
+  Loader --> ModelDSO
+  ModelDSO --> Registry
   Registry --> Plugin
   Plugin --> Backend
   Backend --> Module
@@ -103,9 +111,8 @@ flowchart TB
 | `ModelConfig` | `python/tensorrt_model_connect/config.py` | HuggingFace config differences. | Many model repos use different key names for the same concepts. This gives builders one typed view. |
 | `FamilyPlugin` | `python/tensorrt_model_connect/families/base.py` | A model-family adapter. | Matching, weight loading, graph construction, modality-specific components, and quantization hooks vary by family. |
 | `WeightDict` and checkpoint mapper | `python/tensorrt_model_connect/checkpoint_mapper.py` | Normalized weight names and tensors. | Builders need stable tensor names even when checkpoint layouts differ. |
-| `graph_ops.py` | `python/tensorrt_model_connect/graph_ops.py` | Atomic TensorRT graph operations. | Family builders should not rewrite low-level TRT layer creation repeatedly. |
-| `graph_blocks.py` | `python/tensorrt_model_connect/graph_blocks.py` | Reusable transformer/model blocks. | Shared blocks keep attention, MLP, normalization, and projection patterns consistent. |
-| Dedicated builders | `standard_decoder_builder.py`, `encoder_builder.py`, `*_builder.py` | Engine construction flows. | Different model shapes need different graph topology and profile handling. |
+| Family-owned graph helpers | `python/tensorrt_model_connect/families/<family>/graph_ops.py` and `graph_blocks.py` when present | TensorRT graph operations and reusable blocks for one family. | Helpers stay beside the model code that defines their assumptions; there are no repository-root graph helper modules. |
+| Family-owned builders | Files such as `python/tensorrt_model_connect/families/qwen/standard_decoder_builder.py` | Engine construction flows. | Different model shapes need different graph topology and profile handling without a central model switch. |
 | Quantization context | `python/tensorrt_model_connect/quantization/` | Calibration, scales, formats, exclusions. | Quantization needs model-aware policy without leaking into every builder. |
 | Python `ConfigBundle` mirror | `python/tensorrt_model_connect/runtime_config/` | Schema-controlled build/runtime config merge. | Python writes bundle defaults using the same conceptual layers as C++. |
 | `BundleInfo` / `BundleSection` | `python/tensorrt_model_connect/bundle_writer.py` | Bundle metadata and named payloads. | The runtime needs a structured artifact, not a directory of unrelated files. |
@@ -127,6 +134,7 @@ flowchart TB
 | `IPipeline` | `include/trtmc/pipeline.h` | User-facing task interface and typed results. | Applications, CLI, C ABI, tests. |
 | `LoadOptions` | `include/trtmc/pipeline.h` | Bundle load-time knobs. | Applications and CLI. |
 | `PipelineFactory` | `src/runtime/registry/pipeline_factory.cpp` | Bundle-to-pipeline construction. | Public API and C ABI. |
+| `PipelinePluginLoader` | `src/runtime/registry/pipeline_plugin_loader.cpp` | Strategy-owner lookup, model DSO loading, and registration validation. | The factory and loader tests. |
 | `PipelineRegistry` | `src/runtime/registry/pipeline_registry.cpp` | Strategy-to-plugin lookup. | Factory and registration tests. |
 | `IPipelinePlugin` | `include/trtmc/runtime/pipeline_plugin.h` | Strategy-specific pipeline construction. | Runtime plugin implementations. |
 | `PipelineContext` | `include/trtmc/runtime/pipeline_plugin.h` | The construction context passed to plugins. | Runtime plugin implementations. |
@@ -134,8 +142,8 @@ flowchart TB
 | `ITrtModule` | `include/trtmc/runtime/trt_module.h` | Engine execution and tensor introspection without TensorRT headers. | Pipelines and runtime core. |
 | `Tensor` | `include/trtmc/runtime/tensor.h` | CPU-side tensor view. | Pipeline input/output binding. |
 | `DeviceTensor` | `include/trtmc/runtime/device_tensor.h` | Owned GPU tensor storage. | Runtime core and pipelines. |
-| `IInferenceState` | `src/runtime/models/<family>/inference_state.h` | Per-sequence decode state. | Text/recurrent/hybrid pipelines. |
-| `ISampler` | `src/runtime/models/<family>/sampler.h` | Token selection from logits. | Text-generation pipelines. |
+| Model inference state | `src/runtime/models/<owner>/inference_state.h` when present | Per-sequence decode state under an owner-specific interface such as `QwenInferenceState`. | That owner's text, recurrent, or hybrid pipeline. |
+| Model sampler | `src/runtime/models/<owner>/sampler.h` when present | Token selection from logits under an owner-specific interface such as `QwenISampler`. | That owner's text-generation pipeline. |
 | `ConfigBundle` | `include/trtmc/config/config_bundle.h` | Resolved layered runtime config. | Factory and migrated plugins. |
 
 ## How the blocks interact during text generation
@@ -144,10 +152,10 @@ flowchart TB
 sequenceDiagram
   participant App
   participant API as IPipeline
-  participant Pipe as TextGenerationPipeline
-  participant State as IInferenceState
+  participant Pipe as QwenTextGenerationPipeline
+  participant State as QwenInferenceState
   participant Module as ITrtModule
-  participant Sampler as ISampler
+  participant Sampler as QwenISampler
   participant Tensor as Tensor/DeviceTensor
 
   App->>API: generate(prompt, cfg)
@@ -164,28 +172,22 @@ sequenceDiagram
 
 ## Choosing the right extension point
 
-Use this decision tree:
-
-<figure className="trtmc-diagram trtmc-diagram--wide">
-  <div className="trtmc-diagram__media">
-    <img src={useBaseUrl('/img/diagrams/trtmc-extension-decision.svg')} alt="Extension decision tree" />
-  </div>
-  <figcaption>The decision path keeps family conversion, runtime behavior, public API, and validation from drifting together.</figcaption>
-</figure>
-
 ```mermaid
 flowchart TD
-  Start["What are you adding?"] --> SameTask{"Same request-time task shape?"}
-  SameTask -- yes --> NewFamily["Add or update a Python FamilyPlugin"]
-  SameTask -- no --> NewStrategy{"Can an existing public IPipeline method express it?"}
-  NewStrategy -- yes --> Plugin["Add runtime strategy + IPipelinePlugin + pipeline"]
-  NewStrategy -- no --> API["Extend IPipeline API carefully"]
-  NewFamily --> Bundle["Add bundle metadata or sections if needed"]
-  Plugin --> Manifest["Add plugin manifest entry"]
-  API --> CLI["Update CLI/C ABI/docs/tests"]
-  Bundle --> Tests["Add builder + E2E coverage"]
-  Manifest --> Tests
-  CLI --> Tests
+  Start["What are you changing?"] --> NewModel{"New supported model?"}
+  NewModel -- yes --> Capsule["Add Python family + unique strategy + model DSO + E2E descriptor"]
+  NewModel -- no --> Runtime{"New runtime behavior for an existing owner?"}
+  Runtime -- yes --> Owner["Extend that src/runtime/models/owner directory and MODEL.toml"]
+  Runtime -- no --> Public{"New user-visible task contract?"}
+  Public -- yes --> API["Extend IPipeline + CLI and C ABI as appropriate"]
+  Public -- no --> Config["Use the owning shared or model config schema"]
+  Capsule --> Tests["Builder + C++ + exact-model E2E evidence"]
+  Owner --> Tests
+  API --> Tests
+  Config --> Tests
 ```
 
-The preferred path is usually the smallest one: add build-time support if runtime behavior already exists; add runtime strategy only when request-time behavior genuinely differs.
+Do not point a new family at another model's runtime strategy. Similar models
+may reuse source patterns, but each supported model owns a unique strategy key,
+DSO, and registration manifest. E2E `task_strategy` is where models with the
+same user-visible task are grouped.

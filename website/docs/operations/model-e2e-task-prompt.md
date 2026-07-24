@@ -1,121 +1,91 @@
-# Model E2E Task Prompt
+# Model E2E Task Checklist
 
-This archived task prompt is kept as operations reference for single-model E2E
-bring-up work.
+Use this checklist for single-model bring-up. The three model-owned
+descriptors, not a generic strategy table, define the contract.
 
-```text
-You are working in tensorrt-model-connect. Add one model end-to-end so it is
-  truly working and CI-ready, not just compiling.
+## Inputs
 
-  Hard requirements:
-  1) Run everything inside your own container/workspace only.
-  2) Do not ask for confirmation for routine commands; execute directly.
-  3) Keep changes minimal and scoped to this model.
-  4) Do not relax thresholds unless repeated evidence proves it is necessary.
-  5) Validate functional quality (text/image/audio/video meaningfully), not
-  only metric pass.
+- Family ID: the common `<family>` directory name
+- Hugging Face model ID and immutable revision
+- Python descriptor:
+  `python/tensorrt_model_connect/families/<family>/MODEL.toml`
+- Runtime descriptor:
+  `src/runtime/models/<family>/MODEL.toml`
+- E2E descriptor:
+  `tests/e2e/models/<family>/MODEL.toml`
+- Runtime strategy: an exact key declared by the runtime descriptor
+- Task strategy: the runner/comparator contract declared by the E2E manifest
 
-  Inputs you must set before starting:
-  - MODEL_NAME: <e2e case name, e.g. xglm-564m>
-  - HF_ID: <huggingface model id>
-  - FAMILY: <family plugin name>
-  - RUNTIME_STRATEGY: <decoder_kv_cache | vision_language | text_to_audio
-  | ...>
-  - BUNDLE_NAME: <model>.trtfb
-  - PROMPT_OR_INPUT: <prompt/image/audio as applicable>
-  - TRUST_REMOTE_CODE: <true|false>
+Do not substitute generic labels such as `decoder_kv_cache` or
+`vision_language` for a family-owned strategy. For example, current Qwen text
+generation uses `qwen_decoder_kv_cache`.
 
-  Execution plan (must follow in order):
+## Required implementation evidence
 
-  A) Environment precheck/build
-  - python3 -c "import tensorrt, torch, transformers; print('ok')"
-  - pip install --no-deps -e . -C py-only=true
-  - cmake -S . -B build -G Ninja \
-    -DTRTMC_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
-    -DTRTMC_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/
-  tensorrt_libs}/libnvinfer.so" \
-    -DTRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
-    -DTRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
-  - cmake --build build -j
+1. The Python descriptor resolves the intended checkpoint family.
+2. The bundle records the exact family-owned `runtime_strategy`.
+3. The runtime descriptor maps that strategy to a model DSO and registration
+   symbol.
+4. CMake discovers the descriptor without a central plugin-list edit.
+5. The E2E descriptor declares the manifest.
+6. The JSON manifest contains `runtime_strategy`, `task_strategy`, and a
+   non-empty `testcases` array.
+7. Each testcase declares its user contract, CI tier, inputs, and comparison
+   expectations.
+8. Tests demonstrate meaningful reference parity; compilation alone is not
+   parity evidence.
 
-  B) Implement model support
-  - If existing family supports the model:
-    - Add/update manifest in tests/e2e/models/<FAMILY>/manifests/<MODEL_NAME>.json
-    - Add/update tests/e2e/models/<FAMILY>/MODEL.toml so it lists the manifest.
-  - If new family required:
-    - Scaffold with scripts/new_family.py
-    - Implement plugin in python/tensorrt_model_connect/families/<family>.py
-    - Ensure family coverage check passes.
+## Local checks
 
-  C) Harness compatibility check
-  - Ensure runtime->task mapping exists in tests/e2e_harness/contracts.py
-  - Ensure manifest_loader can infer proper stage/reference.
-  - Ensure suitable runner/reference/comparator/threshold profile exists for
-  task strategy.
-  - Add only missing wiring; do not refactor unrelated code.
+Replace `<family>` and `<manifest-name>` with literal values before running:
 
-  D) Single-model E2E validation (mandatory)
-  Run:
-  - python -m pytest tests/test_e2e.py::test_e2e[<MODEL_NAME>] -v \
-    --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
-    --trtmc-binary ./build/trtmc \
-    --hf-python /opt/venv/bin/python \
-    --e2e-artifacts-dir /workspace/users/yifeif/tensorrt-model-connect/test-result
+```bash
+DOC_REMOTE="github"
+if ! git remote get-url "$DOC_REMOTE" >/dev/null 2>&1; then
+  DOC_REMOTE="origin"
+fi
+DOC_REMOTE_URL=$(git remote get-url "$DOC_REMOTE")
+case "$DOC_REMOTE_URL" in
+  https://github.com/NVIDIA/TensorRT-Model-Connect|\
+  https://github.com/NVIDIA/TensorRT-Model-Connect.git|\
+  git@github.com:NVIDIA/TensorRT-Model-Connect.git|\
+  ssh://git@github.com/NVIDIA/TensorRT-Model-Connect.git) ;;
+  *)
+    echo "Refusing non-canonical remote: $DOC_REMOTE_URL" >&2
+    exit 1
+    ;;
+esac
+git fetch "$DOC_REMOTE" main
 
-  Then inspect artifacts/result.json and verify output quality:
-  - text: continuation makes sense
-  - audio: listen to wav + check rms/duration
-  - image/video: open outputs and verify visually sensible
-  - segmentation/detection: masks/boxes plausible
+PYTHONPATH=python:. python3 tools/check_runtime_strategy_matrix.py
 
-  E) Determinism/repro sanity
-  - Re-run the same model at least twice.
-  - If stochastic path, set/use seed controls.
-  - Confirm stable behavior or quantify acceptable variance.
-  - Only then decide if threshold override is needed.
+PYTHONPATH=python:. python3 -m pytest \
+  tests/builder/test_manifest_validation.py \
+  tests/tools/test_runtime_strategy_matrix_checker.py \
+  tests/tools/test_model_plugin_encapsulation_static.py -q
 
-  F) CI-equivalent local gates
-  Run:
-  - python scripts/check_family_coverage.py
-  - python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py -n
-  auto
-  - python -m pytest tests/tools/ -v -n auto
-  - ctest --test-dir build --output-on-failure
-  - python -m pytest tests/builder/test_graph_ops.py tests/builder/
-  test_graph_ops_extended.py tests/builder/test_graph_blocks.py -v -n auto
-  - python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
-    --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
-    --trtmc-binary ./build/trtmc \
-    --hf-python /opt/venv/bin/python \
-    --rebuild-engines
-  - Re-run the target model e2e once more after all fixes.
+PYTHONPATH=python:. python3 tools/model_ci.py validate
 
-  G) Output/report format (final answer must be strict)
-  Provide:
+PYTHONPATH=python:. python3 tools/model_ci.py impact \
+  --base "$DOC_REMOTE/main" \
+  --head HEAD
 
-  1. Summary
-  - What was added/fixed for MODEL_NAME.
-
-  2. Files changed
-  - Exact file list with one-line reason each.
-
-  3. Commands run
-  - Exact commands, in execution order.
-
-  4. Validation results
-  - Key metrics from result.json (including pass/fail).
-  - Functional sanity observations (text/audio/image/video quality).
-  - Determinism findings from reruns.
-
-  5. CI readiness
-  - Which CI-equivalent gates passed.
-  - Any remaining risk or known limitation.
-
-  6. Artifacts
-  - Absolute paths to relevant outputs (result.json, logs, wav/png/frames).
-
-  7. Commit
-  - Create one clean commit with a cle
-
-  Stop only when all required steps are complete and the model is CI-ready.
+PYTHONPATH=python:. python3 -m pytest \
+  tests/e2e/models/<family> \
+  --e2e-model <manifest-name> \
+  --engine-dir /path/to/engines \
+  --trtmc-binary ./build/trtmc \
+  --model-plugin-dir ./build/models \
+  -v
 ```
+
+Check `python3 tools/model_ci.py --help` and
+`python3 -m pytest --help` in the execution environment before adding
+model-specific options. E2E execution additionally requires the checkpoint,
+TensorRT/CUDA, suitable GPU capacity, the built CLI, and built model DSOs.
+
+## Completion gate
+
+Record the exact tested commit, command, hardware, generated bundle, comparison
+artifact, performance artifact when claimed, and unresolved limitations. Do
+not relax an acceptance threshold merely to obtain a passing result.

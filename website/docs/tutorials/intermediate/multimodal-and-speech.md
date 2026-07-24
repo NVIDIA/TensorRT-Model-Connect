@@ -30,7 +30,10 @@ The difference between text, vision, and speech is mostly the preprocessing, com
   --max-new-tokens 48
 ```
 
-The family plugin builds a vision encoder and a text decoder. The runtime plugin creates a `VLPipeline`, preprocesses the image, injects image embeddings into the prompt flow, and decodes text.
+The family plugin builds a vision encoder and a text decoder. The Qwen-VL
+runtime plugin creates `QwenVlPipeline`, preprocesses the image, injects image
+embeddings into the prompt flow, and decodes text. InternVL uses its own
+`InternVlPipeline` in a separate model DSO.
 
 ```mermaid
 flowchart TD
@@ -66,7 +69,10 @@ Key ideas:
   --max-new-tokens 224
 ```
 
-`speech_to_text` bundles use audio preprocessing, mel feature extraction, encoder/decoder execution, and text decoding.
+The Whisper bundle emits the model-owned
+`whisper_speech_to_text` strategy. Its runtime uses audio preprocessing, mel
+feature extraction, encoder/decoder execution, and text decoding. Canary uses
+the separate `canary_speech_to_text` strategy for the same broad task.
 
 For local Canary checkpoints, multilingual prompts, beam search, batching, and
 segment controls, continue with [Configurable Canary Decoding](canary-decoding.md).
@@ -150,7 +156,7 @@ Text-to-audio is a good example of why `IPipeline` has task-specific methods. Th
 
 | Modality | Inspect for |
 | --- | --- |
-| Vision-language | Vision engine section, tokenizer assets, image preprocessing config, `vision_language` strategy. |
-| Speech-to-text | Audio feature metadata, tokenizer assets, encoder/decoder sections, `speech_to_text` strategy. |
-| Streaming ASR | RNNT/streaming config, supported context schedule, `speech_to_text_rnnt` strategy. |
-| Text-to-audio | Acoustic and codec sections, tokenizer/phoneme assets, audio sample-rate metadata. |
+| Vision-language | Vision engine section, tokenizer assets, image preprocessing config, and an owner-qualified key such as `qwen_vl_vision_language` or `internvl_vision_language`. |
+| Speech-to-text | Audio feature metadata, tokenizer assets, encoder/decoder sections, and `whisper_speech_to_text` or `canary_speech_to_text` for those families. |
+| Streaming ASR | RNNT/streaming config, supported context schedule, and `nemotron_speech_streaming_speech_to_text_rnnt`. |
+| Text-to-audio | Acoustic and codec sections, tokenizer/phoneme assets, audio sample-rate metadata, and `text_to_audio_magpie` for Magpie. |

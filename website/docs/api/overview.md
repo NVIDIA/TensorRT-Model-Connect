@@ -8,7 +8,7 @@ TensorRT-Model-Connect exposes three public API layers.
 | --- | --- | --- |
 | Python builder | `tensorrt_model_connect.build()` and `trtmc build` | Building `.trtfb` bundles from HuggingFace IDs or local model directories. |
 | C++ runtime | `#include <trtmc/pipeline.h>` and `trtmc::load()` | Native applications that want task-specific inference results. |
-| C ABI | `trtmc_create_pipeline_ex()` | FFI callers and existing C-style integrations. |
+| C-linkage subset | `trtmc_create_pipeline_ex()` and `trtmc_generate_batch()` | C++ shims and experimental FFI integration; the current header/handle is not yet a complete pure-C ownership API. |
 
 The command-line interface is a thin adapter over these APIs:
 

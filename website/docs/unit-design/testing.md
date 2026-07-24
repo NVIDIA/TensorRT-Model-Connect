@@ -49,7 +49,10 @@ Use for:
 - Runtime core classes.
 - Domain helpers and generation plans.
 
-C++ tests should protect ownership boundaries. If a plugin should be registered without editing the factory, test the registry. If a cache class should satisfy `IInferenceState`, test the lifecycle directly.
+C++ tests should protect ownership boundaries. If a plugin should be
+registered without editing the factory, test model-DSO loading and the
+registry. Test each model-owned inference-state or cache lifecycle directly
+against that owner's contract.
 
 ## Tool tests
 
@@ -89,8 +92,8 @@ flowchart LR
 
 | Change type | Minimum useful coverage |
 | --- | --- |
-| New Python family using existing runtime strategy | Family plugin tests plus one E2E manifest. |
-| New runtime strategy | C++ registry/plugin tests, pipeline tests, CLI/API test if exposed, and one E2E manifest. |
+| New supported model | Family plugin tests, model-owned runtime DSO/registry tests, and one exact-model E2E manifest. |
+| Additional strategy for an existing runtime owner | Owner manifest and plugin tests, pipeline tests, CLI/API test if exposed, and one E2E manifest. |
 | New config namespace | Python and C++ config schema tests, CLI `--set` tests, effective config checks. |
 | New quantization format | Quantization plan tests, calibration/scale tests, one numerical E2E. |
 | New report or scheduling behavior | Tool tests plus one small fixture artifact. |

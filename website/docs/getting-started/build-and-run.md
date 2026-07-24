@@ -44,7 +44,10 @@ $TRTMC run /tmp/qwen25vl.trtfb \
   --max-new-tokens 48
 ```
 
-Vision-language families build a vision engine plus a text decoder and route through `runtime_strategy="vision_language"`.
+This Qwen-VL bundle routes through the model-owned
+`runtime_strategy="qwen_vl_vision_language"`. Other vision-language families
+use their own strategy keys and DSOs even when they implement the same public
+`generate(prompt, image, ...)` task shape.
 
 ## Speech and audio
 
@@ -92,13 +95,11 @@ $TRTMC segment /tmp/segformer.trtfb \
   --output /tmp/mask.png
 ```
 
-Object-detection bundles use the same image-loading path through `trtmc detect`:
-
-```bash
-$TRTMC detect /tmp/detector.trtfb \
-  --image tests/assets/test_scene.jpg \
-  --output-json /tmp/detections.json
-```
+The public API and CLI reserve `IPipeline::detect()` and `trtmc detect`, but
+the current model manifests and E2E catalog do not include an object-detection
+owner. There is therefore no supported detector bundle to run in this guide.
+Treat the command as an API contract for a future model implementation, not as
+current support evidence.
 
 ## Neural-operator style solve
 

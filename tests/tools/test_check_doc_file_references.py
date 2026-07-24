@@ -1,19 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the pure path-extraction helpers in
+"""Unit tests for documentation path, drift, and inventory checks in
 ``tools/check_doc_file_references.py``.
 
 Intent:
     ``check_doc_file_references.py`` is the CI gate that enforces
     ISO 26262-6 §7.4.1 compliance by catching phantom/stale file references
-    in documentation. Its two pure helpers — ``_expand_path`` (h/cpp and
-    h/hpp shorthand expansion) and ``extract_path_references`` (regex
-    extraction, wildcard/placeholder filtering, and trailing-punctuation
-    cleanup) — are the extraction front door. A silent regression in
-    either would let phantom paths slip past the gate unnoticed. These
-    tests lock their documented behavior using raw in-memory strings so
-    that no filesystem or subprocess is required.
+    in documentation. The tests lock shorthand/path extraction, shell-command
+    path discovery, retired-surface classification, tracked-file discovery,
+    and authoritative family-package counting.
 
 Preconditions:
     ``tools.check_doc_file_references`` is importable (pure-stdlib module
@@ -23,9 +19,10 @@ Postconditions:
     ``_expand_path`` expands the h/cpp and h/hpp shorthand forms and
     otherwise returns the input unchanged; ``extract_path_references``
     captures backtick-quoted paths that start with a known repo prefix
-    with 1-based line numbers, skips wildcard and placeholder paths, and
-    strips trailing punctuation. The shorthand expansion is preserved
-    end-to-end with both entries sharing one line number.
+    plus paths in shell fences with 1-based line numbers, skips wildcard and
+    placeholder paths, and strips trailing punctuation. Retired truth surfaces
+    are rejected unless explicitly historical, and family counts use package
+    ``MODEL.toml``/``plugin.py`` roots rather than flat helper modules.
 
 Trace IDs:
     - ARCH-CI-QUALITY-GATES (ISO 26262-6 §7.4.1 doc-reference gate)
@@ -35,6 +32,8 @@ Trace IDs:
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 from tools import check_doc_file_references as cdfr
 
@@ -81,9 +80,7 @@ def test_extract_path_references_captures_backtick_path_with_1_based_line_no() -
     # 1-based line number. Line 2 (not 1) is used here to lock down that the
     # enumerate() start=1 convention is preserved.
     content = (
-        "first line of the doc\n"
-        "see `src/runtime/models/qwen/plugin.cpp` for the impl\n"
-        "third line\n"
+        "first line of the doc\nsee `src/runtime/models/qwen/plugin.cpp` for the impl\nthird line\n"
     )
 
     refs = cdfr.extract_path_references(content, "website/docs/wiki/any.md")
@@ -138,3 +135,209 @@ def test_extract_path_references_h_cpp_shorthand_yields_two_entries_same_line() 
     assert refs == [(1, "src/foo.h"), (1, "src/foo.cpp")]
     # The two entries share exactly one line number; guard the invariant.
     assert {line for line, _path in refs} == {1}
+
+
+def test_extract_path_references_strips_pytest_node_selector() -> None:
+    content = "```bash\npytest tests/e2e/test_model.py::test_model[small] -q\n```\n"
+
+    assert cdfr.extract_path_references(content, "README.md") == [(2, "tests/e2e/test_model.py")]
+
+
+def test_extract_path_references_captures_paths_inside_shell_fence() -> None:
+    content = (
+        "```bash\n"
+        "python3 tools/nsight_collect.py --help\n"
+        'rg -n "PluginRegistrar" src/runtime/plugins --glob "*.cpp"\n'
+        "```\n"
+    )
+
+    refs = cdfr.extract_path_references(content, "README.md")
+
+    assert refs == [
+        (2, "tools/nsight_collect.py"),
+        (3, "src/runtime/plugins"),
+    ]
+
+
+def test_extract_path_references_covers_authoritative_non_source_roots() -> None:
+    content = (
+        "See `.github/workflows/nightly.yml`, `cmake/plugins.cmake`, "
+        "`examples/plan.yaml`, and `CMakeLists.txt`.\n"
+    )
+
+    assert cdfr.extract_path_references(content, "README.md") == [
+        (1, ".github/workflows/nightly.yml"),
+        (1, "cmake/plugins.cmake"),
+        (1, "examples/plan.yaml"),
+        (1, "CMakeLists.txt"),
+    ]
+
+
+def test_extract_path_references_does_not_scan_non_shell_fence() -> None:
+    content = "```text\npython3 tools/example.py --help\n```\n"
+
+    assert cdfr.extract_path_references(content, "README.md") == []
+
+
+def test_extract_path_references_skips_explicit_shell_output_destination() -> None:
+    content = (
+        "```bash\n"
+        "python3 tools/generate.py --output reports/generated\n"
+        "trtmc-bench report results/gb300 results/h100 -o reports/combined\n"
+        "```\n"
+    )
+
+    assert cdfr.extract_path_references(content, "README.md") == [(2, "tools/generate.py")]
+
+
+# ---------------------------------------------------------------------------
+# retired truth surfaces
+# ---------------------------------------------------------------------------
+
+
+def test_retired_surface_is_found_in_plain_prose() -> None:
+    content = (
+        "Runtime registration is implemented in src/runtime/plugins and src/runtime/pipelines.\n"
+    )
+
+    findings = cdfr.extract_retired_surface_findings(content, "README.md")
+
+    assert [finding.message for finding in findings] == [
+        "Retired truth surface is presented as current: src/runtime/plugins; "
+        "mark it historical/retired or replace it",
+        "Retired truth surface is presented as current: src/runtime/pipelines; "
+        "mark it historical/retired or replace it",
+    ]
+
+
+def test_retired_missing_path_produces_one_actionable_finding(
+    tmp_path: Path,
+) -> None:
+    doc = tmp_path / "README.md"
+    doc.write_text(
+        "Runtime registration lives in `src/runtime/plugins`.\n",
+        encoding="utf-8",
+    )
+
+    report = cdfr.check_markdown_files([doc], tmp_path)
+
+    assert len(report.findings) == 1
+    assert "Retired truth surface" in report.findings[0].message
+
+
+def test_retired_surface_is_allowed_when_same_context_marks_it_retired() -> None:
+    content = (
+        "The retired path `python/tensorrt_model_connect/graph_ops.py` no "
+        "longer owns graph construction.\n"
+    )
+
+    assert cdfr.extract_retired_surface_findings(content, "README.md") == []
+
+
+def test_historical_document_allows_personal_evidence_paths() -> None:
+    content = (
+        "# Historical evidence snapshot — not a replay runbook\n\n"
+        "Workspace: `/workspace/users/yifeif/workspaces/agent-4/repo`\n"
+    )
+
+    assert cdfr.extract_retired_surface_findings(content, "reports/evidence.md") == []
+
+
+def test_historical_document_skips_live_path_and_count_checks(tmp_path: Path) -> None:
+    report_path = tmp_path / "reports" / "evidence.md"
+    report_path.parent.mkdir()
+    report_path.write_text(
+        "# Historical evidence snapshot — not a replay runbook\n\n"
+        "The old run used `tools/deleted.py` and covered 197 models.\n",
+        encoding="utf-8",
+    )
+
+    report = cdfr.check_markdown_files([report_path], tmp_path)
+
+    assert report.findings == []
+
+
+def test_personal_workspace_path_is_rejected_in_current_document() -> None:
+    content = "Build from /workspace/users/yifeif/workspaces/current/repo.\n"
+
+    findings = cdfr.extract_retired_surface_findings(content, "README.md")
+
+    assert len(findings) == 1
+    assert "personal /workspace/users/yifeif path" in findings[0].message
+
+
+def test_generic_task_label_is_rejected_as_runtime_strategy() -> None:
+    content = "Inspect the bundle for its `vision_language` runtime strategy.\n"
+
+    findings = cdfr.extract_generic_strategy_findings(content, "README.md")
+
+    assert [finding.message for finding in findings] == [
+        "Generic task label is presented as a runtime strategy: "
+        "vision_language; use a family-owned strategy key"
+    ]
+
+
+def test_generic_strategy_label_is_allowed_when_explicitly_noncurrent() -> None:
+    content = (
+        "Do not use the retired generic `decoder_kv_cache` runtime strategy; "
+        "use the owning family's key.\n"
+    )
+
+    assert cdfr.extract_generic_strategy_findings(content, "README.md") == []
+
+
+# ---------------------------------------------------------------------------
+# inventory and tracked-file selection
+# ---------------------------------------------------------------------------
+
+
+def test_family_plugin_count_uses_unique_package_roots(tmp_path: Path) -> None:
+    families = tmp_path / "python" / "tensorrt_model_connect" / "families"
+    families.mkdir(parents=True)
+    (families / "_time_series_trt.py").write_text("# helper\n", encoding="utf-8")
+    (families / "__init__.py").write_text("", encoding="utf-8")
+
+    alpha = families / "alpha"
+    alpha.mkdir()
+    (alpha / "MODEL.toml").write_text("[model]\n", encoding="utf-8")
+    (alpha / "plugin.py").write_text("", encoding="utf-8")
+
+    beta = families / "beta"
+    beta.mkdir()
+    (beta / "MODEL.toml").write_text("[model]\n", encoding="utf-8")
+
+    gamma = families / "gamma"
+    gamma.mkdir()
+    (gamma / "plugin.py").write_text("", encoding="utf-8")
+
+    counts = cdfr._get_actual_counts(tmp_path)
+
+    assert counts["family_plugins"] == 3
+
+
+def test_plugin_claim_never_uses_total_python_file_count() -> None:
+    findings = cdfr.extract_numerical_claims(
+        "The checkout contains 5 plugins.\n",
+        "README.md",
+        {"family_plugins": 2, "families_total_py": 5},
+    )
+
+    assert len(findings) == 1
+    assert "actual count of family plugin packages" in findings[0].message
+
+
+def test_tracked_markdown_files_uses_git_results(tmp_path: Path, monkeypatch) -> None:
+    class Result:
+        returncode = 0
+        stdout = b"README.md\0docs/design.mdx\0"
+        stderr = b""
+
+    def fake_run(*_args, **_kwargs):
+        return Result()
+
+    monkeypatch.setattr(cdfr.subprocess, "run", fake_run)
+
+    assert cdfr.tracked_markdown_files(tmp_path) == [
+        tmp_path / "README.md",
+        tmp_path / "docs" / "design.mdx",
+    ]

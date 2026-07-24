@@ -60,11 +60,11 @@ Decoder-only language models are the simplest place to learn this project becaus
 | Concept | In this tutorial |
 | --- | --- |
 | Model family | `qwen`, selected by the Python builder. |
-| Runtime strategy | `decoder_kv_cache`, selected from bundle metadata at runtime. |
+| Runtime strategy | `qwen_decoder_kv_cache`, selected from bundle metadata at runtime. |
 | Public API method | `IPipeline::generate`. |
 | Main engine section | `engine_plan`. |
-| Main runtime state | `KvCache` through the `IInferenceState` abstraction. |
-| Token selection | `ISampler`, controlled by `GenerateConfig` or CLI flags. |
+| Main runtime state | Model-owned `QwenKvCache` through `QwenInferenceState`. |
+| Token selection | Model-owned `QwenISampler`, controlled by `GenerateConfig` or CLI flags. |
 
 :::tip Progress check
 In your learning log, answer: "What part of this example is model-specific, and what part is runtime-behavior-specific?"
@@ -140,7 +140,7 @@ Confirm that the output reports:
 
 - `family=qwen`
 - `precision=fp16`
-- `runtime_strategy=decoder_kv_cache`
+- `runtime_strategy=qwen_decoder_kv_cache`
 
 Then list engine sections:
 
@@ -152,7 +152,7 @@ You are looking for the pieces that the C++ runtime will later consume:
 
 | Field or section | Why it matters |
 | --- | --- |
-| `runtime_strategy=decoder_kv_cache` | Tells `PipelineRegistry` to use the decoder runtime plugin. |
+| `runtime_strategy=qwen_decoder_kv_cache` | Selects the Qwen model DSO and its registered decoder plugin. |
 | `engine_plan` | Serialized TensorRT decoder engine. |
 | Tokenizer sections | Needed to convert prompt text to token IDs and output token IDs back to text. |
 | `max_cache_length=256` | Default cache capacity for this bundle. |
@@ -186,11 +186,13 @@ flowchart TD
   Run["./build/trtmc run"] --> Load["trtmc::load"]
   Load --> Factory["PipelineFactory"]
   Factory --> Read["ReadBundleFile"]
-  Read --> Strategy["decoder_kv_cache"]
-  Strategy --> Registry["PipelineRegistry"]
-  Registry --> Plugin["DecoderPlugin"]
+  Read --> Strategy["qwen_decoder_kv_cache"]
+  Strategy --> Loader["ModelPluginLoader"]
+  Loader --> DSO["libtrtmc_model_qwen.so"]
+  DSO --> Registry["PipelineRegistry"]
+  Registry --> Plugin["QwenDecoderPlugin"]
   Plugin --> Backend["IBackend creates ITrtModule"]
-  Plugin --> Pipeline["TextGenerationPipeline"]
+  Plugin --> Pipeline["QwenTextGenerationPipeline"]
   Pipeline --> Generate["generate(prompt, cfg)"]
 ```
 
@@ -227,8 +229,10 @@ You understand this stage when you can explain why two successful runs can produ
 ## Stage 6: Validate the Contract
 
 ```bash
-/opt/venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b-fp16] -v \
-  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+ENGINE_DIR=/tmp/trtmc-engines
+mkdir -p "${ENGINE_DIR}"
+python -m pytest 'tests/test_e2e.py::test_e2e[qwen3-0.6b-fp16]' -v \
+  --engine-dir "${ENGINE_DIR}" \
   --trtmc-binary ./build/trtmc \
   --rebuild-engines
 ```
@@ -243,7 +247,7 @@ Read [Advanced Tutorial - Validation and Benchmarking](/tutorials/advanced/valid
 
 | Symptom | Likely layer |
 | --- | --- |
-| `No plugin registered for runtime_strategy` | The binary was built without the needed runtime plugin or manifest entry. |
+| `No plugin registered for runtime_strategy` | The strategy has no manifest owner, or the owning model DSO is missing/unloadable from the model-plugin search path. |
 | TensorRT ABI mismatch | The bundle was built with a TensorRT version incompatible with the loaded backend DSO. |
 | Missing tokenizer section | The bundle did not include the tokenizer assets expected by the decoder plugin. |
 | CUDA out of memory | Reduce `--max-cache-length`, generated tokens, batch size, or precision/quantization footprint. |
@@ -278,6 +282,13 @@ Run once with `--greedy` and once with sampling enabled. Record the flags and ex
 <details>
 <summary>Exercise 3: Trace the runtime source path</summary>
 
-Use `rg` to find the plugin registration for `decoder_kv_cache`, then follow the path to the concrete pipeline implementation.
+Use the following source lookup to find the Qwen strategy declaration and
+plugin registration, then follow the includes to the concrete pipeline:
+
+```bash
+rg -n 'qwen_decoder_kv_cache|REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST' \
+  src/runtime/models/qwen/MODEL.toml \
+  src/runtime/models/qwen/plugin.cpp
+```
 
 </details>

@@ -206,6 +206,8 @@ if [[ "$ISOLATE_MODEL_PLUGIN" == "true" ]]; then
         echo "==== isolate model plugin ===="
         if MODEL_PLUGIN_DIR="$(copy_isolated_model_plugin "$RUNTIME_STRATEGY" "$BINARY" "$ONLY_DIR")"; then
             echo "Using isolated model plugin dir: $MODEL_PLUGIN_DIR"
+            export TRTMC_MODEL_PLUGIN_DIR="$MODEL_PLUGIN_DIR"
+            export TRTMC_MODEL_PLUGIN_STRICT=1
             STEPS+=("PASS  isolate model plugin (${RUNTIME_STRATEGY})")
             PASS=$((PASS + 1))
         else

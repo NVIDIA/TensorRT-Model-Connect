@@ -1,13 +1,17 @@
 # C ABI Runtime Edge
 
-This directory now contains only the thin C ABI edge for the service-composed runtime.
+This directory contains the thin C ABI edge for the plugin-composed runtime.
+The only behavior-bearing source below this directory is
+`api/trtmc_c.cpp`.
 
-Subdirectories:
-- `api/`: exported C API entrypoint glue (`trtmc_c.cpp`)
-- `config/`: `FastPathModelConfig` parsing from bundle `config.json`
-- `bundle/`: shared bundle extraction and tokenizer/bundle helpers reused by the runtime builders
+Current ownership:
 
-Suggested reading order:
-1. `api/trtmc_c.cpp` (public API validation, bundle loading, builder composition entry)
-2. `bundle/` (bundle metadata and tokenizer extraction helpers)
-3. `config/` (config parsing consumed by builders and TRT executors)
+- `api/trtmc_c.cpp`: exported C API validation, error mapping, pipeline
+  creation, and batch-result conversion.
+- `src/bundle/`: `.trtfb` format and bundle-view implementations.
+- `src/runtime/config/`: layered runtime configuration and schema handling.
+- `src/runtime/registry/pipeline_factory.cpp`: bundle-to-plugin pipeline
+  composition.
+
+`bundle/README.md` is an ownership note only; no C ABI bundle-helper
+implementation remains in that subdirectory.

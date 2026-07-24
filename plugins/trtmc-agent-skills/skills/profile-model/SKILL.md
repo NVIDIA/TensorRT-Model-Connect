@@ -13,7 +13,7 @@ description: >-
 - GPU, CUDA, and TensorRT are available, usually inside a dev container.
 - `tensorrt_model_connect` is installed in editable mode:
   `pip install --no-deps -e . -C py-only=true`.
-- `./build/trtmc` is built when C++ timing or Nsight capture is needed.
+- `./build/trtmc` is built when C++ timing is needed.
 - The model is available as a HuggingFace ID or local path.
 
 ## Environment Check
@@ -101,8 +101,12 @@ Useful flags:
 | `--compile-mode max-autotune` | More thorough torch.compile comparison |
 | `--no-layer-profile` | E2E-only quick check |
 | `--cpu-profile` | Decode overhead investigation |
-| `--nsight` | Kernel-level trace, requires binary and bundle |
+| `--nsight` | Unavailable in this revision; do not use |
 | `--trust-remote-code` | HF custom code models |
+
+The parser still exposes `--nsight`, but that path calls a removed Nsight
+collection helper and cannot produce a supported trace. Use external `nsys`
+tooling directly when a kernel-level trace is required.
 
 ## CPU Phase Deep Dive
 
@@ -122,7 +126,7 @@ For SSM/Mamba:
 python tools/cpu_profile.py \
   --model <model> \
   --bundle /tmp/<model-name>.trtfb \
-  --runner mamba \
+  --runner family \
   --max-new-tokens 10 \
   --json /tmp/<model-name>_profile/cpu_profile_mamba.json
 ```
@@ -142,7 +146,7 @@ python tools/profile_report.py \
 
 | Condition | Classification | Likely next step |
 |-----------|----------------|------------------|
-| `d2h + argmax > 15%` | Sync bottleneck | Evaluate GPU argmax (`TRTMC_GPU_ARGMAX=1`) |
+| `d2h + argmax > 15%` | Sync bottleneck | On supported C++ decoder paths, compare `--set runtime.prefer_gpu_greedy=true`; the former `TRTMC_GPU_ARGMAX` environment variable is retired. |
 | `tensor_bind > 10%` | Launch overhead | Evaluate CUDA Graph capture/replay |
 | `execute > 75%` | Compute-bound | Evaluate FP16/BF16 or kernel quality |
 | `execute < 50%`, no dominant phase | Mixed overhead | Combine GPU argmax, CUDA Graphs, and precision work |

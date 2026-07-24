@@ -1,10 +1,10 @@
 ---
 name: native-trt-builder-guidelines
 description: >-
-  Use when modifying TensorRT builders, shared graph construction helpers, or
-  runtime strategy graph code in TensorRT-Model-Connect. Enforces strongly typed
-  TensorRT networks, reusable primitive helpers, and compact GQA/MQA cache
-  handling while preserving legitimate model-specific builder logic.
+  Use when modifying TensorRT builders, family-owned graph construction
+  helpers, or runtime strategy graph code in TensorRT-Model-Connect. Enforces
+  strongly typed TensorRT networks, reusable family-local primitives, and
+  compact GQA/MQA cache handling while preserving model ownership.
 ---
 
 # Native TRT Builder Guidelines
@@ -13,8 +13,10 @@ description: >-
 
 - Builders must create strongly typed networks with
   `builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))`.
-- Basic TensorRT primitives should use shared helpers in `graph_ops.py` or
-  `graph_blocks.py` when the tensor contract and semantics match.
+- Basic TensorRT primitives should use the owning family's
+  `python/tensorrt_model_connect/families/<family>/graph_ops.py` or
+  `graph_blocks.py` when the tensor contract and semantics match. There is no
+  supported root-level shared graph-helper module.
 - TensorRT `IAttentionLayer` supports GQA/MQA. Do not expand K/V projections,
   K/V bias, or cache tensors to query-head width solely for attention; prefer
   compact K/V width: `num_key_value_heads * head_dim`.
@@ -29,8 +31,10 @@ description: >-
 
 1. Check network creation with `rg -n "create_network\\("`; every builder path
    should use `NetworkDefinitionCreationFlag.STRONGLY_TYPED`.
-2. Search for duplicated primitive logic before adding new helpers. Extend a
-   shared helper only when the change is a reusable primitive contract.
+2. Search the owning family for duplicated primitive logic before adding new
+   helpers. Keep new graph helpers family-local unless a separate,
+   model-independent shared contract and its cross-family tests justify a
+   shared abstraction.
 3. For decoder GQA/MQA paths, verify K/V projection weights, K/V bias tensors,
    and cache tensors remain at compact K/V width unless a non-attention
    primitive explicitly requires a different layout.

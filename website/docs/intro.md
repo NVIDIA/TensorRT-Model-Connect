@@ -35,13 +35,6 @@ If you are new to inference, start with this mental model:
 - TensorRT-Model-Connect builds those engines from HuggingFace-style checkpoints and packages them into `.trtfb` bundles.
 - The C++ runtime loads a bundle and exposes task methods such as `generate`, `transcribe`, `generate_image`, `segment`, and `solve`.
 
-<figure className="trtmc-diagram trtmc-diagram--wide">
-  <div className="trtmc-diagram__media">
-    <img src={useBaseUrl('/img/diagrams/trtmc-system-map.svg')} alt="System map showing Python builder, bundle, and C++ runtime" />
-  </div>
-  <figcaption>The build side understands checkpoints and TensorRT export; the runtime side loads a bundle and exposes task APIs.</figcaption>
-</figure>
-
 ```mermaid
 flowchart LR
   UserInput["User input<br/>text, image, audio, time-series"] --> Pipeline["C++ IPipeline method"]
@@ -55,7 +48,9 @@ The project is intentionally split into two phases:
 
 - Python builds TensorRT engine bundles from HuggingFace checkpoints.
 - C++ loads those `.trtfb` bundles and runs task-specific pipelines.
-- The bundle is the contract between build and runtime. It carries engine plans, tokenizer assets, model metadata, and the `runtime_strategy` key used by the C++ registry.
+- The bundle is the contract between build and runtime. It carries engine
+  plans, tokenizer assets, model metadata, and the `runtime_strategy` key used
+  by the generated model-DSO index and C++ registry.
 
 ```mermaid
 flowchart TB
@@ -68,7 +63,9 @@ flowchart TB
 
   subgraph Run["Run phase: C++"]
     Bundle --> Factory["PipelineFactory"]
-    Factory --> Plugin["IPipelinePlugin"]
+    Factory --> Loader["model-plugin loader"]
+    Loader --> DSO["owning libtrtmc_model_*.so"]
+    DSO --> Plugin["IPipelinePlugin"]
     Plugin --> Runtime["Concrete IPipeline"]
     Runtime --> Output["Task output"]
   end
@@ -116,7 +113,11 @@ Most modern AI models are released as Python-first artifacts: a `config.json`, t
 - Predictable GPU execution.
 - A deployable artifact that does not require the full original Python model stack at request time.
 - Clear compatibility with CUDA, TensorRT, GPU architecture, quantization format, and runtime settings.
-- A single user-facing API across text, audio, image, video, vision-language, segmentation, detection, translation, and time-series models.
+- A task-oriented API across the text, audio, image, video,
+  vision-language, segmentation, classification, translation, and time-series
+  models represented by the current descriptors. A detection method/command is
+  reserved in the API, but no current model descriptor or E2E manifest claims
+  object-detection support.
 
 TensorRT-Model-Connect addresses that by separating "understand the model" from "serve the model":
 
@@ -128,11 +129,19 @@ TensorRT-Model-Connect addresses that by separating "understand the model" from 
 | Load, validate, and dispatch the bundle | C++ runtime | Deployment code can stay native and task-oriented. |
 | Execute engine plans and own request state | C++ pipeline and backend DSO | Request-time latency stays in native code and TensorRT ABI is isolated. |
 
-The facts in these pages were refreshed from the current checkout:
+The model-owned inventories at this revision contain:
 
-- 71 Python family plugins under `python/tensorrt_model_connect/families/`.
-- 197 E2E model manifests and 74 family indexes under `tests/e2e/models/`.
-- 36 C++ runtime strategy keys registered by model manifests under `src/runtime/models/`.
+- 78 Python family manifests under
+  `python/tensorrt_model_connect/families/*/MODEL.toml`.
+- 78 E2E family indexes and 203 declared E2E manifests under
+  `tests/e2e/models/`.
+- 78 C++ runtime model manifests and 79 unique model-owned runtime strategy
+  keys under `src/runtime/models/`. Eagle VLM intentionally owns two strategy
+  keys.
+
+Do not update these numbers by hand after adding a model. Run
+`python3 tools/model_ci.py validate` from the repository root; it validates the
+three ownership roots and prints the current model inventory.
 
 ## Reading order
 

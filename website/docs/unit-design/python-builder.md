@@ -43,7 +43,12 @@ Think of `engine_builder.py` as the build coordinator:
 
 ## Family plugins
 
-`python/tensorrt_model_connect/families/` owns raw TRT family support. Each plugin declares matching logic and build behavior. Auto-discovery lives in `families/__init__.py`.
+`python/tensorrt_model_connect/families/` owns raw TRT family support. Each
+family package has a `MODEL.toml` descriptor and a module, normally
+`plugin.py`. Discovery in `families/__init__.py` reads the descriptors first
+and imports only the selected package. Adding a loose
+`families/<family>.py` file does not participate in the current descriptor
+contract.
 
 The `FamilyPlugin` protocol is the contract. Required methods are:
 
@@ -81,16 +86,22 @@ classDiagram
 
 | Unit | Purpose |
 | --- | --- |
-| `graph_ops.py` | Atomic TensorRT graph operations. |
-| `graph_blocks.py` | Reusable transformer and model blocks. |
-| `standard_decoder_builder.py` | Parameterized decoder engine builder. |
+| `families/<family>/graph_ops.py` | Family-owned TensorRT graph operations when that family defines them. |
+| `families/<family>/graph_blocks.py` | Family-owned reusable blocks when that family defines them. |
+| `families/<family>/standard_decoder_builder.py` | A family-owned decoder engine builder where present. |
 | Dedicated builders | Vision, encoder, diffusion, codec, and model-specific engines. |
 
-The design goal is to avoid repeating TensorRT layer wiring in every family plugin. A family plugin should describe what is family-specific: weight naming, architecture variations, optional components, and config metadata.
+There are no repository-root `graph_ops.py` or `graph_blocks.py` modules.
+Reuse within a family is encouraged, while helpers whose assumptions are
+model-specific remain under the owning family package.
 
 ## Native TRT build path
 
-`trtmc build` now uses the native TRT family plugins under `python/tensorrt_model_connect/families/`. The builder emits TensorRT plans and a bundle `runtime_strategy` consumed by the C++ runtime.
+`trtmc build` uses native TRT family plugins under
+`python/tensorrt_model_connect/families/`. The builder emits TensorRT plans and
+the exact model-owned `runtime_strategy` consumed by the C++ loader. That key
+must match one strategy declared by a single
+`src/runtime/models/<owner>/MODEL.toml`.
 
 ## Runtime config
 
@@ -106,7 +117,9 @@ flowchart BT
   Platform --> Session["SessionRequest"]
 ```
 
-Higher layers override lower layers only where the schema allows them. The builder writes bundle defaults; the runtime can merge session overrides and write `effective_config.json` next to the bundle.
+Higher layers override lower layers only where the schema allows them. The
+builder writes bundle defaults; successful runtime resolution writes
+`<bundle>.effective_config.json` next to the bundle.
 
 ## Builder unit test strategy
 

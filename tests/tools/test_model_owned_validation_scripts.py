@@ -30,6 +30,8 @@ def test_validate_family_uses_model_owned_e2e_entrypoint() -> None:
     assert "tests/e2e/models/${E2E_FAMILY}/test_${E2E_FAMILY}_e2e.py" in text
     assert "--model-plugin-dir" in text
     assert "--isolate-model-plugin" in text
+    assert 'export TRTMC_MODEL_PLUGIN_DIR="$MODEL_PLUGIN_DIR"' in text
+    assert "export TRTMC_MODEL_PLUGIN_STRICT=1" in text
 
 
 def test_autopilot_prompt_uses_model_owned_e2e_entrypoint() -> None:
@@ -38,9 +40,26 @@ def test_autopilot_prompt_uses_model_owned_e2e_entrypoint() -> None:
     Preconditions: scripts/autopilot/autorun.py exists.
     Postconditions: the final E2E command points at tests/e2e/models/<family>.
     """
-    text = (REPO_ROOT / "scripts" / "autopilot" / "autorun.py").read_text(
-        encoding="utf-8"
-    )
+    text = (REPO_ROOT / "scripts" / "autopilot" / "autorun.py").read_text(encoding="utf-8")
 
     assert "tests/test_e2e.py::test_e2e[{family_name}]" not in text
     assert "tests/e2e/models/{family_name}/test_{family_name}_e2e.py" in text
+    assert "src/runtime/plugins/" not in text
+    assert "REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK" not in text
+    assert "RUNTIME_TO_TASK_STRATEGY" not in text
+    assert "tools/check_runtime_strategy_matrix.py" in text
+    assert "src/runtime/models/{family_name}/MODEL.toml" in text
+
+
+def test_dispatch_prompt_uses_complete_model_owned_capsule() -> None:
+    text = (REPO_ROOT / "scripts" / "autopilot" / "dispatch.py").read_text(encoding="utf-8")
+
+    assert '"runtime_strategy": "decoder_kv_cache"' not in text
+    assert "python/tensorrt_model_connect/families/{family_name}.py" not in text
+    assert "python/tensorrt_model_connect/families/{family_name}/MODEL.toml" in text
+    assert "src/runtime/models/{family_name}/MODEL.toml" in text
+    assert "tests/runtime_strategy_matrix.yaml" in text
+    assert '"reference_family": "causal_base_continuation"' in text
+    assert '"user_contract": "continuation_parity"' in text
+    assert '"reference_family": "causal_lm"' not in text
+    assert '"user_contract": "text_generation"' not in text

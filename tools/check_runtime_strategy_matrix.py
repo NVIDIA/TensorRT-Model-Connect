@@ -19,15 +19,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MATRIX_PATH = PROJECT_ROOT / "tests" / "runtime_strategy_matrix.yaml"
 DEFAULT_CPP_PATH = PROJECT_ROOT / "src" / "cabi" / "api" / "trtmc_c.cpp"
 DEFAULT_BUILDERS_DIR = PROJECT_ROOT / "src" / "runtime" / "builders"
-DEFAULT_RUNTIME_REGISTRY_PATH = PROJECT_ROOT / "src" / "runtime" / "registry" / "pipeline_factory.cpp"
+DEFAULT_RUNTIME_REGISTRY_PATH = (
+    PROJECT_ROOT / "src" / "runtime" / "registry" / "pipeline_factory.cpp"
+)
 DEFAULT_RUNTIME_MODELS_DIR = PROJECT_ROOT / "src" / "runtime" / "models"
 DEFAULT_TORCHTRT_STRATEGIES_DIR = (
-    PROJECT_ROOT
-    / "python"
-    / "tensorrt_model_connect"
-    / "engine_defs"
-    / "torch_trt"
-    / "strategies"
+    PROJECT_ROOT / "python" / "tensorrt_model_connect" / "engine_defs" / "torch_trt" / "strategies"
 )
 DEFAULT_DIFF_CHECKS_DIR = PROJECT_ROOT / "tools" / "diff_framework" / "checks"
 DEFAULT_E2E_MODELS_DIR = PROJECT_ROOT / "tests" / "e2e" / "models"
@@ -61,9 +58,7 @@ def load_yaml_like(path: Path) -> Any:
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"{path} is not JSON-compatible YAML and PyYAML is unavailable."
-        ) from exc
+        raise ValueError(f"{path} is not JSON-compatible YAML and PyYAML is unavailable.") from exc
 
 
 def load_runtime_strategy_matrix(path: Path) -> dict[str, dict[str, Any]]:
@@ -124,9 +119,7 @@ def extract_runtime_strategies_from_cpp_files(
     """Extract runtime_strategy keys from multiple source files."""
     strategies: set[str] = set()
     for file_path in cpp_paths:
-        strategies.update(
-            extract_runtime_strategies_from_cpp(file_path, candidate_strategies)
-        )
+        strategies.update(extract_runtime_strategies_from_cpp(file_path, candidate_strategies))
     return strategies
 
 
@@ -203,20 +196,13 @@ def extract_runtime_to_task_strategy_from_manifests(models_dir: Path) -> dict[st
             continue
         values.setdefault(runtime_strategy, set()).add(task_strategy)
 
-    conflicts = {
-        runtime: sorted(tasks)
-        for runtime, tasks in values.items()
-        if len(tasks) > 1
-    }
+    conflicts = {runtime: sorted(tasks) for runtime, tasks in values.items() if len(tasks) > 1}
     if conflicts:
         raise ValueError(
             f"{models_dir}: runtime_strategy values map to multiple task_strategy "
             f"values: {conflicts}"
         )
-    return {
-        runtime: next(iter(tasks))
-        for runtime, tasks in sorted(values.items())
-    }
+    return {runtime: next(iter(tasks)) for runtime, tasks in sorted(values.items())}
 
 
 def _extract_constant_return(class_node: ast.ClassDef, method_name: str) -> str | None:
@@ -233,7 +219,13 @@ def _extract_constant_return(class_node: ast.ClassDef, method_name: str) -> str 
 
 
 def _iter_plugin_python_files(root: Path, kind: str) -> Iterable[Path]:
-    """Yield central legacy or model-local E2E plugin files for ``kind``."""
+    """Yield central legacy or model-local E2E plugin files for ``kind``.
+
+    Most model-local implementations live below ``runners/`` or
+    ``comparators/``.  A model may instead expose a specialized wrapper through
+    the singular ``runner.py`` or ``comparator.py`` entry point; include that
+    active entry point so validation follows the object the harness loads.
+    """
     if (root / kind).is_dir():
         yield from sorted((root / kind).glob("*.py"))
         return
@@ -243,6 +235,10 @@ def _iter_plugin_python_files(root: Path, kind: str) -> Iterable[Path]:
         return
     for plugin_dir in sorted(root.glob(f"*/e2e_plugins/{kind}")):
         yield from sorted(plugin_dir.glob("*.py"))
+        entrypoint_name = "runner.py" if kind == "runners" else "comparator.py"
+        entrypoint = plugin_dir.parent / entrypoint_name
+        if entrypoint.is_file():
+            yield entrypoint
 
 
 def _extract_class_map_by_method(root: Path, kind: str, method_name: str) -> dict[str, set[str]]:
@@ -282,8 +278,9 @@ def extract_diff_framework_check_classes(checks_dir: Path) -> set[str]:
                 continue
             has_name = any(
                 isinstance(stmt, ast.Assign)
-                and any(isinstance(target, ast.Name) and target.id == "name"
-                        for target in stmt.targets)
+                and any(
+                    isinstance(target, ast.Name) and target.id == "name" for target in stmt.targets
+                )
                 for stmt in node.body
             )
             if not has_name:
@@ -339,6 +336,14 @@ def validate_matrix_data(
             "tests/runtime_strategy_matrix.yaml missing runtime strategies from "
             f"E2E manifests: {missing_matrix_for_manifests}"
         )
+    authoritative_strategies = cpp_runtime_strategies | manifest_strategies
+    stale_matrix_strategies = sorted(matrix_strategies - authoritative_strategies)
+    if stale_matrix_strategies:
+        errors.append(
+            "tests/runtime_strategy_matrix.yaml has runtime strategies absent "
+            "from runtime sources and E2E manifests: "
+            f"{stale_matrix_strategies}"
+        )
 
     for runtime_strategy in sorted(matrix_strategies):
         entry = matrix[runtime_strategy]
@@ -365,9 +370,7 @@ def validate_matrix_data(
 
         performance_mode = entry.get("performance_mode")
         if not _is_nonempty_str(performance_mode):
-            errors.append(
-                f"{runtime_strategy}: 'performance_mode' must be a non-empty string."
-            )
+            errors.append(f"{runtime_strategy}: 'performance_mode' must be a non-empty string.")
 
         runner_class_ref = entry.get("runner_class")
         if not _is_nonempty_str(runner_class_ref):
@@ -405,9 +408,7 @@ def validate_matrix_data(
 
         matrix_diff_checks = entry.get("diff_framework_check_classes", [])
         if not isinstance(matrix_diff_checks, list):
-            errors.append(
-                f"{runtime_strategy}: 'diff_framework_check_classes' must be a list."
-            )
+            errors.append(f"{runtime_strategy}: 'diff_framework_check_classes' must be a list.")
             matrix_diff_checks = []
         elif not all(_is_nonempty_str(item) for item in matrix_diff_checks):
             errors.append(
@@ -461,9 +462,7 @@ def validate_matrix_paths(
 ) -> list[str]:
     """Load all sources and validate the runtime strategy matrix."""
     matrix = load_runtime_strategy_matrix(matrix_path)
-    runtime_to_task_strategy = extract_runtime_to_task_strategy_from_manifests(
-        e2e_models_dir
-    )
+    runtime_to_task_strategy = extract_runtime_to_task_strategy_from_manifests(e2e_models_dir)
     candidate_strategies = set(matrix.keys()) | set(runtime_to_task_strategy.keys())
 
     runtime_cpp_files = discover_runtime_strategy_source_files(
@@ -481,9 +480,7 @@ def validate_matrix_paths(
     )
     diff_check_classes = extract_diff_framework_check_classes(diff_checks_dir)
     runner_classes_by_task = extract_runner_classes_by_task_strategy(runners_dir)
-    comparator_classes_by_task = extract_comparator_classes_by_task_strategy(
-        comparators_dir
-    )
+    comparator_classes_by_task = extract_comparator_classes_by_task_strategy(comparators_dir)
     return validate_matrix_data(
         matrix=matrix,
         cpp_runtime_strategies=cpp_runtime_strategies,

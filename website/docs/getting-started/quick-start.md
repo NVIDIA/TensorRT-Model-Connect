@@ -60,7 +60,7 @@ Expected fields include:
 ```text
 Model ID:           Qwen/Qwen3-0.6B
 Family:             qwen
-Runtime strategy:   decoder_kv_cache
+Runtime strategy:   qwen_decoder_kv_cache
 Precision:          fp16
 ```
 
@@ -88,7 +88,7 @@ flowchart LR
   Build["trtmc build"] --> Bundle["/tmp/qwen3-0.6b.trtfb"]
   Bundle --> Inspect["inspect metadata"]
   Bundle --> Load["trtmc::load"]
-  Load --> Strategy["decoder_kv_cache"]
+  Load --> Strategy["qwen_decoder_kv_cache"]
   Strategy --> Generate["IPipeline::generate"]
   Generate --> Text["TextResult"]
 ```
@@ -100,7 +100,7 @@ If generation fails, classify the failure before changing code:
 | Build cannot download model | HuggingFace model ID, auth, network, or cache problem. |
 | Build fails inside TensorRT | Unsupported graph, shape/profile issue, or TensorRT environment issue. |
 | Inspection fails | Bundle was not written correctly, the path is wrong, or the runtime library environment is incomplete. |
-| Runtime says no plugin registered | The binary was built without the plugin for the bundle's `runtime_strategy`. |
+| Runtime says no plugin registered | The strategy has no manifest owner, or its owning model DSO is missing/unloadable from the model-plugin search path. |
 | Output differs between runs | Sampling is enabled. Use `--greedy` or a fixed `--seed` for smoke tests. |
 
 ## Jetson Thor: Wan2.2 720p In Two Commands

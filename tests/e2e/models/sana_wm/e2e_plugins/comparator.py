@@ -11,5 +11,9 @@ from .comparators.sana_wm import SanaWmComparator
 class SanaWmDiffusionMediaGenerationComparator(SanaWmComparator):
     """SANA-WM local comparator for diffusion_media_generation."""
 
+    @property
+    def task_strategy(self) -> str:
+        return "diffusion_media_generation"
+
 
 comparator = SanaWmDiffusionMediaGenerationComparator()

@@ -13,13 +13,6 @@ Training is the process that creates model weights. Inference is the process tha
 
 A forward pass means running input numbers through the model to produce output numbers. During training, the system also computes a loss value that measures error and then runs a backward pass to update weights. During inference, weights are fixed, so only the forward computation is needed.
 
-<figure className="trtmc-diagram trtmc-diagram--wide">
-  <div className="trtmc-diagram__media">
-    <img src={useBaseUrl('/img/diagrams/trtmc-system-map.svg')} alt="System map showing the deployment handoff" />
-  </div>
-  <figcaption>The `.trtfb` bundle is the handoff between Python model conversion and native C++ inference.</figcaption>
-</figure>
-
 ```mermaid
 flowchart TB
   Data["Training data"] --> Train["Training loop<br/>forward + loss + backward"]
@@ -117,8 +110,8 @@ The reusable attention state is the KV cache. Without a KV cache, every generate
 ```mermaid
 sequenceDiagram
   participant User
-  participant Pipeline as TextGenerationPipeline
-  participant State as IInferenceState / KvCache
+  participant Pipeline as QwenTextGenerationPipeline
+  participant State as QwenInferenceState / QwenKvCache
   participant Engine as TensorRT decoder engine
   participant Sampler
 
@@ -137,7 +130,10 @@ sequenceDiagram
   Pipeline-->>User: TextResult
 ```
 
-In the source tree, this abstraction is `IInferenceState`. Attention models use `KvCache`; recurrent or state-space models use family-owned recurrent state classes; hybrid models can compose both.
+These interfaces and implementations are model-owned in the current source
+tree. For example, Qwen uses `QwenInferenceState` and `QwenKvCache` under
+`src/runtime/models/qwen/`; LLaMA, Mistral, recurrent, and hybrid owners keep
+their corresponding state classes under their own runtime directories.
 
 ## What TensorRT changes
 
@@ -166,28 +162,34 @@ flowchart TD
 
 A bundle lets a C++ process load a model without rediscovering the original HuggingFace structure. The runtime still may need helper assets for tokenization or verification, but engine execution is driven by the bundle.
 
-## Model family versus runtime strategy
+## Family, runtime strategy, and task strategy
 
-Two names matter:
+Three names matter:
 
 | Name | Example | Meaning |
 | --- | --- | --- |
-| Family plugin | `qwen`, `llama`, `whisper`, `flux`, `pixart` | Python build-time adapter that understands a model family's config and weights. |
-| Runtime strategy | `decoder_kv_cache`, `speech_to_text`, `diffusion_flux`, `diffusion_pixart` | C++ dispatch key that selects the runtime plugin and pipeline shape. |
+| Family plugin | `qwen`, `llama`, `whisper`, `flux` | Python build-time adapter that understands one model family's config, weights, graphs, and bundle sections. |
+| Runtime strategy | `qwen_decoder_kv_cache`, `llama_decoder_kv_cache`, `whisper_speech_to_text`, `diffusion_flux` | Model-owned C++ dispatch key. It selects exactly one runtime model DSO and then one registered `IPipelinePlugin`. |
+| Task strategy | `text_generation_causal`, `speech_to_text`, `diffusion_media_generation` | Shared E2E contract category used to choose runners, comparators, and CLI task shape. It is not runtime dispatch metadata. |
 
-Many families can share one runtime strategy. Qwen, LLaMA, Mistral, GPT-2, OPT, Bloom, and other decoder-only families can route through `decoder_kv_cache` because their request-time behavior is the same: tokenize prompt, run decoder, sample tokens, update cache.
+Qwen and LLaMA both implement causal text generation, but they deliberately do
+not share one runtime strategy or DSO. Their E2E manifests share
+`task_strategy="text_generation_causal"` while their bundles carry
+`qwen_decoder_kv_cache` and `llama_decoder_kv_cache`, respectively.
 
 ```mermaid
 flowchart LR
-  Qwen["qwen family"] --> Decoder["decoder_kv_cache strategy"]
-  Llama["llama family"] --> Decoder
-  Mistral["mistral family"] --> Decoder
-  Whisper["whisper family"] --> STT["speech_to_text strategy"]
-  Flux["flux family"] --> Diff["diffusion_flux strategy"]
-  PixArt["pixart family"] --> Pix["diffusion_pixart strategy"]
+  QwenFamily["qwen Python family"] --> QwenRuntime["qwen_decoder_kv_cache<br/>libtrtmc_model_qwen.so"]
+  LlamaFamily["llama Python family"] --> LlamaRuntime["llama_decoder_kv_cache<br/>libtrtmc_model_llama.so"]
+  QwenRuntime --> TextTask["text_generation_causal task contract"]
+  LlamaRuntime --> TextTask
+  WhisperFamily["whisper Python family"] --> WhisperRuntime["whisper_speech_to_text<br/>libtrtmc_model_whisper.so"]
+  WhisperRuntime --> SpeechTask["speech_to_text task contract"]
 ```
 
-That separation is the key extensibility idea in this repository.
+This model-owned boundary is the key extensibility rule in the current
+repository: implementation details stay with the family, while shared tools
+reason about capability labels and task strategies.
 
 ## What to learn next
 

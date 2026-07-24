@@ -1,5 +1,17 @@
 # Model Plugin Encapsulation Acceptance Evidence
 
+> **Historical evidence snapshot — not a replay runbook.**
+>
+> This report records results collected for the model-plugin encapsulation
+> change that landed in repository snapshot
+> `4196fb58cd9a4fabdb2c2a553cbcf6b2c02e4277`. Counts and pass totals below are
+> evidence from that run, not claims about the current checkout. The named
+> workspace, container, build directories, `/tmp` artifacts, engine cache, and
+> mutable `origin/main`/`github/main` refs were local to that run and may no
+> longer exist or resolve to the same commits. Do not copy these commands as
+> current validation instructions; create fresh paths and pin comparison refs
+> to immutable SHAs when reproducing the proof.
+
 Date: 2026-06-12
 Workspace: `/workspace/users/yifeif/workspaces/agent-4/TensorRT-Model-Connect`
 Container: `trtmc-dev-gb300-agent4`

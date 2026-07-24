@@ -28,13 +28,19 @@ python -m tensorrt_model_connect build <hf-repo-or-local-dir> -o <output.trtfb>
 
 | Option | Purpose |
 | --- | --- |
+| `--model-revision REV` | Build a Hugging Face commit, tag, or branch instead of its default revision. |
+| `--trust-remote-code` | Allow model repositories that require Hugging Face remote code. |
 | `--max-cache-length N` | KV cache length, default `256`. |
+| `--decoder-engine-layout split|dual_profile` | Select separate prefill/decode engines or one multi-profile decoder engine. |
 | `--dynamic-kv-cache` | Enable runtime-resizable KV cache support. |
+| `--tensor-parallel-size N`, `--tp-size N` | Build a supported decoder for TP size `1`, `2`, `4`, or `8`. |
 | `--dynamic-kv-profile-rows A,B,C` | Override dynamic-KV optimization profiles. |
 | `--image-height`, `--image-width` | Diffusion image shape overrides. |
 | `--video-height`, `--video-width`, `--video-num-frames` | Diffusion video shape overrides. |
 | `--num-inference-steps N` | Diffusion denoising step override. |
+| `--max-batch-size N` | Build supported diffusion engines for a maximum per-call batch. |
 | `--precision fp32|fp16|bf16` | Override the family-selected build precision. Wan2.2 defaults to BF16. |
+| `--fp32-layers I,J` | Keep selected model-local layer indices in FP32. |
 | `--quantize fp8|int8|int8_sq|int4|int4_awq|nvfp4|w4a8` | Quantization format. |
 | `--quant-scales PATH` | Load precomputed quantization scales. |
 | `--quant-calibration-samples N` | PTQ calibration sample count. |
@@ -45,6 +51,7 @@ python -m tensorrt_model_connect build <hf-repo-or-local-dir> -o <output.trtfb>
 | `--config FILE` | Load schema-driven config profile. |
 | `--set NS.FIELD=VALUE` | Override a config field; repeatable. |
 | `--build-timing-json PATH` | Write structured build timing. |
+| `--verbose` | Enable verbose TensorRT builder output. |
 
 TriAttention options are also exposed for experimental KV compaction: `--triattention-stats`, `--triattention-kv-budget`, `--triattention-divide-length`, `--triattention-recent-window`, score aggregation, prompt-token accounting, prefill protection, and MLR/trig disable flags.
 
@@ -59,6 +66,9 @@ TensorRT is the build backend; there is no public build-method selector. Older
 trtmc run <bundle.trtfb> --prompt "text" [--image PATH] [--greedy]
 trtmc encode <bundle.trtfb> --prompt "text"
 trtmc segment <bundle.trtfb> --image PATH --output PATH
+trtmc segment-prompted <bundle.trtfb> --image PATH --output DIR [--point-x F --point-y F]
+trtmc segment-prompted <bundle.trtfb> --image PATH --output DIR --prompt "object"
+trtmc classify <bundle.trtfb> --image PATH [--benchmark N --warmup N]
 trtmc detect <bundle.trtfb> --image PATH [--output-json PATH]
 trtmc generate-audio <bundle.trtfb> --prompt "text" --output PATH
 trtmc serve-audio <bundle.trtfb>
@@ -74,11 +84,17 @@ trtmc inspect <bundle.trtfb> --list-engines
 trtmc version
 ```
 
-Common options include `--hf-python`, `--backend-dir`, `--runtime-cache`, `--cuda-graphs`, `--benchmark`, `--warmup`, `--config`, and repeatable `--set`.
+Depending on the command, shared load/run options include `--hf-python`,
+`--backend-dir`, repeatable `--model-plugin-dir`, `--runtime-cache`,
+`--cuda-graphs`, `--benchmark`, `--warmup`, `--config`, and repeatable
+`--set`. Use `trtmc --help` for the exact options accepted by each command.
 
 Text-generation options include `--max-new-tokens`, `--greedy`, `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--seed`, `--chat-template`, and `--no-thinking`.
 
-Object detection is available through `trtmc detect` for pipelines that implement `IPipeline::detect`.
+Object detection is exposed through `trtmc detect` for a pipeline that
+implements `IPipeline::detect`. The current model manifests and E2E catalog do
+not provide an object-detection model, so command availability alone is not
+support evidence.
 
 ### Canary transcription options
 

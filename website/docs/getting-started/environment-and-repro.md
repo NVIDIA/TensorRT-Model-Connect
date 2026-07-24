@@ -104,6 +104,6 @@ For gated or private models, log in or provide the required HuggingFace token be
 | CMake cannot find CUDA headers or `cudart` | Native build env | Confirm CUDA development files are installed in the container. |
 | `libtorch.so` missing for `./build/trtmc` | Runtime library path | Run inside container or export the container's library paths. |
 | TensorRT ABI mismatch | Bundle/runtime compatibility | Rebuild the bundle in the same TensorRT environment or load the matching backend DSO. |
-| `No plugin registered for runtime_strategy` | Runtime plugin build | Confirm the binary was built from the source tree that supports the bundle strategy. |
+| `No plugin registered for runtime_strategy` | Model-plugin discovery | Confirm the strategy has a manifest owner and its model DSO is available in the configured search paths. |
 
 Once this page passes, continue to [Quick Start](quick-start.md).

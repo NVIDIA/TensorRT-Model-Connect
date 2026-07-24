@@ -526,17 +526,6 @@
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_pixart'].",
       "performance_mode": "diffusion"
     },
-    "diffusion_pixart_torchtrt": {
-      "task_strategy": "diffusion_media_generation",
-      "cli_commands": [
-        "generate-video"
-      ],
-      "runner_class": "diffusion.DiffusionMediaRunner",
-      "comparator_class": "diffusion.DiffusionComparator",
-      "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_pixart_torchtrt'].",
-      "performance_mode": "diffusion"
-    },
     "diffusion_qwen_image": {
       "task_strategy": "diffusion_media_generation",
       "cli_commands": [
@@ -579,6 +568,17 @@
       "comparator_class": "diffusion.DiffusionComparator",
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_zimage'].",
+      "performance_mode": "diffusion"
+    },
+    "diffusion_sana_wm": {
+      "task_strategy": "diffusion_media_generation",
+      "cli_commands": [
+        "generate-video"
+      ],
+      "runner_class": "runner.SanaWmDiffusionMediaGenerationRunner",
+      "comparator_class": "comparator.SanaWmDiffusionMediaGenerationComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_sana_wm'].",
       "performance_mode": "diffusion"
     },
     "albert_encoder_only": {
@@ -822,7 +822,7 @@
         "generate-audio",
         "speak"
       ],
-      "runner_class": "omni.OmniMultimodalRunner",
+      "runner_class": "runner.Qwen3OmniMultimodalRunner",
       "comparator_class": "omni.OmniComparator",
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['qwen3_omni_multimodal'].",
@@ -960,7 +960,7 @@
       "cli_commands": [
         "speak"
       ],
-      "runner_class": "audio_speech.SpeechToSpeechRunner",
+      "runner_class": "runner.PersonaplexSpeechToSpeechRunner",
       "comparator_class": "speech_to_speech.SpeechToSpeechComparator",
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['personaplex_speech_to_speech'].",
@@ -971,7 +971,7 @@
       "cli_commands": [
         "transcribe"
       ],
-      "runner_class": "audio_speech.SpeechToTextRunner",
+      "runner_class": "runner.WhisperSpeechToTextRunner",
       "comparator_class": "speech_to_text.SpeechToTextComparator",
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['whisper_speech_to_text'].",
@@ -982,7 +982,7 @@
       "cli_commands": [
         "transcribe"
       ],
-      "runner_class": "audio_speech.SpeechToTextRunner",
+      "runner_class": "runner.CanarySpeechToTextRunner",
       "comparator_class": "speech_to_text.SpeechToTextComparator",
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['canary_speech_to_text'].",
@@ -993,7 +993,7 @@
       "cli_commands": [
         "transcribe"
       ],
-      "runner_class": "audio_speech.SpeechToTextRunner",
+      "runner_class": "runner.NemotronSpeechStreamingSpeechToTextRunner",
       "comparator_class": "speech_to_text.SpeechToTextComparator",
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['nemotron_speech_streaming_speech_to_text_rnnt'].",
@@ -1078,28 +1078,6 @@
       "comparator_class": "text.TextComparator",
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['t5_text_to_text']."
-    },
-    "torchtrt_decoder": {
-      "task_strategy": "text_generation_causal",
-      "cli_commands": [
-        "run"
-      ],
-      "runner_class": "text_generation.TextGenerationCausalRunner",
-      "comparator_class": "text.TextComparator",
-      "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['torchtrt_decoder'].",
-      "performance_mode": "decode"
-    },
-    "torchtrt_diffusion": {
-      "task_strategy": "diffusion_media_generation",
-      "cli_commands": [
-        "generate-video"
-      ],
-      "runner_class": "diffusion.DiffusionMediaRunner",
-      "comparator_class": "diffusion.DiffusionComparator",
-      "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['torchtrt_diffusion'].",
-      "performance_mode": "diffusion"
     }
   }
 }

@@ -14,7 +14,7 @@ const config = {
   organizationName,
   projectName: repositoryName,
   onBrokenLinks: 'throw',
-  onBrokenMarkdownLinks: 'warn',
+  onBrokenMarkdownLinks: 'throw',
   markdown: {
     mermaid: true
   },

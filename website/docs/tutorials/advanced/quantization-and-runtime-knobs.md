@@ -97,7 +97,7 @@ Dynamic KV cache separates the bundle's compiled profiles from the session's cac
 
 ```mermaid
 flowchart LR
-  Bundle["Bundle profiles"] --> State["IInferenceState"]
+  Bundle["Bundle profiles"] --> State["model-owned inference state"]
   Budget["--kv-cache-size"] --> State
   State --> Rows["preferred_cache_rows"]
   Rows --> Module["ITrtModule profile/context"]

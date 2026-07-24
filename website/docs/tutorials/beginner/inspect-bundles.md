@@ -69,7 +69,7 @@ Example shape:
 Model ID:            Qwen/Qwen3-0.6B
 Model type:          qwen3
 Family:              qwen
-Runtime strategy:    decoder_kv_cache
+Runtime strategy:    qwen_decoder_kv_cache
 TRT version:         <version recorded at build time>
 TRT ABI:             <ABI key>
 Precision:           fp16
@@ -107,34 +107,47 @@ Run inspection for the bundle and record the strategy and section names before s
 
 ```mermaid
 flowchart LR
-  Strategy["runtime_strategy"] --> Registry["PipelineRegistry"]
+  Strategy["runtime_strategy"] --> Index["generated model-plugin index"]
+  Index --> DSO["libtrtmc_model_owner.so"]
+  DSO --> Registry["PipelineRegistry"]
   Registry --> Plugin["IPipelinePlugin"]
   Plugin --> Pipeline["IPipeline implementation"]
   Pipeline --> Method["generate / transcribe / solve / segment / detect"]
 ```
 
 Do not confuse it with `family`. `family` explains the Python builder that created the bundle. `runtime_strategy` explains the C++ runtime shape.
+In the current model-encapsulated layout, every runtime strategy has exactly
+one model-manifest owner and selects that owner's DSO before registry lookup.
 
 Examples:
 
 | Family | Possible runtime strategy | Runtime meaning |
 | --- | --- | --- |
-| `qwen`, `llama`, `mistral` | `decoder_kv_cache` | Decoder-only text generation with attention cache. |
-| `whisper` | `speech_to_text` | Audio features to transcript. |
-| `qwen_vl`, `internvl` | `vision_language` | Image encoder plus text decoder. |
-| `flux`, `wan_t2v`, `z_image` | Diffusion strategy keys | Text prompt to image/video via denoising pipeline. |
+| `qwen` | `qwen_decoder_kv_cache` | Qwen-owned decoder text generation with attention cache. |
+| `llama` | `llama_decoder_kv_cache` | LLaMA-owned decoder text generation in its own model DSO. |
+| `whisper` | `whisper_speech_to_text` | Whisper audio features to transcript. |
+| `qwen_vl` | `qwen_vl_vision_language` | Qwen-VL image encoder plus text decoder. |
+| `internvl` | `internvl_vision_language` | InternVL image encoder plus text decoder. |
+| `flux` | `diffusion_flux` | Flux text-to-image denoising pipeline. |
+| `wan_t2v` | `diffusion_wan` | Wan text-to-video denoising pipeline; runtime owner directory is `wan`. |
 | `pixart` | `diffusion_pixart` | Image diffusion generation. |
 
 :::tip Progress check
-You understand this section when you can explain why two different families can use the same runtime strategy, and why one family may need a new strategy when request-time behavior changes.
+You understand this section when you can explain why Qwen and LLaMA have
+different strategy keys even though both implement decoder text generation,
+and how an E2E `task_strategy` groups them under the same user-visible task.
 :::
 
 ## Common mismatch
 
 If `runtime_strategy` is present but runtime creation fails with "No plugin registered", check:
 
-- `cmake/trtmc_pipeline_plugins.cmake` includes the plugin source and registrar.
-- The plugin uses `REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST`.
+- The owning `src/runtime/models/<owner>/MODEL.toml` declares the strategy,
+  runtime library, and `plugin.cpp|registrar` pair.
+- The plugin uses `REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST` with the same
+  strategy and registrar.
+- The owning model DSO is present in a configured model-plugin search
+  directory.
 - The built binary is from the same source tree as the bundle strategy you are testing.
 
 ## Debugging checklist
@@ -142,8 +155,9 @@ If `runtime_strategy` is present but runtime creation fails with "No plugin regi
 | Check | Command or source |
 | --- | --- |
 | Bundle header parses | `./build/trtmc inspect model.trtfb` |
-| Runtime strategy exists | `rg "REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST" src/runtime/plugins` |
-| Plugin is in manifest | `rg "<plugin file>" cmake/trtmc_pipeline_plugins.cmake` |
+| Qwen strategy is declared | `rg -n 'qwen_decoder_kv_cache' src/runtime/models/qwen/MODEL.toml` |
+| Qwen registrar is implemented | `rg -n 'REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST' src/runtime/models/qwen/plugin.cpp` |
+| Runtime DSO was built | `find build/models/qwen -name 'libtrtmc_model_qwen.so' -print` |
 | Engine sections exist | `./build/trtmc inspect model.trtfb --list-engines` |
 | E2E manifest matches expected contract | `tests/e2e/models/<family>/manifests/<model>.json` |
 

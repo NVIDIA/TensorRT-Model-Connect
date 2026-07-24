@@ -1,5 +1,18 @@
 # Simple Model Plugin Encapsulation Plan
 
+:::info Implementation-history snapshot
+
+This plan records the migration toward model-owned Builder, Runtime, and E2E
+trees. The migration has since landed: current discovery is driven by the
+three per-family `MODEL.toml` descriptors. Paths under “Target Shape” are
+design notation, not copy-and-paste scaffolding instructions. Use the
+[current Add a Model Family guide](../extend/add-model-family.md) and the live
+descriptor files for current onboarding. Command-looking `text` blocks below
+are preserved acceptance sketches from the migration and are not a replayable
+runbook.
+
+:::
+
 Goal: each model is a self-contained plugin. Adding or changing one model
 should require touching only that model's three folders:
 
@@ -41,9 +54,10 @@ code that couples unrelated models.
    - plugin lookup/loading
 8. Nothing else should be shared by default.
 
-In particular, do not keep broad shared model helper modules such as
-`python/tensorrt_model_connect/graph_ops.py` as required cross-model
-infrastructure. Copy the needed logic into each model folder.
+In particular, the migration retired broad root-level model helper modules.
+Current graph operations that encode model behavior are owned below
+`python/tensorrt_model_connect/families/<model>/`; model-independent
+infrastructure stays shared only when ownership tests permit it.
 
 ## Target Shape
 
@@ -131,7 +145,7 @@ bundle/model.
 
 Validation for each model:
 
-```bash
+```text
 cmake --build build --target trtmc_model_<model>
 ldd build/models/<model>/libtrtmc_model_<model>.so
 nm -D build/models/<model>/libtrtmc_model_<model>.so
@@ -151,7 +165,7 @@ TRT/API abstraction.
 
 Validation for each model:
 
-```bash
+```text
 pytest builder/<model>/tests -v
 python -m tensorrt_model_connect build <model-or-dir> -o /tmp/<model>.trtfb
 ```
@@ -169,13 +183,13 @@ manifests.
 
 Validation for each model:
 
-```bash
+```text
 pytest test/<model> -v
 ```
 
 Current-repo equivalent during migration:
 
-```bash
+```text
 pytest tests/test_e2e.py --e2e-model <model> -v
 ```
 
@@ -292,7 +306,7 @@ Done when touching one model selects only that model.
 
 For a one-model PR, CI runs:
 
-```bash
+```text
 cmake --build build --target trtmc_model_<model>
 pytest builder/<model>/tests -v
 pytest runtime/<model>/tests -v
@@ -307,7 +321,7 @@ Done when one-model PRs no longer run unrelated model E2E.
 
 For every supported model:
 
-```bash
+```text
 cmake --build build --target trtmc_model_<model>
 pytest builder/<model>/tests -v
 pytest runtime/<model>/tests -v
@@ -316,7 +330,7 @@ pytest test/<model> -v
 
 Then prove isolation:
 
-```bash
+```text
 mkdir -p /tmp/only-<model>
 cp build/models/<model>/libtrtmc_model_<model>.so /tmp/only-<model>/
 trtmc run <model-bundle> --model-plugin-dir /tmp/only-<model>
@@ -324,7 +338,7 @@ trtmc run <model-bundle> --model-plugin-dir /tmp/only-<model>
 
 Then save a reference copy of `origin/main` and build it:
 
-```bash
+```text
 git clone . /tmp/trtmc-origin-main
 git -C /tmp/trtmc-origin-main fetch origin main
 git -C /tmp/trtmc-origin-main checkout origin/main
@@ -334,7 +348,7 @@ cmake --build /tmp/trtmc-origin-main/build --target trtmc
 
 Run the current model plugin through the real migrated `trtmc` binary:
 
-```bash
+```text
 pytest test/<model> -v \
   --trtmc-binary "$(command -v trtmc)" \
   --model-plugin-dir /tmp/only-<model>
@@ -342,7 +356,7 @@ pytest test/<model> -v \
 
 Run the same user-contract test against the saved `origin/main` build:
 
-```bash
+```text
 pytest /tmp/trtmc-origin-main/tests/test_e2e.py::test_e2e[<model>] -v \
   --trtmc-binary /tmp/trtmc-origin-main/build/trtmc
 ```

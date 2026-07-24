@@ -17,15 +17,9 @@ The boundary between those responsibilities is the `.trtfb` bundle.
 1. Python owns model-format diversity: configs, weights, tokenizers, processors, and graph construction.
 2. The `.trtfb` bundle is the contract between build time and run time.
 3. C++ does not dispatch by HuggingFace model name. It dispatches by `runtime_strategy`.
-4. Runtime plugins own task behavior such as text generation, speech transcription, diffusion, segmentation, or time-series solve.
+4. A model-owned runtime DSO registers the plugin, pipeline, state, and helpers
+   for each of its strategies.
 5. TensorRT ABI-sensitive execution is isolated behind backend DSOs so the public runtime can stay focused on bundle loading and task APIs.
-
-<figure className="trtmc-diagram trtmc-diagram--wide">
-  <div className="trtmc-diagram__media">
-    <img src={useBaseUrl('/img/diagrams/trtmc-system-map.svg')} alt="TensorRT-Model-Connect build and runtime system map" />
-  </div>
-  <figcaption>Architecture starts at the artifact boundary: Python produces a bundle, and C++ consumes it through registries and plugins.</figcaption>
-</figure>
 
 ```mermaid
 flowchart LR
@@ -50,6 +44,8 @@ flowchart LR
 
   subgraph Runtime["C++ run phase"]
     Factory["PipelineFactory"]
+    Loader["PipelinePluginLoader"]
+    DSO["owning model DSO"]
     Registry["PipelineRegistry"]
     Plugin["IPipelinePlugin"]
     Backend["IBackend DSO"]
@@ -66,7 +62,9 @@ flowchart LR
   Plans --> Writer
   Writer --> Bundle
   Bundle --> Factory
-  Factory --> Registry
+  Factory --> Loader
+  Loader --> DSO
+  DSO --> Registry
   Registry --> Plugin
   Factory --> Backend
   Plugin --> Pipeline
@@ -114,10 +112,14 @@ The same model has three identities as it moves through the stack:
 | Identity | Example | Source of truth | Used by |
 | --- | --- | --- | --- |
 | HuggingFace model type | `qwen3`, `whisper`, `flux` | `config.json` from the model repo | Python `ModelConfig` and family matching. |
-| Builder family | `qwen`, `whisper`, `flux`, `pixart` | `python/tensorrt_model_connect/families/*.py` | Weight loading and engine construction. |
-| Runtime strategy | `decoder_kv_cache`, `speech_to_text`, `diffusion_flux` | Bundle metadata and C++ plugin manifest | C++ dispatch and pipeline construction. |
+| Builder family | `qwen`, `whisper`, `flux`, `pixart` | `python/tensorrt_model_connect/families/<family>/MODEL.toml` and its package | Weight loading and engine construction. |
+| Runtime strategy | `qwen_decoder_kv_cache`, `whisper_speech_to_text`, `diffusion_flux` | Bundle metadata and `src/runtime/models/<owner>/MODEL.toml` | Model DSO selection, plugin lookup, and pipeline construction. |
 
-This matters because adding a new model does not always mean adding a new runtime. A new decoder-only family can often reuse `decoder_kv_cache`; a new task shape may need a new runtime strategy.
+Runtime strategies are model-owned in the current architecture. Two families
+can implement the same task shape without sharing a strategy or DSO: Qwen and
+LLaMA use `qwen_decoder_kv_cache` and `llama_decoder_kv_cache`, while their E2E
+manifests share the `text_generation_causal` task strategy. Shared orchestration
+uses capabilities and task contracts; model implementation remains local.
 
 ```mermaid
 flowchart TB
@@ -131,7 +133,8 @@ flowchart TB
   end
 
   subgraph RunTime["Runtime identity"]
-    Strategy --> CppPlugin["C++ IPipelinePlugin"]
+    Strategy --> DSO["Owning libtrtmc_model_*.so"]
+    DSO --> CppPlugin["C++ IPipelinePlugin"]
     Sections --> CppPlugin
     CppPlugin --> Pipeline["Concrete IPipeline"]
   end
@@ -163,7 +166,7 @@ The important builder abstractions are:
 | --- | --- | --- |
 | `ModelConfig` | `python/tensorrt_model_connect/config.py` | Normalizes HuggingFace config fields into one typed view. |
 | `FamilyPlugin` | `python/tensorrt_model_connect/families/base.py` | Per-family matching, weight loading, engine building, optional quantization hooks, and optional modality-specific build methods. |
-| Graph builders | `graph_ops.py`, `graph_blocks.py`, `standard_decoder_builder.py`, dedicated builder files | Convert model structure and weights into TensorRT networks or compiled components. |
+| Family-owned graph builders | `python/tensorrt_model_connect/families/<family>/graph_ops.py`, `graph_blocks.py`, and dedicated builders when present | Convert that family's model structure and weights into TensorRT networks or compiled components. There are no repository-root `graph_ops.py` or `graph_blocks.py` modules. |
 | Quantization units | `python/tensorrt_model_connect/quantization/` | Plan quantization, calibration, scale loading, and family-specific exclusions. |
 | `BundleInfo` and `BundleSection` | `python/tensorrt_model_connect/bundle_writer.py` | Serialize build metadata and binary sections into `.trtfb`. |
 
@@ -183,10 +186,12 @@ flowchart TD
   Load["trtmc::load or PipelineFactory::from_bundle"] --> Read["ReadBundleFile"]
   Read --> Config["extract config.json"]
   Config --> Strategy["runtime_strategy<br/>with legacy normalization"]
+  Strategy --> Owner["generated strategy-to-model index"]
+  Owner --> ModelDSO["dlopen owning libtrtmc_model_*.so"]
+  ModelDSO --> Lookup["PipelineRegistry::lookup"]
   Config --> RuntimeConfig["resolve ConfigBundle<br/>schema defaults + bundle defaults + session overrides"]
   Config --> BackendName["engine_backend / TRT ABI metadata"]
   BackendName --> Backend["load IBackend DSO"]
-  Strategy --> Lookup["PipelineRegistry::lookup"]
   Lookup --> Plugin["IPipelinePlugin::create(ctx)"]
   RuntimeConfig --> Context["PipelineContext"]
   Backend --> Context
@@ -202,20 +207,21 @@ The important runtime abstractions are:
 | `IPipeline` | `include/trtmc/pipeline.h` | User-facing task interface. Methods unsupported by a concrete pipeline throw with the pipeline type. |
 | `LoadOptions` | `include/trtmc/pipeline.h` | Runtime load knobs: HF Python helper path, runtime cache path, CUDA graphs, KV cache budget, config file, `--set` overrides, backend search paths. |
 | `PipelineFactory` | `include/trtmc/runtime/pipeline_factory.h`, `src/runtime/registry/pipeline_factory.cpp` | Single creation path from bundle file to pipeline instance. |
-| `PipelineRegistry` | `include/trtmc/runtime/pipeline_registry.h` | Maps `runtime_strategy` strings to registered `IPipelinePlugin` implementations. |
+| Model plugin index/loader | `include/trtmc/runtime/pipeline_plugin_loader.h`, `src/runtime/registry/pipeline_plugin_loader.cpp` | Maps a strategy to its manifest owner, loads that model DSO, and verifies the DSO registers only its declared strategies. |
+| `PipelineRegistry` | `include/trtmc/runtime/pipeline_registry.h` | Maps loaded `runtime_strategy` strings to registered `IPipelinePlugin` implementations. |
 | `IPipelinePlugin` | `include/trtmc/runtime/pipeline_plugin.h` | Strategy-specific constructor that reads bundle sections and returns a concrete `IPipeline`. |
 | `IBackend` | `include/trtmc/runtime/trt_backend.h` | Backend DSO interface for deserializing engines and creating `ITrtModule` execution wrappers. |
 | `ITrtModule` | `include/trtmc/runtime/trt_module.h` | Engine execution interface used by pipelines without including TensorRT headers. |
-| `IInferenceState` | `src/runtime/models/<family>/inference_state.h` | Unified request state abstraction for KV cache, recurrent state, and hybrid state. |
-| `ISampler` | `src/runtime/models/<family>/sampler.h` | Token selection abstraction for greedy, top-k, top-p, min-p, and GPU-side sampling paths. |
+| Model-owned inference state | `src/runtime/models/<family>/inference_state.h` when that family needs it | Family-local KV, recurrent, or hybrid request state. The old shared state implementation has been retired. |
+| Model-owned sampler | `src/runtime/models/<family>/sampler.h` when that family needs it | Family-local token selection for greedy, top-k, top-p, min-p, and optional GPU paths. |
 
 Primary source locations:
 
 - `include/trtmc/pipeline.h`
 - `src/runtime/registry/pipeline_factory.cpp`
+- `src/runtime/registry/pipeline_plugin_loader.cpp`
 - `src/runtime/registry/pipeline_registry.cpp`
 - `include/trtmc/runtime/pipeline_plugin.h`
-- `src/runtime/models/`
 - `src/runtime/models/`
 
 ## Request-time flow
@@ -232,11 +238,11 @@ After a pipeline is constructed, each user request is task-specific. Text genera
 ```mermaid
 sequenceDiagram
   participant App as User application
-  participant Pipe as TextGenerationPipeline
+  participant Pipe as QwenTextGenerationPipeline
   participant Tok as Tokenizer
-  participant State as IInferenceState
+  participant State as QwenInferenceState
   participant Mod as ITrtModule
-  participant Samp as ISampler
+  participant Samp as QwenISampler
 
   App->>Pipe: generate(prompt, GenerateConfig)
   Pipe->>Tok: encode prompt to token IDs
@@ -272,9 +278,9 @@ Other modalities reuse the same architectural pattern:
 | --- | --- |
 | Python builds, C++ runs | Checkpoint parsing and graph construction stay in Python; request-time inference stays native. |
 | Bundle is the boundary | The runtime does not rediscover the original model repository to decide pipeline shape. |
-| Family and strategy are separate | Build-time model support can grow without central runtime `switch` statements. |
+| Family and strategy are separate but model-owned | A Python package builds the family, while a concrete strategy selects its runtime DSO. Shared task behavior is expressed through capabilities and E2E `task_strategy`, not a generic runtime plugin. |
 | Strategy is resolved at load | A request uses a concrete pipeline instance; no per-request strategy redispatch is needed. |
-| Runtime plugins are manifest registered | Adding a strategy changes a plugin file and manifest, not the factory core. |
+| Runtime plugins are manifest discovered | Adding a strategy changes the owning `src/runtime/models/<owner>/MODEL.toml` and local source; CMake generates the DSO registrar and strategy index without a factory edit. |
 | Backend DSOs isolate TensorRT ABI | The public runtime can load the backend matching the bundle's TensorRT metadata. |
 | Task methods are explicit | A user calls `generate`, `transcribe`, `generate_image`, `segment`, `solve`, or `detect` instead of manipulating engine tensors directly. |
 

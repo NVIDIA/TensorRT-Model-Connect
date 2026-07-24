@@ -16,6 +16,7 @@ Prerequisites:
     - Agent CLI in PATH. Codex is the default; override with TRTMC_AGENT_BIN/TRTMC_AGENT_ARGS.
     - At least one running container: trtmc-dev-gb300-agent-N
 """
+
 from __future__ import annotations
 
 import argparse
@@ -36,19 +37,50 @@ WORKSPACE_ROOT = "/workspace/users/yifeif/workspaces"
 DISCOVER_CONTAINER = "trtmc-dev-gb300-agent-1"
 DEFAULT_AGENT_BIN = "codex"
 DEFAULT_AGENT_ARGS = [
-    "exec", "-s", "danger-full-access", "-a", "never",
-    "-C", "{workspace}", "{prompt}",
+    "exec",
+    "-s",
+    "danger-full-access",
+    "-a",
+    "never",
+    "-C",
+    "{workspace}",
+    "{prompt}",
 ]
 
 # Architecture types that are vision/audio/exotic and unlikely to work
 # with the standard encoder/decoder scaffold without C++ runtime changes.
 SKIP_TYPES = {
-    "vit", "clip", "clap", "wav2vec2", "wav2vec2-encoder", "blip", "siglip",
-    "siglip2", "dinov2", "dinov3_vit", "vitpose", "mobilevit", "vitmatte",
-    "lightglue", "superpoint", "grounding-dino", "rt_detr",
-    "vision-encoder-decoder", "depth_anything", "zoedepth", "timm_wrapper",
-    "yolos", "clipseg", "esm", "musicgen", "table-transformer", "moondream1",
-    "llava", "h2ovl_chat", "florence2", "openvla",
+    "vit",
+    "clip",
+    "clap",
+    "wav2vec2",
+    "wav2vec2-encoder",
+    "blip",
+    "siglip",
+    "siglip2",
+    "dinov2",
+    "dinov3_vit",
+    "vitpose",
+    "mobilevit",
+    "vitmatte",
+    "lightglue",
+    "superpoint",
+    "grounding-dino",
+    "rt_detr",
+    "vision-encoder-decoder",
+    "depth_anything",
+    "zoedepth",
+    "timm_wrapper",
+    "yolos",
+    "clipseg",
+    "esm",
+    "musicgen",
+    "table-transformer",
+    "moondream1",
+    "llava",
+    "h2ovl_chat",
+    "florence2",
+    "openvla",
 }
 
 # ---------------------------------------------------------------------------
@@ -89,6 +121,10 @@ WORKER_PROMPT = textwrap.dedent("""\
     docker exec trtmc-dev-gb300-{agent_id} bash -c \\
         './build/trtmc build {hf_id} -o /tmp/{family_name}.trtfb --max-cache-length 256 --verbose 2>&1; echo EXIT=$?'
     ```
+    `scripts/new_family.py` creates only a preliminary Python package. It does
+    not create a complete model capsule. Complete the Python, runtime, and E2E
+    ownership descriptors and implementations before treating the build as
+    evidence.
 
     ### Validate (3 mandatory gates — ALL must pass)
     After the bundle builds, you MUST pass ALL THREE validation gates.
@@ -110,24 +146,25 @@ WORKER_PROMPT = textwrap.dedent("""\
     This runs: build → diff_logits battery → diff_layers → C++ runner parity → E2E pytest.
     ALL steps must PASS. If validate_family.sh fails, the model is NOT done.
 
-    **Gate 3: E2E harness compatibility**
-    If you created a NEW runtime_strategy, you MUST register it in:
-    - `tests/e2e_harness/contracts.py` → add to RUNTIME_TO_TASK_STRATEGY dict
-    - `tests/e2e_harness/manifest_loader.py` → add to _KNOWN_RUNTIME_STRATEGIES set
-    - `tools/test_impact.py` → add to RUNTIME_TO_TASK_STRATEGY and CPP_PLUGIN_STRATEGIES
-    Verify no "unknown runtime_strategy" warnings when running:
+    **Gate 3: declarative ownership and strategy consistency**
+    If you created a new runtime strategy, declare the same family-owned key in:
+    - `python/tensorrt_model_connect/families/{family_name}/MODEL.toml`
+    - `src/runtime/models/{family_name}/MODEL.toml`
+    - `tests/e2e/models/{family_name}/manifests/*.json`
+    - `tests/runtime_strategy_matrix.yaml`
+
+    Keep runner, comparator, and reference implementations under
+    `tests/e2e/models/{family_name}/e2e_plugins/`. Validate live repository
+    metadata instead of editing retired central strategy tables:
     ```
-    docker exec trtmc-dev-gb300-{agent_id} python3 -c "
-    from tests.e2e_harness.manifest_loader import load_all_manifests
-    import warnings; warnings.simplefilter('error')
-    cases = load_all_manifests()
-    print(f'OK: {{len(cases)}} manifests loaded without warnings')
-    "
+    docker exec trtmc-dev-gb300-{agent_id} python3 tools/model_ci.py validate
+    docker exec trtmc-dev-gb300-{agent_id} python3 tools/test_impact.py --validate
+    docker exec trtmc-dev-gb300-{agent_id} python3 tools/check_runtime_strategy_matrix.py
     ```
 
     Reference code for understanding validation:
-      tests/e2e_harness/comparators/  (text.py, diffusion.py, segmentation.py, etc.)
-      tests/e2e_harness/runners/      (how different modalities run inference)
+      tests/e2e/models/<family>/e2e_plugins/  (model-owned E2E behavior)
+      tests/e2e_harness/                       (shared protocols/orchestration)
       tools/diff_logits.py            (decoder logit comparison)
       tensorrt_model_connect/families/{family_name}/model/runtime.py
                                                 (family-owned TRT inference)
@@ -149,15 +186,15 @@ WORKER_PROMPT = textwrap.dedent("""\
       ```
     - Read existing family plugins for reference at:
       /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/python/tensorrt_model_connect/families/
-    - Read the selected family's model/model.py for graph operations and blocks.
+    - Read the selected family's family-local graph operations and builders.
     - Read the HF model's modeling code to understand the EXACT computation.
     - If the model uses a novel attention mechanism (disentangled, sliding
       window, linear, etc.), you MUST implement it correctly in the plugin's
       build_engine() — do not approximate or skip it.
     - Edit the plugin on the HOST at:
       /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/python/tensorrt_model_connect/families/{family_name}/
-      Keep plugin.py and config.py at the root; put weight loading in weights/
-      and graph/build/runtime implementation in model/.
+      Follow the nearest current family layout. Keep graph helpers and builders
+      inside this package; do not add repository-root shared graph helpers.
 
     ### C++ runtime plugin (if needed for full E2E)
     The goal is FULL onboarding: a user must be able to run the model via
@@ -165,15 +202,14 @@ WORKER_PROMPT = textwrap.dedent("""\
     If no existing C++ runtime strategy handles this model, you MUST create one.
 
     How to add a C++ runtime plugin:
-    1. Read an existing plugin for reference. Key files at:
-       /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/src/runtime/plugins/
-       - decoder_plugin.cpp (decoder-only text gen)
-       - a specialized encoder-decoder plugin
-       - encoder_plugin.cpp (encoder-only)
-       - shared/plugin_helpers.h (TrtModule loading, tokenizer, helpers)
-    2. Create your plugin .cpp file with REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK.
-    3. Add one source/symbol entry to cmake/trtmc_pipeline_plugins.cmake.
-    4. Reconfigure so CMake generates linker anchors and adds the source.
+    1. Read the closest owner under `src/runtime/models/<family>/`.
+    2. Create `src/runtime/models/{family_name}/plugin.cpp` and its
+       family-local pipeline and helpers.
+    3. Register the family-owned key with
+       `REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST`.
+    4. Create `src/runtime/models/{family_name}/MODEL.toml` with the model DSO,
+       registrar, strategy, schemas, and tests. CMake discovers this descriptor;
+       do not add a model-specific branch to the shared loader.
     5. Rebuild: `docker exec trtmc-dev-gb300-{agent_id} cmake --build build -j`
     6. Test: `docker exec trtmc-dev-gb300-{agent_id} ./build/trtmc run /tmp/{family_name}.trtfb --prompt "test" --max-new-tokens 5`
 
@@ -194,7 +230,7 @@ WORKER_PROMPT = textwrap.dedent("""\
     docker exec trtmc-dev-gb300-{agent_id} /opt/venv/bin/python -m pytest \
         tests/e2e/models/{family_name}/test_{family_name}_e2e.py -v \
         --e2e-model {family_name} \
-        --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+        --engine-dir /tmp/trtmc-engines \
         --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python \
         --rebuild-engines
     ```
@@ -239,20 +275,17 @@ WORKER_PROMPT = textwrap.dedent("""\
       The container's /workspace/tensorrt-model-connect/ maps to the host workspace.
       Do NOT try to write directly to /workspace/users/yifeif/workspaces/{agent_id}/
       — that path is read-only from the sandbox. Always write via docker exec.
-    - **Decoupling**: Create NEW files for your plugin — do NOT modify existing
-      plugins (decoder, encoder, or modality-specific plugins, etc.).
-      Each family gets its own isolated Python plugin and (if needed) its own
-      C++ plugin .cpp file. You may ONLY share code through:
-      - generic package infrastructure outside families/
-      - shared/plugin_helpers.h/cpp (C++ TRT module loading, tokenizer, helpers)
-      - shared/audio_helpers.h, shared/diffusion_helpers.h (modality-specific shared utils)
+    - **Decoupling**: Create NEW files for the owner — do NOT modify existing
+      model owners. Each family gets its own isolated Python package and
+      model-owned C++ DSO under `src/runtime/models/{family_name}/`. Share only
+      genuinely model-independent contracts through the existing runtime
+      domains or generic package infrastructure.
       It's fine to DUPLICATE code from an existing plugin into your new file —
       copy-paste is better than tight coupling. Each plugin must be self-contained.
     - Do NOT edit shared framework files or another family. Keep checkpoint mapping
-      and decoder builders under the selected family's weights/ and model/ directories;
-      do not add new files at the family package root. Do not edit
-      pipeline_factory.cpp, pipeline_registry.cpp). You CAN add new plugin files and
-      edit cmake/trtmc_pipeline_plugins.cmake to register your new plugin.
+      and builders under the selected family package. Do not edit
+      `pipeline_factory.cpp`, `pipeline_registry.cpp`, or central model tables.
+      Register the new runtime owner through its `MODEL.toml`.
     - Do NOT skip C++ runtime implementation. The model must work end-to-end.
     - The final test is: `./build/trtmc run <bundle> --prompt "..." --max-new-tokens N`
       must produce correct output. If it doesn't, keep fixing.
@@ -263,18 +296,31 @@ WORKER_PROMPT = textwrap.dedent("""\
 # Discovery (runs inside container)
 # ---------------------------------------------------------------------------
 
+
 def discover(container: str, min_downloads: int, max_models: int) -> list[dict]:
     """Run discover.py inside a container and return the task list."""
-    print(f"[discover] Querying HuggingFace for top {max_models} models "
-          f"(min {min_downloads:,} downloads)...")
+    print(
+        f"[discover] Querying HuggingFace for top {max_models} models "
+        f"(min {min_downloads:,} downloads)..."
+    )
 
     result = subprocess.run(
-        ["docker", "exec", container, "python3",
-         "scripts/autopilot/discover.py",
-         "--min-downloads", str(min_downloads),
-         "--max-models", str(max_models),
-         "--output", "/tmp/autopilot_tasks.json"],
-        capture_output=True, text=True, timeout=300,
+        [
+            "docker",
+            "exec",
+            container,
+            "python3",
+            "scripts/autopilot/discover.py",
+            "--min-downloads",
+            str(min_downloads),
+            "--max-models",
+            str(max_models),
+            "--output",
+            "/tmp/autopilot_tasks.json",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
     )
     # Print discover's stderr (the pretty table)
     if result.stderr:
@@ -287,7 +333,8 @@ def discover(container: str, min_downloads: int, max_models: int) -> list[dict]:
     # Read the JSON from the container
     cat = subprocess.run(
         ["docker", "exec", container, "cat", "/tmp/autopilot_tasks.json"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     data = json.loads(cat.stdout)
     return data.get("tasks", [])
@@ -296,6 +343,7 @@ def discover(container: str, min_downloads: int, max_models: int) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Auto-select best candidates
 # ---------------------------------------------------------------------------
+
 
 def select_tasks(
     tasks: list[dict],
@@ -363,12 +411,10 @@ def build_prompt(task: dict, agent_id: str, *, optimize: bool = False) -> str:
         hf_id=task["hf_id"],
         family_name=task["family_name"],
         agent_id=agent_id,
-        trust_remote_code_line=(
-            "- trust_remote_code: yes" if trust_rc else ""),
+        trust_remote_code_line=("- trust_remote_code: yes" if trust_rc else ""),
         trust_flag="--trust-remote-code" if trust_rc else "",
         trust_remote_code_py=", trust_remote_code=True" if trust_rc else "",
-        trust_manifest_line=(
-            ',\n    "trust_remote_code": true' if trust_rc else ""),
+        trust_manifest_line=(',\n    "trust_remote_code": true' if trust_rc else ""),
         optimize_section=optimize_section,
     )
 
@@ -376,6 +422,7 @@ def build_prompt(task: dict, agent_id: str, *, optimize: bool = False) -> str:
 # ---------------------------------------------------------------------------
 # Dispatch + monitor
 # ---------------------------------------------------------------------------
+
 
 def _agent_command(workspace: str, prompt: str) -> list[str]:
     """Build the configured non-interactive agent command for one worker."""
@@ -473,18 +520,21 @@ def wait_all(
                     pass
 
                 icon = "\u2713" if status == "PASS" else "\u2717"
-                print(f"  {icon} {aid} ({family}): {status} "
-                      f"(exit={ret}, {int(time.time()-start)}s)")
+                print(
+                    f"  {icon} {aid} ({family}): {status} (exit={ret}, {int(time.time() - start)}s)"
+                )
 
-                results.append({
-                    "agent_id": aid,
-                    "family": family,
-                    "hf_id": task_map[aid]["hf_id"],
-                    "status": status,
-                    "exit_code": ret,
-                    "log": log_path,
-                    "summary": summary,
-                })
+                results.append(
+                    {
+                        "agent_id": aid,
+                        "family": family,
+                        "hf_id": task_map[aid]["hf_id"],
+                        "status": status,
+                        "exit_code": ret,
+                        "log": log_path,
+                        "summary": summary,
+                    }
+                )
                 del remaining[aid]
 
         if remaining:
@@ -500,14 +550,16 @@ def wait_all(
         proc.terminate()
         family = task_map[aid]["family_name"]
         print(f"  ! {aid} ({family}): TIMEOUT ({timeout}s)")
-        results.append({
-            "agent_id": aid,
-            "family": family,
-            "hf_id": task_map[aid]["hf_id"],
-            "status": "TIMEOUT",
-            "exit_code": -1,
-            "log": f"/tmp/autopilot_{family}.log",
-        })
+        results.append(
+            {
+                "agent_id": aid,
+                "family": family,
+                "hf_id": task_map[aid]["hf_id"],
+                "status": "TIMEOUT",
+                "exit_code": -1,
+                "log": f"/tmp/autopilot_{family}.log",
+            }
+        )
 
     return results
 
@@ -516,32 +568,46 @@ def wait_all(
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(
-        description="One-command autopilot: discover → implement → validate.")
-    parser.add_argument("--auto", action="store_true",
-                        help="Fully autonomous (no prompts)")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Preview tasks without launching agents")
-    parser.add_argument("--min-downloads", type=int, default=1000000,
-                        help="Min downloads to consider (default: 1M)")
-    parser.add_argument("--max-models", type=int, default=500,
-                        help="Max HF models to scan (default: 500)")
-    parser.add_argument("--agents", type=int, default=4,
-                        help="Number of parallel agents (default: 4)")
-    parser.add_argument("--limit", type=int, default=None,
-                        help="Max tasks to process")
-    parser.add_argument("--timeout", type=int, default=1800,
-                        help="Per-batch timeout in seconds (default: 1800)")
-    parser.add_argument("--include-trust-remote-code", action="store_true",
-                        help="Include models needing trust_remote_code")
-    parser.add_argument("--optimize", action="store_true",
-                        help="After validation, run precision optimization (FP16/FP8/INT8)")
-    parser.add_argument("--discover-container", default=DISCOVER_CONTAINER,
-                        help=f"Container for discovery (default: {DISCOVER_CONTAINER})")
+        description="One-command autopilot: discover → implement → validate."
+    )
+    parser.add_argument("--auto", action="store_true", help="Fully autonomous (no prompts)")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Preview tasks without launching agents"
+    )
+    parser.add_argument(
+        "--min-downloads", type=int, default=1000000, help="Min downloads to consider (default: 1M)"
+    )
+    parser.add_argument(
+        "--max-models", type=int, default=500, help="Max HF models to scan (default: 500)"
+    )
+    parser.add_argument(
+        "--agents", type=int, default=4, help="Number of parallel agents (default: 4)"
+    )
+    parser.add_argument("--limit", type=int, default=None, help="Max tasks to process")
+    parser.add_argument(
+        "--timeout", type=int, default=1800, help="Per-batch timeout in seconds (default: 1800)"
+    )
+    parser.add_argument(
+        "--include-trust-remote-code",
+        action="store_true",
+        help="Include models needing trust_remote_code",
+    )
+    parser.add_argument(
+        "--optimize",
+        action="store_true",
+        help="After validation, run precision optimization (FP16/FP8/INT8)",
+    )
+    parser.add_argument(
+        "--discover-container",
+        default=DISCOVER_CONTAINER,
+        help=f"Container for discovery (default: {DISCOVER_CONTAINER})",
+    )
     args = parser.parse_args()
 
-    agent_ids = [f"agent-{i+1}" for i in range(args.agents)]
+    agent_ids = [f"agent-{i + 1}" for i in range(args.agents)]
 
     print("=" * 60)
     print("  trtmc Autopilot")
@@ -553,8 +619,7 @@ def main():
     print()
 
     # ---- Step 1: Discover ----
-    all_tasks = discover(
-        args.discover_container, args.min_downloads, args.max_models)
+    all_tasks = discover(args.discover_container, args.min_downloads, args.max_models)
 
     # ---- Step 2: Auto-select ----
     tasks = select_tasks(
@@ -571,8 +636,7 @@ def main():
     print(f"{'#':>3}  {'model_type':<20} {'downloads':>12}  {'hf_id'}")
     print("-" * 80)
     for i, t in enumerate(tasks, 1):
-        print(f"{i:3}  {t['model_type']:<20} {t['total_downloads']:>12,}  "
-              f"{t['hf_id']}")
+        print(f"{i:3}  {t['model_type']:<20} {t['total_downloads']:>12,}  {t['hf_id']}")
 
     # ---- Approval gate ----
     if not args.auto and not args.dry_run:
@@ -591,12 +655,11 @@ def main():
 
     for batch_num in range(total_batches):
         batch_start = batch_num * batch_size
-        batch_tasks = tasks[batch_start:batch_start + batch_size]
-        batch = list(zip(agent_ids[:len(batch_tasks)], batch_tasks))
+        batch_tasks = tasks[batch_start : batch_start + batch_size]
+        batch = list(zip(agent_ids[: len(batch_tasks)], batch_tasks))
 
         print(f"\n--- Batch {batch_num + 1}/{total_batches} ---")
-        procs = launch_batch(batch, dry_run=args.dry_run,
-                             optimize=args.optimize)
+        procs = launch_batch(batch, dry_run=args.dry_run, optimize=args.optimize)
 
         if args.dry_run:
             continue

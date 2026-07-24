@@ -48,23 +48,57 @@ tensorrt_model_connect.build(
 
 | Option | Purpose |
 | --- | --- |
+| `model_revision` | Hugging Face commit, tag, or branch to resolve. |
 | `max_cache_length` | Default KV cache length for decoder-style bundles. |
+| `decoder_engine_layout` | `split` or `dual_profile` for supported decoders. |
 | `precision` | Engine precision: `fp32`, `fp16`, or `bf16`. |
+| `fp32_layers` | Model-local layer indices that should compute in FP32. |
 | `quantize` | Structured quantization format such as `fp8` or `int4_awq`. |
 | `dynamic_kv_cache` | Build decoder bundles with runtime-resizable KV cache support. |
+| `dynamic_kv_profile_rows_override` | Explicit dynamic-KV profile upper bounds. |
+| `parallel_config` | Programmatic tensor-parallel build configuration. |
 | `rtx` | Build for TensorRT-RTX backend selection. |
 | `diffusion_overrides` | Image/video shape and inference-step overrides for diffusion models. |
+| `max_batch_size` | Maximum supported diffusion batch size, subject to family component policy. |
+| `family_build_options` | Opaque model-family build options for the selected plugin. |
+| `build_timing_path` | Structured build-timing JSON output path. |
 
 ## Family plugin protocol
 
-Family plugins implement `python/tensorrt_model_connect/families/base.py`. Required pieces are:
+Family packages are discovered from
+`python/tensorrt_model_connect/families/<family>/MODEL.toml`; the selected
+descriptor identifies the package by its directory and family ID. The loader
+imports that package, whose `__init__.py` exposes the module-level `plugin`.
+The descriptor does not select an arbitrary import module. The protocol itself
+is defined in `python/tensorrt_model_connect/families/base.py`.
 
 ```python
 class FamilyPlugin(Protocol):
     name: str
+
     def matches(self, model_type: str) -> bool: ...
-    def load_weights(self, model_dir: str, config: ModelConfig, *, precision: str = "fp32") -> WeightDict: ...
-    def build_engine(self, config: ModelConfig, weights: WeightDict, max_cache_length: int, *, precision: str = "fp32", quant_ctx=None, verbose: bool = False) -> bytes: ...
+
+    def load_weights(
+        self,
+        model_dir: str,
+        config: ModelConfig,
+        *,
+        precision: str = "fp32",
+    ) -> WeightDict: ...
+
+    def build_engine(
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
+    ) -> bytes: ...
 ```
 
-Optional methods add quantization, vision-language, diffusion, and FP8 calibration behavior.
+Optional methods add split decoder roles, quantization, vision-language,
+diffusion component/bundle ownership, and FP8 calibration behavior. Treat the
+live protocol as the source of truth instead of copying its complete optional
+surface into downstream integrations.

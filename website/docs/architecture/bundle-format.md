@@ -2,7 +2,10 @@
 title: Bundle Format
 ---
 
-`.trtfb` is the repository's build/runtime contract. It carries everything the C++ runtime needs to select and construct a pipeline.
+`.trtfb` is the repository's build/runtime artifact contract. It carries the
+metadata, engine plans, and model assets used to select and construct a
+pipeline; the runtime installation separately supplies the core, backend, and
+owning model DSOs.
 
 ```mermaid
 flowchart TD
@@ -39,7 +42,9 @@ Typical sections include:
 - One or more TensorRT engine plans
 - Tokenizer assets
 - Family-specific metadata
-- Optional config artifacts such as effective config output
+
+`effective_config.json` is not a bundle section. When schema-driven config is
+resolved, the builder/runtime writes that audit artifact next to the bundle.
 
 Different strategies expect different section sets:
 
@@ -76,17 +81,31 @@ bool ok = trtmc::IsBundle("/tmp/model.trtfb");
 
 ## Runtime strategy
 
-The most important bundle field is `runtime_strategy`. It selects the C++ runtime plugin, not the Python family plugin. Many Python families can share a runtime strategy. For example, Qwen, LLaMA, Mistral, GPT-2, OPT, Bloom, and several other decoder families can all route through `decoder_kv_cache`.
+The most important bundle field is `runtime_strategy`. It selects the owning
+C++ model DSO and then the registered runtime plugin; it does not select the
+Python family package.
+
+Current strategy keys are model-owned. Qwen, LLaMA, and Mistral use
+`qwen_decoder_kv_cache`, `llama_decoder_kv_cache`, and
+`mistral_decoder_kv_cache`, respectively. Their E2E manifests share the
+`text_generation_causal` task strategy, but that task label is not stored as
+the runtime dispatch key.
 
 ```mermaid
 flowchart LR
   Bundle[".trtfb header"] --> Strategy["runtime_strategy"]
-  Strategy --> Registry["PipelineRegistry"]
+  Strategy --> Index["Generated model plugin index"]
+  Index --> ModelDSO["Owning libtrtmc_model_*.so"]
+  ModelDSO --> Registry["PipelineRegistry"]
   Registry --> Plugin["IPipelinePlugin"]
   Plugin --> Pipeline["Concrete pipeline"]
 ```
 
-If runtime creation fails, inspect `runtime_strategy` first. A valid strategy must have a registered C++ plugin in the binary you are running.
+If runtime creation fails, inspect `runtime_strategy` first. A valid strategy
+must resolve through the generated index to an owning model DSO, and that DSO
+must be present and loadable from the configured model-plugin search paths.
+Loading the DSO registers the plugin; model plugins are not compiled into the
+`trtmc` executable.
 
 ## Header versus config section
 
@@ -108,16 +127,19 @@ Bundles are deployable artifacts, but they are not universally portable binaries
 | TensorRT version and ABI | The runtime checks bundle TensorRT metadata and backend DSO metadata before executing. |
 | GPU and shape profile | TensorRT engines are built for optimization profiles and target capabilities selected at build time. |
 | Tokenizer/preprocessor assets | A bundle must include the assets the runtime plugin expects. |
-| Runtime strategy support | The running binary must include the plugin registered for the bundle strategy. |
+| Runtime strategy support | The runtime installation must provide the owning model DSO and a generated index entry for the bundle strategy. |
 | Config schema | New schema-controlled runtime knobs should have defaults so older bundles can still load when possible. |
 
 ## How to reason about a bundle
 
 Use this checklist when debugging:
 
-1. Does `./build/trtmc inspect` report the expected model, family, precision, and runtime strategy?
+1. Does
+   `PYTHONPATH=python python3 -m tensorrt_model_connect inspect <bundle.trtfb>`
+   report the expected model, family, precision, and runtime strategy?
 2. Does `./build/trtmc inspect` parse the same bundle from the C++ side?
 3. Are the expected engine sections present for the strategy?
-4. Does the runtime binary register the strategy?
+4. Does `src/runtime/models/<owner>/MODEL.toml` declare the strategy, and is
+   its `libtrtmc_model_<owner>.so` available in a model-plugin search path?
 5. Does TensorRT ABI detection select a compatible backend DSO?
 6. Are tokenizer, image, audio, or scheduler assets present for the concrete pipeline?

@@ -2,28 +2,40 @@
 title: Runtime Strategies
 ---
 
-A runtime strategy is the C++ dispatch key stored in bundle `config.json`.
+A runtime strategy is the model-owned C++ dispatch key stored in bundle
+`config.json`. Each key belongs to exactly one
+`src/runtime/models/<owner>/MODEL.toml` and resolves to that owner's
+`libtrtmc_model_<owner>.so`.
 
 ## Strategy categories
 
-| Category | Strategies |
+| Category | Representative model-owned strategies |
 | --- | --- |
-| Text decoder | `decoder_kv_cache`, `decoder_moe` |
-| Recurrent text | `mamba_ssm_recurrent`, `rwkv_recurrent`, `hybrid_mamba_attention` |
-| Encoder and retrieval | `encoder_only`, `embedding`, `reranking`, `neural_operator` |
+| Text decoder | `qwen_decoder_kv_cache`, `llama_decoder_kv_cache`, `mixtral_decoder_moe`, `gpt_oss_decoder_moe` |
+| Recurrent text | `mamba_ssm_recurrent`, `rwkv_recurrent`, `nemotron_h_hybrid_mamba_attention`, `qwen3_5_hybrid_mamba_attention` |
+| Encoder and retrieval | `bert_encoder_only`, `mpnet_encoder_only`, `eagle_vlm_embedding`, `eagle_vlm_reranking` |
 | Seq2seq | `t5_text_to_text`, `marian_translation`, `bart_seq2seq_encoder_decoder`, `m2m_100_seq2seq_encoder_decoder` |
-| Vision and multimodal | `vision_language`, `omni_multimodal` |
-| Speech and audio | `speech_to_text`, `speech_to_text_rnnt`, `text_to_audio_bark`, `text_to_audio_magpie`, `speech_to_speech` |
-| Diffusion | `diffusion_flux`, `diffusion_wan`, `diffusion_zimage`, `diffusion_pixart` |
-| Perception | `segmentation`, `prompted_segmentation`, `object_detection` |
+| Vision and multimodal | `qwen_vl_vision_language`, `internvl_vision_language`, `qwen3_omni_multimodal` |
+| Speech and audio | `whisper_speech_to_text`, `nemotron_speech_streaming_speech_to_text_rnnt`, `text_to_audio_bark`, `personaplex_speech_to_speech` |
+| Diffusion | `diffusion_flux`, `diffusion_wan`, `diffusion_wan2_2_ti2v`, `diffusion_qwen_image`, `diffusion_sana_wm` |
+| Perception | `segformer_segmentation`, `sam_prompted_segmentation`, `sam3_prompted_segmentation`, `timm_vit_image_classification` |
+| Numeric operators | `chronos_bolt_trt`, `patchtsmixer_trt`, `patchtst_trt`, `timesfm_trt` |
 
-## Why strategies are separate from families
+The complete live list is the union of the `runtime_strategies` arrays in the
+runtime model manifests. At this revision it contains 79 unique keys for 78
+runtime owners.
 
-Families describe how to build a model. Strategies describe how to run a bundle. This separation lets multiple families reuse one runtime path while still allowing specialized pipelines for genuinely different execution contracts.
+## Runtime strategy versus task strategy
 
-Examples:
+Do not use a generic task label as a runtime strategy:
 
-- Many decoder families reuse `decoder_kv_cache`.
-- MoE decoder families reuse `decoder_moe`.
-- SegFormer and SAM need different perception strategies.
-- FLUX, Wan, Z-Image, and PixArt use separate diffusion strategies because their component layout and generation loops differ.
+| Layer | Qwen example | LLaMA example |
+| --- | --- | --- |
+| Python family | `qwen` | `llama` |
+| Runtime strategy | `qwen_decoder_kv_cache` | `llama_decoder_kv_cache` |
+| Runtime DSO | `libtrtmc_model_qwen.so` | `libtrtmc_model_llama.so` |
+| E2E task strategy | `text_generation_causal` | `text_generation_causal` |
+
+The task strategy lets generic runners and comparators share a user contract.
+The runtime strategy keeps pipeline code, state, samplers, helpers, and
+dependencies owned by the model.

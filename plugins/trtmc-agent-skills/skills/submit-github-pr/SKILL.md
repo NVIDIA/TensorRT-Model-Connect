@@ -10,10 +10,11 @@ description: >-
 
 ## Ground Rules
 
-- Treat `https://github.com/NVIDIA/TensorRT-Model-Connect.git` and the local
-  `github` remote as the active repository.
+- Treat `https://github.com/NVIDIA/TensorRT-Model-Connect.git` as the active
+  repository. Resolve the matching local remote instead of assuming its name;
+  maintained checkouts commonly call it `github` or `origin`.
 - Target `main`; never push directly to `main`.
-- Push feature branches to `github`.
+- Push feature branches to the resolved GitHub remote.
 - Use `gh` for GitHub PR operations.
 - Use `$write-git-messages` to draft the PR title/body and any commit or squash
   message.
@@ -23,11 +24,27 @@ description: >-
 ## Quick Flow
 
 ```bash
-git fetch github main
+if git remote get-url github >/dev/null 2>&1; then
+  GITHUB_REMOTE=github
+else
+  GITHUB_REMOTE=origin
+fi
+GITHUB_REMOTE_URL=$(git remote get-url "$GITHUB_REMOTE")
+case "$GITHUB_REMOTE_URL" in
+  https://github.com/NVIDIA/TensorRT-Model-Connect|\
+  https://github.com/NVIDIA/TensorRT-Model-Connect.git|\
+  git@github.com:NVIDIA/TensorRT-Model-Connect.git|\
+  ssh://git@github.com/NVIDIA/TensorRT-Model-Connect.git) ;;
+  *)
+    echo "Refusing non-canonical remote: $GITHUB_REMOTE_URL" >&2
+    exit 1
+    ;;
+esac
+git fetch "$GITHUB_REMOTE" main
 git status --short --branch
 git diff --check
-git diff --stat github/main...HEAD
-git push -u github HEAD
+git diff --stat "$GITHUB_REMOTE/main"...HEAD
+git push -u "$GITHUB_REMOTE" HEAD
 ```
 
 Create the PR:
@@ -51,10 +68,10 @@ GH_TOKEN=<redacted> gh pr view --repo NVIDIA/TensorRT-Model-Connect
 ## ADR Check
 
 Before creating the PR, decide whether the diff warrants an Architecture
-Decision Record. Analyze the diff against `github/main`:
+Decision Record. Analyze the diff against the resolved GitHub main:
 
 ```bash
-git diff --name-only github/main...HEAD
+git diff --name-only "$GITHUB_REMOTE/main"...HEAD
 ```
 
 Create an ADR when the diff introduces or substantially changes any of these:
@@ -63,7 +80,7 @@ Create an ADR when the diff introduces or substantially changes any of these:
 |--------|-----------|
 | New runtime strategy | New plugin/strategy registration or runtime pipeline path |
 | New family plugin | New family module under `python/tensorrt_model_connect/families/` |
-| New pipeline class | New `.cpp` or `.h` under `src/runtime/pipelines/` or equivalent runtime path |
+| New pipeline class | New `.cpp` or `.h` under `src/runtime/models/<family>/` |
 | Config schema change | New persisted config field or parser behavior |
 | New E2E task strategy | New harness runner or comparator family |
 | New comparator/reference | New comparator/reference mechanism used by tests |

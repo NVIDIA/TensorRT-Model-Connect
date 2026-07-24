@@ -10,11 +10,14 @@ flowchart TD
   Factory --> Bundle["src/bundle"]
   Factory --> Config["ConfigBundle resolution"]
   Factory --> Backend["BackendLoader"]
+  Factory --> Loader["PipelinePluginLoader"]
+  Loader --> DSO["model-owned DSO"]
   Factory --> Registry["PipelineRegistry"]
+  DSO --> Registry
   Registry --> Plugin["IPipelinePlugin"]
   Backend --> Module["ITrtModule"]
   Plugin --> Pipeline["Concrete IPipeline"]
-  Pipeline --> Core["runtime core<br/>state, sampler, tensors"]
+  Pipeline --> Core["runtime core<br/>device, CUDA, graph helpers"]
   Module --> Core
 ```
 
@@ -26,7 +29,9 @@ Factory responsibilities:
 
 - Read and validate the bundle container.
 - Extract `config.json`.
-- Normalize legacy strategy names such as old generic diffusion or text-to-audio keys.
+- Ask the generated model-plugin index for the strategy owner and load that
+  owner's DSO. Manifest-declared legacy aliases are normalized during this
+  lookup.
 - Resolve layered runtime config.
 - Select and load a backend DSO.
 - Look up the plugin by `runtime_strategy`.
@@ -40,20 +45,28 @@ Factory non-responsibilities:
 
 ## Pipeline registry
 
-`src/runtime/registry/pipeline_registry.cpp` maps runtime strategy strings to `IPipelinePlugin` instances. It is intentionally small and should not learn model-family details.
+`src/runtime/registry/pipeline_plugin_loader.cpp` maps a runtime strategy to one
+manifest owner and DSO using the generated index. The DSO's generated registrar
+invokes the symbols declared by that owner's `MODEL.toml`, then
+`pipeline_registry.cpp` maps the strategy to an `IPipelinePlugin` instance.
+Both units stay free of model-specific switches.
 
 Built-in plugins are registered through generated manifest calls. Ad hoc static registration macros remain for tests and local extensions.
 
 ## Plugins
 
-`src/runtime/models/` files parse strategy-specific config and assemble pipelines. They own the boundary between generic bundle metadata and concrete runtime classes.
+Each `src/runtime/models/<owner>/` directory parses its strategy-specific
+config and assembles pipelines. Its `MODEL.toml` declares its DSO, registrar
+symbols, unique strategy keys, focused tests, and optional config schemas.
 
 Examples:
 
-- `decoder_plugin.cpp` handles `decoder_kv_cache` and `decoder_moe`.
-- `encoder_plugin.cpp` handles encoder, embedding, reranking, and neural operator strategies.
-- `rnnt_plugin.cpp` handles cache-aware streaming ASR.
-- `pixart/plugin.cpp` handles native TRT PixArt bundles.
+- `qwen/plugin.cpp` registers `qwen_decoder_kv_cache`.
+- `bert/plugin.cpp` registers `bert_encoder_only`.
+- `eagle_vlm/plugin.cpp` registers model-owned embedding and reranking
+  strategies.
+- `nemotron_speech_streaming/plugin.cpp` registers cache-aware streaming ASR.
+- `pixart/plugin.cpp` registers `diffusion_pixart`.
 
 Plugin construction typically follows this sequence:
 
@@ -82,8 +95,8 @@ Examples:
 
 | Pipeline | Primary method | Core runtime concerns |
 | --- | --- | --- |
-| `TextGenerationPipeline` | `generate` | Tokenization, prefill/decode loop, KV cache, sampler, stopping. |
-| `VLPipeline` | `generate(prompt, image, ...)` | Image preprocessing, vision engine execution, image embedding injection, text decoding. |
+| `QwenTextGenerationPipeline` | `generate` | Qwen tokenization, prefill/decode loop, KV cache, sampler, stopping. |
+| `QwenVlPipeline`, `InternVlPipeline` | `generate(prompt, image, ...)` | Owner-specific image preprocessing, vision engine execution, image embedding injection, and text decoding. |
 | `WhisperPipeline` | `transcribe` | Audio preprocessing, encoder/decoder execution, token decoding. |
 | `RnntPipeline` | `create_transcription_stream` / streaming transcription | Chunk schedule, feature cache, RNNT state, partial results. |
 | `FluxPipeline`, `WanPipeline`, `ZImagePipeline` | `generate_image` | Prompt encoding, denoising loop, scheduler, VAE decode. |
@@ -96,26 +109,18 @@ The public `IPipeline` interface uses default throwing methods. That keeps the A
 Core runtime units own reusable device-side execution concerns:
 
 - `DeviceTensor`
-- `KvCache`
-- family-owned recurrent state classes
-- `Sampler`
-- `FlowMatchEulerScheduler`
-- CUDA streams and buffers
-- TensorRT engine lifecycle wrappers
+- distributed-runtime setup
+- pipeline pooling
+- CUDA and TensorRT graph helpers
+- step-state utilities
+- shared CUDA streams, buffers, and TensorRT lifecycle helpers
 
-```mermaid
-flowchart LR
-  Pipeline["Concrete pipeline"] --> Tensor["Tensor / DeviceTensor"]
-  Pipeline --> State["IInferenceState"]
-  Pipeline --> Sampler["ISampler"]
-  Pipeline --> Scheduler["Schedulers"]
-  Pipeline --> Module["ITrtModule"]
-  State --> Tensor
-  Sampler --> Tensor
-  Module --> Tensor
-```
-
-These units are where shared request-time mechanics should live. For example, a new cache policy should extend the inference-state layer rather than being hard-coded in one decoder plugin.
+Model-specific caches, inference-state classes, samplers, schedulers, and
+pipelines live under `src/runtime/models/<owner>/`. They are not shared core
+interfaces merely because several models implement similar loops. Move code to
+`src/runtime/core/` or `src/runtime/domains/` only after multiple real owners
+need an assumption-free abstraction; the current shared domains contain only a
+small diffusion-math helper plus kernel build support.
 
 ## Backend DSOs
 

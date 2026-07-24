@@ -20,6 +20,25 @@ Schema sources live under:
 - `python/tensorrt_model_connect/runtime_config/schemas/`
 - `cmake/trtmc_config_schemas.cmake`
 
+Model-owned schemas instead live beside their owners:
+
+- Python: `python/tensorrt_model_connect/families/<family>/runtime_config_schema.py`
+- C++: `src/runtime/models/<owner>/config_schema.cpp`
+- Registration: the owner's `runtime_config_schemas` entry in
+  `src/runtime/models/<owner>/MODEL.toml`
+
+Python build-time config resolution rejects unknown namespaces, fields, and
+invalid values. The C++ CLI also resolves explicit `--config`/`--set` input
+before dispatch and exits nonzero on an invalid value. Direct
+`PipelineFactory` callers have a different current behavior: the factory
+catches a resolution error, prints
+`[trtmc.config] Failed to resolve runtime config`, and continues with
+`runtime_config == nullptr`; the owning plugin then chooses its local fallback
+behavior. Successful resolution writes
+`<bundle>.effective_config.json`; a failed factory resolution does not write a
+new effective-config file. Callers using the factory API must treat that
+warning as an error if silent fallback is unacceptable.
+
 ## Backend DSOs
 
 The runtime loads TensorRT backends dynamically:

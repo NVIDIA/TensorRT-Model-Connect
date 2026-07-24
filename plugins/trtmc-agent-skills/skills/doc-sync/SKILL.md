@@ -22,26 +22,58 @@ files being described before editing prose.
 
 ## Change Set
 
-Read the last scan SHA:
+Resolve the configured remote that points at the canonical GitHub repository.
+Prefer the repo-standard `github` name, but support checkouts where the same
+repository is configured only as `origin`:
 
 ```bash
+DOC_SYNC_REMOTE="github"
+if ! git remote get-url "$DOC_SYNC_REMOTE" >/dev/null 2>&1; then
+  DOC_SYNC_REMOTE="origin"
+fi
+DOC_SYNC_REMOTE_URL=$(git remote get-url "$DOC_SYNC_REMOTE")
+case "$DOC_SYNC_REMOTE_URL" in
+  https://github.com/NVIDIA/TensorRT-Model-Connect|\
+  https://github.com/NVIDIA/TensorRT-Model-Connect.git|\
+  git@github.com:NVIDIA/TensorRT-Model-Connect.git|\
+  ssh://git@github.com/NVIDIA/TensorRT-Model-Connect.git) ;;
+  *)
+    echo "Refusing non-canonical remote: $DOC_SYNC_REMOTE_URL" >&2
+    exit 1
+    ;;
+esac
+
+git fetch "$DOC_SYNC_REMOTE" main
+CURRENT_SHA=$(git rev-parse "$DOC_SYNC_REMOTE/main")
+```
+
+Read the last scan marker only after fetching, and accept it only when it names
+a commit in the current canonical-main history:
+
+```bash
+DOC_SYNC_MARKER="website/docs/context/.last_scan_sha"
 LAST_SHA=""
-if [ -f website/docs/context/.last_scan_sha ]; then
-  LAST_SHA=$(cat website/docs/context/.last_scan_sha)
+if [ -s "$DOC_SYNC_MARKER" ]; then
+  read -r LAST_SHA < "$DOC_SYNC_MARKER"
+  if ! git cat-file -e "$LAST_SHA^{commit}" 2>/dev/null ||
+     ! git merge-base --is-ancestor "$LAST_SHA" "$CURRENT_SHA"; then
+    echo "Ignoring invalid or unrelated doc-sync marker: $LAST_SHA" >&2
+    LAST_SHA=""
+  fi
 fi
 ```
 
-For a first scan, bootstrap from the oldest commit in the last 7 days:
+For a first scan or invalid marker, use the latest commit at or before the
+seven-day boundary. If the repository is younger than that, use its root
+commit:
 
 ```bash
-LAST_SHA=$(git log --since="7 days ago" --format="%H" --reverse | head -1)
-```
-
-Fetch current GitHub main:
-
-```bash
-git fetch github main
-CURRENT_SHA=$(git rev-parse github/main)
+if [ -z "$LAST_SHA" ]; then
+  LAST_SHA=$(git rev-list --max-count=1 --before="7 days ago" "$CURRENT_SHA")
+fi
+if [ -z "$LAST_SHA" ]; then
+  LAST_SHA=$(git rev-list --max-parents=0 "$CURRENT_SHA" | tail -n 1)
+fi
 ```
 
 If there is no change set, update the marker only when that marker update is
@@ -54,6 +86,13 @@ git log --oneline "$LAST_SHA".."$CURRENT_SHA"
 git diff --name-only "$LAST_SHA".."$CURRENT_SHA"
 ```
 
+Do not advance the marker until all requested phases and validations succeed.
+When a marker update is explicitly in scope, write the exact scanned SHA:
+
+```bash
+printf '%s\n' "$CURRENT_SHA" > "$DOC_SYNC_MARKER"
+```
+
 ## Branch And PR Flow
 
 Create one branch per phase that produces changes:
@@ -63,20 +102,20 @@ PHASE_NAME="adr"  # or "wiki" or "traceability"
 DATE=$(date +%Y-%m-%d)
 BRANCH="doc-sync/${PHASE_NAME}-${DATE}"
 
-git fetch github main
-git switch -c "$BRANCH" github/main
+git fetch "$DOC_SYNC_REMOTE" main
+git switch -c "$BRANCH" "$DOC_SYNC_REMOTE/main"
 ```
 
 Skip a phase if the remote branch already exists:
 
 ```bash
-git ls-remote --heads github "$BRANCH"
+git ls-remote --heads "$DOC_SYNC_REMOTE" "$BRANCH"
 ```
 
 Push and open a GitHub PR:
 
 ```bash
-git push -u github HEAD
+git push -u "$DOC_SYNC_REMOTE" HEAD
 gh pr create \
   --repo NVIDIA/TensorRT-Model-Connect \
   --base main \
@@ -97,8 +136,8 @@ Checks:
 - Parse frontmatter: `number`, `title`, `status`, `date`, `source_commits`,
   and `superseded_by`.
 - Verify backtick-quoted file paths such as `src/...`,
-  `tensorrt_model_connect/...`, `tests/...`, and `include/...` exist. For moved
-  paths, use `git log --follow --diff-filter=R -- <old_path>`.
+  `python/tensorrt_model_connect/...`, `tests/...`, and `include/...` exist.
+  For moved paths, use `git log --follow --diff-filter=R -- <old_path>`.
 - Verify backtick-quoted class, function, and strategy names exist.
 - Update numeric claims, including runtime strategy count, family plugin count,
   and E2E manifest count.
@@ -113,10 +152,15 @@ Checks:
 Ground truth commands:
 
 ```bash
-rg -n "PluginRegistrar" src/runtime/plugins --glob "*.cpp"
-find python/tensorrt_model_connect/families/ -name "*.py" \
-  -not -name "__init__.py" -not -name "base.py" | sort
-find tests/e2e/models/ -name "*.json" | sort
+rg -n "PluginRegistrar|trtmc_register_model_plugin" \
+  include/trtmc/runtime src/runtime/registry src/runtime/models \
+  --glob "*.h" --glob "*.cpp"
+find python/tensorrt_model_connect/families -mindepth 2 -maxdepth 2 \
+  \( -name "MODEL.toml" -o -name "plugin.py" \) | sort
+find src/runtime/models -mindepth 2 -maxdepth 2 \
+  \( -name "MODEL.toml" -o -name "plugin.cpp" \) | sort
+find tests/e2e/models -mindepth 3 -maxdepth 3 \
+  -path "*/manifests/*.json" | sort
 ```
 
 PR body should summarize changed ADR numbers, status changes, index updates, and
@@ -129,15 +173,34 @@ Scan all markdown files in `website/docs/wiki/`.
 Collect reusable ground truth first:
 
 ```bash
-rg -n "PluginRegistrar" src/runtime/plugins --glob "*.cpp"
-find python/tensorrt_model_connect/families/ -name "*.py" \
-  -not -name "__init__.py" -not -name "base.py" | sort
-find tests/e2e/models/ -name "*.json" | sort
-find src/runtime/pipelines/ -name "*.h" -o -name "*.cpp" | sort
-find tests/builder/ tests/tools/ -name "test_*.py" | sort
-find tests/cpp/ -name "test_*.cpp" | sort
-find src/ include/ -type f \( -name "*.cpp" -o -name "*.h" \) | sort
-find python/tensorrt_model_connect/ -type f -name "*.py" | sort
+# One family root is counted once even though it normally owns both files.
+find python/tensorrt_model_connect/families -mindepth 2 -maxdepth 2 \
+  \( -name "MODEL.toml" -o -name "plugin.py" \) \
+  -printf '%h\n' | sort -u
+
+find src/runtime/models -mindepth 2 -maxdepth 2 -name "MODEL.toml" | sort
+find tests/e2e/models -mindepth 3 -maxdepth 3 \
+  -path "*/manifests/*.json" | sort
+find src/runtime/models src/runtime/registry -type f \
+  \( -name "*.h" -o -name "*.cpp" \) | sort
+find tests/builder tests/tools -type f -name "test_*.py" | sort
+find tests/cpp -type f -name "test_*.cpp" | sort
+find src include -type f \( -name "*.cpp" -o -name "*.h" \) | sort
+find python/tensorrt_model_connect -type f -name "*.py" | sort
+```
+
+Compute count claims from the same authoritative sets:
+
+```bash
+find python/tensorrt_model_connect/families -mindepth 2 -maxdepth 2 \
+  \( -name "MODEL.toml" -o -name "plugin.py" \) \
+  -printf '%h\n' | sort -u | wc -l
+find src/runtime/models -mindepth 2 -maxdepth 2 -name "MODEL.toml" | wc -l
+find tests/e2e/models -mindepth 3 -maxdepth 3 \
+  -path "*/manifests/*.json" | wc -l
+find tests/builder -type f -name "test_*.py" | wc -l
+find tests/tools -type f -name "test_*.py" | wc -l
+find tests/cpp -type f -name "test_*.cpp" | wc -l
 ```
 
 Rules:
@@ -178,9 +241,11 @@ rg -n "Trace:|Trace ID:" tests/cpp --glob "*.cpp"
 Scan E2E manifests and source files:
 
 ```bash
-find tests/e2e/models/ -name "*.json" | sort
-find src/ -name "*.cpp" -o -name "*.h" | sort
-find python/tensorrt_model_connect/ -name "*.py" -not -name "__init__.py" | sort
+find tests/e2e/models -mindepth 3 -maxdepth 3 \
+  -path "*/manifests/*.json" | sort
+find src -type f \( -name "*.cpp" -o -name "*.h" \) | sort
+find python/tensorrt_model_connect -type f -name "*.py" \
+  -not -name "__init__.py" | sort
 ```
 
 Fixes:
@@ -202,6 +267,8 @@ fits, read the source and matrix context before creating or assigning one.
 Run at minimum:
 
 ```bash
+python3 tools/check_doc_file_references.py --strict --tracked
+python3 tools/check_doc_commands.py
 git diff --check
 ```
 

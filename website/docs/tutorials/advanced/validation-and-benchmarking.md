@@ -19,8 +19,10 @@ flowchart TB
 ## Focused E2E validation
 
 ```bash
-pytest tests/test_e2e.py::test_e2e[qwen3-0.6b-fp16] -v \
-  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+ENGINE_DIR=/tmp/trtmc-engines
+mkdir -p "${ENGINE_DIR}"
+pytest 'tests/test_e2e.py::test_e2e[qwen3-0.6b-fp16]' -v \
+  --engine-dir "${ENGINE_DIR}" \
   --trtmc-binary ./build/trtmc
 ```
 
@@ -39,12 +41,16 @@ Read the manifest before debugging a failure. It tells you what the test is tryi
 ## C++ unit tests
 
 ```bash
-ctest --test-dir build --output-on-failure -R 'test_pipeline_registry|test_pipeline_api'
+ctest --test-dir build --output-on-failure --no-tests=error \
+  -R 'test_pipeline_registry|test_pipeline_api'
 ```
 
 Use this when changing pipeline interfaces, registries, plugin manifests, bundle parsing, or runtime core behavior.
 
-C++ unit tests should make runtime failures local. For example, if `TextGenerationPipeline` fails an E2E, the unit tests should help separate registry failure, bundle parsing, tokenizer behavior, cache lifecycle, and sampler behavior.
+C++ unit tests should make runtime failures local. For example, if a
+model-owned text-generation pipeline fails an E2E, the unit tests should help
+separate DSO/registry failure, bundle parsing, tokenizer behavior, cache
+lifecycle, and sampler behavior.
 
 ## Builder tests
 
@@ -88,13 +94,24 @@ flowchart LR
 
 These numbers answer different questions. Do not compare them as if they measure the same thing.
 
-For raw engine enqueue timing, use the dedicated engine timing path when available:
+The native `run` command reports a standard timing line with
+`prefill_ms`, `decode_ms`, and `total_ms`; no timing environment variable is
+required. For repeatable CLI-level measurements, use the same benchmark
+command with fixed prompt, warmup count, iteration count, and decoding flags:
 
 ```bash
-TRTMC_ENGINE_TIMING=1 ./build/trtmc run /tmp/qwen3.trtfb \
+./build/trtmc run /tmp/qwen3.trtfb \
   --prompt "Benchmark prompt" \
-  --max-new-tokens 64
+  --max-new-tokens 64 \
+  --greedy \
+  --benchmark 20 \
+  --warmup 3
 ```
+
+This timing includes the runtime's measured generation phases; it is not a raw
+TensorRT enqueue-only benchmark. Use a model-specific profiler or benchmark
+worker when engine-only timing is required, and identify that tool explicitly
+in the report.
 
 ## Validation taxonomy
 

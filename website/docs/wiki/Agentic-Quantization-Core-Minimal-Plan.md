@@ -1,178 +1,56 @@
-# Agentic Quantization Core: Minimal Plan
+# Quantization Core Implementation Note
 
-Status: implemented v1 slice
+:::info Implementation snapshot
 
-This document describes the minimum quantization architecture needed for
-agent-driven rollout without coupling model builders to each other.
+This page replaces the earlier forward-looking plan with the current shared
+contract. Actual format support remains family-dependent and must be proved by
+the selected family's build and E2E evidence.
 
-## Shared Core
+:::
 
-The shared core is intentionally small:
+## Shared core
 
-1. `QuantPlan`
-   - canonical description of one build attempt
-   - normalizes format aliases like `int8 -> int8_sq`
-   - records `base_precision`, `quant_format`, `scale_source`,
-     `scale_artifact`, and calibration budget
+`python/tensorrt_model_connect/quantization/` owns:
 
-2. `ScaleMap`
-   - canonical per-op scale storage
-   - still keyed by builder seam names in the current standard decoder path
+- `QuantPlan`: normalized requested format, scale source, calibration budget,
+  and exclusions
+- `QuantContext`: build-time quantization state passed to a compatible family
+  builder
+- `ScaleMap` and scale providers
+- format adapters/emitters
+- registry and profile helpers
 
-3. `FormatKernel`
-   - shared QDQ emitters in `python/tensorrt_model_connect/quantization/formats.py`
-   - owns format math, not model semantics
+The build CLI accepts:
 
-4. `ScaleProvider`
-   - shared scale acquisition layer
-   - v1 uses:
-     - `PrecomputedJsonProvider`
-     - `ModelOptCalibrationProvider`
+```bash
+PYTHONPATH=python python3 -m tensorrt_model_connect build --help
+```
 
-5. `Validation Contract`
-   - E2E manifests now accept a generic `quantization` block
-   - orchestrator converts that block into `./build/trtmc build` args
+The parser currently exposes `--quantize` values `fp8`, `int8`, `int8_sq`,
+`int4`, `int4_awq`, `nvfp4`, and `w4a8`, plus scale and calibration options.
+Parser acceptance is not a claim that every family supports every format.
 
-Authoritative shared-core files for quantization:
+## Ownership rule
 
-- `python/tensorrt_model_connect/quantization/plan.py`
-- `python/tensorrt_model_connect/quantization/context.py`
-- `python/tensorrt_model_connect/quantization/formats.py`
-- `python/tensorrt_model_connect/quantization/profile.py`
-- `python/tensorrt_model_connect/quantization/scales.py`
-- `python/tensorrt_model_connect/quantization/scale_providers.py`
-- `python/tensorrt_model_connect/quantization/adapters.py`
-- `python/tensorrt_model_connect/quantization/__init__.py`
-- `python/tensorrt_model_connect/graph_blocks.py`
-- `python/tensorrt_model_connect/graph_ops.py`
-- `python/tensorrt_model_connect/families/qwen/standard_decoder_builder.py`
+The shared core owns format mechanics. A family owns:
 
-## Family-Local Layer
+- which formats it accepts
+- model-specific exclusions and calibration adapters
+- graph seams where quantization is applied
+- pre-quantized checkpoint interpretation
+- tensor-parallel compatibility
+- parity, health, and performance evidence
 
-Family ownership stays local:
+The engine builder passes a quantization context only to plugins whose build
+entry point accepts it. That signature check is not a global support gate: a
+plugin can currently accept and ignore the context. Therefore parser
+acceptance and even a successful build do not prove that quantization was
+applied. Each family should reject unsupported combinations explicitly, and
+qualification must verify the resulting bundle metadata and task output.
 
-1. `FamilyQuantAdapter`
-   - bridges reference model loading, calibration inputs, and scale-name
-     mapping
-   - provided via `plugin.quant_adapter(format_name)` when a family needs
-     custom calibration behavior
+## Evidence
 
-2. `FamilyQuantSeam`
-   - the family builder decides where quantization is allowed
-   - the shared format layer decides how QDQ is emitted
-
-For the current v1 slice, the standard decoder path already had the seam
-through `quant_ctx`, so only the adapter boundary had to be added.
-
-## Ownership Standard
-
-This section is normative. It defines the boundary that parallel agents are
-expected to follow.
-
-1. Family agent default scope
-   - A family agent defaults to family-local files only.
-   - Examples:
-     - `python/tensorrt_model_connect/families/<family>.py`
-     - family-specific builder files
-     - family-specific manifests and tests
-
-2. Core agent scope
-   - A core agent owns the shared-core files listed above.
-   - Family agents should not edit those files during normal model onboarding.
-
-3. Escalation rule
-   - A task becomes a core task only when it adds or fixes a shared primitive:
-     - new quantization format
-     - new shared op seam
-     - shared scale contract change
-     - shared dtype/runtime/reference bug
-
-4. Shared-core hygiene
-   - Shared quantization code must not import specific family plugins.
-   - Shared quantization code must not branch on concrete family names.
-   - Family-specific quantization policy belongs in plugin hooks such as
-     `quant_adapter()` and `quant_exclude_patterns()`.
-
-5. Review rule
-   - If a family rollout appears to require a shared-core edit, that edit
-     should be isolated and reviewed as a core delta, not hidden inside the
-     family change.
-
-## What Was Implemented
-
-Code changes in this branch:
-
-- added `python/tensorrt_model_connect/quantization/plan.py`
-- added `python/tensorrt_model_connect/quantization/adapters.py`
-- refactored `ModelOptCalibrationProvider` to use a calibration adapter
-  instead of hardcoding `AutoModelForCausalLM` logic directly
-- taught `build_quant_context()` to consume a `QuantPlan`
-- normalized CLI quantization aliases
-- taught the E2E manifest/orchestrator path to consume a generic
-  `quantization` block
-- added a qwen FP8 E2E manifest
-
-## Validation Result
-
-Validated locally with `Qwen/Qwen3-0.6B`.
-
-Working path:
-
-- `FP8 + FP16 base`
-- ModelOpt calibration through the new default decoder adapter
-- bundle build succeeded
-- bundle inspect showed:
-  - baseline bundle: `3.1G`
-  - quantized bundle: `1.6G`
-  - precision: `fp16`
-  - quantization: `fp8`
-- direct runtime generation produced non-empty text
-- E2E case `qwen3-0.6b-fp8` passed end to end
-
-Known limitation discovered during validation:
-
-- `FP8 + BF16 base` is still broken in the existing standard decoder builder
-  path because some tensors remain `Half` while cache tensors are `BFloat16`
-  at concatenation boundaries
-- this is a builder precision bug, not a quantization contract bug
-
-## Why This Is The Minimum Viable Shape
-
-This split is small enough to scale:
-
-- adding a new family should only require a family-local adapter and local
-  builder seam work
-- adding a new format should only require shared format-kernel work
-- adding a new scale source should only require provider work
-
-This avoids the two main failure modes:
-
-1. a global quant context that every family must edit
-2. format math duplicated independently inside every builder
-
-It also keeps parallel rollout sane:
-
-- most new families should land without touching shared core
-- shared core stays small enough for a small number of core agents to own
-- family-local work remains embarrassingly parallel
-
-## Test Enforcement
-
-The repo should enforce this standard in CI:
-
-- shared quantization core files must exist as a small fixed set
-- shared quantization core must not import concrete family modules
-- shared quantization core must not contain family-name branches
-- family-specific quantization hooks must live in the family plugin
-
-## Next Steps
-
-Priority order:
-
-1. fix BF16 threading in the standard decoder path so `FP8 + BF16 base`
-   works as intended
-2. add a diffusion family adapter and manifest using the same `QuantPlan`
-   and `quantization` manifest contract
-3. wire pre-quantized checkpoint extraction into the main provider path
-4. extend coverage reporting so agents can detect "built but silently mostly
-   fallbacked" quantized bundles
+For a quantized model, retain the exact model revision, format, scale source,
+calibration data/version, build command, bundle, comparison artifact, hardware,
+and performance artifact when performance is claimed. A generic unit test of
+the format core is not model qualification.

@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Auto-discover family plugins from this package.
+"""Resolve family plugins from model-owned package descriptors.
 
-Any .py file or package in this directory (excluding _-prefixed and base.py)
-that exposes a module-level ``plugin`` attribute is automatically registered.
-Adding a new family = drop a .py file or package, zero edits to shared files.
+The supported discovery path indexes ``*/MODEL.toml``, selects the owning
+package directory, and imports its module-level ``plugin`` attribute. A legacy
+fallback can scan loose modules/packages for compatibility, but that scan is
+not a complete family definition and does not replace the required Python,
+runtime, and E2E ownership descriptors.
 """
 
 from __future__ import annotations
@@ -188,51 +190,44 @@ def _load_family_metadata() -> list[_FamilyMetadata]:
         normalized_prefixes = frozenset(_normalize_key(value) for value in prefixes)
         compact_prefixes = frozenset(_compact_key(value) for value in prefixes)
 
-        metadata.append(_FamilyMetadata(
-            id=plugin_id,
-            import_module=index_path.parent.name,
-            aliases=normalized_aliases,
-            compact_aliases=compact_aliases,
-            prefixes=normalized_prefixes,
-            compact_prefixes=compact_prefixes,
-            capabilities=_metadata_strings(raw.get("capabilities")),
-            architecture_patterns=_metadata_strings(raw.get("architecture_patterns")),
-            diffusion_pipeline_classes=_metadata_strings(
-                raw.get("diffusion_pipeline_classes")
-            ),
-            nemo_target_patterns=_metadata_strings(
-                raw.get("nemo_target_patterns")
-            ),
-            nemo_model_type=raw.get("nemo_model_type", "")
-            if isinstance(raw.get("nemo_model_type"), str) else "",
-            nemo_archive_adapter=raw.get("nemo_archive_adapter", "")
-            if isinstance(raw.get("nemo_archive_adapter"), str) else "",
-            hf_allow_patterns=tuple(_metadata_strings(raw.get("hf_allow_patterns"))),
-            hf_required_files=tuple(
-                _metadata_strings(raw.get("hf_required_files"))
-            ),
-            hf_warm_dependencies=tuple(
-                _metadata_strings(raw.get("hf_warm_dependencies"))
-            ),
-            hf_warm_files=tuple(
-                _metadata_strings(raw.get("hf_warm_files"))
-            ),
-            config_adapter=raw.get("config_adapter", "")
-            if isinstance(raw.get("config_adapter"), str) else "",
-            model_dir_adapter=raw.get("model_dir_adapter", "")
-            if isinstance(raw.get("model_dir_adapter"), str) else "",
-            debug_runner=raw.get("debug_runner", "")
-            if isinstance(raw.get("debug_runner"), str) else "",
-            debug_runtime_strategies=_metadata_strings(
-                raw.get("debug_runtime_strategies")
-            ),
-            python_profile_specs=tuple(
-                _metadata_strings(raw.get("python_profile_specs"))
-            ),
-            default_execution_profiles=tuple(
-                _metadata_strings(raw.get("default_execution_profiles"))
-            ),
-        ))
+        metadata.append(
+            _FamilyMetadata(
+                id=plugin_id,
+                import_module=index_path.parent.name,
+                aliases=normalized_aliases,
+                compact_aliases=compact_aliases,
+                prefixes=normalized_prefixes,
+                compact_prefixes=compact_prefixes,
+                capabilities=_metadata_strings(raw.get("capabilities")),
+                architecture_patterns=_metadata_strings(raw.get("architecture_patterns")),
+                diffusion_pipeline_classes=_metadata_strings(raw.get("diffusion_pipeline_classes")),
+                nemo_target_patterns=_metadata_strings(raw.get("nemo_target_patterns")),
+                nemo_model_type=raw.get("nemo_model_type", "")
+                if isinstance(raw.get("nemo_model_type"), str)
+                else "",
+                nemo_archive_adapter=raw.get("nemo_archive_adapter", "")
+                if isinstance(raw.get("nemo_archive_adapter"), str)
+                else "",
+                hf_allow_patterns=tuple(_metadata_strings(raw.get("hf_allow_patterns"))),
+                hf_required_files=tuple(_metadata_strings(raw.get("hf_required_files"))),
+                hf_warm_dependencies=tuple(_metadata_strings(raw.get("hf_warm_dependencies"))),
+                hf_warm_files=tuple(_metadata_strings(raw.get("hf_warm_files"))),
+                config_adapter=raw.get("config_adapter", "")
+                if isinstance(raw.get("config_adapter"), str)
+                else "",
+                model_dir_adapter=raw.get("model_dir_adapter", "")
+                if isinstance(raw.get("model_dir_adapter"), str)
+                else "",
+                debug_runner=raw.get("debug_runner", "")
+                if isinstance(raw.get("debug_runner"), str)
+                else "",
+                debug_runtime_strategies=_metadata_strings(raw.get("debug_runtime_strategies")),
+                python_profile_specs=tuple(_metadata_strings(raw.get("python_profile_specs"))),
+                default_execution_profiles=tuple(
+                    _metadata_strings(raw.get("default_execution_profiles"))
+                ),
+            )
+        )
 
     _METADATA_CACHE = metadata
     return metadata
@@ -319,13 +314,11 @@ def _candidate_module_names(model_type: str) -> list[str]:
     prefix_scored: list[tuple[int, str, _ModuleCandidate]] = []
     for key in _candidate_prefix_keys(normalized):
         prefix_scored.extend(
-            (len(key), candidate.id, candidate)
-            for candidate in index.prefixes.get(key, ())
+            (len(key), candidate.id, candidate) for candidate in index.prefixes.get(key, ())
         )
     for key in _candidate_prefix_keys(compact):
         prefix_scored.extend(
-            (len(key), candidate.id, candidate)
-            for candidate in index.compact_prefixes.get(key, ())
+            (len(key), candidate.id, candidate) for candidate in index.compact_prefixes.get(key, ())
         )
     for _, _, candidate in sorted(prefix_scored, key=lambda item: (-item[0], item[1])):
         _append_candidate_modules(modules, seen, (candidate,))
@@ -427,9 +420,7 @@ def family_hf_allow_patterns() -> list[str]:
 def _metadata_pair(spec: str, field_name: str) -> tuple[str, str]:
     key, sep, value = spec.partition("|")
     if not sep or not key or not value:
-        raise ValueError(
-            f"Invalid {field_name} entry {spec!r}; expected 'key|value'"
-        )
+        raise ValueError(f"Invalid {field_name} entry {spec!r}; expected 'key|value'")
     return key, value
 
 
@@ -437,9 +428,7 @@ def _metadata_triple(spec: str, field_name: str) -> tuple[str, str, str]:
     first, sep, rest = spec.partition("|")
     second, sep2, third = rest.partition("|")
     if not sep or not sep2 or not first or not second or not third:
-        raise ValueError(
-            f"Invalid {field_name} entry {spec!r}; expected 'name|hf_id|filename'"
-        )
+        raise ValueError(f"Invalid {field_name} entry {spec!r}; expected 'name|hf_id|filename'")
     return first, second, third
 
 
@@ -449,9 +438,7 @@ def _metadata_bool(value: str, field_name: str) -> bool:
         return True
     if normalized in {"0", "false", "no", "off"}:
         return False
-    raise ValueError(
-        f"Invalid {field_name} bool {value!r}; expected true or false"
-    )
+    raise ValueError(f"Invalid {field_name} bool {value!r}; expected true or false")
 
 
 def family_default_execution_profiles(family: object) -> dict[str, str]:
@@ -485,13 +472,10 @@ def family_python_profile_specs() -> dict[str, dict[str, object]]:
                 )
             name, requirements, verification_script_file = parts[:3]
             system_site_packages = (
-                _metadata_bool(parts[3], "python_profile_specs")
-                if len(parts) == 4 else True
+                _metadata_bool(parts[3], "python_profile_specs") if len(parts) == 4 else True
             )
             if name in profiles:
-                raise ValueError(
-                    f"Python profile {name!r} is declared by multiple families"
-                )
+                raise ValueError(f"Python profile {name!r} is declared by multiple families")
             profiles[name] = {
                 "kind": "venv",
                 "requirements": requirements,
@@ -517,8 +501,7 @@ def family_hf_warm_dependencies(family: object) -> list[tuple[str, str]]:
     if not metadata:
         return []
     return [
-        _metadata_pair(spec, "hf_warm_dependencies")
-        for spec in metadata[0].hf_warm_dependencies
+        _metadata_pair(spec, "hf_warm_dependencies") for spec in metadata[0].hf_warm_dependencies
     ]
 
 
@@ -527,18 +510,14 @@ def family_hf_warm_files(family: object) -> list[tuple[str, str, str]]:
     metadata = _matching_family_metadata(family)
     if not metadata:
         return []
-    return [
-        _metadata_triple(spec, "hf_warm_files")
-        for spec in metadata[0].hf_warm_files
-    ]
+    return [_metadata_triple(spec, "hf_warm_files") for spec in metadata[0].hf_warm_files]
 
 
 def _load_metadata_callable(meta: _FamilyMetadata, spec: str):
     module_spec, sep, attr_name = spec.partition("|")
     if not sep or not module_spec or not attr_name:
         raise ValueError(
-            f"Invalid metadata callable {spec!r} for family {meta.id}; "
-            "expected module.py|function"
+            f"Invalid metadata callable {spec!r} for family {meta.id}; expected module.py|function"
         )
     module_name = module_spec[:-3] if module_spec.endswith(".py") else module_spec
     module_name = module_name.replace("/", ".")
@@ -553,17 +532,17 @@ def _load_metadata_callable_from_file(meta: _FamilyMetadata, spec: str):
     module_spec, sep, attr_name = spec.partition("|")
     if not sep or not module_spec or not attr_name:
         raise ValueError(
-            f"Invalid metadata callable {spec!r} for family {meta.id}; "
-            "expected module.py|function"
+            f"Invalid metadata callable {spec!r} for family {meta.id}; expected module.py|function"
         )
     module_name = module_spec[:-3] if module_spec.endswith(".py") else module_spec
-    module_path = Path(__file__).parent / meta.import_module / Path(
-        *module_name.split(".")
-    ).with_suffix(".py")
+    module_path = (
+        Path(__file__).parent
+        / meta.import_module
+        / Path(*module_name.split(".")).with_suffix(".py")
+    )
     if not module_path.is_file():
         raise FileNotFoundError(
-            f"Metadata callable module for family {meta.id} does not exist: "
-            f"{module_path}"
+            f"Metadata callable module for family {meta.id} does not exist: {module_path}"
         )
     spec_obj = importlib.util.spec_from_file_location(
         f"_trtmc_family_{meta.import_module}_{module_name.replace('.', '_')}",
@@ -604,8 +583,7 @@ def resolve_family_model_dir(model_dir: str | Path) -> str | None:
     for meta in _load_family_metadata():
         if not meta.model_dir_adapter:
             continue
-        adapter = _load_metadata_callable_from_file(
-            meta, meta.model_dir_adapter)
+        adapter = _load_metadata_callable_from_file(meta, meta.model_dir_adapter)
         result = adapter(path)
         if result is None:
             continue
@@ -696,15 +674,8 @@ def _matching_family_metadata(model_type: object) -> list[_FamilyMetadata]:
     modules = _candidate_module_names(model_type_str)
     if not modules:
         return []
-    by_module = {
-        meta.import_module: meta
-        for meta in _load_family_metadata()
-    }
-    return [
-        by_module[module]
-        for module in modules
-        if module in by_module
-    ]
+    by_module = {meta.import_module: meta for meta in _load_family_metadata()}
+    return [by_module[module] for module in modules if module in by_module]
 
 
 def family_has_capability(model_type: object, capability: str) -> bool:
@@ -831,7 +802,7 @@ def find_diffusion_plugin(pipeline_class: str) -> "FamilyPlugin | None":
     """
     if not isinstance(_ALL_PLUGINS, _LazyPluginList):
         for p in _ALL_PLUGINS:
-            classes = getattr(p, 'pipeline_classes', None)
+            classes = getattr(p, "pipeline_classes", None)
             if classes and pipeline_class in classes:
                 return p
         return None
@@ -840,7 +811,7 @@ def find_diffusion_plugin(pipeline_class: str) -> "FamilyPlugin | None":
         if pipeline_class not in meta.diffusion_pipeline_classes:
             continue
         plugin = _load_plugin_from_module(meta.import_module)
-        classes = getattr(plugin, 'pipeline_classes', None) if plugin is not None else None
+        classes = getattr(plugin, "pipeline_classes", None) if plugin is not None else None
         if classes and pipeline_class in classes:
             return plugin
     return None

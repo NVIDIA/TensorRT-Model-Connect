@@ -2,6 +2,16 @@
 
 Status: In progress
 
+:::caution Proposal, not current runtime support
+
+This document is an implementation plan. Unchecked exit criteria are not
+claims of support or qualification, and the example A100/Edge-LLM commands
+require the private dependencies and target hardware named in the plan.
+Current supported runtime behavior is defined by model-owned descriptors and
+the normal native/delegated runtime tests, not by the desired end state below.
+
+:::
+
 Goal reference:
 `website/docs/context/optimized-runtime-family-adapter-plan.md`
 
@@ -378,7 +388,10 @@ process-global compatibility registry.
 
 ## Implementation Work
 
-Deliver one focused replacement feature PR from `github/main`:
+The historical plan called for one focused replacement feature PR based on the
+GitHub `main` branch. Remote names are checkout-local, so automation must
+resolve and validate whichever remote points to the canonical GitHub
+repository. The planned work was:
 
 1. **Minimal generic discovery change**
    - Discover adapter roots only inside the already-resolved model family.

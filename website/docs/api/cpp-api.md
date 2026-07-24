@@ -29,7 +29,8 @@ options.runtime_cache_path = "/tmp/trtmc-rtx.cache";
 options.cuda_graphs = true;
 options.kv_cache_size_bytes = 512ULL * 1000ULL * 1000ULL;
 options.backend_search_paths = {"/opt/trtmc/backends"};
-options.set_tokens = {"runtime.max_batch_size=1"};
+options.model_plugin_search_paths = {"/opt/trtmc/models"};
+options.set_tokens = {"runtime.prefer_gpu_greedy=true"};
 
 auto pipe = trtmc::load("/tmp/model.trtfb", options);
 ```
@@ -43,7 +44,13 @@ auto pipe = trtmc::load("/tmp/model.trtfb", options);
 | `AudioResult` | `generate_audio()`, `speak()` |
 | `EmbeddingResult` | `embed()`, `encode()`, `solve()` |
 | `SegmentResult` | `segment()` |
+| `PromptedSegmentationResult` | `segment_prompted()`, `segment_prompted_text()` |
+| `ClassificationResult` | `classify()` |
 | `TextEmbedding` | `encode_text()` for diffusion text encoders |
+
+`rerank()` returns a `float`, and `detect()` returns serialized detection JSON
+as `std::string`. `generate_image_batch()` returns
+`std::vector<ImageResult>`.
 
 ## GenerateConfig
 
@@ -109,17 +116,34 @@ legacy max-token/sample-rate overload is still supported.
 
 ## C ABI
 
-The C ABI is for FFI and backward-compatible integrations:
+The current C-linkage subset is a starting point for C++ shims and FFI
+experiments:
 
 ```cpp
 TrtmcPipelineOptions opts{};
-opts.max_new_tokens = 50;
 opts.hf_python = "/opt/venv/bin/python";
 
 trtmc::IPipeline* pipe = trtmc_create_pipeline_ex("/tmp/model.trtfb", &opts);
-const char* err = trtmc_last_error();
+if (pipe == nullptr) {
+    const char* err = trtmc_last_error();
+    // Report err and stop.
+}
 const char* version = trtmc_version();
 int has_trt = trtmc_has_trt();
 ```
 
-The C ABI currently exposes creation and query entry points. The returned pointer is produced by the C++ runtime; FFI users should wrap it in a C++ ownership shim or add a matching destroy function before exposing it across a pure-C or foreign-language boundary.
+The C-linkage surface currently exposes pipeline creation, error/version
+queries, batched image generation through `trtmc_generate_batch()`, and
+per-image cleanup through `trtmc_image_result_free()`. The caller owns the
+output array, and must free each successful result's pixel buffer.
+
+There is no exported pipeline-destroy function. Creation returns an
+`IPipeline*`, and the public header uses C++ types even for its C-linkage
+declarations. Do not expose that handle as a complete pure-C or
+foreign-language ownership contract; wrap it in C++ or add a matching destroy
+entry point first.
+
+`TrtmcPipelineOptions::hf_python`, `runtime_cache`, and `cuda_graphs` are
+consumed during creation. The current implementation does not consume the
+legacy `max_new_tokens` or `image_path` fields; generation settings belong on
+the request API.

@@ -120,13 +120,7 @@ def test_model_local_e2e_plugin_discovery(tmp_path: Path):
     mod = _import_checker()
 
     runners_dir = (
-        tmp_path
-        / "tests"
-        / "e2e"
-        / "models"
-        / "example_decoder"
-        / "e2e_plugins"
-        / "runners"
+        tmp_path / "tests" / "e2e" / "models" / "example_decoder" / "e2e_plugins" / "runners"
     )
     runners_dir.mkdir(parents=True)
     (runners_dir / "text_generation.py").write_text(
@@ -138,13 +132,7 @@ class TextGenerationCausalRunner:
         encoding="utf-8",
     )
     comparators_dir = (
-        tmp_path
-        / "tests"
-        / "e2e"
-        / "models"
-        / "example_decoder"
-        / "e2e_plugins"
-        / "comparators"
+        tmp_path / "tests" / "e2e" / "models" / "example_decoder" / "e2e_plugins" / "comparators"
     )
     comparators_dir.mkdir(parents=True)
     (comparators_dir / "text.py").write_text(
@@ -162,6 +150,38 @@ class TextComparator:
     }
     assert mod.extract_comparator_classes_by_task_strategy(models_dir) == {
         "text_generation_causal": {"TextComparator"},
+    }
+
+
+def test_model_local_e2e_entrypoint_wrapper_discovery(tmp_path: Path):
+    mod = _import_checker()
+
+    plugin_root = tmp_path / "tests" / "e2e" / "models" / "example_speech" / "e2e_plugins"
+    runners_dir = plugin_root / "runners"
+    runners_dir.mkdir(parents=True)
+    (runners_dir / "audio.py").write_text(
+        """
+class RuntimeSpecificRunner:
+    @property
+    def strategy_name(self):
+        return "example_speech_runtime"
+        """,
+        encoding="utf-8",
+    )
+    (plugin_root / "runner.py").write_text(
+        """
+class ActiveSpeechRunner:
+    @property
+    def strategy_name(self):
+        return "speech_to_text"
+        """,
+        encoding="utf-8",
+    )
+
+    models_dir = tmp_path / "tests" / "e2e" / "models"
+    assert mod.extract_runner_classes_by_task_strategy(models_dir) == {
+        "example_speech_runtime": {"RuntimeSpecificRunner"},
+        "speech_to_text": {"ActiveSpeechRunner"},
     }
 
 
@@ -207,6 +227,30 @@ def test_validate_matrix_data_detects_runtime_source_mismatch():
     )
 
     assert any("missing runtime strategies from runtime sources" in message for message in errors)
+
+
+def test_validate_matrix_data_rejects_source_less_matrix_row():
+    mod = _import_checker()
+    errors = mod.validate_matrix_data(
+        matrix={
+            "retired_runtime": {
+                "task_strategy": "text_generation_causal",
+                "cli_commands": ["run"],
+                "runner_class": "TextGenerationCausalRunner",
+                "comparator_class": "TextComparator",
+                "diff_framework_check_classes": [],
+                "diff_framework_exemption": "No active diff check.",
+                "performance_mode": "decode",
+            }
+        },
+        cpp_runtime_strategies=set(),
+        runtime_to_task_strategy={},
+        diff_check_classes=set(),
+        runner_classes_by_task={"text_generation_causal": {"TextGenerationCausalRunner"}},
+        comparator_classes_by_task={"text_generation_causal": {"TextComparator"}},
+    )
+
+    assert any("absent from runtime sources and E2E manifests" in message for message in errors)
 
 
 def test_validate_matrix_paths_supports_builder_source_extraction(tmp_path: Path):

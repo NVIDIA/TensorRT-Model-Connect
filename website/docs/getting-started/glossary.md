@@ -15,7 +15,7 @@ Use this page whenever a tutorial uses an unfamiliar deployment or inference ter
 | Tensor | A typed rectangular block of numbers. | Engine inputs and outputs are tensors such as token IDs, masks, logits, pixels, or audio features. |
 | Shape | Tensor dimensions. | Examples: `[batch, sequence]` for token IDs or `[channels, height, width]` for image data. |
 | Token | A numeric ID representing part of text. | Prompts are tokenized before they enter the engine. Output token IDs are decoded back to text. |
-| Logits | Raw next-token scores before sampling. | The decoder engine returns logits, and `ISampler` chooses the next token. |
+| Logits | Raw next-token scores before sampling. | A decoder engine returns logits, and the model-owned sampler chooses the next token. |
 | Sampler | The rule for choosing a token from logits. | Greedy, top-k, top-p, temperature, and seed settings control it. |
 | Prefill | The first decoder pass over the prompt. | It fills attention state for all prompt tokens. |
 | Decode | The repeated one-token generation loop. | It reuses cached state and appends one token at a time. |
@@ -43,7 +43,8 @@ Use this page whenever a tutorial uses an unfamiliar deployment or inference ter
 | Python builder | Build-time conversion tool. | `trtmc build` reads checkpoints, builds engine plans, and writes `.trtfb` bundles. |
 | C++ runtime | Request-time execution library and CLI. | `trtmc`, source-built `./build/trtmc`, and `trtmc::load()` load bundles and run task APIs. |
 | Family plugin | Python adapter for a model family. | Examples: `qwen`, `llama`, `whisper`, `flux`, `pixart`. It handles config and weights. |
-| Runtime strategy | C++ dispatch key in bundle metadata. | Examples: `decoder_kv_cache`, `speech_to_text`, `diffusion_flux`, `diffusion_pixart`. |
+| Runtime strategy | Model-owned C++ dispatch key in bundle metadata. | Examples: `qwen_decoder_kv_cache`, `whisper_speech_to_text`, `diffusion_flux`, `diffusion_pixart`. |
+| Task strategy | E2E/user-contract category shared by models with the same result shape. | Examples: `text_generation_causal`, `speech_to_text`, `vision_language_generation`, `diffusion_media_generation`. It does not select a runtime DSO. |
 | Pipeline | Task-oriented runtime implementation. | A concrete `IPipeline` handles generation, transcription, segmentation, solve, or another task. |
 | Registry | Lookup table for runtime plugins. | `PipelineRegistry` maps `runtime_strategy` to an `IPipelinePlugin`. |
 | E2E manifest | Canonical test description. | Files in `tests/e2e/models/` define model IDs, task type, expected runtime strategy, prompts, and tolerances. |

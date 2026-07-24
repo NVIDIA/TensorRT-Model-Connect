@@ -94,8 +94,11 @@ How to fix:
 
 ## E2E Manifests
 
-If the model has an E2E manifest, reuse it. If not, create one in
-`tests/e2e/models/`. For persistent FP16 variants, use a distinct manifest name:
+If the model has an E2E manifest, reuse it. If not, create one under
+`tests/e2e/models/<family>/manifests/` and list it in the owning
+`tests/e2e/models/<family>/MODEL.toml`. For persistent FP16 variants, use a
+distinct manifest name and copy the closest current manifest with the same
+`task_strategy`:
 
 ```json
 {
@@ -103,13 +106,28 @@ If the model has an E2E manifest, reuse it. If not, create one in
   "hf_id": "<org>/<model>",
   "bundle": "<model-name>-fp16.trtfb",
   "family": "<family>",
-  "runtime_strategy": "<strategy>",
+  "runtime_strategy": "<family_owned_strategy>",
+  "task_strategy": "<task_strategy>",
   "precision": "fp16",
   "max_cache_length": 256,
-  "prompt": "test prompt",
-  "max_new_tokens": 20
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "<model-name>-fp16",
+      "trace_id": "IT-E2E-<MODEL>-FP16-01",
+      "reference_family": "<reference_family>",
+      "user_contract": "<user_contract>",
+      "prompt": "test prompt",
+      "max_new_tokens": 20
+    }
+  ]
 }
 ```
+
+The manifest loader requires a known runtime/task-strategy pair and a non-empty
+`testcases` list. Audio, vision, diffusion, time-series, and other non-text
+tasks use contract-specific testcase fields, so do not copy the text example
+without comparing it to a current manifest for that task.
 
 Only relax thresholds when repeated evidence shows the lower-precision output is
 valid but not bitwise or token-identical to the FP32/HF reference. Record the

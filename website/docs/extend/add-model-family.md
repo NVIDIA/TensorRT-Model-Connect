@@ -2,105 +2,225 @@
 title: Add a Model Family
 ---
 
-Add a Python family plugin when the model can reuse an existing runtime strategy.
+A current model family is a three-sided, model-owned unit:
 
-## 1. Create a plugin file
+1. A Python build package.
+2. A C++ runtime model DSO with its own strategy key.
+3. An E2E family index with one or more concrete manifests.
 
-Create `python/tensorrt_model_connect/families/<family>.py`:
+Even if the new model implements an existing public task such as causal text
+generation, do not reuse a retired generic runtime key such as
+`decoder_kv_cache`. Give the family a concrete key such as
+`example_decoder_kv_cache` and keep its runtime implementation in its own DSO.
+Shared tooling groups compatible models through capabilities and
+`task_strategy`.
 
-```python
-from __future__ import annotations
+## 1. Choose the closest existing owner
 
-from ..checkpoint_mapper import WeightDict, load_standard_weights
-from ..config import ModelConfig
-from ..standard_decoder_builder import build_standard_decoder_engine
+Choose an existing family with the same checkpoint layout and request-time
+contract. Compare all three roots before copying:
 
-
-class YiPlugin:
-    name = "yi"
-    runtime_strategy = "decoder_kv_cache"
-
-    def matches(self, model_type: str) -> bool:
-        return model_type.lower().startswith("yi")
-
-    def load_weights(
-        self,
-        model_dir: str,
-        config: ModelConfig,
-        *,
-        precision: str = "fp32",
-    ) -> WeightDict:
-        return load_standard_weights(model_dir, config, precision=precision)
-
-    def build_engine(
-        self,
-        config: ModelConfig,
-        weights: WeightDict,
-        max_cache_length: int,
-        *,
-        precision: str = "fp32",
-        quant_ctx=None,
-        verbose: bool = False,
-    ) -> bytes:
-        return build_standard_decoder_engine(
-            config,
-            weights,
-            max_cache_length,
-            precision=precision,
-            quant_ctx=quant_ctx,
-            verbose=verbose,
-        )
-
-
-plugin = YiPlugin()
+```text
+python/tensorrt_model_connect/families/qwen/
+src/runtime/models/qwen/
+tests/e2e/models/qwen/
 ```
 
-Auto-discovery registers modules with a module-level `plugin` attribute. No central Python registration edit is required.
+Copy only the files the new family actually needs. Do not import or include a
+sibling family's model-owned implementation in production code.
 
-## 2. Build a smoke bundle
+`scripts/new_family.py` is only a preliminary Python bootstrap in this
+revision. It creates `plugin.py` and `__init__.py`, but it does not create the
+required `MODEL.toml`, family-local builder modules, runtime DSO, or E2E
+descriptor. It is not a complete onboarding command.
 
-```bash
-./build/trtmc build <hf-repo-or-local-dir> -o /tmp/family-smoke.trtfb --max-cache-length 256
+## 2. Add the Python family package
+
+Create:
+
+```text
+python/tensorrt_model_connect/families/<family>/
+  MODEL.toml
+  __init__.py
+  plugin.py
+  config.py
+  checkpoint_mapper.py
+  <family-owned builders and graph helpers>
 ```
 
-## 3. Validate
+A minimal Python descriptor is:
 
-```bash
-./scripts/validate_family.sh <hf-repo-or-local-dir>
+```toml
+id = "example"
+plugin = "example"
+module = "plugin"
+aliases = ["example", "ExampleModel"]
+prefixes = ["example"]
 ```
 
-If the model requires remote tokenizer or modeling code, pass the relevant trust flag through the validation flow.
+Use `architecture_patterns` for architecture-name matching,
+`diffusion_pipeline_classes` for Diffusers discovery, or the other metadata
+fields only when the family needs them. Discovery starts from
+`families/*/MODEL.toml`, narrows candidates using this metadata, and then
+imports the selected module-level `plugin`.
 
-## 4. Add an E2E manifest
+`plugin.py` must provide:
 
-Create `tests/e2e/models/<family>/manifests/<model-name>.json` with:
+- `name`, matching the logical family ID;
+- `runtime_strategy`, matching exactly one strategy in the C++ runtime
+  descriptor;
+- `matches(model_type)`;
+- `load_weights(...)`;
+- `build_engine(...)` or the modality-specific component hooks used by the
+  closest family.
 
-- `name`
-- `hf_id`
-- `bundle`
-- `family`
-- `runtime_strategy`
-- task input fields
-- reference backend
+Keep config adapters, checkpoint mapping, graph helpers, builders, calibration
+policy, and optional debug hooks in this family package. The old repository-root
+`graph_ops.py`, `graph_blocks.py`, and `standard_decoder_builder.py` ownership
+model has been retired.
 
-Use nearby manifests with the same task contract as the template.
-List the manifest in `tests/e2e/models/<family>/MODEL.toml` under `test_manifests`.
+## 3. Add the runtime model DSO
 
-Each family directory also owns its E2E runner surface:
+Create:
 
-- `tests/e2e/models/<family>/runner.py`
-- `tests/e2e/models/<family>/test_<family>_e2e.py`
-- `tests/e2e/models/<family>/e2e_plugins/*.py`
-- `tests/e2e/models/<family>/thresholds/<model-name>.json`
-- optional `tests/e2e/models/<family>/waives.txt`
+```text
+src/runtime/models/<runtime-owner>/
+  MODEL.toml
+  plugin.cpp
+  pipeline.h
+  pipeline.cpp
+  <model-owned state, sampler, helpers, and CUDA sources>
+```
 
-For a new family, copy the runner and test shim from the closest existing
-family and update only the family name in the docstrings and filename. Put any
-family-specific runner, reference, or comparator overrides in `e2e_plugins/`
-with module-level `runner`, `reference`, or `comparator` objects. Validate with:
+Use the same name for `<family>` and `<runtime-owner>` unless an existing
+compatibility boundary requires a different physical owner. A minimal runtime
+descriptor is:
+
+```toml
+id = "example"
+runtime_library = "libtrtmc_model_example.so"
+runtime_plugins = ["plugin.cpp|register_example_plugin"]
+runtime_strategies = ["example_decoder_kv_cache"]
+```
+
+The plugin source registers the same key:
+
+```cpp
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(
+    register_example_plugin,
+    ExamplePlugin,
+    "example_decoder_kv_cache");
+```
+
+Do not edit a central plugin list. CMake discovers the descriptor, creates the
+`trtmc_model_example` target, generates its exported model entrypoint, and adds
+the strategy-to-DSO index used by the loader.
+
+If the runtime needs model-owned C++ tests or a model-owned config schema,
+declare them in this same `MODEL.toml` with `runtime_tests` or
+`runtime_config_schemas`.
+
+## 4. Add the E2E ownership root
+
+Create:
+
+```text
+tests/e2e/models/<family>/
+  MODEL.toml
+  manifests/<case-name>.json
+  runner.py
+  e2e_plugins/
+  <focused family tests and optional thresholds>
+```
+
+The E2E index declares every JSON manifest and the defaults for each task
+strategy:
+
+```toml
+id = "example"
+plugin = "example"
+test_manifests = [
+  "manifests/example-small-fp16.json",
+]
+
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]
+```
+
+Use an existing JSON manifest for the same task contract as the schema
+reference. Every new manifest needs, at minimum, a unique `name`, concrete
+`hf_id`, output `bundle`, logical `family`, exact model-owned
+`runtime_strategy`, `task_strategy`, precision/build settings, and a non-empty
+`testcases` array. Each testcase must name a real registered reference family
+and user contract; do not invent placeholder oracle names.
+
+The E2E `task_strategy` is the generic contract (`text_generation_causal`,
+`vision_language_generation`, `speech_to_text`, and so on). It is intentionally
+different from the model-owned runtime dispatch key.
+
+## 5. Validate ownership and build the model target
+
+From the repository root:
 
 ```bash
-pytest tests/e2e/models/<family> --e2e-model <model-name> -v \
+python3 tools/model_ci.py validate
+
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target trtmc trtmc_model_example -j
+```
+
+`model_ci.py validate` must report the new logical model and no descriptor
+errors. CMake configure must reject missing sources, duplicate strategies, or
+invalid runtime manifest entries.
+
+## 6. Build, inspect, and isolate the smoke bundle
+
+Set the concrete model reference once, then use the public CLI:
+
+```bash
+MODEL_REF=example-org/example-small
+
+./build/trtmc build "$MODEL_REF" \
+  -o /tmp/example-small.trtfb \
+  --precision fp16 \
+  --max-cache-length 256
+
+./build/trtmc inspect /tmp/example-small.trtfb --list-engines
+./scripts/validate_family.sh "$MODEL_REF" \
+  --binary ./build/trtmc \
+  --isolate-model-plugin
+```
+
+Inspect the bundle before inference. Confirm that `family`,
+`runtime_strategy`, section layout, precision, and TensorRT metadata match the
+three descriptors. `--isolate-model-plugin` proves the requested strategy can
+be satisfied by the owning DSO rather than a stale installed plugin.
+
+Add `--trust-remote-code` only after reviewing the model repository and only
+when the checkpoint actually requires it.
+
+## 7. Run the declared E2E case
+
+Use the manifest `name`, not the filename stem:
+
+```bash
+E2E_MODEL=example-small-fp16
+FAMILY=example
+ENGINE_DIR=/tmp/trtmc-example-engines
+
+PYTHONPATH=python:. pytest \
+  "tests/e2e/models/${FAMILY}/test_${FAMILY}_e2e.py::test_model_e2e[${E2E_MODEL}]" \
+  -v \
+  --e2e-model "$E2E_MODEL" \
+  --engine-dir "$ENGINE_DIR" \
   --trtmc-binary ./build/trtmc \
-  --model-plugin-dir ./build/models
+  --model-plugin-dir ./build/models \
+  --rebuild-engines
 ```
+
+The acceptance evidence is the exact-revision E2E result and its comparison
+artifacts, not the presence of the three descriptors alone.

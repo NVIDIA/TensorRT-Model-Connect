@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: TensorRT-Model-Connect Docs Validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate documentation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install validator test dependency
+        run: python3 -m pip install --disable-pip-version-check --quiet pytest
+
+      - name: Test documentation validators
+        run: >-
+          python3 -m pytest
+          tests/tools/test_check_doc_file_references.py
+          tests/tools/test_check_doc_commands.py
+          tests/tools/test_runtime_strategy_matrix_checker.py
+          -q
+
+      - name: Validate file references and current counts
+        run: python3 tools/check_doc_file_references.py --strict --tracked
+
+      - name: Validate documented shell commands
+        run: python3 tools/check_doc_commands.py
+
+      - name: Validate the live runtime strategy matrix
+        run: PYTHONPATH=python:. python3 tools/check_runtime_strategy_matrix.py
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install website dependencies
+        working-directory: website
+        run: npm ci
+
+      - name: Build Docusaurus site
+        working-directory: website
+        run: npm run build

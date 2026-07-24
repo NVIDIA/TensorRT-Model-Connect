@@ -24,8 +24,8 @@ class FamilyPlugin(Protocol):
     Optional attributes:
         runtime_strategy: Backend dispatch key for C++ runtime.
             Must be a concrete runtime strategy owned by a runtime model
-            manifest, for example "qwen_decoder_kv_cache", "ssm_recurrent",
-            or "qwen_vl_vision_language".
+            manifest, for example "qwen_decoder_kv_cache",
+            "mamba_ssm_recurrent", or "qwen_vl_vision_language".
         runtime_capabilities: Capability labels such as "decoder_kv" that let
             shared build orchestration apply generic contracts without naming
             model-owned strategy strings.
@@ -46,15 +46,22 @@ class FamilyPlugin(Protocol):
         ...
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
-        *, precision: str = "fp32",
+        self,
+        model_dir: str,
+        config: ModelConfig,
+        *,
+        precision: str = "fp32",
     ) -> WeightDict:
         """Load and preprocess weights for this family."""
         ...
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
         quant_ctx: QuantContext | None = None,
         verbose: bool = False,
     ) -> bytes:
@@ -68,8 +75,13 @@ class FamilyPlugin(Protocol):
     def quant_exclude_patterns(self, format_name: str) -> list[str]:
         """Weight name patterns to exclude from quantization."""
         return [
-            "embedding", "final_norm", "w_out", "lm_head",
-            "*.input_norm", "*.post_attn_norm", "*_norm*",
+            "embedding",
+            "final_norm",
+            "w_out",
+            "lm_head",
+            "*.input_norm",
+            "*.post_attn_norm",
+            "*_norm*",
         ]
 
     def calibration_data(self, format_name: str) -> list[str] | None:
@@ -89,8 +101,13 @@ class FamilyPlugin(Protocol):
     # ------------------------------------------------------------------
 
     def build_vision_engine(
-        self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, precision: str = "fp32", verbose: bool = False,
+        self,
+        model_dir: str,
+        config: ModelConfig,
+        weights: WeightDict,
+        *,
+        precision: str = "fp32",
+        verbose: bool = False,
     ) -> bytes | None:
         """Build TRT engine plan bytes for the vision encoder.
 
@@ -128,8 +145,13 @@ class FamilyPlugin(Protocol):
     # ------------------------------------------------------------------
 
     def build_components(
-        self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, precision: str = "fp32", verbose: bool = False,
+        self,
+        model_dir: str,
+        config: ModelConfig,
+        weights: WeightDict,
+        *,
+        precision: str = "fp32",
+        verbose: bool = False,
     ) -> dict | None:
         """Build all diffusion engine components.
 
@@ -144,7 +166,10 @@ class FamilyPlugin(Protocol):
         return None
 
     def diffusion_bundle_sections(
-        self, components: dict, *, parallel_config=None,
+        self,
+        components: dict,
+        *,
+        parallel_config=None,
     ) -> list[tuple[str, bytes]] | None:
         """Return bundle sections for family-owned diffusion components.
 
@@ -156,7 +181,10 @@ class FamilyPlugin(Protocol):
         return None
 
     def diffusion_bundle_config(
-        self, config: ModelConfig, *, components: dict,
+        self,
+        config: ModelConfig,
+        *,
+        components: dict,
     ) -> dict | None:
         """Return component-derived diffusion bundle config fields.
 
@@ -167,7 +195,10 @@ class FamilyPlugin(Protocol):
         return None
 
     def diffusion_tokenizer_add_special_tokens(
-        self, model_dir_path, *, detect_tokenizer_add_special_tokens,
+        self,
+        model_dir_path,
+        *,
+        detect_tokenizer_add_special_tokens,
     ) -> bool:
         """Return whether this diffusion family bundles add-special tokenizer behavior.
 
@@ -177,7 +208,10 @@ class FamilyPlugin(Protocol):
         return False
 
     def diffusion_tokenizer_bundle_sections(
-        self, model_dir_path, *, ensure_tokenizer_json,
+        self,
+        model_dir_path,
+        *,
+        ensure_tokenizer_json,
     ) -> list[tuple[str, bytes]] | None:
         """Return tokenizer bundle sections for this diffusion family.
 
@@ -217,7 +251,9 @@ class FamilyPlugin(Protocol):
         return None
 
     def fp8_calibrate(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> dict[str, dict[str, float]] | None:
         """Run FP8 calibration and return per-layer scales.
 

@@ -1,5 +1,16 @@
 # Config Registry — Implementation Status
 
+:::info Historical implementation log — 2026-04-20
+
+This page preserves the decisions, intermediate commands, and evidence from
+the config-registry implementation loop. It is not a current contributor
+guide, and “next tick” text describes the state at that point in the log.
+Current config behavior is defined by `src/runtime/config/`, model-owned
+runtime schemas, and the CLI parser. Historical paths are identified as such
+where their files were later retired.
+
+:::
+
 Loop prompt: declarative, namespaced, self-registering config registry that
 replaces every `TRTMC_*` env var on the `triattention` branch. Bundle becomes
 a defaults provider, not ground truth.
@@ -789,7 +800,8 @@ Commit chain:
 - C++ mirror (decode_policy header/source, historical branch note) + schema manifest
   entry. Second schema to land; the manifest pattern continues to be a
   one-line edit per new cluster.
-- Reader migration (`python/tensorrt_model_connect/graph_blocks.py`):
+- Reader migration (the root-level graph-block helper used on the historical
+  branch and later retired):
   `force_manual_attention = os.getenv(...)` deleted; replaced with a
   new `force_manual_attention: bool = False` kwarg on
   `add_attention_block`. `import os` dropped (unused).

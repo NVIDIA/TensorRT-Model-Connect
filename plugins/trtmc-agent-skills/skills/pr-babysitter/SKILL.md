@@ -129,6 +129,7 @@ Use an explicit merge command only after those checks pass. Do not include
 ```bash
 gh pr merge <number> \
   --repo NVIDIA/TensorRT-Model-Connect \
+  --match-head-commit "<verified-head-sha>" \
   --squash \
   --delete-branch \
   --subject "<reviewed squash title>" \

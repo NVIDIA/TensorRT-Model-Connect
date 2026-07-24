@@ -56,7 +56,7 @@ Diffusion inference is iterative like text generation, but the loop is over deno
 ## Wan video generation
 
 ```bash
-./build/trtmc build Wan-AI/Wan2.1-T2V-1.3B \
+./build/trtmc build Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
   -o /tmp/wan21.trtfb \
   --precision fp16 \
   --video-height 480 \
@@ -84,7 +84,13 @@ flowchart LR
   Post --> Result["SegmentResult or detection JSON"]
 ```
 
-Inspect these bundles for `segmentation`, `prompted_segmentation`, or `object_detection` runtime strategies.
+Current segmentation owners use qualified strategies: SegFormer emits
+`segformer_segmentation`, while SAM and SAM3 emit
+`sam_prompted_segmentation` and `sam3_prompted_segmentation`. The public API
+and CLI also expose `detect()`, but the current model descriptors do not claim
+an object-detection runtime strategy. Do not present that API surface as a
+supported model until a model-owned descriptor and E2E manifest provide the
+evidence.
 
 ## What you should understand now
 

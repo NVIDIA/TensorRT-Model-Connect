@@ -3,9 +3,6 @@ title: Learning Path
 description: A course-style path for learning TensorRT-Model-Connect from inference fundamentals to extension work.
 ---
 
-import useBaseUrl from '@docusaurus/useBaseUrl';
-
-
 Use this page like a course handout. Each stage tells you what to read, what to do, what evidence to record, and what you should be able to explain before moving on.
 
 <div className="trtmc-handout-meta">
@@ -27,12 +24,14 @@ Use this page like a course handout. Each stage tells you what to read, what to 
   </div>
 </div>
 
-<figure className="trtmc-diagram trtmc-diagram--wide">
-  <div className="trtmc-diagram__media">
-    <img src={useBaseUrl('/img/diagrams/trtmc-course-map.svg')} alt="Course-style learning map for TensorRT-Model-Connect" />
-  </div>
-  <figcaption>Each stage has a reading target, required task, and proof point so readers can check understanding as they go.</figcaption>
-</figure>
+```mermaid
+flowchart LR
+  F1["F1: vocabulary"] --> F2["F2: build, inspect, run"]
+  F2 --> E1["E1: loader and runtime"]
+  E1 --> E2["E2: source ownership"]
+  E2 --> D1["D1: compare modalities"]
+  D1 --> C1["C1: extend and validate"]
+```
 
 ## Information Boxes
 
@@ -78,8 +77,9 @@ After completing the path, you should be able to:
 - Describe why TensorRT engines are build artifacts, not raw checkpoints.
 - Build and inspect a `.trtfb` bundle.
 - Trace a request from `trtmc::load()` to a concrete `IPipeline`.
-- Explain the difference between Python family plugins and C++ runtime strategies.
-- Decide where to add a model family, runtime plugin, pipeline, config schema, or test.
+- Explain the difference between a Python family, a model-owned C++ runtime
+  strategy, and an E2E task strategy.
+- Plan the complete Python/runtime/E2E slice for a new supported model.
 
 ## Stage F1: Learn the Vocabulary
 
@@ -178,7 +178,10 @@ You are ready to move on when you can distinguish model knowledge, artifact evid
 :::
 
 :::danger Required task
-For text, audio, image, diffusion, time-series, segmentation, and detection, name the preprocessing, engine components, postprocessing, and public `IPipeline` method.
+For each task represented by a current E2E manifest, name the preprocessing,
+engine components, postprocessing, and public `IPipeline` method. Treat
+`detect()` as an API surface, not supported-model evidence, until a
+model-owned object-detection descriptor and E2E manifest exist.
 :::
 
 :::tip Progress check
@@ -197,16 +200,16 @@ You are ready to move on when you can explain which differences are task differe
 :::
 
 :::danger Required task
-Fill out the extension decision tree for your change. Name the builder tests, C++ tests, E2E manifest, and documentation page that should prove the behavior.
+For a hypothetical new model, name its Python family descriptor/package,
+unique runtime strategy and DSO owner, C++ tests, E2E descriptor/manifest, and
+documentation evidence. For an existing model change, identify which part of
+that vertical slice owns the behavior.
 :::
 
 :::tip Progress check
 You finish the course when you can explain the implementation plan before opening an editor, and the plan names the owning abstraction for every change.
 :::
 
-<figure className="trtmc-diagram trtmc-diagram--wide">
-  <div className="trtmc-diagram__media">
-    <img src={useBaseUrl('/img/diagrams/trtmc-extension-decision.svg')} alt="Extension decision tree" />
-  </div>
-  <figcaption>Pick the smallest ownership boundary that can support the behavior, then prove it with the matching tests.</figcaption>
-</figure>
+The extension is ready for review only when its descriptors agree, its
+model-owned DSO loads the emitted strategy, and the exact-model E2E evidence
+uses the intended oracle and thresholds.
