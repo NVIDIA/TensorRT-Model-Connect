@@ -28,6 +28,7 @@ from .worker import (
     find_worker,
     run_worker,
     worker_backend_abi,
+    worker_metadata,
 )
 
 
@@ -180,6 +181,7 @@ def _environment(worker: Path) -> dict[str, Any]:
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "worker": str(worker),
         "runtime_backend_abi": worker_backend_abi(worker),
+        "worker_build": worker_metadata(worker)["build"],
         "git_commit": commit,
         "source_revision": explicit_revision or commit,
     }

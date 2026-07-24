@@ -22,12 +22,21 @@
 #include <utility>
 #include <vector>
 
+#ifndef TRTMC_BUILD_CONFIGURATION
+#define TRTMC_BUILD_CONFIGURATION "unknown"
+#endif
+
+#ifndef TRTMC_SOURCE_REVISION
+#define TRTMC_SOURCE_REVISION "unknown"
+#endif
+
 namespace {
 
 using Json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
 
 struct Arguments {
+    bool metadata{false};
     std::string request_path;
     std::string output_path;
 };
@@ -38,8 +47,13 @@ Arguments parse_arguments(int argc, char** argv) {
         const std::string argument = argv[index];
         if (argument == "--help" || argument == "-h") {
             std::cout
-                << "Usage: trtmc_benchmark_worker --request REQUEST.json --output RESULT.json\n";
+                << "Usage: trtmc_benchmark_worker --metadata\n"
+                << "       trtmc_benchmark_worker --request REQUEST.json --output RESULT.json\n";
             std::exit(0);
+        }
+        if (argument == "--metadata") {
+            arguments.metadata = true;
+            continue;
         }
         if (argument != "--request" && argument != "--output") {
             throw std::runtime_error("unknown argument: " + argument);
@@ -51,10 +65,27 @@ Arguments parse_arguments(int argc, char** argv) {
             argument == "--request" ? arguments.request_path : arguments.output_path;
         destination = argv[index];
     }
+    if (arguments.metadata) {
+        if (!arguments.request_path.empty() || !arguments.output_path.empty()) {
+            throw std::runtime_error("--metadata cannot be combined with request arguments");
+        }
+        return arguments;
+    }
     if (arguments.request_path.empty() || arguments.output_path.empty()) {
         throw std::runtime_error("--request and --output are required");
     }
     return arguments;
+}
+
+Json worker_metadata() {
+    return {
+        {"schema_version", "trtmc.benchmark-worker-metadata/v1"},
+        {"build",
+         {
+             {"configuration", TRTMC_BUILD_CONFIGURATION},
+             {"source_revision", TRTMC_SOURCE_REVISION},
+         }},
+    };
 }
 
 Json read_json(const std::string& path) {
@@ -1015,6 +1046,10 @@ int main(int argc, char** argv) {
     std::string output_path;
     try {
         const Arguments arguments = parse_arguments(argc, argv);
+        if (arguments.metadata) {
+            std::cout << worker_metadata().dump(2) << '\n';
+            return 0;
+        }
         output_path = arguments.output_path;
         write_json(output_path, execute(read_json(arguments.request_path)));
         return 0;

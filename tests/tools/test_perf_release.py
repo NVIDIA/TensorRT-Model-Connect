@@ -50,6 +50,7 @@ TASK_ADAPTERS = {
     "timesfm.solve": "pytorch-timeseries",
     "timm_vit.classify": "hf-transformers-vision",
     "wan_t2v.generate_image": "hf-diffusers",
+    "wan2_2_ti2v.generate_image": "hf-diffusers",
     "whisper.transcribe": "hf-transformers-asr",
     "z_image.generate_image": "hf-diffusers",
 }
@@ -59,7 +60,7 @@ def _write_fake_trtmc(path: Path) -> None:
     manifest = REPOSITORY / "tests/e2e/models/gpt2/manifests/distilgpt2.json"
     path.write_text(
         f"""#!/usr/bin/env python3
-import argparse, json
+import argparse, json, subprocess
 from pathlib import Path
 p=argparse.ArgumentParser()
 p.add_argument('command')
@@ -105,12 +106,34 @@ result={{'schema_version':'trtmc.benchmark-run/v1','run_id':'fake','status':'com
  'measurement_policy':{{'timing_scope':timing_scope,
                        'input_preparation_included':timing_scope=='public_pipeline_call_wall',
                        'asset_loading_included':asset_loading}},
- 'environment':{{'gpu':'fake'}},
+ 'environment':{{'gpu':'fake',
+                'worker_build':json.loads(subprocess.run(
+                    [a.worker, '--metadata'], check=True, capture_output=True, text=True
+                ).stdout)['build']}},
  'cells':[{{'status':'completed','name':'default','model':'distilgpt2','operation':'generate',
            'case_digest':'candidate-digest','artifact_dir':artifact.name,
            'metrics':{{'sample_count':a.iterations,'latency_ms':{{'p50':10.5}}}},
            'output_summary':{{'text':'ok','token_ids':[7,8]}}}}]}}
 (a.output/'result.json').write_text(json.dumps(result))
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _write_fake_worker(path: Path, revision: str) -> None:
+    path.write_text(
+        f"""#!/usr/bin/env python3
+import json, sys
+if sys.argv[1:] != ['--metadata']:
+    raise SystemExit('expected --metadata')
+print(json.dumps({{
+    'schema_version': 'trtmc.benchmark-worker-metadata/v1',
+    'build': {{
+        'configuration': 'Release',
+        'source_revision': {revision!r},
+    }},
+}}))
 """,
         encoding="utf-8",
     )
@@ -155,21 +178,25 @@ a.output.parent.mkdir(parents=True, exist_ok=True); a.output.write_text(json.dum
 
 
 def test_release_suite_covers_every_ready_family_operation() -> None:
+    from tensorrt_model_connect.families.wan2_2_ti2v.model_config import (
+        OFFICIAL_NEGATIVE_PROMPT,
+    )
+
     suite = perf_release._read_yaml(SUITE)
     cases = perf_release._cases(suite)
 
     perf_release._validate_coverage(cases)
 
-    assert len(cases) == 78
-    assert len({(case["family"], case["operation"]) for case in cases}) == 78
-    assert len({case["family"] for case in cases}) == 77
+    assert len(cases) == 79
+    assert len({(case["family"], case["operation"]) for case in cases}) == 79
+    assert len({case["family"] for case in cases}) == 78
     assert [case["operation"] for case in cases if case["family"] == "eagle_vlm"] == [
         "embed",
         "rerank",
     ]
     assert Counter(perf_release._candidate_timing_scope(case) for case in cases) == {
         "model_call_wall": 18,
-        "public_pipeline_call_wall": 60,
+        "public_pipeline_call_wall": 61,
     }
     assert {
         case["id"]
@@ -234,6 +261,14 @@ def test_release_suite_covers_every_ready_family_operation() -> None:
     assert by_id["personaplex.speak"]["baseline"]["adapter_options"] == {
         "reference_commit": "3428dfd95309a7f3c84fd93259ded0f810d1ff91"
     }
+    assert by_id["wan2_2_ti2v.generate_image"]["baseline"]["adapter_options"] == {
+        "model_id": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "model_revision": "b8fff7315c768468a5333511427288870b2e9635",
+    }
+    assert (
+        by_id["wan2_2_ti2v.generate_image"]["request"]["negative_prompt"]
+        == OFFICIAL_NEGATIVE_PROMPT
+    )
     diffusion_baseline = by_id["nemotron_labs_diffusion.generate"]["baseline"]
     assert diffusion_baseline["mode"] == "hf-eager"
     assert diffusion_baseline["model_class"] == "auto"
@@ -418,11 +453,141 @@ def test_token_agreement_contract_bounds_cross_precision_drift() -> None:
     assert perf_release._output_contract(case, candidate, reference) == (True, "")
 
 
-def test_run_consolidates_results_and_records_replayable_commands(tmp_path: Path) -> None:
+def test_segmentation_contract_rejects_raw_masks_against_postprocessed_masks() -> None:
+    case = {
+        "operation": "segment_prompted",
+        "baseline": {"output_contract": "segmentation-shape"},
+    }
+    candidate = {
+        "output_summary": {
+            "num_masks": 3,
+            "height": 382,
+            "width": 640,
+        }
+    }
+    raw_reference = {
+        "output_summary": {
+            "shape": [1, 1, 3, 256, 256],
+            "element_count": 196_608,
+        }
+    }
+
+    assert perf_release._output_contract(case, candidate, raw_reference) == (
+        False,
+        "segmentation output shape differs",
+    )
+
+    aligned_reference = {
+        "output_summary": {
+            "num_masks": 3,
+            "height": 382,
+            "width": 640,
+        }
+    }
+    assert perf_release._output_contract(case, candidate, aligned_reference) == (True, "")
+
+
+def test_audio_contract_rejects_different_generated_sample_counts() -> None:
+    case = {
+        "operation": "generate_audio",
+        "baseline": {"output_contract": "audio-shape"},
+    }
+    candidate = {
+        "output_summary": {
+            "num_samples": 58_965,
+            "sample_rate": 24_000,
+        }
+    }
+    reference = {
+        "output_summary": {
+            "audio_samples": 37_845,
+            "sample_rate": 24_000,
+        }
+    }
+
+    assert perf_release._output_contract(case, candidate, reference) == (
+        False,
+        "audio output shape differs",
+    )
+
+    reference["output_summary"]["audio_samples"] = 58_965
+    assert perf_release._output_contract(case, candidate, reference) == (True, "")
+
+
+def test_media_contract_compares_materialized_frame_geometry() -> None:
+    case = {
+        "operation": "generate_image",
+        "baseline": {"output_contract": "media-shape"},
+    }
+    candidate = {
+        "output_summary": {
+            "num_frames": 5,
+            "height": 384,
+            "width": 672,
+            "channels": 3,
+        }
+    }
+    reference = {
+        "output_summary": {
+            "media_count": 5,
+            "media_type": "video",
+            "height": 384,
+            "width": 672,
+            "channels": 3,
+        }
+    }
+
+    assert perf_release._output_contract(case, candidate, reference) == (True, "")
+    reference["output_summary"]["height"] = 704
+    assert perf_release._output_contract(case, candidate, reference) == (
+        False,
+        "media output shape differs",
+    )
+
+
+@pytest.mark.parametrize("configuration", ["", "Debug", "RelWithDebInfo"])
+def test_worker_preflight_rejects_non_release_builds(configuration: str) -> None:
+    metadata = {
+        "schema_version": "trtmc.benchmark-worker-metadata/v1",
+        "build": {
+            "configuration": configuration,
+            "source_revision": "abc123",
+        },
+    }
+
+    with pytest.raises(
+        perf_release.PerfReleaseError,
+        match="worker build configuration must be Release",
+    ):
+        perf_release._validate_worker_metadata(metadata, "abc123")
+
+
+def test_worker_preflight_rejects_stale_source_revision() -> None:
+    metadata = {
+        "schema_version": "trtmc.benchmark-worker-metadata/v1",
+        "build": {
+            "configuration": "Release",
+            "source_revision": "old-revision",
+        },
+    }
+
+    with pytest.raises(
+        perf_release.PerfReleaseError,
+        match="worker source revision",
+    ):
+        perf_release._validate_worker_metadata(metadata, "current-revision")
+
+
+def test_run_consolidates_results_and_records_replayable_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     fake_trtmc = tmp_path / "trtmc-bench"
+    fake_worker = tmp_path / "trtmc_benchmark_worker"
     fake_baseline = tmp_path / "hf_transformers.py"
     output = tmp_path / "results"
+    monkeypatch.setenv("TRTMC_PERF_SOURCE_REVISION", "tested-commit")
     _write_fake_trtmc(fake_trtmc)
+    _write_fake_worker(fake_worker, "tested-commit")
     _write_fake_baseline(fake_baseline)
 
     exit_code = perf_release.main(
@@ -432,6 +597,8 @@ def test_run_consolidates_results_and_records_replayable_commands(tmp_path: Path
             "gpt2.generate",
             "--trtmc-bench",
             str(fake_trtmc),
+            "--trtmc-worker",
+            str(fake_worker),
             "--hf-transformers-runner",
             str(fake_baseline),
             "--output",
@@ -447,9 +614,14 @@ def test_run_consolidates_results_and_records_replayable_commands(tmp_path: Path
     ]
     results = json.loads((output / "results.json").read_text(encoding="utf-8"))
     rows = {row["id"]: row for row in results["cases"]}
-    assert len(rows) == 78
+    assert len(rows) == 79
     assert results["timing_preflight"]["status"] == "aligned"
     assert results["timing_preflight"]["case_count"] == 1
+    assert results["candidate_worker_preflight"]["build"] == {
+        "configuration": "Release",
+        "source_revision": "tested-commit",
+    }
+    assert results["candidate_worker_preflight"]["validated_against"] == "tested-commit"
     assert rows["gpt2.generate"]["status"] == "green"
     assert rows["gpt2.generate"]["candidate"]["backend"] == "trtmc-bench"
     assert rows["gpt2.generate"]["baseline"]["mode"] == "torch-compile"
@@ -457,8 +629,8 @@ def test_run_consolidates_results_and_records_replayable_commands(tmp_path: Path
     report = (output / "report.html").read_text(encoding="utf-8")
     assert ">gpt2<" in report
     assert "HF eager" in report
-    assert "77 families" in report
-    assert "78 family-operation comparisons" in report
+    assert "78 families" in report
+    assert "79 family-operation comparisons" in report
     assert "TRTMC p50 (ms)" in report
     assert "Baseline p50 (ms)" in report
     assert ">10.450<" in report
@@ -491,6 +663,17 @@ def test_run_consolidates_results_and_records_replayable_commands(tmp_path: Path
         "operation": rows["gpt2.generate"]["operation"],
     }
     assert perf_release._reuse_mismatch(case, rows["gpt2.generate"], resolved) == ""
+    assert "worker build" in perf_release._reuse_mismatch(
+        case,
+        rows["gpt2.generate"],
+        resolved,
+        {
+            "build": {
+                "configuration": "Release",
+                "source_revision": "different-commit",
+            }
+        },
+    )
     rows["gpt2.generate"]["candidate"]["measurement_policy"]["timing_scope"] = (
         "model_call_wall"
     )
@@ -890,6 +1073,62 @@ def test_diffusers_local_mode_loads_resolved_snapshot_path(tmp_path: Path, monke
     assert captured["kwargs"]["local_files_only"] is True
 
 
+def test_wan22_diffusers_adapter_uses_pinned_conversion_and_fp32_vae(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    captured: dict[str, object] = {}
+
+    class FakeVae:
+        @classmethod
+        def from_pretrained(cls, model, **kwargs):
+            captured.update(vae_model=model, vae_kwargs=kwargs)
+            return cls()
+
+    class FakePipeline:
+        @classmethod
+        def from_pretrained(cls, model, **kwargs):
+            captured.update(pipeline_model=model, pipeline_kwargs=kwargs)
+            return cls()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "diffusers",
+        Namespace(
+            AutoencoderKLWan=FakeVae,
+            WanPipeline=FakePipeline,
+            DiffusionPipeline=FakePipeline,
+        ),
+    )
+    arguments = Namespace(
+        family="wan2_2_ti2v",
+        local_files_only=False,
+        model="Wan-AI/Wan2.2-TI2V-5B",
+        precision="bf16",
+        revision="native-revision",
+        trust_remote_code=False,
+    )
+    torch_module = Namespace(float16="fp16", float32="fp32", bfloat16="bf16")
+    options = {
+        "model_id": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "model_revision": "diffusers-revision",
+    }
+
+    runner["_diffusion_pipeline"](arguments, torch_module, options)
+
+    assert captured["vae_model"] == options["model_id"]
+    assert captured["vae_kwargs"] == {
+        "subfolder": "vae",
+        "torch_dtype": "fp32",
+        "revision": "diffusers-revision",
+        "local_files_only": False,
+    }
+    assert captured["pipeline_model"] == options["model_id"]
+    assert captured["pipeline_kwargs"]["torch_dtype"] == "bf16"
+    assert captured["pipeline_kwargs"]["revision"] == "diffusers-revision"
+    assert isinstance(captured["pipeline_kwargs"]["vae"], FakeVae)
+
+
 def test_cached_snapshot_path_keeps_snapshot_parent_for_symlinked_marker(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -991,7 +1230,13 @@ def test_diffusers_adapter_uses_resolved_sana_runtime_controls(tmp_path: Path) -
     assert captured["rotation_speed_deg"] == 1.2
     assert captured["num_frames"] == 321
     assert captured["step"] == 60
-    assert summary == {"media_type": "video", "media_count": 2}
+    assert summary == {
+        "media_type": "video",
+        "media_count": 2,
+        "height": None,
+        "width": None,
+        "channels": None,
+    }
 
 
 def test_diffusers_media_count_accepts_array_like_video_frames() -> None:
@@ -1460,7 +1705,14 @@ def test_sana_wm_adapter_runs_pinned_official_pipeline_with_resolved_inputs(
 
     assert result[:6] == (
         [101.0, 102.0],
-        {"frame_count": 321, "shape": [321, 704, 1280, 3]},
+        {
+            "frame_count": 321,
+            "shape": [321, 704, 1280, 3],
+            "media_count": 321,
+            "height": 704,
+            "width": 1280,
+            "channels": 3,
+        },
         "pinned-commit",
         "sana-wm-pytorch",
         "task-pipeline-call-wall",

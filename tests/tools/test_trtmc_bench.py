@@ -27,7 +27,7 @@ from tensorrt_model_connect.benchmark.metrics import reduce_metrics
 from tensorrt_model_connect.benchmark.operations import registered_operations
 from tensorrt_model_connect.benchmark.task_adapters import registered_task_adapters
 from tensorrt_model_connect.benchmark.types import BenchmarkError
-from tensorrt_model_connect.benchmark.worker import worker_backend_abi
+from tensorrt_model_connect.benchmark.worker import worker_backend_abi, worker_metadata
 
 
 pytestmark = pytest.mark.unit
@@ -44,7 +44,13 @@ def _worker(tmp_path: Path) -> Path:
     worker = tmp_path / "trtmc_benchmark_worker"
     worker.write_text(
         """#!/usr/bin/env python3
-import argparse, json
+import argparse, json, sys
+if sys.argv[1:] == ['--metadata']:
+    print(json.dumps({
+      'schema_version': 'trtmc.benchmark-worker-metadata/v1',
+      'build': {'configuration': 'Release', 'source_revision': 'test-revision'},
+    }))
+    raise SystemExit(0)
 p = argparse.ArgumentParser()
 p.add_argument('--request', required=True)
 p.add_argument('--output', required=True)
@@ -81,6 +87,12 @@ def _failing_worker(tmp_path: Path) -> Path:
     worker.write_text(
         """#!/usr/bin/env python3
 import argparse, json, sys
+if sys.argv[1:] == ['--metadata']:
+    print(json.dumps({
+      'schema_version': 'trtmc.benchmark-worker-metadata/v1',
+      'build': {'configuration': 'Release', 'source_revision': 'test-revision'},
+    }))
+    raise SystemExit(0)
 p = argparse.ArgumentParser()
 p.add_argument('--request', required=True)
 p.add_argument('--output', required=True)
@@ -1280,3 +1292,13 @@ def test_worker_backend_abi_uses_packaged_alias(tmp_path: Path) -> None:
     worker = _worker(tmp_path)
     (tmp_path / "libtrtmc_backend_trt_10_15.so").touch()
     assert worker_backend_abi(worker) == "10.15"
+
+
+def test_worker_metadata_reports_build_provenance(tmp_path: Path) -> None:
+    assert worker_metadata(_worker(tmp_path)) == {
+        "schema_version": "trtmc.benchmark-worker-metadata/v1",
+        "build": {
+            "configuration": "Release",
+            "source_revision": "test-revision",
+        },
+    }

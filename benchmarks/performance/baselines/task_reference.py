@@ -1094,12 +1094,17 @@ def _diffusion_pipeline(
         "qwen_image": ("QwenImagePipeline", "DiffusionPipeline"),
         "sana_wm": ("SanaVideoPipeline", "DiffusionPipeline"),
         "wan_t2v": ("WanPipeline", "DiffusionPipeline"),
+        "wan2_2_ti2v": ("WanPipeline", "DiffusionPipeline"),
         "z_image": ("ZImagePipeline", "DiffusionPipeline"),
     }[arguments.family]
-    model_source: str | Path = arguments.model
+    model_id = str(options.get("model_id", arguments.model))
+    requested_revision = str(
+        options.get("model_revision", getattr(arguments, "revision", None) or "")
+    ) or None
+    model_source: str | Path = model_id
     if arguments.local_files_only:
         model_source = (
-            _cached_snapshot_path(arguments.model, arguments.revision, "model_index.json")
+            _cached_snapshot_path(model_id, requested_revision, "model_index.json")
             or model_source
         )
     errors = []
@@ -1108,12 +1113,29 @@ def _diffusion_pipeline(
         if pipeline_class is None:
             continue
         try:
+            load_options: dict[str, Any] = {}
+            if arguments.family == "wan2_2_ti2v":
+                vae_class = getattr(diffusers, "AutoencoderKLWan", None)
+                if vae_class is None:
+                    raise RuntimeError("Diffusers does not provide AutoencoderKLWan")
+                load_options["vae"] = vae_class.from_pretrained(
+                    model_source,
+                    subfolder="vae",
+                    torch_dtype=torch_module.float32,
+                    **(
+                        {"revision": requested_revision}
+                        if requested_revision and model_source == model_id
+                        else {}
+                    ),
+                    local_files_only=arguments.local_files_only,
+                )
             return pipeline_class.from_pretrained(
                 model_source,
                 torch_dtype=_torch_dtype(torch_module, arguments.precision),
+                **load_options,
                 **(
-                    {"revision": arguments.revision}
-                    if arguments.revision and model_source == arguments.model
+                    {"revision": requested_revision}
+                    if requested_revision and model_source == model_id
                     else {}
                 ),
                 trust_remote_code=bool(
@@ -1213,15 +1235,27 @@ def _load_diffusers(
         if media is None:
             media = getattr(result, "frames", None)
         media_type = str(request.get("media_type", "image"))
-        return {"media_type": media_type, "media_count": _media_count(media, media_type)}
+        return _media_summary(media, media_type)
 
-    revision = _resolved_revision(arguments, getattr(pipeline, "transformer", pipeline))
+    requested_revision = str(
+        options.get("model_revision", getattr(arguments, "revision", None) or "")
+    ) or None
+    revision = (
+        _model_revision(getattr(pipeline, "transformer", pipeline), requested_revision)
+        if options.get("model_revision")
+        else _resolved_revision(arguments, getattr(pipeline, "transformer", pipeline))
+    )
+    reference_model = str(options.get("model_id", getattr(arguments, "model", "unresolved")))
     return Session(
         invoke,
         revision,
         "diffusers",
         timing_scope="task-pipeline-call-wall",
         input_preparation_included=True,
+        reference_source={
+            "repository": f"https://huggingface.co/{reference_model}",
+            "revision": revision,
+        },
     )
 
 
@@ -1239,6 +1273,42 @@ def _media_count(media: Any, media_type: str) -> int:
         return len(media[0])
     except TypeError:
         return outer_count
+
+
+def _media_summary(media: Any, media_type: str) -> dict[str, Any]:
+    """Describe materialized image/video geometry without copying its pixels."""
+    count = _media_count(media, media_type)
+    item = media
+    try:
+        item = item[0]
+        if media_type == "video":
+            item = item[0]
+    except (IndexError, KeyError, TypeError):
+        pass
+    width = height = channels = None
+    size = getattr(item, "size", None)
+    bands = getattr(item, "getbands", None)
+    if (
+        isinstance(size, tuple)
+        and len(size) == 2
+        and callable(bands)
+    ):
+        width, height = (int(value) for value in size)
+        channels = len(bands())
+    else:
+        shape = tuple(int(value) for value in getattr(item, "shape", ()))
+        if len(shape) >= 3:
+            if shape[-1] in {1, 3, 4}:
+                height, width, channels = shape[-3:]
+            elif shape[-3] in {1, 3, 4}:
+                channels, height, width = shape[-3:]
+    return {
+        "media_type": media_type,
+        "media_count": count,
+        "height": height,
+        "width": width,
+        "channels": channels,
+    }
 
 
 def _numeric_values(request: Mapping[str, Any], key: str) -> list[float]:
@@ -1452,7 +1522,25 @@ def _load_vision(
         def invoke() -> Mapping[str, Any]:
             with torch.inference_mode():
                 outputs = model(**inputs)
-            return _tensor_summary(outputs.pred_masks)
+            original_sizes = inputs.get("original_sizes")
+            target_sizes = (
+                original_sizes.cpu().tolist()
+                if hasattr(original_sizes, "cpu")
+                else original_sizes
+            )
+            result = processor.post_process_instance_segmentation(
+                outputs,
+                threshold=0.5,
+                mask_threshold=0.5,
+                target_sizes=target_sizes,
+            )[0]
+            masks = result.get("masks")
+            num_masks = 0 if masks is None else int(masks.shape[0] if masks.ndim > 2 else 1)
+            return {
+                "num_masks": num_masks,
+                "height": height,
+                "width": width,
+            }
 
     else:
         processor = transformers.SamProcessor.from_pretrained(arguments.model, **processor_kwargs)
@@ -1475,7 +1563,18 @@ def _load_vision(
         def invoke() -> Mapping[str, Any]:
             with torch.inference_mode():
                 outputs = model(**inputs)
-            return _tensor_summary(outputs.pred_masks)
+            masks = processor.image_processor.post_process_masks(
+                outputs.pred_masks.cpu(),
+                inputs["original_sizes"].cpu(),
+                inputs["reshaped_input_sizes"].cpu(),
+            )[0]
+            height, width = (int(value) for value in masks.shape[-2:])
+            num_masks = int(masks.numel() // (height * width))
+            return {
+                "num_masks": num_masks,
+                "height": height,
+                "width": width,
+            }
 
     return Session(invoke, _resolved_revision(arguments, model), "transformers")
 
@@ -1634,8 +1733,16 @@ def _load_personaplex(
                     other_mimi.decode(tokens[:, 1:9])
                     generated_frames += 1
                     if generated_frames >= max_frames:
-                        return {"audio_frames": generated_frames, "sample_rate": mimi.sample_rate}
-        return {"audio_frames": generated_frames, "sample_rate": mimi.sample_rate}
+                        return {
+                            "audio_frames": generated_frames,
+                            "audio_samples": generated_frames * frame_size,
+                            "sample_rate": mimi.sample_rate,
+                        }
+        return {
+            "audio_frames": generated_frames,
+            "audio_samples": generated_frames * frame_size,
+            "sample_rate": mimi.sample_rate,
+        }
 
     revision = arguments.revision or _snapshot_revision(model_weights) or "unresolved"
     return Session(
@@ -2014,9 +2121,20 @@ def _run_sana_wm(
             f"SANA-WM reference returned {len(samples)} samples; "
             f"expected {arguments.iterations}"
         )
+    summary = dict(payload.get("output_summary", {}))
+    shape = summary.get("shape", [])
+    if isinstance(shape, list) and len(shape) >= 4:
+        summary.update(
+            {
+                "media_count": int(summary.get("frame_count", shape[0])),
+                "height": int(shape[-3]),
+                "width": int(shape[-2]),
+                "channels": int(shape[-1]),
+            }
+        )
     return (
         samples,
-        dict(payload.get("output_summary", {})),
+        summary,
         reference_revision,
         "sana-wm-pytorch",
         "task-pipeline-call-wall",

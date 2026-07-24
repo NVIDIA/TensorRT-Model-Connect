@@ -38,6 +38,11 @@ for source_root in (REPOSITORY, PYTHON_SOURCE):
 
 from benchmarks.performance.baselines.timing_contracts import timing_contract  # noqa: E402
 from tensorrt_model_connect.benchmark.catalog import ManifestCatalog  # noqa: E402
+from tensorrt_model_connect.benchmark.types import BenchmarkError  # noqa: E402
+from tensorrt_model_connect.benchmark.worker import (  # noqa: E402
+    find_worker,
+    worker_metadata,
+)
 from tensorrt_model_connect.python_profiles import (  # noqa: E402
     default_execution_profiles,
     resolve_profile_python,
@@ -301,10 +306,13 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
         raise PerfReleaseError(f"case {case['id']} baseline experts implementation is invalid")
     output_contract = baseline.get("output_contract", "exact-token-ids")
     if output_contract not in {
+        "audio-shape",
         "exact-token-ids",
         "exact-text",
+        "media-shape",
         "normalized-text",
         "ocr-text",
+        "segmentation-shape",
         "token-agreement",
     }:
         raise PerfReleaseError(f"case {case['id']} baseline output contract is invalid")
@@ -656,6 +664,43 @@ def _resolve_candidate(
         )
     command.pop("stdout", None)
     return value, argv, command
+
+
+def _validate_worker_metadata(
+    metadata: Mapping[str, Any], expected_revision: str
+) -> None:
+    if metadata.get("schema_version") != "trtmc.benchmark-worker-metadata/v1":
+        raise PerfReleaseError("worker metadata schema is unsupported")
+    build = metadata.get("build")
+    if not isinstance(build, Mapping):
+        raise PerfReleaseError("worker metadata is missing build provenance")
+    if build.get("configuration") != "Release":
+        raise PerfReleaseError("worker build configuration must be Release")
+    revision = str(build.get("source_revision", "")).strip()
+    if revision != expected_revision:
+        raise PerfReleaseError(
+            f"worker source revision {revision or '<missing>'} does not match "
+            f"requested source revision {expected_revision}"
+        )
+
+
+def _preflight_worker(options: RunOptions) -> dict[str, Any] | None:
+    if options.only == "baseline" or options.dry_run:
+        return None
+    expected_revision = _git_commit()
+    if not expected_revision:
+        raise PerfReleaseError("cannot determine requested source revision for worker preflight")
+    try:
+        worker = find_worker(options.trtmc_worker)
+        metadata = worker_metadata(worker)
+    except BenchmarkError as exc:
+        raise PerfReleaseError(f"candidate worker preflight failed: {exc}") from exc
+    _validate_worker_metadata(metadata, expected_revision)
+    return {
+        **metadata,
+        "path": str(worker),
+        "validated_against": expected_revision,
+    }
 
 
 def _preflight_candidates(
@@ -1068,8 +1113,36 @@ def _output_contract(
     left = candidate.get("output_summary", {})
     right = baseline.get("output_summary", {})
     operation = str(case["operation"])
+    contract = case["baseline"].get("output_contract")
+    if contract == "segmentation-shape":
+        left_shape = tuple(left.get(name) for name in ("num_masks", "height", "width"))
+        right_shape = tuple(right.get(name) for name in ("num_masks", "height", "width"))
+        matched = None not in left_shape and left_shape == right_shape
+        return matched, "segmentation output shape differs" if not matched else ""
+    if contract == "audio-shape":
+        left_shape = (
+            left.get("num_samples", left.get("audio_samples")),
+            left.get("sample_rate"),
+        )
+        right_shape = (
+            right.get("num_samples", right.get("audio_samples")),
+            right.get("sample_rate"),
+        )
+        matched = None not in left_shape and left_shape == right_shape
+        return matched, "audio output shape differs" if not matched else ""
+    if contract == "media-shape":
+        names = ("height", "width", "channels")
+        left_shape = (
+            left.get("num_frames", left.get("media_count")),
+            *(left.get(name) for name in names),
+        )
+        right_shape = (
+            right.get("num_frames", right.get("media_count")),
+            *(right.get(name) for name in names),
+        )
+        matched = None not in left_shape and left_shape == right_shape
+        return matched, "media output shape differs" if not matched else ""
     if operation == "generate":
-        contract = case["baseline"].get("output_contract")
         if contract == "exact-text":
             matched = left.get("text") == right.get("text")
             return matched, "generated text differs" if not matched else ""
@@ -1701,6 +1774,7 @@ def _reuse_mismatch(
     case: Mapping[str, Any],
     row: Mapping[str, Any],
     resolved: Mapping[str, Any],
+    expected_worker: Mapping[str, Any] | None = None,
 ) -> str:
     if row.get("status") not in {"green", "yellow", "red"}:
         return "earlier row is not a valid completed comparison"
@@ -1719,6 +1793,10 @@ def _reuse_mismatch(
     baseline = row.get("baseline")
     if not isinstance(candidate, Mapping) or not isinstance(baseline, Mapping):
         return "recorded candidate or baseline evidence is missing"
+    if expected_worker is not None:
+        recorded_build = candidate.get("environment", {}).get("worker_build")
+        if recorded_build != expected_worker.get("build"):
+            return "recorded TRTMC worker build differs from the validated worker"
     digest = _workload_digest(resolved)
     if candidate.get("workload_digest") != digest or baseline.get("workload_digest") != digest:
         return "resolved workload changed"
@@ -1751,6 +1829,7 @@ def _reuse_aligned_rows(
     source_path: Path,
     cases: Sequence[Mapping[str, Any]],
     preflight: Mapping[str, tuple[dict[str, Any], list[str], dict[str, str]]],
+    worker: Mapping[str, Any] | None,
 ) -> None:
     source = _load_results(source_path)
     source_rows = {
@@ -1766,7 +1845,7 @@ def _reuse_aligned_rows(
         if source_row is None:
             rerun_reasons[case_id] = "earlier result is missing"
             continue
-        mismatch = _reuse_mismatch(case, source_row, preflight[case_id][0])
+        mismatch = _reuse_mismatch(case, source_row, preflight[case_id][0], worker)
         if mismatch:
             rerun_reasons[case_id] = mismatch
             continue
@@ -1800,6 +1879,7 @@ def _prepare_output(
     cases: Sequence[Mapping[str, Any]],
     options: RunOptions,
     preflight: Mapping[str, tuple[dict[str, Any], list[str], dict[str, str]]],
+    worker: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     output.mkdir(parents=True, exist_ok=True)
     result_path = output / "results.json"
@@ -1817,6 +1897,7 @@ def _prepare_output(
             options.reuse_aligned_from.resolve(),
             cases,
             preflight,
+            worker,
         )
     return results
 
@@ -1858,9 +1939,14 @@ def run(arguments: argparse.Namespace) -> int:
         local_files_only=arguments.local_files_only,
         timeout_seconds=arguments.timeout_seconds,
     )
+    worker = _preflight_worker(options)
     preflight_cases = cases if options.reuse_aligned_from is not None else selected
     preflight = _preflight_candidates(preflight_cases, options)
-    results = _prepare_output(options.output, suite_path, suite, cases, options, preflight)
+    results = _prepare_output(
+        options.output, suite_path, suite, cases, options, preflight, worker
+    )
+    if worker is not None:
+        results["candidate_worker_preflight"] = worker
     results["timing_preflight"] = _preflight_evidence(preflight_cases, preflight)
     rows = _result_rows(results)
     work_root = options.output / ".work"

@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 This matrix compares the public TRTMC operation measured by `trtmc-bench` with the
 baseline named in each row of `release.yaml`. The release suite contains exactly one
 representative for every ready `(family, operation)` in the benchmark catalog. The current
-suite has 78 family-operation comparisons across 77 unique families because `eagle_vlm`
+suite has 79 family-operation comparisons across 78 unique families because `eagle_vlm`
 exposes both `embed` and `rerank`. A catalog change makes suite validation fail until the
 new row is reviewed.
 
@@ -28,6 +28,16 @@ contract registry. Before any benchmark command executes, `trtmc-bench --dry-run
 the requested TRTMC scope and asset-loading policy for every selected row. The baseline runner
 checks its implemented boundary before collecting samples, and final classification checks
 the recorded policy from both processes. A mismatch produces no performance light.
+
+The candidate worker is also checked before execution. Its `--metadata` response must identify
+a `Release` build from the exact source revision being reported. Configure source builds with
+`cmake -S . -B build -DCMAKE_BUILD_TYPE=Release`; stale, Debug, and unlabelled workers are
+rejected instead of producing performance evidence.
+
+Non-text rows declare an output-shape contract in `release.yaml`. Segmentation compares the
+materialized mask count and source geometry, audio compares generated sample count and sample
+rate, and image/video generation compares frame count and geometry. These contracts prevent
+raw and postprocessed outputs, or different generation lengths, from receiving a traffic light.
 
 ## Manual runs
 

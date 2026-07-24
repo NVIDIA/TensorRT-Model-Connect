@@ -39,6 +39,7 @@ cases:
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
+      output_contract: audio-shape
   - id: bart.generate
     family: bart
     operation: generate
@@ -252,6 +253,7 @@ cases:
       mode: hf-eager
       reference_backend: hf_diffusers
       timing_scope: task-pipeline-call-wall
+      output_contract: media-shape
   - id: fnet.encode
     family: fnet
     operation: encode
@@ -401,6 +403,7 @@ cases:
       mode: hf-eager
       reference_backend: hf_diffusers
       timing_scope: task-pipeline-call-wall
+      output_contract: media-shape
   - id: m2m_100.generate
     family: m2m_100
     operation: generate
@@ -422,6 +425,7 @@ cases:
       mode: pytorch-eager
       reference_backend: nemo_reference
       timing_scope: task-pipeline-call-wall
+      output_contract: audio-shape
       adapter_options:
         speaker_encoder_revision: e9124b5364a2c3e9b4f78da429a33cbca8f8c22b
   - id: mamba.generate
@@ -583,6 +587,7 @@ cases:
       mode: pytorch-eager
       reference_backend: torch_reference
       timing_scope: task-pipeline-call-wall
+      output_contract: audio-shape
       adapter_options:
         reference_commit: 3428dfd95309a7f3c84fd93259ded0f810d1ff91
   - id: phi.generate
@@ -630,6 +635,7 @@ cases:
       mode: hf-eager
       reference_backend: hf_diffusers
       timing_scope: task-pipeline-call-wall
+      output_contract: media-shape
   - id: qwen.generate
     family: qwen
     operation: generate
@@ -660,6 +666,7 @@ cases:
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
+      output_contract: audio-shape
       adapter_options:
         device_map: cuda:0
         speaker: Ethan
@@ -675,6 +682,7 @@ cases:
       mode: hf-eager
       reference_backend: hf_diffusers
       timing_scope: task-pipeline-call-wall
+      output_contract: media-shape
       adapter_options:
         cpu_offload: true
   - id: qwen_moe.generate
@@ -729,6 +737,7 @@ cases:
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
+      output_contract: segmentation-shape
   - id: sam3.segment_prompted
     family: sam3
     operation: segment_prompted
@@ -741,6 +750,7 @@ cases:
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
+      output_contract: segmentation-shape
   - id: sana_wm.generate_image
     family: sana_wm
     operation: generate_image
@@ -752,6 +762,7 @@ cases:
       mode: pytorch-eager
       reference_backend: official_sana
       timing_scope: task-pipeline-call-wall
+      output_contract: media-shape
       python_profile: sana_wm_reference
       adapter_options:
         reference_commit: 59629fdf790850797cb657bad014fce432bd713d
@@ -831,6 +842,24 @@ cases:
       mode: hf-eager
       reference_backend: hf_diffusers
       timing_scope: task-pipeline-call-wall
+      output_contract: media-shape
+  - id: wan2_2_ti2v.generate_image
+    family: wan2_2_ti2v
+    operation: generate_image
+    model: wan22-ti2v-5b-l0
+    priority: slow
+    request:
+      negative_prompt: 色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走
+    baseline:
+      runner: task-reference
+      adapter: hf-diffusers
+      mode: hf-eager
+      reference_backend: hf_diffusers
+      timing_scope: task-pipeline-call-wall
+      output_contract: media-shape
+      adapter_options:
+        model_id: Wan-AI/Wan2.2-TI2V-5B-Diffusers
+        model_revision: b8fff7315c768468a5333511427288870b2e9635
   - id: whisper.transcribe
     family: whisper
     operation: transcribe
@@ -872,3 +901,4 @@ cases:
       mode: hf-eager
       reference_backend: hf_diffusers
       timing_scope: task-pipeline-call-wall
+      output_contract: media-shape

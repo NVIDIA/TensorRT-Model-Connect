@@ -28,6 +28,23 @@ set(TRTMC_MODEL_PROOF_MODEL "" CACHE STRING
   "Require the source tree to contain exactly this runtime model (CI isolation proof mode).")
 set(TRTMC_TRT_BACKEND_ABI "" CACHE STRING
   "TensorRT ABI suffix for the standard backend DSO, e.g. 10_15. Empty means auto-detect from headers.")
+set(TRTMC_SOURCE_REVISION "" CACHE STRING
+  "Source revision embedded in release benchmark worker provenance.")
+if(NOT TRTMC_SOURCE_REVISION)
+  execute_process(
+    COMMAND git rev-parse HEAD
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    RESULT_VARIABLE _trtmc_source_revision_status
+    OUTPUT_VARIABLE _trtmc_source_revision
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+  )
+  if(_trtmc_source_revision_status EQUAL 0)
+    set(TRTMC_SOURCE_REVISION "${_trtmc_source_revision}")
+  else()
+    set(TRTMC_SOURCE_REVISION "unknown")
+  endif()
+endif()
 
 # CUDA is required by the core runtime. TensorRT is optional at core build time:
 # concrete TRT runtimes live in backend DSOs.
@@ -627,6 +644,10 @@ if(TRTMC_BUILD_BENCHMARKS)
   target_link_libraries(trtmc_benchmark_worker PRIVATE trtmc_core)
   target_include_directories(trtmc_benchmark_worker SYSTEM PRIVATE
     ${_trtmc_nlohmann_json_include}
+  )
+  target_compile_definitions(trtmc_benchmark_worker PRIVATE
+    TRTMC_BUILD_CONFIGURATION=\"$<CONFIG>\"
+    TRTMC_SOURCE_REVISION=\"${TRTMC_SOURCE_REVISION}\"
   )
   set_target_properties(trtmc_benchmark_worker PROPERTIES
     BUILD_RPATH "\$ORIGIN"
