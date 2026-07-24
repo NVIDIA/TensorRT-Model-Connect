@@ -691,6 +691,15 @@ _COMPARISON_METRICS = (
 _EXECUTION_ERROR_FIELDS = ("error", "exception", "traceback", "failure_class")
 
 
+def _is_comparison_gate_failure(raw_result: Mapping[str, Any]) -> bool:
+    failures = raw_result.get("gate_failures")
+    return (
+        raw_result.get("error_type") == "BenchmarkGateError"
+        and isinstance(failures, list)
+        and bool(failures)
+    )
+
+
 def _raw_comparison(result: Mapping[str, Any]) -> dict[str, Any]:
     raw_result = result.get("raw_result")
     if isinstance(raw_result, dict) and raw_result:
@@ -710,7 +719,12 @@ def _execution_details(
     result: Mapping[str, Any],
     raw_result: Mapping[str, Any],
 ) -> dict[str, Any]:
-    has_error = any(raw_result.get(name) for name in _EXECUTION_ERROR_FIELDS)
+    comparison_gate_failure = _is_comparison_gate_failure(raw_result)
+    has_error = any(
+        raw_result.get(name)
+        for name in _EXECUTION_ERROR_FIELDS
+        if name != "error" or not comparison_gate_failure
+    )
     completed = bool(raw_result) and not has_error
     return {
         "status": "completed" if completed else "error",

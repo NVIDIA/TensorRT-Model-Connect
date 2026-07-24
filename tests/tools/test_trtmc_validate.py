@@ -921,6 +921,27 @@ def test_compare_entrypoint_forwards_to_validation_backend(monkeypatch):
             "failed",
         ),
         (
+            {
+                "status": "failed",
+                "prediction_agreement_rate": 0.5,
+                "gate_failures": [
+                    {
+                        "gate": "min_prediction_agreement_rate",
+                        "actual": 0.5,
+                        "required": 0.98,
+                    }
+                ],
+                "error_type": "BenchmarkGateError",
+                "error": (
+                    "min_prediction_agreement_rate "
+                    "actual=0.5 required=0.98"
+                ),
+            },
+            "completed",
+            "disagreement",
+            "failed",
+        ),
+        (
             {"status": "failed", "error": "runner crashed"},
             "error",
             "not_run",
