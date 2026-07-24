@@ -536,9 +536,13 @@ def test_failed_sample_uses_recorded_trtmc_command_and_copies_media(tmp_path):
     frames.mkdir(parents=True)
     input_image = work_dir / "input.png"
     reference_image = frames / "000.png"
+    reference_visualization = work_dir / "reference_visualization.png"
+    trtmc_visualization = work_dir / "trtmc_visualization.png"
     trtmc_audio = work_dir / "output.wav"
     input_image.write_bytes(b"input-image")
     reference_image.write_bytes(b"reference-image")
+    reference_visualization.write_bytes(b"reference-visualization")
+    trtmc_visualization.write_bytes(b"trtmc-visualization")
     trtmc_audio.write_bytes(b"RIFFfake-wave")
     prompt = {
         "sample_id": "sample-9",
@@ -576,6 +580,7 @@ def test_failed_sample_uses_recorded_trtmc_command_and_copies_media(tmp_path):
                     {
                         "sample_id": "sample-9",
                         "frames_dir": str(frames),
+                        "visualization_path": str(reference_visualization),
                     }
                 ]
             }
@@ -589,6 +594,7 @@ def test_failed_sample_uses_recorded_trtmc_command_and_copies_media(tmp_path):
                     {
                         "sample_id": "sample-9",
                         "wav_path": str(trtmc_audio),
+                        "visualization_path": str(trtmc_visualization),
                     }
                 ]
             }
@@ -637,6 +643,11 @@ def test_failed_sample_uses_recorded_trtmc_command_and_copies_media(tmp_path):
     )
     media = record["artifacts"]["media"]
     assert {item["kind"] for item in media} == {"image", "audio"}
+    assert len(media) == 5
+    assert {item["label"] for item in media} >= {
+        "Reference visualization_path",
+        "TRTMC visualization_path",
+    }
     assert all((case_dir / item["path"]).is_file() for item in media)
     rendered = trtmc_validate._render_disagreement_record(
         record,

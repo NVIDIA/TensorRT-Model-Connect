@@ -152,6 +152,38 @@ def _record_native_command(path: Path, sample_id: str, output: Any) -> None:
         )
 
 
+def _run_reference_stage(
+    reference: Any,
+    case: Any,
+    stage: Any,
+    context: RunContext,
+) -> Any:
+    """Run a model reference while preserving its direct subprocess command."""
+    run_stage = reference.run_stage
+    function = getattr(run_stage, "__func__", run_stage)
+    namespace = getattr(function, "__globals__", {})
+    original = namespace.get("run_reference_subprocess")
+    if not callable(original):
+        return run_stage(case, stage, context)
+
+    def run_and_record(*args: Any, **kwargs: Any) -> Any:
+        output = original(*args, **kwargs)
+        command = _command_tokens(kwargs.get("command"))
+        metadata = getattr(output, "metadata", {})
+        if command and not _native_command_from_metadata(metadata):
+            output.metadata = {
+                **(metadata if isinstance(metadata, dict) else {}),
+                "command": command,
+            }
+        return output
+
+    namespace["run_reference_subprocess"] = run_and_record
+    try:
+        return run_stage(case, stage, context)
+    finally:
+        namespace["run_reference_subprocess"] = original
+
+
 def _model_manifest_path(manifest: Mapping[str, Any]) -> Path:
     task_config = manifest.get("task_eval", {})
     task_config = task_config if isinstance(task_config, dict) else {}
@@ -250,7 +282,8 @@ def _run_time_series(
     responses = []
     for run_index, (source_index, prompt_row) in enumerate(rows):
         case = _time_series_case(template, prompt_row, source_index)
-        output = reference.run_stage(
+        output = _run_reference_stage(
+            reference,
             case,
             _stage(case, "full_inference"),
             _context(case, artifacts_dir),
@@ -442,7 +475,8 @@ def _run_vision(
     responses = []
     for run_index, (source_index, prompt_row) in enumerate(rows):
         case = _vision_case(template, prompt_row, task_config, source_index)
-        output = reference.run_stage(
+        output = _run_reference_stage(
+            reference,
             case,
             _stage(case, "full_inference"),
             _context(case, artifacts_dir),
@@ -512,7 +546,8 @@ def _run_reranking(
     responses = []
     for run_index, (source_index, prompt_row) in enumerate(rows):
         case = _reranking_case(template, prompt_row, source_index)
-        output = reference.run_stage(
+        output = _run_reference_stage(
+            reference,
             case,
             _stage(case, "full_inference"),
             _context(case, artifacts_dir),
@@ -587,7 +622,8 @@ def _run_diffusion(
     responses = []
     for run_index, (source_index, prompt_row) in enumerate(rows):
         case = _diffusion_case(template, prompt_row, generation, source_index)
-        output = reference.run_stage(
+        output = _run_reference_stage(
+            reference,
             case,
             _stage(case, "end_to_end"),
             _context(case, artifacts_dir),

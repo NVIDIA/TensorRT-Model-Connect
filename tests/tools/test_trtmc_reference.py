@@ -489,6 +489,44 @@ def test_plugin_reference_records_nested_upstream_command(tmp_path: Path) -> Non
     assert "plugin_reference.py" not in " ".join(row["command"])
 
 
+def test_plugin_reference_preserves_model_owned_subprocess_command() -> None:
+    namespace: dict[str, object] = {}
+
+    def fake_run_reference_subprocess(*, command, **_kwargs):
+        return SimpleNamespace(
+            metadata={"returncode": 0},
+            command_was_run=list(command),
+        )
+
+    namespace["run_reference_subprocess"] = fake_run_reference_subprocess
+    exec(
+        "def run_stage(case, stage, context):\n"
+        "    return run_reference_subprocess(\n"
+        "        command=[context.hf_python, '-c', case.script],\n"
+        "    )\n",
+        namespace,
+    )
+    original = namespace["run_reference_subprocess"]
+    reference = SimpleNamespace(run_stage=namespace["run_stage"])
+    case = SimpleNamespace(script="print('native HF')")
+    context = SimpleNamespace(hf_python="/profiles/reference/bin/python")
+
+    output = plugin_reference._run_reference_stage(
+        reference,
+        case,
+        SimpleNamespace(name="full_inference"),
+        context,
+    )
+
+    assert output.metadata["command"] == [
+        "/profiles/reference/bin/python",
+        "-c",
+        "print('native HF')",
+    ]
+    assert output.command_was_run == output.metadata["command"]
+    assert namespace["run_reference_subprocess"] is original
+
+
 def test_vlm_reference_metadata_is_direct_and_sample_selectable(
     tmp_path: Path,
 ) -> None:

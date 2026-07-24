@@ -361,6 +361,7 @@ def _media_candidates(
         "trtfb_image",
         "video",
         "video_path",
+        "visualization_path",
         "wav_path",
     )
     candidates = [
