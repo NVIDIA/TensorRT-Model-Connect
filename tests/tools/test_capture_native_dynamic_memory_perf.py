@@ -433,6 +433,11 @@ cache.mkdir(parents=True, exist_ok=True)
     assert cache["initial_state"] == "cold"
     assert cache["before"]["file_count"] == 0
     assert cache["after"]["file_count"] == 1
+    assert result["cuda_jit_cache"] == cache
+    assert (
+        result["qualification_provenance"]["cuda_jit_cache_sha256"]
+        == capture._canonical_sha(result["cuda_jit_cache"])
+    )
     assert (
         result["qualification_provenance"][
             "runtime_attention_plans_sha256"

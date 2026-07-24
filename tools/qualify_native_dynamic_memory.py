@@ -14,6 +14,7 @@ the model's existing family thresholds.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gc
 import hashlib
 import json
@@ -24,6 +25,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -1162,7 +1164,9 @@ def run_trt_case(
     case: Case,
     context_limit: int,
     work_dir: Path,
+    evidence_dir: Path,
 ) -> tuple[dict[str, Any], np.ndarray | None, str]:
+    evidence_dir.mkdir(parents=True, exist_ok=False)
     token_path = work_dir / f"{case.name}.tokens.txt"
     logits_path = work_dir / f"{case.name}.trt-logits.bin"
     _write_tokens(token_path, tokens)
@@ -1179,6 +1183,11 @@ def run_trt_case(
         "--max-sequence-length",
         str(context_limit),
     ]
+    (evidence_dir / "command.json").write_text(
+        json.dumps(command, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    _write_tokens(evidence_dir / "tokens.txt", tokens)
     completed = subprocess.run(
         command,
         check=False,
@@ -1186,7 +1195,25 @@ def run_trt_case(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+    (evidence_dir / "runner.stdout.log").write_text(
+        completed.stdout,
+        encoding="utf-8",
+    )
+    (evidence_dir / "runner.stderr.log").write_text(
+        completed.stderr,
+        encoding="utf-8",
+    )
+    (evidence_dir / "returncode.txt").write_text(
+        f"{completed.returncode}\n",
+        encoding="utf-8",
+    )
+    if logits_path.exists():
+        (evidence_dir / "runner-logits.bin").write_bytes(logits_path.read_bytes())
     trace = _parse_runner_json(completed.stdout)
+    (evidence_dir / "runner-trace.json").write_text(
+        json.dumps(trace, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     if case.expect_admission_rejection:
         if completed.returncode != 3:
             raise RuntimeError(
@@ -2085,18 +2112,35 @@ def validate_context_memory_envelope(
 
 
 def reconcile_device_peak_with_nvml(trace: dict[str, Any]) -> dict[str, Any]:
-    """Reconcile device-wide cudaMemGetInfo high-water with process NVML.
+    """Reconcile the receipt with independently attributed NVML observations.
 
-    The qualification-only runtime observer records NVML process usage beside
-    the exact cudaMemGetInfo samples used by the receipt. The samplers have
-    different scope, so the gate allows the larger of 64 MiB and two percent
-    while preserving every raw value.
+    ``cudaMemGetInfo`` is device-wide while the ownership observation for the
+    qualification runner is process-scoped.  On a shared GPU, comparing their
+    independent maxima silently assumes every other process is stationary.
+    Instead, pair the two required boundaries and retain three independent
+    quantities:
+
+    * ``D``: the signed device-wide CUDA growth used by the receipt;
+    * ``P``: the signed current-process NVML growth;
+    * ``X``: independently measured non-current NVML device growth.
+
+    The unexplained residual is ``U = D - P - X``.  Visible other-process
+    growth must also explain ``X`` after allowing the same documented
+    CUDA/NVML tolerance for driver bookkeeping.  The receipt-to-raw-CUDA
+    equality remains exact and is checked before any attribution.
     """
     sampler = trace.get("memory_sampler")
     if not isinstance(sampler, dict) or sampler.get("source") != (
         "nvmlDeviceGetComputeRunningProcesses_v3"
     ):
         raise RuntimeError("qualification requires independent NVML process memory sampling")
+    if sampler.get("captures_all_compute_processes") is not True:
+        raise RuntimeError("qualification requires the complete NVML compute-process ledger")
+    if sampler.get("device_memory_source") != "nvmlDeviceGetMemoryInfo_v2":
+        raise RuntimeError("qualification requires independent NVML device memory sampling")
+    sampler_pid = sampler.get("pid")
+    if not isinstance(sampler_pid, int) or sampler_pid <= 0:
+        raise RuntimeError("qualification NVML sampler has no valid process id")
     receipt = trace.get("runtime_memory_receipt")
     if not isinstance(receipt, dict):
         raise RuntimeError("qualification trace has no runtime memory receipt")
@@ -2113,7 +2157,7 @@ def reconcile_device_peak_with_nvml(trace: dict[str, Any]) -> dict[str, Any]:
     phase_samples = lifetime.get("runtime_phase_memory_samples")
     if not isinstance(phase_samples, list) or not phase_samples:
         raise RuntimeError("qualification lifetime has no synchronized runtime phase samples")
-    parsed_samples: list[dict[str, int | str]] = []
+    parsed_samples: list[dict[str, Any]] = []
     for sample in phase_samples:
         if not isinstance(sample, dict):
             raise RuntimeError("runtime phase memory sample is not an object")
@@ -2121,23 +2165,83 @@ def reconcile_device_peak_with_nvml(trace: dict[str, Any]) -> dict[str, Any]:
         free_bytes = sample.get("free_bytes")
         total_bytes = sample.get("total_bytes")
         process_used_bytes = sample.get("process_used_bytes")
+        all_process_used_bytes = sample.get("all_compute_process_used_bytes")
+        other_process_used_bytes = sample.get("other_compute_process_used_bytes")
+        nvml_total_bytes = sample.get("nvml_device_total_bytes")
+        nvml_reserved_bytes = sample.get("nvml_device_reserved_bytes")
+        nvml_free_bytes = sample.get("nvml_device_free_bytes")
+        nvml_used_bytes = sample.get("nvml_device_used_bytes")
+        post_nvml_free_bytes = sample.get("post_nvml_free_bytes")
+        post_nvml_total_bytes = sample.get("post_nvml_total_bytes")
+        compute_processes = sample.get("compute_processes")
         if (
             not isinstance(phase, str)
             or not isinstance(free_bytes, int)
             or not isinstance(total_bytes, int)
             or not isinstance(process_used_bytes, int)
+            or not isinstance(all_process_used_bytes, int)
+            or not isinstance(other_process_used_bytes, int)
+            or not isinstance(nvml_total_bytes, int)
+            or not isinstance(nvml_reserved_bytes, int)
+            or not isinstance(nvml_free_bytes, int)
+            or not isinstance(nvml_used_bytes, int)
+            or not isinstance(post_nvml_free_bytes, int)
+            or not isinstance(post_nvml_total_bytes, int)
+            or not isinstance(compute_processes, list)
             or free_bytes <= 0
             or total_bytes <= 0
             or free_bytes > total_bytes
             or process_used_bytes < 0
+            or all_process_used_bytes < process_used_bytes
+            or other_process_used_bytes != all_process_used_bytes - process_used_bytes
+            or nvml_total_bytes <= 0
+            or nvml_reserved_bytes < 0
+            or nvml_free_bytes < 0
+            or nvml_used_bytes < 0
+            or nvml_reserved_bytes + nvml_free_bytes + nvml_used_bytes != nvml_total_bytes
+            or post_nvml_free_bytes <= 0
+            or post_nvml_total_bytes != total_bytes
+            or post_nvml_free_bytes > post_nvml_total_bytes
         ):
             raise RuntimeError("runtime phase memory sample is invalid")
+        process_sum = 0
+        current_process_sum = 0
+        parsed_processes: list[dict[str, int]] = []
+        for process in compute_processes:
+            if not isinstance(process, dict):
+                raise RuntimeError("runtime phase NVML process row is not an object")
+            pid = process.get("pid")
+            used_bytes = process.get("used_bytes")
+            if (
+                not isinstance(pid, int)
+                or pid <= 0
+                or not isinstance(used_bytes, int)
+                or used_bytes < 0
+            ):
+                raise RuntimeError("runtime phase NVML process row is invalid")
+            process_sum += used_bytes
+            if pid == sampler_pid:
+                current_process_sum += used_bytes
+            parsed_processes.append({"pid": pid, "used_bytes": used_bytes})
+        if process_sum != all_process_used_bytes or current_process_sum != process_used_bytes:
+            raise RuntimeError(
+                "runtime phase NVML process ledger disagrees with its aggregate fields"
+            )
         parsed_samples.append(
             {
                 "phase": phase,
                 "free_bytes": free_bytes,
                 "total_bytes": total_bytes,
                 "process_used_bytes": process_used_bytes,
+                "all_compute_process_used_bytes": all_process_used_bytes,
+                "other_compute_process_used_bytes": other_process_used_bytes,
+                "nvml_device_total_bytes": nvml_total_bytes,
+                "nvml_device_reserved_bytes": nvml_reserved_bytes,
+                "nvml_device_free_bytes": nvml_free_bytes,
+                "nvml_device_used_bytes": nvml_used_bytes,
+                "post_nvml_free_bytes": post_nvml_free_bytes,
+                "post_nvml_total_bytes": post_nvml_total_bytes,
+                "compute_processes": parsed_processes,
             }
         )
 
@@ -2166,10 +2270,15 @@ def reconcile_device_peak_with_nvml(trace: dict[str, Any]) -> dict[str, Any]:
         "after successful runtime-memory request completion",
     }
     observed_phase_names = {str(sample["phase"]) for sample in observed_boundaries}
-    if not required_boundaries.issubset(observed_phase_names):
+    if observed_phase_names != required_boundaries:
         missing = sorted(required_boundaries - observed_phase_names)
         raise RuntimeError(
             "qualification lifetime is missing synchronized peak boundaries: " + ", ".join(missing)
+        )
+    if len(observed_boundaries) != len(required_boundaries):
+        raise RuntimeError(
+            "qualification lifetime must have exactly one sample for each "
+            "synchronized peak boundary"
         )
 
     receipt_total = receipt.get("pre_load_total_bytes")
@@ -2188,24 +2297,82 @@ def reconcile_device_peak_with_nvml(trace: dict[str, Any]) -> dict[str, Any]:
             f"receipt={device_peak}, synchronized={synchronized_device_peak}"
         )
 
-    baseline = int(baseline_sample["process_used_bytes"])
+    baseline_process = int(baseline_sample["process_used_bytes"])
+    baseline_other_process = int(baseline_sample["other_compute_process_used_bytes"])
+    baseline_nvml_non_current = int(baseline_sample["nvml_device_used_bytes"]) - baseline_process
+    baseline_bracket_difference = abs(
+        int(baseline_sample["post_nvml_free_bytes"]) - int(baseline_sample["free_bytes"])
+    )
+    boundary_reconciliation: list[dict[str, Any]] = []
+    for sample in observed_boundaries:
+        device_growth = baseline_free - int(sample["free_bytes"])
+        process_growth = int(sample["process_used_bytes"]) - baseline_process
+        other_process_growth = (
+            int(sample["other_compute_process_used_bytes"]) - baseline_other_process
+        )
+        nvml_non_current = int(sample["nvml_device_used_bytes"]) - int(sample["process_used_bytes"])
+        external_growth = nvml_non_current - baseline_nvml_non_current
+        unexplained_growth = device_growth - process_growth - external_growth
+        unlisted_external_growth = external_growth - other_process_growth
+        bracket_difference = abs(int(sample["post_nvml_free_bytes"]) - int(sample["free_bytes"]))
+        tolerance = max(
+            64 * 1024 * 1024,
+            math.ceil(
+                0.02
+                * max(
+                    abs(device_growth),
+                    abs(process_growth),
+                    abs(external_growth),
+                    1,
+                )
+            ),
+        )
+        row_passed = bool(
+            baseline_bracket_difference <= tolerance
+            and bracket_difference <= tolerance
+            and abs(unexplained_growth) <= tolerance
+            and abs(unlisted_external_growth) <= tolerance
+        )
+        boundary_reconciliation.append(
+            {
+                "phase": str(sample["phase"]),
+                "cuda_device_growth_bytes": device_growth,
+                "nvml_current_process_growth_bytes": process_growth,
+                "nvml_visible_other_process_growth_bytes": other_process_growth,
+                "nvml_non_current_device_growth_bytes": external_growth,
+                "unlisted_external_growth_bytes": unlisted_external_growth,
+                "unexplained_growth_bytes": unexplained_growth,
+                "baseline_cuda_nvml_bracket_difference_bytes": (baseline_bracket_difference),
+                "boundary_cuda_nvml_bracket_difference_bytes": bracket_difference,
+                "tolerance_bytes": tolerance,
+                "passed": row_passed,
+                "sample": sample,
+            }
+        )
+
     process_peak = max(
         0,
-        max(int(sample["process_used_bytes"]) - baseline for sample in observed_boundaries),
+        max(int(row["nvml_current_process_growth_bytes"]) for row in boundary_reconciliation),
     )
-    difference = abs(device_peak - process_peak)
-    tolerance = max(
-        64 * 1024 * 1024,
-        math.ceil(0.02 * max(device_peak, process_peak, 1)),
-    )
+    device_process_difference = abs(device_peak - process_peak)
+    maximum_tolerance = max(int(row["tolerance_bytes"]) for row in boundary_reconciliation)
+    passed = all(bool(row["passed"]) for row in boundary_reconciliation)
     result = {
         "device_wide_peak_bytes": device_peak,
         "nvml_process_peak_bytes": process_peak,
-        "absolute_difference_bytes": difference,
-        "tolerance_bytes": tolerance,
+        "absolute_difference_bytes": device_process_difference,
+        "maximum_unexplained_difference_bytes": max(
+            abs(int(row["unexplained_growth_bytes"])) for row in boundary_reconciliation
+        ),
+        "maximum_unlisted_external_difference_bytes": max(
+            abs(int(row["unlisted_external_growth_bytes"])) for row in boundary_reconciliation
+        ),
+        "tolerance_bytes": maximum_tolerance,
         "tolerance_rule": "max(64MiB,2pct)",
         "device_scope": "cudaMemGetInfo-device-wide",
         "process_scope": "nvml-current-process",
+        "external_scope": ("nvml-device-used-minus-current-process-with-visible-process-ledger"),
+        "reconciliation_formula": "U = D - P - X",
         "sample_boundaries": [
             str(baseline_sample["phase"]),
             "after runtime KV allocation",
@@ -2214,13 +2381,25 @@ def reconcile_device_peak_with_nvml(trace: dict[str, Any]) -> dict[str, Any]:
         "synchronized_cuda_peak_bytes": synchronized_device_peak,
         "baseline_sample": baseline_sample,
         "peak_boundary_samples": observed_boundaries,
-        "passed": difference <= tolerance,
+        "boundary_reconciliation": boundary_reconciliation,
+        "passed": passed,
     }
     if not result["passed"]:
+        failed_rows = [
+            {
+                "phase": row["phase"],
+                "unexplained_growth_bytes": row["unexplained_growth_bytes"],
+                "unlisted_external_growth_bytes": row["unlisted_external_growth_bytes"],
+                "baseline_bracket_bytes": row["baseline_cuda_nvml_bracket_difference_bytes"],
+                "boundary_bracket_bytes": row["boundary_cuda_nvml_bracket_difference_bytes"],
+                "tolerance_bytes": row["tolerance_bytes"],
+            }
+            for row in boundary_reconciliation
+            if not row["passed"]
+        ]
         raise RuntimeError(
-            "device-wide peak and NVML process peak do not reconcile: "
-            f"device={device_peak}, process={process_peak}, "
-            f"difference={difference}, tolerance={tolerance}"
+            "CUDA/NVML memory scopes do not reconcile after independent "
+            f"external attribution: {failed_rows}"
         )
     return result
 
@@ -2371,6 +2550,81 @@ def evaluate_qualification_outcome(
         ],
         "parity_execution": parity_states,
     }
+
+
+def _write_qualification_report(report_path: Path, report: Mapping[str, Any]) -> None:
+    report_path.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+@contextlib.contextmanager
+def qualification_failure_checkpoint(
+    *,
+    report: dict[str, Any],
+    report_path: Path,
+    repo_root: Path,
+    output_dir: Path,
+):
+    """Persist a complete failed checkpoint with the copied runner evidence."""
+    try:
+        yield
+    except Exception as exc:  # noqa: BLE001 - evidence must survive every producer failure.
+        failure = {
+            "type": type(exc).__name__,
+            "message": str(exc),
+            "traceback": traceback.format_exc(),
+            "stage": report.get("stage", "unknown"),
+        }
+        cases = report.get("cases")
+        if isinstance(cases, list) and cases:
+            active_case = cases[-1]
+            if isinstance(active_case, dict) and active_case.get("status") == "running":
+                failure["stage"] = active_case.get("stage", failure["stage"])
+                active_case.update(
+                    {
+                        "status": "failed",
+                        "passed": False,
+                        "diagnostic_passed": False,
+                        "qualification_passed": False,
+                        "execution_passed": False,
+                        "failure": failure,
+                    }
+                )
+        report.update(
+            {
+                "status": "failed",
+                "passed": False,
+                "diagnostic_passed": False,
+                "execution_passed": False,
+                "case_diagnostics_passed_so_far": False,
+                "qualification_blockers": ["execution_error"],
+                "failure": failure,
+            }
+        )
+        try:
+            source_state_post = source_state_provenance(
+                repo_root,
+                Path(__file__),
+                output_dir,
+                label="post-failure",
+            )
+            report["source_state_post"] = source_state_post
+            source_state_pre = report.get("source_state_pre")
+            report["source_state_unchanged"] = bool(
+                isinstance(source_state_pre, Mapping)
+                and source_state_pre.get("git_head") == source_state_post.get("git_head")
+                and source_state_pre.get("source_state_sha256")
+                == source_state_post.get("source_state_sha256")
+            )
+        except Exception as source_exc:  # noqa: BLE001
+            report["source_state_post_error"] = {
+                "type": type(source_exc).__name__,
+                "message": str(source_exc),
+            }
+            report["source_state_unchanged"] = False
+        _write_qualification_report(report_path, report)
 
 
 def main() -> int:
@@ -2547,10 +2801,23 @@ def main() -> int:
             revision=args.model_revision,
         )
 
+    report_path = output_dir / "qualification-report.json"
+    _write_qualification_report(report_path, report)
     all_case_diagnostics_passed = True
-    with tempfile.TemporaryDirectory(
-        prefix="trtmc-native-memory-qualification-", dir=output_dir
-    ) as temporary:
+    runner_evidence_root = output_dir / "runner-evidence"
+    with (
+        qualification_failure_checkpoint(
+            report=report,
+            report_path=report_path,
+            repo_root=repo_root,
+            output_dir=output_dir,
+        ),
+        tempfile.TemporaryDirectory(
+            prefix="trtmc-native-memory-qualification-",
+            dir=output_dir,
+        ) as temporary,
+    ):
+        runner_evidence_root.mkdir(exist_ok=False)
         work_dir = Path(temporary)
         variant_work_dir = work_dir / "chunk-variant"
         if variant_bundle is not None:
@@ -2563,6 +2830,21 @@ def main() -> int:
                 flush=True,
             )
             tokens = deterministic_token_ids(case.prompt_tokens, vocab_size)
+            case_report: dict[str, Any] = {
+                "name": case.name,
+                "prompt_tokens": case.prompt_tokens,
+                "decode_tokens": case.decode_tokens,
+                "expect_admission_rejection": (case.expect_admission_rejection),
+                "input_token_sha256": hashlib.sha256(tokens.tobytes()).hexdigest(),
+                "status": "running",
+                "stage": "base_runner",
+                "execution_passed": False,
+                "runner_evidence": {
+                    "base": str(runner_evidence_root / case.name / "base"),
+                },
+            }
+            report["cases"].append(case_report)
+            _write_qualification_report(report_path, report)
             trace, trt_logits, runner_stderr = run_trt_case(
                 runner=runner,
                 bundle=bundle,
@@ -2570,20 +2852,18 @@ def main() -> int:
                 case=case,
                 context_limit=spec.context_limit,
                 work_dir=work_dir,
+                evidence_dir=runner_evidence_root / case.name / "base",
             )
-            case_report: dict[str, Any] = {
-                "name": case.name,
-                "prompt_tokens": case.prompt_tokens,
-                "decode_tokens": case.decode_tokens,
-                "expect_admission_rejection": (case.expect_admission_rejection),
-                "input_token_sha256": hashlib.sha256(tokens.tobytes()).hexdigest(),
-                "trace": trace,
-                "execution_passed": True,
-            }
+            case_report["trace"] = trace
+            case_report["execution_passed"] = True
+            case_report["stage"] = "chunk_variant_runner"
             variant_trace: dict[str, Any] | None = None
             variant_logits: np.ndarray | None = None
             variant_stderr = ""
             if variant_bundle is not None:
+                case_report["runner_evidence"]["chunk_variant"] = str(
+                    runner_evidence_root / case.name / "chunk-variant"
+                )
                 variant_trace, variant_logits, variant_stderr = run_trt_case(
                     runner=runner,
                     bundle=variant_bundle,
@@ -2591,7 +2871,9 @@ def main() -> int:
                     case=case,
                     context_limit=spec.context_limit,
                     work_dir=variant_work_dir,
+                    evidence_dir=(runner_evidence_root / case.name / "chunk-variant"),
                 )
+            case_report["stage"] = "validation"
             if case.expect_admission_rejection:
                 case_report["admission_rejected_before_attention"] = True
                 case_report["parity"] = {
@@ -2607,6 +2889,7 @@ def main() -> int:
                     }
             else:
                 assert trt_logits is not None
+                case_report["stage"] = "base_validation"
                 _validate_trace(
                     case,
                     spec,
@@ -2624,6 +2907,7 @@ def main() -> int:
                 if variant_trace is not None:
                     assert variant_logits is not None
                     assert variant_chunk_limit is not None
+                    case_report["stage"] = "chunk_variant_validation"
                     _validate_trace(
                         case,
                         spec,
@@ -2659,12 +2943,14 @@ def main() -> int:
                         "reason": "--skip-hf was requested",
                     }
                 else:
+                    case_report["stage"] = "hf_reference"
                     hf_logits = run_hf_reference(
                         hf_model,
                         tokens,
                         trace["selected_token_ids"],
                         args.device,
                     )
+                    case_report["stage"] = "hf_parity"
                     parity = compare_logits(
                         trt_logits,
                         hf_logits,
@@ -2698,6 +2984,14 @@ def main() -> int:
             case_report["qualification_passed"] = qualification_case_passed
             case_report["diagnostic_passed"] = diagnostic_case_passed
             case_report["passed"] = qualification_case_passed
+            case_report["status"] = (
+                "passed"
+                if qualification_case_passed
+                else "diagnostic_passed"
+                if diagnostic_case_passed
+                else "failed"
+            )
+            case_report["stage"] = "completed"
             if runner_stderr:
                 stderr_path = output_dir / f"{case.name}.runner.stderr.log"
                 stderr_path.write_text(runner_stderr, encoding="utf-8")
@@ -2711,48 +3005,88 @@ def main() -> int:
             all_case_diagnostics_passed = bool(
                 all_case_diagnostics_passed and diagnostic_case_passed
             )
-            report["cases"].append(case_report)
-            report_path = output_dir / "qualification-report.json"
             report["case_diagnostics_passed_so_far"] = all_case_diagnostics_passed
-            report_path.write_text(
-                json.dumps(report, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
+            _write_qualification_report(report_path, report)
 
-    context_memory_envelope = validate_context_memory_envelope(
-        spec,
-        report["cases"],
-        require_full_coverage=not bool(args.case),
-    )
-    report["context_memory_envelope"] = context_memory_envelope
-    source_state_post = source_state_provenance(
-        repo_root,
-        Path(__file__),
-        output_dir,
-        label="post",
-    )
-    source_state_unchanged = (
-        source_state_pre["source_state_sha256"] == source_state_post["source_state_sha256"]
-    )
-    report["source_state_post"] = source_state_post
-    report["source_state_unchanged"] = source_state_unchanged
-    outcome = evaluate_qualification_outcome(
-        canonical_cases=canonical_cases,
-        selected_cases=cases,
-        case_reports=report["cases"],
-        skip_hf=args.skip_hf,
-        case_filter_used=bool(args.case),
-        source_state_pre=source_state_pre,
-        source_state_post=source_state_post,
-        context_memory_envelope=context_memory_envelope,
-        qualified_engine_graph=qualified_engine_graph,
-    )
-    report.update(outcome)
-    report_path = output_dir / "qualification-report.json"
-    report_path.write_text(
-        json.dumps(report, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    if report.get("failure") is not None:
+        print(
+            json.dumps(
+                {
+                    "passed": False,
+                    "diagnostic_passed": False,
+                    "execution_passed": False,
+                    "status": "failed",
+                    "qualification_blockers": report["qualification_blockers"],
+                    "report": str(report_path),
+                    "bundle_sha256": report["bundle_sha256"],
+                    "cases": len(report["cases"]),
+                    "failure": report["failure"],
+                },
+                sort_keys=True,
+            )
+        )
+        return 1
+
+    with qualification_failure_checkpoint(
+        report=report,
+        report_path=report_path,
+        repo_root=repo_root,
+        output_dir=output_dir,
+    ):
+        report["stage"] = "context_memory_envelope"
+        context_memory_envelope = validate_context_memory_envelope(
+            spec,
+            report["cases"],
+            require_full_coverage=not bool(args.case),
+        )
+        report["context_memory_envelope"] = context_memory_envelope
+        report["stage"] = "source_state_post"
+        source_state_post = source_state_provenance(
+            repo_root,
+            Path(__file__),
+            output_dir,
+            label="post",
+        )
+        source_state_unchanged = (
+            source_state_pre["source_state_sha256"]
+            == source_state_post["source_state_sha256"]
+        )
+        report["source_state_post"] = source_state_post
+        report["source_state_unchanged"] = source_state_unchanged
+        report["stage"] = "qualification_outcome"
+        outcome = evaluate_qualification_outcome(
+            canonical_cases=canonical_cases,
+            selected_cases=cases,
+            case_reports=report["cases"],
+            skip_hf=args.skip_hf,
+            case_filter_used=bool(args.case),
+            source_state_pre=source_state_pre,
+            source_state_post=source_state_post,
+            context_memory_envelope=context_memory_envelope,
+            qualified_engine_graph=qualified_engine_graph,
+        )
+        report.update(outcome)
+        report["stage"] = "completed"
+        _write_qualification_report(report_path, report)
+
+    if report.get("failure") is not None:
+        print(
+            json.dumps(
+                {
+                    "passed": False,
+                    "diagnostic_passed": False,
+                    "execution_passed": False,
+                    "status": "failed",
+                    "qualification_blockers": report["qualification_blockers"],
+                    "report": str(report_path),
+                    "bundle_sha256": report["bundle_sha256"],
+                    "cases": len(report["cases"]),
+                    "failure": report["failure"],
+                },
+                sort_keys=True,
+            )
+        )
+        return 1
 
     print(
         json.dumps(

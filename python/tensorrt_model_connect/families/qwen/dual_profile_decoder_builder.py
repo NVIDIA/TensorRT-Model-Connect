@@ -83,6 +83,44 @@ def _const_in_work_dtype(
     return const
 
 
+def _qualified_lm_head_reuses_embedding(
+    config: "ModelConfig",
+    weights: "WeightDict",
+) -> bool:
+    """Validate and select the qualified tied-embedding LM-head path.
+
+    The exact Qwen prototype declares tied token embedding and output
+    projection weights. Materializing ``w_out`` as a second TensorRT
+    constant makes the dynamic prefill plan carry another full vocabulary
+    matrix even though both arrays are identical. Reuse is deliberately
+    fail-closed: the qualified graph only aliases the existing embedding
+    tensor when the checkpoint mapper's two views match bit-for-bit.
+    """
+    if not config.tie_word_embeddings:
+        return False
+
+    embedding = weights.get("embedding")
+    output_projection = weights.get("w_out")
+    if not isinstance(embedding, np.ndarray) or not isinstance(
+            output_projection, np.ndarray):
+        raise ValueError(
+            "qualified tied-embedding LM head requires numpy embedding and "
+            "w_out weights")
+    expected_shape = (embedding.shape[1], embedding.shape[0])
+    if output_projection.shape != expected_shape:
+        raise ValueError(
+            "qualified tied-embedding LM head has incompatible shapes: "
+            f"embedding={embedding.shape}, w_out={output_projection.shape}")
+    if output_projection.dtype != embedding.dtype:
+        raise ValueError(
+            "qualified tied-embedding LM head has incompatible dtypes: "
+            f"embedding={embedding.dtype}, w_out={output_projection.dtype}")
+    if not np.array_equal(output_projection, embedding.T):
+        raise ValueError(
+            "qualified tied-embedding LM head weights differ from embedding.T")
+    return True
+
+
 def _make_matmul_fn(
     network: trt.INetworkDefinition,
     dtype: np.dtype,
@@ -561,6 +599,9 @@ def build_dual_profile_decoder_engine(
     embedding_table = _const_in_work_dtype(
         network, (vocab, hidden), weights["embedding"],
         work_np_dtype, work_trt_dtype)
+    reuse_embedding_for_lm_head = bool(
+        qualified_runtime_memory
+        and _qualified_lm_head_reuses_embedding(config, weights))
 
     # RoPE tables (only when position_type == "rope"). Built for the worst
     # case key length max_cache_length + max_prefill_length, since RoPE is
@@ -897,9 +938,17 @@ def build_dual_profile_decoder_engine(
 
     out_vocab = (weights["w_out"].shape[1]
                  if isinstance(weights["w_out"], np.ndarray) else vocab)
-    logits = graph_ops.add_matmul_rhs_constant(
-        network, lm_input, hidden, out_vocab, weights["w_out"],
-        dtype=work_np_dtype)
+    if reuse_embedding_for_lm_head:
+        logits = network.add_matrix_multiply(
+            lm_input,
+            trt.MatrixOperation.NONE,
+            embedding_table,
+            trt.MatrixOperation.TRANSPOSE,
+        ).get_output(0)
+    else:
+        logits = graph_ops.add_matmul_rhs_constant(
+            network, lm_input, hidden, out_vocab, weights["w_out"],
+            dtype=work_np_dtype)
     lm_bias = weights.get("lm_head_bias")
     if lm_bias is not None:
         logits = graph_ops.add_bias_sum(

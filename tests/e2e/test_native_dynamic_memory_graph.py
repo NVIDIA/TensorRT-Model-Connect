@@ -21,12 +21,18 @@ def _weights(
     vocab: int,
     layers: int,
     kv_width: int,
+    tied_embedding: bool = False,
 ) -> dict:
     rng = np.random.RandomState(17)
+    embedding = rng.randn(vocab, hidden).astype(np.float32)
     values: dict[str, np.ndarray | int] = {
-        "embedding": rng.randn(vocab, hidden).astype(np.float32),
+        "embedding": embedding,
         "final_norm": rng.randn(hidden).astype(np.float32),
-        "w_out": rng.randn(hidden, vocab).astype(np.float32),
+        "w_out": (
+            np.ascontiguousarray(embedding.T)
+            if tied_embedding
+            else rng.randn(hidden, vocab).astype(np.float32)
+        ),
         "_attention_size": hidden,
         "_kv_attention_size": kv_width,
         "_mlp_size": hidden * 2,
@@ -108,6 +114,7 @@ def _build(family: str, role: str):
     hidden, vocab, layers = 64, 32, 1
     query_heads, kv_heads = 4, 2
     head_dim = hidden // query_heads
+    tied_embedding = family == "qwen"
     config = ModelConfig(
         model_type="qwen3" if family == "qwen" else "llama",
         hidden_size=hidden,
@@ -118,6 +125,7 @@ def _build(family: str, role: str):
         max_position_embeddings=8,
         rms_norm_eps=1e-5,
         rope_theta=10000.0,
+        tie_word_embeddings=tied_embedding,
     )
     config.raw["_runtime_memory_contract"] = _contract(family)
     config.raw["_decoder_engine_role"] = role
@@ -128,6 +136,7 @@ def _build(family: str, role: str):
             vocab=vocab,
             layers=layers,
             kv_width=kv_heads * head_dim,
+            tied_embedding=tied_embedding,
         ),
         8,
         precision="bf16",

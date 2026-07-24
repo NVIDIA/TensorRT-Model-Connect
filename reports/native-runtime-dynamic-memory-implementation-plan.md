@@ -944,19 +944,30 @@ replacing separate max/sum-exp optional outputs with the standard cuDNN LSE
 statistics path. Cold private-cache plugin execution reaches Qwen
 `T=40,960, H=40,959, Sq=1` without a compilation failure.
 
-The earlier clean `c68729b8` snapshot remains historical evidence only:
-TinyLlama passed its exact-head matrix, while Qwen exposed one deterministic
-BF16 near-tie at the old `C=2,048` boundary and both models exposed concrete
-split-performance regressions. The revised Qwen `C=1,024` candidate and the
-256-token history buckets fix those cases without changing thresholds.
-Dirty-snapshot diagnostics now pass the complete Qwen and TinyLlama
-correctness matrices; short/medium decode ratios are at least 100% of their
-static baselines, and the measured-pressure Qwen run resolves a requested
-8,192-token target from actual NVML/CUDA observations. Those runs still do not
-promote the candidate because their source state is dirty.
+The clean `0639f7ab` candidate built all six required artifacts: no-flag
+dynamic, exact-head static split, and source-bound `C/2` bundles for both
+models. Its fixed manifest passed 161 CTests, 22 dynamic-memory CTests, 290
+selected dynamic-memory pytest nodes, and both real TensorRT graph tests.
+Those results are diagnostic rather than promotable because the formal
+correctness producer compared a device-wide CUDA delta with a current-process
+NVML delta while unrelated GPU processes were changing. The signed mismatch
+changed direction across otherwise identical runs, so increasing the
+tolerance would be incorrect. The formal performance producer also exposed
+two product defects: `cuda_jit_cache` was not emitted at the top-level schema
+required by its consumer, and the Qwen dynamic prefill plan retained a second
+copy of the tied 151,936-by-1,024 vocabulary matrix, causing an approximately
+11.4% MEM-13 packaging regression.
 
-One final clean HEAD must therefore regenerate both dynamic bundles, both
-exact-head static baselines, both `C/2` variants, every
+The next candidate fixes the producer schema, records independently
+attributable CUDA/NVML scopes at every synchronized boundary, preserves all
+runner evidence on failure, and reuses the Qwen embedding tensor for the LM
+head only after shape, dtype, and bit-exact transpose validation. Focused unit,
+schema, and real TensorRT graph tests pass, but this source state has not yet
+completed the full 40,960/2,048 formal matrix. Therefore the current answer is
+still “implementation candidate,” not “qualified full-context support.”
+
+One final clean HEAD must regenerate both dynamic bundles, both exact-head
+static baselines, both `C/2` variants, every
 correctness/memory/soak/surface/performance receipt, and the v2
 process-isolation aggregates. Older or dirty receipts remain diagnostic
 evidence only; they do not qualify a different source state.
@@ -1719,7 +1730,12 @@ MEM-13 compares bundles built from the same source snapshot, pinned model
 revision, precision, target, TensorRT/CUDA/cuDNN toolchain, and documented
 no-flag product build flow. The receipt records the final topology and obtains
 resident weight bytes from TensorRT engine statistics, not bundle-size
-proxies.
+proxies. When a qualified checkpoint declares tied embeddings, a plan may
+reuse the existing embedding tensor for its transposed LM-head operand only
+after the mapped `w_out` and `embedding.T` have identical shape, dtype, and
+values. A mismatch fails the qualified build; it may not silently alias
+independent weights. The real-plan accounting gate, not source inspection,
+must prove that this removes the duplicate resident vocabulary matrix.
 
 For contiguous-v1:
 
@@ -1733,18 +1749,37 @@ The final field means that TensorRT owns no persistent or full-history cache
 output. It does not exclude the separately reported, runtime-owned bounded
 current-row staging allocation.
 
-NVML peak is supporting evidence, not the sole memory source. Its difference
-from structured receipts must remain within `max(64 MiB, 2%)`, unless an
-independently identified CUDA/TensorRT allocator pool explains the delta.
-The developer-only qualification runner installs the internal runtime-device
-observer for exactly one load lifetime. At every runtime `cudaMemGetInfo`
-boundary it records the exact phase/free/total snapshot and an independent
-NVML current-process sample, attaches those rows as
-`runtime_phase_memory_samples`, and removes the observer on both success and
-exception. Qualification requires exactly one pre-engine baseline plus the
-post-KV-allocation and successful-request-completion boundaries; the
-device-wide peak reconstructed from those synchronized rows must equal the
-receipt before the CUDA/NVML tolerance is evaluated.
+NVML peak is supporting evidence, not the sole memory source. The
+developer-only qualification runner installs the internal runtime-device
+observer for exactly one load lifetime. Each synchronized boundary records:
+
+```text
+D = signed cudaMemGetInfo device-used change
+P = signed NVML current-process change
+X = signed NVML non-current device-used change
+U = D - P - X
+```
+
+The runner records the complete visible compute-process ledger, current and
+all-process bytes, NVML v2 device total/reserved/free/used values, and a second
+CUDA free/total sample after the NVML calls. Qualification requires exactly
+one pre-engine baseline, exactly one post-KV-allocation boundary, and exactly
+one successful-request-completion boundary. The device-wide peak
+reconstructed from those synchronized rows must equal the structured receipt
+byte-for-byte. At every boundary, both the unexplained residual `U` and the
+NVML device delta not represented by the visible process ledger must remain
+within `max(64 MiB, 2%)`; the CUDA/NVML sampling bracket must meet the same
+bound. Missing attribution fields, duplicated boundaries, unstable brackets,
+or a larger unexplained residual fail closed. Full-GPU qualification is
+required; MIG is rejected until CUDA-instance-to-NVML-instance attribution is
+implemented.
+
+The producer writes each runner command, deterministic token input, stdout,
+stderr, return code, raw logits, and raw trace before validation. Both
+per-case validation failures and post-case envelope/source/outcome failures
+write a final failed report with the precise stage and post-failure source
+state. A failed run may not disappear with its temporary directory or leave a
+stale `status=running` report.
 
 For MEM-07 request-completion headroom, the calibration guard remains
 conservative: it uses the maximum of the synchronized device-wide free-memory

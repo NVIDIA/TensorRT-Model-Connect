@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <nlohmann/json.hpp>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -22,17 +23,12 @@ inline nlohmann::json make_runtime_phase_memory_samples() {
 }
 
 inline nlohmann::json make_runtime_phase_memory_sample(std::string phase, std::uint32_t device,
-                                                       std::uint64_t free_bytes,
-                                                       std::uint64_t total_bytes,
-                                                       std::uint64_t process_used_bytes) {
-    return {
-        {"phase", std::move(phase)},
-        {"device", device},
-        {"free_bytes", free_bytes},
-        {"total_bytes", total_bytes},
-        {"used_bytes", total_bytes - free_bytes},
-        {"process_used_bytes", process_used_bytes},
-    };
+                                                       nlohmann::json sample) {
+    if (!sample.is_object())
+        throw std::invalid_argument("runtime phase memory sample must be an object");
+    sample["phase"] = std::move(phase);
+    sample["device"] = device;
+    return sample;
 }
 
 inline void attach_runtime_phase_memory_samples(nlohmann::json& lifetime,

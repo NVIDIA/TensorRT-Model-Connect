@@ -180,9 +180,7 @@ def test_tiny_matrix_covers_every_bucket_neighbor_and_m_plus_one() -> None:
 
 def _qualified_engine_graph_evidence(spec) -> dict:
     num_layers = spec.num_layers
-    width = spec.kv_bytes_per_token // (
-        2 * num_layers * qualify._KV_DTYPE_BYTES[spec.kv_dtype]
-    )
+    width = spec.kv_bytes_per_token // (2 * num_layers * qualify._KV_DTYPE_BYTES[spec.kv_dtype])
 
     def section(role: str) -> dict:
         is_prefill = role == "prefill"
@@ -1537,11 +1535,44 @@ def test_trace_validation_rejects_kv_base_change_across_bucket() -> None:
         qualify._validate_trace(case, spec, trace, np.zeros((3, 8), dtype=np.float32))
 
 
-def test_peak_reconciliation_uses_independent_nvml_process_samples() -> None:
-    trace = {
+def _attributed_phase_sample(
+    *,
+    phase: str,
+    cuda_free: int,
+    current_process: int,
+    other_process: int,
+    nvml_used: int,
+    post_nvml_free: int | None = None,
+) -> dict:
+    nvml_reserved = 100_000_000
+    nvml_total = 1_100_000_000
+    return {
+        "phase": phase,
+        "free_bytes": cuda_free,
+        "total_bytes": 1_000_000_000,
+        "process_used_bytes": current_process,
+        "all_compute_process_used_bytes": current_process + other_process,
+        "other_compute_process_used_bytes": other_process,
+        "nvml_device_total_bytes": nvml_total,
+        "nvml_device_reserved_bytes": nvml_reserved,
+        "nvml_device_free_bytes": nvml_total - nvml_reserved - nvml_used,
+        "nvml_device_used_bytes": nvml_used,
+        "post_nvml_free_bytes": (cuda_free if post_nvml_free is None else post_nvml_free),
+        "post_nvml_total_bytes": 1_000_000_000,
+        "compute_processes": [
+            {"pid": 123, "used_bytes": current_process},
+            {"pid": 456, "used_bytes": other_process},
+        ],
+    }
+
+
+def _attributed_peak_trace() -> dict:
+    return {
         "memory_sampler": {
             "source": "nvmlDeviceGetComputeRunningProcesses_v3",
             "pid": 123,
+            "captures_all_compute_processes": True,
+            "device_memory_source": "nvmlDeviceGetMemoryInfo_v2",
         },
         "runtime_memory_receipt": {
             "peak_device_bytes": 100_000_000,
@@ -1550,34 +1581,42 @@ def test_peak_reconciliation_uses_independent_nvml_process_samples() -> None:
         "load_cycles": [
             {
                 "runtime_phase_memory_samples": [
-                    {
-                        "phase": ("before runtime-memory Qwen engine deserialization"),
-                        "free_bytes": 800_000_000,
-                        "total_bytes": 1_000_000_000,
-                        "process_used_bytes": 100_000_000,
-                    },
-                    {
-                        "phase": "before runtime KV planning",
-                        "free_bytes": 740_000_000,
-                        "total_bytes": 1_000_000_000,
-                        "process_used_bytes": 160_000_000,
-                    },
-                    {
-                        "phase": "after runtime KV allocation",
-                        "free_bytes": 700_000_000,
-                        "total_bytes": 1_000_000_000,
-                        "process_used_bytes": 198_000_000,
-                    },
-                    {
-                        "phase": ("after successful runtime-memory request completion"),
-                        "free_bytes": 705_000_000,
-                        "total_bytes": 1_000_000_000,
-                        "process_used_bytes": 190_000_000,
-                    },
+                    _attributed_phase_sample(
+                        phase="before runtime-memory Qwen engine deserialization",
+                        cuda_free=800_000_000,
+                        current_process=100_000_000,
+                        other_process=50_000_000,
+                        nvml_used=200_000_000,
+                    ),
+                    _attributed_phase_sample(
+                        phase="before runtime KV planning",
+                        cuda_free=740_000_000,
+                        current_process=160_000_000,
+                        other_process=50_000_000,
+                        nvml_used=260_000_000,
+                    ),
+                    _attributed_phase_sample(
+                        phase="after runtime KV allocation",
+                        cuda_free=700_000_000,
+                        current_process=198_000_000,
+                        other_process=50_000_000,
+                        nvml_used=298_000_000,
+                    ),
+                    _attributed_phase_sample(
+                        phase="after successful runtime-memory request completion",
+                        cuda_free=705_000_000,
+                        current_process=190_000_000,
+                        other_process=55_000_000,
+                        nvml_used=295_000_000,
+                    ),
                 ],
             }
         ],
     }
+
+
+def test_peak_reconciliation_uses_independent_nvml_process_samples() -> None:
+    trace = _attributed_peak_trace()
 
     result = qualify.reconcile_device_peak_with_nvml(trace)
 
@@ -1591,8 +1630,80 @@ def test_peak_reconciliation_uses_independent_nvml_process_samples() -> None:
     with pytest.raises(RuntimeError, match="does not match synchronized"):
         qualify.reconcile_device_peak_with_nvml(trace)
 
+
+def test_peak_reconciliation_accepts_signed_visible_external_growth() -> None:
+    trace = _attributed_peak_trace()
+    allocation = trace["load_cycles"][0]["runtime_phase_memory_samples"][2]
+    allocation.update(
+        _attributed_phase_sample(
+            phase="after runtime KV allocation",
+            cuda_free=500_000_000,
+            current_process=198_000_000,
+            other_process=250_000_000,
+            nvml_used=498_000_000,
+        )
+    )
+    trace["runtime_memory_receipt"]["peak_device_bytes"] = 300_000_000
+
+    result = qualify.reconcile_device_peak_with_nvml(trace)
+
+    assert result["passed"]
+    allocation_row = result["boundary_reconciliation"][0]
+    assert allocation_row["nvml_visible_other_process_growth_bytes"] == 200_000_000
+    assert allocation_row["nvml_non_current_device_growth_bytes"] == 200_000_000
+    assert allocation_row["unexplained_growth_bytes"] == 2_000_000
+
+    completion = trace["load_cycles"][0]["runtime_phase_memory_samples"][3]
+    completion.update(
+        _attributed_phase_sample(
+            phase="after successful runtime-memory request completion",
+            cuda_free=760_000_000,
+            current_process=190_000_000,
+            other_process=0,
+            nvml_used=240_000_000,
+        )
+    )
+    result = qualify.reconcile_device_peak_with_nvml(trace)
+    assert result["passed"]
+    assert (
+        result["boundary_reconciliation"][1]["nvml_visible_other_process_growth_bytes"]
+        == -50_000_000
+    )
+
+
+def test_peak_reconciliation_rejects_unexplained_or_unlisted_growth() -> None:
+    trace = _attributed_peak_trace()
     trace["load_cycles"][0]["runtime_phase_memory_samples"][2]["free_bytes"] = 600_000_000
-    with pytest.raises(RuntimeError, match="do not reconcile"):
+    trace["runtime_memory_receipt"]["peak_device_bytes"] = 200_000_000
+    with pytest.raises(RuntimeError, match="external attribution"):
+        qualify.reconcile_device_peak_with_nvml(trace)
+
+    trace = _attributed_peak_trace()
+    allocation = trace["load_cycles"][0]["runtime_phase_memory_samples"][2]
+    allocation["nvml_device_used_bytes"] += 100_000_000
+    allocation["nvml_device_free_bytes"] -= 100_000_000
+    with pytest.raises(RuntimeError, match="external attribution"):
+        qualify.reconcile_device_peak_with_nvml(trace)
+
+    trace = _attributed_peak_trace()
+    trace["load_cycles"][0]["runtime_phase_memory_samples"][2]["post_nvml_free_bytes"] -= (
+        100_000_000
+    )
+    with pytest.raises(RuntimeError, match="external attribution"):
+        qualify.reconcile_device_peak_with_nvml(trace)
+
+    trace = _attributed_peak_trace()
+    del trace["load_cycles"][0]["runtime_phase_memory_samples"][2]["all_compute_process_used_bytes"]
+    with pytest.raises(RuntimeError, match="sample is invalid"):
+        qualify.reconcile_device_peak_with_nvml(trace)
+
+
+def test_peak_reconciliation_rejects_duplicate_required_boundary() -> None:
+    trace = _attributed_peak_trace()
+    samples = trace["load_cycles"][0]["runtime_phase_memory_samples"]
+    samples.append(copy.deepcopy(samples[2]))
+
+    with pytest.raises(RuntimeError, match="exactly one sample"):
         qualify.reconcile_device_peak_with_nvml(trace)
 
 
@@ -1601,6 +1712,8 @@ def test_peak_reconciliation_rejects_unsynchronized_lifetime_samples() -> None:
         "memory_sampler": {
             "source": "nvmlDeviceGetComputeRunningProcesses_v3",
             "pid": 123,
+            "captures_all_compute_processes": True,
+            "device_memory_source": "nvmlDeviceGetMemoryInfo_v2",
         },
         "runtime_memory_receipt": {
             "peak_device_bytes": 100_000_000,
@@ -1616,3 +1729,88 @@ def test_peak_reconciliation_rejects_unsynchronized_lifetime_samples() -> None:
 
     with pytest.raises(RuntimeError, match="no synchronized runtime phase"):
         qualify.reconcile_device_peak_with_nvml(trace)
+
+
+def test_failure_checkpoint_persists_first_case_and_source_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_state = {
+        "git_head": "a" * 40,
+        "source_state_sha256": "b" * 64,
+    }
+    monkeypatch.setattr(
+        qualify,
+        "source_state_provenance",
+        lambda *_args, **_kwargs: dict(source_state),
+    )
+    report_path = tmp_path / "qualification-report.json"
+    report = {
+        "source_state_pre": dict(source_state),
+        "status": "running",
+        "passed": False,
+        "cases": [],
+    }
+
+    with qualify.qualification_failure_checkpoint(
+        report=report,
+        report_path=report_path,
+        repo_root=tmp_path,
+        output_dir=tmp_path,
+    ):
+        report["cases"].append(
+            {
+                "name": "first-case",
+                "status": "running",
+                "stage": "chunk_variant_validation",
+                "runner_evidence": {
+                    "base": str(tmp_path / "runner-evidence" / "first-case" / "base")
+                },
+            }
+        )
+        raise RuntimeError("injected attribution failure")
+
+    persisted = json.loads(report_path.read_text(encoding="utf-8"))
+    assert persisted["status"] == "failed"
+    assert persisted["source_state_unchanged"] is True
+    assert persisted["failure"]["type"] == "RuntimeError"
+    assert persisted["failure"]["stage"] == "chunk_variant_validation"
+    assert persisted["cases"][0]["status"] == "failed"
+    assert persisted["cases"][0]["execution_passed"] is False
+    assert persisted["cases"][0]["failure"]["message"] == ("injected attribution failure")
+
+
+def test_failure_checkpoint_persists_post_case_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_state = {
+        "git_head": "a" * 40,
+        "source_state_sha256": "b" * 64,
+    }
+    monkeypatch.setattr(
+        qualify,
+        "source_state_provenance",
+        lambda *_args, **_kwargs: dict(source_state),
+    )
+    report_path = tmp_path / "qualification-report.json"
+    report = {
+        "source_state_pre": dict(source_state),
+        "status": "running",
+        "stage": "context_memory_envelope",
+        "passed": False,
+        "cases": [{"name": "last-case", "status": "passed"}],
+    }
+
+    with qualify.qualification_failure_checkpoint(
+        report=report,
+        report_path=report_path,
+        repo_root=tmp_path,
+        output_dir=tmp_path,
+    ):
+        raise RuntimeError("injected finalization failure")
+
+    persisted = json.loads(report_path.read_text(encoding="utf-8"))
+    assert persisted["status"] == "failed"
+    assert persisted["failure"]["stage"] == "context_memory_envelope"
+    assert persisted["cases"][0]["status"] == "passed"

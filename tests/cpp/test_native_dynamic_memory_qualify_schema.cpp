@@ -34,7 +34,20 @@ void test_repeat_schema(std::size_t repeat) {
 void test_runtime_phase_memory_schema() {
     auto samples = trtmc::qualification::make_runtime_phase_memory_samples();
     samples.push_back(trtmc::qualification::make_runtime_phase_memory_sample(
-        "after runtime KV allocation", 2, 700, 1000, 275));
+        "after runtime KV allocation", 2,
+        {
+            {"free_bytes", 700},
+            {"total_bytes", 1000},
+            {"used_bytes", 300},
+            {"process_used_bytes", 275},
+            {"all_compute_process_used_bytes", 325},
+            {"other_compute_process_used_bytes", 50},
+            {"nvml_device_used_bytes", 340},
+            {"post_nvml_free_bytes", 695},
+            {"compute_processes",
+             {{{"pid", 17}, {"used_bytes", 275}},
+              {{"pid", 23}, {"used_bytes", 50}}}},
+        }));
 
     nlohmann::json lifetime = {{"label", "measured-load-cycle"}};
     trtmc::qualification::attach_runtime_phase_memory_samples(lifetime, samples);
@@ -52,6 +65,16 @@ void test_runtime_phase_memory_schema() {
     check(sample.at("used_bytes") == 300, "runtime phase sample derives device-wide used bytes");
     check(sample.at("process_used_bytes") == 275,
           "runtime phase sample preserves independent process bytes");
+    check(sample.at("all_compute_process_used_bytes") == 325,
+          "runtime phase sample preserves all visible process bytes");
+    check(sample.at("other_compute_process_used_bytes") == 50,
+          "runtime phase sample preserves independently visible external bytes");
+    check(sample.at("nvml_device_used_bytes") == 340,
+          "runtime phase sample preserves independent device-wide NVML bytes");
+    check(sample.at("post_nvml_free_bytes") == 695,
+          "runtime phase sample preserves the post-NVML CUDA bracket");
+    check(sample.at("compute_processes").size() == 2,
+          "runtime phase sample preserves the visible process ledger");
 }
 
 } // namespace

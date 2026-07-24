@@ -1433,6 +1433,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
         "before": cache_before,
         "after": cache_after,
     }
+    result["cuda_jit_cache"] = cuda_jit_cache
     environment = _environment_identity()
     toolchain = {
         "worker": str(worker),

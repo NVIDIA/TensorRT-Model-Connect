@@ -327,6 +327,21 @@ json success_json(const std::string& model_id, const std::string& pipeline_type,
     return out;
 }
 
+struct ProcessMemoryEntry {
+    std::uint32_t pid{0};
+    std::uint64_t used_bytes{0};
+};
+
+struct ProcessMemoryObservation {
+    std::uint64_t current_process_used_bytes{0};
+    std::uint64_t all_compute_process_used_bytes{0};
+    std::uint64_t nvml_device_total_bytes{0};
+    std::uint64_t nvml_device_reserved_bytes{0};
+    std::uint64_t nvml_device_free_bytes{0};
+    std::uint64_t nvml_device_used_bytes{0};
+    std::vector<ProcessMemoryEntry> compute_processes;
+};
+
 #if TRTMC_HAS_NVML
 class ProcessMemorySampler {
   public:
@@ -348,6 +363,17 @@ class ProcessMemorySampler {
         pci_bus_id_ = pci_bus_id;
         check(nvmlDeviceGetHandleByPciBusId_v2(pci_bus_id, &device_),
               "nvmlDeviceGetHandleByPciBusId_v2");
+        unsigned int current_mig_mode = NVML_DEVICE_MIG_DISABLE;
+        unsigned int pending_mig_mode = NVML_DEVICE_MIG_DISABLE;
+        const auto mig_status =
+            nvmlDeviceGetMigMode(device_, &current_mig_mode, &pending_mig_mode);
+        if (mig_status == NVML_SUCCESS && current_mig_mode == NVML_DEVICE_MIG_ENABLE) {
+            throw std::runtime_error(
+                "native dynamic-memory qualification requires a full GPU; "
+                "MIG instance attribution is not supported");
+        }
+        if (mig_status != NVML_SUCCESS && mig_status != NVML_ERROR_NOT_SUPPORTED)
+            check(mig_status, "nvmlDeviceGetMigMode");
         check(nvmlDeviceGetIndex(device_, &physical_device_index_), "nvmlDeviceGetIndex");
         char uuid[NVML_DEVICE_UUID_V2_BUFFER_SIZE]{};
         check(nvmlDeviceGetUUID(device_, uuid, sizeof(uuid)), "nvmlDeviceGetUUID");
@@ -355,7 +381,7 @@ class ProcessMemorySampler {
         pid_ = static_cast<unsigned int>(getpid());
     }
 
-    std::uint64_t sample_process_used_bytes() const {
+    ProcessMemoryObservation sample() const {
         std::vector<nvmlProcessInfo_t> processes(64);
         for (int attempt = 0; attempt < 3; ++attempt) {
             auto count = static_cast<unsigned int>(processes.size());
@@ -366,15 +392,44 @@ class ProcessMemorySampler {
                 continue;
             }
             check(status, "nvmlDeviceGetComputeRunningProcesses_v3");
+            ProcessMemoryObservation observation;
+            observation.compute_processes.reserve(count);
+            bool found_current_process = false;
             for (unsigned int index = 0; index < count; ++index) {
-                if (processes[index].pid != pid_)
-                    continue;
                 if (processes[index].usedGpuMemory == NVML_VALUE_NOT_AVAILABLE) {
                     throw std::runtime_error("NVML did not report process GPU memory");
                 }
-                return processes[index].usedGpuMemory;
+                const auto used_bytes =
+                    static_cast<std::uint64_t>(processes[index].usedGpuMemory);
+                observation.all_compute_process_used_bytes =
+                    checked_add(observation.all_compute_process_used_bytes, used_bytes,
+                                "NVML all-process GPU memory");
+                observation.compute_processes.push_back(
+                    {processes[index].pid, used_bytes});
+                if (processes[index].pid == pid_) {
+                    observation.current_process_used_bytes =
+                        checked_add(observation.current_process_used_bytes, used_bytes,
+                                    "NVML current-process GPU memory");
+                    found_current_process = true;
+                }
             }
-            throw std::runtime_error("NVML did not list the qualification runner process");
+            if (!found_current_process)
+                throw std::runtime_error("NVML did not list the qualification runner process");
+            std::sort(observation.compute_processes.begin(),
+                      observation.compute_processes.end(),
+                      [](const ProcessMemoryEntry& lhs, const ProcessMemoryEntry& rhs) {
+                          return lhs.pid < rhs.pid;
+                      });
+
+            nvmlMemory_v2_t memory{};
+            memory.version = nvmlMemory_v2;
+            check(nvmlDeviceGetMemoryInfo_v2(device_, &memory),
+                  "nvmlDeviceGetMemoryInfo_v2");
+            observation.nvml_device_total_bytes = memory.total;
+            observation.nvml_device_reserved_bytes = memory.reserved;
+            observation.nvml_device_free_bytes = memory.free;
+            observation.nvml_device_used_bytes = memory.used;
+            return observation;
         }
         throw std::runtime_error("NVML process list changed during every sampling attempt");
     }
@@ -387,6 +442,8 @@ class ProcessMemorySampler {
             {"physical_device_index", physical_device_index_},
             {"pci_bus_id", pci_bus_id_},
             {"gpu_uuid", gpu_uuid_},
+            {"captures_all_compute_processes", true},
+            {"device_memory_source", "nvmlDeviceGetMemoryInfo_v2"},
         };
     }
 
@@ -416,9 +473,22 @@ struct DeviceMemorySample {
     std::uint64_t free_bytes{0};
     std::uint64_t total_bytes{0};
     std::uint64_t process_used_bytes{0};
+    std::uint64_t all_compute_process_used_bytes{0};
+    std::uint64_t nvml_device_total_bytes{0};
+    std::uint64_t nvml_device_reserved_bytes{0};
+    std::uint64_t nvml_device_free_bytes{0};
+    std::uint64_t nvml_device_used_bytes{0};
+    std::uint64_t post_nvml_free_bytes{0};
+    std::uint64_t post_nvml_total_bytes{0};
+    std::vector<ProcessMemoryEntry> compute_processes;
 };
 
-DeviceMemorySample sample_device_memory() {
+struct CudaMemorySample {
+    std::uint64_t free_bytes{0};
+    std::uint64_t total_bytes{0};
+};
+
+CudaMemorySample sample_cuda_device_memory() {
     const auto sync_status = cudaDeviceSynchronize();
     if (sync_status != cudaSuccess) {
         throw std::runtime_error(
@@ -432,22 +502,68 @@ DeviceMemorySample sample_device_memory() {
         throw std::runtime_error(std::string("cudaMemGetInfo failed during memory sampling: ") +
                                  cudaGetErrorString(info_status));
     }
-    std::uint64_t process_used_bytes = 0;
+    return {
+        static_cast<std::uint64_t>(free_bytes),
+        static_cast<std::uint64_t>(total_bytes),
+    };
+}
+
+DeviceMemorySample enrich_device_memory_sample(std::uint64_t free_bytes,
+                                               std::uint64_t total_bytes) {
+    ProcessMemoryObservation observation;
 #if TRTMC_HAS_NVML
-    process_used_bytes = process_memory_sampler().sample_process_used_bytes();
+    observation = process_memory_sampler().sample();
 #else
-    process_used_bytes = static_cast<std::uint64_t>(total_bytes - free_bytes);
+    observation.current_process_used_bytes = total_bytes - free_bytes;
+    observation.all_compute_process_used_bytes = total_bytes - free_bytes;
+    observation.nvml_device_total_bytes = total_bytes;
+    observation.nvml_device_free_bytes = free_bytes;
+    observation.nvml_device_used_bytes = total_bytes - free_bytes;
 #endif
-    return {static_cast<std::uint64_t>(free_bytes), static_cast<std::uint64_t>(total_bytes),
-            process_used_bytes};
+    const auto post_nvml = sample_cuda_device_memory();
+    return {
+        free_bytes,
+        total_bytes,
+        observation.current_process_used_bytes,
+        observation.all_compute_process_used_bytes,
+        observation.nvml_device_total_bytes,
+        observation.nvml_device_reserved_bytes,
+        observation.nvml_device_free_bytes,
+        observation.nvml_device_used_bytes,
+        post_nvml.free_bytes,
+        post_nvml.total_bytes,
+        std::move(observation.compute_processes),
+    };
+}
+
+DeviceMemorySample sample_device_memory() {
+    const auto cuda = sample_cuda_device_memory();
+    return enrich_device_memory_sample(cuda.free_bytes, cuda.total_bytes);
 }
 
 json sample_json(const DeviceMemorySample& sample) {
+    auto processes = json::array();
+    for (const auto& process : sample.compute_processes) {
+        processes.push_back({
+            {"pid", process.pid},
+            {"used_bytes", process.used_bytes},
+        });
+    }
     return {
         {"free_bytes", sample.free_bytes},
         {"total_bytes", sample.total_bytes},
         {"used_bytes", sample.total_bytes - sample.free_bytes},
         {"process_used_bytes", sample.process_used_bytes},
+        {"all_compute_process_used_bytes", sample.all_compute_process_used_bytes},
+        {"other_compute_process_used_bytes",
+         sample.all_compute_process_used_bytes - sample.process_used_bytes},
+        {"nvml_device_total_bytes", sample.nvml_device_total_bytes},
+        {"nvml_device_reserved_bytes", sample.nvml_device_reserved_bytes},
+        {"nvml_device_free_bytes", sample.nvml_device_free_bytes},
+        {"nvml_device_used_bytes", sample.nvml_device_used_bytes},
+        {"post_nvml_free_bytes", sample.post_nvml_free_bytes},
+        {"post_nvml_total_bytes", sample.post_nvml_total_bytes},
+        {"compute_processes", std::move(processes)},
     };
 }
 
@@ -460,15 +576,10 @@ class RuntimePhaseMemoryObserverScope {
         : samples_(samples), after_snapshot_(std::move(after_snapshot)) {
         trtmc::set_runtime_device_memory_qualification_observer(
             [this](const char* phase, const trtmc::RuntimeDeviceMemorySnapshot& snapshot) {
-                std::uint64_t process_used_bytes = snapshot.total_bytes - snapshot.free_bytes;
-#if TRTMC_HAS_NVML
-                process_used_bytes = process_memory_sampler().sample_process_used_bytes();
-#endif
-                const DeviceMemorySample sample{snapshot.free_bytes, snapshot.total_bytes,
-                                                process_used_bytes};
+                const auto sample =
+                    enrich_device_memory_sample(snapshot.free_bytes, snapshot.total_bytes);
                 samples_.push_back(trtmc::qualification::make_runtime_phase_memory_sample(
-                    phase, snapshot.device, snapshot.free_bytes, snapshot.total_bytes,
-                    process_used_bytes));
+                    phase, snapshot.device, sample_json(sample)));
                 if (after_snapshot_)
                     after_snapshot_(phase, sample);
             });
