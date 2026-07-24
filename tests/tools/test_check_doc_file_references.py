@@ -257,6 +257,22 @@ def test_historical_document_skips_live_path_and_count_checks(tmp_path: Path) ->
     assert report.findings == []
 
 
+def test_generated_output_path_is_allowed_but_missing_source_path_is_not(
+    tmp_path: Path,
+) -> None:
+    doc = tmp_path / "README.md"
+    doc.write_text(
+        "Docusaurus writes `website/build/`; source lives in `website/missing/`.\n",
+        encoding="utf-8",
+    )
+
+    report = cdfr.check_markdown_files([doc], tmp_path)
+
+    assert [finding.message for finding in report.findings] == [
+        "Path does not exist: website/missing/"
+    ]
+
+
 def test_personal_workspace_path_is_rejected_in_current_document() -> None:
     content = "Build from /workspace/users/yifeif/workspaces/current/repo.\n"
 
