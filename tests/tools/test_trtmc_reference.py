@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import stat
 
 from tools import trtmc_reference
 
@@ -105,7 +106,9 @@ def test_reference_cache_reuses_same_settings_across_work_directories(
     assert json.loads((second / "hf_cache.json").read_text(encoding="utf-8"))[
         "status"
     ] == "reused"
-    assert len([path for path in cache_dir.iterdir() if not path.name.startswith(".")]) == 1
+    entries = [path for path in cache_dir.iterdir() if not path.name.startswith(".")]
+    assert len(entries) == 1
+    assert stat.S_IMODE(entries[0].stat().st_mode) & 0o055 == 0o055
 
 
 def test_reference_cache_key_changes_with_inference_setting(

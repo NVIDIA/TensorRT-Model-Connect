@@ -191,6 +191,14 @@ def _restore_moved_outputs(moved: Iterable[tuple[Path, Path]]) -> None:
             shutil.move(str(source), str(destination))
 
 
+def _make_cache_readable(root: Path) -> None:
+    for path in [root, *root.rglob("*")]:
+        if path.is_symlink():
+            continue
+        mode = path.stat().st_mode
+        path.chmod(mode | (0o055 if path.is_dir() else 0o044))
+
+
 def _move_outputs_to_cache(
     *,
     work_dir: Path,
@@ -216,6 +224,7 @@ def _move_outputs_to_cache(
             json.dumps(dict(metadata), indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+        _make_cache_readable(stage)
         stage.rename(entry)
     except BaseException:
         _restore_moved_outputs(moved)
