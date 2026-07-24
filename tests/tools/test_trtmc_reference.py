@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import stat
+import sys
 from types import SimpleNamespace
 
 from tools.reference import (
@@ -17,6 +18,82 @@ from tools.reference import (
     transformers_vlm,
 )
 from tools import trtmc_reference
+
+
+def test_tts_transcriber_passes_local_files_only_once(monkeypatch) -> None:
+    load_calls: list[tuple[str, str, dict[str, object]]] = []
+    pipeline_call: dict[str, object] = {}
+    loaded_model = object()
+    loaded_processor = SimpleNamespace(
+        tokenizer=object(),
+        feature_extractor=SimpleNamespace(sampling_rate=16000),
+    )
+
+    class FakeTranscriber:
+        feature_extractor = SimpleNamespace(sampling_rate=16000)
+
+        def __call__(self, _waveforms, **_kwargs):
+            return [{"text": "hello"}]
+
+    class FakeModelLoader:
+        @staticmethod
+        def from_pretrained(model_id: str, **kwargs):
+            load_calls.append(("model", model_id, kwargs))
+            return loaded_model
+
+    class FakeProcessorLoader:
+        @staticmethod
+        def from_pretrained(model_id: str, **kwargs):
+            load_calls.append(("processor", model_id, kwargs))
+            return loaded_processor
+
+    def fake_pipeline(task: str, **kwargs):
+        assert task == "automatic-speech-recognition"
+        pipeline_call.update(kwargs)
+        return FakeTranscriber()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False)),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(
+            AutoModelForSpeechSeq2Seq=FakeModelLoader,
+            AutoProcessor=FakeProcessorLoader,
+            pipeline=fake_pipeline,
+        ),
+    )
+    monkeypatch.setattr(
+        speech,
+        "_read_wav_float32",
+        lambda _path: ([0.0], 16000),
+    )
+    monkeypatch.setattr(
+        speech,
+        "_resample_audio",
+        lambda audio, _source_rate, _target_rate: audio,
+    )
+
+    result = speech._transcribe_tts(
+        SimpleNamespace(device="cuda", local_files_only=True),
+        [Path("sample.wav")],
+        "openai/whisper-tiny",
+    )
+
+    assert result == ["hello"]
+    assert load_calls == [
+        ("model", "openai/whisper-tiny", {"local_files_only": True}),
+        ("processor", "openai/whisper-tiny", {"local_files_only": True}),
+    ]
+    assert pipeline_call == {
+        "model": loaded_model,
+        "tokenizer": loaded_processor.tokenizer,
+        "feature_extractor": loaded_processor.feature_extractor,
+        "device": -1,
+    }
 
 
 def _prepare_work(path: Path) -> None:

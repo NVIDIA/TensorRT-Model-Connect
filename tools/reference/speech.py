@@ -542,20 +542,31 @@ def _transcribe_tts(
     model_id: str,
 ) -> list[str]:
     import torch
-    from transformers import pipeline
+    from transformers import (
+        AutoModelForSpeechSeq2Seq,
+        AutoProcessor,
+        pipeline,
+    )
 
     device = (
         0
         if arguments.device.startswith("cuda") and torch.cuda.is_available()
         else -1
     )
+    model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        model_id,
+        local_files_only=arguments.local_files_only,
+    )
+    processor = AutoProcessor.from_pretrained(
+        model_id,
+        local_files_only=arguments.local_files_only,
+    )
     transcriber = pipeline(
         "automatic-speech-recognition",
-        model=model_id,
+        model=model,
+        tokenizer=processor.tokenizer,
+        feature_extractor=processor.feature_extractor,
         device=device,
-        model_kwargs={"local_files_only": True}
-        if arguments.local_files_only
-        else {},
     )
     target_rate = int(transcriber.feature_extractor.sampling_rate)
     waveforms = []
