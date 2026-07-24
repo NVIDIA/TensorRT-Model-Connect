@@ -325,6 +325,27 @@ static void test_module_enable_after_normal_run() {
     cudaStreamDestroy(stream);
 }
 
+static void test_module_cuda_graph_destruction() {
+    auto engine = build_identity_engine();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    {
+        auto module = make_module(engine.get(), stream);
+        module->enable_cuda_graph();
+
+        float input[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+        float output[4] = {0};
+        run_and_read(*module, input, output);
+        check(module->cuda_graph_active(), "graph_destruction: graph remains active");
+    }
+    check(cudaStreamSynchronize(stream) == cudaSuccess,
+          "graph_destruction: module releases graph before stream teardown");
+    cudaStreamDestroy(stream);
+}
+
 int main() {
     // CudaGraphExec unit tests
     test_default_state();
@@ -338,6 +359,7 @@ int main() {
     test_module_cuda_graph_correctness();
     test_module_cuda_graph_multiple_runs();
     test_module_enable_after_normal_run();
+    test_module_cuda_graph_destruction();
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;

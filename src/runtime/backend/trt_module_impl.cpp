@@ -183,6 +183,11 @@ void TrtModuleImpl::reset_execution_context() {
 
 TrtModuleImpl::~TrtModuleImpl() {
     flush_timing_events();
+    // CUDA Graphs may contain TensorRT collective launches that retain the
+    // distributed communicator. Destroy the captured graph before member
+    // teardown releases distributed_owner from keep_alive_.
+    if (cuda_graph_)
+        cuda_graph_->reset();
     free_buffers();
     delete ctx_;
 }
