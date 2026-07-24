@@ -665,6 +665,7 @@ def test_inner_proof_runs_the_exact_model_owned_python_test_selection() -> None:
         ("m2m_100", "exclusive_gpu"),
         ("mixtral", "exclusive_gpu"),
         ("timesfm", "exclusive_gpu"),
+        ("whisper", "exclusive_gpu"),
     ),
 )
 def test_selection_derives_the_most_restrictive_gpu_resource_class(
@@ -676,6 +677,33 @@ def test_selection_derives_the_most_restrictive_gpu_resource_class(
 
     assert selection["resource_class"] == expected_resource
     assert {case["resource_class"] for case in selection["e2e_cases"]} == {expected_resource}
+
+
+def test_whisper_nightly_selection_leases_one_complete_gpu(
+    tmp_path: Path,
+) -> None:
+    selection = _run_test_selection(
+        tmp_path,
+        "whisper",
+        "nightly",
+        lease_env={
+            "TRTMC_MODEL_PROOF_GPU_ID": "2",
+            "TRTMC_MODEL_PROOF_GPU_SLOT_IDS": "0,1,2,3",
+            "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "4",
+            "TRTMC_MODEL_PROOF_RESOURCE_CLASS": "exclusive_gpu",
+        },
+    )
+
+    assert len(selection["e2e_cases"]) == 16
+    assert {case["manifest"] for case in selection["e2e_cases"]} == {
+        "whisper-large-v3-turbo.json",
+        "whisper-tiny-fp16.json",
+    }
+    assert {case["resource_class"] for case in selection["e2e_cases"]} == {
+        "exclusive_gpu"
+    }
+    assert selection["gpu_resource_class"] == "exclusive_gpu"
+    assert selection["gpu_slot_ids"] == [0, 1, 2, 3]
 
 
 def test_qwen3_omni_selection_requires_clean_gpu_capacity(tmp_path: Path) -> None:
@@ -3464,6 +3492,7 @@ def test_explicit_runner_gpu_id_cannot_bypass_a_busy_slot(tmp_path: Path) -> Non
     assert not _proof_gpu_ids_if_present(docker_log)
 
 
+@pytest.mark.model_proof_allocator
 def test_model_proof_cannot_bypass_an_exclusive_whole_machine_lock(
     tmp_path: Path,
 ) -> None:

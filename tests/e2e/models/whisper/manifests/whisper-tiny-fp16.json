@@ -9,6 +9,7 @@
   "fp32_layers": [0],
   "max_cache_length": 64,
   "trust_remote_code": false,
+  "e2e_parallel_resource": "exclusive_gpu",
   "testcases": [
     {
       "name": "whisper-tiny-fp16",
