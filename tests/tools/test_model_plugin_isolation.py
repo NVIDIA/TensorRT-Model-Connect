@@ -893,6 +893,8 @@ def _write_build_ledger(
         "status": "passed",
         "invocation_count": 1,
         "attempt_count": 1,
+        "builder_pid": 222,
+        "started_at": "2026-01-01T00:00:02+00:00",
         "recovery_attempts": [],
         "returncode": 0,
         "source_revision": "abc123",
@@ -964,6 +966,9 @@ def test_verify_builds_accepts_one_recorded_sigsegv_recovery(
                 "attempt": 1,
                 "returncode": -signal.SIGSEGV,
                 "signal": signal.SIGSEGV,
+                "builder_pid": 111,
+                "started_at": "2026-01-01T00:00:01+00:00",
+                "recovered_at": "2026-01-01T00:00:02+00:00",
             }
         ],
     )
@@ -980,6 +985,127 @@ def test_verify_builds_accepts_one_recorded_sigsegv_recovery(
 
     assert result.returncode == 0
     assert "PASS decoder-small" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_recovery_builder_pid",
+        "boolean_recovery_builder_pid",
+        "same_builder_pid",
+        "invalid_recovery_started_at",
+        "invalid_recovered_at",
+        "recovered_at_mismatch",
+        "reversed_recovery_time",
+        "extra_recovery_field",
+    ],
+)
+def test_verify_builds_rejects_incomplete_fresh_process_recovery_evidence(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    models_file = tmp_path / "models.txt"
+    models_file.write_text("decoder-small\n", encoding="utf-8")
+    ledger_dir = tmp_path / "engine-builds"
+    bundle_path = tmp_path / "decoder-small.trtfb"
+    bundle_path.write_bytes(b"bundle")
+    timing_path = tmp_path / "decoder-small-timing.json"
+    timing_path.write_text("{}\n", encoding="utf-8")
+    recovery = {
+        "attempt": 1,
+        "returncode": -signal.SIGSEGV,
+        "signal": signal.SIGSEGV,
+        "builder_pid": 111,
+        "started_at": "2026-01-01T00:00:01+00:00",
+        "recovered_at": "2026-01-01T00:00:02+00:00",
+    }
+    if mutation == "missing_recovery_builder_pid":
+        recovery.pop("builder_pid")
+    elif mutation == "boolean_recovery_builder_pid":
+        recovery["builder_pid"] = True
+    elif mutation == "same_builder_pid":
+        recovery["builder_pid"] = 222
+    elif mutation == "invalid_recovery_started_at":
+        recovery["started_at"] = "not-a-timestamp"
+    elif mutation == "invalid_recovered_at":
+        recovery["recovered_at"] = "2026-01-01T00:00:02"
+    elif mutation == "recovered_at_mismatch":
+        recovery["recovered_at"] = "2026-01-01T00:00:03+00:00"
+    elif mutation == "reversed_recovery_time":
+        recovery["started_at"] = "2026-01-01T00:00:03+00:00"
+    else:
+        recovery["unexpected"] = "field"
+    _write_build_ledger(
+        ledger_dir,
+        "decoder-small",
+        bundle_path,
+        timing_path,
+        attempt_count=2,
+        recovery_attempts=[recovery],
+    )
+
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        _run(
+            "verify-builds",
+            "--models-file",
+            str(models_file),
+            "--ledger-dir",
+            str(ledger_dir),
+            "--source-revision",
+            "abc123",
+        )
+
+    assert exc_info.value.returncode == 1
+    assert "complete ordered fresh-process SIGSEGV evidence" in exc_info.value.stderr
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_error"),
+    [
+        ("schema_version", True, "schema_version is True, expected 1"),
+        ("schema_version", 2, "schema_version is 2, expected 1"),
+        ("builder_pid", True, "builder_pid is True, expected a positive integer"),
+        ("builder_pid", 0, "builder_pid is 0, expected a positive integer"),
+        ("started_at", "not-a-timestamp", "expected a UTC timestamp"),
+        ("started_at", "2026-01-01T00:00:02", "expected a UTC timestamp"),
+        ("returncode", False, "returncode is False, expected 0"),
+        ("returncode", 0.0, "returncode is 0.0, expected 0"),
+    ],
+)
+def test_verify_builds_rejects_malformed_process_evidence(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    expected_error: str,
+) -> None:
+    models_file = tmp_path / "models.txt"
+    models_file.write_text("decoder-small\n", encoding="utf-8")
+    ledger_dir = tmp_path / "engine-builds"
+    bundle_path = tmp_path / "decoder-small.trtfb"
+    bundle_path.write_bytes(b"bundle")
+    timing_path = tmp_path / "decoder-small-timing.json"
+    timing_path.write_text("{}\n", encoding="utf-8")
+    _write_build_ledger(
+        ledger_dir,
+        "decoder-small",
+        bundle_path,
+        timing_path,
+        **{field: value},
+    )
+
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        _run(
+            "verify-builds",
+            "--models-file",
+            str(models_file),
+            "--ledger-dir",
+            str(ledger_dir),
+            "--source-revision",
+            "abc123",
+        )
+
+    assert exc_info.value.returncode == 1
+    assert expected_error in exc_info.value.stderr
 
 
 @pytest.mark.parametrize(

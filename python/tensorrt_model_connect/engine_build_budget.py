@@ -14,7 +14,7 @@ import re
 import signal
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, ParamSpec, TypeVar
 
@@ -145,6 +145,18 @@ def _pid_is_alive(pid: object) -> bool:
     return True
 
 
+def _utc_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        timestamp = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if timestamp.tzinfo is None or timestamp.utcoffset() != timedelta(0):
+        return None
+    return timestamp
+
+
 def _recover_interrupted_claim(
     claim_path: Path,
     *,
@@ -165,6 +177,7 @@ def _recover_interrupted_claim(
         ) from exc
     previous_attempt = attempt - 1
     expected = {
+        "schema_version": 1,
         "identity": identity,
         "status": "started",
         "invocation_count": 1,
@@ -176,15 +189,22 @@ def _recover_interrupted_claim(
         "command": command,
     }
     mismatches = [key for key, value in expected.items() if payload.get(key) != value]
-    for field in ("invocation_count", "attempt_count"):
+    for field in ("schema_version", "invocation_count", "attempt_count"):
         if type(payload.get(field)) is not int:
             mismatches.append(field)
     recoveries = payload.get("recovery_attempts", [])
     if not isinstance(recoveries, list) or len(recoveries) != previous_attempt - 1:
         mismatches.append("recovery_attempts")
     previous_pid = payload.get("builder_pid")
-    if _pid_is_alive(previous_pid):
+    current_pid = os.getpid()
+    if type(previous_pid) is not int or previous_pid < 1 or previous_pid == current_pid:
         mismatches.append("builder_pid")
+    elif _pid_is_alive(previous_pid):
+        mismatches.append("builder_pid")
+    previous_started_at = _utc_timestamp(payload.get("started_at"))
+    recovered_at_time = datetime.now(timezone.utc)
+    if previous_started_at is None or previous_started_at > recovered_at_time:
+        mismatches.append("started_at")
     if output_path.exists():
         mismatches.append("bundle_path_exists")
     if mismatches:
@@ -193,7 +213,7 @@ def _recover_interrupted_claim(
             f"ledger mismatch: {', '.join(sorted(set(mismatches)))}"
         )
 
-    recovered_at = datetime.now(timezone.utc).isoformat()
+    recovered_at = recovered_at_time.isoformat()
     recoveries.append(
         {
             "attempt": previous_attempt,
@@ -208,7 +228,7 @@ def _recover_interrupted_claim(
         {
             "status": "started",
             "attempt_count": attempt,
-            "builder_pid": os.getpid(),
+            "builder_pid": current_pid,
             "started_at": recovered_at,
             "recovery_attempts": recoveries,
         }

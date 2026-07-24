@@ -404,6 +404,45 @@ def test_guard_recovery_rejects_boolean_ledger_counts(
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema_version", 2),
+        ("schema_version", True),
+        ("schema_version", 1.0),
+        ("builder_pid", True),
+        ("builder_pid", 0),
+        ("started_at", "not-a-timestamp"),
+        ("started_at", "9999-01-01T00:00:00+00:00"),
+    ],
+)
+def test_guard_recovery_rejects_malformed_process_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    guard_dir = _enable_guard(monkeypatch, tmp_path)
+    bundle_path = tmp_path / "unit.trtfb"
+    timing_path = tmp_path / "build_timing.json"
+    _start_abandoned_build("/models/unit", bundle_path, timing_path)
+    record_path = next(guard_dir.glob("*.json"))
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record[field] = value
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    _request_sigsegv_recovery(monkeypatch)
+    calls: list[str] = []
+
+    with pytest.raises(RuntimeError, match=field):
+        _guarded_builder(calls)(
+            "/models/unit",
+            str(bundle_path),
+            build_timing_path=str(timing_path),
+        )
+
+    assert calls == []
+
+
 def test_guard_allows_only_one_concurrent_recovery(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

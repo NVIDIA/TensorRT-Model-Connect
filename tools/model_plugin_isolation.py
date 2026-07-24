@@ -20,6 +20,7 @@ import signal
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
@@ -76,9 +77,36 @@ _ORACLE_PROOF_KINDS = {
     "L4_invariants": "functional_invariant",
 }
 
+_RECOVERY_FIELDS = frozenset(
+    {
+        "attempt",
+        "returncode",
+        "signal",
+        "builder_pid",
+        "started_at",
+        "recovered_at",
+    }
+)
+
 
 def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _utc_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        timestamp = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if timestamp.tzinfo is None or timestamp.utcoffset() != timedelta(0):
+        return None
+    return timestamp
+
+
+def _positive_pid(value: object) -> bool:
+    return type(value) is int and value > 0
 
 
 def _toml_string(text: str, key: str) -> str:
@@ -826,6 +854,11 @@ def command_verify_builds(args: argparse.Namespace) -> int:
         record_errors: list[str] = []
         if not identity:
             record_errors.append("identity is missing")
+        schema_version = record.get("schema_version")
+        if type(schema_version) is not int or schema_version != 1:
+            record_errors.append(
+                f"schema_version is {schema_version!r}, expected 1"
+            )
         invocation_count = record.get("invocation_count")
         if type(invocation_count) is not int or invocation_count != 1:
             record_errors.append(
@@ -837,25 +870,61 @@ def command_verify_builds(args: argparse.Namespace) -> int:
         )
         if not valid_attempt_count:
             record_errors.append(f"attempt_count is {attempt_count!r}, expected 1 or 2")
+        builder_pid = record.get("builder_pid")
+        if not _positive_pid(builder_pid):
+            record_errors.append(
+                f"builder_pid is {builder_pid!r}, expected a positive integer"
+            )
+        started_at = record.get("started_at")
+        started_at_time = _utc_timestamp(started_at)
+        if started_at_time is None:
+            record_errors.append(
+                f"started_at is {started_at!r}, expected a UTC timestamp"
+            )
         recovery_attempts = record.get("recovery_attempts")
         expected_recoveries = attempt_count - 1 if valid_attempt_count else -1
         if not isinstance(recovery_attempts, list) or len(recovery_attempts) != expected_recoveries:
             record_errors.append("recovery_attempts does not match attempt_count")
         elif any(
             not isinstance(recovery, dict)
-            or recovery.get("attempt") != index
-            or recovery.get("returncode") != -signal.SIGSEGV
-            or recovery.get("signal") != signal.SIGSEGV
+            or type(recovery.get("attempt")) is not int
+            or recovery["attempt"] != index
+            or type(recovery.get("returncode")) is not int
+            or recovery["returncode"] != -signal.SIGSEGV
+            or type(recovery.get("signal")) is not int
+            or recovery["signal"] != signal.SIGSEGV
             for index, recovery in enumerate(recovery_attempts, start=1)
         ):
             record_errors.append("recovery_attempts must contain only ordered SIGSEGV recoveries")
+        elif recovery_attempts:
+            recovery = recovery_attempts[0]
+            recovery_started_at = _utc_timestamp(recovery.get("started_at"))
+            recovered_at = recovery.get("recovered_at")
+            recovered_at_time = _utc_timestamp(recovered_at)
+            complete_fresh_process_evidence = (
+                frozenset(recovery) == _RECOVERY_FIELDS
+                and _positive_pid(recovery.get("builder_pid"))
+                and _positive_pid(builder_pid)
+                and recovery.get("builder_pid") != builder_pid
+                and recovery_started_at is not None
+                and recovered_at_time is not None
+                and recovered_at == started_at
+                and started_at_time == recovered_at_time
+                and recovery_started_at <= recovered_at_time
+            )
+            if not complete_fresh_process_evidence:
+                record_errors.append(
+                    "recovery_attempts must contain complete ordered "
+                    "fresh-process SIGSEGV evidence"
+                )
         if record.get("status") != "passed":
             record_errors.append(
                 f"status is {record.get('status')!r}, expected 'passed'"
             )
-        if record.get("returncode") != 0:
+        returncode = record.get("returncode")
+        if type(returncode) is not int or returncode != 0:
             record_errors.append(
-                f"returncode is {record.get('returncode')!r}, expected 0"
+                f"returncode is {returncode!r}, expected 0"
             )
         if expected_revision and record.get("source_revision") != expected_revision:
             record_errors.append(
