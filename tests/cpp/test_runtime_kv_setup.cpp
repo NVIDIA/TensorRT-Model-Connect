@@ -305,6 +305,10 @@ trtmc::RuntimeKvSetupRequest make_request(FakeRuntimeModuleBase& prefill,
         {&decode16, trtmc::RuntimeKvExecutionRoleKind::kDecode, 16},
     };
     request.expected_active_kv_profile_limits = {4, 16};
+    request.module_residency_reserve_bytes_by_profile = {1, 1};
+    request.module_residency_plan_set_sha256 = std::string(64, 'a');
+    request.module_residency_cuda_module_loading_mode = "lazy";
+    request.module_residency_evidence_sha256 = std::string(64, 'b');
     request.policy = trtmc::RuntimeKvPolicy{trtmc::RuntimeKvPolicyKind::kBytes, 0.0, 2048};
     request.expected_kv_bytes_per_token = 512;
     request.safety_reserve_bytes = 0;
@@ -361,6 +365,7 @@ void test_small_r_below_prefill_chunk_and_lifetime() {
     FakeRuntimeModule decode4(1, 4, 2048);
     FakeRuntimeModule decode16(1, 16, 8192);
     auto request = make_request(prefill, decode4, decode16, allocator);
+    request.module_residency_reserve_bytes_by_profile = {12345, 12345};
     std::size_t copy_calls = 0;
     std::size_t observed_destination_pitch = 0;
     std::size_t observed_source_pitch = 0;
@@ -404,6 +409,8 @@ void test_small_r_below_prefill_chunk_and_lifetime() {
         assert(state->receipt().post_load_device_used_bytes == (1ULL << 20));
         assert(state->receipt().capacity_decision_snapshot_available);
         assert(state->receipt().capacity_decision_free_bytes == (1ULL << 20) - (4096 + 64) - 2048);
+        assert(state->receipt().capacity_decision_resident_overhead_bytes == 6304);
+        assert(state->receipt().final_non_kv_overhead_delta_bytes == 0);
         assert(state->receipt().settled_snapshot_available);
         assert(state->receipt().settled_free_bytes == (1ULL << 20) - (4096 + 64) - 2048 - 2048);
         assert(state->receipt().final_snapshot_available);
@@ -427,8 +434,13 @@ void test_small_r_below_prefill_chunk_and_lifetime() {
         assert(state->receipt().peak_device_sample_count == 1);
         assert(state->receipt().peak_sampled_at_load_completion);
         assert(!state->receipt().peak_sampled_at_request_completion);
+        assert(state->receipt().module_residency_reserve_bytes == 12345);
+        assert(state->receipt().module_residency_reserve_profile_limit == 4);
+        assert(state->receipt().module_residency_plan_set_sha256 == std::string(64, 'a'));
+        assert(state->receipt().module_residency_cuda_module_loading_mode == "lazy");
+        assert(state->receipt().module_residency_evidence_sha256 == std::string(64, 'b'));
         const auto receipt_json = state->receipt_json();
-        assert(receipt_json.find("\"receipt_schema_version\":3") != std::string::npos);
+        assert(receipt_json.find("\"receipt_schema_version\":4") != std::string::npos);
         assert(receipt_json.find("\"engine_weight_bytes\":"
                                  "\"tensorrt_engine_stat_total_weights_size\"") !=
                std::string::npos);
@@ -443,6 +455,10 @@ void test_small_r_below_prefill_chunk_and_lifetime() {
         assert(receipt_json.find("\"capacity_decision_free_bytes\":"
                                  "\"cuda_mem_get_info_after_tentative_context_and_output_"
                                  "reservation\"") != std::string::npos);
+        assert(receipt_json.find("\"capacity_decision_resident_overhead_bytes\":6304") !=
+               std::string::npos);
+        assert(receipt_json.find("\"final_non_kv_overhead_delta_bytes\":0") !=
+               std::string::npos);
         assert(receipt_json.find("\"settled_free_bytes\":"
                                  "\"cuda_mem_get_info_after_final_context_output_and_kv_"
                                  "allocation\"") != std::string::npos);
@@ -463,6 +479,8 @@ void test_small_r_below_prefill_chunk_and_lifetime() {
         assert(allocator->requests[1].alignment == 256);
         assert(allocator->requests[2].bytes == 2048);
         assert(allocator->requests[2].alignment == 256);
+        assert(std::none_of(allocator->requests.begin(), allocator->requests.end(),
+                            [](const auto& allocation) { return allocation.bytes == 12345; }));
         assert(allocator->live_bytes() == 8256);
         assert(allocator->live_bytes() == state->receipt().context_device_memory_bytes +
                                               state->staging_bytes() +

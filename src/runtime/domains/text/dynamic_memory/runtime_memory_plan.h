@@ -68,18 +68,27 @@ struct RuntimeMemoryPlanRequest {
     std::uint64_t request_context_limit{0}; // 0 = no additional U cap
     std::uint64_t prefill_chunk_limit{0};
     std::vector<std::uint64_t> active_kv_profile_limits;
+    // Cumulative plan-bound CUDA module residency that may materialize when
+    // the corresponding active profile (or any lower profile) executes.
+    // This table is indexed exactly like active_kv_profile_limits.
+    std::vector<std::uint64_t> module_residency_reserve_bytes_by_profile;
     RuntimeKvPolicy policy;
     std::uint32_t max_solve_iterations{8};
 };
 
 struct RuntimeMemoryReceipt {
-    std::uint32_t receipt_schema_version{3};
-    std::uint32_t contract_version{1};
+    std::uint32_t receipt_schema_version{4};
+    std::uint32_t contract_version{2};
     RuntimeKvPolicyKind policy{RuntimeKvPolicyKind::kAuto};
     double policy_fraction{0.0};
     std::uint64_t requested_kv_bytes{0};
     std::uint64_t post_load_free_bytes{0};
     std::uint64_t safety_reserve_bytes{0};
+    std::uint64_t module_residency_reserve_bytes{0};
+    std::uint64_t module_residency_reserve_profile_limit{0};
+    std::string module_residency_plan_set_sha256;
+    std::string module_residency_cuda_module_loading_mode;
+    std::string module_residency_evidence_sha256;
     std::uint64_t model_context_limit{0};
     std::uint64_t prefill_chunk_limit{0};
     std::uint64_t request_context_limit{0};
@@ -105,6 +114,10 @@ struct RuntimeMemoryReceipt {
     std::uint64_t capacity_decision_free_bytes{0};
     std::uint64_t capacity_decision_total_bytes{0};
     std::uint64_t capacity_decision_device_used_bytes{0};
+    // O(resident) is already reflected in capacity_decision_free_bytes.  If
+    // O(final) is larger, only this positive delta remains to be charged.
+    std::uint64_t capacity_decision_resident_overhead_bytes{0};
+    std::uint64_t final_non_kv_overhead_delta_bytes{0};
     bool capacity_decision_snapshot_available{false};
     std::uint64_t settled_free_bytes{0};
     std::uint64_t settled_total_bytes{0};

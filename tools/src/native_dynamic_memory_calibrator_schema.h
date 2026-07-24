@@ -18,6 +18,39 @@
 
 namespace trtmc::qualification {
 
+inline nlohmann::json make_product_identity_evidence(
+    const std::string& product_version, const std::string& build_identity) {
+    const auto lowercase_hex = [](char value) {
+        return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
+    };
+    if (product_version.empty() || product_version.find_first_of("\r\n") != std::string::npos)
+        throw std::invalid_argument("product identity requires a single-line version");
+    if (build_identity.size() != 64 ||
+        !std::all_of(build_identity.begin(), build_identity.end(), lowercase_hex)) {
+        throw std::invalid_argument(
+            "product identity requires a lowercase SHA256 build identity");
+    }
+    return {
+        {"schema_version", 1},
+        {"source", "compiled_product_identity"},
+        {"product_version", product_version},
+        {"build_identity", build_identity},
+        {"helper_protocol_version", 1},
+    };
+}
+
+inline nlohmann::json make_cuda_module_loading_mode_evidence(
+    const std::string& mode, std::int32_t driver_value) {
+    if (mode != "lazy" && mode != "eager")
+        throw std::invalid_argument("CUDA module loading mode must be lazy or eager");
+    return {
+        {"schema_version", 1},
+        {"mode", mode},
+        {"driver_value", driver_value},
+        {"source", "cuModuleGetLoadingMode"},
+    };
+}
+
 inline nlohmann::json make_sequential_request_samples() {
     return nlohmann::json::array();
 }

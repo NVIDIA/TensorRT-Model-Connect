@@ -503,11 +503,18 @@ void RuntimeKvStateCore::sample_request_completion_device_memory() noexcept {
 }
 
 bool RuntimeKvStateCore::valid() const {
+    const auto exact_product = [](std::uint64_t lhs, std::uint64_t rhs,
+                                  std::uint64_t expected) {
+        return lhs == 0 || rhs <= std::numeric_limits<std::uint64_t>::max() / lhs
+                   ? lhs * rhs == expected
+                   : false;
+    };
     return !commit_poisoned_ && allocation_ && allocation_->valid() && staging_ &&
            staging_->valid() &&
-           allocation_->total_bytes() == layout_.capacity_tokens * receipt_.kv_bytes_per_token &&
-           staging_->total_bytes() ==
-               staging_token_capacity_for_layout(layout_) * receipt_.kv_bytes_per_token &&
+           exact_product(layout_.capacity_tokens, receipt_.kv_bytes_per_token,
+                         allocation_->total_bytes()) &&
+           exact_product(staging_token_capacity_for_layout(layout_), receipt_.kv_bytes_per_token,
+                         staging_->total_bytes()) &&
            receipt_.runtime_kv_capacity_tokens == layout_.capacity_tokens &&
            receipt_.kv_allocation_id == allocation_->allocation_id();
 }

@@ -1191,9 +1191,17 @@ std::size_t TrtModuleImpl::compute_alloc_bytes(const nvinfer1::Dims& dims, DType
     for (int32_t d = 0; d < dims.nbDims; ++d) {
         int64_t dim = std::max(static_cast<int64_t>(dims.d[d]), int64_t{1});
         shape_out.push_back(dim);
-        n *= static_cast<std::size_t>(dim);
+        const auto extent = static_cast<std::size_t>(dim);
+        if (extent != 0 && n > std::numeric_limits<std::size_t>::max() / extent) {
+            throw std::overflow_error("TensorRT tensor allocation element count overflows size_t");
+        }
+        n *= extent;
     }
-    return n * dtype_size(dtype);
+    const auto element_bytes = dtype_size(dtype);
+    if (element_bytes == 0 || n > std::numeric_limits<std::size_t>::max() / element_bytes) {
+        throw std::overflow_error("TensorRT tensor allocation byte size overflows size_t");
+    }
+    return n * element_bytes;
 }
 
 std::size_t TrtModuleImpl::compute_shape_bytes(const std::vector<int64_t>& shape, DType dtype,

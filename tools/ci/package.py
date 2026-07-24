@@ -29,6 +29,17 @@ WHEEL_INSTALL_STATE = "wheel-installed.json"
 WHEEL_MODEL_SMOKE_RECEIPT = "wheel-model-smoke/receipt.json"
 MEMORY_RECEIPT_PREFIX = "[trtmc.memory] "
 REQUEST_COMPLETION_BOUNDARY = "after_successful_request_completion"
+_PRODUCT_IDENTITY_PATTERN = re.compile(
+    rb"TRTMC_INTERNAL_DYNAMIC_MEMORY_CALIBRATOR_IDENTITY_V1:"
+    rb"[0-9A-Za-z][0-9A-Za-z._+-]{0,127}:[0-9a-f]{64}(?![0-9a-f])"
+)
+
+
+def _single_product_identity(payload: bytes) -> bytes | None:
+    identities = set(_PRODUCT_IDENTITY_PATTERN.findall(payload))
+    if len(identities) != 1:
+        return None
+    return next(iter(identities))
 
 
 class InstalledWheelValidator:
@@ -54,7 +65,17 @@ class InstalledWheelValidator:
         native_dir = Path(importlib.resources.files("tensorrt_model_connect").joinpath("bin"))
         native = native_dir / "trtmc"
         benchmark_worker = native_dir / "trtmc_benchmark_worker"
+        packaged_calibrator = (
+            native_dir
+            / ".trtmc-internal"
+            / "trtmc_dynamic_memory_qualify"
+        )
         benchmark_script = shutil.which("trtmc-bench")
+        installed_calibrator = (
+            script_path.parent
+            / ".trtmc-internal"
+            / "trtmc_dynamic_memory_qualify"
+        )
         benchmark_catalog = Path(
             importlib.resources.files("tensorrt_model_connect").joinpath("benchmark", "_catalog")
         )
@@ -64,6 +85,10 @@ class InstalledWheelValidator:
             raise CiError(f"packaged native trtmc executable is missing under {native_dir}")
         if not benchmark_worker.is_file():
             raise CiError(f"packaged benchmark worker is missing under {native_dir}")
+        self.require_elf(packaged_calibrator)
+        self.require_elf(installed_calibrator)
+        self.require_matching_product_identity(native, packaged_calibrator)
+        self.require_matching_product_identity(script_path, installed_calibrator)
         if not benchmark_script:
             raise CiError("wheel did not install trtmc-bench on PATH")
         if not benchmark_catalog.is_dir():
@@ -79,6 +104,8 @@ class InstalledWheelValidator:
         print(f"packaged_native_trtmc={native}")
         print(f"installed_trtmc_bench={benchmark_script}")
         print(f"packaged_benchmark_worker={benchmark_worker}")
+        print(f"packaged_dynamic_memory_calibrator={packaged_calibrator}")
+        print(f"installed_dynamic_memory_calibrator={installed_calibrator}")
         print(f"packaged_benchmark_catalog={benchmark_catalog}")
         print(f"packaged_benchmark_smoke_model={benchmark_model.name}")
         for backend in backends:
@@ -90,6 +117,22 @@ class InstalledWheelValidator:
     def require_elf(path: Path) -> None:
         if not path.is_file() or path.read_bytes()[:4] != b"\x7fELF":
             raise CiError(f"{path} is not the native ELF trtmc executable")
+
+    @staticmethod
+    def require_matching_product_identity(
+        launcher: Path, calibrator: Path
+    ) -> None:
+        launcher_identity = _single_product_identity(launcher.read_bytes())
+        calibrator_identity = _single_product_identity(calibrator.read_bytes())
+        if (
+            launcher_identity is None
+            or calibrator_identity is None
+            or launcher_identity != calibrator_identity
+        ):
+            raise CiError(
+                "native launcher/internal calibrator build identity mismatch: "
+                f"{launcher} vs {calibrator}"
+            )
 
 
 class WheelArchiveValidator:
@@ -119,6 +162,43 @@ class WheelArchiveValidator:
             benchmark_workers = [
                 name for name in names if name.endswith("/bin/trtmc_benchmark_worker")
             ]
+            packaged_calibrators = [
+                name
+                for name in names
+                if name.endswith(
+                    "/bin/.trtmc-internal/trtmc_dynamic_memory_qualify"
+                )
+            ]
+            script_calibrators = [
+                name
+                for name in names
+                if name.endswith(
+                    ".data/scripts/.trtmc-internal/"
+                    "trtmc_dynamic_memory_qualify"
+                )
+            ]
+            calibrator_elf_identity = all(
+                archive.read(name)[:4] == b"\x7fELF"
+                for name in (*packaged_calibrators, *script_calibrators)
+            )
+            product_identity_entries = (
+                *binaries,
+                *scripts,
+                *packaged_calibrators,
+                *script_calibrators,
+            )
+            product_identities = [
+                _single_product_identity(archive.read(name))
+                for name in product_identity_entries
+            ]
+            product_identity_matches = (
+                len(binaries) == 1
+                and len(scripts) == 1
+                and len(packaged_calibrators) == 1
+                and len(script_calibrators) == 1
+                and all(identity is not None for identity in product_identities)
+                and len(set(product_identities)) == 1
+            )
             benchmark_scripts = [
                 name for name in names if name.endswith(".data/scripts/trtmc-bench")
             ]
@@ -165,6 +245,22 @@ class WheelArchiveValidator:
             (len(binaries) == 1, "expected one packaged trtmc executable"),
             (len(scripts) == 1, "expected one native trtmc script executable"),
             (len(benchmark_workers) == 1, "expected one native benchmark worker"),
+            (
+                len(packaged_calibrators) == 1,
+                "expected one packaged internal dynamic-memory calibrator",
+            ),
+            (
+                len(script_calibrators) == 1,
+                "expected one internal dynamic-memory calibrator beside the native script",
+            ),
+            (
+                calibrator_elf_identity,
+                "internal dynamic-memory calibrator ELF identity is invalid",
+            ),
+            (
+                product_identity_matches,
+                "native launcher/internal calibrator build identity mismatch",
+            ),
             (len(benchmark_scripts) == 1, "expected one trtmc-bench script"),
             (bool(benchmark_descriptors), "packaged benchmark MODEL.toml files are missing"),
             (bool(benchmark_manifests), "packaged benchmark manifests are missing"),
@@ -227,6 +323,8 @@ class WheelArchiveValidator:
                 *binaries,
                 *scripts,
                 *benchmark_workers,
+                *packaged_calibrators,
+                *script_calibrators,
                 *benchmark_scripts,
                 *package_cores,
                 *script_cores,
@@ -804,8 +902,8 @@ class WheelPackageManager:
         completion = receipts[-1]
 
         expected = {
-            "receipt_schema_version": 3,
-            "contract_version": 1,
+            "receipt_schema_version": 4,
+            "contract_version": 2,
             "policy": "auto",
             "requested_kv_bytes": 0,
             "request_context_limit": 0,
@@ -834,17 +932,44 @@ class WheelPackageManager:
                 )
             return value
 
+        def nonnegative_integer(name: str) -> int:
+            value = completion.get(name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise CiError(
+                    f"request-completion memory receipt {name} must be a nonnegative integer"
+                )
+            return value
+
         model_limit = positive_integer("model_context_limit")
         chunk_limit = positive_integer("prefill_chunk_limit")
         capacity = positive_integer("runtime_kv_capacity_tokens")
+        module_residency_reserve = positive_integer(
+            "module_residency_reserve_bytes"
+        )
+        module_residency_profile = positive_integer(
+            "module_residency_reserve_profile_limit"
+        )
         effective_limit = positive_integer("effective_request_limit")
         bytes_per_token = positive_integer("kv_bytes_per_token")
+        kv_budget = positive_integer("kv_budget_bytes")
+        safety_reserve = nonnegative_integer("safety_reserve_bytes")
         reserved = positive_integer("kv_reserved_bytes")
         committed = positive_integer("kv_committed_bytes")
         allocation_id = positive_integer("kv_allocation_id")
         capacity_decision_free = positive_integer("capacity_decision_free_bytes")
         capacity_decision_total = positive_integer("capacity_decision_total_bytes")
         capacity_decision_used = positive_integer("capacity_decision_device_used_bytes")
+        resident_overhead = nonnegative_integer(
+            "capacity_decision_resident_overhead_bytes"
+        )
+        final_overhead_delta = nonnegative_integer(
+            "final_non_kv_overhead_delta_bytes"
+        )
+        context_overhead = positive_integer("context_device_memory_bytes")
+        ordinary_input = nonnegative_integer("ordinary_device_input_bytes")
+        ordinary_output = nonnegative_integer("ordinary_device_output_bytes")
+        external_output = nonnegative_integer("external_device_output_bytes")
+        graph_private = nonnegative_integer("graph_private_device_bytes")
         settled_free = positive_integer("settled_free_bytes")
         settled_total = positive_integer("settled_total_bytes")
         settled_used = positive_integer("settled_device_used_bytes")
@@ -874,6 +999,70 @@ class WheelPackageManager:
             raise CiError("prefill chunk limit exceeds the model context limit")
         if capacity > model_limit:
             raise CiError("runtime KV capacity exceeds the model context limit")
+        if not (
+            capacity <= module_residency_profile <= model_limit
+        ):
+            raise CiError(
+                "module residency reserve profile does not cover runtime KV capacity"
+            )
+        for field in (
+            "module_residency_plan_set_sha256",
+            "module_residency_evidence_sha256",
+        ):
+            value = completion.get(field)
+            if not isinstance(value, str) or re.fullmatch(
+                r"[0-9a-f]{64}", value
+            ) is None:
+                raise CiError(
+                    f"request-completion memory receipt {field} must be a lowercase SHA256"
+                )
+        if completion.get(
+            "module_residency_cuda_module_loading_mode"
+        ) not in {"lazy", "eager"}:
+            raise CiError(
+                "request-completion memory receipt CUDA module loading mode is invalid"
+            )
+        final_overhead = (
+            context_overhead
+            + ordinary_input
+            + ordinary_output
+            + external_output
+            + graph_private
+        )
+        expected_overhead_delta = max(0, final_overhead - resident_overhead)
+        if final_overhead_delta != expected_overhead_delta:
+            raise CiError(
+                "runtime-memory receipt final non-KV overhead delta does not "
+                "replay O(final)-O(resident)"
+            )
+        safely_available = max(
+            0,
+            capacity_decision_free
+            - safety_reserve
+            - module_residency_reserve
+            - final_overhead_delta,
+        )
+        if reserved > safely_available:
+            raise CiError(
+                "runtime KV allocation exceeds capacity-decision free memory "
+                "after all schema-v4 reserves"
+            )
+        numerator, denominator = float(fraction).as_integer_ratio()
+        expected_budget = numerator * safely_available // denominator
+        if kv_budget != expected_budget:
+            raise CiError(
+                "runtime KV budget does not exactly replay the automatic "
+                "schema-v4 memory policy"
+            )
+        conservative_capacity_ceiling = min(
+            model_limit,
+            kv_budget // bytes_per_token,
+        )
+        if capacity > conservative_capacity_ceiling:
+            raise CiError(
+                "runtime KV capacity exceeds the automatic schema-v4 "
+                "conservative monotonic solve ceiling"
+            )
         if effective_limit != capacity:
             raise CiError("automatic effective request limit does not equal runtime KV capacity")
         if reserved != capacity * bytes_per_token or committed != reserved:
@@ -882,11 +1071,20 @@ class WheelPackageManager:
             raise CiError("runtime KV allocation id is invalid")
 
         stable_fields = (
+            "receipt_schema_version",
+            "contract_version",
             "policy",
             "model_context_limit",
             "runtime_kv_capacity_tokens",
             "kv_reserved_bytes",
             "kv_allocation_id",
+            "module_residency_reserve_bytes",
+            "module_residency_reserve_profile_limit",
+            "module_residency_plan_set_sha256",
+            "module_residency_evidence_sha256",
+            "module_residency_cuda_module_loading_mode",
+            "capacity_decision_resident_overhead_bytes",
+            "final_non_kv_overhead_delta_bytes",
         )
         mismatches = [
             name for name in stable_fields if load_receipt.get(name) != completion.get(name)

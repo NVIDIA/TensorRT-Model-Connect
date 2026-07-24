@@ -455,6 +455,10 @@ def test_model_only_build_parser_hides_build_time_kv_controls(
     assert "-o OUTPUT, --output OUTPUT" in help_text
     assert "default: derived from model name" in normalized_help
     assert "--max-cache-length" not in help_text
+    assert "--max-sequence-length" not in help_text
+    assert "--max-input-length" not in help_text
+    assert "--kv-cache-size" not in help_text
+    assert "--kv-cache-memory" not in help_text
     assert "--dynamic-kv-cache" not in help_text
     assert "--dynamic-kv-profile-rows" not in help_text
     assert "--decoder-engine-layout" not in help_text

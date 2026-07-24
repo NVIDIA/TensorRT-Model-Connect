@@ -610,6 +610,16 @@ class TestCmdBuildMocked:
         import tensorrt_model_connect.python_profiles as profile_mod
 
         captured: dict[str, object] = {}
+        calibrator = "/opt/trtmc/libexec/trtmc/trtmc_dynamic_memory_qualify"
+        monkeypatch.setenv(
+            "_TRTMC_INTERNAL_DYNAMIC_MEMORY_CALIBRATOR",
+            calibrator,
+        )
+        calibrator_identity = "a" * 64
+        monkeypatch.setenv(
+            "_TRTMC_INTERNAL_DYNAMIC_MEMORY_CALIBRATOR_BUILD_IDENTITY",
+            calibrator_identity,
+        )
 
         monkeypatch.setattr(
             cli,
@@ -666,7 +676,7 @@ class TestCmdBuildMocked:
             "/tmp/example-profile/bin/python",
             "-c",
         ]
-        assert "sys.path.append" in command[2]
+        assert "sys.path.insert(0" in command[2]
         assert "runpy.run_module" in command[2]
         assert command[3:] == [
             str(Path(cli.__file__).resolve().parent.parent),
@@ -678,6 +688,16 @@ class TestCmdBuildMocked:
             "example_profile",
         ]
         assert all("ACTIVE_PYTHON_PROFILE" not in key for key in captured["env"])
+        assert (
+            captured["env"]["_TRTMC_INTERNAL_DYNAMIC_MEMORY_CALIBRATOR"]
+            == calibrator
+        )
+        assert (
+            captured["env"][
+                "_TRTMC_INTERNAL_DYNAMIC_MEMORY_CALIBRATOR_BUILD_IDENTITY"
+            ]
+            == calibrator_identity
+        )
 
     def test_profile_reexec_bootstrap_imports_explicit_package_root(self, tmp_path):
         """A profile can import TRTMC when a baked editable path is unavailable."""

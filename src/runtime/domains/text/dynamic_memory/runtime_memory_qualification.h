@@ -23,6 +23,7 @@ inline constexpr std::uint32_t kRuntimeMemoryQualificationApiVersionV1 = 1U;
 
 struct RuntimeMemoryContract;
 struct QualifiedRuntimeStack;
+struct BundleFile;
 class ITrtModule;
 
 struct RuntimeMemoryQualifiedTuple {
@@ -37,7 +38,7 @@ struct RuntimeMemoryQualifiedTuple {
     std::string cudnn_frontend_revision;
     std::string nvrtc_version;
     std::string driver_version;
-    std::int32_t contract_version{1};
+    std::int32_t contract_version{2};
     std::int32_t native_kv_plugin_abi{2};
     std::int32_t model_context_limit{0};
     std::int32_t prefill_chunk_limit{0};
@@ -48,6 +49,19 @@ struct RuntimeMemoryQualifiedTuple {
 
 void validate_runtime_memory_qualified_tuple(const RuntimeMemoryContract& contract,
                                              const RuntimeMemoryQualifiedTuple& expected);
+
+// Verify that the calibration is for the exact section bytes about to be
+// deserialized and for the CUDA driver's effective module-loading mode.
+// This must run before either split engine is deserialized.
+void validate_runtime_memory_module_residency_calibration(
+    const RuntimeMemoryContract& contract, const BundleFile& bundle);
+
+// Validate the fixed embedded-evidence section without touching CUDA. This is
+// split out so bundle/schema tests can exercise the pre-deserialization gate.
+// Legacy exact-manifest bundles may omit the section; an embedded_bundle_v1
+// contract may not.
+void validate_runtime_memory_embedded_calibration_evidence(
+    const RuntimeMemoryContract& contract, const BundleFile& bundle);
 
 struct RuntimeMemoryRuntimeTarget {
     std::int32_t cuda_device{-1};

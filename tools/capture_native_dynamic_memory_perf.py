@@ -116,6 +116,87 @@ RUNTIME_STACK_FIELDS = (
     "nvrtc",
     "driver",
 )
+MODULE_RESIDENCY_RECEIPT_FIELDS = (
+    "receipt_schema_version",
+    "contract_version",
+    "module_residency_reserve_bytes",
+    "module_residency_reserve_profile_limit",
+    "module_residency_plan_set_sha256",
+    "module_residency_evidence_sha256",
+    "module_residency_cuda_module_loading_mode",
+)
+FILE_IDENTITY_FIELDS = (
+    "path",
+    "device",
+    "inode",
+    "size_bytes",
+    "mtime_ns",
+    "ctime_ns",
+    "sha256",
+)
+SCHEMA_V4_REQUIRED_RECEIPT_FIELDS = (
+    "receipt_schema_version",
+    "contract_version",
+    "policy",
+    "policy_fraction",
+    "requested_kv_bytes",
+    "post_load_free_bytes",
+    "safety_reserve_bytes",
+    "module_residency_reserve_bytes",
+    "module_residency_reserve_profile_limit",
+    "module_residency_plan_set_sha256",
+    "module_residency_cuda_module_loading_mode",
+    "module_residency_evidence_sha256",
+    "model_context_limit",
+    "prefill_chunk_limit",
+    "request_context_limit",
+    "runtime_kv_capacity_tokens",
+    "effective_request_limit",
+    "kv_bytes_per_token",
+    "kv_budget_bytes",
+    "pre_load_free_bytes",
+    "pre_load_total_bytes",
+    "serialized_plan_bytes",
+    "resident_weight_bytes",
+    "resident_weight_copy_count",
+    "engine_weight_bytes",
+    "weight_streaming_active",
+    "post_load_total_bytes",
+    "post_load_device_used_bytes",
+    "capacity_decision_free_bytes",
+    "capacity_decision_total_bytes",
+    "capacity_decision_device_used_bytes",
+    "capacity_decision_resident_overhead_bytes",
+    "final_non_kv_overhead_delta_bytes",
+    "settled_free_bytes",
+    "settled_total_bytes",
+    "settled_device_used_bytes",
+    "settled_snapshot_unavailable_reason",
+    "final_free_bytes",
+    "final_total_bytes",
+    "final_device_used_bytes",
+    "context_device_memory_bytes",
+    "ordinary_device_input_bytes",
+    "ordinary_device_output_bytes",
+    "external_device_output_bytes",
+    "host_staging_bytes",
+    "graph_private_device_bytes",
+    "kv_reserved_bytes",
+    "kv_committed_bytes",
+    "kv_metadata_bytes",
+    "peak_device_bytes",
+    "peak_device_bytes_scope",
+    "peak_device_bytes_baseline",
+    "peak_device_sample_count",
+    "peak_device_sample_boundaries",
+    "backend_owned_cache_input_bytes",
+    "backend_owned_cache_output_bytes",
+    "kv_allocation_id",
+    "solve_iterations",
+    "capped_by_model",
+    "capped_by_request_limit",
+    "measurement_sources",
+)
 RUNTIME_LIBRARY_PATTERNS = {
     "nvrtc": re.compile(r"^libnvrtc\.so\.13(?:\.[0-9]+)*$"),
     "nvrtc_builtins": re.compile(
@@ -188,6 +269,7 @@ BUILD_RECEIPT_FIELDS = {
     "build_manifest",
     "runtime_kv_plugin",
     "runtime_kv_plugin_mapping",
+    "mapped_dso_identities",
 }
 
 
@@ -306,6 +388,7 @@ class _PinnedFiles(AbstractContextManager["_PinnedFiles"]):
     def __init__(self) -> None:
         self._by_inode: dict[tuple[int, int], _PinnedFile] = {}
         self._runtime_kv_abi_by_inode: dict[tuple[int, int], bool] = {}
+        self._mapped_inodes: set[tuple[int, int]] = set()
 
     def pin(self, path: Path, *, label: str) -> _PinnedFile:
         metadata = path.expanduser().resolve(strict=True).stat()
@@ -316,6 +399,40 @@ class _PinnedFiles(AbstractContextManager["_PinnedFiles"]):
         pinned = _PinnedFile(path, label=label)
         self._by_inode[key] = pinned
         return pinned
+
+    def record_mapping(
+        self,
+        pinned: _PinnedFile,
+        mapping: Mapping[str, Any],
+    ) -> None:
+        identity = pinned.identity
+        if (
+            identity["path"] != mapping.get("path")
+            or identity["device"] != mapping.get("device")
+            or identity["inode"] != mapping.get("inode")
+            or mapping.get("deleted") is not False
+        ):
+            raise CaptureError(
+                "mapped DSO changed before its open inode could be retained: "
+                f"{mapping.get('path')}"
+            )
+        self._mapped_inodes.add(
+            (int(identity["device"]), int(identity["inode"]))
+        )
+
+    def mapped_identities(self) -> list[dict[str, Any]]:
+        identities = [
+            self._by_inode[key].verify()
+            for key in sorted(self._mapped_inodes)
+        ]
+        identities.sort(
+            key=lambda row: (
+                str(row["path"]),
+                int(row["device"]),
+                int(row["inode"]),
+            )
+        )
+        return identities
 
     def get(self, device: int, inode: int) -> _PinnedFile | None:
         return self._by_inode.get((device, inode))
@@ -439,6 +556,210 @@ def _validate_file_identity(
         if value.get(field) != actual[field]:
             raise CaptureError(f"{label}.{field} no longer matches the file")
     return actual
+
+
+def _validate_mapped_dso_identities(
+    value: Any,
+    *,
+    label: str,
+) -> list[dict[str, Any]]:
+    """Reopen every producer-pinned mapped DSO and verify its full identity."""
+
+    if not isinstance(value, list):
+        raise CaptureError(f"{label} must be a JSON array")
+    validated: list[dict[str, Any]] = []
+    for index, raw in enumerate(value):
+        validated.append(
+            _validate_file_identity(
+                raw,
+                label=f"{label}[{index}]",
+            )
+        )
+    canonical = sorted(
+        validated,
+        key=lambda row: (
+            str(row["path"]),
+            int(row["device"]),
+            int(row["inode"]),
+        ),
+    )
+    if validated != canonical:
+        raise CaptureError(f"{label} is not in canonical path/inode order")
+    keys = {
+        (row["path"], row["device"], row["inode"])
+        for row in validated
+    }
+    if len(keys) != len(validated):
+        raise CaptureError(f"{label} contains duplicate mapped DSOs")
+    return validated
+
+
+def _validate_complete_schema_v4_receipt(
+    receipt: Mapping[str, Any],
+    *,
+    comparison_sequence_limit: int,
+) -> None:
+    """Require the complete product schema-v4 receipt without truncating it."""
+
+    missing = [
+        field
+        for field in SCHEMA_V4_REQUIRED_RECEIPT_FIELDS
+        if field not in receipt
+    ]
+    if missing:
+        raise CaptureError(
+            "dynamic runtime receipt is not the complete schema-v4 product "
+            f"receipt; missing={missing!r}"
+        )
+    if (
+        type(receipt["receipt_schema_version"]) is not int
+        or receipt["receipt_schema_version"] != 4
+        or type(receipt["contract_version"]) is not int
+        or receipt["contract_version"] != 2
+    ):
+        raise CaptureError(
+            "dynamic runtime receipt must use schema 4 and contract 2"
+        )
+    integer_fields = (
+        "model_context_limit",
+        "prefill_chunk_limit",
+        "request_context_limit",
+        "runtime_kv_capacity_tokens",
+        "effective_request_limit",
+        "kv_bytes_per_token",
+        "kv_budget_bytes",
+        "capacity_decision_free_bytes",
+        "capacity_decision_total_bytes",
+        "capacity_decision_device_used_bytes",
+        "capacity_decision_resident_overhead_bytes",
+        "final_non_kv_overhead_delta_bytes",
+        "settled_free_bytes",
+        "settled_total_bytes",
+        "settled_device_used_bytes",
+        "final_free_bytes",
+        "final_total_bytes",
+        "final_device_used_bytes",
+        "context_device_memory_bytes",
+        "ordinary_device_input_bytes",
+        "ordinary_device_output_bytes",
+        "external_device_output_bytes",
+        "host_staging_bytes",
+        "graph_private_device_bytes",
+        "kv_reserved_bytes",
+        "kv_committed_bytes",
+        "kv_metadata_bytes",
+        "backend_owned_cache_input_bytes",
+        "backend_owned_cache_output_bytes",
+        "kv_allocation_id",
+        "solve_iterations",
+    )
+    if any(
+        type(receipt[field]) is not int or int(receipt[field]) < 0
+        for field in integer_fields
+    ):
+        raise CaptureError(
+            "dynamic runtime receipt has an invalid typed schema-v4 integer"
+        )
+    positive_fields = (
+        "model_context_limit",
+        "prefill_chunk_limit",
+        "runtime_kv_capacity_tokens",
+        "effective_request_limit",
+        "kv_bytes_per_token",
+        "kv_budget_bytes",
+        "capacity_decision_free_bytes",
+        "capacity_decision_total_bytes",
+        "settled_free_bytes",
+        "settled_total_bytes",
+        "final_free_bytes",
+        "final_total_bytes",
+        "context_device_memory_bytes",
+        "kv_reserved_bytes",
+        "kv_committed_bytes",
+        "kv_allocation_id",
+        "solve_iterations",
+    )
+    if any(int(receipt[field]) <= 0 for field in positive_fields):
+        raise CaptureError(
+            "dynamic runtime receipt has a non-positive required "
+            "schema-v4 integer"
+        )
+    capacity = int(receipt["runtime_kv_capacity_tokens"])
+    bytes_per_token = int(receipt["kv_bytes_per_token"])
+    if (
+        int(receipt["request_context_limit"]) != comparison_sequence_limit
+        or capacity > comparison_sequence_limit
+        or int(receipt["effective_request_limit"]) != capacity
+        or int(receipt["kv_reserved_bytes"]) != capacity * bytes_per_token
+        or int(receipt["kv_committed_bytes"])
+        != int(receipt["kv_reserved_bytes"])
+        or int(receipt["kv_metadata_bytes"]) != 0
+        or int(receipt["backend_owned_cache_input_bytes"]) != 0
+        or int(receipt["backend_owned_cache_output_bytes"]) != 0
+    ):
+        raise CaptureError(
+            "dynamic runtime receipt does not preserve the requested "
+            "contiguous schema-v4 KV accounting"
+        )
+    capacity_total = int(receipt["capacity_decision_total_bytes"])
+    capacity_free = int(receipt["capacity_decision_free_bytes"])
+    settled_total = int(receipt["settled_total_bytes"])
+    settled_free = int(receipt["settled_free_bytes"])
+    if (
+        capacity_free > capacity_total
+        or int(receipt["capacity_decision_device_used_bytes"])
+        != capacity_total - capacity_free
+        or settled_total != capacity_total
+        or settled_free > settled_total
+        or int(receipt["settled_device_used_bytes"])
+        != settled_total - settled_free
+        or receipt["settled_snapshot_unavailable_reason"] is not None
+        or int(receipt["final_free_bytes"]) != capacity_free
+        or int(receipt["final_total_bytes"]) != capacity_total
+        or int(receipt["final_device_used_bytes"])
+        != capacity_total - capacity_free
+    ):
+        raise CaptureError(
+            "dynamic runtime receipt has inconsistent schema-v4 memory "
+            "snapshots"
+        )
+    final_overhead = sum(
+        int(receipt[field])
+        for field in (
+            "context_device_memory_bytes",
+            "ordinary_device_input_bytes",
+            "ordinary_device_output_bytes",
+            "external_device_output_bytes",
+            "graph_private_device_bytes",
+        )
+    )
+    if int(receipt["final_non_kv_overhead_delta_bytes"]) != max(
+        0,
+        final_overhead
+        - int(receipt["capacity_decision_resident_overhead_bytes"]),
+    ):
+        raise CaptureError(
+            "dynamic runtime receipt does not replay schema-v4 "
+            "O(final)-O(resident)"
+        )
+    if (
+        receipt["peak_device_bytes_scope"] != "device_wide"
+        or receipt["peak_device_bytes_baseline"]
+        != "cuda_mem_get_info_before_engine_deserialization_free"
+        or type(receipt["peak_device_sample_count"]) is not int
+        or receipt["peak_device_sample_count"] < 2
+        or not isinstance(receipt["peak_device_sample_boundaries"], list)
+        or "after_runtime_kv_allocation"
+        not in receipt["peak_device_sample_boundaries"]
+        or "after_successful_request_completion"
+        not in receipt["peak_device_sample_boundaries"]
+        or type(receipt["capped_by_model"]) is not bool
+        or type(receipt["capped_by_request_limit"]) is not bool
+    ):
+        raise CaptureError(
+            "dynamic runtime receipt has incomplete schema-v4 peak/solve "
+            "evidence"
+        )
 
 
 def _resolve_command_executable(
@@ -768,6 +1089,120 @@ def _bundle_section_bytes(
     if len(payload) != size:
         raise CaptureError(f"bundle {name} section is truncated")
     return payload
+
+
+def _dynamic_bundle_runtime_memory_contract(
+    bundle: Path,
+    header: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Reopen and validate the exact sealed v2 contract and engine bytes."""
+
+    boundary = _load_boundary_module()
+    try:
+        spec = boundary._resolve_spec(dict(header))
+        contract = boundary._sealed_profile_sweep_contract(
+            bundle,
+            header,
+            expected_model_id=spec.model_id,
+            expected_context_limit=spec.context_limit,
+            expected_profile_limits=tuple(spec.buckets),
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise CaptureError(
+            "dynamic performance bundle has no exact sealed v2 "
+            f"module-residency contract: {exc}"
+        ) from exc
+    return dict(contract)
+
+
+def _validate_runtime_module_residency_receipt(
+    receipt: Mapping[str, Any],
+    *,
+    contract: Mapping[str, Any],
+    live_runtime_stack: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind a live schema-v4 receipt to its exact bundle calibration row."""
+
+    calibration = contract.get("module_residency_calibration")
+    if not isinstance(calibration, Mapping):
+        raise CaptureError(
+            "sealed runtime-memory contract has no module-residency calibration"
+        )
+    contract_stack = contract.get("qualified_runtime_stack")
+    if not isinstance(contract_stack, Mapping):
+        raise CaptureError(
+            "sealed runtime-memory contract has no qualified runtime stack"
+        )
+    observed_stack = {
+        field: live_runtime_stack.get(field)
+        for field in contract_stack
+    }
+    if observed_stack != dict(contract_stack):
+        raise CaptureError(
+            "live runtime stack does not match the bundle-qualified "
+            f"module-residency stack: live={observed_stack!r}, "
+            f"bundle={dict(contract_stack)!r}"
+        )
+
+    capacity = receipt.get("runtime_kv_capacity_tokens")
+    if (
+        isinstance(capacity, bool)
+        or not isinstance(capacity, int)
+        or capacity <= 0
+        or capacity > int(contract["model_context_limit"])
+    ):
+        raise CaptureError(
+            "dynamic runtime receipt has no valid runtime KV capacity"
+        )
+    reserves = calibration.get("profile_reserves")
+    if not isinstance(reserves, list):
+        raise CaptureError(
+            "sealed module-residency calibration has no profile reserves"
+        )
+    selected = next(
+        (
+            row
+            for row in reserves
+            if isinstance(row, Mapping)
+            and int(row.get("covering_profile_limit", 0)) >= capacity
+        ),
+        None,
+    )
+    if selected is None:
+        raise CaptureError(
+            "module-residency calibration does not cover the runtime KV "
+            f"capacity {capacity}"
+        )
+    expected = {
+        "receipt_schema_version": 4,
+        "contract_version": 2,
+        "module_residency_reserve_bytes": selected[
+            "cumulative_reserve_bytes"
+        ],
+        "module_residency_reserve_profile_limit": selected[
+            "covering_profile_limit"
+        ],
+        "module_residency_plan_set_sha256": calibration[
+            "plan_set_sha256"
+        ],
+        "module_residency_evidence_sha256": calibration[
+            "evidence_sha256"
+        ],
+        "module_residency_cuda_module_loading_mode": calibration[
+            "cuda_module_loading_mode"
+        ],
+    }
+    mismatches = {
+        field: {"expected": value, "actual": receipt.get(field)}
+        for field, value in expected.items()
+        if receipt.get(field) != value
+    }
+    if mismatches:
+        raise CaptureError(
+            "dynamic runtime receipt does not bind the exact bundle "
+            f"module-residency calibration row: {mismatches}"
+        )
+    return expected
 
 
 def _tokenizer_contract(
@@ -1418,6 +1853,7 @@ def _record_observed_mappings(
     records: Sequence[Mapping[str, Any]],
     *,
     pins: _PinnedFiles | None,
+    pin_generic_elf: bool = True,
 ) -> None:
     for raw in records:
         record = dict(raw)
@@ -1443,11 +1879,23 @@ def _record_observed_mappings(
                     inode,
                     exports_abi,
                 )
-            if not path.name.startswith("libtrtmc") and not exports_abi:
+            is_elf_dso = _is_elf_dynamic_object(path)
+            is_qualified_runtime_library = any(
+                pattern.fullmatch(path.name) is not None
+                for pattern in RUNTIME_LIBRARY_PATTERNS.values()
+            )
+            if (
+                not path.name.startswith("libtrtmc")
+                and not exports_abi
+                and not (pin_generic_elf and is_elf_dso)
+                and not is_qualified_runtime_library
+            ):
                 continue
             pinned = pins.pin(path, label=f"mapped ELF object {path.name}")
             identity = pinned.identity
             if (
+                identity["path"] != record["path"]
+                or
                 identity["device"] != record["device"]
                 or identity["inode"] != record["inode"]
             ):
@@ -1455,6 +1903,7 @@ def _record_observed_mappings(
                     "mapped TRTMC DSO changed before it could be pinned: "
                     f"{path}"
                 )
+            pins.record_mapping(pinned, record)
 
 
 def _run_build_with_library_capture(
@@ -1486,6 +1935,12 @@ def _run_build_with_library_capture(
                 observed,
                 _mapped_process_tree_library_records(process.pid),
                 pins=pins,
+                # The build receipt needs the exact TRTMC/runtime-KV mapping,
+                # not every interpreter and libc DSO.  Hashing every generic
+                # ELF mapping can take longer than a short-lived build child,
+                # causing the next process-tree snapshot to miss the plugin
+                # that the receipt is intended to prove.
+                pin_generic_elf=False,
             )
             returncode = process.poll()
             if returncode is not None:
@@ -1552,6 +2007,7 @@ def _runtime_library_provenance(
     *,
     artifact_role: str,
     runtime_stack: Mapping[str, Any] | None,
+    mapped_dso_identities: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any] | None:
     """Resolve the exact NVRTC pair mapped by the dynamic worker process."""
 
@@ -1562,27 +2018,48 @@ def _runtime_library_provenance(
 
     provenance: dict[str, Any] = {}
     for label, pattern in RUNTIME_LIBRARY_PATTERNS.items():
-        matches = sorted(
+        matches = [
+            record
+            for record in records
+            if record.get("deleted") is False
+            and pattern.fullmatch(Path(str(record["path"])).name) is not None
+        ]
+        matches = list(
             {
-                Path(record["path"]).resolve()
-                for record in records
-                for path in (Path(record["path"]),)
-                if record.get("deleted") is False
-                if pattern.fullmatch(path.name) is not None
-            }
+                (
+                    str(record["path"]),
+                    int(record["device"]),
+                    int(record["inode"]),
+                ): record
+                for record in matches
+            }.values()
         )
         if len(matches) != 1:
             raise CaptureError(
                 "dynamic worker must map exactly one "
                 f"{label.replace('_', '-')} library, found "
-                f"{[str(path) for path in matches]!r}"
+                f"{[dict(record) for record in matches]!r}"
             )
-        path = matches[0]
+        mapping = matches[0]
+        identity_matches = [
+            identity
+            for identity in mapped_dso_identities
+            if identity.get("path") == mapping["path"]
+            and identity.get("device") == mapping["device"]
+            and identity.get("inode") == mapping["inode"]
+        ]
+        if len(identity_matches) != 1:
+            raise CaptureError(
+                f"mapped {label.replace('_', '-')} was not retained through "
+                "one pinned DSO identity"
+            )
+        identity = identity_matches[0]
+        path = Path(str(identity["path"]))
         provenance[label] = {
             "path": str(path),
             "basename": path.name,
-            "sha256": _sha256(path),
-            "size_bytes": path.stat().st_size,
+            "sha256": identity["sha256"],
+            "size_bytes": identity["size_bytes"],
         }
 
     nvrtc_version = str(runtime_stack["nvrtc"])
@@ -2245,75 +2722,58 @@ def _cmd_build(args: argparse.Namespace) -> int:
             "current source does not match the exact-head build manifest"
         )
     started_ns = time.time_ns()
-    if runtime_kv_plugin is not None:
-        with _PinnedFiles() as pins:
-            pinned_executable = pins.pin(
-                executable, label="trtmc build executable"
-            )
+    with _PinnedFiles() as pins:
+        pinned_executable = pins.pin(
+            executable, label="trtmc build executable"
+        )
+        pinned_plugin: _PinnedFile | None = None
+        build_environment = dict(os.environ)
+        pass_fds = [pinned_executable.fd]
+        if runtime_kv_plugin is not None:
             pinned_plugin = pins.pin(
                 Path(runtime_kv_plugin["path"]),
                 label="build-selected runtime-KV plugin",
             )
-            execution_command = _pinned_execution_command(
-                pinned_executable,
-                command[1:],
-            )
             build_environment = _bind_pinned_plugin_environment(
-                os.environ,
+                build_environment,
                 pinned_plugin,
                 preload=_pinned_is_elf(pinned_executable),
             )
-            completed, mapped_libraries = _run_build_with_library_capture(
-                execution_command,
-                cwd=cwd,
-                environment=build_environment,
-                stdout_output=stdout_output,
-                stderr_output=stderr_output,
-                pins=pins,
-                pass_fds=(
-                    pinned_executable.fd,
-                    pinned_plugin.fd,
-                ),
-            )
+            pass_fds.append(pinned_plugin.fd)
+        execution_command = _pinned_execution_command(
+            pinned_executable,
+            command[1:],
+        )
+        completed, mapped_libraries = _run_build_with_library_capture(
+            execution_command,
+            cwd=cwd,
+            environment=build_environment,
+            stdout_output=stdout_output,
+            stderr_output=stderr_output,
+            pins=pins,
+            pass_fds=pass_fds,
+        )
+        if runtime_kv_plugin is not None:
             runtime_kv_plugin_mapping = _validate_exact_plugin_mapping(
                 mapped_libraries,
                 selected=runtime_kv_plugin,
                 where="trtmc build process tree",
                 pins=pins,
             )
-            if pinned_executable.verify() != trtmc_executable:
-                raise CaptureError(
-                    "trtmc executable changed while building the bundle"
-                )
+        else:
+            runtime_kv_plugin_mapping = None
+        mapped_dso_identities = pins.mapped_identities()
+        if pinned_executable.verify() != trtmc_executable:
+            raise CaptureError(
+                "trtmc executable changed while building the bundle"
+            )
+        if pinned_plugin is not None:
+            assert runtime_kv_plugin is not None
             if pinned_plugin.verify() != runtime_kv_plugin:
                 raise CaptureError(
                     "runtime-KV plugin changed while building the bundle"
                 )
-            pins.verify_all()
-    else:
-        mapped_libraries = ()
-        runtime_kv_plugin_mapping = None
-        with stdout_output.open("wb") as stdout_stream, stderr_output.open(
-            "wb"
-        ) as stderr_stream:
-            with _PinnedFile(
-                executable, label="trtmc build executable"
-            ) as pinned_executable:
-                completed = subprocess.run(
-                    _pinned_execution_command(
-                        pinned_executable,
-                        command[1:],
-                    ),
-                    cwd=cwd,
-                    check=False,
-                    stdout=stdout_stream,
-                    stderr=stderr_stream,
-                    pass_fds=(pinned_executable.fd,),
-                )
-                if pinned_executable.verify() != trtmc_executable:
-                    raise CaptureError(
-                        "trtmc executable changed while building the bundle"
-                    )
+        pins.verify_all()
     finished_ns = time.time_ns()
     after = _source_state(repo_root, source_artifact_dir, label="postbuild")
     if completed.returncode != 0:
@@ -2379,6 +2839,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
         "build_manifest": build_manifest,
         "runtime_kv_plugin": runtime_kv_plugin,
         "runtime_kv_plugin_mapping": runtime_kv_plugin_mapping,
+        "mapped_dso_identities": mapped_dso_identities,
     }
     _write_json(receipt_path, receipt)
     print(
@@ -2519,6 +2980,10 @@ def _validate_build_receipt(
         trtmc_identity,
         where="build receipt trtmc executable",
     )
+    mapped_dso_identities = _validate_mapped_dso_identities(
+        receipt.get("mapped_dso_identities"),
+        label="build receipt.mapped_dso_identities",
+    )
     if role == "native-dynamic":
         plugin_identity = _validate_file_identity(
             receipt.get("runtime_kv_plugin"),
@@ -2555,6 +3020,10 @@ def _validate_build_receipt(
         ):
             raise CaptureError(
                 "build receipt runtime-KV mapping does not match the plugin"
+            )
+        if plugin_identity not in mapped_dso_identities:
+            raise CaptureError(
+                "build receipt mapped DSO set omits the runtime-KV plugin"
             )
     elif receipt.get("runtime_kv_plugin") is not None:
         raise CaptureError(
@@ -2648,6 +3117,11 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     header, payload_offset = _bundle_header(bundle)
     tokenizer_contract = _tokenizer_contract(
         bundle, header, payload_offset
+    )
+    dynamic_runtime_memory_contract = (
+        _dynamic_bundle_runtime_memory_contract(bundle, header)
+        if args.role == "native-dynamic"
+        else None
     )
     if args.role == "exact-head-static-split":
         if int(header.get("max_cache_length", 0)) != args.comparison_sequence_limit:
@@ -2755,6 +3229,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
             model_id=model_id,
             plugin_identity=plugin_identity,
         )
+        mapped_dso_identities = pins.mapped_identities()
         if pinned_worker.verify() != worker_identity:
             raise CaptureError(
                 "benchmark worker changed while qualification was running"
@@ -2781,6 +3256,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
         mapped_libraries,
         artifact_role=args.role,
         runtime_stack=runtime_stack,
+        mapped_dso_identities=mapped_dso_identities,
     )
     expected_model_key = (
         "model_qwen"
@@ -2824,12 +3300,29 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     )
 
     accounting = _engine_accounting(bundle, plugin_library)
+    runtime_module_residency_receipt: dict[str, Any] | None = None
     if args.role == "native-dynamic":
         raw_receipt = result.get("runtime_memory_receipt")
         if not isinstance(raw_receipt, Mapping):
             raise CaptureError(
                 "dynamic benchmark worker did not return a runtime receipt"
             )
+        assert dynamic_runtime_memory_contract is not None
+        if runtime_stack is None:
+            raise CaptureError(
+                "dynamic benchmark worker returned no live runtime stack"
+            )
+        runtime_module_residency_receipt = (
+            _validate_runtime_module_residency_receipt(
+                raw_receipt,
+                contract=dynamic_runtime_memory_contract,
+                live_runtime_stack=runtime_stack,
+            )
+        )
+        _validate_complete_schema_v4_receipt(
+            raw_receipt,
+            comparison_sequence_limit=args.comparison_sequence_limit,
+        )
         runtime_fields = _runtime_memory_fields(raw_receipt)
         accounting_fields = {
             key: accounting[key]
@@ -2852,20 +3345,33 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
             "static baseline unexpectedly implements dynamic-memory introspection"
         )
 
-    result["runtime_memory_receipt"] = {
-        key: accounting[key]
-        for key in (
-            "serialized_plan_bytes",
-            "resident_weight_bytes",
-            "resident_weight_copy_count",
-            "weight_streaming_active",
-            "measurement_sources",
-        )
-    }
+    if args.role == "native-dynamic":
+        # Preserve the complete product receipt.  Replacing it with only the
+        # independent accounting subset would discard the runtime capacity
+        # and sealed module-residency provenance that promotion must replay.
+        result["runtime_memory_receipt"] = dict(raw_receipt)
+    else:
+        result["runtime_memory_receipt"] = {
+            key: accounting[key]
+            for key in (
+                "serialized_plan_bytes",
+                "resident_weight_bytes",
+                "resident_weight_copy_count",
+                "weight_streaming_active",
+                "measurement_sources",
+            )
+        }
+    result["bundle_runtime_memory_contract"] = (
+        dynamic_runtime_memory_contract
+    )
+    result["runtime_module_residency_receipt"] = (
+        runtime_module_residency_receipt
+    )
     result["runtime_attention_plans"] = runtime_attention_plans
     result["runtime_stack"] = runtime_stack
     result["runtime_libraries"] = runtime_libraries
     result["runtime_trtmc_libraries"] = runtime_trtmc_libraries
+    result["mapped_dso_identities"] = mapped_dso_identities
     build_runtime_kv_plugin = build_receipt["runtime_kv_plugin"]
     result["build_runtime_kv_plugin"] = build_runtime_kv_plugin
     result["generation_workload"] = generation_workload
@@ -2947,6 +3453,9 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
         "runtime_trtmc_libraries_sha256": _canonical_sha(
             runtime_trtmc_libraries
         ),
+        "mapped_dso_identities_sha256": _canonical_sha(
+            mapped_dso_identities
+        ),
         "build_runtime_kv_plugin_sha256": _canonical_sha(
             build_runtime_kv_plugin
         ),
@@ -2956,6 +3465,19 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
         "cuda_jit_cache_sha256": _canonical_sha(cuda_jit_cache),
         "generation_workload_sha256": _canonical_sha(generation_workload),
         "tokenizer_contract_sha256": _canonical_sha(tokenizer_contract),
+        "bundle_runtime_memory_contract_sha256": (
+            _canonical_sha(dynamic_runtime_memory_contract)
+            if dynamic_runtime_memory_contract is not None
+            else None
+        ),
+        "runtime_memory_receipt_sha256": _canonical_sha(
+            result["runtime_memory_receipt"]
+        ),
+        "runtime_module_residency_receipt_sha256": (
+            _canonical_sha(runtime_module_residency_receipt)
+            if runtime_module_residency_receipt is not None
+            else None
+        ),
     }
     result["qualification_evidence"] = {
         "build_receipt": str(args.build_receipt.expanduser().resolve()),
@@ -2974,11 +3496,21 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
         "live_runtime_stack": runtime_stack,
         "runtime_libraries": runtime_libraries,
         "runtime_trtmc_libraries": runtime_trtmc_libraries,
+        "mapped_dso_identities": mapped_dso_identities,
         "build_runtime_kv_plugin": build_runtime_kv_plugin,
         "build_manifest": dict(build_receipt["build_manifest"]),
         "cuda_jit_cache": cuda_jit_cache,
         "generation_workload": generation_workload,
         "tokenizer_contract": tokenizer_contract,
+        "bundle_runtime_memory_contract": (
+            dynamic_runtime_memory_contract
+        ),
+        "runtime_memory_receipt": dict(
+            result["runtime_memory_receipt"]
+        ),
+        "runtime_module_residency_receipt": (
+            runtime_module_residency_receipt
+        ),
         "source_state": source_state_pre,
         "source_state_pre": source_state_pre,
         "source_state_post": source_state_post,

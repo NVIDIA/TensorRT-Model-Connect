@@ -24,6 +24,8 @@ option(TRTMC_BUILD_BACKEND_TRT "Build standard TensorRT backend DSO" ON)
 option(TRTMC_BUILD_TESTS "Build C++ unit test executables" ON)
 option(TRTMC_BUILD_BENCHMARKS "Build benchmark executables" ON)
 option(TRTMC_ENABLE_LIBTORCH_MULTINOMIAL "Enable optional libtorch-backed multinomial sampler" ON)
+option(TRTMC_REQUIRE_DYNAMIC_MEMORY_CALIBRATOR_NVML
+  "Fail configuration when the product dynamic-memory calibrator cannot use NVML" OFF)
 set(TRTMC_MODEL_PROOF_MODEL "" CACHE STRING
   "Require the source tree to contain exactly this runtime model (CI isolation proof mode).")
 set(TRTMC_TRT_BACKEND_ABI "" CACHE STRING
@@ -705,11 +707,109 @@ if(TRTMC_BUILD_BACKEND_RTX)
   endif()
 endif()
 
+file(RELATIVE_PATH _trtmc_internal_calibrator_install_relative
+  "${CMAKE_INSTALL_FULL_BINDIR}"
+  "${CMAKE_INSTALL_FULL_LIBEXECDIR}/trtmc/trtmc_dynamic_memory_qualify"
+)
+file(RELATIVE_PATH _trtmc_internal_runtime_lib_relative
+  "${CMAKE_INSTALL_FULL_LIBEXECDIR}/trtmc"
+  "${CMAKE_INSTALL_FULL_LIBDIR}"
+)
+find_library(TRTMC_NVML_LIBRARY
+  NAMES nvidia-ml libnvidia-ml.so.1
+)
+if(TRTMC_NVML_LIBRARY)
+  set(_trtmc_internal_calibrator_has_nvml 1)
+else()
+  set(_trtmc_internal_calibrator_has_nvml 0)
+endif()
+string(TOUPPER "${CMAKE_BUILD_TYPE}" _trtmc_internal_build_type_upper)
+set(_trtmc_internal_config_cxx_flags "")
+set(_trtmc_internal_config_cuda_flags "")
+if(_trtmc_internal_build_type_upper)
+  set(_trtmc_internal_cxx_flags_variable
+    "CMAKE_CXX_FLAGS_${_trtmc_internal_build_type_upper}")
+  set(_trtmc_internal_cuda_flags_variable
+    "CMAKE_CUDA_FLAGS_${_trtmc_internal_build_type_upper}")
+  set(_trtmc_internal_config_cxx_flags
+    "${${_trtmc_internal_cxx_flags_variable}}")
+  set(_trtmc_internal_config_cuda_flags
+    "${${_trtmc_internal_cuda_flags_variable}}")
+endif()
+
+set(_trtmc_internal_calibrator_identity_inputs
+  CMakeLists.txt
+  src/cli/args.cpp
+  src/cli/args.h
+  src/cli/main.cpp
+  src/cli/internal_dynamic_memory_calibrator.cpp
+  src/cli/internal_dynamic_memory_calibrator.h
+  tools/src/native_dynamic_memory_calibrator.cpp
+  tools/src/native_dynamic_memory_calibrator_paths.h
+  tools/src/native_dynamic_memory_calibrator_schema.h
+  include/trtmc/bundle.h
+  include/trtmc/pipeline.h
+  src/runtime/domains/text/dynamic_memory/runtime_kv_setup.cpp
+  src/runtime/domains/text/dynamic_memory/runtime_kv_setup.h
+  src/runtime/domains/text/dynamic_memory/runtime_memory_qualification.cpp
+  src/runtime/domains/text/dynamic_memory/runtime_memory_qualification.h
+)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  ${_trtmc_internal_calibrator_identity_inputs}
+)
+set(_trtmc_internal_calibrator_identity_material
+  "product_version=${PROJECT_VERSION}\n"
+  "protocol_version=1\n"
+  "system_processor=${CMAKE_SYSTEM_PROCESSOR}\n"
+  "cxx_compiler=${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}\n"
+  "cuda_compiler=${CMAKE_CUDA_COMPILER_ID}-${CMAKE_CUDA_COMPILER_VERSION}\n"
+  "build_type=${CMAKE_BUILD_TYPE}\n"
+  "generator=${CMAKE_GENERATOR}\n"
+  "generator_platform=${CMAKE_GENERATOR_PLATFORM}\n"
+  "generator_toolset=${CMAKE_GENERATOR_TOOLSET}\n"
+  "cxx_flags=${CMAKE_CXX_FLAGS}\n"
+  "config_cxx_flags=${_trtmc_internal_config_cxx_flags}\n"
+  "cuda_flags=${CMAKE_CUDA_FLAGS}\n"
+  "config_cuda_flags=${_trtmc_internal_config_cuda_flags}\n"
+  "cuda_architectures=${CMAKE_CUDA_ARCHITECTURES}\n"
+  "tensorrt_abi=${TRTMC_TRT_BACKEND_ABI}\n"
+  "enable_trt=${TRTMC_ENABLE_TRT}\n"
+  "build_backend_trt=${TRTMC_BUILD_BACKEND_TRT}\n"
+  "has_nvml=${_trtmc_internal_calibrator_has_nvml}\n"
+  "calibrator_install_relative=${_trtmc_internal_calibrator_install_relative}\n"
+  "runtime_lib_relative=${_trtmc_internal_runtime_lib_relative}\n"
+)
+foreach(_trtmc_identity_input IN LISTS
+    _trtmc_internal_calibrator_identity_inputs)
+  file(SHA256
+    "${PROJECT_SOURCE_DIR}/${_trtmc_identity_input}"
+    _trtmc_identity_input_sha256
+  )
+  string(APPEND _trtmc_internal_calibrator_identity_material
+    "${_trtmc_identity_input}=${_trtmc_identity_input_sha256}\n"
+  )
+endforeach()
+string(SHA256 TRTMC_INTERNAL_CALIBRATOR_BUILD_IDENTITY
+  "${_trtmc_internal_calibrator_identity_material}"
+)
+
+add_library(trtmc_cli_internal STATIC
+  src/cli/internal_dynamic_memory_calibrator.cpp
+)
+target_include_directories(trtmc_cli_internal PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(trtmc_cli_internal PRIVATE
+  TRTMC_INTERNAL_DYNAMIC_MEMORY_CALIBRATOR_INSTALL_RELATIVE="${_trtmc_internal_calibrator_install_relative}"
+  TRTMC_INTERNAL_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+  TRTMC_INTERNAL_PRODUCT_VERSION="${PROJECT_VERSION}"
+  TRTMC_INTERNAL_CALIBRATOR_BUILD_IDENTITY="${TRTMC_INTERNAL_CALIBRATOR_BUILD_IDENTITY}"
+)
+target_compile_options(trtmc_cli_internal PRIVATE -Wall -Wextra -Wpedantic)
+
 add_executable(trtmc
   src/cli/args.cpp
   src/cli/main.cpp
 )
-target_link_libraries(trtmc PRIVATE trtmc_core)
+target_link_libraries(trtmc PRIVATE trtmc_core trtmc_cli_internal)
 target_include_directories(trtmc PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_include_directories(trtmc SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb)
 set_target_properties(trtmc PROPERTIES
@@ -737,32 +837,41 @@ if(TRTMC_BUILD_BENCHMARKS)
   )
 endif()
 
-if(TRTMC_BUILD_TESTS)
-enable_testing()
-add_custom_target(trtmc_cpp_tests)
-add_custom_target(trtmc_platform_cpp_tests)
-
-# Developer-only real-bundle qualification runner. This intentionally is not
-# installed and does not extend the public IPipeline/C ABI.
-add_executable(trtmc_dynamic_memory_qualify EXCLUDE_FROM_ALL
-  tests/qualification/native_dynamic_memory_qualify.cpp
+# Product-owned internal calibrator. The target remains named
+# `trtmc_dynamic_memory_qualify` so existing qualification manifests continue
+# to bind the same executable, but it is now built by default and installed
+# under libexec rather than exposed as a public command.
+add_executable(trtmc_dynamic_memory_qualify
+  tools/src/native_dynamic_memory_calibrator.cpp
 )
 target_link_libraries(trtmc_dynamic_memory_qualify PRIVATE
   trtmc_core ${TRTMC_CUDART_LIBRARY})
-find_library(TRTMC_NVML_LIBRARY
-  NAMES nvidia-ml libnvidia-ml.so.1
+target_compile_definitions(trtmc_dynamic_memory_qualify PRIVATE
+  TRTMC_INTERNAL_PRODUCT_VERSION="${PROJECT_VERSION}"
+  TRTMC_INTERNAL_CALIBRATOR_BUILD_IDENTITY="${TRTMC_INTERNAL_CALIBRATOR_BUILD_IDENTITY}"
 )
+if(TRTMC_REQUIRE_DYNAMIC_MEMORY_CALIBRATOR_NVML AND NOT TRTMC_NVML_LIBRARY)
+  message(FATAL_ERROR
+    "TRTMC product packaging requires NVML for automatic dynamic-memory calibration")
+endif()
 if(TRTMC_NVML_LIBRARY)
   target_compile_definitions(trtmc_dynamic_memory_qualify PRIVATE
-    TRTMC_HAS_NVML=1)
+    TRTMC_HAS_NVML=1
+    TRTMC_INTERNAL_RUNTIME_LIB_RELATIVE="${_trtmc_internal_runtime_lib_relative}"
+  )
   target_link_libraries(trtmc_dynamic_memory_qualify PRIVATE
     ${TRTMC_NVML_LIBRARY})
 else()
+  # The loading-mode query remains available, but every memory-calibration
+  # sweep fails closed before loading a bundle.
   target_compile_definitions(trtmc_dynamic_memory_qualify PRIVATE
-    TRTMC_HAS_NVML=0)
+    TRTMC_HAS_NVML=0
+    TRTMC_INTERNAL_RUNTIME_LIB_RELATIVE="${_trtmc_internal_runtime_lib_relative}"
+  )
 endif()
 target_include_directories(trtmc_dynamic_memory_qualify PRIVATE
   ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/tools/src
 )
 target_include_directories(trtmc_dynamic_memory_qualify SYSTEM PRIVATE
   ${TRTMC_CUDA_INCLUDE_DIR}
@@ -771,6 +880,7 @@ target_include_directories(trtmc_dynamic_memory_qualify SYSTEM PRIVATE
 set_target_properties(trtmc_dynamic_memory_qualify PROPERTIES
   BUILD_RPATH "\$ORIGIN"
   BUILD_RPATH_USE_ORIGIN TRUE
+  INSTALL_RPATH "\$ORIGIN/${_trtmc_internal_runtime_lib_relative}"
 )
 if(TARGET trtmc_backend_trt)
   add_dependencies(trtmc_dynamic_memory_qualify trtmc_backend_trt)
@@ -781,6 +891,11 @@ endif()
 if(TARGET trtmc_model_llama)
   add_dependencies(trtmc_dynamic_memory_qualify trtmc_model_llama)
 endif()
+if(TRTMC_BUILD_TESTS)
+enable_testing()
+add_custom_target(trtmc_cpp_tests)
+add_custom_target(trtmc_platform_cpp_tests)
+
 # Keep the fixed nine-command qualification manifest unchanged while still
 # forcing the release-only CUDA-13.0 NVRTC regression probe to be rebuilt from
 # the same clean source snapshot as the main qualifier.  The manifest hashes
@@ -1290,6 +1405,21 @@ trtmc_add_test(test_json_helpers)
 trtmc_add_test(test_data_dir)
 trtmc_add_test(test_cli_args DYNAMIC_MEMORY)
 target_sources(test_cli_args PRIVATE src/cli/args.cpp)
+trtmc_add_test(test_internal_dynamic_memory_calibrator DYNAMIC_MEMORY)
+target_link_libraries(test_internal_dynamic_memory_calibrator PRIVATE
+  trtmc_cli_internal
+)
+target_include_directories(test_internal_dynamic_memory_calibrator PRIVATE
+  ${PROJECT_SOURCE_DIR}/tools/src
+)
+add_dependencies(test_internal_dynamic_memory_calibrator
+  trtmc
+  trtmc_dynamic_memory_qualify
+)
+target_compile_definitions(test_internal_dynamic_memory_calibrator PRIVATE
+  TRTMC_TEST_TRTMC_EXECUTABLE="$<TARGET_FILE:trtmc>"
+  TRTMC_TEST_CALIBRATOR_EXECUTABLE="$<TARGET_FILE:trtmc_dynamic_memory_qualify>"
+)
 trtmc_add_test(test_config_schema_registry)
 trtmc_add_test(test_config_cli_support)
 trtmc_add_test(test_config_schemas_triattention)
@@ -1300,7 +1430,13 @@ trtmc_add_test(test_runtime_kv_allocation DYNAMIC_MEMORY)
 trtmc_add_test(test_runtime_kv_setup DYNAMIC_MEMORY)
 trtmc_add_test(test_runtime_memory_plan DYNAMIC_MEMORY)
 trtmc_add_test(test_runtime_memory_transfer_ledger DYNAMIC_MEMORY)
+target_include_directories(test_runtime_memory_transfer_ledger SYSTEM PRIVATE
+  ${_trtmc_nlohmann_json_include}
+)
 trtmc_add_test(test_native_dynamic_memory_qualify_schema DYNAMIC_MEMORY)
+target_include_directories(test_native_dynamic_memory_qualify_schema PRIVATE
+  ${PROJECT_SOURCE_DIR}/tools/src
+)
 target_include_directories(test_native_dynamic_memory_qualify_schema SYSTEM PRIVATE
   ${_trtmc_nlohmann_json_include}
 )
@@ -1472,6 +1608,13 @@ install(DIRECTORY include/trtmc/
 # Install CLI executable
 install(TARGETS trtmc
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+# Private executable used only by `trtmc build` for automatic per-build
+# dynamic-memory calibration. It is intentionally absent from public CLI help
+# and installed outside the public binary directory.
+install(TARGETS trtmc_dynamic_memory_qualify
+  RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/trtmc
 )
 
 if(TARGET trtmc_benchmark_worker)

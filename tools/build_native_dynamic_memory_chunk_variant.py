@@ -604,12 +604,95 @@ def _read_bundle_header(path: Path) -> dict[str, Any]:
     return header
 
 
+def _bundle_plan_section_sha256(
+    path: Path,
+    header: Mapping[str, Any],
+) -> dict[str, str]:
+    """Hash both split plans from their exact on-disk bundle ranges."""
+
+    sections = header.get("sections")
+    if not isinstance(sections, Mapping):
+        raise ChunkVariantBuildError(
+            "qualified C/2 bundle has no section table"
+        )
+    required_names = ("engine_plan", "prefill_engine_plan")
+    spans: dict[str, tuple[int, int]] = {}
+    for name in required_names:
+        section = sections.get(name)
+        if not isinstance(section, Mapping):
+            raise ChunkVariantBuildError(
+                f"qualified C/2 bundle has no {name} section"
+            )
+        offset = section.get("offset")
+        size = section.get("size")
+        if (
+            type(offset) is not int
+            or offset < 0
+            or type(size) is not int
+            or size <= 0
+        ):
+            raise ChunkVariantBuildError(
+                f"qualified C/2 bundle has an invalid {name} span"
+            )
+        spans[name] = (offset, size)
+
+    ordered_spans = sorted(
+        (offset, offset + size, name)
+        for name, (offset, size) in spans.items()
+    )
+    if ordered_spans[0][1] > ordered_spans[1][0]:
+        raise ChunkVariantBuildError(
+            "qualified C/2 split plan sections overlap"
+        )
+
+    hashes: dict[str, str] = {}
+    with path.open("rb") as bundle:
+        if bundle.read(8) != BUNDLE_MAGIC:
+            raise ChunkVariantBuildError(
+                f"qualified builder did not produce a TRTMC bundle: {path}"
+            )
+        raw_length = bundle.read(8)
+        if len(raw_length) != 8:
+            raise ChunkVariantBuildError(
+                f"qualified bundle has a truncated header length: {path}"
+            )
+        header_length = struct.unpack("<Q", raw_length)[0]
+        payload_offset = 16 + header_length
+        file_size = os.fstat(bundle.fileno()).st_size
+        payload_size = file_size - payload_offset
+        if payload_size < 0:
+            raise ChunkVariantBuildError(
+                f"qualified bundle has a truncated JSON header: {path}"
+            )
+        for name in required_names:
+            offset, size = spans[name]
+            if offset > payload_size or size > payload_size - offset:
+                raise ChunkVariantBuildError(
+                    f"qualified C/2 bundle {name} extends beyond the file"
+                )
+            bundle.seek(payload_offset + offset)
+            remaining = size
+            digest = hashlib.sha256()
+            while remaining:
+                chunk = bundle.read(min(8 * 1024 * 1024, remaining))
+                if not chunk:
+                    raise ChunkVariantBuildError(
+                        f"qualified C/2 bundle has a truncated {name}"
+                    )
+                digest.update(chunk)
+                remaining -= len(chunk)
+            hashes[name] = digest.hexdigest()
+    return hashes
+
+
 def _expected_contract(
     qualification: ResolvedDynamicMemoryQualification,
 ) -> dict[str, Any]:
     record = qualification.qualification
     return {
-        "contract_version": 1,
+        # v1 exists only while the builder has not serialized both plans.
+        # This producer validates the final user-consumable artifact.
+        "contract_version": 2,
         "qualified_model_id": record.qualified_model_id,
         "qualified_model_revision": record.qualified_model_revision,
         "qualified_config_sha256": record.qualified_config_sha256,
@@ -689,6 +772,29 @@ def _validate_built_bundle(
                 "expected": "engine_plan and prefill_engine_plan",
                 "actual_missing": missing_sections,
             }
+        else:
+            actual_plan_hashes = _bundle_plan_section_sha256(
+                bundle, header
+            )
+            calibration = contract.get(
+                "module_residency_calibration"
+            )
+            declared_plan_hashes = (
+                {
+                    plan["section_name"]: plan["section_sha256"]
+                    for plan in calibration["plans"]
+                }
+                if isinstance(calibration, Mapping)
+                and isinstance(calibration.get("plans"), list)
+                else {}
+            )
+            if declared_plan_hashes != actual_plan_hashes:
+                mismatches["module_residency_calibration.plans"] = {
+                    "expected_exact_bundle_plan_sha256":
+                        actual_plan_hashes,
+                    "actual_declared_plan_sha256":
+                        declared_plan_hashes,
+                }
     if mismatches:
         raise ChunkVariantBuildError(
             "qualified builder produced the wrong C/2 bundle facts: "

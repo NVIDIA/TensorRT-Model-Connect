@@ -24,6 +24,7 @@ import re
 import struct
 import subprocess
 import sys
+import tempfile
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,7 +38,10 @@ sys.path.insert(0, str(REPO_ROOT / "python"))
 from tensorrt_model_connect.dynamic_memory_contract import (  # noqa: E402
     DEVELOPER_CHUNK_VARIANT_ENV,
     DEVELOPER_CHUNK_VARIANT_VALUE,
+    module_residency_plan_set_sha256,
+    qualified_runtime_stack_sha256,
     require_developer_chunk_variant_opt_in,
+    validate_runtime_memory_contract,
 )
 
 
@@ -115,8 +119,6 @@ _RUNTIME_PHASES_AFTER_BASELINE = (
     "after successful runtime-memory request completion",
 )
 _MEMORY_ATTRIBUTION_FLOOR_BYTES = 64 * 1024 * 1024
-_COLD_START_RETENTION_FLOOR_BYTES = 512 * 1024 * 1024
-_COLD_START_RETENTION_WEIGHT_FRACTION = 0.05
 _COLD_START_PERSISTENT_DRIVER_LIMIT_BYTES = 2 * 1024 * 1024 * 1024
 _COLD_WARM_OUTPUT_EQUIVALENCE_FIELDS = {
     "schema_version",
@@ -132,6 +134,28 @@ _COLD_WARM_OUTPUT_EQUIVALENCE_FIELDS = {
     "passed",
 }
 RUNNER_CAPTURE_SCHEMA = "trtmc.native-dynamic-memory-runner-capture/v1"
+PROFILE_SWEEP_CAPTURE_SCHEMA = (
+    "trtmc.native-dynamic-memory-profile-sweep-capture/v1"
+)
+PROFILE_SWEEP_EVIDENCE_SCHEMA = (
+    "trtmc.native-dynamic-memory-profile-sweep-evidence/v2"
+)
+PROFILE_SWEEP_CALIBRATION_SCHEMA = (
+    "trtmc.native-dynamic-memory-calibration-evidence/v2"
+)
+EMBEDDED_CALIBRATION_ROOT = "runtime_memory_calibration"
+EMBEDDED_CALIBRATION_EVIDENCE_SECTION = (
+    f"{EMBEDDED_CALIBRATION_ROOT}/evidence.json"
+)
+EMBEDDED_CALIBRATION_EVIDENCE_SCHEMA = (
+    "trtmc.native-dynamic-memory-build-calibration-evidence/v2"
+)
+EMBEDDED_CALIBRATION_CAPTURE_SCHEMA = (
+    "trtmc.native-dynamic-memory-build-calibration-capture/v1"
+)
+PROFILE_SWEEP_PROCESS_COUNT = 2
+PROFILE_SWEEP_SECOND_SWEEP_PROCESS_LIMIT_BYTES = 64 * 1024 * 1024
+PROFILE_SWEEP_CALIBRATION_GUARD_BYTES = 64 * 1024 * 1024
 _FULL_GPU_UUID_PATTERN = re.compile(
     r"GPU-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
@@ -274,6 +298,12 @@ def _resolve_spec(header: dict[str, Any]) -> ModelSpec:
     contract = header.get("runtime_memory")
     if not isinstance(contract, dict):
         raise ValueError("bundle has no runtime_memory contract")
+    try:
+        contract = validate_runtime_memory_contract(contract)
+    except ValueError as exc:
+        raise ValueError(
+            f"bundle has an invalid sealed runtime_memory contract: {exc}"
+        ) from exc
     model_id = contract.get("qualified_model_id")
     try:
         spec = SPECS[str(model_id)]
@@ -282,7 +312,7 @@ def _resolve_spec(header: dict[str, Any]) -> ModelSpec:
             f"bundle model {model_id!r} is not one of the two qualified models"
         ) from exc
     expected = {
-        "contract_version": 1,
+        "contract_version": 2,
         "model_context_limit": spec.context_limit,
         "prefill_chunk_limit": spec.chunk_limit,
         "active_kv_profile_limits": list(spec.buckets),
@@ -2188,6 +2218,2677 @@ def _admission_trace_passed(trace: Any, *, label: str) -> bool:
 
 def _write_tokens(path: Path, tokens: np.ndarray) -> None:
     path.write_text("\n".join(str(int(token)) for token in tokens) + "\n", encoding="utf-8")
+
+
+def _profile_sweep_prompt_lengths(
+    active_profile_limits: Iterable[int],
+    *,
+    model_context_limit: int,
+) -> tuple[int, ...]:
+    """Pick one deterministic prompt strictly inside every decode interval.
+
+    Every profile uses ``profile_limit-1`` so its one decode token proves the
+    upper active shape for that profile.  This matters under CUDA lazy module
+    loading: a tiny shape can select the same TensorRT profile ID without
+    loading every kernel module needed near that profile's upper boundary.
+    The terminal row therefore also proves ``A=M`` without requesting beyond
+    the model contract.
+    """
+
+    limits = tuple(active_profile_limits)
+    if (
+        not limits
+        or any(type(value) is not int or value <= 0 for value in limits)
+        or tuple(sorted(set(limits))) != limits
+        or limits[-1] != model_context_limit
+    ):
+        raise ValueError(
+            "profile sweep requires sorted unique positive limits ending at M"
+        )
+    lengths: list[int] = []
+    previous = 0
+    for index, limit in enumerate(limits):
+        prompt_tokens = limit - 1
+        if (
+            prompt_tokens <= previous
+            or prompt_tokens > limit
+            or prompt_tokens + 1 > model_context_limit
+        ):
+            raise ValueError(
+                "profile sweep cannot choose a one-decode prompt inside "
+                f"profile interval ({previous}, {limit}]"
+            )
+        lengths.append(prompt_tokens)
+        previous = limit
+    return tuple(lengths)
+
+
+def _simple_file_identity(path: Path) -> dict[str, Any]:
+    resolved = path.expanduser().resolve(strict=True)
+    return {
+        "path": str(resolved),
+        "size_bytes": resolved.stat().st_size,
+        "sha256": _sha256(resolved),
+    }
+
+
+def _sealed_profile_sweep_contract(
+    bundle: Path,
+    header: Mapping[str, Any],
+    *,
+    expected_model_id: str,
+    expected_context_limit: int,
+    expected_profile_limits: tuple[int, ...],
+) -> dict[str, Any]:
+    raw_contract = header.get("runtime_memory")
+    try:
+        contract = validate_runtime_memory_contract(raw_contract)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"profile sweep requires a valid sealed v2 runtime-memory contract: {exc}"
+        ) from exc
+    if (
+        contract["contract_version"] != 2
+        or contract["qualified_model_id"] != expected_model_id
+        or contract["model_context_limit"] != expected_context_limit
+        or tuple(contract["active_kv_profile_limits"])
+        != expected_profile_limits
+    ):
+        raise RuntimeError(
+            "profile sweep bundle does not match the expected sealed model/profile tuple"
+        )
+
+    calibration = contract["module_residency_calibration"]
+    expected_stack_sha = qualified_runtime_stack_sha256(
+        contract["qualified_runtime_stack"]
+    )
+    if calibration["qualified_runtime_stack_sha256"] != expected_stack_sha:
+        raise RuntimeError(
+            "profile sweep calibration does not bind the qualified runtime stack"
+        )
+    expected_plan_set_sha = module_residency_plan_set_sha256(
+        calibration["plans"]
+    )
+    if calibration["plan_set_sha256"] != expected_plan_set_sha:
+        raise RuntimeError(
+            "profile sweep calibration has a non-canonical plan-set digest"
+        )
+
+    expected_plan_topology = (
+        ("engine_plan", "decode", len(expected_profile_limits)),
+        ("prefill_engine_plan", "prefill", 1),
+    )
+    for plan, (section_name, role, profile_count) in zip(
+        calibration["plans"],
+        expected_plan_topology,
+        strict=True,
+    ):
+        actual_plan_sha = hashlib.sha256(
+            _read_bundle_section(bundle, header, section_name)
+        ).hexdigest()
+        if plan != {
+            "section_name": section_name,
+            "section_sha256": actual_plan_sha,
+            "role": role,
+            "optimization_profile_count": profile_count,
+        }:
+            raise RuntimeError(
+                "profile sweep calibration does not bind the exact bundle "
+                f"{section_name} bytes/topology"
+            )
+    return contract
+
+
+def _profile_sweep_command(
+    *,
+    runner: Path,
+    bundle: Path,
+    token_paths: Iterable[Path],
+    logits_path: Path,
+    model_context_limit: int,
+) -> list[str]:
+    command = [
+        str(runner),
+        "--bundle",
+        str(bundle),
+        "--logits",
+        str(logits_path),
+        "--max-new-tokens",
+        "1",
+        "--max-sequence-length",
+        str(model_context_limit),
+    ]
+    for token_path in token_paths:
+        command.extend(("--profile-sweep-tokens", str(token_path)))
+    return command
+
+
+def _profile_sweep_receipt_provenance(
+    receipt: Any,
+    *,
+    contract: Mapping[str, Any],
+    bootstrap_evidence_sha256_exemption: bool = False,
+) -> None:
+    calibration = contract["module_residency_calibration"]
+    terminal_reserve = calibration["profile_reserves"][-1]
+    expected = {
+        "receipt_schema_version": 4,
+        "contract_version": 2,
+        "policy": "auto",
+        "request_context_limit": contract["model_context_limit"],
+        "model_context_limit": contract["model_context_limit"],
+        "prefill_chunk_limit": contract["prefill_chunk_limit"],
+        "runtime_kv_capacity_tokens": contract["model_context_limit"],
+        "effective_request_limit": contract["model_context_limit"],
+        "kv_bytes_per_token": contract["kv_bytes_per_token"],
+        "module_residency_reserve_bytes": terminal_reserve[
+            "cumulative_reserve_bytes"
+        ],
+        "module_residency_reserve_profile_limit": terminal_reserve[
+            "covering_profile_limit"
+        ],
+        "module_residency_plan_set_sha256": calibration[
+            "plan_set_sha256"
+        ],
+        "module_residency_evidence_sha256": calibration[
+            "evidence_sha256"
+        ],
+        "module_residency_cuda_module_loading_mode": calibration[
+            "cuda_module_loading_mode"
+        ],
+    }
+    if not isinstance(receipt, Mapping):
+        raise RuntimeError("profile sweep row has no runtime-memory receipt")
+    if bootstrap_evidence_sha256_exemption:
+        bootstrap_evidence_sha256 = receipt.get(
+            "module_residency_evidence_sha256"
+        )
+        if (
+            not isinstance(bootstrap_evidence_sha256, str)
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                bootstrap_evidence_sha256,
+            )
+            is None
+        ):
+            raise RuntimeError(
+                "bootstrap profile-sweep receipt has no well-formed "
+                "module_residency_evidence_sha256"
+            )
+        expected.pop("module_residency_evidence_sha256")
+    mismatches = {
+        field: {"expected": value, "actual": receipt.get(field)}
+        for field, value in expected.items()
+        if receipt.get(field) != value
+    }
+    if mismatches:
+        raise RuntimeError(
+            "profile sweep runtime-memory receipt does not bind the sealed "
+            f"bundle calibration: {mismatches}"
+        )
+
+
+def _validate_profile_sweep_trace(
+    trace: Any,
+    *,
+    contract: Mapping[str, Any],
+    expected_model_id: str,
+    token_paths: tuple[Path, ...],
+    prompt_lengths: tuple[int, ...],
+    logits_path: Path,
+    expected_sampler: SamplerTrustAnchor,
+    bootstrap_evidence_sha256_exemption: bool = False,
+) -> list[dict[str, int]]:
+    if not isinstance(trace, Mapping):
+        raise RuntimeError("profile sweep trace is not a JSON object")
+    expected_limits = tuple(contract["active_kv_profile_limits"])
+    calibration = contract["module_residency_calibration"]
+    expected_loading_mode = calibration["cuda_module_loading_mode"]
+    expected_top_level = {
+        "schema_version": 1,
+        "mode": "all_profile_two_sweep",
+        "status": "ok",
+        "error_type": None,
+        "passed": True,
+        "qualification_blockers": [],
+        "qualification_api_version": 1,
+        "model_id": expected_model_id,
+        "pipeline_type": {
+            "Qwen/Qwen3-0.6B": "QwenTextGenerationPipeline",
+            "TinyLlama/TinyLlama-1.1B-Chat-v1.0": (
+                "LlamaTextGenerationPipeline"
+            ),
+        }[expected_model_id],
+    }
+    mismatches = {
+        field: {"expected": value, "actual": trace.get(field)}
+        for field, value in expected_top_level.items()
+        if trace.get(field) != value
+    }
+    if mismatches:
+        raise RuntimeError(f"profile sweep top-level trace mismatch: {mismatches}")
+
+    loading = trace.get("cuda_module_loading")
+    if loading != {
+        "source": "cuModuleGetLoadingMode",
+        "mode": expected_loading_mode,
+        "driver_value": 2 if expected_loading_mode == "lazy" else 1,
+    }:
+        raise RuntimeError(
+            "profile sweep CUDA module-loading mode does not bind the v2 contract"
+        )
+    protocol = trace.get("protocol")
+    expected_protocol = {
+        "schema_version": 1,
+        "execution_order": ["sweep_a", "sweep_b"],
+        "pipeline_load_count": 1,
+        "kv_allocation_count": 1,
+        "max_new_tokens_per_request": 1,
+        "profile_order": "ascending",
+        "second_sweep_process_growth_limit_bytes": (
+            PROFILE_SWEEP_SECOND_SWEEP_PROCESS_LIMIT_BYTES
+        ),
+    }
+    if protocol != expected_protocol:
+        raise RuntimeError("profile sweep protocol is not the canonical two-sweep protocol")
+
+    sampler = trace.get("memory_sampler")
+    expected_sampler_fields = {
+        "source": "nvmlDeviceGetComputeRunningProcesses_v3",
+        "pid": expected_sampler.pid,
+        "cuda_logical_device_index": expected_sampler.cuda_logical_device_index,
+        "physical_device_index": expected_sampler.physical_device_index,
+        "gpu_uuid": expected_sampler.gpu_uuid,
+        "captures_all_compute_processes": True,
+        "device_memory_source": "nvmlDeviceGetMemoryInfo_v2",
+    }
+    if (
+        not isinstance(sampler, Mapping)
+        or set(sampler) != {*expected_sampler_fields, "pci_bus_id"}
+        or any(
+            sampler.get(field) != value
+            for field, value in expected_sampler_fields.items()
+        )
+        or not isinstance(sampler.get("pci_bus_id"), str)
+        or _normalize_pci_bus_id(sampler["pci_bus_id"])
+        != expected_sampler.pci_bus_id
+    ):
+        raise RuntimeError(
+            "profile sweep NVML sampler does not bind the independently trusted child/GPU"
+        )
+
+    manifest = trace.get("input_manifest")
+    if not isinstance(manifest, list) or len(manifest) != len(expected_limits):
+        raise RuntimeError("profile sweep input manifest does not cover every profile")
+    previous = 0
+    for index, (row, token_path, prompt_tokens, limit) in enumerate(
+        zip(
+            manifest,
+            token_paths,
+            prompt_lengths,
+            expected_limits,
+            strict=True,
+        )
+    ):
+        expected_row = {
+            "row_index": index,
+            "token_file": str(token_path.resolve()),
+            "prompt_tokens": prompt_tokens,
+            "expected_profile_id": index,
+            "expected_profile_limit": limit,
+            "expected_prompt_lower_exclusive": previous,
+        }
+        if row != expected_row:
+            raise RuntimeError(
+                f"profile sweep input manifest row {index} is not exact"
+            )
+        previous = limit
+
+    stable_allocation_id = trace.get("stable_kv_allocation_id")
+    if type(stable_allocation_id) is not int or stable_allocation_id <= 0:
+        raise RuntimeError("profile sweep has no stable nonzero KV allocation ID")
+    expected_gates = {
+        "stable_kv_allocation_id",
+        "sweep_a_exact_profile_coverage",
+        "sweep_b_exact_profile_coverage",
+        "selected_token_ids_bitwise_equivalent",
+        "complete_float32_logits_bitwise_equivalent",
+        "invocation_tuples_equivalent",
+        "sweep_b_process_incremental_high_water_within_limit",
+    }
+    gates = trace.get("gates")
+    if (
+        not isinstance(gates, Mapping)
+        or set(gates) != expected_gates
+        or any(value is not True for value in gates.values())
+    ):
+        raise RuntimeError("profile sweep did not pass every exact protocol gate")
+
+    sweep_a = trace.get("sweep_a")
+    sweep_b = trace.get("sweep_b")
+    if not isinstance(sweep_a, Mapping) or not isinstance(sweep_b, Mapping):
+        raise RuntimeError("profile sweep is missing Sweep A or Sweep B")
+    rows_a = sweep_a.get("rows")
+    rows_b = sweep_b.get("rows")
+    reserve_rows = trace.get("profile_reserve_rows")
+    if (
+        not isinstance(rows_a, list)
+        or not isinstance(rows_b, list)
+        or not isinstance(reserve_rows, list)
+        or len(rows_a) != len(expected_limits)
+        or len(rows_b) != len(expected_limits)
+        or len(reserve_rows) != len(expected_limits)
+    ):
+        raise RuntimeError("profile sweep rows do not exactly cover every profile")
+
+    normalized_reserves: list[dict[str, int]] = []
+    prior_process = 0
+    prior_device = 0
+    previous_limit = 0
+    for index, (row_a, row_b, reserve_row, prompt_tokens, limit) in enumerate(
+        zip(
+            rows_a,
+            rows_b,
+            reserve_rows,
+            prompt_lengths,
+            expected_limits,
+            strict=True,
+        )
+    ):
+        expected_common = {
+            "row_index": index,
+            "token_file": str(token_paths[index].resolve()),
+            "prompt_tokens": prompt_tokens,
+            "max_new_tokens": 1,
+            "expected_profile_id": index,
+            "expected_profile_limit": limit,
+            "profile_match": True,
+            "observed_decode_profile_ids": [index],
+            "kv_allocation_id": stable_allocation_id,
+        }
+        if not isinstance(row_a, Mapping) or not isinstance(row_b, Mapping):
+            raise RuntimeError(f"profile sweep row {index} is not an object")
+        for field, value in expected_common.items():
+            if row_a.get(field) != value or row_b.get(field) != value:
+                raise RuntimeError(
+                    f"profile sweep row {index} does not bind its exact profile"
+                )
+        if (
+            row_a.get("expected_prompt_lower_exclusive") != previous_limit
+            or row_b.get("expected_prompt_lower_exclusive") != previous_limit
+        ):
+            raise RuntimeError(
+                f"profile sweep row {index} has the wrong profile interval"
+            )
+        for field in (
+            "selected_token_ids",
+            "step_top1_token_ids",
+            "invocation_tuples",
+        ):
+            if row_a.get(field) != row_b.get(field):
+                raise RuntimeError(
+                    f"profile sweep row {index} changed {field} between sweeps"
+                )
+        if row_b.get("equivalence_to_sweep_a") != {
+            "selected_token_ids_bitwise_equal": True,
+            "complete_float32_logits_bitwise_equal": True,
+            "invocation_tuples_equal": True,
+            "passed": True,
+        }:
+            raise RuntimeError(
+                f"profile sweep row {index} has incomplete A/B equivalence"
+            )
+        _profile_sweep_receipt_provenance(
+            row_a.get("runtime_memory_receipt"),
+            contract=contract,
+            bootstrap_evidence_sha256_exemption=(
+                bootstrap_evidence_sha256_exemption
+            ),
+        )
+        _profile_sweep_receipt_provenance(
+            row_b.get("runtime_memory_receipt"),
+            contract=contract,
+            bootstrap_evidence_sha256_exemption=(
+                bootstrap_evidence_sha256_exemption
+            ),
+        )
+        growth = row_a.get("cumulative_first_use_growth")
+        if not isinstance(growth, Mapping):
+            raise RuntimeError(
+                f"profile sweep row {index} has no cumulative first-use growth"
+            )
+        process_bytes = growth.get("cumulative_process_high_water_bytes")
+        device_bytes = growth.get("cumulative_device_wide_high_water_bytes")
+        if (
+            type(process_bytes) is not int
+            or process_bytes < prior_process
+            or type(device_bytes) is not int
+            or device_bytes < prior_device
+        ):
+            raise RuntimeError(
+                f"profile sweep row {index} has invalid cumulative first-use growth"
+            )
+        expected_reserve_row = {
+            "profile_id": index,
+            "covering_profile_limit": limit,
+            "cumulative_process_first_use_bytes": process_bytes,
+            "cumulative_device_wide_first_use_bytes": device_bytes,
+        }
+        if reserve_row != expected_reserve_row:
+            raise RuntimeError(
+                f"profile sweep reserve row {index} is not derived from Sweep A"
+            )
+        normalized_reserves.append(expected_reserve_row)
+        prior_process = process_bytes
+        prior_device = device_bytes
+        previous_limit = limit
+
+    if (
+        sweep_a.get("cumulative_process_first_use_high_water_bytes")
+        != prior_process
+        or sweep_a.get("cumulative_device_wide_first_use_high_water_bytes")
+        != prior_device
+        or sweep_b.get("process_growth_limit_bytes")
+        != PROFILE_SWEEP_SECOND_SWEEP_PROCESS_LIMIT_BYTES
+        or sweep_b.get("process_growth_within_limit") is not True
+        or type(sweep_b.get("incremental_process_high_water_bytes")) is not int
+        or sweep_b["incremental_process_high_water_bytes"]
+        > PROFILE_SWEEP_SECOND_SWEEP_PROCESS_LIMIT_BYTES
+    ):
+        raise RuntimeError("profile sweep high-water summary is inconsistent")
+
+    logits = read_logits_artifact(logits_path)
+    logits_source = _validate_logits_artifact_metadata(
+        trace.get("logits_artifact"),
+        role="profile sweep",
+        expected_rows=logits.shape[0],
+        expected_columns=logits.shape[1],
+    )
+    if logits_source.resolve() != logits_path.resolve():
+        raise RuntimeError(
+            "profile sweep logits metadata does not bind the requested output"
+        )
+    return normalized_reserves
+
+
+def _write_profile_sweep_capture_manifest(
+    evidence_dir: Path,
+    *,
+    child_pid: int,
+    sampler_anchor: SamplerTrustAnchor,
+    token_paths: tuple[Path, ...],
+) -> dict[str, Any]:
+    artifact_paths = {
+        "command": evidence_dir / "command.json",
+        "returncode": evidence_dir / "returncode.txt",
+        "runner_stdout": evidence_dir / "runner.stdout.log",
+        "runner_stderr": evidence_dir / "runner.stderr.log",
+        "raw_trace": evidence_dir / "runner-output.raw.json",
+        "normalized_trace": evidence_dir / "runner-trace.json",
+        "logits": evidence_dir / "runner-logits.bin",
+    }
+    artifact_paths.update(
+        {
+            f"profile_tokens_{index:02d}": path
+            for index, path in enumerate(token_paths)
+        }
+    )
+    manifest = {
+        "schema": PROFILE_SWEEP_CAPTURE_SCHEMA,
+        "runner_pid": child_pid,
+        "sampler_trust_anchor": _sampler_anchor_json(sampler_anchor),
+        "artifacts": {
+            name: _capture_file_receipt(path, root=evidence_dir)
+            for name, path in artifact_paths.items()
+        },
+    }
+    (evidence_dir / "capture-manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def _run_profile_sweep_process(
+    *,
+    runner: Path,
+    bundle: Path,
+    contract: Mapping[str, Any],
+    expected_model_id: str,
+    vocab_size: int,
+    prompt_lengths: tuple[int, ...],
+    evidence_dir: Path,
+    runner_cuda_visible_device: str,
+) -> tuple[dict[str, Any], list[dict[str, int]], SamplerTrustAnchor]:
+    evidence_dir.mkdir(parents=True, exist_ok=False)
+    token_paths: list[Path] = []
+    for index, prompt_tokens in enumerate(prompt_lengths):
+        token_path = evidence_dir / f"profile-{index:02d}.tokens.txt"
+        _write_tokens(
+            token_path,
+            deterministic_token_ids(prompt_tokens, vocab_size),
+        )
+        token_paths.append(token_path)
+    token_path_tuple = tuple(token_paths)
+    logits_path = evidence_dir / "runner-logits.bin"
+    command = _profile_sweep_command(
+        runner=runner,
+        bundle=bundle,
+        token_paths=token_path_tuple,
+        logits_path=logits_path,
+        model_context_limit=contract["model_context_limit"],
+    )
+    (evidence_dir / "command.json").write_text(
+        json.dumps(command, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    completed, child_pid = _run_captured_command(
+        command,
+        environment=_runner_child_environment(
+            runner_cuda_visible_device
+        ),
+    )
+    sampler_anchor = _sampler_trust_anchor(
+        child_pid=child_pid,
+        cuda_logical_device_index=0,
+        cuda_visible_device=runner_cuda_visible_device,
+    )
+    (evidence_dir / "runner.stdout.log").write_text(
+        completed.stdout,
+        encoding="utf-8",
+    )
+    (evidence_dir / "runner.stderr.log").write_text(
+        completed.stderr,
+        encoding="utf-8",
+    )
+    (evidence_dir / "returncode.txt").write_text(
+        f"{completed.returncode}\n",
+        encoding="utf-8",
+    )
+    trace = _parse_runner_json(completed.stdout)
+    raw_lines = [line for line in completed.stdout.splitlines() if line.strip()]
+    (evidence_dir / "runner-output.raw.json").write_text(
+        raw_lines[-1] + "\n",
+        encoding="utf-8",
+    )
+    (evidence_dir / "runner-trace.json").write_text(
+        json.dumps(trace, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "all-profile two-sweep runner failed "
+            f"({completed.returncode}); trace={trace}; "
+            f"stderr={completed.stderr[-4000:]}"
+        )
+    reserve_rows = _validate_profile_sweep_trace(
+        trace,
+        contract=contract,
+        expected_model_id=expected_model_id,
+        token_paths=token_path_tuple,
+        prompt_lengths=prompt_lengths,
+        logits_path=logits_path,
+        expected_sampler=sampler_anchor,
+    )
+    _write_profile_sweep_capture_manifest(
+        evidence_dir,
+        child_pid=child_pid,
+        sampler_anchor=sampler_anchor,
+        token_paths=token_path_tuple,
+    )
+    return trace, reserve_rows, sampler_anchor
+
+
+def aggregate_profile_sweep_calibration_rows(
+    per_process_rows: Iterable[Iterable[Mapping[str, Any]]],
+    *,
+    active_profile_limits: Iterable[int],
+    configured_profile_reserves: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Aggregate independent NVML sweeps into guarded calibration rows."""
+
+    limits = tuple(active_profile_limits)
+    configured = tuple(configured_profile_reserves)
+    process_rows = tuple(tuple(rows) for rows in per_process_rows)
+    if len(process_rows) < PROFILE_SWEEP_PROCESS_COUNT:
+        raise RuntimeError(
+            "module-residency calibration requires at least two independent processes"
+        )
+    if not limits or len(configured) != len(limits):
+        raise RuntimeError(
+            "module-residency calibration limits/reserves are not aligned"
+        )
+    aggregate_rows: list[dict[str, Any]] = []
+    prior_guarded_minimum = 0
+    for index, (limit, configured_row) in enumerate(
+        zip(limits, configured, strict=True)
+    ):
+        if (
+            type(limit) is not int
+            or limit <= 0
+            or not isinstance(configured_row, Mapping)
+            or configured_row.get("covering_profile_limit") != limit
+            or type(configured_row.get("cumulative_reserve_bytes")) is not int
+        ):
+            raise RuntimeError(
+                f"module-residency calibration profile {index} is invalid"
+            )
+        process_values: list[int] = []
+        device_values: list[int] = []
+        for rows in process_rows:
+            if len(rows) != len(limits):
+                raise RuntimeError(
+                    "module-residency calibration process rows do not "
+                    "cover every profile"
+                )
+            row = rows[index]
+            expected_identity = {
+                "profile_id": index,
+                "covering_profile_limit": limit,
+            }
+            if (
+                not isinstance(row, Mapping)
+                or any(
+                    row.get(field) != value
+                    for field, value in expected_identity.items()
+                )
+                or type(
+                    row.get("cumulative_process_first_use_bytes")
+                )
+                is not int
+                or row["cumulative_process_first_use_bytes"] < 0
+                or type(
+                    row.get("cumulative_device_wide_first_use_bytes")
+                )
+                is not int
+                or row["cumulative_device_wide_first_use_bytes"] < 0
+            ):
+                raise RuntimeError(
+                    f"module-residency calibration process row {index} is invalid"
+                )
+            process_values.append(
+                row["cumulative_process_first_use_bytes"]
+            )
+            device_values.append(
+                row["cumulative_device_wide_first_use_bytes"]
+            )
+        process_max = max(process_values)
+        device_max = max(device_values)
+        row_wise_max = max(process_max, device_max)
+        if (
+            process_max
+            > (2**64 - 1) - PROFILE_SWEEP_CALIBRATION_GUARD_BYTES
+        ):
+            raise RuntimeError(
+                "module-residency process first-use plus calibration guard "
+                "overflows uint64"
+            )
+        guarded_minimum = max(
+            prior_guarded_minimum,
+            process_max + PROFILE_SWEEP_CALIBRATION_GUARD_BYTES,
+        )
+        configured_bytes = configured_row["cumulative_reserve_bytes"]
+        aggregate_rows.append(
+            {
+                "profile_id": index,
+                "covering_profile_limit": limit,
+                "process_first_use_bytes_by_process": process_values,
+                "device_wide_first_use_bytes_by_process": device_values,
+                "row_wise_max_process_first_use_bytes": process_max,
+                "row_wise_max_device_wide_first_use_bytes": device_max,
+                "row_wise_max_first_use_bytes": row_wise_max,
+                "calibration_guard_bytes": (
+                    PROFILE_SWEEP_CALIBRATION_GUARD_BYTES
+                ),
+                "required_guarded_process_reserve_bytes": (
+                    guarded_minimum
+                ),
+                "configured_cumulative_reserve_bytes": configured_bytes,
+                "configured_reserve_covers_process_max_plus_guard": (
+                    configured_bytes >= guarded_minimum
+                ),
+            }
+        )
+        prior_guarded_minimum = guarded_minimum
+    return aggregate_rows
+
+
+def _read_embedded_calibration_section(
+    bundle: Path,
+    header: Mapping[str, Any],
+    receipt: Any,
+    *,
+    label: str,
+) -> tuple[dict[str, Any], bytes]:
+    """Reopen one hash-bound automatic-calibration bundle section."""
+
+    if not isinstance(receipt, Mapping) or set(receipt) != {
+        "section_name",
+        "size_bytes",
+        "sha256",
+    }:
+        raise RuntimeError(f"embedded calibration {label} receipt is invalid")
+    section_name = receipt.get("section_name")
+    size_bytes = receipt.get("size_bytes")
+    sha256 = receipt.get("sha256")
+    if (
+        not isinstance(section_name, str)
+        or not section_name.startswith(f"{EMBEDDED_CALIBRATION_ROOT}/")
+        or type(size_bytes) is not int
+        or size_bytes < 0
+        or not isinstance(sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", sha256) is None
+    ):
+        raise RuntimeError(f"embedded calibration {label} receipt is invalid")
+    sections = header.get("sections")
+    entry = sections.get(section_name) if isinstance(sections, Mapping) else None
+    if (
+        not isinstance(entry, Mapping)
+        or entry.get("size") != size_bytes
+        or type(entry.get("offset")) is not int
+        or entry["offset"] < 0
+    ):
+        raise RuntimeError(
+            f"embedded calibration {label} does not bind the section table"
+        )
+    offset = entry["offset"]
+    with bundle.open("rb") as source:
+        if source.read(8) != BUNDLE_MAGIC:
+            raise RuntimeError(f"{bundle} is not a TRTMC bundle")
+        raw_length = source.read(8)
+        if len(raw_length) != 8:
+            raise RuntimeError(f"{bundle} has a truncated header length")
+        data_offset = 16 + struct.unpack("<Q", raw_length)[0]
+        file_size = bundle.stat().st_size
+        if (
+            data_offset > file_size
+            or offset > file_size - data_offset
+            or size_bytes > file_size - data_offset - offset
+        ):
+            raise RuntimeError(
+                f"embedded calibration {label} section is truncated"
+            )
+        source.seek(data_offset + offset)
+        payload = source.read(size_bytes)
+    if (
+        len(payload) != size_bytes
+        or hashlib.sha256(payload).hexdigest() != sha256
+    ):
+        raise RuntimeError(
+            f"embedded calibration {label} section does not match its receipt"
+        )
+    return dict(receipt), payload
+
+
+def _embedded_section_table_receipt(
+    header: Mapping[str, Any],
+    section_name: str,
+) -> dict[str, Any]:
+    sections = header.get("sections")
+    entry = sections.get(section_name) if isinstance(sections, Mapping) else None
+    if (
+        not isinstance(entry, Mapping)
+        or type(entry.get("size")) is not int
+        or entry["size"] <= 0
+    ):
+        raise RuntimeError(
+            f"qualified bundle is missing embedded calibration section {section_name}"
+        )
+    return {
+        "section_name": section_name,
+        "size_bytes": entry["size"],
+        "sha256": "",
+    }
+
+
+def _trace_with_reopened_embedded_paths(
+    trace: Mapping[str, Any],
+    *,
+    token_paths: tuple[Path, ...],
+    logits_path: Path,
+) -> dict[str, Any]:
+    """Copy a capture trace and point only file fields at reopened payloads."""
+
+    rewritten = json.loads(json.dumps(trace))
+    for index, token_path in enumerate(token_paths):
+        reopened_path = str(token_path.resolve())
+        rewritten["input_manifest"][index]["token_file"] = reopened_path
+        rewritten["sweep_a"]["rows"][index]["token_file"] = reopened_path
+        rewritten["sweep_b"]["rows"][index]["token_file"] = reopened_path
+    rewritten["logits_artifact"]["path"] = str(logits_path.resolve())
+    return rewritten
+
+
+def _validate_embedded_source_calibration_evidence(
+    *,
+    bundle: Path,
+    header: Mapping[str, Any],
+    runner: Path,
+    contract: Mapping[str, Any],
+    spec: ModelSpec,
+) -> dict[str, Any]:
+    """Reopen and replay the automatic build calibration from one bundle."""
+
+    bundle = bundle.expanduser().resolve(strict=True)
+    runner = runner.expanduser().resolve(strict=True)
+    calibration = contract["module_residency_calibration"]
+    sections = header.get("sections")
+    evidence_entry = (
+        sections.get(EMBEDDED_CALIBRATION_EVIDENCE_SECTION)
+        if isinstance(sections, Mapping)
+        else None
+    )
+    if (
+        not isinstance(evidence_entry, Mapping)
+        or type(evidence_entry.get("size")) is not int
+        or evidence_entry["size"] <= 0
+    ):
+        raise RuntimeError(
+            "sealed bundle has no embedded automatic calibration evidence"
+        )
+    evidence_receipt = {
+        "section_name": EMBEDDED_CALIBRATION_EVIDENCE_SECTION,
+        "size_bytes": evidence_entry["size"],
+        "sha256": calibration["evidence_sha256"],
+    }
+    evidence_receipt, evidence_bytes = _read_embedded_calibration_section(
+        bundle,
+        header,
+        evidence_receipt,
+        label="evidence document",
+    )
+    try:
+        document = json.loads(evidence_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "embedded automatic calibration evidence is not valid JSON"
+        ) from exc
+    expected_document_fields = {
+        "schema",
+        "measurement_kind",
+        "aggregation",
+        "independent_process_count",
+        "model_id",
+        "model_context_limit",
+        "active_kv_profile_limits",
+        "prompt_lengths",
+        "terminal_active_length",
+        "helper_identity_before",
+        "helper_identity_after",
+        "contract_provenance",
+        "bootstrap_contract",
+        "bootstrap_only",
+        "runs",
+        "profile_rows",
+        "recommended_profile_reserves",
+        "gates",
+        "passed",
+    }
+    active_limits = tuple(
+        int(value) for value in contract["active_kv_profile_limits"]
+    )
+    prompt_lengths = _profile_sweep_prompt_lengths(
+        active_limits,
+        model_context_limit=spec.context_limit,
+    )
+    expected_contract_provenance = {
+        "qualified_runtime_stack_sha256": calibration[
+            "qualified_runtime_stack_sha256"
+        ],
+        "plan_set_sha256": calibration["plan_set_sha256"],
+        "cuda_module_loading_mode": calibration[
+            "cuda_module_loading_mode"
+        ],
+        "plans": calibration["plans"],
+    }
+    expected_gates = {
+        "two_distinct_processes": True,
+        "single_gpu_identity": True,
+        "all_profile_upper_edges_executed": True,
+        "terminal_decode_reaches_model_limit": True,
+        "second_sweep_growth_within_limit": True,
+        "raw_plan_receipts_match_bootstrap": True,
+        "all_capture_sections_embedded_and_hashed": True,
+        "helper_identity_unchanged": True,
+    }
+    if (
+        not isinstance(document, Mapping)
+        or set(document) != expected_document_fields
+        or document.get("schema") != EMBEDDED_CALIBRATION_EVIDENCE_SCHEMA
+        or document.get("measurement_kind")
+        != "nvml_process_cumulative_first_use"
+        or document.get("aggregation")
+        != "row_wise_process_max_plus_64mib_guard"
+        or document.get("independent_process_count")
+        != PROFILE_SWEEP_PROCESS_COUNT
+        or document.get("model_id") != spec.model_id
+        or document.get("model_context_limit") != spec.context_limit
+        or document.get("active_kv_profile_limits") != list(active_limits)
+        or document.get("prompt_lengths") != list(prompt_lengths)
+        or document.get("terminal_active_length") != spec.context_limit
+        or document.get("contract_provenance")
+        != expected_contract_provenance
+        or document.get("gates") != expected_gates
+        or document.get("passed") is not True
+    ):
+        raise RuntimeError(
+            "embedded automatic calibration document does not bind the "
+            "model/profile/plan/stack/loading-mode tuple"
+        )
+    helper_before = document.get("helper_identity_before")
+    helper_after = document.get("helper_identity_after")
+    helper_identity_fields = {
+        "device",
+        "inode",
+        "size_bytes",
+        "mtime_ns",
+        "sha256",
+    }
+    if (
+        not isinstance(helper_before, Mapping)
+        or set(helper_before) != helper_identity_fields
+        or helper_before != helper_after
+        or any(
+            type(helper_before.get(field)) is not int
+            or helper_before[field] < 0
+            for field in ("device", "inode", "size_bytes", "mtime_ns")
+        )
+        or helper_before["size_bytes"] <= 0
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(helper_before.get("sha256", "")),
+        )
+        is None
+        or _sha256(runner) != helper_before["sha256"]
+        or runner.stat().st_size != helper_before["size_bytes"]
+    ):
+        raise RuntimeError(
+            "embedded automatic calibration helper identity is not stable "
+            "or differs from the qualification runner"
+        )
+    bootstrap_contract_raw = document.get("bootstrap_contract")
+    if not isinstance(bootstrap_contract_raw, Mapping):
+        raise RuntimeError(
+            "embedded automatic calibration has no bootstrap contract"
+        )
+    bootstrap_contract = validate_runtime_memory_contract(
+        dict(bootstrap_contract_raw)
+    )
+    invariant_fields = set(contract).difference(
+        {"module_residency_calibration"}
+    )
+    bootstrap_calibration = bootstrap_contract[
+        "module_residency_calibration"
+    ]
+    if (
+        any(
+            bootstrap_contract.get(field) != contract.get(field)
+            for field in invariant_fields
+        )
+        or bootstrap_calibration["plans"] != calibration["plans"]
+        or bootstrap_calibration["plan_set_sha256"]
+        != calibration["plan_set_sha256"]
+        or bootstrap_calibration["qualified_runtime_stack_sha256"]
+        != calibration["qualified_runtime_stack_sha256"]
+        or bootstrap_calibration["cuda_module_loading_mode"]
+        != calibration["cuda_module_loading_mode"]
+        or any(
+            row
+            != {
+                "covering_profile_limit": limit,
+                "cumulative_reserve_bytes": 1,
+            }
+            for row, limit in zip(
+                bootstrap_calibration["profile_reserves"],
+                active_limits,
+                strict=True,
+            )
+        )
+        or document.get("bootstrap_only")
+        != {
+            "profile_reserve_bytes": 1,
+            "evidence_sha256": bootstrap_calibration["evidence_sha256"],
+            "never_published": True,
+        }
+    ):
+        raise RuntimeError(
+            "embedded automatic calibration bootstrap contract is not exact"
+        )
+    for plan in calibration["plans"]:
+        plan_bytes = _read_bundle_section(
+            bundle,
+            header,
+            str(plan["section_name"]),
+        )
+        if hashlib.sha256(plan_bytes).hexdigest() != plan["section_sha256"]:
+            raise RuntimeError(
+                "embedded automatic calibration plan receipt differs from "
+                f"the final bundle: {plan['section_name']}"
+            )
+
+    runs = document.get("runs")
+    if not isinstance(runs, list) or len(runs) != PROFILE_SWEEP_PROCESS_COUNT:
+        raise RuntimeError(
+            "embedded automatic calibration must contain exactly two captures"
+        )
+    required_artifacts = {
+        "command",
+        "returncode",
+        "runner_stdout",
+        "runner_stderr",
+        "raw_trace",
+        "normalized_trace",
+        "logits",
+        *{
+            f"profile_tokens_{index:02d}"
+            for index in range(len(active_limits))
+        },
+    }
+    replayed_rows: list[list[dict[str, int]]] = []
+    process_ids: set[int] = set()
+    gpu_uuids: set[str] = set()
+    capture_manifest_identities: list[dict[str, Any]] = []
+    raw_capture_identities: list[dict[str, Any]] = []
+    logits_identities: list[dict[str, Any]] = []
+    bootstrap_evidence_values: set[str] = set()
+    with tempfile.TemporaryDirectory(
+        prefix=".trtmc-reopen-embedded-calibration-"
+    ) as temporary:
+        extraction_root = Path(temporary)
+        for process_index, run in enumerate(runs):
+            expected_run_fields = {
+                "process_index",
+                "runner_pid",
+                "gpu_uuid",
+                "sampler_trust_anchor",
+                "capture_manifest",
+                "artifacts",
+            }
+            if (
+                not isinstance(run, Mapping)
+                or set(run) != expected_run_fields
+                or run.get("process_index") != process_index
+                or type(run.get("runner_pid")) is not int
+                or run["runner_pid"] <= 0
+                or not isinstance(run.get("gpu_uuid"), str)
+                or not run["gpu_uuid"]
+                or not isinstance(run.get("sampler_trust_anchor"), Mapping)
+                or not isinstance(run.get("artifacts"), Mapping)
+                or set(run["artifacts"]) != required_artifacts
+            ):
+                raise RuntimeError(
+                    f"embedded automatic calibration run {process_index} is invalid"
+                )
+            manifest_receipt, manifest_bytes = (
+                _read_embedded_calibration_section(
+                    bundle,
+                    header,
+                    run.get("capture_manifest"),
+                    label=f"process {process_index} capture manifest",
+                )
+            )
+            try:
+                capture_manifest = json.loads(
+                    manifest_bytes.decode("utf-8")
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    "embedded automatic calibration capture manifest is "
+                    "not valid JSON"
+                ) from exc
+            expected_manifest = {
+                "schema": EMBEDDED_CALIBRATION_CAPTURE_SCHEMA,
+                "process_index": process_index,
+                "runner_pid": run["runner_pid"],
+                "gpu_uuid": run["gpu_uuid"],
+                "sampler_trust_anchor": run["sampler_trust_anchor"],
+                "artifacts": run["artifacts"],
+            }
+            if capture_manifest != expected_manifest:
+                raise RuntimeError(
+                    f"embedded automatic calibration process {process_index} "
+                    "manifest does not match the evidence document"
+                )
+            captured: dict[str, bytes] = {}
+            for name, receipt in run["artifacts"].items():
+                _identity, payload = _read_embedded_calibration_section(
+                    bundle,
+                    header,
+                    receipt,
+                    label=f"process {process_index} artifact {name}",
+                )
+                captured[name] = payload
+            if captured["returncode"] != b"0\n":
+                raise RuntimeError(
+                    f"embedded automatic calibration process {process_index} "
+                    "did not exit successfully"
+                )
+            try:
+                stdout = captured["runner_stdout"].decode("utf-8")
+                raw_trace = json.loads(captured["raw_trace"].decode("utf-8"))
+                normalized_trace = json.loads(
+                    captured["normalized_trace"].decode("utf-8")
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    "embedded automatic calibration trace artifacts are invalid"
+                ) from exc
+            stdout_lines = [
+                line for line in stdout.splitlines() if line.strip()
+            ]
+            if (
+                len(stdout_lines) != 1
+                or captured["raw_trace"]
+                != (stdout_lines[0] + "\n").encode("utf-8")
+                or raw_trace != normalized_trace
+            ):
+                raise RuntimeError(
+                    "embedded automatic calibration raw/normalized/stdout "
+                    "traces disagree"
+                )
+            manifest_rows = normalized_trace.get("input_manifest")
+            logits_metadata = normalized_trace.get("logits_artifact")
+            if (
+                not isinstance(manifest_rows, list)
+                or len(manifest_rows) != len(active_limits)
+                or not isinstance(logits_metadata, Mapping)
+                or not isinstance(logits_metadata.get("path"), str)
+            ):
+                raise RuntimeError(
+                    "embedded automatic calibration trace file bindings "
+                    "are incomplete"
+                )
+            recorded_token_paths = tuple(
+                str(row.get("token_file"))
+                for row in manifest_rows
+                if isinstance(row, Mapping)
+            )
+            if (
+                len(recorded_token_paths) != len(active_limits)
+                or any(
+                    not Path(path).is_absolute()
+                    or str(Path(path).resolve()) != path
+                    for path in recorded_token_paths
+                )
+            ):
+                raise RuntimeError(
+                    "embedded automatic calibration token paths are invalid"
+                )
+            for sweep_name in ("sweep_a", "sweep_b"):
+                sweep = normalized_trace.get(sweep_name)
+                sweep_rows = (
+                    sweep.get("rows")
+                    if isinstance(sweep, Mapping)
+                    else None
+                )
+                if (
+                    not isinstance(sweep_rows, list)
+                    or len(sweep_rows) != len(recorded_token_paths)
+                    or any(
+                        not isinstance(row, Mapping)
+                        or row.get("token_file")
+                        != recorded_token_paths[index]
+                        for index, row in enumerate(sweep_rows)
+                    )
+                ):
+                    raise RuntimeError(
+                        "embedded automatic calibration raw profile token "
+                        f"paths disagree between input_manifest and {sweep_name}"
+                    )
+            recorded_logits_path = str(logits_metadata["path"])
+            process_dir = extraction_root / f"process-{process_index:02d}"
+            process_dir.mkdir()
+            token_paths: list[Path] = []
+            for index, prompt_tokens in enumerate(prompt_lengths):
+                payload = captured[f"profile_tokens_{index:02d}"]
+                try:
+                    token_values = np.asarray(
+                        [
+                            int(line)
+                            for line in payload.decode("ascii").splitlines()
+                            if line
+                        ],
+                        dtype=np.int32,
+                    )
+                except (UnicodeDecodeError, ValueError, OverflowError) as exc:
+                    raise RuntimeError(
+                        "embedded automatic calibration token payload is invalid"
+                    ) from exc
+                if not np.array_equal(
+                    token_values,
+                    deterministic_token_ids(
+                        prompt_tokens,
+                        int(spec.vocab_size),
+                    ),
+                ):
+                    raise RuntimeError(
+                        "embedded automatic calibration token payload is "
+                        "not deterministic"
+                    )
+                token_path = process_dir / f"profile-{index:02d}.tokens.txt"
+                token_path.write_bytes(payload)
+                token_paths.append(token_path)
+            logits_path = process_dir / "runner-logits.bin"
+            logits_path.write_bytes(captured["logits"])
+            try:
+                command = json.loads(captured["command"].decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    "embedded automatic calibration command is invalid"
+                ) from exc
+            if (
+                not isinstance(command, list)
+                or len(command) < 9
+                or not all(isinstance(value, str) for value in command)
+            ):
+                raise RuntimeError(
+                    "embedded automatic calibration command is invalid"
+                )
+            recorded_runner = command[0]
+            recorded_bundle = command[2] if len(command) > 2 else ""
+            expected_command = [
+                recorded_runner,
+                "--bundle",
+                recorded_bundle,
+                "--logits",
+                recorded_logits_path,
+                "--max-new-tokens",
+                "1",
+                "--max-sequence-length",
+                str(spec.context_limit),
+            ]
+            for recorded_path in recorded_token_paths:
+                expected_command.extend(
+                    ("--profile-sweep-tokens", recorded_path)
+                )
+            if (
+                command != expected_command
+                or any(
+                    not Path(path).is_absolute()
+                    or str(Path(path).resolve()) != path
+                    for path in (
+                        recorded_runner,
+                        recorded_bundle,
+                        recorded_logits_path,
+                    )
+                )
+            ):
+                raise RuntimeError(
+                    "embedded automatic calibration command is not the "
+                    "canonical all-profile invocation"
+                )
+            anchor_payload = run["sampler_trust_anchor"]
+            try:
+                anchor = SamplerTrustAnchor(
+                    pid=int(anchor_payload["pid"]),
+                    cuda_logical_device_index=int(
+                        anchor_payload["cuda_logical_device_index"]
+                    ),
+                    physical_device_index=int(
+                        anchor_payload["physical_device_index"]
+                    ),
+                    pci_bus_id=_normalize_pci_bus_id(
+                        str(anchor_payload["pci_bus_id"])
+                    ),
+                    gpu_uuid=str(anchor_payload["gpu_uuid"]),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "embedded automatic calibration sampler anchor is invalid"
+                ) from exc
+            if (
+                anchor.pid != run["runner_pid"]
+                or anchor.gpu_uuid != run["gpu_uuid"]
+            ):
+                raise RuntimeError(
+                    "embedded automatic calibration PID/GPU binding differs"
+                )
+            reopened_trace = _trace_with_reopened_embedded_paths(
+                normalized_trace,
+                token_paths=tuple(token_paths),
+                logits_path=logits_path,
+            )
+            rows = _validate_profile_sweep_trace(
+                reopened_trace,
+                contract=bootstrap_contract,
+                expected_model_id=spec.model_id,
+                token_paths=tuple(token_paths),
+                prompt_lengths=prompt_lengths,
+                logits_path=logits_path,
+                expected_sampler=anchor,
+            )
+            for sweep_name in ("sweep_a", "sweep_b"):
+                for row in normalized_trace[sweep_name]["rows"]:
+                    bootstrap_evidence_values.add(
+                        row["runtime_memory_receipt"][
+                            "module_residency_evidence_sha256"
+                        ]
+                    )
+            replayed_rows.append(rows)
+            process_ids.add(anchor.pid)
+            gpu_uuids.add(anchor.gpu_uuid)
+            capture_manifest_identities.append(manifest_receipt)
+            raw_capture_identities.append(dict(run["artifacts"]["raw_trace"]))
+            logits_identities.append(dict(run["artifacts"]["logits"]))
+    if (
+        len(process_ids) != PROFILE_SWEEP_PROCESS_COUNT
+        or len(gpu_uuids) != 1
+        or bootstrap_evidence_values
+        != {bootstrap_calibration["evidence_sha256"]}
+    ):
+        raise RuntimeError(
+            "embedded automatic calibration must use two distinct PIDs on "
+            "one GPU and exact bootstrap receipts"
+        )
+    aggregate_rows = aggregate_profile_sweep_calibration_rows(
+        replayed_rows,
+        active_profile_limits=active_limits,
+        configured_profile_reserves=calibration["profile_reserves"],
+    )
+    observed_rows = [
+        {
+            field: row[field]
+            for field in (
+                "profile_id",
+                "covering_profile_limit",
+                "process_first_use_bytes_by_process",
+                "device_wide_first_use_bytes_by_process",
+                "row_wise_max_process_first_use_bytes",
+                "row_wise_max_device_wide_first_use_bytes",
+                "row_wise_max_first_use_bytes",
+                "calibration_guard_bytes",
+                "required_guarded_process_reserve_bytes",
+            )
+        }
+        for row in aggregate_rows
+    ]
+    recommended_reserves = [
+        {
+            "covering_profile_limit": row["covering_profile_limit"],
+            "cumulative_reserve_bytes": row[
+                "required_guarded_process_reserve_bytes"
+            ],
+        }
+        for row in aggregate_rows
+    ]
+    if (
+        document.get("profile_rows") != observed_rows
+        or document.get("recommended_profile_reserves")
+        != recommended_reserves
+        or calibration["profile_reserves"] != recommended_reserves
+    ):
+        raise RuntimeError(
+            "embedded automatic calibration rows do not reproduce the sealed "
+            "profile reserves"
+        )
+    return {
+        "source": "embedded_bundle_sections",
+        "evidence_schema": EMBEDDED_CALIBRATION_EVIDENCE_SCHEMA,
+        "bundle": _simple_file_identity(bundle),
+        "evidence_section": evidence_receipt,
+        "capture_manifests": capture_manifest_identities,
+        "raw_captures": raw_capture_identities,
+        "logits": logits_identities,
+        "runner_sha256": _sha256(runner),
+        "contract_provenance": expected_contract_provenance,
+        "recommended_profile_reserves": recommended_reserves,
+        "bootstrap_cycle_exemption": {
+            "field": "module_residency_evidence_sha256",
+            "reason": (
+                "embedded bootstrap receipts predate the main evidence "
+                "section bound by the final contract"
+            ),
+            "observed_bootstrap_values": sorted(
+                bootstrap_evidence_values
+            ),
+            "final_sealed_value": calibration["evidence_sha256"],
+            "all_other_receipt_provenance_replayed": True,
+        },
+        "passed": True,
+    }
+
+
+def _validate_source_calibration_evidence(
+    *,
+    evidence_path: Path,
+    raw_capture_paths: Iterable[Path],
+    runner: Path,
+    contract: Mapping[str, Any],
+    spec: ModelSpec,
+) -> dict[str, Any]:
+    """Reopen the exact bootstrap evidence referenced by a sealed contract.
+
+    The bootstrap bundle/header identity is intentionally not compared with
+    the final sealed bundle: doing so would create a hash cycle.  Its actual
+    split-plan bytes, model/profile geometry, qualified stack, and every raw
+    trace field remain binding.  Only the raw receipt's evidence digest is
+    exempt because that digest names the document produced from those traces.
+    """
+
+    evidence_path = evidence_path.expanduser().resolve(strict=True)
+    runner = runner.expanduser().resolve(strict=True)
+    raw_paths = tuple(
+        path.expanduser().resolve(strict=True)
+        for path in raw_capture_paths
+    )
+    if len(raw_paths) != PROFILE_SWEEP_PROCESS_COUNT:
+        raise RuntimeError(
+            "sealed source calibration requires exactly two raw captures"
+        )
+    calibration = contract["module_residency_calibration"]
+    document_sha256 = _sha256(evidence_path)
+    if document_sha256 != calibration["evidence_sha256"]:
+        raise RuntimeError(
+            "sealed source calibration document SHA does not match "
+            "module_residency_evidence_sha256"
+        )
+    document = _read_json_object(
+        evidence_path,
+        "sealed source calibration evidence",
+    )
+    expected_document_fields = {
+        "schema_version",
+        "measurement_kind",
+        "aggregation",
+        "independent_process_count",
+        "model_id",
+        "model_context_limit",
+        "active_kv_profile_limits",
+        "prompt_lengths",
+        "terminal_active_length",
+        "runner_sha256",
+        "contract_provenance",
+        "runs",
+        "profile_rows",
+        "recommended_profile_reserves",
+        "gates",
+        "passed",
+    }
+    active_limits = tuple(
+        int(value) for value in contract["active_kv_profile_limits"]
+    )
+    prompt_lengths = _profile_sweep_prompt_lengths(
+        active_limits,
+        model_context_limit=spec.context_limit,
+    )
+    expected_contract_provenance = {
+        "qualified_runtime_stack_sha256": calibration[
+            "qualified_runtime_stack_sha256"
+        ],
+        "plan_set_sha256": calibration["plan_set_sha256"],
+        "cuda_module_loading_mode": calibration[
+            "cuda_module_loading_mode"
+        ],
+        "plans": calibration["plans"],
+    }
+    runner_sha256 = _sha256(runner)
+    if (
+        set(document) != expected_document_fields
+        or document.get("schema_version")
+        != PROFILE_SWEEP_CALIBRATION_SCHEMA
+        or document.get("measurement_kind")
+        != "nvml_process_cumulative_first_use"
+        or document.get("aggregation")
+        != "row_wise_max_across_independent_processes"
+        or document.get("independent_process_count")
+        != PROFILE_SWEEP_PROCESS_COUNT
+        or document.get("model_id") != spec.model_id
+        or document.get("model_context_limit") != spec.context_limit
+        or document.get("active_kv_profile_limits")
+        != list(active_limits)
+        or document.get("prompt_lengths") != list(prompt_lengths)
+        or document.get("terminal_active_length")
+        != spec.context_limit
+        or document.get("runner_sha256") != runner_sha256
+        or document.get("contract_provenance")
+        != expected_contract_provenance
+        or document.get("passed") is not True
+        or document.get("gates")
+        != {
+            "two_independent_processes": True,
+            "terminal_decode_reaches_model_limit": True,
+            "all_fresh_process_sweeps_passed": True,
+        }
+    ):
+        raise RuntimeError(
+            "sealed source calibration document does not bind the final "
+            "runner/model/profile/plan/stack/loading-mode tuple"
+        )
+    runs = document.get("runs")
+    if (
+        not isinstance(runs, list)
+        or len(runs) != PROFILE_SWEEP_PROCESS_COUNT
+    ):
+        raise RuntimeError(
+            "sealed source calibration document must name two runs"
+        )
+
+    replayed_rows: list[list[dict[str, int]]] = []
+    raw_identities: list[dict[str, Any]] = []
+    capture_manifest_identities: list[dict[str, Any]] = []
+    logits_identities: list[dict[str, Any]] = []
+    source_bundle_identities: list[dict[str, Any]] = []
+    process_ids: set[int] = set()
+    gpu_uuids: set[str] = set()
+    bootstrap_receipt_evidence_sha256s: set[str] = set()
+    for process_index, (run, raw_path) in enumerate(
+        zip(runs, raw_paths, strict=True)
+    ):
+        expected_run_fields = {
+            "process_index",
+            "runner_pid",
+            "gpu_uuid",
+            "capture_manifest_sha256",
+            "raw_trace_sha256",
+            "logits_sha256",
+        }
+        if (
+            not isinstance(run, Mapping)
+            or set(run) != expected_run_fields
+            or run.get("process_index") != process_index
+            or type(run.get("runner_pid")) is not int
+            or run["runner_pid"] <= 0
+            or not isinstance(run.get("gpu_uuid"), str)
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(run.get("capture_manifest_sha256", "")),
+            )
+            is None
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(run.get("raw_trace_sha256", "")),
+            )
+            is None
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(run.get("logits_sha256", "")),
+            )
+            is None
+        ):
+            raise RuntimeError(
+                f"sealed source calibration run {process_index} is invalid"
+            )
+        capture_dir = raw_path.parent
+        capture_manifest_path = capture_dir / "capture-manifest.json"
+        if (
+            _sha256(raw_path) != run["raw_trace_sha256"]
+            or _sha256(capture_manifest_path)
+            != run["capture_manifest_sha256"]
+        ):
+            raise RuntimeError(
+                "sealed source calibration raw/capture-manifest hash "
+                f"mismatch for process {process_index}"
+            )
+        capture_manifest = _read_json_object(
+            capture_manifest_path,
+            "sealed source profile-sweep capture manifest",
+        )
+        anchor_payload = capture_manifest.get("sampler_trust_anchor")
+        if not isinstance(anchor_payload, Mapping):
+            raise RuntimeError(
+                "sealed source capture has no sampler trust anchor"
+            )
+        anchor = SamplerTrustAnchor(
+            pid=anchor_payload["pid"],
+            cuda_logical_device_index=anchor_payload[
+                "cuda_logical_device_index"
+            ],
+            physical_device_index=anchor_payload[
+                "physical_device_index"
+            ],
+            pci_bus_id=anchor_payload["pci_bus_id"],
+            gpu_uuid=anchor_payload["gpu_uuid"],
+        )
+        if (
+            capture_manifest.get("schema")
+            != PROFILE_SWEEP_CAPTURE_SCHEMA
+            or capture_manifest.get("runner_pid") != anchor.pid
+            or anchor.pid != run["runner_pid"]
+            or anchor.gpu_uuid != run["gpu_uuid"]
+        ):
+            raise RuntimeError(
+                "sealed source capture manifest/PID/GPU binding mismatch"
+            )
+        artifacts = capture_manifest.get("artifacts")
+        required_artifacts = {
+            "command",
+            "returncode",
+            "runner_stdout",
+            "runner_stderr",
+            "raw_trace",
+            "normalized_trace",
+            "logits",
+            *{
+                f"profile_tokens_{index:02d}"
+                for index in range(len(active_limits))
+            },
+        }
+        if not isinstance(artifacts, Mapping) or set(artifacts) != (
+            required_artifacts
+        ):
+            raise RuntimeError(
+                "sealed source capture manifest artifact set is incomplete"
+            )
+        captured = {
+            name: _read_capture_file(
+                capture_dir,
+                receipt,
+                name=name,
+            )
+            for name, receipt in artifacts.items()
+        }
+        if captured["raw_trace"][0] != raw_path:
+            raise RuntimeError(
+                "explicit sealed source raw capture is not the manifest raw trace"
+            )
+        if (
+            captured["returncode"][1] != b"0\n"
+            or _sha256(captured["logits"][0])
+            != run["logits_sha256"]
+        ):
+            raise RuntimeError(
+                "sealed source capture returncode/logits hash is invalid"
+            )
+        raw_trace = json.loads(
+            captured["raw_trace"][1].decode("utf-8")
+        )
+        normalized_trace = json.loads(
+            captured["normalized_trace"][1].decode("utf-8")
+        )
+        stdout_trace = _parse_runner_json(
+            captured["runner_stdout"][1].decode("utf-8")
+        )
+        if raw_trace != normalized_trace or raw_trace != stdout_trace:
+            raise RuntimeError(
+                "sealed source raw/normalized/stdout traces disagree"
+            )
+        token_paths = tuple(
+            captured[f"profile_tokens_{index:02d}"][0]
+            for index in range(len(active_limits))
+        )
+        for prompt_tokens, (_, token_bytes) in zip(
+            prompt_lengths,
+            (
+                captured[f"profile_tokens_{index:02d}"]
+                for index in range(len(active_limits))
+            ),
+            strict=True,
+        ):
+            token_values = np.asarray(
+                [
+                    int(line)
+                    for line in token_bytes.decode("utf-8").splitlines()
+                    if line
+                ],
+                dtype=np.int32,
+            )
+            if not np.array_equal(
+                token_values,
+                deterministic_token_ids(
+                    prompt_tokens,
+                    int(spec.vocab_size),
+                ),
+            ):
+                raise RuntimeError(
+                    "sealed source calibration token file is not deterministic"
+                )
+        command = json.loads(captured["command"][1].decode("utf-8"))
+        if (
+            not isinstance(command, list)
+            or not command
+            or "--bundle" not in command
+        ):
+            raise RuntimeError(
+                "sealed source capture has no bootstrap bundle command"
+            )
+        source_runner = Path(str(command[0])).resolve(strict=True)
+        if _sha256(source_runner) != runner_sha256:
+            raise RuntimeError(
+                "sealed source capture runner differs from the "
+                "manifest-bound qualifier runner"
+            )
+        bundle_index = command.index("--bundle") + 1
+        if bundle_index >= len(command):
+            raise RuntimeError(
+                "sealed source capture bundle argument is truncated"
+            )
+        source_bundle = Path(str(command[bundle_index])).resolve(
+            strict=True
+        )
+        source_header = _read_bundle_header(source_bundle)
+        source_contract = source_header.get("runtime_memory")
+        if not isinstance(source_contract, Mapping):
+            raise RuntimeError(
+                "sealed source bootstrap bundle has no runtime-memory header"
+            )
+        source_contract_fields = (
+            "qualified_model_id",
+            "model_context_limit",
+            "prefill_chunk_limit",
+            "kv_bytes_per_token",
+            "active_kv_profile_limits",
+            "qualified_runtime_stack",
+        )
+        if any(
+            source_contract.get(field) != contract.get(field)
+            for field in source_contract_fields
+        ):
+            raise RuntimeError(
+                "sealed source bootstrap bundle model/profile/runtime-stack "
+                "tuple differs from the final contract"
+            )
+        for plan in calibration["plans"]:
+            section_name = str(plan["section_name"])
+            actual_sha256 = hashlib.sha256(
+                _read_bundle_section(
+                    source_bundle,
+                    source_header,
+                    section_name,
+                )
+            ).hexdigest()
+            if actual_sha256 != plan["section_sha256"]:
+                raise RuntimeError(
+                    "sealed source bootstrap bundle plan bytes differ from "
+                    f"the final contract: {section_name}"
+                )
+        rows = _validate_profile_sweep_trace(
+            normalized_trace,
+            contract=contract,
+            expected_model_id=spec.model_id,
+            token_paths=token_paths,
+            prompt_lengths=prompt_lengths,
+            logits_path=captured["logits"][0],
+            expected_sampler=anchor,
+            bootstrap_evidence_sha256_exemption=True,
+        )
+        for sweep_name in ("sweep_a", "sweep_b"):
+            for row in normalized_trace[sweep_name]["rows"]:
+                receipt = row["runtime_memory_receipt"]
+                bootstrap_receipt_evidence_sha256s.add(
+                    receipt["module_residency_evidence_sha256"]
+                )
+        replayed_rows.append(rows)
+        process_ids.add(anchor.pid)
+        gpu_uuids.add(anchor.gpu_uuid)
+        raw_identities.append(_simple_file_identity(raw_path))
+        capture_manifest_identities.append(
+            _simple_file_identity(capture_manifest_path)
+        )
+        logits_identities.append(
+            _simple_file_identity(captured["logits"][0])
+        )
+        source_bundle_identities.append(
+            _simple_file_identity(source_bundle)
+        )
+    if (
+        len(process_ids) != PROFILE_SWEEP_PROCESS_COUNT
+        or len(gpu_uuids) != 1
+        or not bootstrap_receipt_evidence_sha256s
+    ):
+        raise RuntimeError(
+            "sealed source calibration must use two distinct PIDs on one GPU"
+        )
+
+    aggregate_rows = aggregate_profile_sweep_calibration_rows(
+        replayed_rows,
+        active_profile_limits=active_limits,
+        configured_profile_reserves=calibration["profile_reserves"],
+    )
+    observed_rows = [
+        {
+            field: row[field]
+            for field in (
+                "profile_id",
+                "covering_profile_limit",
+                "process_first_use_bytes_by_process",
+                "device_wide_first_use_bytes_by_process",
+                "row_wise_max_process_first_use_bytes",
+                "row_wise_max_device_wide_first_use_bytes",
+                "row_wise_max_first_use_bytes",
+                "calibration_guard_bytes",
+                "required_guarded_process_reserve_bytes",
+            )
+        }
+        for row in aggregate_rows
+    ]
+    recommended_reserves = [
+        {
+            "covering_profile_limit": row[
+                "covering_profile_limit"
+            ],
+            "cumulative_reserve_bytes": row[
+                "required_guarded_process_reserve_bytes"
+            ],
+        }
+        for row in aggregate_rows
+    ]
+    if (
+        document.get("profile_rows") != observed_rows
+        or document.get("recommended_profile_reserves")
+        != recommended_reserves
+        or any(
+            required["covering_profile_limit"]
+            != configured["covering_profile_limit"]
+            or required["cumulative_reserve_bytes"]
+            > configured["cumulative_reserve_bytes"]
+            for required, configured in zip(
+                recommended_reserves,
+                calibration["profile_reserves"],
+                strict=True,
+            )
+        )
+    ):
+        raise RuntimeError(
+            "sealed source calibration rows are not replayable or exceed "
+            "the final configured reserve"
+        )
+    return {
+        "document": _simple_file_identity(evidence_path),
+        "raw_captures": raw_identities,
+        "capture_manifests": capture_manifest_identities,
+        "logits": logits_identities,
+        "bootstrap_bundles": source_bundle_identities,
+        "runner_sha256": runner_sha256,
+        "contract_provenance": expected_contract_provenance,
+        "recommended_profile_reserves": recommended_reserves,
+        "bootstrap_cycle_exemption": {
+            "field": "module_residency_evidence_sha256",
+            "reason": (
+                "bootstrap raw receipts predate the evidence document "
+                "whose SHA is sealed into the final contract"
+            ),
+            "observed_bootstrap_values": sorted(
+                bootstrap_receipt_evidence_sha256s
+            ),
+            "final_sealed_value": calibration["evidence_sha256"],
+            "all_other_receipt_provenance_replayed": True,
+        },
+        "passed": True,
+    }
+
+
+def produce_profile_sweep_evidence(
+    *,
+    runner: Path,
+    bundle: Path,
+    header: Mapping[str, Any],
+    spec: ModelSpec,
+    evidence_dir: Path,
+    runner_cuda_visible_device: str,
+    source_calibration_evidence: Path | None = None,
+    source_calibration_raw_captures: Iterable[Path] = (),
+) -> dict[str, Any]:
+    """Run and aggregate two independent all-profile two-sweep processes."""
+
+    runner = runner.expanduser().resolve(strict=True)
+    bundle = bundle.expanduser().resolve(strict=True)
+    active_limits = tuple(
+        int(value)
+        for value in header["runtime_memory"]["active_kv_profile_limits"]
+    )
+    contract = _sealed_profile_sweep_contract(
+        bundle,
+        header,
+        expected_model_id=spec.model_id,
+        expected_context_limit=spec.context_limit,
+        expected_profile_limits=active_limits,
+    )
+    sections = header.get("sections")
+    if (
+        isinstance(sections, Mapping)
+        and EMBEDDED_CALIBRATION_EVIDENCE_SECTION in sections
+    ):
+        if source_calibration_evidence is not None or tuple(
+            source_calibration_raw_captures
+        ):
+            raise RuntimeError(
+                "embedded automatic calibration evidence cannot be combined "
+                "with external source-calibration paths"
+            )
+        source_calibration_binding = (
+            _validate_embedded_source_calibration_evidence(
+                bundle=bundle,
+                header=header,
+                runner=runner,
+                contract=contract,
+                spec=spec,
+            )
+        )
+    else:
+        if source_calibration_evidence is None:
+            raise RuntimeError(
+                "sealed bundle has neither embedded automatic calibration "
+                "evidence nor an external source-calibration document"
+            )
+        source_calibration_binding = _validate_source_calibration_evidence(
+            evidence_path=source_calibration_evidence,
+            raw_capture_paths=source_calibration_raw_captures,
+            runner=runner,
+            contract=contract,
+            spec=spec,
+        )
+    prompt_lengths = _profile_sweep_prompt_lengths(
+        active_limits,
+        model_context_limit=spec.context_limit,
+    )
+    vocab_size = header.get("vocab_size")
+    if type(vocab_size) is not int or vocab_size <= 1:
+        raise RuntimeError("profile sweep bundle has no valid vocabulary size")
+    evidence_dir.mkdir(parents=True, exist_ok=False)
+
+    traces: list[dict[str, Any]] = []
+    per_process_rows: list[list[dict[str, int]]] = []
+    run_summaries: list[dict[str, Any]] = []
+    process_ids: set[int] = set()
+    for process_index in range(PROFILE_SWEEP_PROCESS_COUNT):
+        run_dir = evidence_dir / f"process-{process_index:02d}"
+        trace, rows, anchor = _run_profile_sweep_process(
+            runner=runner,
+            bundle=bundle,
+            contract=contract,
+            expected_model_id=spec.model_id,
+            vocab_size=vocab_size,
+            prompt_lengths=prompt_lengths,
+            evidence_dir=run_dir,
+            runner_cuda_visible_device=runner_cuda_visible_device,
+        )
+        if anchor.pid in process_ids:
+            raise RuntimeError(
+                "profile sweep did not use distinct runner process identities"
+            )
+        process_ids.add(anchor.pid)
+        traces.append(trace)
+        per_process_rows.append(rows)
+        run_summaries.append(
+            {
+                "process_index": process_index,
+                "capture_dir": str(run_dir.resolve()),
+                "capture_manifest": _simple_file_identity(
+                    run_dir / "capture-manifest.json"
+                ),
+                "raw_trace": _simple_file_identity(
+                    run_dir / "runner-output.raw.json"
+                ),
+                "logits": _simple_file_identity(
+                    run_dir / "runner-logits.bin"
+                ),
+                "sampler_trust_anchor": _sampler_anchor_json(anchor),
+                "sweep_b_incremental_process_high_water_bytes": trace[
+                    "sweep_b"
+                ]["incremental_process_high_water_bytes"],
+            }
+        )
+
+    calibration_reserves = contract["module_residency_calibration"][
+        "profile_reserves"
+    ]
+    aggregate_rows = aggregate_profile_sweep_calibration_rows(
+        per_process_rows,
+        active_profile_limits=active_limits,
+        configured_profile_reserves=calibration_reserves,
+    )
+    for index, row in enumerate(aggregate_rows):
+        if (
+            row[
+                "configured_reserve_covers_process_max_plus_guard"
+            ]
+            is not True
+        ):
+            raise RuntimeError(
+                "sealed module-residency reserve does not cover the fresh "
+                "two-process process first-use max plus 64 MiB "
+                f"at profile {index}: {row}"
+            )
+
+    contract_provenance = {
+        "contract_version": 2,
+        "qualified_runtime_stack_sha256": contract[
+            "module_residency_calibration"
+        ]["qualified_runtime_stack_sha256"],
+        "plan_set_sha256": contract["module_residency_calibration"][
+            "plan_set_sha256"
+        ],
+        "evidence_sha256": contract["module_residency_calibration"][
+            "evidence_sha256"
+        ],
+        "cuda_module_loading_mode": contract[
+            "module_residency_calibration"
+        ]["cuda_module_loading_mode"],
+        "plans": contract["module_residency_calibration"]["plans"],
+    }
+    calibration_contract_provenance = {
+        "qualified_runtime_stack_sha256": contract_provenance[
+            "qualified_runtime_stack_sha256"
+        ],
+        "plan_set_sha256": contract_provenance["plan_set_sha256"],
+        "cuda_module_loading_mode": contract_provenance[
+            "cuda_module_loading_mode"
+        ],
+        "plans": contract_provenance["plans"],
+    }
+    observed_calibration_rows = [
+        {
+            field: row[field]
+            for field in (
+                "profile_id",
+                "covering_profile_limit",
+                "process_first_use_bytes_by_process",
+                "device_wide_first_use_bytes_by_process",
+                "row_wise_max_process_first_use_bytes",
+                "row_wise_max_device_wide_first_use_bytes",
+                "row_wise_max_first_use_bytes",
+                "calibration_guard_bytes",
+                "required_guarded_process_reserve_bytes",
+            )
+        }
+        for row in aggregate_rows
+    ]
+    calibration_evidence = {
+        "schema_version": PROFILE_SWEEP_CALIBRATION_SCHEMA,
+        "measurement_kind": "nvml_process_cumulative_first_use",
+        "aggregation": "row_wise_max_across_independent_processes",
+        "independent_process_count": PROFILE_SWEEP_PROCESS_COUNT,
+        "model_id": spec.model_id,
+        "model_context_limit": spec.context_limit,
+        "active_kv_profile_limits": list(active_limits),
+        "prompt_lengths": list(prompt_lengths),
+        "terminal_active_length": prompt_lengths[-1] + 1,
+        "runner_sha256": _sha256(runner),
+        "contract_provenance": calibration_contract_provenance,
+        "runs": [
+            {
+                "process_index": run["process_index"],
+                "runner_pid": run["sampler_trust_anchor"]["pid"],
+                "gpu_uuid": run["sampler_trust_anchor"]["gpu_uuid"],
+                "capture_manifest_sha256": run["capture_manifest"][
+                    "sha256"
+                ],
+                "raw_trace_sha256": run["raw_trace"]["sha256"],
+                "logits_sha256": run["logits"]["sha256"],
+            }
+            for run in run_summaries
+        ],
+        "profile_rows": observed_calibration_rows,
+        "recommended_profile_reserves": [
+            {
+                "covering_profile_limit": row[
+                    "covering_profile_limit"
+                ],
+                "cumulative_reserve_bytes": row[
+                    "required_guarded_process_reserve_bytes"
+                ],
+            }
+            for row in aggregate_rows
+        ],
+        "gates": {
+            "two_independent_processes": len(process_ids)
+            == PROFILE_SWEEP_PROCESS_COUNT,
+            "terminal_decode_reaches_model_limit": (
+                prompt_lengths[-1] + 1 == spec.context_limit
+            ),
+            "all_fresh_process_sweeps_passed": all(
+                trace.get("passed") is True for trace in traces
+            ),
+        },
+        "passed": True,
+    }
+    calibration_path = evidence_dir / "calibration-evidence.json"
+    calibration_path.write_text(
+        json.dumps(calibration_evidence, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    result = {
+        "schema_version": PROFILE_SWEEP_EVIDENCE_SCHEMA,
+        "status": "passed",
+        "passed": True,
+        "bundle": _simple_file_identity(bundle),
+        "runner": _simple_file_identity(runner),
+        "process_count": PROFILE_SWEEP_PROCESS_COUNT,
+        "prompt_lengths": list(prompt_lengths),
+        "contract_provenance": contract_provenance,
+        "runs": run_summaries,
+        "aggregation": {
+            "method": "row_wise_max_across_independent_processes",
+            "profile_rows": aggregate_rows,
+        },
+        "source_calibration_evidence": source_calibration_binding,
+        "fresh_calibration_evidence": _simple_file_identity(
+            calibration_path
+        ),
+        "fresh_calibration_evidence_sha256": _sha256(calibration_path),
+    }
+    (evidence_dir / "profile-sweep-evidence.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return result
+
+
+def _persisted_source_calibration_evidence_passed(
+    evidence: Any,
+    *,
+    runner: Path,
+    bundle: Path,
+    spec: ModelSpec,
+) -> bool:
+    """Independently reopen the sealed bootstrap document and two captures."""
+
+    try:
+        if (
+            not isinstance(evidence, Mapping)
+            or evidence.get("schema_version")
+            != PROFILE_SWEEP_EVIDENCE_SCHEMA
+        ):
+            return False
+        runner = runner.expanduser().resolve(strict=True)
+        bundle = bundle.expanduser().resolve(strict=True)
+        header = _read_bundle_header(bundle)
+        active_limits = tuple(
+            int(value)
+            for value in header["runtime_memory"][
+                "active_kv_profile_limits"
+            ]
+        )
+        contract = _sealed_profile_sweep_contract(
+            bundle,
+            header,
+            expected_model_id=spec.model_id,
+            expected_context_limit=spec.context_limit,
+            expected_profile_limits=active_limits,
+        )
+        persisted = evidence.get("source_calibration_evidence")
+        if not isinstance(persisted, Mapping):
+            return False
+        if persisted.get("source") == "embedded_bundle_sections":
+            replayed = _validate_embedded_source_calibration_evidence(
+                bundle=bundle,
+                header=header,
+                runner=runner,
+                contract=contract,
+                spec=spec,
+            )
+            return dict(persisted) == replayed
+        document = persisted.get("document")
+        raws = persisted.get("raw_captures")
+        if (
+            not isinstance(document, Mapping)
+            or not isinstance(raws, list)
+            or len(raws) != PROFILE_SWEEP_PROCESS_COUNT
+            or any(not isinstance(raw, Mapping) for raw in raws)
+        ):
+            return False
+        replayed = _validate_source_calibration_evidence(
+            evidence_path=Path(str(document["path"])),
+            raw_capture_paths=tuple(
+                Path(str(raw["path"])) for raw in raws
+            ),
+            runner=runner,
+            contract=contract,
+            spec=spec,
+        )
+        return dict(persisted) == replayed
+    except (
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+        RuntimeError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        OverflowError,
+    ):
+        return False
+
+
+def _persisted_profile_sweep_evidence_passed(
+    evidence: Any,
+    *,
+    runner: Path,
+    bundle: Path,
+    spec: ModelSpec,
+) -> bool:
+    """Reopen both raw process captures and recompute their aggregate gate."""
+
+    expected_fields = {
+        "schema_version",
+        "status",
+        "passed",
+        "bundle",
+        "runner",
+        "process_count",
+        "prompt_lengths",
+        "contract_provenance",
+        "runs",
+        "aggregation",
+        "source_calibration_evidence",
+        "fresh_calibration_evidence",
+        "fresh_calibration_evidence_sha256",
+    }
+    try:
+        if (
+            not isinstance(evidence, Mapping)
+            or set(evidence) != expected_fields
+            or evidence.get("schema_version")
+            != PROFILE_SWEEP_EVIDENCE_SCHEMA
+            or evidence.get("status") != "passed"
+            or evidence.get("passed") is not True
+            or evidence.get("process_count")
+            != PROFILE_SWEEP_PROCESS_COUNT
+        ):
+            return False
+        runner = runner.expanduser().resolve(strict=True)
+        bundle = bundle.expanduser().resolve(strict=True)
+        _validate_file_identity(
+            evidence["runner"],
+            runner,
+            label="profile-sweep qualifier runner",
+        )
+        _validate_file_identity(
+            evidence["bundle"],
+            bundle,
+            label="profile-sweep bundle",
+        )
+        header = _read_bundle_header(bundle)
+        active_limits = tuple(
+            int(value)
+            for value in header["runtime_memory"][
+                "active_kv_profile_limits"
+            ]
+        )
+        contract = _sealed_profile_sweep_contract(
+            bundle,
+            header,
+            expected_model_id=spec.model_id,
+            expected_context_limit=spec.context_limit,
+            expected_profile_limits=active_limits,
+        )
+        prompt_lengths = _profile_sweep_prompt_lengths(
+            active_limits,
+            model_context_limit=spec.context_limit,
+        )
+        if evidence.get("prompt_lengths") != list(prompt_lengths):
+            return False
+        expected_contract_provenance = {
+            "contract_version": 2,
+            "qualified_runtime_stack_sha256": contract[
+                "module_residency_calibration"
+            ]["qualified_runtime_stack_sha256"],
+            "plan_set_sha256": contract[
+                "module_residency_calibration"
+            ]["plan_set_sha256"],
+            "evidence_sha256": contract[
+                "module_residency_calibration"
+            ]["evidence_sha256"],
+            "cuda_module_loading_mode": contract[
+                "module_residency_calibration"
+            ]["cuda_module_loading_mode"],
+            "plans": contract["module_residency_calibration"]["plans"],
+        }
+        if evidence.get("contract_provenance") != expected_contract_provenance:
+            return False
+        source_calibration_evidence = evidence.get(
+            "source_calibration_evidence"
+        )
+        if not isinstance(source_calibration_evidence, Mapping):
+            return False
+        if (
+            source_calibration_evidence.get("source")
+            == "embedded_bundle_sections"
+        ):
+            replayed_source_calibration = (
+                _validate_embedded_source_calibration_evidence(
+                    bundle=bundle,
+                    header=header,
+                    runner=runner,
+                    contract=contract,
+                    spec=spec,
+                )
+            )
+        else:
+            source_document = source_calibration_evidence.get("document")
+            source_raw_captures = source_calibration_evidence.get(
+                "raw_captures"
+            )
+            if (
+                not isinstance(source_document, Mapping)
+                or not isinstance(source_raw_captures, list)
+                or len(source_raw_captures)
+                != PROFILE_SWEEP_PROCESS_COUNT
+                or any(
+                    not isinstance(identity, Mapping)
+                    for identity in source_raw_captures
+                )
+            ):
+                return False
+            replayed_source_calibration = _validate_source_calibration_evidence(
+                evidence_path=Path(str(source_document["path"])),
+                raw_capture_paths=tuple(
+                    Path(str(identity["path"]))
+                    for identity in source_raw_captures
+                ),
+                runner=runner,
+                contract=contract,
+                spec=spec,
+            )
+        if dict(source_calibration_evidence) != (
+            replayed_source_calibration
+        ):
+            return False
+
+        runs = evidence.get("runs")
+        if not isinstance(runs, list) or len(runs) != PROFILE_SWEEP_PROCESS_COUNT:
+            return False
+        process_ids: set[int] = set()
+        replayed_rows: list[list[dict[str, int]]] = []
+        replayed_run_summaries: list[dict[str, Any]] = []
+        for process_index, run in enumerate(runs):
+            if (
+                not isinstance(run, Mapping)
+                or set(run)
+                != {
+                    "process_index",
+                    "capture_dir",
+                    "capture_manifest",
+                    "raw_trace",
+                    "logits",
+                    "sampler_trust_anchor",
+                    "sweep_b_incremental_process_high_water_bytes",
+                }
+                or run.get("process_index") != process_index
+                or not isinstance(run.get("capture_dir"), str)
+                or not isinstance(run.get("sampler_trust_anchor"), Mapping)
+            ):
+                return False
+            capture_dir = Path(run["capture_dir"]).resolve(strict=True)
+            capture_manifest_path = capture_dir / "capture-manifest.json"
+            _validate_file_identity(
+                run.get("capture_manifest"),
+                capture_manifest_path,
+                label="profile-sweep capture manifest",
+            )
+            capture_manifest = _read_json_object(
+                capture_manifest_path,
+                "profile-sweep capture manifest",
+            )
+            anchor_payload = run["sampler_trust_anchor"]
+            anchor = SamplerTrustAnchor(
+                pid=anchor_payload["pid"],
+                cuda_logical_device_index=anchor_payload[
+                    "cuda_logical_device_index"
+                ],
+                physical_device_index=anchor_payload[
+                    "physical_device_index"
+                ],
+                pci_bus_id=anchor_payload["pci_bus_id"],
+                gpu_uuid=anchor_payload["gpu_uuid"],
+            )
+            if (
+                anchor.pid in process_ids
+                or capture_manifest.get("schema")
+                != PROFILE_SWEEP_CAPTURE_SCHEMA
+                or capture_manifest.get("runner_pid") != anchor.pid
+                or capture_manifest.get("sampler_trust_anchor")
+                != _sampler_anchor_json(anchor)
+            ):
+                return False
+            process_ids.add(anchor.pid)
+            artifacts = capture_manifest.get("artifacts")
+            if not isinstance(artifacts, Mapping):
+                return False
+            required_artifacts = {
+                "command",
+                "returncode",
+                "runner_stdout",
+                "runner_stderr",
+                "raw_trace",
+                "normalized_trace",
+                "logits",
+                *{
+                    f"profile_tokens_{index:02d}"
+                    for index in range(len(active_limits))
+                },
+            }
+            if set(artifacts) != required_artifacts:
+                return False
+            captured = {
+                name: _read_capture_file(
+                    capture_dir,
+                    receipt,
+                    name=name,
+                )
+                for name, receipt in artifacts.items()
+            }
+            token_paths = tuple(
+                captured[f"profile_tokens_{index:02d}"][0]
+                for index in range(len(active_limits))
+            )
+            for prompt_tokens, (_, token_bytes) in zip(
+                prompt_lengths,
+                (
+                    captured[f"profile_tokens_{index:02d}"]
+                    for index in range(len(active_limits))
+                ),
+                strict=True,
+            ):
+                token_values = np.asarray(
+                    [
+                        int(line)
+                        for line in token_bytes.decode("utf-8").splitlines()
+                        if line
+                    ],
+                    dtype=np.int32,
+                )
+                if not np.array_equal(
+                    token_values,
+                    deterministic_token_ids(
+                        prompt_tokens,
+                        int(header["vocab_size"]),
+                    ),
+                ):
+                    return False
+            expected_command = _profile_sweep_command(
+                runner=runner,
+                bundle=bundle,
+                token_paths=token_paths,
+                logits_path=captured["logits"][0],
+                model_context_limit=spec.context_limit,
+            )
+            command = json.loads(captured["command"][1].decode("utf-8"))
+            if command != expected_command:
+                return False
+            if captured["returncode"][1] != b"0\n":
+                return False
+            stdout = captured["runner_stdout"][1].decode("utf-8")
+            stdout_trace = _parse_runner_json(stdout)
+            raw_trace = json.loads(
+                captured["raw_trace"][1].decode("utf-8")
+            )
+            normalized_trace = json.loads(
+                captured["normalized_trace"][1].decode("utf-8")
+            )
+            if stdout_trace != raw_trace or raw_trace != normalized_trace:
+                return False
+            rows = _validate_profile_sweep_trace(
+                normalized_trace,
+                contract=contract,
+                expected_model_id=spec.model_id,
+                token_paths=token_paths,
+                prompt_lengths=prompt_lengths,
+                logits_path=captured["logits"][0],
+                expected_sampler=anchor,
+            )
+            replayed_rows.append(rows)
+            raw_trace_identity = _validate_file_identity(
+                run.get("raw_trace"),
+                captured["raw_trace"][0],
+                label="profile-sweep raw trace",
+            )
+            logits_identity = _validate_file_identity(
+                run.get("logits"),
+                captured["logits"][0],
+                label="profile-sweep logits",
+            )
+            capture_manifest_identity = _validate_file_identity(
+                run.get("capture_manifest"),
+                capture_manifest_path,
+                label="profile-sweep capture manifest",
+            )
+            expected_run_summary = {
+                "process_index": process_index,
+                "capture_dir": str(capture_dir),
+                "capture_manifest": capture_manifest_identity,
+                "raw_trace": raw_trace_identity,
+                "logits": logits_identity,
+                "sampler_trust_anchor": _sampler_anchor_json(anchor),
+                "sweep_b_incremental_process_high_water_bytes": (
+                    normalized_trace["sweep_b"][
+                        "incremental_process_high_water_bytes"
+                    ]
+                ),
+            }
+            if dict(run) != expected_run_summary:
+                return False
+            replayed_run_summaries.append(expected_run_summary)
+
+        aggregation = evidence.get("aggregation")
+        if (
+            not isinstance(aggregation, Mapping)
+            or aggregation.get("method")
+            != "row_wise_max_across_independent_processes"
+            or not isinstance(aggregation.get("profile_rows"), list)
+        ):
+            return False
+        calibration_reserves = contract["module_residency_calibration"][
+            "profile_reserves"
+        ]
+        expected_aggregate_rows = (
+            aggregate_profile_sweep_calibration_rows(
+                replayed_rows,
+                active_profile_limits=active_limits,
+                configured_profile_reserves=calibration_reserves,
+            )
+        )
+        if (
+            aggregation["profile_rows"] != expected_aggregate_rows
+            or any(
+                row[
+                    "configured_reserve_covers_process_max_plus_guard"
+                ]
+                is not True
+                for row in expected_aggregate_rows
+            )
+        ):
+            return False
+
+        calibration_identity = evidence.get(
+            "fresh_calibration_evidence"
+        )
+        if not isinstance(calibration_identity, Mapping):
+            return False
+        calibration_path = Path(
+            str(calibration_identity.get("path", ""))
+        )
+        _validate_file_identity(
+            calibration_identity,
+            calibration_path,
+            label="profile-sweep calibration evidence",
+        )
+        if evidence.get(
+            "fresh_calibration_evidence_sha256"
+        ) != calibration_identity.get("sha256"):
+            return False
+        calibration_document = _read_json_object(
+            calibration_path,
+            "profile-sweep calibration evidence",
+        )
+        expected_calibration_contract_provenance = {
+            field: expected_contract_provenance[field]
+            for field in (
+                "qualified_runtime_stack_sha256",
+                "plan_set_sha256",
+                "cuda_module_loading_mode",
+                "plans",
+            )
+        }
+        expected_observed_calibration_rows = [
+            {
+                field: row[field]
+                for field in (
+                    "profile_id",
+                    "covering_profile_limit",
+                    "process_first_use_bytes_by_process",
+                    "device_wide_first_use_bytes_by_process",
+                    "row_wise_max_process_first_use_bytes",
+                    "row_wise_max_device_wide_first_use_bytes",
+                    "row_wise_max_first_use_bytes",
+                    "calibration_guard_bytes",
+                    "required_guarded_process_reserve_bytes",
+                )
+            }
+            for row in expected_aggregate_rows
+        ]
+        expected_calibration_document = {
+            "schema_version": PROFILE_SWEEP_CALIBRATION_SCHEMA,
+            "measurement_kind": "nvml_process_cumulative_first_use",
+            "aggregation": "row_wise_max_across_independent_processes",
+            "independent_process_count": PROFILE_SWEEP_PROCESS_COUNT,
+            "model_id": spec.model_id,
+            "model_context_limit": spec.context_limit,
+            "active_kv_profile_limits": list(active_limits),
+            "prompt_lengths": list(prompt_lengths),
+            "terminal_active_length": prompt_lengths[-1] + 1,
+            "runner_sha256": _sha256(runner),
+            "contract_provenance": (
+                expected_calibration_contract_provenance
+            ),
+            "runs": [
+                {
+                    "process_index": run["process_index"],
+                    "runner_pid": run["sampler_trust_anchor"]["pid"],
+                    "gpu_uuid": run["sampler_trust_anchor"]["gpu_uuid"],
+                    "capture_manifest_sha256": run[
+                        "capture_manifest"
+                    ]["sha256"],
+                    "raw_trace_sha256": run["raw_trace"]["sha256"],
+                    "logits_sha256": run["logits"]["sha256"],
+                }
+                for run in replayed_run_summaries
+            ],
+            "profile_rows": expected_observed_calibration_rows,
+            "recommended_profile_reserves": [
+                {
+                    "covering_profile_limit": row[
+                        "covering_profile_limit"
+                    ],
+                    "cumulative_reserve_bytes": row[
+                        "required_guarded_process_reserve_bytes"
+                    ],
+                }
+                for row in expected_aggregate_rows
+            ],
+            "gates": {
+                "two_independent_processes": True,
+                "terminal_decode_reaches_model_limit": (
+                    prompt_lengths[-1] + 1 == spec.context_limit
+                ),
+                "all_fresh_process_sweeps_passed": True,
+            },
+            "passed": True,
+        }
+        if calibration_document != expected_calibration_document:
+            return False
+    except (
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+        RuntimeError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        OverflowError,
+    ):
+        return False
+    return True
 
 
 def _parse_runner_json(stdout: str) -> dict[str, Any]:
@@ -4141,9 +6842,32 @@ def _validate_receipt_policy_binding(
     graph_private_device_bytes = receipt.get(
         "graph_private_device_bytes"
     )
+    capacity_decision_resident_overhead_bytes = receipt.get(
+        "capacity_decision_resident_overhead_bytes"
+    )
+    final_non_kv_overhead_delta_bytes = receipt.get(
+        "final_non_kv_overhead_delta_bytes"
+    )
+    module_residency_reserve_bytes = receipt.get(
+        "module_residency_reserve_bytes"
+    )
+    module_residency_reserve_profile_limit = receipt.get(
+        "module_residency_reserve_profile_limit"
+    )
+    module_residency_plan_set_sha256 = receipt.get(
+        "module_residency_plan_set_sha256"
+    )
+    module_residency_evidence_sha256 = receipt.get(
+        "module_residency_evidence_sha256"
+    )
+    module_residency_cuda_module_loading_mode = receipt.get(
+        "module_residency_cuda_module_loading_mode"
+    )
     if (
         type(receipt.get("receipt_schema_version")) is not int
-        or receipt.get("receipt_schema_version") != 3
+        or receipt.get("receipt_schema_version") != 4
+        or type(receipt.get("contract_version")) is not int
+        or receipt.get("contract_version") != 2
         or receipt.get("policy") != expected_receipt_policy
         or type(policy_fraction) not in {int, float}
         or not math.isfinite(float(policy_fraction))
@@ -4179,11 +6903,51 @@ def _validate_receipt_policy_binding(
         or external_device_output_bytes < 0
         or type(graph_private_device_bytes) is not int
         or graph_private_device_bytes < 0
+        or type(capacity_decision_resident_overhead_bytes) is not int
+        or capacity_decision_resident_overhead_bytes < 0
+        or type(final_non_kv_overhead_delta_bytes) is not int
+        or final_non_kv_overhead_delta_bytes < 0
+        or type(module_residency_reserve_bytes) is not int
+        or module_residency_reserve_bytes <= 0
+        or type(module_residency_reserve_profile_limit) is not int
+        or module_residency_reserve_profile_limit < capacity_tokens
+        or module_residency_reserve_profile_limit > model_context_limit
+        or not isinstance(module_residency_plan_set_sha256, str)
+        or re.fullmatch(
+            r"[0-9a-f]{64}", module_residency_plan_set_sha256
+        )
+        is None
+        or not isinstance(module_residency_evidence_sha256, str)
+        or re.fullmatch(
+            r"[0-9a-f]{64}", module_residency_evidence_sha256
+        )
+        is None
+        or module_residency_cuda_module_loading_mode not in {"lazy", "eager"}
     ):
         raise RuntimeError(
             "runtime-memory receipt does not bind the typed request policy, "
             "resolved R/effective limit, exact contiguous KV ledger, and "
-            "typed non-KV device accounting"
+            "typed non-KV device accounting with plan-bound module residency"
+        )
+    final_non_kv_overhead_bytes = (
+        context_device_memory_bytes
+        + ordinary_device_input_bytes
+        + ordinary_device_output_bytes
+        + external_device_output_bytes
+        + graph_private_device_bytes
+    )
+    expected_final_non_kv_overhead_delta_bytes = max(
+        0,
+        final_non_kv_overhead_bytes
+        - capacity_decision_resident_overhead_bytes,
+    )
+    if (
+        final_non_kv_overhead_delta_bytes
+        != expected_final_non_kv_overhead_delta_bytes
+    ):
+        raise RuntimeError(
+            "runtime-memory receipt final non-KV overhead delta does not "
+            "replay O(final)-O(resident)"
         )
 
     if expected_request_limit > trusted_geometry.model_context_limit:
@@ -4237,12 +7001,15 @@ def _validate_receipt_policy_binding(
         or safety_reserve_bytes < 0
     ):
         raise RuntimeError(
-            "runtime-memory receipt has no exact schema-v3 capacity-decision, "
+            "runtime-memory receipt has no exact schema-v4 capacity-decision, "
             "settled, and deprecated-final snapshot binding"
         )
     safely_available_bytes = max(
         0,
-        capacity_decision_free_bytes - safety_reserve_bytes,
+        capacity_decision_free_bytes
+        - safety_reserve_bytes
+        - module_residency_reserve_bytes
+        - final_non_kv_overhead_delta_bytes,
     )
     if kind == "bytes":
         expected_budget_bytes = expected_requested_bytes
@@ -4274,10 +7041,14 @@ def _validate_receipt_policy_binding(
         else trusted_geometry.model_context_limit,
     )
     budget_rows = kv_budget_bytes // trusted_geometry.kv_bytes_per_token
-    expected_resolved_capacity = min(semantic_limit, budget_rows)
+    conservative_capacity_ceiling = min(semantic_limit, budget_rows)
+    if capacity_tokens > conservative_capacity_ceiling:
+        raise RuntimeError(
+            "runtime-memory receipt R exceeds the conservative monotonic "
+            "solver's semantic/capacity-decision-budget ceiling"
+        )
     if (
-        capacity_tokens != expected_resolved_capacity
-        or kv_reserved_bytes > kv_budget_bytes
+        kv_reserved_bytes > kv_budget_bytes
         or capacity_tokens * trusted_geometry.kv_bytes_per_token
         > kv_budget_bytes
         or receipt.get("capped_by_model")
@@ -4289,8 +7060,8 @@ def _validate_receipt_policy_binding(
         )
     ):
         raise RuntimeError(
-            "runtime-memory receipt R does not exactly equal the runtime "
-            "solver's semantic/capacity-decision-budget row minimum"
+            "runtime-memory receipt R violates the conservative monotonic "
+            "solver's capacity ledger or semantic cap markers"
         )
 
 
@@ -4890,6 +7661,8 @@ def validate_warmup_evidence(
         }
 
     stable_receipt_fields = (
+        "receipt_schema_version",
+        "contract_version",
         "policy",
         "policy_fraction",
         "requested_kv_bytes",
@@ -4910,6 +7683,13 @@ def validate_warmup_evidence(
         "graph_private_device_bytes",
         "kv_reserved_bytes",
         "kv_committed_bytes",
+        "module_residency_reserve_bytes",
+        "module_residency_reserve_profile_limit",
+        "module_residency_plan_set_sha256",
+        "module_residency_evidence_sha256",
+        "module_residency_cuda_module_loading_mode",
+        "capacity_decision_resident_overhead_bytes",
+        "final_non_kv_overhead_delta_bytes",
     )
     cold_receipt = warmup["runtime_memory_receipt"]
     for field in stable_receipt_fields:
@@ -5000,12 +7780,7 @@ def validate_warmup_evidence(
     resident_weight_bytes = cold_receipt.get("resident_weight_bytes")
     if type(resident_weight_bytes) is not int or resident_weight_bytes <= 0:
         raise RuntimeError("cold-start receipt has no resident-weight accounting")
-    cold_retention_limit = max(
-        _COLD_START_RETENTION_FLOOR_BYTES,
-        math.ceil(
-            _COLD_START_RETENTION_WEIGHT_FRACTION * resident_weight_bytes
-        ),
-    )
+    cold_retention_limit = cold_receipt["module_residency_reserve_bytes"]
     cold_retained_process = int(warmup["retained_bytes"])
     cold_retained_device = int(warmup["device_wide_retained_bytes"])
     measured_retained_process = int(measured["retained_bytes"])
@@ -5081,7 +7856,19 @@ def validate_warmup_evidence(
             "process_retained_bytes": cold_retained_process,
             "device_wide_retained_bytes": cold_retained_device,
             "limit_bytes": cold_retention_limit,
-            "limit_rule": "max(512MiB,5pct_resident_weights)",
+            "limit_rule": "plan_bound_profile_calibration",
+            "covering_profile_limit": cold_receipt[
+                "module_residency_reserve_profile_limit"
+            ],
+            "plan_set_sha256": cold_receipt[
+                "module_residency_plan_set_sha256"
+            ],
+            "evidence_sha256": cold_receipt[
+                "module_residency_evidence_sha256"
+            ],
+            "cuda_module_loading_mode": cold_receipt[
+                "module_residency_cuda_module_loading_mode"
+            ],
             "attribution": cold_recovery,
             "passed": cold_retention_passed,
         },
@@ -5363,6 +8150,7 @@ def evaluate_qualification_outcome(
     trusted_variant_geometry: TrustedRuntimeGeometry | None = None,
     variant_build_receipt: Mapping[str, Any] | None = None,
     qualified_variant_engine_graph: Mapping[str, Any] | None = None,
+    profile_sweep_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Separate canonical qualification from developer diagnostics.
 
@@ -5736,6 +8524,55 @@ def evaluate_qualification_outcome(
             source_state=source_state_pre,
         )
     )
+    base_source_calibration_evidence_reopened = bool(
+        isinstance(profile_sweep_evidence, Mapping)
+        and _persisted_source_calibration_evidence_passed(
+            profile_sweep_evidence.get("base"),
+            runner=runner,
+            bundle=bundle,
+            spec=model_spec,
+        )
+    )
+    variant_source_calibration_evidence_reopened = bool(
+        variant_bundle is None
+        or (
+            isinstance(profile_sweep_evidence, Mapping)
+            and _persisted_source_calibration_evidence_passed(
+                profile_sweep_evidence.get("chunk_variant"),
+                runner=runner,
+                bundle=variant_bundle,
+                spec=model_spec,
+            )
+        )
+    )
+    source_calibration_evidence_reopened = bool(
+        base_source_calibration_evidence_reopened
+        and variant_source_calibration_evidence_reopened
+    )
+    base_profile_sweep_passed = bool(
+        isinstance(profile_sweep_evidence, Mapping)
+        and _persisted_profile_sweep_evidence_passed(
+            profile_sweep_evidence.get("base"),
+            runner=runner,
+            bundle=bundle,
+            spec=model_spec,
+        )
+    )
+    variant_profile_sweep_passed = bool(
+        variant_bundle is None
+        or (
+            isinstance(profile_sweep_evidence, Mapping)
+            and _persisted_profile_sweep_evidence_passed(
+                profile_sweep_evidence.get("chunk_variant"),
+                runner=runner,
+                bundle=variant_bundle,
+                spec=model_spec,
+            )
+        )
+    )
+    all_profile_two_sweep_passed = bool(
+        base_profile_sweep_passed and variant_profile_sweep_passed
+    )
     warmup_evidence_passed = bool(
         len(reports) == len(selected_cases)
         and all(
@@ -5782,6 +8619,10 @@ def evaluate_qualification_outcome(
         "c_div_2_variant_producer_receipt_passed": (
             c_div_2_variant_producer_receipt_passed
         ),
+        "source_calibration_evidence_reopened": (
+            source_calibration_evidence_reopened
+        ),
+        "all_profile_two_sweep_passed": all_profile_two_sweep_passed,
         "warmup_evidence_passed": warmup_evidence_passed,
         "admission_rejection_evidence_passed": (
             admission_rejection_evidence_passed
@@ -5824,6 +8665,32 @@ def evaluate_qualification_outcome(
             ),
             "passed": admission_rejection_evidence_passed,
             "case_states": admission_states,
+        },
+        "all_profile_two_sweep_evidence": {
+            "status": (
+                "passed" if all_profile_two_sweep_passed else "failed"
+            ),
+            "passed": all_profile_two_sweep_passed,
+            "base": base_profile_sweep_passed,
+            "chunk_variant": (
+                variant_profile_sweep_passed
+                if variant_bundle is not None
+                else "not_applicable"
+            ),
+        },
+        "source_calibration_evidence": {
+            "status": (
+                "passed"
+                if source_calibration_evidence_reopened
+                else "failed"
+            ),
+            "passed": source_calibration_evidence_reopened,
+            "base": base_source_calibration_evidence_reopened,
+            "chunk_variant": (
+                variant_source_calibration_evidence_reopened
+                if variant_bundle is not None
+                else "not_applicable"
+            ),
         },
     }
 
@@ -5904,6 +8771,39 @@ def qualification_failure_checkpoint(
         _write_qualification_report(report_path, report)
 
 
+def _validate_calibration_source_inputs(
+    *,
+    label: str,
+    header: Mapping[str, Any],
+    evidence_path: Path | None,
+    raw_paths: Iterable[Path],
+) -> None:
+    """Validate legacy source arguments without burdening embedded bundles."""
+
+    normalized_raw_paths = tuple(raw_paths)
+    sections = header.get("sections")
+    has_embedded = bool(
+        isinstance(sections, Mapping)
+        and EMBEDDED_CALIBRATION_EVIDENCE_SECTION in sections
+    )
+    if has_embedded:
+        if evidence_path is not None or normalized_raw_paths:
+            raise ValueError(
+                f"{label} bundle embeds automatic calibration evidence; "
+                "external calibration source inputs are forbidden"
+            )
+        return
+    if (
+        evidence_path is None
+        or len(normalized_raw_paths) != PROFILE_SWEEP_PROCESS_COUNT
+    ):
+        raise ValueError(
+            f"{label} legacy bundle requires its source calibration "
+            "document; --base-calibration-source-raw-capture must be "
+            "provided exactly twice"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle", type=Path, required=True)
@@ -5957,6 +8857,42 @@ def main() -> int:
             "--chunk-variant-bundle and for canonical qualification."
         ),
     )
+    parser.add_argument(
+        "--base-calibration-source-evidence",
+        type=Path,
+        help=(
+            "Legacy external calibration document. Omit for bundles carrying "
+            "embedded automatic calibration evidence."
+        ),
+    )
+    parser.add_argument(
+        "--base-calibration-source-raw-capture",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Legacy external raw calibration trace; pass exactly twice only "
+            "with --base-calibration-source-evidence."
+        ),
+    )
+    parser.add_argument(
+        "--chunk-variant-calibration-source-evidence",
+        type=Path,
+        help=(
+            "Bootstrap calibration-evidence document referenced by the "
+            "developer C/2 bundle."
+        ),
+    )
+    parser.add_argument(
+        "--chunk-variant-calibration-source-raw-capture",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "One bootstrap raw all-profile trace referenced by the C/2 "
+            "calibration document; pass exactly twice in process order."
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--case",
@@ -6001,12 +8937,53 @@ def main() -> int:
         raise ValueError(
             "--chunk-variant-bundle and --chunk-variant-build-receipt must be provided together"
         )
+    variant_source_evidence = (
+        args.chunk_variant_calibration_source_evidence
+    )
+    variant_source_raw_captures = (
+        args.chunk_variant_calibration_source_raw_capture
+    )
+    if variant_bundle is None:
+        if variant_source_evidence is not None or (
+            variant_source_raw_captures
+        ):
+            raise ValueError(
+                "chunk-variant calibration source inputs require "
+                "--chunk-variant-bundle"
+            )
     variant_chunk_limit = None
     variant_header = None
     if variant_bundle is not None:
         require_developer_chunk_variant_opt_in()
         variant_header = _read_bundle_header(variant_bundle)
         variant_chunk_limit = _validate_chunk_variant(header, variant_header, spec)
+    source_inputs = (
+        (
+            "base",
+            header,
+            args.base_calibration_source_evidence,
+            args.base_calibration_source_raw_capture,
+        ),
+        *(
+            (
+                (
+                    "chunk variant",
+                    variant_header,
+                    variant_source_evidence,
+                    variant_source_raw_captures,
+                ),
+            )
+            if variant_header is not None
+            else ()
+        ),
+    )
+    for label, source_header, evidence_path, raw_paths in source_inputs:
+        _validate_calibration_source_inputs(
+            label=label,
+            header=source_header,
+            evidence_path=evidence_path,
+            raw_paths=raw_paths,
+        )
     canonical_cases = _cases_for(spec)
     cases = _select_cases(canonical_cases, args.case)
     vocab_size = int(header.get("vocab_size", 0))
@@ -6110,6 +9087,7 @@ def main() -> int:
         "selected_case_names": [case.name for case in cases],
         "case_filter_used": bool(args.case),
         "hf_parity_requested": not args.skip_hf,
+        "module_residency_profile_sweeps": None,
         "passed": False,
         "promotion_eligible": False,
         "diagnostic_passed": False,
@@ -6139,14 +9117,10 @@ def main() -> int:
             "qualified_engine_graph": variant_engine_graph,
         }
 
+    # Keep the independent runner-GPU residency calibration free of any HF
+    # reference allocation owned by this producer process.  The reference is
+    # loaded only after both cold profile-sweep processes have exited.
     hf_model = None
-    if not args.skip_hf and any(not case.expect_admission_rejection for case in cases):
-        hf_model = load_hf_model(
-            args.model,
-            _hf_dtype_name(str(contract["kv_dtype"])),
-            args.device,
-            revision=args.model_revision,
-        )
 
     report_path = output_dir / "qualification-report.json"
     _write_qualification_report(report_path, report)
@@ -6159,6 +9133,65 @@ def main() -> int:
         repo_root=repo_root,
         output_dir=output_dir,
     ):
+        report["stage"] = "all_profile_two_sweep"
+        profile_sweep_root = output_dir / "profile-sweep-evidence"
+        profile_sweep_root.mkdir(exist_ok=False)
+        profile_sweep_evidence: dict[str, Any] = {
+            "base": produce_profile_sweep_evidence(
+                runner=runner,
+                bundle=bundle,
+                header=header,
+                spec=spec,
+                evidence_dir=profile_sweep_root / "base",
+                runner_cuda_visible_device=(
+                    args.runner_cuda_visible_device
+                ),
+                source_calibration_evidence=(
+                    args.base_calibration_source_evidence
+                ),
+                source_calibration_raw_captures=(
+                    args.base_calibration_source_raw_capture
+                ),
+            )
+        }
+        if variant_bundle is not None:
+            assert variant_header is not None
+            profile_sweep_evidence["chunk_variant"] = (
+                produce_profile_sweep_evidence(
+                    runner=runner,
+                    bundle=variant_bundle,
+                    header=variant_header,
+                    spec=spec,
+                    evidence_dir=profile_sweep_root / "chunk-variant",
+                    runner_cuda_visible_device=(
+                        args.runner_cuda_visible_device
+                    ),
+                    source_calibration_evidence=(
+                        variant_source_evidence
+                    ),
+                    source_calibration_raw_captures=(
+                        variant_source_raw_captures
+                    ),
+                )
+            )
+        report["module_residency_profile_sweeps"] = (
+            profile_sweep_evidence
+        )
+        _write_qualification_report(report_path, report)
+        if (
+            not args.skip_hf
+            and any(
+                not case.expect_admission_rejection for case in cases
+            )
+        ):
+            report["stage"] = "hf_reference_load"
+            hf_model = load_hf_model(
+                args.model,
+                _hf_dtype_name(str(contract["kv_dtype"])),
+                args.device,
+                revision=args.model_revision,
+            )
+        report["stage"] = "case_matrix"
         runner_evidence_root.mkdir(exist_ok=False)
         for case in cases:
             print(
@@ -6531,6 +9564,9 @@ def main() -> int:
             ),
             variant_build_receipt=variant_build_receipt,
             qualified_variant_engine_graph=variant_engine_graph,
+            profile_sweep_evidence=report[
+                "module_residency_profile_sweeps"
+            ],
         )
         report.update(outcome)
         report["stage"] = "completed"

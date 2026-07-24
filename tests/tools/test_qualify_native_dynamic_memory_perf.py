@@ -8,6 +8,7 @@ import importlib.util
 import json
 from pathlib import Path
 import stat
+import struct
 import sys
 
 import pytest
@@ -68,6 +69,89 @@ TOKENIZER_CONTRACT = {
     "tokenizer_special_prefix_ids": [],
     "tokenizer_special_suffix_ids": [],
 }
+PROFILE_LIMITS = (128, 256, 512, 1024, 2048, 8192, 32768, 40960)
+MODULE_RESIDENCY_RESERVE_BYTES = 1024
+
+
+def _dynamic_bundle_bytes() -> bytes:
+    capture = perf._load_capture_module()
+    boundary = capture._load_boundary_module()
+    engine_plan = b"decode-plan"
+    prefill_plan = b"prefill-plan"
+    plans = [
+        {
+            "section_name": "engine_plan",
+            "section_sha256": hashlib.sha256(engine_plan).hexdigest(),
+            "role": "decode",
+            "optimization_profile_count": len(PROFILE_LIMITS),
+        },
+        {
+            "section_name": "prefill_engine_plan",
+            "section_sha256": hashlib.sha256(prefill_plan).hexdigest(),
+            "role": "prefill",
+            "optimization_profile_count": 1,
+        },
+    ]
+    stack = {key: value for key, value in RUNTIME_STACK.items() if key != "schema"}
+    contract = {
+        "contract_version": 2,
+        "qualified_model_id": "Qwen/Qwen3-0.6B",
+        "qualified_model_revision": "1" * 40,
+        "qualified_config_sha256": "2" * 64,
+        "qualified_target": "sm103 + TensorRT 11.2.0.113",
+        "qualified_runtime_stack": stack,
+        "native_kv_plugin_abi": 2,
+        "model_context_limit": 40960,
+        "prefill_chunk_limit": 1024,
+        "kv_layout": "contiguous_v1",
+        "kv_dtype": "bfloat16",
+        "kv_bytes_per_token": 114688,
+        "active_kv_profile_limits": list(PROFILE_LIMITS),
+        "runtime_owned": True,
+        "module_residency_calibration": {
+            "schema_version": 1,
+            "measurement_kind": "nvml_process_cumulative_first_use",
+            "cuda_module_loading_mode": "lazy",
+            "qualified_runtime_stack_sha256": (
+                boundary.qualified_runtime_stack_sha256(stack)
+            ),
+            "plan_set_sha256": (
+                boundary.module_residency_plan_set_sha256(plans)
+            ),
+            "plans": plans,
+            "profile_reserves": [
+                {
+                    "covering_profile_limit": limit,
+                    "cumulative_reserve_bytes": (
+                        MODULE_RESIDENCY_RESERVE_BYTES
+                    ),
+                }
+                for limit in PROFILE_LIMITS
+            ],
+            "evidence_sha256": "3" * 64,
+        },
+    }
+    sections = {
+        "engine_plan": {"offset": 0, "size": len(engine_plan)},
+        "prefill_engine_plan": {
+            "offset": len(engine_plan),
+            "size": len(prefill_plan),
+        },
+    }
+    header = json.dumps(
+        {
+            "model_id": "Qwen/Qwen3-0.6B",
+            "runtime_memory": contract,
+            "sections": sections,
+        }
+    ).encode("utf-8")
+    return (
+        capture.BUNDLE_MAGIC
+        + struct.pack("<Q", len(header))
+        + header
+        + engine_plan
+        + prefill_plan
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -111,8 +195,10 @@ def _runtime_libraries(root: Path) -> dict:
     directory.mkdir(parents=True, exist_ok=True)
     nvrtc = directory / "libnvrtc.so.13.3.33"
     builtins = directory / "libnvrtc-builtins.so.13.3"
-    nvrtc.write_bytes(b"nvrtc")
-    builtins.write_bytes(b"nvrtc-builtins")
+    if not nvrtc.exists():
+        nvrtc.write_bytes(b"nvrtc")
+    if not builtins.exists():
+        builtins.write_bytes(b"nvrtc-builtins")
     return {
         "directory": str(directory.resolve()),
         "live_nvrtc_version": "13.3",
@@ -142,6 +228,17 @@ def _binary_identity(path: Path) -> dict:
         "ctime_ns": metadata.st_ctime_ns,
         "sha256": _sha256(path),
     }
+
+
+def _canonical_identities(*paths: Path) -> list[dict]:
+    return sorted(
+        (_binary_identity(path) for path in paths),
+        key=lambda row: (
+            row["path"],
+            row["device"],
+            row["inode"],
+        ),
+    )
 
 
 def _manifest_artifact_identity(
@@ -268,6 +365,42 @@ def _qualification_context(
         ),
         "model": _binary_identity(build / relative_paths["model_qwen"]),
     }
+    runtime_libraries = _runtime_libraries(root)
+    unrelated_mapped_dso = root / "runtime-libraries" / "libunrelated.so"
+    unrelated_mapped_dso.write_bytes(b"unrelated-mapped-dso")
+    static_mapped_dso_identities = sorted(
+        [
+            *(
+                runtime_trtmc[field]
+                for field in (
+                    "core",
+                    "trt_backend",
+                    "runtime_kv_plugin",
+                    "model",
+                )
+            ),
+            _binary_identity(unrelated_mapped_dso),
+        ],
+        key=lambda row: (
+            row["path"],
+            row["device"],
+            row["inode"],
+        ),
+    )
+    dynamic_mapped_dso_identities = sorted(
+        [
+            *static_mapped_dso_identities,
+            *_canonical_identities(
+                Path(runtime_libraries["nvrtc"]["path"]),
+                Path(runtime_libraries["nvrtc_builtins"]["path"]),
+            ),
+        ],
+        key=lambda row: (
+            row["path"],
+            row["device"],
+            row["inode"],
+        ),
+    )
     worker_identity = _binary_identity(
         build / relative_paths["benchmark_worker"]
     )
@@ -308,6 +441,9 @@ def _qualification_context(
             if plugin is not None
             else None
         )
+        build_mapped_dso_identities = (
+            [plugin_identity] if plugin is not None else []
+        )
         bundle_mtime = bundle.stat().st_mtime_ns
         receipt = {
             "schema_version": "trtmc.native-dynamic-memory-perf-build/v2",
@@ -347,6 +483,7 @@ def _qualification_context(
             "build_manifest": manifest_binding,
             "runtime_kv_plugin": plugin,
             "runtime_kv_plugin_mapping": mapping,
+            "mapped_dso_identities": build_mapped_dso_identities,
         }
         receipt_path = build / f"{role}-receipt.json"
         receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
@@ -357,8 +494,107 @@ def _qualification_context(
         "plugin_identity": plugin_identity,
         "toolchain": toolchain,
         "environment": environment,
+        "runtime_libraries": runtime_libraries,
+        "static_mapped_dso_identities": (
+            static_mapped_dso_identities
+        ),
+        "dynamic_mapped_dso_identities": (
+            dynamic_mapped_dso_identities
+        ),
+        "unrelated_mapped_dso": unrelated_mapped_dso,
         "receipts": receipts,
         "source_state": source_state,
+    }
+
+
+def _complete_dynamic_receipt(
+    *,
+    calibration: dict,
+    serialized_plan_bytes: int,
+    resident_weight_bytes: int,
+    resident_weight_copy_count: int,
+    weight_streaming_active: bool,
+) -> dict:
+    capacity = 128
+    bytes_per_token = 114_688
+    capacity_total = 8 * 1024 * 1024 * 1024
+    capacity_free = 4 * 1024 * 1024 * 1024
+    settled_free = capacity_free - capacity * bytes_per_token
+    return {
+        "receipt_schema_version": 4,
+        "contract_version": 2,
+        "policy": "auto",
+        "policy_fraction": 0.9,
+        "requested_kv_bytes": 0,
+        "post_load_free_bytes": capacity_free,
+        "safety_reserve_bytes": 64 * 1024 * 1024,
+        "module_residency_reserve_bytes": (
+            MODULE_RESIDENCY_RESERVE_BYTES
+        ),
+        "module_residency_reserve_profile_limit": 128,
+        "module_residency_plan_set_sha256": calibration[
+            "plan_set_sha256"
+        ],
+        "module_residency_evidence_sha256": calibration[
+            "evidence_sha256"
+        ],
+        "module_residency_cuda_module_loading_mode": calibration[
+            "cuda_module_loading_mode"
+        ],
+        "model_context_limit": 40_960,
+        "prefill_chunk_limit": 1_024,
+        "request_context_limit": 128,
+        "runtime_kv_capacity_tokens": capacity,
+        "effective_request_limit": capacity,
+        "kv_bytes_per_token": bytes_per_token,
+        "kv_budget_bytes": capacity * bytes_per_token,
+        "pre_load_free_bytes": capacity_free,
+        "pre_load_total_bytes": capacity_total,
+        "serialized_plan_bytes": serialized_plan_bytes,
+        "resident_weight_bytes": resident_weight_bytes,
+        "resident_weight_copy_count": resident_weight_copy_count,
+        "engine_weight_bytes": resident_weight_bytes,
+        "weight_streaming_active": weight_streaming_active,
+        "post_load_total_bytes": capacity_total,
+        "post_load_device_used_bytes": capacity_total - capacity_free,
+        "capacity_decision_free_bytes": capacity_free,
+        "capacity_decision_total_bytes": capacity_total,
+        "capacity_decision_device_used_bytes": capacity_total - capacity_free,
+        "capacity_decision_resident_overhead_bytes": 100,
+        "final_non_kv_overhead_delta_bytes": 50,
+        "settled_free_bytes": settled_free,
+        "settled_total_bytes": capacity_total,
+        "settled_device_used_bytes": capacity_total - settled_free,
+        "settled_snapshot_unavailable_reason": None,
+        "final_free_bytes": capacity_free,
+        "final_total_bytes": capacity_total,
+        "final_device_used_bytes": capacity_total - capacity_free,
+        "context_device_memory_bytes": 10,
+        "ordinary_device_input_bytes": 20,
+        "ordinary_device_output_bytes": 30,
+        "external_device_output_bytes": 40,
+        "host_staging_bytes": 60,
+        "graph_private_device_bytes": 50,
+        "kv_reserved_bytes": capacity * bytes_per_token,
+        "kv_committed_bytes": capacity * bytes_per_token,
+        "kv_metadata_bytes": 0,
+        "peak_device_bytes": capacity * bytes_per_token,
+        "peak_device_bytes_scope": "device_wide",
+        "peak_device_bytes_baseline": (
+            "cuda_mem_get_info_before_engine_deserialization_free"
+        ),
+        "peak_device_sample_count": 2,
+        "peak_device_sample_boundaries": [
+            "after_runtime_kv_allocation",
+            "after_successful_request_completion",
+        ],
+        "backend_owned_cache_input_bytes": 0,
+        "backend_owned_cache_output_bytes": 0,
+        "kv_allocation_id": 1,
+        "solve_iterations": 1,
+        "capped_by_model": False,
+        "capped_by_request_limit": True,
+        "measurement_sources": dict(perf._MEASUREMENT_SOURCES),
     }
 
 
@@ -391,7 +627,7 @@ def _write_result(
     runtime_libraries = (
         None
         if role == "exact-head-static-split"
-        else _runtime_libraries(path.parent)
+        else qualification_context["runtime_libraries"]
     )
     build_runtime_kv_plugin = (
         None
@@ -402,9 +638,46 @@ def _write_result(
         "runtime_trtmc_libraries"
     ]
     build_manifest = qualification_context["build_manifest"]
+    mapped_dso_identities = (
+        qualification_context["static_mapped_dso_identities"]
+        if role == "exact-head-static-split"
+        else qualification_context["dynamic_mapped_dso_identities"]
+    )
     toolchain = qualification_context["toolchain"]
     cuda_jit_cache = _cuda_jit_cache()
     generated_stream = list(range(output_tokens))
+    runtime_receipt = {
+        "serialized_plan_bytes": serialized_plan_bytes,
+        "resident_weight_bytes": resident_weight_bytes,
+        "resident_weight_copy_count": resident_weight_copy_count,
+        "weight_streaming_active": weight_streaming_active,
+        "measurement_sources": dict(perf._MEASUREMENT_SOURCES),
+    }
+    runtime_memory_contract = None
+    module_residency_receipt = None
+    if role == "native-dynamic":
+        capture = perf._load_capture_module()
+        header, _ = capture._bundle_header(bundle)
+        runtime_memory_contract = (
+            capture._dynamic_bundle_runtime_memory_contract(
+                bundle,
+                header,
+            )
+        )
+        calibration = runtime_memory_contract[
+            "module_residency_calibration"
+        ]
+        runtime_receipt = _complete_dynamic_receipt(
+            calibration=calibration,
+            serialized_plan_bytes=serialized_plan_bytes,
+            resident_weight_bytes=resident_weight_bytes,
+            resident_weight_copy_count=resident_weight_copy_count,
+            weight_streaming_active=weight_streaming_active,
+        )
+        module_residency_receipt = {
+            field: runtime_receipt[field]
+            for field in perf._MODULE_RESIDENCY_RECEIPT_FIELDS
+        }
     structural_identity = {
         "operation": "generate",
         "prompt_sha256": (
@@ -509,6 +782,9 @@ def _write_result(
             "runtime_trtmc_libraries_sha256": perf._canonical_sha(
                 runtime_trtmc_libraries
             ),
+            "mapped_dso_identities_sha256": perf._canonical_sha(
+                mapped_dso_identities
+            ),
             "build_runtime_kv_plugin_sha256": perf._canonical_sha(
                 build_runtime_kv_plugin
             ),
@@ -520,18 +796,28 @@ def _write_result(
             "tokenizer_contract_sha256": perf._canonical_sha(
                 TOKENIZER_CONTRACT
             ),
+            "bundle_runtime_memory_contract_sha256": (
+                perf._canonical_sha(runtime_memory_contract)
+                if runtime_memory_contract is not None
+                else None
+            ),
+            "runtime_memory_receipt_sha256": perf._canonical_sha(
+                runtime_receipt
+            ),
+            "runtime_module_residency_receipt_sha256": (
+                perf._canonical_sha(module_residency_receipt)
+                if module_residency_receipt is not None
+                else None
+            ),
         },
-        "runtime_memory_receipt": {
-            "serialized_plan_bytes": serialized_plan_bytes,
-            "resident_weight_bytes": resident_weight_bytes,
-            "resident_weight_copy_count": resident_weight_copy_count,
-            "weight_streaming_active": weight_streaming_active,
-            "measurement_sources": dict(perf._MEASUREMENT_SOURCES),
-        },
+        "runtime_memory_receipt": runtime_receipt,
+        "bundle_runtime_memory_contract": runtime_memory_contract,
+        "runtime_module_residency_receipt": module_residency_receipt,
         "runtime_attention_plans": runtime_attention_plans,
         "runtime_stack": runtime_stack,
         "runtime_libraries": runtime_libraries,
         "runtime_trtmc_libraries": runtime_trtmc_libraries,
+        "mapped_dso_identities": mapped_dso_identities,
         "build_runtime_kv_plugin": build_runtime_kv_plugin,
         "cuda_jit_cache": cuda_jit_cache,
         "generation_workload": generation_workload,
@@ -559,13 +845,19 @@ def _write_result(
         "build_receipt_sha256": _sha256(build_receipt),
         "request_file": str(request_file.resolve()),
         "request_file_sha256": _sha256(request_file),
+        "comparison_sequence_limit": 128,
         "worker_command": worker_command,
         "worker_command_sha256": perf._canonical_sha(worker_command),
         "toolchain": toolchain,
         "environment": qualification_context["environment"],
         "runtime_trtmc_libraries": runtime_trtmc_libraries,
+        "mapped_dso_identities": mapped_dso_identities,
+        "runtime_libraries": runtime_libraries,
         "build_runtime_kv_plugin": build_runtime_kv_plugin,
         "build_manifest": build_manifest,
+        "bundle_runtime_memory_contract": runtime_memory_contract,
+        "runtime_memory_receipt": runtime_receipt,
+        "runtime_module_residency_receipt": module_residency_receipt,
         "source_state_pre": qualification_context["source_state"],
         "worker_stderr": str(worker_stderr.resolve()),
         "worker_stderr_sha256": _sha256(worker_stderr),
@@ -580,8 +872,9 @@ def _evidence(tmp_path: Path) -> dict[str, Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     static_bundle = tmp_path / "static.trtfb"
     dynamic_bundle = tmp_path / "dynamic.trtfb"
-    static_bundle.write_bytes(b"s" * 1_000)
-    dynamic_bundle.write_bytes(b"d" * 1_040)
+    dynamic_payload = _dynamic_bundle_bytes()
+    dynamic_bundle.write_bytes(dynamic_payload)
+    static_bundle.write_bytes(b"s" * len(dynamic_payload))
     qualification_context = _qualification_context(
         tmp_path,
         static_bundle=static_bundle,
@@ -639,6 +932,14 @@ def _refresh_evidence_hash(payload: dict, field: str) -> None:
     )
 
 
+def _sync_runtime_receipt_evidence(payload: dict) -> None:
+    receipt = json.loads(
+        json.dumps(payload["runtime_memory_receipt"])
+    )
+    payload["qualification_evidence"]["runtime_memory_receipt"] = receipt
+    _refresh_evidence_hash(payload, "runtime_memory_receipt")
+
+
 def test_passes_all_performance_packaging_and_provenance_gates(
     tmp_path: Path,
 ) -> None:
@@ -672,6 +973,111 @@ def test_passes_all_performance_packaging_and_provenance_gates(
     assert not report["diagnostics"]["runtime_attention_plan_scope"][
         "per_invocation_H_A_profile_plan_proved"
     ]
+
+
+def test_independent_sealed_contract_replay_rejects_plan_tamper(
+    tmp_path: Path,
+) -> None:
+    bundle = tmp_path / "dynamic.trtfb"
+    payload = bytearray(_dynamic_bundle_bytes())
+    payload[-1] ^= 1
+    bundle.write_bytes(payload)
+
+    with pytest.raises(
+        perf.QualificationError,
+        match="independently replay the sealed v2 bundle contract",
+    ):
+        perf._replay_sealed_runtime_memory_contract(bundle)
+
+
+def test_reopens_every_mapped_dso_and_rejects_unrelated_path_swap(
+    tmp_path: Path,
+) -> None:
+    paths = _evidence(tmp_path)
+    payload = json.loads(
+        paths["static_short"].read_text(encoding="utf-8")
+    )
+    unrelated = next(
+        Path(row["path"])
+        for row in payload["mapped_dso_identities"]
+        if Path(row["path"]).name == "libunrelated.so"
+    )
+    unrelated.write_bytes(b"path-swapped-after-capture")
+
+    with pytest.raises(
+        perf.QualificationError,
+        match=(
+            "mapped_dso_identities.*does not match the captured "
+            "binary identity"
+        ),
+    ):
+        _qualify(paths)
+
+
+@pytest.mark.parametrize(
+    ("source_drift", "expected_returncode"),
+    [(False, 0), (True, 1)],
+)
+def test_main_samples_standalone_source_state_before_and_after(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_drift: bool,
+    expected_returncode: int,
+) -> None:
+    paths = _evidence(tmp_path)
+    output = tmp_path / "final-report.json"
+    pre = {
+        "git_head": GIT_HEAD,
+        "source_state_sha256": SOURCE_SHA,
+        "git_dirty": False,
+        "exact_head_gate_satisfied": True,
+    }
+    post = {
+        **pre,
+        "source_state_sha256": (
+            "f" * 64 if source_drift else SOURCE_SHA
+        ),
+    }
+    snapshots = iter((pre, post))
+    labels: list[str] = []
+
+    def snapshot(
+        _repo_root: Path,
+        _artifact_dir: Path,
+        *,
+        label: str,
+    ) -> dict:
+        labels.append(label)
+        return next(snapshots)
+
+    monkeypatch.setattr(perf, "_source_state_snapshot", snapshot)
+    returncode = perf.main(
+        [
+            "--static-short",
+            str(paths["static_short"]),
+            "--dynamic-short",
+            str(paths["dynamic_short"]),
+            "--static-medium",
+            str(paths["static_medium"]),
+            "--dynamic-medium",
+            str(paths["dynamic_medium"]),
+            "--static-bundle",
+            str(paths["static_bundle"]),
+            "--dynamic-bundle",
+            str(paths["dynamic_bundle"]),
+            "--repo-root",
+            str(tmp_path),
+            "--output",
+            str(output),
+        ]
+    )
+
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert labels == ["final-perf-pre", "final-perf-post"]
+    assert returncode == expected_returncode
+    assert report["gates"]["standalone_source_state"]["passed"] is (
+        not source_drift
+    )
 
 
 @pytest.mark.parametrize(
@@ -1128,12 +1534,11 @@ def test_fails_when_dynamic_live_stacks_differ_across_prompts(
         _refresh_evidence_hash(payload, "runtime_stack")
 
     _edit(paths["dynamic_medium"], change_driver)
-    report = _qualify(paths)
-
-    assert report["status"] == "failed"
-    assert not report["gates"]["runtime_evidence_consistency"][
-        "dynamic_runtime_stack_matches_across_prompts"
-    ]
+    with pytest.raises(
+        perf.QualificationError,
+        match="live runtime stack does not match.*bundle calibration",
+    ):
+        _qualify(paths)
 
 
 def test_fails_when_dynamic_runtime_libraries_differ_across_prompts(
@@ -1147,12 +1552,11 @@ def test_fails_when_dynamic_runtime_libraries_differ_across_prompts(
         _refresh_evidence_hash(payload, "runtime_libraries")
 
     _edit(paths["dynamic_medium"], change_libraries)
-    report = _qualify(paths)
-
-    assert report["status"] == "failed"
-    assert not report["gates"]["runtime_evidence_consistency"][
-        "dynamic_runtime_libraries_match_across_prompts"
-    ]
+    with pytest.raises(
+        perf.QualificationError,
+        match="mapped_dso_identities does not bind the live nvrtc DSO",
+    ):
+        _qualify(paths)
 
 
 def test_generated_token_divergence_is_explicit_but_not_a_false_failure(
@@ -1291,11 +1695,13 @@ def test_fails_mem13_size_thresholds(
 ) -> None:
     paths = _evidence(tmp_path)
     for prompt_kind in ("short", "medium"):
+        def change_receipt(payload: dict) -> None:
+            payload["runtime_memory_receipt"][receipt_field] = value
+            _sync_runtime_receipt_evidence(payload)
+
         _edit(
             paths[f"dynamic_{prompt_kind}"],
-            lambda payload: payload["runtime_memory_receipt"].__setitem__(
-                receipt_field, value
-            ),
+            change_receipt,
         )
 
     report = _qualify(paths)
@@ -1314,6 +1720,7 @@ def test_fails_weight_copy_and_streaming_gates(
                 "resident_weight_copy_count"
             ] = 3
             payload["runtime_memory_receipt"]["weight_streaming_active"] = True
+            _sync_runtime_receipt_evidence(payload)
 
         _edit(paths[f"dynamic_{prompt_kind}"], break_receipt)
 

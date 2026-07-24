@@ -948,6 +948,9 @@ def test_nightly_runs_every_runnable_stage_after_an_upstream_failure() -> None:
     cache_warm = text.split("\n  cache-warm:", maxsplit=1)[1].split("\n  package:", maxsplit=1)[0]
     package = text.split("\n  package:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]
     model_proof = text.split("\n  model-proof:", maxsplit=1)[1].split(
+        "\n  dynamic-memory:", maxsplit=1
+    )[0]
+    dynamic_memory = text.split("\n  dynamic-memory:", maxsplit=1)[1].split(
         "\n  diffusion-vlm:", maxsplit=1
     )[0]
     diffusion_vlm = text.split("\n  diffusion-vlm:", maxsplit=1)[1].split(
@@ -1024,6 +1027,22 @@ def test_nightly_runs_every_runnable_stage_after_an_upstream_failure() -> None:
     assert "revision: ${{ needs.legal.outputs.tested_sha || github.sha }}" in model_proof
     assert "suite: nightly" in model_proof
 
+    for dependency in (
+        "legal",
+        "inventory",
+        "source-quality",
+        "unit-tests",
+        "cache-warm",
+        "package",
+        "model-proof",
+    ):
+        assert f"- {dependency}" in dynamic_memory
+    assert "!cancelled()" in dynamic_memory
+    assert "needs.inventory.outputs.has_models == 'true'" in dynamic_memory
+    assert "needs.model-proof.result == 'success'" not in dynamic_memory
+    assert "fail-fast: false" in dynamic_memory
+    assert "needs.legal.outputs.tested_sha || github.sha" in dynamic_memory
+
     assert "- legal" in diffusion_vlm
     assert "- inventory" in diffusion_vlm
     assert "- model-proof" in diffusion_vlm
@@ -1043,6 +1062,7 @@ def test_nightly_runs_every_runnable_stage_after_an_upstream_failure() -> None:
         "cache-warm",
         "package",
         "model-proof",
+        "dynamic-memory",
         "diffusion-vlm",
     ):
         assert f"- {dependency}" in report
@@ -1055,6 +1075,7 @@ def test_nightly_runs_every_runnable_stage_after_an_upstream_failure() -> None:
         "cache-warm",
         "package",
         "model-proof",
+        "dynamic-memory",
         "diffusion-vlm",
         "report",
     ):
@@ -1097,6 +1118,7 @@ def test_nightly_self_hosted_stages_use_the_configured_proof_runner_pool() -> No
     for start, end in (
         ("unit-tests", "cache-warm"),
         ("package", "model-proof"),
+        ("dynamic-memory", "diffusion-vlm"),
         ("diffusion-vlm", "report"),
     ):
         block = text.split(f"\n  {start}:", maxsplit=1)[1].split(f"\n  {end}:", maxsplit=1)[0]
@@ -1182,6 +1204,7 @@ def test_nightly_report_requires_exact_all_model_results_and_evidence() -> None:
         "cache-warm",
         "package",
         "model-proof",
+        "dynamic-memory",
         "diffusion-vlm",
     ):
         assert f'--upstream-result "{upstream}=$' in report
@@ -1242,12 +1265,20 @@ def test_nightly_preserves_diffusion_vlm_gate_and_injects_it_into_the_html() -> 
 
 def test_nightly_all_gpu_gate_uses_the_model_proof_machine_lock() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    dynamic_memory = text.split("\n  dynamic-memory:", maxsplit=1)[1].split(
+        "\n  diffusion-vlm:", maxsplit=1
+    )[0]
     vlm = text.split("\n  diffusion-vlm:", maxsplit=1)[1].split("\n  report:", maxsplit=1)[0]
     proof_runner = _ci_source("gpu_lease.py")
 
     assert "TRTMC_MODEL_PROOF_GPU_LOCK_DIR:" in text
     assert "whole-machine.lock" in vlm
     assert 'flock -w "$TRTMC_WHOLE_MACHINE_GPU_LOCK_TIMEOUT_SECONDS" -x 9' in vlm
+    assert "whole-machine.lock" in dynamic_memory
+    assert (
+        'flock -w "$TRTMC_WHOLE_MACHINE_GPU_LOCK_TIMEOUT_SECONDS" -x 9'
+        in dynamic_memory
+    )
     assert 'FileLock(self.lock_dir / "whole-machine.lock")' in proof_runner
     assert "self._wait_lock(self.machine, deadline, shared=True)" in proof_runner
     assert text.index("- model-proof", text.index("\n  diffusion-vlm:")) < text.index(
@@ -1336,6 +1367,9 @@ def test_nightly_preserves_python_and_cpp_coverage_without_rebuilding_the_wheel(
 def test_nightly_long_jobs_reserve_finalization_time() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     package = text.split("\n  package:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]
+    dynamic_memory = text.split("\n  dynamic-memory:", maxsplit=1)[1].split(
+        "\n  diffusion-vlm:", maxsplit=1
+    )[0]
     vlm = text.split("\n  diffusion-vlm:", maxsplit=1)[1].split("\n  report:", maxsplit=1)[0]
 
     package_job_minutes = 330
@@ -1346,6 +1380,9 @@ def test_nightly_long_jobs_reserve_finalization_time() -> None:
     assert package_job_minutes >= package_step_minutes + 30
     assert "timeout-minutes: 420" in vlm
     assert vlm_job_minutes >= vlm_step_minutes + 30
+    assert "timeout-minutes: 540" in dynamic_memory
+    assert "timeout-minutes: 390" in dynamic_memory
+    assert 540 >= 90 + 5 + 390 + 30
 
 
 def test_nightly_python_coverage_runs_allocator_contract_serially() -> None:
@@ -1376,11 +1413,40 @@ def test_nightly_python_coverage_runs_allocator_contract_serially() -> None:
 
 def test_nightly_graph_stage_numbers_are_unambiguous() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
-    assert "name: 5 / Diffusion semantic assessment" in text
-    assert "name: 6 / Combined HTML report" in text
-    assert "name: 7 / Nightly CI" in text
-    assert "name: 8 / Publish nightly wheels" in text
-    assert "name: 9 / Nightly failure issue" in text
+    assert "name: 5 / Dynamic memory / ${{ matrix.model }}" in text
+    assert "name: 6 / Diffusion semantic assessment" in text
+    assert "name: 7 / Combined HTML report" in text
+    assert "name: 8 / Nightly CI" in text
+    assert "name: 9 / Publish nightly wheels" in text
+    assert "name: 10 / Nightly failure issue" in text
+
+
+def test_nightly_dynamic_memory_is_a_two_model_embedded_evidence_gate() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    dynamic_memory = text.split(
+        "\n  dynamic-memory:", maxsplit=1
+    )[1].split("\n  diffusion-vlm:", maxsplit=1)[0]
+    report = text.split("\n  report:", maxsplit=1)[1].split(
+        "\n  required:", maxsplit=1
+    )[0]
+
+    assert "- qwen" in dynamic_memory
+    assert "- tinyllama" in dynamic_memory
+    assert "tools/ci/dynamic_memory_nightly.py run" in dynamic_memory
+    assert (
+        "--fixture "
+        '"$TRTMC_CI_WORKSPACE/tools/ci/fixtures/'
+        'native_dynamic_memory_nightly.json"'
+    ) in dynamic_memory
+    assert "calibration-source" not in dynamic_memory
+    assert "BOOTSTRAP_EVIDENCE_ROOT" not in dynamic_memory
+    assert "tools/ci/dynamic_memory_nightly.py verify-artifacts" in report
+    assert (
+        "--fixture tools/ci/fixtures/native_dynamic_memory_nightly.json"
+        in report
+    )
+    assert "expected_models" in report
+    assert '["qwen", "tinyllama"]' in report
 
 
 def test_github_workflows_write_e2e_markdown_summary() -> None:

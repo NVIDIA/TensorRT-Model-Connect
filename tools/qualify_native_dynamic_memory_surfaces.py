@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +35,13 @@ RECEIPT_EQUIVALENCE_FIELDS = (
     "requested_kv_bytes",
     "kv_budget_bytes",
     "safety_reserve_bytes",
+    "module_residency_reserve_bytes",
+    "module_residency_reserve_profile_limit",
+    "module_residency_plan_set_sha256",
+    "module_residency_evidence_sha256",
+    "module_residency_cuda_module_loading_mode",
+    "capacity_decision_resident_overhead_bytes",
+    "final_non_kv_overhead_delta_bytes",
     "model_context_limit",
     "prefill_chunk_limit",
     "request_context_limit",
@@ -72,14 +80,14 @@ NEGATIVE_POLICY_ERRORS = {
 }
 
 
-def _schema_v3_receipt_errors(
+def _schema_v4_receipt_errors(
     receipt: dict[str, Any],
     *,
     expected_policy: str = "bytes",
     expected_fraction: float = 0.0,
     expected_requested_bytes: int = 2_048,
 ) -> list[str]:
-    """Validate per-process schema-v3 invariants without comparing free memory."""
+    """Validate per-process schema-v4 invariants without comparing free memory."""
 
     errors: list[str] = []
 
@@ -93,9 +101,9 @@ def _schema_v3_receipt_errors(
 
     if (
         type(receipt.get("receipt_schema_version")) is not int
-        or receipt.get("receipt_schema_version") != 3
+        or receipt.get("receipt_schema_version") != 4
     ):
-        errors.append("receipt_schema_version must be integer 3")
+        errors.append("receipt_schema_version must be integer 4")
 
     capacity_free = typed_int("capacity_decision_free_bytes", positive=True)
     capacity_total = typed_int("capacity_decision_total_bytes", positive=True)
@@ -106,12 +114,19 @@ def _schema_v3_receipt_errors(
     final_free = typed_int("final_free_bytes", positive=True)
     final_total = typed_int("final_total_bytes", positive=True)
     final_used = typed_int("final_device_used_bytes")
+    context_overhead = typed_int("context_device_memory_bytes", positive=True)
+    graph_private = typed_int("graph_private_device_bytes")
+    device_overheads: list[int | None] = []
     for field in (
         "ordinary_device_input_bytes",
         "ordinary_device_output_bytes",
         "external_device_output_bytes",
     ):
-        typed_int(field)
+        device_overheads.append(typed_int(field))
+    resident_overhead = typed_int(
+        "capacity_decision_resident_overhead_bytes"
+    )
+    final_overhead_delta = typed_int("final_non_kv_overhead_delta_bytes")
     kv_budget = typed_int("kv_budget_bytes", positive=True)
     requested_bytes = typed_int(
         "requested_kv_bytes",
@@ -120,6 +135,56 @@ def _schema_v3_receipt_errors(
     capacity_tokens = typed_int("runtime_kv_capacity_tokens", positive=True)
     bytes_per_token = typed_int("kv_bytes_per_token", positive=True)
     kv_reserved = typed_int("kv_reserved_bytes", positive=True)
+    module_residency_reserve = typed_int(
+        "module_residency_reserve_bytes",
+        positive=True,
+    )
+    module_residency_profile = typed_int(
+        "module_residency_reserve_profile_limit",
+        positive=True,
+    )
+    for field in (
+        "module_residency_plan_set_sha256",
+        "module_residency_evidence_sha256",
+    ):
+        value = receipt.get(field)
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            errors.append(f"{field} must be a lowercase SHA256")
+    if receipt.get("module_residency_cuda_module_loading_mode") not in {
+        "lazy",
+        "eager",
+    }:
+        errors.append(
+            "module_residency_cuda_module_loading_mode must be lazy or eager"
+        )
+    if (
+        module_residency_profile is not None
+        and capacity_tokens is not None
+        and module_residency_profile < capacity_tokens
+    ):
+        errors.append(
+            "module residency profile limit does not cover runtime KV capacity"
+        )
+    if (
+        context_overhead is not None
+        and graph_private is not None
+        and resident_overhead is not None
+        and final_overhead_delta is not None
+        and all(value is not None for value in device_overheads)
+    ):
+        final_overhead = (
+            context_overhead
+            + graph_private
+            + sum(int(value) for value in device_overheads)
+        )
+        if final_overhead_delta != max(
+            0,
+            final_overhead - resident_overhead,
+        ):
+            errors.append(
+                "final non-KV overhead delta does not replay "
+                "O(final)-O(resident)"
+            )
 
     if (
         capacity_free is not None
@@ -182,6 +247,28 @@ def _schema_v3_receipt_errors(
         errors.append("KV reservation must equal R times bytes per token")
     if kv_reserved is not None and kv_budget is not None and kv_reserved > kv_budget:
         errors.append("KV reservation exceeds bytes-policy budget")
+    if (
+        expected_policy == "bytes"
+        and kv_reserved is not None
+        and module_residency_reserve is not None
+        and capacity_free is not None
+    ):
+        safety_reserve = typed_int("safety_reserve_bytes")
+        if (
+            safety_reserve is not None
+            and final_overhead_delta is not None
+            and kv_reserved
+            > max(
+                0,
+                capacity_free
+                - safety_reserve
+                - module_residency_reserve
+                - final_overhead_delta,
+            )
+        ):
+            errors.append(
+                "KV reservation exceeds safe memory after schema-v4 reserves"
+            )
     return errors
 
 
@@ -201,6 +288,87 @@ def _bundle_identity(path: Path) -> dict[str, Any]:
         "mtime_ns": stat.st_mtime_ns,
         "sha256": _sha256(path),
     }
+
+
+def _sealed_runtime_memory_contract(
+    bundle: Path,
+    header: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Reopen split plan bytes and validate the exact sealed v2 calibration."""
+
+    resolved_header = (
+        boundary._read_bundle_header(bundle)
+        if header is None
+        else header
+    )
+    spec = boundary._resolve_spec(resolved_header)
+    try:
+        return dict(
+            boundary._sealed_profile_sweep_contract(
+                bundle,
+                resolved_header,
+                expected_model_id=spec.model_id,
+                expected_context_limit=spec.context_limit,
+                expected_profile_limits=tuple(spec.buckets),
+            )
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RuntimeError(
+            "surface qualification could not replay the sealed v2 "
+            f"module-residency calibration: {exc}"
+        ) from exc
+
+
+def _module_residency_receipt_errors(
+    receipt: dict[str, Any],
+    contract: dict[str, Any],
+) -> list[str]:
+    calibration = contract.get("module_residency_calibration")
+    if not isinstance(calibration, dict):
+        return ["sealed contract has no module_residency_calibration"]
+    capacity = receipt.get("runtime_kv_capacity_tokens")
+    reserves = calibration.get("profile_reserves")
+    if type(capacity) is not int or capacity <= 0 or not isinstance(
+        reserves,
+        list,
+    ):
+        return ["cannot select a sealed module-residency reserve row"]
+    selected = next(
+        (
+            row
+            for row in reserves
+            if isinstance(row, dict)
+            and type(row.get("covering_profile_limit")) is int
+            and row["covering_profile_limit"] >= capacity
+        ),
+        None,
+    )
+    if selected is None:
+        return [f"sealed calibration does not cover runtime R={capacity}"]
+    expected = {
+        "receipt_schema_version": 4,
+        "contract_version": 2,
+        "module_residency_reserve_bytes": selected.get(
+            "cumulative_reserve_bytes"
+        ),
+        "module_residency_reserve_profile_limit": selected.get(
+            "covering_profile_limit"
+        ),
+        "module_residency_plan_set_sha256": calibration.get(
+            "plan_set_sha256"
+        ),
+        "module_residency_evidence_sha256": calibration.get(
+            "evidence_sha256"
+        ),
+        "module_residency_cuda_module_loading_mode": calibration.get(
+            "cuda_module_loading_mode"
+        ),
+    }
+    return [
+        f"{field} does not match sealed bundle calibration"
+        for field, value in expected.items()
+        if receipt.get(field) != value
+    ]
 
 
 def _source_state_snapshot(artifact_dir: Path, *, label: str) -> dict[str, Any]:
@@ -275,6 +443,7 @@ def compare_surface_receipts(
     expected_policy: str = "bytes",
     expected_fraction: float = 0.0,
     expected_requested_bytes: int = 2_048,
+    runtime_memory_contract: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], bool]:
     if not surfaces:
         raise ValueError("surface comparison requires at least one result")
@@ -302,25 +471,36 @@ def compare_surface_receipts(
             int(receipt.get("runtime_kv_capacity_tokens", 0)) == expected_capacity
         )
         request_peak_complete = _request_peak_is_complete(receipt)
-        schema_v3_errors = _schema_v3_receipt_errors(
+        schema_v4_errors = _schema_v4_receipt_errors(
             receipt,
             expected_policy=expected_policy,
             expected_fraction=expected_fraction,
             expected_requested_bytes=expected_requested_bytes,
         )
+        calibration_errors = (
+            _module_residency_receipt_errors(
+                receipt,
+                runtime_memory_contract,
+            )
+            if runtime_memory_contract is not None
+            else []
+        )
         passed = (
             accepted
             and capacity_matches
             and request_peak_complete
-            and not schema_v3_errors
+            and not schema_v4_errors
+            and not calibration_errors
             and not mismatches
         )
         comparisons[surface["surface"]] = {
             "accepted": accepted,
             f"resolved_R_is_{expected_capacity}": capacity_matches,
             "request_complete_peak": request_peak_complete,
-            "schema_v3_complete": not schema_v3_errors,
-            "schema_v3_errors": schema_v3_errors,
+            "schema_v4_complete": not schema_v4_errors,
+            "schema_v4_errors": schema_v4_errors,
+            "sealed_calibration_matches": not calibration_errors,
+            "sealed_calibration_errors": calibration_errors,
             "receipt_mismatches": mismatches,
             "passed": passed,
         }
@@ -516,6 +696,7 @@ def qualification_gate(
     rejection_matrix: dict[str, Any],
     negative_surfaces_passed: bool,
     bundle_unchanged: bool,
+    sealed_calibration_replayed: bool,
 ) -> dict[str, bool]:
     positive_complete = set(policy_matrix) == POSITIVE_POLICY_CASE_NAMES
     negative_complete = set(rejection_matrix) == set(NEGATIVE_POLICY_ERRORS)
@@ -525,12 +706,14 @@ def qualification_gate(
         "positive_surfaces_passed": positive_surfaces_passed,
         "negative_surfaces_passed": negative_surfaces_passed,
         "bundle_unchanged": bundle_unchanged,
+        "sealed_calibration_replayed": sealed_calibration_replayed,
         "passed": bool(
             positive_complete
             and negative_complete
             and positive_surfaces_passed
             and negative_surfaces_passed
             and bundle_unchanged
+            and sealed_calibration_replayed
         ),
     }
 
@@ -920,6 +1103,10 @@ def main() -> int:
 
     header = boundary._read_bundle_header(bundle)
     spec = boundary._resolve_spec(header)
+    runtime_memory_contract = _sealed_runtime_memory_contract(
+        bundle,
+        header,
+    )
     bytes_per_token = int(header["runtime_memory"]["kv_bytes_per_token"])
     kv_bytes = 512 * bytes_per_token
     bundle_before = _bundle_identity(bundle)
@@ -973,6 +1160,7 @@ def main() -> int:
             expected_requested_bytes=int(
                 policy_case["expected_requested_bytes"]
             ),
+            runtime_memory_contract=runtime_memory_contract,
         )
         policy_matrix[str(policy_case["name"])] = {
             "policy": policy_case,
@@ -1047,6 +1235,7 @@ def main() -> int:
         rejection_matrix=rejection_matrix,
         negative_surfaces_passed=rejection_surfaces_passed,
         bundle_unchanged=bundle_unchanged,
+        sealed_calibration_replayed=True,
     )
     report = {
         "schema_version": 1,
@@ -1065,6 +1254,17 @@ def main() -> int:
             "uses that documented handle for the positive text request."
         ),
         "receipt_equivalence_fields": list(RECEIPT_EQUIVALENCE_FIELDS),
+        "bundle_runtime_memory_contract": runtime_memory_contract,
+        "bundle_runtime_memory_contract_sha256": (
+            hashlib.sha256(
+                json.dumps(
+                    runtime_memory_contract,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+        ),
         **gate,
         "bundle_before": bundle_before,
         "bundle_after": bundle_after,

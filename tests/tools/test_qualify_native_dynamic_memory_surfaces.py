@@ -33,7 +33,8 @@ def _receipt(
     total = 20_000
     receipt.update(
         {
-            "receipt_schema_version": 3,
+            "receipt_schema_version": 4,
+            "contract_version": 2,
             "policy": "bytes",
             "policy_fraction": 0.0,
             "requested_kv_bytes": 2_048,
@@ -41,9 +42,18 @@ def _receipt(
             "runtime_kv_capacity_tokens": 512,
             "kv_bytes_per_token": 4,
             "kv_reserved_bytes": 2_048,
+            "module_residency_reserve_bytes": 1,
+            "module_residency_reserve_profile_limit": 512,
+            "module_residency_plan_set_sha256": "a" * 64,
+            "module_residency_evidence_sha256": "b" * 64,
+            "module_residency_cuda_module_loading_mode": "lazy",
             "ordinary_device_input_bytes": 128,
             "ordinary_device_output_bytes": 256,
             "external_device_output_bytes": 512,
+            "context_device_memory_bytes": 1_024,
+            "graph_private_device_bytes": 0,
+            "capacity_decision_resident_overhead_bytes": 1_920,
+            "final_non_kv_overhead_delta_bytes": 0,
             "capacity_decision_free_bytes": capacity_free,
             "capacity_decision_total_bytes": total,
             "capacity_decision_device_used_bytes": total - capacity_free,
@@ -65,6 +75,22 @@ def _receipt(
     )
     receipt.update(overrides)
     return receipt
+
+
+def _runtime_memory_contract() -> dict:
+    return {
+        "module_residency_calibration": {
+            "profile_reserves": [
+                {
+                    "covering_profile_limit": 512,
+                    "cumulative_reserve_bytes": 1,
+                }
+            ],
+            "plan_set_sha256": "a" * 64,
+            "evidence_sha256": "b" * 64,
+            "cuda_module_loading_mode": "lazy",
+        }
+    }
 
 
 def _rejection(
@@ -131,7 +157,66 @@ def test_surface_comparison_accepts_equal_resolution_with_different_peaks() -> N
     assert passed
     assert set(comparison) == {"cli", "cpp", "cabi", "python"}
     assert all(item["passed"] for item in comparison.values())
-    assert all(item["schema_v3_complete"] for item in comparison.values())
+    assert all(item["schema_v4_complete"] for item in comparison.values())
+
+
+def test_surface_comparison_replays_sealed_module_residency_contract() -> None:
+    results = [
+        {
+            "status": "accepted",
+            "surface": surface,
+            "runtime_memory_receipt": _receipt(),
+        }
+        for surface in ("cli", "cpp", "cabi", "python")
+    ]
+
+    comparison, passed = surfaces.compare_surface_receipts(
+        results,
+        runtime_memory_contract=_runtime_memory_contract(),
+    )
+
+    assert passed
+    assert all(
+        item["sealed_calibration_matches"]
+        for item in comparison.values()
+    )
+
+
+def test_surface_comparison_fails_closed_on_sealed_calibration_drift() -> None:
+    results = [
+        {
+            "status": "accepted",
+            "surface": "cli",
+            "runtime_memory_receipt": _receipt(
+                module_residency_evidence_sha256="c" * 64,
+            ),
+        }
+    ]
+
+    comparison, passed = surfaces.compare_surface_receipts(
+        results,
+        runtime_memory_contract=_runtime_memory_contract(),
+    )
+
+    assert not passed
+    assert not comparison["cli"]["sealed_calibration_matches"]
+    assert comparison["cli"]["sealed_calibration_errors"] == [
+        "module_residency_evidence_sha256 does not match sealed bundle calibration"
+    ]
+
+
+def test_surface_schema_replays_positive_final_overhead_delta() -> None:
+    receipt = _receipt(
+        capacity_free=12_016,
+        capacity_decision_resident_overhead_bytes=1_904,
+        final_non_kv_overhead_delta_bytes=16,
+    )
+    errors = surfaces._schema_v4_receipt_errors(receipt)
+    assert not errors
+
+    receipt["final_non_kv_overhead_delta_bytes"] = 0
+    errors = surfaces._schema_v4_receipt_errors(receipt)
+    assert any("O(final)-O(resident)" in error for error in errors)
 
 
 def test_positive_policy_matrix_covers_auto_fraction_bytes_and_u() -> None:
@@ -205,7 +290,7 @@ def test_positive_policy_matrix_rejects_policy_drift() -> None:
         expected_requested_bytes=case["expected_requested_bytes"],
     )
     assert not passed
-    assert not comparison["python"]["schema_v3_complete"]
+    assert not comparison["python"]["schema_v4_complete"]
 
 
 def test_negative_policy_matrix_covers_u_over_m_and_conflicting_policy() -> None:
@@ -312,6 +397,7 @@ def test_report_gate_requires_complete_positive_and_negative_matrices() -> None:
         rejection_matrix=negative,
         negative_surfaces_passed=True,
         bundle_unchanged=True,
+        sealed_calibration_replayed=True,
     )
     assert gate["passed"]
 
@@ -321,6 +407,7 @@ def test_report_gate_requires_complete_positive_and_negative_matrices() -> None:
         {"policy_matrix": {}},
         {"positive_surfaces_passed": False},
         {"bundle_unchanged": False},
+        {"sealed_calibration_replayed": False},
     ):
         arguments = {
             "policy_matrix": positive,
@@ -328,6 +415,7 @@ def test_report_gate_requires_complete_positive_and_negative_matrices() -> None:
             "rejection_matrix": negative,
             "negative_surfaces_passed": True,
             "bundle_unchanged": True,
+            "sealed_calibration_replayed": True,
         }
         arguments.update(overrides)
         assert not surfaces.qualification_gate(**arguments)["passed"]
@@ -362,9 +450,37 @@ def test_report_gate_requires_complete_positive_and_negative_matrices() -> None:
             lambda receipt: receipt.pop("settled_snapshot_unavailable_reason"),
             "settled_snapshot_unavailable_reason must be present",
         ),
+        (
+            lambda receipt: receipt.__setitem__(
+                "module_residency_reserve_bytes",
+                0,
+            ),
+            "module_residency_reserve_bytes",
+        ),
+        (
+            lambda receipt: receipt.__setitem__(
+                "module_residency_reserve_profile_limit",
+                511,
+            ),
+            "does not cover",
+        ),
+        (
+            lambda receipt: receipt.__setitem__(
+                "module_residency_plan_set_sha256",
+                "A" * 64,
+            ),
+            "lowercase SHA256",
+        ),
+        (
+            lambda receipt: receipt.__setitem__(
+                "module_residency_cuda_module_loading_mode",
+                "unknown",
+            ),
+            "must be lazy or eager",
+        ),
     ],
 )
-def test_surface_comparison_rejects_incomplete_schema_v3(
+def test_surface_comparison_rejects_incomplete_schema_v4(
     tamper,
     expected_error: str,
 ) -> None:
@@ -386,8 +502,8 @@ def test_surface_comparison_rejects_incomplete_schema_v3(
     comparison, passed = surfaces.compare_surface_receipts(results)
 
     assert not passed
-    assert not comparison["cpp"]["schema_v3_complete"]
-    assert any(expected_error in error for error in comparison["cpp"]["schema_v3_errors"])
+    assert not comparison["cpp"]["schema_v4_complete"]
+    assert any(expected_error in error for error in comparison["cpp"]["schema_v4_errors"])
 
 
 def test_surface_comparison_requires_ordinary_allocation_equivalence() -> None:
@@ -400,14 +516,17 @@ def test_surface_comparison_requires_ordinary_allocation_equivalence() -> None:
         {
             "status": "accepted",
             "surface": "cpp",
-            "runtime_memory_receipt": _receipt(ordinary_device_input_bytes=129),
+            "runtime_memory_receipt": _receipt(
+                ordinary_device_input_bytes=129,
+                capacity_decision_resident_overhead_bytes=1_921,
+            ),
         },
     ]
 
     comparison, passed = surfaces.compare_surface_receipts(results)
 
     assert not passed
-    assert comparison["cpp"]["schema_v3_complete"]
+    assert comparison["cpp"]["schema_v4_complete"]
     assert "ordinary_device_input_bytes" in (comparison["cpp"]["receipt_mismatches"])
 
 

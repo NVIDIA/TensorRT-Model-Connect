@@ -97,6 +97,7 @@ def _fake_native_build(build: Path) -> None:
     for relative in (
         "trtmc",
         "trtmc_benchmark_worker",
+        "trtmc_dynamic_memory_qualify",
         "libtrtmc_core.so",
         "libtrtmc_backend_trt.so",
         "libtrtmc_trt_plugins.so",
@@ -105,6 +106,36 @@ def _fake_native_build(build: Path) -> None:
         path = build / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(relative.encode())
+
+
+def test_conan_wheel_build_requires_nvml_calibrator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recipe_module = _load_conan_recipe(monkeypatch)
+    captured: dict[str, object] = {}
+
+    class FakeDependencies:
+        def __init__(self, _recipe):
+            pass
+
+        def generate(self) -> None:
+            pass
+
+    class FakeToolchain:
+        def __init__(self, _recipe):
+            self.cache_variables: dict[str, object] = {}
+
+        def generate(self) -> None:
+            captured.update(self.cache_variables)
+
+    recipe_module.CMakeDeps = FakeDependencies
+    recipe_module.CMakeToolchain = FakeToolchain
+    recipe = recipe_module.TensorRTModelConnectConan()
+    recipe.source_folder = str(tmp_path)
+    recipe.generate()
+
+    assert captured["TRTMC_REQUIRE_DYNAMIC_MEMORY_CALIBRATOR_NVML"] is True
 
 
 def _package(recipe_module, source: Path, tmp_path: Path) -> Path:
@@ -191,6 +222,19 @@ def test_package_stages_a_model_owned_adapter_as_inert_source(
     assert (sdk / "trtmc" / "pipeline.h").is_file()
     assert (module / "bin" / "trtmc").is_file()
     assert (module / "bin" / "trtmc_benchmark_worker").is_file()
+    assert (
+        module
+        / "bin"
+        / ".trtmc-internal"
+        / "trtmc_dynamic_memory_qualify"
+    ).is_file()
+    assert (
+        module.parent
+        / "tensorrt_model_connect-0.1.0.data"
+        / "scripts"
+        / ".trtmc-internal"
+        / "trtmc_dynamic_memory_qualify"
+    ).is_file()
     assert (module / "bin" / "libtrtmc_trt_plugins.so").is_file()
     assert (
         "libtrtmc_trt_plugins.so",
@@ -200,6 +244,7 @@ def test_package_stages_a_model_owned_adapter_as_inert_source(
     assert {
         "trtmc",
         "trtmc_benchmark_worker",
+        "trtmc_dynamic_memory_qualify",
         "libtrtmc_core.so",
         "libtrtmc_backend_trt.so",
         "libtrtmc_trt_plugins.so",

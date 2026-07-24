@@ -161,7 +161,20 @@ documentation.
 `.github/workflows/nightly.yml` uses the same image, container, pipeline, model
 proof, scheduling, and reporting classes. It broadens selection to the full
 model inventory and adds package, coverage, full-E2E, semantic media assessment,
-and eligible task-evaluation work.
+eligible task-evaluation work, and a two-model GB300 dynamic-memory gate.
+
+The dynamic-memory gate builds Qwen3-0.6B and TinyLlama from the model-only
+command, then composes the existing correctness, policy, memory-slope,
+pressure, soak, API-surface, performance, and process-isolation producers. It
+uploads only their source-bound receipts. The combined report independently
+replays those receipts for the exact tested SHA before the final nightly gate
+can admit publication. Base and developer C/2 module-residency calibration
+source evidence must be reopened from each freshly built bundle and pass the
+correctness producer's in-bundle replay. The replay validates the automatic
+build calibrator's two complete process-capture trees, their
+plan/stack/loading-mode binding, and the sealed profile reserves; external
+bootstrap paths are not nightly inputs. An absent embedded capture tree, cache
+snapshot, or four-GPU GB300 topology fails closed.
 
 Pre-merge and nightly therefore exercise the same implementation; only their
 selection and breadth differ.
@@ -187,6 +200,7 @@ selection and breadth differ.
 | `e2e_scheduler.py` | Launch workers, enforce timeouts, and merge results | Container |
 | `isolation.py` | Queue projected model groups for isolated validation | Container |
 | `gpu_lease.py` | Allocate FIFO shared slots or exclusive GPUs | Host processes |
+| `dynamic_memory_nightly.py` | Compose and replay the two-model GB300 dynamic-memory receipt gate | Trusted GPU container and report host |
 | `optimized_runtime_qualifications.py` | Select model-owned optimized-runtime hardware proofs | Trusted host |
 | `model_proof_selection.py` | Resolve and validate one model's proof contract | Projected source |
 | `model_proof.py` | Prepare caches, projection, lease, and proof container | Trusted host |
@@ -633,6 +647,28 @@ the producing class remains the source of truth for optional evidence fields.
   Task evaluation supplements nightly coverage and never replaces the standard
   model E2E/reference comparison.
 
+### `dynamic_memory_nightly.py`
+
+- **Functionality / units:** `create_plan` declares the fixed Qwen/TinyLlama
+  producer graph; `run_gate` performs exact-head, pinned-cache, and four-GB300
+  preflights before invoking those producers;
+  `verify_artifacts` selects the latest attempt for each model and replays every
+  uploaded primary receipt.
+- **Inputs:** Exact repository/build paths and tested SHA, the reviewed
+  `fixtures/native_dynamic_memory_nightly.json`, one pinned HF snapshot per
+  model and distinct producer/runner/isolation GPU selectors. Each fresh base
+  and C/2 bundle must carry the complete automatic-calibration evidence
+  document and both raw process-capture trees in bundle sections.
+- **Outputs:** A deterministic plan, producer logs and primary receipts,
+  `dynamic-memory-nightly-gate.json` per model, and the combined
+  `dynamic-memory-nightly-status.json`. Missing producer fields remain JSON
+  `null`; the aggregate never manufactures `passed` or
+  `promotion_eligible` on a producer's behalf.
+- **Boundary:** It does not implement runtime memory, build engines, calculate
+  thresholds, or duplicate producer validators. Runtime/build/performance
+  behavior remains in the existing tools. GitHub Actions owns the exclusive
+  whole-machine lock, container lifecycle, transport, and final release gate.
+
 ## Data passed between stages
 
 The orchestration favors small files over hidden global state:
@@ -646,6 +682,8 @@ The orchestration favors small files over hidden global state:
 | `gpu-lease.json` | `GpuLease` | Inner lease validation and report |
 | `proof.json` | Inner model proof | Per-model and combined certification |
 | `model-proof-report.html` | Report generator | Actions artifact and combined report |
+| `dynamic-memory-nightly-gate.json` | Two-model dynamic-memory orchestration | Combined nightly report |
+| `dynamic-memory-nightly-status.json` | Report-host receipt replay | Final nightly gate |
 
 Environment forwarding is explicit in `environment.py`. Add a variable there
 only when code inside the container must receive it.

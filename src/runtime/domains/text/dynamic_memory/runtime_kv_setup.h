@@ -58,6 +58,12 @@ struct RuntimeKvSetupRequest {
     // deserialized decode profiles do not exactly implement these limits,
     // including the terminal M profile.
     std::vector<std::uint64_t> expected_active_kv_profile_limits;
+    // Exact-plan, cumulative future first-use residency headroom aligned with
+    // expected_active_kv_profile_limits.
+    std::vector<std::uint64_t> module_residency_reserve_bytes_by_profile;
+    std::string module_residency_plan_set_sha256;
+    std::string module_residency_cuda_module_loading_mode;
+    std::string module_residency_evidence_sha256;
     RuntimeKvPolicy policy;
     std::uint64_t request_context_limit{0};
     std::uint64_t expected_kv_bytes_per_token{0};

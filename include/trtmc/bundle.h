@@ -37,6 +37,39 @@ struct QualifiedRuntimeStack {
     std::string driver;
 };
 
+struct ModuleResidencyPlanCalibration {
+    std::string section_name;
+    std::string section_sha256;
+    std::string role;
+    int32_t optimization_profile_count{0};
+};
+
+struct ModuleResidencyProfileReserve {
+    int32_t covering_profile_limit{0};
+    std::uint64_t cumulative_reserve_bytes{0};
+};
+
+// Exact-plan calibration for CUDA/TensorRT modules that are materialized only
+// when a profile is first enqueued. The bytes are headroom, not an allocation:
+// runtime KV planning subtracts the row covering its candidate capacity before
+// allocating the cache.
+struct ModuleResidencyCalibration {
+    bool present{false};
+    int32_t schema_version{0};
+    std::string measurement_kind;
+    std::string cuda_module_loading_mode;
+    // Old sealed-v2 bundles omitted this field and are interpreted as
+    // external_manifest_v1. Newly auto-calibrated bundles declare
+    // embedded_bundle_v1 so deleting the embedded evidence cannot silently
+    // downgrade them to the legacy manifest path.
+    std::string evidence_provenance{"external_manifest_v1"};
+    std::string qualified_runtime_stack_sha256;
+    std::string plan_set_sha256;
+    std::string evidence_sha256;
+    std::vector<ModuleResidencyPlanCalibration> plans;
+    std::vector<ModuleResidencyProfileReserve> profile_reserves;
+};
+
 struct RuntimeMemoryContract {
     bool present{false};
     int32_t contract_version{0};
@@ -53,6 +86,7 @@ struct RuntimeMemoryContract {
     std::uint64_t kv_bytes_per_token{0};
     std::vector<int32_t> active_kv_profile_limits;
     bool runtime_owned{false};
+    ModuleResidencyCalibration module_residency_calibration;
 };
 
 struct BundleInfo {

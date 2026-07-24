@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import math
@@ -38,9 +39,18 @@ CONTROLLED_PREPLANNING_HEADROOM_BYTES = 32 * CONTROLLED_RESERVATION_ALIGNMENT_BY
 CONTROLLED_MAX_CORRECTION_ATTEMPTS = 64
 CONTROLLED_TARGET_TOLERANCE_ROWS = 19
 MEMORY_ATTRIBUTION_FLOOR_BYTES = 64 * 1024 * 1024
-COLD_PROCESS_RETENTION_FLOOR_BYTES = 512 * 1024 * 1024
-COLD_PROCESS_RETENTION_WEIGHT_FRACTION = 0.05
 COLD_PERSISTENT_UNLISTED_LIMIT_BYTES = 2 * 1024 * 1024 * 1024
+_PLAN_BOUND_RESIDENCY_STABLE_RECEIPT_FIELDS = (
+    "receipt_schema_version",
+    "contract_version",
+    "module_residency_reserve_bytes",
+    "module_residency_reserve_profile_limit",
+    "module_residency_plan_set_sha256",
+    "module_residency_evidence_sha256",
+    "module_residency_cuda_module_loading_mode",
+    "capacity_decision_resident_overhead_bytes",
+    "final_non_kv_overhead_delta_bytes",
+)
 _SAMPLER_FIELDS = {
     "source",
     "pid",
@@ -79,6 +89,17 @@ _TINY_PRESSURE_NOT_APPLICABLE_REASON = (
 )
 
 
+def _canonical_sha256(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _source_state_snapshot(artifact_dir: Path, *, label: str) -> dict[str, Any]:
     artifact_dir = artifact_dir.resolve()
     try:
@@ -98,6 +119,146 @@ def _source_state_snapshot(artifact_dir: Path, *, label: str) -> dict[str, Any]:
         artifact_dir,
         label=label,
     )
+
+
+def _sealed_runtime_memory_contract(
+    bundle: Path,
+    header: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Hash the actual engine sections and replay sealed contract v2."""
+
+    resolved_header = (
+        boundary._read_bundle_header(bundle)
+        if header is None
+        else header
+    )
+    spec = boundary._resolve_spec(resolved_header)
+    try:
+        return dict(
+            boundary._sealed_profile_sweep_contract(
+                bundle,
+                resolved_header,
+                expected_model_id=spec.model_id,
+                expected_context_limit=spec.context_limit,
+                expected_profile_limits=tuple(spec.buckets),
+            )
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RuntimeError(
+            "soak qualification could not replay the sealed v2 "
+            f"module-residency calibration: {exc}"
+        ) from exc
+
+
+def _runtime_receipts(value: Any) -> list[dict[str, Any]]:
+    receipts: list[dict[str, Any]] = []
+
+    def visit(node: Any) -> None:
+        if isinstance(node, Mapping):
+            receipt = node.get("runtime_memory_receipt")
+            if isinstance(receipt, dict):
+                receipts.append(receipt)
+            for child in node.values():
+                visit(child)
+        elif isinstance(node, list):
+            for child in node:
+                visit(child)
+
+    visit(value)
+    unique: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for receipt in receipts:
+        identity = id(receipt)
+        if identity not in seen:
+            seen.add(identity)
+            unique.append(receipt)
+    return unique
+
+
+def validate_trace_module_residency(
+    trace: Mapping[str, Any],
+    *,
+    contract: Mapping[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    """Bind every trace receipt to the independently reopened bundle row."""
+
+    calibration = contract.get("module_residency_calibration")
+    if not isinstance(calibration, Mapping):
+        raise RuntimeError(
+            f"{label}: sealed contract has no module-residency calibration"
+        )
+    reserves = calibration.get("profile_reserves")
+    if not isinstance(reserves, list):
+        raise RuntimeError(
+            f"{label}: sealed calibration has no profile reserve table"
+        )
+    receipts = _runtime_receipts(trace)
+    if not receipts:
+        raise RuntimeError(
+            f"{label}: trace contains no runtime-memory receipt to bind"
+        )
+    covered_profiles: set[int] = set()
+    for index, receipt in enumerate(receipts):
+        capacity = receipt.get("runtime_kv_capacity_tokens")
+        if type(capacity) is not int or capacity <= 0:
+            raise RuntimeError(
+                f"{label}: receipt {index} has no valid runtime KV capacity"
+            )
+        selected = next(
+            (
+                row
+                for row in reserves
+                if isinstance(row, Mapping)
+                and type(row.get("covering_profile_limit")) is int
+                and int(row["covering_profile_limit"]) >= capacity
+            ),
+            None,
+        )
+        if selected is None:
+            raise RuntimeError(
+                f"{label}: sealed calibration does not cover R={capacity}"
+            )
+        expected = {
+            "receipt_schema_version": 4,
+            "contract_version": 2,
+            "module_residency_reserve_bytes": selected.get(
+                "cumulative_reserve_bytes"
+            ),
+            "module_residency_reserve_profile_limit": selected.get(
+                "covering_profile_limit"
+            ),
+            "module_residency_plan_set_sha256": calibration.get(
+                "plan_set_sha256"
+            ),
+            "module_residency_evidence_sha256": calibration.get(
+                "evidence_sha256"
+            ),
+            "module_residency_cuda_module_loading_mode": calibration.get(
+                "cuda_module_loading_mode"
+            ),
+        }
+        mismatches = {
+            field: {"expected": value, "actual": receipt.get(field)}
+            for field, value in expected.items()
+            if receipt.get(field) != value
+        }
+        if mismatches:
+            raise RuntimeError(
+                f"{label}: receipt {index} does not match the sealed "
+                f"module-residency calibration: {mismatches}"
+            )
+        covered_profiles.add(int(selected["covering_profile_limit"]))
+    return {
+        "receipt_count": len(receipts),
+        "covering_profile_limits": sorted(covered_profiles),
+        "plan_set_sha256": calibration["plan_set_sha256"],
+        "evidence_sha256": calibration["evidence_sha256"],
+        "cuda_module_loading_mode": calibration[
+            "cuda_module_loading_mode"
+        ],
+        "passed": True,
+    }
 
 
 def apply_source_state_gate(
@@ -557,10 +718,16 @@ def validate_receipt(
         raise RuntimeError("runner output has no runtime memory receipt")
     required = (
         "receipt_schema_version",
+        "contract_version",
         "policy",
         "policy_fraction",
         "requested_kv_bytes",
         "safety_reserve_bytes",
+        "module_residency_reserve_bytes",
+        "module_residency_reserve_profile_limit",
+        "module_residency_plan_set_sha256",
+        "module_residency_evidence_sha256",
+        "module_residency_cuda_module_loading_mode",
         "model_context_limit",
         "request_context_limit",
         "effective_request_limit",
@@ -572,6 +739,8 @@ def validate_receipt(
         "capacity_decision_free_bytes",
         "capacity_decision_total_bytes",
         "capacity_decision_device_used_bytes",
+        "capacity_decision_resident_overhead_bytes",
+        "final_non_kv_overhead_delta_bytes",
         "settled_free_bytes",
         "settled_total_bytes",
         "settled_device_used_bytes",
@@ -616,6 +785,8 @@ def validate_receipt(
         "kv_metadata_bytes",
         "backend_owned_cache_input_bytes",
         "backend_owned_cache_output_bytes",
+        "capacity_decision_resident_overhead_bytes",
+        "final_non_kv_overhead_delta_bytes",
     )
     invalid_nonnegative = [
         field
@@ -628,7 +799,9 @@ def validate_receipt(
         )
     if (
         type(receipt["receipt_schema_version"]) is not int
-        or receipt["receipt_schema_version"] != 3
+        or receipt["receipt_schema_version"] != 4
+        or type(receipt["contract_version"]) is not int
+        or receipt["contract_version"] != 2
         or type(receipt["resident_weight_copy_count"]) is not int
         or receipt["resident_weight_copy_count"] <= 0
         or type(receipt["kv_allocation_id"]) is not int
@@ -645,9 +818,53 @@ def validate_receipt(
         or receipt["kv_bytes_per_token"] <= 0
         or type(receipt["kv_budget_bytes"]) is not int
         or receipt["kv_budget_bytes"] <= 0
+        or type(receipt["module_residency_reserve_bytes"]) is not int
+        or receipt["module_residency_reserve_bytes"] <= 0
+        or type(receipt["module_residency_reserve_profile_limit"]) is not int
+        or receipt["module_residency_reserve_profile_limit"]
+        < receipt["runtime_kv_capacity_tokens"]
+        or receipt["module_residency_reserve_profile_limit"]
+        > receipt["model_context_limit"]
+        or not isinstance(receipt["module_residency_plan_set_sha256"], str)
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            receipt["module_residency_plan_set_sha256"],
+        )
+        is None
+        or not isinstance(receipt["module_residency_evidence_sha256"], str)
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            receipt["module_residency_evidence_sha256"],
+        )
+        is None
+        or receipt["module_residency_cuda_module_loading_mode"]
+        not in {"lazy", "eager"}
     ):
         raise RuntimeError(
-            "runtime memory receipt does not use the complete typed schema-v3 contract"
+            "runtime memory receipt does not use the complete typed schema-v4 contract"
+        )
+    final_non_kv_overhead = sum(
+        int(receipt[field])
+        for field in (
+            "context_device_memory_bytes",
+            "ordinary_device_input_bytes",
+            "ordinary_device_output_bytes",
+            "external_device_output_bytes",
+            "graph_private_device_bytes",
+        )
+    )
+    expected_final_non_kv_overhead_delta = max(
+        0,
+        final_non_kv_overhead
+        - int(receipt["capacity_decision_resident_overhead_bytes"]),
+    )
+    if (
+        receipt["final_non_kv_overhead_delta_bytes"]
+        != expected_final_non_kv_overhead_delta
+    ):
+        raise RuntimeError(
+            "runtime memory receipt final non-KV overhead delta does not "
+            "replay O(final)-O(resident)"
         )
 
     capacity_free = receipt["capacity_decision_free_bytes"]
@@ -694,7 +911,10 @@ def validate_receipt(
     if b <= 0 or reserved != r * b:
         raise RuntimeError(f"KV reservation is not contiguous R*B: R={r}, B={b}, bytes={reserved}")
     if reserved > receipt["kv_budget_bytes"]:
-        raise RuntimeError("KV reservation exceeds the capacity-decision policy budget")
+        raise RuntimeError(
+            "runtime R exceeds the capacity-decision policy budget and "
+            "conservative monotonic solve ceiling"
+        )
     exact_zero = (
         "kv_metadata_bytes",
         "backend_owned_cache_input_bytes",
@@ -734,7 +954,10 @@ def validate_receipt(
             raise RuntimeError("runtime memory receipt does not bind the expected typed policy")
         safely_available = max(
             0,
-            capacity_free - receipt["safety_reserve_bytes"],
+            capacity_free
+            - receipt["safety_reserve_bytes"]
+            - receipt["module_residency_reserve_bytes"]
+            - receipt["final_non_kv_overhead_delta_bytes"],
         )
         if kind == "bytes":
             expected_budget = expected_requested_bytes
@@ -751,10 +974,14 @@ def validate_receipt(
             receipt["model_context_limit"],
             expected_request_limit if expected_request_limit else receipt["model_context_limit"],
         )
-        expected_capacity = min(semantic_limit, expected_budget // b)
-        if r != expected_capacity:
+        conservative_capacity_ceiling = min(
+            semantic_limit,
+            expected_budget // b,
+        )
+        if r > conservative_capacity_ceiling:
             raise RuntimeError(
-                "runtime R does not resolve from the capacity-decision policy budget"
+                "runtime R exceeds the capacity-decision policy budget's "
+                "conservative monotonic solve ceiling"
             )
     return {
         "R": r,
@@ -770,7 +997,7 @@ def _validate_receipt_phase_binding(
     *,
     role: str,
 ) -> None:
-    """Bind schema-v3 snapshots to their synchronized runtime phase samples."""
+    """Bind schema-v4 snapshots to their synchronized runtime phase samples."""
 
     expected_snapshot_fields = (
         ("pre_load_free_bytes", phase_samples[0]["free_bytes"]),
@@ -1082,10 +1309,7 @@ def _validate_lifetime_memory(
     if type(resident_weight_bytes) is not int or resident_weight_bytes <= 0:
         raise RuntimeError(f"{role} lifetime has no valid resident-weight receipt")
     process_limit = (
-        max(
-            COLD_PROCESS_RETENTION_FLOOR_BYTES,
-            math.ceil(COLD_PROCESS_RETENTION_WEIGHT_FRACTION * resident_weight_bytes),
-        )
+        int(raw_receipt["module_residency_reserve_bytes"])
         if cold_start
         else MEMORY_ATTRIBUTION_FLOOR_BYTES
     )
@@ -1125,7 +1349,11 @@ def _validate_lifetime_memory(
             "signed_delta_bytes": retained_process,
             "absolute_delta_bytes": abs(retained_process),
             "limit_bytes": process_limit,
-            "limit_rule": ("max(512MiB,5pct_resident_weights)" if cold_start else "64MiB"),
+            "limit_rule": (
+                "plan_bound_profile_calibration"
+                if cold_start
+                else "64MiB"
+            ),
             "passed": process_retention_passed,
         },
         "device_retention_gate": {
@@ -1486,6 +1714,9 @@ def validate_load_cycles(
             "role": "warmup",
         },
     )
+    warmup_receipt = warmup.get("runtime_memory_receipt")
+    if not isinstance(warmup_receipt, Mapping):
+        raise RuntimeError("cold-start lifetime has no stable runtime-memory receipt")
     cold_driver_budget = max(
         0,
         int(
@@ -1523,6 +1754,17 @@ def validate_load_cycles(
                 "role": "measured",
             },
         )
+        cycle_receipt = cycle.get("runtime_memory_receipt")
+        if not isinstance(cycle_receipt, Mapping):
+            raise RuntimeError(
+                f"load_cycle_measured_{index} has no stable runtime-memory receipt"
+            )
+        for field in _PLAN_BOUND_RESIDENCY_STABLE_RECEIPT_FIELDS:
+            if cycle_receipt.get(field) != warmup_receipt.get(field):
+                raise RuntimeError(
+                    "cold/measured receipts disagree on stable plan-bound "
+                    f"module residency field {field}"
+                )
         continuity_gates.append(
             _validate_positive_growth_envelope(
                 previous_evidence["after_unload"],
@@ -2057,6 +2299,17 @@ def validate_controlled_reservation(
         for receipt in (calibration_receipt_raw, constrained_receipt_raw)
     ):
         raise RuntimeError("controlled reservation changed the safety reserve")
+    module_residency_reserve_bytes = int(
+        baseline_receipt_raw["module_residency_reserve_bytes"]
+    )
+    if any(
+        int(receipt.get("module_residency_reserve_bytes", -1))
+        != module_residency_reserve_bytes
+        for receipt in (calibration_receipt_raw, constrained_receipt_raw)
+    ):
+        raise RuntimeError(
+            "controlled reservation changed the plan-bound module residency reserve"
+        )
     logical_context_output_bytes = sum(
         int(calibration_receipt_raw[field])
         for field in (
@@ -2067,7 +2320,11 @@ def validate_controlled_reservation(
             "graph_private_device_bytes",
         )
     )
-    final_free_lower_bound = safety_reserve_bytes + policy_safe_bytes
+    final_free_lower_bound = (
+        safety_reserve_bytes
+        + module_residency_reserve_bytes
+        + policy_safe_bytes
+    )
     final_free_upper_bound = final_free_lower_bound + alignment
     required_visible_post_load_free = (
         logical_context_output_bytes
@@ -2130,7 +2387,14 @@ def validate_controlled_reservation(
             auto_fraction,
             max(
                 0,
-                int(constrained_receipt_raw["capacity_decision_free_bytes"]) - safety_reserve_bytes,
+                int(constrained_receipt_raw["capacity_decision_free_bytes"])
+                - safety_reserve_bytes
+                - module_residency_reserve_bytes
+                - int(
+                    constrained_receipt_raw[
+                        "final_non_kv_overhead_delta_bytes"
+                    ]
+                ),
             ),
         )
         // baseline_receipt["B"],
@@ -2697,6 +2961,10 @@ def main() -> int:
     raw_dir = output.parent / "soak-raw"
     header = boundary._read_bundle_header(bundle)
     spec = boundary._resolve_spec(header)
+    runtime_memory_contract = _sealed_runtime_memory_contract(
+        bundle,
+        header,
+    )
     controlled_requirement = controlled_reservation_requirement(
         spec.model_id,
         args.reservation_target_tokens,
@@ -2770,6 +3038,31 @@ def main() -> int:
     }
     if controlled_reservation is not None:
         raw_traces["controlled_reservation"] = str(raw_dir / "controlled-reservation.json")
+    module_residency_replays = {
+        "sequential_100": validate_trace_module_residency(
+            sequential,
+            contract=runtime_memory_contract,
+            label="sequential_100",
+        ),
+        "load_unload_20": validate_trace_module_residency(
+            load_cycles,
+            contract=runtime_memory_contract,
+            label="load_unload_20",
+        ),
+        "same_process_two_r": validate_trace_module_residency(
+            two_r,
+            contract=runtime_memory_contract,
+            label="same_process_two_r",
+        ),
+    }
+    if controlled_reservation is not None:
+        module_residency_replays["controlled_reservation"] = (
+            validate_trace_module_residency(
+                controlled_reservation,
+                contract=runtime_memory_contract,
+                label="controlled_reservation",
+            )
+        )
     sequential_result = validate_sequential_requests(
         sequential,
         expected_count=100,
@@ -2810,6 +3103,10 @@ def main() -> int:
         "sequential_100_passed": sequential_result.get("passed") is True,
         "load_unload_20_passed": load_cycles_result.get("passed") is True,
         "same_process_two_r_passed": two_r_result.get("passed") is True,
+        "sealed_module_residency_replayed_for_every_trace": all(
+            replay.get("passed") is True
+            for replay in module_residency_replays.values()
+        ),
         "controlled_external_reservation_present_and_passed_or_not_applicable": (
             controlled_gate["passed"] is True
             and (
@@ -2824,9 +3121,14 @@ def main() -> int:
         "model_id": spec.model_id,
         "bundle": str(bundle),
         "bundle_sha256": boundary._sha256(bundle),
+        "bundle_runtime_memory_contract": runtime_memory_contract,
+        "bundle_runtime_memory_contract_sha256": _canonical_sha256(
+            runtime_memory_contract
+        ),
         "runner": str(runner),
         "runner_sha256": boundary._sha256(runner),
         "raw_traces": raw_traces,
+        "module_residency_replays": module_residency_replays,
         "memory_sampler": validate_nvml_sampler(sequential),
         "sequential_requests": sequential_result,
         "load_unload_cycles": load_cycles_result,

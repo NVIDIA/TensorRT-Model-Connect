@@ -1681,8 +1681,8 @@ class TestUnitTiers:
     def test_dynamic_memory_qualification_native(self, imap):
         """Native qualification sources require the C++ validation tier."""
         for path in (
-            "tests/qualification/native_dynamic_memory_qualify.cpp",
-            "tests/qualification/native_dynamic_memory_qualify_schema.h",
+            "tools/src/native_dynamic_memory_calibrator.cpp",
+            "tools/src/native_dynamic_memory_calibrator_schema.h",
             "tests/qualification/native_dynamic_memory_surfaces.cpp",
         ):
             match = test_impact.classify_file(path, imap)

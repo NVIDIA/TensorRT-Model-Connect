@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "../qualification/native_dynamic_memory_qualify_schema.h"
+#include "native_dynamic_memory_calibrator_schema.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -54,6 +54,49 @@ void test_repeat_schema(std::size_t repeat) {
     check(samples.size() == repeat, "sequential request sample count exactly equals repeat");
     check(samples.empty() || samples.front().is_object(),
           "sequential request samples have no leading nested empty array");
+}
+
+void test_cuda_module_loading_mode_query_schema() {
+    const auto lazy =
+        trtmc::qualification::make_cuda_module_loading_mode_evidence("lazy", 2);
+    const nlohmann::json expected = {
+        {"schema_version", 1},
+        {"mode", "lazy"},
+        {"driver_value", 2},
+        {"source", "cuModuleGetLoadingMode"},
+    };
+    check(lazy == expected, "module-loading query has the exact internal schema");
+    check_invalid_argument(
+        [] {
+            (void)trtmc::qualification::make_cuda_module_loading_mode_evidence(
+                "unknown", 7);
+        },
+        "module-loading query rejects an unknown driver mode");
+}
+
+void test_product_identity_query_schema() {
+    const auto identity = trtmc::qualification::make_product_identity_evidence(
+        "0.1.0", std::string(64, 'a'));
+    const nlohmann::json expected = {
+        {"schema_version", 1},
+        {"source", "compiled_product_identity"},
+        {"product_version", "0.1.0"},
+        {"build_identity", std::string(64, 'a')},
+        {"helper_protocol_version", 1},
+    };
+    check(identity == expected, "product identity query has the exact internal schema");
+    check_invalid_argument(
+        [] {
+            (void)trtmc::qualification::make_product_identity_evidence(
+                "0.1.0", std::string(64, 'A'));
+        },
+        "product identity query rejects a non-lowercase build identity");
+    check_invalid_argument(
+        [] {
+            (void)trtmc::qualification::make_product_identity_evidence(
+                "0.1.0\nother", std::string(64, 'a'));
+        },
+        "product identity query rejects a multiline product version");
 }
 
 void test_runtime_phase_memory_schema() {
@@ -362,6 +405,8 @@ void test_controlled_final_feedback_contract() {
 } // namespace
 
 int main() {
+    test_product_identity_query_schema();
+    test_cuda_module_loading_mode_query_schema();
     test_repeat_schema(1);
     test_repeat_schema(100);
     test_runtime_phase_memory_schema();

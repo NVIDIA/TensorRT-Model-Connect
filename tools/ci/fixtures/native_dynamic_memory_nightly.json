@@ -1,0 +1,87 @@
+{
+  "schema_version": "trtmc.native-dynamic-memory-nightly-request/v1",
+  "platform": {
+    "cuda_module_loading": "LAZY",
+    "gpu_name": "NVIDIA GB300",
+    "target": "gb300-trt-11.2"
+  },
+  "embedded_automatic_calibration": {
+    "calibration_schema": "trtmc.native-dynamic-memory-build-calibration-evidence/v2",
+    "evidence_section": "runtime_memory_calibration/evidence.json",
+    "capture_count": 2,
+    "capture_prefixes": [
+      "runtime_memory_calibration/process-00/",
+      "runtime_memory_calibration/process-01/"
+    ],
+    "required": true,
+    "require_complete_capture_sections": [
+      "command.json",
+      "returncode.txt",
+      "runner.stdout.log",
+      "runner.stderr.log",
+      "runner-output.raw.json",
+      "runner-trace.json",
+      "runner-logits.bin",
+      "capture-manifest.json"
+    ],
+    "roles": [
+      "base",
+      "chunk_variant"
+    ]
+  },
+  "performance": {
+    "measurement": {
+      "iterations": 3,
+      "warmup": 1
+    },
+    "medium_prompt": {
+      "repeat": 32,
+      "text": "Runtime-selected KV capacity must preserve the model context limit while charging only the memory admitted for this request. "
+    },
+    "request": {
+      "capture_generated_token_ids": true,
+      "eos_token_id": 2147483647,
+      "generation_mode": "ar",
+      "max_new_tokens": 32,
+      "min_p": 0.0,
+      "num_samples": 1,
+      "stop_on_boxed_answer": false,
+      "temperature": 0.0,
+      "top_k": 1,
+      "top_p": 1.0,
+      "use_chat_template": false
+    },
+    "short_prompt": {
+      "repeat": 1,
+      "text": "Explain why runtime KV cache sizing matters."
+    }
+  },
+  "models": {
+    "qwen": {
+      "config_sha256": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+      "context_limit": 40960,
+      "default_bundle_name": "qwen3-0.6b.trtfb",
+      "family": "qwen",
+      "model_id": "Qwen/Qwen3-0.6B",
+      "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+      "soak": {
+        "r1": 1024,
+        "r2": 40960,
+        "reservation_target_tokens": 32768
+      }
+    },
+    "tinyllama": {
+      "config_sha256": "486bedda3a6988332e60d9638a09ca4b260d34ebcf1b19e22cf3b140b63d8fe9",
+      "context_limit": 2048,
+      "default_bundle_name": "tinyllama-1.1b-chat-v1.0.trtfb",
+      "family": "llama",
+      "model_id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+      "revision": "fe8a4ea1ffedaf415f4da2f062534de366a451e6",
+      "soak": {
+        "r1": 512,
+        "r2": 2048,
+        "reservation_target_tokens": null
+      }
+    }
+  }
+}

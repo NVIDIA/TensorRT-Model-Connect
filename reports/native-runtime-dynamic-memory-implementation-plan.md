@@ -17,11 +17,20 @@ trtmc build TinyLlama/TinyLlama-1.1B-Chat-v1.0
 产物仍然是每个模型一个 bundle。用户不需要、也不应该在 build 时选择
 KV cache、context length 或 TensorRT profile。bundle 内部记录模型语义上限
 `M`、prefill 分块上限 `C`、每 token KV 字节数 `B` 和内部 history buckets；
-这些是可执行 contract，不是用户调参。
+这些是可执行 contract，不是用户调参。builder 在 engine bytes 尚未生成时先
+构造内部 provisional contract v1；engine 序列化后，普通的 no-flag build
+会先按 exact plan hashes、完整 qualified runtime stack 和 CUDA module-loading
+mode 查找已有校准记录。TensorRT plan bytes 不是跨 build 稳定标识；若本次
+plan 没有 exact record，builder 会在内部用两个独立进程自动执行全 profile
+驻留校准，再把这一次实际 plan、guarded reserves 和可重放 evidence 一起
+封装为 sealed contract v2。用户仍然只得到一个 bundle，也不需要增加 flag。
+v1 和内部 bootstrap bundle 都不是可发布的产品 bundle。
 
 runtime 才决定本次进程的物理 KV capacity `R`：
 
-- 默认 `auto`：固定 engine 加载后，取安全可用显存的 90%，再受模型上限约束；
+- 默认 `auto`：固定 engine 加载后，从安全可用显存中先扣除当前候选 profile
+  的 calibrated module-residency reserve 和非 KV overhead，再取 90%，最后
+  受模型上限约束；
 - 百分比：例如 `--kv-cache-memory 80%`；
 - 具体值：例如 `--kv-cache-memory 8GiB`；
 - 可另加 `--max-sequence-length 32K`，它是请求 admission 上限 `U`，不是
@@ -35,15 +44,35 @@ runtime 才决定本次进程的物理 KV capacity `R`：
 Qwen bundle 必须能够表达并执行模型的 40,960 context，而不是被某个
 2K/4K profile 伪装成模型能力上限。
 
+这里还有一个容易被误认为“2K context cap”的资源问题：CUDA lazy module
+loading、TensorRT/Myelin tactic 以及 JIT kernel 会在某个 decode profile
+第一次真正执行时才驻留，并可能在 pipeline unload 后继续由进程持有。这个
+开销随候选 `R` 所覆盖的 profile 阶梯变化；它既不是 KV，也不是
+`updateDeviceMemorySizeForShapes()` 返回的 context memory。若 planner 只减去
+固定 512 MiB 或 weight-size 百分比，较大 profile 的首次执行就可能在 KV
+已经占满显存后失败，于是表现成一个隐藏的小 context cap。
+
+最终设计不再使用该经验 cap。每个实际生成的 exact split-plan set 都必须有
+两个独立冷进程的 all-profile two-sweep；已有 exact record 是快速路径，新的
+plan bytes 则在同一次 no-flag build 内自动生成该证据。每个进程在一个
+pipeline、一个 KV allocation 内先按 profile 递增执行 Sweep A，再重复 Sweep
+B。Sweep A 以当前进程 NVML cumulative first-use high-water 得出逐 profile
+的非递减 reserve，两个冷进程逐行取最大值后再加 64 MiB guard；Sweep B
+必须证明第二次遍历的额外进程增长不超过 64 MiB。reserve 是 runtime planning
+headroom，不是预先分配的另一块显存。
+
 显存分配时序如下：
 
-1. 读取 bundle contract，并验证 exact model/revision/config；
-2. 在任何 engine deserialize 或 KV allocation 之前，验证当前真实 target；
-   prototype 至少要求 `sm103 + TensorRT 11.2.0.113`，release 还必须匹配
-   Section 10 固定下来的 CUDA/cuDNN/Frontend/NVRTC/driver tuple；
+1. 读取 sealed v2 bundle contract，并验证 exact model/revision/config；
+2. 在任何 engine deserialize 或 KV allocation 之前，重新 hash bundle 内的
+   `engine_plan`/`prefill_engine_plan` bytes，验证 plan topology、plan-set
+   digest、完整 live runtime stack，以及 `cuModuleGetLoadingMode()` 返回的
+   CUDA loading mode；
 3. 反序列化 split engines，使用 `kUSER_MANAGED` planning contexts 查询
    actual-shape context memory；此时不挂载 context device memory，也不分配 KV；
-4. 读取 post-load free memory，解析 `auto/%/bytes/U`，求出 `R`；
+4. 读取 post-load free memory，解析 `auto/%/bytes/U`，在每次候选 `R`
+   变化时同时选择 covering profile 的 cumulative module-residency reserve，
+   通过单调递减 fixed-point 求解 `R`；
 5. 只分配一次 `R * B` KV slab、精确 staging，以及所有保留 contexts 共用的
    一个 device-memory block；
 6. pipeline 生命周期结束时统一释放。后续请求复用同一 allocation。
@@ -154,9 +183,13 @@ For the two selected model-only paths, the builder must:
 3. verify the graph-config fingerprint and target qualification;
 4. read the model's semantic context limit from model metadata;
 5. choose an internal prefill chunk policy;
-6. build separately optimized prefill and decode execution roles;
-7. write the runtime-memory contract into the bundle;
-8. derive the default output filename.
+6. create the internal provisional-v1 metadata and build separately optimized
+   prefill and decode execution roles;
+7. hash the actual serialized plan sections and match exactly one
+   family-owned runtime-stack/loading-mode calibration record;
+8. seal and write only the validated v2 runtime-memory contract into the user
+   bundle;
+9. derive the default output filename.
 
 The revision is an internal qualification choice, not a new user flag. A local
 snapshot or embedding-API revision only enters this dynamic path when it
@@ -204,10 +237,11 @@ trtmc run qwen3-0.6b.trtfb \
   --max-new-tokens 32
 ```
 
-Default `auto` uses 90% of safely usable GPU memory remaining after fixed
-runtime allocations. The model's semantic limit remains the upper bound, so a
-small model does not allocate otherwise unused hundreds of GiB just because
-the GPU is large.
+Default `auto` applies 90% only after subtracting the safety reserve,
+candidate-dependent exact-plan module-residency headroom, and measured non-KV
+runtime overhead from post-load free memory. The model's semantic limit
+remains the upper bound, so a small model does not allocate otherwise unused
+hundreds of GiB just because the GPU is large.
 
 ### 3.3 Inspectability
 
@@ -224,6 +258,10 @@ active_kv_profile_limits
 qualified_model_revision
 qualified_config_fingerprint
 qualified_runtime_stack
+module_residency_plan_set_sha256
+module_residency_cuda_module_loading_mode
+module_residency_profile_reserves
+module_residency_evidence_sha256
 ```
 
 It must not initialize CUDA, load an engine, or claim a runtime capacity.
@@ -233,8 +271,15 @@ after device selection and allocation:
 
 ```text
 policy
+receipt_schema_version
+contract_version
 post_load_free_bytes
 safety_reserve_bytes
+module_residency_reserve_bytes
+module_residency_reserve_profile_limit
+module_residency_plan_set_sha256
+module_residency_cuda_module_loading_mode
+module_residency_evidence_sha256
 kv_budget_bytes
 runtime_kv_capacity_tokens
 effective_request_limit
@@ -262,9 +307,12 @@ Use the following symbols in code, logs, metadata, and tests:
 | `U` | `request_context_limit` | User/runtime admission | Optional user cap; `U <= M`. It may exceed `R`, in which case runtime resources remain the effective bound. |
 | `B` | `kv_bytes_per_token` | Bundle/runtime validation | Bytes required for one token across all local K and V layers. |
 | `P` | history bucket/profile limit | Internal performance policy | `H/T` range optimized by a prefill or decode execution context. |
+| `Q(r)` | cumulative module-residency reserve | Sealed v2 calibration/runtime planner | Guarded process-owned first-use bytes for the smallest active profile that covers candidate capacity `r`; headroom, not an allocation. |
+| `O(r)` | resident non-KV runtime overhead | TensorRT/backend planner | Actual-shape context memory plus ordinary/external device I/O and graph-private device allocations for candidate capacity `r`. |
 
-The v1 bundle field is named `active_kv_profile_limits` for continuity with
-the prototype, but its selected segmented-attention semantics are history
+The field `active_kv_profile_limits` retains its prototype spelling in both
+the provisional v1 and sealed v2 schemas, but its selected
+segmented-attention semantics are history
 `T` buckets. It must never be interpreted as a second model context limit.
 Here `ceil_bucket(H)` means the smallest declared history bucket greater than
 or equal to `H`. Therefore `H=P` may still bind `T=P`; the next bucket is
@@ -298,8 +346,22 @@ causing an undersized allocation.
 
 ### 5.1 Build-time contract
 
-The bundle records model capability and the execution ABI, not a user memory
-choice:
+The bundle records model capability, execution ABI, and the measured
+first-use module-residency envelope; it does not record a user memory choice.
+There are two deliberately different contract states:
+
+1. `contract_version = 1` is an internal provisional build object. It can be
+   created before TensorRT serialization because it contains only
+   model/config/target facts, `M/C/B`, layout, and profile limits.
+2. `contract_version = 2` is the only product runtime contract. Once both
+   TensorRT plans have been serialized, the builder hashes their exact bytes.
+   It reuses one unique exact calibration record when present; otherwise it
+   invokes the product-owned internal two-process calibrator for those exact
+   bytes. It then adds `module_residency_calibration`, embeds the replayable
+   calibration evidence, validates the complete object, and only then writes
+   the user bundle.
+
+The v1 base has the following shape:
 
 ```text
 {
@@ -331,8 +393,74 @@ choice:
 }
 ```
 
-The exact dtype and byte count come from the actual build. The JSON above is an
-illustration, not a hard-coded Qwen policy.
+The final no-flag product build automatically seals that object as v2:
+
+```text
+{
+  "runtime_memory": {
+    "contract_version": 2,
+    "...all validated v1 fields...": "...",
+    "module_residency_calibration": {
+      "schema_version": 1,
+      "measurement_kind": "nvml_process_cumulative_first_use",
+      "cuda_module_loading_mode": "lazy",
+      "qualified_runtime_stack_sha256": "<sha256>",
+      "plan_set_sha256": "<sha256>",
+      "plans": [
+        {
+          "section_name": "engine_plan",
+          "section_sha256": "<sha256>",
+          "role": "decode",
+          "optimization_profile_count": 8
+        },
+        {
+          "section_name": "prefill_engine_plan",
+          "section_sha256": "<sha256>",
+          "role": "prefill",
+          "optimization_profile_count": 1
+        }
+      ],
+      "profile_reserves": [
+        {
+          "covering_profile_limit": 128,
+          "cumulative_reserve_bytes": "<measured-plus-guard>"
+        },
+        "...one entry for every active_kv_profile_limit...",
+        {
+          "covering_profile_limit": 40960,
+          "cumulative_reserve_bytes": "<measured-plus-guard>"
+        }
+      ],
+      "evidence_sha256": "<sha256>"
+    }
+  }
+}
+```
+
+The exact dtype, byte count, plan hashes, profile count, loading mode, and
+reserve values come from the actual build and qualification evidence. The
+objects above illustrate the schema; they are not hard-coded Qwen policy or a
+claim that the displayed tuple has completed promotion.
+
+v2 validation is strict:
+
+- `plans` is ordered exactly as `engine_plan/decode`, then
+  `prefill_engine_plan/prefill`;
+- decode declares one optimization profile per
+  `active_kv_profile_limits` entry and prefill declares exactly one;
+- `profile_reserves` aligns one-for-one with those active limits, is positive,
+  and is nondecreasing;
+- the runtime-stack digest uses the canonical ordered full stack tuple;
+- the plan-set digest uses the ordered section name, section hash, role, and
+  profile count;
+- `evidence_sha256` is a required lowercase manifest-provenance digest; the
+  product runtime repeats it in schema-v4 receipts. Automatically calibrated
+  bundles also package the bound evidence and two raw captures so promotion
+  can reopen them without a sidecar;
+- an unknown exact raw plan is not assigned a family-wide reserve: it must
+  complete automatic calibration. Missing helpers, failed sweeps, malformed
+  evidence, mismatched records, or ambiguously duplicated records fail the
+  build rather than falling back to an uncalibrated reserve.
 
 Initial internal qualification candidates:
 
@@ -356,6 +484,91 @@ also present for both models so a medium prompt does not jump directly from
 `T=128` to `T=512`. Neither change is user-visible or reduces `M`; both must
 still pass the complete fresh-build correctness, plan-size, and performance
 matrix before the candidate is promoted.
+
+#### 5.1.1 Hidden-cap root cause and calibration
+
+The remaining apparent context cap was not a 2K/4K TensorRT legality limit and
+was not growth of the runtime-owned KV slab. CUDA lazy module loading means
+that code backing TensorRT/Myelin tactics can become device-resident only
+when a profile executes for the first time. A memory planner that sampled
+free memory after deserialization, allocated nearly all of the remainder to
+KV, and reserved no profile-specific first-use headroom could therefore load
+successfully and later OOM exactly when decode crossed into a larger profile.
+That failure looked like a maximum-token cap even though:
+
+- the serialized decode profiles still reached `M`;
+- the KV allocation ID, base address, and `R * B` reservation remained stable;
+- retained process memory increased at first profile use rather than once per
+  decode token; and
+- a second execution of the same profile set showed only bounded incremental
+  growth.
+
+This is CUDA/TensorRT/Myelin module residency, not a KV leak. A single global
+allowance such as `max(512 MiB, 5% of resident weights)` is also insufficient:
+the first-use amount is plan- and profile-dependent and can accumulate as new
+profiles become active.
+
+The canonical calibration protocol for one exact plan set is:
+
+1. run two fresh, independent runner processes on the qualified stack and
+   verify distinct PIDs plus the same GPU identity;
+2. in each process, load one sealed candidate bundle exactly once, allocate
+   one KV slab, and capture the synchronized process/device baseline
+   immediately after runtime KV allocation;
+3. Sweep A visits every decode profile in ascending order. For every profile
+   `i`, use the deterministic upper-edge prompt `P[i]-1`, require it to remain
+   strictly above `P[i-1]`, then run one decode token. A small shape that merely
+   selects profile 0 is insufficient because it may not trigger the modules
+   needed near that profile's upper boundary. The terminal row is therefore
+   `M-1` plus one decode token and reaches `A=M`. Record the cumulative
+   current-process NVML and device-wide first-use high-water after each row;
+4. Sweep B repeats the same rows in the same process and requires the same
+   selected token IDs, complete float32 logits, invocation tuples, exact
+   profile IDs, and stable KV allocation ID. Its incremental
+   current-process high-water must be at most 64 MiB;
+5. combine the two independent processes row-by-row. For profile `i`, let
+   `N_i` be the maximum cumulative current-process first-use bytes across the
+   two processes. The required reserve is:
+
+   ```text
+   Q_i = max(Q_(i-1), N_i + 64 MiB)
+   ```
+
+   Device-wide maxima remain recorded for attribution, but unrelated device
+   activity cannot inflate the process-owned reserve. The configured
+   `cumulative_reserve_bytes` for every row must be at least `Q_i`;
+6. write the calibration evidence and raw-capture identities, then bind its
+   provenance digest, exact plan-set SHA, complete qualified-stack SHA, and
+   actual `cuModuleGetLoadingMode()` result into the v2 record. Runtime checks
+   the plan/stack/loading-mode bindings and propagates the evidence digest;
+   source-bound qualification, not product inference, must reopen the
+   referenced evidence and raw captures.
+
+For a new raw plan set, this protocol is part of the private build
+implementation. The builder first writes an ephemeral, exact-plan bootstrap
+bundle with a one-byte placeholder reserve solely so the internal runner can
+load the plans under an explicit `R=M` admission. That placeholder is never
+published. Only after both independent captures pass does the builder derive
+the nondecreasing guarded rows, seal final v2, embed the replay inputs, and
+write the requested output. Any calibration failure removes the temporary
+bundle and leaves no final output.
+
+Both the base bundle and the developer-only `C/2` plan set need their own
+calibration. A reserve measured for different plan bytes, profile topology,
+runtime stack, or loading mode is invalid even when the model ID is the same.
+
+The normal user command remains only `trtmc build <model>`. The builder creates
+the provisional object, takes the exact-record fast path when possible, and
+otherwise performs the private calibration plus v2 sealing internally without
+a context, KV, profile, calibration, or reseal flag. This can make the first
+build of previously unseen plan bytes slower, but it never turns a user memory
+choice into bundle metadata. The separate
+`tools/seal_native_dynamic_memory_bundle.py` path exists only to bootstrap
+qualification of an already-produced provisional v1 artifact: it streams the
+unchanged payload into a new bundle while replacing the header, refuses to
+overwrite the input or accept an already-v2 bundle, and emits a reseal
+receipt. A bootstrap-resealed artifact is not the release user flow and cannot
+replace a fresh no-flag product build in promotion evidence.
 
 The TensorRT profile envelope uses:
 
@@ -409,11 +622,12 @@ decode KV copy.
 
 The runtime loads both plans before measuring post-load free memory. Therefore
 their duplicated resident weights are accounted for before the default 90%
-KV budget is chosen. Record that weight cost in the memory receipt and compare
-it with a one-engine/multi-profile experiment; a later packaging optimization
-may use one serialized engine only if it passes the same split-performance
-gates. It is not required for dynamic memory and is not exposed as a user
-choice.
+fraction is applied; candidate-specific `Q(R)` and `O(R)` are then deducted as
+defined in Section 5.7. Record that weight cost in the memory receipt and
+compare it with a one-engine/multi-profile experiment; a later packaging
+optimization may use one serialized engine only if it passes the same
+split-performance gates. It is not required for dynamic memory and is not
+exposed as a user choice.
 
 The user never selects this packaging.
 
@@ -634,9 +848,10 @@ This keeps position-encoding activation proportional to `C`, not `M`.
 The model-native runtime owns the default KV allocation. TensorRT receives
 external bindings and must not allocate a duplicate profile-MAX input buffer.
 
-The contiguous-v1 cache is physical token-major order inside each layer K or V
-span. Engine execution reads history and writes only an exact-size staging
-span; the runtime commit then appends current rows:
+The `contiguous_runtime_v1` KV layout carried by the sealed-v2 contract is
+physical token-major order inside each layer K or V span. Engine execution
+reads history and writes only an exact-size staging span; the runtime commit
+then appends current rows:
 
 ```text
 cache_k_i input       -> layer K span, bound history view [T, Hkv*D]
@@ -675,13 +890,19 @@ pointer; cache ownership is independent of engine-role specialization.
 The runtime load sequence is:
 
 ```text
+parse sealed contract v2
+        |
+hash exact plan sections and validate plan topology/set digest
+        |
+validate the complete live runtime stack and CUDA module-loading mode
+        |
 deserialize engine and load weights
         |
 create USER_MANAGED execution contexts without device-memory blocks
         |
 query free memory after fixed engine/plugin allocations
         |
-derive a tentative R from policy, M, and U
+derive a tentative R from policy, M, U, and calibrated Q(R)
         |
 enumerate every Sq/T shape reachable by the native chunk/decode scheduler
         |
@@ -702,17 +923,26 @@ This is a bounded, decreasing solve rather than a one-time
 `cudaMemGetInfo()` snapshot. Let:
 
 ```text
-F = free bytes after engine weights and fixed plugin state
+F1 = free bytes after engine weights and fixed plugin state
+F2 = free bytes after the tentative O(resident) reservation
+Q(r) = cumulative first-use module-residency reserve for the smallest
+       calibrated covering profile P >= r
 O(r) = max context device-memory block for capacity r
        + external device output buffers
        + graph-private device allocations reserved up front
+O(resident) = tentative non-KV overhead already reflected in F2
 S = safety reserve bytes
 ```
 
-For a percentage `a`, start with:
+`Q(r)` comes from the exact v2 plan calibration. It is headroom, not a second
+allocation, and the lookup uses the smallest declared
+`active_kv_profile_limit >= r`; a synthetic clipped terminal bucket must not
+select a smaller reserve.
+
+For a percentage `a`, first establish an upper bound:
 
 ```text
-r0 = min(M, U if specified, floor(a * max(0, F - S) / B))
+r0 = min(M, U if specified, floor(a * max(0, F1 - S) / B))
 ```
 
 For each candidate `rn`, query TensorRT across the complete finite set of
@@ -723,7 +953,7 @@ rn+1 = min(
     rn,
     M,
     U if specified,
-    floor(a * max(0, F - S - O(rn)) / B)
+    floor(a * max(0, F1 - S - Q(rn) - O(rn)) / B)
 )
 ```
 
@@ -732,6 +962,26 @@ If tactic/profile discontinuities prevent convergence within a small fixed
 iteration count, evaluate the remaining lower bucket boundaries and choose the
 largest plan whose measured allocation fits. Never increase `R` during this
 solve.
+
+After the tentative `O(resident)` block is materialized, synchronize and take
+`F2`. The second fixed-point charges only overhead not already present in that
+snapshot:
+
+```text
+delta_O(rn) = max(0, O(rn) - O(resident))
+
+rn+1 = min(
+    rn,
+    M,
+    U if specified,
+    floor(a * max(0, F2 - S - Q(rn) - delta_O(rn)) / B)
+)
+```
+
+This avoids double-charging the resident context/output block while still
+reserving code memory that may appear only when a later decode profile first
+executes. Neither the second snapshot nor the later settled snapshot may
+increase `R`.
 
 The context envelope must not assume that
 `updateDeviceMemorySizeForShapes()` is monotonic between TensorRT profile
@@ -745,8 +995,8 @@ sweep; a later invocation still re-queries its exact shape and fails closed if
 the backend violates the proven envelope.
 
 Default `a` is `0.90`. The percentage applies to safely usable memory after
-non-KV runtime overhead, not to total device memory and not to the
-pre-engine-load free-memory reading.
+candidate-dependent module residency and non-KV runtime overhead, not to total
+device memory and not to the pre-engine-load free-memory reading.
 Treat the accepted binary64 value of `a` as an exact integer ratio and perform
 the multiply-and-floor with integer arithmetic; a rounded floating-point
 product must never allocate even one byte above that ratio. Serialize
@@ -758,8 +1008,10 @@ Explicit bytes:
 - first cap the requested budget by `M * B` and, when present, `U * B`; this
   avoids allocating rows the single-pipeline beta can never address;
 - convert that semantically useful byte ceiling into `R`;
-- query `O(R)` before allocating the context block or KV;
-- require `R * B + O(R) <= F - S`;
+- select `Q(R)` and query `O(R)` before allocating the context block or KV;
+- require `R * B + Q(R) + O(R) <= F1 - S`;
+- after the tentative overhead reservation, require
+  `R * B <= F2 - S - Q(R) - max(0, O(R) - O(resident))`;
 - round down by at most one token row;
 - fail clearly if fewer than one token row fits;
 - do not silently shrink `R` because of memory pressure.
@@ -793,7 +1045,8 @@ blocks to the final envelope, synchronize, and keep the already-decreased
 `R`. Do not retain a hidden `C*B` staging allocation while reporting
 `min(C,R)*B`, and do not use newly freed bytes to increase `R` again.
 
-Receipt schema v3 gives the two synchronized snapshots distinct meanings:
+Receipt schema v4 gives the two synchronized snapshots distinct meanings and
+binds the selected calibration:
 
 - `capacity_decision_*` is sampled after the tentative context/output
   reservation and is the only second snapshot used to derive the final `R`
@@ -801,9 +1054,19 @@ Receipt schema v3 gives the two synchronized snapshots distinct meanings:
 - `settled_*` reuses the synchronized `after runtime KV allocation` boundary
   after any smaller context/staging replacement and the final KV slab are all
   resident. It reports actual settled residency and never feeds another solve;
-- schema-v2 `final_*` remains only as an explicitly deprecated alias of
+- legacy `final_*` remains only as an explicitly deprecated alias of
   `capacity_decision_*`, preserving evidence compatibility without presenting
   it as settled state.
+- `module_residency_reserve_bytes` and
+  `module_residency_reserve_profile_limit` report the actual `Q(R)` row;
+- `module_residency_plan_set_sha256`,
+  `module_residency_cuda_module_loading_mode`, and
+  `module_residency_evidence_sha256` bind the receipt to the sealed v2
+  provenance;
+- `capacity_decision_resident_overhead_bytes` and
+  `final_non_kv_overhead_delta_bytes` show the two-stage overhead accounting;
+  `measurement_sources` identifies the plan-bound calibration lookup and
+  every synchronized CUDA/ledger source.
 
 If settled sampling fails, product inference may continue with `settled_*`
 set to `null` and a typed unavailable reason, but qualification fails closed.
@@ -817,7 +1080,8 @@ pipeline destruction.
 
 Opt in to user-managed actual-shape allocation only when all are true:
 
-- the bundle declares `runtime_memory.contract_version = 1`;
+- the product bundle declares sealed `runtime_memory.contract_version = 2`
+  with a complete exact-plan module-residency calibration;
 - the selected backend is standard TensorRT;
 - the runtime satisfies the pinned TensorRT 11.2 capability check;
 - the engine was built with runtime activation resize enabled.
@@ -1007,46 +1271,43 @@ in Section 12.
 
 ### Current qualification status
 
-The former `Sq=1` blocker is resolved in the component implementation by
-replacing separate max/sum-exp optional outputs with the standard cuDNN LSE
-statistics path. Cold private-cache plugin execution reaches Qwen
-`T=40,960, H=40,959, Sq=1` without a compilation failure.
+The implementation now contains the provisional-v1/sealed-v2 builder split,
+strict Python and C++ contract parsing, exact plan/runtime-stack/loading-mode
+validation before engine deserialization, profile-indexed reserve plumbing,
+the two-stage fixed-point solver, receipt schema v4, and an all-profile
+two-process qualification producer. The former `Sq=1` component blocker is
+also addressed by the standard cuDNN LSE statistics path.
 
-The clean `0639f7ab` candidate built all six required artifacts: no-flag
-dynamic, exact-head static split, and source-bound `C/2` bundles for both
-models. Its fixed manifest passed 161 CTests, 22 dynamic-memory CTests, 290
-selected dynamic-memory pytest nodes, and both real TensorRT graph tests.
-Those results are diagnostic rather than promotable because the formal
-correctness producer compared a device-wide CUDA delta with a current-process
-NVML delta while unrelated GPU processes were changing. The signed mismatch
-changed direction across otherwise identical runs, so increasing the
-tolerance would be incorrect. The formal performance producer also exposed
-two product defects: `cuda_jit_cache` was not emitted at the top-level schema
-required by its consumer, and the Qwen dynamic prefill plan retained a second
-copy of the tied 151,936-by-1,024 vocabulary matrix, causing an approximately
-11.4% MEM-13 packaging regression.
+Earlier diagnostic runs proved that the Qwen plans contain and can exercise
+the 32K and 40,960 paths and that TinyLlama can reach 2,048. They also exposed
+the profile-crossing failure described in Section 5.1.1: cold first use of
+additional CUDA/TensorRT/Myelin profile code consumed memory that the old
+90%-of-free calculation had already given to KV. Stable KV allocation
+evidence contradicts the KV-leak hypothesis, but those older artifacts predate
+the sealed-v2 source state and cannot promote it.
 
-The current review candidate fixes the producer schema, records independently
-attributable CUDA/NVML scopes at every synchronized boundary, preserves all
-runner evidence on failure, and reuses the Qwen embedding tensor for the LM
-head only after shape, dtype, and bit-exact transpose validation. It also
-fail-closes the core/backend/model-plugin ABI boundary, binds the fixed test
-manifest to exact mapped build artifacts, and adds a GQA-aware direct
-`Sq=1, P<=512` decode kernel while retaining the standard-LSE cuDNN path for
-larger history profiles and all prefill work. The integrated dirty review
-source passes 162/162 CTests, all 24 dynamic-memory CTests, all 549 selected
-dynamic-memory pytest nodes, and both real TensorRT graph tests. CUDA
-memcheck/racecheck report no errors or hazards for the direct decode path; its
-same-GPU component microbenchmark improves from a 40.3789 microsecond median
-to 11.6749 microseconds. The independent CUDA-13.0 NVRTC negative replay also
-passes every component gate while remaining explicitly non-promotable because
-the source is dirty.
+Four qualification-only bootstrap plan sets have now passed the canonical
+calibration protocol: Qwen base, Qwen `C/2`, TinyLlama base, and TinyLlama
+`C/2`. For each exact plan set, two independent processes completed ascending
+Sweep A and equivalent Sweep B, the terminal row reached `A=M`, and every
+configured reserve covered the recomputed process-owned row maximum plus the
+64 MiB guard. These ignored-artifact receipts validate the candidate reserve
+tables and the profile-crossing fix; they do not turn bootstrap-resealed
+bundles into product builds.
 
-These component and diagnostic results do not replace the source-bound model
-matrix. This source state has not yet completed the clean exact-HEAD
-40,960/2,048 correctness, pressure, soak, surface, isolation, and end-to-end
-performance receipts. Therefore the current answer remains “implementation
-candidate,” not “qualified full-context support.”
+Runtime validation of the current schema proves that `evidence_sha256` is a
+well-formed value selected by the exact calibration record; it does not by
+itself prove that an evidence file still exists or matches that digest.
+Promotion remains responsible for reopening the source-bound calibration
+report and both raw process captures and for binding those file identities to
+the same clean source and fresh no-flag bundle SHA.
+
+This source state has not yet repeated those four calibration passes from
+fresh no-flag bundles on one clean exact HEAD, nor completed the clean
+exact-HEAD 40,960/2,048 correctness, pressure, soak, surface, isolation, and
+end-to-end performance receipts or the required consecutive external
+nightlies. Therefore the current answer remains “implementation candidate,”
+not “qualified full-context support.”
 
 One final clean HEAD must regenerate both dynamic bundles, both exact-head
 static baselines, both `C/2` variants, every
@@ -1079,16 +1340,27 @@ families:
 python/tensorrt_model_connect/dynamic_memory_contract.py
 python/tensorrt_model_connect/families/qwen/MODEL.toml
 python/tensorrt_model_connect/families/llama/MODEL.toml
+python/tensorrt_model_connect/families/qwen/MODULE_RESIDENCY_CALIBRATIONS.json
+python/tensorrt_model_connect/families/llama/MODULE_RESIDENCY_CALIBRATIONS.json
+tools/seal_native_dynamic_memory_bundle.py
 ```
 
 Responsibilities:
 
 - read and validate `M` from the pinned model revision, including any
   family-qualified RoPE scaling semantics;
-- select family-owned `C` and history-extent buckets (serialized in contract
-  v1 as `active_kv_profile_limits`);
+- select family-owned `C` and history-extent buckets, serialized as
+  `active_kv_profile_limits`;
 - calculate and serialize `B`;
-- emit contract version and layout;
+- create provisional v1 before engine serialization, then either match exact
+  plan hashes or automatically calibrate the newly serialized plan set before
+  sealing product contract v2;
+- discover a product-owned internal calibrator without exposing a public flag,
+  run exactly two independent all-profile processes, embed replayable evidence,
+  and fail without publishing the output if any calibration gate fails;
+- validate exact schema keys, canonical runtime-stack/plan-set digests,
+  profile topology, nondecreasing profile reserves, loading mode, and evidence
+  SHA;
 - match canonical model ID, resolved revision, graph-config fingerprint, and
   target platform against a model-owned qualification profile;
 - select the native implementation only after that exact match;
@@ -1229,8 +1501,9 @@ Responsibilities:
   `format/strides`, `alignment`, `device`, and `owner/lifetime`;
 - bind read-only cache history inputs to the persistent allocation and
   exact-shape current K/V outputs to the shared staging allocation;
-- require `kLINEAR` cache I/O for v1, or calculate required bytes from actual
-  strides rather than assuming contiguous rows;
+- require `kLINEAR` cache I/O for the `contiguous_runtime_v1` layout, or
+  calculate required bytes from actual strides rather than assuming
+  contiguous rows;
 - reject any PluginV3 cache alias metadata in the qualified engine and verify
   that every declared current-K/V output has the expected mode, dtype, rank,
   and dynamic `Sq`;
@@ -1269,12 +1542,17 @@ Responsibilities:
   helper;
 - exact bytes-per-token validation;
 - safety reserve;
-- auto/percentage/bytes resolution;
+- exact-plan profile-residency reserve selection;
+- bounded decreasing auto/percentage/bytes fixed-point resolution that
+  charges `Q(R)` and only the positive post-reservation `O(R)` delta;
 - runtime admission;
-- structured memory receipt;
+- structured receipt schema v4 with selected reserve/profile and
+  plan-set/loading-mode/evidence provenance;
 - exact live-target validation before deserialization: query the current CUDA
-  device compute capability and the four-component version from the actually
-  loaded `libnvinfer`, then require `sm103` and `11.2.0.113`;
+  device compute capability and the complete runtime stack from the actually
+  loaded runtime components, then match the sealed calibration stack;
+- recompute both plan-section hashes and query `cuModuleGetLoadingMode()`
+  before engine deserialization;
 - allocator injection for tests and future embedding APIs;
 - deterministic error objects/messages.
 
@@ -1428,7 +1706,7 @@ tests/builder/test_runtime_memory_contract.py
 tests/builder/test_runtime_kv_plugins.py
 tests/builder/test_dynamic_memory_qualification.py
 tests/e2e/test_native_dynamic_memory_graph.py
-tests/qualification/native_dynamic_memory_qualify.cpp
+tools/src/native_dynamic_memory_calibrator.cpp
 tests/qualification/native_dynamic_memory_surfaces.cpp
 tools/build_native_dynamic_memory_chunk_variant.py
 tools/capture_dynamic_memory_test_manifest.py
@@ -1439,6 +1717,7 @@ tools/qualify_native_dynamic_memory_perf.py
 tools/qualify_native_dynamic_memory_policies.py
 tools/qualify_native_dynamic_memory_soak.py
 tools/qualify_native_dynamic_memory_surfaces.py
+tools/seal_native_dynamic_memory_bundle.py
 tests/tools/test_build_native_dynamic_memory_chunk_variant.py
 tests/tools/test_capture_dynamic_memory_test_manifest.py
 tests/tools/test_capture_native_dynamic_memory_perf.py
@@ -1448,6 +1727,7 @@ tests/tools/test_qualify_native_dynamic_memory_perf.py
 tests/tools/test_qualify_native_dynamic_memory_policies.py
 tests/tools/test_qualify_native_dynamic_memory_soak.py
 tests/tools/test_qualify_native_dynamic_memory_surfaces.py
+tests/tools/test_seal_native_dynamic_memory_bundle.py
 tests/tools/test_package_cuda_runtime_metadata.py
 ```
 
@@ -1504,6 +1784,13 @@ or ELF DSO, and scans defined ELF dynamic symbols without a directory or
 basename allowlist. Path-swap, deleted-map, duplicate-name, renamed-plugin,
 wrong-model, and stale-backend evidence all fail closed.
 
+Canonical correctness also launches the all-profile runner twice in distinct
+processes for the base and `C/2` bundles. The validator reopens both raw
+captures, checks the complete Sweep A/B protocol, recomputes the row-wise
+current-process maxima and 64 MiB guards, and requires the sealed v2 reserve
+at every covering profile to be large enough. This evidence is additional to,
+not a replacement for, the ordinary HF parity and memory-slope matrix.
+
 ## 8. Implementation phases
 
 ### Phase 0: focused TensorRT spikes
@@ -1555,7 +1842,10 @@ Exit criteria:
 
 Implement:
 
-- bundle metadata split into `M`, `C`, `B`, layout, and buckets;
+- provisional v1 metadata split into `M`, `C`, `B`, layout, and buckets;
+- automatic exact-plan sealed v2 product contract, an exact-record fast path,
+  private per-build calibration for new raw plans, and pre-deserialization
+  plan/stack/loading-mode validation;
 - exact model/revision/config/platform qualification records;
 - typed runtime memory policy;
 - shared budget/admission code;
@@ -1564,7 +1854,7 @@ Implement:
 - backend deferred external bindings;
 - user-managed context memory;
 - activation-resize builder feature;
-- structured receipts;
+- structured receipt schema v4 with module-residency provenance;
 - old-bundle and TensorRT-RTX compatibility;
 - all target routing still disabled.
 
@@ -1587,7 +1877,10 @@ Implement:
 - dynamic-position RoPE;
 - read-only segmented attention and current-row-only KV commit;
 - runtime bucket selection;
-- removal of the 4,096 cap.
+- removal of the 4,096 graph cap;
+- profile-indexed cumulative first-use reserve and the two-stage fixed-point
+  solve, so crossing into a larger profile does not reintroduce a resource
+  cap after load.
 
 Exit criteria:
 
@@ -1596,6 +1889,8 @@ Exit criteria:
   position;
 - context memory follows the measured actual-`Sq/T` envelope and does not
   allocate for profile `M`;
+- two independent all-profile processes prove every v2 reserve row covers the
+  observed process-owned first-use maximum plus 64 MiB;
 - no `[M, M]` mask/score allocation exists;
 - no full-history concatenate/copy exists;
 - prefill/decode share one KV allocation;
@@ -1674,8 +1969,8 @@ output, or layout flags. Every runtime row reuses the same bundle SHA.
 
 | ID | Test | Required result |
 |---|---|---|
-| UX-01 | `trtmc build <model>` | Deterministic output bundle; no user build-time context decision. |
-| UX-02 | Static `trtmc inspect` | Shows contract, `M/C/B/layout/buckets`, revision, and fingerprint without initializing CUDA; no runtime-budget claim or 4,096 Qwen product cap. |
+| UX-01 | `trtmc build <model>` | One sealed-v2 output bundle bound to the actual serialized plans; provisional-v1 creation, exact-record lookup, optional private calibration, and final sealing are automatic, with no user build-time context or calibration decision. Raw TensorRT bytes are not falsely claimed to be reproducible across separate builds. |
+| UX-02 | Static `trtmc inspect` | Shows v2 contract, `M/C/B/layout/buckets`, revision, fingerprint, plan-set/loading-mode provenance, and profile reserves without initializing CUDA; no runtime-budget claim or 4,096 Qwen product cap. |
 | UX-03 | Run `auto`, percentage, bytes, and runtime max sequence | Same bundle SHA and mtime; no rebuild; load-time receipt reports the resolved device values. |
 | UX-04 | Same greedy request under different sufficient budgets | Identical generated token IDs and qualified logits. |
 | UX-05 | Set equivalent policy through CLI, C++, C ABI, and Python | Same resolved `R`, admission result, and receipt fields. |
@@ -1780,13 +2075,22 @@ Every receipt emits the following schema fields; unavailable observations are
 explicitly `null` rather than fabricated:
 
 ```text
+receipt_schema_version = 4
+contract_version = 2
 serialized_plan_bytes
 resident_weight_bytes
 resident_weight_copy_count
 engine_weight_bytes
+module_residency_reserve_bytes
+module_residency_reserve_profile_limit
+module_residency_plan_set_sha256
+module_residency_cuda_module_loading_mode
+module_residency_evidence_sha256
 capacity_decision_free_bytes
 capacity_decision_total_bytes
 capacity_decision_device_used_bytes
+capacity_decision_resident_overhead_bytes
+final_non_kv_overhead_delta_bytes
 settled_free_bytes
 settled_total_bytes
 settled_device_used_bytes
@@ -1815,6 +2119,15 @@ after a downward envelope replacement, but it cannot increase `R`. The
 deprecated `final_*` fields equal `capacity_decision_*` byte-for-byte and must
 not be interpreted as settled residency.
 
+`module_residency_reserve_bytes` is the cumulative calibrated `Q(R)` selected
+from the smallest covering active profile; it is reserved headroom and must
+not appear as an allocator-owned buffer. The accompanying profile limit,
+plan-set hash, loading mode, and evidence hash must equal the sealed v2
+contract. `capacity_decision_resident_overhead_bytes` is already reflected in
+the second free-memory sample, so only
+`final_non_kv_overhead_delta_bytes = max(0, O(final)-O(resident))` is deducted
+again.
+
 `ordinary_device_input_bytes` and `ordinary_device_output_bytes` are the
 per-module/context high-water device capacities materialized for ordinary
 dynamic TensorRT I/O after the post-load snapshot. They exclude static I/O,
@@ -1833,7 +2146,7 @@ Required gates:
 | ID | Test | Required result |
 |---|---|---|
 | MEM-01 | Allocation timeline | KV policy resolves only after engine weight memory and queried/reserved non-KV overhead are known. |
-| MEM-02 | Default auto | Uses 90% of safe post-load free memory, capped by `M`. |
+| MEM-02 | Default auto | Uses 90% only after safety, candidate `Q(R)`, and measured non-KV overhead deductions; result is capped by `M`. |
 | MEM-03 | Percentage/bytes | Allocation stays within policy; rounding loses at most one row. |
 | MEM-04 | Large budget plus small `U` | Allocate only `min(R, U)` token rows. |
 | MEM-05 | Small runtime capacity in full-`M` bundle | Allocation equals runtime `R`, with no profile-MAX cache allocation. |
@@ -1846,6 +2159,8 @@ Required gates:
 | MEM-12 | Active `A` grows while physical `R` is fixed | Both paths use cold `T=1` or `T=P=min(ceil_bucket(H), R)`; allocation ID, base pointer, and reserved KV bytes stay fixed across history-bucket transitions. |
 | MEM-13 | Engine packaging A/B | Shared-engine path has one resident weight copy. Separate-plan fallback has at most two and does not exceed the exact-head static split baseline's plan/resident-weight bytes by more than 5%; weight streaming must be disabled. |
 | MEM-14 | Context memory receipt | Reported `context_device_memory_bytes` equals the selected maximum `updateDeviceMemorySizeForShapes()` result; no invented activation/workspace split. |
+| MEM-15 | Two-process all-profile first-use calibration | Two independent PIDs each pass ascending Sweep A and equivalent Sweep B; every configured cumulative profile reserve covers the row-wise process maximum plus 64 MiB and the terminal row reaches `A=M`. |
+| MEM-16 | Exact calibration/runtime binding | Before deserialization, actual plan-section hashes, canonical plan-set/topology, full live runtime stack, and `cuModuleGetLoadingMode()` match sealed v2; schema-v4 receipt repeats the selected reserve/profile and provenance exactly. |
 
 MEM-06 is evaluated only from actual-shape
 `updateDeviceMemorySizeForShapes()` observations. For each role independently,
@@ -1890,7 +2205,7 @@ values. A mismatch fails the qualified build; it may not silently alias
 independent weights. The real-plan accounting gate, not source inspection,
 must prove that this removes the duplicate resident vocabulary matrix.
 
-For contiguous-v1:
+For the `contiguous_runtime_v1` KV layout inside a sealed-v2 bundle:
 
 ```text
 kv_reserved_bytes == R * B
@@ -1952,24 +2267,26 @@ cold driver/JIT allocation and its later release described below. A cold-start
 observation is not made non-gating merely by labelling it warm-up.
 
 The cold-start unload boundary must reconcile independently. One-time
-process-global TensorRT/CUDA initialization retained into the measured
-baseline is capped at `max(512 MiB, 5% of resident_weight_bytes)`, recorded
-explicitly, and included in the measured lifetime's pre-engine baseline. This
-floor is evidence-based rather than an allocation request: three isolated
-TinyLlama processes retained exactly 400,556,032 process bytes and isolated
-Qwen retained 513,802,240 bytes after its first load/unload. A cold-only
-driver/JIT allocation that NVML device accounting does not charge to the
-process ledger is allowed only when the visible other-compute-process ledger
-is empty, its signed delta persists from both cold peak boundaries through
-cold unload, and it is at most 2 GiB. The measured lifetime may retain at most
-64 MiB of process memory after unload; a negative unlisted delta is accepted
-only as an explicitly bounded release of that previously proven cold driver
-allocation. The cold unload and measured pre-load samples must otherwise
-reconcile under the same `max(64 MiB, 2%)` attribution rule. Missing
-attribution fields, duplicated boundaries, unstable brackets, output drift,
-excessive retention, or a larger unexplained residual fail closed. Full-GPU
-qualification is required; MIG is rejected until CUDA-instance-to-NVML-instance
-attribution is implemented.
+process-global TensorRT/CUDA/Myelin module residency retained into the
+measured baseline is bounded by the cold lifetime receipt's exact
+`module_residency_reserve_bytes`, selected from the covering profile row and
+bound to the plan-set, evidence, stack, and CUDA loading mode. The former
+`max(512 MiB, 5% of resident_weight_bytes)` allowance is not used: it was an
+empirical global cap and did not represent the stepwise first-use cost of the
+profiles actually exercised.
+
+A cold-only driver/JIT allocation that NVML device accounting does not charge
+to the process ledger remains a separate attribution category. It is allowed
+only when the visible other-compute-process ledger is empty, its signed delta
+persists from both cold peak boundaries through cold unload, and it is at most
+2 GiB. The measured lifetime may retain at most 64 MiB of process memory after
+unload; a negative unlisted delta is accepted only as an explicitly bounded
+release of that previously proven cold driver allocation. The cold unload and
+measured pre-load samples must otherwise reconcile under the same
+`max(64 MiB, 2%)` attribution rule. Missing attribution fields, duplicated
+boundaries, unstable brackets, output drift, excessive retention, or a larger
+unexplained residual fail closed. Full-GPU qualification is required; MIG is
+rejected until CUDA-instance-to-NVML-instance attribution is implemented.
 
 The Python producer performs TensorRT engine inspection before it launches a
 runner, so canonical qualification isolates those two processes on different
@@ -2050,6 +2367,9 @@ Reject before attention execution:
   reporting capacity tokens, required bytes, and budget bytes;
 - `prompt + max_new_tokens > effective_request_limit`, reporting all values;
 - a contract claiming `M` that its engine profiles cannot cover;
+- a leaked provisional-v1 dynamic bundle, an unsealed/malformed v2 bundle, or
+  any v2 plan hash, plan topology, runtime-stack digest, malformed evidence
+  digest, or CUDA module-loading-mode mismatch;
 - dynamic-memory options on an old/static bundle;
 - multi-lane dynamic use before device-pool partitioning is implemented.
 
@@ -2062,8 +2382,8 @@ engine cannot execute a model-valid 40K request, the bundle is unqualified.
 |---|---|---|
 | PR CPU | CLI parsing, budget properties, overflow, admission, metadata, routing, legacy contract, public-help surface | Required |
 | PR synthetic TensorRT GPU | Dynamic shapes, user-managed context, external input/output binding, red zones, fused attention, no dense mask | Required |
-| PR exact-head model proof | Two no-flag builds, short HF parity, bucket boundaries, two runtime budgets, SHA receipts | Required |
-| Nightly GB300 | Qwen 32K/40K, TinyLlama 2K, memory slope, pressure, performance, soak | Required for promotion |
+| PR exact-head model proof | Two no-flag sealed-v2 builds, short HF parity, bucket boundaries, two runtime budgets, exact-plan/two-process all-profile receipts | Required |
+| Nightly GB300 | Qwen 32K/40K, TinyLlama 2K, first-use reserve replay, memory slope, pressure, performance, soak | Required for promotion |
 | Release qualification | Every advertised SM/TensorRT/CUDA/cuDNN/Frontend/NVRTC/driver tuple | Required for release claim |
 
 Primary implementation platform:
@@ -2105,6 +2425,24 @@ are not model build options. Its build action:
 3. executes the exact argv itself;
 4. requires the source snapshot to be unchanged afterward;
 5. records command, log, bundle, source, and tool hashes.
+
+The bootstrap reseal tool is deliberately outside that product producer.
+When bringing up a previously serialized exact plan set for the first
+calibration only, qualification may run:
+
+```bash
+python tools/seal_native_dynamic_memory_bundle.py \
+  --input <provisional-v1.trtfb> \
+  --output <qualification-only-sealed-v2.trtfb> \
+  --family <qwen-or-llama>
+```
+
+This command does not add a supported build flag and does not mutate the
+input. It must match an exact family calibration record, stream/hash the
+existing plan sections, atomically write a distinct output, and emit a
+receipt. It exists to break the initial qualification bootstrap cycle; all
+promotion bundles must still come from the ordinary fresh no-flag
+`trtmc build <model>` path, whose builder seals v2 automatically.
 
 The historical optional-output failure also has an executable, fail-closed
 diagnostic. It deliberately retains the qualified product stack
@@ -2238,9 +2576,13 @@ Each hardware receipt contains:
   source digest manifest; the pre-build and post-proof snapshot digests must
   match;
 - bundle SHA and model revision;
+- sealed contract version, ordered split-plan section hashes, canonical
+  plan-set digest, and calibration evidence digest;
 - GPU, SM, TensorRT, CUDA, and driver versions;
 - cuDNN backend version and cuDNN Frontend revision;
 - resolved NVRTC and NVRTC-builtins paths, versions, and SHA-256 digests;
+- actual CUDA module-loading mode plus both independent all-profile Sweep A/B
+  capture sets and the recomputed guarded profile-reserve table;
 - selected execution-plan identity for every exercised `Sq/T` geometry and
   whether its JIT cache was cold or warm;
 - exact build and runtime commands;
@@ -2259,13 +2601,23 @@ nightlies on the primary platform.
 Example successful load:
 
 ```json
-[trtmc.memory] {"policy":"auto","policy_fraction":0.90,
+[trtmc.memory] {"receipt_schema_version":4,"contract_version":2,
+"policy":"auto","policy_fraction":0.90,
 "model_context_limit":40960,"prefill_chunk_limit":1024,
 "post_load_free_bytes":292367106048,"safety_reserve_bytes":67108864,
+"module_residency_reserve_bytes":1879048192,
+"module_residency_reserve_profile_limit":40960,
+"module_residency_plan_set_sha256":"<sha256>",
+"module_residency_cuda_module_loading_mode":"lazy",
+"module_residency_evidence_sha256":"<sha256>",
 "kv_bytes_per_token":114688,"kv_budget_bytes":262798206566,
 "runtime_kv_capacity_tokens":40960,"kv_reserved_bytes":4697620480,
 "effective_request_limit":40960}
 ```
+
+The numeric reserve above is illustrative. A real receipt must reproduce the
+exact row in its own sealed bundle and is not qualification evidence merely
+because it has schema version 4.
 
 Example resource error:
 
@@ -2310,7 +2662,9 @@ engine-packaging choices are resolved.
 
 Scope:
 
-- bundle metadata;
+- provisional-v1 build metadata and exact-plan sealed-v2 product contract;
+- profile-indexed module-residency calibration, runtime validation, and
+  receipt schema v4;
 - qualified Qwen revision/config/platform profile;
 - CLI/runtime policy;
 - shared planner;
@@ -2358,6 +2712,7 @@ and contain no EdgeLLM adapter changes.
 | Two-segment attention regresses decode or TTFT | Optimize graph reuse/merge or stop the beta; never reintroduce full-history concatenation. |
 | Shared engine profiles compromise decode tactics | Use the measured separate-plan fallback; record duplicate weight memory. |
 | Actual-shape context memory changes as history grows | Size one shared context block for enabled runtime buckets; never use profile-global MAX allocation. |
+| CUDA/TensorRT/Myelin code becomes resident only at first use of a larger profile | Seal a cumulative per-profile reserve to exact plan bytes, stack, and loading mode; subtract `Q(R)` in both fixed-point stages and require two independent all-profile sweeps plus a 64 MiB guard. Never substitute a global weight-derived cap. |
 | Physical capacity `R`, active total `A`, history length `H`, and bound history extent `T` are confused | Centralize the Section 4 cold-sentinel, `T<=R`, and `A=H+Sq<=R` byte-capacity checks in the backend and cover with red-zone tests. |
 | Free memory changes between measurement and allocation | Re-query once; auto may recompute, explicit bytes fail with requested/available detail. |
 | CUDA graph capture turns buckets into a correctness cap | Always retain uncaptured `enqueueV3` fallback. |
@@ -2365,6 +2720,7 @@ and contain no EdgeLLM adapter changes.
 | Qwen passes but Llama diverges | Shared planner plus independent TinyLlama exact-head parity is a release gate. |
 | PipelinePool multiplies the requested budget per lane | Fail fast until the device-level paged pool lands. |
 | Build time or engine size grows excessively | Track plan bytes/build seconds per profile and remove only unhelpful performance buckets, never reduce `M`. |
+| TensorRT emits new raw plan bytes on an ordinary no-flag rebuild | Never append the hash to a manifest without evidence and never use an inspector-only semantic fingerprint. Run the internal two-process all-profile calibration for that exact plan, embed its replay evidence, or fail without publishing a bundle. |
 
 ## 14. Review budget
 
@@ -2398,11 +2754,15 @@ The two-model native-runtime milestone is complete only when all statements are
 true:
 
 - users build both models with only `trtmc build <model>`;
+- that no-flag build creates provisional v1 only internally and emits a
+  strict sealed-v2 user bundle matched to the exact serialized split plans;
 - a qualified bundle fails before engine deserialization unless the live
   target matches its complete advertised
   SM/TensorRT/CUDA/cuDNN/Frontend/NVRTC/driver tuple; the prototype's minimum
   guard is `sm103 + TensorRT 11.2.0.113`, and bundle-declared target text is
   not accepted as evidence of the current runtime;
+- both plan-section hashes, ordered topology/plan-set digest, and actual CUDA
+  module-loading mode match the sealed calibration before deserialization;
 - one bundle per model supports `auto`, percentage, bytes, and runtime sequence
   policy without rebuild;
 - Qwen's bundle advertises and executes its 40,960 model limit, including a
@@ -2419,6 +2779,15 @@ true:
 - TensorRT does not allocate a duplicate profile-MAX KV input/output buffer;
 - KV allocation equals the runtime-selected capacity and is shared by prefill
   and decode;
+- each base and `C/2` exact plan set has two independent all-profile process
+  sweeps, every cumulative reserve covers the process-owned row-wise maximum
+  plus 64 MiB, and the fixed-point solver deducts that selected `Q(R)` without
+  allocating a duplicate buffer;
+- promotion reopens and hashes the calibration evidence plus both raw process
+  captures against the same clean source/bundle tuple; a well-formed
+  `evidence_sha256` echoed by runtime is not sufficient on its own;
+- every load emits receipt schema v4 with the selected reserve/profile,
+  plan-set SHA, loading mode, evidence SHA, and two-stage overhead accounting;
 - no K/V data is copied to host or copied in proportion to full history;
 - split execution meets correctness and performance gates;
 - cold-cache, warm-cache, and concurrent different-GPU process loads directly
@@ -2447,6 +2816,8 @@ general feature:
 
 - product routing is limited to the two exact qualified model tuples;
 - the normal build help exposes no context/KV/profile builder control;
+- product bundles require exact-plan sealed v2; provisional v1 and bootstrap
+  resealing remain internal qualification mechanics;
 - runtime policy is available through CLI, C ABI V2, and Python;
 - common backend/plugin/planner code is shared, while Qwen/Llama retain only
   model-owned tensor and generation behavior;
@@ -2544,3 +2915,12 @@ references define the APIs and constraints used by this plan:
   no-allocation enqueue guidance;
 - [TensorRT fused attention](https://docs.nvidia.com/deeplearning/tensorrt/latest/inference-library/transformers-fused-attention.html):
   supported fused-attention configurations and qualification constraints.
+- [CUDA lazy loading](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/lazy-loading.html):
+  module/kernel loading can be deferred until first use, which is why
+  post-deserialization free memory alone is not a safe KV budget.
+- [CUDA module-loading environment](https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/environment-variables.html):
+  the configured loading policy is process state; qualification records the
+  effective driver-reported mode instead of assuming an environment default.
+- [TensorRT first-enqueue overhead](https://docs.nvidia.com/deeplearning/tensorrt/10.x.x/performance/overhead-layer-optimization.html):
+  first execution and profile/tactic initialization can incur one-time work
+  that must be separated from steady-state inference.

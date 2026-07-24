@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "schema_version": 1,
+      "measurement_kind": "nvml_process_cumulative_first_use",
+      "cuda_module_loading_mode": "lazy",
+      "qualified_runtime_stack_sha256": "1b94f56092107d0fa1c6d43e2e8e4245c904ddc5967646f96ff8e64496e0f210",
+      "plan_set_sha256": "00656733b93051c7f3f98340f9fbb274b59e10f1db634012b5c0f0e5eba156eb",
+      "plans": [
+        {
+          "section_name": "engine_plan",
+          "section_sha256": "8147ac1d4915482230a7a0affbb940c7daeb19e5a6fa10c9dfff54cc93238128",
+          "role": "decode",
+          "optimization_profile_count": 4
+        },
+        {
+          "section_name": "prefill_engine_plan",
+          "section_sha256": "f598c683718186c232a536652a1a1447da6e8c1c66bc4bbe4de1bae65bd80a1d",
+          "role": "prefill",
+          "optimization_profile_count": 1
+        }
+      ],
+      "profile_reserves": [
+        {"covering_profile_limit": 128, "cumulative_reserve_bytes": 268435456},
+        {"covering_profile_limit": 256, "cumulative_reserve_bytes": 268435456},
+        {"covering_profile_limit": 512, "cumulative_reserve_bytes": 268435456},
+        {"covering_profile_limit": 2048, "cumulative_reserve_bytes": 536870912}
+      ],
+      "evidence_sha256": "18b3f6fff23e0a650d84a376d0d4207bd6d8f7a51717773c71e45cbfaed950f6"
+    },
+    {
+      "schema_version": 1,
+      "measurement_kind": "nvml_process_cumulative_first_use",
+      "cuda_module_loading_mode": "lazy",
+      "qualified_runtime_stack_sha256": "1b94f56092107d0fa1c6d43e2e8e4245c904ddc5967646f96ff8e64496e0f210",
+      "plan_set_sha256": "d7d716a7c5c3354e55d6b4ad361ff5cc3289a62ca5f99e13a60bc36a12f1d8ca",
+      "plans": [
+        {
+          "section_name": "engine_plan",
+          "section_sha256": "640f568364d4a6eda754894f9ca9208b7d741b746e30df8e7ce8c8cb0770b665",
+          "role": "decode",
+          "optimization_profile_count": 4
+        },
+        {
+          "section_name": "prefill_engine_plan",
+          "section_sha256": "5df9f0ef82e666ed92253047c358a811a22a0ecf3557bf6d5763915ad043b029",
+          "role": "prefill",
+          "optimization_profile_count": 1
+        }
+      ],
+      "profile_reserves": [
+        {"covering_profile_limit": 128, "cumulative_reserve_bytes": 268435456},
+        {"covering_profile_limit": 256, "cumulative_reserve_bytes": 268435456},
+        {"covering_profile_limit": 512, "cumulative_reserve_bytes": 268435456},
+        {"covering_profile_limit": 2048, "cumulative_reserve_bytes": 536870912}
+      ],
+      "evidence_sha256": "8b0c3fe191bf50670e67d1a2decdc2aea5acc80fa4b465bc33c9b30bf88a3238"
+    }
+  ]
+}

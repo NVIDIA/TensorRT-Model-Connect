@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import re
+import struct
 from pathlib import Path
 
 import pytest
@@ -14,7 +17,9 @@ from tensorrt_model_connect.dynamic_memory_contract import (
     BuildTarget,
     DynamicMemoryContractError,
     load_dynamic_memory_qualifications,
+    module_residency_plan_set_sha256,
     qualification_for_model_ref,
+    qualified_runtime_stack_sha256,
     resolve_model_only_qualification,
 )
 
@@ -43,6 +48,82 @@ QUALIFIED_STACK = {
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _sealed_qwen_runtime_memory_header() -> dict:
+    runtime_stack = {
+        "sm": "sm103",
+        "tensorrt": "11.2.0.113",
+        "cuda_runtime": "13.3",
+        "cudnn_backend": "9.20.0",
+        "cudnn_frontend_revision": "c" * 40,
+        "nvrtc": "13.3",
+        "driver": "580.105.08",
+    }
+    profile_limits = [128, 256, 512, 1024, 2048, 8192, 32768, 40960]
+    plans = [
+        {
+            "section_name": "engine_plan",
+            "section_sha256": "d" * 64,
+            "role": "decode",
+            "optimization_profile_count": len(profile_limits),
+        },
+        {
+            "section_name": "prefill_engine_plan",
+            "section_sha256": "e" * 64,
+            "role": "prefill",
+            "optimization_profile_count": 1,
+        },
+    ]
+    reserves = [
+        {
+            "covering_profile_limit": limit,
+            "cumulative_reserve_bytes": 268435456 * (index + 1),
+        }
+        for index, limit in enumerate(profile_limits)
+    ]
+    return {
+        "model_id": QWEN_ID,
+        "model_type": "qwen3",
+        "family": "qwen",
+        "precision": "bf16",
+        "max_cache_length": 40960,
+        "runtime_memory": {
+            "contract_version": 2,
+            "qualified_model_id": QWEN_ID,
+            "qualified_model_revision": "a" * 40,
+            "qualified_config_sha256": "b" * 64,
+            "qualified_target": "gb300-trt-11.2",
+            "qualified_runtime_stack": runtime_stack,
+            "native_kv_plugin_abi": 2,
+            "model_context_limit": 40960,
+            "prefill_chunk_limit": 1024,
+            "kv_layout": "contiguous_runtime_v1",
+            "kv_dtype": "bfloat16",
+            "kv_bytes_per_token": 114688,
+            "active_kv_profile_limits": profile_limits,
+            "runtime_owned": True,
+            "module_residency_calibration": {
+                "schema_version": 1,
+                "measurement_kind": "nvml_process_cumulative_first_use",
+                "cuda_module_loading_mode": "lazy",
+                "qualified_runtime_stack_sha256":
+                    qualified_runtime_stack_sha256(runtime_stack),
+                "plan_set_sha256": module_residency_plan_set_sha256(plans),
+                "evidence_sha256": "f" * 64,
+                "plans": plans,
+                "profile_reserves": reserves,
+            },
+        },
+        "sections": {},
+    }
+
+
+def _write_header_only_bundle(path: Path, header: dict) -> None:
+    payload = json.dumps(header).encode("utf-8")
+    path.write_bytes(
+        b"TRTFB\x00\x01\x00" + struct.pack("<Q", len(payload)) + payload
+    )
+
+
 def test_inspect_qwen_runtime_memory_bundle_reports_only_static_contract(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -50,8 +131,6 @@ def test_inspect_qwen_runtime_memory_bundle_reports_only_static_contract(
 ) -> None:
     import argparse
     import ctypes
-    import json
-    import struct
     import subprocess
     import sys
 
@@ -59,50 +138,8 @@ def test_inspect_qwen_runtime_memory_bundle_reports_only_static_contract(
     from tensorrt_model_connect.build_cli import _cmd_inspect
 
     bundle_path = tmp_path / "dynamic.trtfb"
-    header = {
-        "model_id": QWEN_ID,
-        "model_type": "qwen3",
-        "family": "qwen",
-        "max_cache_length": 40960,
-        "runtime_memory": {
-            "contract_version": 1,
-            "qualified_model_id": QWEN_ID,
-            "qualified_model_revision": "a" * 40,
-            "qualified_config_sha256": "b" * 64,
-            "qualified_target": "gb300-trt-11.2",
-            "qualified_runtime_stack": {
-                "sm": "sm103",
-                "tensorrt": "11.2.0.113",
-                "cuda_runtime": "13.3",
-                "cudnn_backend": "9.20.0",
-                "cudnn_frontend_revision": "c" * 40,
-                "nvrtc": "13.3",
-                "driver": "580.105.08",
-            },
-            "native_kv_plugin_abi": 2,
-            "model_context_limit": 40960,
-            "prefill_chunk_limit": 1024,
-            "kv_layout": "contiguous_runtime_v1",
-            "kv_dtype": "bfloat16",
-            "kv_bytes_per_token": 114688,
-            "active_kv_profile_limits": [
-                128,
-                256,
-                512,
-                1024,
-                2048,
-                8192,
-                32768,
-                40960,
-            ],
-            "runtime_owned": True,
-        },
-        "sections": {},
-    }
-    payload = json.dumps(header).encode("utf-8")
-    bundle_path.write_bytes(
-        b"TRTFB\x00\x01\x00" + struct.pack("<Q", len(payload)) + payload
-    )
+    header = _sealed_qwen_runtime_memory_header()
+    _write_header_only_bundle(bundle_path, header)
 
     def unexpected_runtime_touch(*_args, **_kwargs):
         pytest.fail(
@@ -120,24 +157,113 @@ def test_inspect_qwen_runtime_memory_bundle_reports_only_static_contract(
     assert _cmd_inspect(argparse.Namespace(bundle_path=str(bundle_path))) == 0
     output = capsys.readouterr().out
     expected_static_fields = {
-        "Runtime KV contract version": "1",
-        "Qualified model ID": QWEN_ID,
-        "Qualified model revision": "a" * 40,
-        "Qualified config fingerprint": "b" * 64,
-        "Model context limit": "40960",
-        "Prefill chunk limit": "1024",
-        "KV layout": "contiguous_runtime_v1",
-        "KV bytes per token": "114688",
+        "runtime_kv_contract_version": "2",
+        "qualified_model_id": QWEN_ID,
+        "qualified_model_revision": "a" * 40,
+        "qualified_config_fingerprint": "b" * 64,
+        "model_context_limit": "40960",
+        "prefill_chunk_limit": "1024",
+        "kv_layout": "contiguous_runtime_v1",
+        "kv_dtype": "bfloat16",
+        "kv_bytes_per_token": "114688",
+        "module_residency_plan_set_sha256":
+            header["runtime_memory"]["module_residency_calibration"][
+                "plan_set_sha256"
+            ],
+        "module_residency_cuda_module_loading_mode": "lazy",
+        "module_residency_evidence_sha256": "f" * 64,
     }
     for label, value in expected_static_fields.items():
-        assert f"{label + ':':<32} {value}" in output
+        assert f"{label + ':':<48} {value}" in output
     assert (
-        f"{'Active KV profile limits:':<32} "
+        f"{'active_kv_profile_limits:':<48} "
         "128, 256, 512, 1024, 2048, 8192, 32768, 40960"
+    ) in output
+    assert (
+        f"{'module_residency_profile_reserves:':<48} "
+        "128=>268435456, 256=>536870912, 512=>805306368, "
+        "1024=>1073741824, 2048=>1342177280, 8192=>1610612736, "
+        "32768=>1879048192, 40960=>2147483648"
+    ) in output
+    assert (
+        f"{'qualified_runtime_stack:':<48} "
+        "SM=sm103, TensorRT=11.2.0.113, CUDA=13.3, cuDNN=9.20.0, "
+        f"Frontend={'c' * 40}, NVRTC=13.3, driver=580.105.08"
     ) in output
     assert "Max cache length:" not in output
     assert "runtime_kv_capacity_tokens" not in output
     assert "post_load_free_bytes" not in output
+
+
+@pytest.mark.parametrize(
+    ("mutate", "error_fragment"),
+    (
+        (
+            lambda header: header.update(runtime_memory=[]),
+            "must be a JSON object",
+        ),
+        (
+            lambda header: header["runtime_memory"][
+                "module_residency_calibration"
+            ].pop("evidence_sha256"),
+            "missing required field",
+        ),
+        (
+            lambda header: header["runtime_memory"][
+                "module_residency_calibration"
+            ].update(plan_set_sha256="0" * 64),
+            "plan_set_sha256 does not bind",
+        ),
+        (
+            lambda header: header["runtime_memory"][
+                "module_residency_calibration"
+            ]["profile_reserves"][0].update(covering_profile_limit=127),
+            "must align exactly",
+        ),
+    ),
+)
+def test_inspect_malformed_v2_runtime_memory_fails_closed(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    mutate,
+    error_fragment: str,
+) -> None:
+    import argparse
+
+    from tensorrt_model_connect.build_cli import _cmd_inspect
+
+    header = copy.deepcopy(_sealed_qwen_runtime_memory_header())
+    mutate(header)
+    bundle_path = tmp_path / "malformed-v2.trtfb"
+    _write_header_only_bundle(bundle_path, header)
+
+    assert _cmd_inspect(argparse.Namespace(bundle_path=str(bundle_path))) == 1
+    error = capsys.readouterr().err
+    assert "Invalid runtime_memory contract" in error
+    assert error_fragment in error
+
+
+def test_inspect_duplicate_v2_key_fails_closed(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import argparse
+
+    from tensorrt_model_connect.build_cli import _cmd_inspect
+
+    payload = json.dumps(_sealed_qwen_runtime_memory_header())
+    payload = payload.replace(
+        '"contract_version": 2',
+        '"contract_version": 2, "contract_version": 2',
+        1,
+    ).encode()
+    bundle_path = tmp_path / "duplicate-v2-key.trtfb"
+    bundle_path.write_bytes(
+        b"TRTFB\x00\x01\x00" + struct.pack("<Q", len(payload)) + payload
+    )
+
+    assert _cmd_inspect(argparse.Namespace(bundle_path=str(bundle_path))) == 1
+    assert "Duplicate JSON key" in capsys.readouterr().err
 
 
 def _target(

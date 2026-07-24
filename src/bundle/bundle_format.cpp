@@ -6,6 +6,7 @@
 #include "bundle/bundle_format.h"
 
 #include "utils/json_helpers.h"
+#include "utils/sha256.h"
 
 #include <algorithm>
 #include <array>
@@ -13,8 +14,11 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <nlohmann/json.hpp>
+#include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 namespace trtmc {
@@ -145,48 +149,365 @@ bool is_lower_hex(const std::string& value, std::size_t expected_size) {
     throw std::runtime_error("Invalid runtime_memory contract: " + detail);
 }
 
-void parse_runtime_memory_contract(const std::string& json, BundleInfo& info) {
-    const std::string text = extract_json_object_text(json, "runtime_memory");
-    if (text.empty()) {
-        if (json.find("\"runtime_memory\"") != std::string::npos)
-            invalid_runtime_memory("runtime_memory must be an object");
-        return;
+nlohmann::json parse_unique_json(const std::string& text, const std::string& context) {
+    bool duplicate_key = false;
+    std::vector<std::set<std::string>> object_keys;
+    const auto callback =
+        [&duplicate_key, &object_keys](int, nlohmann::json::parse_event_t event,
+                                      nlohmann::json& parsed) {
+            if (event == nlohmann::json::parse_event_t::object_start) {
+                object_keys.emplace_back();
+            } else if (event == nlohmann::json::parse_event_t::key) {
+                if (object_keys.empty() ||
+                    !object_keys.back().insert(parsed.get<std::string>()).second) {
+                    duplicate_key = true;
+                }
+            } else if (event == nlohmann::json::parse_event_t::object_end &&
+                       !object_keys.empty()) {
+                object_keys.pop_back();
+            }
+            return true;
+        };
+
+    nlohmann::json parsed;
+    try {
+        parsed = nlohmann::json::parse(text, callback);
+    } catch (const nlohmann::json::exception& error) {
+        invalid_runtime_memory(context + " JSON is invalid: " + std::string(error.what()));
     }
+    if (duplicate_key)
+        invalid_runtime_memory(context + " JSON contains a duplicate object key");
+    return parsed;
+}
+
+void require_exact_keys(const nlohmann::json& value,
+                        const std::set<std::string>& expected_keys,
+                        const std::string& context) {
+    if (!value.is_object())
+        invalid_runtime_memory(context + " must be an object");
+    std::set<std::string> actual_keys;
+    for (auto item = value.begin(); item != value.end(); ++item)
+        actual_keys.insert(item.key());
+    if (actual_keys != expected_keys)
+        invalid_runtime_memory(context + " has an incompatible schema");
+}
+
+std::int32_t require_int32(const nlohmann::json& value, const std::string& context) {
+    if (value.is_number_unsigned()) {
+        const auto unsigned_value = value.get<std::uint64_t>();
+        if (unsigned_value >
+            static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max())) {
+            invalid_runtime_memory(context + " is outside the int32 range");
+        }
+        return static_cast<std::int32_t>(unsigned_value);
+    }
+    if (value.is_number_integer()) {
+        const auto signed_value = value.get<std::int64_t>();
+        if (signed_value < std::numeric_limits<std::int32_t>::min() ||
+            signed_value > std::numeric_limits<std::int32_t>::max()) {
+            invalid_runtime_memory(context + " is outside the int32 range");
+        }
+        return static_cast<std::int32_t>(signed_value);
+    }
+    invalid_runtime_memory(context + " must be an integer");
+}
+
+std::string qualified_runtime_stack_digest(const QualifiedRuntimeStack& stack) {
+    internal::Sha256 digest;
+    const auto add = [&digest](std::string_view key, const std::string& value) {
+        const auto record = std::to_string(key.size()) + ":" + std::string(key) + "=" +
+                            std::to_string(value.size()) + ":" + value + "\n";
+        digest.update(record);
+    };
+    add("sm", stack.sm);
+    add("tensorrt", stack.tensorrt);
+    add("cuda_runtime", stack.cuda_runtime);
+    add("cudnn_backend", stack.cudnn_backend);
+    add("cudnn_frontend_revision", stack.cudnn_frontend_revision);
+    add("nvrtc", stack.nvrtc);
+    add("driver", stack.driver);
+    return digest.hex_digest();
+}
+
+std::string module_residency_plan_set_digest(
+    const std::vector<ModuleResidencyPlanCalibration>& plans) {
+    internal::Sha256 digest;
+    for (const auto& plan : plans) {
+        digest.update(plan.section_name);
+        const char separator = '\0';
+        digest.update(&separator, 1);
+        digest.update(plan.section_sha256);
+        digest.update(&separator, 1);
+        digest.update(plan.role);
+        digest.update(&separator, 1);
+        digest.update(std::to_string(plan.optimization_profile_count));
+        const char newline = '\n';
+        digest.update(&newline, 1);
+    }
+    return digest.hex_digest();
+}
+
+void parse_module_residency_calibration(const nlohmann::json& runtime_memory,
+                                        RuntimeMemoryContract& contract) {
+    const auto found = runtime_memory.find("module_residency_calibration");
+    if (found == runtime_memory.end() || !found->is_object()) {
+        invalid_runtime_memory("contract version 2 requires module_residency_calibration");
+    }
+    const auto& value = *found;
+    static const std::set<std::string> kExpectedKeys = {
+        "schema_version",
+        "measurement_kind",
+        "cuda_module_loading_mode",
+        "qualified_runtime_stack_sha256",
+        "plan_set_sha256",
+        "evidence_sha256",
+        "plans",
+        "profile_reserves",
+    };
+    auto expected_keys = kExpectedKeys;
+    if (value.contains("evidence_provenance"))
+        expected_keys.insert("evidence_provenance");
+    require_exact_keys(value, expected_keys, "module_residency_calibration");
+
+    auto& calibration = contract.module_residency_calibration;
+    calibration.present = true;
+    try {
+        calibration.schema_version =
+            require_int32(value.at("schema_version"),
+                          "module_residency_calibration.schema_version");
+        calibration.measurement_kind = value.at("measurement_kind").get<std::string>();
+        calibration.cuda_module_loading_mode =
+            value.at("cuda_module_loading_mode").get<std::string>();
+        calibration.evidence_provenance =
+            value.value("evidence_provenance", std::string("external_manifest_v1"));
+        calibration.qualified_runtime_stack_sha256 =
+            value.at("qualified_runtime_stack_sha256").get<std::string>();
+        calibration.plan_set_sha256 = value.at("plan_set_sha256").get<std::string>();
+        calibration.evidence_sha256 = value.at("evidence_sha256").get<std::string>();
+    } catch (const nlohmann::json::exception& error) {
+        invalid_runtime_memory("module_residency_calibration scalar field is invalid: " +
+                               std::string(error.what()));
+    }
+    if (calibration.schema_version != 1)
+        invalid_runtime_memory("unsupported module_residency_calibration schema_version");
+    if (calibration.measurement_kind != "nvml_process_cumulative_first_use") {
+        invalid_runtime_memory("unsupported module-residency measurement_kind");
+    }
+    if (calibration.cuda_module_loading_mode != "lazy" &&
+        calibration.cuda_module_loading_mode != "eager") {
+        invalid_runtime_memory("unsupported CUDA module-loading mode");
+    }
+    if (calibration.evidence_provenance != "external_manifest_v1" &&
+        calibration.evidence_provenance != "embedded_bundle_v1") {
+        invalid_runtime_memory("unsupported module-residency evidence_provenance");
+    }
+    if (!is_lower_hex(calibration.qualified_runtime_stack_sha256, 64) ||
+        !is_lower_hex(calibration.plan_set_sha256, 64) ||
+        !is_lower_hex(calibration.evidence_sha256, 64)) {
+        invalid_runtime_memory("module-residency provenance requires lowercase SHA-256 values");
+    }
+
+    const auto& plans = value.at("plans");
+    if (!plans.is_array() || plans.size() != 2)
+        invalid_runtime_memory("module-residency calibration requires two ordered plans");
+    static const std::set<std::string> kExpectedPlanKeys = {
+        "section_name",
+        "section_sha256",
+        "role",
+        "optimization_profile_count",
+    };
+    for (std::size_t index = 0; index < plans.size(); ++index) {
+        const auto& plan_value = plans.at(index);
+        if (!plan_value.is_object())
+            invalid_runtime_memory("module-residency plan entry must be an object");
+        require_exact_keys(plan_value, kExpectedPlanKeys, "module-residency plan entry");
+        ModuleResidencyPlanCalibration plan;
+        try {
+            plan.section_name = plan_value.at("section_name").get<std::string>();
+            plan.section_sha256 = plan_value.at("section_sha256").get<std::string>();
+            plan.role = plan_value.at("role").get<std::string>();
+            plan.optimization_profile_count =
+                require_int32(plan_value.at("optimization_profile_count"),
+                              "module-residency plan optimization_profile_count");
+        } catch (const nlohmann::json::exception& error) {
+            invalid_runtime_memory("module-residency plan entry is invalid: " +
+                                   std::string(error.what()));
+        }
+        const bool expected_decode =
+            index == 0 && plan.section_name == "engine_plan" && plan.role == "decode" &&
+            plan.optimization_profile_count ==
+                static_cast<int32_t>(contract.active_kv_profile_limits.size());
+        const bool expected_prefill =
+            index == 1 && plan.section_name == "prefill_engine_plan" && plan.role == "prefill" &&
+            plan.optimization_profile_count == 1;
+        if ((!expected_decode && !expected_prefill) ||
+            !is_lower_hex(plan.section_sha256, 64)) {
+            invalid_runtime_memory(
+                "module-residency plans do not match the split engine/profile topology");
+        }
+        calibration.plans.push_back(std::move(plan));
+    }
+    if (calibration.qualified_runtime_stack_sha256 !=
+        qualified_runtime_stack_digest(contract.qualified_runtime_stack)) {
+        invalid_runtime_memory(
+            "module-residency calibration runtime-stack digest does not match the contract");
+    }
+    if (calibration.plan_set_sha256 !=
+        module_residency_plan_set_digest(calibration.plans)) {
+        invalid_runtime_memory(
+            "module-residency calibration plan-set digest does not match its plan entries");
+    }
+
+    const auto& reserves = value.at("profile_reserves");
+    if (!reserves.is_array() || reserves.size() != contract.active_kv_profile_limits.size()) {
+        invalid_runtime_memory(
+            "module-residency profile reserves must align with active KV profiles");
+    }
+    static const std::set<std::string> kExpectedReserveKeys = {
+        "covering_profile_limit",
+        "cumulative_reserve_bytes",
+    };
+    std::uint64_t previous_reserve = 0;
+    for (std::size_t index = 0; index < reserves.size(); ++index) {
+        const auto& reserve_value = reserves.at(index);
+        if (!reserve_value.is_object())
+            invalid_runtime_memory("module-residency reserve entry must be an object");
+        require_exact_keys(reserve_value, kExpectedReserveKeys,
+                           "module-residency reserve entry");
+        ModuleResidencyProfileReserve reserve;
+        try {
+            reserve.covering_profile_limit =
+                require_int32(reserve_value.at("covering_profile_limit"),
+                              "module-residency reserve covering_profile_limit");
+            const auto& reserve_bytes = reserve_value.at("cumulative_reserve_bytes");
+            if (!reserve_bytes.is_number_unsigned() &&
+                (!reserve_bytes.is_number_integer() ||
+                 reserve_bytes.get<std::int64_t>() <= 0)) {
+                invalid_runtime_memory(
+                    "module-residency cumulative reserve must be a positive integer");
+            }
+            reserve.cumulative_reserve_bytes =
+                reserve_bytes.get<std::uint64_t>();
+        } catch (const nlohmann::json::exception& error) {
+            invalid_runtime_memory("module-residency reserve entry is invalid: " +
+                                   std::string(error.what()));
+        }
+        if (reserve.covering_profile_limit != contract.active_kv_profile_limits[index] ||
+            reserve.cumulative_reserve_bytes == 0 ||
+            reserve.cumulative_reserve_bytes < previous_reserve) {
+            invalid_runtime_memory(
+                "module-residency reserves must be positive, aligned, and nondecreasing");
+        }
+        previous_reserve = reserve.cumulative_reserve_bytes;
+        calibration.profile_reserves.push_back(reserve);
+    }
+}
+
+void parse_runtime_memory_contract(const std::string& json, BundleInfo& info) {
+    if (json.find("\"runtime_memory\"") == std::string::npos)
+        return;
+
+    const auto header = parse_unique_json(json, "bundle header");
+    if (!header.is_object())
+        invalid_runtime_memory("bundle header must be an object");
+    const auto found = header.find("runtime_memory");
+    if (found == header.end())
+        return;
+    const auto& value = *found;
+    if (!value.is_object())
+        invalid_runtime_memory("runtime_memory must be an object");
+
+    const auto version_value = value.find("contract_version");
+    if (version_value == value.end())
+        invalid_runtime_memory("contract_version is required");
 
     auto& contract = info.runtime_memory;
     contract.present = true;
-    contract.contract_version = extract_json_int(text, "contract_version", 0);
-    contract.qualified_model_id = extract_json_string(text, "qualified_model_id", "");
-    contract.qualified_model_revision = extract_json_string(text, "qualified_model_revision", "");
-    contract.qualified_config_sha256 = extract_json_string(text, "qualified_config_sha256", "");
-    contract.qualified_target = extract_json_string(text, "qualified_target", "");
-    const std::string runtime_stack_text =
-        extract_json_object_text(text, "qualified_runtime_stack");
-    if (runtime_stack_text.empty())
-        invalid_runtime_memory("qualified_runtime_stack is required");
-    auto& runtime_stack = contract.qualified_runtime_stack;
-    runtime_stack.sm = extract_json_string(runtime_stack_text, "sm", "");
-    runtime_stack.tensorrt = extract_json_string(runtime_stack_text, "tensorrt", "");
-    runtime_stack.cuda_runtime = extract_json_string(runtime_stack_text, "cuda_runtime", "");
-    runtime_stack.cudnn_backend = extract_json_string(runtime_stack_text, "cudnn_backend", "");
-    runtime_stack.cudnn_frontend_revision =
-        extract_json_string(runtime_stack_text, "cudnn_frontend_revision", "");
-    runtime_stack.nvrtc = extract_json_string(runtime_stack_text, "nvrtc", "");
-    runtime_stack.driver = extract_json_string(runtime_stack_text, "driver", "");
-    contract.native_kv_plugin_abi = extract_json_int(text, "native_kv_plugin_abi", 0);
-    contract.model_context_limit = extract_json_int(text, "model_context_limit", 0);
-    contract.prefill_chunk_limit = extract_json_int(text, "prefill_chunk_limit", 0);
-    contract.kv_layout = extract_json_string(text, "kv_layout", "");
-    contract.kv_dtype = extract_json_string(text, "kv_dtype", "");
-    const int64_t bytes_per_token = parse_int64_field(text, "kv_bytes_per_token");
-    if (bytes_per_token > 0)
-        contract.kv_bytes_per_token = static_cast<std::uint64_t>(bytes_per_token);
-    contract.active_kv_profile_limits =
-        extract_json_int_array(text, "active_kv_profile_limits", 64);
-    contract.runtime_owned = extract_json_bool(text, "runtime_owned", false);
-
-    if (contract.contract_version != 1)
+    contract.contract_version = require_int32(*version_value, "contract_version");
+    if (contract.contract_version != 1 && contract.contract_version != 2)
         invalid_runtime_memory("unsupported contract_version");
+
+    static const std::set<std::string> kVersionOneKeys = {
+        "contract_version",
+        "qualified_model_id",
+        "qualified_model_revision",
+        "qualified_config_sha256",
+        "qualified_target",
+        "qualified_runtime_stack",
+        "native_kv_plugin_abi",
+        "model_context_limit",
+        "prefill_chunk_limit",
+        "kv_layout",
+        "kv_dtype",
+        "kv_bytes_per_token",
+        "active_kv_profile_limits",
+        "runtime_owned",
+    };
+    auto expected_keys = kVersionOneKeys;
+    if (contract.contract_version == 2)
+        expected_keys.insert("module_residency_calibration");
+    require_exact_keys(value, expected_keys, "runtime_memory");
+
+    const auto& runtime_stack_value = value.at("qualified_runtime_stack");
+    static const std::set<std::string> kRuntimeStackKeys = {
+        "sm",
+        "tensorrt",
+        "cuda_runtime",
+        "cudnn_backend",
+        "cudnn_frontend_revision",
+        "nvrtc",
+        "driver",
+    };
+    require_exact_keys(runtime_stack_value, kRuntimeStackKeys, "qualified_runtime_stack");
+
+    auto& runtime_stack = contract.qualified_runtime_stack;
+    try {
+        contract.qualified_model_id = value.at("qualified_model_id").get<std::string>();
+        contract.qualified_model_revision =
+            value.at("qualified_model_revision").get<std::string>();
+        contract.qualified_config_sha256 =
+            value.at("qualified_config_sha256").get<std::string>();
+        contract.qualified_target = value.at("qualified_target").get<std::string>();
+        runtime_stack.sm = runtime_stack_value.at("sm").get<std::string>();
+        runtime_stack.tensorrt = runtime_stack_value.at("tensorrt").get<std::string>();
+        runtime_stack.cuda_runtime =
+            runtime_stack_value.at("cuda_runtime").get<std::string>();
+        runtime_stack.cudnn_backend =
+            runtime_stack_value.at("cudnn_backend").get<std::string>();
+        runtime_stack.cudnn_frontend_revision =
+            runtime_stack_value.at("cudnn_frontend_revision").get<std::string>();
+        runtime_stack.nvrtc = runtime_stack_value.at("nvrtc").get<std::string>();
+        runtime_stack.driver = runtime_stack_value.at("driver").get<std::string>();
+        contract.native_kv_plugin_abi =
+            require_int32(value.at("native_kv_plugin_abi"), "native_kv_plugin_abi");
+        contract.model_context_limit =
+            require_int32(value.at("model_context_limit"), "model_context_limit");
+        contract.prefill_chunk_limit =
+            require_int32(value.at("prefill_chunk_limit"), "prefill_chunk_limit");
+        contract.kv_layout = value.at("kv_layout").get<std::string>();
+        contract.kv_dtype = value.at("kv_dtype").get<std::string>();
+        const auto& bytes_per_token = value.at("kv_bytes_per_token");
+        if (!bytes_per_token.is_number_unsigned() &&
+            (!bytes_per_token.is_number_integer() ||
+             bytes_per_token.get<std::int64_t>() <= 0)) {
+            invalid_runtime_memory("kv_bytes_per_token must be a positive integer");
+        }
+        contract.kv_bytes_per_token = bytes_per_token.get<std::uint64_t>();
+        const auto& profile_limits = value.at("active_kv_profile_limits");
+        if (!profile_limits.is_array())
+            invalid_runtime_memory("active_kv_profile_limits must be an array");
+        contract.active_kv_profile_limits.clear();
+        contract.active_kv_profile_limits.reserve(profile_limits.size());
+        for (const auto& profile_limit : profile_limits) {
+            contract.active_kv_profile_limits.push_back(
+                require_int32(profile_limit, "active_kv_profile_limits[]"));
+        }
+        contract.runtime_owned = value.at("runtime_owned").get<bool>();
+    } catch (const nlohmann::json::exception& error) {
+        invalid_runtime_memory("runtime_memory scalar or array field is invalid: " +
+                               std::string(error.what()));
+    }
+
     if (contract.qualified_model_id.empty())
         invalid_runtime_memory("qualified_model_id is required");
     if (!is_lower_hex(contract.qualified_model_revision, 40))
@@ -238,6 +559,9 @@ void parse_runtime_memory_contract(const std::string& json, BundleInfo& info) {
     }
     if (!contract.runtime_owned)
         invalid_runtime_memory("runtime_owned must be true");
+    if (contract.contract_version == 2) {
+        parse_module_residency_calibration(value, contract);
+    }
     if (info.model_id != contract.qualified_model_id)
         invalid_runtime_memory("qualified_model_id does not match bundle model_id");
     if (info.max_cache_length != contract.model_context_limit)

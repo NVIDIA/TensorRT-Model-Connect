@@ -71,6 +71,10 @@ std::uint64_t fraction_budget_bytes(double fraction, std::uint64_t bytes) {
     // can therefore over-allocate the user's policy by a few bytes.
     std::uint64_t bits = 0;
     static_assert(sizeof(bits) == sizeof(fraction));
+    static_assert(std::numeric_limits<double>::is_iec559 &&
+                  std::numeric_limits<double>::digits == 53 &&
+                  std::numeric_limits<double>::max_exponent == 1024,
+                  "Runtime KV percentage policy requires IEEE-754 binary64");
     std::memcpy(&bits, &fraction, sizeof(bits));
     const auto exponent_bits = static_cast<std::uint32_t>((bits >> 52U) & 0x7ffU);
     const auto fraction_bits = bits & ((std::uint64_t{1} << 52U) - 1U);
@@ -103,6 +107,36 @@ std::uint64_t overhead_device_bytes(const RuntimeMemoryOverhead& overhead) {
     return overhead.device_bytes();
 }
 
+struct ModuleResidencyReserve {
+    std::uint64_t bytes{0};
+    std::uint64_t profile_limit{0};
+};
+
+ModuleResidencyReserve module_residency_reserve(const RuntimeMemoryPlanRequest& request,
+                                               std::uint64_t candidate) {
+    const auto found = std::lower_bound(request.active_kv_profile_limits.begin(),
+                                        request.active_kv_profile_limits.end(), candidate);
+    if (found == request.active_kv_profile_limits.end()) {
+        throw std::logic_error(
+            "Module residency reserve table does not cover the runtime KV candidate");
+    }
+    const auto index =
+        static_cast<std::size_t>(found - request.active_kv_profile_limits.begin());
+    return ModuleResidencyReserve{
+        request.module_residency_reserve_bytes_by_profile[index], *found};
+}
+
+std::uint64_t bytes_after_candidate_reserves(std::uint64_t bytes,
+                                             std::uint64_t module_residency_reserve_bytes,
+                                             std::uint64_t overhead_bytes) {
+    if (bytes <= module_residency_reserve_bytes)
+        return 0;
+    const auto after_module_residency = bytes - module_residency_reserve_bytes;
+    if (after_module_residency <= overhead_bytes)
+        return 0;
+    return after_module_residency - overhead_bytes;
+}
+
 void validate_request(const RuntimeMemoryPlanRequest& request) {
     if (request.post_load_free_bytes == 0)
         throw std::invalid_argument("Runtime memory planning requires post-load free GPU memory");
@@ -113,6 +147,34 @@ void validate_request(const RuntimeMemoryPlanRequest& request) {
     if (request.prefill_chunk_limit == 0 ||
         request.prefill_chunk_limit > request.model_context_limit) {
         throw std::invalid_argument("Prefill chunk limit must be in [1, model_context_limit]");
+    }
+    if (request.active_kv_profile_limits.empty()) {
+        throw std::invalid_argument("Active-KV profile limits must not be empty");
+    }
+    for (std::size_t index = 0; index < request.active_kv_profile_limits.size(); ++index) {
+        const auto limit = request.active_kv_profile_limits[index];
+        if (limit == 0 || limit > request.model_context_limit ||
+            (index != 0 && limit <= request.active_kv_profile_limits[index - 1])) {
+            throw std::invalid_argument(
+                "Active-KV profile limits must be positive and strictly increasing");
+        }
+    }
+    if (request.active_kv_profile_limits.back() != request.model_context_limit) {
+        throw std::invalid_argument(
+            "Active-KV profile limits must end at the model context limit");
+    }
+    if (request.module_residency_reserve_bytes_by_profile.empty()) {
+        throw std::invalid_argument("Module residency reserve table must not be empty");
+    }
+    if (request.module_residency_reserve_bytes_by_profile.size() !=
+        request.active_kv_profile_limits.size()) {
+        throw std::invalid_argument(
+            "Module residency reserve table must align with Active-KV profile limits");
+    }
+    if (!std::is_sorted(request.module_residency_reserve_bytes_by_profile.begin(),
+                        request.module_residency_reserve_bytes_by_profile.end())) {
+        throw std::invalid_argument(
+            "Cumulative module residency reserve table must be nondecreasing");
     }
     if (request.request_context_limit > request.model_context_limit) {
         throw std::invalid_argument(
@@ -144,6 +206,7 @@ void validate_request(const RuntimeMemoryPlanRequest& request) {
 struct FractionSolveResult {
     std::uint64_t capacity{0};
     RuntimeMemoryOverhead overhead;
+    ModuleResidencyReserve module_residency_reserve;
     std::vector<std::uint64_t> profiles;
     std::uint32_t iterations{0};
 };
@@ -151,7 +214,7 @@ struct FractionSolveResult {
 std::vector<std::uint64_t> lower_bucket_boundaries(const RuntimeMemoryPlanRequest& request,
                                                    std::uint64_t upper_bound) {
     std::vector<std::uint64_t> boundaries;
-    boundaries.reserve(request.active_kv_profile_limits.size() + 1);
+    boundaries.reserve(request.active_kv_profile_limits.size() + 2);
     const auto useful_limit = semantic_limit(request);
     for (const auto limit : request.active_kv_profile_limits) {
         if (limit == 0 || limit > request.model_context_limit) {
@@ -160,6 +223,14 @@ std::vector<std::uint64_t> lower_bucket_boundaries(const RuntimeMemoryPlanReques
         }
         if (limit < upper_bound && limit <= useful_limit)
             boundaries.push_back(limit);
+    }
+    // R=C uses the full prefill staging envelope and includes the Sq=C cold
+    // shape. R=C-1 is therefore a distinct finite fallback boundary even when
+    // C itself is not a history-profile endpoint.
+    if (request.prefill_chunk_limit > 1) {
+        const auto below_prefill_chunk = request.prefill_chunk_limit - 1;
+        if (below_prefill_chunk < upper_bound && below_prefill_chunk <= useful_limit)
+            boundaries.push_back(below_prefill_chunk);
     }
     if (upper_bound > 1)
         boundaries.push_back(1);
@@ -191,11 +262,14 @@ FractionSolveResult solve_fraction_capacity(const RuntimeMemoryPlanRequest& requ
         FractionSolveResult evaluation;
         evaluation.capacity = rows;
         evaluation.profiles = enabled_profiles(request, rows);
+        evaluation.module_residency_reserve = module_residency_reserve(request, rows);
         evaluation.overhead = query_overhead(rows, evaluation.profiles);
-        evaluation.capacity =
-            std::min(useful_limit,
-                     fraction_rows(request.policy.fraction, available_bytes(evaluation.overhead),
-                                   request.kv_bytes_per_token));
+        evaluation.capacity = std::min(
+            useful_limit,
+            fraction_rows(request.policy.fraction,
+                          available_bytes(evaluation.module_residency_reserve,
+                                          evaluation.overhead),
+                          request.kv_bytes_per_token));
         return evaluation;
     };
 
@@ -227,9 +301,18 @@ FractionSolveResult solve_fraction_capacity(const RuntimeMemoryPlanRequest& requ
     }
 
     // Discontinuous tactic/context envelopes can defeat the bounded
-    // fixed-point solve one row at a time. Profile limits are the finite lower
-    // bucket boundaries that the runtime can safely fall back to.
+    // fixed-point solve one row at a time. Profile limits and the R=C-1
+    // staging/shape transition are the finite lower boundaries that the
+    // runtime can safely fall back to.
     for (const auto boundary : boundaries) {
+        // Every candidate observed by this solve must be monotonically
+        // decreasing. A discontinuous envelope can make a profile boundary
+        // that was crossed earlier fit again, but returning to it would
+        // regrow R after a lower candidate was already selected. Only
+        // boundaries strictly below the last unsafe candidate remain
+        // admissible.
+        if (boundary >= candidate)
+            continue;
         auto fallback = evaluate(boundary);
         count_solve_iteration(result.iterations);
         if (boundary <= fallback.capacity) {
@@ -252,6 +335,10 @@ RuntimeMemoryReceipt make_receipt(const RuntimeMemoryPlanRequest& request,
         request.policy.kind == RuntimeKvPolicyKind::kBytes ? request.policy.bytes : 0;
     receipt.post_load_free_bytes = request.post_load_free_bytes;
     receipt.safety_reserve_bytes = request.safety_reserve_bytes;
+    const auto module_residency =
+        module_residency_reserve(request, plan.runtime_kv_capacity_tokens);
+    receipt.module_residency_reserve_bytes = module_residency.bytes;
+    receipt.module_residency_reserve_profile_limit = module_residency.profile_limit;
     receipt.model_context_limit = request.model_context_limit;
     receipt.prefill_chunk_limit = request.prefill_chunk_limit;
     receipt.request_context_limit = request.request_context_limit;
@@ -409,6 +496,11 @@ RuntimeMemoryPlan solve_runtime_memory_plan(const RuntimeMemoryPlanRequest& requ
         request.capacity_decision_upper_bound_tokens != 0;
     if (caller_supplied_capacity_baseline) {
         const auto upper = request.capacity_decision_upper_bound_tokens;
+        const auto upper_module_residency = module_residency_reserve(request, upper);
+        const auto upper_resident_overhead_bytes =
+            overhead_device_bytes(request.capacity_decision_resident_overhead);
+        const auto maximum_post_load_kv_bytes = bytes_after_candidate_reserves(
+            safe_free, upper_module_residency.bytes, upper_resident_overhead_bytes);
         if (request.policy.kind == RuntimeKvPolicyKind::kBytes) {
             const auto expected =
                 std::min(useful_limit, request.policy.bytes / request.kv_bytes_per_token);
@@ -416,13 +508,22 @@ RuntimeMemoryPlan solve_runtime_memory_plan(const RuntimeMemoryPlanRequest& requ
                 throw std::invalid_argument(
                     "Explicit KV capacity-decision upper bound disagrees with the byte policy");
             }
-        } else {
-            const auto maximum_without_overhead =
-                std::min(useful_limit, fraction_rows(request.policy.fraction, safe_free,
-                                                     request.kv_bytes_per_token));
-            if (upper > maximum_without_overhead) {
+            const auto upper_kv_bytes =
+                checked_mul(upper, request.kv_bytes_per_token, "KV cache");
+            if (upper_kv_bytes > maximum_post_load_kv_bytes) {
                 throw std::invalid_argument(
-                    "Capacity-decision upper bound exceeds the post-load policy budget");
+                    "Explicit KV capacity-decision baseline is underprovisioned for its "
+                    "module residency reserve and resident non-KV overhead");
+            }
+        } else {
+            const auto maximum_with_reserves =
+                std::min(useful_limit,
+                         fraction_rows(request.policy.fraction, maximum_post_load_kv_bytes,
+                                       request.kv_bytes_per_token));
+            if (upper > maximum_with_reserves) {
+                throw std::invalid_argument(
+                    "Capacity-decision upper bound exceeds the post-load policy budget after "
+                    "module residency and resident non-KV reserves");
             }
         }
         plan.runtime_kv_capacity_tokens = upper;
@@ -445,12 +546,16 @@ RuntimeMemoryPlan solve_runtime_memory_plan(const RuntimeMemoryPlanRequest& requ
         if (request.policy.kind == RuntimeKvPolicyKind::kBytes) {
             plan.enabled_profile_limits = enabled_profiles(request, candidate);
             plan.overhead = query_overhead(candidate, plan.enabled_profile_limits);
+            const auto module_residency = module_residency_reserve(request, candidate);
             const auto kv_bytes = checked_mul(candidate, request.kv_bytes_per_token, "KV cache");
-            const auto required =
-                checked_add(kv_bytes, overhead_device_bytes(plan.overhead), "Runtime allocation");
+            auto required = checked_add(kv_bytes, module_residency.bytes, "Runtime allocation");
+            required =
+                checked_add(required, overhead_device_bytes(plan.overhead), "Runtime allocation");
             if (required > safe_free) {
                 throw std::runtime_error("Explicit KV policy resolves to " +
                                          std::to_string(kv_bytes) + " KV bytes plus " +
+                                         std::to_string(module_residency.bytes) +
+                                         " module residency reserve bytes plus " +
                                          std::to_string(overhead_device_bytes(plan.overhead)) +
                                          " non-KV device bytes, exceeding " +
                                          std::to_string(safe_free) + " safely available bytes");
@@ -460,10 +565,12 @@ RuntimeMemoryPlan solve_runtime_memory_plan(const RuntimeMemoryPlanRequest& requ
             iterations = 1;
         } else {
             auto solved = solve_fraction_capacity(
-                request, candidate, query_overhead, [&](const RuntimeMemoryOverhead& overhead) {
+                request, candidate, query_overhead,
+                [&](const ModuleResidencyReserve& module_residency,
+                    const RuntimeMemoryOverhead& overhead) {
                     const auto overhead_bytes = overhead_device_bytes(overhead);
-                    return overhead_bytes < safe_free ? safe_free - overhead_bytes
-                                                      : std::uint64_t{0};
+                    return bytes_after_candidate_reserves(
+                        safe_free, module_residency.bytes, overhead_bytes);
                 });
             plan.runtime_kv_capacity_tokens = solved.capacity;
             plan.allocated_kv_bytes =
@@ -494,34 +601,36 @@ RuntimeMemoryPlan solve_runtime_memory_plan(const RuntimeMemoryPlanRequest& requ
             plan.allocated_kv_bytes = checked_mul(upper, request.kv_bytes_per_token, "KV cache");
             plan.enabled_profile_limits = enabled_profiles(request, upper);
             plan.overhead = query_overhead(upper, plan.enabled_profile_limits);
+            const auto module_residency = module_residency_reserve(request, upper);
             count_solve_iteration(iterations);
             const auto final_overhead_bytes = overhead_device_bytes(plan.overhead);
             const auto positive_delta =
                 final_overhead_bytes > capacity_resident_overhead_bytes
                     ? final_overhead_bytes - capacity_resident_overhead_bytes
                     : std::uint64_t{0};
-            const auto available_for_kv =
-                positive_delta < final_safe ? final_safe - positive_delta : std::uint64_t{0};
+            const auto available_for_kv = bytes_after_candidate_reserves(
+                final_safe, module_residency.bytes, positive_delta);
             if (plan.allocated_kv_bytes > available_for_kv) {
                 throw std::runtime_error(
                     "Available GPU memory changed before the explicit KV allocation: resolved " +
                     std::to_string(plan.allocated_kv_bytes) + " KV bytes, now safely available " +
                     std::to_string(available_for_kv) +
-                    " bytes after the final non-KV overhead delta");
+                    " bytes after the module residency reserve and final non-KV overhead delta");
             }
         } else {
             const auto final_rows_without_delta =
                 fraction_rows(request.policy.fraction, final_safe, request.kv_bytes_per_token);
             auto solved = solve_fraction_capacity(
                 request, std::min(upper, final_rows_without_delta), query_overhead,
-                [&](const RuntimeMemoryOverhead& overhead) {
+                [&](const ModuleResidencyReserve& module_residency,
+                    const RuntimeMemoryOverhead& overhead) {
                     const auto final_overhead_bytes = overhead_device_bytes(overhead);
                     const auto positive_delta =
                         final_overhead_bytes > capacity_resident_overhead_bytes
                             ? final_overhead_bytes - capacity_resident_overhead_bytes
                             : std::uint64_t{0};
-                    return positive_delta < final_safe ? final_safe - positive_delta
-                                                       : std::uint64_t{0};
+                    return bytes_after_candidate_reserves(
+                        final_safe, module_residency.bytes, positive_delta);
                 });
             plan.runtime_kv_capacity_tokens = solved.capacity;
             plan.allocated_kv_bytes =
@@ -541,18 +650,21 @@ RuntimeMemoryPlan solve_runtime_memory_plan(const RuntimeMemoryPlanRequest& requ
         if (request.capacity_decision_free_bytes != 0) {
             const auto final_safe = bytes_after_fixed_reserve(request.capacity_decision_free_bytes,
                                                               request.safety_reserve_bytes);
+            const auto module_residency =
+                module_residency_reserve(request, plan.runtime_kv_capacity_tokens);
             const auto final_overhead_bytes = overhead_device_bytes(plan.overhead);
             const auto positive_delta =
                 final_overhead_bytes > capacity_resident_overhead_bytes
                     ? final_overhead_bytes - capacity_resident_overhead_bytes
                     : std::uint64_t{0};
-            exact_fraction_policy_available_bytes =
-                positive_delta < final_safe ? final_safe - positive_delta : std::uint64_t{0};
+            exact_fraction_policy_available_bytes = bytes_after_candidate_reserves(
+                final_safe, module_residency.bytes, positive_delta);
         } else {
+            const auto module_residency =
+                module_residency_reserve(request, plan.runtime_kv_capacity_tokens);
             const auto final_overhead_bytes = overhead_device_bytes(plan.overhead);
-            exact_fraction_policy_available_bytes = final_overhead_bytes < safe_free
-                                                        ? safe_free - final_overhead_bytes
-                                                        : std::uint64_t{0};
+            exact_fraction_policy_available_bytes = bytes_after_candidate_reserves(
+                safe_free, module_residency.bytes, final_overhead_bytes);
         }
         const auto invariant_rows =
             fraction_rows(request.policy.fraction, exact_fraction_policy_available_bytes,
@@ -565,6 +677,15 @@ RuntimeMemoryPlan solve_runtime_memory_plan(const RuntimeMemoryPlanRequest& requ
     }
 
     plan.receipt = make_receipt(request, plan, iterations);
+    if (request.capacity_decision_free_bytes != 0) {
+        plan.receipt.capacity_decision_resident_overhead_bytes =
+            capacity_resident_overhead_bytes;
+        const auto final_overhead_bytes = overhead_device_bytes(plan.overhead);
+        plan.receipt.final_non_kv_overhead_delta_bytes =
+            final_overhead_bytes > capacity_resident_overhead_bytes
+                ? final_overhead_bytes - capacity_resident_overhead_bytes
+                : std::uint64_t{0};
+    }
     if (request.policy.kind != RuntimeKvPolicyKind::kBytes) {
         plan.receipt.kv_budget_bytes =
             fraction_budget_bytes(request.policy.fraction, exact_fraction_policy_available_bytes);
@@ -596,6 +717,15 @@ std::string RuntimeMemoryReceipt::to_json() const {
         << ",\"requested_kv_bytes\":" << requested_kv_bytes
         << ",\"post_load_free_bytes\":" << post_load_free_bytes
         << ",\"safety_reserve_bytes\":" << safety_reserve_bytes
+        << ",\"module_residency_reserve_bytes\":" << module_residency_reserve_bytes
+        << ",\"module_residency_reserve_profile_limit\":"
+        << module_residency_reserve_profile_limit
+        << ",\"module_residency_plan_set_sha256\":\""
+        << module_residency_plan_set_sha256
+        << "\",\"module_residency_cuda_module_loading_mode\":\""
+        << module_residency_cuda_module_loading_mode
+        << "\",\"module_residency_evidence_sha256\":\""
+        << module_residency_evidence_sha256 << '"'
         << ",\"model_context_limit\":" << model_context_limit
         << ",\"prefill_chunk_limit\":" << prefill_chunk_limit
         << ",\"request_context_limit\":" << request_context_limit
@@ -619,6 +749,11 @@ std::string RuntimeMemoryReceipt::to_json() const {
     nullable_u64("capacity_decision_total_bytes", capacity_decision_total_bytes,
                  capacity_decision_snapshot_available);
     nullable_u64("capacity_decision_device_used_bytes", capacity_decision_device_used_bytes,
+                 capacity_decision_snapshot_available);
+    nullable_u64("capacity_decision_resident_overhead_bytes",
+                 capacity_decision_resident_overhead_bytes,
+                 capacity_decision_snapshot_available);
+    nullable_u64("final_non_kv_overhead_delta_bytes", final_non_kv_overhead_delta_bytes,
                  capacity_decision_snapshot_available);
     nullable_u64("settled_free_bytes", settled_free_bytes, settled_snapshot_available);
     nullable_u64("settled_total_bytes", settled_total_bytes, settled_snapshot_available);
@@ -696,6 +831,14 @@ std::string RuntimeMemoryReceipt::to_json() const {
                     "cuda_mem_get_info_device_total_minus_free_device_wide",
                     capacity_decision_snapshot_available);
     out << ',';
+    nullable_source("capacity_decision_resident_overhead_bytes",
+                    "tentative_context_and_output_reservation_ledger",
+                    capacity_decision_snapshot_available);
+    out << ',';
+    nullable_source("final_non_kv_overhead_delta_bytes",
+                    "max_zero_final_non_kv_overhead_minus_resident_overhead",
+                    capacity_decision_snapshot_available);
+    out << ',';
     nullable_source("settled_free_bytes",
                     "cuda_mem_get_info_after_final_context_output_and_kv_allocation",
                     settled_snapshot_available);
@@ -742,6 +885,11 @@ std::string RuntimeMemoryReceipt::to_json() const {
     out << ',';
     nullable_source("kv_budget_bytes",
                     "runtime_kv_policy_after_reserves_and_positive_non_kv_overhead_delta", true);
+    out << ',';
+    nullable_source("module_residency_reserve_bytes", "plan_bound_profile_calibration", true);
+    out << ',';
+    nullable_source("module_residency_reserve_profile_limit",
+                    "active_kv_profile_limit_lower_bound", true);
     out << ',';
     nullable_source("external_device_output_bytes", "runtime_exact_sq_staging_allocation_ledger",
                     external_device_output_bytes_available);

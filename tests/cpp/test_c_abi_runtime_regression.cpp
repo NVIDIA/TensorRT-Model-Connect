@@ -175,7 +175,7 @@ void write_invalid_engine_bundle(const std::filesystem::path& path) {
 
 std::string runtime_memory_fixture_contract() {
     return R"({
-    "contract_version": 1,
+    "contract_version": 2,
     "qualified_model_id": "qwen",
     "qualified_model_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "qualified_config_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -188,7 +188,33 @@ std::string runtime_memory_fixture_contract() {
     "kv_dtype": "float16",
     "kv_bytes_per_token": 256,
     "active_kv_profile_limits": [16, 32],
-    "runtime_owned": true
+    "runtime_owned": true,
+    "module_residency_calibration": {
+      "schema_version": 1,
+      "measurement_kind": "nvml_process_cumulative_first_use",
+      "cuda_module_loading_mode": "lazy",
+      "qualified_runtime_stack_sha256": "1b94f56092107d0fa1c6d43e2e8e4245c904ddc5967646f96ff8e64496e0f210",
+      "plan_set_sha256": "60d8179e21e2b671155f90dfa50688046d06a11813284d1ef3c2d78d97a7ab9c",
+      "evidence_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "plans": [
+        {
+          "section_name": "engine_plan",
+          "section_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "role": "decode",
+          "optimization_profile_count": 2
+        },
+        {
+          "section_name": "prefill_engine_plan",
+          "section_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "role": "prefill",
+          "optimization_profile_count": 1
+        }
+      ],
+      "profile_reserves": [
+        {"covering_profile_limit": 16, "cumulative_reserve_bytes": 268435456},
+        {"covering_profile_limit": 32, "cumulative_reserve_bytes": 536870912}
+      ]
+    }
   })";
 }
 
@@ -460,7 +486,7 @@ void test_runtime_kv_policy_rejects_unsupported_and_static_bundles() {
         (void)trtmc::load(unsupported_path.string(), percentage_options);
     } catch (const std::invalid_argument& error) {
         const std::string message = error.what();
-        unsupported_rejected = message.find("does not declare runtime_memory contract version 1") !=
+        unsupported_rejected = message.find("does not declare runtime_memory contract version 2") !=
                                    std::string::npos &&
                                message.find("engine_plan") == std::string::npos;
     }
@@ -471,7 +497,7 @@ void test_runtime_kv_policy_rejects_unsupported_and_static_bundles() {
     v2_options.kv_cache_memory_policy = TRTMC_KV_CACHE_MEMORY_FRACTION;
     v2_options.kv_cache_memory_fraction = 0.8;
     expect_v2_creation_rejected(unsupported_path, &v2_options,
-                                "does not declare runtime_memory contract version 1",
+                                "does not declare runtime_memory contract version 2",
                                 "C ABI V2 rejects percentage policy on unsupported bundle");
     const std::string v2_fraction_error = trtmc_last_error();
     check(v2_fraction_error.find("engine_plan") == std::string::npos,
@@ -481,14 +507,14 @@ void test_runtime_kv_policy_rejects_unsupported_and_static_bundles() {
     v2_options.kv_cache_memory_policy = TRTMC_KV_CACHE_MEMORY_BYTES;
     v2_options.kv_cache_memory_bytes = 4ULL * 1024ULL * 1024ULL * 1024ULL;
     expect_v2_creation_rejected(unsupported_path, &v2_options,
-                                "does not declare runtime_memory contract version 1",
+                                "does not declare runtime_memory contract version 2",
                                 "C ABI V2 rejects byte policy on unsupported bundle");
 
     trtmc_pipeline_options_v2_init(&v2_options);
     v2_options.max_sequence_length = 32768;
     v2_options.max_sequence_length_explicit = 1;
     expect_v2_creation_rejected(unsupported_path, &v2_options,
-                                "does not declare runtime_memory contract version 1",
+                                "does not declare runtime_memory contract version 2",
                                 "C ABI V2 rejects sequence policy on unsupported bundle");
 
     const auto static_qwen_path = root / "static_qwen_auto_policy.trtfb";
@@ -509,11 +535,36 @@ void test_runtime_kv_policy_rejects_unsupported_and_static_bundles() {
         (void)trtmc::load(static_qwen_path.string(), explicit_auto);
     } catch (const std::invalid_argument& error) {
         const std::string message = error.what();
-        static_rejected = message.find("does not declare runtime_memory contract version 1") !=
+        static_rejected = message.find("does not declare runtime_memory contract version 2") !=
                               std::string::npos &&
                           message.find("engine_plan") == std::string::npos;
     }
     check(static_rejected, "static Qwen bundle rejects explicit auto KV policy");
+
+    const auto static_rtx_path = root / "static_rtx_auto_policy.trtfb";
+    const std::string static_rtx_config = R"({
+  "runtime_strategy": "qwen_decoder_kv_cache",
+  "engine_backend": "trt_rtx",
+  "dynamic_kv_cache": false,
+  "hidden_size": 64,
+  "num_attention_heads": 1,
+  "num_key_value_heads": 1
+})";
+    write_bundle_with_sections(static_rtx_path,
+                               {BundleSectionSpec{"config.json", static_rtx_config}}, "qwen");
+    bool static_rtx_rejected = false;
+    try {
+        (void)trtmc::load(static_rtx_path.string(), percentage_options);
+    } catch (const std::invalid_argument& error) {
+        const std::string message = error.what();
+        static_rtx_rejected =
+            message.find("does not declare runtime_memory contract version 2") !=
+                std::string::npos &&
+            message.find("trt_rtx") == std::string::npos &&
+            message.find("backend") == std::string::npos;
+    }
+    check(static_rtx_rejected,
+          "static TensorRT-RTX bundle rejects runtime-memory policy before backend dispatch");
 
     const auto dynamic_qwen_path = root / "dynamic_qwen_pool.trtfb";
     const std::string dynamic_qwen_config = R"({
@@ -522,25 +573,9 @@ void test_runtime_kv_policy_rejects_unsupported_and_static_bundles() {
   "num_attention_heads": 1,
   "num_key_value_heads": 1
 })";
-    const std::string runtime_memory = R"({
-    "contract_version": 1,
-    "qualified_model_id": "qwen",
-    "qualified_model_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "qualified_config_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "qualified_target": "gb300-trt-11.2",
-    "qualified_runtime_stack": {"sm":"sm103","tensorrt":"11.2.0.113","cuda_runtime":"13.3","cudnn_backend":"9.20.0","cudnn_frontend_revision":"7b9b711c22b6823e87150213ecd8449260db8610","nvrtc":"13.3","driver":"580.105.08"},
-    "native_kv_plugin_abi": 2,
-    "model_context_limit": 32,
-    "prefill_chunk_limit": 16,
-    "kv_layout": "layer_major_contiguous_k_then_v",
-    "kv_dtype": "float16",
-    "kv_bytes_per_token": 256,
-    "active_kv_profile_limits": [16, 32],
-    "runtime_owned": true
-  })";
     write_bundle_with_sections(dynamic_qwen_path,
                                {BundleSectionSpec{"config.json", dynamic_qwen_config}}, "qwen",
-                               runtime_memory);
+                               runtime_memory_fixture_contract());
     bool pool_rejected = false;
     try {
         (void)trtmc::PipelineFactory::from_bundle_pool(dynamic_qwen_path.string(), 2);
@@ -720,7 +755,7 @@ void test_cli_legacy_size_and_runtime_memory_policy_are_distinct(const std::file
                           trtmc::cli::make_load_options(invalid_static_args));
     } catch (const std::invalid_argument& error) {
         invalid_static_rejected =
-            std::string(error.what()).find("does not declare runtime_memory contract version 1") !=
+            std::string(error.what()).find("does not declare runtime_memory contract version 2") !=
             std::string::npos;
     }
     check(invalid_static_rejected,

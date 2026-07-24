@@ -15,6 +15,11 @@ import sys
 
 import pytest
 
+from tensorrt_model_connect.dynamic_memory_contract import (
+    module_residency_plan_set_sha256,
+    qualified_runtime_stack_sha256,
+    seal_runtime_memory_contract,
+)
 from tests.tools.dynamic_memory_manifest_fixture import (
     seed_manifest_test_modules,
 )
@@ -234,6 +239,34 @@ if behavior == "token_mismatch" and label == "gpu-b-concurrent":
 runtime_stack = request["test_runtime_stack"]
 runtime_libraries = request["test_runtime_libraries"]
 runtime_trtmc = request["test_runtime_trtmc_libraries"]
+runtime_memory_receipt = request["test_runtime_memory_receipt"]
+runtime_memory_contract = request["test_runtime_memory_contract"]
+runtime_module_residency_receipt = request[
+    "test_runtime_module_residency_receipt"
+]
+mapped_dso_identities = sorted(
+    {
+        (
+            row["path"],
+            row["device"],
+            row["inode"],
+        ): row
+        for row in (
+            *(
+                runtime_trtmc[field]
+                for field in (
+                    "core",
+                    "trt_backend",
+                    "runtime_kv_plugin",
+                    "model",
+                )
+            ),
+            identity(Path(runtime_libraries["nvrtc"]["path"])),
+            identity(Path(runtime_libraries["nvrtc_builtins"]["path"])),
+        )
+    }.values(),
+    key=lambda row: (row["path"], row["device"], row["inode"]),
+)
 if behavior == "runtime_stack_mismatch" and label == "gpu-b-concurrent":
     runtime_stack = dict(runtime_stack)
     runtime_stack["driver"] = "580.105.09"
@@ -335,7 +368,13 @@ payload = {
     "runtime_stack": runtime_stack,
     "runtime_libraries": runtime_libraries,
     "runtime_trtmc_libraries": runtime_trtmc,
+    "mapped_dso_identities": mapped_dso_identities,
     "build_runtime_kv_plugin": plugin_identity,
+    "runtime_memory_receipt": runtime_memory_receipt,
+    "bundle_runtime_memory_contract": runtime_memory_contract,
+    "runtime_module_residency_receipt": (
+        runtime_module_residency_receipt
+    ),
     "cuda_jit_cache": cache,
     "qualification_provenance": {
         "git_head": build["git_head"],
@@ -352,7 +391,19 @@ payload = {
         "runtime_stack_sha256": canonical(runtime_stack),
         "runtime_libraries_sha256": canonical(runtime_libraries),
         "runtime_trtmc_libraries_sha256": canonical(runtime_trtmc),
+        "mapped_dso_identities_sha256": canonical(
+            mapped_dso_identities
+        ),
         "build_runtime_kv_plugin_sha256": canonical(plugin_identity),
+        "runtime_memory_receipt_sha256": canonical(
+            runtime_memory_receipt
+        ),
+        "bundle_runtime_memory_contract_sha256": canonical(
+            runtime_memory_contract
+        ),
+        "runtime_module_residency_receipt_sha256": canonical(
+            runtime_module_residency_receipt
+        ),
         "build_manifest_sha256": canonical(build_manifest),
         "cuda_jit_cache_sha256": canonical(cache),
     },
@@ -366,7 +417,16 @@ payload = {
         "toolchain": toolchain,
         "build_manifest": build_manifest,
         "runtime_trtmc_libraries": runtime_trtmc,
+        "mapped_dso_identities": mapped_dso_identities,
         "build_runtime_kv_plugin": plugin_identity,
+        "comparison_sequence_limit": request["runtime"][
+            "max_sequence_length"
+        ],
+        "runtime_memory_receipt": runtime_memory_receipt,
+        "bundle_runtime_memory_contract": runtime_memory_contract,
+        "runtime_module_residency_receipt": (
+            runtime_module_residency_receipt
+        ),
         "source_state_pre": source_state,
         "source_state_post": source_state,
         "source_state_unchanged": source_unchanged,
@@ -437,11 +497,101 @@ def _runtime_libraries(inputs: Path) -> dict:
     }
 
 
+def _mapped_dso_identities(
+    runtime_trtmc: dict,
+    runtime_libraries: dict,
+) -> list[dict]:
+    identities = [
+        dict(runtime_trtmc[field])
+        for field in ("core", "trt_backend", "runtime_kv_plugin", "model")
+    ]
+    identities.extend(
+        isolation._file_identity(Path(runtime_libraries[field]["path"]))
+        for field in ("nvrtc", "nvrtc_builtins")
+    )
+    unique = {
+        (row["path"], row["device"], row["inode"]): row
+        for row in identities
+    }
+    return sorted(
+        unique.values(),
+        key=lambda row: (row["path"], row["device"], row["inode"]),
+    )
+
+
 def _write_test_bundle(path: Path, spec) -> None:
     plans = {
         "prefill_engine_plan": b"qualified-prefill-engine-plan",
         "engine_plan": b"qualified-decode-engine-plan",
     }
+    runtime_stack = {
+        key: value
+        for key, value in RUNTIME_STACK.items()
+        if key != "schema"
+    }
+    base_contract = {
+        "contract_version": 1,
+        "qualified_model_id": MODEL_ID,
+        "qualified_model_revision": MODEL_REVISION,
+        "qualified_config_sha256": "b" * 64,
+        "qualified_target": "linux-x86_64-gb300",
+        "qualified_runtime_stack": runtime_stack,
+        "native_kv_plugin_abi": 2,
+        "model_context_limit": spec.context_limit,
+        "prefill_chunk_limit": spec.chunk_limit,
+        "kv_layout": "contiguous_runtime_v1",
+        "kv_dtype": spec.kv_dtype,
+        "kv_bytes_per_token": spec.kv_bytes_per_token,
+        "active_kv_profile_limits": list(spec.buckets),
+        "runtime_owned": True,
+    }
+    calibration_plans = [
+        {
+            "section_name": "engine_plan",
+            "section_sha256": hashlib.sha256(
+                plans["engine_plan"]
+            ).hexdigest(),
+            "role": "decode",
+            "optimization_profile_count": len(spec.buckets),
+        },
+        {
+            "section_name": "prefill_engine_plan",
+            "section_sha256": hashlib.sha256(
+                plans["prefill_engine_plan"]
+            ).hexdigest(),
+            "role": "prefill",
+            "optimization_profile_count": 1,
+        },
+    ]
+    runtime_memory = seal_runtime_memory_contract(
+        base_contract,
+        plan_sections=plans,
+        module_residency_calibration={
+            "schema_version": 1,
+            "measurement_kind": "nvml_process_cumulative_first_use",
+            "cuda_module_loading_mode": "lazy",
+            "evidence_provenance": "external_manifest_v1",
+            "qualified_runtime_stack_sha256": (
+                qualified_runtime_stack_sha256(runtime_stack)
+            ),
+            "plan_set_sha256": module_residency_plan_set_sha256(
+                calibration_plans
+            ),
+            "plans": calibration_plans,
+            "profile_reserves": [
+                {
+                    "covering_profile_limit": limit,
+                    "cumulative_reserve_bytes": (
+                        (index + 1) * 256 * 1024 * 1024
+                    ),
+                }
+                for index, limit in enumerate(spec.buckets)
+            ],
+            "evidence_sha256": hashlib.sha256(
+                b"qualified fixture module-residency evidence"
+            ).hexdigest(),
+        },
+    )
     section_offset = 0
     sections = {}
     for name, plan in plans.items():
@@ -459,26 +609,7 @@ def _write_test_bundle(path: Path, spec) -> None:
         "num_key_value_heads": 2,
         "max_cache_length": spec.context_limit,
         "precision": "bf16",
-        "runtime_memory": {
-            "contract_version": 1,
-            "qualified_model_id": MODEL_ID,
-            "qualified_model_revision": MODEL_REVISION,
-            "qualified_config_sha256": "b" * 64,
-            "qualified_target": "linux-x86_64-gb300",
-            "qualified_runtime_stack": {
-                key: value
-                for key, value in RUNTIME_STACK.items()
-                if key != "schema"
-            },
-            "native_kv_plugin_abi": 1,
-            "model_context_limit": spec.context_limit,
-            "prefill_chunk_limit": spec.chunk_limit,
-            "kv_layout": "contiguous",
-            "kv_dtype": spec.kv_dtype,
-            "kv_bytes_per_token": spec.kv_bytes_per_token,
-            "active_kv_profile_limits": list(spec.buckets),
-            "runtime_owned": True,
-        },
+        "runtime_memory": runtime_memory,
         "sections": sections,
     }
     header_bytes = json.dumps(header).encode("utf-8")
@@ -488,6 +619,114 @@ def _write_test_bundle(path: Path, spec) -> None:
         + header_bytes
         + b"".join(plans.values())
     )
+
+
+def _schema_v4_runtime_memory_receipt(
+    contract: dict,
+    *,
+    comparison_sequence_limit: int,
+    serialized_plan_bytes: int,
+) -> dict:
+    capacity = comparison_sequence_limit
+    bytes_per_token = contract["kv_bytes_per_token"]
+    capacity_total = 8 * 1024 * 1024 * 1024
+    capacity_free = 4 * 1024 * 1024 * 1024
+    settled_free = capacity_free - capacity * bytes_per_token
+    calibration = contract["module_residency_calibration"]
+    reserve = next(
+        row
+        for row in calibration["profile_reserves"]
+        if row["covering_profile_limit"] >= capacity
+    )
+    return {
+        "receipt_schema_version": 4,
+        "contract_version": 2,
+        "policy": "auto",
+        "policy_fraction": 0.9,
+        "requested_kv_bytes": 0,
+        "post_load_free_bytes": capacity_free,
+        "safety_reserve_bytes": 64 * 1024 * 1024,
+        "module_residency_reserve_bytes": reserve[
+            "cumulative_reserve_bytes"
+        ],
+        "module_residency_reserve_profile_limit": reserve[
+            "covering_profile_limit"
+        ],
+        "module_residency_plan_set_sha256": calibration[
+            "plan_set_sha256"
+        ],
+        "module_residency_evidence_sha256": calibration[
+            "evidence_sha256"
+        ],
+        "module_residency_cuda_module_loading_mode": calibration[
+            "cuda_module_loading_mode"
+        ],
+        "model_context_limit": contract["model_context_limit"],
+        "prefill_chunk_limit": contract["prefill_chunk_limit"],
+        "request_context_limit": comparison_sequence_limit,
+        "runtime_kv_capacity_tokens": capacity,
+        "effective_request_limit": capacity,
+        "kv_bytes_per_token": bytes_per_token,
+        "kv_budget_bytes": capacity * bytes_per_token,
+        "pre_load_free_bytes": capacity_free,
+        "pre_load_total_bytes": capacity_total,
+        "serialized_plan_bytes": serialized_plan_bytes,
+        "resident_weight_bytes": 2_000,
+        "resident_weight_copy_count": 2,
+        "engine_weight_bytes": 2_000,
+        "weight_streaming_active": False,
+        "post_load_total_bytes": capacity_total,
+        "post_load_device_used_bytes": capacity_total - capacity_free,
+        "capacity_decision_free_bytes": capacity_free,
+        "capacity_decision_total_bytes": capacity_total,
+        "capacity_decision_device_used_bytes": (
+            capacity_total - capacity_free
+        ),
+        "capacity_decision_resident_overhead_bytes": 100,
+        "final_non_kv_overhead_delta_bytes": 50,
+        "settled_free_bytes": settled_free,
+        "settled_total_bytes": capacity_total,
+        "settled_device_used_bytes": capacity_total - settled_free,
+        "settled_snapshot_unavailable_reason": None,
+        "final_free_bytes": capacity_free,
+        "final_total_bytes": capacity_total,
+        "final_device_used_bytes": capacity_total - capacity_free,
+        "context_device_memory_bytes": 10,
+        "ordinary_device_input_bytes": 20,
+        "ordinary_device_output_bytes": 30,
+        "external_device_output_bytes": 40,
+        "host_staging_bytes": 60,
+        "graph_private_device_bytes": 50,
+        "kv_reserved_bytes": capacity * bytes_per_token,
+        "kv_committed_bytes": capacity * bytes_per_token,
+        "kv_metadata_bytes": 0,
+        "peak_device_bytes": capacity * bytes_per_token,
+        "peak_device_bytes_scope": "device_wide",
+        "peak_device_bytes_baseline": (
+            "cuda_mem_get_info_before_engine_deserialization_free"
+        ),
+        "peak_device_sample_count": 2,
+        "peak_device_sample_boundaries": [
+            "after_runtime_kv_allocation",
+            "after_successful_request_completion",
+        ],
+        "backend_owned_cache_input_bytes": 0,
+        "backend_owned_cache_output_bytes": 0,
+        "kv_allocation_id": 1,
+        "solve_iterations": 1,
+        "capped_by_model": False,
+        "capped_by_request_limit": True,
+        "measurement_sources": dict(
+            isolation.performance._MEASUREMENT_SOURCES
+        ),
+    }
+
+
+def _module_residency_receipt(receipt: dict) -> dict:
+    return {
+        field: receipt[field]
+        for field in isolation.performance._MODULE_RESIDENCY_RECEIPT_FIELDS
+    }
 
 
 def _qualified_engine_graph(
@@ -793,10 +1032,14 @@ def _performance_provenance(
     runtime_stack: dict | None,
     runtime_libraries: dict | None,
     runtime_trtmc: dict | None = None,
+    mapped_dso_identities: list[dict] | None = None,
     build_plugin: dict | None = None,
     toolchain: dict | None = None,
     environment: dict | None = None,
     build_manifest: dict | None = None,
+    runtime_memory_receipt: dict | None = None,
+    runtime_memory_contract: dict | None = None,
+    runtime_module_residency_receipt: dict | None = None,
 ) -> dict:
     provenance = {
         "git_head": source["git_head"],
@@ -826,10 +1069,14 @@ def _performance_provenance(
     }
     if role == "native-dynamic":
         assert runtime_trtmc is not None
+        assert mapped_dso_identities is not None
         assert build_plugin is not None
         assert toolchain is not None
         assert environment is not None
         assert build_manifest is not None
+        assert runtime_memory_receipt is not None
+        assert runtime_memory_contract is not None
+        assert runtime_module_residency_receipt is not None
         provenance.update(
             {
                 "toolchain_sha256": isolation._canonical_sha(
@@ -841,11 +1088,25 @@ def _performance_provenance(
                 "runtime_trtmc_libraries_sha256": (
                     isolation._canonical_sha(runtime_trtmc)
                 ),
+                "mapped_dso_identities_sha256": (
+                    isolation._canonical_sha(mapped_dso_identities)
+                ),
                 "build_runtime_kv_plugin_sha256": (
                     isolation._canonical_sha(build_plugin)
                 ),
                 "build_manifest_sha256": isolation._canonical_sha(
                     build_manifest
+                ),
+                "runtime_memory_receipt_sha256": (
+                    isolation._canonical_sha(runtime_memory_receipt)
+                ),
+                "bundle_runtime_memory_contract_sha256": (
+                    isolation._canonical_sha(runtime_memory_contract)
+                ),
+                "runtime_module_residency_receipt_sha256": (
+                    isolation._canonical_sha(
+                        runtime_module_residency_receipt
+                    )
                 ),
             }
         )
@@ -874,6 +1135,30 @@ def _write_performance_report(
     )
     worker_identity = isolation._file_identity(worker)
     plugin_identity = isolation._file_identity(plugin)
+    mapped_dso_identities = _mapped_dso_identities(
+        runtime_trtmc,
+        runtime_libraries,
+    )
+    dynamic_header = isolation.boundary._read_bundle_header(
+        dynamic_bundle
+    )
+    runtime_memory_contract = dynamic_header["runtime_memory"]
+    comparison_sequence_limit = int(
+        json.loads(request.read_text(encoding="utf-8"))["runtime"][
+            "max_sequence_length"
+        ]
+    )
+    runtime_memory_receipt = _schema_v4_runtime_memory_receipt(
+        runtime_memory_contract,
+        comparison_sequence_limit=comparison_sequence_limit,
+        serialized_plan_bytes=sum(
+            int(dynamic_header["sections"][name]["size"])
+            for name in ("engine_plan", "prefill_engine_plan")
+        ),
+    )
+    runtime_module_residency_receipt = _module_residency_receipt(
+        runtime_memory_receipt
+    )
     toolchain = {
         "worker": worker_identity,
         "plugin_library": plugin_identity,
@@ -906,6 +1191,9 @@ def _write_performance_report(
             runtime_stack=stack,
             runtime_libraries=libraries,
             runtime_trtmc=runtime_trtmc if dynamic else None,
+            mapped_dso_identities=(
+                mapped_dso_identities if dynamic else None
+            ),
             build_plugin=plugin_identity if dynamic else None,
             toolchain=toolchain if dynamic else None,
             environment=environment,
@@ -913,6 +1201,15 @@ def _write_performance_report(
                 build_document["build_manifest"]
                 if dynamic
                 else None
+            ),
+            runtime_memory_receipt=(
+                runtime_memory_receipt if dynamic else None
+            ),
+            runtime_memory_contract=(
+                runtime_memory_contract if dynamic else None
+            ),
+            runtime_module_residency_receipt=(
+                runtime_module_residency_receipt if dynamic else None
             ),
         )
         capture = {
@@ -948,7 +1245,15 @@ def _write_performance_report(
             capture.update(
                 {
                     "runtime_trtmc_libraries": runtime_trtmc,
+                    "mapped_dso_identities": mapped_dso_identities,
                     "build_runtime_kv_plugin": plugin_identity,
+                    "runtime_memory_receipt": runtime_memory_receipt,
+                    "bundle_runtime_memory_contract": (
+                        runtime_memory_contract
+                    ),
+                    "runtime_module_residency_receipt": (
+                        runtime_module_residency_receipt
+                    ),
                     "qualification_evidence": {
                         "build_receipt": str(build_receipt.resolve()),
                         "build_receipt_sha256": isolation._sha256(
@@ -968,7 +1273,20 @@ def _write_performance_report(
                             "build_manifest"
                         ],
                         "runtime_trtmc_libraries": runtime_trtmc,
+                        "mapped_dso_identities": mapped_dso_identities,
                         "build_runtime_kv_plugin": plugin_identity,
+                        "comparison_sequence_limit": (
+                            comparison_sequence_limit
+                        ),
+                        "runtime_memory_receipt": (
+                            runtime_memory_receipt
+                        ),
+                        "bundle_runtime_memory_contract": (
+                            runtime_memory_contract
+                        ),
+                        "runtime_module_residency_receipt": (
+                            runtime_module_residency_receipt
+                        ),
                         "source_state_pre": source,
                         "source_state_post": source,
                         "source_state_unchanged": True,
@@ -1118,6 +1436,25 @@ def _prepare(
     request_document["test_runtime_stack"] = RUNTIME_STACK
     request_document["test_runtime_libraries"] = runtime_libraries
     request_document["test_runtime_trtmc_libraries"] = runtime_trtmc
+    bundle_header = isolation.boundary._read_bundle_header(bundle)
+    runtime_memory_contract = bundle_header["runtime_memory"]
+    runtime_memory_receipt = _schema_v4_runtime_memory_receipt(
+        runtime_memory_contract,
+        comparison_sequence_limit=128,
+        serialized_plan_bytes=sum(
+            int(bundle_header["sections"][name]["size"])
+            for name in ("engine_plan", "prefill_engine_plan")
+        ),
+    )
+    request_document["test_runtime_memory_contract"] = (
+        runtime_memory_contract
+    )
+    request_document["test_runtime_memory_receipt"] = (
+        runtime_memory_receipt
+    )
+    request_document["test_runtime_module_residency_receipt"] = (
+        _module_residency_receipt(runtime_memory_receipt)
+    )
     request.write_text(json.dumps(request_document), encoding="utf-8")
     performance_report = _write_performance_report(
         inputs,
@@ -1791,6 +2128,7 @@ def test_rejects_failed_or_unbound_performance_receipt(
         "same-bytes-new-receipt-inode",
         "swap-worker-plugin",
         "swap-runtime-plugin",
+        "mismatch-mapped-dso",
         "swap-build-plugin",
     ],
 )
@@ -1839,6 +2177,10 @@ def test_replays_complete_dynamic_performance_provenance(
         provenance["toolchain_sha256"] = isolation._canonical_sha(
             evidence["toolchain"]
         )
+    elif mutation == "mismatch-mapped-dso":
+        evidence["mapped_dso_identities"] = evidence[
+            "mapped_dso_identities"
+        ][1:]
     else:
         wrong_plugin = evidence["toolchain"]["worker"]
         capture["build_runtime_kv_plugin"] = wrong_plugin
@@ -1949,11 +2291,14 @@ def test_child_source_state_drift_fails_closed(
 
 @pytest.mark.parametrize(
     ("behavior", "error"),
-    [
-        (
-            "runtime_stack_mismatch",
-            "runtime stack differs from companion receipts",
-        ),
+        [
+            (
+                "runtime_stack_mismatch",
+                (
+                    "live runtime stack does not match the independently "
+                    "reopened bundle calibration"
+                ),
+            ),
         (
             "runtime_library_mismatch",
             "runtime libraries differ from performance receipt",

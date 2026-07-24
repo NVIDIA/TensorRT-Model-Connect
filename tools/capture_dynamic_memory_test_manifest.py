@@ -47,6 +47,17 @@ BUILD_ARTIFACTS = {
     ),
     "surfaces": Path("trtmc_dynamic_memory_surfaces"),
 }
+FIXED_COMMAND_LABELS = (
+    "build",
+    "build_cpp_tests_and_qualifiers",
+    "ctest_manifest_all",
+    "ctest_all",
+    "ctest_manifest_dynamic_memory",
+    "ctest_dynamic_memory",
+    "pytest_manifest_dynamic_memory",
+    "pytest_dynamic_memory",
+    "pytest_graph_e2e",
+)
 
 
 class ManifestError(RuntimeError):
@@ -94,11 +105,23 @@ def _canonical_sha(value: Any) -> str:
     ).hexdigest()
 
 
+def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ManifestError(
+                f"build manifest contains duplicate JSON key {key!r}"
+            )
+        value[key] = item
+    return value
+
+
 def _open_file_identity(
     path: Path,
     *,
     artifact_key: str,
     relative_path: Path,
+    expected_root: Path | None = None,
 ) -> dict[str, Any]:
     """Hash one open file descriptor and reject identity changes during read."""
 
@@ -108,6 +131,14 @@ def _open_file_identity(
         raise ManifestError(
             f"build artifact {artifact_key!r} cannot be resolved: {path}: {error}"
         ) from error
+    if expected_root is not None:
+        try:
+            canonical.relative_to(expected_root.resolve(strict=True))
+        except (OSError, ValueError) as error:
+            raise ManifestError(
+                f"build artifact {artifact_key!r} escapes the build directory: "
+                f"{canonical}"
+            ) from error
     try:
         with canonical.open("rb") as stream:
             before = os.fstat(stream.fileno())
@@ -155,6 +186,7 @@ def _cmake_cache_identity(repo_root: Path, build_dir: Path) -> dict[str, Any]:
         cache,
         artifact_key="cmake_cache",
         relative_path=Path("CMakeCache.txt"),
+        expected_root=build_dir,
     )
     try:
         lines = cache.read_text(encoding="utf-8", errors="strict").splitlines()
@@ -207,6 +239,11 @@ def _build_artifact_identities(build_dir: Path) -> dict[str, dict[str, Any]]:
     )
     generic_backend = build_dir / BUILD_ARTIFACTS["trt_backend"]
     active_backend_path = build_dir / active_backend
+    if not active_backend_path.is_symlink():
+        raise ManifestError(
+            "active TensorRT backend alias must be a symlink to the generic "
+            "backend"
+        )
     try:
         generic_canonical = generic_backend.resolve(strict=True)
         active_canonical = active_backend_path.resolve(strict=True)
@@ -232,6 +269,7 @@ def _build_artifact_identities(build_dir: Path) -> dict[str, dict[str, Any]]:
             build_dir / relative,
             artifact_key=key,
             relative_path=relative,
+            expected_root=build_dir,
         )
         for key, relative in artifact_paths.items()
     }
@@ -251,7 +289,10 @@ def load_and_validate_build_manifest(path: Path) -> dict[str, Any]:
     """Reopen a passed v2 manifest and every binary/log it source-binds."""
 
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_strict_json_object,
+        )
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ManifestError(f"build manifest is unreadable: {path}: {error}") from error
     required_fields = {
@@ -319,6 +360,11 @@ def load_and_validate_build_manifest(path: Path) -> dict[str, Any]:
             f"build manifest Python executable cannot be resolved: {error}"
         ) from error
     expected_commands = _commands(build_dir, python)
+    if tuple(label for label, _ in expected_commands) != FIXED_COMMAND_LABELS:
+        raise ManifestError(
+            "validator implementation does not define the fixed ordered "
+            "nine-command contract"
+        )
     if (
         not isinstance(commands, list)
         or len(commands) != len(expected_commands)
@@ -327,7 +373,9 @@ def load_and_validate_build_manifest(path: Path) -> dict[str, Any]:
             "build manifest must contain the complete ordered command set"
         )
     output_dir = path.resolve().parent
+    all_ctest_manifest: list[str] = []
     dynamic_pytest_manifest: list[str] = []
+    previous_finished_ns: int | None = None
     base_fields = {
         "label",
         "argv",
@@ -403,6 +451,14 @@ def load_and_validate_build_manifest(path: Path) -> dict[str, Any]:
             raise ManifestError(
                 f"build manifest command {expected_label!r} timestamps are invalid"
             )
+        if (
+            previous_finished_ns is not None
+            and started_ns < previous_finished_ns
+        ):
+            raise ManifestError(
+                "build manifest command timestamps do not prove ordered replay"
+            )
+        previous_finished_ns = finished_ns
         stdout_text = ""
         for stream_name in ("stdout", "stderr"):
             expected_stream = (
@@ -429,6 +485,13 @@ def load_and_validate_build_manifest(path: Path) -> dict[str, Any]:
             raise ManifestError(
                 f"build manifest command {expected_label!r} manifest changed"
             )
+        _validate_collected_manifest(
+            expected_label,
+            entries,
+            all_ctest_entries=all_ctest_manifest,
+        )
+        if expected_label == "ctest_manifest_all":
+            all_ctest_manifest = list(entries)
         if expected_label == "pytest_manifest_dynamic_memory":
             dynamic_pytest_manifest = list(entries)
         if expected_pytest_entries is not None:
@@ -584,6 +647,85 @@ def _manifest_entries(label: str, stdout: str) -> list[str]:
     return []
 
 
+def _validate_collected_manifest(
+    label: str,
+    entries: Sequence[str],
+    *,
+    all_ctest_entries: Sequence[str],
+) -> None:
+    if label not in {
+        "ctest_manifest_all",
+        "ctest_manifest_dynamic_memory",
+        "pytest_manifest_dynamic_memory",
+    }:
+        return
+    if not entries:
+        raise ManifestError(f"{label} collected an empty test manifest")
+    if len(entries) != len(set(entries)):
+        raise ManifestError(f"{label} collected duplicate test entries")
+    if label == "ctest_manifest_dynamic_memory":
+        unexpected = sorted(set(entries) - set(all_ctest_entries))
+        if unexpected:
+            raise ManifestError(
+                "dynamic-memory CTest manifest is not a subset of the full "
+                f"CTest manifest: {unexpected}"
+            )
+    if label == "pytest_manifest_dynamic_memory":
+        required_modules = {
+            "tests/builder": False,
+            "tests/tools": False,
+            "tests/e2e/test_native_dynamic_memory_graph.py": False,
+        }
+        invalid = [
+            entry
+            for entry in entries
+            if not _pytest_entry_in_frozen_selection(
+                entry,
+                required_modules=required_modules,
+            )
+        ]
+        if invalid:
+            raise ManifestError(
+                "dynamic-memory pytest manifest escaped the frozen selection: "
+                f"{invalid}"
+            )
+        missing_modules = [
+            module for module, observed in required_modules.items() if not observed
+        ]
+        if missing_modules:
+            raise ManifestError(
+                "dynamic-memory pytest manifest omitted a frozen selection: "
+                f"{missing_modules}"
+            )
+
+
+def _pytest_entry_in_frozen_selection(
+    entry: str,
+    *,
+    required_modules: dict[str, bool],
+) -> bool:
+    module, separator, _ = entry.partition("::")
+    relative = Path(module)
+    if (
+        not separator
+        or relative.is_absolute()
+        or ".." in relative.parts
+        or relative.suffix != ".py"
+    ):
+        return False
+    if module.startswith("tests/builder/"):
+        required_modules["tests/builder"] = True
+        return True
+    if module.startswith("tests/tools/"):
+        required_modules["tests/tools"] = True
+        return True
+    graph = "tests/e2e/test_native_dynamic_memory_graph.py"
+    if module == graph:
+        required_modules[graph] = True
+        return True
+    return False
+
+
 def _junit_node_id(
     testcase: ET.Element,
     *,
@@ -691,7 +833,7 @@ def _run_one(
     if expected_pytest_entries is not None:
         junit_path = output_dir / f"{label}.junit.xml"
         executed_argv.append(f"--junitxml={junit_path}")
-    started_ns = time.time_ns()
+    started_ns = time.monotonic_ns()
     environment = os.environ.copy()
     environment.update(environment_overrides or {})
     completed = subprocess.run(
@@ -703,7 +845,7 @@ def _run_one(
         stderr=subprocess.PIPE,
         text=True,
     )
-    finished_ns = time.time_ns()
+    finished_ns = time.monotonic_ns()
     stdout_path.write_text(completed.stdout, encoding="utf-8")
     stderr_path.write_text(completed.stderr, encoding="utf-8")
     entries = _manifest_entries(label, completed.stdout)
@@ -784,7 +926,11 @@ def capture(
         raise
 
     failed_label: str | None = None
+    failed_reason: str | None = None
+    all_ctest_manifest: list[str] = []
     dynamic_pytest_manifest: list[str] = []
+    built_cmake_cache: dict[str, Any] | None = None
+    built_artifacts: dict[str, dict[str, Any]] | None = None
     for label, argv in _commands(build_dir, python):
         environment_overrides = (
             _pytest_environment_overrides(build_dir)
@@ -810,6 +956,26 @@ def capture(
         )
         if label == "pytest_manifest_dynamic_memory":
             dynamic_pytest_manifest = list(result["manifest_entries"])
+        try:
+            _validate_collected_manifest(
+                label,
+                result["manifest_entries"],
+                all_ctest_entries=all_ctest_manifest,
+            )
+            if label == "ctest_manifest_all":
+                all_ctest_manifest = list(result["manifest_entries"])
+            if (
+                label == "build_cpp_tests_and_qualifiers"
+                and result["passed"]
+            ):
+                built_cmake_cache = _cmake_cache_identity(
+                    repo_root,
+                    build_dir,
+                )
+                built_artifacts = _build_artifact_identities(build_dir)
+        except ManifestError as error:
+            result["passed"] = False
+            failed_reason = str(error)
         report["commands"].append(result)
         _write_json(report_path, report)
         if not result["passed"]:
@@ -835,13 +1001,29 @@ def capture(
         build_commands = [command for command in report["commands"] if command["label"] == "build"]
         if len(build_commands) != 1:
             artifact_error = ManifestError("test manifest requires exactly one clean build command")
+        elif built_cmake_cache is None or built_artifacts is None:
+            artifact_error = ManifestError(
+                "test manifest did not capture artifacts immediately after "
+                "the explicit C++ test and qualifier build"
+            )
         else:
             try:
-                report["cmake_cache"] = _cmake_cache_identity(
+                final_cmake_cache = _cmake_cache_identity(
                     repo_root,
                     build_dir,
                 )
-                report["build_artifacts"] = _build_artifact_identities(build_dir)
+                final_artifacts = _build_artifact_identities(build_dir)
+                if final_cmake_cache != built_cmake_cache:
+                    raise ManifestError(
+                        "CMake cache changed after the explicit qualifier build"
+                    )
+                if final_artifacts != built_artifacts:
+                    raise ManifestError(
+                        "build artifacts changed after the explicit qualifier "
+                        "build"
+                    )
+                report["cmake_cache"] = final_cmake_cache
+                report["build_artifacts"] = final_artifacts
                 report["build_artifacts_sha256"] = _canonical_sha(report["build_artifacts"])
                 report["clean_build_command_sha256"] = _canonical_sha(build_commands[0])
             except ManifestError as error:
@@ -857,7 +1039,11 @@ def capture(
     _write_json(report_path, report)
     if failed_label is not None:
         failed = report["commands"][-1]
-        raise ManifestError(f"test-manifest command failed: {failed_label}; see {failed['stderr']}")
+        detail = f"; {failed_reason}" if failed_reason else ""
+        raise ManifestError(
+            f"test-manifest command failed: {failed_label}{detail}; "
+            f"see {failed['stderr']}"
+        )
     if not report["passed"]:
         if artifact_error is not None:
             raise artifact_error

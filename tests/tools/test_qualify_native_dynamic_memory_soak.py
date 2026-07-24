@@ -21,6 +21,7 @@ sys.modules[SPEC.name] = soak
 SPEC.loader.exec_module(soak)
 
 pytestmark = pytest.mark.dynamic_memory
+_MODULE_RESIDENCY_RESERVE_BYTES = 512 * 1024 * 1024
 
 
 _TEST_DEVICE_TOTAL_BYTES = 16 * 1024 * 1024 * 1024
@@ -94,19 +95,33 @@ def _sampler() -> dict:
 
 def _receipt(r: int, b: int, allocation_id: int) -> dict:
     safety_reserve = 64 * 1024 * 1024
-    capacity_free = safety_reserve + max(2 * r * b, 1)
+    capacity_free = (
+        safety_reserve
+        + _MODULE_RESIDENCY_RESERVE_BYTES
+        + max(2 * r * b, 1)
+    )
     capacity_total = max(_TEST_DEVICE_TOTAL_BYTES, capacity_free + 1)
     settled_free = max(1, capacity_free - r * b)
     kv_budget = soak._fraction_budget_bytes(
         0.9,
-        capacity_free - safety_reserve,
+        capacity_free
+        - safety_reserve
+        - _MODULE_RESIDENCY_RESERVE_BYTES,
     )
     return {
-        "receipt_schema_version": 3,
+        "receipt_schema_version": 4,
+        "contract_version": 2,
         "policy": "auto",
         "policy_fraction": 0.9,
         "requested_kv_bytes": 0,
         "safety_reserve_bytes": safety_reserve,
+        "module_residency_reserve_bytes": (
+            _MODULE_RESIDENCY_RESERVE_BYTES
+        ),
+        "module_residency_reserve_profile_limit": r,
+        "module_residency_plan_set_sha256": "a" * 64,
+        "module_residency_evidence_sha256": "b" * 64,
+        "module_residency_cuda_module_loading_mode": "lazy",
         "model_context_limit": r,
         "request_context_limit": 0,
         "effective_request_limit": r,
@@ -118,6 +133,8 @@ def _receipt(r: int, b: int, allocation_id: int) -> dict:
         "capacity_decision_free_bytes": capacity_free,
         "capacity_decision_total_bytes": capacity_total,
         "capacity_decision_device_used_bytes": (capacity_total - capacity_free),
+        "capacity_decision_resident_overhead_bytes": 20,
+        "final_non_kv_overhead_delta_bytes": 0,
         "settled_free_bytes": settled_free,
         "settled_total_bytes": capacity_total,
         "settled_device_used_bytes": capacity_total - settled_free,
@@ -144,6 +161,24 @@ def _receipt(r: int, b: int, allocation_id: int) -> dict:
         "kv_allocation_id": allocation_id,
         "kv_bytes_per_token": b,
         "runtime_kv_capacity_tokens": r,
+    }
+
+
+def _runtime_memory_contract(*, profile_limit: int = 512) -> dict:
+    return {
+        "module_residency_calibration": {
+            "profile_reserves": [
+                {
+                    "covering_profile_limit": profile_limit,
+                    "cumulative_reserve_bytes": (
+                        _MODULE_RESIDENCY_RESERVE_BYTES
+                    ),
+                }
+            ],
+            "plan_set_sha256": "a" * 64,
+            "evidence_sha256": "b" * 64,
+            "cuda_module_loading_mode": "lazy",
+        }
     }
 
 
@@ -280,7 +315,10 @@ def _sync_receipt_snapshots(lifetime: dict) -> None:
     request_limit = int(policy["requested_tokens"]) if kind == "max_sequence_length" else 0
     safely_available = max(
         0,
-        decision_free - int(receipt["safety_reserve_bytes"]),
+        decision_free
+        - int(receipt["safety_reserve_bytes"])
+        - int(receipt["module_residency_reserve_bytes"])
+        - int(receipt["final_non_kv_overhead_delta_bytes"]),
     )
     kv_budget = (
         requested_bytes
@@ -311,6 +349,20 @@ def _sync_receipt_snapshots(lifetime: dict) -> None:
             "final_device_used_bytes": decision_total - decision_free,
         }
     )
+
+
+def _set_receipt_fully_resident_overhead(receipt: dict) -> None:
+    receipt["capacity_decision_resident_overhead_bytes"] = sum(
+        int(receipt[field])
+        for field in (
+            "context_device_memory_bytes",
+            "ordinary_device_input_bytes",
+            "ordinary_device_output_bytes",
+            "external_device_output_bytes",
+            "graph_private_device_bytes",
+        )
+    )
+    receipt["final_non_kv_overhead_delta_bytes"] = 0
 
 
 def test_two_r_slope_requires_exact_contiguous_delta() -> None:
@@ -405,7 +457,11 @@ def _controlled_reservation_trace() -> dict:
     constrained_request_device_bytes = 4 * 1024
     constrained_request_process_bytes = 16
     policy_safe_bytes = soak._ceil_divided_by_fraction(target_kv_bytes, 0.9)
-    final_free_lower_bound = safety + policy_safe_bytes
+    final_free_lower_bound = (
+        safety
+        + _MODULE_RESIDENCY_RESERVE_BYTES
+        + policy_safe_bytes
+    )
     final_free_upper_bound = final_free_lower_bound + alignment
     required_visible_free = (
         logical_context_output_bytes
@@ -462,7 +518,9 @@ def _controlled_reservation_trace() -> dict:
             0.9,
             max(
                 0,
-                guard_before_release["free_bytes"] - safety,
+                guard_before_release["free_bytes"]
+                - safety
+                - _MODULE_RESIDENCY_RESERVE_BYTES,
             ),
         )
         // b
@@ -551,6 +609,8 @@ def _controlled_reservation_trace() -> dict:
             "graph_private_device_bytes": graph_private_device_bytes,
         }
     )
+    for receipt in (calibration_receipt, baseline_receipt, constrained_receipt):
+        _set_receipt_fully_resident_overhead(receipt)
 
     warmup_before_load = _device_sample(
         total=total,
@@ -900,6 +960,9 @@ def test_controlled_reservation_rejects_tampered_receipts(
     proof = trace["controlled_reservation"]
     if tamper == "calibration_r":
         proof["calibration"]["runtime_memory_receipt"]["runtime_kv_capacity_tokens"] += 1
+        proof["calibration"]["runtime_memory_receipt"][
+            "module_residency_reserve_profile_limit"
+        ] += 1
     elif tamper == "guard_release_phase":
         proof["guard"]["release_after_snapshot_phase"] = "after runtime KV allocation"
     elif tamper == "bulk_bytes":
@@ -1192,7 +1255,12 @@ def test_load_cycle_rejects_cumulative_retention_against_common_baseline() -> No
 def test_load_cycle_rejects_cold_retention_above_explicit_bound() -> None:
     trace = _load_cycle_trace()
     warmup = trace["load_cycle_warmup"]
-    retained = soak.COLD_PROCESS_RETENTION_FLOOR_BYTES + 1
+    retained = (
+        warmup["runtime_memory_receipt"][
+            "module_residency_reserve_bytes"
+        ]
+        + 1
+    )
     warmup["after_unload"] = _sample(1_000 + retained)
     warmup["retained_bytes"] = retained
     warmup["device_wide_retained_bytes"] = retained
@@ -1654,9 +1722,34 @@ def test_receipt_requires_complete_contiguous_accounting() -> None:
             "cudaMemGetInfo failed",
             "capacity-decision and settled snapshots",
         ),
+        (
+            "module_residency_reserve_bytes",
+            0,
+            "schema-v4",
+        ),
+        (
+            "module_residency_reserve_profile_limit",
+            511,
+            "schema-v4",
+        ),
+        (
+            "module_residency_plan_set_sha256",
+            "A" * 64,
+            "schema-v4",
+        ),
+        (
+            "module_residency_cuda_module_loading_mode",
+            "unknown",
+            "schema-v4",
+        ),
+        (
+            "contract_version",
+            1,
+            "schema-v4",
+        ),
     ],
 )
-def test_receipt_schema_v3_fails_closed(
+def test_receipt_schema_v4_fails_closed(
     field: str,
     value: object,
     match: str,
@@ -1668,12 +1761,117 @@ def test_receipt_schema_v3_fails_closed(
         soak.validate_receipt({"runtime_memory_receipt": receipt}, 512)
 
 
-def test_receipt_schema_v3_rejects_missing_ordinary_field() -> None:
+def test_receipt_schema_v4_rejects_missing_ordinary_field() -> None:
     receipt = _receipt(512, 22_528, 4)
     receipt.pop("ordinary_device_input_bytes")
 
     with pytest.raises(RuntimeError, match="misses fields"):
         soak.validate_receipt({"runtime_memory_receipt": receipt}, 512)
+
+
+def test_receipt_schema_v4_replays_positive_final_overhead_delta() -> None:
+    receipt = _receipt(512, 22_528, 4)
+    receipt["capacity_decision_resident_overhead_bytes"] = 10
+    receipt["final_non_kv_overhead_delta_bytes"] = 10
+    receipt["capacity_decision_free_bytes"] += 10
+    receipt["capacity_decision_device_used_bytes"] -= 10
+    receipt["final_free_bytes"] += 10
+    receipt["final_device_used_bytes"] -= 10
+
+    soak.validate_receipt(
+        {"runtime_memory_receipt": receipt},
+        512,
+        expected_policy={"kind": "auto"},
+    )
+
+    receipt["final_non_kv_overhead_delta_bytes"] = 0
+    with pytest.raises(RuntimeError, match=r"replay O\(final\)-O\(resident\)"):
+        soak.validate_receipt(
+            {"runtime_memory_receipt": receipt},
+            512,
+            expected_policy={"kind": "auto"},
+        )
+
+
+def test_receipt_accepts_conservative_underfill_across_reserve_discontinuity() -> None:
+    receipt = _receipt(512, 22_528, 4)
+    receipt["model_context_limit"] = 1_024
+    receipt["module_residency_reserve_profile_limit"] = 1_024
+
+    result = soak.validate_receipt(
+        {"runtime_memory_receipt": receipt},
+        512,
+        expected_policy={"kind": "auto"},
+    )
+
+    assert result["R"] == 512
+    assert receipt["kv_budget_bytes"] // receipt["kv_bytes_per_token"] > result["R"]
+
+
+def test_receipt_rejects_capacity_above_conservative_monotonic_ceiling() -> None:
+    receipt = _receipt(512, 22_528, 4)
+    receipt["model_context_limit"] = 1_024
+    receipt["module_residency_reserve_profile_limit"] = 1_024
+    receipt["runtime_kv_capacity_tokens"] = 922
+    receipt["effective_request_limit"] = 922
+    receipt["kv_reserved_bytes"] = 922 * receipt["kv_bytes_per_token"]
+    receipt["kv_committed_bytes"] = receipt["kv_reserved_bytes"]
+
+    with pytest.raises(RuntimeError, match="conservative monotonic solve ceiling"):
+        soak.validate_receipt(
+            {"runtime_memory_receipt": receipt},
+            922,
+            expected_policy={"kind": "auto"},
+        )
+
+
+def test_load_cycles_require_stable_plan_bound_residency_receipts() -> None:
+    trace = _load_cycle_trace(1)
+    trace["load_cycles"][0]["runtime_memory_receipt"][
+        "module_residency_evidence_sha256"
+    ] = "c" * 64
+
+    with pytest.raises(
+        RuntimeError,
+        match="cold/measured receipts disagree.*module_residency_evidence_sha256",
+    ):
+        soak.validate_load_cycles(
+            trace,
+            expected_count=1,
+            expected_r=512,
+            tolerance_bytes=32,
+        )
+
+
+def test_trace_receipts_replay_sealed_module_residency_contract() -> None:
+    trace = _load_cycle_trace(1)
+
+    replay = soak.validate_trace_module_residency(
+        trace,
+        contract=_runtime_memory_contract(),
+        label="load-cycle",
+    )
+
+    assert replay["passed"]
+    assert replay["receipt_count"] == 2
+    assert replay["covering_profile_limits"] == [512]
+
+
+def test_trace_receipts_fail_closed_on_sealed_plan_hash_drift() -> None:
+    trace = _load_cycle_trace(1)
+    trace["load_cycles"][0]["runtime_memory_receipt"][
+        "module_residency_plan_set_sha256"
+    ] = "c" * 64
+
+    with pytest.raises(
+        RuntimeError,
+        match="does not match the sealed module-residency calibration",
+    ):
+        soak.validate_trace_module_residency(
+            trace,
+            contract=_runtime_memory_contract(),
+            label="load-cycle",
+        )
 
 
 def test_fraction_policy_uses_exact_binary64_floor() -> None:
@@ -1687,21 +1885,24 @@ def test_fraction_policy_uses_exact_binary64_floor() -> None:
     assert rounded_multiply_budget == exact_budget + 1
 
     receipt = _receipt(1, 1, 1)
-    total = safely_available + 1_000_000
+    decision_free = (
+        safely_available + receipt["module_residency_reserve_bytes"]
+    )
+    total = decision_free + 1_000_000
     receipt.update(
         {
             "policy": "fraction",
             "policy_fraction": fraction,
             "model_context_limit": 1,
-            "capacity_decision_free_bytes": safely_available,
+            "capacity_decision_free_bytes": decision_free,
             "capacity_decision_total_bytes": total,
-            "capacity_decision_device_used_bytes": (total - safely_available),
-            "final_free_bytes": safely_available,
+            "capacity_decision_device_used_bytes": (total - decision_free),
+            "final_free_bytes": decision_free,
             "final_total_bytes": total,
-            "final_device_used_bytes": total - safely_available,
-            "settled_free_bytes": safely_available - 1,
+            "final_device_used_bytes": total - decision_free,
+            "settled_free_bytes": decision_free - 1,
             "settled_total_bytes": total,
-            "settled_device_used_bytes": total - safely_available + 1,
+            "settled_device_used_bytes": total - decision_free + 1,
             "safety_reserve_bytes": 0,
             "kv_budget_bytes": rounded_multiply_budget,
         }
@@ -1739,7 +1940,10 @@ def test_lifetime_rejects_swapped_decision_and_settled_snapshots() -> None:
         0.9,
         max(
             0,
-            receipt["capacity_decision_free_bytes"] - receipt["safety_reserve_bytes"],
+            receipt["capacity_decision_free_bytes"]
+            - receipt["safety_reserve_bytes"]
+            - receipt["module_residency_reserve_bytes"]
+            - receipt["final_non_kv_overhead_delta_bytes"],
         ),
     )
     with pytest.raises(RuntimeError, match="synchronized runtime phase"):

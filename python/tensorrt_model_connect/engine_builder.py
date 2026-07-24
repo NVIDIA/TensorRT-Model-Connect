@@ -22,6 +22,10 @@ from .build_timing import (
     write_build_timing as _write_build_timing,
 )
 from .config import ModelConfig
+from .dynamic_memory_contract import (
+    UnknownModuleResidencyCalibrationError,
+    seal_runtime_memory_contract_from_qualified_manifest,
+)
 from .engine_build_budget import enforce_single_full_bundle_build
 from .families import (
     available_plugin_ids,
@@ -1332,7 +1336,41 @@ def build_bundle(
         time.monotonic() - tokenizer_t0)
     _write_build_timing(build_timing)
 
-    # 6. Write bundle
+    # 6. Resolve the plan-bound runtime-memory calibration.  A family manifest
+    # hit is the fast path.  TensorRT serialization is not byte-deterministic,
+    # so an otherwise valid new raw plan set is calibrated automatically after
+    # all bundle sections have been assembled below.
+    automatic_runtime_memory_calibration = False
+    if runtime_memory_contract is not None:
+        if prefill_engine_plan is None:
+            raise ValueError(
+                "Qualified runtime-memory bundle cannot be sealed without "
+                "prefill_engine_plan"
+            )
+        try:
+            runtime_memory_contract = (
+                seal_runtime_memory_contract_from_qualified_manifest(
+                    runtime_memory_contract,
+                    family=plugin.name,
+                    plan_sections={
+                        "engine_plan": engine_plan,
+                        "prefill_engine_plan": prefill_engine_plan,
+                    },
+                )
+            )
+        except UnknownModuleResidencyCalibrationError:
+            automatic_runtime_memory_calibration = True
+            print(
+                "[trtmc build] Runtime memory: new TensorRT plan bytes; "
+                "starting automatic module-residency calibration",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "[trtmc build] Runtime memory: sealed exact-plan module "
+                "residency calibration",
+                file=sys.stderr,
+            )
     trt_version = _get_trt_version()
     trt_abi = _trt_abi_from_version(trt_version)
     info = BundleInfo(
@@ -1513,6 +1551,76 @@ def build_bundle(
             })
         manifest_json = _json.dumps({"kernels": manifest_entries}).encode("utf-8")
         sections.append(BundleSection("kernel_manifest.json", manifest_json))
+
+    if automatic_runtime_memory_calibration:
+        from .dynamic_memory_calibration import (
+            CALIBRATION_EVIDENCE_SECTION,
+            calibrate_unknown_plan_set,
+        )
+
+        calibration_t0 = time.monotonic()
+
+        def write_bootstrap_bundle(
+            bootstrap_path: Path,
+            bootstrap_contract,
+        ) -> None:
+            write_bundle(
+                bootstrap_path,
+                replace(info, runtime_memory=dict(bootstrap_contract)),
+                sections,
+            )
+
+        calibration = calibrate_unknown_plan_set(
+            base_contract=runtime_memory_contract,
+            plan_sections={
+                "engine_plan": engine_plan,
+                "prefill_engine_plan": prefill_engine_plan,
+            },
+            vocab_size=config.vocab_size,
+            working_directory=Path(output_path).expanduser().resolve().parent,
+            write_bootstrap_bundle=write_bootstrap_bundle,
+        )
+        runtime_memory_contract = calibration.runtime_memory_contract
+        info.runtime_memory = runtime_memory_contract
+        calibration_section_names = {
+            evidence_section.name
+            for evidence_section in calibration.evidence_sections
+        }
+        existing_section_names = {section.name for section in sections}
+        collisions = sorted(
+            existing_section_names.intersection(calibration_section_names)
+        )
+        if collisions:
+            raise ValueError(
+                "Bundle already contains the reserved automatic calibration "
+                f"section(s): {', '.join(collisions)}"
+            )
+        if (
+            not calibration.evidence_sections
+            or calibration.evidence_sections[0].name
+            != CALIBRATION_EVIDENCE_SECTION
+            or calibration.evidence_sections[0].data
+            != calibration.evidence_bytes
+        ):
+            raise ValueError(
+                "Automatic calibration did not return its canonical evidence "
+                "section first"
+            )
+        sections.extend(
+            BundleSection(evidence_section.name, evidence_section.data)
+            for evidence_section in calibration.evidence_sections
+        )
+        _add_build_timing(
+            build_timing,
+            "automatic_module_residency_calibration_s",
+            time.monotonic() - calibration_t0,
+        )
+        _write_build_timing(build_timing)
+        print(
+            "[trtmc build] Runtime memory: automatic two-process "
+            "all-profile calibration sealed",
+            file=sys.stderr,
+        )
 
     write_t0 = time.monotonic()
     write_bundle(output_path, info, sections)

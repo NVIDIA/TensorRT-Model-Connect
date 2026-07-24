@@ -29,6 +29,7 @@
 //   trtmc version
 
 #include "cli/args.h"
+#include "cli/internal_dynamic_memory_calibrator.h"
 #include "stb_image_write.h"
 #include "trtmc/bundle.h"
 #include "trtmc/config/cli_support.h"
@@ -277,6 +278,12 @@ int run_python_module(const std::vector<std::string>& argv) {
             setenv("PYTHONPATH", pythonpath.c_str(), 1);
         if (!configure_builder_plugin_library())
             _exit(127);
+        std::string calibrator_error;
+        if (!trtmc::cli::configure_internal_dynamic_memory_calibrator(
+                current_executable_path(), calibrator_error)) {
+            std::cerr << "Error: " << calibrator_error << '\n';
+            _exit(127);
+        }
         execvp(exec_argv[0], exec_argv.data());
         std::cerr << "Error: failed to execute " << argv[0] << ": " << std::strerror(errno) << '\n';
         _exit(127);
@@ -1480,31 +1487,51 @@ int cmd_inspect(const CliArgs& args) {
         std::cout << "KV heads:           " << info.num_key_value_heads << '\n';
         if (info.runtime_memory.present) {
             const auto& memory = info.runtime_memory;
-            std::cout << "Runtime KV contract version: " << memory.contract_version << '\n';
-            std::cout << "Qualified model ID: " << memory.qualified_model_id << '\n';
-            std::cout << "Qualified model revision: " << memory.qualified_model_revision << '\n';
-            std::cout << "Qualified config fingerprint: " << memory.qualified_config_sha256 << '\n';
-            std::cout << "Qualified target:   " << memory.qualified_target << '\n';
+            std::cout << "runtime_kv_contract_version: " << memory.contract_version << '\n';
+            std::cout << "qualified_model_id: " << memory.qualified_model_id << '\n';
+            std::cout << "qualified_model_revision: " << memory.qualified_model_revision << '\n';
+            std::cout << "qualified_config_fingerprint: " << memory.qualified_config_sha256
+                      << '\n';
+            std::cout << "qualified_target:   " << memory.qualified_target << '\n';
             const auto& stack = memory.qualified_runtime_stack;
-            std::cout << "Qualified runtime stack: "
+            std::cout << "qualified_runtime_stack: "
                       << "SM=" << stack.sm << ", TensorRT=" << stack.tensorrt
                       << ", CUDA=" << stack.cuda_runtime << ", cuDNN=" << stack.cudnn_backend
-                      << ", Frontend=" << stack.cudnn_frontend_revision << ", NVRTC=" << stack.nvrtc
-                      << ", driver=" << stack.driver << '\n';
-            std::cout << "Native KV plugin ABI: " << memory.native_kv_plugin_abi << '\n';
-            std::cout << "Model context limit: " << memory.model_context_limit << '\n';
-            std::cout << "Prefill chunk limit: " << memory.prefill_chunk_limit << '\n';
-            std::cout << "KV layout:          " << memory.kv_layout << '\n';
-            std::cout << "KV dtype:           " << memory.kv_dtype << '\n';
-            std::cout << "KV bytes per token: " << memory.kv_bytes_per_token << '\n';
-            std::cout << "Active KV profile limits: ";
+                      << ", Frontend=" << stack.cudnn_frontend_revision
+                      << ", NVRTC=" << stack.nvrtc << ", driver=" << stack.driver << '\n';
+            std::cout << "native_kv_plugin_abi: " << memory.native_kv_plugin_abi << '\n';
+            std::cout << "model_context_limit: " << memory.model_context_limit << '\n';
+            std::cout << "prefill_chunk_limit: " << memory.prefill_chunk_limit << '\n';
+            std::cout << "kv_layout:          " << memory.kv_layout << '\n';
+            std::cout << "kv_dtype:           " << memory.kv_dtype << '\n';
+            std::cout << "kv_bytes_per_token: " << memory.kv_bytes_per_token << '\n';
+            std::cout << "active_kv_profile_limits: ";
             for (std::size_t index = 0; index < memory.active_kv_profile_limits.size(); ++index) {
                 if (index != 0)
                     std::cout << ", ";
                 std::cout << memory.active_kv_profile_limits[index];
             }
             std::cout << '\n';
-            std::cout << "Runtime-owned KV:   yes\n";
+            if (memory.module_residency_calibration.present) {
+                const auto& calibration = memory.module_residency_calibration;
+                std::cout << "module_residency_plan_set_sha256: "
+                          << calibration.plan_set_sha256 << '\n';
+                std::cout << "module_residency_cuda_module_loading_mode: "
+                          << calibration.cuda_module_loading_mode << '\n';
+                std::cout << "module_residency_profile_reserves: ";
+                for (std::size_t index = 0;
+                     index < calibration.profile_reserves.size(); ++index) {
+                    if (index != 0)
+                        std::cout << ", ";
+                    const auto& reserve = calibration.profile_reserves[index];
+                    std::cout << reserve.covering_profile_limit << "=>"
+                              << reserve.cumulative_reserve_bytes;
+                }
+                std::cout << '\n';
+                std::cout << "module_residency_evidence_sha256: "
+                          << calibration.evidence_sha256 << '\n';
+            }
+            std::cout << "runtime_owned_kv:   yes\n";
         } else {
             std::cout << "Max cache length:   " << info.max_cache_length << '\n';
         }
@@ -1547,12 +1574,12 @@ int apply_cli_config(const CliArgs& args) {
     if ((args.kv_cache_memory.explicitly_set || args.max_sequence_length_explicitly_set) &&
         !args.bundle_path.empty() && trtmc::IsBundle(args.bundle_path)) {
         const auto info = trtmc::InspectBundle(args.bundle_path);
-        if (!info.runtime_memory.present || info.runtime_memory.contract_version != 1 ||
+        if (!info.runtime_memory.present || info.runtime_memory.contract_version != 2 ||
             !info.runtime_memory.runtime_owned) {
             // Config-schema discovery dlopens the model provider. Keep the
             // runtime-policy contract rejection ahead of that preload just as
             // PipelineFactory does on the ordinary no-config path.
-            std::cerr << "Error: This bundle does not declare runtime_memory contract version 1; "
+            std::cerr << "Error: This bundle does not declare runtime_memory contract version 2; "
                          "runtime KV memory and max-sequence policies cannot be applied\n";
             return EXIT_FAILURE;
         }

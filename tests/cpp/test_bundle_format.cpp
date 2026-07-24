@@ -323,6 +323,181 @@ static void test_runtime_memory_contract_parse_and_legacy_omission() {
     trtmc_test::remove_all_safe(tmp);
 }
 
+static void test_runtime_memory_v2_module_residency_calibration() {
+    const auto tmp = make_temp_dir();
+    const auto path = (tmp / "runtime-memory-v2.trtfb").string();
+    const std::string json = R"({
+  "model_id": "Qwen/Qwen3-0.6B",
+  "precision": "bf16",
+  "max_cache_length": 40960,
+  "runtime_memory": {
+    "contract_version": 2,
+    "qualified_model_id": "Qwen/Qwen3-0.6B",
+    "qualified_model_revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+    "qualified_config_sha256": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+    "qualified_target": "gb300-trt-11.2",
+    "qualified_runtime_stack": {
+      "sm": "sm103",
+      "tensorrt": "11.2.0.113",
+      "cuda_runtime": "13.3",
+      "cudnn_backend": "9.20.0",
+      "cudnn_frontend_revision": "7b9b711c22b6823e87150213ecd8449260db8610",
+      "nvrtc": "13.3",
+      "driver": "580.105.08"
+    },
+    "native_kv_plugin_abi": 2,
+    "model_context_limit": 40960,
+    "prefill_chunk_limit": 1024,
+    "kv_layout": "contiguous_runtime_v1",
+    "kv_dtype": "bfloat16",
+    "kv_bytes_per_token": 114688,
+    "active_kv_profile_limits": [128, 256, 512, 1024, 2048, 8192, 32768, 40960],
+    "runtime_owned": true,
+    "module_residency_calibration": {
+      "schema_version": 1,
+      "measurement_kind": "nvml_process_cumulative_first_use",
+      "cuda_module_loading_mode": "lazy",
+      "qualified_runtime_stack_sha256": "1b94f56092107d0fa1c6d43e2e8e4245c904ddc5967646f96ff8e64496e0f210",
+      "plan_set_sha256": "03a91c583af3092f271235032460a9a4f17c13f1550166e3caee538a0d21fc24",
+      "evidence_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "plans": [
+        {
+          "section_name": "engine_plan",
+          "section_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "role": "decode",
+          "optimization_profile_count": 8
+        },
+        {
+          "section_name": "prefill_engine_plan",
+          "section_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "role": "prefill",
+          "optimization_profile_count": 1
+        }
+      ],
+      "profile_reserves": [
+        {"covering_profile_limit": 128, "cumulative_reserve_bytes": 268435456},
+        {"covering_profile_limit": 256, "cumulative_reserve_bytes": 268435456},
+        {"covering_profile_limit": 512, "cumulative_reserve_bytes": 268435456},
+        {"covering_profile_limit": 1024, "cumulative_reserve_bytes": 522190848},
+        {"covering_profile_limit": 2048, "cumulative_reserve_bytes": 775946240},
+        {"covering_profile_limit": 8192, "cumulative_reserve_bytes": 1029701632},
+        {"covering_profile_limit": 32768, "cumulative_reserve_bytes": 1283457024},
+        {"covering_profile_limit": 40960, "cumulative_reserve_bytes": 1537212416}
+      ]
+    }
+  },
+  "sections": {}
+})";
+    write_minimal_bundle(path, json);
+
+    const auto info = trtmc::InspectBundle(path);
+    const auto& memory = info.runtime_memory;
+    check(memory.contract_version == 2, "runtime_memory v2 version");
+    const auto& calibration = memory.module_residency_calibration;
+    check(calibration.present, "module residency calibration present");
+    check(calibration.schema_version == 1, "module residency calibration schema");
+    check(calibration.measurement_kind == "nvml_process_cumulative_first_use",
+          "module residency measurement kind");
+    check(calibration.cuda_module_loading_mode == "lazy",
+          "module residency CUDA loading mode");
+    check(calibration.qualified_runtime_stack_sha256 ==
+              "1b94f56092107d0fa1c6d43e2e8e4245c904ddc5967646f96ff8e64496e0f210",
+          "module residency runtime stack digest");
+    check(calibration.plan_set_sha256 ==
+              "03a91c583af3092f271235032460a9a4f17c13f1550166e3caee538a0d21fc24",
+          "module residency plan set digest");
+    check(calibration.evidence_sha256 ==
+              "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "module residency evidence digest");
+    check(calibration.evidence_provenance == "external_manifest_v1",
+          "legacy v2 module residency evidence defaults to external manifest");
+    check(calibration.plans.size() == 2 &&
+              calibration.plans.front().section_name == "engine_plan" &&
+              calibration.plans.front().section_sha256 ==
+                  "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" &&
+              calibration.plans.front().role == "decode" &&
+              calibration.plans.front().optimization_profile_count == 8 &&
+              calibration.plans.back().section_name == "prefill_engine_plan" &&
+              calibration.plans.back().section_sha256 ==
+                  "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
+              calibration.plans.back().role == "prefill" &&
+              calibration.plans.back().optimization_profile_count == 1,
+          "module residency plan topology");
+    check(calibration.profile_reserves.size() == 8 &&
+              calibration.profile_reserves.front().covering_profile_limit == 128 &&
+              calibration.profile_reserves.front().cumulative_reserve_bytes == 268435456 &&
+              calibration.profile_reserves.back().covering_profile_limit == 40960 &&
+              calibration.profile_reserves.back().cumulative_reserve_bytes == 1537212416,
+          "module residency cumulative reserve table");
+
+    const auto replace_once = [](std::string text, const std::string& needle,
+                                 const std::string& replacement) {
+        const auto position = text.find(needle);
+        if (position == std::string::npos)
+            throw std::runtime_error("test fixture replacement target is missing");
+        text.replace(position, needle.size(), replacement);
+        return text;
+    };
+    const auto embedded_path = (tmp / "embedded-provenance.trtfb").string();
+    write_minimal_bundle(
+        embedded_path,
+        replace_once(
+            json,
+            "      \"cuda_module_loading_mode\": \"lazy\",\n",
+            "      \"cuda_module_loading_mode\": \"lazy\",\n"
+            "      \"evidence_provenance\": \"embedded_bundle_v1\",\n"));
+    const auto embedded = trtmc::InspectBundle(embedded_path);
+    check(embedded.runtime_memory.module_residency_calibration.evidence_provenance ==
+              "embedded_bundle_v1",
+          "runtime_memory v2 parses embedded evidence provenance");
+
+    const std::vector<std::pair<std::string, std::string>> malformed_cases = {
+        {
+            "bad-plan-set-digest",
+            replace_once(
+                json,
+                "\"plan_set_sha256\": "
+                "\"03a91c583af3092f271235032460a9a4f17c13f1550166e3caee538a0d21fc24\"",
+                "\"plan_set_sha256\": "
+                "\"0000000000000000000000000000000000000000000000000000000000000000\""),
+        },
+        {
+            "misaligned-profile-reserve",
+            replace_once(json, "\"covering_profile_limit\": 128",
+                         "\"covering_profile_limit\": 127"),
+        },
+        {
+            "missing-evidence-digest",
+            replace_once(
+                json,
+                "      \"evidence_sha256\": "
+                "\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\n",
+                ""),
+        },
+        {
+            "unsupported-evidence-provenance",
+            replace_once(
+                json,
+                "      \"cuda_module_loading_mode\": \"lazy\",\n",
+                "      \"cuda_module_loading_mode\": \"lazy\",\n"
+                "      \"evidence_provenance\": \"downgraded\",\n"),
+        },
+    };
+    for (const auto& [name, malformed_json] : malformed_cases) {
+        const auto malformed_path = (tmp / (name + ".trtfb")).string();
+        write_minimal_bundle(malformed_path, malformed_json);
+        bool rejected = false;
+        try {
+            (void)trtmc::InspectBundle(malformed_path);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("runtime_memory") != std::string::npos;
+        }
+        check(rejected, ("runtime_memory v2 fail-closed case: " + name).c_str());
+    }
+
+    trtmc_test::remove_all_safe(tmp);
+}
+
 static void test_invalid_runtime_memory_contract_is_rejected() {
     const auto tmp = make_temp_dir();
     const auto path = (tmp / "invalid-runtime-memory.trtfb").string();
@@ -364,6 +539,79 @@ static void test_invalid_runtime_memory_contract_is_rejected() {
         rejected = std::string(error.what()).find("runtime_memory") != std::string::npos;
     }
     check(rejected, "runtime_memory whose final bucket does not cover M is rejected");
+
+    trtmc_test::remove_all_safe(tmp);
+}
+
+static void test_runtime_memory_schema_is_fail_closed() {
+    const auto tmp = make_temp_dir();
+    const std::string valid = R"({
+  "model_id": "Qwen/Qwen3-0.6B",
+  "precision": "bf16",
+  "max_cache_length": 40960,
+  "runtime_memory": {
+    "contract_version": 1,
+    "qualified_model_id": "Qwen/Qwen3-0.6B",
+    "qualified_model_revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+    "qualified_config_sha256": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+    "qualified_target": "gb300-trt-11.2",
+    "qualified_runtime_stack": {
+      "sm": "sm103",
+      "tensorrt": "11.2.0.113",
+      "cuda_runtime": "13.3",
+      "cudnn_backend": "9.20.0",
+      "cudnn_frontend_revision": "7b9b711c22b6823e87150213ecd8449260db8610",
+      "nvrtc": "13.3",
+      "driver": "580.105.08"
+    },
+    "native_kv_plugin_abi": 2,
+    "model_context_limit": 40960,
+    "prefill_chunk_limit": 2048,
+    "kv_layout": "contiguous_runtime_v1",
+    "kv_dtype": "bfloat16",
+    "kv_bytes_per_token": 114688,
+    "active_kv_profile_limits": [128, 512, 2048, 8192, 32768, 40960],
+    "runtime_owned": true
+  },
+  "sections": {}
+})";
+
+    const auto replace_once = [](std::string text, const std::string& needle,
+                                 const std::string& replacement) {
+        const auto position = text.find(needle);
+        if (position == std::string::npos)
+            throw std::runtime_error("test fixture replacement target is missing");
+        text.replace(position, needle.size(), replacement);
+        return text;
+    };
+    const std::vector<std::pair<std::string, std::string>> cases = {
+        {"unknown-contract-key",
+         replace_once(valid, "\"runtime_owned\": true",
+                      "\"unexpected\": true, \"runtime_owned\": true")},
+        {"unknown-stack-key",
+         replace_once(valid, "\"driver\": \"580.105.08\"",
+                      "\"driver\": \"580.105.08\", \"unexpected\": \"value\"")},
+        {"duplicate-contract-key",
+         replace_once(valid, "\"contract_version\": 1",
+                      "\"contract_version\": 1, \"contract_version\": 1")},
+        {"overflowing-contract-version",
+         replace_once(valid, "\"contract_version\": 1",
+                      "\"contract_version\": 4294967297")},
+        {"non-boolean-runtime-owned",
+         replace_once(valid, "\"runtime_owned\": true", "\"runtime_owned\": 1")},
+    };
+
+    for (const auto& [name, json] : cases) {
+        const auto path = (tmp / (name + ".trtfb")).string();
+        write_minimal_bundle(path, json);
+        bool rejected = false;
+        try {
+            (void)trtmc::InspectBundle(path);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("runtime_memory") != std::string::npos;
+        }
+        check(rejected, ("runtime_memory fail-closed case: " + name).c_str());
+    }
 
     trtmc_test::remove_all_safe(tmp);
 }
@@ -504,7 +752,9 @@ int main() {
     test_inspect_returns_metadata();
     test_inspect_is_header_only();
     test_runtime_memory_contract_parse_and_legacy_omission();
+    test_runtime_memory_v2_module_residency_calibration();
     test_invalid_runtime_memory_contract_is_rejected();
+    test_runtime_memory_schema_is_fail_closed();
     test_tokenizer_add_special_tokens_header();
     test_truncated_bundle_throws();
     test_max_batch_size_parse_and_back_compat();

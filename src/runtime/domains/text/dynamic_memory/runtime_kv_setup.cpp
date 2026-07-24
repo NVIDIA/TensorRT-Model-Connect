@@ -9,6 +9,7 @@
 #include "trtmc/runtime/trt_module.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cuda_runtime_api.h>
 #include <limits>
 #include <set>
@@ -51,6 +52,15 @@ std::uint64_t staging_capacity_tokens(const RuntimeKvGraphLayout& layout, std::u
 std::uint64_t staging_bytes(const RuntimeKvSetupRequest& request, std::uint64_t capacity) {
     return checked_mul(staging_capacity_tokens(request.layout, capacity),
                        request.expected_kv_bytes_per_token, "Runtime KV current-row staging bytes");
+}
+
+bool is_lower_sha256(const std::string& value) {
+    return value.size() == 64 &&
+           std::all_of(value.begin(), value.end(), [](unsigned char character) {
+               return std::isdigit(character) != 0 ||
+                      (character >= static_cast<unsigned char>('a') &&
+                       character <= static_cast<unsigned char>('f'));
+           });
 }
 
 std::uint64_t profile_sequence_limit(const ITrtModule& module, const std::string& tensor_name) {
@@ -143,6 +153,25 @@ void validate_request(const RuntimeKvSetupRequest& request) {
     if (request.expected_active_kv_profile_limits.back() != request.layout.capacity_tokens) {
         throw std::invalid_argument(
             "Bundle history-bound profile limits do not reach model context limit");
+    }
+    if (request.module_residency_reserve_bytes_by_profile.size() !=
+        request.expected_active_kv_profile_limits.size()) {
+        throw std::invalid_argument(
+            "Bundle module-residency reserve table does not align with profile limits");
+    }
+    if (request.module_residency_reserve_bytes_by_profile.empty() ||
+        request.module_residency_reserve_bytes_by_profile.front() == 0 ||
+        !std::is_sorted(request.module_residency_reserve_bytes_by_profile.begin(),
+                        request.module_residency_reserve_bytes_by_profile.end())) {
+        throw std::invalid_argument(
+            "Bundle module-residency reserve table must be positive and nondecreasing");
+    }
+    if (!is_lower_sha256(request.module_residency_plan_set_sha256) ||
+        !is_lower_sha256(request.module_residency_evidence_sha256) ||
+        (request.module_residency_cuda_module_loading_mode != "lazy" &&
+         request.module_residency_cuda_module_loading_mode != "eager")) {
+        throw std::invalid_argument(
+            "Bundle module-residency calibration provenance is incomplete");
     }
     std::sort(decode_limits.begin(), decode_limits.end());
     if (std::adjacent_find(decode_limits.begin(), decode_limits.end()) != decode_limits.end()) {
@@ -561,6 +590,8 @@ std::unique_ptr<RuntimeKvStateCore> create_runtime_kv_state(const RuntimeKvSetup
     plan_request.prefill_chunk_limit = request.layout.prefill_chunk_limit;
     plan_request.policy = request.policy;
     plan_request.active_kv_profile_limits = request.expected_active_kv_profile_limits;
+    plan_request.module_residency_reserve_bytes_by_profile =
+        request.module_residency_reserve_bytes_by_profile;
 
     const auto query = [&](std::uint64_t capacity, const std::vector<std::uint64_t>&) {
         return query_context_envelope(request, capacity).overhead;
@@ -648,6 +679,12 @@ std::unique_ptr<RuntimeKvStateCore> create_runtime_kv_state(const RuntimeKvSetup
     }
 
     auto receipt = final_plan.receipt;
+    receipt.module_residency_plan_set_sha256 =
+        request.module_residency_plan_set_sha256;
+    receipt.module_residency_cuda_module_loading_mode =
+        request.module_residency_cuda_module_loading_mode;
+    receipt.module_residency_evidence_sha256 =
+        request.module_residency_evidence_sha256;
     receipt.serialized_plan_bytes = request.serialized_plan_bytes;
     if (request.pre_load_memory_snapshot_available) {
         const auto& pre_load = request.pre_load_memory_snapshot;
@@ -670,7 +707,7 @@ std::unique_ptr<RuntimeKvStateCore> create_runtime_kv_state(const RuntimeKvSetup
     receipt.capacity_decision_snapshot_available = true;
     // Schema-v2 compatibility: final_* was historically the snapshot used to
     // make the final capacity decision. Keep that binding explicit while
-    // schema-v3 consumers use settled_* for actual post-allocation residency.
+    // schema-v4 consumers use settled_* for actual post-allocation residency.
     receipt.final_free_bytes = receipt.capacity_decision_free_bytes;
     receipt.final_total_bytes = receipt.capacity_decision_total_bytes;
     receipt.final_device_used_bytes = receipt.capacity_decision_device_used_bytes;

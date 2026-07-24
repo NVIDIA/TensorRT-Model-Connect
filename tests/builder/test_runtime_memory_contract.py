@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,7 +15,12 @@ import pytest
 from tensorrt_model_connect.config import ModelConfig
 from tensorrt_model_connect.dynamic_memory_contract import (
     DynamicMemoryContractError,
+    UnknownModuleResidencyCalibrationError,
     load_dynamic_memory_qualifications,
+    module_residency_plan_set_sha256,
+    qualified_runtime_stack_sha256,
+    seal_runtime_memory_contract,
+    seal_runtime_memory_contract_from_qualified_manifest,
     validate_runtime_memory_contract,
 )
 
@@ -21,9 +28,7 @@ pytestmark = pytest.mark.dynamic_memory
 
 
 QWEN_REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
-QWEN_CONFIG_SHA256 = (
-    "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd"
-)
+QWEN_CONFIG_SHA256 = "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd"
 
 
 def _valid_contract() -> dict:
@@ -38,8 +43,7 @@ def _valid_contract() -> dict:
             "tensorrt": "11.2.0.113",
             "cuda_runtime": "13.3",
             "cudnn_backend": "9.20.0",
-            "cudnn_frontend_revision":
-                "7b9b711c22b6823e87150213ecd8449260db8610",
+            "cudnn_frontend_revision": "7b9b711c22b6823e87150213ecd8449260db8610",
             "nvrtc": "13.3",
             "driver": "580.105.08",
         },
@@ -61,7 +65,56 @@ def _valid_contract() -> dict:
     }
 
 
-def test_version_one_runtime_memory_contract_is_normalized() -> None:
+def _plan_sections() -> dict[str, bytes]:
+    return {
+        "engine_plan": b"serialized decode engine plan",
+        "prefill_engine_plan": b"serialized prefill engine plan",
+    }
+
+
+def _valid_calibration(
+    contract: dict | None = None,
+) -> dict:
+    base = _valid_contract() if contract is None else contract
+    sections = _plan_sections()
+    plans = [
+        {
+            "section_name": "engine_plan",
+            "section_sha256": hashlib.sha256(sections["engine_plan"]).hexdigest(),
+            "role": "decode",
+            "optimization_profile_count": len(base["active_kv_profile_limits"]),
+        },
+        {
+            "section_name": "prefill_engine_plan",
+            "section_sha256": hashlib.sha256(
+                sections["prefill_engine_plan"]
+            ).hexdigest(),
+            "role": "prefill",
+            "optimization_profile_count": 1,
+        },
+    ]
+    return {
+        "schema_version": 1,
+        "measurement_kind": "nvml_process_cumulative_first_use",
+        "cuda_module_loading_mode": "lazy",
+        "evidence_provenance": "external_manifest_v1",
+        "qualified_runtime_stack_sha256": qualified_runtime_stack_sha256(
+            base["qualified_runtime_stack"]
+        ),
+        "plan_set_sha256": module_residency_plan_set_sha256(plans),
+        "plans": plans,
+        "profile_reserves": [
+            {
+                "covering_profile_limit": limit,
+                "cumulative_reserve_bytes": (index + 1) * 16 * 1024 * 1024,
+            }
+            for index, limit in enumerate(base["active_kv_profile_limits"])
+        ],
+        "evidence_sha256": hashlib.sha256(b"qualification evidence").hexdigest(),
+    }
+
+
+def test_version_one_provisional_runtime_memory_contract_is_normalized() -> None:
     contract = _valid_contract()
     assert validate_runtime_memory_contract(contract) == contract
 
@@ -69,7 +122,7 @@ def test_version_one_runtime_memory_contract_is_normalized() -> None:
 @pytest.mark.parametrize(
     ("mutation", "message"),
     (
-        (lambda value: value.update(contract_version=2), "contract_version"),
+        (lambda value: value.update(contract_version=3), "contract_version"),
         (lambda value: value.pop("qualified_target"), "missing required"),
         (
             lambda value: value["qualified_runtime_stack"].pop("driver"),
@@ -88,9 +141,7 @@ def test_version_one_runtime_memory_contract_is_normalized() -> None:
             "strictly increasing",
         ),
         (
-            lambda value: value.update(
-                active_kv_profile_limits=[128, 512, 2048]
-            ),
+            lambda value: value.update(active_kv_profile_limits=[128, 512, 2048]),
             "must end",
         ),
         (
@@ -111,6 +162,376 @@ def test_invalid_runtime_memory_contract_fails_closed(
     mutation(contract)
     with pytest.raises(DynamicMemoryContractError, match=message):
         validate_runtime_memory_contract(contract)
+
+
+def test_v2_sealing_binds_stack_plan_set_and_actual_plan_bytes() -> None:
+    base = _valid_contract()
+    calibration = _valid_calibration(base)
+
+    sealed = seal_runtime_memory_contract(
+        base,
+        plan_sections=_plan_sections(),
+        module_residency_calibration=calibration,
+    )
+
+    assert base["contract_version"] == 1
+    assert sealed["contract_version"] == 2
+    assert sealed["module_residency_calibration"] == calibration
+    assert validate_runtime_memory_contract(sealed) == sealed
+
+
+def test_legacy_v2_calibration_without_provenance_defaults_to_external() -> None:
+    base = _valid_contract()
+    calibration = _valid_calibration(base)
+    calibration.pop("evidence_provenance")
+
+    sealed = seal_runtime_memory_contract(
+        base,
+        plan_sections=_plan_sections(),
+        module_residency_calibration=calibration,
+    )
+
+    assert (
+        sealed["module_residency_calibration"]["evidence_provenance"]
+        == "external_manifest_v1"
+    )
+
+
+def test_v2_calibration_rejects_unknown_evidence_provenance() -> None:
+    base = _valid_contract()
+    calibration = _valid_calibration(base)
+    calibration["evidence_provenance"] = "downgraded"
+
+    with pytest.raises(
+        DynamicMemoryContractError,
+        match="evidence_provenance",
+    ):
+        seal_runtime_memory_contract(
+            base,
+            plan_sections=_plan_sections(),
+            module_residency_calibration=calibration,
+        )
+
+
+def test_qualified_manifest_rejects_embedded_evidence_provenance(
+    tmp_path: Path,
+) -> None:
+    base = _valid_contract()
+    calibration = _valid_calibration(base)
+    calibration["evidence_provenance"] = "embedded_bundle_v1"
+    manifest = tmp_path / "MODULE_RESIDENCY_CALIBRATIONS.json"
+    manifest.write_text(
+        json.dumps({"schema_version": 1, "records": [calibration]}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        DynamicMemoryContractError,
+        match="evidence_provenance",
+    ):
+        seal_runtime_memory_contract_from_qualified_manifest(
+            base,
+            family="qwen",
+            plan_sections=_plan_sections(),
+            manifest_path=manifest,
+        )
+
+
+def test_qualified_manifest_sealing_selects_the_exact_plan(
+    tmp_path: Path,
+) -> None:
+    base = _valid_contract()
+    selected = _valid_calibration(base)
+    other = _valid_calibration(base)
+    other["plans"][0]["section_sha256"] = "0" * 64
+    other["plan_set_sha256"] = module_residency_plan_set_sha256(
+        other["plans"]
+    )
+    manifest = tmp_path / "MODULE_RESIDENCY_CALIBRATIONS.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "records": [other, selected],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    sealed = seal_runtime_memory_contract_from_qualified_manifest(
+        base,
+        family="qwen",
+        plan_sections=_plan_sections(),
+        manifest_path=manifest,
+    )
+
+    assert sealed["contract_version"] == 2
+    assert sealed["module_residency_calibration"] == selected
+
+
+def test_qualified_manifest_sealing_rejects_an_unqualified_plan(
+    tmp_path: Path,
+) -> None:
+    base = _valid_contract()
+    manifest = tmp_path / "MODULE_RESIDENCY_CALIBRATIONS.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "records": [_valid_calibration(base)],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        DynamicMemoryContractError,
+        match="No unique exact-plan",
+    ):
+        seal_runtime_memory_contract_from_qualified_manifest(
+            base,
+            family="qwen",
+            plan_sections={
+                **_plan_sections(),
+                "engine_plan": b"unqualified plan bytes",
+            },
+            manifest_path=manifest,
+        )
+
+
+def test_qualified_manifest_distinguishes_malformed_record_from_exact_miss(
+    tmp_path: Path,
+) -> None:
+    base = _valid_contract()
+    malformed = _valid_calibration(base)
+    del malformed["plans"][0]["section_sha256"]
+    manifest = tmp_path / "MODULE_RESIDENCY_CALIBRATIONS.json"
+    manifest.write_text(
+        json.dumps({"schema_version": 1, "records": [malformed]}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DynamicMemoryContractError) as caught:
+        seal_runtime_memory_contract_from_qualified_manifest(
+            base,
+            family="qwen",
+            plan_sections={
+                **_plan_sections(),
+                "engine_plan": b"unknown plan bytes",
+            },
+            manifest_path=manifest,
+        )
+
+    assert not isinstance(
+        caught.value,
+        UnknownModuleResidencyCalibrationError,
+    )
+    assert "missing required field" in str(caught.value)
+
+
+def test_v2_accepts_eager_cuda_module_loading_calibration() -> None:
+    base = _valid_contract()
+    calibration = _valid_calibration(base)
+    calibration["cuda_module_loading_mode"] = "eager"
+
+    sealed = seal_runtime_memory_contract(
+        base,
+        plan_sections=_plan_sections(),
+        module_residency_calibration=calibration,
+    )
+
+    assert (
+        sealed["module_residency_calibration"]["cuda_module_loading_mode"]
+        == "eager"
+    )
+
+
+def test_v2_requires_module_residency_calibration() -> None:
+    contract = _valid_contract()
+    contract["contract_version"] = 2
+
+    with pytest.raises(
+        DynamicMemoryContractError,
+        match="module_residency_calibration",
+    ):
+        validate_runtime_memory_contract(contract)
+
+
+def test_calibration_digest_preimages_are_language_neutral() -> None:
+    contract = _valid_contract()
+    stack = contract["qualified_runtime_stack"]
+    stack_preimage = b"".join(
+        (
+            f"{len(key.encode('ascii'))}:{key}={len(stack[key].encode('utf-8'))}:{stack[key]}\n"
+        ).encode("utf-8")
+        for key in (
+            "sm",
+            "tensorrt",
+            "cuda_runtime",
+            "cudnn_backend",
+            "cudnn_frontend_revision",
+            "nvrtc",
+            "driver",
+        )
+    )
+    assert (
+        qualified_runtime_stack_sha256(stack)
+        == hashlib.sha256(stack_preimage).hexdigest()
+    )
+
+    plans = _valid_calibration(contract)["plans"]
+    plan_preimage = b"".join(
+        (
+            f"{plan['section_name']}\0{plan['section_sha256']}\0"
+            f"{plan['role']}\0{plan['optimization_profile_count']}\n"
+        ).encode("ascii")
+        for plan in plans
+    )
+    assert (
+        module_residency_plan_set_sha256(plans)
+        == hashlib.sha256(plan_preimage).hexdigest()
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        (
+            lambda value: value.update(extra=True),
+            "unsupported field",
+        ),
+        (
+            lambda value: value.update(schema_version=2),
+            "schema_version",
+        ),
+        (
+            lambda value: value.update(measurement_kind="estimated"),
+            "measurement_kind",
+        ),
+        (
+            lambda value: value.update(cuda_module_loading_mode="default"),
+            "cuda_module_loading_mode",
+        ),
+        (
+            lambda value: value.update(qualified_runtime_stack_sha256="0" * 64),
+            "does not bind the outer",
+        ),
+        (
+            lambda value: value.update(plan_set_sha256="0" * 64),
+            "does not bind the ordered plans",
+        ),
+        (
+            lambda value: value["plans"].reverse(),
+            "ordered exactly",
+        ),
+        (
+            lambda value: value["plans"][0].update(extra=True),
+            "unsupported field",
+        ),
+        (
+            lambda value: value["plans"][1].update(optimization_profile_count=2),
+            "exactly one prefill",
+        ),
+        (
+            lambda value: value["plans"][0].update(
+                section_sha256=value["plans"][0]["section_sha256"].upper()
+            ),
+            "lowercase SHA-256",
+        ),
+        (
+            lambda value: value["profile_reserves"][0].update(extra=True),
+            "unsupported field",
+        ),
+        (
+            lambda value: value["profile_reserves"][1].update(
+                covering_profile_limit=129
+            ),
+            "align exactly",
+        ),
+        (
+            lambda value: value["profile_reserves"][1].update(
+                cumulative_reserve_bytes=1
+            ),
+            "nondecreasing",
+        ),
+        (
+            lambda value: value["profile_reserves"][-1].update(
+                cumulative_reserve_bytes=0
+            ),
+            "positive integer",
+        ),
+        (
+            lambda value: value.update(evidence_sha256="A" * 64),
+            "lowercase SHA-256",
+        ),
+    ),
+)
+def test_invalid_v2_calibration_fails_closed(
+    mutation,
+    message: str,
+) -> None:
+    contract = _valid_contract()
+    calibration = _valid_calibration(contract)
+    mutation(calibration)
+    contract.update(
+        contract_version=2,
+        module_residency_calibration=calibration,
+    )
+
+    with pytest.raises(DynamicMemoryContractError, match=message):
+        validate_runtime_memory_contract(contract)
+
+
+def test_v2_rejects_outer_stack_drift_after_sealing() -> None:
+    base = _valid_contract()
+    sealed = seal_runtime_memory_contract(
+        base,
+        plan_sections=_plan_sections(),
+        module_residency_calibration=_valid_calibration(base),
+    )
+    sealed["qualified_runtime_stack"]["driver"] = "580.105.09"
+
+    with pytest.raises(
+        DynamicMemoryContractError,
+        match="does not bind the outer",
+    ):
+        validate_runtime_memory_contract(sealed)
+
+
+@pytest.mark.parametrize(
+    ("sections", "message"),
+    (
+        (
+            {"engine_plan": b"serialized decode engine plan"},
+            "missing required",
+        ),
+        (
+            {
+                **_plan_sections(),
+                "other_plan": b"not calibrated",
+            },
+            "unsupported field",
+        ),
+        (
+            {
+                **_plan_sections(),
+                "engine_plan": b"different decode engine plan",
+            },
+            "hash mismatch for engine_plan",
+        ),
+    ),
+)
+def test_sealing_rejects_missing_extra_or_drifted_plan_bytes(
+    sections: dict[str, bytes],
+    message: str,
+) -> None:
+    base = _valid_contract()
+    with pytest.raises(DynamicMemoryContractError, match=message):
+        seal_runtime_memory_contract(
+            base,
+            plan_sections=sections,
+            module_residency_calibration=_valid_calibration(base),
+        )
 
 
 @pytest.mark.parametrize(
@@ -217,7 +638,9 @@ def test_contract_rejects_precision_and_model_limit_drift(
         )
 
 
-def test_engine_builder_injects_one_transient_graph_signal_only_when_qualified() -> None:
+def test_engine_builder_injects_one_transient_graph_signal_only_when_qualified() -> (
+    None
+):
     from tensorrt_model_connect.engine_builder import (
         _prepare_runtime_memory_contract,
     )

@@ -88,6 +88,15 @@ _RECEIPT_FIELDS = (
     "resident_weight_copy_count",
     "weight_streaming_active",
 )
+_MODULE_RESIDENCY_RECEIPT_FIELDS = (
+    "receipt_schema_version",
+    "contract_version",
+    "module_residency_reserve_bytes",
+    "module_residency_reserve_profile_limit",
+    "module_residency_plan_set_sha256",
+    "module_residency_evidence_sha256",
+    "module_residency_cuda_module_loading_mode",
+)
 _MEASUREMENT_SOURCES = {
     "serialized_plan_bytes": "bundle_engine_section_sizes",
     "resident_weight_bytes": (
@@ -172,6 +181,15 @@ _RUNTIME_TRTMC_FIELDS = (
     "runtime_kv_plugin",
     "model",
 )
+_MAPPED_DSO_IDENTITY_FIELDS = (
+    "path",
+    "device",
+    "inode",
+    "size_bytes",
+    "mtime_ns",
+    "ctime_ns",
+    "sha256",
+)
 _CUDA_CACHE_FIELDS = (
     "path",
     "path_source",
@@ -236,10 +254,13 @@ class CaseEvidence:
     output_tokens: tuple[int, ...]
     provenance: Mapping[str, Any]
     receipt: Mapping[str, Any]
+    runtime_memory_contract: Mapping[str, Any] | None
+    module_residency_receipt: Mapping[str, Any] | None
     runtime_attention_plans: tuple[Mapping[str, Any], ...]
     runtime_stack: Mapping[str, Any] | None
     runtime_libraries: Mapping[str, Any] | None
     runtime_trtmc_libraries: Mapping[str, Any]
+    mapped_dso_identities: tuple[Mapping[str, Any], ...]
     build_runtime_kv_plugin: Mapping[str, Any] | None
     build_manifest: Mapping[str, Any]
     build_receipt: Mapping[str, Any]
@@ -269,6 +290,16 @@ class CaseEvidence:
             "runtime_memory_receipt": {
                 field: self.receipt[field] for field in _RECEIPT_FIELDS
             },
+            "bundle_runtime_memory_contract": (
+                dict(self.runtime_memory_contract)
+                if self.runtime_memory_contract is not None
+                else None
+            ),
+            "runtime_module_residency_receipt": (
+                dict(self.module_residency_receipt)
+                if self.module_residency_receipt is not None
+                else None
+            ),
             "runtime_attention_plans": [
                 dict(plan) for plan in self.runtime_attention_plans
             ],
@@ -285,6 +316,10 @@ class CaseEvidence:
             "runtime_trtmc_libraries": dict(
                 self.runtime_trtmc_libraries
             ),
+            "mapped_dso_identities": [
+                dict(identity)
+                for identity in self.mapped_dso_identities
+            ],
             "build_runtime_kv_plugin": (
                 dict(self.build_runtime_kv_plugin)
                 if self.build_runtime_kv_plugin is not None
@@ -655,6 +690,182 @@ def _validate_binary_identity(
             f"{where} does not match the captured binary identity"
         )
     return identity
+
+
+def _validate_mapped_dso_identities(
+    value: Any,
+    *,
+    where: str,
+) -> tuple[Mapping[str, Any], ...]:
+    if not isinstance(value, list):
+        raise QualificationError(f"{where} must be a JSON array")
+    rows: list[Mapping[str, Any]] = []
+    for index, raw in enumerate(value):
+        row = _object(raw, f"{where}[{index}]")
+        _exact_fields(
+            row,
+            _MAPPED_DSO_IDENTITY_FIELDS,
+            f"{where}[{index}]",
+        )
+        rows.append(
+            _validate_binary_identity(
+                row,
+                where=f"{where}[{index}]",
+            )
+        )
+    expected = sorted(
+        rows,
+        key=lambda row: (
+            str(row["path"]),
+            int(row["device"]),
+            int(row["inode"]),
+        ),
+    )
+    if rows != expected:
+        raise QualificationError(
+            f"{where} must use canonical path/inode ordering"
+        )
+    if len(
+        {
+            (row["path"], row["device"], row["inode"])
+            for row in rows
+        }
+    ) != len(rows):
+        raise QualificationError(f"{where} contains duplicate mapped DSOs")
+    return tuple(rows)
+
+
+def _load_boundary_module() -> Any:
+    path = Path(__file__).with_name("qualify_native_dynamic_memory.py")
+    spec = importlib.util.spec_from_file_location(
+        "_trtmc_dynamic_memory_perf_boundary_replay",
+        path,
+    )
+    if spec is None or spec.loader is None:
+        raise QualificationError(
+            f"cannot load sealed-bundle validator: {path}"
+        )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _replay_sealed_runtime_memory_contract(
+    bundle: Path,
+) -> Mapping[str, Any]:
+    """Independently hash the split plans and validate sealed contract v2."""
+
+    boundary = _load_boundary_module()
+    try:
+        header = boundary._read_bundle_header(bundle)
+        spec = boundary._resolve_spec(header)
+        contract = boundary._sealed_profile_sweep_contract(
+            bundle,
+            header,
+            expected_model_id=spec.model_id,
+            expected_context_limit=spec.context_limit,
+            expected_profile_limits=tuple(spec.buckets),
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise QualificationError(
+            "final performance gate could not independently replay the "
+            f"sealed v2 bundle contract: {exc}"
+        ) from exc
+    return contract
+
+
+def _replay_module_residency_receipt(
+    receipt: Mapping[str, Any],
+    *,
+    contract: Mapping[str, Any],
+    live_runtime_stack: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Independently bind one live receipt to plan hashes and stack tuple."""
+
+    calibration = _object(
+        _required(
+            contract,
+            "module_residency_calibration",
+            "sealed runtime_memory contract",
+        ),
+        "sealed runtime_memory contract.module_residency_calibration",
+    )
+    qualified_stack = _object(
+        _required(
+            contract,
+            "qualified_runtime_stack",
+            "sealed runtime_memory contract",
+        ),
+        "sealed runtime_memory contract.qualified_runtime_stack",
+    )
+    observed_stack = {
+        field: live_runtime_stack.get(field)
+        for field in qualified_stack
+    }
+    if observed_stack != dict(qualified_stack):
+        raise QualificationError(
+            "live runtime stack does not match the independently reopened "
+            "bundle calibration"
+        )
+    capacity = _positive_int(
+        receipt,
+        "runtime_kv_capacity_tokens",
+        "runtime_memory_receipt",
+    )
+    raw_reserves = _required(
+        calibration,
+        "profile_reserves",
+        "sealed runtime_memory contract.module_residency_calibration",
+    )
+    if not isinstance(raw_reserves, list):
+        raise QualificationError(
+            "sealed module-residency profile reserves must be an array"
+        )
+    selected = next(
+        (
+            row
+            for row in raw_reserves
+            if isinstance(row, Mapping)
+            and type(row.get("covering_profile_limit")) is int
+            and int(row["covering_profile_limit"]) >= capacity
+        ),
+        None,
+    )
+    if selected is None:
+        raise QualificationError(
+            f"sealed module-residency calibration does not cover R={capacity}"
+        )
+    expected = {
+        "receipt_schema_version": 4,
+        "contract_version": 2,
+        "module_residency_reserve_bytes": selected[
+            "cumulative_reserve_bytes"
+        ],
+        "module_residency_reserve_profile_limit": selected[
+            "covering_profile_limit"
+        ],
+        "module_residency_plan_set_sha256": calibration[
+            "plan_set_sha256"
+        ],
+        "module_residency_evidence_sha256": calibration[
+            "evidence_sha256"
+        ],
+        "module_residency_cuda_module_loading_mode": calibration[
+            "cuda_module_loading_mode"
+        ],
+    }
+    mismatches = {
+        field: {"expected": value, "actual": receipt.get(field)}
+        for field, value in expected.items()
+        if receipt.get(field) != value
+    }
+    if mismatches:
+        raise QualificationError(
+            "runtime receipt does not match the independently reopened "
+            f"module-residency calibration: {mismatches}"
+        )
+    return expected
 
 
 def _validate_runtime_trtmc_libraries(
@@ -1060,6 +1271,7 @@ def _validate_qualification_evidence(
     model_id: str,
     provenance: Mapping[str, Any],
     runtime_trtmc_libraries: Mapping[str, Any],
+    mapped_dso_identities: tuple[Mapping[str, Any], ...],
     build_runtime_kv_plugin: Mapping[str, Any] | None,
 ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
     where = f"{label}.qualification_evidence"
@@ -1132,6 +1344,12 @@ def _validate_qualification_evidence(
         raise QualificationError(
             f"{where}.runtime_trtmc_libraries disagree with result"
         )
+    if evidence.get("mapped_dso_identities") != list(
+        mapped_dso_identities
+    ):
+        raise QualificationError(
+            f"{where}.mapped_dso_identities disagree with result"
+        )
     if evidence.get("build_runtime_kv_plugin") != build_runtime_kv_plugin:
         raise QualificationError(
             f"{where}.build_runtime_kv_plugin disagrees with result"
@@ -1201,6 +1419,124 @@ def _validate_qualification_evidence(
         raise QualificationError(
             f"{where}.build_receipt replay failed: {exc}"
         ) from exc
+
+    runtime_receipt = _object(
+        _required(result, "runtime_memory_receipt", label),
+        f"{label}.runtime_memory_receipt",
+    )
+    if evidence.get("runtime_memory_receipt") != runtime_receipt:
+        raise QualificationError(
+            f"{where}.runtime_memory_receipt disagrees with result"
+        )
+    if provenance.get("runtime_memory_receipt_sha256") != _canonical_sha(
+        runtime_receipt
+    ):
+        raise QualificationError(
+            f"{label}.qualification_provenance."
+            "runtime_memory_receipt_sha256 is invalid"
+        )
+    comparison_sequence_limit = _positive_int(
+        evidence,
+        "comparison_sequence_limit",
+        where,
+    )
+    if expected_role == "native-dynamic":
+        try:
+            capture._validate_complete_schema_v4_receipt(
+                runtime_receipt,
+                comparison_sequence_limit=comparison_sequence_limit,
+            )
+        except Exception as exc:
+            if exc.__class__.__name__ != "CaptureError":
+                raise
+            raise QualificationError(
+                f"{where} complete schema-v4 receipt replay failed: {exc}"
+            ) from exc
+
+    runtime_memory_contract = result.get(
+        "bundle_runtime_memory_contract"
+    )
+    module_residency_receipt = result.get(
+        "runtime_module_residency_receipt"
+    )
+    if expected_role == "native-dynamic":
+        runtime_memory_contract = _object(
+            runtime_memory_contract,
+            f"{label}.bundle_runtime_memory_contract",
+        )
+        module_residency_receipt = _object(
+            module_residency_receipt,
+            f"{label}.runtime_module_residency_receipt",
+        )
+        if (
+            evidence.get("bundle_runtime_memory_contract")
+            != runtime_memory_contract
+            or evidence.get("runtime_module_residency_receipt")
+            != module_residency_receipt
+        ):
+            raise QualificationError(
+                f"{where} module-residency evidence disagrees with result"
+            )
+        if provenance.get(
+            "bundle_runtime_memory_contract_sha256"
+        ) != _canonical_sha(runtime_memory_contract):
+            raise QualificationError(
+                f"{label}.qualification_provenance."
+                "bundle_runtime_memory_contract_sha256 is invalid"
+            )
+        if provenance.get(
+            "runtime_module_residency_receipt_sha256"
+        ) != _canonical_sha(module_residency_receipt):
+            raise QualificationError(
+                f"{label}.qualification_provenance."
+                "runtime_module_residency_receipt_sha256 is invalid"
+            )
+        try:
+            reopened_contract = _replay_sealed_runtime_memory_contract(
+                expected_bundle
+            )
+            replayed_receipt = _replay_module_residency_receipt(
+                runtime_receipt,
+                contract=reopened_contract,
+                live_runtime_stack=_object(
+                    _required(result, "runtime_stack", label),
+                    f"{label}.runtime_stack",
+                ),
+            )
+        except Exception as exc:
+            if exc.__class__.__name__ not in {
+                "CaptureError",
+                "ValueError",
+                "RuntimeError",
+            }:
+                raise
+            raise QualificationError(
+                f"{where} module-residency replay failed: {exc}"
+            ) from exc
+        if (
+            dict(runtime_memory_contract) != reopened_contract
+            or dict(module_residency_receipt) != replayed_receipt
+        ):
+            raise QualificationError(
+                f"{where} module-residency objects do not match the "
+                "reopened bundle and runtime receipt"
+            )
+    elif (
+        runtime_memory_contract is not None
+        or module_residency_receipt is not None
+        or evidence.get("bundle_runtime_memory_contract") is not None
+        or evidence.get("runtime_module_residency_receipt") is not None
+        or provenance.get("bundle_runtime_memory_contract_sha256")
+        is not None
+        or provenance.get(
+            "runtime_module_residency_receipt_sha256"
+        )
+        is not None
+    ):
+        raise QualificationError(
+            f"{where} static baseline unexpectedly claims a dynamic "
+            "module-residency contract"
+        )
     model_key = (
         "model_qwen"
         if runtime_trtmc_libraries["model_family"] == "qwen"
@@ -1310,13 +1646,21 @@ def _read_case(
         "runtime_stack_sha256",
         "runtime_libraries_sha256",
         "runtime_trtmc_libraries_sha256",
+        "mapped_dso_identities_sha256",
         "build_runtime_kv_plugin_sha256",
         "build_manifest_sha256",
         "cuda_jit_cache_sha256",
         "generation_workload_sha256",
         "tokenizer_contract_sha256",
+        "runtime_memory_receipt_sha256",
     ):
         _sha_field(provenance, field, provenance_where)
+    if expected_role == "native-dynamic":
+        for field in (
+            "bundle_runtime_memory_contract_sha256",
+            "runtime_module_residency_receipt_sha256",
+        ):
+            _sha_field(provenance, field, provenance_where)
     _sha_field(provenance, "git_head", provenance_where, git=True)
     _boolean(provenance, "source_state_unchanged", provenance_where)
     _validate_source_state_boundaries(
@@ -1388,6 +1732,44 @@ def _read_case(
         where=f"{label}.runtime_trtmc_libraries",
         model_id=model_id,
     )
+    mapped_dso_value = _required(
+        result,
+        "mapped_dso_identities",
+        label,
+    )
+    mapped_dso_identities = _validate_mapped_dso_identities(
+        mapped_dso_value,
+        where=f"{label}.mapped_dso_identities",
+    )
+    runtime_identity_rows = tuple(
+        runtime_trtmc_libraries[field]
+        for field in ("core", "trt_backend", "runtime_kv_plugin", "model")
+    )
+    if any(identity not in mapped_dso_identities for identity in runtime_identity_rows):
+        raise QualificationError(
+            f"{label}.mapped_dso_identities omits a mapped TRTMC runtime DSO"
+        )
+    if runtime_libraries is not None:
+        for library_name in ("nvrtc", "nvrtc_builtins"):
+            runtime_library = _object(
+                runtime_libraries[library_name],
+                f"{label}.runtime_libraries.{library_name}",
+            )
+            matches = [
+                identity
+                for identity in mapped_dso_identities
+                if (
+                    identity["path"] == runtime_library["path"]
+                    and identity["size_bytes"]
+                    == runtime_library["size_bytes"]
+                    and identity["sha256"] == runtime_library["sha256"]
+                )
+            ]
+            if len(matches) != 1:
+                raise QualificationError(
+                    f"{label}.mapped_dso_identities does not bind the live "
+                    f"{library_name} DSO"
+                )
     build_plugin_value = _required(
         result,
         "build_runtime_kv_plugin",
@@ -1422,6 +1804,10 @@ def _read_case(
         (
             runtime_trtmc_value,
             "runtime_trtmc_libraries_sha256",
+        ),
+        (
+            mapped_dso_value,
+            "mapped_dso_identities_sha256",
         ),
         (
             build_plugin_value,
@@ -1460,8 +1846,31 @@ def _read_case(
             model_id=model_id,
             provenance=provenance,
             runtime_trtmc_libraries=runtime_trtmc_libraries,
+            mapped_dso_identities=mapped_dso_identities,
             build_runtime_kv_plugin=build_runtime_kv_plugin,
         )
+    )
+    raw_runtime_memory_contract = result.get(
+        "bundle_runtime_memory_contract"
+    )
+    raw_module_residency_receipt = result.get(
+        "runtime_module_residency_receipt"
+    )
+    runtime_memory_contract = (
+        _object(
+            raw_runtime_memory_contract,
+            f"{label}.bundle_runtime_memory_contract",
+        )
+        if raw_runtime_memory_contract is not None
+        else None
+    )
+    module_residency_receipt = (
+        _object(
+            raw_module_residency_receipt,
+            f"{label}.runtime_module_residency_receipt",
+        )
+        if raw_module_residency_receipt is not None
+        else None
     )
     build_manifest = _object(
         _required(qualification_evidence, "build_manifest", f"{label}.qualification_evidence"),
@@ -1480,10 +1889,13 @@ def _read_case(
         output_tokens=tuple(output_tokens),
         provenance=provenance,
         receipt=receipt,
+        runtime_memory_contract=runtime_memory_contract,
+        module_residency_receipt=module_residency_receipt,
         runtime_attention_plans=runtime_attention_plans,
         runtime_stack=runtime_stack,
         runtime_libraries=runtime_libraries,
         runtime_trtmc_libraries=runtime_trtmc_libraries,
+        mapped_dso_identities=mapped_dso_identities,
         build_runtime_kv_plugin=build_runtime_kv_plugin,
         build_manifest=build_manifest,
         build_receipt=build_receipt,
@@ -1738,6 +2150,14 @@ def qualify(
             )
             == 1
         ),
+        "mapped_dso_identities_match_across_static_prompts": (
+            static_cases[0].mapped_dso_identities
+            == static_cases[1].mapped_dso_identities
+        ),
+        "mapped_dso_identities_match_across_dynamic_prompts": (
+            dynamic_cases[0].mapped_dso_identities
+            == dynamic_cases[1].mapped_dso_identities
+        ),
         "static_runtime_stack_absent": all(
             case.runtime_stack is None for case in static_cases
         ),
@@ -1752,6 +2172,41 @@ def qualify(
         ),
         "cuda_jit_cache_present_for_all_cases": all(
             bool(case.cuda_jit_cache) for case in values
+        ),
+        "one_dynamic_bundle_runtime_memory_contract": (
+            all(
+                case.runtime_memory_contract is not None
+                for case in dynamic_cases
+            )
+            and len(
+                {
+                    _canonical_sha(case.runtime_memory_contract)
+                    for case in dynamic_cases
+                }
+            )
+            == 1
+        ),
+        "dynamic_module_residency_provenance_matches": (
+            all(
+                case.module_residency_receipt is not None
+                for case in dynamic_cases
+            )
+            and all(
+                dynamic_cases[0].module_residency_receipt[field]
+                == dynamic_cases[1].module_residency_receipt[field]
+                for field in (
+                    "receipt_schema_version",
+                    "contract_version",
+                    "module_residency_plan_set_sha256",
+                    "module_residency_evidence_sha256",
+                    "module_residency_cuda_module_loading_mode",
+                )
+            )
+        ),
+        "static_module_residency_contract_absent": all(
+            case.runtime_memory_contract is None
+            and case.module_residency_receipt is None
+            for case in static_cases
         ),
     }
     performance: dict[str, Any] = {}
@@ -1939,6 +2394,76 @@ def _write_report(path: Path, report: Mapping[str, Any]) -> None:
     )
 
 
+def _source_state_snapshot(
+    repo_root: Path,
+    artifact_dir: Path,
+    *,
+    label: str,
+) -> Mapping[str, Any]:
+    boundary = _load_boundary_module()
+    return boundary.source_state_provenance(
+        repo_root.resolve(),
+        Path(__file__).resolve(),
+        artifact_dir.resolve(),
+        label=label,
+    )
+
+
+def _apply_standalone_source_state_gate(
+    report: dict[str, Any],
+    *,
+    source_state_pre: Mapping[str, Any],
+    source_state_post: Mapping[str, Any],
+) -> None:
+    pre_sha = source_state_pre.get("source_state_sha256")
+    unchanged = bool(
+        isinstance(pre_sha, str)
+        and _SHA256.fullmatch(pre_sha) is not None
+        and pre_sha == source_state_post.get("source_state_sha256")
+        and source_state_pre.get("git_head")
+        == source_state_post.get("git_head")
+    )
+    clean = (
+        source_state_pre.get("git_dirty") is False
+        and source_state_post.get("git_dirty") is False
+    )
+    exact_head = (
+        source_state_pre.get("exact_head_gate_satisfied") is True
+        and source_state_post.get("exact_head_gate_satisfied") is True
+    )
+    case_provenance = [
+        case.get("qualification_provenance")
+        for case in report.get("cases", {}).values()
+        if isinstance(case, Mapping)
+    ]
+    matches_cases = bool(case_provenance) and all(
+        isinstance(provenance, Mapping)
+        and provenance.get("git_head") == source_state_pre.get("git_head")
+        and provenance.get("source_state_sha256") == pre_sha
+        for provenance in case_provenance
+    )
+    standalone_gate = {
+        "source_state_unchanged": unchanged,
+        "source_state_clean": clean,
+        "source_state_exact_head": exact_head,
+        "source_state_matches_all_captures": matches_cases,
+    }
+    standalone_gate["passed"] = all(standalone_gate.values())
+    report["source_state_pre"] = dict(source_state_pre)
+    report["source_state_post"] = dict(source_state_post)
+    report["source_state_unchanged"] = unchanged
+    if isinstance(report.get("gates"), dict):
+        report["gates"]["standalone_source_state"] = standalone_gate
+    else:
+        report["standalone_source_state_gate"] = standalone_gate
+    report["status"] = (
+        "passed"
+        if report.get("status") == "passed"
+        and standalone_gate["passed"]
+        else "failed"
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--static-short", type=Path, required=True)
@@ -1947,10 +2472,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--dynamic-medium", type=Path, required=True)
     parser.add_argument("--static-bundle", type=Path, required=True)
     parser.add_argument("--dynamic-bundle", type=Path, required=True)
+    parser.add_argument(
+        "--repo-root",
+        type=Path,
+        default=Path(__file__).resolve().parents[1],
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
 
+    source_state_pre: Mapping[str, Any] | None = None
     try:
+        source_state_pre = _source_state_snapshot(
+            args.repo_root,
+            args.output.expanduser().resolve().parent,
+            label="final-perf-pre",
+        )
         report = qualify(
             static_short=args.static_short,
             dynamic_short=args.dynamic_short,
@@ -1965,6 +2501,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             "status": "failed",
             "errors": [str(exc)],
         }
+    try:
+        source_state_post = _source_state_snapshot(
+            args.repo_root,
+            args.output.expanduser().resolve().parent,
+            label="final-perf-post",
+        )
+        if source_state_pre is None:
+            raise QualificationError(
+                "final performance gate has no pre-run source-state sample"
+            )
+        _apply_standalone_source_state_gate(
+            report,
+            source_state_pre=source_state_pre,
+            source_state_post=source_state_post,
+        )
+    except (QualificationError, OSError, ValueError) as exc:
+        report["status"] = "failed"
+        report.setdefault("errors", []).append(str(exc))
     _write_report(args.output, report)
     print(
         json.dumps(

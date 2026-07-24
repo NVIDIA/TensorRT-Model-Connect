@@ -1736,7 +1736,12 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ClassificationRule(
             priority=425,
             name="dynamic_memory_qualification_native",
-            matcher=_path_startswith("tests/qualification/"),
+            matcher=_path_startswith_any(
+                (
+                    "tests/qualification/",
+                    "tools/src/native_dynamic_memory_calibrator",
+                )
+            ),
             resolver=_match_result(
                 "dynamic_memory_qualification_native",
                 _no_models,

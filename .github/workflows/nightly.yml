@@ -499,8 +499,153 @@ jobs:
       revision: ${{ needs.legal.outputs.tested_sha || github.sha }}
       suite: nightly
 
+  dynamic-memory:
+    name: 5 / Dynamic memory / ${{ matrix.model }}
+    needs:
+      - legal
+      - inventory
+      - source-quality
+      - unit-tests
+      - cache-warm
+      - package
+      - model-proof
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.inventory.outputs.has_models == 'true'
+      }}
+    strategy:
+      # Each model emits independent failure evidence; one must not cancel the
+      # other. The whole-machine lock serializes rows that land on one node.
+      fail-fast: false
+      matrix:
+        model:
+          - qwen
+          - tinyllama
+    runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
+    timeout-minutes: 540
+    permissions:
+      contents: read
+      packages: read
+    env:
+      TRTMC_CI_CONTAINER_NAME: trtmc-nightly-dynamic-memory-${{ matrix.model }}-${{ github.run_id }}-${{ github.run_attempt }}
+      TRTMC_CI_WORKSPACE: ${{ github.workspace }}/nightly-dynamic-memory-${{ matrix.model }}-${{ github.run_id }}-${{ github.run_attempt }}
+      TRTMC_DYNAMIC_MEMORY_CUDNN_FRONTEND_INCLUDE_DIR: ${{ vars.TRTMC_DYNAMIC_MEMORY_CUDNN_FRONTEND_INCLUDE_DIR || '' }}
+
+    steps:
+      - name: Check out exact nightly snapshot
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.legal.outputs.tested_sha || github.sha }}
+          path: nightly-dynamic-memory-${{ matrix.model }}-${{ github.run_id }}-${{ github.run_attempt }}
+          fetch-depth: 1
+          persist-credentials: false
+          clean: true
+          lfs: false
+
+      - name: Log in to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          docker_config="${RUNNER_TEMP}/trtmc-docker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-dynamic-memory-${{ matrix.model }}"
+          mkdir -p "$docker_config"
+          echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
+          printf '%s' "$GHCR_TOKEN" | DOCKER_CONFIG="$docker_config" docker login ghcr.io \
+            --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Ensure CI Docker image
+        id: ci_image
+        timeout-minutes: 90
+        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
+        run: python3 -m tools.ci image ensure
+
+      - name: Start Model Connect GB300 container
+        timeout-minutes: 5
+        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
+        env:
+          TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
+        run: python3 -m tools.ci container start
+
+      - name: Run exact-head dynamic-memory qualification
+        timeout-minutes: 390
+        run: |
+          set -euo pipefail
+          [[ "$TRTMC_WHOLE_MACHINE_GPU_LOCK_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::TRTMC_WHOLE_MACHINE_GPU_LOCK_TIMEOUT_SECONDS must be a positive integer"
+            exit 1
+          }
+          mkdir -p -- "$TRTMC_MODEL_PROOF_GPU_LOCK_DIR"
+          exec 9<>"$TRTMC_MODEL_PROOF_GPU_LOCK_DIR/whole-machine.lock"
+          flock -w "$TRTMC_WHOLE_MACHINE_GPU_LOCK_TIMEOUT_SECONDS" -x 9 || {
+            echo "::error::Timed out waiting for exclusive whole-machine GPU access"
+            exit 1
+          }
+          docker exec \
+            -w "$TRTMC_CI_WORKSPACE" \
+            -e "TRTMC_DYNAMIC_MEMORY_CUDNN_FRONTEND_INCLUDE_DIR=$TRTMC_DYNAMIC_MEMORY_CUDNN_FRONTEND_INCLUDE_DIR" \
+            "$TRTMC_CI_CONTAINER_NAME" \
+            bash -lc '
+              set -euo pipefail
+              test -n "$TRTMC_DYNAMIC_MEMORY_CUDNN_FRONTEND_INCLUDE_DIR" || {
+                echo "TRTMC_DYNAMIC_MEMORY_CUDNN_FRONTEND_INCLUDE_DIR is required" >&2
+                exit 1
+              }
+              test -f "$TRTMC_DYNAMIC_MEMORY_CUDNN_FRONTEND_INCLUDE_DIR/cudnn_frontend.h" || {
+                echo "Pinned cuDNN Frontend headers are missing" >&2
+                exit 1
+              }
+              cmake -S . -B build-dynamic-memory-nightly -G Ninja \
+                -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+                -DTRTMC_BUILD_BACKEND_TRT=ON \
+                -DTRTMC_BUILD_BACKEND_RTX=OFF \
+                -DTRTMC_BUILD_TESTS=ON \
+                -DTRTMC_ENABLE_TESTS=ON \
+                -DTRTMC_BUILD_BENCHMARKS=ON \
+                -DTRTMC_ENABLE_CUDNN_RUNTIME_KV_SDPA=ON \
+                -DTRTMC_CUDNN_FRONTEND_INCLUDE_DIR="$TRTMC_DYNAMIC_MEMORY_CUDNN_FRONTEND_INCLUDE_DIR" \
+                -DTRTMC_TRT_BACKEND_ABI=11_2
+            '
+          docker exec \
+            -w "$TRTMC_CI_WORKSPACE" \
+            -e CUDA_MODULE_LOADING=LAZY \
+            -e HF_HUB_OFFLINE=1 \
+            -e TRANSFORMERS_OFFLINE=1 \
+            "$TRTMC_CI_CONTAINER_NAME" \
+            /opt/venv/bin/python tools/ci/dynamic_memory_nightly.py run \
+              --repo-root "$TRTMC_CI_WORKSPACE" \
+              --build-dir "$TRTMC_CI_WORKSPACE/build-dynamic-memory-nightly" \
+              --python /opt/venv/bin/python \
+              --output-dir "$TRTMC_CI_WORKSPACE/artifacts/nightly-dynamic-memory/${{ matrix.model }}" \
+              --fixture "$TRTMC_CI_WORKSPACE/tools/ci/fixtures/native_dynamic_memory_nightly.json" \
+              --model "${{ matrix.model }}" \
+              --expected-tested-sha "${{ needs.legal.outputs.tested_sha || github.sha }}" \
+              --workflow-run-id "${{ github.run_id }}" \
+              --workflow-run-attempt "${{ github.run_attempt }}" \
+              --producer-gpu 0 \
+              --runner-gpu 1 \
+              --isolation-gpu-a 2 \
+              --isolation-gpu-b 3
+
+      - name: Upload dynamic-memory receipts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: trtmc-nightly-dynamic-memory-${{ github.run_id }}-${{ needs.legal.outputs.tested_sha || github.sha }}-${{ matrix.model }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+          path: ${{ env.TRTMC_CI_WORKSPACE }}/artifacts/nightly-dynamic-memory/${{ matrix.model }}/receipt-upload/
+
+      - name: Clean dynamic-memory container
+        if: ${{ always() }}
+        run: |
+          docker rm -f "$TRTMC_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
+          if [ -n "${DOCKER_CONFIG:-}" ]; then
+            rm -rf "$DOCKER_CONFIG"
+          fi
+
   diffusion-vlm:
-    name: 5 / Diffusion semantic assessment
+    name: 6 / Diffusion semantic assessment
     needs:
       - legal
       - inventory
@@ -772,7 +917,7 @@ jobs:
           fi
 
   report:
-    name: 6 / Combined HTML report
+    name: 7 / Combined HTML report
     needs:
       - legal
       - inventory
@@ -781,6 +926,7 @@ jobs:
       - cache-warm
       - package
       - model-proof
+      - dynamic-memory
       - diffusion-vlm
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -803,6 +949,7 @@ jobs:
           CACHE_RESULT: ${{ needs.cache-warm.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
           MODEL_RESULT: ${{ needs.model-proof.result }}
+          DYNAMIC_MEMORY_RESULT: ${{ needs.dynamic-memory.result }}
           VLM_RESULT: ${{ needs.diffusion-vlm.result }}
           REPORT_OUTPUT_DIR: ${{ runner.temp }}/nightly-model-report-${{ github.run_id }}-${{ github.run_attempt }}
           PARTS_DIR: ${{ runner.temp }}/nightly-model-parts-${{ github.run_id }}-${{ github.run_attempt }}
@@ -816,7 +963,7 @@ jobs:
             "$EXPECTED_RESULT_COUNT" "$REVISION" \
             "$LEGAL_RESULT" "$INVENTORY_RESULT" "$SOURCE_QUALITY_RESULT" \
             "$UNIT_RESULT" "$CACHE_RESULT" "$PACKAGE_RESULT" "$MODEL_RESULT" \
-            "$VLM_RESULT" <<'PY'
+            "$DYNAMIC_MEMORY_RESULT" "$VLM_RESULT" <<'PY'
           import html
           import json
           import sys
@@ -835,6 +982,7 @@ jobs:
               cache_result,
               package_result,
               model_result,
+              dynamic_memory_result,
               vlm_result,
           ) = sys.argv[1:]
           root = Path(output_dir)
@@ -863,6 +1011,7 @@ jobs:
               "cache-warm": cache_result,
               "package": package_result,
               "model-proof": model_result,
+              "dynamic-memory": dynamic_memory_result,
               "diffusion-vlm": vlm_result,
           }
           issues = ["Combined nightly report generation has not completed."]
@@ -895,6 +1044,26 @@ jobs:
           }
           (root / "model-proof-report-status.json").write_text(
               json.dumps(status, indent=2) + "\n", encoding="utf-8"
+          )
+          dynamic_status = {
+              "schema_version": (
+                  "trtmc.native-dynamic-memory-nightly-artifact-"
+                  "verification/v1"
+              ),
+              "status": "failed",
+              "passed": False,
+              "tested_sha": revision,
+              "workflow_run_id": None,
+              "max_attempt": None,
+              "expected_models": ["qwen", "tinyllama"],
+              "selected_models": [],
+              "selected": [],
+              "errors": [
+                  "Dynamic-memory artifact verification has not completed."
+              ],
+          }
+          (root / "dynamic-memory-nightly-status.json").write_text(
+              json.dumps(dynamic_status, indent=2) + "\n", encoding="utf-8"
           )
           issue_items = "".join(f"<li>{html.escape(issue)}</li>" for issue in issues)
           document = f"""<!DOCTYPE html>
@@ -940,6 +1109,29 @@ jobs:
           path: ${{ runner.temp }}/nightly-vlm-parts-${{ github.run_id }}-${{ github.run_attempt }}
           merge-multiple: false
 
+      - name: Download dynamic-memory receipts
+        id: dynamic_memory_download
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: trtmc-nightly-dynamic-memory-${{ github.run_id }}-${{ needs.legal.outputs.tested_sha || github.sha }}-*-*
+          path: ${{ runner.temp }}/nightly-dynamic-memory-parts-${{ github.run_id }}-${{ github.run_attempt }}
+          merge-multiple: false
+
+      - name: Verify exact-head dynamic-memory receipts
+        id: dynamic_memory_verify
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          python3 tools/ci/dynamic_memory_nightly.py verify-artifacts \
+            --parts-dir "${{ runner.temp }}/nightly-dynamic-memory-parts-${{ github.run_id }}-${{ github.run_attempt }}" \
+            --fixture tools/ci/fixtures/native_dynamic_memory_nightly.json \
+            --expected-tested-sha "${{ needs.legal.outputs.tested_sha || github.sha }}" \
+            --expected-run-id "${{ github.run_id }}" \
+            --max-attempt "${{ github.run_attempt }}" \
+            --output "$REPORT_OUTPUT_DIR/dynamic-memory-nightly-status.json"
+
       - name: Select latest diffusion semantic assessment attempt
         id: vlm_select
         if: ${{ always() && steps.checkout.outcome == 'success' && steps.vlm_download.outcome == 'success' }}
@@ -962,6 +1154,8 @@ jobs:
           REVISION: ${{ needs.legal.outputs.tested_sha || github.sha }}
           CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
           DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
+          DYNAMIC_MEMORY_DOWNLOAD_OUTCOME: ${{ steps.dynamic_memory_download.outcome }}
+          DYNAMIC_MEMORY_VERIFICATION_OUTCOME: ${{ steps.dynamic_memory_verify.outcome }}
           VLM_DOWNLOAD_OUTCOME: ${{ steps.vlm_download.outcome }}
           VLM_SELECTION_OUTCOME: ${{ steps.vlm_select.outcome }}
           VLM_ASSESSMENT: ${{ steps.vlm_select.outputs.selected_file }}
@@ -973,6 +1167,7 @@ jobs:
           CACHE_RESULT: ${{ needs.cache-warm.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
           MODEL_RESULT: ${{ needs.model-proof.result }}
+          DYNAMIC_MEMORY_RESULT: ${{ needs.dynamic-memory.result }}
           VLM_RESULT: ${{ needs.diffusion-vlm.result }}
         run: |
           set -uo pipefail
@@ -1045,8 +1240,11 @@ jobs:
                 --upstream-result "cache-warm=$CACHE_RESULT" \
                 --upstream-result "package=$PACKAGE_RESULT" \
                 --upstream-result "model-proof=$MODEL_RESULT" \
+                --upstream-result "dynamic-memory=$DYNAMIC_MEMORY_RESULT" \
                 --upstream-result "diffusion-vlm=$VLM_RESULT" \
                 --upstream-result "model-artifact-download=$DOWNLOAD_OUTCOME" \
+                --upstream-result "dynamic-memory-artifact-download=$DYNAMIC_MEMORY_DOWNLOAD_OUTCOME" \
+                --upstream-result "dynamic-memory-artifact-verification=$DYNAMIC_MEMORY_VERIFICATION_OUTCOME" \
                 --upstream-result "vlm-artifact-download=$VLM_DOWNLOAD_OUTCOME" \
                 --upstream-result "vlm-artifact-selection=$VLM_SELECTION_OUTCOME"; then
               compose_rc=0
@@ -1068,6 +1266,7 @@ jobs:
           path: |
             ${{ runner.temp }}/nightly-model-report-${{ github.run_id }}-${{ github.run_attempt }}/model-proof-report.html
             ${{ runner.temp }}/nightly-model-report-${{ github.run_id }}-${{ github.run_attempt }}/model-proof-report-status.json
+            ${{ runner.temp }}/nightly-model-report-${{ github.run_id }}-${{ github.run_attempt }}/dynamic-memory-nightly-status.json
 
       - name: Enforce complete nightly report certification
         if: ${{ always() }}
@@ -1090,20 +1289,28 @@ jobs:
           }
           python3 - \
             "$REPORT_OUTPUT_DIR/model-proof-report-status.json" \
+            "$REPORT_OUTPUT_DIR/dynamic-memory-nightly-status.json" \
             "$EXPECTED_MODELS" "$EXPECTED_CASES_BY_MODEL" \
-            "$EXPECTED_RESULT_COUNT" "$REVISION" <<'PY'
+            "$EXPECTED_RESULT_COUNT" "$REVISION" \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" <<'PY'
           import json
           import sys
           from pathlib import Path
 
           (
               status_path,
+              dynamic_status_path,
               raw_expected,
               raw_expected_cases_by_model,
               raw_expected_result_count,
               revision,
+              workflow_run_id,
+              raw_workflow_run_attempt,
           ) = sys.argv[1:]
           status = json.loads(Path(status_path).read_text(encoding="utf-8"))
+          dynamic_status = json.loads(
+              Path(dynamic_status_path).read_text(encoding="utf-8")
+          )
           expected = json.loads(raw_expected)
           expected_cases_by_model = json.loads(raw_expected_cases_by_model)
           expected_result_count = int(raw_expected_result_count)
@@ -1190,6 +1397,50 @@ jobs:
                   )
           if errors:
               raise SystemExit("Nightly report status is not certified:\n- " + "\n- ".join(errors))
+          expected_dynamic = {
+              "schema_version": (
+                  "trtmc.native-dynamic-memory-nightly-artifact-"
+                  "verification/v1"
+              ),
+              "status": "passed",
+              "passed": True,
+              "tested_sha": revision,
+              "workflow_run_id": workflow_run_id,
+              "max_attempt": int(raw_workflow_run_attempt),
+              "expected_models": ["qwen", "tinyllama"],
+              "selected_models": ["qwen", "tinyllama"],
+              "errors": [],
+          }
+          dynamic_errors = {
+              key: {"expected": wanted, "actual": dynamic_status.get(key)}
+              for key, wanted in expected_dynamic.items()
+              if dynamic_status.get(key) != wanted
+          }
+          selected = dynamic_status.get("selected")
+          if (
+              not isinstance(selected, list)
+              or [row.get("model_key") for row in selected] != [
+                  "qwen",
+                  "tinyllama",
+              ]
+              or any(
+                  not isinstance(row.get("receipt_count"), int)
+                  or row["receipt_count"] != 14
+                  for row in selected
+              )
+          ):
+              dynamic_errors["selected"] = {
+                  "expected": (
+                      "ordered qwen/tinyllama receipt sets with exactly "
+                      "14 reviewed producer receipts each"
+                  ),
+                  "actual": selected,
+              }
+          if dynamic_errors:
+              raise SystemExit(
+                  "Dynamic-memory nightly status is not certified: "
+                  + json.dumps(dynamic_errors, sort_keys=True)
+              )
           PY
 
       - name: Write nightly report summary
@@ -1209,7 +1460,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   required:
-    name: 7 / Nightly CI
+    name: 8 / Nightly CI
     needs:
       - legal
       - inventory
@@ -1218,6 +1469,7 @@ jobs:
       - cache-warm
       - package
       - model-proof
+      - dynamic-memory
       - diffusion-vlm
       - report
     if: ${{ always() }}
@@ -1235,6 +1487,7 @@ jobs:
           CACHE_RESULT: ${{ needs.cache-warm.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
           MODEL_RESULT: ${{ needs.model-proof.result }}
+          DYNAMIC_MEMORY_RESULT: ${{ needs.dynamic-memory.result }}
           VLM_RESULT: ${{ needs.diffusion-vlm.result }}
           REPORT_RESULT: ${{ needs.report.result }}
           HAS_MODELS: ${{ needs.inventory.outputs.has_models }}
@@ -1247,7 +1500,8 @@ jobs:
           for result in \
             "$LEGAL_RESULT" "$INVENTORY_RESULT" "$SOURCE_QUALITY_RESULT" \
             "$UNIT_RESULT" "$CACHE_RESULT" "$PACKAGE_RESULT" \
-            "$MODEL_RESULT" "$VLM_RESULT" "$REPORT_RESULT"; do
+            "$MODEL_RESULT" "$DYNAMIC_MEMORY_RESULT" "$VLM_RESULT" \
+            "$REPORT_RESULT"; do
             test "$result" = "success"
           done
           test "$HAS_MODELS" = "true"
@@ -1257,7 +1511,7 @@ jobs:
           echo "All nightly gates passed for \`$TESTED_SHA\`." >> "$GITHUB_STEP_SUMMARY"
 
   release:
-    name: 8 / Publish nightly wheels
+    name: 9 / Publish nightly wheels
     needs:
       - legal
       - required
@@ -1360,7 +1614,7 @@ jobs:
           done
 
   nightly-issue:
-    name: 9 / Nightly failure issue
+    name: 10 / Nightly failure issue
     needs:
       - required
       - release

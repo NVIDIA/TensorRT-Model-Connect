@@ -3,15 +3,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "bundle/bundle_format.h"
 #include "runtime/backend/runtime_memory_backend.h"
 #include "runtime/domains/text/dynamic_memory/runtime_memory_qualification.h"
 #include "trtmc/bundle.h"
+#include "utils/sha256.h"
 
 #include <cstdlib>
 #include <iostream>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -54,7 +59,7 @@ trtmc::RuntimeMemoryQualificationResultV1 result_with_transfer(std::uint64_t d2h
                                                                std::uint64_t d2d_bytes) {
     trtmc::RuntimeMemoryQualificationResultV1 result;
     result.runtime_memory_receipt_json =
-        R"({"kv_allocation_id":9,"runtime_kv_capacity_tokens":128,"kv_bytes_per_token":16,"context_device_memory_bytes":4096})";
+        R"({"receipt_schema_version":4,"contract_version":2,"kv_allocation_id":9,"runtime_kv_capacity_tokens":128,"kv_bytes_per_token":16,"kv_budget_bytes":2048,"kv_reserved_bytes":2048,"kv_committed_bytes":2048,"safety_reserve_bytes":0,"context_device_memory_bytes":4096,"ordinary_device_input_bytes":0,"ordinary_device_output_bytes":0,"external_device_output_bytes":0,"graph_private_device_bytes":0,"module_residency_reserve_bytes":268435456,"module_residency_reserve_profile_limit":128,"module_residency_plan_set_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","module_residency_evidence_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","module_residency_cuda_module_loading_mode":"lazy","capacity_decision_free_bytes":536870912,"capacity_decision_total_bytes":1073741824,"capacity_decision_device_used_bytes":536870912,"capacity_decision_resident_overhead_bytes":4096,"final_non_kv_overhead_delta_bytes":0,"settled_free_bytes":536868864,"settled_total_bytes":1073741824,"settled_device_used_bytes":536872960,"final_free_bytes":536870912,"final_total_bytes":1073741824,"final_device_used_bytes":536870912})";
     trtmc::RuntimeMemoryInvocationTraceV1 trace;
     trace.role = "prefill";
     trace.plan_id = "prefill_engine_plan@engine=0x1234";
@@ -73,6 +78,218 @@ trtmc::RuntimeMemoryQualificationResultV1 result_with_transfer(std::uint64_t d2h
     trace.full_history_device_to_device_bytes = d2d_bytes;
     result.invocations.push_back(trace);
     return result;
+}
+
+trtmc::RuntimeMemoryContract embedded_evidence_contract() {
+    trtmc::RuntimeMemoryContract contract;
+    contract.present = true;
+    contract.contract_version = 2;
+    contract.qualified_model_id = "Qwen/Qwen3-0.6B";
+    contract.qualified_model_revision = std::string(40, '1');
+    contract.qualified_config_sha256 = std::string(64, '2');
+    contract.qualified_target = "gb300-trt-11.2";
+    contract.qualified_runtime_stack.sm = "sm103";
+    contract.qualified_runtime_stack.tensorrt = "11.2.0.113";
+    contract.qualified_runtime_stack.cuda_runtime = "13.3";
+    contract.qualified_runtime_stack.cudnn_backend = "9.20.0";
+    contract.qualified_runtime_stack.cudnn_frontend_revision = std::string(40, '3');
+    contract.qualified_runtime_stack.nvrtc = "13.3";
+    contract.qualified_runtime_stack.driver = "580.105.08";
+    contract.native_kv_plugin_abi = 2;
+    contract.model_context_limit = 512;
+    contract.prefill_chunk_limit = 256;
+    contract.kv_layout = "contiguous_runtime_v1";
+    contract.kv_dtype = "bfloat16";
+    contract.kv_bytes_per_token = 16;
+    contract.active_kv_profile_limits = {128, 256, 512};
+    contract.runtime_owned = true;
+
+    auto& calibration = contract.module_residency_calibration;
+    calibration.present = true;
+    calibration.schema_version = 1;
+    calibration.measurement_kind = "nvml_process_cumulative_first_use";
+    calibration.cuda_module_loading_mode = "lazy";
+    calibration.evidence_provenance = "embedded_bundle_v1";
+    calibration.qualified_runtime_stack_sha256 = std::string(64, 'a');
+    calibration.plan_set_sha256 = std::string(64, 'b');
+    calibration.plans = {
+        {"engine_plan", std::string(64, 'c'), "decode", 3},
+        {"prefill_engine_plan", std::string(64, 'd'), "prefill", 1},
+    };
+    calibration.profile_reserves = {
+        {128, 1024},
+        {256, 2048},
+        {512, 4096},
+    };
+    return contract;
+}
+
+nlohmann::json embedded_evidence_document(const trtmc::RuntimeMemoryContract& contract) {
+    const auto& calibration = contract.module_residency_calibration;
+    nlohmann::json plans = nlohmann::json::array();
+    for (const auto& plan : calibration.plans) {
+        plans.push_back({
+            {"section_name", plan.section_name},
+            {"section_sha256", plan.section_sha256},
+            {"role", plan.role},
+            {"optimization_profile_count", plan.optimization_profile_count},
+        });
+    }
+    nlohmann::json reserves = nlohmann::json::array();
+    nlohmann::json bootstrap_reserves = nlohmann::json::array();
+    for (const auto& reserve : calibration.profile_reserves) {
+        reserves.push_back({
+            {"covering_profile_limit", reserve.covering_profile_limit},
+            {"cumulative_reserve_bytes", reserve.cumulative_reserve_bytes},
+        });
+        bootstrap_reserves.push_back({
+            {"covering_profile_limit", reserve.covering_profile_limit},
+            {"cumulative_reserve_bytes", 1},
+        });
+    }
+    const auto bootstrap_evidence_sha256 = std::string(64, 'e');
+    const nlohmann::json stack = {
+        {"sm", contract.qualified_runtime_stack.sm},
+        {"tensorrt", contract.qualified_runtime_stack.tensorrt},
+        {"cuda_runtime", contract.qualified_runtime_stack.cuda_runtime},
+        {"cudnn_backend", contract.qualified_runtime_stack.cudnn_backend},
+        {"cudnn_frontend_revision",
+         contract.qualified_runtime_stack.cudnn_frontend_revision},
+        {"nvrtc", contract.qualified_runtime_stack.nvrtc},
+        {"driver", contract.qualified_runtime_stack.driver},
+    };
+    const nlohmann::json bootstrap_calibration = {
+        {"schema_version", calibration.schema_version},
+        {"measurement_kind", calibration.measurement_kind},
+        {"cuda_module_loading_mode", calibration.cuda_module_loading_mode},
+        {"evidence_provenance", "external_manifest_v1"},
+        {"qualified_runtime_stack_sha256",
+         calibration.qualified_runtime_stack_sha256},
+        {"plan_set_sha256", calibration.plan_set_sha256},
+        {"plans", plans},
+        {"profile_reserves", bootstrap_reserves},
+        {"evidence_sha256", bootstrap_evidence_sha256},
+    };
+    const nlohmann::json bootstrap_contract = {
+        {"contract_version", contract.contract_version},
+        {"qualified_model_id", contract.qualified_model_id},
+        {"qualified_model_revision", contract.qualified_model_revision},
+        {"qualified_config_sha256", contract.qualified_config_sha256},
+        {"qualified_target", contract.qualified_target},
+        {"qualified_runtime_stack", stack},
+        {"native_kv_plugin_abi", contract.native_kv_plugin_abi},
+        {"model_context_limit", contract.model_context_limit},
+        {"prefill_chunk_limit", contract.prefill_chunk_limit},
+        {"kv_layout", contract.kv_layout},
+        {"kv_dtype", contract.kv_dtype},
+        {"kv_bytes_per_token", contract.kv_bytes_per_token},
+        {"active_kv_profile_limits", contract.active_kv_profile_limits},
+        {"runtime_owned", contract.runtime_owned},
+        {"module_residency_calibration", bootstrap_calibration},
+    };
+    return {
+        {"schema", "trtmc.native-dynamic-memory-build-calibration-evidence/v2"},
+        {"measurement_kind", calibration.measurement_kind},
+        {"model_id", contract.qualified_model_id},
+        {"model_context_limit", contract.model_context_limit},
+        {"active_kv_profile_limits", contract.active_kv_profile_limits},
+        {"contract_provenance",
+         {
+             {"qualified_runtime_stack_sha256",
+              calibration.qualified_runtime_stack_sha256},
+             {"plan_set_sha256", calibration.plan_set_sha256},
+             {"cuda_module_loading_mode", calibration.cuda_module_loading_mode},
+             {"plans", plans},
+         }},
+        {"bootstrap_contract", bootstrap_contract},
+        {"bootstrap_only",
+         {
+             {"profile_reserve_bytes", 1},
+             {"evidence_sha256", bootstrap_evidence_sha256},
+             {"never_published", true},
+         }},
+        {"recommended_profile_reserves", reserves},
+        {"passed", true},
+    };
+}
+
+trtmc::BundleFile bundle_with_embedded_evidence(
+    trtmc::RuntimeMemoryContract& contract, const nlohmann::json& document) {
+    const auto serialized = document.dump();
+    std::vector<char> bytes(serialized.begin(), serialized.end());
+    trtmc::internal::Sha256 digest;
+    digest.update(bytes.data(), bytes.size());
+    contract.module_residency_calibration.evidence_sha256 = digest.hex_digest();
+    trtmc::BundleFile bundle;
+    bundle.sections.push_back(
+        {"runtime_memory_calibration/evidence.json", std::move(bytes)});
+    return bundle;
+}
+
+bool rejects_embedded_evidence(const trtmc::RuntimeMemoryContract& contract,
+                               const trtmc::BundleFile& bundle,
+                               const std::string& expected_message) {
+    try {
+        trtmc::validate_runtime_memory_embedded_calibration_evidence(contract, bundle);
+    } catch (const std::runtime_error& error) {
+        return std::string(error.what()).find(expected_message) != std::string::npos;
+    }
+    return false;
+}
+
+void test_embedded_calibration_evidence_is_bound_before_deserialization() {
+    auto external = embedded_evidence_contract();
+    external.module_residency_calibration.evidence_provenance =
+        "external_manifest_v1";
+    trtmc::BundleFile empty_bundle;
+    bool external_accepted = true;
+    try {
+        trtmc::validate_runtime_memory_embedded_calibration_evidence(external,
+                                                                    empty_bundle);
+    } catch (...) {
+        external_accepted = false;
+    }
+    check(external_accepted,
+          "legacy exact-manifest calibration may omit embedded evidence");
+
+    auto contract = embedded_evidence_contract();
+    check(rejects_embedded_evidence(contract, empty_bundle, "missing bundle section"),
+          "embedded provenance cannot silently downgrade when evidence is absent");
+
+    auto document = embedded_evidence_document(contract);
+    auto bundle = bundle_with_embedded_evidence(contract, document);
+    bool valid_accepted = true;
+    try {
+        trtmc::validate_runtime_memory_embedded_calibration_evidence(contract, bundle);
+    } catch (...) {
+        valid_accepted = false;
+    }
+    check(valid_accepted, "exact embedded calibration evidence is accepted");
+
+    auto tampered_bundle = bundle;
+    tampered_bundle.sections.front().data.back() ^= 1;
+    check(rejects_embedded_evidence(contract, tampered_bundle, "hash mismatch"),
+          "embedded evidence byte tamper is rejected");
+
+    auto reserve_tamper = contract;
+    reserve_tamper.module_residency_calibration.profile_reserves.back()
+        .cumulative_reserve_bytes += 1;
+    check(rejects_embedded_evidence(reserve_tamper, bundle, "reserve contract"),
+          "embedded evidence binds the final cumulative reserve table");
+
+    auto contract_tamper = contract;
+    contract_tamper.kv_dtype = "float16";
+    check(rejects_embedded_evidence(contract_tamper, bundle, "kv_dtype"),
+          "embedded evidence binds outer runtime-memory contract invariants");
+
+    auto wrong_schema = document;
+    wrong_schema["schema"] = 2;
+    auto wrong_schema_contract = embedded_evidence_contract();
+    auto wrong_schema_bundle =
+        bundle_with_embedded_evidence(wrong_schema_contract, wrong_schema);
+    check(rejects_embedded_evidence(wrong_schema_contract, wrong_schema_bundle,
+                                    "invalid field"),
+          "wrong-typed embedded evidence schema fails closed as runtime_error");
 }
 
 void test_exact_qualified_tuple_rejects_tampered_bundle_identity() {
@@ -418,6 +635,197 @@ void test_measured_current_row_commit_must_match_sq_times_b() {
     }
 }
 
+void test_qualification_requires_v2_schema4_module_residency_receipt() {
+    const auto replace_receipt_field =
+        [](trtmc::RuntimeMemoryQualificationResultV1& result, const std::string& expected,
+           const std::string& replacement) {
+            const auto offset = result.runtime_memory_receipt_json.find(expected);
+            if (offset == std::string::npos)
+                throw std::logic_error("test receipt does not contain expected field");
+            result.runtime_memory_receipt_json.replace(offset, expected.size(), replacement);
+        };
+    {
+        auto legacy_schema = result_with_transfer(0, 0);
+        replace_receipt_field(legacy_schema, "\"receipt_schema_version\":4",
+                              "\"receipt_schema_version\":3");
+        bool rejected = false;
+        try {
+            trtmc::finalize_runtime_memory_invocation_traces(legacy_schema);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("schema 4") != std::string::npos;
+        }
+        check(rejected, "qualification rejects a legacy receipt schema");
+    }
+    {
+        auto provisional_contract = result_with_transfer(0, 0);
+        replace_receipt_field(provisional_contract, "\"contract_version\":2",
+                              "\"contract_version\":1");
+        bool rejected = false;
+        try {
+            trtmc::finalize_runtime_memory_invocation_traces(provisional_contract);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("contract version 2") !=
+                       std::string::npos;
+        }
+        check(rejected, "qualification rejects a provisional runtime-memory contract");
+    }
+    {
+        auto missing_provenance = result_with_transfer(0, 0);
+        replace_receipt_field(missing_provenance,
+                              "\"module_residency_reserve_bytes\":268435456",
+                              "\"module_residency_reserve_bytes\":0");
+        bool rejected = false;
+        try {
+            trtmc::finalize_runtime_memory_invocation_traces(missing_provenance);
+        } catch (const std::runtime_error& error) {
+            rejected =
+                std::string(error.what()).find("module-residency provenance") !=
+                std::string::npos;
+        }
+        check(rejected, "qualification rejects an unbounded module-residency receipt");
+    }
+    {
+        auto stale_profile = result_with_transfer(0, 0);
+        replace_receipt_field(stale_profile,
+                              "\"module_residency_reserve_profile_limit\":128",
+                              "\"module_residency_reserve_profile_limit\":127");
+        bool rejected = false;
+        try {
+            trtmc::finalize_runtime_memory_invocation_traces(stale_profile);
+        } catch (const std::runtime_error& error) {
+            rejected =
+                std::string(error.what()).find("module-residency provenance") !=
+                std::string::npos;
+        }
+        check(rejected, "qualification rejects a reserve row that does not cover runtime R");
+    }
+    for (const auto& [expected, replacement] :
+         std::vector<std::pair<std::string, std::string>>{
+             {
+                 "\"module_residency_plan_set_sha256\":"
+                 "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+                 "\"module_residency_plan_set_sha256\":\"not-a-sha256\"",
+             },
+             {
+                 "\"module_residency_evidence_sha256\":"
+                 "\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"",
+                 "\"module_residency_evidence_sha256\":\""
+                 "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\"",
+             },
+             {
+                 "\"module_residency_cuda_module_loading_mode\":\"lazy\"",
+                 "\"module_residency_cuda_module_loading_mode\":\"unknown\"",
+             },
+         }) {
+        auto invalid_provenance = result_with_transfer(0, 0);
+        replace_receipt_field(invalid_provenance, expected, replacement);
+        bool rejected = false;
+        try {
+            trtmc::finalize_runtime_memory_invocation_traces(invalid_provenance);
+        } catch (const std::runtime_error& error) {
+            rejected =
+                std::string(error.what()).find("module-residency provenance") !=
+                std::string::npos;
+        }
+        check(rejected,
+              "qualification rejects malformed plan, evidence, or loading-mode provenance");
+    }
+
+    {
+        auto invalid_kv_allocation = result_with_transfer(0, 0);
+        replace_receipt_field(invalid_kv_allocation, "\"kv_reserved_bytes\":2048",
+                              "\"kv_reserved_bytes\":2049");
+        bool rejected = false;
+        try {
+            trtmc::finalize_runtime_memory_invocation_traces(invalid_kv_allocation);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("exactly R*B") != std::string::npos;
+        }
+        check(rejected, "qualification rejects a KV allocation that is not exactly R*B");
+    }
+    {
+        auto invalid_capacity_snapshot = result_with_transfer(0, 0);
+        replace_receipt_field(invalid_capacity_snapshot,
+                              "\"capacity_decision_device_used_bytes\":536870912",
+                              "\"capacity_decision_device_used_bytes\":536870911");
+        bool rejected = false;
+        try {
+            trtmc::finalize_runtime_memory_invocation_traces(invalid_capacity_snapshot);
+        } catch (const std::runtime_error& error) {
+            rejected =
+                std::string(error.what()).find("capacity-decision snapshot") !=
+                std::string::npos;
+        }
+        check(rejected, "qualification rejects an incoherent capacity-decision snapshot");
+    }
+    {
+        auto missing_settled_snapshot = result_with_transfer(0, 0);
+        replace_receipt_field(missing_settled_snapshot, "\"settled_free_bytes\":536868864",
+                              "\"settled_free_bytes\":null");
+        bool rejected = false;
+        try {
+            trtmc::finalize_runtime_memory_invocation_traces(missing_settled_snapshot);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("settled_free_bytes") !=
+                       std::string::npos;
+        }
+        check(rejected, "qualification fails closed when the settled snapshot is unavailable");
+    }
+    {
+        auto invalid_settled_snapshot = result_with_transfer(0, 0);
+        replace_receipt_field(invalid_settled_snapshot,
+                              "\"settled_device_used_bytes\":536872960",
+                              "\"settled_device_used_bytes\":536872959");
+        bool rejected = false;
+        try {
+            trtmc::finalize_runtime_memory_invocation_traces(invalid_settled_snapshot);
+        } catch (const std::runtime_error& error) {
+            rejected =
+                std::string(error.what()).find("settled snapshot") != std::string::npos;
+        }
+        check(rejected, "qualification rejects an incoherent settled snapshot");
+    }
+    {
+        auto stale_final_alias = result_with_transfer(0, 0);
+        replace_receipt_field(stale_final_alias, "\"final_free_bytes\":536870912",
+                              "\"final_free_bytes\":536870911");
+        bool rejected = false;
+        try {
+            trtmc::finalize_runtime_memory_invocation_traces(stale_final_alias);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("deprecated final aliases") !=
+                       std::string::npos;
+        }
+        check(rejected,
+              "qualification requires deprecated final aliases to equal capacity-decision");
+    }
+    {
+        auto invalid_overhead_delta = result_with_transfer(0, 0);
+        replace_receipt_field(invalid_overhead_delta, "\"final_non_kv_overhead_delta_bytes\":0",
+                              "\"final_non_kv_overhead_delta_bytes\":1");
+        bool rejected = false;
+        try {
+            trtmc::finalize_runtime_memory_invocation_traces(invalid_overhead_delta);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("final non-KV overhead delta") !=
+                       std::string::npos;
+        }
+        check(rejected, "qualification rejects double-charged or omitted non-KV overhead");
+    }
+    {
+        auto overflowed_kv_product = result_with_transfer(0, 0);
+        replace_receipt_field(overflowed_kv_product, "\"kv_bytes_per_token\":16",
+                              "\"kv_bytes_per_token\":18446744073709551615");
+        bool rejected = false;
+        try {
+            trtmc::finalize_runtime_memory_invocation_traces(overflowed_kv_product);
+        } catch (const std::overflow_error& error) {
+            rejected = std::string(error.what()).find("R*B overflowed") != std::string::npos;
+        }
+        check(rejected, "qualification fails closed when receipt R*B overflows");
+    }
+}
+
 void test_invocation_must_sample_active_allocation() {
     for (const auto [allocation_id, reserved_tokens] :
          {std::pair<std::uint64_t, std::uint64_t>{0, 128},
@@ -459,6 +867,7 @@ void test_exact_m_observability_does_not_query_m_plus_one() {
 } // namespace
 
 int main() {
+    test_embedded_calibration_evidence_is_bound_before_deserialization();
     test_exact_qualified_tuple_rejects_tampered_bundle_identity();
     test_developer_c_div_2_tuple_requires_exact_opt_in_and_buckets();
     test_exact_runtime_target_rejects_gpu_and_trt_drift();
@@ -466,6 +875,7 @@ int main() {
     test_cache_copy_events_are_measured_and_rejected();
     test_non_kv_transfer_is_filtered();
     test_measured_current_row_commit_must_match_sq_times_b();
+    test_qualification_requires_v2_schema4_module_residency_receipt();
     test_invocation_must_sample_active_allocation();
     test_exact_m_observability_does_not_query_m_plus_one();
     if (failures != 0)

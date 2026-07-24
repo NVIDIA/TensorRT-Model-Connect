@@ -113,7 +113,7 @@ int main() {
     const auto dynamic_bundle = temp.path() / "dynamic.trtfb";
     const auto static_bundle = temp.path() / "static.trtfb";
     const std::string runtime_memory = R"({
-      "contract_version":1,
+      "contract_version":2,
       "qualified_model_id":"qwen",
       "qualified_model_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "qualified_config_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -126,7 +126,23 @@ int main() {
       "kv_dtype":"float16",
       "kv_bytes_per_token":256,
       "active_kv_profile_limits":[16,32],
-      "runtime_owned":true
+      "runtime_owned":true,
+      "module_residency_calibration":{
+        "schema_version":1,
+        "measurement_kind":"nvml_process_cumulative_first_use",
+        "cuda_module_loading_mode":"lazy",
+        "qualified_runtime_stack_sha256":"1b94f56092107d0fa1c6d43e2e8e4245c904ddc5967646f96ff8e64496e0f210",
+        "plan_set_sha256":"60d8179e21e2b671155f90dfa50688046d06a11813284d1ef3c2d78d97a7ab9c",
+        "evidence_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "plans":[
+          {"section_name":"engine_plan","section_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","role":"decode","optimization_profile_count":2},
+          {"section_name":"prefill_engine_plan","section_sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","role":"prefill","optimization_profile_count":1}
+        ],
+        "profile_reserves":[
+          {"covering_profile_limit":16,"cumulative_reserve_bytes":268435456},
+          {"covering_profile_limit":32,"cumulative_reserve_bytes":536870912}
+        ]
+      }
     })";
     write_bundle(dynamic_bundle, runtime_memory);
     write_bundle(static_bundle);

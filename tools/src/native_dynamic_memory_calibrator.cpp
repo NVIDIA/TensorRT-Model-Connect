@@ -3,19 +3,31 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Developer-only runner for Section 9.2 of the native dynamic-memory plan.
-// It loads the real bundle through the same public factory as `trtmc run`,
-// then discovers the independently versioned private qualification interface.
+// Product-owned internal calibrator for native dynamic-memory bundles. It
+// loads the real bundle through the same public factory as `trtmc run`, then
+// discovers the independently versioned private qualification interface.
 
-#include "native_dynamic_memory_qualify_schema.h"
+#include "native_dynamic_memory_calibrator_schema.h"
+#include "native_dynamic_memory_calibrator_paths.h"
 #include "runtime/domains/text/dynamic_memory/runtime_kv_setup.h"
 #include "runtime/domains/text/dynamic_memory/runtime_memory_qualification.h"
+#include "trtmc/bundle.h"
 #include "trtmc/pipeline.h"
 
+#include <cuda.h>
 #include <cuda_runtime_api.h>
 #include <nlohmann/json.hpp>
 #ifndef TRTMC_HAS_NVML
 #define TRTMC_HAS_NVML 0
+#endif
+#ifndef TRTMC_INTERNAL_RUNTIME_LIB_RELATIVE
+#define TRTMC_INTERNAL_RUNTIME_LIB_RELATIVE "."
+#endif
+#ifndef TRTMC_INTERNAL_PRODUCT_VERSION
+#error "TRTMC_INTERNAL_PRODUCT_VERSION must be defined by the product build"
+#endif
+#ifndef TRTMC_INTERNAL_CALIBRATOR_BUILD_IDENTITY
+#error "TRTMC_INTERNAL_CALIBRATOR_BUILD_IDENTITY must be defined by the product build"
 #endif
 #if TRTMC_HAS_NVML
 #include <nvml.h>
@@ -31,6 +43,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -40,6 +53,15 @@
 namespace {
 
 using json = nlohmann::json;
+
+#if defined(__GNUC__) || defined(__clang__)
+[[gnu::used]]
+#endif
+constexpr char kProductIdentityMarker[] =
+    "TRTMC_INTERNAL_DYNAMIC_MEMORY_CALIBRATOR_IDENTITY_V1:"
+    TRTMC_INTERNAL_PRODUCT_VERSION ":" TRTMC_INTERNAL_CALIBRATOR_BUILD_IDENTITY;
+static_assert(sizeof(TRTMC_INTERNAL_CALIBRATOR_BUILD_IDENTITY) == 65,
+              "calibrator build identity must be a lowercase SHA256");
 
 class QualificationDiagnosticError : public std::runtime_error {
   public:
@@ -76,6 +98,8 @@ std::uint64_t ceil_fraction_denominator(std::uint64_t bytes, double fraction) {
 }
 
 struct Arguments {
+    bool query_module_loading_mode{false};
+    bool query_product_identity{false};
     std::string bundle;
     std::string token_file;
     std::string logits_file;
@@ -88,18 +112,23 @@ struct Arguments {
     std::uint32_t repeat{1};
     std::uint32_t load_cycles{1};
     bool warmup_load_cycle{false};
+    std::vector<std::string> profile_sweep_token_files;
     std::vector<std::string> backend_dirs;
     std::vector<std::string> model_plugin_dirs;
 };
 
 [[noreturn]] void usage_error(const std::string& message) {
     throw std::invalid_argument(
-        message + "\nusage: trtmc_dynamic_memory_qualify --bundle MODEL.trtfb "
+        message +
+        "\nusage: trtmc_dynamic_memory_qualify --query-product-identity\n"
+        "   or: trtmc_dynamic_memory_qualify --query-module-loading-mode\n"
+        "   or: trtmc_dynamic_memory_qualify --bundle MODEL.trtfb "
                   "--tokens IDS.txt --logits LOGITS.bin [--max-new-tokens N] "
                   "[--max-sequence-length N] [--kv-cache-bytes N | --kv-cache-fraction F] "
                   "[--second-max-sequence-length N] "
                   "[--controlled-reservation-target-tokens N] "
                   "[--repeat N | --load-cycles N] [--warmup-load-cycle] "
+                  "[--profile-sweep-tokens IDS.txt ...] "
                   "[--backend-dir DIR] [--model-plugin-dir DIR]");
 }
 
@@ -138,7 +167,11 @@ Arguments parse_arguments(int argc, char** argv) {
                 usage_error(flag + " requires a value");
             return argv[++index];
         };
-        if (flag == "--bundle")
+        if (flag == "--query-module-loading-mode")
+            out.query_module_loading_mode = true;
+        else if (flag == "--query-product-identity")
+            out.query_product_identity = true;
+        else if (flag == "--bundle")
             out.bundle = require_value();
         else if (flag == "--tokens")
             out.token_file = require_value();
@@ -165,6 +198,8 @@ Arguments parse_arguments(int argc, char** argv) {
                 static_cast<std::uint32_t>(parse_u64(require_value(), "--load-cycles"));
         else if (flag == "--warmup-load-cycle")
             out.warmup_load_cycle = true;
+        else if (flag == "--profile-sweep-tokens")
+            out.profile_sweep_token_files.push_back(require_value());
         else if (flag == "--backend-dir")
             out.backend_dirs.push_back(require_value());
         else if (flag == "--model-plugin-dir")
@@ -172,8 +207,21 @@ Arguments parse_arguments(int argc, char** argv) {
         else
             usage_error("unknown argument: " + flag);
     }
-    if (out.bundle.empty() || out.token_file.empty() || out.logits_file.empty())
-        usage_error("--bundle, --tokens, and --logits are required");
+    if (out.query_module_loading_mode || out.query_product_identity) {
+        if (argc != 2) {
+            usage_error(
+                "internal product queries are isolated and accept no other arguments");
+        }
+        return out;
+    }
+    const bool profile_sweep = !out.profile_sweep_token_files.empty();
+    if (out.bundle.empty() || out.logits_file.empty() ||
+        (out.token_file.empty() && !profile_sweep)) {
+        usage_error("--bundle, --logits, and either --tokens or "
+                    "--profile-sweep-tokens are required");
+    }
+    if (profile_sweep && !out.token_file.empty())
+        usage_error("--tokens cannot be combined with --profile-sweep-tokens");
     if (out.max_new_tokens < 0)
         usage_error("--max-new-tokens must be non-negative");
     if (out.kv_cache_bytes != 0 && out.kv_cache_fraction != 0.0)
@@ -200,6 +248,15 @@ Arguments parse_arguments(int argc, char** argv) {
             out.load_cycles != 1) {
             usage_error("--controlled-reservation-target-tokens requires one "
                         "auto-policy request per lifetime");
+        }
+    }
+    if (profile_sweep) {
+        if (out.max_new_tokens != 0 && out.max_new_tokens != 1)
+            usage_error("--profile-sweep-tokens fixes --max-new-tokens at one");
+        if (out.repeat != 1 || out.load_cycles != 1 || out.warmup_load_cycle ||
+            out.second_max_sequence_length != 0 || out.controlled_reservation_target_tokens != 0) {
+            usage_error("--profile-sweep-tokens is a self-contained two-sweep "
+                        "single-lifetime mode");
         }
     }
     trtmc::qualification::validate_single_warmup_arguments(
@@ -294,12 +351,14 @@ json parse_receipt(const std::string& receipt) {
 }
 
 void append_default_search_paths(const char* argv0, trtmc::LoadOptionsV2& options) {
-    const auto executable =
-        std::filesystem::absolute(std::filesystem::path(argv0)).lexically_normal();
-    const auto build_dir = executable.parent_path();
-    options.backend_search_paths.push_back(build_dir.string());
-    options.model_plugin_search_paths.push_back((build_dir / "models/qwen").string());
-    options.model_plugin_search_paths.push_back((build_dir / "models/llama").string());
+    const auto paths = trtmc::qualification::internal_calibrator_search_paths(
+        std::filesystem::path(argv0),
+        std::filesystem::path(TRTMC_INTERNAL_RUNTIME_LIB_RELATIVE));
+    options.backend_search_paths.insert(options.backend_search_paths.end(),
+                                        paths.backend.begin(), paths.backend.end());
+    options.model_plugin_search_paths.insert(options.model_plugin_search_paths.end(),
+                                             paths.model_plugin.begin(),
+                                             paths.model_plugin.end());
 }
 
 json invocation_json(const trtmc::RuntimeMemoryQualificationResultV1& result) {
@@ -613,6 +672,44 @@ json sample_json(const DeviceMemorySample& sample) {
         {"post_nvml_total_bytes", sample.post_nvml_total_bytes},
         {"compute_processes", std::move(processes)},
     };
+}
+
+struct CudaModuleLoadingModeEvidence {
+    std::string mode;
+    std::int32_t driver_value{0};
+};
+
+CudaModuleLoadingModeEvidence query_cuda_module_loading_mode() {
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 11070
+    void* entry_point = nullptr;
+    cudaDriverEntryPointQueryResult query_result = cudaDriverEntryPointSymbolNotFound;
+    const auto lookup_status = cudaGetDriverEntryPointByVersion(
+        "cuModuleGetLoadingMode", &entry_point, 11070, cudaEnableDefault, &query_result);
+    if (lookup_status != cudaSuccess || query_result != cudaDriverEntryPointSuccess ||
+        entry_point == nullptr) {
+        throw std::runtime_error(
+            "internal calibrator could not resolve cuModuleGetLoadingMode from the active CUDA "
+            "driver");
+    }
+
+    using QueryModuleLoadingMode = CUresult(CUDAAPI*)(CUmoduleLoadingMode*);
+    const auto query = reinterpret_cast<QueryModuleLoadingMode>(entry_point);
+    CUmoduleLoadingMode mode{};
+    const auto query_status = query(&mode);
+    if (query_status != CUDA_SUCCESS) {
+        throw std::runtime_error("cuModuleGetLoadingMode failed with CUDA driver status " +
+                                 std::to_string(static_cast<std::int32_t>(query_status)));
+    }
+    if (mode == CU_MODULE_LAZY_LOADING)
+        return {"lazy", static_cast<std::int32_t>(mode)};
+    if (mode == CU_MODULE_EAGER_LOADING)
+        return {"eager", static_cast<std::int32_t>(mode)};
+    throw std::runtime_error("cuModuleGetLoadingMode returned an unknown loading mode " +
+                             std::to_string(static_cast<std::int32_t>(mode)));
+#else
+    throw std::runtime_error(
+        "internal calibrator requires CUDA 11.7 or newer for cuModuleGetLoadingMode");
+#endif
 }
 
 using RuntimePhaseAfterSnapshot = std::function<void(const char*, const DeviceMemorySample&)>;
@@ -933,11 +1030,421 @@ json lifetime_json(const QualificationLifetime& lifetime, const json& policy, co
     return out;
 }
 
+constexpr std::uint64_t kProfileSweepSecondSweepGrowthLimitBytes = 64ULL * 1024ULL * 1024ULL;
+
+std::uint64_t device_used_bytes(const DeviceMemorySample& sample) {
+    if (sample.free_bytes > sample.total_bytes)
+        throw std::runtime_error("profile sweep received an invalid CUDA memory sample");
+    return sample.total_bytes - sample.free_bytes;
+}
+
+json invocation_tuple_json(const trtmc::RuntimeMemoryQualificationResultV1& result) {
+    auto tuples = json::array();
+    for (const auto& trace : result.invocations) {
+        tuples.push_back({
+            {"role", trace.role},
+            {"plan_id", trace.plan_id},
+            {"profile_id", trace.profile_id},
+        });
+    }
+    return tuples;
+}
+
+std::vector<std::int32_t>
+observed_decode_profile_ids(const trtmc::RuntimeMemoryQualificationResultV1& result) {
+    std::vector<std::int32_t> profiles;
+    for (const auto& trace : result.invocations) {
+        if (trace.role == "decode")
+            profiles.push_back(trace.profile_id);
+    }
+    return profiles;
+}
+
+bool exact_decode_profile_observed(const trtmc::RuntimeMemoryQualificationResultV1& result,
+                                   std::int32_t expected_profile) {
+    const auto profiles = observed_decode_profile_ids(result);
+    return result.decode_launches == 1 && profiles.size() == 1 &&
+           profiles.front() == expected_profile;
+}
+
+json growth_from_baseline(const DeviceMemorySample& baseline, const DeviceMemorySample& sample,
+                          std::uint64_t& process_high_water,
+                          std::uint64_t& device_wide_high_water) {
+    const auto process_growth =
+        positive_growth(baseline.process_used_bytes, sample.process_used_bytes);
+    const auto device_growth =
+        positive_growth(device_used_bytes(baseline), device_used_bytes(sample));
+    process_high_water = std::max(process_high_water, process_growth);
+    device_wide_high_water = std::max(device_wide_high_water, device_growth);
+    return {
+        {"process_growth_bytes", process_growth},
+        {"device_wide_growth_bytes", device_growth},
+        {"cumulative_process_high_water_bytes", process_high_water},
+        {"cumulative_device_wide_high_water_bytes", device_wide_high_water},
+    };
+}
+
+struct ProfileSweepInput {
+    std::string path;
+    std::vector<std::int32_t> tokens;
+    std::uint64_t lower_exclusive{0};
+    std::uint64_t profile_limit{0};
+};
+
+std::vector<ProfileSweepInput> load_profile_sweep_inputs(const Arguments& args,
+                                                         const trtmc::BundleInfo& bundle_info) {
+    const auto& contract = bundle_info.runtime_memory;
+    if (!contract.present || contract.active_kv_profile_limits.empty()) {
+        throw std::runtime_error(
+            "profile sweep requires a bundle with an active runtime_memory profile contract");
+    }
+    if (args.profile_sweep_token_files.size() != contract.active_kv_profile_limits.size()) {
+        throw std::invalid_argument(
+            "--profile-sweep-tokens count must exactly equal the bundle active profile count (" +
+            std::to_string(contract.active_kv_profile_limits.size()) + ")");
+    }
+
+    std::vector<ProfileSweepInput> inputs;
+    inputs.reserve(args.profile_sweep_token_files.size());
+    std::uint64_t previous_limit = 0;
+    for (std::size_t index = 0; index < args.profile_sweep_token_files.size(); ++index) {
+        const auto profile_limit =
+            static_cast<std::uint64_t>(contract.active_kv_profile_limits[index]);
+        auto tokens = read_tokens(args.profile_sweep_token_files[index]);
+        const auto token_count = static_cast<std::uint64_t>(tokens.size());
+        if (tokens.empty() || token_count <= previous_limit || token_count > profile_limit) {
+            throw std::invalid_argument(
+                "profile sweep token file " + args.profile_sweep_token_files[index] +
+                " must contain a prompt in (" + std::to_string(previous_limit) + ", " +
+                std::to_string(profile_limit) + "] tokens");
+        }
+        if (args.max_sequence_length != 0 && token_count + 1U > args.max_sequence_length) {
+            throw std::invalid_argument(
+                "profile sweep request exceeds the explicit max sequence length");
+        }
+        inputs.push_back({std::filesystem::absolute(args.profile_sweep_token_files[index]).string(),
+                          std::move(tokens), previous_limit, profile_limit});
+        previous_limit = profile_limit;
+    }
+    return inputs;
+}
+
+int run_profile_sweep_mode(const Arguments& args, const trtmc::LoadOptionsV2& options) {
+#if !TRTMC_HAS_NVML
+    throw std::runtime_error("profile sweep requires independent NVML process-memory attribution");
+#endif
+    const auto bundle_info = trtmc::InspectBundle(args.bundle);
+    const auto inputs = load_profile_sweep_inputs(args, bundle_info);
+    const auto loading_mode = query_cuda_module_loading_mode();
+
+    json runtime_phase_memory_samples = trtmc::qualification::make_runtime_phase_memory_samples();
+    std::optional<DeviceMemorySample> after_kv_baseline;
+    std::uint32_t after_kv_baseline_count = 0;
+    DeviceMemorySample before_load;
+    DeviceMemorySample after_sweep_a;
+    DeviceMemorySample before_sweep_b;
+    DeviceMemorySample after_sweep_b;
+    DeviceMemorySample after_unload;
+    std::string model_id;
+    std::string pipeline_type;
+    json sweep_a_rows = json::array();
+    json sweep_b_rows = json::array();
+    json reserve_rows = json::array();
+    std::vector<trtmc::RuntimeMemoryQualificationResultV1> sweep_a_results;
+    sweep_a_results.reserve(inputs.size());
+    std::optional<trtmc::RuntimeMemoryQualificationResultV1> final_sweep_b_result;
+
+    bool stable_allocation_id_gate = true;
+    bool sweep_a_profile_coverage_gate = true;
+    bool sweep_b_profile_coverage_gate = true;
+    bool selected_ids_equivalent_gate = true;
+    bool logits_equivalent_gate = true;
+    bool invocation_tuples_equivalent_gate = true;
+    std::optional<std::uint64_t> stable_allocation_id;
+    std::uint64_t sweep_a_process_high_water = 0;
+    std::uint64_t sweep_a_device_high_water = 0;
+    std::uint64_t sweep_b_process_high_water = 0;
+    std::uint64_t sweep_b_device_high_water = 0;
+
+    const auto observe_allocation_id = [&](std::uint64_t allocation_id) {
+        if (allocation_id == 0)
+            stable_allocation_id_gate = false;
+        if (!stable_allocation_id.has_value()) {
+            stable_allocation_id = allocation_id;
+        } else if (*stable_allocation_id != allocation_id) {
+            stable_allocation_id_gate = false;
+        }
+    };
+
+    {
+        RuntimePhaseMemoryObserverScope observer(
+            runtime_phase_memory_samples, [&](const char* phase, const DeviceMemorySample& sample) {
+                if (std::string(phase) != "after runtime KV allocation")
+                    return;
+                ++after_kv_baseline_count;
+                if (after_kv_baseline_count != 1) {
+                    throw std::runtime_error(
+                        "profile sweep observed more than one runtime KV allocation phase");
+                }
+                after_kv_baseline = sample;
+            });
+
+        before_load = sample_device_memory();
+        auto pipeline = trtmc::load(args.bundle, options);
+        if (!after_kv_baseline.has_value() || after_kv_baseline_count != 1) {
+            throw std::runtime_error(
+                "profile sweep did not observe the exact after-runtime-KV-allocation baseline");
+        }
+        auto* qualifier = dynamic_cast<trtmc::IRuntimeMemoryQualificationV1*>(pipeline.get());
+        if (qualifier == nullptr || qualifier->runtime_memory_qualification_api_version() !=
+                                        trtmc::kRuntimeMemoryQualificationApiVersionV1) {
+            throw std::runtime_error(
+                "profile sweep requires runtime-memory qualification interface V1");
+        }
+        model_id = pipeline->model_id();
+        pipeline_type = pipeline->pipeline_type();
+
+        for (std::size_t index = 0; index < inputs.size(); ++index) {
+            trtmc::RuntimeMemoryQualificationRequestV1 request;
+            request.input_ids = inputs[index].tokens;
+            request.max_new_tokens = 1;
+            auto result = qualifier->qualify_runtime_memory(request);
+            const auto sample = sample_device_memory();
+            const auto receipt = parse_receipt(result.runtime_memory_receipt_json);
+            const auto allocation_id = receipt.at("kv_allocation_id").get<std::uint64_t>();
+            observe_allocation_id(allocation_id);
+            const auto expected_profile = static_cast<std::int32_t>(index);
+            const bool profile_match = exact_decode_profile_observed(result, expected_profile);
+            sweep_a_profile_coverage_gate = sweep_a_profile_coverage_gate && profile_match;
+            auto growth = growth_from_baseline(
+                *after_kv_baseline, sample, sweep_a_process_high_water, sweep_a_device_high_water);
+            reserve_rows.push_back({
+                {"profile_id", expected_profile},
+                {"covering_profile_limit", inputs[index].profile_limit},
+                {"cumulative_process_first_use_bytes",
+                 growth.at("cumulative_process_high_water_bytes")},
+                {"cumulative_device_wide_first_use_bytes",
+                 growth.at("cumulative_device_wide_high_water_bytes")},
+            });
+            sweep_a_rows.push_back({
+                {"row_index", index},
+                {"token_file", inputs[index].path},
+                {"prompt_tokens", result.prompt_tokens},
+                {"max_new_tokens", 1},
+                {"expected_profile_id", expected_profile},
+                {"expected_profile_limit", inputs[index].profile_limit},
+                {"expected_prompt_lower_exclusive", inputs[index].lower_exclusive},
+                {"profile_match", profile_match},
+                {"observed_decode_profile_ids", observed_decode_profile_ids(result)},
+                {"selected_token_ids", result.selected_token_ids},
+                {"step_top1_token_ids", step_top1_token_ids(result)},
+                {"kv_allocation_id", allocation_id},
+                {"runtime_memory_receipt", receipt},
+                {"invocation_tuples", invocation_tuple_json(result)},
+                {"invocations", invocation_json(result)},
+                {"after_request", sample_json(sample)},
+                {"cumulative_first_use_growth", std::move(growth)},
+            });
+            after_sweep_a = sample;
+            sweep_a_results.push_back(std::move(result));
+        }
+
+        before_sweep_b = sample_device_memory();
+        for (std::size_t index = 0; index < inputs.size(); ++index) {
+            trtmc::RuntimeMemoryQualificationRequestV1 request;
+            request.input_ids = inputs[index].tokens;
+            request.max_new_tokens = 1;
+            auto result = qualifier->qualify_runtime_memory(request);
+            const auto sample = sample_device_memory();
+            const auto receipt = parse_receipt(result.runtime_memory_receipt_json);
+            const auto allocation_id = receipt.at("kv_allocation_id").get<std::uint64_t>();
+            observe_allocation_id(allocation_id);
+
+            const auto expected_profile = static_cast<std::int32_t>(index);
+            const bool profile_match = exact_decode_profile_observed(result, expected_profile);
+            sweep_b_profile_coverage_gate = sweep_b_profile_coverage_gate && profile_match;
+            const auto& reference = sweep_a_results[index];
+            const bool selected_ids_equal =
+                reference.selected_token_ids == result.selected_token_ids;
+            const bool logits_equal = trtmc::qualification::float32_logits_bitwise_equal(
+                reference.step_logits, result.step_logits);
+            const bool invocation_tuples_equal =
+                invocation_tuple_json(reference) == invocation_tuple_json(result);
+            selected_ids_equivalent_gate = selected_ids_equivalent_gate && selected_ids_equal;
+            logits_equivalent_gate = logits_equivalent_gate && logits_equal;
+            invocation_tuples_equivalent_gate =
+                invocation_tuples_equivalent_gate && invocation_tuples_equal;
+            auto growth = growth_from_baseline(before_sweep_b, sample, sweep_b_process_high_water,
+                                               sweep_b_device_high_water);
+            sweep_b_rows.push_back({
+                {"row_index", index},
+                {"token_file", inputs[index].path},
+                {"prompt_tokens", result.prompt_tokens},
+                {"max_new_tokens", 1},
+                {"expected_profile_id", expected_profile},
+                {"expected_profile_limit", inputs[index].profile_limit},
+                {"expected_prompt_lower_exclusive", inputs[index].lower_exclusive},
+                {"profile_match", profile_match},
+                {"observed_decode_profile_ids", observed_decode_profile_ids(result)},
+                {"selected_token_ids", result.selected_token_ids},
+                {"step_top1_token_ids", step_top1_token_ids(result)},
+                {"kv_allocation_id", allocation_id},
+                {"runtime_memory_receipt", receipt},
+                {"invocation_tuples", invocation_tuple_json(result)},
+                {"invocations", invocation_json(result)},
+                {"after_request", sample_json(sample)},
+                {"incremental_growth_from_sweep_b_baseline", std::move(growth)},
+                {"equivalence_to_sweep_a",
+                 {
+                     {"selected_token_ids_bitwise_equal", selected_ids_equal},
+                     {"complete_float32_logits_bitwise_equal", logits_equal},
+                     {"invocation_tuples_equal", invocation_tuples_equal},
+                     {"passed", selected_ids_equal && logits_equal && invocation_tuples_equal},
+                 }},
+            });
+            after_sweep_b = sample;
+            if (index + 1 == inputs.size())
+                final_sweep_b_result = std::move(result);
+        }
+
+        pipeline.reset();
+        after_unload = sample_device_memory();
+    }
+
+    if (!final_sweep_b_result.has_value())
+        throw std::logic_error("profile sweep produced no Sweep B result");
+    write_logits(args.logits_file, *final_sweep_b_result);
+
+    const bool sweep_b_incremental_growth_gate =
+        sweep_b_process_high_water <= kProfileSweepSecondSweepGrowthLimitBytes;
+    const bool passed = stable_allocation_id_gate && sweep_a_profile_coverage_gate &&
+                        sweep_b_profile_coverage_gate && selected_ids_equivalent_gate &&
+                        logits_equivalent_gate && invocation_tuples_equivalent_gate &&
+                        sweep_b_incremental_growth_gate;
+    json blockers = json::array();
+    const auto add_blocker = [&](bool gate, const char* name) {
+        if (!gate)
+            blockers.push_back(name);
+    };
+    add_blocker(stable_allocation_id_gate, "stable_kv_allocation_id");
+    add_blocker(sweep_a_profile_coverage_gate, "sweep_a_exact_profile_coverage");
+    add_blocker(sweep_b_profile_coverage_gate, "sweep_b_exact_profile_coverage");
+    add_blocker(selected_ids_equivalent_gate, "selected_token_ids_bitwise_equivalent");
+    add_blocker(logits_equivalent_gate, "complete_float32_logits_bitwise_equivalent");
+    add_blocker(invocation_tuples_equivalent_gate, "invocation_tuples_equivalent");
+    add_blocker(sweep_b_incremental_growth_gate,
+                "sweep_b_process_incremental_high_water_within_limit");
+
+    json input_manifest = json::array();
+    for (std::size_t index = 0; index < inputs.size(); ++index) {
+        input_manifest.push_back({
+            {"row_index", index},
+            {"token_file", inputs[index].path},
+            {"prompt_tokens", inputs[index].tokens.size()},
+            {"expected_profile_id", index},
+            {"expected_profile_limit", inputs[index].profile_limit},
+            {"expected_prompt_lower_exclusive", inputs[index].lower_exclusive},
+        });
+    }
+
+    json output{
+        {"schema_version", 1},
+        {"mode", "all_profile_two_sweep"},
+        {"status", passed ? "ok" : "error"},
+        {"error_type", passed ? json(nullptr) : json("qualification_gate")},
+        {"passed", passed},
+        {"qualification_blockers", std::move(blockers)},
+        {"qualification_api_version", trtmc::kRuntimeMemoryQualificationApiVersionV1},
+        {"model_id", model_id},
+        {"pipeline_type", pipeline_type},
+        {"cuda_module_loading",
+         {
+             {"source", "cuModuleGetLoadingMode"},
+             {"mode", loading_mode.mode},
+             {"driver_value", loading_mode.driver_value},
+         }},
+        {"protocol",
+         {
+             {"schema_version", 1},
+             {"execution_order", {"sweep_a", "sweep_b"}},
+             {"pipeline_load_count", 1},
+             {"kv_allocation_count", 1},
+             {"max_new_tokens_per_request", 1},
+             {"profile_order", "ascending"},
+             {"second_sweep_process_growth_limit_bytes", kProfileSweepSecondSweepGrowthLimitBytes},
+         }},
+        {"input_manifest", std::move(input_manifest)},
+        {"stable_kv_allocation_id",
+         stable_allocation_id.has_value() ? json(*stable_allocation_id) : json(nullptr)},
+        {"memory",
+         {
+             {"before_load", sample_json(before_load)},
+             {"after_runtime_kv_allocation", sample_json(*after_kv_baseline)},
+             {"after_sweep_a", sample_json(after_sweep_a)},
+             {"before_sweep_b", sample_json(before_sweep_b)},
+             {"after_sweep_b", sample_json(after_sweep_b)},
+             {"after_unload", sample_json(after_unload)},
+             {"retained_process_bytes", retained_process_bytes(before_load, after_unload)},
+             {"retained_device_wide_bytes", retained_device_wide_bytes(before_load, after_unload)},
+         }},
+        {"profile_reserve_rows", std::move(reserve_rows)},
+        {"sweep_a",
+         {
+             {"rows", std::move(sweep_a_rows)},
+             {"cumulative_process_first_use_high_water_bytes", sweep_a_process_high_water},
+             {"cumulative_device_wide_first_use_high_water_bytes", sweep_a_device_high_water},
+         }},
+        {"sweep_b",
+         {
+             {"rows", std::move(sweep_b_rows)},
+             {"incremental_process_high_water_bytes", sweep_b_process_high_water},
+             {"incremental_device_wide_high_water_bytes", sweep_b_device_high_water},
+             {"process_growth_limit_bytes", kProfileSweepSecondSweepGrowthLimitBytes},
+             {"process_growth_within_limit", sweep_b_incremental_growth_gate},
+         }},
+        {"gates",
+         {
+             {"stable_kv_allocation_id", stable_allocation_id_gate},
+             {"sweep_a_exact_profile_coverage", sweep_a_profile_coverage_gate},
+             {"sweep_b_exact_profile_coverage", sweep_b_profile_coverage_gate},
+             {"selected_token_ids_bitwise_equivalent", selected_ids_equivalent_gate},
+             {"complete_float32_logits_bitwise_equivalent", logits_equivalent_gate},
+             {"invocation_tuples_equivalent", invocation_tuples_equivalent_gate},
+             {"sweep_b_process_incremental_high_water_within_limit",
+              sweep_b_incremental_growth_gate},
+         }},
+        {"runtime_phase_memory_samples", std::move(runtime_phase_memory_samples)},
+        {"logits_artifact", logits_artifact_json(args.logits_file, *final_sweep_b_result)},
+    };
+#if TRTMC_HAS_NVML
+    output["memory_sampler"] = process_memory_sampler().metadata();
+#endif
+    std::cout << output.dump() << '\n';
+    return passed ? 0 : 1;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     try {
         const auto args = parse_arguments(argc, argv);
+        if (args.query_product_identity) {
+            (void)kProductIdentityMarker;
+            std::cout << trtmc::qualification::make_product_identity_evidence(
+                             TRTMC_INTERNAL_PRODUCT_VERSION,
+                             TRTMC_INTERNAL_CALIBRATOR_BUILD_IDENTITY)
+                             .dump()
+                      << '\n';
+            return 0;
+        }
+        if (args.query_module_loading_mode) {
+            const auto loading_mode = query_cuda_module_loading_mode();
+            std::cout << trtmc::qualification::make_cuda_module_loading_mode_evidence(
+                             loading_mode.mode, loading_mode.driver_value)
+                             .dump()
+                      << '\n';
+            return 0;
+        }
         trtmc::LoadOptionsV2 options;
         append_default_search_paths(argv[0], options);
         options.backend_search_paths.insert(options.backend_search_paths.end(),
@@ -956,6 +1463,9 @@ int main(int argc, char** argv) {
         } else if (args.max_sequence_length != 0) {
             options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kAuto;
         }
+
+        if (!args.profile_sweep_token_files.empty())
+            return run_profile_sweep_mode(args, options);
 
         trtmc::RuntimeMemoryQualificationRequestV1 request;
         request.input_ids = read_tokens(args.token_file);

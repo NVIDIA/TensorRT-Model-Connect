@@ -346,6 +346,8 @@ class QwenDecoderPlugin final : public IPipelinePlugin, public IRuntimeMemoryPip
         }
         const auto& expected = qualified_runtime_memory_tuple();
         validate_runtime_memory_qualified_tuple(ctx.bundle.info.runtime_memory, expected);
+        validate_runtime_memory_module_residency_calibration(
+            ctx.bundle.info.runtime_memory, ctx.bundle);
         return create_impl(ctx, &options);
     }
 
@@ -418,7 +420,7 @@ class QwenDecoderPlugin final : public IPipelinePlugin, public IRuntimeMemoryPip
 
             const auto& contract = ctx.bundle.info.runtime_memory;
             validate_runtime_memory_qualified_tuple(contract, qualified_runtime_memory_tuple());
-            if (contract.contract_version != 1 || contract.native_kv_plugin_abi != 2 ||
+            if (contract.contract_version != 2 || contract.native_kv_plugin_abi != 2 ||
                 contract.kv_layout != "contiguous_runtime_v1" || contract.kv_dtype != "bfloat16" ||
                 !contract.runtime_owned) {
                 throw std::runtime_error(
@@ -450,6 +452,15 @@ class QwenDecoderPlugin final : public IPipelinePlugin, public IRuntimeMemoryPip
             setup.layout.names.cache_v_output = kv_names.present_v;
             setup.expected_active_kv_profile_limits.assign(
                 contract.active_kv_profile_limits.begin(), contract.active_kv_profile_limits.end());
+            const auto& calibration = contract.module_residency_calibration;
+            for (const auto& reserve : calibration.profile_reserves) {
+                setup.module_residency_reserve_bytes_by_profile.push_back(
+                    reserve.cumulative_reserve_bytes);
+            }
+            setup.module_residency_plan_set_sha256 = calibration.plan_set_sha256;
+            setup.module_residency_cuda_module_loading_mode =
+                calibration.cuda_module_loading_mode;
+            setup.module_residency_evidence_sha256 = calibration.evidence_sha256;
             setup.expected_kv_bytes_per_token = contract.kv_bytes_per_token;
             setup.request_context_limit = runtime_options->max_sequence_length;
             setup.stream = stream;

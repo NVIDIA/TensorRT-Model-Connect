@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import _ctypes
 import _ssl
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -63,9 +64,87 @@ RUNTIME_STACK = (
     "7b9b711c22b6823e87150213ecd8449260db8610 "
     "nvrtc=13.3 driver=580.105.08"
 )
+RUNTIME_STACK_CONTRACT = {
+    "sm": "sm103",
+    "tensorrt": "11.2.0.113",
+    "cuda_runtime": "13.3",
+    "cudnn_backend": "9.20.0",
+    "cudnn_frontend_revision": (
+        "7b9b711c22b6823e87150213ecd8449260db8610"
+    ),
+    "nvrtc": "13.3",
+    "driver": "580.105.08",
+}
+PROFILE_LIMITS = (128, 256, 512, 1024, 2048, 8192, 32768, 40960)
+MODULE_RESIDENCY_RESERVE_BYTES = 1024
+
+
+def _runtime_memory_contract(
+    engine_plan: bytes,
+    prefill_engine_plan: bytes,
+) -> dict:
+    boundary = capture._load_boundary_module()
+    plans = [
+        {
+            "section_name": "engine_plan",
+            "section_sha256": hashlib.sha256(engine_plan).hexdigest(),
+            "role": "decode",
+            "optimization_profile_count": len(PROFILE_LIMITS),
+        },
+        {
+            "section_name": "prefill_engine_plan",
+            "section_sha256": hashlib.sha256(
+                prefill_engine_plan
+            ).hexdigest(),
+            "role": "prefill",
+            "optimization_profile_count": 1,
+        },
+    ]
+    return {
+        "contract_version": 2,
+        "qualified_model_id": MODEL_ID,
+        "qualified_model_revision": "1" * 40,
+        "qualified_config_sha256": "2" * 64,
+        "qualified_target": "sm103 + TensorRT 11.2.0.113",
+        "qualified_runtime_stack": dict(RUNTIME_STACK_CONTRACT),
+        "native_kv_plugin_abi": 2,
+        "model_context_limit": 40960,
+        "prefill_chunk_limit": 1024,
+        "kv_layout": "contiguous_v1",
+        "kv_dtype": "bfloat16",
+        "kv_bytes_per_token": 114688,
+        "active_kv_profile_limits": list(PROFILE_LIMITS),
+        "runtime_owned": True,
+        "module_residency_calibration": {
+            "schema_version": 1,
+            "measurement_kind": "nvml_process_cumulative_first_use",
+            "cuda_module_loading_mode": "lazy",
+            "qualified_runtime_stack_sha256": (
+                boundary.qualified_runtime_stack_sha256(
+                    RUNTIME_STACK_CONTRACT
+                )
+            ),
+            "plan_set_sha256": (
+                boundary.module_residency_plan_set_sha256(plans)
+            ),
+            "plans": plans,
+            "profile_reserves": [
+                {
+                    "covering_profile_limit": limit,
+                    "cumulative_reserve_bytes": (
+                        MODULE_RESIDENCY_RESERVE_BYTES
+                    ),
+                }
+                for limit in PROFILE_LIMITS
+            ],
+            "evidence_sha256": "3" * 64,
+        },
+    }
 
 
 def _bundle_bytes(model_id: str = MODEL_ID) -> bytes:
+    engine_plan = b"1234"
+    prefill_engine_plan = b"56789"
     tokenizer = b'{"model":{"type":"BPE"}}'
     config = b"{}"
     sections = {
@@ -81,6 +160,10 @@ def _bundle_bytes(model_id: str = MODEL_ID) -> bytes:
         {
             "model_id": model_id,
             "tokenizer_add_special_tokens": 0,
+            "runtime_memory": _runtime_memory_contract(
+                engine_plan,
+                prefill_engine_plan,
+            ),
             "sections": sections,
         }
     ).encode("utf-8")
@@ -88,7 +171,8 @@ def _bundle_bytes(model_id: str = MODEL_ID) -> bytes:
         capture.BUNDLE_MAGIC
         + struct.pack("<Q", len(header))
         + header
-        + b"123456789"
+        + engine_plan
+        + prefill_engine_plan
         + tokenizer
         + config
     )
@@ -336,6 +420,20 @@ def _mapping_record(path: Path) -> dict:
     }
 
 
+def _mapped_identities(*paths: Path) -> list[dict]:
+    return sorted(
+        (
+            capture._file_identity(path, label=f"mapped {path.name}")
+            for path in paths
+        ),
+        key=lambda row: (
+            row["path"],
+            row["device"],
+            row["inode"],
+        ),
+    )
+
+
 def _worker_mapping_records(
     repo: Path, runtime_libraries: tuple[Path, Path]
 ) -> tuple[dict, ...]:
@@ -367,7 +465,92 @@ def _fixed_generation_request(max_new_tokens: int = 2) -> dict:
     }
 
 
+def _complete_schema_v4_receipt(serialized_plan_bytes: int) -> dict:
+    capacity = 128
+    bytes_per_token = 114_688
+    capacity_total = 8 * 1024 * 1024 * 1024
+    capacity_free = 4 * 1024 * 1024 * 1024
+    settled_free = capacity_free - capacity * bytes_per_token
+    return {
+        "receipt_schema_version": 4,
+        "contract_version": 2,
+        "policy": "auto",
+        "policy_fraction": 0.9,
+        "requested_kv_bytes": 0,
+        "post_load_free_bytes": capacity_free,
+        "safety_reserve_bytes": 64 * 1024 * 1024,
+        "module_residency_reserve_bytes": (
+            MODULE_RESIDENCY_RESERVE_BYTES
+        ),
+        "module_residency_reserve_profile_limit": 128,
+        "module_residency_plan_set_sha256": (
+            _runtime_memory_contract(b"1234", b"56789")[
+                "module_residency_calibration"
+            ]["plan_set_sha256"]
+        ),
+        "module_residency_evidence_sha256": "3" * 64,
+        "module_residency_cuda_module_loading_mode": "lazy",
+        "model_context_limit": 40_960,
+        "prefill_chunk_limit": 1_024,
+        "request_context_limit": 128,
+        "runtime_kv_capacity_tokens": capacity,
+        "effective_request_limit": capacity,
+        "kv_bytes_per_token": bytes_per_token,
+        "kv_budget_bytes": capacity * bytes_per_token,
+        "pre_load_free_bytes": capacity_free,
+        "pre_load_total_bytes": capacity_total,
+        "serialized_plan_bytes": serialized_plan_bytes,
+        "resident_weight_bytes": 2_000,
+        "resident_weight_copy_count": 2,
+        "engine_weight_bytes": 2_000,
+        "weight_streaming_active": False,
+        "post_load_total_bytes": capacity_total,
+        "post_load_device_used_bytes": capacity_total - capacity_free,
+        "capacity_decision_free_bytes": capacity_free,
+        "capacity_decision_total_bytes": capacity_total,
+        "capacity_decision_device_used_bytes": capacity_total - capacity_free,
+        "capacity_decision_resident_overhead_bytes": 100,
+        "final_non_kv_overhead_delta_bytes": 50,
+        "settled_free_bytes": settled_free,
+        "settled_total_bytes": capacity_total,
+        "settled_device_used_bytes": capacity_total - settled_free,
+        "settled_snapshot_unavailable_reason": None,
+        "final_free_bytes": capacity_free,
+        "final_total_bytes": capacity_total,
+        "final_device_used_bytes": capacity_total - capacity_free,
+        "context_device_memory_bytes": 10,
+        "ordinary_device_input_bytes": 20,
+        "ordinary_device_output_bytes": 30,
+        "external_device_output_bytes": 40,
+        "host_staging_bytes": 60,
+        "graph_private_device_bytes": 50,
+        "kv_reserved_bytes": capacity * bytes_per_token,
+        "kv_committed_bytes": capacity * bytes_per_token,
+        "kv_metadata_bytes": 0,
+        "peak_device_bytes": capacity * bytes_per_token,
+        "peak_device_bytes_scope": "device_wide",
+        "peak_device_bytes_baseline": (
+            "cuda_mem_get_info_before_engine_deserialization_free"
+        ),
+        "peak_device_sample_count": 2,
+        "peak_device_sample_boundaries": [
+            "after_runtime_kv_allocation",
+            "after_successful_request_completion",
+        ],
+        "backend_owned_cache_input_bytes": 0,
+        "backend_owned_cache_output_bytes": 0,
+        "kv_allocation_id": 1,
+        "solve_iterations": 1,
+        "capped_by_model": False,
+        "capped_by_request_limit": True,
+        "measurement_sources": dict(capture.MEASUREMENT_SOURCES),
+    }
+
+
 def _benchmark_worker_source(serialized_plan_bytes: int) -> str:
+    runtime_receipt = _complete_schema_v4_receipt(
+        serialized_plan_bytes
+    )
     return f"""#!/usr/bin/env python3
 import json
 import os
@@ -395,17 +578,7 @@ payload = {{
         "generated_token_ids": [1]
     }}],
     "output_summary": {{"token_ids": [1]}},
-    "runtime_memory_receipt": {{
-        "serialized_plan_bytes": {serialized_plan_bytes},
-        "resident_weight_bytes": 2000,
-        "resident_weight_copy_count": 2,
-        "weight_streaming_active": False,
-        "measurement_sources": {{
-            "serialized_plan_bytes": "bundle_engine_section_sizes",
-            "resident_weight_bytes": "tensorrt_total_weights_size_weight_streaming_disabled",
-            "resident_weight_copy_count": "deduplicated_tensorrt_engine_identity"
-        }}
-    }}
+    "runtime_memory_receipt": {runtime_receipt!r}
 }}
 open(args["--output"], "w", encoding="utf-8").write(json.dumps(payload))
 cache_path = os.environ.get("CUDA_CACHE_PATH")
@@ -852,6 +1025,10 @@ def test_benchmark_runs_real_worker_and_enriches_dynamic_receipt(
 
     assert capture._cmd_benchmark(args) == 0
     result = json.loads(output.read_text(encoding="utf-8"))
+    assert (
+        result["runtime_memory_receipt"]
+        == _complete_schema_v4_receipt(9)
+    )
     assert result["runtime_memory_receipt"]["resident_weight_copy_count"] == 2
     assert result["qualification_provenance"]["fresh_build"] is True
     assert result["qualification_provenance"]["artifact_reused"] is False
@@ -930,6 +1107,26 @@ def test_benchmark_runs_real_worker_and_enriches_dynamic_receipt(
     assert result["runtime_libraries"] == result["qualification_evidence"][
         "runtime_libraries"
     ]
+    expected_mapped_paths = {
+        str(path.resolve())
+        for path in (
+            *runtime_libraries,
+            repo / "artifacts" / "libtrtmc_core.so",
+            repo / "artifacts" / "libtrtmc_backend_trt.so",
+            plugin,
+            (
+                repo
+                / "artifacts"
+                / "models/qwen/libtrtmc_model_qwen.so"
+            ),
+        )
+    }
+    assert {
+        row["path"] for row in result["mapped_dso_identities"]
+    } == expected_mapped_paths
+    assert result["qualification_evidence"]["mapped_dso_identities"] == (
+        result["mapped_dso_identities"]
+    )
     assert result["generation_workload"]["kind"] == "fixed_length_greedy_ar"
     assert result["generation_workload"]["measured_generated_token_ids"] == [
         [1]
@@ -1148,6 +1345,7 @@ def test_runtime_library_provenance_requires_one_coherent_pair(
         (_mapping_record(nvrtc), _mapping_record(builtins)),
         artifact_role="native-dynamic",
         runtime_stack=stack,
+        mapped_dso_identities=_mapped_identities(nvrtc, builtins),
     )
     assert result is not None
     assert result["directory"] == str(nvrtc.parent)
@@ -1164,6 +1362,11 @@ def test_runtime_library_provenance_requires_one_coherent_pair(
             ),
             artifact_role="native-dynamic",
             runtime_stack=stack,
+            mapped_dso_identities=_mapped_identities(
+                nvrtc,
+                duplicate,
+                builtins,
+            ),
         )
 
     other_directory = tmp_path / "other"
@@ -1175,6 +1378,10 @@ def test_runtime_library_provenance_requires_one_coherent_pair(
             (_mapping_record(nvrtc), _mapping_record(other_builtins)),
             artifact_role="native-dynamic",
             runtime_stack=stack,
+            mapped_dso_identities=_mapped_identities(
+                nvrtc,
+                other_builtins,
+            ),
         )
 
 
@@ -1184,6 +1391,7 @@ def test_static_runtime_library_provenance_is_not_required() -> None:
             (),
             artifact_role="exact-head-static-split",
             runtime_stack=None,
+            mapped_dso_identities=[],
         )
         is None
     )

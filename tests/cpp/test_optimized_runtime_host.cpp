@@ -378,7 +378,7 @@ void test_runtime_kv_policy_fails_before_loading_optimized_runtime() {
         (void)trtmc::load(bundle.string(), options);
     } catch (const std::invalid_argument& error) {
         rejected =
-            std::string(error.what()).find("does not declare runtime_memory contract version 1") !=
+            std::string(error.what()).find("does not declare runtime_memory contract version 2") !=
             std::string::npos;
     }
     check(rejected, "bundle contract rejects unsupported dynamic KV policy");

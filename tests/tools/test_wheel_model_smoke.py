@@ -38,8 +38,8 @@ def _memory_receipt(*, request_complete: bool) -> dict[str, Any]:
     if request_complete:
         boundaries.append("after_successful_request_completion")
     return {
-        "receipt_schema_version": 3,
-        "contract_version": 1,
+        "receipt_schema_version": 4,
+        "contract_version": 2,
         "policy": "auto",
         "policy_fraction": 0.9,
         "requested_kv_bytes": 0,
@@ -49,19 +49,33 @@ def _memory_receipt(*, request_complete: bool) -> dict[str, Any]:
         "runtime_kv_capacity_tokens": 16,
         "effective_request_limit": 16,
         "kv_bytes_per_token": 64,
+        "kv_budget_bytes": 1024,
+        "safety_reserve_bytes": 0,
         "kv_reserved_bytes": 1024,
         "kv_committed_bytes": 1024,
+        "module_residency_reserve_bytes": 512,
+        "module_residency_reserve_profile_limit": 16,
+        "module_residency_plan_set_sha256": "a" * 64,
+        "module_residency_evidence_sha256": "b" * 64,
+        "module_residency_cuda_module_loading_mode": "lazy",
         "kv_allocation_id": 7,
-        "capacity_decision_free_bytes": 4096,
+        "capacity_decision_free_bytes": 1650,
         "capacity_decision_total_bytes": 16384,
-        "capacity_decision_device_used_bytes": 12288,
-        "settled_free_bytes": 3072,
+        "capacity_decision_device_used_bytes": 14734,
+        "capacity_decision_resident_overhead_bytes": 64,
+        "final_non_kv_overhead_delta_bytes": 0,
+        "context_device_memory_bytes": 64,
+        "ordinary_device_input_bytes": 0,
+        "ordinary_device_output_bytes": 0,
+        "external_device_output_bytes": 0,
+        "graph_private_device_bytes": 0,
+        "settled_free_bytes": 626,
         "settled_total_bytes": 16384,
-        "settled_device_used_bytes": 13312,
+        "settled_device_used_bytes": 15758,
         "settled_snapshot_unavailable_reason": None,
-        "final_free_bytes": 4096,
+        "final_free_bytes": 1650,
         "final_total_bytes": 16384,
-        "final_device_used_bytes": 12288,
+        "final_device_used_bytes": 14734,
         "backend_owned_cache_input_bytes": 0,
         "backend_owned_cache_output_bytes": 0,
         "peak_device_sample_boundaries": boundaries,
@@ -286,6 +300,21 @@ def test_memory_parser_rejects_malformed_json() -> None:
             1,
             "capacity-decision compatibility alias",
         ),
+        (
+            "module_residency_reserve_profile_limit",
+            15,
+            "does not cover",
+        ),
+        (
+            "module_residency_plan_set_sha256",
+            "A" * 64,
+            "lowercase SHA256",
+        ),
+        (
+            "module_residency_cuda_module_loading_mode",
+            "unknown",
+            "loading mode is invalid",
+        ),
     ],
 )
 def test_memory_parser_rejects_invalid_completion_invariants(
@@ -297,6 +326,93 @@ def test_memory_parser_rejects_invalid_completion_invariants(
     with pytest.raises(CiError, match=message):
         WheelPackageManager._parse_and_validate_memory_receipts(
             _memory_stderr(completion=completion)
+        )
+
+
+def test_memory_parser_requires_stable_plan_bound_residency_receipts() -> None:
+    completion = _memory_receipt(request_complete=True)
+    completion["module_residency_evidence_sha256"] = "c" * 64
+
+    with pytest.raises(CiError, match="disagree.*module_residency_evidence_sha256"):
+        WheelPackageManager._parse_and_validate_memory_receipts(
+            _memory_stderr(completion=completion)
+        )
+
+
+def test_memory_parser_rejects_provisional_or_drifting_contract_version() -> None:
+    provisional = _memory_receipt(request_complete=True)
+    provisional["contract_version"] = 1
+    with pytest.raises(CiError, match="contract_version must be 2"):
+        WheelPackageManager._parse_and_validate_memory_receipts(
+            _memory_stderr(completion=provisional)
+        )
+
+    load = _memory_receipt(request_complete=False)
+    load["contract_version"] = 1
+    with pytest.raises(CiError, match="disagree.*contract_version"):
+        WheelPackageManager._parse_and_validate_memory_receipts(
+            _memory_stderr(load=load)
+        )
+
+
+def test_memory_parser_replays_positive_final_overhead_delta() -> None:
+    load = _memory_receipt(request_complete=False)
+    completion = _memory_receipt(request_complete=True)
+    for receipt in (load, completion):
+        receipt["capacity_decision_resident_overhead_bytes"] = 48
+        receipt["final_non_kv_overhead_delta_bytes"] = 16
+        receipt["capacity_decision_free_bytes"] += 16
+        receipt["capacity_decision_device_used_bytes"] -= 16
+        receipt["final_free_bytes"] += 16
+        receipt["final_device_used_bytes"] -= 16
+
+    parsed = WheelPackageManager._parse_and_validate_memory_receipts(
+        _memory_stderr(load=load, completion=completion)
+    )
+    assert parsed["validated"]
+
+    completion["final_non_kv_overhead_delta_bytes"] = 0
+    with pytest.raises(CiError, match=r"replay O\(final\)-O\(resident\)"):
+        WheelPackageManager._parse_and_validate_memory_receipts(
+            _memory_stderr(load=load, completion=completion)
+        )
+
+
+def test_memory_parser_accepts_conservative_monotonic_underfill() -> None:
+    load = _memory_receipt(request_complete=False)
+    completion = _memory_receipt(request_complete=True)
+    for receipt in (load, completion):
+        receipt["runtime_kv_capacity_tokens"] = 8
+        receipt["effective_request_limit"] = 8
+        receipt["kv_reserved_bytes"] = 512
+        receipt["kv_committed_bytes"] = 512
+        receipt["settled_free_bytes"] = 1_138
+        receipt["settled_device_used_bytes"] = 15_246
+
+    parsed = WheelPackageManager._parse_and_validate_memory_receipts(
+        _memory_stderr(load=load, completion=completion)
+    )
+
+    assert parsed["validated"]
+    assert parsed["request_completion"]["kv_budget_bytes"] // 64 == 16
+    assert parsed["request_completion"]["runtime_kv_capacity_tokens"] == 8
+
+
+def test_memory_parser_rejects_capacity_above_monotonic_ceiling() -> None:
+    load = _memory_receipt(request_complete=False)
+    completion = _memory_receipt(request_complete=True)
+    for receipt in (load, completion):
+        receipt["runtime_kv_capacity_tokens"] = 17
+        receipt["effective_request_limit"] = 17
+        receipt["kv_reserved_bytes"] = 1_088
+        receipt["kv_committed_bytes"] = 1_088
+        receipt["module_residency_reserve_profile_limit"] = 32
+        receipt["settled_free_bytes"] = 562
+        receipt["settled_device_used_bytes"] = 15_822
+
+    with pytest.raises(CiError, match="conservative monotonic solve ceiling"):
+        WheelPackageManager._parse_and_validate_memory_receipts(
+            _memory_stderr(load=load, completion=completion)
         )
 
 

@@ -56,12 +56,18 @@ def test_commands_build_excluded_cpp_tests_before_ctest() -> None:
         Path("/opt/venv/bin/python"),
     )
     labels = [label for label, _ in commands]
-    assert labels[:4] == [
+    assert labels == [
         "build",
         "build_cpp_tests_and_qualifiers",
         "ctest_manifest_all",
         "ctest_all",
+        "ctest_manifest_dynamic_memory",
+        "ctest_dynamic_memory",
+        "pytest_manifest_dynamic_memory",
+        "pytest_dynamic_memory",
+        "pytest_graph_e2e",
     ]
+    assert tuple(labels) == capture.FIXED_COMMAND_LABELS
     assert commands[0][1] == [
         "cmake",
         "--build",
@@ -124,7 +130,13 @@ def test_capture_preserves_virtual_environment_python_symlink(
 
     def commands(_build_dir: Path, python: Path) -> list[tuple[str, list[str]]]:
         observed.append(python)
-        return [("build", [sys.executable, "-c", "pass"])]
+        return [
+            ("build", [sys.executable, "-c", "pass"]),
+            (
+                "build_cpp_tests_and_qualifiers",
+                [sys.executable, "-c", "pass"],
+            ),
+        ]
 
     monkeypatch.setattr(capture, "_commands", commands)
     report = capture.capture(
@@ -197,6 +209,10 @@ def test_capture_records_exact_manifests_and_source_state(
         lambda *_: [
             ("build", [sys.executable, "-c", "pass"]),
             (
+                "build_cpp_tests_and_qualifiers",
+                [sys.executable, "-c", "pass"],
+            ),
+            (
                 "ctest_manifest_all",
                 [
                     sys.executable,
@@ -205,11 +221,25 @@ def test_capture_records_exact_manifests_and_source_state(
                 ],
             ),
             (
+                "ctest_manifest_dynamic_memory",
+                [
+                    sys.executable,
+                    "-c",
+                    "print('  Test #1: one')",
+                ],
+            ),
+            (
                 "pytest_manifest_dynamic_memory",
                 [
                     sys.executable,
                     "-c",
-                    "print('tests/example.py::test_one')",
+                    (
+                        "print("
+                        "'tests/builder/test_dynamic_memory_qualification.py::test_one"
+                        "\\ntests/tools/test_capture_dynamic_memory_test_manifest.py::test_tool"
+                        "\\ntests/e2e/test_native_dynamic_memory_graph.py::test_graph'"
+                        ")"
+                    ),
                 ],
             ),
         ],
@@ -226,11 +256,15 @@ def test_capture_records_exact_manifests_and_source_state(
     assert report["passed"] is True
     assert report["source_state_unchanged"] is True
     assert report["source_state_pre"]["exact_head_gate_satisfied"] is True
-    assert report["commands"][1]["manifest_entries"] == ["one", "two"]
-    assert report["commands"][1]["manifest_count"] == 2
-    assert report["commands"][2]["manifest_entries"] == ["tests/example.py::test_one"]
+    assert report["commands"][2]["manifest_entries"] == ["one", "two"]
+    assert report["commands"][2]["manifest_count"] == 2
+    assert report["commands"][4]["manifest_entries"] == [
+        "tests/builder/test_dynamic_memory_qualification.py::test_one",
+        "tests/e2e/test_native_dynamic_memory_graph.py::test_graph",
+        "tests/tools/test_capture_dynamic_memory_test_manifest.py::test_tool",
+    ]
     assert report["commands"][0]["environment_overrides"] == {}
-    assert report["commands"][2]["environment_overrides"] == {
+    assert report["commands"][4]["environment_overrides"] == {
         "TRTMC_BENCH_WORKER": str(
             (build_dir / "trtmc_benchmark_worker").resolve()
         ),
@@ -354,10 +388,91 @@ def test_capture_rejects_missing_exact_build_artifact(
     monkeypatch.setattr(
         capture,
         "_commands",
-        lambda *_: [("build", [sys.executable, "-c", "pass"])],
+        lambda *_: [
+            ("build", [sys.executable, "-c", "pass"]),
+            (
+                "build_cpp_tests_and_qualifiers",
+                [sys.executable, "-c", "pass"],
+            ),
+        ],
     )
 
     with pytest.raises(capture.ManifestError, match="runtime_kv_plugin"):
+        capture.capture(
+            repo_root=repo,
+            build_dir=build_dir,
+            python=Path(sys.executable),
+            output_dir=repo / "artifacts" / "manifest",
+        )
+
+
+def test_capture_rejects_empty_collected_ctest_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    build_dir = repo / "build-dynkv"
+    _seed_build_tree(repo, build_dir)
+    monkeypatch.setattr(
+        capture,
+        "_commands",
+        lambda *_: [
+            ("build", [sys.executable, "-c", "pass"]),
+            (
+                "build_cpp_tests_and_qualifiers",
+                [sys.executable, "-c", "pass"],
+            ),
+            (
+                "ctest_manifest_all",
+                [sys.executable, "-c", "pass"],
+            ),
+        ],
+    )
+
+    with pytest.raises(capture.ManifestError, match="empty test manifest"):
+        capture.capture(
+            repo_root=repo,
+            build_dir=build_dir,
+            python=Path(sys.executable),
+            output_dir=repo / "artifacts" / "manifest",
+        )
+
+
+def test_capture_rejects_build_artifact_changed_during_test_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    build_dir = repo / "build-dynkv"
+    _seed_build_tree(repo, build_dir)
+    core = build_dir / capture.BUILD_ARTIFACTS["core"]
+    mutation = (
+        "from pathlib import Path; "
+        f"Path({str(core)!r}).write_bytes(b'changed-after-build'); "
+        "print('  Test #1: one')"
+    )
+    monkeypatch.setattr(
+        capture,
+        "_commands",
+        lambda *_: [
+            ("build", [sys.executable, "-c", "pass"]),
+            (
+                "build_cpp_tests_and_qualifiers",
+                [sys.executable, "-c", "pass"],
+            ),
+            (
+                "ctest_manifest_all",
+                [sys.executable, "-c", mutation],
+            ),
+        ],
+    )
+
+    with pytest.raises(
+        capture.ManifestError,
+        match="build artifacts changed after the explicit qualifier build",
+    ):
         capture.capture(
             repo_root=repo,
             build_dir=build_dir,
@@ -430,7 +545,13 @@ def _captured_validatable_manifest(
     monkeypatch.setattr(
         capture,
         "_commands",
-        lambda *_: [("build", [sys.executable, "-c", "pass"])],
+        lambda *_: [
+            ("build", [sys.executable, "-c", "pass"]),
+            (
+                "build_cpp_tests_and_qualifiers",
+                [sys.executable, "-c", "pass"],
+            ),
+        ],
     )
     output_dir = repo / "artifacts" / "manifest"
     capture.capture(
@@ -494,7 +615,39 @@ def test_manifest_rejects_independent_versioned_trt_backend_copy(
     active.unlink()
     active.write_bytes((build_dir / "libtrtmc_backend_trt.so").read_bytes())
 
-    with pytest.raises(capture.ManifestError, match="independent artifact"):
+    with pytest.raises(capture.ManifestError, match="must be a symlink"):
+        capture._build_artifact_identities(build_dir)
+
+
+def test_manifest_rejects_versioned_trt_backend_hardlink(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    build_dir = repo / "build-dynkv"
+    _seed_build_tree(repo, build_dir)
+    active = build_dir / "libtrtmc_backend_trt_11_2.so"
+    active.unlink()
+    active.hardlink_to(build_dir / "libtrtmc_backend_trt.so")
+
+    with pytest.raises(capture.ManifestError, match="must be a symlink"):
+        capture._build_artifact_identities(build_dir)
+
+
+def test_manifest_rejects_artifact_symlink_outside_build(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    build_dir = repo / "build-dynkv"
+    _seed_build_tree(repo, build_dir)
+    outside = tmp_path / "outside-model.so"
+    outside.write_bytes(b"outside")
+    model = build_dir / capture.BUILD_ARTIFACTS["model_qwen"]
+    model.unlink()
+    model.symlink_to(outside)
+
+    with pytest.raises(capture.ManifestError, match="escapes the build directory"):
         capture._build_artifact_identities(build_dir)
 
 
@@ -528,6 +681,34 @@ def test_manifest_validator_rejects_extra_field(
         capture.load_and_validate_build_manifest(report_path)
 
 
+def test_manifest_validator_rejects_duplicate_json_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report_path, _ = _captured_validatable_manifest(tmp_path, monkeypatch)
+    payload = report_path.read_text(encoding="utf-8").rstrip()
+    report_path.write_text(
+        payload[:-1] + ', "passed": true}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(capture.ManifestError, match="duplicate JSON key 'passed'"):
+        capture.load_and_validate_build_manifest(report_path)
+
+
+def test_manifest_validator_rejects_wrong_schema_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report_path, _ = _captured_validatable_manifest(tmp_path, monkeypatch)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["schema_version"] = "trtmc.dynamic-memory-test-manifest/v1"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    with pytest.raises(capture.ManifestError, match="not a passed v2"):
+        capture.load_and_validate_build_manifest(report_path)
+
+
 def test_manifest_validator_rejects_clean_build_argv_tamper(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -551,6 +732,90 @@ def test_manifest_validator_rejects_omitted_required_command(
     report_path.write_text(json.dumps(report), encoding="utf-8")
 
     with pytest.raises(capture.ManifestError, match="complete ordered"):
+        capture.load_and_validate_build_manifest(report_path)
+
+
+def test_manifest_validator_rejects_reordered_commands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report_path, _ = _captured_validatable_manifest(tmp_path, monkeypatch)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["commands"][3], report["commands"][4] = (
+        report["commands"][4],
+        report["commands"][3],
+    )
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    with pytest.raises(capture.ManifestError, match="contract changed"):
+        capture.load_and_validate_build_manifest(report_path)
+
+
+def test_manifest_validator_rejects_overlapping_command_timestamps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report_path, _ = _captured_validatable_manifest(tmp_path, monkeypatch)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    previous = report["commands"][0]
+    current = report["commands"][1]
+    current["started_ns"] = previous["finished_ns"] - 1
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    with pytest.raises(capture.ManifestError, match="ordered replay"):
+        capture.load_and_validate_build_manifest(report_path)
+
+
+def _replace_command_stdout(
+    report: dict,
+    *,
+    label: str,
+    text: str,
+) -> None:
+    command = next(
+        item for item in report["commands"] if item["label"] == label
+    )
+    stdout = Path(command["stdout"])
+    stdout.write_text(text, encoding="utf-8")
+    command["stdout_sha256"] = capture._sha256(stdout)
+    command["manifest_entries"] = capture._manifest_entries(label, text)
+    command["manifest_count"] = len(command["manifest_entries"])
+
+
+def test_manifest_validator_rejects_focused_ctest_outside_full_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report_path, _ = _captured_validatable_manifest(tmp_path, monkeypatch)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    _replace_command_stdout(
+        report,
+        label="ctest_manifest_dynamic_memory",
+        text="  Test #1: absent_from_full_manifest\n",
+    )
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    with pytest.raises(capture.ManifestError, match="not a subset"):
+        capture.load_and_validate_build_manifest(report_path)
+
+
+def test_manifest_validator_rejects_duplicate_pytest_collection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report_path, _ = _captured_validatable_manifest(tmp_path, monkeypatch)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    duplicate = (
+        "tests/e2e/test_native_dynamic_memory_graph.py::test_graph_fixture"
+    )
+    _replace_command_stdout(
+        report,
+        label="pytest_manifest_dynamic_memory",
+        text=f"{duplicate}\n{duplicate}\n",
+    )
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    with pytest.raises(capture.ManifestError, match="duplicate test entries"):
         capture.load_and_validate_build_manifest(report_path)
 
 

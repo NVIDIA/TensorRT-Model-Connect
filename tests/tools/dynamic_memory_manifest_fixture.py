@@ -13,6 +13,7 @@ from typing import Any
 
 DYNAMIC_TEST_ENTRIES = (
     "tests/builder/test_dynamic_memory_qualification.py::test_manifest_fixture",
+    "tests/tools/test_capture_dynamic_memory_test_manifest.py::test_manifest_fixture",
     "tests/e2e/test_native_dynamic_memory_graph.py::test_graph_fixture",
 )
 
@@ -41,6 +42,7 @@ def seed_manifest_test_modules(repo_root: Path) -> None:
 
     for relative in (
         "tests/builder/test_dynamic_memory_qualification.py",
+        "tests/tools/test_capture_dynamic_memory_test_manifest.py",
         "tests/e2e/test_native_dynamic_memory_graph.py",
     ):
         path = repo_root / relative

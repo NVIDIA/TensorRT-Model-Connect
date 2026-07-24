@@ -277,10 +277,69 @@ def test_existing_qualified_builder_calls_the_fail_closed_guard(
 
 def _bundle_bytes(
     qualification: ResolvedDynamicMemoryQualification,
+    *,
+    sealed: bool = True,
 ) -> bytes:
     record = qualification.qualification
     contract = producer._expected_contract(qualification)
+    contract["contract_version"] = 1
     contract["kv_bytes_per_token"] = 114_688
+    plan_sections = {
+        "engine_plan": b"1",
+        "prefill_engine_plan": b"2",
+    }
+    plans = [
+        {
+            "section_name": "engine_plan",
+            "section_sha256": hashlib.sha256(
+                plan_sections["engine_plan"]
+            ).hexdigest(),
+            "role": "decode",
+            "optimization_profile_count": len(
+                record.active_kv_profile_limits
+            ),
+        },
+        {
+            "section_name": "prefill_engine_plan",
+            "section_sha256": hashlib.sha256(
+                plan_sections["prefill_engine_plan"]
+            ).hexdigest(),
+            "role": "prefill",
+            "optimization_profile_count": 1,
+        },
+    ]
+    if sealed:
+        calibration = {
+            "schema_version": 1,
+            "measurement_kind":
+                "nvml_process_cumulative_first_use",
+            "cuda_module_loading_mode": "lazy",
+            "qualified_runtime_stack_sha256":
+                contract_module.qualified_runtime_stack_sha256(
+                    contract["qualified_runtime_stack"]
+                ),
+            "plan_set_sha256":
+                contract_module.module_residency_plan_set_sha256(
+                    plans
+                ),
+            "plans": plans,
+            "profile_reserves": [
+                {
+                    "covering_profile_limit": limit,
+                    "cumulative_reserve_bytes":
+                        (index + 1) * 64 * 1024 * 1024,
+                }
+                for index, limit in enumerate(
+                    record.active_kv_profile_limits
+                )
+            ],
+            "evidence_sha256": "e" * 64,
+        }
+        contract = contract_module.seal_runtime_memory_contract(
+            contract,
+            plan_sections=plan_sections,
+            module_residency_calibration=calibration,
+        )
     header = {
         "model_id": record.qualified_model_id,
         "family": record.family,
@@ -298,8 +357,57 @@ def _bundle_bytes(
         producer.BUNDLE_MAGIC
         + struct.pack("<Q", len(payload))
         + payload
-        + b"12"
+        + b"".join(plan_sections.values())
     )
+
+
+def test_final_bundle_validation_requires_sealed_v2_exact_plan_calibration(
+    tmp_path: Path,
+) -> None:
+    default = _resolved(
+        "Qwen/Qwen3-0.6B",
+        model_dir=tmp_path / "snapshot",
+    )
+    variant = derive_developer_chunk_variant_qualification(
+        default,
+        environment={
+            DEVELOPER_CHUNK_VARIANT_ENV:
+                DEVELOPER_CHUNK_VARIANT_VALUE
+        },
+    )
+    sealed_path = tmp_path / "sealed.trtfb"
+    sealed_path.write_bytes(_bundle_bytes(variant))
+    _header, sealed_contract = producer._validate_built_bundle(
+        sealed_path, variant
+    )
+    assert sealed_contract["contract_version"] == 2
+    assert (
+        sealed_contract["module_residency_calibration"]["plans"][0][
+            "section_sha256"
+        ]
+        == hashlib.sha256(b"1").hexdigest()
+    )
+
+    provisional_path = tmp_path / "provisional.trtfb"
+    provisional_path.write_bytes(
+        _bundle_bytes(variant, sealed=False)
+    )
+    with pytest.raises(
+        producer.ChunkVariantBuildError,
+        match="wrong C/2 bundle facts.*contract_version",
+    ):
+        producer._validate_built_bundle(
+            provisional_path, variant
+        )
+
+    tampered_path = tmp_path / "tampered.trtfb"
+    valid_bytes = _bundle_bytes(variant)
+    tampered_path.write_bytes(valid_bytes[:-2] + b"x2")
+    with pytest.raises(
+        producer.ChunkVariantBuildError,
+        match="module_residency_calibration.plans",
+    ):
+        producer._validate_built_bundle(tampered_path, variant)
 
 
 def _fake_plugin(
@@ -852,22 +960,17 @@ def test_qualification_runner_requires_env_before_accepting_variant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = qualify.SPECS["Qwen/Qwen3-0.6B"]
-    base_contract = {
-        "contract_version": 1,
-        "qualified_model_id": spec.model_id,
-        "model_context_limit": spec.context_limit,
-        "prefill_chunk_limit": spec.chunk_limit,
-        "kv_bytes_per_token": spec.kv_bytes_per_token,
-        "active_kv_profile_limits": list(spec.buckets),
-        "runtime_owned": True,
-    }
+    default = _resolved(
+        spec.model_id,
+        model_dir=tmp_path / "snapshot",
+    )
+    base_bundle = tmp_path / "base.trtfb"
+    base_bundle.write_bytes(_bundle_bytes(default))
+    base_header = producer._read_bundle_header(base_bundle)
     monkeypatch.setattr(
         qualify,
         "_read_bundle_header",
-        lambda _path: {
-            "runtime_memory": base_contract,
-            "vocab_size": 151_936,
-        },
+        lambda _path: base_header,
     )
     monkeypatch.setattr(
         qualify,
@@ -899,52 +1002,36 @@ def test_qualification_runner_requires_env_before_accepting_variant(
         qualify.main()
 
 
-def test_runner_rejects_noncanonical_variant_buckets() -> None:
+def test_runner_rejects_noncanonical_variant_buckets(
+    tmp_path: Path,
+) -> None:
     spec = qualify.SPECS["Qwen/Qwen3-0.6B"]
-    base_contract = {
-        "contract_version": 1,
-        "qualified_model_id": spec.model_id,
-        "qualified_model_revision": "1" * 40,
-        "qualified_config_sha256": "2" * 64,
-        "qualified_target": "gb300-trt-11.2",
-        "qualified_runtime_stack": {
-            "sm": "sm103",
-            "tensorrt": "11.2.0.113",
-            "cuda_runtime": "13.3",
-            "cudnn_backend": "9.20.0",
-            "cudnn_frontend_revision":
-                "7b9b711c22b6823e87150213ecd8449260db8610",
-            "nvrtc": "13.3",
-            "driver": "580.105.08",
-        },
-        "native_kv_plugin_abi": 2,
-        "model_context_limit": spec.context_limit,
-        "prefill_chunk_limit": spec.chunk_limit,
-        "kv_layout": "contiguous_runtime_v1",
-        "kv_dtype": "bfloat16",
-        "kv_bytes_per_token": 114_688,
-        "active_kv_profile_limits": list(spec.buckets),
-        "runtime_owned": True,
-    }
-    base = {
-        "vocab_size": 151_936,
-        "runtime_memory": base_contract,
-    }
-    variant_contract = dict(base_contract)
-    variant_contract["prefill_chunk_limit"] = spec.chunk_limit // 2
-    variant_contract["active_kv_profile_limits"] = [
-        128,
-        512,
-        1_024,
-        2_048,
-        8_192,
-        32_768,
-        40_960,
-    ]
-    variant = {
-        "vocab_size": 151_936,
-        "runtime_memory": variant_contract,
-    }
+    default = _resolved(
+        spec.model_id,
+        model_dir=tmp_path / "snapshot",
+    )
+    noncanonical = replace(
+        default,
+        qualification=replace(
+            default.qualification,
+            prefill_chunk_limit=spec.chunk_limit // 2,
+            active_kv_profile_limits=(
+                128,
+                512,
+                1_024,
+                2_048,
+                8_192,
+                32_768,
+                40_960,
+            ),
+        ),
+    )
+    base_path = tmp_path / "base.trtfb"
+    variant_path = tmp_path / "variant.trtfb"
+    base_path.write_bytes(_bundle_bytes(default))
+    variant_path.write_bytes(_bundle_bytes(noncanonical))
+    base = producer._read_bundle_header(base_path)
+    variant = producer._read_bundle_header(variant_path)
 
     with pytest.raises(ValueError, match="canonical C/2 buckets"):
         qualify._validate_chunk_variant(base, variant, spec)

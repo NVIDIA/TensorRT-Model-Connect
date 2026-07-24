@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "schema_version": 1,
+      "measurement_kind": "nvml_process_cumulative_first_use",
+      "cuda_module_loading_mode": "lazy",
+      "qualified_runtime_stack_sha256": "1b94f56092107d0fa1c6d43e2e8e4245c904ddc5967646f96ff8e64496e0f210",
+      "plan_set_sha256": "5ebe4d92161ea3cfe33dd98f74719193dbb3321beb7bb2bfd7c36e56320196d0",
+      "plans": [
+        {
+          "section_name": "engine_plan",
+          "section_sha256": "1187171ab6d98938238a589a603d8bd0b86acfd1e49196dd27afabb03b2e94fe",
+          "role": "decode",
+          "optimization_profile_count": 8
+        },
+        {
+          "section_name": "prefill_engine_plan",
+          "section_sha256": "1423cccbd2014875a81a8f8aef652d159f6fa5fd07371b1cfa526195dc97c44f",
+          "role": "prefill",
+          "optimization_profile_count": 1
+        }
+      ],
+      "profile_reserves": [
+        {"covering_profile_limit": 128, "cumulative_reserve_bytes": 536870912},
+        {"covering_profile_limit": 256, "cumulative_reserve_bytes": 536870912},
+        {"covering_profile_limit": 512, "cumulative_reserve_bytes": 536870912},
+        {"covering_profile_limit": 1024, "cumulative_reserve_bytes": 805306368},
+        {"covering_profile_limit": 2048, "cumulative_reserve_bytes": 1073741824},
+        {"covering_profile_limit": 8192, "cumulative_reserve_bytes": 1342177280},
+        {"covering_profile_limit": 32768, "cumulative_reserve_bytes": 1610612736},
+        {"covering_profile_limit": 40960, "cumulative_reserve_bytes": 1879048192}
+      ],
+      "evidence_sha256": "86a20b0757218dffc7f40acf594c7cc15831ebdf84c58901d2aed384c2602454"
+    },
+    {
+      "schema_version": 1,
+      "measurement_kind": "nvml_process_cumulative_first_use",
+      "cuda_module_loading_mode": "lazy",
+      "qualified_runtime_stack_sha256": "1b94f56092107d0fa1c6d43e2e8e4245c904ddc5967646f96ff8e64496e0f210",
+      "plan_set_sha256": "6bfd32e6e3794f9c3518a96ddcefefecc42ae9fd7a18d1b5a6b39ee5e6e9040d",
+      "plans": [
+        {
+          "section_name": "engine_plan",
+          "section_sha256": "693dad1f8f126784107f7bda4b12709457d16eab7e25d6409c75fa1ef11522fa",
+          "role": "decode",
+          "optimization_profile_count": 8
+        },
+        {
+          "section_name": "prefill_engine_plan",
+          "section_sha256": "5e5ced37c9922b6dcb9ff299c2353def60fb265c7bda32b66b940c7ae91ffdb2",
+          "role": "prefill",
+          "optimization_profile_count": 1
+        }
+      ],
+      "profile_reserves": [
+        {"covering_profile_limit": 128, "cumulative_reserve_bytes": 536870912},
+        {"covering_profile_limit": 256, "cumulative_reserve_bytes": 536870912},
+        {"covering_profile_limit": 512, "cumulative_reserve_bytes": 536870912},
+        {"covering_profile_limit": 1024, "cumulative_reserve_bytes": 805306368},
+        {"covering_profile_limit": 2048, "cumulative_reserve_bytes": 1073741824},
+        {"covering_profile_limit": 8192, "cumulative_reserve_bytes": 1342177280},
+        {"covering_profile_limit": 32768, "cumulative_reserve_bytes": 1610612736},
+        {"covering_profile_limit": 40960, "cumulative_reserve_bytes": 1879048192}
+      ],
+      "evidence_sha256": "60966c6f39a83daa84eeab7f20272edc716fbd16f8730667774587d9e20f07e9"
+    }
+  ]
+}

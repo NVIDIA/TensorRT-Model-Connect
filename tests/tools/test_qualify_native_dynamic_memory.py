@@ -13,6 +13,7 @@ import stat
 import struct
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -43,6 +44,26 @@ TEST_SAMPLER = qualify.SamplerTrustAnchor(
     pci_bus_id="0000:01:00.0",
     gpu_uuid="GPU-01234567-89ab-cdef-0123-456789abcdef",
 )
+_MODULE_RESIDENCY_PLAN_SET_SHA256 = "a" * 64
+_MODULE_RESIDENCY_EVIDENCE_SHA256 = "b" * 64
+
+
+def _module_residency_receipt_fields(
+    *,
+    reserve_bytes: int,
+    profile_limit: int,
+) -> dict[str, object]:
+    return {
+        "module_residency_reserve_bytes": reserve_bytes,
+        "module_residency_reserve_profile_limit": profile_limit,
+        "module_residency_plan_set_sha256": (
+            _MODULE_RESIDENCY_PLAN_SET_SHA256
+        ),
+        "module_residency_evidence_sha256": (
+            _MODULE_RESIDENCY_EVIDENCE_SHA256
+        ),
+        "module_residency_cuda_module_loading_mode": "lazy",
+    }
 
 
 def _validate_warmup_evidence(
@@ -207,6 +228,130 @@ def test_cli_rejects_multiple_runner_cuda_visible_devices(
     )
 
 
+def test_cli_accepts_omitted_external_source_calibration_inputs(
+    tmp_path: Path,
+) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(MODULE_PATH),
+            "--bundle",
+            str(tmp_path / "missing.trtfb"),
+            "--model",
+            TEST_SPEC.model_id,
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--runner-cuda-visible-device",
+            "0",
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert completed.returncode != 2
+    assert "--base-calibration-source-evidence" not in completed.stderr
+    assert "--base-calibration-source-raw-capture" not in completed.stderr
+
+
+def test_cli_requires_exactly_two_base_source_raw_captures(
+    tmp_path: Path,
+) -> None:
+    bundle, _ = _write_base_bundle(tmp_path / "sealed.trtfb")
+    source = tmp_path / "source.json"
+    raw = tmp_path / "process-00.raw.json"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(MODULE_PATH),
+            "--bundle",
+            str(bundle),
+            "--model",
+            TEST_SPEC.model_id,
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--runner-cuda-visible-device",
+            "0",
+            "--base-calibration-source-evidence",
+            str(source),
+            "--base-calibration-source-raw-capture",
+            str(raw),
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "--base-calibration-source-raw-capture must be provided exactly twice"
+        in completed.stderr
+    )
+
+
+def test_embedded_base_and_chunk_variant_need_no_external_source_inputs() -> None:
+    embedded_header = {
+        "sections": {
+            qualify.EMBEDDED_CALIBRATION_EVIDENCE_SECTION: {
+                "offset": 0,
+                "size": 1,
+            }
+        }
+    }
+    for label in ("base", "chunk variant"):
+        qualify._validate_calibration_source_inputs(
+            label=label,
+            header=embedded_header,
+            evidence_path=None,
+            raw_paths=(),
+        )
+
+
+def test_cli_rejects_unpaired_chunk_variant_source_inputs(
+    tmp_path: Path,
+) -> None:
+    bundle, _ = _write_base_bundle(tmp_path / "sealed.trtfb")
+    base_source = tmp_path / "base-source.json"
+    raw0 = tmp_path / "base-process-00.raw.json"
+    raw1 = tmp_path / "base-process-01.raw.json"
+    variant_source = tmp_path / "variant-source.json"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(MODULE_PATH),
+            "--bundle",
+            str(bundle),
+            "--model",
+            TEST_SPEC.model_id,
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--runner-cuda-visible-device",
+            "0",
+            "--base-calibration-source-evidence",
+            str(base_source),
+            "--base-calibration-source-raw-capture",
+            str(raw0),
+            "--base-calibration-source-raw-capture",
+            str(raw1),
+            "--chunk-variant-calibration-source-evidence",
+            str(variant_source),
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "chunk-variant calibration source inputs require "
+        "--chunk-variant-bundle"
+        in completed.stderr
+    )
+
+
 def test_runner_child_environment_overrides_only_the_child(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -229,6 +374,1288 @@ def test_runner_child_environment_overrides_only_the_child(
     assert completed.returncode == 0
     assert completed.stdout.strip() == "3"
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "2"
+
+
+def _profile_sweep_test_contract() -> dict:
+    return {
+        "contract_version": 2,
+        "qualified_model_id": TEST_SPEC.model_id,
+        "model_context_limit": TEST_SPEC.context_limit,
+        "prefill_chunk_limit": TEST_SPEC.chunk_limit,
+        "kv_bytes_per_token": TEST_SPEC.kv_bytes_per_token,
+        "active_kv_profile_limits": list(TEST_SPEC.buckets),
+        "module_residency_calibration": {
+            "cuda_module_loading_mode": "lazy",
+            "qualified_runtime_stack_sha256": "c" * 64,
+            "plan_set_sha256": _MODULE_RESIDENCY_PLAN_SET_SHA256,
+            "evidence_sha256": _MODULE_RESIDENCY_EVIDENCE_SHA256,
+            "plans": [
+                {
+                    "section_name": "engine_plan",
+                    "section_sha256": "d" * 64,
+                    "role": "decode",
+                    "optimization_profile_count": len(TEST_SPEC.buckets),
+                },
+                {
+                    "section_name": "prefill_engine_plan",
+                    "section_sha256": "e" * 64,
+                    "role": "prefill",
+                    "optimization_profile_count": 1,
+                },
+            ],
+            "profile_reserves": [
+                {
+                    "covering_profile_limit": limit,
+                    "cumulative_reserve_bytes": (
+                        (index + 1) * 256 * 1024 * 1024
+                    ),
+                }
+                for index, limit in enumerate(TEST_SPEC.buckets)
+            ],
+        },
+    }
+
+
+def _profile_sweep_test_trace(
+    tmp_path: Path,
+) -> tuple[dict, tuple[Path, ...], tuple[int, ...], Path]:
+    contract = _profile_sweep_test_contract()
+    prompt_lengths = qualify._profile_sweep_prompt_lengths(
+        TEST_SPEC.buckets,
+        model_context_limit=TEST_SPEC.context_limit,
+    )
+    token_paths: list[Path] = []
+    for index, length in enumerate(prompt_lengths):
+        token_path = tmp_path / f"profile-{index:02d}.tokens.txt"
+        qualify._write_tokens(
+            token_path,
+            qualify.deterministic_token_ids(length, TEST_SPEC.vocab_size),
+        )
+        token_paths.append(token_path)
+    logits_path = tmp_path / "runner-logits.bin"
+    logits = np.asarray([[1.0, 2.0, 3.0]], dtype=np.float32)
+    logits_path.write_bytes(
+        qualify.LOGITS_HEADER.pack(
+            qualify.LOGITS_MAGIC,
+            1,
+            1,
+            logits.shape[0],
+            logits.shape[1],
+        )
+        + logits.astype("<f4").tobytes()
+    )
+    terminal = contract["module_residency_calibration"][
+        "profile_reserves"
+    ][-1]
+    receipt = {
+        "receipt_schema_version": 4,
+        "contract_version": 2,
+        "policy": "auto",
+        "request_context_limit": TEST_SPEC.context_limit,
+        "model_context_limit": TEST_SPEC.context_limit,
+        "prefill_chunk_limit": TEST_SPEC.chunk_limit,
+        "runtime_kv_capacity_tokens": TEST_SPEC.context_limit,
+        "effective_request_limit": TEST_SPEC.context_limit,
+        "kv_bytes_per_token": TEST_SPEC.kv_bytes_per_token,
+        "kv_allocation_id": 77,
+        "module_residency_reserve_bytes": terminal[
+            "cumulative_reserve_bytes"
+        ],
+        "module_residency_reserve_profile_limit": terminal[
+            "covering_profile_limit"
+        ],
+        "module_residency_plan_set_sha256": (
+            _MODULE_RESIDENCY_PLAN_SET_SHA256
+        ),
+        "module_residency_evidence_sha256": (
+            _MODULE_RESIDENCY_EVIDENCE_SHA256
+        ),
+        "module_residency_cuda_module_loading_mode": "lazy",
+    }
+    rows_a = []
+    rows_b = []
+    reserve_rows = []
+    previous = 0
+    for index, (token_path, prompt_tokens, limit) in enumerate(
+        zip(token_paths, prompt_lengths, TEST_SPEC.buckets, strict=True)
+    ):
+        common = {
+            "row_index": index,
+            "token_file": str(token_path.resolve()),
+            "prompt_tokens": prompt_tokens,
+            "max_new_tokens": 1,
+            "expected_profile_id": index,
+            "expected_profile_limit": limit,
+            "expected_prompt_lower_exclusive": previous,
+            "profile_match": True,
+            "observed_decode_profile_ids": [index],
+            "selected_token_ids": [index + 1],
+            "step_top1_token_ids": [index + 1],
+            "kv_allocation_id": 77,
+            "runtime_memory_receipt": copy.deepcopy(receipt),
+            "invocation_tuples": [["decode", index]],
+            "invocations": [],
+            "after_request": {},
+        }
+        process_bytes = (index + 1) * 100
+        device_bytes = (index + 1) * 200
+        rows_a.append(
+            {
+                **common,
+                "cumulative_first_use_growth": {
+                    "process_growth_bytes": process_bytes,
+                    "device_wide_growth_bytes": device_bytes,
+                    "cumulative_process_high_water_bytes": process_bytes,
+                    "cumulative_device_wide_high_water_bytes": device_bytes,
+                },
+            }
+        )
+        rows_b.append(
+            {
+                **copy.deepcopy(common),
+                "incremental_growth_from_sweep_b_baseline": {
+                    "process_growth_bytes": 0,
+                    "device_wide_growth_bytes": 0,
+                    "cumulative_process_high_water_bytes": 0,
+                    "cumulative_device_wide_high_water_bytes": 0,
+                },
+                "equivalence_to_sweep_a": {
+                    "selected_token_ids_bitwise_equal": True,
+                    "complete_float32_logits_bitwise_equal": True,
+                    "invocation_tuples_equal": True,
+                    "passed": True,
+                },
+            }
+        )
+        reserve_rows.append(
+            {
+                "profile_id": index,
+                "covering_profile_limit": limit,
+                "cumulative_process_first_use_bytes": process_bytes,
+                "cumulative_device_wide_first_use_bytes": device_bytes,
+            }
+        )
+        previous = limit
+    trace = {
+        "schema_version": 1,
+        "mode": "all_profile_two_sweep",
+        "status": "ok",
+        "error_type": None,
+        "passed": True,
+        "qualification_blockers": [],
+        "qualification_api_version": 1,
+        "model_id": TEST_SPEC.model_id,
+        "pipeline_type": "LlamaTextGenerationPipeline",
+        "cuda_module_loading": {
+            "source": "cuModuleGetLoadingMode",
+            "mode": "lazy",
+            "driver_value": 2,
+        },
+        "protocol": {
+            "schema_version": 1,
+            "execution_order": ["sweep_a", "sweep_b"],
+            "pipeline_load_count": 1,
+            "kv_allocation_count": 1,
+            "max_new_tokens_per_request": 1,
+            "profile_order": "ascending",
+            "second_sweep_process_growth_limit_bytes": 64 * 1024 * 1024,
+        },
+        "input_manifest": [
+            {
+                "row_index": index,
+                "token_file": str(token_path.resolve()),
+                "prompt_tokens": prompt_tokens,
+                "expected_profile_id": index,
+                "expected_profile_limit": limit,
+                "expected_prompt_lower_exclusive": (
+                    0 if index == 0 else TEST_SPEC.buckets[index - 1]
+                ),
+            }
+            for index, (token_path, prompt_tokens, limit) in enumerate(
+                zip(token_paths, prompt_lengths, TEST_SPEC.buckets, strict=True)
+            )
+        ],
+        "stable_kv_allocation_id": 77,
+        "profile_reserve_rows": reserve_rows,
+        "sweep_a": {
+            "rows": rows_a,
+            "cumulative_process_first_use_high_water_bytes": 400,
+            "cumulative_device_wide_first_use_high_water_bytes": 800,
+        },
+        "sweep_b": {
+            "rows": rows_b,
+            "incremental_process_high_water_bytes": 0,
+            "incremental_device_wide_high_water_bytes": 0,
+            "process_growth_limit_bytes": 64 * 1024 * 1024,
+            "process_growth_within_limit": True,
+        },
+        "gates": {
+            "stable_kv_allocation_id": True,
+            "sweep_a_exact_profile_coverage": True,
+            "sweep_b_exact_profile_coverage": True,
+            "selected_token_ids_bitwise_equivalent": True,
+            "complete_float32_logits_bitwise_equivalent": True,
+            "invocation_tuples_equivalent": True,
+            "sweep_b_process_incremental_high_water_within_limit": True,
+        },
+        "memory_sampler": {
+            "source": "nvmlDeviceGetComputeRunningProcesses_v3",
+            "pid": TEST_SAMPLER.pid,
+            "cuda_logical_device_index": 0,
+            "physical_device_index": TEST_SAMPLER.physical_device_index,
+            "pci_bus_id": TEST_SAMPLER.pci_bus_id,
+            "gpu_uuid": TEST_SAMPLER.gpu_uuid,
+            "captures_all_compute_processes": True,
+            "device_memory_source": "nvmlDeviceGetMemoryInfo_v2",
+        },
+        "logits_artifact": {
+            "format": "trtmc-qualification-logits-v1",
+            "dtype": "float32",
+            "rows": logits.shape[0],
+            "vocab_size": logits.shape[1],
+            "path": str(logits_path.resolve()),
+        },
+    }
+    return trace, tuple(token_paths), prompt_lengths, logits_path
+
+
+def _source_calibration_fixture(
+    tmp_path: Path,
+    *,
+    receipt_plan_tamper: bool = False,
+) -> tuple[Path, Path, tuple[Path, Path], Path, dict]:
+    runner = tmp_path / "qualifier-runner"
+    runner.write_bytes(b"manifest-bound-qualifier")
+    decode_plan = b"bootstrap-decode-plan"
+    prefill_plan = b"bootstrap-prefill-plan"
+    runtime_stack = {
+        "sm": "sm103",
+        "tensorrt": "11.2.0.113",
+        "cuda_runtime": "13.3",
+        "cudnn_backend": "9.20.0",
+        "cudnn_frontend_revision": (
+            "7b9b711c22b6823e87150213ecd8449260db8610"
+        ),
+        "nvrtc": "13.3",
+        "driver": "580.105.08",
+    }
+    plans = [
+        {
+            "section_name": "engine_plan",
+            "section_sha256": hashlib.sha256(
+                decode_plan
+            ).hexdigest(),
+            "role": "decode",
+            "optimization_profile_count": len(TEST_SPEC.buckets),
+        },
+        {
+            "section_name": "prefill_engine_plan",
+            "section_sha256": hashlib.sha256(
+                prefill_plan
+            ).hexdigest(),
+            "role": "prefill",
+            "optimization_profile_count": 1,
+        },
+    ]
+    contract = _profile_sweep_test_contract()
+    contract.update(
+        {
+            "qualified_model_id": TEST_SPEC.model_id,
+            "qualified_runtime_stack": runtime_stack,
+        }
+    )
+    calibration = contract["module_residency_calibration"]
+    calibration.update(
+        {
+            "qualified_runtime_stack_sha256": (
+                qualify.qualified_runtime_stack_sha256(runtime_stack)
+            ),
+            "plans": plans,
+            "plan_set_sha256": (
+                qualify.module_residency_plan_set_sha256(plans)
+            ),
+            "evidence_sha256": "0" * 64,
+        }
+    )
+    source_bundle = tmp_path / "bootstrap-source.trtfb"
+    sections = {
+        "engine_plan": {"offset": 0, "size": len(decode_plan)},
+        "prefill_engine_plan": {
+            "offset": len(decode_plan),
+            "size": len(prefill_plan),
+        },
+    }
+    source_header = {
+        "model_id": TEST_SPEC.model_id,
+        "vocab_size": TEST_SPEC.vocab_size,
+        "runtime_memory": contract,
+        "sections": sections,
+    }
+    raw_header = json.dumps(source_header).encode("utf-8")
+    source_bundle.write_bytes(
+        qualify.BUNDLE_MAGIC
+        + struct.pack("<Q", len(raw_header))
+        + raw_header
+        + decode_plan
+        + prefill_plan
+    )
+
+    prompt_lengths = qualify._profile_sweep_prompt_lengths(
+        TEST_SPEC.buckets,
+        model_context_limit=TEST_SPEC.context_limit,
+    )
+    per_process_rows: list[list[dict]] = []
+    raw_paths: list[Path] = []
+    runs: list[dict] = []
+    for process_index in range(qualify.PROFILE_SWEEP_PROCESS_COUNT):
+        process_dir = tmp_path / f"process-{process_index:02d}"
+        process_dir.mkdir()
+        trace, token_paths, _, logits_path = _profile_sweep_test_trace(
+            process_dir
+        )
+        pid = 700 + process_index
+        trace["memory_sampler"]["pid"] = pid
+        for sweep_name in ("sweep_a", "sweep_b"):
+            for row in trace[sweep_name]["rows"]:
+                receipt = row["runtime_memory_receipt"]
+                receipt["module_residency_plan_set_sha256"] = (
+                    "f" * 64
+                    if receipt_plan_tamper
+                    else calibration["plan_set_sha256"]
+                )
+                receipt["module_residency_evidence_sha256"] = "0" * 64
+        command = qualify._profile_sweep_command(
+            runner=runner.resolve(),
+            bundle=source_bundle.resolve(),
+            token_paths=token_paths,
+            logits_path=logits_path,
+            model_context_limit=TEST_SPEC.context_limit,
+        )
+        (process_dir / "command.json").write_text(
+            json.dumps(command) + "\n",
+            encoding="utf-8",
+        )
+        raw_trace = json.dumps(trace, sort_keys=True) + "\n"
+        (process_dir / "runner.stdout.log").write_text(
+            raw_trace,
+            encoding="utf-8",
+        )
+        (process_dir / "runner.stderr.log").write_text(
+            "",
+            encoding="utf-8",
+        )
+        (process_dir / "returncode.txt").write_text(
+            "0\n",
+            encoding="utf-8",
+        )
+        raw_path = process_dir / "runner-output.raw.json"
+        raw_path.write_text(raw_trace, encoding="utf-8")
+        (process_dir / "runner-trace.json").write_text(
+            json.dumps(trace, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        anchor = qualify.SamplerTrustAnchor(
+            pid=pid,
+            cuda_logical_device_index=0,
+            physical_device_index=TEST_SAMPLER.physical_device_index,
+            pci_bus_id=TEST_SAMPLER.pci_bus_id,
+            gpu_uuid=TEST_SAMPLER.gpu_uuid,
+        )
+        qualify._write_profile_sweep_capture_manifest(
+            process_dir,
+            child_pid=pid,
+            sampler_anchor=anchor,
+            token_paths=token_paths,
+        )
+        capture_manifest = process_dir / "capture-manifest.json"
+        runs.append(
+            {
+                "process_index": process_index,
+                "runner_pid": pid,
+                "gpu_uuid": TEST_SAMPLER.gpu_uuid,
+                "capture_manifest_sha256": qualify._sha256(
+                    capture_manifest
+                ),
+                "raw_trace_sha256": qualify._sha256(raw_path),
+                "logits_sha256": qualify._sha256(logits_path),
+            }
+        )
+        per_process_rows.append(trace["profile_reserve_rows"])
+        raw_paths.append(raw_path)
+    aggregate_rows = qualify.aggregate_profile_sweep_calibration_rows(
+        per_process_rows,
+        active_profile_limits=TEST_SPEC.buckets,
+        configured_profile_reserves=calibration["profile_reserves"],
+    )
+    observed_rows = [
+        {
+            field: row[field]
+            for field in (
+                "profile_id",
+                "covering_profile_limit",
+                "process_first_use_bytes_by_process",
+                "device_wide_first_use_bytes_by_process",
+                "row_wise_max_process_first_use_bytes",
+                "row_wise_max_device_wide_first_use_bytes",
+                "row_wise_max_first_use_bytes",
+                "calibration_guard_bytes",
+                "required_guarded_process_reserve_bytes",
+            )
+        }
+        for row in aggregate_rows
+    ]
+    document = {
+        "schema_version": qualify.PROFILE_SWEEP_CALIBRATION_SCHEMA,
+        "measurement_kind": "nvml_process_cumulative_first_use",
+        "aggregation": "row_wise_max_across_independent_processes",
+        "independent_process_count": qualify.PROFILE_SWEEP_PROCESS_COUNT,
+        "model_id": TEST_SPEC.model_id,
+        "model_context_limit": TEST_SPEC.context_limit,
+        "active_kv_profile_limits": list(TEST_SPEC.buckets),
+        "prompt_lengths": list(prompt_lengths),
+        "terminal_active_length": TEST_SPEC.context_limit,
+        "runner_sha256": qualify._sha256(runner),
+        "contract_provenance": {
+            "qualified_runtime_stack_sha256": calibration[
+                "qualified_runtime_stack_sha256"
+            ],
+            "plan_set_sha256": calibration["plan_set_sha256"],
+            "cuda_module_loading_mode": "lazy",
+            "plans": plans,
+        },
+        "runs": runs,
+        "profile_rows": observed_rows,
+        "recommended_profile_reserves": [
+            {
+                "covering_profile_limit": row[
+                    "covering_profile_limit"
+                ],
+                "cumulative_reserve_bytes": row[
+                    "required_guarded_process_reserve_bytes"
+                ],
+            }
+            for row in aggregate_rows
+        ],
+        "gates": {
+            "two_independent_processes": True,
+            "terminal_decode_reaches_model_limit": True,
+            "all_fresh_process_sweeps_passed": True,
+        },
+        "passed": True,
+    }
+    evidence_path = tmp_path / "calibration-evidence.json"
+    evidence_path.write_text(
+        json.dumps(document, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    final_contract = copy.deepcopy(contract)
+    final_contract["module_residency_calibration"][
+        "evidence_sha256"
+    ] = qualify._sha256(evidence_path)
+    return (
+        runner,
+        evidence_path,
+        (raw_paths[0], raw_paths[1]),
+        source_bundle,
+        final_contract,
+    )
+
+
+def test_profile_sweep_prompts_cover_each_interval_and_terminal_a_equals_m() -> None:
+    assert qualify._profile_sweep_prompt_lengths(
+        TEST_SPEC.buckets,
+        model_context_limit=TEST_SPEC.context_limit,
+    ) == (127, 255, 511, 2_047)
+    with pytest.raises(
+        ValueError,
+        match="cannot choose a one-decode prompt",
+    ):
+        qualify._profile_sweep_prompt_lengths(
+            (2, 3),
+            model_context_limit=3,
+        )
+
+
+def test_qualification_model_resolution_requires_sealed_v2_bundle(
+    tmp_path: Path,
+) -> None:
+    _, header = _write_base_bundle(tmp_path / "sealed.trtfb")
+    assert qualify._resolve_spec(header) == TEST_SPEC
+
+    provisional = copy.deepcopy(header)
+    provisional["runtime_memory"]["contract_version"] = 1
+    del provisional["runtime_memory"]["module_residency_calibration"]
+    with pytest.raises(ValueError, match="contract_version"):
+        qualify._resolve_spec(provisional)
+
+
+def test_profile_sweep_trace_strictly_binds_v2_receipt_and_two_sweeps(
+    tmp_path: Path,
+) -> None:
+    trace, token_paths, prompt_lengths, logits_path = (
+        _profile_sweep_test_trace(tmp_path)
+    )
+
+    rows = qualify._validate_profile_sweep_trace(
+        trace,
+        contract=_profile_sweep_test_contract(),
+        expected_model_id=TEST_SPEC.model_id,
+        token_paths=token_paths,
+        prompt_lengths=prompt_lengths,
+        logits_path=logits_path,
+        expected_sampler=TEST_SAMPLER,
+    )
+
+    assert [row["profile_id"] for row in rows] == [0, 1, 2, 3]
+    assert rows[-1]["cumulative_process_first_use_bytes"] == 400
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error"),
+    (
+        ("loading-mode", "module-loading mode"),
+        ("receipt-evidence", "does not bind the sealed bundle"),
+        ("profile-row", "exact profile"),
+        ("a-b-equivalence", "incomplete A/B equivalence"),
+        ("second-sweep-growth", "high-water summary"),
+    ),
+)
+def test_profile_sweep_trace_fails_closed(
+    tmp_path: Path,
+    mutation: str,
+    error: str,
+) -> None:
+    trace, token_paths, prompt_lengths, logits_path = (
+        _profile_sweep_test_trace(tmp_path)
+    )
+    if mutation == "loading-mode":
+        trace["cuda_module_loading"]["mode"] = "eager"
+    elif mutation == "receipt-evidence":
+        trace["sweep_a"]["rows"][0]["runtime_memory_receipt"][
+            "module_residency_evidence_sha256"
+        ] = "f" * 64
+    elif mutation == "profile-row":
+        trace["sweep_b"]["rows"][1]["observed_decode_profile_ids"] = [0]
+    elif mutation == "a-b-equivalence":
+        trace["sweep_b"]["rows"][2]["equivalence_to_sweep_a"][
+            "passed"
+        ] = False
+    elif mutation == "second-sweep-growth":
+        trace["sweep_b"]["incremental_process_high_water_bytes"] = (
+            64 * 1024 * 1024 + 1
+        )
+    else:  # pragma: no cover
+        raise AssertionError(mutation)
+
+    with pytest.raises(RuntimeError, match=error):
+        qualify._validate_profile_sweep_trace(
+            trace,
+            contract=_profile_sweep_test_contract(),
+            expected_model_id=TEST_SPEC.model_id,
+            token_paths=token_paths,
+            prompt_lengths=prompt_lengths,
+            logits_path=logits_path,
+            expected_sampler=TEST_SAMPLER,
+        )
+
+
+def test_source_calibration_reopens_doc_raw_captures_and_bootstrap_plans(
+    tmp_path: Path,
+) -> None:
+    runner, evidence, raws, _source_bundle, contract = (
+        _source_calibration_fixture(tmp_path)
+    )
+
+    binding = qualify._validate_source_calibration_evidence(
+        evidence_path=evidence,
+        raw_capture_paths=raws,
+        runner=runner,
+        contract=contract,
+        spec=TEST_SPEC,
+    )
+
+    assert binding["passed"]
+    assert binding["document"]["sha256"] == contract[
+        "module_residency_calibration"
+    ]["evidence_sha256"]
+    assert len(binding["raw_captures"]) == 2
+    assert binding["bootstrap_cycle_exemption"] == {
+        "field": "module_residency_evidence_sha256",
+        "reason": (
+            "bootstrap raw receipts predate the evidence document "
+            "whose SHA is sealed into the final contract"
+        ),
+        "observed_bootstrap_values": ["0" * 64],
+        "final_sealed_value": contract[
+            "module_residency_calibration"
+        ]["evidence_sha256"],
+        "all_other_receipt_provenance_replayed": True,
+    }
+
+
+def test_source_calibration_rejects_raw_capture_hash_tamper(
+    tmp_path: Path,
+) -> None:
+    runner, evidence, raws, _source_bundle, contract = (
+        _source_calibration_fixture(tmp_path)
+    )
+    raws[1].write_text(
+        raws[1].read_text(encoding="utf-8") + " ",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="raw/capture-manifest hash mismatch",
+    ):
+        qualify._validate_source_calibration_evidence(
+            evidence_path=evidence,
+            raw_capture_paths=raws,
+            runner=runner,
+            contract=contract,
+            spec=TEST_SPEC,
+        )
+
+
+def test_source_calibration_rejects_bootstrap_plan_byte_tamper(
+    tmp_path: Path,
+) -> None:
+    runner, evidence, raws, source_bundle, contract = (
+        _source_calibration_fixture(tmp_path)
+    )
+    payload = bytearray(source_bundle.read_bytes())
+    payload[-1] ^= 1
+    source_bundle.write_bytes(payload)
+
+    with pytest.raises(
+        RuntimeError,
+        match="bootstrap bundle plan bytes differ",
+    ):
+        qualify._validate_source_calibration_evidence(
+            evidence_path=evidence,
+            raw_capture_paths=raws,
+            runner=runner,
+            contract=contract,
+            spec=TEST_SPEC,
+        )
+
+
+def test_source_calibration_exempts_only_evidence_sha_cycle(
+    tmp_path: Path,
+) -> None:
+    runner, evidence, raws, _source_bundle, contract = (
+        _source_calibration_fixture(
+            tmp_path,
+            receipt_plan_tamper=True,
+        )
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="runtime-memory receipt does not bind.*plan_set",
+    ):
+        qualify._validate_source_calibration_evidence(
+            evidence_path=evidence,
+            raw_capture_paths=raws,
+            runner=runner,
+            contract=contract,
+            spec=TEST_SPEC,
+        )
+
+
+def _embedded_calibration_fixture(
+    tmp_path: Path,
+    *,
+    raw_sweep_path_tamper: bool = False,
+) -> tuple[Path, Path, dict]:
+    """Write one self-contained bundle with two replayable build captures."""
+
+    runner = tmp_path / "qualifier-runner"
+    runner.write_bytes(b"embedded-manifest-bound-qualifier")
+    runner.chmod(0o755)
+    _unused, template_header = _write_base_bundle(
+        tmp_path / "template.trtfb"
+    )
+    final_contract = copy.deepcopy(template_header["runtime_memory"])
+    decode_plan = b"embedded-decode-plan"
+    prefill_plan = b"embedded-prefill-plan"
+    plans = [
+        {
+            "section_name": "engine_plan",
+            "section_sha256": hashlib.sha256(decode_plan).hexdigest(),
+            "role": "decode",
+            "optimization_profile_count": len(TEST_SPEC.buckets),
+        },
+        {
+            "section_name": "prefill_engine_plan",
+            "section_sha256": hashlib.sha256(prefill_plan).hexdigest(),
+            "role": "prefill",
+            "optimization_profile_count": 1,
+        },
+    ]
+    calibration = final_contract["module_residency_calibration"]
+    calibration["plans"] = plans
+    calibration["plan_set_sha256"] = (
+        qualify.module_residency_plan_set_sha256(plans)
+    )
+    bootstrap_contract = copy.deepcopy(final_contract)
+    bootstrap_calibration = bootstrap_contract[
+        "module_residency_calibration"
+    ]
+    bootstrap_calibration["plans"] = plans
+    bootstrap_calibration["plan_set_sha256"] = calibration[
+        "plan_set_sha256"
+    ]
+    bootstrap_calibration["evidence_sha256"] = "0" * 64
+    bootstrap_calibration["profile_reserves"] = [
+        {
+            "covering_profile_limit": limit,
+            "cumulative_reserve_bytes": 1,
+        }
+        for limit in TEST_SPEC.buckets
+    ]
+    prompt_lengths = qualify._profile_sweep_prompt_lengths(
+        TEST_SPEC.buckets,
+        model_context_limit=TEST_SPEC.context_limit,
+    )
+
+    def canonical(value: object) -> bytes:
+        return (
+            json.dumps(
+                value,
+                indent=2,
+                sort_keys=True,
+                separators=(",", ": "),
+            )
+            + "\n"
+        ).encode("utf-8")
+
+    capture_sections: list[tuple[str, bytes]] = []
+    runs: list[dict] = []
+    process_rows: list[list[dict]] = []
+    for process_index in range(qualify.PROFILE_SWEEP_PROCESS_COUNT):
+        capture_dir = tmp_path / f"source-process-{process_index:02d}"
+        capture_dir.mkdir()
+        trace, token_paths, _, logits_path = _profile_sweep_test_trace(
+            capture_dir
+        )
+        pid = 900 + process_index
+        trace["memory_sampler"]["pid"] = pid
+        for sweep_name in ("sweep_a", "sweep_b"):
+            for row in trace[sweep_name]["rows"]:
+                receipt = row["runtime_memory_receipt"]
+                receipt["module_residency_reserve_bytes"] = 1
+                receipt["module_residency_plan_set_sha256"] = calibration[
+                    "plan_set_sha256"
+                ]
+                receipt["module_residency_evidence_sha256"] = "0" * 64
+        prefix = (
+            f"{qualify.EMBEDDED_CALIBRATION_ROOT}/"
+            f"process-{process_index:02d}"
+        )
+        recorded_bootstrap = (
+            tmp_path / "private-bootstrap.trtfb"
+        ).resolve()
+        command = qualify._profile_sweep_command(
+            runner=runner.resolve(),
+            bundle=recorded_bootstrap,
+            token_paths=token_paths,
+            logits_path=logits_path,
+            model_context_limit=TEST_SPEC.context_limit,
+        )
+        if raw_sweep_path_tamper and process_index == 1:
+            trace["sweep_b"]["rows"][0]["token_file"] = str(
+                (capture_dir / "different-profile.tokens.txt").resolve()
+            )
+        raw_trace = (
+            json.dumps(trace, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        artifact_payloads = {
+            "command": ("command.json", canonical(command)),
+            "returncode": ("returncode.txt", b"0\n"),
+            "runner_stdout": ("runner.stdout.log", raw_trace),
+            "runner_stderr": ("runner.stderr.log", b""),
+            "raw_trace": ("runner-output.raw.json", raw_trace),
+            "normalized_trace": (
+                "runner-trace.json",
+                canonical(trace),
+            ),
+            "logits": ("runner-logits.bin", logits_path.read_bytes()),
+        }
+        artifact_payloads.update(
+            {
+                f"profile_tokens_{index:02d}": (
+                    f"profile-{index:02d}.tokens.txt",
+                    token_path.read_bytes(),
+                )
+                for index, token_path in enumerate(token_paths)
+            }
+        )
+        artifacts: dict[str, dict] = {}
+        for logical_name, (filename, payload) in artifact_payloads.items():
+            section_name = f"{prefix}/{filename}"
+            capture_sections.append((section_name, payload))
+            artifacts[logical_name] = {
+                "section_name": section_name,
+                "size_bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        anchor = {
+            "pid": pid,
+            "cuda_logical_device_index": 0,
+            "physical_device_index": TEST_SAMPLER.physical_device_index,
+            "pci_bus_id": TEST_SAMPLER.pci_bus_id,
+            "gpu_uuid": TEST_SAMPLER.gpu_uuid,
+        }
+        manifest = {
+            "schema": qualify.EMBEDDED_CALIBRATION_CAPTURE_SCHEMA,
+            "process_index": process_index,
+            "runner_pid": pid,
+            "gpu_uuid": TEST_SAMPLER.gpu_uuid,
+            "sampler_trust_anchor": anchor,
+            "artifacts": artifacts,
+        }
+        manifest_name = f"{prefix}/capture-manifest.json"
+        manifest_bytes = canonical(manifest)
+        capture_sections.append((manifest_name, manifest_bytes))
+        runs.append(
+            {
+                "process_index": process_index,
+                "runner_pid": pid,
+                "gpu_uuid": TEST_SAMPLER.gpu_uuid,
+                "sampler_trust_anchor": anchor,
+                "capture_manifest": {
+                    "section_name": manifest_name,
+                    "size_bytes": len(manifest_bytes),
+                    "sha256": hashlib.sha256(
+                        manifest_bytes
+                    ).hexdigest(),
+                },
+                "artifacts": artifacts,
+            }
+        )
+        process_rows.append(trace["profile_reserve_rows"])
+    aggregated = qualify.aggregate_profile_sweep_calibration_rows(
+        process_rows,
+        active_profile_limits=TEST_SPEC.buckets,
+        configured_profile_reserves=calibration["profile_reserves"],
+    )
+    observed_rows = [
+        {
+            field: row[field]
+            for field in (
+                "profile_id",
+                "covering_profile_limit",
+                "process_first_use_bytes_by_process",
+                "device_wide_first_use_bytes_by_process",
+                "row_wise_max_process_first_use_bytes",
+                "row_wise_max_device_wide_first_use_bytes",
+                "row_wise_max_first_use_bytes",
+                "calibration_guard_bytes",
+                "required_guarded_process_reserve_bytes",
+            )
+        }
+        for row in aggregated
+    ]
+    recommended = [
+        {
+            "covering_profile_limit": row["covering_profile_limit"],
+            "cumulative_reserve_bytes": row[
+                "required_guarded_process_reserve_bytes"
+            ],
+        }
+        for row in aggregated
+    ]
+    calibration["profile_reserves"] = recommended
+    runner_stat = runner.stat()
+    helper_identity = {
+        "device": runner_stat.st_dev,
+        "inode": runner_stat.st_ino,
+        "size_bytes": runner_stat.st_size,
+        "mtime_ns": runner_stat.st_mtime_ns,
+        "sha256": qualify._sha256(runner),
+    }
+    evidence = {
+        "schema": qualify.EMBEDDED_CALIBRATION_EVIDENCE_SCHEMA,
+        "measurement_kind": "nvml_process_cumulative_first_use",
+        "aggregation": "row_wise_process_max_plus_64mib_guard",
+        "independent_process_count": 2,
+        "model_id": TEST_SPEC.model_id,
+        "model_context_limit": TEST_SPEC.context_limit,
+        "active_kv_profile_limits": list(TEST_SPEC.buckets),
+        "prompt_lengths": list(prompt_lengths),
+        "terminal_active_length": TEST_SPEC.context_limit,
+        "helper_identity_before": helper_identity,
+        "helper_identity_after": helper_identity,
+        "contract_provenance": {
+            "qualified_runtime_stack_sha256": calibration[
+                "qualified_runtime_stack_sha256"
+            ],
+            "plan_set_sha256": calibration["plan_set_sha256"],
+            "cuda_module_loading_mode": "lazy",
+            "plans": plans,
+        },
+        "bootstrap_contract": bootstrap_contract,
+        "bootstrap_only": {
+            "profile_reserve_bytes": 1,
+            "evidence_sha256": "0" * 64,
+            "never_published": True,
+        },
+        "runs": runs,
+        "profile_rows": observed_rows,
+        "recommended_profile_reserves": recommended,
+        "gates": {
+            "two_distinct_processes": True,
+            "single_gpu_identity": True,
+            "all_profile_upper_edges_executed": True,
+            "terminal_decode_reaches_model_limit": True,
+            "second_sweep_growth_within_limit": True,
+            "raw_plan_receipts_match_bootstrap": True,
+            "all_capture_sections_embedded_and_hashed": True,
+            "helper_identity_unchanged": True,
+        },
+        "passed": True,
+    }
+    evidence_bytes = canonical(evidence)
+    calibration["evidence_sha256"] = hashlib.sha256(
+        evidence_bytes
+    ).hexdigest()
+    all_sections = [
+        ("engine_plan", decode_plan),
+        ("prefill_engine_plan", prefill_plan),
+        (qualify.EMBEDDED_CALIBRATION_EVIDENCE_SECTION, evidence_bytes),
+        *capture_sections,
+    ]
+    offset = 0
+    section_table: dict[str, dict[str, int]] = {}
+    for name, payload in all_sections:
+        section_table[name] = {"offset": offset, "size": len(payload)}
+        offset += len(payload)
+    header = {
+        "model_id": TEST_SPEC.model_id,
+        "precision": "bf16",
+        "vocab_size": TEST_SPEC.vocab_size,
+        "runtime_memory": final_contract,
+        "sections": section_table,
+    }
+    header_bytes = json.dumps(header, sort_keys=True).encode("utf-8")
+    bundle = tmp_path / "embedded.trtfb"
+    bundle.write_bytes(
+        qualify.BUNDLE_MAGIC
+        + struct.pack("<Q", len(header_bytes))
+        + header_bytes
+        + b"".join(payload for _name, payload in all_sections)
+    )
+    return runner, bundle, header
+
+
+def test_embedded_calibration_reopens_all_bundle_sections(
+    tmp_path: Path,
+) -> None:
+    runner, bundle, header = _embedded_calibration_fixture(tmp_path)
+    binding = qualify._validate_embedded_source_calibration_evidence(
+        bundle=bundle,
+        header=header,
+        runner=runner,
+        contract=header["runtime_memory"],
+        spec=TEST_SPEC,
+    )
+    assert binding["source"] == "embedded_bundle_sections"
+    assert (
+        binding["evidence_schema"]
+        == qualify.EMBEDDED_CALIBRATION_EVIDENCE_SCHEMA
+    )
+    assert binding["passed"] is True
+    assert len(binding["capture_manifests"]) == 2
+    assert len(binding["raw_captures"]) == 2
+    assert binding["evidence_section"]["sha256"] == header[
+        "runtime_memory"
+    ]["module_residency_calibration"]["evidence_sha256"]
+
+
+def test_embedded_calibration_rejects_section_byte_tamper(
+    tmp_path: Path,
+) -> None:
+    runner, bundle, header = _embedded_calibration_fixture(tmp_path)
+    raw_name = (
+        f"{qualify.EMBEDDED_CALIBRATION_ROOT}/"
+        "process-01/runner-output.raw.json"
+    )
+    raw_entry = header["sections"][raw_name]
+    header_size = struct.unpack("<Q", bundle.read_bytes()[8:16])[0]
+    payload = bytearray(bundle.read_bytes())
+    payload[16 + header_size + raw_entry["offset"]] ^= 1
+    bundle.write_bytes(payload)
+    with pytest.raises(RuntimeError, match="does not match its receipt"):
+        qualify._validate_embedded_source_calibration_evidence(
+            bundle=bundle,
+            header=header,
+            runner=runner,
+            contract=header["runtime_memory"],
+            spec=TEST_SPEC,
+        )
+
+
+def test_embedded_calibration_rejects_helper_byte_tamper(
+    tmp_path: Path,
+) -> None:
+    runner, bundle, header = _embedded_calibration_fixture(tmp_path)
+    runner.write_bytes(runner.read_bytes() + b"tamper")
+    with pytest.raises(RuntimeError, match="helper identity"):
+        qualify._validate_embedded_source_calibration_evidence(
+            bundle=bundle,
+            header=header,
+            runner=runner,
+            contract=header["runtime_memory"],
+            spec=TEST_SPEC,
+        )
+
+
+def test_embedded_calibration_rejects_raw_sweep_token_path_mismatch(
+    tmp_path: Path,
+) -> None:
+    runner, bundle, header = _embedded_calibration_fixture(
+        tmp_path,
+        raw_sweep_path_tamper=True,
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="raw profile token paths disagree.*sweep_b",
+    ):
+        qualify._validate_embedded_source_calibration_evidence(
+            bundle=bundle,
+            header=header,
+            runner=runner,
+            contract=header["runtime_memory"],
+            spec=TEST_SPEC,
+        )
+
+
+def test_profile_sweep_producer_uses_two_processes_and_row_wise_max(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = tmp_path / "runner"
+    bundle = tmp_path / "bundle.trtfb"
+    runner.write_bytes(b"runner")
+    bundle.write_bytes(b"bundle")
+    contract = _profile_sweep_test_contract()
+    header = {
+        "vocab_size": TEST_SPEC.vocab_size,
+        "runtime_memory": {
+            "active_kv_profile_limits": list(TEST_SPEC.buckets),
+        },
+    }
+    monkeypatch.setattr(
+        qualify,
+        "_sealed_profile_sweep_contract",
+        lambda *args, **kwargs: contract,
+    )
+    observed_processes: list[int] = []
+
+    def fake_process(**kwargs: object):
+        evidence_dir = Path(str(kwargs["evidence_dir"]))
+        process_index = int(evidence_dir.name.rsplit("-", 1)[-1])
+        observed_processes.append(process_index)
+        evidence_dir.mkdir(parents=True)
+        prompt_lengths = tuple(kwargs["prompt_lengths"])
+        token_paths = tuple(
+            evidence_dir / f"profile-{index:02d}.tokens.txt"
+            for index in range(len(prompt_lengths))
+        )
+        for token_path, prompt_tokens in zip(
+            token_paths,
+            prompt_lengths,
+            strict=True,
+        ):
+            qualify._write_tokens(
+                token_path,
+                qualify.deterministic_token_ids(
+                    prompt_tokens,
+                    TEST_SPEC.vocab_size,
+                ),
+            )
+        logits_path = evidence_dir / "runner-logits.bin"
+        logits_path.write_bytes(f"logits-{process_index}".encode())
+        command = qualify._profile_sweep_command(
+            runner=runner.resolve(),
+            bundle=bundle.resolve(),
+            token_paths=token_paths,
+            logits_path=logits_path,
+            model_context_limit=TEST_SPEC.context_limit,
+        )
+        (evidence_dir / "command.json").write_text(
+            json.dumps(command) + "\n",
+            encoding="utf-8",
+        )
+        rows = [
+            {
+                "profile_id": index,
+                "covering_profile_limit": limit,
+                "cumulative_process_first_use_bytes": (
+                    (index + 1) * 100 + process_index
+                ),
+                "cumulative_device_wide_first_use_bytes": (
+                    (index + 1) * 200 + process_index
+                ),
+            }
+            for index, limit in enumerate(TEST_SPEC.buckets)
+        ]
+        anchor = qualify.SamplerTrustAnchor(
+            pid=100 + process_index,
+            cuda_logical_device_index=0,
+            physical_device_index=TEST_SAMPLER.physical_device_index,
+            pci_bus_id=TEST_SAMPLER.pci_bus_id,
+            gpu_uuid=TEST_SAMPLER.gpu_uuid,
+        )
+        trace = {
+            "passed": True,
+            "test_process_index": process_index,
+            "sweep_b": {
+                "incremental_process_high_water_bytes": 0,
+            },
+        }
+        raw_trace = json.dumps(trace, sort_keys=True) + "\n"
+        (evidence_dir / "runner.stdout.log").write_text(
+            raw_trace,
+            encoding="utf-8",
+        )
+        (evidence_dir / "runner.stderr.log").write_text(
+            "",
+            encoding="utf-8",
+        )
+        (evidence_dir / "returncode.txt").write_text(
+            "0\n",
+            encoding="utf-8",
+        )
+        (evidence_dir / "runner-output.raw.json").write_text(
+            raw_trace,
+            encoding="utf-8",
+        )
+        (evidence_dir / "runner-trace.json").write_text(
+            json.dumps(trace, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        qualify._write_profile_sweep_capture_manifest(
+            evidence_dir,
+            child_pid=anchor.pid,
+            sampler_anchor=anchor,
+            token_paths=token_paths,
+        )
+        return (
+            trace,
+            rows,
+            anchor,
+        )
+
+    monkeypatch.setattr(
+        qualify,
+        "_run_profile_sweep_process",
+        fake_process,
+    )
+    source_document = tmp_path / "source-calibration-evidence.json"
+    source_document.write_text("{}\n", encoding="utf-8")
+    source_raw_captures = (
+        tmp_path / "source-process-00.raw.json",
+        tmp_path / "source-process-01.raw.json",
+    )
+    for path in source_raw_captures:
+        path.write_text("{}\n", encoding="utf-8")
+    source_binding = {
+        "document": qualify._simple_file_identity(source_document),
+        "raw_captures": [
+            qualify._simple_file_identity(path)
+            for path in source_raw_captures
+        ],
+        "passed": True,
+    }
+    monkeypatch.setattr(
+        qualify,
+        "_validate_source_calibration_evidence",
+        lambda **_kwargs: source_binding,
+    )
+
+    evidence = qualify.produce_profile_sweep_evidence(
+        runner=runner,
+        bundle=bundle,
+        header=header,
+        spec=TEST_SPEC,
+        evidence_dir=tmp_path / "evidence",
+        runner_cuda_visible_device="7",
+        source_calibration_evidence=source_document,
+        source_calibration_raw_captures=source_raw_captures,
+    )
+
+    assert observed_processes == [0, 1]
+    assert evidence["process_count"] == 2
+    final = evidence["aggregation"]["profile_rows"][-1]
+    assert final["process_first_use_bytes_by_process"] == [400, 401]
+    assert final["row_wise_max_process_first_use_bytes"] == 401
+    assert final["row_wise_max_device_wide_first_use_bytes"] == 801
+    assert final["required_guarded_process_reserve_bytes"] == (
+        401 + 64 * 1024 * 1024
+    )
+    assert final[
+        "configured_reserve_covers_process_max_plus_guard"
+    ]
+    assert evidence["source_calibration_evidence"] == source_binding
+    calibration = Path(evidence["fresh_calibration_evidence"]["path"])
+    assert evidence["fresh_calibration_evidence_sha256"] == qualify._sha256(
+        calibration
+    )
+    calibration_payload = json.loads(
+        calibration.read_text(encoding="utf-8")
+    )
+    assert calibration_payload["schema_version"].endswith("/v2")
+    assert "bundle_sha256" not in calibration_payload
+    assert (
+        "evidence_sha256"
+        not in calibration_payload["contract_provenance"]
+    )
+    assert all(
+        "configured_cumulative_reserve_bytes" not in row
+        for row in calibration_payload["profile_rows"]
+    )
+
+    monkeypatch.setattr(
+        qualify,
+        "_read_bundle_header",
+        lambda _bundle: header,
+    )
+    monkeypatch.setattr(
+        qualify,
+        "_validate_profile_sweep_trace",
+        lambda trace, **kwargs: [
+            {
+                "profile_id": index,
+                "covering_profile_limit": limit,
+                "cumulative_process_first_use_bytes": (
+                    (index + 1) * 100 + trace["test_process_index"]
+                ),
+                "cumulative_device_wide_first_use_bytes": (
+                    (index + 1) * 200 + trace["test_process_index"]
+                ),
+            }
+            for index, limit in enumerate(TEST_SPEC.buckets)
+        ],
+    )
+    assert qualify._persisted_profile_sweep_evidence_passed(
+        evidence,
+        runner=runner,
+        bundle=bundle,
+        spec=TEST_SPEC,
+    )
+
+    calibration.write_text(
+        calibration.read_text(encoding="utf-8") + " ",
+        encoding="utf-8",
+    )
+    assert not qualify._persisted_profile_sweep_evidence_passed(
+        evidence,
+        runner=runner,
+        bundle=bundle,
+        spec=TEST_SPEC,
+    )
 
 
 @pytest.mark.parametrize(
@@ -1244,6 +2671,20 @@ def test_qualification_outcome_replays_chunk_variant_artifacts(
             base_artifact_binding is not None
         ),
     )
+    monkeypatch.setattr(
+        qualify,
+        "_persisted_profile_sweep_evidence_passed",
+        lambda _evidence, *, runner, bundle, spec: True,
+    )
+    monkeypatch.setattr(
+        qualify,
+        "_persisted_source_calibration_evidence_passed",
+        lambda _evidence, *, runner, bundle, spec: True,
+    )
+    inputs["profile_sweep_evidence"] = {
+        "base": {"passed": True},
+        "chunk_variant": {"passed": True},
+    }
     case = inputs["selected_cases"][0]
     report = inputs["case_reports"][0]
     inputs["canonical_cases"] = (case,)
@@ -1367,8 +2808,31 @@ def test_qualification_outcome_replays_chunk_variant_artifacts(
     assert result["qualification_gates"][
         "runtime_kv_plugin_binding_passed"
     ]
+    assert result["qualification_gates"][
+        "source_calibration_evidence_reopened"
+    ]
     assert result["passed"]
     assert result["promotion_eligible"]
+
+    monkeypatch.setattr(
+        qualify,
+        "_persisted_source_calibration_evidence_passed",
+        lambda _evidence, *, runner, bundle, spec: False,
+    )
+    missing_source = qualify.evaluate_qualification_outcome(**inputs)
+    assert not missing_source["qualification_gates"][
+        "source_calibration_evidence_reopened"
+    ]
+    assert "source_calibration_evidence_reopened" in missing_source[
+        "qualification_blockers"
+    ]
+    assert not missing_source["passed"]
+    assert not missing_source["promotion_eligible"]
+    monkeypatch.setattr(
+        qualify,
+        "_persisted_source_calibration_evidence_passed",
+        lambda _evidence, *, runner, bundle, spec: True,
+    )
 
     validated_receipt = inputs["variant_build_receipt"]
     inputs["variant_build_receipt"] = None
@@ -1866,16 +3330,38 @@ def _write_base_bundle(
     *,
     spec=TEST_SPEC,
 ) -> tuple[Path, dict]:
+    runtime_stack = {
+        "sm": "sm103",
+        "tensorrt": "11.2.0.113",
+        "cuda_runtime": "13.3",
+        "cudnn_backend": "9.20.0",
+        "cudnn_frontend_revision": (
+            "7b9b711c22b6823e87150213ecd8449260db8610"
+        ),
+        "nvrtc": "13.3",
+        "driver": "580.105.08",
+    }
+    plans = [
+        {
+            "section_name": "engine_plan",
+            "section_sha256": "c" * 64,
+            "role": "decode",
+            "optimization_profile_count": len(spec.buckets),
+        },
+        {
+            "section_name": "prefill_engine_plan",
+            "section_sha256": "d" * 64,
+            "role": "prefill",
+            "optimization_profile_count": 1,
+        },
+    ]
     contract = {
-        "contract_version": 1,
+        "contract_version": 2,
         "qualified_model_id": spec.model_id,
         "qualified_model_revision": "1" * 40,
         "qualified_config_sha256": "2" * 64,
         "qualified_target": "gb300-trt-11.2",
-        "qualified_runtime_stack": {
-            "sm": "sm103",
-            "tensorrt": "11.2.0.113",
-        },
+        "qualified_runtime_stack": runtime_stack,
         "native_kv_plugin_abi": 2,
         "model_context_limit": spec.context_limit,
         "prefill_chunk_limit": spec.chunk_limit,
@@ -1884,6 +3370,26 @@ def _write_base_bundle(
         "kv_bytes_per_token": spec.kv_bytes_per_token,
         "active_kv_profile_limits": list(spec.buckets),
         "runtime_owned": True,
+        "module_residency_calibration": {
+            "schema_version": 1,
+            "measurement_kind": "nvml_process_cumulative_first_use",
+            "cuda_module_loading_mode": "lazy",
+            "qualified_runtime_stack_sha256": (
+                qualify.qualified_runtime_stack_sha256(runtime_stack)
+            ),
+            "plan_set_sha256": (
+                qualify.module_residency_plan_set_sha256(plans)
+            ),
+            "plans": plans,
+            "profile_reserves": [
+                {
+                    "covering_profile_limit": limit,
+                    "cumulative_reserve_bytes": (index + 1) * 1024,
+                }
+                for index, limit in enumerate(spec.buckets)
+            ],
+            "evidence_sha256": "e" * 64,
+        },
     }
     header = {
         "model_id": spec.model_id,
@@ -1966,6 +3472,7 @@ def _write_base_build_receipt(
             "deleted": False,
             "identity_sha256": perf._canonical_sha(plugin),
         },
+        "mapped_dso_identities": [plugin],
     }
     assert set(receipt) == perf.BUILD_RECEIPT_FIELDS
     path = tmp_path / "base-build-receipt.json"
@@ -2166,46 +3673,53 @@ def test_base_artifact_binding_selects_manifest_runtime_plugin_before_load(
         "tensorrt_model_connect.trt_plugins",
         raising=False,
     )
-    monkeypatch.delenv(
+    previous_plugin_environment = os.environ.pop(
         qualify.RUNTIME_KV_PLUGIN_ENV,
-        raising=False,
+        None,
     )
-
-    selected = (
-        qualify._bind_runtime_kv_plugin_from_base_artifacts(
-            binding
+    try:
+        selected = (
+            qualify._bind_runtime_kv_plugin_from_base_artifacts(
+                binding
+            )
         )
-    )
 
-    assert not selected["environment_was_set"]
-    assert selected["selected"] == binding["runtime_kv_plugin"]
-    assert os.environ[qualify.RUNTIME_KV_PLUGIN_ENV] == binding[
-        "runtime_kv_plugin"
-    ]["path"]
-    perf = qualify._load_perf_provenance_module()
-    manifest_plugin = binding["runtime_kv_plugin"]
-    monkeypatch.setattr(
-        perf,
-        "_mapped_library_records",
-        lambda _pid: (
-            {
-                "path": manifest_plugin["path"],
-                "device": manifest_plugin["device"],
-                "inode": manifest_plugin["inode"],
-                "deleted": False,
-            },
-        ),
-    )
-    finalized = qualify._finalize_runtime_kv_plugin_binding(
-        selected
-    )
-    assert finalized["loaded_mapping"]["inode"] == (
-        manifest_plugin["inode"]
-    )
-    assert qualify._runtime_kv_plugin_binding_passed(
-        finalized,
-        base_artifact_binding=binding,
-    )
+        assert not selected["environment_was_set"]
+        assert selected["selected"] == binding["runtime_kv_plugin"]
+        assert os.environ[qualify.RUNTIME_KV_PLUGIN_ENV] == binding[
+            "runtime_kv_plugin"
+        ]["path"]
+        perf = qualify._load_perf_provenance_module()
+        manifest_plugin = binding["runtime_kv_plugin"]
+        monkeypatch.setattr(
+            perf,
+            "_mapped_library_records",
+            lambda _pid: (
+                {
+                    "path": manifest_plugin["path"],
+                    "device": manifest_plugin["device"],
+                    "inode": manifest_plugin["inode"],
+                    "deleted": False,
+                },
+            ),
+        )
+        finalized = qualify._finalize_runtime_kv_plugin_binding(
+            selected
+        )
+        assert finalized["loaded_mapping"]["inode"] == (
+            manifest_plugin["inode"]
+        )
+        assert qualify._runtime_kv_plugin_binding_passed(
+            finalized,
+            base_artifact_binding=binding,
+        )
+    finally:
+        if previous_plugin_environment is None:
+            os.environ.pop(qualify.RUNTIME_KV_PLUGIN_ENV, None)
+        else:
+            os.environ[
+                qualify.RUNTIME_KV_PLUGIN_ENV
+            ] = previous_plugin_environment
 
 
 def test_base_artifact_binding_rejects_wrong_explicit_runtime_plugin(
@@ -2806,16 +4320,19 @@ def _sampled_peak_receipt(
     bytes_per_token: int,
     context_bytes: int = 4096,
 ) -> dict:
+    module_residency_reserve_bytes = 1
+    final_non_kv_overhead_bytes = context_bytes + 1_024 + 2_048 + 4_096
     capacity_decision_free_bytes = math.ceil(
         capacity_tokens * bytes_per_token / 0.9
-    )
+    ) + module_residency_reserve_bytes
     total_bytes = capacity_decision_free_bytes + 1_000_000_000
     settled_free_bytes = max(
         1,
         capacity_decision_free_bytes - capacity_tokens * bytes_per_token,
     )
     return {
-        "receipt_schema_version": 3,
+        "receipt_schema_version": 4,
+        "contract_version": 2,
         "policy": "auto",
         "policy_fraction": 0.9,
         "requested_kv_bytes": 0,
@@ -2826,11 +4343,19 @@ def _sampled_peak_receipt(
         "effective_request_limit": capacity_tokens,
         "kv_bytes_per_token": bytes_per_token,
         "safety_reserve_bytes": 0,
+        **_module_residency_receipt_fields(
+            reserve_bytes=module_residency_reserve_bytes,
+            profile_limit=model_context_limit,
+        ),
         "capacity_decision_free_bytes": capacity_decision_free_bytes,
         "capacity_decision_total_bytes": total_bytes,
         "capacity_decision_device_used_bytes": (
             total_bytes - capacity_decision_free_bytes
         ),
+        "capacity_decision_resident_overhead_bytes": (
+            final_non_kv_overhead_bytes
+        ),
+        "final_non_kv_overhead_delta_bytes": 0,
         "settled_free_bytes": settled_free_bytes,
         "settled_total_bytes": total_bytes,
         "settled_device_used_bytes": total_bytes - settled_free_bytes,
@@ -2840,8 +4365,10 @@ def _sampled_peak_receipt(
         "final_device_used_bytes": (
             total_bytes - capacity_decision_free_bytes
         ),
-        "kv_budget_bytes": math.floor(
-            0.9 * capacity_decision_free_bytes
+        "kv_budget_bytes": qualify._binary64_fraction_floor(
+            0.9,
+            capacity_decision_free_bytes
+            - module_residency_reserve_bytes,
         ),
         "kv_reserved_bytes": capacity_tokens * bytes_per_token,
         "kv_committed_bytes": capacity_tokens * bytes_per_token,
@@ -2889,13 +4416,15 @@ def _bind_receipt_to_phase_samples(receipt: dict, samples: list[dict]) -> None:
             ),
         }
     )
-    receipt["kv_budget_bytes"] = math.floor(
-        receipt["policy_fraction"]
-        * max(
+    receipt["kv_budget_bytes"] = qualify._binary64_fraction_floor(
+        receipt["policy_fraction"],
+        max(
             0,
             receipt["capacity_decision_free_bytes"]
-            - receipt["safety_reserve_bytes"],
-        )
+            - receipt["safety_reserve_bytes"]
+            - receipt["module_residency_reserve_bytes"]
+            - receipt["final_non_kv_overhead_delta_bytes"],
+        ),
     )
 
 
@@ -3571,28 +5100,34 @@ def _attributed_peak_trace(tmp_path: Path) -> dict:
 
     def receipt(samples: list[dict], allocation_id: int) -> dict:
         safety_reserve_bytes = 67_108_864
+        module_residency_reserve_bytes = 512 * 1024 * 1024
         capacity_decision_free_bytes = samples[2]["free_bytes"]
         capacity_decision_total_bytes = samples[2]["total_bytes"]
         settled_free_bytes = samples[3]["free_bytes"]
         settled_total_bytes = samples[3]["total_bytes"]
+        final_non_kv_overhead_bytes = 44_000_000
         return {
-            "receipt_schema_version": 3,
+            "receipt_schema_version": 4,
+            "contract_version": 2,
             "policy": "auto",
             "policy_fraction": 0.9,
             "requested_kv_bytes": 0,
             "safety_reserve_bytes": safety_reserve_bytes,
+            **_module_residency_receipt_fields(
+                reserve_bytes=module_residency_reserve_bytes,
+                profile_limit=2_048,
+            ),
             "model_context_limit": 2_048,
             "prefill_chunk_limit": 512,
             "request_context_limit": 2_048,
             "runtime_kv_capacity_tokens": 2_048,
             "effective_request_limit": 2_048,
             "kv_bytes_per_token": 22_528,
-            "kv_budget_bytes": math.floor(
-                0.9
-                * (
-                    capacity_decision_free_bytes
-                    - safety_reserve_bytes
-                )
+            "kv_budget_bytes": qualify._binary64_fraction_floor(
+                0.9,
+                capacity_decision_free_bytes
+                - safety_reserve_bytes
+                - module_residency_reserve_bytes,
             ),
             "serialized_plan_bytes": 100_000_000,
             "resident_weight_bytes": 400_000_000,
@@ -3602,6 +5137,10 @@ def _attributed_peak_trace(tmp_path: Path) -> dict:
             "ordinary_device_output_bytes": 2_000_000,
             "external_device_output_bytes": 1_000_000,
             "graph_private_device_bytes": 20_000_000,
+            "capacity_decision_resident_overhead_bytes": (
+                final_non_kv_overhead_bytes
+            ),
+            "final_non_kv_overhead_delta_bytes": 0,
             "kv_reserved_bytes": 46_137_344,
             "kv_committed_bytes": 46_137_344,
             "kv_allocation_id": allocation_id,
@@ -3773,6 +5312,7 @@ def _set_attributed_trace_capacity(trace: dict, capacity_tokens: int) -> None:
         ) // numerator
         receipt["safety_reserve_bytes"] = (
             receipt["capacity_decision_free_bytes"]
+            - receipt["module_residency_reserve_bytes"]
             - safely_available_bytes
         )
         receipt["kv_budget_bytes"] = qualify._binary64_fraction_floor(
@@ -3830,22 +5370,26 @@ def test_policy_budget_uses_exact_rational_value_of_binary64_fraction() -> None:
         capacity_tokens=TEST_SPEC.context_limit,
         bytes_per_token=TEST_SPEC.kv_bytes_per_token,
     )
-    total_bytes = safely_available_bytes + 1_000_000_000
-    settled_free_bytes = (
+    capacity_decision_free_bytes = (
         safely_available_bytes
+        + receipt["module_residency_reserve_bytes"]
+    )
+    total_bytes = capacity_decision_free_bytes + 1_000_000_000
+    settled_free_bytes = (
+        capacity_decision_free_bytes
         - receipt["kv_reserved_bytes"]
     )
     receipt.update(
         {
-            "capacity_decision_free_bytes": safely_available_bytes,
+            "capacity_decision_free_bytes": capacity_decision_free_bytes,
             "capacity_decision_total_bytes": total_bytes,
             "capacity_decision_device_used_bytes": (
-                total_bytes - safely_available_bytes
+                total_bytes - capacity_decision_free_bytes
             ),
-            "final_free_bytes": safely_available_bytes,
+            "final_free_bytes": capacity_decision_free_bytes,
             "final_total_bytes": total_bytes,
             "final_device_used_bytes": (
-                total_bytes - safely_available_bytes
+                total_bytes - capacity_decision_free_bytes
             ),
             "settled_free_bytes": settled_free_bytes,
             "settled_total_bytes": total_bytes,
@@ -3876,6 +5420,132 @@ def test_policy_budget_uses_exact_rational_value_of_binary64_fraction() -> None:
             trusted_geometry=TEST_GEOMETRY,
             expected_capacity_tokens=TEST_SPEC.context_limit,
             expected_effective_request_limit=TEST_SPEC.context_limit,
+        )
+
+
+def test_policy_budget_replays_positive_final_overhead_delta() -> None:
+    receipt = _sampled_peak_receipt(
+        model_context_limit=TEST_SPEC.context_limit,
+        prefill_chunk_limit=TEST_SPEC.chunk_limit,
+        capacity_tokens=TEST_SPEC.context_limit,
+        bytes_per_token=TEST_SPEC.kv_bytes_per_token,
+    )
+    delta_bytes = 1_024
+    receipt["capacity_decision_resident_overhead_bytes"] -= delta_bytes
+    receipt["final_non_kv_overhead_delta_bytes"] = delta_bytes
+    receipt["capacity_decision_free_bytes"] += delta_bytes
+    receipt["capacity_decision_device_used_bytes"] -= delta_bytes
+    receipt["final_free_bytes"] += delta_bytes
+    receipt["final_device_used_bytes"] -= delta_bytes
+    policy = {
+        "kind": "max_sequence_length",
+        "requested_tokens": TEST_SPEC.context_limit,
+    }
+
+    qualify._validate_receipt_policy_binding(
+        policy,
+        receipt,
+        trusted_geometry=TEST_GEOMETRY,
+        expected_capacity_tokens=TEST_SPEC.context_limit,
+        expected_effective_request_limit=TEST_SPEC.context_limit,
+    )
+
+    receipt["final_non_kv_overhead_delta_bytes"] = 0
+    with pytest.raises(RuntimeError, match=r"replay O\(final\)-O\(resident\)"):
+        qualify._validate_receipt_policy_binding(
+            policy,
+            receipt,
+            trusted_geometry=TEST_GEOMETRY,
+            expected_capacity_tokens=TEST_SPEC.context_limit,
+            expected_effective_request_limit=TEST_SPEC.context_limit,
+        )
+
+
+def test_policy_binding_accepts_conservative_monotonic_underfill() -> None:
+    model_limit = 4_096
+    initial_capacity = 2_048
+    final_capacity = 1_024
+    receipt = _sampled_peak_receipt(
+        model_context_limit=model_limit,
+        prefill_chunk_limit=TEST_SPEC.chunk_limit,
+        capacity_tokens=initial_capacity,
+        bytes_per_token=TEST_SPEC.kv_bytes_per_token,
+    )
+    receipt["runtime_kv_capacity_tokens"] = final_capacity
+    receipt["effective_request_limit"] = final_capacity
+    receipt["kv_reserved_bytes"] = (
+        final_capacity * TEST_SPEC.kv_bytes_per_token
+    )
+    receipt["kv_committed_bytes"] = receipt["kv_reserved_bytes"]
+    receipt["capped_by_model"] = False
+    receipt["capped_by_request_limit"] = False
+    receipt["settled_free_bytes"] = (
+        receipt["capacity_decision_free_bytes"]
+        - receipt["kv_reserved_bytes"]
+    )
+    receipt["settled_device_used_bytes"] = (
+        receipt["settled_total_bytes"] - receipt["settled_free_bytes"]
+    )
+
+    qualify._validate_receipt_policy_binding(
+        {
+            "kind": "max_sequence_length",
+            "requested_tokens": model_limit,
+        },
+        receipt,
+        trusted_geometry=replace(
+            TEST_GEOMETRY,
+            model_context_limit=model_limit,
+        ),
+        expected_capacity_tokens=final_capacity,
+        expected_effective_request_limit=final_capacity,
+    )
+
+    assert (
+        receipt["kv_budget_bytes"] // receipt["kv_bytes_per_token"]
+        == initial_capacity
+    )
+
+
+def test_policy_binding_rejects_capacity_above_monotonic_ceiling() -> None:
+    model_limit = 4_096
+    initial_capacity = 2_048
+    invalid_capacity = initial_capacity + 1
+    receipt = _sampled_peak_receipt(
+        model_context_limit=model_limit,
+        prefill_chunk_limit=TEST_SPEC.chunk_limit,
+        capacity_tokens=initial_capacity,
+        bytes_per_token=TEST_SPEC.kv_bytes_per_token,
+    )
+    receipt["runtime_kv_capacity_tokens"] = invalid_capacity
+    receipt["effective_request_limit"] = invalid_capacity
+    receipt["kv_reserved_bytes"] = (
+        invalid_capacity * TEST_SPEC.kv_bytes_per_token
+    )
+    receipt["kv_committed_bytes"] = receipt["kv_reserved_bytes"]
+    receipt["capped_by_model"] = False
+    receipt["capped_by_request_limit"] = False
+    receipt["settled_free_bytes"] = (
+        receipt["capacity_decision_free_bytes"]
+        - receipt["kv_reserved_bytes"]
+    )
+    receipt["settled_device_used_bytes"] = (
+        receipt["settled_total_bytes"] - receipt["settled_free_bytes"]
+    )
+
+    with pytest.raises(RuntimeError, match="conservative monotonic.*ceiling"):
+        qualify._validate_receipt_policy_binding(
+            {
+                "kind": "max_sequence_length",
+                "requested_tokens": model_limit,
+            },
+            receipt,
+            trusted_geometry=replace(
+                TEST_GEOMETRY,
+                model_context_limit=model_limit,
+            ),
+            expected_capacity_tokens=invalid_capacity,
+            expected_effective_request_limit=invalid_capacity,
         )
 
 
@@ -3985,6 +5655,7 @@ def test_warmup_evidence_preserves_typed_policy_without_equating_u_and_r(
         safely_available_bytes = (
             receipt["capacity_decision_free_bytes"]
             - receipt["safety_reserve_bytes"]
+            - receipt["module_residency_reserve_bytes"]
         )
         receipt["kv_budget_bytes"] = (
             policy["requested_bytes"]
@@ -4183,13 +5854,23 @@ def test_warmup_evidence_rejects_unattributed_inter_lifetime_drift(
     tmp_path: Path,
 ) -> None:
     trace = _attributed_peak_trace(tmp_path)
+    warmup = trace["load_cycle_warmup"]
     measured = trace["load_cycles"][0]
+    for lifetime in (warmup, measured):
+        lifetime["runtime_memory_receipt"][
+            "module_residency_reserve_bytes"
+        ] = 256 * 1024 * 1024
+    _bind_receipt_to_phase_samples(
+        warmup["runtime_memory_receipt"],
+        warmup["runtime_phase_memory_samples"],
+    )
+    unattributed_drift_bytes = 200_000_000
     for sample in measured["runtime_phase_memory_samples"]:
-        sample["free_bytes"] -= 200_000_000
-        sample["used_bytes"] += 200_000_000
-        sample["nvml_device_free_bytes"] -= 200_000_000
-        sample["nvml_device_used_bytes"] += 200_000_000
-        sample["post_nvml_free_bytes"] -= 200_000_000
+        sample["free_bytes"] -= unattributed_drift_bytes
+        sample["used_bytes"] += unattributed_drift_bytes
+        sample["nvml_device_free_bytes"] -= unattributed_drift_bytes
+        sample["nvml_device_used_bytes"] += unattributed_drift_bytes
+        sample["post_nvml_free_bytes"] -= unattributed_drift_bytes
     samples = measured["runtime_phase_memory_samples"]
     measured["before_load"] = copy.deepcopy(samples[0])
     measured["after_requests"] = copy.deepcopy(samples[-1])
@@ -4255,6 +5936,14 @@ def test_warmup_evidence_allows_bounded_attributed_cold_retention(
     assert (
         result["cold_start_retention_gate"]["device_wide_retained_bytes"]
         == 10_000_000
+    )
+    assert result["cold_start_retention_gate"]["limit_bytes"] == (
+        warmup["runtime_memory_receipt"][
+            "module_residency_reserve_bytes"
+        ]
+    )
+    assert result["cold_start_retention_gate"]["limit_rule"] == (
+        "plan_bound_profile_calibration"
     )
 
 
@@ -4361,6 +6050,64 @@ def test_warmup_evidence_rejects_cold_receipt_stable_field_drift(
         RuntimeError,
         match="does not bind the typed request policy",
     ):
+        _validate_warmup_evidence(trace)
+
+
+def test_warmup_evidence_requires_stable_plan_bound_residency_hashes(
+    tmp_path: Path,
+) -> None:
+    trace = _attributed_peak_trace(tmp_path)
+    trace["load_cycle_warmup"]["runtime_memory_receipt"][
+        "module_residency_evidence_sha256"
+    ] = "c" * 64
+
+    with pytest.raises(
+        RuntimeError,
+        match="cold/measured receipts disagree.*module_residency_evidence_sha256",
+    ):
+        _validate_warmup_evidence(trace)
+
+
+def test_warmup_evidence_rejects_provisional_contract_receipts(
+    tmp_path: Path,
+) -> None:
+    trace = _attributed_peak_trace(tmp_path)
+    for lifetime in (
+        trace["load_cycle_warmup"],
+        trace["load_cycles"][0],
+    ):
+        lifetime["runtime_memory_receipt"]["contract_version"] = 1
+
+    with pytest.raises(
+        RuntimeError,
+        match="does not bind the typed request policy",
+    ):
+        _validate_warmup_evidence(trace)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("module_residency_reserve_bytes", 0),
+        ("module_residency_reserve_profile_limit", 2_047),
+        ("module_residency_plan_set_sha256", "A" * 64),
+        ("module_residency_evidence_sha256", "bad"),
+        ("module_residency_cuda_module_loading_mode", "unknown"),
+    ),
+)
+def test_warmup_evidence_rejects_invalid_plan_bound_residency_receipt(
+    field: str,
+    value: object,
+    tmp_path: Path,
+) -> None:
+    trace = _attributed_peak_trace(tmp_path)
+    for lifetime in (
+        trace["load_cycle_warmup"],
+        trace["load_cycles"][0],
+    ):
+        lifetime["runtime_memory_receipt"][field] = value
+
+    with pytest.raises(RuntimeError, match="plan-bound module residency"):
         _validate_warmup_evidence(trace)
 
 

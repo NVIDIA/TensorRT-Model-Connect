@@ -194,11 +194,11 @@ bool requests_runtime_kv_policy(const LoadOptionsV2& options) {
 void validate_runtime_kv_policy_support(const BundleInfo& header, bool requested) {
     if (!requested)
         return;
-    if (header.runtime_memory.present && header.runtime_memory.contract_version == 1 &&
+    if (header.runtime_memory.present && header.runtime_memory.contract_version == 2 &&
         header.runtime_memory.runtime_owned) {
         return;
     }
-    throw std::invalid_argument("This bundle does not declare runtime_memory contract version 1; "
+    throw std::invalid_argument("This bundle does not declare runtime_memory contract version 2; "
                                 "runtime KV memory and max-sequence policies cannot be applied");
 }
 

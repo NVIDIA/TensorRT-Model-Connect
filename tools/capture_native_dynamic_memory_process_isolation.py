@@ -1186,6 +1186,12 @@ def _replay_dynamic_capture_provenance(
             where=f"{label}.runtime_trtmc_libraries",
             model_id=expected_model_id,
         )
+        mapped_dso_identities = (
+            performance._validate_mapped_dso_identities(
+                result.get("mapped_dso_identities"),
+                where=f"{label}.mapped_dso_identities",
+            )
+        )
         build_plugin = performance._validate_build_runtime_kv_plugin(
             result.get("build_runtime_kv_plugin"),
             where=f"{label}.build_runtime_kv_plugin",
@@ -1200,6 +1206,7 @@ def _replay_dynamic_capture_provenance(
                 model_id=expected_model_id,
                 provenance=provenance,
                 runtime_trtmc_libraries=runtime_trtmc,
+                mapped_dso_identities=mapped_dso_identities,
                 build_runtime_kv_plugin=build_plugin,
             )
         )
@@ -1211,11 +1218,13 @@ def _replay_dynamic_capture_provenance(
     if (
         provenance.get("runtime_trtmc_libraries_sha256")
         != _canonical_sha(runtime_trtmc)
+        or provenance.get("mapped_dso_identities_sha256")
+        != _canonical_sha(mapped_dso_identities)
         or provenance.get("build_runtime_kv_plugin_sha256")
         != _canonical_sha(build_plugin)
     ):
         raise IsolationError(
-            f"{label}: runtime TRTMC/build-plugin provenance hash mismatch"
+            f"{label}: runtime TRTMC/mapped-DSO/build-plugin provenance hash mismatch"
         )
     _validate_source_snapshot(
         validated_evidence.get("source_state_pre"),

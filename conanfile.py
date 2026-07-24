@@ -239,6 +239,9 @@ class TensorRTModelConnectConan(ConanFile):
         )
         toolchain.cache_variables["TRTMC_BUILD_BENCHMARKS"] = True
         toolchain.cache_variables["TRTMC_ENABLE_LIBTORCH_MULTINOMIAL"] = False
+        toolchain.cache_variables[
+            "TRTMC_REQUIRE_DYNAMIC_MEMORY_CALIBRATOR_NVML"
+        ] = True
 
         for name in (
             "TRTMC_TRT_INCLUDE_DIR",
@@ -281,6 +284,16 @@ class TensorRTModelConnectConan(ConanFile):
             dst=str(package_bin),
             keep_path=False,
         )
+        package_internal = package_bin / ".trtmc-internal"
+        script_internal = wheel_data_scripts / ".trtmc-internal"
+        for destination in (package_internal, script_internal):
+            copy(
+                self,
+                "trtmc_dynamic_memory_qualify",
+                src=self.build_folder,
+                dst=str(destination),
+                keep_path=False,
+            )
         copy(
             self,
             "trtmc-bench",
@@ -362,6 +375,8 @@ class TensorRTModelConnectConan(ConanFile):
         native = package_bin / "trtmc"
         installed_script = wheel_data_scripts / "trtmc"
         benchmark_worker = package_bin / "trtmc_benchmark_worker"
+        package_calibrator = package_internal / "trtmc_dynamic_memory_qualify"
+        script_calibrator = script_internal / "trtmc_dynamic_memory_qualify"
         benchmark_script = wheel_data_scripts / "trtmc-bench"
         package_cores = sorted(package_bin.glob("libtrtmc_core.so*"))
         script_cores = sorted(wheel_data_scripts.glob("libtrtmc_core.so*"))
@@ -374,6 +389,10 @@ class TensorRTModelConnectConan(ConanFile):
             raise ConanException("TRTMC native executable was not staged as the wheel script")
         if not benchmark_worker.is_file():
             raise ConanException("TRTMC benchmark worker was not staged into the wheel package")
+        if not package_calibrator.is_file() or not script_calibrator.is_file():
+            raise ConanException(
+                "TRTMC internal dynamic-memory calibrator was not staged beside both native CLIs"
+            )
         if not benchmark_script.is_file():
             raise ConanException("trtmc-bench was not staged as the wheel script")
         _set_wheel_python_shebang(benchmark_script)
@@ -403,6 +422,8 @@ class TensorRTModelConnectConan(ConanFile):
         )
         for executable in (native, installed_script, benchmark_worker):
             _rewrite_elf_runpath(executable, "$ORIGIN")
+        _rewrite_elf_runpath(package_calibrator, "$ORIGIN/..")
+        _rewrite_elf_runpath(script_calibrator, "$ORIGIN/..")
         for core in package_cores:
             _rewrite_elf_runpath(core, package_core_runpath)
         for core in script_cores:
@@ -414,6 +435,13 @@ class TensorRTModelConnectConan(ConanFile):
         for model_plugin in model_plugins:
             _rewrite_elf_runpath(model_plugin, model_plugin_runpath)
 
-        for executable in (native, installed_script, benchmark_worker, benchmark_script):
+        for executable in (
+            native,
+            installed_script,
+            benchmark_worker,
+            package_calibrator,
+            script_calibrator,
+            benchmark_script,
+        ):
             mode = executable.stat().st_mode
             executable.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)

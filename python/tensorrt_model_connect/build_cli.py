@@ -42,7 +42,7 @@ _OPTIMIZED_ROUTING_INTERNAL_FIELDS = frozenset({
 
 _PROFILE_REEXEC_BOOTSTRAP = (
     "import runpy, sys; "
-    "sys.path.append(sys.argv.pop(1)); "
+    "sys.path.insert(0, sys.argv.pop(1)); "
     "runpy.run_module("
     "'tensorrt_model_connect.__main__', run_name='__main__', alter_sys=True)"
 )
@@ -642,6 +642,17 @@ def _parse_layer_indices(value: str) -> list[int]:
     return layers
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict:
+    """Build one JSON object while rejecting ambiguous duplicate keys."""
+
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"Duplicate JSON key in bundle header: {key}")
+        value[key] = item
+    return value
+
+
 def _read_bundle_header(bundle_path: str) -> dict:
     """Read and return the JSON header from a .trtfb bundle."""
     with open(bundle_path, "rb") as f:
@@ -650,7 +661,10 @@ def _read_bundle_header(bundle_path: str) -> dict:
             raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
         header_len = struct.unpack("<Q", f.read(8))[0]
         header_json = f.read(header_len).decode("utf-8")
-    return json.loads(header_json)
+    return json.loads(
+        header_json,
+        object_pairs_hook=_reject_duplicate_json_keys,
+    )
 
 
 def list_engine_sections(bundle_path: str) -> list[dict]:
@@ -740,29 +754,72 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
         for label, key in fields:
             print(f"{label + ':':<20} {header.get(key, '')}")
 
-        runtime_memory = header.get("runtime_memory")
-        if isinstance(runtime_memory, dict):
+        raw_runtime_memory = header.get("runtime_memory")
+        if "runtime_memory" in header and not isinstance(
+            raw_runtime_memory, dict
+        ):
+            raise ValueError(
+                "Invalid runtime_memory contract: runtime_memory must be a "
+                "JSON object"
+            )
+        if isinstance(raw_runtime_memory, dict):
+            # Inspect remains header-only, but a runtime-memory header is a
+            # security- and admission-relevant contract.  Apply the same
+            # strict, closed schema used by the builder instead of displaying
+            # a partially understood v2 object.
+            from .dynamic_memory_contract import (
+                DynamicMemoryContractError,
+                validate_runtime_memory_contract,
+            )
+
+            try:
+                runtime_memory = validate_runtime_memory_contract(
+                    raw_runtime_memory
+                )
+            except DynamicMemoryContractError as exc:
+                raise ValueError(f"Invalid runtime_memory contract: {exc}") from exc
+            if header.get("model_id") != runtime_memory["qualified_model_id"]:
+                raise ValueError(
+                    "Invalid runtime_memory contract: qualified_model_id "
+                    "does not match bundle model_id"
+                )
+            if header.get("max_cache_length") != runtime_memory[
+                "model_context_limit"
+            ]:
+                raise ValueError(
+                    "Invalid runtime_memory contract: model_context_limit "
+                    "does not match max_cache_length"
+                )
+            if (
+                runtime_memory["kv_dtype"] == "bfloat16"
+                and header.get("precision") != "bf16"
+            ):
+                raise ValueError(
+                    "Invalid runtime_memory contract: bfloat16 KV contract "
+                    "requires bf16 bundle precision"
+                )
+
             static_memory_fields = (
-                ("Runtime KV contract version", "contract_version"),
-                ("Qualified model ID", "qualified_model_id"),
-                ("Qualified model revision", "qualified_model_revision"),
-                ("Qualified config fingerprint", "qualified_config_sha256"),
-                ("Qualified target", "qualified_target"),
-                ("Native KV plugin ABI", "native_kv_plugin_abi"),
-                ("Model context limit", "model_context_limit"),
-                ("Prefill chunk limit", "prefill_chunk_limit"),
-                ("KV layout", "kv_layout"),
-                ("KV dtype", "kv_dtype"),
-                ("KV bytes per token", "kv_bytes_per_token"),
+                ("runtime_kv_contract_version", "contract_version"),
+                ("qualified_model_id", "qualified_model_id"),
+                ("qualified_model_revision", "qualified_model_revision"),
+                ("qualified_config_fingerprint", "qualified_config_sha256"),
+                ("qualified_target", "qualified_target"),
+                ("native_kv_plugin_abi", "native_kv_plugin_abi"),
+                ("model_context_limit", "model_context_limit"),
+                ("prefill_chunk_limit", "prefill_chunk_limit"),
+                ("kv_layout", "kv_layout"),
+                ("kv_dtype", "kv_dtype"),
+                ("kv_bytes_per_token", "kv_bytes_per_token"),
             )
             for label, key in static_memory_fields:
-                print(f"{label + ':':<32} {runtime_memory.get(key, '')}")
+                print(f"{label + ':':<48} {runtime_memory[key]}")
             runtime_stack = runtime_memory.get(
                 "qualified_runtime_stack", {}
             )
             if isinstance(runtime_stack, dict):
                 print(
-                    f"{'Qualified runtime stack:':<32} "
+                    f"{'qualified_runtime_stack:':<48} "
                     f"SM={runtime_stack.get('sm', '')}, "
                     f"TensorRT={runtime_stack.get('tensorrt', '')}, "
                     f"CUDA={runtime_stack.get('cuda_runtime', '')}, "
@@ -774,10 +831,33 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
                 )
             limits = runtime_memory.get("active_kv_profile_limits", [])
             print(
-                f"{'Active KV profile limits:':<32} "
+                f"{'active_kv_profile_limits:':<48} "
                 + ", ".join(str(value) for value in limits)
             )
-            print(f"{'Runtime-owned KV:':<32} yes")
+            calibration = runtime_memory.get("module_residency_calibration")
+            if isinstance(calibration, dict):
+                print(
+                    f"{'module_residency_plan_set_sha256:':<48} "
+                    f"{calibration['plan_set_sha256']}"
+                )
+                print(
+                    f"{'module_residency_cuda_module_loading_mode:':<48} "
+                    f"{calibration['cuda_module_loading_mode']}"
+                )
+                reserves = calibration["profile_reserves"]
+                print(
+                    f"{'module_residency_profile_reserves:':<48} "
+                    + ", ".join(
+                        f"{row['covering_profile_limit']}=>"
+                        f"{row['cumulative_reserve_bytes']}"
+                        for row in reserves
+                    )
+                )
+                print(
+                    f"{'module_residency_evidence_sha256:':<48} "
+                    f"{calibration['evidence_sha256']}"
+                )
+            print(f"{'runtime_owned_kv:':<48} yes")
         else:
             print(
                 f"{'Max cache length:':<20} "
