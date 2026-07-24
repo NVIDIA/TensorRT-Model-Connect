@@ -163,21 +163,21 @@ class GpuLease:
                             return self
                         capacity_rejected.add(candidate_gpu)
                         self._release_gpu()
-                        if len(capacity_rejected) == len(self.gpu_ids):
-                            if all(
-                                gpu in self.last_observed_total_mib
-                                and self.last_observed_total_mib[gpu] < self.min_free_gpu_memory_mib
+                        if all(
+                            gpu in self.last_observed_total_mib
+                            and self.last_observed_total_mib[gpu] < self.min_free_gpu_memory_mib
+                            for gpu in self.gpu_ids
+                        ):
+                            totals = ", ".join(
+                                f"GPU {gpu}={self.last_observed_total_mib[gpu]} MiB"
                                 for gpu in self.gpu_ids
-                            ):
-                                totals = ", ".join(
-                                    f"GPU {gpu}={self.last_observed_total_mib[gpu]} MiB"
-                                    for gpu in self.gpu_ids
-                                )
-                                raise CiError(
-                                    "configured GPUs cannot meet the model-proof minimum free "
-                                    f"memory requirement of {self.min_free_gpu_memory_mib} MiB "
-                                    f"(total memory: {totals})"
-                                )
+                            )
+                            raise CiError(
+                                "configured GPUs cannot meet the model-proof minimum free "
+                                f"memory requirement of {self.min_free_gpu_memory_mib} MiB "
+                                f"(total memory: {totals})"
+                            )
+                        if len(capacity_rejected) == len(self.gpu_ids):
                             capacity_rejected.clear()
                         self._requeue_after_capacity_rejection(deadline)
                         continue
@@ -588,8 +588,15 @@ class GpuLease:
             }
         if gpu not in snapshots:
             raise CiError(f"nvidia-smi did not report configured GPU {gpu}")
+        for configured_gpu in self.gpu_ids:
+            configured_snapshot = snapshots.get(configured_gpu)
+            if configured_snapshot is not None:
+                self.last_observed_total_mib[configured_gpu] = int(configured_snapshot["total_mib"])
         snapshot = snapshots[gpu]
-        if snapshot["free_mib"] >= self.min_free_gpu_memory_mib:
+        if (
+            snapshot["free_mib"] >= self.min_free_gpu_memory_mib
+            or snapshot["total_mib"] < self.min_free_gpu_memory_mib
+        ):
             return snapshot
         remaining = max(0.001, timeout_seconds - (time.monotonic() - started))
         coherent = self._coherent_gpu_memory_snapshot(

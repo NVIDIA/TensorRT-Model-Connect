@@ -3262,6 +3262,7 @@ def test_capacity_gate_fails_closed_when_nvidia_smi_fails(tmp_path: Path) -> Non
         assert not _lock_is_busy(lease.lock_dir / f"gpu-{gpu}-slot-1.lock")
 
 
+@pytest.mark.model_proof_allocator
 def test_capacity_gate_fails_fast_when_gpu_total_memory_is_too_small(
     tmp_path: Path,
 ) -> None:
@@ -3276,11 +3277,30 @@ def test_capacity_gate_fails_fast_when_gpu_total_memory_is_too_small(
         min_free_gpu_memory_mib=240000,
     )
 
+    def unexpected_coherent_fallback(
+        gpu: int,
+        raw: dict[str, object],
+        *,
+        timeout_seconds: float,
+    ) -> dict[str, object] | None:
+        pytest.fail(f"GPU {gpu} cannot gain capacity beyond its {raw['total_mib']} MiB total")
+
+    def unexpected_requeue(deadline: float) -> bool:
+        pytest.fail(f"physically impossible capacity must not requeue before {deadline}")
+
+    lease._coherent_gpu_memory_snapshot = unexpected_coherent_fallback  # type: ignore[method-assign]
+    lease._requeue_after_capacity_rejection = unexpected_requeue  # type: ignore[method-assign]
+
     started = time.monotonic()
-    with pytest.raises(CiError, match="cannot meet.*240000 MiB.*GPU 2=200000 MiB"):
+    with pytest.raises(
+        CiError,
+        match=("cannot meet.*240000 MiB.*GPU 2=200000 MiB.*GPU 3=220000 MiB"),
+    ):
         lease.acquire()
 
     assert time.monotonic() - started < 2
+    assert lease.last_observed_total_mib == {2: 200000, 3: 220000}
+    assert lease.gpu_memory_admission is None
     assert not list(lease.lock_dir.glob("admission-global-*.lock"))
 
 
