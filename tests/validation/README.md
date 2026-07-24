@@ -39,6 +39,17 @@ directories therefore do not retain another copy of the bundle.
 
 At completion the command prints the exact reference and TRTMC reproduction
 commands, the per-model `comparison.json`, and the aggregate `report.html`.
+Dataset-backed comparison runs through `tools/trtmc_compare.py`; task-eval
+commands are not part of the validation result or its reproduction contract.
+
+The report keeps three statuses separate:
+
+- `execution`: whether the programs completed or errored;
+- `comparison`: whether TRTMC agrees or disagrees with the reference;
+- `validation`: the final pass, fail, or skipped result.
+
+The HTML report renders each status as an independent colored signal and shows
+the primary agreement metric next to it.
 
 ## Add or extend a model
 

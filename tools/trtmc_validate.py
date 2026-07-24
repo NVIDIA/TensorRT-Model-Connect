@@ -301,7 +301,7 @@ def _source_environment() -> dict[str, str]:
     return environment
 
 
-def _task_eval_command(
+def _comparison_command(
     binding: Binding,
     *,
     case_dir: Path,
@@ -309,11 +309,10 @@ def _task_eval_command(
     arguments: argparse.Namespace,
     reference_python: str,
 ) -> list[str]:
-    work_root = case_dir / "task-eval"
+    work_root = case_dir / "validation"
     command = [
         sys.executable,
-        str(REPO_ROOT / "tools" / "task_eval.py"),
-        "eval",
+        str(REPO_ROOT / "tools" / "trtmc_compare.py"),
         "--suite",
         binding.workload,
         "--dataset",
@@ -457,15 +456,189 @@ def _commands_from_e2e_results(results: Sequence[Mapping[str, Any]]) -> dict[str
     return commands
 
 
-def _task_eval_result(
+_PRIMARY_COMPARISON_METRICS = (
+    "sample_agreement_rate",
+    "prediction_agreement_rate",
+    "vector_pass_rate",
+    "top1_agreement",
+    "backend_pixel_agreement",
+    "mean_pairwise_ordering_agreement",
+    "token_prefix_agreement",
+    "token_agreement_rate",
+    "exact_match_rate",
+)
+_PRIMARY_METRIC_BY_MODE = {
+    "asr_transcript": "prediction_agreement_rate",
+    "continuation": "token_prefix_agreement",
+    "diffusion_text_parity": "token_agreement_rate",
+    "encoder_embedding_parity": "vector_pass_rate",
+    "image_classification_parity": "top1_agreement",
+    "ocrbench_v2": "prediction_agreement_rate",
+    "reranking_parity": "mean_pairwise_ordering_agreement",
+    "semantic_segmentation_parity": "backend_pixel_agreement",
+    "time_series_parity": "sample_agreement_rate",
+}
+_COMPARISON_METRICS = (
+    *_PRIMARY_COMPARISON_METRICS,
+    "token_id_prefix_agreement",
+    "normalized_transcript_exact_agreement_rate",
+    "correctness_agreement_rate",
+    "divergence_rate",
+    "divergent_count",
+    "hf_accuracy",
+    "trtfb_accuracy",
+    "accuracy_delta_trtfb_minus_hf",
+    "accuracy_drop_from_hf",
+    "hf_top1_accuracy",
+    "trtfb_top1_accuracy",
+    "top1_accuracy_drop_from_hf",
+    "hf_mean_iou",
+    "trtfb_mean_iou",
+    "backend_mean_iou",
+    "mean_iou_drop_from_hf",
+    "mean_vector_cosine",
+    "min_vector_cosine",
+    "mean_pair_cosine_abs_delta",
+    "max_pair_cosine_abs_delta",
+    "mean_relative_l2",
+    "max_relative_l2",
+    "max_absolute_error",
+)
+_EXECUTION_ERROR_FIELDS = ("error", "exception", "traceback", "failure_class")
+
+
+def _raw_comparison(result: Mapping[str, Any]) -> dict[str, Any]:
+    raw_result = result.get("raw_result")
+    if isinstance(raw_result, dict) and raw_result:
+        return dict(raw_result)
+    raw_results = result.get("raw_results")
+    if isinstance(raw_results, list) and raw_results:
+        passed = all(
+            isinstance(item, dict) and item.get("status") in {"pass", "passed"}
+            for item in raw_results
+        )
+        return {"mode": "e2e", "status": "passed" if passed else "failed"}
+    status = str(result.get("status", "") or "")
+    return {"status": status} if status else {}
+
+
+def _execution_details(
+    result: Mapping[str, Any],
+    raw_result: Mapping[str, Any],
+) -> dict[str, Any]:
+    has_error = any(raw_result.get(name) for name in _EXECUTION_ERROR_FIELDS)
+    completed = bool(raw_result) and not has_error
+    return {
+        "status": "completed" if completed else "error",
+        "exit_code": result.get("returncode"),
+    }
+
+
+def _comparison_metrics(raw_result: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        name: raw_result[name]
+        for name in _COMPARISON_METRICS
+        if raw_result.get(name) is not None
+    }
+
+
+def _primary_metric(
+    mode: str,
+    metrics: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    preferred = _PRIMARY_METRIC_BY_MODE.get(mode)
+    if preferred in metrics:
+        return {"name": preferred, "value": metrics[preferred]}
+    for name in _PRIMARY_COMPARISON_METRICS:
+        if name in metrics:
+            return {"name": name, "value": metrics[name]}
+    return None
+
+
+def _comparison_details(
+    raw_result: Mapping[str, Any],
+    execution: Mapping[str, Any],
+) -> dict[str, Any]:
+    raw_status = str(raw_result.get("status", "") or "")
+    status_by_raw = {
+        "pass": "agreement",
+        "passed": "agreement",
+        "fail": "disagreement",
+        "failed": "disagreement",
+        "skip": "not_run",
+        "skipped": "not_run",
+    }
+    status = (
+        status_by_raw.get(raw_status, "not_run")
+        if execution.get("status") == "completed"
+        else "not_run"
+    )
+    metrics = _comparison_metrics(raw_result)
+    failures = raw_result.get("gate_failures", [])
+    mode = str(raw_result.get("mode", "") or "")
+    return {
+        "status": status,
+        "mode": mode,
+        "primary_metric": _primary_metric(mode, metrics),
+        "metrics": metrics,
+        "failures": failures if isinstance(failures, list) else [],
+    }
+
+
+def _validation_details(
+    execution: Mapping[str, Any],
+    comparison: Mapping[str, Any],
+) -> dict[str, str]:
+    if execution.get("status") != "completed":
+        return {"status": "failed"}
+    status_by_comparison = {
+        "agreement": "passed",
+        "disagreement": "failed",
+        "not_run": "skipped",
+    }
+    return {"status": status_by_comparison[str(comparison["status"])]}
+
+
+def _normalize_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(result)
+    raw_result = _raw_comparison(normalized)
+    execution = normalized.get("execution")
+    if not isinstance(execution, dict):
+        execution = _execution_details(normalized, raw_result)
+    comparison = normalized.get("comparison")
+    if not isinstance(comparison, dict):
+        comparison = _comparison_details(raw_result, execution)
+    validation = normalized.get("validation")
+    if not isinstance(validation, dict):
+        validation = _validation_details(execution, comparison)
+    reproduce = normalized.get("reproduce", {})
+    if not isinstance(reproduce, dict):
+        reproduce = {}
+    normalized.update(
+        {
+            "schema_version": "trtmc.validation-result/v2",
+            "execution": execution,
+            "comparison": comparison,
+            "validation": validation,
+            "reproduce": {
+                "hf": list(reproduce.get("hf", [])),
+                "trtmc": list(reproduce.get("trtmc", [])),
+            },
+        }
+    )
+    normalized.pop("returncode", None)
+    normalized.pop("status", None)
+    return normalized
+
+
+def _comparison_result(
     binding: Binding,
     *,
     case_dir: Path,
     returncode: int,
     reference_environment: EnvironmentSelection,
-    command: Sequence[str],
 ) -> dict[str, Any]:
-    summary_path = case_dir / "task-eval" / binding.workload / "eval_summary.json"
+    summary_path = case_dir / "validation" / binding.workload / "eval_summary.json"
     raw_result: dict[str, Any] = {}
     if summary_path.is_file():
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -478,25 +651,23 @@ def _task_eval_result(
     status = str(raw_result.get("status", "") or "")
     if status not in {"passed", "failed", "skipped"}:
         status = "passed" if returncode == 0 else "failed"
-    work_dir = case_dir / "task-eval" / binding.workload / binding.model
-    return {
-        "schema_version": "trtmc.validation-result/v1",
+    work_dir = case_dir / "validation" / binding.workload / binding.model
+    return _normalize_result({
+        "schema_version": "trtmc.validation-result/v2",
         "model": binding.model,
         "workload": binding.workload,
-        "executor": "task_eval",
+        "executor": "trtmc_compare",
         "status": status,
+        "returncode": returncode,
         "reference_environment": [
             {"name": name, "python": path} for name, path in reference_environment.names_and_paths
         ],
-        "reproduce": {
-            **_commands_from_logs(work_dir),
-            "validation": shlex.join(command),
-        },
+        "reproduce": _commands_from_logs(work_dir),
         "raw_result": raw_result,
         "raw_result_path": str(summary_path),
         "execution_log": str(case_dir / "execution.log"),
         "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
+    })
 
 
 def _e2e_result(
@@ -505,7 +676,6 @@ def _e2e_result(
     case_dir: Path,
     returncode: int,
     reference_environment: EnvironmentSelection,
-    command: Sequence[str],
 ) -> dict[str, Any]:
     result_paths = sorted((case_dir / "e2e").glob("*/result.json"))
     raw_results = [json.loads(path.read_text(encoding="utf-8")) for path in result_paths]
@@ -516,24 +686,22 @@ def _e2e_result(
         and all(result.get("status") == "pass" for result in raw_results)
         else "failed"
     )
-    return {
-        "schema_version": "trtmc.validation-result/v1",
+    return _normalize_result({
+        "schema_version": "trtmc.validation-result/v2",
         "model": binding.model,
         "workload": binding.workload,
         "executor": "e2e",
         "status": status,
+        "returncode": returncode,
         "reference_environment": [
             {"name": name, "python": path} for name, path in reference_environment.names_and_paths
         ],
-        "reproduce": {
-            **_commands_from_e2e_results(raw_results),
-            "validation": shlex.join(command),
-        },
+        "reproduce": _commands_from_e2e_results(raw_results),
         "raw_result_paths": [str(path) for path in result_paths],
         "raw_results": raw_results,
         "execution_log": str(case_dir / "execution.log"),
         "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
+    })
 
 
 def run_binding(
@@ -568,7 +736,6 @@ def run_binding(
             case_dir=case_dir,
             returncode=returncode,
             reference_environment=environment,
-            command=command,
         )
     else:
         suite = suites[binding.workload]
@@ -577,7 +744,7 @@ def run_binding(
             if arguments.dataset
             else _dataset_path(suite, arguments.dataset_root)
         )
-        command = _task_eval_command(
+        command = _comparison_command(
             binding,
             case_dir=case_dir,
             dataset=dataset,
@@ -585,12 +752,11 @@ def run_binding(
             reference_python=environment.base_python,
         )
         returncode = _run_subprocess(command, case_dir / "execution.log", process_env)
-        result = _task_eval_result(
+        result = _comparison_result(
             binding,
             case_dir=case_dir,
             returncode=returncode,
             reference_environment=environment,
-            command=command,
         )
 
     comparison = case_dir / "comparison.json"
@@ -705,51 +871,185 @@ def _reference_result_status(result: Mapping[str, Any]) -> str:
     )
 
 
-def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
-    result_paths = sorted(output.glob("*/*/comparison.json"))
-    results = [json.loads(path.read_text(encoding="utf-8")) for path in result_paths]
-    for result in results:
+def _signal(status: str, labels: Mapping[str, str]) -> str:
+    label = labels.get(status, status.replace("_", " ").title())
+    safe_status = status if status.replace("_", "").isalnum() else "unknown"
+    return (
+        f'<span class="signal signal-{safe_status}">'
+        '<span class="signal-light"></span>'
+        f"{html.escape(label)}</span>"
+    )
+
+
+def _render_execution(result: Mapping[str, Any]) -> str:
+    execution = result.get("execution", {})
+    status = str(execution.get("status", "error")) if isinstance(execution, dict) else "error"
+    return _signal(status, {"completed": "Completed", "error": "Error"})
+
+
+def _render_reference(result: Mapping[str, Any]) -> str:
+    status = _reference_result_status(result)
+    display_status = {
+        "reused": "cached",
+        "adopted": "cached",
+        "generated": "completed",
+        "ran": "completed",
+    }.get(status, "not_run")
+    label = {
+        "reused": "Reused",
+        "adopted": "Adopted",
+        "generated": "Generated",
+        "ran": "Generated",
+    }.get(status, "Not recorded")
+    environments = ", ".join(
+        str(item.get("name", ""))
+        for item in result.get("reference_environment", [])
+        if isinstance(item, dict)
+    )
+    detail = f'<div class="detail">{html.escape(environments)}</div>' if environments else ""
+    return _signal(display_status, {display_status: label}) + detail
+
+
+def _render_comparison(result: Mapping[str, Any]) -> str:
+    comparison = result.get("comparison", {})
+    if not isinstance(comparison, dict):
+        return _signal("not_run", {"not_run": "Not compared"})
+    status = str(comparison.get("status", "not_run"))
+    signal = _signal(
+        status,
+        {
+            "agreement": "Agreement",
+            "disagreement": "Disagreement",
+            "not_run": "Not compared",
+        },
+    )
+    mode = str(comparison.get("mode", "") or "")
+    detail = f'<div class="detail">{html.escape(mode)}</div>' if mode else ""
+    return signal + detail
+
+
+def _format_metric_value(name: str, value: Any) -> str:
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, int):
+        return str(value)
+    if not isinstance(value, float):
+        return str(value)
+    is_ratio = any(
+        token in name
+        for token in ("accuracy", "agreement", "pass_rate", "exact_match", "divergence_rate")
+    )
+    if is_ratio:
+        return f"{value * 100:.2f}%"
+    if value and abs(value) < 0.001:
+        return f"{value:.3e}"
+    return f"{value:.6f}"
+
+
+def _render_metrics(result: Mapping[str, Any]) -> str:
+    comparison = result.get("comparison", {})
+    metrics = comparison.get("metrics", {}) if isinstance(comparison, dict) else {}
+    if not isinstance(metrics, dict) or not metrics:
+        return '<span class="unavailable">No metrics</span>'
+    primary = comparison.get("primary_metric")
+    primary_name = primary.get("name") if isinstance(primary, dict) else None
+    ordered = ([primary_name] if primary_name in metrics else []) + [
+        name for name in metrics if name != primary_name
+    ]
+    visible = ordered[:5]
+    rows = [
+        (
+            f'<div class="metric{" primary" if name == primary_name else ""}">'
+            f"<span>{html.escape(str(name))}</span>"
+            f"<strong>{html.escape(_format_metric_value(str(name), metrics[name]))}</strong>"
+            "</div>"
+        )
+        for name in visible
+    ]
+    remaining = len(ordered) - len(visible)
+    if remaining:
+        rows.append(f'<div class="detail">+{remaining} more in comparison.json</div>')
+    return "".join(rows)
+
+
+def _render_validation(result: Mapping[str, Any]) -> str:
+    validation = result.get("validation", {})
+    status = (
+        str(validation.get("status", "failed"))
+        if isinstance(validation, dict)
+        else "failed"
+    )
+    return _signal(
+        status,
+        {"passed": "Pass", "failed": "Fail", "skipped": "Skipped"},
+    )
+
+
+def _normalize_result_files(
+    result_paths: Sequence[Path],
+) -> list[dict[str, Any]]:
+    results = []
+    for path in result_paths:
+        result = _normalize_result(json.loads(path.read_text(encoding="utf-8")))
         _merge_commands_from_result_logs(result)
-    counts = {
-        name: sum(result.get("status") == name for result in results)
+        path.write_text(
+            json.dumps(result, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        results.append(result)
+    return results
+
+
+def _report_counts(
+    results: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, int], dict[str, int], int]:
+    validation_counts = {
+        name: sum(result["validation"]["status"] == name for result in results)
         for name in ("passed", "failed", "skipped")
     }
-    report = {
-        "schema_version": "trtmc.validation-report/v1",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "status": "passed" if results and counts["failed"] == 0 else "failed",
-        "summary": {"cases": len(results), **counts},
-        "results": results,
+    comparison_counts = {
+        name: sum(result["comparison"]["status"] == name for result in results)
+        for name in ("agreement", "disagreement", "not_run")
     }
-    run_path = output / "run.json"
-    if run_path.is_file():
-        report["run"] = json.loads(run_path.read_text(encoding="utf-8"))
-    json_path = output / "report.json"
-    html_path = output / "report.html"
-    json_path.write_text(
-        json.dumps(report, indent=2, ensure_ascii=False),
-        encoding="utf-8",
+    execution_errors = sum(
+        result["execution"]["status"] == "error" for result in results
     )
+    return validation_counts, comparison_counts, execution_errors
+
+
+def _report_rows(
+    output: Path,
+    results: Sequence[Mapping[str, Any]],
+    result_paths: Sequence[Path],
+) -> str:
     rows = []
     for result, path in zip(results, result_paths, strict=True):
         relative = path.relative_to(output)
-        environments = ", ".join(
-            str(item.get("name", "")) for item in result.get("reference_environment", [])
-        )
-        status = str(result.get("status", "failed"))
         rows.append(
             "<tr>"
             f"<td>{html.escape(str(result.get('model', '')))}</td>"
             f"<td>{html.escape(str(result.get('workload', '')))}</td>"
-            f'<td class="{html.escape(status)}">{html.escape(status)}</td>'
-            f"<td>{html.escape(environments)}</td>"
-            f"<td>{html.escape(_reference_result_status(result))}</td>"
+            f"<td>{_render_execution(result)}</td>"
+            f"<td>{_render_reference(result)}</td>"
+            f"<td>{_render_comparison(result)}</td>"
+            f"<td>{_render_metrics(result)}</td>"
+            f"<td>{_render_validation(result)}</td>"
             f"<td>{_render_reproduction(result)}</td>"
             f'<td><a href="{html.escape(str(relative))}">comparison.json</a></td>'
             "</tr>"
         )
+    return "".join(rows)
+
+
+def _report_document(
+    report: Mapping[str, Any],
+    *,
+    rows: str,
+    comparison_counts: Mapping[str, int],
+    execution_errors: int,
+) -> str:
     provenance = _report_provenance(report.get("run", {}))
-    document = f"""<!doctype html>
+    return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>TRTMC Validation Report</title>
 <style>
@@ -766,20 +1066,80 @@ summary {{ cursor: pointer; color: #185abc; }}
 pre {{ margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
        background: #f8f9fa; border: 1px solid #dadce0; border-radius: 4px; }}
 .unavailable {{ color: #5f6368; }}
-.passed {{ color: #137333; font-weight: 600; }}
-.failed {{ color: #b3261e; font-weight: 600; }}
-.skipped {{ color: #8a4f00; font-weight: 600; }}
+.signal {{ display: inline-flex; align-items: center; gap: 7px; font-weight: 650;
+           white-space: nowrap; }}
+.signal-light {{ width: 10px; height: 10px; border-radius: 50%;
+                 background: #80868b; box-shadow: 0 0 0 3px #eef0f1; }}
+.signal-completed, .signal-agreement, .signal-passed {{ color: #137333; }}
+.signal-completed .signal-light, .signal-agreement .signal-light,
+.signal-passed .signal-light {{ background: #1e8e3e; box-shadow: 0 0 0 3px #e6f4ea; }}
+.signal-error, .signal-disagreement, .signal-failed {{ color: #b3261e; }}
+.signal-error .signal-light, .signal-disagreement .signal-light,
+.signal-failed .signal-light {{ background: #d93025; box-shadow: 0 0 0 3px #fce8e6; }}
+.signal-skipped {{ color: #8a4f00; }}
+.signal-skipped .signal-light {{ background: #f9ab00; box-shadow: 0 0 0 3px #fef7e0; }}
+.signal-cached {{ color: #185abc; }}
+.signal-cached .signal-light {{ background: #1a73e8; box-shadow: 0 0 0 3px #e8f0fe; }}
+.signal-not_run {{ color: #5f6368; }}
+.detail {{ color: #5f6368; font-size: 12px; margin-top: 4px; }}
+.metric {{ display: flex; justify-content: space-between; gap: 14px;
+           font-variant-numeric: tabular-nums; font-size: 12px; }}
+.metric span {{ color: #5f6368; }}
+.metric.primary {{ font-size: 13px; }}
+.metric.primary span, .metric.primary strong {{ color: #202124; }}
 </style></head><body>
 <h1>TRTMC Validation Report</h1>
 <div class="summary">{report["summary"]["cases"]} cases ·
-{counts["passed"]} passed · {counts["failed"]} failed · {counts["skipped"]} skipped<br>
+{comparison_counts["agreement"]} agreements ·
+{comparison_counts["disagreement"]} disagreements ·
+{execution_errors} execution errors<br>
 {html.escape(provenance)}</div>
-<table><thead><tr><th>Model</th><th>Workload</th><th>Status</th>
-<th>Reference environment</th><th>Reference result</th>
-<th>Vanilla reproduction</th><th>Result</th></tr></thead>
-<tbody>{"".join(rows)}</tbody></table>
+<table><thead><tr><th>Model</th><th>Workload</th><th>Execution</th>
+<th>Reference</th><th>Comparison</th><th>Agreement metrics</th>
+<th>Validation</th><th>Vanilla reproduction</th><th>Result</th></tr></thead>
+<tbody>{rows}</tbody></table>
 </body></html>
 """
+
+
+def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
+    result_paths = sorted(output.glob("*/*/comparison.json"))
+    results = _normalize_result_files(result_paths)
+    validation_counts, comparison_counts, execution_errors = _report_counts(results)
+    report = {
+        "schema_version": "trtmc.validation-report/v2",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "validation_status": (
+            "passed" if results and validation_counts["failed"] == 0 else "failed"
+        ),
+        "summary": {
+            "cases": len(results),
+            "execution_completed": len(results) - execution_errors,
+            "execution_errors": execution_errors,
+            "agreements": comparison_counts["agreement"],
+            "disagreements": comparison_counts["disagreement"],
+            "not_compared": comparison_counts["not_run"],
+            "validation_passed": validation_counts["passed"],
+            "validation_failed": validation_counts["failed"],
+            "validation_skipped": validation_counts["skipped"],
+        },
+        "results": results,
+    }
+    run_path = output / "run.json"
+    if run_path.is_file():
+        report["run"] = json.loads(run_path.read_text(encoding="utf-8"))
+    json_path = output / "report.json"
+    html_path = output / "report.html"
+    json_path.write_text(
+        json.dumps(report, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    document = _report_document(
+        report,
+        rows=_report_rows(output, results, result_paths),
+        comparison_counts=comparison_counts,
+        execution_errors=execution_errors,
+    )
     html_path.write_text(document, encoding="utf-8")
     return json_path, html_path, report
 
@@ -917,7 +1277,7 @@ def _run_bindings(
         _, report_path, _ = write_report(arguments.output)
         comparison = arguments.output / binding.model / binding.workload / "comparison.json"
         _print_result(result, comparison, report_path)
-        failed = failed or result.get("status") == "failed"
+        failed = failed or result["validation"]["status"] == "failed"
     return 1 if failed else 0
 
 

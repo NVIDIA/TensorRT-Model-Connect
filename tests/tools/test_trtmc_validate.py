@@ -9,6 +9,7 @@ import json
 import pytest
 
 from tools import task_eval
+from tools import trtmc_compare
 from tools import trtmc_validate
 
 
@@ -176,14 +177,26 @@ def test_write_report_links_each_comparison(tmp_path):
 
     assert report["summary"] == {
         "cases": 1,
-        "passed": 1,
-        "failed": 0,
-        "skipped": 0,
+        "execution_completed": 1,
+        "execution_errors": 0,
+        "agreements": 1,
+        "disagreements": 0,
+        "not_compared": 0,
+        "validation_passed": 1,
+        "validation_failed": 0,
+        "validation_skipped": 0,
     }
+    assert report["validation_status"] == "passed"
+    assert report["results"][0]["execution"]["status"] == "completed"
+    assert report["results"][0]["comparison"]["status"] == "agreement"
+    assert report["results"][0]["validation"]["status"] == "passed"
+    assert "status" not in report["results"][0]
     assert json_path == tmp_path / "report.json"
     assert html_path == tmp_path / "report.html"
     document = html_path.read_text(encoding="utf-8")
     assert "model-a/workload-a/comparison.json" in document
+    assert "Agreement" in document
+    assert "Completed" in document
     assert "Vanilla reproduction" in document
     assert "Reference 1 · TRTMC 1" in document
     assert "$ python hf.py" in document
@@ -202,7 +215,7 @@ def test_write_report_does_not_render_validation_wrapper(tmp_path):
                 "reproduce": {
                     "hf": ["python hf.py --prompt '<hello>'"],
                     "trtmc": [],
-                    "validation": "python tools/trtmc_validate.py model-a",
+                    "validation": "python tools/task_eval.py eval --model model-a",
                 },
             }
         ),
@@ -214,7 +227,9 @@ def test_write_report_does_not_render_validation_wrapper(tmp_path):
     document = html_path.read_text(encoding="utf-8")
     assert "python hf.py --prompt &#x27;&lt;hello&gt;&#x27;" in document
     assert "Not reached; see comparison.json." in document
-    assert "python tools/trtmc_validate.py" not in document
+    assert "task_eval.py" not in document
+    migrated = json.loads((case_dir / "comparison.json").read_text(encoding="utf-8"))
+    assert set(migrated["reproduce"]) == {"hf", "trtmc"}
 
 
 def test_write_report_recovers_json_logged_runner_command(tmp_path):
@@ -272,7 +287,7 @@ def test_run_metadata_records_source_and_exact_command(monkeypatch, tmp_path):
     assert metadata["command"] == "tools/trtmc_validate.py model-a"
 
 
-def test_task_eval_command_is_directly_reproducible(tmp_path):
+def test_comparison_command_uses_validation_entrypoint(tmp_path):
     arguments = argparse.Namespace(
         engine_dir=tmp_path / "engines",
         reference_cache_dir=tmp_path / "references",
@@ -288,7 +303,7 @@ def test_task_eval_command_is_directly_reproducible(tmp_path):
         cuda_visible_devices="1",
     )
 
-    command = trtmc_validate._task_eval_command(
+    command = trtmc_validate._comparison_command(
         trtmc_validate.Binding("model-a", "workload-a"),
         case_dir=tmp_path / "case",
         dataset=tmp_path / "dataset.json",
@@ -296,11 +311,14 @@ def test_task_eval_command_is_directly_reproducible(tmp_path):
         reference_python="/profiles/python",
     )
 
-    assert command[:3] == [
+    assert command[:2] == [
         trtmc_validate.sys.executable,
-        str(trtmc_validate.REPO_ROOT / "tools" / "task_eval.py"),
-        "eval",
+        str(trtmc_validate.REPO_ROOT / "tools" / "trtmc_compare.py"),
     ]
+    assert "task_eval.py" not in " ".join(command)
+    assert command[command.index("--work-root") + 1] == str(
+        tmp_path / "case" / "validation"
+    )
     assert command[command.index("--model") + 1] == "model-a"
     assert command[command.index("--suite") + 1] == "workload-a"
     assert command[command.index("--hf-python") + 1] == "/profiles/python"
@@ -311,3 +329,59 @@ def test_task_eval_command_is_directly_reproducible(tmp_path):
     assert "--force-hf" in command
     assert "--require-prebuilt-bundles" in command
     assert "--local-files-only" in command
+
+
+def test_compare_entrypoint_forwards_to_validation_backend(monkeypatch):
+    captured = []
+
+    def run(arguments):
+        captured.extend(arguments)
+        return 7
+
+    monkeypatch.setattr(trtmc_compare.task_eval, "main", run)
+
+    assert trtmc_compare.main(["--suite", "suite-a"]) == 7
+    assert captured == ["eval", "--suite", "suite-a"]
+
+
+@pytest.mark.parametrize(
+    ("raw_result", "execution", "comparison", "validation"),
+    [
+        (
+            {"status": "passed", "prediction_agreement_rate": 1.0},
+            "completed",
+            "agreement",
+            "passed",
+        ),
+        (
+            {"status": "failed", "prediction_agreement_rate": 0.5},
+            "completed",
+            "disagreement",
+            "failed",
+        ),
+        (
+            {"status": "failed", "error": "runner crashed"},
+            "error",
+            "not_run",
+            "failed",
+        ),
+    ],
+)
+def test_result_statuses_separate_execution_from_agreement(
+    raw_result,
+    execution,
+    comparison,
+    validation,
+):
+    result = trtmc_validate._normalize_result(
+        {
+            "model": "model-a",
+            "workload": "workload-a",
+            "status": raw_result["status"],
+            "raw_result": raw_result,
+        }
+    )
+
+    assert result["execution"]["status"] == execution
+    assert result["comparison"]["status"] == comparison
+    assert result["validation"]["status"] == validation
