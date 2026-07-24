@@ -133,7 +133,7 @@ no_impact tools/legal_headers.py # offline legal-header audit utility; no runtim
 no_impact tools/lance_reference.py # standalone pinned release-reference helper; focused performance-runner tests cover its behavior
 no_impact tools/nsys_to_layer_timing.py # developer utility script; no CI test impact is intentional
 no_impact tools/perf_compare.py # developer utility script; no CI test impact is intentional
-no_impact tools/perf_release.py # standalone release performance orchestrator; focused tool tests cover its contracts and reporting
+no_impact tools/perf_matrix.py # standalone performance-matrix orchestrator; focused tool tests cover its contracts and reporting
 no_impact tools/perfdb.py # developer utility script; no CI test impact is intentional
 no_impact tools/prepare_dpg_bench.py # offline dataset conversion utility; task-eval behavior is tested separately
 no_impact tools/prepare_vision_task_eval_datasets.py # offline dataset conversion utility; vision task-eval behavior is tested separately

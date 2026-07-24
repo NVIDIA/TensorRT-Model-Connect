@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run and report the release TRTMC-versus-reference performance matrix."""
+"""Run and report a TRTMC-versus-reference performance matrix."""
 
 from __future__ import annotations
 
@@ -49,17 +49,9 @@ from tensorrt_model_connect.python_profiles import (  # noqa: E402
 )
 
 
-RESULT_SCHEMA = "trtmc.perf-release/v1"
-SUITE_SCHEMA = "trtmc.perf-suite/v1"
-TERMINAL_STATUSES = {
-    "green",
-    "yellow",
-    "red",
-    "failed",
-    "contract-mismatch",
-    "partial",
-}
-PRIORITIES = {"fast": 0, "normal": 1, "slow": 2}
+RESULT_SCHEMA = "trtmc.perf-matrix/v1"
+SUITE_SCHEMA = "trtmc.perf-suite/v2"
+ENVIRONMENT_SCHEMA = "trtmc.perf-environment/v1"
 SEQUENCE_RUNTIME_MARKERS = ("bart_", "marian_", "m2m_100_", "t5_")
 TASK_REFERENCE_ADAPTERS = {
     "hf-diffusers",
@@ -78,15 +70,30 @@ TASK_REFERENCE_ADAPTERS = {
     "upstream-lance",
     "upstream-sana-wm",
 }
+REPRODUCTION_ENVIRONMENT_NAMES = (
+    "CUDA_VISIBLE_DEVICES",
+    "HF_HOME",
+    "LD_LIBRARY_PATH",
+    "PYTHONPATH",
+    "TRANSFORMERS_CACHE",
+    "TRTMC_BENCH_MANIFEST_ROOT",
+    "TRTMC_ELF_REFERENCE_REPO",
+    "TRTMC_LANCE_REFERENCE_REPO",
+    "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY",
+    "TRTMC_PYTHON_PROFILE_ROOT",
+    "TRTMC_SANA_WM_REFERENCE_REPO",
+    "PERSONAPLEX_OFFICIAL_REPO",
+)
 
 
-class PerfReleaseError(RuntimeError):
-    """The release performance request or evidence is invalid."""
+class PerfMatrixError(RuntimeError):
+    """The performance matrix request or evidence is invalid."""
 
 
 @dataclass(frozen=True)
 class RunOptions:
     output: Path
+    scratch_root: Path
     trtmc_bench: str
     trtmc_worker: Path | None
     hf_transformers_runner: Path
@@ -94,115 +101,260 @@ class RunOptions:
     bundle_cache: Path | None
     bundle_roots: tuple[Path, ...]
     runtime_dirs: tuple[Path, ...]
-    only: str
-    dry_run: bool
-    ci: bool
-    resume: bool
-    reuse_aligned_from: Path | None
-    rerun_failed: bool
     local_files_only: bool
+    minimum_free_space_gib: int
     timeout_seconds: int
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("suite", type=Path, help="release performance suite YAML")
-    parser.add_argument("--output", type=Path, default=Path("artifacts/perf"))
-    parser.add_argument("--case", action="append", default=[], help="case id; repeatable")
-    parser.add_argument(
-        "--priority",
-        choices=tuple(PRIORITIES),
-        help="run this priority and faster priorities",
-    )
-    parser.add_argument("--max-cases", type=int)
-    parser.add_argument("--only", choices=("both", "trtmc", "baseline"), default="both")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--ci", action="store_true", help="fail after reporting unexpected rows")
-    parser.add_argument("--resume", action="store_true")
-    parser.add_argument(
-        "--reuse-aligned-from",
-        type=Path,
-        help=(
-            "seed a new report from aligned terminal rows in an earlier results.json; "
-            "rows with changed timing contracts are run again"
-        ),
-    )
-    parser.add_argument("--rerun-failed", action="store_true")
-    parser.add_argument("--trtmc-bench", default=os.environ.get("TRTMC_BENCH", "trtmc-bench"))
-    parser.add_argument(
-        "--trtmc-worker",
-        type=Path,
-        default=Path(os.environ["TRTMC_PERF_WORKER"])
-        if os.environ.get("TRTMC_PERF_WORKER")
-        else None,
-    )
-    parser.add_argument(
-        "--hf-transformers-runner",
-        type=Path,
-        default=REPOSITORY / "benchmarks/performance/baselines/hf_transformers.py",
-    )
-    parser.add_argument(
-        "--task-reference-runner",
-        type=Path,
-        default=REPOSITORY / "benchmarks/performance/baselines/task_reference.py",
-    )
-    parser.add_argument(
-        "--bundle-cache",
-        type=Path,
-        default=(
-            Path(os.environ["TRTMC_PERF_BUNDLE_CACHE"])
-            if os.environ.get("TRTMC_PERF_BUNDLE_CACHE")
-            else None
-        ),
-    )
-    parser.add_argument("--local-files-only", action="store_true")
-    parser.add_argument(
-        "--bundle-root",
-        action="append",
-        default=[
-            Path(value)
-            for value in os.environ.get("TRTMC_PERF_BUNDLE_ROOTS", "").split(os.pathsep)
-            if value
-        ],
-        type=Path,
-    )
-    parser.add_argument(
-        "--runtime-dir",
-        action="append",
-        default=[
-            Path(value)
-            for value in os.environ.get("TRTMC_PERF_RUNTIME_DIRS", "").split(os.pathsep)
-            if value
-        ],
-        type=Path,
-    )
-    parser.add_argument("--timeout-seconds", type=int, default=7200)
+    commands = parser.add_subparsers(dest="command", required=True)
+    for name, help_text in (
+        ("check", "resolve and validate the selected matrix entries"),
+        ("run", "run the selected matrix entries"),
+    ):
+        command = commands.add_parser(name, help=help_text)
+        command.add_argument("suite", type=Path, help="performance suite YAML")
+        command.add_argument(
+            "--environment",
+            required=True,
+            type=Path,
+            help="execution environment YAML",
+        )
+        command.add_argument(
+            "--entry",
+            action="append",
+            default=[],
+            help="exact family.operation entry id; repeatable",
+        )
+    resume = commands.add_parser("resume", help="continue an incomplete run")
+    resume.add_argument("run_directory", type=Path)
     return parser
 
 
-def _read_yaml(path: Path) -> dict[str, Any]:
+def _read_yaml_object(path: Path, label: str) -> dict[str, Any]:
     try:
         value = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
-        raise PerfReleaseError(f"cannot read suite {path}: {exc}") from exc
+        raise PerfMatrixError(f"cannot read {label} {path}: {exc}") from exc
     if not isinstance(value, dict):
-        raise PerfReleaseError("performance suite must contain a YAML object")
-    if value.get("schema_version") != SUITE_SCHEMA:
-        raise PerfReleaseError(f"suite schema_version must be {SUITE_SCHEMA!r}")
+        raise PerfMatrixError(f"{label} must contain a YAML object")
     return value
+
+
+def _read_yaml(path: Path) -> dict[str, Any]:
+    value = _read_yaml_object(path, "performance suite")
+    if value.get("schema_version") != SUITE_SCHEMA:
+        raise PerfMatrixError(f"suite schema_version must be {SUITE_SCHEMA!r}")
+    return value
+
+
+_ENVIRONMENT_VARIABLE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expand_environment_value(value: str, field: str) -> str:
+    missing: list[str] = []
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        configured = os.environ.get(name)
+        if configured is None or not configured.strip():
+            missing.append(name)
+            return ""
+        return configured
+
+    expanded = _ENVIRONMENT_VARIABLE.sub(replace, value)
+    if missing:
+        raise PerfMatrixError(
+            f"environment {field} requires: {', '.join(sorted(set(missing)))}"
+        )
+    return expanded
+
+
+def _resolved_path(value: str, field: str) -> Path:
+    expanded = _expand_environment_value(value, field)
+    path = Path(expanded).expanduser()
+    return path.resolve() if path.is_absolute() else (REPOSITORY / path).resolve()
+
+
+def _resolved_executable(value: str, field: str) -> str:
+    expanded = _expand_environment_value(value, field)
+    if Path(expanded).is_absolute() or os.sep in expanded:
+        return str(_resolved_path(expanded, field))
+    return expanded
+
+
+def _resolved_path_list(value: Any, field: str) -> tuple[Path, ...]:
+    if isinstance(value, str):
+        expanded = _expand_environment_value(value, field)
+        configured = [item for item in expanded.split(os.pathsep) if item]
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        configured = [
+            _expand_environment_value(item, f"{field}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    else:
+        raise PerfMatrixError(f"environment {field} must be a path list or path-list string")
+    return tuple(_resolved_path(item, field) for item in configured)
+
+
+def _read_environment(path: Path) -> dict[str, Any]:
+    source = path.resolve()
+    raw = _read_yaml_object(source, "performance environment")
+    if raw.get("schema_version") != ENVIRONMENT_SCHEMA:
+        raise PerfMatrixError(
+            f"environment schema_version must be {ENVIRONMENT_SCHEMA!r}"
+        )
+    name = raw.get("name")
+    tools = raw.get("tools")
+    storage = raw.get("storage")
+    execution = raw.get("execution")
+    if not isinstance(name, str) or not name.strip():
+        raise PerfMatrixError("environment name must be a non-empty string")
+    for field, value in (
+        ("tools", tools),
+        ("storage", storage),
+        ("execution", execution),
+    ):
+        if not isinstance(value, Mapping):
+            raise PerfMatrixError(f"environment {field} must be an object")
+    assert isinstance(tools, Mapping)
+    assert isinstance(storage, Mapping)
+    assert isinstance(execution, Mapping)
+    required_tools = (
+        "trtmc_bench",
+        "trtmc_worker",
+        "hf_transformers_runner",
+        "task_reference_runner",
+    )
+    missing_tools = [
+        field
+        for field in required_tools
+        if not isinstance(tools.get(field), str) or not str(tools[field]).strip()
+    ]
+    if missing_tools:
+        raise PerfMatrixError(
+            f"environment tools is missing: {', '.join(missing_tools)}"
+        )
+    required_storage = ("results_root", "scratch_root", "bundle_roots", "runtime_dirs")
+    missing_storage = [field for field in required_storage if field not in storage]
+    if missing_storage:
+        raise PerfMatrixError(
+            f"environment storage is missing: {', '.join(missing_storage)}"
+        )
+    bundle_cache = storage.get("bundle_cache")
+    if bundle_cache is not None and not isinstance(bundle_cache, str):
+        raise PerfMatrixError("environment storage.bundle_cache must be a path or null")
+    timeout_seconds = execution.get("timeout_seconds")
+    minimum_free_space_gib = storage.get("minimum_free_space_gib", 0)
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, int)
+        or timeout_seconds <= 0
+    ):
+        raise PerfMatrixError("environment execution.timeout_seconds must be positive")
+    if (
+        isinstance(minimum_free_space_gib, bool)
+        or not isinstance(minimum_free_space_gib, int)
+        or minimum_free_space_gib < 0
+    ):
+        raise PerfMatrixError(
+            "environment storage.minimum_free_space_gib must be non-negative"
+        )
+    local_files_only = execution.get("local_files_only", False)
+    if not isinstance(local_files_only, bool):
+        raise PerfMatrixError("environment execution.local_files_only must be boolean")
+    return {
+        "schema_version": ENVIRONMENT_SCHEMA,
+        "name": name.strip(),
+        "source": str(source),
+        "sha256": _sha256_file(source),
+        "tools": {
+            "trtmc_bench": _resolved_executable(
+                str(tools["trtmc_bench"]), "tools.trtmc_bench"
+            ),
+            "trtmc_worker": str(
+                _resolved_path(str(tools["trtmc_worker"]), "tools.trtmc_worker")
+            ),
+            "hf_transformers_runner": str(
+                _resolved_path(
+                    str(tools["hf_transformers_runner"]),
+                    "tools.hf_transformers_runner",
+                )
+            ),
+            "task_reference_runner": str(
+                _resolved_path(
+                    str(tools["task_reference_runner"]),
+                    "tools.task_reference_runner",
+                )
+            ),
+        },
+        "storage": {
+            "results_root": str(
+                _resolved_path(str(storage["results_root"]), "storage.results_root")
+            ),
+            "scratch_root": str(
+                _resolved_path(str(storage["scratch_root"]), "storage.scratch_root")
+            ),
+            "bundle_cache": (
+                str(_resolved_path(bundle_cache, "storage.bundle_cache"))
+                if bundle_cache is not None
+                else None
+            ),
+            "bundle_roots": [
+                str(path)
+                for path in _resolved_path_list(
+                    storage["bundle_roots"], "storage.bundle_roots"
+                )
+            ],
+            "runtime_dirs": [
+                str(path)
+                for path in _resolved_path_list(
+                    storage["runtime_dirs"], "storage.runtime_dirs"
+                )
+            ],
+            "minimum_free_space_gib": minimum_free_space_gib,
+        },
+        "execution": {
+            "local_files_only": local_files_only,
+            "timeout_seconds": timeout_seconds,
+        },
+    }
+
+
+def _run_options(environment: Mapping[str, Any], output: Path) -> RunOptions:
+    tools = environment["tools"]
+    storage = environment["storage"]
+    execution = environment["execution"]
+    return RunOptions(
+        output=output,
+        scratch_root=Path(str(storage["scratch_root"])),
+        trtmc_bench=str(tools["trtmc_bench"]),
+        trtmc_worker=Path(str(tools["trtmc_worker"])),
+        hf_transformers_runner=Path(str(tools["hf_transformers_runner"])),
+        task_reference_runner=Path(str(tools["task_reference_runner"])),
+        bundle_cache=(
+            Path(str(storage["bundle_cache"])) if storage.get("bundle_cache") else None
+        ),
+        bundle_roots=tuple(Path(str(value)) for value in storage["bundle_roots"]),
+        runtime_dirs=tuple(Path(str(value)) for value in storage["runtime_dirs"]),
+        local_files_only=bool(execution["local_files_only"]),
+        minimum_free_space_gib=int(storage["minimum_free_space_gib"]),
+        timeout_seconds=int(execution["timeout_seconds"]),
+    )
 
 
 def _cases(suite: Mapping[str, Any]) -> list[dict[str, Any]]:
     defaults = suite.get("defaults", {})
-    configured = suite.get("cases")
+    configured = suite.get("entries")
     if not isinstance(defaults, Mapping):
-        raise PerfReleaseError("suite defaults must be an object")
+        raise PerfMatrixError("suite defaults must be an object")
     if not isinstance(configured, list) or not configured:
-        raise PerfReleaseError("suite cases must be a non-empty list")
+        raise PerfMatrixError("suite entries must be a non-empty list")
     cases: list[dict[str, Any]] = []
     for raw in configured:
         if not isinstance(raw, Mapping):
-            raise PerfReleaseError("every suite case must be an object")
+            raise PerfMatrixError("every suite entry must be an object")
         merged = _merge_case(defaults, raw)
         _validate_case_shape(merged)
         cases.append(merged)
@@ -223,20 +375,39 @@ def _merge_case(defaults: Mapping[str, Any], case: Mapping[str, Any]) -> dict[st
 
 
 def _validate_case_shape(case: Mapping[str, Any]) -> None:
-    required = ("id", "family", "operation", "model", "priority", "measurement", "baseline")
+    required = ("id", "family", "operation", "model", "workload", "measurement", "baseline")
     missing = [name for name in required if name not in case]
     if missing:
-        raise PerfReleaseError(f"case is missing {', '.join(missing)}: {case}")
-    if case["priority"] not in PRIORITIES:
-        raise PerfReleaseError(f"case {case['id']} has invalid priority {case['priority']!r}")
+        raise PerfMatrixError(f"case is missing {', '.join(missing)}: {case}")
+    _validate_workload(case)
     _validate_measurement(case)
     _validate_baseline(case)
+
+
+def _validate_workload(case: Mapping[str, Any]) -> None:
+    workload = case["workload"]
+    if not isinstance(workload, Mapping):
+        raise PerfMatrixError(f"case {case['id']} workload must be an object")
+    unsupported = sorted(set(workload) - {"testcase", "request"})
+    if unsupported:
+        raise PerfMatrixError(
+            f"case {case['id']} workload has unsupported fields: {', '.join(unsupported)}"
+        )
+    testcase = workload.get("testcase")
+    if not isinstance(testcase, str) or not testcase.strip():
+        raise PerfMatrixError(
+            f"case {case['id']} workload.testcase must be explicit; "
+            "dataset workloads are not implemented yet"
+        )
+    request = workload.get("request", {})
+    if not isinstance(request, Mapping):
+        raise PerfMatrixError(f"case {case['id']} workload.request must be an object")
 
 
 def _validate_measurement(case: Mapping[str, Any]) -> None:
     measurement = case["measurement"]
     if not isinstance(measurement, Mapping):
-        raise PerfReleaseError(f"case {case['id']} measurement must be an object")
+        raise PerfMatrixError(f"case {case['id']} measurement must be an object")
     for name in ("warmup", "iterations"):
         value = measurement.get(name)
         if (
@@ -244,7 +415,7 @@ def _validate_measurement(case: Mapping[str, Any]) -> None:
             or not isinstance(value, int)
             or value < (0 if name == "warmup" else 1)
         ):
-            raise PerfReleaseError(f"case {case['id']} measurement.{name} is invalid")
+            raise PerfMatrixError(f"case {case['id']} measurement.{name} is invalid")
 
 
 def _validate_baseline(case: Mapping[str, Any]) -> None:
@@ -253,19 +424,19 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
         "hf-transformers",
         "task-reference",
     }:
-        raise PerfReleaseError(f"case {case['id']} has an unsupported baseline runner")
+        raise PerfMatrixError(f"case {case['id']} has an unsupported baseline runner")
     if baseline.get("runner") == "task-reference":
         adapter = str(baseline.get("adapter", ""))
         if adapter not in TASK_REFERENCE_ADAPTERS:
-            raise PerfReleaseError(
+            raise PerfMatrixError(
                 f"case {case['id']} has an unsupported task-reference adapter: {adapter}"
             )
         if not baseline.get("reference_backend"):
-            raise PerfReleaseError(
+            raise PerfMatrixError(
                 f"case {case['id']} task-reference baseline needs a reference_backend"
             )
         if not isinstance(baseline.get("adapter_options", {}), Mapping):
-            raise PerfReleaseError(
+            raise PerfMatrixError(
                 f"case {case['id']} task-reference adapter_options must be an object"
             )
         expected_mode = (
@@ -283,27 +454,27 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
             else "hf-eager"
         )
         if baseline.get("mode") != expected_mode:
-            raise PerfReleaseError(
+            raise PerfMatrixError(
                 f"case {case['id']} adapter {adapter} requires mode {expected_mode}"
             )
     token_policy = baseline.get("output_token_policy", "new-tokens")
     if token_policy not in {"new-tokens", "strip-start", "strip-start-and-eos"}:
-        raise PerfReleaseError(f"case {case['id']} baseline output token policy is invalid")
+        raise PerfMatrixError(f"case {case['id']} baseline output token policy is invalid")
     if baseline.get("padding", "longest") not in {"longest", "max-length"}:
-        raise PerfReleaseError(f"case {case['id']} baseline padding is invalid")
+        raise PerfMatrixError(f"case {case['id']} baseline padding is invalid")
     if baseline.get("precision") not in {None, "fp16", "fp32", "bf16"}:
-        raise PerfReleaseError(f"case {case['id']} baseline precision is invalid")
+        raise PerfMatrixError(f"case {case['id']} baseline precision is invalid")
     if baseline.get("model_class", "task") not in {"task", "auto"}:
-        raise PerfReleaseError(f"case {case['id']} baseline model class is invalid")
+        raise PerfMatrixError(f"case {case['id']} baseline model class is invalid")
     if baseline.get("generation_method", "generate") not in {"generate", "ar-generate"}:
-        raise PerfReleaseError(f"case {case['id']} baseline generation method is invalid")
+        raise PerfMatrixError(f"case {case['id']} baseline generation method is invalid")
     if baseline.get("experts_implementation") not in {
         None,
         "eager",
         "batched_mm",
         "grouped_mm",
     }:
-        raise PerfReleaseError(f"case {case['id']} baseline experts implementation is invalid")
+        raise PerfMatrixError(f"case {case['id']} baseline experts implementation is invalid")
     output_contract = baseline.get("output_contract", "exact-token-ids")
     if output_contract not in {
         "audio-shape",
@@ -315,7 +486,7 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
         "segmentation-shape",
         "token-agreement",
     }:
-        raise PerfReleaseError(f"case {case['id']} baseline output contract is invalid")
+        raise PerfMatrixError(f"case {case['id']} baseline output contract is invalid")
     if output_contract == "token-agreement":
         for name in ("min_positional_token_agreement", "max_normalized_edit_distance"):
             value = baseline.get(name)
@@ -324,7 +495,7 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
                 or not isinstance(value, (int, float))
                 or not 0.0 <= float(value) <= 1.0
             ):
-                raise PerfReleaseError(
+                raise PerfMatrixError(
                     f"case {case['id']} token-agreement contract has invalid {name}"
                 )
     if output_contract == "ocr-text":
@@ -334,7 +505,7 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
             or not required
             or any(not isinstance(value, str) or not value.strip() for value in required)
         ):
-            raise PerfReleaseError(
+            raise PerfMatrixError(
                 f"case {case['id']} OCR output contract needs required_substrings"
             )
         limit = baseline.get("max_normalized_edit_distance")
@@ -343,7 +514,7 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
             or not isinstance(limit, (int, float))
             or not 0.0 <= float(limit) <= 1.0
         ):
-            raise PerfReleaseError(
+            raise PerfMatrixError(
                 f"case {case['id']} OCR output contract has an invalid edit-distance limit"
             )
     expected_timing = timing_contract(
@@ -356,7 +527,7 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
         "asset_loading_included",
     ):
         if baseline.get(name) != expected_timing[name]:
-            raise PerfReleaseError(
+            raise PerfMatrixError(
                 f"case {case['id']} baseline.{name} must be "
                 f"{expected_timing[name]!r} for its reference"
             )
@@ -367,14 +538,14 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
         else {"torch-compile", "hf-eager"}
     )
     if mode not in allowed_modes:
-        raise PerfReleaseError(f"case {case['id']} baseline mode is invalid: {mode}")
+        raise PerfMatrixError(f"case {case['id']} baseline mode is invalid: {mode}")
 
 
 def _validate_unique_ids(cases: Sequence[Mapping[str, Any]]) -> None:
     ids = [str(case["id"]) for case in cases]
     duplicates = sorted({value for value in ids if ids.count(value) > 1})
     if duplicates:
-        raise PerfReleaseError(f"duplicate case ids: {', '.join(duplicates)}")
+        raise PerfMatrixError(f"duplicate entry ids: {', '.join(duplicates)}")
 
 
 def _validate_coverage(cases: Sequence[Mapping[str, Any]]) -> None:
@@ -388,7 +559,7 @@ def _validate_coverage(cases: Sequence[Mapping[str, Any]]) -> None:
     extra = sorted(actual - expected)
     if missing or extra or len(actual) != len(cases):
         details = _coverage_details(missing, extra, len(actual) != len(cases))
-        raise PerfReleaseError("suite coverage does not match ready catalog: " + "; ".join(details))
+        raise PerfMatrixError("suite coverage does not match ready catalog: " + "; ".join(details))
 
 
 def _coverage_details(
@@ -409,19 +580,11 @@ def _coverage_details(
 def _selected_cases(
     cases: Sequence[dict[str, Any]],
     requested: Sequence[str],
-    priority: str | None,
-    max_cases: int | None,
 ) -> list[dict[str, Any]]:
     requested = [value for value in requested if value]
     _validate_requested_cases(cases, requested)
     selected = [case for case in cases if not requested or case["id"] in requested]
-    if priority is not None and not requested:
-        selected = _select_through_priority(selected, priority)
-    selected.sort(key=lambda case: (PRIORITIES[str(case["priority"])], str(case["id"])))
-    if max_cases is not None:
-        if max_cases <= 0:
-            raise PerfReleaseError("--max-cases must be positive")
-        selected = selected[:max_cases]
+    selected.sort(key=lambda case: str(case["id"]))
     return selected
 
 
@@ -429,14 +592,7 @@ def _validate_requested_cases(cases: Sequence[Mapping[str, Any]], requested: Seq
     known = {str(case["id"]) for case in cases}
     unknown = sorted(set(requested) - known)
     if unknown:
-        raise PerfReleaseError(f"unknown case ids: {', '.join(unknown)}")
-
-
-def _select_through_priority(
-    cases: Sequence[dict[str, Any]], priority: str
-) -> list[dict[str, Any]]:
-    ceiling = PRIORITIES[priority]
-    return [case for case in cases if PRIORITIES[str(case["priority"])] <= ceiling]
+        raise PerfMatrixError(f"unknown entry ids: {', '.join(unknown)}")
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -490,6 +646,8 @@ def _initial_results(
     suite_path: Path,
     suite: Mapping[str, Any],
     cases: Sequence[Mapping[str, Any]],
+    selected: Sequence[Mapping[str, Any]],
+    environment_config: Mapping[str, Any],
 ) -> dict[str, Any]:
     environment = {
         "hostname": platform.node(),
@@ -508,13 +666,16 @@ def _initial_results(
         "git_commit": _git_commit(),
         "started_at": _now(),
         "environment": environment,
+        "environment_config": deepcopy(dict(environment_config)),
+        "selected_entry_ids": [str(case["id"]) for case in selected],
         "cases": [
             {
                 "id": case["id"],
                 "family": case["family"],
                 "operation": case["operation"],
                 "model": case["model"],
-                "priority": case["priority"],
+                "workload_contract": deepcopy(dict(case["workload"])),
+                "measurement_contract": deepcopy(dict(case["measurement"])),
                 "baseline_contract": dict(case["baseline"]),
                 "status": "pending",
             }
@@ -523,29 +684,17 @@ def _initial_results(
     }
 
 
-def _load_resume(path: Path, suite_path: Path) -> dict[str, Any]:
+def _load_resume(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise PerfReleaseError(f"cannot resume results {path}: {exc}") from exc
+        raise PerfMatrixError(f"cannot resume results {path}: {exc}") from exc
     if value.get("schema_version") != RESULT_SCHEMA:
-        raise PerfReleaseError(f"cannot resume non-{RESULT_SCHEMA} results")
-    if value.get("suite_sha256") != _sha256_file(suite_path):
-        raise PerfReleaseError("cannot resume because the suite content changed")
+        raise PerfMatrixError(f"cannot resume non-{RESULT_SCHEMA} results")
+    if not isinstance(value.get("cases"), list):
+        raise PerfMatrixError("cannot resume results without matrix entries")
     value["status"] = "running"
     value.pop("finished_at", None)
-    return value
-
-
-def _load_results(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise PerfReleaseError(f"cannot read results {path}: {exc}") from exc
-    if value.get("schema_version") != RESULT_SCHEMA:
-        raise PerfReleaseError(f"cannot reuse non-{RESULT_SCHEMA} results")
-    if not isinstance(value.get("cases"), list):
-        raise PerfReleaseError(f"cannot reuse results without a cases list: {path}")
     return value
 
 
@@ -584,9 +733,8 @@ def _candidate_base_argv(case: Mapping[str, Any], options: RunOptions) -> list[s
         "measurement.asset_loading_included="
         + _yaml_cli_value(bool(case["baseline"]["asset_loading_included"])),
     ]
-    testcase = case.get("testcase")
-    if testcase:
-        argv.extend(["--case", str(testcase)])
+    workload = case["workload"]
+    argv.extend(["--case", str(workload["testcase"])])
     if options.bundle_cache is not None:
         argv.extend(["--bundle-cache", str(options.bundle_cache.resolve())])
     if options.trtmc_worker is not None:
@@ -595,9 +743,7 @@ def _candidate_base_argv(case: Mapping[str, Any], options: RunOptions) -> list[s
         argv.extend(["--bundle-root", str(root.resolve())])
     for directory in options.runtime_dirs:
         argv.extend(["--runtime-dir", str(directory.resolve())])
-    request = case.get("request", {})
-    if request and not isinstance(request, Mapping):
-        raise PerfReleaseError(f"case {case['id']} request must be an object")
+    request = workload.get("request", {})
     for name, value in sorted((request or {}).items()):
         argv.extend(["--set", f"request.{name}={_yaml_cli_value(value)}"])
     return argv
@@ -628,30 +774,30 @@ def _resolve_candidate(
     argv = [*_candidate_base_argv(case, options), "--dry-run"]
     command = _run_command(argv, _command_environment(), options.timeout_seconds)
     if command["exit_code"] != 0:
-        raise PerfReleaseError(
+        raise PerfMatrixError(
             f"trtmc-bench could not resolve {case['id']}: {command['stderr_tail']}"
         )
     try:
         resolved = json.loads(command["stdout"])
     except json.JSONDecodeError as exc:
-        raise PerfReleaseError(f"trtmc-bench dry-run returned invalid JSON: {exc}") from exc
+        raise PerfMatrixError(f"trtmc-bench dry-run returned invalid JSON: {exc}") from exc
     if not isinstance(resolved, list) or len(resolved) != 1 or not isinstance(resolved[0], dict):
-        raise PerfReleaseError(f"case {case['id']} must resolve to exactly one trtmc-bench case")
+        raise PerfMatrixError(f"case {case['id']} must resolve to exactly one trtmc-bench case")
     value = resolved[0]
     if (value.get("model", {}).get("family"), value.get("operation")) != (
         case["family"],
         case["operation"],
     ):
-        raise PerfReleaseError(f"case {case['id']} does not match its resolved family-operation")
+        raise PerfMatrixError(f"case {case['id']} does not match its resolved family-operation")
     measurement = value.get("measurement", {})
     expected_scope = _candidate_timing_scope(case)
     if not isinstance(measurement, Mapping) or measurement.get("timing_scope") != expected_scope:
-        raise PerfReleaseError(
+        raise PerfMatrixError(
             f"case {case['id']} TRTMC timing scope did not resolve to {expected_scope}"
         )
     expected_asset_loading = bool(case["baseline"]["asset_loading_included"])
     if measurement.get("asset_loading_included") is not expected_asset_loading:
-        raise PerfReleaseError(
+        raise PerfMatrixError(
             f"case {case['id']} TRTMC asset-loading scope did not resolve to "
             f"{expected_asset_loading}"
         )
@@ -659,7 +805,7 @@ def _resolve_candidate(
     if expected_asset_loading and not any(
         name in request for name in ("audio_path", "image_path")
     ):
-        raise PerfReleaseError(
+        raise PerfMatrixError(
             f"case {case['id']} includes asset loading but resolves no timed asset path"
         )
     command.pop("stdout", None)
@@ -670,31 +816,29 @@ def _validate_worker_metadata(
     metadata: Mapping[str, Any], expected_revision: str
 ) -> None:
     if metadata.get("schema_version") != "trtmc.benchmark-worker-metadata/v1":
-        raise PerfReleaseError("worker metadata schema is unsupported")
+        raise PerfMatrixError("worker metadata schema is unsupported")
     build = metadata.get("build")
     if not isinstance(build, Mapping):
-        raise PerfReleaseError("worker metadata is missing build provenance")
+        raise PerfMatrixError("worker metadata is missing build provenance")
     if build.get("configuration") != "Release":
-        raise PerfReleaseError("worker build configuration must be Release")
+        raise PerfMatrixError("worker build configuration must be Release")
     revision = str(build.get("source_revision", "")).strip()
     if revision != expected_revision:
-        raise PerfReleaseError(
+        raise PerfMatrixError(
             f"worker source revision {revision or '<missing>'} does not match "
             f"requested source revision {expected_revision}"
         )
 
 
-def _preflight_worker(options: RunOptions) -> dict[str, Any] | None:
-    if options.only == "baseline" or options.dry_run:
-        return None
+def _preflight_worker(options: RunOptions) -> dict[str, Any]:
     expected_revision = _git_commit()
     if not expected_revision:
-        raise PerfReleaseError("cannot determine requested source revision for worker preflight")
+        raise PerfMatrixError("cannot determine requested source revision for worker preflight")
     try:
         worker = find_worker(options.trtmc_worker)
         metadata = worker_metadata(worker)
     except BenchmarkError as exc:
-        raise PerfReleaseError(f"candidate worker preflight failed: {exc}") from exc
+        raise PerfMatrixError(f"candidate worker preflight failed: {exc}") from exc
     _validate_worker_metadata(metadata, expected_revision)
     return {
         **metadata,
@@ -714,14 +858,59 @@ def _preflight_candidates(
         print(f"[{case_id}] timing preflight", flush=True)
         try:
             resolved[case_id] = _resolve_candidate(case, options)
-        except (PerfReleaseError, OSError, ValueError, RuntimeError) as exc:
+        except (PerfMatrixError, OSError, ValueError, RuntimeError) as exc:
             failures.append(f"{case_id}: {exc}")
     if failures:
         detail = "\n".join(f"  - {failure}" for failure in failures)
-        raise PerfReleaseError(
+        raise PerfMatrixError(
             "candidate timing preflight failed before benchmark execution:\n" + detail
         )
     return resolved
+
+
+def _preflight_references(
+    cases: Sequence[Mapping[str, Any]],
+    preflight: Mapping[str, tuple[dict[str, Any], list[str], dict[str, str]]],
+    options: RunOptions,
+) -> dict[str, Any]:
+    entries = []
+    failures = []
+    for case in cases:
+        case_id = str(case["id"])
+        resolved = preflight[case_id][0]
+        output = options.scratch_root / "preflight" / _slug(case_id) / "baseline.json"
+        try:
+            argv, profile = _baseline_argv(case, resolved, output, options)
+            executable = argv[0]
+            if os.sep in executable:
+                if not Path(executable).is_file():
+                    raise PerfMatrixError(
+                        f"reference Python does not exist: {executable}"
+                    )
+            elif shutil.which(executable) is None:
+                raise PerfMatrixError(f"reference Python is not on PATH: {executable}")
+            entries.append(
+                {
+                    "id": case_id,
+                    "runner": case["baseline"]["runner"],
+                    "mode": case["baseline"].get("mode", "torch-compile"),
+                    "python_profile": profile,
+                    "python": executable,
+                }
+            )
+        except (PerfMatrixError, OSError, ValueError, RuntimeError) as exc:
+            failures.append(f"{case_id}: {exc}")
+    if failures:
+        detail = "\n".join(f"  - {failure}" for failure in failures)
+        raise PerfMatrixError(
+            "reference preflight failed before benchmark execution:\n" + detail
+        )
+    return {
+        "checked_at": _now(),
+        "entry_count": len(entries),
+        "status": "ready",
+        "entries": entries,
+    }
 
 
 def _preflight_evidence(
@@ -775,7 +964,7 @@ def _manifest_values(resolved: Mapping[str, Any]) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise PerfReleaseError(f"cannot read resolved model manifest {path}: {exc}") from exc
+        raise PerfMatrixError(f"cannot read resolved model manifest {path}: {exc}") from exc
     return value
 
 
@@ -785,7 +974,7 @@ def _baseline_task(resolved: Mapping[str, Any]) -> str:
     if strategy == "encoder_only_nlp":
         return "encoder"
     if strategy != "text_generation_causal":
-        raise PerfReleaseError(f"hf-transformers runner does not support task {strategy!r}")
+        raise PerfMatrixError(f"hf-transformers runner does not support task {strategy!r}")
     return "seq2seq-lm" if runtime.startswith(SEQUENCE_RUNTIME_MARKERS) else "causal-lm"
 
 
@@ -1002,6 +1191,11 @@ def _run_command(
         "argv": list(argv),
         "rendered": shlex.join(argv),
         "cwd": str(REPOSITORY),
+        "environment": {
+            name: environment[name]
+            for name in REPRODUCTION_ENVIRONMENT_NAMES
+            if environment.get(name)
+        },
         "redacted_environment_names": [
             name for name in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN") if environment.get(name)
         ],
@@ -1024,13 +1218,13 @@ def _candidate_result(run_dir: Path, workload_digest: str) -> dict[str, Any]:
     try:
         result = json.loads(result_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise PerfReleaseError(f"cannot read trtmc-bench result: {exc}") from exc
+        raise PerfMatrixError(f"cannot read trtmc-bench result: {exc}") from exc
     if result.get("schema_version") != "trtmc.benchmark-run/v1":
-        raise PerfReleaseError("trtmc-bench returned an unsupported result schema")
+        raise PerfMatrixError("trtmc-bench returned an unsupported result schema")
     cells = result.get("cells", [])
     if result.get("status") != "completed" or len(cells) != 1:
         error = cells[0].get("error") if len(cells) == 1 else result.get("status")
-        raise PerfReleaseError(f"trtmc-bench did not complete one case: {error}")
+        raise PerfMatrixError(f"trtmc-bench did not complete one case: {error}")
     cell = cells[0]
     artifact = run_dir / str(cell["artifact_dir"])
     observations = []
@@ -1038,7 +1232,7 @@ def _candidate_result(run_dir: Path, workload_digest: str) -> dict[str, Any]:
         for line in (artifact / "observations.jsonl").read_text(encoding="utf-8").splitlines():
             observations.append(json.loads(line))
     except (OSError, json.JSONDecodeError) as exc:
-        raise PerfReleaseError(f"cannot read trtmc-bench observations: {exc}") from exc
+        raise PerfMatrixError(f"cannot read trtmc-bench observations: {exc}") from exc
     samples = [float(item["runtime_e2e_wall_ms"]) for item in observations]
     return {
         "schema_version": result["schema_version"],
@@ -1057,16 +1251,16 @@ def _read_baseline(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise PerfReleaseError(f"cannot read baseline result: {exc}") from exc
+        raise PerfMatrixError(f"cannot read baseline result: {exc}") from exc
     if value.get("schema_version") != "trtmc.perf-baseline/v1":
-        raise PerfReleaseError("baseline returned an unsupported result schema")
+        raise PerfMatrixError("baseline returned an unsupported result schema")
     return value
 
 
 def _median(result: Mapping[str, Any]) -> float:
     values = result.get("samples_ms")
     if not isinstance(values, list) or not values:
-        raise PerfReleaseError("backend result has no timing samples")
+        raise PerfMatrixError("backend result has no timing samples")
     return float(statistics.median(float(value) for value in values))
 
 
@@ -1319,7 +1513,6 @@ def _case_row(
         "family": case["family"],
         "operation": case["operation"],
         "model": case["model"],
-        "priority": case["priority"],
         "status": "running",
         "resolved_settings": {
             "model": resolved["model"],
@@ -1327,8 +1520,15 @@ def _case_row(
             "request": resolved["request"],
             "runtime": resolved["runtime"],
             "measurement": case["measurement"],
+            "workload": {
+                "source": "testcase",
+                "testcase": case["workload"]["testcase"],
+                "request": resolved["request"],
+            },
             "workload_digest": workload_digest,
         },
+        "workload_contract": deepcopy(dict(case["workload"])),
+        "measurement_contract": deepcopy(dict(case["measurement"])),
         "baseline_contract": dict(case["baseline"]),
         "commands": {},
         "started_at": _now(),
@@ -1356,14 +1556,8 @@ def _run_supported_case(
     row["commands"] = commands
     print(f"[{case['id']}] TRTMC: {commands['trtmc']['rendered']}", flush=True)
     print(f"[{case['id']}] baseline: {commands['baseline']['rendered']}", flush=True)
-    if options.dry_run:
-        row["status"] = "partial"
-        row["reason"] = "dry-run: commands resolved but not executed"
-        return
     order = ("trtmc", "baseline") if _stable_even(str(case["id"])) else ("baseline", "trtmc")
     for side in order:
-        if options.only != "both" and options.only != side:
-            continue
         argv = candidate_argv if side == "trtmc" else baseline_argv
         command = _run_command(argv, environment, options.timeout_seconds)
         command.pop("stdout", None)
@@ -1372,14 +1566,6 @@ def _run_supported_case(
             row["status"] = "failed"
             row["reason"] = f"{side} command failed with rc={command['exit_code']}"
             return
-    if options.only != "both":
-        row["status"] = "partial"
-        row["reason"] = f"only {options.only} was requested"
-        if options.only == "trtmc":
-            row["candidate"] = _candidate_result(candidate_dir, digest)
-        else:
-            row["baseline"] = _read_baseline(baseline_path)
-        return
     candidate = _candidate_result(candidate_dir, digest)
     candidate["precision"] = str(resolved["model"]["precision"])
     baseline = _read_baseline(baseline_path)
@@ -1410,7 +1596,7 @@ def _run_one(
     case_work.mkdir(parents=True, exist_ok=True)
     try:
         _run_supported_case(case, resolved, options, case_work, row)
-    except (PerfReleaseError, OSError, ValueError, RuntimeError) as exc:
+    except (PerfMatrixError, OSError, ValueError, RuntimeError) as exc:
         row["status"] = "failed"
         row["reason"] = str(exc)
     row["finished_at"] = _now()
@@ -1425,7 +1611,6 @@ def _resolution_failure_row(
         "family": case["family"],
         "operation": case["operation"],
         "model": case["model"],
-        "priority": case["priority"],
         "status": "failed",
         "reason": reason,
         "baseline_contract": dict(case["baseline"]),
@@ -1441,18 +1626,14 @@ def _slug(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-") or "case"
 
 
-def _should_skip(row: Mapping[str, Any], options: RunOptions) -> bool:
-    status = row.get("status")
-    if row.get("evidence_reuse") and status in {"green", "yellow", "red"}:
-        return True
-    if not options.resume or status not in TERMINAL_STATUSES:
-        return False
-    return not options.rerun_failed or status not in {"failed", "contract-mismatch"}
+def _should_skip(row: Mapping[str, Any]) -> bool:
+    return row.get("status") in {"green", "yellow", "red"}
 
 
 def _final_status(rows: Iterable[Mapping[str, Any]]) -> str:
     statuses = {str(row.get("status")) for row in rows}
-    return "completed-with-errors" if statuses & {"failed", "contract-mismatch"} else "completed"
+    invalid = {"failed", "contract-mismatch", "partial", "pending", "running"}
+    return "completed-with-errors" if statuses & invalid else "completed"
 
 
 def _light(status: str) -> str:
@@ -1655,6 +1836,16 @@ def _raw_commands_html(row: Mapping[str, Any], default_cwd: str) -> str:
             f"<div class='command-label'>{html.escape(command_label)}</div>"
             f"<pre><code>{html.escape(str(command['rendered']))}</code></pre>"
         )
+        environment = command.get("environment")
+        if isinstance(environment, Mapping) and environment:
+            rendered_environment = "\n".join(
+                f"{name}={shlex.quote(str(value))}"
+                for name, value in sorted(environment.items())
+            )
+            parts.append(
+                "<div class='command-label'>Environment</div>"
+                f"<pre><code>{html.escape(rendered_environment)}</code></pre>"
+            )
     parts.append("</details>")
     return "".join(parts)
 
@@ -1704,16 +1895,9 @@ def _report_html(results: Mapping[str, Any]) -> str:
     preflight_count = (
         int(preflight.get("case_count", 0)) if isinstance(preflight, Mapping) else 0
     )
-    reuse = results.get("evidence_reuse", {})
-    reuse_note = ""
-    if isinstance(reuse, Mapping) and reuse.get("reused_case_count"):
-        reuse_note = (
-            f" {int(reuse['reused_case_count'])} already-aligned rows reused their "
-            "recorded samples; remaining rows were rerun."
-        )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>TRTMC release performance matrix</title>
+<title>TRTMC performance matrix</title>
 <style>
 body{{font-family:Arial,sans-serif;margin:28px;color:#1f2937}} h1{{margin-bottom:4px}}
 .meta{{color:#4b5563;margin:4px 0 18px}} .table-wrap{{overflow-x:auto}} table{{border-collapse:collapse;width:100%;min-width:1500px}}
@@ -1724,9 +1908,9 @@ th{{background:#e5e7eb}} tr:nth-child(even){{background:#f9fafb}} code{{font-siz
 .timing-meta{{color:#6b7280;font-size:11px;margin-top:2px}} .scope-side{{font-size:11px;margin-bottom:7px;min-width:270px}}
 .scope-title{{font-size:12px;font-weight:700;margin-bottom:2px}}
 </style></head><body>
-<h1>TRTMC release performance matrix</h1>
+<h1>TRTMC performance matrix</h1>
 <p class="meta">Generated {generated}. {family_count} families across {len(rows)} family-operation comparisons.{repeated_note}</p>
-<p class="meta">Timing contracts were validated before execution for {preflight_count} comparisons. A row is classified only when its recorded TRTMC and reference policies match that contract.{reuse_note}</p>
+<p class="meta">Timing contracts were validated before execution for {preflight_count} comparisons. A row is classified only when its recorded TRTMC and reference policies match that contract.</p>
 <p class="meta">Times are the p50 wall time from the recorded timed samples. Measured scope states the exact recorded boundary and the work included and excluded on each side.</p>
 <p><strong>{summary}</strong></p>
 <div class="table-wrap"><table><thead><tr><th>Family</th><th>Operation</th><th>Model</th><th>Baseline</th><th>TRTMC p50 (ms)</th><th>Baseline p50 (ms)</th><th>Measured scope</th><th>Light</th><th>Note</th><th>Commands</th></tr></thead>
@@ -1743,239 +1927,264 @@ def _write_artifacts(output: Path, results: Mapping[str, Any]) -> None:
         legacy_replay.unlink()
 
 
-def _policy_for_reuse(result: Mapping[str, Any], side: str) -> dict[str, Any]:
-    scope = _timing_scope(result)
-    input_included = _timing_policy_value(result, "input_preparation_included")
-    if input_included is None:
-        if side == "candidate":
-            input_included = scope == "public_pipeline_call_wall"
-        elif scope == "public_operation_call_wall":
-            input_included = _timing_policy_value(result, "tokenization_included") is True
-    asset_included = _timing_policy_value(result, "asset_loading_included")
-    if asset_included is None:
-        asset_included = False
-    return {
-        "timing_scope": scope,
-        "input_preparation_included": input_included,
-        "asset_loading_included": asset_included,
-    }
+def _existing_ancestor(path: Path) -> Path:
+    current = path.expanduser().resolve()
+    while not current.exists() and current != current.parent:
+        current = current.parent
+    return current
 
 
-def _without_timing_contract(value: Mapping[str, Any]) -> dict[str, Any]:
-    ignored = {
-        "timing_scope",
-        "input_preparation_included",
-        "asset_loading_included",
-    }
-    return {name: item for name, item in value.items() if name not in ignored}
-
-
-def _reuse_mismatch(
-    case: Mapping[str, Any],
-    row: Mapping[str, Any],
-    resolved: Mapping[str, Any],
-    expected_worker: Mapping[str, Any] | None = None,
-) -> str:
-    if row.get("status") not in {"green", "yellow", "red"}:
-        return "earlier row is not a valid completed comparison"
-    identity = (row.get("family"), row.get("operation"), row.get("model"))
-    if identity != (case["family"], case["operation"], case["model"]):
-        return "case identity changed"
-    previous_contract = row.get("baseline_contract")
-    if not isinstance(previous_contract, Mapping) or _without_timing_contract(
-        previous_contract
-    ) != _without_timing_contract(case["baseline"]):
-        return "non-timing baseline contract changed"
-    recorded_measurement = row.get("resolved_settings", {}).get("measurement")
-    if recorded_measurement != case["measurement"]:
-        return "measurement settings changed"
-    candidate = row.get("candidate")
-    baseline = row.get("baseline")
-    if not isinstance(candidate, Mapping) or not isinstance(baseline, Mapping):
-        return "recorded candidate or baseline evidence is missing"
-    if expected_worker is not None:
-        recorded_build = candidate.get("environment", {}).get("worker_build")
-        if recorded_build != expected_worker.get("build"):
-            return "recorded TRTMC worker build differs from the validated worker"
-    digest = _workload_digest(resolved)
-    if candidate.get("workload_digest") != digest or baseline.get("workload_digest") != digest:
-        return "resolved workload changed"
-    expected = timing_contract(
-        runner=str(case["baseline"]["runner"]),
-        family=str(case["family"]),
-    )
-    candidate_expected = {
-        "timing_scope": expected["candidate_timing_scope"],
-        "input_preparation_included": expected["input_preparation_included"],
-        "asset_loading_included": expected["asset_loading_included"],
-    }
-    if _policy_for_reuse(candidate, "candidate") != candidate_expected:
-        return "recorded TRTMC timing boundary differs from the reference contract"
-    baseline_expected = {
-        name: expected[name]
-        for name in (
-            "timing_scope",
-            "input_preparation_included",
-            "asset_loading_included",
-        )
-    }
-    if _policy_for_reuse(baseline, "baseline") != baseline_expected:
-        return "recorded baseline timing boundary differs from the reference contract"
-    return ""
-
-
-def _reuse_aligned_rows(
-    results: MutableMapping[str, Any],
-    source_path: Path,
-    cases: Sequence[Mapping[str, Any]],
-    preflight: Mapping[str, tuple[dict[str, Any], list[str], dict[str, str]]],
-    worker: Mapping[str, Any] | None,
-) -> None:
-    source = _load_results(source_path)
-    source_rows = {
-        str(row.get("id")): row for row in source["cases"] if isinstance(row, Mapping)
-    }
-    target_rows = _result_rows(results)
-    reused_ids = []
-    rerun_reasons: dict[str, str] = {}
-    source_sha256 = _sha256_file(source_path)
-    for case in cases:
-        case_id = str(case["id"])
-        source_row = source_rows.get(case_id)
-        if source_row is None:
-            rerun_reasons[case_id] = "earlier result is missing"
-            continue
-        mismatch = _reuse_mismatch(case, source_row, preflight[case_id][0], worker)
-        if mismatch:
-            rerun_reasons[case_id] = mismatch
-            continue
-        reused = deepcopy(source_row)
-        reused["baseline_contract"] = dict(case["baseline"])
-        reused["evidence_reuse"] = {
-            "source_results": str(source_path.resolve()),
-            "source_results_sha256": source_sha256,
-            "source_git_commit": source.get("git_commit"),
-            "source_finished_at": source.get("finished_at"),
-            "validated_at": _now(),
-            "reason": "recorded workload and timing boundaries match the current contract",
-        }
-        target_rows[case_id].clear()
-        target_rows[case_id].update(reused)
-        reused_ids.append(case_id)
-    results["evidence_reuse"] = {
-        "source_results": str(source_path.resolve()),
-        "source_results_sha256": source_sha256,
-        "reused_case_count": len(reused_ids),
-        "rerun_case_count": len(cases) - len(reused_ids),
-        "reused_case_ids": reused_ids,
-        "rerun_reasons": rerun_reasons,
-    }
-
-
-def _prepare_output(
-    output: Path,
-    suite_path: Path,
-    suite: Mapping[str, Any],
-    cases: Sequence[Mapping[str, Any]],
-    options: RunOptions,
-    preflight: Mapping[str, tuple[dict[str, Any], list[str], dict[str, str]]],
-    worker: Mapping[str, Any] | None,
+def _environment_preflight(
+    environment: Mapping[str, Any], options: RunOptions
 ) -> dict[str, Any]:
-    output.mkdir(parents=True, exist_ok=True)
-    result_path = output / "results.json"
-    if options.resume and result_path.is_file():
-        return _load_resume(result_path, suite_path)
-    existing = [path for path in output.iterdir() if path.name != ".work"]
-    if existing:
-        raise PerfReleaseError(
-            f"output directory is not empty; use --resume or choose another path: {output}"
+    executable = options.trtmc_bench
+    if os.sep in executable:
+        executable_path = Path(executable)
+        if not executable_path.is_file():
+            raise PerfMatrixError(f"trtmc-bench does not exist: {executable_path}")
+    elif shutil.which(executable) is None:
+        raise PerfMatrixError(f"trtmc-bench is not on PATH: {executable}")
+    for label, path in (
+        ("TRTMC worker", options.trtmc_worker),
+        ("HF Transformers runner", options.hf_transformers_runner),
+        ("task reference runner", options.task_reference_runner),
+    ):
+        if path is None or not path.is_file():
+            raise PerfMatrixError(f"{label} does not exist: {path}")
+    paths = {
+        "results_root": Path(str(environment["storage"]["results_root"])),
+        "scratch_root": options.scratch_root,
+    }
+    if options.bundle_cache is not None:
+        paths["bundle_cache"] = options.bundle_cache
+    filesystems: dict[tuple[int, int, int], dict[str, Any]] = {}
+    for label, path in paths.items():
+        probe = _existing_ancestor(path)
+        usage = shutil.disk_usage(probe)
+        key = (usage.total, usage.used, usage.free)
+        record = filesystems.setdefault(
+            key,
+            {
+                "paths": [],
+                "total_bytes": usage.total,
+                "used_bytes": usage.used,
+                "free_bytes": usage.free,
+            },
         )
-    results = _initial_results(suite_path, suite, cases)
-    if options.reuse_aligned_from is not None:
-        _reuse_aligned_rows(
-            results,
-            options.reuse_aligned_from.resolve(),
-            cases,
-            preflight,
-            worker,
+        record["paths"].append({"name": label, "path": str(path), "probe": str(probe)})
+    minimum_bytes = options.minimum_free_space_gib * 1024**3
+    insufficient = [
+        value for value in filesystems.values() if value["free_bytes"] < minimum_bytes
+    ]
+    if insufficient:
+        available = min(value["free_bytes"] for value in insufficient) / 1024**3
+        raise PerfMatrixError(
+            f"environment has only {available:.1f} GiB free; "
+            f"requires {options.minimum_free_space_gib} GiB"
         )
-    return results
+    for value in filesystems.values():
+        labels = ", ".join(item["name"] for item in value["paths"])
+        print(
+            f"Storage: {labels}: {value['free_bytes'] / 1024**3:.1f} GiB free",
+            flush=True,
+        )
+    return {"checked_at": _now(), "filesystems": list(filesystems.values())}
 
 
-def _ci_failed(results: Mapping[str, Any], selected_ids: set[str]) -> bool:
-    for row in results["cases"]:
-        if row["id"] not in selected_ids:
+def _new_run_directory(
+    results_root: Path, suite: Mapping[str, Any]
+) -> tuple[str, Path]:
+    results_root.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    revision = (_git_commit() or "unknown")[:8]
+    base = f"{_slug(str(suite.get('name', 'performance-matrix')))}-{timestamp}-{revision}"
+    for index in range(1, 1000):
+        run_id = base if index == 1 else f"{base}-{index}"
+        output = results_root / run_id
+        try:
+            output.mkdir()
+        except FileExistsError:
             continue
-        if row.get("status") in {"failed", "contract-mismatch", "pending"}:
-            return True
-    return False
+        return run_id, output
+    raise PerfMatrixError(f"cannot allocate a unique run directory under {results_root}")
 
 
-def run(arguments: argparse.Namespace) -> int:
-    if arguments.resume and arguments.reuse_aligned_from is not None:
-        raise PerfReleaseError("--resume and --reuse-aligned-from cannot be used together")
-    suite_path = arguments.suite.resolve()
-    suite = _read_yaml(suite_path)
-    cases = _cases(suite)
-    _validate_coverage(cases)
-    selected = _selected_cases(cases, arguments.case, arguments.priority, arguments.max_cases)
-    if not selected:
-        raise PerfReleaseError("selection contains no cases")
-    options = RunOptions(
-        output=arguments.output.resolve(),
-        trtmc_bench=arguments.trtmc_bench,
-        trtmc_worker=arguments.trtmc_worker,
-        hf_transformers_runner=arguments.hf_transformers_runner,
-        task_reference_runner=arguments.task_reference_runner,
-        bundle_cache=arguments.bundle_cache,
-        bundle_roots=tuple(arguments.bundle_root),
-        runtime_dirs=tuple(arguments.runtime_dir),
-        only=arguments.only,
-        dry_run=arguments.dry_run,
-        ci=arguments.ci,
-        resume=arguments.resume,
-        reuse_aligned_from=arguments.reuse_aligned_from,
-        rerun_failed=arguments.rerun_failed,
-        local_files_only=arguments.local_files_only,
-        timeout_seconds=arguments.timeout_seconds,
-    )
-    worker = _preflight_worker(options)
-    preflight_cases = cases if options.reuse_aligned_from is not None else selected
-    preflight = _preflight_candidates(preflight_cases, options)
-    results = _prepare_output(
-        options.output, suite_path, suite, cases, options, preflight, worker
-    )
-    if worker is not None:
-        results["candidate_worker_preflight"] = worker
-    results["timing_preflight"] = _preflight_evidence(preflight_cases, preflight)
+def _selected_rows(
+    results: Mapping[str, Any], selected_ids: set[str]
+) -> list[Mapping[str, Any]]:
+    return [row for row in results["cases"] if str(row["id"]) in selected_ids]
+
+
+def _campaign_failed(results: Mapping[str, Any], selected_ids: set[str]) -> bool:
+    valid = {"green", "yellow", "red"}
+    return any(row.get("status") not in valid for row in _selected_rows(results, selected_ids))
+
+
+def _execute_campaign(
+    *,
+    selected: Sequence[Mapping[str, Any]],
+    options: RunOptions,
+    results: MutableMapping[str, Any],
+    preflight: Mapping[str, tuple[dict[str, Any], list[str], dict[str, str]]],
+    reference_preflight: Mapping[str, Any],
+    worker: Mapping[str, Any],
+    storage_preflight: Mapping[str, Any],
+) -> int:
+    results["candidate_worker_preflight"] = dict(worker)
+    results["storage_preflight"] = deepcopy(dict(storage_preflight))
+    results["reference_preflight"] = deepcopy(dict(reference_preflight))
+    results["timing_preflight"] = _preflight_evidence(selected, preflight)
     rows = _result_rows(results)
-    work_root = options.output / ".work"
-    work_root.mkdir(exist_ok=True)
+    work_root = options.scratch_root / options.output.name
+    work_root.mkdir(parents=True, exist_ok=True)
     _write_artifacts(options.output, results)
     for case in selected:
         existing = rows[str(case["id"])]
-        if _should_skip(existing, options):
-            source = "aligned evidence" if existing.get("evidence_reuse") else "resume"
-            print(f"[{case['id']}] {source}: keeping {existing['status']}", flush=True)
+        if _should_skip(existing):
+            print(f"[{case['id']}] resume: keeping {existing['status']}", flush=True)
             continue
         row = _run_one(case, options, work_root, preflight[str(case["id"])])
         rows[str(case["id"])].clear()
         rows[str(case["id"])].update(row)
         _write_artifacts(options.output, results)
+    selected_ids = {str(case["id"]) for case in selected}
     results["finished_at"] = _now()
-    results["status"] = _final_status(results["cases"])
+    results["status"] = _final_status(_selected_rows(results, selected_ids))
     _write_artifacts(options.output, results)
     shutil.rmtree(work_root, ignore_errors=True)
+    try:
+        options.scratch_root.rmdir()
+    except OSError:
+        pass
     print(f"Results: {options.output / 'results.json'}")
     print(f"Report: {options.output / 'report.html'}")
-    selected_ids = {str(case["id"]) for case in selected}
-    return 1 if options.ci and _ci_failed(results, selected_ids) else 0
+    return 1 if _campaign_failed(results, selected_ids) else 0
+
+
+def _load_suite_request(
+    arguments: argparse.Namespace,
+) -> tuple[
+    Path,
+    dict[str, Any],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    dict[str, Any],
+]:
+    suite_path = arguments.suite.resolve()
+    suite = _read_yaml(suite_path)
+    cases = _cases(suite)
+    _validate_coverage(cases)
+    selected = _selected_cases(cases, arguments.entry)
+    if not selected:
+        raise PerfMatrixError("selection contains no entries")
+    environment = _read_environment(arguments.environment)
+    return suite_path, suite, cases, selected, environment
+
+
+def _check(arguments: argparse.Namespace) -> int:
+    _, _, _, selected, environment = _load_suite_request(arguments)
+    options = _run_options(
+        environment, Path(str(environment["storage"]["results_root"]))
+    )
+    storage = _environment_preflight(environment, options)
+    worker = _preflight_worker(options)
+    preflight = _preflight_candidates(selected, options)
+    references = _preflight_references(selected, preflight, options)
+    evidence = _preflight_evidence(selected, preflight)
+    print(f"Environment: {environment['name']} ({environment['source']})")
+    print(f"Entries: {evidence['case_count']}")
+    print(f"Timing: {evidence['status']}")
+    print(f"Worker: {worker['path']}")
+    print(f"Reference profiles: {references['entry_count']}")
+    print(f"Storage filesystems: {len(storage['filesystems'])}")
+    return 0
+
+
+def _run_new(arguments: argparse.Namespace) -> int:
+    suite_path, suite, cases, selected, environment = _load_suite_request(arguments)
+    results_root = Path(str(environment["storage"]["results_root"]))
+    preliminary_options = _run_options(environment, results_root)
+    storage = _environment_preflight(environment, preliminary_options)
+    worker = _preflight_worker(preliminary_options)
+    preflight = _preflight_candidates(selected, preliminary_options)
+    references = _preflight_references(selected, preflight, preliminary_options)
+    run_id, output = _new_run_directory(results_root, suite)
+    options = _run_options(environment, output)
+    results = _initial_results(suite_path, suite, cases, selected, environment)
+    results["run_id"] = run_id
+    return _execute_campaign(
+        selected=selected,
+        options=options,
+        results=results,
+        preflight=preflight,
+        reference_preflight=references,
+        worker=worker,
+        storage_preflight=storage,
+    )
+
+
+def _resume(arguments: argparse.Namespace) -> int:
+    output = arguments.run_directory.resolve()
+    result_path = output / "results.json"
+    results = _load_resume(result_path)
+    suite_path = Path(str(results.get("suite", "")))
+    environment_record = results.get("environment_config")
+    if not suite_path.is_file():
+        raise PerfMatrixError(f"cannot resume because suite is unavailable: {suite_path}")
+    if not isinstance(environment_record, Mapping):
+        raise PerfMatrixError("cannot resume without an environment configuration")
+    environment_path = Path(str(environment_record.get("source", "")))
+    if not environment_path.is_file():
+        raise PerfMatrixError(
+            f"cannot resume because environment is unavailable: {environment_path}"
+        )
+    if results.get("suite_sha256") != _sha256_file(suite_path):
+        raise PerfMatrixError("cannot resume because the suite content changed")
+    if environment_record.get("sha256") != _sha256_file(environment_path):
+        raise PerfMatrixError("cannot resume because the environment content changed")
+    if results.get("git_commit") != _git_commit():
+        raise PerfMatrixError("cannot resume because the repository revision changed")
+    suite = _read_yaml(suite_path)
+    cases = _cases(suite)
+    _validate_coverage(cases)
+    selected_ids = results.get("selected_entry_ids")
+    if not isinstance(selected_ids, list) or not all(
+        isinstance(value, str) for value in selected_ids
+    ):
+        raise PerfMatrixError("cannot resume without selected entry ids")
+    selected = _selected_cases(cases, selected_ids)
+    environment = _read_environment(environment_path)
+    if environment != environment_record:
+        raise PerfMatrixError(
+            "cannot resume because the resolved environment values changed"
+        )
+    options = _run_options(environment, output)
+    storage = _environment_preflight(environment, options)
+    worker = _preflight_worker(options)
+    preflight = _preflight_candidates(selected, options)
+    references = _preflight_references(selected, preflight, options)
+    return _execute_campaign(
+        selected=selected,
+        options=options,
+        results=results,
+        preflight=preflight,
+        reference_preflight=references,
+        worker=worker,
+        storage_preflight=storage,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     try:
-        return run(build_parser().parse_args(argv))
-    except PerfReleaseError as exc:
+        arguments = build_parser().parse_args(argv)
+        if arguments.command == "check":
+            return _check(arguments)
+        if arguments.command == "run":
+            return _run_new(arguments)
+        if arguments.command == "resume":
+            return _resume(arguments)
+        raise PerfMatrixError(f"unsupported command: {arguments.command}")
+    except PerfMatrixError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 

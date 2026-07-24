@@ -4,54 +4,19 @@
 name: TRTMC Performance Matrix
 
 run-name: >-
-  Performance matrix · ${{ inputs.case || inputs.priority || 'fast' }}
+  Performance matrix · ${{ inputs.entry || 'complete' }}
 
 on:
   workflow_dispatch:
     inputs:
-      case:
-        description: Optional exact family.operation case
+      entry:
+        description: Optional exact family.operation entry
         required: false
-        type: string
-      priority:
-        description: Include this priority and faster rows
-        required: true
-        default: fast
-        type: choice
-        options:
-          - fast
-          - normal
-          - slow
-      only:
-        description: Run both sides or debug one side
-        required: true
-        default: both
-        type: choice
-        options:
-          - both
-          - trtmc
-          - baseline
-      max_cases:
-        description: Maximum selected rows
-        required: true
-        default: "100"
         type: string
   workflow_call:
     inputs:
-      case:
+      entry:
         required: false
-        type: string
-      priority:
-        required: false
-        default: fast
-        type: string
-      only:
-        required: false
-        default: both
-        type: string
-      max_cases:
-        required: false
-        default: "100"
         type: string
 
 permissions:
@@ -63,7 +28,7 @@ concurrency:
 
 jobs:
   performance:
-    name: Performance / release family matrix
+    name: Performance / family matrix
     runs-on: ${{ fromJSON(vars.TRTMC_PERF_RUNNER_LABELS || vars.TRTMC_MODEL_RUNNER_LABELS || '["self-hosted"]') }}
     timeout-minutes: 600
     env:
@@ -77,6 +42,7 @@ jobs:
       TRTMC_PYTHON_PROFILE_PREBUILT_ONLY: "1"
       TRTMC_ELF_REFERENCE_REPO: ${{ vars.TRTMC_ELF_REFERENCE_REPO }}
       TRTMC_LANCE_REFERENCE_REPO: ${{ vars.TRTMC_LANCE_REFERENCE_REPO }}
+      TRTMC_SANA_WM_REFERENCE_REPO: ${{ vars.TRTMC_SANA_WM_REFERENCE_REPO }}
       PERSONAPLEX_OFFICIAL_REPO: ${{ vars.PERSONAPLEX_OFFICIAL_REPO }}
 
     steps:
@@ -90,16 +56,10 @@ jobs:
 
       - name: Run performance matrix
         run: >-
-          python3 tools/perf_release.py
+          python3 tools/perf_matrix.py run
           benchmarks/performance/release.yaml
-          --output artifacts/perf
-          --trtmc-bench "${{ vars.TRTMC_PERF_BENCH || 'trtmc-bench' }}"
-          --case "${{ inputs.case }}"
-          --priority "${{ inputs.priority }}"
-          --only "${{ inputs.only }}"
-          --max-cases "${{ inputs.max_cases }}"
-          --timeout-seconds 7200
-          --ci
+          --environment benchmarks/performance/environments/gb300.yaml
+          --entry "${{ inputs.entry }}"
 
       - name: Upload internal evidence and public report
         if: ${{ always() }}

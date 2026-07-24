@@ -15,11 +15,13 @@ from types import ModuleType
 import pytest
 import yaml
 
-from tools import perf_release
+from tools import perf_matrix
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 SUITE = REPOSITORY / "benchmarks/performance/release.yaml"
+GB300_ENVIRONMENT = REPOSITORY / "benchmarks/performance/environments/gb300.yaml"
+PERFORMANCE_WORKFLOW = REPOSITORY / ".github/workflows/performance.yml"
 TASK_ADAPTERS = {
     "bark.generate_audio": "hf-transformers-tts",
     "canary.transcribe": "nemo-asr",
@@ -65,6 +67,7 @@ from pathlib import Path
 p=argparse.ArgumentParser()
 p.add_argument('command')
 p.add_argument('--model')
+p.add_argument('--case')
 p.add_argument('--warmup', type=int)
 p.add_argument('--iterations', type=int)
 p.add_argument('--telemetry')
@@ -81,7 +84,7 @@ timing_scope=overrides.get('measurement.timing_scope','public_pipeline_call_wall
 asset_loading=overrides.get('measurement.asset_loading_included',False)
 resolved={{
  'schema_version':'trtmc.benchmark-case/v1',
- 'name':'default', 'testcase':'distilgpt2', 'operation':'generate',
+ 'name':a.case, 'testcase':a.case, 'operation':'generate',
  'bundle_name':'distilgpt2.trtfb', 'bundle_path':'/tmp/distilgpt2.trtfb',
  'resolved_case_digest':'candidate-digest', 'sources':{{}},
  'request':{{'batch_size':1,'prompt':\"Hello, I'm a language model\",'max_new_tokens':2,
@@ -177,24 +180,70 @@ a.output.parent.mkdir(parents=True, exist_ok=True); a.output.write_text(json.dum
     path.chmod(0o755)
 
 
+def _write_environment(
+    path: Path,
+    *,
+    results_root: Path,
+    scratch_root: Path,
+    trtmc_bench: Path,
+    trtmc_worker: Path,
+    hf_transformers_runner: Path,
+) -> None:
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": "trtmc.perf-environment/v1",
+                "name": "test-gb300",
+                "tools": {
+                    "trtmc_bench": str(trtmc_bench),
+                    "trtmc_worker": str(trtmc_worker),
+                    "hf_transformers_runner": str(hf_transformers_runner),
+                    "task_reference_runner": str(
+                        REPOSITORY
+                        / "benchmarks/performance/baselines/task_reference.py"
+                    ),
+                },
+                "storage": {
+                    "results_root": str(results_root),
+                    "scratch_root": str(scratch_root),
+                    "bundle_cache": None,
+                    "bundle_roots": [],
+                    "runtime_dirs": [],
+                    "minimum_free_space_gib": 0,
+                },
+                "execution": {
+                    "local_files_only": False,
+                    "timeout_seconds": 30,
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_release_suite_covers_every_ready_family_operation() -> None:
     from tensorrt_model_connect.families.wan2_2_ti2v.model_config import (
         OFFICIAL_NEGATIVE_PROMPT,
     )
 
-    suite = perf_release._read_yaml(SUITE)
-    cases = perf_release._cases(suite)
+    suite = perf_matrix._read_yaml(SUITE)
+    cases = perf_matrix._cases(suite)
+    raw_entries = yaml.safe_load(SUITE.read_text(encoding="utf-8"))["entries"]
 
-    perf_release._validate_coverage(cases)
+    perf_matrix._validate_coverage(cases)
 
     assert len(cases) == 79
+    assert all(set(entry["workload"]) <= {"testcase", "request"} for entry in raw_entries)
+    assert all(entry["workload"].get("testcase") for entry in raw_entries)
+    assert not any("priority" in entry for entry in raw_entries)
     assert len({(case["family"], case["operation"]) for case in cases}) == 79
     assert len({case["family"] for case in cases}) == 78
     assert [case["operation"] for case in cases if case["family"] == "eagle_vlm"] == [
         "embed",
         "rerank",
     ]
-    assert Counter(perf_release._candidate_timing_scope(case) for case in cases) == {
+    assert Counter(perf_matrix._candidate_timing_scope(case) for case in cases) == {
         "model_call_wall": 18,
         "public_pipeline_call_wall": 61,
     }
@@ -219,7 +268,7 @@ def test_release_suite_covers_every_ready_family_operation() -> None:
     ] == "b29d8833609e9ab7f67cd9da39435ac5cea04837"
     assert by_id["elf_flow.generate"]["baseline"]["precision"] == "bf16"
     assert by_id["elf_flow.generate"]["baseline"]["output_contract"] == "token-agreement"
-    assert by_id["elf_flow.generate"]["request"] == {
+    assert by_id["elf_flow.generate"]["workload"]["request"] == {
         "seed": 42,
         "initial_latents_path": "data/elf-b-de-en-replay/initial_latents.f32",
         "sampling_steps_path": "data/elf-b-de-en-replay/sampling_steps.f32",
@@ -243,7 +292,7 @@ def test_release_suite_covers_every_ready_family_operation() -> None:
     assert by_id["phi_moe.generate"]["baseline"]["experts_implementation"] == "batched_mm"
     assert by_id["qwen_moe.generate"]["baseline"]["experts_implementation"] == "batched_mm"
     assert by_id["phi_moe.generate"]["baseline"]["output_contract"] == "exact-text"
-    assert by_id["opt.generate"]["request"]["max_new_tokens"] == 10
+    assert by_id["opt.generate"]["workload"]["request"]["max_new_tokens"] == 10
     assert by_id["deepseek_ocr.generate"]["baseline"]["precision"] == "bf16"
     assert by_id["nemotron_h.generate"]["baseline"]["mode"] == "hf-eager"
     nemotron_baseline = by_id["nemotron_speech_streaming.transcribe"]["baseline"]
@@ -266,13 +315,42 @@ def test_release_suite_covers_every_ready_family_operation() -> None:
         "model_revision": "b8fff7315c768468a5333511427288870b2e9635",
     }
     assert (
-        by_id["wan2_2_ti2v.generate_image"]["request"]["negative_prompt"]
+        by_id["wan2_2_ti2v.generate_image"]["workload"]["request"]["negative_prompt"]
         == OFFICIAL_NEGATIVE_PROMPT
     )
     diffusion_baseline = by_id["nemotron_labs_diffusion.generate"]["baseline"]
     assert diffusion_baseline["mode"] == "hf-eager"
     assert diffusion_baseline["model_class"] == "auto"
     assert diffusion_baseline["generation_method"] == "ar-generate"
+
+
+def test_checked_in_gb300_environment_is_ci_runnable() -> None:
+    raw = yaml.safe_load(GB300_ENVIRONMENT.read_text(encoding="utf-8"))
+
+    assert raw["schema_version"] == "trtmc.perf-environment/v1"
+    assert raw["tools"]["trtmc_bench"] == "scripts/trtmc-bench"
+    assert raw["tools"]["trtmc_worker"] == "${TRTMC_PERF_WORKER}"
+    assert raw["storage"]["results_root"] == "artifacts/perf"
+    assert raw["storage"]["bundle_cache"] == "${TRTMC_PERF_BUNDLE_CACHE}"
+    assert raw["storage"]["bundle_roots"] == "${TRTMC_PERF_BUNDLE_ROOTS}"
+    assert raw["storage"]["runtime_dirs"] == "${TRTMC_PERF_RUNTIME_DIRS}"
+    assert raw["execution"]["timeout_seconds"] == 7200
+
+
+def test_performance_workflow_uses_the_matrix_cli_and_reference_checkouts() -> None:
+    workflow = PERFORMANCE_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "python3 tools/perf_matrix.py run" in workflow
+    assert "benchmarks/performance/environments/gb300.yaml" in workflow
+    assert '--entry "${{ inputs.entry }}"' in workflow
+    assert "tools/perf_release.py" not in workflow
+    for name in (
+        "TRTMC_ELF_REFERENCE_REPO",
+        "TRTMC_LANCE_REFERENCE_REPO",
+        "TRTMC_SANA_WM_REFERENCE_REPO",
+        "PERSONAPLEX_OFFICIAL_REPO",
+    ):
+        assert f"{name}: ${{{{ vars.{name} }}}}" in workflow
 
 
 def test_compile_contract_cannot_silently_fall_back_to_eager() -> None:
@@ -293,7 +371,7 @@ def test_compile_contract_cannot_silently_fall_back_to_eager() -> None:
         "output_summary": {"token_ids": [1]},
     }
 
-    status, comparison = perf_release._classify(case, candidate, baseline)
+    status, comparison = perf_matrix._classify(case, candidate, baseline)
 
     assert status == "contract-mismatch"
     assert "mode" in comparison["reason"]
@@ -302,7 +380,7 @@ def test_compile_contract_cannot_silently_fall_back_to_eager() -> None:
 def test_suite_timing_contract_drift_is_rejected_before_execution() -> None:
     case = next(
         value
-        for value in perf_release._cases(perf_release._read_yaml(SUITE))
+        for value in perf_matrix._cases(perf_matrix._read_yaml(SUITE))
         if value["id"] == "bark.generate_audio"
     )
     drifted = {
@@ -314,10 +392,10 @@ def test_suite_timing_contract_drift_is_rejected_before_execution() -> None:
     }
 
     with pytest.raises(
-        perf_release.PerfReleaseError,
+        perf_matrix.PerfMatrixError,
         match=r"baseline\.timing_scope must be 'task-model-call-wall'",
     ):
-        perf_release._validate_baseline(drifted)
+        perf_matrix._validate_baseline(drifted)
 
 
 def test_exact_text_contract_is_explicit_and_still_strict() -> None:
@@ -342,7 +420,7 @@ def test_exact_text_contract_is_explicit_and_still_strict() -> None:
         "output_summary": {"text": "same", "token_ids": [2]},
     }
 
-    status, _ = perf_release._classify(case, candidate, baseline)
+    status, _ = perf_matrix._classify(case, candidate, baseline)
 
     assert status == "green"
 
@@ -363,12 +441,12 @@ def test_timing_scope_details_state_measured_included_and_excluded_work() -> Non
         "model_load_included": False,
     }
 
-    assert perf_release._timing_scope_details(candidate, "candidate") == {
+    assert perf_matrix._timing_scope_details(candidate, "candidate") == {
         "measured": "first TensorRT module call through returned output",
         "included": "module input transfer, model execution, inter-module work, output materialization",
         "excluded": "bundle/model load, warmup, pipeline preprocessing, asset loading, telemetry",
     }
-    assert perf_release._timing_scope_details(model_only_baseline, "baseline") == {
+    assert perf_matrix._timing_scope_details(model_only_baseline, "baseline") == {
         "measured": "task model call",
         "included": "prepared model invocation through returned summary",
         "excluded": "model load, warmup, input preparation, asset loading",
@@ -391,10 +469,10 @@ def test_ocr_text_contract_preserves_required_content_and_allows_format_variatio
         "output_summary": {"text": "Architecture:\nAttention:Standard Q/K/V/O"}
     }
 
-    assert perf_release._output_contract(case, candidate, reference) == (True, "")
+    assert perf_matrix._output_contract(case, candidate, reference) == (True, "")
 
     candidate["output_summary"]["text"] = "OCR title only"
-    matched, reason = perf_release._output_contract(case, candidate, reference)
+    matched, reason = perf_matrix._output_contract(case, candidate, reference)
     assert not matched
     assert reason == "TRTMC OCR text misses required content"
 
@@ -407,10 +485,10 @@ def test_normalized_text_contract_allows_only_case_and_whitespace_variation() ->
     candidate = {"output_summary": {"text": "Paris\n</think>\n"}}
     reference = {"output_summary": {"text": "paris  </think>"}}
 
-    assert perf_release._output_contract(case, candidate, reference) == (True, "")
+    assert perf_matrix._output_contract(case, candidate, reference) == (True, "")
 
     reference["output_summary"]["text"] = "London </think>"
-    assert perf_release._output_contract(case, candidate, reference) == (
+    assert perf_matrix._output_contract(case, candidate, reference) == (
         False,
         "normalized generated text differs",
     )
@@ -438,19 +516,19 @@ def test_token_agreement_contract_bounds_cross_precision_drift() -> None:
         }
     }
 
-    assert perf_release._output_contract(case, candidate, reference) == (
+    assert perf_matrix._output_contract(case, candidate, reference) == (
         False,
         "positional token agreement is below the configured contract",
     )
 
     case["baseline"]["min_positional_token_agreement"] = 0.7
-    assert perf_release._output_contract(case, candidate, reference) == (
+    assert perf_matrix._output_contract(case, candidate, reference) == (
         False,
         "normalized text distance exceeds the configured contract",
     )
 
     case["baseline"]["max_normalized_edit_distance"] = 0.4
-    assert perf_release._output_contract(case, candidate, reference) == (True, "")
+    assert perf_matrix._output_contract(case, candidate, reference) == (True, "")
 
 
 def test_segmentation_contract_rejects_raw_masks_against_postprocessed_masks() -> None:
@@ -472,7 +550,7 @@ def test_segmentation_contract_rejects_raw_masks_against_postprocessed_masks() -
         }
     }
 
-    assert perf_release._output_contract(case, candidate, raw_reference) == (
+    assert perf_matrix._output_contract(case, candidate, raw_reference) == (
         False,
         "segmentation output shape differs",
     )
@@ -484,7 +562,7 @@ def test_segmentation_contract_rejects_raw_masks_against_postprocessed_masks() -
             "width": 640,
         }
     }
-    assert perf_release._output_contract(case, candidate, aligned_reference) == (True, "")
+    assert perf_matrix._output_contract(case, candidate, aligned_reference) == (True, "")
 
 
 def test_audio_contract_rejects_different_generated_sample_counts() -> None:
@@ -505,13 +583,13 @@ def test_audio_contract_rejects_different_generated_sample_counts() -> None:
         }
     }
 
-    assert perf_release._output_contract(case, candidate, reference) == (
+    assert perf_matrix._output_contract(case, candidate, reference) == (
         False,
         "audio output shape differs",
     )
 
     reference["output_summary"]["audio_samples"] = 58_965
-    assert perf_release._output_contract(case, candidate, reference) == (True, "")
+    assert perf_matrix._output_contract(case, candidate, reference) == (True, "")
 
 
 def test_media_contract_compares_materialized_frame_geometry() -> None:
@@ -537,9 +615,9 @@ def test_media_contract_compares_materialized_frame_geometry() -> None:
         }
     }
 
-    assert perf_release._output_contract(case, candidate, reference) == (True, "")
+    assert perf_matrix._output_contract(case, candidate, reference) == (True, "")
     reference["output_summary"]["height"] = 704
-    assert perf_release._output_contract(case, candidate, reference) == (
+    assert perf_matrix._output_contract(case, candidate, reference) == (
         False,
         "media output shape differs",
     )
@@ -556,10 +634,10 @@ def test_worker_preflight_rejects_non_release_builds(configuration: str) -> None
     }
 
     with pytest.raises(
-        perf_release.PerfReleaseError,
+        perf_matrix.PerfMatrixError,
         match="worker build configuration must be Release",
     ):
-        perf_release._validate_worker_metadata(metadata, "abc123")
+        perf_matrix._validate_worker_metadata(metadata, "abc123")
 
 
 def test_worker_preflight_rejects_stale_source_revision() -> None:
@@ -572,10 +650,10 @@ def test_worker_preflight_rejects_stale_source_revision() -> None:
     }
 
     with pytest.raises(
-        perf_release.PerfReleaseError,
+        perf_matrix.PerfMatrixError,
         match="worker source revision",
     ):
-        perf_release._validate_worker_metadata(metadata, "current-revision")
+        perf_matrix._validate_worker_metadata(metadata, "current-revision")
 
 
 def test_run_consolidates_results_and_records_replayable_commands(
@@ -584,39 +662,51 @@ def test_run_consolidates_results_and_records_replayable_commands(
     fake_trtmc = tmp_path / "trtmc-bench"
     fake_worker = tmp_path / "trtmc_benchmark_worker"
     fake_baseline = tmp_path / "hf_transformers.py"
-    output = tmp_path / "results"
+    results_root = tmp_path / "results"
+    scratch_root = tmp_path / "scratch"
+    environment = tmp_path / "gb300.yaml"
     monkeypatch.setenv("TRTMC_PERF_SOURCE_REVISION", "tested-commit")
     _write_fake_trtmc(fake_trtmc)
     _write_fake_worker(fake_worker, "tested-commit")
     _write_fake_baseline(fake_baseline)
+    _write_environment(
+        environment,
+        results_root=results_root,
+        scratch_root=scratch_root,
+        trtmc_bench=fake_trtmc,
+        trtmc_worker=fake_worker,
+        hf_transformers_runner=fake_baseline,
+    )
 
-    exit_code = perf_release.main(
+    exit_code = perf_matrix.main(
         [
+            "run",
             str(SUITE),
-            "--case",
+            "--environment",
+            str(environment),
+            "--entry",
             "gpt2.generate",
-            "--trtmc-bench",
-            str(fake_trtmc),
-            "--trtmc-worker",
-            str(fake_worker),
-            "--hf-transformers-runner",
-            str(fake_baseline),
-            "--output",
-            str(output),
-            "--ci",
         ]
     )
 
     assert exit_code == 0
+    run_directories = [path for path in results_root.iterdir() if path.is_dir()]
+    assert len(run_directories) == 1
+    output = run_directories[0]
     assert sorted(path.name for path in output.iterdir()) == [
         "report.html",
         "results.json",
     ]
+    assert not scratch_root.exists()
     results = json.loads((output / "results.json").read_text(encoding="utf-8"))
     rows = {row["id"]: row for row in results["cases"]}
     assert len(rows) == 79
+    assert results["environment_config"]["name"] == "test-gb300"
+    assert results["environment_config"]["source"] == str(environment.resolve())
     assert results["timing_preflight"]["status"] == "aligned"
     assert results["timing_preflight"]["case_count"] == 1
+    assert results["reference_preflight"]["status"] == "ready"
+    assert results["reference_preflight"]["entry_count"] == 1
     assert results["candidate_worker_preflight"]["build"] == {
         "configuration": "Release",
         "source_revision": "tested-commit",
@@ -648,38 +738,72 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert str(fake_trtmc) in report
     assert str(fake_baseline) in report
     assert "reproduce.py" not in report
+    assert str(REPOSITORY) in report
+    assert "PYTHONPATH" in report
 
     baseline_argv = rows["gpt2.generate"]["commands"]["baseline"]["argv"]
     request = baseline_argv[baseline_argv.index("--request-json") + 1]
     assert json.loads(request)["prompt"] == "Hello, I'm a language model"
-
-    case = next(
-        value
-        for value in perf_release._cases(perf_release._read_yaml(SUITE))
-        if value["id"] == "gpt2.generate"
-    )
-    resolved = {
-        **rows["gpt2.generate"]["resolved_settings"],
-        "operation": rows["gpt2.generate"]["operation"],
+    assert rows["gpt2.generate"]["resolved_settings"]["workload"] == {
+        "source": "testcase",
+        "testcase": "distilgpt2",
+        "request": rows["gpt2.generate"]["resolved_settings"]["request"],
     }
-    assert perf_release._reuse_mismatch(case, rows["gpt2.generate"], resolved) == ""
-    assert "worker build" in perf_release._reuse_mismatch(
-        case,
-        rows["gpt2.generate"],
-        resolved,
-        {
-            "build": {
-                "configuration": "Release",
-                "source_revision": "different-commit",
-            }
-        },
+    assert rows["gpt2.generate"]["commands"]["trtmc"]["cwd"] == str(REPOSITORY)
+    assert rows["gpt2.generate"]["commands"]["baseline"]["cwd"] == str(REPOSITORY)
+
+    rows["gpt2.generate"]["status"] = "failed"
+    (output / "results.json").write_text(
+        json.dumps(results, indent=2) + "\n", encoding="utf-8"
     )
-    rows["gpt2.generate"]["candidate"]["measurement_policy"]["timing_scope"] = (
-        "model_call_wall"
+
+    assert perf_matrix.main(["resume", str(output)]) == 0
+    resumed = json.loads((output / "results.json").read_text(encoding="utf-8"))
+    resumed_rows = {row["id"]: row for row in resumed["cases"]}
+    assert resumed_rows["gpt2.generate"]["status"] == "green"
+    assert sorted(path.name for path in output.iterdir()) == [
+        "report.html",
+        "results.json",
+    ]
+    assert not scratch_root.exists()
+
+
+def test_check_runs_preflight_without_creating_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_trtmc = tmp_path / "trtmc-bench"
+    fake_worker = tmp_path / "trtmc_benchmark_worker"
+    fake_baseline = tmp_path / "hf_transformers.py"
+    results_root = tmp_path / "results"
+    scratch_root = tmp_path / "scratch"
+    environment = tmp_path / "gb300.yaml"
+    monkeypatch.setenv("TRTMC_PERF_SOURCE_REVISION", "tested-commit")
+    _write_fake_trtmc(fake_trtmc)
+    _write_fake_worker(fake_worker, "tested-commit")
+    _write_fake_baseline(fake_baseline)
+    _write_environment(
+        environment,
+        results_root=results_root,
+        scratch_root=scratch_root,
+        trtmc_bench=fake_trtmc,
+        trtmc_worker=fake_worker,
+        hf_transformers_runner=fake_baseline,
     )
-    assert "TRTMC timing boundary" in perf_release._reuse_mismatch(
-        case, rows["gpt2.generate"], resolved
+
+    exit_code = perf_matrix.main(
+        [
+            "check",
+            str(SUITE),
+            "--environment",
+            str(environment),
+            "--entry",
+            "gpt2.generate",
+        ]
     )
+
+    assert exit_code == 0
+    assert not results_root.exists()
+    assert not scratch_root.exists()
 
 
 def test_task_reference_commands_record_external_checkout_paths(
@@ -690,19 +814,19 @@ def test_task_reference_commands_record_external_checkout_paths(
     monkeypatch.setenv("TRTMC_SANA_WM_REFERENCE_REPO", "/references/Sana")
     monkeypatch.setenv("PERSONAPLEX_OFFICIAL_REPO", "/references/PersonaPlex")
 
-    assert perf_release._resolved_adapter_options({"adapter": "upstream-elf"}) == {
+    assert perf_matrix._resolved_adapter_options({"adapter": "upstream-elf"}) == {
         "reference_repo": "/references/ELF"
     }
-    assert perf_release._resolved_adapter_options({"adapter": "upstream-lance"}) == {
+    assert perf_matrix._resolved_adapter_options({"adapter": "upstream-lance"}) == {
         "reference_repo": "/references/Lance"
     }
-    assert perf_release._resolved_adapter_options({"adapter": "upstream-sana-wm"}) == {
+    assert perf_matrix._resolved_adapter_options({"adapter": "upstream-sana-wm"}) == {
         "reference_repo": "/references/Sana"
     }
-    assert perf_release._resolved_adapter_options({"adapter": "pytorch-personaplex"}) == {
+    assert perf_matrix._resolved_adapter_options({"adapter": "pytorch-personaplex"}) == {
         "official_repo": "/references/PersonaPlex"
     }
-    assert perf_release._resolved_adapter_options(
+    assert perf_matrix._resolved_adapter_options(
         {
             "adapter": "upstream-elf",
             "adapter_options": {"reference_repo": "/explicit/ELF"},
@@ -712,7 +836,7 @@ def test_task_reference_commands_record_external_checkout_paths(
 
 def test_suite_has_explicit_eager_and_task_reference_rows() -> None:
     raw = yaml.safe_load(SUITE.read_text(encoding="utf-8"))
-    rows = {row["id"]: row for row in raw["cases"]}
+    rows = {row["id"]: row for row in raw["entries"]}
 
     assert rows["mamba.generate"]["baseline"]["mode"] == "hf-eager"
     assert rows["rwkv.generate"]["baseline"]["mode"] == "hf-eager"
@@ -745,9 +869,10 @@ def test_suite_has_explicit_eager_and_task_reference_rows() -> None:
 
 
 def test_resolution_failure_stops_preflight_before_execution(tmp_path: Path, monkeypatch) -> None:
-    case = perf_release._cases(perf_release._read_yaml(SUITE))[0]
-    options = perf_release.RunOptions(
+    case = perf_matrix._cases(perf_matrix._read_yaml(SUITE))[0]
+    options = perf_matrix.RunOptions(
         output=tmp_path,
+        scratch_root=tmp_path / "scratch",
         trtmc_bench="trtmc-bench",
         trtmc_worker=None,
         hf_transformers_runner=tmp_path / "baseline.py",
@@ -755,36 +880,29 @@ def test_resolution_failure_stops_preflight_before_execution(tmp_path: Path, mon
         bundle_cache=None,
         bundle_roots=(),
         runtime_dirs=(),
-        only="both",
-        dry_run=False,
-        ci=False,
-        resume=False,
-        reuse_aligned_from=None,
-        rerun_failed=False,
         local_files_only=False,
+        minimum_free_space_gib=0,
         timeout_seconds=1,
     )
 
     def fail_resolution(*_args, **_kwargs):
-        raise perf_release.PerfReleaseError("profile unavailable")
+        raise perf_matrix.PerfMatrixError("profile unavailable")
 
-    monkeypatch.setattr(perf_release, "_resolve_candidate", fail_resolution)
+    monkeypatch.setattr(perf_matrix, "_resolve_candidate", fail_resolution)
 
     with pytest.raises(
-        perf_release.PerfReleaseError,
+        perf_matrix.PerfMatrixError,
         match="timing preflight failed before benchmark execution",
     ):
-        perf_release._preflight_candidates([case], options)
+        perf_matrix._preflight_candidates([case], options)
 
 
-def test_explicit_case_takes_precedence_over_priority() -> None:
-    cases = perf_release._cases(perf_release._read_yaml(SUITE))
+def test_entry_is_the_only_run_selection() -> None:
+    cases = perf_matrix._cases(perf_matrix._read_yaml(SUITE))
 
-    selected = perf_release._selected_cases(
+    selected = perf_matrix._selected_cases(
         cases,
         requested=["flux.generate_image"],
-        priority="fast",
-        max_cases=None,
     )
 
     assert [case["id"] for case in selected] == ["flux.generate_image"]
@@ -858,7 +976,7 @@ def test_hf_runner_closes_ignored_disabled_thinking_prompt() -> None:
 def test_source_revision_can_be_injected_without_git(monkeypatch) -> None:
     monkeypatch.setenv("TRTMC_PERF_SOURCE_REVISION", "tested-commit")
 
-    assert perf_release._git_commit() == "tested-commit"
+    assert perf_matrix._git_commit() == "tested-commit"
 
 
 def test_task_reference_runner_measures_loaded_public_operation(
@@ -1440,7 +1558,7 @@ def test_qwen3_omni_uses_visible_single_gpu_placement(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
 
-    cases = perf_release._cases(perf_release._read_yaml(SUITE))
+    cases = perf_matrix._cases(perf_matrix._read_yaml(SUITE))
     case = next(case for case in cases if case["id"] == "qwen3_omni.generate_audio")
     options = case["baseline"]["adapter_options"]
     runner["_load_qwen3_omni"](

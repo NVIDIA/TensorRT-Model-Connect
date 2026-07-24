@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-schema_version: trtmc.perf-suite/v1
+schema_version: trtmc.perf-suite/v2
 name: release-family-performance
 
 defaults:
@@ -17,12 +17,13 @@ defaults:
     input_preparation_included: true
     asset_loading_included: false
 
-cases:
+entries:
   - id: albert.encode
     family: albert
     operation: encode
     model: albert-base
-    priority: fast
+    workload:
+      testcase: albert-base
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -31,7 +32,8 @@ cases:
     family: bark
     operation: generate_audio
     model: bark-small
-    priority: slow
+    workload:
+      testcase: bark-small
     baseline:
       runner: task-reference
       adapter: hf-transformers-tts
@@ -44,7 +46,8 @@ cases:
     family: bart
     operation: generate
     model: bart-base
-    priority: fast
+    workload:
+      testcase: bart-base
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -54,7 +57,8 @@ cases:
     family: bert
     operation: encode
     model: all-minilm-l6-v2
-    priority: fast
+    workload:
+      testcase: all-minilm-l6-v2
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -63,7 +67,8 @@ cases:
     family: bloom
     operation: generate
     model: bloom-560m
-    priority: fast
+    workload:
+      testcase: bloom-560m
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -72,7 +77,8 @@ cases:
     family: canary
     operation: transcribe
     model: canary-1b-v2
-    priority: slow
+    workload:
+      testcase: canary-1b-v2
     baseline:
       runner: task-reference
       adapter: nemo-asr
@@ -84,7 +90,8 @@ cases:
     family: chronos_bolt
     operation: solve
     model: chronos-bolt-tiny-official
-    priority: slow
+    workload:
+      testcase: chronos-bolt-tiny-official
     baseline:
       runner: task-reference
       adapter: pytorch-timeseries
@@ -96,7 +103,8 @@ cases:
     family: codegen
     operation: generate
     model: codegen-350m
-    priority: fast
+    workload:
+      testcase: codegen-350m
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -105,7 +113,8 @@ cases:
     family: convbert
     operation: encode
     model: convbert-base
-    priority: fast
+    workload:
+      testcase: convbert-base
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -114,7 +123,8 @@ cases:
     family: deberta
     operation: encode
     model: deberta-base
-    priority: fast
+    workload:
+      testcase: deberta-base
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -124,7 +134,8 @@ cases:
     family: deepseek_ocr
     operation: generate
     model: deepseek-ocr
-    priority: slow
+    workload:
+      testcase: deepseek-ocr
     baseline:
       runner: task-reference
       adapter: hf-transformers-vlm
@@ -146,7 +157,8 @@ cases:
     family: deepseek_v2
     operation: generate
     model: deepseek-v2-lite
-    priority: slow
+    workload:
+      testcase: deepseek-v2-lite
     baseline:
       runner: hf-transformers
       mode: hf-eager
@@ -155,7 +167,8 @@ cases:
     family: distilbert
     operation: encode
     model: distilbert-base-uncased
-    priority: fast
+    workload:
+      testcase: distilbert-base-uncased
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -164,7 +177,8 @@ cases:
     family: dpr
     operation: encode
     model: dpr-ctx-encoder
-    priority: fast
+    workload:
+      testcase: dpr-ctx-encoder
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -173,7 +187,8 @@ cases:
     family: eagle_vlm
     operation: embed
     model: nemotron-embed-vl-1b-v2
-    priority: slow
+    workload:
+      testcase: nemotron-embed-vl-1b-v2
     baseline:
       runner: task-reference
       adapter: hf-transformers-embedding
@@ -185,7 +200,8 @@ cases:
     family: eagle_vlm
     operation: rerank
     model: nemotron-rerank-vl-1b-v2
-    priority: slow
+    workload:
+      testcase: nemotron-rerank-vl-1b-v2
     baseline:
       runner: task-reference
       adapter: hf-transformers-reranking
@@ -197,7 +213,8 @@ cases:
     family: electra
     operation: encode
     model: electra-base-discriminator
-    priority: fast
+    workload:
+      testcase: electra-base-discriminator
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -206,13 +223,14 @@ cases:
     family: elf_flow
     operation: generate
     model: elf-b-de-en-l0
-    priority: slow
-    request:
-      seed: 42
-      initial_latents_path: data/elf-b-de-en-replay/initial_latents.f32
-      sampling_steps_path: data/elf-b-de-en-replay/sampling_steps.f32
-      condition_latents_path: data/elf-b-de-en-replay/condition_latents.f32
-      condition_mask_path: data/elf-b-de-en-replay/condition_mask.f32
+    workload:
+      testcase: elf-b-de-en-l0
+      request:
+        seed: 42
+        initial_latents_path: data/elf-b-de-en-replay/initial_latents.f32
+        sampling_steps_path: data/elf-b-de-en-replay/sampling_steps.f32
+        condition_latents_path: data/elf-b-de-en-replay/condition_latents.f32
+        condition_mask_path: data/elf-b-de-en-replay/condition_mask.f32
     baseline:
       runner: task-reference
       adapter: upstream-elf
@@ -237,7 +255,8 @@ cases:
     family: falcon
     operation: generate
     model: falcon-rw-1b
-    priority: fast
+    workload:
+      testcase: falcon-rw-1b
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -246,7 +265,8 @@ cases:
     family: flux
     operation: generate_image
     model: flux-schnell-l0
-    priority: slow
+    workload:
+      testcase: flux-schnell-l0
     baseline:
       runner: task-reference
       adapter: hf-diffusers
@@ -258,7 +278,8 @@ cases:
     family: fnet
     operation: encode
     model: fnet-base
-    priority: fast
+    workload:
+      testcase: fnet-base
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -269,7 +290,8 @@ cases:
     family: gemma
     operation: generate
     model: gemma-2-2b
-    priority: normal
+    workload:
+      testcase: gemma-2-2b
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -279,7 +301,8 @@ cases:
     family: glm
     operation: generate
     model: glm-4-9b
-    priority: slow
+    workload:
+      testcase: glm-4-9b
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -288,7 +311,8 @@ cases:
     family: gpt2
     operation: generate
     model: distilgpt2
-    priority: fast
+    workload:
+      testcase: distilgpt2
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -297,7 +321,8 @@ cases:
     family: gpt_neo
     operation: generate
     model: gpt-neo-125m
-    priority: fast
+    workload:
+      testcase: gpt-neo-125m
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -306,7 +331,8 @@ cases:
     family: gpt_neox
     operation: generate
     model: pythia-70m
-    priority: fast
+    workload:
+      testcase: pythia-70m
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -315,7 +341,8 @@ cases:
     family: gpt_oss
     operation: generate
     model: gpt-oss-20b
-    priority: slow
+    workload:
+      testcase: gpt-oss-20b
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -324,7 +351,8 @@ cases:
     family: granite
     operation: generate
     model: granite-3.1-2b
-    priority: normal
+    workload:
+      testcase: granite-3.1-2b
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -333,7 +361,8 @@ cases:
     family: internlm
     operation: generate
     model: internlm2-1.8b
-    priority: normal
+    workload:
+      testcase: internlm2-1.8b
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -342,7 +371,8 @@ cases:
     family: internvl
     operation: generate
     model: internvl3-2b
-    priority: slow
+    workload:
+      testcase: internvl3-2b
     baseline:
       runner: task-reference
       adapter: hf-transformers-vlm
@@ -355,7 +385,8 @@ cases:
     family: lance
     operation: generate
     model: lance-3b-x2t-image
-    priority: slow
+    workload:
+      testcase: lance-3b-x2t-image
     baseline:
       runner: task-reference
       adapter: upstream-lance
@@ -374,7 +405,8 @@ cases:
     family: llama
     operation: generate
     model: falcon3-1b
-    priority: fast
+    workload:
+      testcase: falcon3-1b
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -383,7 +415,8 @@ cases:
     family: locateanything
     operation: generate
     model: locateanything-3b
-    priority: slow
+    workload:
+      testcase: locateanything-3b
     baseline:
       runner: task-reference
       adapter: hf-transformers-vlm
@@ -396,7 +429,8 @@ cases:
     family: ltx_video
     operation: generate_image
     model: ltx-video-l0
-    priority: slow
+    workload:
+      testcase: ltx-video-l0
     baseline:
       runner: task-reference
       adapter: hf-diffusers
@@ -408,7 +442,8 @@ cases:
     family: m2m_100
     operation: generate
     model: nllb-200-distilled-600m
-    priority: fast
+    workload:
+      testcase: nllb-200-distilled-600m
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -418,7 +453,8 @@ cases:
     family: magpie_tts
     operation: generate_audio
     model: magpie-tts-357m
-    priority: slow
+    workload:
+      testcase: magpie-tts-357m
     baseline:
       runner: task-reference
       adapter: nemo-tts
@@ -432,7 +468,8 @@ cases:
     family: mamba
     operation: generate
     model: mamba-130m
-    priority: fast
+    workload:
+      testcase: mamba-130m
     baseline:
       runner: hf-transformers
       mode: hf-eager
@@ -440,7 +477,8 @@ cases:
     family: marian
     operation: generate
     model: marian-en-ru
-    priority: fast
+    workload:
+      testcase: marian-en-ru
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -450,7 +488,8 @@ cases:
     family: mistral
     operation: generate
     model: mistral-7b
-    priority: slow
+    workload:
+      testcase: mistral-7b
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -459,7 +498,8 @@ cases:
     family: mixtral
     operation: generate
     model: mixtral-stories-15m
-    priority: fast
+    workload:
+      testcase: mixtral-stories-15m
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -469,7 +509,8 @@ cases:
     family: modernbert
     operation: encode
     model: modernbert-base
-    priority: fast
+    workload:
+      testcase: modernbert-base
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -478,7 +519,8 @@ cases:
     family: mpnet
     operation: encode
     model: all-mpnet-base-v2
-    priority: fast
+    workload:
+      testcase: all-mpnet-base-v2
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -487,7 +529,8 @@ cases:
     family: nemotron
     operation: generate
     model: nemotron-hindi-4b
-    priority: slow
+    workload:
+      testcase: nemotron-hindi-4b
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -496,7 +539,8 @@ cases:
     family: nemotron_h
     operation: generate
     model: nemotron-h-nano-9b
-    priority: slow
+    workload:
+      testcase: nemotron-h-nano-9b
     baseline:
       runner: hf-transformers
       mode: hf-eager
@@ -504,7 +548,8 @@ cases:
     family: nemotron_labs_diffusion
     operation: generate
     model: nemotron-labs-diffusion-8b
-    priority: slow
+    workload:
+      testcase: nemotron-labs-diffusion-8b-ar
     baseline:
       runner: hf-transformers
       mode: hf-eager
@@ -515,7 +560,8 @@ cases:
     family: nemotron_speech_streaming
     operation: transcribe
     model: nemotron-3.5-asr-streaming-0.6b
-    priority: slow
+    workload:
+      testcase: nemotron-3.5-asr-streaming-0.6b
     baseline:
       runner: task-reference
       adapter: nemo-asr
@@ -527,7 +573,8 @@ cases:
     family: olmo
     operation: generate
     model: olmo-1b
-    priority: fast
+    workload:
+      testcase: olmo-1b
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -536,7 +583,8 @@ cases:
     family: olmo2
     operation: generate
     model: olmo2-1b
-    priority: fast
+    workload:
+      testcase: olmo2-1b
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -545,9 +593,10 @@ cases:
     family: opt
     operation: generate
     model: opt-125m
-    priority: fast
-    request:
-      max_new_tokens: 10
+    workload:
+      testcase: opt-125m
+      request:
+        max_new_tokens: 10
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -556,7 +605,8 @@ cases:
     family: patchtsmixer
     operation: solve
     model: patchtsmixer-granite-official
-    priority: slow
+    workload:
+      testcase: patchtsmixer-granite-official
     baseline:
       runner: task-reference
       adapter: pytorch-timeseries
@@ -568,7 +618,8 @@ cases:
     family: patchtst
     operation: solve
     model: patchtst-etth1-regression-distribution
-    priority: slow
+    workload:
+      testcase: patchtst-etth1-regression-distribution
     baseline:
       runner: task-reference
       adapter: pytorch-timeseries
@@ -580,7 +631,8 @@ cases:
     family: personaplex
     operation: speak
     model: personaplex-7b-l0
-    priority: slow
+    workload:
+      testcase: personaplex-7b-l0
     baseline:
       runner: task-reference
       adapter: pytorch-personaplex
@@ -594,7 +646,8 @@ cases:
     family: phi
     operation: generate
     model: phi3-mini
-    priority: normal
+    workload:
+      testcase: phi3-mini
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -604,7 +657,8 @@ cases:
     family: phi4_multimodal
     operation: generate
     model: phi4-multimodal
-    priority: slow
+    workload:
+      testcase: phi4-multimodal
     baseline:
       runner: task-reference
       adapter: hf-transformers-vlm
@@ -617,7 +671,8 @@ cases:
     family: phi_moe
     operation: generate
     model: phi-moe
-    priority: fast
+    workload:
+      testcase: phi-moe
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -628,7 +683,8 @@ cases:
     family: pixart
     operation: generate_image
     model: pixart-sigma-1024-l0
-    priority: slow
+    workload:
+      testcase: pixart-sigma-1024-l0
     baseline:
       runner: task-reference
       adapter: hf-diffusers
@@ -640,7 +696,8 @@ cases:
     family: qwen
     operation: generate
     model: qwen3-0.6b-fp16
-    priority: fast
+    workload:
+      testcase: qwen3-0.6b-fp16
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -649,7 +706,8 @@ cases:
     family: qwen3_5
     operation: generate
     model: qwen35-9b
-    priority: slow
+    workload:
+      testcase: qwen35-9b
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -658,7 +716,8 @@ cases:
     family: qwen3_omni
     operation: generate_audio
     model: qwen3-omni-30b-a3b-instruct
-    priority: slow
+    workload:
+      testcase: qwen3-omni-30b-a3b-instruct
     baseline:
       runner: task-reference
       adapter: hf-qwen3-omni
@@ -675,7 +734,8 @@ cases:
     family: qwen_image
     operation: generate_image
     model: qwen-image-l0
-    priority: slow
+    workload:
+      testcase: qwen-image-l0
     baseline:
       runner: task-reference
       adapter: hf-diffusers
@@ -689,7 +749,8 @@ cases:
     family: qwen_moe
     operation: generate
     model: qwen3-moe-30b-a3b
-    priority: slow
+    workload:
+      testcase: qwen3-moe-30b-a3b
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -699,7 +760,8 @@ cases:
     family: qwen_vl
     operation: generate
     model: qwen3-vl-2b
-    priority: slow
+    workload:
+      testcase: qwen3-vl-2b
     baseline:
       runner: task-reference
       adapter: hf-transformers-vlm
@@ -712,7 +774,8 @@ cases:
     family: roberta
     operation: encode
     model: camembert-base
-    priority: fast
+    workload:
+      testcase: camembert-base
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -721,7 +784,8 @@ cases:
     family: rwkv
     operation: generate
     model: rwkv-169m
-    priority: fast
+    workload:
+      testcase: rwkv-169m
     baseline:
       runner: hf-transformers
       mode: hf-eager
@@ -729,7 +793,8 @@ cases:
     family: sam
     operation: segment_prompted
     model: sam-vit-base
-    priority: slow
+    workload:
+      testcase: sam-vit-base
     baseline:
       runner: task-reference
       adapter: hf-transformers-vision
@@ -742,7 +807,8 @@ cases:
     family: sam3
     operation: segment_prompted
     model: sam3
-    priority: slow
+    workload:
+      testcase: sam3
     baseline:
       runner: task-reference
       adapter: hf-transformers-vision
@@ -755,7 +821,8 @@ cases:
     family: sana_wm
     operation: generate_image
     model: sana-wm-bidirectional
-    priority: slow
+    workload:
+      testcase: sana-wm-bidirectional
     baseline:
       runner: task-reference
       adapter: upstream-sana-wm
@@ -771,7 +838,8 @@ cases:
     family: segformer
     operation: segment
     model: segformer-b0-ade
-    priority: slow
+    workload:
+      testcase: segformer-b0-ade
     baseline:
       runner: task-reference
       adapter: hf-transformers-vision
@@ -783,7 +851,8 @@ cases:
     family: stablelm
     operation: generate
     model: stablelm2-1.6b
-    priority: normal
+    workload:
+      testcase: stablelm2-1.6b
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -792,7 +861,8 @@ cases:
     family: starcoder2
     operation: generate
     model: starcoder2-3b
-    priority: normal
+    workload:
+      testcase: starcoder2-3b
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -801,7 +871,8 @@ cases:
     family: t5
     operation: generate
     model: t5-small
-    priority: fast
+    workload:
+      testcase: t5-small
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -811,7 +882,8 @@ cases:
     family: timesfm
     operation: solve
     model: timesfm-2.0-500m-official
-    priority: slow
+    workload:
+      testcase: timesfm-2.0-500m-official
     baseline:
       runner: task-reference
       adapter: pytorch-timeseries
@@ -823,7 +895,8 @@ cases:
     family: timm_vit
     operation: classify
     model: timm-vit-base-p16-224-augreg-in21k-ft-in1k
-    priority: slow
+    workload:
+      testcase: timm-vit-base-p16-224-augreg-in21k-ft-in1k
     baseline:
       runner: task-reference
       adapter: hf-transformers-vision
@@ -835,7 +908,8 @@ cases:
     family: wan_t2v
     operation: generate_image
     model: wan21-t2v-1.3b-l0
-    priority: slow
+    workload:
+      testcase: wan21-t2v-1.3b-l0
     baseline:
       runner: task-reference
       adapter: hf-diffusers
@@ -847,9 +921,10 @@ cases:
     family: wan2_2_ti2v
     operation: generate_image
     model: wan22-ti2v-5b-l0
-    priority: slow
-    request:
-      negative_prompt: 色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走
+    workload:
+      testcase: wan22-ti2v-5b-l0
+      request:
+        negative_prompt: 色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走
     baseline:
       runner: task-reference
       adapter: hf-diffusers
@@ -864,7 +939,8 @@ cases:
     family: whisper
     operation: transcribe
     model: whisper-tiny-fp16
-    priority: slow
+    workload:
+      testcase: whisper-tiny-fp16
     baseline:
       runner: task-reference
       adapter: hf-transformers-asr
@@ -876,7 +952,8 @@ cases:
     family: xglm
     operation: generate
     model: xglm-564m
-    priority: fast
+    workload:
+      testcase: xglm-564m
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -885,7 +962,8 @@ cases:
     family: xlnet
     operation: encode
     model: xlnet-base
-    priority: fast
+    workload:
+      testcase: xlnet-base
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -894,7 +972,8 @@ cases:
     family: z_image
     operation: generate_image
     model: z-image-turbo-l0
-    priority: slow
+    workload:
+      testcase: z-image-turbo-l0
     baseline:
       runner: task-reference
       adapter: hf-diffusers

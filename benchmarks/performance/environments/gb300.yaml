@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-environment/v1
+name: gb300-ci
+
+tools:
+  trtmc_bench: scripts/trtmc-bench
+  trtmc_worker: ${TRTMC_PERF_WORKER}
+  hf_transformers_runner: benchmarks/performance/baselines/hf_transformers.py
+  task_reference_runner: benchmarks/performance/baselines/task_reference.py
+
+storage:
+  results_root: artifacts/perf
+  scratch_root: artifacts/perf-scratch
+  bundle_cache: ${TRTMC_PERF_BUNDLE_CACHE}
+  bundle_roots: ${TRTMC_PERF_BUNDLE_ROOTS}
+  runtime_dirs: ${TRTMC_PERF_RUNTIME_DIRS}
+  minimum_free_space_gib: 20
+
+execution:
+  local_files_only: false
+  timeout_seconds: 7200
