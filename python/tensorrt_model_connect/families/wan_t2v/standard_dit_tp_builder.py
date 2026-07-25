@@ -57,11 +57,8 @@ def build_standard_dit_engine(
     context_dim: int,
     num_patches: int,
     text_seq_len: int = 512,
-    qk_norm: bool = True,
-    cross_attn_norm: bool = True,
-    ffn_activation: str = "gelu_new",
     use_rope: bool = True,
-    eps: float = 1e-6,
+    eps: float = 1e-06,
     verbose: bool = False,
     parallel_config: ParallelConfig | None = None,
 ) -> bytes:
@@ -117,281 +114,243 @@ def build_standard_dit_engine(
     local_num_heads = num_heads // parallel.tp_size
     local_dim = dim // parallel.tp_size
     local_ffn_dim = ffn_dim // parallel.tp_size
-
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
-
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-
-    # Inputs
-    hidden_inp = network.add_input(
-        "hidden_states", trt.float32, (num_patches, dim))
-    # Block modulation temb from external embedder: [1, 6 * dim]
-    temb_inp = network.add_input(
-        "timestep_embedding", trt.float32, (1, 6 * dim))
-    # Time embed for final output modulation: [1, dim]
-    time_embed_inp = network.add_input(
-        "time_embed", trt.float32, (1, dim))
+    hidden_inp = network.add_input("hidden_states", trt.float32, (num_patches, dim))
+    temb_inp = network.add_input("timestep_embedding", trt.float32, (1, 6 * dim))
+    time_embed_inp = network.add_input("time_embed", trt.float32, (1, dim))
     encoder_hidden = network.add_input(
-        "encoder_hidden_states", trt.float32, (text_seq_len, context_dim))
-
-    # Optional cross-attention mask: [1, 1, text_seq_len] float32.
-    # 0.0 for valid tokens, -10000.0 for padding.
-    # Only added when use_rope=False (PixArt, etc.) since Wan models
-    # don't need it (fixed-length text with no padding).
+        "encoder_hidden_states", trt.float32, (text_seq_len, context_dim)
+    )
     cross_attn_mask = None
     if not use_rope:
         cross_attn_mask = network.add_input(
-            "encoder_attention_mask", trt.float32, (1, 1, text_seq_len))
-
-    # Constants
-    eps_t = graph_ops.add_constant(
-        network, (1, 1), np.array([eps], dtype=np.float32))
-
-    # RoPE inputs and precomputation (only when use_rope=True)
+            "encoder_attention_mask", trt.float32, (1, 1, text_seq_len)
+        )
+    eps_t = graph_ops.add_constant(network, (1, 1), np.array([eps], dtype=np.float32))
     rotary_cos = rotary_sin = None
     if use_rope:
-        rotary_cos = network.add_input(
-            "rotary_cos", trt.float32, (num_patches, head_dim))
-        rotary_sin = network.add_input(
-            "rotary_sin", trt.float32, (num_patches, head_dim))
-
+        rotary_cos = network.add_input("rotary_cos", trt.float32, (num_patches, head_dim))
+        rotary_sin = network.add_input("rotary_sin", trt.float32, (num_patches, head_dim))
     hidden = hidden_inp
-
     for layer_idx in range(num_layers):
         prefix = f"blocks.{layer_idx}"
-
-        # --- AdaLN modulation ---
-        # scale_shift_table: [1, 6, dim] -> flatten to [1, 6*dim]
         sst = weights[f"{prefix}.scale_shift_table"]
-        sst_const = graph_ops.add_constant(
-            network, (1, 6 * dim), sst.reshape(1, 6 * dim))
-
-        # modulation = sst + temb
-        modulation = network.add_elementwise(
-            sst_const, temb_inp, trt.ElementWiseOperation.SUM)
-
-        # Chunk into 6 parts: shift_sa, scale_sa, gate_sa, shift_ff, scale_ff, gate_ff
+        sst_const = graph_ops.add_constant(network, (1, 6 * dim), sst.reshape(1, 6 * dim))
+        modulation = network.add_elementwise(sst_const, temb_inp, trt.ElementWiseOperation.SUM)
         chunks = []
         for i in range(6):
             s = network.add_slice(
-                modulation.get_output(0),
-                start=(0, i * dim),
-                shape=(1, dim),
-                stride=(1, 1),
+                modulation.get_output(0), start=(0, i * dim), shape=(1, dim), stride=(1, 1)
             )
             chunks.append(s.get_output(0))
         shift_sa, scale_sa, gate_sa, shift_ff, scale_ff, gate_ff = chunks
-
-        # === 1. Self-attention with AdaLN + RoPE ===
-        normed = graph_ops.add_adaptive_layernorm(
-            network, hidden, scale_sa, shift_sa, dim, eps)
-
-        # QKV projections
+        normed = graph_ops.add_adaptive_layernorm(network, hidden, scale_sa, shift_sa, dim, eps)
         q = _linear_col_parallel(
-            network, normed, dim, dim, weights, f"{prefix}.attn1.to_q", parallel)
+            network, normed, dim, dim, weights, f"{prefix}.attn1.to_q", parallel
+        )
         k = _linear_col_parallel(
-            network, normed, dim, dim, weights, f"{prefix}.attn1.to_k", parallel)
+            network, normed, dim, dim, weights, f"{prefix}.attn1.to_k", parallel
+        )
         v = _linear_col_parallel(
-            network, normed, dim, dim, weights, f"{prefix}.attn1.to_v", parallel)
-
-        # QK norm
-        if qk_norm:
-            q_norm_w = weights.get(f"{prefix}.attn1.norm_q.weight")
-            k_norm_w = weights.get(f"{prefix}.attn1.norm_k.weight")
-            if q_norm_w is not None:
-                q = graph_ops.add_rms_norm(
-                    network, q, local_dim,
-                    _tp_norm_weight(q_norm_w, local_num_heads, head_dim, parallel), eps_t)
-            if k_norm_w is not None:
-                k = graph_ops.add_rms_norm(
-                    network, k, local_dim,
-                    _tp_norm_weight(k_norm_w, local_num_heads, head_dim, parallel), eps_t)
-
-        # Apply RoPE to Q and K (skip when use_rope=False)
+            network, normed, dim, dim, weights, f"{prefix}.attn1.to_v", parallel
+        )
+        q_norm_w = weights.get(f"{prefix}.attn1.norm_q.weight")
+        k_norm_w = weights.get(f"{prefix}.attn1.norm_k.weight")
+        if q_norm_w is not None:
+            q = graph_ops.add_rms_norm(
+                network,
+                q,
+                local_dim,
+                _tp_norm_weight(q_norm_w, local_num_heads, head_dim, parallel),
+                eps_t,
+            )
+        if k_norm_w is not None:
+            k = graph_ops.add_rms_norm(
+                network,
+                k,
+                local_dim,
+                _tp_norm_weight(k_norm_w, local_num_heads, head_dim, parallel),
+                eps_t,
+            )
         if use_rope:
             q = graph_ops.add_apply_rope_native_from_full_cache(
-                network, q, local_num_heads, head_dim,
-                rotary_cos, rotary_sin, num_patches,
-                interleaved=True)
+                network,
+                q,
+                local_num_heads,
+                head_dim,
+                rotary_cos,
+                rotary_sin,
+                num_patches,
+                interleaved=True,
+            )
             k = graph_ops.add_apply_rope_native_from_full_cache(
-                network, k, local_num_heads, head_dim,
-                rotary_cos, rotary_sin, num_patches,
-                interleaved=True)
-
-        # Multi-head attention
+                network,
+                k,
+                local_num_heads,
+                head_dim,
+                rotary_cos,
+                rotary_sin,
+                num_patches,
+                interleaved=True,
+            )
         context_flat = graph_ops.add_attention_from_rows(
-            network, q, k, v,
-            num_heads=local_num_heads, head_dim=head_dim,
-            q_seq=num_patches, kv_seq=num_patches,
-            tag=f"{prefix}.attn1")
-
-        # Output projection
+            network,
+            q,
+            k,
+            v,
+            num_heads=local_num_heads,
+            head_dim=head_dim,
+            q_seq=num_patches,
+            kv_seq=num_patches,
+            tag=f"{prefix}.attn1",
+        )
         attn_out = _linear_row_parallel(
-            network, context_flat, local_dim, dim, weights,
-            f"{prefix}.attn1.to_out.0", parallel)
-
-        # Gate + residual
-        gated = network.add_elementwise(
-            attn_out, gate_sa, trt.ElementWiseOperation.PROD)
+            network, context_flat, local_dim, dim, weights, f"{prefix}.attn1.to_out.0", parallel
+        )
+        gated = network.add_elementwise(attn_out, gate_sa, trt.ElementWiseOperation.PROD)
         hidden = network.add_elementwise(
-            hidden, gated.get_output(0),
-            trt.ElementWiseOperation.SUM).get_output(0)
-
-        # === 2. Cross-attention ===
-        if cross_attn_norm:
-            cross_norm_w = weights.get(f"{prefix}.norm2.weight")
-            cross_norm_b = weights.get(f"{prefix}.norm2.bias")
-            if cross_norm_w is not None:
-                cross_normed = graph_ops.add_layer_norm(
-                    network, hidden, dim,
-                    cross_norm_w,
-                    cross_norm_b if cross_norm_b is not None else np.zeros(dim, dtype=np.float32),
-                    eps_t)
-            else:
-                cross_normed = hidden
+            hidden, gated.get_output(0), trt.ElementWiseOperation.SUM
+        ).get_output(0)
+        cross_norm_w = weights.get(f"{prefix}.norm2.weight")
+        cross_norm_b = weights.get(f"{prefix}.norm2.bias")
+        if cross_norm_w is not None:
+            cross_normed = graph_ops.add_layer_norm(
+                network,
+                hidden,
+                dim,
+                cross_norm_w,
+                cross_norm_b if cross_norm_b is not None else np.zeros(dim, dtype=np.float32),
+                eps_t,
+            )
         else:
             cross_normed = hidden
-
-        # Cross-attention: Q from hidden, K/V from encoder_hidden
         cross_q = _linear_col_parallel(
-            network, cross_normed, dim, dim, weights, f"{prefix}.attn2.to_q", parallel)
-
-        # K/V from encoder (may use add_k_proj/add_v_proj for context projection)
+            network, cross_normed, dim, dim, weights, f"{prefix}.attn2.to_q", parallel
+        )
         add_k_proj_w = weights.get(f"{prefix}.attn2.add_k_proj.weight")
         if add_k_proj_w is not None:
-            # Context needs projection: [text_seq, context_dim] -> [text_seq, dim]
             cross_k = _linear_col_parallel(
-                network, encoder_hidden, context_dim, dim, weights,
-                f"{prefix}.attn2.add_k_proj", parallel)
+                network,
+                encoder_hidden,
+                context_dim,
+                dim,
+                weights,
+                f"{prefix}.attn2.add_k_proj",
+                parallel,
+            )
             cross_v = _linear_col_parallel(
-                network, encoder_hidden, context_dim, dim, weights,
-                f"{prefix}.attn2.add_v_proj", parallel)
+                network,
+                encoder_hidden,
+                context_dim,
+                dim,
+                weights,
+                f"{prefix}.attn2.add_v_proj",
+                parallel,
+            )
         else:
-            # Direct K/V from already-projected context
             cross_k = _linear_col_parallel(
-                network, encoder_hidden, context_dim, dim, weights,
-                f"{prefix}.attn2.to_k", parallel)
+                network, encoder_hidden, context_dim, dim, weights, f"{prefix}.attn2.to_k", parallel
+            )
             cross_v = _linear_col_parallel(
-                network, encoder_hidden, context_dim, dim, weights,
-                f"{prefix}.attn2.to_v", parallel)
-
-        # QK norm for cross-attention
-        if qk_norm:
-            cq_norm = weights.get(f"{prefix}.attn2.norm_q.weight")
-            ck_norm = weights.get(f"{prefix}.attn2.norm_k.weight")
-            if cq_norm is not None:
-                cross_q = graph_ops.add_rms_norm(
-                    network, cross_q, local_dim,
-                    _tp_norm_weight(cq_norm, local_num_heads, head_dim, parallel), eps_t)
-            # For cross-attn with add_k_proj, the K norm is norm_added_k
-            ck_added_norm = weights.get(f"{prefix}.attn2.norm_added_k.weight")
-            if ck_added_norm is not None:
-                cross_k = graph_ops.add_rms_norm(
-                    network, cross_k, local_dim,
-                    _tp_norm_weight(ck_added_norm, local_num_heads, head_dim, parallel), eps_t)
-            elif ck_norm is not None:
-                cross_k = graph_ops.add_rms_norm(
-                    network, cross_k, local_dim,
-                    _tp_norm_weight(ck_norm, local_num_heads, head_dim, parallel), eps_t)
-
-        # Cross multi-head attention (no RoPE)
+                network, encoder_hidden, context_dim, dim, weights, f"{prefix}.attn2.to_v", parallel
+            )
+        cq_norm = weights.get(f"{prefix}.attn2.norm_q.weight")
+        ck_norm = weights.get(f"{prefix}.attn2.norm_k.weight")
+        if cq_norm is not None:
+            cross_q = graph_ops.add_rms_norm(
+                network,
+                cross_q,
+                local_dim,
+                _tp_norm_weight(cq_norm, local_num_heads, head_dim, parallel),
+                eps_t,
+            )
+        ck_added_norm = weights.get(f"{prefix}.attn2.norm_added_k.weight")
+        if ck_added_norm is not None:
+            cross_k = graph_ops.add_rms_norm(
+                network,
+                cross_k,
+                local_dim,
+                _tp_norm_weight(ck_added_norm, local_num_heads, head_dim, parallel),
+                eps_t,
+            )
+        elif ck_norm is not None:
+            cross_k = graph_ops.add_rms_norm(
+                network,
+                cross_k,
+                local_dim,
+                _tp_norm_weight(ck_norm, local_num_heads, head_dim, parallel),
+                eps_t,
+            )
         cross_mask_4d = None
         if cross_attn_mask is not None:
             cross_mask = network.add_shuffle(cross_attn_mask)
             cross_mask.reshape_dims = (1, 1, 1, text_seq_len)
             cross_mask_4d = cross_mask.get_output(0)
         c_context_flat = graph_ops.add_attention_from_rows(
-            network, cross_q, cross_k, cross_v,
-            num_heads=local_num_heads, head_dim=head_dim,
-            q_seq=num_patches, kv_seq=text_seq_len,
+            network,
+            cross_q,
+            cross_k,
+            cross_v,
+            num_heads=local_num_heads,
+            head_dim=head_dim,
+            q_seq=num_patches,
+            kv_seq=text_seq_len,
             mask=cross_mask_4d,
-            tag=f"{prefix}.attn2")
-
+            tag=f"{prefix}.attn2",
+        )
         cross_out = _linear_row_parallel(
-            network, c_context_flat, local_dim, dim, weights,
-            f"{prefix}.attn2.to_out.0", parallel)
-
-        # Cross-attn residual (no gate in Wan)
+            network, c_context_flat, local_dim, dim, weights, f"{prefix}.attn2.to_out.0", parallel
+        )
         hidden = network.add_elementwise(
-            hidden, cross_out,
-            trt.ElementWiseOperation.SUM).get_output(0)
-
-        # === 3. FFN with AdaLN ===
-        ffn_normed = graph_ops.add_adaptive_layernorm(
-            network, hidden, scale_ff, shift_ff, dim, eps)
-
-        # GELU FFN: Linear(dim, ffn_dim) -> GELU -> Linear(ffn_dim, dim)
+            hidden, cross_out, trt.ElementWiseOperation.SUM
+        ).get_output(0)
+        ffn_normed = graph_ops.add_adaptive_layernorm(network, hidden, scale_ff, shift_ff, dim, eps)
         ffn_fc1 = _linear_col_parallel(
-            network, ffn_normed, dim, ffn_dim, weights,
-            f"{prefix}.ffn.net.0.proj", parallel)
-
+            network, ffn_normed, dim, ffn_dim, weights, f"{prefix}.ffn.net.0.proj", parallel
+        )
         ffn_act = graph_ops.add_gelu_new(network, ffn_fc1)
-
         ffn_fc2 = _linear_row_parallel(
-            network, ffn_act, local_ffn_dim, dim, weights,
-            f"{prefix}.ffn.net.2", parallel)
-
-        # Gate + residual
-        gated_ff = network.add_elementwise(
-            ffn_fc2, gate_ff, trt.ElementWiseOperation.PROD)
+            network, ffn_act, local_ffn_dim, dim, weights, f"{prefix}.ffn.net.2", parallel
+        )
+        gated_ff = network.add_elementwise(ffn_fc2, gate_ff, trt.ElementWiseOperation.PROD)
         hidden = network.add_elementwise(
-            hidden, gated_ff.get_output(0),
-            trt.ElementWiseOperation.SUM).get_output(0)
-
-    # --- Final output: AdaLN modulation + projection ---
-    # HF: shift, scale = (self.scale_shift_table + temb.unsqueeze(1)).chunk(2, dim=1)
-    # scale_shift_table: [1, 2, dim], time_embed: [1, dim] -> unsqueeze -> [1, 1, dim]
-    # Result after add: [1, 2, dim], chunk -> shift [1, 1, dim], scale [1, 1, dim]
-    final_sst = weights["scale_shift_table"]  # [1, 2, dim]
-    final_sst_const = graph_ops.add_constant(
-        network, (1, 2 * dim), final_sst.reshape(1, 2 * dim))
-
-    # time_embed_inp: [1, dim] -> tile to [1, 2*dim] for broadcast add
-    time_embed_tiled = network.add_concatenation(
-        [time_embed_inp, time_embed_inp])
-    time_embed_tiled.axis = 1  # [1, 2*dim]
-
+            hidden, gated_ff.get_output(0), trt.ElementWiseOperation.SUM
+        ).get_output(0)
+    final_sst = weights["scale_shift_table"]
+    final_sst_const = graph_ops.add_constant(network, (1, 2 * dim), final_sst.reshape(1, 2 * dim))
+    time_embed_tiled = network.add_concatenation([time_embed_inp, time_embed_inp])
+    time_embed_tiled.axis = 1
     final_modulation = network.add_elementwise(
-        final_sst_const, time_embed_tiled.get_output(0),
-        trt.ElementWiseOperation.SUM)
-
+        final_sst_const, time_embed_tiled.get_output(0), trt.ElementWiseOperation.SUM
+    )
     final_shift = network.add_slice(
-        final_modulation.get_output(0),
-        start=(0, 0), shape=(1, dim), stride=(1, 1))
+        final_modulation.get_output(0), start=(0, 0), shape=(1, dim), stride=(1, 1)
+    )
     final_scale = network.add_slice(
-        final_modulation.get_output(0),
-        start=(0, dim), shape=(1, dim), stride=(1, 1))
-
-    # Final LayerNorm + AdaLN modulation
+        final_modulation.get_output(0), start=(0, dim), shape=(1, dim), stride=(1, 1)
+    )
     hidden = graph_ops.add_adaptive_layernorm(
-        network, hidden, final_scale.get_output(0),
-        final_shift.get_output(0), dim, eps)
-
-    # Final projection: [num_patches, dim] -> [num_patches, out_channels * prod(patch_size)]
+        network, hidden, final_scale.get_output(0), final_shift.get_output(0), dim, eps
+    )
     proj_out_w = weights["proj_out.weight"]
-    out_dim = proj_out_w.shape[1]  # [dim, out_channels * prod(patch_size)]
-    output = graph_ops.add_matmul_rhs_constant(
-        network, hidden, dim, out_dim, proj_out_w)
+    out_dim = proj_out_w.shape[1]
+    output = graph_ops.add_matmul_rhs_constant(network, hidden, dim, out_dim, proj_out_w)
     proj_out_b = weights.get("proj_out.bias")
     if proj_out_b is not None:
         output = graph_ops.add_bias_sum(network, output, out_dim, proj_out_b)
-
-    # Mark output
     cast_output = network.add_cast(output, trt.float32)
     output_final = cast_output.get_output(0)
     output_final.name = "output"
     network.mark_output(output_final)
-
-    # --- Build ---
-    tp_suffix = (
-        f", tp={parallel.tp_size}, rank={parallel.rank}"
-        if parallel.enabled else "")
-    print(f"[dit-builder] Building TRT engine "
-          f"(dim={dim}, layers={num_layers}, patches={num_patches}{tp_suffix}) ...",
-          file=sys.stderr)
+    tp_suffix = f", tp={parallel.tp_size}, rank={parallel.rank}" if parallel.enabled else ""
+    print(
+        f"[dit-builder] Building TRT engine (dim={dim}, layers={num_layers}, patches={num_patches}{tp_suffix}) ...",
+        file=sys.stderr,
+    )
     plan = builder.build_serialized_network(network, config)
     if plan is None:
         raise RuntimeError("TRT engine serialization failed for DiT")
@@ -454,196 +413,6 @@ def _tp_norm_weight(
         return weight
     if weight.size == head_dim:
         return weight
-    return _slice_first_dim(weight.reshape(-1, head_dim), parallel.rank,
-                            parallel.tp_size).reshape(local_num_heads * head_dim)
-
-
-def load_dit_weights(
-    model_dir: str,
-    *,
-    dim: int,
-    num_heads: int,
-    num_layers: int,
-    ffn_dim: int,
-    context_dim: int,
-) -> WeightDict:
-    """Load DiT weights from a diffusers-format transformer directory.
-
-    Expects: model_dir/diffusion_pytorch_model.safetensors (or sharded).
-    Returns WeightDict with transposed projections for TRT matmul.
-    """
-    from pathlib import Path
-    from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor
-
-    model_path = Path(model_dir)
-    readers = _open_safetensors(model_path)
-    weights = WeightDict()
-
-    def _t(name: str) -> np.ndarray:
-        """Load and transpose [out, in] -> [in, out]."""
-        w = _load_tensor(readers, name)
-        return np.ascontiguousarray(w.T, dtype=np.float32)
-
-    def _f(name: str) -> np.ndarray:
-        """Load flat (1D) weight."""
-        return _load_tensor(readers, name).astype(np.float32)
-
-    def _maybe_t(name: str) -> np.ndarray | None:
-        if _has_tensor(readers, name):
-            return _t(name)
-        return None
-
-    def _maybe_f(name: str) -> np.ndarray | None:
-        if _has_tensor(readers, name):
-            return _f(name)
-        return None
-
-    for i in range(num_layers):
-        p = f"blocks.{i}"
-
-        # Self-attention
-        weights[f"{p}.attn1.to_q.weight"] = _t(f"{p}.attn1.to_q.weight")
-        weights[f"{p}.attn1.to_k.weight"] = _t(f"{p}.attn1.to_k.weight")
-        weights[f"{p}.attn1.to_v.weight"] = _t(f"{p}.attn1.to_v.weight")
-        weights[f"{p}.attn1.to_out.0.weight"] = _t(f"{p}.attn1.to_out.0.weight")
-
-        for proj in ("to_q", "to_k", "to_v"):
-            b = _maybe_f(f"{p}.attn1.{proj}.bias")
-            if b is not None:
-                weights[f"{p}.attn1.{proj}.bias"] = b
-        b = _maybe_f(f"{p}.attn1.to_out.0.bias")
-        if b is not None:
-            weights[f"{p}.attn1.to_out.0.bias"] = b
-
-        # QK norm
-        for norm in ("norm_q", "norm_k"):
-            w = _maybe_f(f"{p}.attn1.{norm}.weight")
-            if w is not None:
-                weights[f"{p}.attn1.{norm}.weight"] = w
-
-        # Cross-attention
-        weights[f"{p}.attn2.to_q.weight"] = _t(f"{p}.attn2.to_q.weight")
-        weights[f"{p}.attn2.to_out.0.weight"] = _t(f"{p}.attn2.to_out.0.weight")
-
-        for proj in ("to_q", "to_k", "to_v"):
-            b = _maybe_f(f"{p}.attn2.{proj}.bias")
-            if b is not None:
-                weights[f"{p}.attn2.{proj}.bias"] = b
-        b = _maybe_f(f"{p}.attn2.to_out.0.bias")
-        if b is not None:
-            weights[f"{p}.attn2.to_out.0.bias"] = b
-
-        # Cross-attn K/V: either to_k/to_v or add_k_proj/add_v_proj
-        if _has_tensor(readers, f"{p}.attn2.add_k_proj.weight"):
-            weights[f"{p}.attn2.add_k_proj.weight"] = _t(f"{p}.attn2.add_k_proj.weight")
-            weights[f"{p}.attn2.add_v_proj.weight"] = _t(f"{p}.attn2.add_v_proj.weight")
-            b = _maybe_f(f"{p}.attn2.add_k_proj.bias")
-            if b is not None:
-                weights[f"{p}.attn2.add_k_proj.bias"] = b
-            b = _maybe_f(f"{p}.attn2.add_v_proj.bias")
-            if b is not None:
-                weights[f"{p}.attn2.add_v_proj.bias"] = b
-        else:
-            weights[f"{p}.attn2.to_k.weight"] = _t(f"{p}.attn2.to_k.weight")
-            weights[f"{p}.attn2.to_v.weight"] = _t(f"{p}.attn2.to_v.weight")
-
-        # Cross-attn QK norm
-        for norm in ("norm_q", "norm_k", "norm_added_k"):
-            w = _maybe_f(f"{p}.attn2.{norm}.weight")
-            if w is not None:
-                weights[f"{p}.attn2.{norm}.weight"] = w
-
-        # Cross-attn norm (LayerNorm)
-        w = _maybe_f(f"{p}.norm2.weight")
-        if w is not None:
-            weights[f"{p}.norm2.weight"] = w
-        b = _maybe_f(f"{p}.norm2.bias")
-        if b is not None:
-            weights[f"{p}.norm2.bias"] = b
-
-        # FFN
-        weights[f"{p}.ffn.net.0.proj.weight"] = _t(f"{p}.ffn.net.0.proj.weight")
-        weights[f"{p}.ffn.net.2.weight"] = _t(f"{p}.ffn.net.2.weight")
-        b = _maybe_f(f"{p}.ffn.net.0.proj.bias")
-        if b is not None:
-            weights[f"{p}.ffn.net.0.proj.bias"] = b
-        b = _maybe_f(f"{p}.ffn.net.2.bias")
-        if b is not None:
-            weights[f"{p}.ffn.net.2.bias"] = b
-
-        # Scale-shift table
-        sst = _load_tensor(readers, f"{p}.scale_shift_table")
-        weights[f"{p}.scale_shift_table"] = sst.astype(np.float32)
-
-    # Final output
-    weights["scale_shift_table"] = _load_tensor(
-        readers, "scale_shift_table").astype(np.float32)
-    weights["proj_out.weight"] = _t("proj_out.weight")
-    b = _maybe_f("proj_out.bias")
-    if b is not None:
-        weights["proj_out.bias"] = b
-
-    # Patch embedding (loaded but used externally, not in the TRT engine)
-    if _has_tensor(readers, "patch_embedding.weight"):
-        weights["patch_embedding.weight"] = _load_tensor(
-            readers, "patch_embedding.weight").astype(np.float32)
-    if _has_tensor(readers, "patch_embedding.bias"):
-        weights["patch_embedding.bias"] = _load_tensor(
-            readers, "patch_embedding.bias").astype(np.float32)
-
-    # Timestep/text embedder weights (used externally)
-    # Map canonical internal names -> possible safetensors names
-    _embedder_aliases = {
-        "condition_embedder.time_embedding.0.weight": [
-            "condition_embedder.time_embedding.0.weight",
-            "condition_embedder.time_embedder.linear_1.weight",
-        ],
-        "condition_embedder.time_embedding.0.bias": [
-            "condition_embedder.time_embedding.0.bias",
-            "condition_embedder.time_embedder.linear_1.bias",
-        ],
-        "condition_embedder.time_embedding.2.weight": [
-            "condition_embedder.time_embedding.2.weight",
-            "condition_embedder.time_embedder.linear_2.weight",
-        ],
-        "condition_embedder.time_embedding.2.bias": [
-            "condition_embedder.time_embedding.2.bias",
-            "condition_embedder.time_embedder.linear_2.bias",
-        ],
-        "condition_embedder.text_embedding.weight": [
-            "condition_embedder.text_embedding.weight",
-            "condition_embedder.text_embedder.linear_1.weight",
-        ],
-        "condition_embedder.text_embedding.bias": [
-            "condition_embedder.text_embedding.bias",
-            "condition_embedder.text_embedder.linear_1.bias",
-        ],
-        "condition_embedder.text_embedding_2.weight": [
-            "condition_embedder.text_embedding_2.weight",
-            "condition_embedder.text_embedder.linear_2.weight",
-        ],
-        "condition_embedder.text_embedding_2.bias": [
-            "condition_embedder.text_embedding_2.bias",
-            "condition_embedder.text_embedder.linear_2.bias",
-        ],
-    }
-    for key in ("condition_embedder.time_proj.weight",
-                "condition_embedder.time_proj.bias"):
-        if _has_tensor(readers, key):
-            w = _load_tensor(readers, key).astype(np.float32)
-            if w.ndim == 2:
-                weights[key] = np.ascontiguousarray(w.T, dtype=np.float32)
-            else:
-                weights[key] = w
-
-    for canonical, aliases in _embedder_aliases.items():
-        for alias in aliases:
-            if _has_tensor(readers, alias):
-                w = _load_tensor(readers, alias).astype(np.float32)
-                if w.ndim == 2:
-                    weights[canonical] = np.ascontiguousarray(w.T, dtype=np.float32)
-                else:
-                    weights[canonical] = w
-                break
-
-    return weights
+    return _slice_first_dim(weight.reshape(-1, head_dim), parallel.rank, parallel.tp_size).reshape(
+        local_num_heads * head_dim
+    )
