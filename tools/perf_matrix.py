@@ -267,10 +267,10 @@ def _read_environment(path: Path) -> dict[str, Any]:
     if (
         isinstance(minimum_gpu_free_fraction, bool)
         or not isinstance(minimum_gpu_free_fraction, (int, float))
-        or not 0 < float(minimum_gpu_free_fraction) <= 1
+        or not 0 <= float(minimum_gpu_free_fraction) <= 1
     ):
         raise PerfMatrixError(
-            "environment execution.minimum_gpu_free_fraction must be in (0, 1]"
+            "environment execution.minimum_gpu_free_fraction must be in [0, 1]"
         )
     local_files_only = execution.get("local_files_only", False)
     if not isinstance(local_files_only, bool):

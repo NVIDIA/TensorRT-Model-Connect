@@ -211,7 +211,7 @@ def _write_environment(
                 },
                 "execution": {
                     "local_files_only": False,
-                    "minimum_gpu_free_fraction": 0.25,
+                    "minimum_gpu_free_fraction": 0.0,
                     "timeout_seconds": 30,
                 },
             },
@@ -331,7 +331,7 @@ def test_checked_in_gb300_environment_is_ci_runnable() -> None:
     assert raw["storage"]["bundle_cache"] == "${TRTMC_PERF_BUNDLE_CACHE}"
     assert raw["storage"]["bundle_roots"] == "${TRTMC_PERF_BUNDLE_ROOTS}"
     assert raw["storage"]["runtime_dirs"] == "${TRTMC_PERF_RUNTIME_DIRS}"
-    assert raw["execution"]["minimum_gpu_free_fraction"] == 0.25
+    assert raw["execution"]["minimum_gpu_free_fraction"] == 0.0
     assert raw["execution"]["timeout_seconds"] == 7200
 
 
@@ -856,7 +856,7 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert results["environment_config"]["name"] == "test-gb300"
     assert (
         results["environment_config"]["execution"]["minimum_gpu_free_fraction"]
-        == 0.25
+        == 0.0
     )
     assert results["environment_config"]["source"] == str(environment.resolve())
     assert results["catalog_coverage"] == {
