@@ -33,7 +33,6 @@ from .checkpoint_mapper import (
     _transpose_2d,
 )
 from ...parallel_config import normalize_parallel_config
-from ...quantization.adapters import StandardDecoderCalibrationAdapter
 from .decoder_tp_builder import build_qwen_vl_tp_decoder_engine
 from .lora import DynamicLoraConfig
 from .standard_decoder_builder import build_standard_decoder_engine
@@ -248,10 +247,18 @@ class QwenVLPlugin:
         """Persist the dynamic binding contract in the bundle config."""
         return DynamicLoraConfig.from_model_config(config).bundle_config()
 
-    def quant_adapter(self, format_name: str) -> StandardDecoderCalibrationAdapter:
-        """Map HF decoder projection names to Qwen-VL graph seam names."""
+    def quant_adapter(self, format_name: str):
+        """VL-aware calibration adapter for Qwen-VL.
+
+        The default (and the standard-decoder) adapter loads via
+        ``AutoModelForCausalLM``, which cannot load a vision-language config
+        (e.g. ``Qwen3VLConfig``). Use a VL adapter that loads via
+        ``AutoModelForImageTextToText`` and calibrates on image+text, mapping
+        the VL language-model layer names onto MC's builder seams.
+        """
         del format_name
-        return StandardDecoderCalibrationAdapter()
+        from ...quantization.adapters import QwenVLCalibrationAdapter
+        return QwenVLCalibrationAdapter()
 
 
 # ---------------------------------------------------------------------------
