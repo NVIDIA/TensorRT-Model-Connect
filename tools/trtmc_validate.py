@@ -1774,6 +1774,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("model", nargs="?")
     parser.add_argument("workload", nargs="?")
     parser.add_argument("--all", action="store_true", help="run every ready model")
+    parser.add_argument(
+        "--on-model-failure",
+        choices=("continue", "stop"),
+        default="continue",
+        help=("with --all, continue after a failed model or stop after recording it"),
+    )
+    parser.add_argument(
+        "--model-worker",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--list", action="store_true", help="list model-first workloads")
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     parser.add_argument("--suites", type=Path, default=DEFAULT_SUITES)
@@ -1875,6 +1886,196 @@ def _print_bindings(
     )
 
 
+def _prepare_run_directories(arguments: argparse.Namespace) -> None:
+    arguments.output.mkdir(parents=True, exist_ok=True)
+    arguments.engine_dir.mkdir(parents=True, exist_ok=True)
+    arguments.reference_cache_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _worker_command(
+    binding: Binding,
+    arguments: argparse.Namespace,
+) -> list[str]:
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        binding.model,
+        binding.workload,
+        "--model-worker",
+    ]
+    for option, value in (
+        ("--catalog", arguments.catalog),
+        ("--suites", arguments.suites),
+        ("--models-dir", arguments.models_dir),
+        ("--output", arguments.output),
+        ("--engine-dir", arguments.engine_dir),
+        ("--reference-cache-dir", arguments.reference_cache_dir),
+        ("--trtmc-binary", arguments.trtmc_binary),
+        ("--benchmark-binary", arguments.benchmark_binary),
+        ("--hf-python", arguments.hf_python),
+    ):
+        command.extend([option, str(value)])
+    for option, value in (
+        ("--dataset-root", arguments.dataset_root),
+        ("--backend-dir", arguments.backend_dir),
+        ("--model-plugin-dir", arguments.model_plugin_dir),
+        ("--cuda-visible-devices", arguments.cuda_visible_devices),
+        ("--platform", arguments.platform),
+    ):
+        if value:
+            command.extend([option, str(value)])
+    if arguments.limit is not None:
+        command.extend(["--limit", str(arguments.limit)])
+    for option, enabled in (
+        ("--force-hf", arguments.force_hf),
+        ("--force-build", arguments.force_build),
+        ("--no-build", arguments.no_build),
+        ("--local-files-only", arguments.local_files_only),
+    ):
+        if enabled:
+            command.append(option)
+    return command
+
+
+def _worker_error_result(
+    binding: Binding,
+    *,
+    command: Sequence[str],
+    returncode: int,
+    worker_log: Path,
+    sample_limit: int,
+    error: str,
+) -> dict[str, Any]:
+    return _normalize_result(
+        {
+            "schema_version": "trtmc.validation-result/v2",
+            "model": binding.model,
+            "workload": binding.workload,
+            "executor": "model_worker",
+            "status": "failed",
+            "returncode": returncode,
+            "reference_environment": [],
+            "reproduce": {
+                "dataset": {
+                    "command": shlex.join(command),
+                    "sample_limit": sample_limit,
+                    "prepared_input_count": 0,
+                },
+                "hf": [],
+                "trtmc": [],
+            },
+            "raw_result": {
+                "status": "failed",
+                "error_type": "WorkerProcessError",
+                "error": error,
+            },
+            "raw_result_path": "",
+            "disagreements": {
+                "count": 0,
+                "path": "disagreements.jsonl",
+                "inline_limit": trtmc_disagreements.INLINE_DISAGREEMENT_LIMIT,
+                "reference_vanilla_available": False,
+                "trtmc_vanilla_available": False,
+            },
+            "execution_log": str(worker_log),
+            "worker_log": str(worker_log),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+
+def _run_supervised_binding(
+    binding: Binding,
+    *,
+    arguments: argparse.Namespace,
+    catalog: Mapping[str, Any],
+) -> dict[str, Any]:
+    case_dir = arguments.output / binding.model / binding.workload
+    case_dir.mkdir(parents=True, exist_ok=True)
+    comparison_path = case_dir / "comparison.json"
+    comparison_path.unlink(missing_ok=True)
+    worker_log = case_dir / "worker.log"
+    command = _worker_command(binding, arguments)
+    launch_error = ""
+    try:
+        returncode = _run_subprocess(command, worker_log, _source_environment())
+    except OSError as exc:
+        returncode = 127
+        launch_error = f"could not start model worker: {exc}"
+    try:
+        if launch_error:
+            raise ValidationError(launch_error)
+        if not comparison_path.is_file():
+            raise ValidationError(
+                f"worker exited with code {returncode} without writing comparison.json"
+            )
+        loaded = json.loads(comparison_path.read_text(encoding="utf-8"))
+        result = _normalize_result(loaded)
+        if result.get("model") != binding.model or result.get("workload") != binding.workload:
+            raise ValidationError("worker wrote comparison.json for a different binding")
+    except (OSError, ValueError, ValidationError) as exc:
+        result = _worker_error_result(
+            binding,
+            command=command,
+            returncode=returncode,
+            worker_log=worker_log,
+            sample_limit=resolve_sample_limit(catalog, binding, arguments.limit),
+            error=str(exc),
+        )
+        (case_dir / "disagreements.jsonl").write_text("", encoding="utf-8")
+    else:
+        result["worker_log"] = str(worker_log)
+        dataset = result.get("reproduce", {}).get("dataset", {})
+        if isinstance(dataset, dict):
+            dataset["command"] = shlex.join(token for token in command if token != "--model-worker")
+    comparison_path.write_text(
+        json.dumps(result, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return result
+
+
+def _run_all_bindings(
+    bindings: Iterable[Binding],
+    *,
+    arguments: argparse.Namespace,
+    catalog: Mapping[str, Any],
+) -> int:
+    _prepare_run_directories(arguments)
+    write_run_metadata(arguments.output)
+    failed = False
+    for binding in bindings:
+        sample_limit = resolve_sample_limit(catalog, binding, arguments.limit)
+        sample_note = (
+            "full dataset"
+            if binding.workload != "e2e" and sample_limit == 0
+            else f"{sample_limit} samples"
+            if binding.workload != "e2e"
+            else "e2e"
+        )
+        print(
+            f"\nStarting worker: {binding.model} / {binding.workload} / {sample_note}",
+            flush=True,
+        )
+        result = _run_supervised_binding(
+            binding,
+            arguments=arguments,
+            catalog=catalog,
+        )
+        _, report_path, _ = write_report(arguments.output)
+        comparison = arguments.output / binding.model / binding.workload / "comparison.json"
+        _print_result(result, comparison, report_path)
+        model_failed = result["validation"]["status"] == "failed"
+        failed = failed or model_failed
+        if model_failed and arguments.on_model_failure == "stop":
+            print(
+                f"Stopping after failed model: {binding.model}",
+                flush=True,
+            )
+            break
+    return 1 if failed else 0
+
+
 def _run_bindings(
     bindings: Iterable[Binding],
     *,
@@ -1884,10 +2085,9 @@ def _run_bindings(
     suites: Mapping[str, dict[str, Any]],
 ) -> int:
     e2e_models = _e2e_models(arguments.models_dir)
-    arguments.output.mkdir(parents=True, exist_ok=True)
-    arguments.engine_dir.mkdir(parents=True, exist_ok=True)
-    arguments.reference_cache_dir.mkdir(parents=True, exist_ok=True)
-    write_run_metadata(arguments.output)
+    _prepare_run_directories(arguments)
+    if not arguments.model_worker:
+        write_run_metadata(arguments.output)
     failed = False
     for binding in bindings:
         binding_arguments = copy.copy(arguments)
@@ -1916,9 +2116,10 @@ def _run_bindings(
             e2e_models=e2e_models,
             suites=suites,
         )
-        _, report_path, _ = write_report(arguments.output)
-        comparison = arguments.output / binding.model / binding.workload / "comparison.json"
-        _print_result(result, comparison, report_path)
+        if not arguments.model_worker:
+            _, report_path, _ = write_report(arguments.output)
+            comparison = arguments.output / binding.model / binding.workload / "comparison.json"
+            _print_result(result, comparison, report_path)
         failed = failed or result["validation"]["status"] == "failed"
     return 1 if failed else 0
 
@@ -1944,6 +2145,12 @@ def _main(arguments: argparse.Namespace) -> int:
             explicit_limit=arguments.limit,
         )
         return 0
+    if arguments.all:
+        return _run_all_bindings(
+            bindings,
+            arguments=arguments,
+            catalog=catalog,
+        )
     return _run_bindings(
         bindings,
         arguments=arguments,

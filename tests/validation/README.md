@@ -26,6 +26,33 @@ Run every single-device model whose catalog status is `ready`:
 python tools/trtmc_validate.py --all
 ```
 
+The all-model command supervises one isolated worker process per model. By
+default it records a failed worker and continues with the remaining models.
+Stop after the first failed model when that is preferable:
+
+```bash
+python tools/trtmc_validate.py --all --on-model-failure stop
+```
+
+Both policies return a nonzero exit status when any attempted model fails.
+Process isolation also covers failures that happen before backend execution,
+such as reference-environment setup or uncaught model-specific Python errors.
+
+The same CLI is the CI case entry point. Generate a machine-readable matrix,
+then run one exact model/workload binding in each CI node:
+
+```bash
+python tools/trtmc_validate.py --all --dry-run
+python tools/trtmc_validate.py gpt2-125m mmlu_continuation_parity \
+  --output validation-artifacts
+```
+
+The case result is always written to
+`<output>/<model>/<workload>/comparison.json`; `report.json` and `report.html`
+are written at the output root. Exit status `0` means reference consistency
+passed, `1` means the case ran but validation failed, and `2` means CLI or
+setup validation failed before the case could run.
+
 Dataset-backed workloads use the task-specific sample limits declared in
 `model_workloads.yaml`. Fast encoder and classification workloads use larger
 slices, while generation-heavy image, video, and audio workloads use smaller

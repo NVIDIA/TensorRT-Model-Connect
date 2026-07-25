@@ -140,6 +140,325 @@ def test_resolve_sample_limit_uses_workload_policy_and_cli_override():
     )
 
 
+def test_all_defaults_to_continue_and_accepts_stop_policy():
+    parser = trtmc_validate.build_parser()
+
+    default = parser.parse_args(["--all"])
+    stop = parser.parse_args(["--all", "--on-model-failure", "stop"])
+
+    assert default.on_model_failure == "continue"
+    assert stop.on_model_failure == "stop"
+
+
+@pytest.mark.parametrize(
+    ("policy", "expected_models"),
+    [
+        ("continue", ["model-a", "model-b"]),
+        ("stop", ["model-a"]),
+    ],
+)
+def test_all_supervisor_applies_model_failure_policy(
+    tmp_path,
+    monkeypatch,
+    policy,
+    expected_models,
+):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--on-model-failure",
+            policy,
+            "--output",
+            str(tmp_path / "results"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    bindings = [
+        trtmc_validate.Binding("model-a", "workload-a"),
+        trtmc_validate.Binding("model-b", "workload-b"),
+    ]
+    catalog = {
+        "sample_limits": {
+            "workload-a": 5,
+            "workload-b": 10,
+        }
+    }
+    attempted = []
+
+    def run_worker(binding, *, arguments, catalog):
+        attempted.append(binding.model)
+        status = "failed" if binding.model == "model-a" else "passed"
+        return {
+            "model": binding.model,
+            "workload": binding.workload,
+            "validation": {"status": status},
+        }
+
+    monkeypatch.setattr(trtmc_validate, "_run_supervised_binding", run_worker)
+    monkeypatch.setattr(trtmc_validate, "write_run_metadata", lambda output: output)
+    monkeypatch.setattr(
+        trtmc_validate,
+        "write_report",
+        lambda output: (
+            output / "report.json",
+            output / "report.html",
+            {},
+        ),
+    )
+    monkeypatch.setattr(trtmc_validate, "_print_result", lambda *args: None)
+
+    returncode = trtmc_validate._run_all_bindings(
+        bindings,
+        arguments=arguments,
+        catalog=catalog,
+    )
+
+    assert returncode == 1
+    assert attempted == expected_models
+
+
+def test_supervised_binding_replaces_stale_result_with_worker_crash(tmp_path, monkeypatch):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--output",
+            str(tmp_path / "results"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+            "--local-files-only",
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "workload-a")
+    catalog = {"sample_limits": {"workload-a": 5}}
+    case_dir = arguments.output / binding.model / binding.workload
+    case_dir.mkdir(parents=True)
+    comparison = case_dir / "comparison.json"
+    comparison.write_text(
+        json.dumps(
+            {
+                "model": binding.model,
+                "workload": binding.workload,
+                "status": "passed",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def crash(command, log_path, env):
+        log_path.write_text("worker crashed before comparison\n", encoding="utf-8")
+        return 2
+
+    monkeypatch.setattr(trtmc_validate, "_run_subprocess", crash)
+
+    result = trtmc_validate._run_supervised_binding(
+        binding,
+        arguments=arguments,
+        catalog=catalog,
+    )
+
+    assert result["execution"] == {"status": "error", "exit_code": 2}
+    assert result["comparison"]["status"] == "not_run"
+    assert result["validation"]["status"] == "failed"
+    assert result["raw_result"]["error_type"] == "WorkerProcessError"
+    assert result["reproduce"]["dataset"]["sample_limit"] == 5
+    assert "--model-worker" in result["reproduce"]["dataset"]["command"]
+    assert "--local-files-only" in result["reproduce"]["dataset"]["command"]
+    assert json.loads(comparison.read_text(encoding="utf-8")) == result
+
+
+def test_supervised_binding_accepts_fresh_worker_result(tmp_path, monkeypatch):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--output",
+            str(tmp_path / "results"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "workload-a")
+    catalog = {"sample_limits": {"workload-a": 5}}
+    comparison = (
+        arguments.output / binding.model / binding.workload / "comparison.json"
+    )
+
+    def pass_worker(command, log_path, env):
+        comparison.write_text(
+            json.dumps(
+                {
+                    "model": binding.model,
+                    "workload": binding.workload,
+                    "status": "passed",
+                    "returncode": 0,
+                    "raw_result": {"status": "passed"},
+                    "reproduce": {
+                        "dataset": {
+                            "command": "internal worker command",
+                            "sample_limit": 5,
+                            "prepared_input_count": 5,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return 0
+
+    monkeypatch.setattr(trtmc_validate, "_run_subprocess", pass_worker)
+
+    result = trtmc_validate._run_supervised_binding(
+        binding,
+        arguments=arguments,
+        catalog=catalog,
+    )
+
+    assert result["execution"]["status"] == "completed"
+    assert result["comparison"]["status"] == "agreement"
+    assert result["validation"]["status"] == "passed"
+    assert result["worker_log"].endswith("/model-a/workload-a/worker.log")
+    assert "--model-worker" not in result["reproduce"]["dataset"]["command"]
+
+
+def test_all_dry_run_emits_machine_readable_ci_cases(monkeypatch, capsys):
+    catalog = {
+        "sample_limits": {"workload-a": 5},
+        "models": {
+            "model-a": {
+                "default": "workload-a",
+                "workloads": ["workload-a"],
+            },
+            "model-e2e": {
+                "default": "e2e",
+                "workloads": ["e2e"],
+            },
+        },
+    }
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_load_validation_inputs",
+        lambda arguments: (
+            catalog,
+            {"workload-a": {}},
+            ("model-a", "model-e2e"),
+            {},
+        ),
+    )
+
+    returncode = trtmc_validate.main(["--all", "--dry-run"])
+
+    assert returncode == 0
+    assert json.loads(capsys.readouterr().out) == [
+        {
+            "model": "model-a",
+            "workload": "workload-a",
+            "sample_limit": 5,
+        },
+        {
+            "model": "model-e2e",
+            "workload": "e2e",
+            "sample_limit": 0,
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    ("validation_status", "comparison_status", "expected_returncode"),
+    [
+        ("passed", "agreement", 0),
+        ("failed", "disagreement", 1),
+    ],
+)
+def test_single_ci_case_writes_stable_result_and_exit_code(
+    tmp_path,
+    monkeypatch,
+    validation_status,
+    comparison_status,
+    expected_returncode,
+):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "model-a",
+            "workload-a",
+            "--output",
+            str(tmp_path / "results"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "workload-a")
+    catalog = {"sample_limits": {"workload-a": 5}}
+
+    def run_binding(binding, *, arguments, task_models, e2e_models, suites):
+        result = {
+            "schema_version": "trtmc.validation-result/v2",
+            "model": binding.model,
+            "workload": binding.workload,
+            "execution": {"status": "completed", "exit_code": 0},
+            "comparison": {
+                "status": comparison_status,
+                "mode": "test",
+                "primary_metric": None,
+                "metrics": {},
+                "failures": [],
+            },
+            "validation": {"status": validation_status},
+            "reproduce": {
+                "dataset": {
+                    "command": "python tools/trtmc_validate.py model-a workload-a",
+                    "sample_limit": arguments.limit,
+                    "prepared_input_count": arguments.limit,
+                },
+                "hf": [],
+                "trtmc": [],
+            },
+        }
+        case_dir = arguments.output / binding.model / binding.workload
+        case_dir.mkdir(parents=True, exist_ok=True)
+        (case_dir / "comparison.json").write_text(
+            json.dumps(result),
+            encoding="utf-8",
+        )
+        return result
+
+    monkeypatch.setattr(trtmc_validate, "_e2e_models", lambda models_dir: {})
+    monkeypatch.setattr(trtmc_validate, "run_binding", run_binding)
+
+    returncode = trtmc_validate._run_bindings(
+        [binding],
+        arguments=arguments,
+        catalog=catalog,
+        task_models={},
+        suites={"workload-a": {}},
+    )
+
+    case_dir = arguments.output / "model-a" / "workload-a"
+    assert returncode == expected_returncode
+    assert (case_dir / "comparison.json").is_file()
+    assert (arguments.output / "report.json").is_file()
+    assert (arguments.output / "report.html").is_file()
+
+
+def test_single_ci_case_returns_exit_two_for_setup_error(monkeypatch):
+    def fail(arguments):
+        raise trtmc_validate.ValidationError("missing CI dataset")
+
+    monkeypatch.setattr(trtmc_validate, "_load_validation_inputs", fail)
+
+    with pytest.raises(SystemExit) as error:
+        trtmc_validate.main(["model-a", "workload-a"])
+
+    assert error.value.code == 2
+
+
 @pytest.mark.parametrize(
     "reference_backend",
     ["hf_transformers", "torch_reference", "diffusers_reference"],
