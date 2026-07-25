@@ -129,28 +129,46 @@ class ModelConfig:
         #   GPT-2: n_embd, n_head, n_layer, n_inner
         #   XGLM/Bloom: d_model, attention_heads, num_layers, ffn_dim
         #   DistilBERT: dim, n_heads, n_layers, hidden_dim
-        hidden_size = (d.get("hidden_size", 0) or d.get("n_embd", 0)
-                       or d.get("d_model", 0) or d.get("n_embed", 0)
-                       or d.get("dim", 0))
-        num_heads = (d.get("num_attention_heads", 0) or d.get("n_head", 0)
-                     or d.get("attention_heads", 0) or d.get("num_heads", 0)
-                     or d.get("n_heads", 0) or d.get("decoder_attention_heads", 0) or 1)
-        num_layers = (d.get("num_hidden_layers", 0) or d.get("n_layer", 0)
-                      or d.get("num_layers", 0) or d.get("n_layers", 0))
-        intermediate = (d.get("intermediate_size", 0)
-                        or d.get("n_inner", 0)
-                        or d.get("ffn_dim", 0)
-                        or d.get("hidden_dim", 0)
-                        or hidden_size * 4)
+        hidden_size = (
+            d.get("hidden_size", 0)
+            or d.get("n_embd", 0)
+            or d.get("d_model", 0)
+            or d.get("n_embed", 0)
+            or d.get("dim", 0)
+        )
+        num_heads = (
+            d.get("num_attention_heads", 0)
+            or d.get("n_head", 0)
+            or d.get("attention_heads", 0)
+            or d.get("num_heads", 0)
+            or d.get("n_heads", 0)
+            or d.get("decoder_attention_heads", 0)
+            or 1
+        )
+        num_layers = (
+            d.get("num_hidden_layers", 0)
+            or d.get("n_layer", 0)
+            or d.get("num_layers", 0)
+            or d.get("n_layers", 0)
+        )
+        intermediate = (
+            d.get("intermediate_size", 0)
+            or d.get("n_inner", 0)
+            or d.get("ffn_dim", 0)
+            or d.get("hidden_dim", 0)
+            or hidden_size * 4
+        )
 
         # Norm epsilon: try rms_norm_eps, then layer_norm_epsilon, then
         # layer_norm_eps, then norm_epsilon, then norm_eps.
-        eps = (d.get("rms_norm_eps")
-               or d.get("layer_norm_epsilon")
-               or d.get("layer_norm_eps")
-               or d.get("norm_epsilon")
-               or d.get("norm_eps")
-               or 1e-5)
+        eps = (
+            d.get("rms_norm_eps")
+            or d.get("layer_norm_epsilon")
+            or d.get("layer_norm_eps")
+            or d.get("norm_epsilon")
+            or d.get("norm_eps")
+            or 1e-5
+        )
 
         # rope_theta: check top-level first, then rope_parameters dict
         # (some model configs store it there),
@@ -188,8 +206,7 @@ class ModelConfig:
             eos_token_id=d.get("eos_token_id", -1) or -1,
             pad_token_id=d.get("pad_token_id", -1) or -1,
             tie_word_embeddings=d.get("tie_word_embeddings", False),
-            max_position_embeddings=d.get("max_position_embeddings",
-                                          d.get("n_positions", 8192)),
+            max_position_embeddings=d.get("max_position_embeddings", d.get("n_positions", 8192)),
             hidden_act=d.get("hidden_act", "") or d.get("activation_function", ""),
             _head_dim=d.get("head_dim", 0),
             raw=original_raw,
@@ -200,10 +217,15 @@ class ModelConfig:
         """Create a minimal ModelConfig for testing (2 layers, hidden=16, vocab=32)."""
         defaults = {
             "model_type": model_type,
-            "vocab_size": 32, "hidden_size": 16, "intermediate_size": 32,
-            "num_hidden_layers": 2, "num_attention_heads": 4,
-            "num_key_value_heads": 4, "rms_norm_eps": 1e-6,
-            "rope_theta": 10000.0, "max_position_embeddings": 128,
+            "vocab_size": 32,
+            "hidden_size": 16,
+            "intermediate_size": 32,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+            "rms_norm_eps": 1e-6,
+            "rope_theta": 10000.0,
+            "max_position_embeddings": 128,
         }
         defaults.update(overrides)
         return cls.from_json(json.dumps(defaults))

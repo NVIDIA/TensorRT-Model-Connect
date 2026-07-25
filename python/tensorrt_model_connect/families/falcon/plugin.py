@@ -38,11 +38,12 @@ class FalconPlugin:
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
-        return (mt == "falcon" or mt.startswith("falcon")
-                or mt in ("refinedweb", "refinedwebmodel"))
+        return mt == "falcon" or mt.startswith("falcon") or mt in ("refinedweb", "refinedwebmodel")
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -63,11 +64,13 @@ class FalconPlugin:
         rw_style = _has_tensor(readers, "transformer.word_embeddings.weight")
 
         # Embedding
-        embed_key = ("transformer.word_embeddings.weight" if rw_style
-                     else "model.embed_tokens.weight")
+        embed_key = (
+            "transformer.word_embeddings.weight" if rw_style else "model.embed_tokens.weight"
+        )
         embedding = _load_tensor(readers, embed_key)
         assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
+        )
         weights["embedding"] = embedding.astype(np.float32)
 
         mlp_size = 0
@@ -122,29 +125,20 @@ class FalconPlugin:
                     # [Q_h0, K_h0, V_h0, Q_h1, K_h1, V_h1, ...]
                     # Shape: [num_heads * 3 * head_dim, hidden]
                     # Reshape to [num_heads, 3, head_dim, hidden] then extract
-                    fused_qkv = fused_qkv.reshape(
-                        num_heads, 3, head_dim, hidden)
+                    fused_qkv = fused_qkv.reshape(num_heads, 3, head_dim, hidden)
                     q_raw = fused_qkv[:, 0, :, :].reshape(q_dim, hidden)
                     k_raw = fused_qkv[:, 1, :, :].reshape(kv_dim, hidden)
                     v_raw = fused_qkv[:, 2, :, :].reshape(kv_dim, hidden)
                 else:
-                    q_raw = _load_tensor(
-                        readers, f"{attn_prefix}.q_proj.weight")
-                    k_raw = _load_tensor(
-                        readers, f"{attn_prefix}.k_proj.weight")
-                    v_raw = _load_tensor(
-                        readers, f"{attn_prefix}.v_proj.weight")
-                o_raw = _load_tensor(
-                    readers, f"{attn_prefix}.dense.weight")
+                    q_raw = _load_tensor(readers, f"{attn_prefix}.q_proj.weight")
+                    k_raw = _load_tensor(readers, f"{attn_prefix}.k_proj.weight")
+                    v_raw = _load_tensor(readers, f"{attn_prefix}.v_proj.weight")
+                o_raw = _load_tensor(readers, f"{attn_prefix}.dense.weight")
             else:
-                q_raw = _load_tensor(
-                    readers, f"{hf_prefix}.self_attn.q_proj.weight")
-                k_raw = _load_tensor(
-                    readers, f"{hf_prefix}.self_attn.k_proj.weight")
-                v_raw = _load_tensor(
-                    readers, f"{hf_prefix}.self_attn.v_proj.weight")
-                o_raw = _load_tensor(
-                    readers, f"{hf_prefix}.self_attn.o_proj.weight")
+                q_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.q_proj.weight")
+                k_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.k_proj.weight")
+                v_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.v_proj.weight")
+                o_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.o_proj.weight")
 
             if attention_size == 0:
                 attention_size = q_raw.shape[0]
@@ -165,8 +159,7 @@ class FalconPlugin:
             if rw_style:
                 fused_qkv_bias_key = f"{attn_prefix}.query_key_value.bias"
                 if _has_tensor(readers, fused_qkv_bias_key):
-                    fused_bias = _load_tensor(
-                        readers, fused_qkv_bias_key).astype(np.float32)
+                    fused_bias = _load_tensor(readers, fused_qkv_bias_key).astype(np.float32)
                     # Same head-interleaved layout as weight
                     fused_bias = fused_bias.reshape(num_heads, 3, head_dim)
                     weights[f"{prefix}.q_bias"] = fused_bias[:, 0, :].reshape(-1)
@@ -174,18 +167,17 @@ class FalconPlugin:
                     weights[f"{prefix}.v_bias"] = fused_bias[:, 2, :].reshape(-1)
                 dense_bias_key = f"{attn_prefix}.dense.bias"
                 if _has_tensor(readers, dense_bias_key):
-                    weights[f"{prefix}.o_bias"] = _load_tensor(
-                        readers, dense_bias_key).astype(np.float32)
+                    weights[f"{prefix}.o_bias"] = _load_tensor(readers, dense_bias_key).astype(
+                        np.float32
+                    )
 
             # MLP: Falcon uses dense_h_to_4h / dense_4h_to_h
             if rw_style:
                 mlp_prefix = f"{hf_prefix}.mlp"
             else:
                 mlp_prefix = f"{hf_prefix}.mlp"
-            fc1_raw = _load_tensor(
-                readers, f"{mlp_prefix}.dense_h_to_4h.weight")
-            fc2_raw = _load_tensor(
-                readers, f"{mlp_prefix}.dense_4h_to_h.weight")
+            fc1_raw = _load_tensor(readers, f"{mlp_prefix}.dense_h_to_4h.weight")
+            fc2_raw = _load_tensor(readers, f"{mlp_prefix}.dense_4h_to_h.weight")
             if mlp_size == 0:
                 mlp_size = fc1_raw.shape[0]
 
@@ -196,11 +188,13 @@ class FalconPlugin:
             fc1_bias_key = f"{mlp_prefix}.dense_h_to_4h.bias"
             fc2_bias_key = f"{mlp_prefix}.dense_4h_to_h.bias"
             if _has_tensor(readers, fc1_bias_key):
-                weights[f"{prefix}.fc1_bias"] = _load_tensor(
-                    readers, fc1_bias_key).astype(np.float32)
+                weights[f"{prefix}.fc1_bias"] = _load_tensor(readers, fc1_bias_key).astype(
+                    np.float32
+                )
             if _has_tensor(readers, fc2_bias_key):
-                weights[f"{prefix}.fc2_bias"] = _load_tensor(
-                    readers, fc2_bias_key).astype(np.float32)
+                weights[f"{prefix}.fc2_bias"] = _load_tensor(readers, fc2_bias_key).astype(
+                    np.float32
+                )
 
         # Final LayerNorm
         if rw_style:
@@ -211,20 +205,19 @@ class FalconPlugin:
             final_norm_beta_key = "model.norm.bias"
 
         if _has_tensor(readers, final_norm_key):
-            weights["final_norm"] = _load_tensor(
-                readers, final_norm_key).astype(np.float32)
+            weights["final_norm"] = _load_tensor(readers, final_norm_key).astype(np.float32)
         else:
             weights["final_norm"] = np.ones(hidden, dtype=np.float32)
 
         if _has_tensor(readers, final_norm_beta_key):
-            weights["final_norm_beta"] = _load_tensor(
-                readers, final_norm_beta_key).astype(np.float32)
+            weights["final_norm_beta"] = _load_tensor(readers, final_norm_beta_key).astype(
+                np.float32
+            )
 
         # LM head
         lm_head_key = "lm_head.weight"
         if _has_tensor(readers, lm_head_key):
-            weights["w_out"] = _transpose_2d(
-                _load_tensor(readers, lm_head_key), "lm_head")
+            weights["w_out"] = _transpose_2d(_load_tensor(readers, lm_head_key), "lm_head")
         else:
             weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied")
 
@@ -235,44 +228,49 @@ class FalconPlugin:
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
         # Falcon-RW models use ALiBi; Falcon-3 uses RoPE
         use_alibi = config.raw.get("alibi", False)
         position_type = "alibi" if use_alibi else "rope"
-        alibi_bias_scale = (
-            float(1.0 / np.sqrt(max(config.head_dim, 1)))
-            if use_alibi
-            else 1.0
-        )
+        alibi_bias_scale = float(1.0 / np.sqrt(max(config.head_dim, 1))) if use_alibi else 1.0
         activation = config.raw.get("activation") or config.hidden_act or "gelu"
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             return build_dual_profile_tp_decoder_engine(
-                config, weights, max_cache_length,
-                precision=precision, quant_ctx=quant_ctx,
-                norm_type="layernorm",
-                mlp_type="gelu_fc",
+                config,
+                weights,
+                max_cache_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
                 position_type=position_type,
                 activation=activation,
                 alibi_bias_scale=alibi_bias_scale,
                 verbose=verbose,
-                parallel_config=parallel)
+                parallel_config=parallel,
+            )
 
         return build_standard_decoder_engine(
-            config, weights, max_cache_length,
-            precision=precision, quant_ctx=quant_ctx,
-            norm_type="layernorm",
-            mlp_type="gelu_fc",
+            config,
+            weights,
+            max_cache_length,
+            precision=precision,
+            quant_ctx=quant_ctx,
             position_type=position_type,
             activation=activation,
             alibi_bias_scale=alibi_bias_scale,
             verbose=verbose,
-            debug_layer_outputs=debug_layer_outputs)
+            debug_layer_outputs=debug_layer_outputs,
+        )
 
 
 plugin = FalconPlugin()
