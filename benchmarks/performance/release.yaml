@@ -981,3 +981,139 @@ entries:
       reference_backend: hf_diffusers
       timing_scope: task-pipeline-call-wall
       output_contract: media-shape
+
+additional_profiles:
+  - model: bark-large
+    inherit: bark.generate_audio
+  - model: bert-base-uncased
+    inherit: bert.encode
+  - model: bge-small-en-v1.5
+    inherit: bert.encode
+  - model: deepseek-ocr-l0
+    inherit: deepseek_ocr.generate
+  - model: deepseek-v2-tiny
+    inherit: deepseek_v2.generate
+  - model: elf-b-owt-l0
+    inherit: elf_flow.generate
+    workload:
+      request:
+        seed: 42
+        generation_mode: unconditional
+        num_inference_steps: 32
+        cfg_scale: 1.0
+        initial_latents_path: data/elf-b-owt-replay/initial_latents.f32
+        sampling_steps_path: data/elf-b-owt-replay/sampling_steps.f32
+    baseline:
+      precision: fp32
+      min_positional_token_agreement: 0.99
+      max_normalized_edit_distance: 0.01
+      adapter_options:
+        reference_commit: b29d8833609e9ab7f67cd9da39435ac5cea04837
+        checkpoint: embedded-language-flows/ELF-B-owt-torch
+        config: src/configs/training_configs/train_owt_ELF-B.yml
+        sampling_method: ode
+        self_cond_cfg_scale: 3.0
+        sde_gamma: 0.0
+        seed: 42
+  - model: elf-b-xsum-l0
+    inherit: elf_flow.generate
+    workload:
+      request:
+        seed: 42
+        generation_mode: conditional
+        num_inference_steps: 64
+        cfg_scale: 2.0
+        initial_latents_path: data/elf-b-xsum-replay/initial_latents.f32
+        sampling_steps_path: data/elf-b-xsum-replay/sampling_steps.f32
+        condition_latents_path: data/elf-b-xsum-replay/condition_latents.f32
+        condition_mask_path: data/elf-b-xsum-replay/condition_mask.f32
+    baseline:
+      precision: fp16
+      adapter_options:
+        reference_commit: b29d8833609e9ab7f67cd9da39435ac5cea04837
+        checkpoint: embedded-language-flows/ELF-B-xsum-torch
+        config: src/configs/training_configs/train_xsum_ELF-B.yml
+        sampling_method: ode
+        self_cond_cfg_scale: 1.0
+        sde_gamma: 0.0
+        seed: 42
+  - model: flux-2-dev
+    inherit: flux.generate_image
+  - model: flux-2-dev-fp8
+    inherit: flux.generate_image
+  - model: flux-2-dev-fp8-l0
+    inherit: flux.generate_image
+  - model: flux-2-dev-l0
+    inherit: flux.generate_image
+  - model: flux-schnell
+    inherit: flux.generate_image
+  - model: flux-schnell-l0-batch2
+    inherit: flux.generate_image
+  - model: glm-4-9b-l0
+    inherit: glm.generate
+  - model: gpt-oss-20b-l0
+    inherit: gpt_oss.generate
+  - model: gpt2-125m
+    inherit: gpt2.generate
+  - model: internvl3-8b
+    inherit: internvl.generate
+  - model: minitron-4b-depth
+    inherit: llama.generate
+  - model: minitron-4b-width
+    inherit: llama.generate
+  - model: minitron-4b-width-l0
+    inherit: llama.generate
+  - model: mistral-7b-l0
+    inherit: mistral.generate
+  - model: nemotron-labs-diffusion-8b-l0
+    inherit: nemotron_labs_diffusion.generate
+  - model: nemotron-mini-4b
+    inherit: nemotron.generate
+  - model: nemotron-nano-4b
+    inherit: llama.generate
+  - model: nemotron-speech-streaming-en-0.6b
+    inherit: nemotron_speech_streaming.transcribe
+  - model: paraphrase-multilingual-minilm-l12-v2
+    inherit: bert.encode
+  - model: patchtst-granite-official
+    inherit: patchtst.solve
+  - model: personaplex-7b
+    inherit: personaplex.speak
+  - model: phi-moe-l0
+    inherit: phi_moe.generate
+  - model: pixart-sigma-1024
+    inherit: pixart.generate_image
+  - model: qwen-image
+    inherit: qwen_image.generate_image
+  - model: qwen-image-2512
+    inherit: qwen_image.generate_image
+  - model: qwen-image-edit-2511
+    inherit: qwen_image.generate_image
+  - model: qwen25vl-3b
+    inherit: qwen_vl.generate
+  - model: qwen3-0.6b-fp8
+    inherit: qwen.generate
+  - model: qwen3-0.6b-topp
+    inherit: qwen.generate
+  - model: qwen3-4b-instruct-2507
+    inherit: qwen.generate
+  - model: qwen3-moe-tiny-random
+    inherit: qwen_moe.generate
+  - model: riva-translate-4b
+    inherit: mistral.generate
+  - model: roberta-base
+    inherit: roberta.encode
+  - model: roberta-large
+    inherit: roberta.encode
+  - model: tinyllama-1.1b
+    inherit: llama.generate
+  - model: wan21-t2v-1.3b
+    inherit: wan_t2v.generate_image
+  - model: wan22-ti2v-5b
+    inherit: wan2_2_ti2v.generate_image
+  - model: whisper-large-v3-turbo
+    inherit: whisper.transcribe
+  - model: xlm-roberta-base
+    inherit: roberta.encode
+  - model: z-image-turbo
+    inherit: z_image.generate_image

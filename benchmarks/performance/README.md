@@ -10,9 +10,12 @@ entry in `release.yaml`. TRTMC measurements always use `trtmc-bench`; reference
 frameworks run in separate Python processes and do not add dependencies to
 `trtmc-bench`.
 
-The suite contains one representative entry for every ready `(family, operation)`
-in the benchmark catalog. It currently has 79 comparisons across 78 families
-because `eagle_vlm` exposes both `embed` and `rerank`.
+The suite contains one row for every single-process model profile marked `ready`
+in the benchmark catalog. It currently has 126 model-profile comparisons across
+78 families and 79 `(family, operation)` contracts because some families expose
+multiple profiles and `eagle_vlm` exposes both `embed` and `rerank`. Catalog
+profiles marked `distributed` require their own multi-process launch and are not
+silently included in this single-GPU matrix.
 
 ## Commands
 
@@ -41,20 +44,31 @@ python3 tools/perf_matrix.py run \
   --entry gpt2.generate
 ```
 
+An additional profile under the same family-operation contract has a
+profile-qualified entry ID:
+
+```bash
+python3 tools/perf_matrix.py run \
+  benchmarks/performance/release.yaml \
+  --environment benchmarks/performance/environments/gb300.yaml \
+  --entry qwen.generate@qwen3-0.6b-fp8
+```
+
 Continue an interrupted run and automatically retry incomplete or failed entries:
 
 ```bash
 python3 tools/perf_matrix.py resume artifacts/perf/<run-id>
 ```
 
-`--entry` selects a `family.operation` matrix entry. It is not a model input or
-testcase name. The default is the complete matrix.
+`--entry` selects an exact matrix entry ID. Base contract rows use
+`family.operation`; additional profiles use `family.operation@model-profile`.
+It is not a model input or testcase name. The default is the complete matrix.
 
 ## Suite configuration
 
 The suite owns the comparison semantics. Every entry explicitly declares:
 
-- the family, operation, and representative model;
+- the family, operation, and model profile;
 - its workload source;
 - warmup and measured iteration counts;
 - its reference backend and mode;
@@ -79,6 +93,22 @@ The current workload source is an explicitly named model testcase:
 never selected implicitly. A future benchmark-dataset source can resolve several
 samples inside one entry without adding report rows. Dataset support is not
 implemented by the current script.
+
+The first profile for a family-operation declares the complete reviewed
+comparison contract. Further catalog profiles name that contract explicitly and
+may override only profile-specific settings:
+
+```yaml
+additional_profiles:
+  - model: qwen3-0.6b-fp8
+    inherit: qwen.generate
+```
+
+The resolved row uses `qwen3-0.6b-fp8` as both its model profile and testcase,
+while retaining the reviewed Qwen timing, reference, and output contracts. A
+profile with different replay inputs or reference assets declares those
+overrides in the same block. The coverage check requires every ready
+single-process catalog profile exactly once.
 
 Suite-level `defaults.measurement` avoids repeating warmup and iteration counts.
 The fully resolved workload and measurement values are recorded in `results.json`.
@@ -187,10 +217,11 @@ another script mode. The workflow uploads the unique run directory under
 
 ## Adding an entry
 
-Adding a ready family operation requires a corresponding suite entry. Choose an
-explicit testcase workload, select an existing reference runner or adapter, and
-review its timing and output contracts. The suite coverage check fails until the
-new entry is present.
+Adding a new family operation requires a complete base suite entry. Adding a
+profile to an existing family operation requires an `additional_profiles` entry
+that names the base contract. Choose an explicit testcase workload and review any
+profile-specific replay, precision, and reference overrides. The suite coverage
+check fails until every ready catalog profile is present exactly once.
 
 Use the shared `hf-transformers` runner for supported encoder, causal-LM, and
 seq2seq-LM execution. Use the existing `task-reference` runner for Diffusers, ASR,

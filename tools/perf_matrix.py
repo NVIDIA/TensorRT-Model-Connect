@@ -125,7 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
             "--entry",
             action="append",
             default=[],
-            help="exact family.operation entry id; repeatable",
+            help="exact matrix entry id; repeatable",
         )
     resume = commands.add_parser("resume", help="continue an incomplete run")
     resume.add_argument("run_directory", type=Path)
@@ -347,10 +347,13 @@ def _run_options(environment: Mapping[str, Any], output: Path) -> RunOptions:
 def _cases(suite: Mapping[str, Any]) -> list[dict[str, Any]]:
     defaults = suite.get("defaults", {})
     configured = suite.get("entries")
+    additional_profiles = suite.get("additional_profiles", [])
     if not isinstance(defaults, Mapping):
         raise PerfMatrixError("suite defaults must be an object")
     if not isinstance(configured, list) or not configured:
         raise PerfMatrixError("suite entries must be a non-empty list")
+    if not isinstance(additional_profiles, list):
+        raise PerfMatrixError("suite additional_profiles must be a list")
     cases: list[dict[str, Any]] = []
     for raw in configured:
         if not isinstance(raw, Mapping):
@@ -358,7 +361,59 @@ def _cases(suite: Mapping[str, Any]) -> list[dict[str, Any]]:
         merged = _merge_case(defaults, raw)
         _validate_case_shape(merged)
         cases.append(merged)
+    cases.extend(_additional_profile_cases(cases, additional_profiles))
     _validate_unique_ids(cases)
+    return cases
+
+
+def _additional_profile_cases(
+    base_cases: Sequence[Mapping[str, Any]],
+    configured: Sequence[Any],
+) -> list[dict[str, Any]]:
+    templates = {str(case["id"]): case for case in base_cases}
+    cases: list[dict[str, Any]] = []
+    allowed = {"id", "model", "inherit", "workload", "measurement", "baseline"}
+    for raw in configured:
+        if not isinstance(raw, Mapping):
+            raise PerfMatrixError("every additional profile must be an object")
+        unsupported = sorted(set(raw) - allowed)
+        if unsupported:
+            raise PerfMatrixError(
+                "additional profile has unsupported fields: " + ", ".join(unsupported)
+            )
+        model = raw.get("model")
+        inherited_id = raw.get("inherit")
+        if not isinstance(model, str) or not model.strip():
+            raise PerfMatrixError("additional profile model must be a non-empty string")
+        if not isinstance(inherited_id, str) or inherited_id not in templates:
+            raise PerfMatrixError(
+                f"additional profile {model} inherits unknown entry {inherited_id!r}"
+            )
+        configured_id = raw.get("id")
+        if configured_id is not None and (
+            not isinstance(configured_id, str) or not configured_id.strip()
+        ):
+            raise PerfMatrixError(f"additional profile {model} id must be a non-empty string")
+        overrides = {
+            key: value
+            for key, value in raw.items()
+            if key in {"measurement", "baseline"}
+        }
+        case = _merge_case(templates[inherited_id], overrides)
+        case["id"] = configured_id or f"{inherited_id}@{model}"
+        case["model"] = model
+        workload = deepcopy(dict(case["workload"]))
+        workload["testcase"] = model
+        configured_workload = raw.get("workload")
+        if configured_workload is not None:
+            if not isinstance(configured_workload, Mapping):
+                raise PerfMatrixError(
+                    f"additional profile {model} workload must be an object"
+                )
+            workload.update(deepcopy(dict(configured_workload)))
+        case["workload"] = workload
+        _validate_case_shape(case)
+        cases.append(case)
     return cases
 
 
@@ -550,30 +605,52 @@ def _validate_unique_ids(cases: Sequence[Mapping[str, Any]]) -> None:
 
 def _validate_coverage(cases: Sequence[Mapping[str, Any]]) -> None:
     expected = {
-        (entry.family, entry.operation)
+        entry.name: (entry.family, entry.operation)
         for entry in ManifestCatalog().entries()
         if entry.status == "ready"
     }
-    actual = {(str(case["family"]), str(case["operation"])) for case in cases}
-    missing = sorted(expected - actual)
-    extra = sorted(actual - expected)
-    if missing or extra or len(actual) != len(cases):
-        details = _coverage_details(missing, extra, len(actual) != len(cases))
-        raise PerfMatrixError("suite coverage does not match ready catalog: " + "; ".join(details))
+    actual_models = [str(case["model"]) for case in cases]
+    actual = set(actual_models)
+    missing = sorted(set(expected) - actual)
+    extra = sorted(actual - set(expected))
+    duplicates = sorted(
+        model for model, count in Counter(actual_models).items() if count > 1
+    )
+    mismatched = sorted(
+        (
+            model,
+            f"{case['family']}.{case['operation']}",
+            f"{expected[model][0]}.{expected[model][1]}",
+        )
+        for case in cases
+        if (model := str(case["model"])) in expected
+        and (str(case["family"]), str(case["operation"])) != expected[model]
+    )
+    if missing or extra or duplicates or mismatched:
+        details = _coverage_details(missing, extra, duplicates, mismatched)
+        raise PerfMatrixError(
+            "suite profile coverage does not match ready catalog: " + "; ".join(details)
+        )
 
 
 def _coverage_details(
-    missing: Sequence[tuple[str, str]],
-    extra: Sequence[tuple[str, str]],
-    duplicates: bool,
+    missing: Sequence[str],
+    extra: Sequence[str],
+    duplicates: Sequence[str],
+    mismatched: Sequence[tuple[str, str, str]],
 ) -> list[str]:
     details = []
     if missing:
-        details.append("missing=" + ",".join(f"{a}.{b}" for a, b in missing))
+        details.append("missing=" + ",".join(missing))
     if extra:
-        details.append("extra=" + ",".join(f"{a}.{b}" for a, b in extra))
+        details.append("extra=" + ",".join(extra))
     if duplicates:
-        details.append("more than one case selects the same family-operation")
+        details.append("duplicate=" + ",".join(duplicates))
+    if mismatched:
+        details.append(
+            "family-operation="
+            + ",".join(f"{model}:{actual}!={expected}" for model, actual, expected in mismatched)
+        )
     return details
 
 
@@ -649,6 +726,7 @@ def _initial_results(
     selected: Sequence[Mapping[str, Any]],
     environment_config: Mapping[str, Any],
 ) -> dict[str, Any]:
+    catalog_counts = Counter(entry.status for entry in ManifestCatalog().entries())
     environment = {
         "hostname": platform.node(),
         "platform": platform.platform(),
@@ -667,6 +745,16 @@ def _initial_results(
         "started_at": _now(),
         "environment": environment,
         "environment_config": deepcopy(dict(environment_config)),
+        "catalog_coverage": {
+            "total_profiles": sum(catalog_counts.values()),
+            "ready_profiles": catalog_counts["ready"],
+            "distributed_profiles": catalog_counts["distributed"],
+            "other_profiles": sum(
+                count
+                for status, count in catalog_counts.items()
+                if status not in {"ready", "distributed"}
+            ),
+        },
         "selected_entry_ids": [str(case["id"]) for case in selected],
         "cases": [
             {
@@ -1889,7 +1977,7 @@ def _report_html(results: Mapping[str, Any]) -> str:
     family_counts = Counter(str(row["family"]) for row in rows)
     family_count = len(family_counts)
     repeated_families = [
-        f"{family} ({count} operations)" for family, count in family_counts.items() if count > 1
+        f"{family} ({count} profiles)" for family, count in family_counts.items() if count > 1
     ]
     counts = {
         status: sum(row.get("status") == status for row in rows)
@@ -1929,6 +2017,10 @@ def _report_html(results: Mapping[str, Any]) -> str:
     preflight_count = (
         int(preflight.get("case_count", 0)) if isinstance(preflight, Mapping) else 0
     )
+    catalog = results.get("catalog_coverage", {})
+    ready_profiles = int(catalog.get("ready_profiles", len(rows)))
+    distributed_profiles = int(catalog.get("distributed_profiles", 0))
+    other_profiles = int(catalog.get("other_profiles", 0))
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TRTMC performance matrix</title>
@@ -1943,11 +2035,12 @@ th{{background:#e5e7eb}} tr:nth-child(even){{background:#f9fafb}} code{{font-siz
 .scope-title{{font-size:12px;font-weight:700;margin-bottom:2px}}
 </style></head><body>
 <h1>TRTMC performance matrix</h1>
-<p class="meta">Generated {generated}. {family_count} families across {len(rows)} family-operation comparisons.{repeated_note}</p>
+<p class="meta">Generated {generated}. {family_count} families across {len(rows)} model-profile comparisons.{repeated_note}</p>
+<p class="meta">Catalog coverage: {ready_profiles} ready single-process profiles. {distributed_profiles} distributed profiles require a separate multi-process run and are outside this report. {other_profiles} other or unsupported profiles.</p>
 <p class="meta">Timing contracts were validated before execution for {preflight_count} comparisons. A row is classified only when its recorded TRTMC and reference policies match that contract.</p>
 <p class="meta">Times are the p50 wall time from the recorded timed samples. Measured scope states the exact recorded boundary and the work included and excluded on each side.</p>
 <p><strong>{summary}</strong></p>
-<div class="table-wrap"><table><thead><tr><th>Family</th><th>Operation</th><th>Model</th><th>Baseline</th><th>TRTMC p50 (ms)</th><th>Baseline p50 (ms)</th><th>Measured scope</th><th>Light</th><th>Note</th><th>Commands</th></tr></thead>
+<div class="table-wrap"><table><thead><tr><th>Family</th><th>Operation</th><th>Model profile</th><th>Baseline</th><th>TRTMC p50 (ms)</th><th>Baseline p50 (ms)</th><th>Measured scope</th><th>Light</th><th>Note</th><th>Commands</th></tr></thead>
 <tbody>{"".join(body)}</tbody></table></div>
 <p class="meta">Green: TRTMC is more than the configured margin faster. Yellow: within the margin. Red: TRTMC is more than the margin slower. White: not run, partial, or invalid comparison. Commands are the original recorded argv and must be run from the displayed working directory with the same model cache and dependencies.</p>
 </body></html>"""

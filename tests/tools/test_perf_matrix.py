@@ -222,21 +222,32 @@ def _write_environment(
     )
 
 
-def test_release_suite_covers_every_ready_family_operation() -> None:
+def test_release_suite_covers_every_ready_model_profile() -> None:
     from tensorrt_model_connect.families.wan2_2_ti2v.model_config import (
         OFFICIAL_NEGATIVE_PROMPT,
     )
 
     suite = perf_matrix._read_yaml(SUITE)
     cases = perf_matrix._cases(suite)
-    raw_entries = yaml.safe_load(SUITE.read_text(encoding="utf-8"))["entries"]
+    raw_suite = yaml.safe_load(SUITE.read_text(encoding="utf-8"))
+    raw_entries = raw_suite["entries"]
+    raw_additional = raw_suite["additional_profiles"]
+    ready_profiles = {
+        entry.name
+        for entry in perf_matrix.ManifestCatalog().entries()
+        if entry.status == "ready"
+    }
 
     perf_matrix._validate_coverage(cases)
 
-    assert len(cases) == 79
+    assert len(cases) == 126
+    assert len(raw_entries) == 79
+    assert len(raw_additional) == 47
     assert all(set(entry["workload"]) <= {"testcase", "request"} for entry in raw_entries)
     assert all(entry["workload"].get("testcase") for entry in raw_entries)
+    assert all(entry.get("model") and entry.get("inherit") for entry in raw_additional)
     assert not any("priority" in entry for entry in raw_entries)
+    assert {case["model"] for case in cases} == ready_profiles
     assert len({(case["family"], case["operation"]) for case in cases}) == 79
     assert len({case["family"] for case in cases}) == 78
     assert [case["operation"] for case in cases if case["family"] == "eagle_vlm"] == [
@@ -244,8 +255,8 @@ def test_release_suite_covers_every_ready_family_operation() -> None:
         "rerank",
     ]
     assert Counter(perf_matrix._candidate_timing_scope(case) for case in cases) == {
-        "model_call_wall": 18,
-        "public_pipeline_call_wall": 61,
+        "model_call_wall": 25,
+        "public_pipeline_call_wall": 101,
     }
     assert {
         case["id"]
@@ -256,6 +267,8 @@ def test_release_suite_covers_every_ready_family_operation() -> None:
         "deepseek_ocr.generate",
         "lance.generate",
         "nemotron_speech_streaming.transcribe",
+        "deepseek_ocr.generate@deepseek-ocr-l0",
+        "nemotron_speech_streaming.transcribe@nemotron-speech-streaming-en-0.6b",
     }
     by_id = {case["id"]: case for case in cases}
     assert by_id["deberta.encode"]["baseline"]["precision"] == "fp32"
@@ -317,6 +330,29 @@ def test_release_suite_covers_every_ready_family_operation() -> None:
     assert (
         by_id["wan2_2_ti2v.generate_image"]["workload"]["request"]["negative_prompt"]
         == OFFICIAL_NEGATIVE_PROMPT
+    )
+    wan_full = by_id["wan2_2_ti2v.generate_image@wan22-ti2v-5b"]
+    assert wan_full["workload"]["testcase"] == "wan22-ti2v-5b"
+    assert wan_full["workload"]["request"]["negative_prompt"] == OFFICIAL_NEGATIVE_PROMPT
+    elf_owt = by_id["elf_flow.generate@elf-b-owt-l0"]
+    assert elf_owt["baseline"]["precision"] == "fp32"
+    assert (
+        elf_owt["baseline"]["adapter_options"]["checkpoint"]
+        == "embedded-language-flows/ELF-B-owt-torch"
+    )
+    assert elf_owt["workload"]["request"] == {
+        "seed": 42,
+        "generation_mode": "unconditional",
+        "num_inference_steps": 32,
+        "cfg_scale": 1.0,
+        "initial_latents_path": "data/elf-b-owt-replay/initial_latents.f32",
+        "sampling_steps_path": "data/elf-b-owt-replay/sampling_steps.f32",
+    }
+    elf_xsum = by_id["elf_flow.generate@elf-b-xsum-l0"]
+    assert elf_xsum["baseline"]["precision"] == "fp16"
+    assert (
+        elf_xsum["baseline"]["adapter_options"]["checkpoint"]
+        == "embedded-language-flows/ELF-B-xsum-torch"
     )
     diffusion_baseline = by_id["nemotron_labs_diffusion.generate"]["baseline"]
     assert diffusion_baseline["mode"] == "hf-eager"
@@ -700,9 +736,15 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert not scratch_root.exists()
     results = json.loads((output / "results.json").read_text(encoding="utf-8"))
     rows = {row["id"]: row for row in results["cases"]}
-    assert len(rows) == 79
+    assert len(rows) == 126
     assert results["environment_config"]["name"] == "test-gb300"
     assert results["environment_config"]["source"] == str(environment.resolve())
+    assert results["catalog_coverage"] == {
+        "total_profiles": 202,
+        "ready_profiles": 126,
+        "distributed_profiles": 76,
+        "other_profiles": 0,
+    }
     assert results["timing_preflight"]["status"] == "aligned"
     assert results["timing_preflight"]["case_count"] == 1
     assert results["reference_preflight"]["status"] == "ready"
@@ -720,7 +762,11 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert ">gpt2<" in report
     assert "HF eager" in report
     assert "78 families" in report
-    assert "79 family-operation comparisons" in report
+    assert "126 model-profile comparisons" in report
+    assert "126 ready single-process profiles" in report
+    assert "76 distributed profiles" in report
+    assert "0 other or unsupported profiles" in report
+    assert "<th>Model profile</th>" in report
     assert "TRTMC p50 (ms)" in report
     assert "Baseline p50 (ms)" in report
     assert ">10.450<" in report

@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       entry:
-        description: Optional exact family.operation entry
+        description: Optional exact matrix entry ID
         required: false
         type: string
   workflow_call:
@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   performance:
-    name: Performance / family matrix
+    name: Performance / model-profile matrix
     runs-on: ${{ fromJSON(vars.TRTMC_PERF_RUNNER_LABELS || vars.TRTMC_MODEL_RUNNER_LABELS || '["self-hosted"]') }}
     timeout-minutes: 600
     env:
