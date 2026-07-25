@@ -967,3 +967,30 @@ def test_result_statuses_separate_execution_from_agreement(
     assert result["execution"]["status"] == execution
     assert result["comparison"]["status"] == comparison
     assert result["validation"]["status"] == validation
+
+
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_comparison_result_marks_missing_summary_as_execution_error(
+    tmp_path,
+    returncode,
+):
+    result = trtmc_validate._comparison_result(
+        trtmc_validate.Binding("model-a", "workload-a"),
+        case_dir=tmp_path,
+        returncode=returncode,
+        reference_environment=trtmc_validate.EnvironmentSelection(
+            base_python="/profiles/python",
+            names_and_paths=(("reference_common", "/profiles/python"),),
+            overrides={},
+        ),
+        dataset_command="python tools/trtmc_validate.py model-a",
+    )
+
+    assert result["execution"] == {
+        "status": "error",
+        "exit_code": returncode,
+    }
+    assert result["comparison"]["status"] == "not_run"
+    assert result["validation"]["status"] == "failed"
+    assert result["raw_result"]["error_type"] == "ComparisonProcessError"
+    assert "without writing" in result["raw_result"]["error"]

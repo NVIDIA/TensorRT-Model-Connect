@@ -909,6 +909,15 @@ def _comparison_result(
                 break
         if not raw_result and summary.get("results"):
             raw_result = summary["results"][0]
+    if not raw_result:
+        raw_result = {
+            "status": "failed",
+            "error_type": "ComparisonProcessError",
+            "error": (
+                f"comparison exited with code {returncode} without writing "
+                f"a model result to {summary_path}"
+            ),
+        }
     status = str(raw_result.get("status", "") or "")
     if status not in {"passed", "failed", "skipped"}:
         status = "passed" if returncode == 0 else "failed"
