@@ -23,6 +23,7 @@ except ImportError:
 from safetensors import safe_open
 
 
+
 def _target_np_dtype(precision: str) -> np.dtype:
     """Map precision string to numpy dtype for weight storage."""
     if precision in ("fp16", "bf16"):
@@ -65,12 +66,10 @@ class WeightDict(dict):
 # Safetensors I/O helpers
 # ---------------------------------------------------------------------------
 
-
 def _detect_framework() -> str:
     """Use 'torch' if available (handles BF16 natively), else 'numpy'."""
     try:
         import torch  # noqa: F401
-
         return "torch"
     except ImportError:
         return "numpy"
@@ -82,7 +81,6 @@ class _TorchBinReader:
 
     def __init__(self, path: Path):
         import torch
-
         self._state = torch.load(str(path), map_location="cpu", weights_only=True)
 
     def keys(self) -> list[str]:
@@ -115,14 +113,17 @@ def _open_safetensors(model_dir: Path) -> list:
     index_path = model_dir / "model.safetensors.index.json"
     if index_path.exists():
         import json
-
         index = json.loads(index_path.read_text())
         weight_map = index.get("weight_map", {})
         shard_files = sorted(set(weight_map.values()))
         readers_by_file = {
-            shard: safe_open(str(model_dir / shard), framework=fw) for shard in shard_files
+            shard: safe_open(str(model_dir / shard), framework=fw)
+            for shard in shard_files
         }
-        tensor_map = {name: readers_by_file[shard] for name, shard in weight_map.items()}
+        tensor_map = {
+            name: readers_by_file[shard]
+            for name, shard in weight_map.items()
+        }
         return _ReaderCollection(
             [readers_by_file[shard] for shard in shard_files],
             tensor_map=tensor_map,
@@ -136,14 +137,17 @@ def _open_safetensors(model_dir: Path) -> list:
     diff_index = model_dir / "diffusion_pytorch_model.safetensors.index.json"
     if diff_index.exists():
         import json
-
         index = json.loads(diff_index.read_text())
         weight_map = index.get("weight_map", {})
         shard_files = sorted(set(weight_map.values()))
         readers_by_file = {
-            shard: safe_open(str(model_dir / shard), framework=fw) for shard in shard_files
+            shard: safe_open(str(model_dir / shard), framework=fw)
+            for shard in shard_files
         }
-        tensor_map = {name: readers_by_file[shard] for name, shard in weight_map.items()}
+        tensor_map = {
+            name: readers_by_file[shard]
+            for name, shard in weight_map.items()
+        }
         return _ReaderCollection(
             [readers_by_file[shard] for shard in shard_files],
             tensor_map=tensor_map,
@@ -155,8 +159,7 @@ def _open_safetensors(model_dir: Path) -> list:
         return _ReaderCollection([_TorchBinReader(bin_single)])
 
     raise FileNotFoundError(
-        f"No model.safetensors, index.json, or pytorch_model.bin in {model_dir}"
-    )
+        f"No model.safetensors, index.json, or pytorch_model.bin in {model_dir}")
 
 
 def _to_numpy_fp32(t) -> np.ndarray:
