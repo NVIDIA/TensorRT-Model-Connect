@@ -2,7 +2,7 @@
 title: Model Support
 ---
 
-Model support is defined by three model-owned descriptor roots:
+Native model support is defined by three model-owned descriptor roots:
 
 - Python build ownership:
   `python/tensorrt_model_connect/families/<family>/MODEL.toml`.
@@ -10,10 +10,20 @@ Model support is defined by three model-owned descriptor roots:
 - E2E contract ownership: `tests/e2e/models/<family>/MODEL.toml` and its
   declared `manifests/*.json`.
 
-At this revision, those roots describe 78 logical model families, 78 runtime
+At this revision, those native roots describe 78 logical model families, 78 runtime
 model DSOs, 79 unique runtime strategy keys, 78 E2E family indexes, and 203
 declared E2E manifests. Eagle VLM is the one runtime owner with two strategy
 keys (`eagle_vlm_embedding` and `eagle_vlm_reranking`).
+
+There is also an optimized-runtime path for exact qualified deployment tuples.
+Its build ownership is under a selected family's adapter subtree; an
+`IMPLEMENTATION.toml` identifies the delegated runtime and private
+implementation DSO, while profile TOMLs bind an exact model ID, immutable
+revision, target, build options, and qualification state. The current
+implementation is Qwen with TensorRT Edge-LLM. Three Qwen3/A100 SM80/FP16
+profiles are marked qualified. These profiles supplement the native inventory;
+they are not additional `runtime_strategy` keys or blanket support for every
+Qwen checkpoint, GPU, or configuration.
 
 Run the ownership validator instead of counting filenames manually:
 
@@ -32,7 +42,8 @@ Keep these levels separate:
 | Evidence | What it proves |
 | --- | --- |
 | Python family descriptor and plugin | The builder can recognize a family and has a model-owned implementation path. It does not prove a real checkpoint builds successfully. |
-| Runtime model descriptor and DSO source | The model owns a runtime strategy, plugin registrar, and shared-library target. It does not prove a bundle executes on target hardware. |
+| Native runtime model descriptor and DSO source | The model owns a native runtime strategy, plugin registrar, and shared-library target. It does not prove a bundle executes on target hardware. |
+| Optimized implementation manifest and profile | A family owns a delegated adapter and an exact model/revision/target/options tuple. Only a profile with current qualification state and semantic-source binding is eligible; the manifest alone is not qualification evidence. |
 | E2E manifest | The repository declares a concrete model, task contract, input, oracle, and comparison policy. It is a test specification, not a current pass result. |
 | Passing exact-revision E2E result | The named model contract passed for that revision and test environment. |
 | Performance or promotion artifact | The measured model, bundle, hardware, software stack, command, and acceptance threshold passed. |
@@ -44,8 +55,10 @@ appropriate build and E2E evidence.
 
 ## Declared task contracts
 
-The table groups current E2E manifests by `task_strategy`. Runtime strategies
-remain model-owned; the examples are dispatch keys, not generic aliases.
+The table groups current native E2E manifests by `task_strategy`. Native
+runtime strategies remain model-owned; the examples are dispatch keys, not
+generic aliases. Optimized-runtime qualifications have their own profile and
+producer descriptors and do not add rows to this native strategy inventory.
 
 | Task strategy | Example runtime strategies | Manifest families |
 | --- | --- | --- |
@@ -66,20 +79,43 @@ The public C++ API and CLI also expose a detection surface, but this revision
 does not have a model-owned `object_detection` runtime strategy or E2E family.
 An API method or CLI command alone is not model-support evidence.
 
-## How dispatch is resolved
+## How build and runtime dispatch are resolved
 
-The Python builder reads family metadata from
-`families/*/MODEL.toml`, narrows candidate packages by aliases, prefixes,
-architecture patterns, or diffusion pipeline classes, then imports the
-selected package's module-level `plugin`.
+The Python builder reads family metadata from `families/*/MODEL.toml`. It first
+narrows candidates by aliases, prefixes, architecture patterns, or diffusion
+pipeline classes. Descriptor and architecture matches import only their
+candidate packages. When descriptor matching cannot decide a full config,
+`find_plugin()` retains a compatibility fallback that uses `pkgutil` to import
+all non-private family modules/packages and calls their matching predicates.
+Loose `families/<family>.py` files can therefore participate only through this
+legacy fallback; they are not complete support because the three ownership
+descriptors are still required.
 
-The built bundle carries that plugin's concrete `runtime_strategy`.
-At CMake configure time, `cmake/trtmc_pipeline_plugins.cmake` discovers every
+After family resolution, build dispatch probes optimized implementations only
+inside that family's directory. Exactly one qualified profile may claim the
+model revision, active target, and requested options. A successful claim writes
+an optimized bundle with `optimized_runtime.json`, implementation metadata,
+and an embedded `libtrtmc_impl_*.so`; no claim continues to the native
+`FamilyPlugin` build.
+
+For a native build, the bundle carries the plugin's concrete
+`runtime_strategy`. At CMake configure time,
+`cmake/trtmc_pipeline_plugins.cmake` discovers every
 `src/runtime/models/*/MODEL.toml`, rejects duplicate strategy ownership, and
-generates a strategy-to-model-DSO index. At load time, the runtime uses that
-index to load only the owning `libtrtmc_model_<owner>.so`, whose registrar adds
-the requested `IPipelinePlugin` to `PipelineRegistry`.
+generates a strategy-to-model-DSO index. At load time, a native bundle uses
+that index to load only the owning `libtrtmc_model_<owner>.so`, whose registrar
+adds the requested `IPipelinePlugin` to `PipelineRegistry`.
+
+For an optimized bundle, `PipelineFactory` sees `optimized_runtime.json`
+before native config/strategy dispatch. It integrity-checks and materializes
+the embedded artifact tree, loads the exact implementation DSO, validates its
+private factory ABI and identities, and asks it to create the public
+`IPipeline`. It does not consult the native strategy index or load a generic
+backend DSO. An optimized-path error is terminal rather than a request to fall
+back to the native bundle path.
 
 For the exact checkpoint list, inputs, precision, task strategy, and oracle,
 read the JSON manifests declared by the relevant
-`tests/e2e/models/<family>/MODEL.toml`.
+`tests/e2e/models/<family>/MODEL.toml`. For an optimized profile, also inspect
+the family-owned profile TOML and the matching
+`tests/e2e/models/<family>/<adapter>/QUALIFICATION.*.toml`.

@@ -158,9 +158,12 @@ flowchart LR
   Build --> Cache[Platform-aware bundle cache]
   Cache --> Service
   Service --> Worker[C++ measurement worker]
-  Worker --> Runner[Native operation runner]
-  Runner --> API[TRTMC public IPipeline]
-  API --> Plugin[Model and backend plugins]
+  Worker --> Load["trtmc::load"]
+  Load -->|native bundle| Native["runtime_strategy<br/>model DSO + backend DSO"]
+  Load -->|optimized_runtime.json| Optimized["embedded implementation DSO<br/>and artifacts"]
+  Native --> API[TRTMC public IPipeline]
+  Optimized --> API
+  API --> Runner[Public operation runner]
   Worker --> Raw[Raw observations]
   Raw --> Metrics[Task-aware metrics]
   Metrics --> Report[JSON + HTML]
@@ -169,22 +172,27 @@ flowchart LR
 
 Python owns configuration, matrix expansion, orchestration, metrics, and
 reporting. The native worker owns the timed loop and calls the same public C++
-pipeline API as an application. Model family, task semantics, and public
-operation are separate extension points:
+pipeline API as an application. It loads the bundle with `trtmc::load`, which
+either follows native `runtime_strategy` dispatch through model and backend
+DSOs or recognizes `optimized_runtime.json` and loads the exact embedded
+implementation path. Both paths return `IPipeline`, so the task operation and
+measurement boundary stay the same. Model family, task semantics, runtime
+implementation, and public operation are separate extension points:
 
 | Change | Benchmark work |
 | --- | --- |
 | New weight/profile in a known family and task | Add the normal manifest and `MODEL.toml.test_manifests` entry; no benchmark code |
-| New family using a known `task_strategy` | Add its normal runtime plugin and manifest; no benchmark code |
+| New native family using a known `task_strategy` | Add its normal runtime model plugin and manifest; no benchmark code |
+| New optimized implementation/profile for a known model and operation | Add the family-owned `IMPLEMENTATION.toml`, exact profile, qualification evidence, and normal E2E/catalog ownership; no benchmark code |
 | New task using an existing public `IPipeline` operation | Add one task adapter that translates its testcase contract |
 | New public pipeline capability | Add an operation metric contract and one native runner, then map task adapters to it |
 
 The benchmark never registers individual families or `runtime_strategy`
 values. For example, a new Wan video family using
 `diffusion_media_generation` and `generate_image` is discovered automatically,
-and a new decoder provider behind `generate` remains invisible to the
-benchmark layer. This is the same rule for source checkouts and the catalog
-snapshot packaged in a wheel.
+and a new native or optimized decoder implementation behind `generate` remains
+invisible to the benchmark layer. This is the same rule for source checkouts
+and the catalog snapshot packaged in a wheel.
 
 ## Run several models
 

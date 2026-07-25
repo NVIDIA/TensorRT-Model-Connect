@@ -9,6 +9,7 @@
 #   ./scripts/validate_family.sh models/hf/org__example-decoder       # local dir
 #   ./scripts/validate_family.sh org/example-decoder --max-cache-length 512
 #   ./scripts/validate_family.sh org/example-decoder --binary ./build/trtmc
+#   ./scripts/validate_family.sh org/example-decoder --engine-dir /tmp/trtmc-engines
 #   ./scripts/validate_family.sh org/example-decoder --isolate-model-plugin
 #
 # Requirements: torch, tensorrt_model_connect installed, C++ binary built.
@@ -22,6 +23,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 MAX_CACHE_LENGTH=256
 BINARY="${PROJECT_DIR}/build/trtmc"
 BUNDLE_DIR="/tmp"
+ENGINE_DIR="${ENGINE_DIR:-}"
 TRUST_REMOTE_CODE=""
 MODEL_PLUGIN_DIR=""
 ISOLATE_MODEL_PLUGIN="false"
@@ -33,11 +35,12 @@ while [[ $# -gt 0 ]]; do
         --max-cache-length) MAX_CACHE_LENGTH="$2"; shift 2 ;;
         --binary) BINARY="$2"; shift 2 ;;
         --bundle-dir) BUNDLE_DIR="$2"; shift 2 ;;
+        --engine-dir) ENGINE_DIR="$2"; shift 2 ;;
         --model-plugin-dir) MODEL_PLUGIN_DIR="$2"; shift 2 ;;
         --isolate-model-plugin) ISOLATE_MODEL_PLUGIN="true"; shift ;;
         --trust-remote-code) TRUST_REMOTE_CODE="--trust-remote-code"; shift ;;
         -h|--help)
-            echo "Usage: $0 <model-id-or-path> [--max-cache-length N] [--binary PATH] [--bundle-dir DIR] [--model-plugin-dir DIR] [--isolate-model-plugin] [--trust-remote-code]"
+            echo "Usage: $0 <model-id-or-path> [--max-cache-length N] [--binary PATH] [--bundle-dir DIR] [--engine-dir DIR] [--model-plugin-dir DIR] [--isolate-model-plugin] [--trust-remote-code]"
             exit 0
             ;;
         *)
@@ -54,7 +57,7 @@ done
 
 if [[ -z "$MODEL" ]]; then
     echo "ERROR: model ID or path required." >&2
-    echo "Usage: $0 <model-id-or-path> [--max-cache-length N] [--binary PATH]" >&2
+    echo "Usage: $0 <model-id-or-path> [--max-cache-length N] [--binary PATH] [--bundle-dir DIR] [--engine-dir DIR] [--model-plugin-dir DIR] [--isolate-model-plugin] [--trust-remote-code]" >&2
     exit 1
 fi
 
@@ -139,6 +142,7 @@ PY
 # Derive a safe bundle filename from the model ID.
 SAFE_NAME="$(echo "$MODEL" | tr '/' '_' | tr ' ' '_')"
 BUNDLE_PATH="${BUNDLE_DIR}/${SAFE_NAME}.trtfb"
+ENGINE_DIR="${ENGINE_DIR:-${BUNDLE_DIR}/engines}"
 
 # Container-baked Python with HF/TRT deps
 HF_PYTHON="${HF_PYTHON:-/opt/venv/bin/python}"
@@ -274,7 +278,7 @@ while IFS= read -r -d '' manifest; do
 done < <(find "${PROJECT_DIR}/tests/e2e/models" -maxdepth 3 -type f -name "*.json" -print0 | sort -z)
 
 if [[ -n "$E2E_MODEL" ]] && [[ -x "$BINARY" ]]; then
-    ENGINE_DIR="${ENGINE_DIR:-/workspace/users/yifeif/tensorrt-model-connect/engines}"
+    mkdir -p "$ENGINE_DIR"
     E2E_NODE="${PROJECT_DIR}/tests/e2e/models/${E2E_FAMILY}/test_${E2E_FAMILY}_e2e.py::test_model_e2e[${E2E_MODEL}]"
     E2E_ARGS=(
         "$E2E_NODE"

@@ -9,6 +9,7 @@ configuration. The public surface stays:
 
 ```bash
 ./build/trtmc run model.trtfb \
+  --prompt "Hello from the configured runtime" \
   --config profile.json \
   --set runtime.prefer_gpu_greedy=true
 ```

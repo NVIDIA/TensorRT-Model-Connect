@@ -95,7 +95,7 @@ _ROOT_PATHS = (
 # Generated output directories are valid documentation references even though
 # they are absent from a clean checkout. Keep this list exact and narrow so a
 # missing source path under the same top-level directory still fails.
-_GENERATED_PATH_PREFIXES = ("website/build/",)
+_GENERATED_DIRECTORY_REFERENCES = {"website/build", "website/build/"}
 
 # Regex: captures a backtick span that starts with one of the known prefixes.
 # Handles:
@@ -602,10 +602,7 @@ def check_markdown_files(md_files: Iterable[Path], repo_root: Path) -> CheckRepo
                 # The retired-surface finding is more actionable than a second
                 # generic "path does not exist" error for the same token.
                 continue
-            if any(
-                ref_path == prefix.rstrip("/") or ref_path.startswith(prefix)
-                for prefix in _GENERATED_PATH_PREFIXES
-            ):
+            if ref_path in _GENERATED_DIRECTORY_REFERENCES:
                 continue
             full = repo_root / ref_path
             # Check both as file and directory

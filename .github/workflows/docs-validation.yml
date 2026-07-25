@@ -40,7 +40,11 @@ jobs:
           tests/tools/test_check_doc_file_references.py
           tests/tools/test_check_doc_commands.py
           tests/tools/test_runtime_strategy_matrix_checker.py
+          tests/tools/test_test_impact.py
           -q
+
+      - name: Validate selective-test impact classifications
+        run: PYTHONPATH=python:. python3 tools/test_impact.py --validate
 
       - name: Validate file references and current counts
         run: python3 tools/check_doc_file_references.py --strict --tracked

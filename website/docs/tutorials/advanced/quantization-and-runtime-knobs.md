@@ -12,11 +12,20 @@ The advanced knobs change either:
 
 ```mermaid
 flowchart LR
-  BuildFlags["Build flags<br/>precision, quantization, profiles"] --> Bundle[".trtfb"]
-  RuntimeFlags["Load flags<br/>backend dir, cache path, CUDA graphs"] --> Pipeline["IPipeline"]
+  BuildFlags["Build flags<br/>precision, quantization, profiles"] --> Probe["Probe exact optimized profile"]
+  Probe -->|one profile claims request| Optimized["Optimized .trtfb"]
+  Probe -->|no profile claims request| Native["Native TensorRT .trtfb"]
+  RuntimeFlags["Load flags"] --> Pipeline["IPipeline"]
   RequestFlags["Request flags<br/>sampling, max tokens, steps"] --> Pipeline
-  Bundle --> Pipeline
+  Optimized --> Pipeline
+  Native --> Pipeline
 ```
+
+The optimized-runtime probe runs before the native builder. It matches the
+resolved model revision, active target, and effective public build options. A
+single supported profile owns the build; no supported profile falls back to
+the native path. A build failure after a profile claims the request is
+terminal.
 
 ## Precision
 
@@ -35,6 +44,10 @@ Precision changes the numeric type used by the engine. It affects memory, speed,
 | `fp32` | Debugging or highest numerical conservatism. |
 | `fp16` | Common GPU inference default. |
 | `bf16` | Useful when model/backend support favors BF16 behavior. |
+
+Precision is also an optimized-profile input. Changing it can cause a profile
+to start or stop matching, so two builds that differ only in the CLI flag can
+still use different runtime implementations.
 
 ## Quantization
 
@@ -65,6 +78,11 @@ Quantization is not just a compression flag. It is a contract between:
 | Quantization registry | Interpret format names and format-specific policy. |
 | Builder | Apply quantization and write required metadata/scales. |
 | Runtime | Load and execute the resulting engine; it should not redo calibration. |
+
+Quantization format, calibration settings, and scale inputs are forwarded to
+the optimized-profile probe as public build options. If the exact combination
+is not qualified by an optimized implementation, the same command proceeds
+through the native builder instead.
 
 ## Reusing scales
 
@@ -103,7 +121,7 @@ flowchart LR
   Rows --> Module["ITrtModule profile/context"]
 ```
 
-## Backend DSO search
+## Native backend DSO search
 
 ```bash
 ./build/trtmc run /tmp/model.trtfb \
@@ -111,11 +129,17 @@ flowchart LR
   --backend-dir /opt/trtmc/backends
 ```
 
-The runtime also searches the executable directory and loader paths. Use `--backend-dir` when testing a backend DSO that is not next to `trtmc`.
+For a native bundle, the runtime also searches the executable directory and
+loader paths. Use `--backend-dir` when testing a native backend DSO that is not
+next to `trtmc`.
 
-Backend selection is part of deployment correctness. The runtime checks TensorRT version and ABI metadata so a bundle built with one ABI is not silently executed with an incompatible backend.
+Native backend selection is part of deployment correctness. The runtime checks
+TensorRT version and ABI metadata so a bundle built with one ABI is not
+silently executed with an incompatible backend. An optimized bundle embeds
+its implementation DSO and artifacts; it does not dispatch through the native
+model/backend DSO chain, so `--backend-dir` does not select its runtime.
 
-## TensorRT-RTX
+## Native TensorRT-RTX
 
 Build an RTX-targeted bundle:
 
@@ -134,7 +158,11 @@ Run with a runtime cache:
   --cuda-graphs
 ```
 
-`--runtime-cache` stores TRT-RTX JIT kernel cache data for faster repeat runs. `--cuda-graphs` enables graph capture for lower launch overhead when the backend supports it.
+For a native TensorRT-RTX bundle, `--runtime-cache` stores JIT kernel cache data
+for faster repeat runs and `--cuda-graphs` requests graph capture when the
+backend supports it. Optimized implementations own their graph-capture policy;
+do not assume that the native `--cuda-graphs` switch enables, disables, or
+otherwise reproduces an optimized implementation's qualified path.
 
 ```mermaid
 flowchart TD
@@ -148,12 +176,19 @@ flowchart TD
 
 ## Advanced knob checklist
 
+First run regular `trtmc inspect <bundle.trtfb>` and record whether the section
+list contains `optimized_runtime.json`. Regular inspection proves the bundle
+kind but does not decode the optimized implementation/profile fields. Changing
+precision or quantization can switch between optimized and native builds, so
+performance comparisons are valid only after confirming that both artifacts
+use the same execution path.
+
 When reporting a result, always include:
 
 | Area | Values to report |
 | --- | --- |
 | Build | Model ID, precision, quantization format, max cache length, dynamic profiles, build GPU, TensorRT version. |
-| Artifact | Bundle path, family, runtime strategy, engine backend, section layout. |
-| Load | Backend DSO, backend search path, runtime cache path, CUDA graphs, config overrides. |
+| Artifact | Bundle path, native or optimized kind, family, runtime strategy or optimized implementation/profile evidence, and section layout. |
+| Load | Native backend DSO/search path or optimized implementation path, runtime cache path, CUDA graph policy, and config overrides. |
 | Request | Prompt/input shape, max tokens or steps, sampling settings, image/video dimensions, audio sample rate, forecast horizon. |
 | Hardware | GPU model, driver, CUDA, TensorRT runtime, container or host environment. |

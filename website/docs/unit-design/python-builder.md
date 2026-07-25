@@ -10,7 +10,10 @@ flowchart TD
   CLI --> ConfigLayer["runtime_config CLI merge"]
   CLI --> EngineBuilder["engine_builder.py"]
   EngineBuilder --> ModelConfig["ModelConfig"]
-  EngineBuilder --> FamilyLookup["families/__init__.py"]
+  ModelConfig --> Provider{"qualified provider<br/>profile matches?"}
+  Provider -->|yes| Adapter["family-owned optimized adapter"]
+  Adapter --> OptimizedBundle["optimized bundle packager"]
+  Provider -->|no| FamilyLookup["families/__init__.py"]
   FamilyLookup --> Family["FamilyPlugin"]
   Family --> Weights["load_weights"]
   Family --> BuildMain["build_engine"]
@@ -30,25 +33,43 @@ The CLI should stay thin. It should translate user intent into builder options a
 
 ## Engine builder
 
-`python/tensorrt_model_connect/engine_builder.py` orchestrates model resolution, plugin selection, weight loading, engine building, and bundle writing.
+`python/tensorrt_model_connect/engine_builder.py` orchestrates model resolution,
+optimized-provider selection, native plugin selection, weight loading, engine
+building, and bundle writing.
 
 Think of `engine_builder.py` as the build coordinator:
 
 1. Resolve the model path or ID.
 2. Read `config.json` through `ModelConfig`.
-3. Select a `FamilyPlugin`.
-4. Build the requested engine components.
-5. Collect tokenizer and asset files.
-6. Write `BundleInfo` and `BundleSection` entries.
+3. Resolve the owning family without loading every family package.
+4. Probe optimized implementations only inside that family. If exactly one
+   qualified model/revision/target/options profile claims the request, run its
+   adapter and write a generic optimized-runtime bundle.
+5. Otherwise select the native `FamilyPlugin` and build the requested engine
+   components.
+6. Collect tokenizer and asset files for the selected path.
+7. Write `BundleInfo` and `BundleSection` entries.
 
 ## Family plugins
 
 `python/tensorrt_model_connect/families/` owns raw TRT family support. Each
 family package has a `MODEL.toml` descriptor and a module, normally
-`plugin.py`. Discovery in `families/__init__.py` reads the descriptors first
-and imports only the selected package. Adding a loose
-`families/<family>.py` file does not participate in the current descriptor
-contract.
+`plugin.py`. Discovery in `families/__init__.py` is descriptor-first, not
+selected-package-only in every case:
+
+1. Alias/prefix metadata and architecture patterns narrow candidate packages;
+   only those candidates are imported and checked.
+2. A direct family-ID lookup imports only that descriptor's package.
+3. If those routes do not find a plugin for a full config,
+   `_ensure_discovered()` preserves a legacy compatibility fallback:
+   `pkgutil.iter_modules()` imports every non-private module/package under
+   `families/` and runs its `matches_config()`/`matches()` predicates.
+
+A loose `families/<family>.py` file can therefore be observed by the legacy
+scan, but it does not participate in the complete descriptor contract and is
+not sufficient for supported model ownership. Keep aliases and architecture
+patterns accurate so normal requests remain on the bounded descriptor-first
+route.
 
 The `FamilyPlugin` protocol is the contract. Required methods are:
 
@@ -95,12 +116,35 @@ There are no repository-root `graph_ops.py` or `graph_blocks.py` modules.
 Reuse within a family is encouraged, while helpers whose assumptions are
 model-specific remain under the owning family package.
 
+## Optimized-runtime build path
+
+Both the CLI and public Python `build()` API try the optimized path before the
+native builder. They resolve the checkpoint and family, inspect only that
+family's implementation manifests, and describe the active CUDA target. A
+model-owned provider profile must match all of these:
+
+- canonical HuggingFace model ID and pinned revision;
+- exact target OS, architecture, platform kind, GPU architecture/name, and
+  minimum memory;
+- supported public build options; and
+- a current qualification state and semantic-source hash.
+
+One successful claim invokes that adapter in an isolated process and writes a
+self-contained bundle with `optimized_runtime.json`, opaque implementation
+metadata, and `optimized_runtime_artifacts/...`, including the exact
+`libtrtmc_impl_*.so`. More than one claim is an error. No claim returns control
+to the native build; a selected adapter's build failure is terminal.
+
+The current Qwen TensorRT Edge-LLM adapter owns three qualified Qwen3/A100
+SM80/FP16 profiles. This is exact profile support, not a generic preference for
+Edge-LLM on every Qwen request.
+
 ## Native TRT build path
 
-`trtmc build` uses native TRT family plugins under
-`python/tensorrt_model_connect/families/`. The builder emits TensorRT plans and
-the exact model-owned `runtime_strategy` consumed by the C++ loader. That key
-must match one strategy declared by a single
+When no optimized profile claims the tuple, `trtmc build` uses native TRT
+family plugins under `python/tensorrt_model_connect/families/`. The builder
+emits TensorRT plans and the exact model-owned `runtime_strategy` consumed by
+the C++ native loader. That key must match one strategy declared by a single
 `src/runtime/models/<owner>/MODEL.toml`.
 
 ## Runtime config

@@ -16,8 +16,11 @@ flowchart TB
 
   subgraph Python["Python builder package"]
     PyProj["pyproject.toml"] --> BuilderModule["tensorrt_model_connect module"]
-    BuilderModule --> Families["family plugins"]
-    BuilderModule --> Engines["engine builders"]
+    BuilderModule --> Router["build orchestrator"]
+    Router --> Families["native family plugins"]
+    Router --> Providers["family-scoped optimized adapters"]
+    Families --> Engines["native engine sections"]
+    Providers --> Optimized["optimized bundle producer"]
   end
 
   subgraph Generated["Generated registration"]
@@ -47,6 +50,11 @@ Important CMake targets:
 | `trtmc_backend_trt` | Standard TensorRT backend DSO when TensorRT headers/libs are available. |
 | `trtmc_backend_rtx` | Optional TensorRT-RTX backend target. It outputs `libtrtmc_backend_trt_rtx.so`. |
 | `trtmc_tvm_ffi_plugin` | Optional TVM-FFI TensorRT plugin shared library. |
+
+These model targets belong to the native path. A qualified optimized
+implementation instead supplies an isolated `libtrtmc_impl_*.so` through its
+family-owned adapter and embeds that exact DSO in the produced bundle. It is not
+registered as a `trtmc_model_<owner>` target or a native `runtime_strategy`.
 
 ## Link boundaries
 
@@ -109,7 +117,38 @@ against the installed artifact.
 
 To build the release wheel manually, run `python -m build --wheel .` from the repository root with `WHEEL_PYVER`, `WHEEL_ABI`, `WHEEL_ARCH`, and the `TRTMC_TRT_*` / `TRTMC_CUDA_*` paths set. See [Installation](../getting-started/installation.md#2-build-wheel-from-source) for the full command.
 
-## Generated registration files
+## Build-path selection
+
+The public CLI and Python `build()` API resolve the checkpoint's owning family
+before choosing an implementation:
+
+```mermaid
+flowchart TD
+  Build["trtmc build / Python build()"] --> Family["resolve family from MODEL.toml metadata"]
+  Family --> Probe["probe IMPLEMENTATION.toml candidates only in that family"]
+  Probe --> Exact{"exact qualified model revision,<br/>target, and options match?"}
+  Exact -- yes, exactly one --> Adapter["run isolated adapter"]
+  Adapter --> OptimizedBundle["write optimized_runtime.json,<br/>implementation metadata, artifacts,<br/>and embedded libtrtmc_impl_*.so"]
+  Exact -- no --> Native["run native FamilyPlugin builder"]
+  Native --> NativeBundle["write native runtime_strategy<br/>and engine sections"]
+  Exact -- more than one --> Ambiguous["fail as ambiguous"]
+```
+
+An optimized candidate is eligible only when its family-local
+`IMPLEMENTATION.toml` and `profiles/*.toml` claim the exact immutable model
+revision, active target, and effective public options with current
+qualification state. The matching producer proof is declared by
+`tests/e2e/models/<family>/<adapter>/QUALIFICATION.<target>.toml`. If no
+candidate claims the request, build continues through the native path. Once an
+optimized adapter is selected, its build failure is terminal.
+
+This optimized route is additive to an existing family. It does not require a
+synthetic native `runtime_strategy`, a corresponding
+`src/runtime/models/<family>/MODEL.toml` entry, or a
+`tests/e2e/models/<family>/MODEL.toml` manifest merely to represent the exact
+optimized implementation/profile.
+
+## Native generated registration files
 
 CMake uses:
 
@@ -121,13 +160,14 @@ CMake uses:
 - `cmake/trtmc_registration_manifest.cmake`
 - `cmake/register_schemas.cpp.in`
 
-These inputs keep model-plugin ownership and shared-schema registration
-declarative.
+These inputs keep native model-plugin ownership and shared-schema registration
+declarative. Optimized implementation/profile discovery does not consume this
+generated native index.
 
-## Why generated registration exists
+## Why native generated registration exists
 
-Without generated registration, a new runtime strategy would require editing a
-central source file. The current design discovers per-model manifests and
+Without generated registration, a new native runtime strategy would require
+editing a central source file. The current design discovers per-model manifests and
 generates both the lookup index in `trtmc_core` and the exported registrar in
 each model DSO.
 
@@ -135,12 +175,15 @@ The current design makes registration data-driven:
 
 | Input | Consumed by | Result |
 | --- | --- | --- |
-| `src/runtime/models/<owner>/MODEL.toml` | `cmake/trtmc_pipeline_plugins.cmake` | Validated model target data, unique strategy ownership, generated strategy/DSO index, and a generated per-model entrypoint. |
+| `src/runtime/models/<owner>/MODEL.toml` | `cmake/trtmc_pipeline_plugins.cmake` | Validated native model target data, unique strategy ownership, generated strategy/DSO index, and a generated per-model entrypoint. |
 | `cmake/trtmc_config_schemas.cmake` | CMake configure step | Generated registration calls for shared config schemas. |
 | Model plugin source macro | Compiler | A typed function that registers the model's declared strategy or strategies. |
 
-This is why model extension work changes local source plus the owning
-`MODEL.toml`, not `PipelineFactory` or a hand-maintained central plugin list.
+This is why a native model extension changes local source plus the three owning
+`MODEL.toml` descriptors in the Python, runtime, and E2E trees, not
+`PipelineFactory` or a hand-maintained central plugin list. A delegated
+optimized implementation for an existing family uses its family-local
+implementation/profile and qualification descriptors instead.
 
 ## Build artifacts to recognize
 
@@ -151,6 +194,7 @@ This is why model extension work changes local source plus the owning
 | `libtrtmc_backend_trt.so` | Standard TensorRT backend DSO. |
 | `libtrtmc_backend_trt_rtx.so` | Optional TensorRT-RTX backend DSO. |
 | `build/models/<owner>/libtrtmc_model_<owner>.so` | Model-owned runtime plugin and pipeline DSO. |
+| Optimized `.trtfb` sections | `optimized_runtime.json`, implementation metadata, an integrity-bound artifact tree, and its embedded `libtrtmc_impl_*.so`. |
 | `libtrtmc_tvm_ffi_plugin.so` | Optional TensorRT plugin for TVM-FFI kernels. |
 | `dist/tensorrt_model_connect-*.whl` | Python wheel containing the builder package, native executables, `libtrtmc_core`, backend DSOs, and flattened model DSOs under package `bin/`. |
 | `website/build/` | Static Docusaurus production output from `npm run build` in `website/`. |

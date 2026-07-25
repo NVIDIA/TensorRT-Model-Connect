@@ -28,11 +28,12 @@ decoder builder are not public architecture contracts.
 
 ## C++ runtime contracts
 
-`PipelineFactory` owns generic materialization and dispatch. `PipelineRegistry`
-stores strategy-to-plugin registrations. `PipelinePluginLoader` loads the DSO
-named by generated descriptor metadata. Concrete `IPipeline` implementations,
-state, kernels, and model-specific helpers remain below
-`src/runtime/models/<family>/`.
+`PipelineFactory` owns bundle-kind selection and generic dispatch. For native
+bundles, `PipelineRegistry` stores strategy-to-plugin registrations and
+`PipelinePluginLoader` loads the DSO named by generated descriptor metadata.
+For optimized bundles, `optimized_runtime_host.cpp` validates/materializes the
+embedded artifact tree and loads the exact implementation DSO through its
+private factory ABI. Both return concrete `IPipeline` implementations.
 
 Shared core/domain code must be model-independent. Static ownership tests
 reject reintroduction of retired shared model implementations.
@@ -42,14 +43,17 @@ reject reintroduction of retired shared model implementations.
 ```mermaid
 flowchart TB
   Python["Python family MODEL.toml"] --> Bundle["Bundle runtime_strategy"]
+  Provider["Family provider manifest + qualified profile"] --> Optimized["Bundle optimized_runtime.json + embedded DSO"]
   Runtime["Runtime family MODEL.toml"] --> Index["Generated strategy-to-DSO index"]
   Bundle --> Factory["PipelineFactory"]
+  Optimized --> Factory
   Index --> Factory
   E2E["E2E family MODEL.toml + manifests"] --> Proof["Runner/comparator evidence"]
   Factory --> Model["Family-owned IPipeline"]
   Proof --> Model
 ```
 
-The descriptors share a family ID but own different concerns. A generic
-`task_strategy` chooses the E2E runner/comparator contract; it must not be
-confused with the concrete `runtime_strategy`.
+The three native descriptors share a family ID but own different concerns. A
+generic `task_strategy` chooses the E2E runner/comparator contract; it must not
+be confused with a native `runtime_strategy` or an optimized implementation
+profile.

@@ -41,17 +41,35 @@ Infer or ask for:
 - Model: HuggingFace repo ID or local path.
 - Bundle: existing `.trtfb` path, or build on demand.
 - Depth: quick (E2E timing only) or full (E2E, per-layer, CPU phases, C++).
+- Route: native runtime strategy or exact qualified optimized
+  implementation/profile.
 
-Detect `runtime_strategy` from an E2E manifest or bundle:
+Inspect the bundle before selecting tooling:
 
 ```bash
-rg '"runtime_strategy"' tests/e2e/models/<family>/manifests/<model-name>.json
-./build/trtmc inspect <bundle.trtfb> | grep "Runtime strategy"
+./build/trtmc inspect <bundle.trtfb>
 ```
 
-Use the unified profiler for decoder, recurrent, encoder, embedding, and
-reranking paths. For diffusion, audio, and other multi-stage models, use the E2E
-harness artifacts until dedicated profiler support is available.
+- A native bundle has a concrete `runtime_strategy`; cross-check it against the
+  owning `tests/e2e/models/<family>/manifests/<model-name>.json` and
+  `src/runtime/models/<owner>/MODEL.toml`.
+- An optimized bundle contains `optimized_runtime.json`; record its
+  implementation ID, profile ID, exact target, artifact identity, and embedded
+  `libtrtmc_impl_*.so`. Its `runtime_strategy` may be empty. Cross-check the
+  family-local `IMPLEMENTATION.toml`, matching `profiles/*.toml`, and
+  `tests/e2e/models/<family>/<adapter>/QUALIFICATION.*.toml`.
+
+The public inspector confirms optimized section and artifact presence but does
+not currently print descriptor identity values. Obtain and verify those values
+through the implementation-owned bundle-section helper and qualification
+artifacts; do not infer them from a filename.
+
+`tools/trtmc_profile.py` is native-only in this revision. Its prebuilt-bundle
+loader requires a top-level `engine_plan`, `config.json`, and a nonempty native
+`runtime_strategy`; optimized bundles do not satisfy that contract. Use it for
+supported native decoder, recurrent, encoder, embedding, and reranking paths.
+For native diffusion, audio, and other multi-stage models, use the E2E harness
+artifacts until dedicated profiler support is available.
 
 ## Build Or Inspect Bundle
 
@@ -62,7 +80,12 @@ harness artifacts until dedicated profiler support is available.
 
 Skip the build when the user provides a bundle.
 
-## Unified Profiler
+The public build command probes exact qualified optimized profiles before the
+native builder. No optimized claim means native fallback; a selected adapter's
+failure is terminal. Always inspect the resulting bundle instead of inferring
+the path from the command line.
+
+## Native Unified Profiler
 
 Quick profile:
 
@@ -108,7 +131,10 @@ The parser still exposes `--nsight`, but that path calls a removed Nsight
 collection helper and cannot produce a supported trace. Use external `nsys`
 tooling directly when a kernel-level trace is required.
 
-## CPU Phase Deep Dive
+These commands are native-only. `--trtmc-binary` does not bypass the
+Python-side native bundle loader.
+
+## Native CPU Phase Deep Dive
 
 ```bash
 python tools/cpu_profile.py \
@@ -131,6 +157,34 @@ python tools/cpu_profile.py \
   --json /tmp/<model-name>_profile/cpu_profile_mamba.json
 ```
 
+## Optimized Implementation Proof
+
+For an optimized bundle, select the affected producer descriptor and use its
+family-owned qualification workflow plus the public C++ benchmark path:
+
+```bash
+python3 tools/ci/optimized_runtime_qualifications.py \
+  --files python/tensorrt_model_connect/families/<family>/<adapter>/profiles/<profile>.toml
+
+PYTHONPATH=python:. python3 -m pytest \
+  tests/tools/test_optimized_runtime_qualifications.py \
+  tests/builder/test_optimized_runtime_orchestrator.py \
+  tests/builder/test_optimized_runtime_capsules.py -q
+
+./build/trtmc run <bundle.trtfb> \
+  --prompt "The capital of France is" \
+  --max-new-tokens 20 \
+  --warmup 3 \
+  --benchmark 10
+```
+
+The selector validates and reports the producer matrix; it does not execute the
+GPU proof. Read the selected `QUALIFICATION.*.toml` and execute its declared
+entrypoint in the required digest-pinned environment and exact target. Use that
+implementation's performance harness for comparisons with its direct-runtime
+baseline. The public benchmark proves C++ pipeline reuse, but it does not expose
+private layer timings or replace the producer proof.
+
 ## Report Generation
 
 `tools/trtmc_profile.py --json` generates the HTML report automatically. If
@@ -146,7 +200,7 @@ python tools/profile_report.py \
 
 | Condition | Classification | Likely next step |
 |-----------|----------------|------------------|
-| `d2h + argmax > 15%` | Sync bottleneck | On supported C++ decoder paths, compare `--set runtime.prefer_gpu_greedy=true`; the former `TRTMC_GPU_ARGMAX` environment variable is retired. |
+| `d2h + argmax > 15%` | Sync bottleneck | On supported native C++ decoder paths, compare `--set runtime.prefer_gpu_greedy=true`; the former `TRTMC_GPU_ARGMAX` environment variable is retired. |
 | `tensor_bind > 10%` | Launch overhead | Evaluate CUDA Graph capture/replay |
 | `execute > 75%` | Compute-bound | Evaluate FP16/BF16 or kernel quality |
 | `execute < 50%`, no dominant phase | Mixed overhead | Combine GPU argmax, CUDA Graphs, and precision work |
@@ -165,13 +219,18 @@ making performance claims.
 
 ## Before/After Comparison
 
-Profile both versions with identical prompts, token counts, warmups, and
-iterations. Compare `perf_compare.json`, CPU phase JSON, and top per-layer
-timings. Report deltas for decode latency, throughput, top CPU phase, and top
-kernel layer.
+Profile both versions with identical prompts, token counts, warmups,
+iterations, model revision, and target. For a native path, compare
+`perf_compare.json`, CPU phase JSON, and top per-layer timings. For an optimized
+path, use the implementation-owned performance artifacts and direct-runtime
+baseline declared by its producer. Report deltas only between equivalent
+contracts.
 
 ## User Report
 
-Include model, bundle, commands run, TRT C++/Python throughput, HF and
+Include model and immutable revision, target, bundle, commands run, and route.
+For native, include `runtime_strategy`, TRT C++/Python throughput, HF and
 torch.compile baselines when available, bottleneck classification, top CPU
-phase, top TRT layer, artifacts, and the next highest-impact recommendation.
+phase, and top TRT layer. For optimized, include implementation/profile IDs,
+embedded DSO, producer descriptor/entrypoint result, its equivalent baseline,
+and qualification artifacts. End with the next highest-impact recommendation.

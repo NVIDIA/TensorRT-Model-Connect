@@ -2,7 +2,8 @@
 title: Add a Runtime Strategy
 ---
 
-A runtime strategy is a model-owned dispatch key. At configure time, each
+This page adds a **native** runtime strategy. A native runtime strategy is a
+model-owned dispatch key. At configure time, each
 `src/runtime/models/<owner>/MODEL.toml` claims one or more unique strategies
 and maps them to one model DSO. At load time, the bundle's strategy selects
 that DSO before `PipelineRegistry` looks up the registered plugin.
@@ -10,6 +11,10 @@ that DSO before `PipelineRegistry` looks up the registered plugin.
 Use this guide to add another strategy to an existing runtime owner. For a new
 model, follow [Add a Model Family](add-model-family.md); every new supported
 model needs the Python family, model-owned runtime DSO, and E2E descriptor.
+
+Do not create a synthetic native strategy for a delegated optimized runtime.
+That path uses a family-owned implementation manifest/profile, an embedded
+`libtrtmc_impl_*.so`, and optimized-runtime qualification evidence.
 
 ## 1. Choose owner and contracts
 

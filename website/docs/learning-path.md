@@ -118,7 +118,11 @@ You are ready to move on when you can draw the path from prompt text to `TextRes
 :::
 
 :::danger Required task
-Build one text-generation bundle, inspect it, and run deterministic generation. Record the exact `family`, `runtime_strategy`, engine section names, tokenizer assets, precision, and TensorRT metadata.
+Build one native text-generation bundle, inspect it, and run deterministic
+generation. Record the exact `family`, `runtime_strategy`, engine section
+names, tokenizer assets, precision, and TensorRT metadata. Then inspect the
+optimized-runtime bundle contract in [Bundle Format](architecture/bundle-format.md)
+and record why `optimized_runtime.json` replaces native strategy dispatch.
 :::
 
 :::tip Progress check
@@ -126,7 +130,11 @@ You are ready to move on when you can explain which part of the output came from
 :::
 
 :::warning Common trap
-Do not treat a successful text response as the whole validation. You also need to inspect the bundle and confirm the runtime strategy that produced the response.
+Do not treat a successful text response as the whole validation. You also need
+to inspect the bundle and confirm the native runtime strategy or the presence
+of optimized descriptor/artifact sections. The current inspector does not
+decode optimized implementation/profile values; use the family-owned
+qualification evidence and runtime load result to validate that exact identity.
 :::
 
 ## Stage E1: Understand the System
@@ -140,11 +148,19 @@ Do not treat a successful text response as the whole validation. You also need t
 :::
 
 :::danger Required task
-Trace `trtmc::load()` through `PipelineFactory`, `PipelineRegistry`, `IPipelinePlugin`, `IBackend`, and the concrete `IPipeline`. Add the source paths you inspected to your learning log.
+Trace both branches of `trtmc::load()`. For a native bundle, follow
+`PipelineFactory`, `PipelineRegistry`, `IPipelinePlugin`, `IBackend`, and the
+concrete `IPipeline`. For an optimized bundle, follow
+`optimized_runtime_host.cpp`, embedded artifact materialization, the private
+factory, and the returned `IPipeline`. Add the source paths you inspected to
+your learning log.
 :::
 
 :::tip Progress check
-You are ready to move on when you can say why the runtime dispatches through `runtime_strategy` instead of a central switch on model names.
+You are ready to move on when you can explain why native bundles dispatch
+through `runtime_strategy`, why optimized bundles dispatch through
+`optimized_runtime.json`, and why neither path uses a central switch on model
+names.
 :::
 
 ## Stage E2: Learn the Source Units

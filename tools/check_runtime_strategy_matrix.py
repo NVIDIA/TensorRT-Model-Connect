@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Validate runtime strategy governance against the new builder-based runtime."""
+"""Validate runtime strategy governance against runtime, CLI, and E2E code."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ DEFAULT_RUNTIME_REGISTRY_PATH = (
     PROJECT_ROOT / "src" / "runtime" / "registry" / "pipeline_factory.cpp"
 )
 DEFAULT_RUNTIME_MODELS_DIR = PROJECT_ROOT / "src" / "runtime" / "models"
+DEFAULT_CLI_ARGS_PATH = PROJECT_ROOT / "src" / "cli" / "args.cpp"
 DEFAULT_TORCHTRT_STRATEGIES_DIR = (
     PROJECT_ROOT / "python" / "tensorrt_model_connect" / "engine_defs" / "torch_trt" / "strategies"
 )
@@ -33,6 +34,10 @@ DEFAULT_COMPARATORS_DIR = DEFAULT_E2E_MODELS_DIR
 
 _STRING_LITERAL_RE = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"')
 _RUNTIME_LIKE_RE = re.compile(r"[a-z]+(?:_[a-z0-9]+)+")
+_KNOWN_CLI_COMMANDS_RE = re.compile(
+    r"static\s+const\s+char\s*\*\s*known_cmds\s*\[\s*\]\s*=\s*\{(?P<body>.*?)\};",
+    re.DOTALL,
+)
 
 
 def _is_nonempty_str(value: Any) -> bool:
@@ -180,6 +185,281 @@ def _iter_e2e_manifest_paths(models_dir: Path) -> Iterable[Path]:
     yield from sorted(models_dir.glob("*/manifests/*.json"))
 
 
+def extract_native_cli_commands(path: Path) -> set[str]:
+    """Extract inference subcommands accepted by the native CLI parser."""
+    text = path.read_text(encoding="utf-8")
+    match = _KNOWN_CLI_COMMANDS_RE.search(text)
+    if match is None:
+        raise ValueError(f"{path}: could not find the native CLI known_cmds table.")
+    commands = _extract_string_literals(match.group("body"))
+    if not commands:
+        raise ValueError(f"{path}: native CLI known_cmds table is empty.")
+    return commands
+
+
+def _plugin_contract_nodes(
+    plugin_dir: Path,
+) -> tuple[dict[str, list[ast.ClassDef]], dict[str, list[ast.FunctionDef]]]:
+    classes: dict[str, list[ast.ClassDef]] = {}
+    functions: dict[str, list[ast.FunctionDef]] = {}
+    if not plugin_dir.is_dir():
+        return classes, functions
+
+    for python_path in sorted(plugin_dir.rglob("*.py")):
+        tree = ast.parse(
+            python_path.read_text(encoding="utf-8"),
+            filename=str(python_path),
+        )
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                classes.setdefault(node.name, []).append(node)
+            elif isinstance(node, ast.FunctionDef):
+                functions.setdefault(node.name, []).append(node)
+    return classes, functions
+
+
+def _active_runner_class_names(
+    plugin_dir: Path,
+    classes: dict[str, list[ast.ClassDef]],
+) -> set[str]:
+    """Extract classes instantiated by the model-local ``runner`` entrypoint."""
+    runner_path = plugin_dir / "runner.py"
+    if not runner_path.is_file():
+        return set()
+    tree = ast.parse(
+        runner_path.read_text(encoding="utf-8"),
+        filename=str(runner_path),
+    )
+    imported_symbols: dict[str, tuple[str, str]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        for imported_name in node.names:
+            local_name = imported_name.asname or imported_name.name
+            imported_symbols[local_name] = (node.module, imported_name.name)
+
+    def resolve_imported_instance(local_name: str) -> set[str]:
+        source = imported_symbols.get(local_name)
+        if source is None:
+            return set()
+        module_name, symbol_name = source
+        module_path = plugin_dir / f"{module_name.replace('.', '/')}.py"
+        if not module_path.is_file():
+            return set()
+        module_tree = ast.parse(
+            module_path.read_text(encoding="utf-8"),
+            filename=str(module_path),
+        )
+        resolved: set[str] = set()
+        for module_node in module_tree.body:
+            if not isinstance(module_node, (ast.Assign, ast.AnnAssign)):
+                continue
+            module_targets = (
+                module_node.targets if isinstance(module_node, ast.Assign) else [module_node.target]
+            )
+            if not any(
+                isinstance(target, ast.Name) and target.id == symbol_name
+                for target in module_targets
+            ):
+                continue
+            if module_node.value is None:
+                continue
+            for child in ast.walk(module_node.value):
+                if not isinstance(child, ast.Call):
+                    continue
+                if isinstance(child.func, ast.Name):
+                    class_name = child.func.id
+                elif isinstance(child.func, ast.Attribute):
+                    class_name = child.func.attr
+                else:
+                    continue
+                if class_name in classes:
+                    resolved.add(class_name)
+        return resolved
+
+    active_classes: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if not any(isinstance(target, ast.Name) and target.id == "runner" for target in targets):
+            continue
+        value = node.value
+        if value is None:
+            continue
+        for child in ast.walk(value):
+            if isinstance(child, ast.Name):
+                active_classes.update(resolve_imported_instance(child.id))
+        for child in ast.walk(value):
+            if not isinstance(child, ast.Call):
+                continue
+            if isinstance(child.func, ast.Name):
+                class_name = child.func.id
+            elif isinstance(child.func, ast.Attribute):
+                class_name = child.func.attr
+            else:
+                continue
+            if class_name in classes:
+                active_classes.add(class_name)
+    return active_classes
+
+
+def _runner_class_lineage(
+    runner_class: str,
+    classes: dict[str, list[ast.ClassDef]],
+) -> set[str]:
+    lineage: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in lineage:
+            return
+        lineage.add(name)
+        for class_node in classes.get(name, []):
+            for base in class_node.bases:
+                if isinstance(base, ast.Name):
+                    visit(base.id)
+                elif isinstance(base, ast.Attribute):
+                    visit(base.attr)
+
+    visit(runner_class)
+    return lineage
+
+
+def _native_commands_in_node(
+    node: ast.AST,
+    native_cli_commands: set[str],
+) -> set[str]:
+    commands: set[str] = set()
+    for child in ast.walk(node):
+        if not isinstance(child, (ast.List, ast.Tuple)) or len(child.elts) < 2:
+            continue
+        command_node = child.elts[1]
+        if not isinstance(command_node, ast.Constant):
+            continue
+        command = command_node.value
+        if isinstance(command, str) and command in native_cli_commands:
+            commands.add(command)
+    return commands
+
+
+def _called_symbol_names(node: ast.AST) -> set[str]:
+    symbols: set[str] = set()
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Call):
+            continue
+        if isinstance(child.func, ast.Name):
+            symbols.add(child.func.id)
+        elif isinstance(child.func, ast.Attribute):
+            symbols.add(child.func.attr)
+    return symbols
+
+
+def _commands_for_runner_class(
+    runner_class: str,
+    *,
+    classes: dict[str, list[ast.ClassDef]],
+    functions: dict[str, list[ast.FunctionDef]],
+    native_cli_commands: set[str],
+) -> set[str]:
+    """Resolve commands from one runner class, its bases, and called helpers."""
+    commands: set[str] = set()
+    visited_classes: set[str] = set()
+    visited_functions: set[str] = set()
+
+    def visit_function(name: str) -> None:
+        if name in visited_functions:
+            return
+        visited_functions.add(name)
+        for function_node in functions.get(name, []):
+            commands.update(_native_commands_in_node(function_node, native_cli_commands))
+            for called_name in _called_symbol_names(function_node):
+                if called_name in functions:
+                    visit_function(called_name)
+
+    def visit_class(name: str) -> None:
+        if name in visited_classes:
+            return
+        visited_classes.add(name)
+        for class_node in classes.get(name, []):
+            commands.update(_native_commands_in_node(class_node, native_cli_commands))
+            for base in class_node.bases:
+                if isinstance(base, ast.Name):
+                    visit_class(base.id)
+                elif isinstance(base, ast.Attribute):
+                    visit_class(base.attr)
+            for called_name in _called_symbol_names(class_node):
+                if called_name in functions:
+                    visit_function(called_name)
+
+    visit_class(runner_class)
+    return commands
+
+
+def extract_runtime_cli_commands_from_e2e_plugins(
+    matrix: dict[str, dict[str, Any]],
+    models_dir: Path,
+    native_cli_commands: set[str],
+) -> dict[str, set[str]]:
+    """Map runtimes to native commands used by their declared runner class."""
+    runtime_commands: dict[str, set[str]] = {}
+    owner_contracts: dict[
+        Path,
+        tuple[
+            dict[str, list[ast.ClassDef]],
+            dict[str, list[ast.FunctionDef]],
+            set[str],
+        ],
+    ] = {}
+
+    for manifest_path in _iter_e2e_manifest_paths(models_dir):
+        try:
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        runtime_strategy = raw.get("runtime_strategy")
+        if not _is_nonempty_str(runtime_strategy):
+            continue
+        runner_class_ref = matrix.get(runtime_strategy, {}).get("runner_class")
+        if not _is_nonempty_str(runner_class_ref):
+            continue
+
+        if manifest_path.parent.name == "manifests":
+            owner_dir = manifest_path.parent.parent
+        else:
+            family = raw.get("family")
+            if not _is_nonempty_str(family):
+                continue
+            owner_dir = models_dir / family
+
+        if owner_dir not in owner_contracts:
+            plugin_dir = owner_dir / "e2e_plugins"
+            classes, functions = _plugin_contract_nodes(plugin_dir)
+            owner_contracts[owner_dir] = (
+                classes,
+                functions,
+                _active_runner_class_names(plugin_dir, classes),
+            )
+        classes, functions, active_runner_classes = owner_contracts[owner_dir]
+        declared_runner_class = _class_basename(runner_class_ref)
+        matching_active_classes = {
+            active_class
+            for active_class in active_runner_classes
+            if declared_runner_class in _runner_class_lineage(active_class, classes)
+        }
+        runtime_commands.setdefault(runtime_strategy, set()).update(
+            command
+            for active_class in matching_active_classes
+            for command in _commands_for_runner_class(
+                active_class,
+                classes=classes,
+                functions=functions,
+                native_cli_commands=native_cli_commands,
+            )
+        )
+
+    return runtime_commands
+
+
 def extract_runtime_to_task_strategy_from_manifests(models_dir: Path) -> dict[str, str]:
     """Extract runtime_strategy -> task_strategy declarations from E2E manifests."""
     values: dict[str, set[str]] = {}
@@ -317,6 +597,8 @@ def validate_matrix_data(
     diff_check_classes: set[str],
     runner_classes_by_task: dict[str, set[str]],
     comparator_classes_by_task: dict[str, set[str]],
+    native_cli_commands: set[str],
+    runner_cli_commands_by_runtime: dict[str, set[str]],
 ) -> list[str]:
     """Validate matrix consistency and coverage requirements."""
     errors: list[str] = []
@@ -367,6 +649,32 @@ def validate_matrix_data(
             errors.append(
                 f"{runtime_strategy}: 'cli_commands' must be a non-empty list of strings."
             )
+        else:
+            duplicate_cli_commands = sorted(
+                command for command in set(cli_commands) if cli_commands.count(command) > 1
+            )
+            if duplicate_cli_commands:
+                errors.append(
+                    f"{runtime_strategy}: duplicate entries in cli_commands: "
+                    f"{duplicate_cli_commands}."
+                )
+
+            unknown_cli_commands = sorted(set(cli_commands) - native_cli_commands)
+            if unknown_cli_commands:
+                errors.append(
+                    f"{runtime_strategy}: cli_commands references commands not accepted "
+                    f"by the native CLI: {unknown_cli_commands}."
+                )
+
+            if runtime_strategy in manifest_strategies:
+                runner_cli_commands = runner_cli_commands_by_runtime.get(runtime_strategy, set())
+                unsupported_cli_commands = sorted(set(cli_commands) - runner_cli_commands)
+                if unsupported_cli_commands:
+                    errors.append(
+                        f"{runtime_strategy}: cli_commands {unsupported_cli_commands} "
+                        "are not used by the model-owned E2E runner/command builders; "
+                        f"discovered native commands: {sorted(runner_cli_commands)}."
+                    )
 
         performance_mode = entry.get("performance_mode")
         if not _is_nonempty_str(performance_mode):
@@ -454,6 +762,7 @@ def validate_matrix_paths(
     builders_dir: Path = DEFAULT_BUILDERS_DIR,
     runtime_registry_path: Path = DEFAULT_RUNTIME_REGISTRY_PATH,
     runtime_models_dir: Path = DEFAULT_RUNTIME_MODELS_DIR,
+    cli_args_path: Path = DEFAULT_CLI_ARGS_PATH,
     torchtrt_strategies_dir: Path = DEFAULT_TORCHTRT_STRATEGIES_DIR,
     e2e_models_dir: Path = DEFAULT_E2E_MODELS_DIR,
     diff_checks_dir: Path = DEFAULT_DIFF_CHECKS_DIR,
@@ -463,6 +772,12 @@ def validate_matrix_paths(
     """Load all sources and validate the runtime strategy matrix."""
     matrix = load_runtime_strategy_matrix(matrix_path)
     runtime_to_task_strategy = extract_runtime_to_task_strategy_from_manifests(e2e_models_dir)
+    native_cli_commands = extract_native_cli_commands(cli_args_path)
+    runner_cli_commands_by_runtime = extract_runtime_cli_commands_from_e2e_plugins(
+        matrix,
+        e2e_models_dir,
+        native_cli_commands,
+    )
     candidate_strategies = set(matrix.keys()) | set(runtime_to_task_strategy.keys())
 
     runtime_cpp_files = discover_runtime_strategy_source_files(
@@ -488,6 +803,8 @@ def validate_matrix_paths(
         diff_check_classes=diff_check_classes,
         runner_classes_by_task=runner_classes_by_task,
         comparator_classes_by_task=comparator_classes_by_task,
+        native_cli_commands=native_cli_commands,
+        runner_cli_commands_by_runtime=runner_cli_commands_by_runtime,
     )
 
 
@@ -524,6 +841,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_RUNTIME_MODELS_DIR,
         help="Path to src/runtime/models directory.",
+    )
+    parser.add_argument(
+        "--cli-args",
+        type=Path,
+        default=DEFAULT_CLI_ARGS_PATH,
+        help="Path to src/cli/args.cpp containing the native known_cmds table.",
     )
     parser.add_argument(
         "--torchtrt-strategies-dir",
@@ -568,6 +891,7 @@ def main(argv: list[str] | None = None) -> int:
             builders_dir=args.builders_dir,
             runtime_registry_path=args.runtime_registry,
             runtime_models_dir=args.runtime_models_dir,
+            cli_args_path=args.cli_args,
             torchtrt_strategies_dir=args.torchtrt_strategies_dir,
             e2e_models_dir=args.e2e_models_dir,
             diff_checks_dir=args.diff_checks_dir,
@@ -586,7 +910,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         "[runtime-strategy-matrix] PASS: matrix is consistent with the new runtime "
-        "entrypoint, builder strategy coverage, E2E manifests, and diff-framework checks."
+        "entrypoint, native CLI, active model-owned runners, E2E manifests, "
+        "and diff-framework checks."
     )
     return 0
 

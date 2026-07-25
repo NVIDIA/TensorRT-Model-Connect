@@ -17,34 +17,8 @@ catch_all benchmarks/performance/release.yaml # release matrix workloads and com
 catch_all conanfile.py # release wheel native packaging recipe; catch-all stays conservative
 catch_all conftest.py # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all docker-compose.yml # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all examples/trtmc_dataset_benchmark.cpp # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all hf_links_wave1.txt # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all NOTICE # top-level legal attribution metadata; conservative full-suite fallback is intentionally retained
 catch_all pyproject.toml # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all ruff.toml # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/__init__.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/assets/test_image.jpg # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/assets/test_scene.jpg # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/__init__.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/conftest.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/test_bundle_inspect.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/test_cache_correctness.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/test_diffusion_pipeline.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/test_error_handling.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/test_full_pipeline.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/test_inference.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/test_logit_parity.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/test_runner_parity.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/test_vl_pipeline.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/timing_estimates.json # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e_partition.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/engine_defs/__init__.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/runtime_strategy_matrix.yaml # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/test_tvm_ffi_e2e.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all third_party/stb/stb_image.h # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all third_party/stb/stb_image_resize2.h # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all third_party/stb/stb_image_write.h # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all verify_encoder.py # tracked path has no precise impact rule yet; catch-all stays conservative
 harness_shared tests/e2e_harness/__init__.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/artifact_sink.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/conftest_gpu.py # shared E2E harness surface; broad E2E impact is intentional
@@ -59,10 +33,6 @@ harness_shared tests/e2e_harness/result_schema.py # shared E2E harness surface; 
 harness_shared tests/e2e_harness/runtime_config.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/runtime_strategy_metadata.py # shared E2E strategy metadata surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/thresholds/__init__.py # shared E2E harness surface; broad E2E impact is intentional
-no_impact scripts/_build_fp8_onnx_monolithic.py # developer utility script; no CI test impact is intentional
-no_impact scripts/_inject_fp8_qdq_proto.py # developer utility script; no CI test impact is intentional
-no_impact scripts/_mk_fp8_bf16_bundle.py # developer utility script; no CI test impact is intentional
-no_impact scripts/_quantize_fp8.py # developer utility script; no CI test impact is intentional
 no_impact scripts/autopilot/__init__.py # developer utility script; no CI test impact is intentional
 no_impact scripts/autopilot/autorun.py # developer utility script; no CI test impact is intentional
 no_impact scripts/autopilot/discover.py # developer utility script; no CI test impact is intentional
@@ -82,8 +52,6 @@ no_impact scripts/hf_tokenizer.py # developer utility script; no CI test impact 
 no_impact scripts/new_family.py # developer utility script; no CI test impact is intentional
 no_impact scripts/perf_evolve_prompt.py # developer utility script; no CI test impact is intentional
 no_impact scripts/publish_tensorrt_sdk.sh # temporary maintainer-only SDK publisher; CI consumes the separately pinned GHCR digest
-no_impact scripts/reporting/__init__.py # developer utility script; no CI test impact is intentional
-no_impact scripts/reporting/vlm_assessment.py # developer utility script; no CI test impact is intentional
 no_impact scripts/repro_trt_fp8_mha.py # standalone TensorRT FP8 MHA repro helper; no CI test impact is intentional
 no_impact scripts/templates/model_family/registration.cpp # developer utility script; no CI test impact is intentional
 no_impact scripts/validate_family.sh # developer utility script; no CI test impact is intentional
@@ -92,9 +60,7 @@ no_impact tools/ai_agent_system.py # developer utility script; no CI test impact
 no_impact tools/ai_staging.py # developer utility script; no CI test impact is intentional
 no_impact tools/auto_perf_tune.py # developer utility script; no CI test impact is intentional
 no_impact tools/check_cyclomatic_complexity.py # developer utility script; no CI test impact is intentional
-no_impact tools/check_doc_file_references.py # developer utility script; no CI test impact is intentional
 no_impact tools/check_legacy_runtime_freeze.py # developer utility script; no CI test impact is intentional
-no_impact tools/check_runtime_strategy_matrix.py # developer utility script; no CI test impact is intentional
 no_impact tools/classify_bottleneck.py # developer utility script; no CI test impact is intentional
 no_impact tools/count_diffusion_frame_pairs.py # developer utility script; no CI test impact is intentional
 no_impact tools/coverage_map/__init__.py # developer utility script; no CI test impact is intentional

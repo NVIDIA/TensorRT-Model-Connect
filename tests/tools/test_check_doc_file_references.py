@@ -273,6 +273,22 @@ def test_generated_output_path_is_allowed_but_missing_source_path_is_not(
     ]
 
 
+def test_missing_generated_output_descendant_is_not_blanket_exempted(
+    tmp_path: Path,
+) -> None:
+    doc = tmp_path / "README.md"
+    doc.write_text(
+        "The generated page is `website/build/missing-page/index.html`.\n",
+        encoding="utf-8",
+    )
+
+    report = cdfr.check_markdown_files([doc], tmp_path)
+
+    assert [finding.message for finding in report.findings] == [
+        "Path does not exist: website/build/missing-page/index.html"
+    ]
+
+
 def test_personal_workspace_path_is_rejected_in_current_document() -> None:
     content = "Build from /workspace/users/yifeif/workspaces/current/repo.\n"
 

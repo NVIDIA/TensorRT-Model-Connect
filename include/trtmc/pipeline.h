@@ -5,7 +5,8 @@
 
 #pragma once
 
-// trtmc public C++ API — the only header users need.
+// Primary trtmc C++ pipeline API. Include trtmc/runtime/pipeline_pool.h as well
+// when using the native multi-instance PipelinePool API.
 //
 // Usage:
 //   auto pipe = trtmc::load("model.trtfb");
@@ -43,8 +44,11 @@ struct TextResult {
 
     std::string text;
     std::vector<int32_t> token_ids;
-    // Time spent resetting per-request logical state and preparing reusable
-    // runtime objects before prefill begins.
+    // Provider-reported phase timing. A provider that cannot expose a
+    // trustworthy phase leaves that value at 0; zero is not a wall-latency
+    // measurement.
+    // setup_ms is time spent resetting per-request logical state and preparing
+    // reusable runtime objects before prefill begins.
     double setup_ms{0.0};
     double prefill_ms{0.0};
     double decode_ms{0.0};
@@ -221,6 +225,10 @@ class ITranscriptionStream {
 
 // --- Pipeline interface ---
 
+// An IPipeline instance may own mutable execution context, streams, caches,
+// and adapter state. The interface provides no concurrent-call guarantee:
+// serialize all calls to one instance, or use an independent instance for each
+// concurrent execution lane.
 class IPipeline {
   public:
     virtual ~IPipeline() = default;
@@ -511,6 +519,8 @@ class IPipeline {
 // the defaults can still call the positional overload below.
 struct LoadOptions {
     std::string hf_python;
+    // Native TRT-RTX: JIT cache path. Optimized runtime: artifact-cache root
+    // used while materializing the integrity-bound embedded payload.
     std::string runtime_cache_path;
     bool cuda_graphs{false};
     std::uint64_t kv_cache_size_bytes{0};               // 0 = use bundle's max_cache_length
@@ -535,7 +545,9 @@ struct TrtmcPipelineOptions {
     int max_new_tokens;        // 0 = use model default
     const char* hf_python;     // nullptr = auto-detect
     const char* image_path;    // nullptr = text-only
-    const char* runtime_cache; // nullptr = no RTX cache
+    // nullptr = default cache behavior. Native TRT-RTX uses this as its JIT
+    // cache path; optimized runtime uses it as the artifact-cache root.
+    const char* runtime_cache;
     int cuda_graphs;           // 0 = disabled
 };
 
@@ -565,10 +577,9 @@ struct trtmc_image_result_t {
     std::uint64_t num_pixels; // total floats in `pixels` (channels*height*width*num_frames)
 };
 
-// Opaque handle alias used by future C-ABI generation functions. Today the
-// C ABI hands users a `trtmc::IPipeline*` directly (a C++ type with a
-// trivial vtable); language bindings that don't want the C++ type can use
-// `trtmc_pipeline_t` for documentation purposes.
+// Opaque-style handle accepted by the implemented C-ABI batch-generation
+// entry point. In the current ABI it aliases the IPipeline pointer returned by
+// trtmc_create_pipeline or trtmc_create_pipeline_ex.
 typedef trtmc::IPipeline* trtmc_pipeline_t;
 
 trtmc::IPipeline* trtmc_create_pipeline(const char* bundle_path, int flags);

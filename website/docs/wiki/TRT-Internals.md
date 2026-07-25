@@ -2,7 +2,11 @@
 
 ## Build side
 
-The Python phase:
+The common Python phase first resolves the checkpoint, immutable revision,
+family, active target, and public build options. It then chooses one of two
+paths.
+
+For a native build, the Python phase:
 
 1. resolves the checkpoint and family descriptor;
 2. loads family-specific config and weights;
@@ -17,9 +21,18 @@ Graph semantics are family-owned below
 `python/tensorrt_model_connect/families/<family>/`. There is no supported
 root-level shared `graph_ops.py` contract.
 
+Before that native work, the build API probes optimized implementations only
+under the resolved family. One exact qualified
+model/revision/target/options profile may claim the request. Its isolated
+adapter invokes the delegated runtime's builder and packages
+`optimized_runtime.json`, opaque implementation metadata, and an
+integrity-bound artifact tree containing the exact
+`libtrtmc_impl_*.so`. If no profile claims the request, native construction
+continues; a selected adapter's build failure is terminal.
+
 ## Runtime side
 
-The C++ phase:
+For a native bundle, the C++ phase:
 
 1. reads the bundle and resolves `runtime_strategy`;
 2. loads the owning model DSO;
@@ -28,6 +41,13 @@ The C++ phase:
 5. creates execution contexts and model-owned state;
 6. binds tensors for the requested operation; and
 7. executes the family pipeline on CUDA.
+
+For a bundle containing `optimized_runtime.json`, the factory instead verifies
+and materializes the embedded artifact tree, loads its exact
+`libtrtmc_impl_*.so`, validates the private factory/toolchain/runtime
+identities, and lets that implementation construct `IPipeline`. It does not
+resolve a native strategy, load a model DSO through the generated index, or
+create a generic backend DSO.
 
 Common TensorRT wrappers and device primitives are in `src/runtime/core/` and
 public runtime headers. KV caches, samplers, schedulers, recurrent state,

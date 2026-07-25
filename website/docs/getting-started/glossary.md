@@ -29,7 +29,7 @@ Use this page whenever a tutorial uses an unfamiliar deployment or inference ter
 | CUDA | NVIDIA GPU programming/runtime stack. | Needed by the C++ runtime and TensorRT execution. |
 | TensorRT | NVIDIA inference compiler/runtime. | Build-time code creates engine plans; runtime code deserializes and executes them. |
 | Engine plan | Serialized TensorRT execution artifact. | Stored in bundle sections such as `engine_plan`, `vision_engine_plan`, or `denoiser_plan`. |
-| `.trtfb` bundle | TensorRT-Model-Connect deployable artifact. | A container with metadata, config, engine plans, tokenizer assets, and other sections. |
+| `.trtfb` bundle | TensorRT-Model-Connect deployable artifact. | A container with metadata plus either native config/plans/assets or an optimized-runtime descriptor and integrity-bound embedded implementation tree. |
 | HuggingFace model ID | A repo name such as `Qwen/Qwen3-0.6B`. | `trtmc build` resolves it to a local model directory, downloading files if needed. |
 | Precision | Numeric format used by engine weights/activations. | `fp16` is common for fast GPU smoke tests; `fp32` is larger and usually slower. |
 | Quantization | Lower-precision representation such as FP8 or INT4. | Reduces footprint or latency when supported by the family and backend. |
@@ -40,13 +40,14 @@ Use this page whenever a tutorial uses an unfamiliar deployment or inference ter
 
 | Term | Plain meaning | In this project |
 | --- | --- | --- |
-| Python builder | Build-time conversion tool. | `trtmc build` reads checkpoints, builds engine plans, and writes `.trtfb` bundles. |
+| Python builder | Build-time conversion tool. | `trtmc build` reads checkpoints, selects an exact qualified optimized provider when one claims the request, otherwise builds native engine plans, and writes `.trtfb` bundles. |
 | C++ runtime | Request-time execution library and CLI. | `trtmc`, source-built `./build/trtmc`, and `trtmc::load()` load bundles and run task APIs. |
 | Family plugin | Python adapter for a model family. | Examples: `qwen`, `llama`, `whisper`, `flux`, `pixart`. It handles config and weights. |
-| Runtime strategy | Model-owned C++ dispatch key in bundle metadata. | Examples: `qwen_decoder_kv_cache`, `whisper_speech_to_text`, `diffusion_flux`, `diffusion_pixart`. |
+| Runtime strategy | Model-owned native C++ dispatch key in bundle metadata. | Examples: `qwen_decoder_kv_cache`, `whisper_speech_to_text`, `diffusion_flux`, `diffusion_pixart`. Optimized-runtime bundles use `optimized_runtime.json` instead. |
+| Optimized-runtime descriptor | Exact delegated implementation contract in a bundle. | `optimized_runtime.json` binds the implementation/profile and embedded artifact tree; it bypasses native strategy, model-plugin, and backend-DSO selection. |
 | Task strategy | E2E/user-contract category shared by models with the same result shape. | Examples: `text_generation_causal`, `speech_to_text`, `vision_language_generation`, `diffusion_media_generation`. It does not select a runtime DSO. |
 | Pipeline | Task-oriented runtime implementation. | A concrete `IPipeline` handles generation, transcription, segmentation, solve, or another task. |
-| Registry | Lookup table for runtime plugins. | `PipelineRegistry` maps `runtime_strategy` to an `IPipelinePlugin`. |
+| Registry | Lookup table for native runtime plugins. | On the native path, `PipelineRegistry` maps `runtime_strategy` to an `IPipelinePlugin`. |
 | E2E manifest | Canonical test description. | Files in `tests/e2e/models/` define model IDs, task type, expected runtime strategy, prompts, and tolerances. |
 | Oracle | Reference behavior used by validation. | Usually HuggingFace, Diffusers, NeMo, or another official implementation. |
 | Tolerance | Allowed numerical difference from the oracle. | Needed because optimized engines may not match reference floating-point values bit-for-bit. |
@@ -57,6 +58,8 @@ TensorRT-Model-Connect is not a training framework. It does not update model wei
 
 It is not a general model-serving cluster like vLLM, SGLang, TGI, or Triton Server. It provides artifact build tools, a native runtime, and task APIs that can be embedded into deployment systems.
 
-It is not an automatic converter for every HuggingFace repo. A model needs a compatible family plugin and runtime strategy, or it needs extension work.
+It is not an automatic converter for every HuggingFace repo. A model needs a
+compatible native family/runtime strategy or an exact qualified optimized
+provider profile; otherwise it needs extension work.
 
 It is not fully portable across every GPU, CUDA, and TensorRT version once an engine has been built. The bundle records compatibility metadata, and the runtime checks that metadata before execution.

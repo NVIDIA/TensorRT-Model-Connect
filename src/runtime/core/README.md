@@ -16,6 +16,9 @@ Key files:
 - `step_state.h`: generic recurrent-step state interface.
 - `stb_impl.cpp`: stb implementation unit for public image I/O.
 
-TensorRT backend DSO loading plus generic engine/context execution and tensor
-binding live under `src/runtime/backend/`. Decode loops, sampling, masks, and
-KV-cache policy are model-owned under `src/runtime/models/<family>/`.
+On the native path, TensorRT backend DSO loading plus generic engine/context
+execution and tensor binding live under `src/runtime/backend/`. Decode loops,
+sampling, masks, and KV-cache policy are model-owned under
+`src/runtime/models/<family>/`. Optimized bundles instead use the generic host
+under `src/runtime/providers/` to verify and load their embedded implementation
+DSO.

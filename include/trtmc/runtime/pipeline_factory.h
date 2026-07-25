@@ -5,9 +5,10 @@
 
 #pragma once
 
-// PipelineFactory: config-driven pipeline assembly.
-// Reads config.json from a .trtfb bundle, dispatches on runtime_strategy,
-// loads TRT engines, creates tokenizers, and assembles the appropriate pipeline.
+// PipelineFactory: bundle-driven pipeline assembly.
+// Optimized-runtime bundles are claimed by optimized_runtime.json and load
+// their embedded implementation DSO. Native bundles read config.json,
+// dispatch on runtime_strategy, and load the owning model and backend DSOs.
 //
 // This is the single entry point for creating pipelines from bundles.
 
@@ -19,6 +20,8 @@
 
 namespace trtmc {
 
+// The lease API is declared in trtmc/runtime/pipeline_pool.h and its
+// synchronization implementation is linked from the runtime library.
 class PipelinePool;
 
 class PipelineFactory {
@@ -29,6 +32,9 @@ class PipelineFactory {
                                                   bool cuda_graphs = false);
     static std::unique_ptr<IPipeline> from_bundle(const std::string& bundle_path,
                                                   const LoadOptions& options);
+    // Native bundles only. Creates pool_size independent pipeline instances.
+    // Optimized-runtime bundles are rejected because their delegated runtime
+    // owns batching and scheduling.
     static std::unique_ptr<PipelinePool> from_bundle_pool(const std::string& bundle_path,
                                                           std::size_t pool_size,
                                                           const LoadOptions& options = {});

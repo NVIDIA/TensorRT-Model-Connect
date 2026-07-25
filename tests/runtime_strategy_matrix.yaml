@@ -529,7 +529,7 @@
     "diffusion_qwen_image": {
       "task_strategy": "diffusion_media_generation",
       "cli_commands": [
-        "generate-video"
+        "run"
       ],
       "runner_class": "diffusion.DiffusionMediaRunner",
       "comparator_class": "diffusion.DiffusionComparator",
@@ -584,7 +584,7 @@
     "albert_encoder_only": {
       "task_strategy": "encoder_only_nlp",
       "cli_commands": [
-        "run"
+        "encode"
       ],
       "runner_class": "encoder_only.EncoderOnlyRunner",
       "comparator_class": "encoder_only.EncoderOnlyComparator",
@@ -595,7 +595,7 @@
     "bert_encoder_only": {
       "task_strategy": "encoder_only_nlp",
       "cli_commands": [
-        "run"
+        "encode"
       ],
       "runner_class": "encoder_only.EncoderOnlyRunner",
       "comparator_class": "encoder_only.EncoderOnlyComparator",
@@ -606,7 +606,7 @@
     "convbert_encoder_only": {
       "task_strategy": "encoder_only_nlp",
       "cli_commands": [
-        "run"
+        "encode"
       ],
       "runner_class": "encoder_only.EncoderOnlyRunner",
       "comparator_class": "encoder_only.EncoderOnlyComparator",
@@ -617,7 +617,7 @@
     "deberta_encoder_only": {
       "task_strategy": "encoder_only_nlp",
       "cli_commands": [
-        "run"
+        "encode"
       ],
       "runner_class": "encoder_only.EncoderOnlyRunner",
       "comparator_class": "encoder_only.EncoderOnlyComparator",
@@ -628,7 +628,7 @@
     "distilbert_encoder_only": {
       "task_strategy": "encoder_only_nlp",
       "cli_commands": [
-        "run"
+        "encode"
       ],
       "runner_class": "encoder_only.EncoderOnlyRunner",
       "comparator_class": "encoder_only.EncoderOnlyComparator",
@@ -639,7 +639,7 @@
     "dpr_encoder_only": {
       "task_strategy": "encoder_only_nlp",
       "cli_commands": [
-        "run"
+        "encode"
       ],
       "runner_class": "encoder_only.EncoderOnlyRunner",
       "comparator_class": "encoder_only.EncoderOnlyComparator",
@@ -672,7 +672,7 @@
     "electra_encoder_only": {
       "task_strategy": "encoder_only_nlp",
       "cli_commands": [
-        "run"
+        "encode"
       ],
       "runner_class": "encoder_only.EncoderOnlyRunner",
       "comparator_class": "encoder_only.EncoderOnlyComparator",
@@ -683,7 +683,7 @@
     "fnet_encoder_only": {
       "task_strategy": "encoder_only_nlp",
       "cli_commands": [
-        "run"
+        "encode"
       ],
       "runner_class": "encoder_only.EncoderOnlyRunner",
       "comparator_class": "encoder_only.EncoderOnlyComparator",
@@ -694,7 +694,7 @@
     "modernbert_encoder_only": {
       "task_strategy": "encoder_only_nlp",
       "cli_commands": [
-        "run"
+        "encode"
       ],
       "runner_class": "encoder_only.EncoderOnlyRunner",
       "comparator_class": "encoder_only.EncoderOnlyComparator",
@@ -705,7 +705,7 @@
     "mpnet_encoder_only": {
       "task_strategy": "encoder_only_nlp",
       "cli_commands": [
-        "run"
+        "encode"
       ],
       "runner_class": "encoder_only.EncoderOnlyRunner",
       "comparator_class": "encoder_only.EncoderOnlyComparator",
@@ -716,7 +716,7 @@
     "roberta_encoder_only": {
       "task_strategy": "encoder_only_nlp",
       "cli_commands": [
-        "run"
+        "encode"
       ],
       "runner_class": "encoder_only.EncoderOnlyRunner",
       "comparator_class": "encoder_only.EncoderOnlyComparator",
@@ -727,7 +727,7 @@
     "xlnet_encoder_only": {
       "task_strategy": "encoder_only_nlp",
       "cli_commands": [
-        "run"
+        "encode"
       ],
       "runner_class": "encoder_only.EncoderOnlyRunner",
       "comparator_class": "encoder_only.EncoderOnlyComparator",
@@ -804,8 +804,7 @@
     "elf_flow": {
       "task_strategy": "diffusion_text_generation",
       "cli_commands": [
-        "run",
-        "solve"
+        "run"
       ],
       "runner_class": "diffusion_text_generation.DiffusionTextGenerationRunner",
       "comparator_class": "diffusion_text_generation.DiffusionTextGenerationComparator",
@@ -831,7 +830,7 @@
     "sam_prompted_segmentation": {
       "task_strategy": "prompted_segmentation",
       "cli_commands": [
-        "segment"
+        "segment-prompted"
       ],
       "runner_class": "segmentation.PromptedSegmentationRunner",
       "comparator_class": "segmentation.PromptedSegmentationComparator",
@@ -842,7 +841,7 @@
     "sam3_prompted_segmentation": {
       "task_strategy": "prompted_segmentation",
       "cli_commands": [
-        "segment"
+        "segment-prompted"
       ],
       "runner_class": "segmentation.PromptedSegmentationRunner",
       "comparator_class": "segmentation.PromptedSegmentationComparator",

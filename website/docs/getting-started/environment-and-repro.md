@@ -20,7 +20,7 @@ flowchart TB
 | NVIDIA driver | Lets containers use the GPU. | `nvidia-smi` fails or no GPU appears in Docker. |
 | Docker + NVIDIA Container Toolkit | Gives a repeatable CUDA/TensorRT environment. | Container launches without GPU access. |
 | Python builder environment | Resolves HuggingFace models and builds bundles. | Missing `transformers`, TensorRT Python package, model auth, or network/cache access. |
-| C++ runtime environment | Loads bundle metadata and backend DSOs. | Missing shared libraries, TensorRT ABI mismatch, missing backend DSO. |
+| C++ runtime environment | Loads bundle metadata and either native model/backend DSOs or an optimized bundle's embedded implementation DSO. | Missing shared libraries, native TensorRT ABI/backend mismatch, or optimized descriptor/artifact/factory identity mismatch. |
 | HuggingFace cache | Stores downloaded model files. | First run is slow, offline build fails, gated model needs login/token. |
 
 ## 1. Start The Dev Container

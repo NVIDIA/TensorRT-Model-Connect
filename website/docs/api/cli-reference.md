@@ -84,6 +84,15 @@ trtmc inspect <bundle.trtfb> --list-engines
 trtmc version
 ```
 
+Regular `trtmc inspect` prints bundle-header fields and section names. The
+presence of `optimized_runtime.json` identifies an optimized bundle, but
+inspection does not decode that descriptor or print its implementation/profile
+identity. `trtmc inspect --list-engines` recognizes only the native
+`engine_plan` and `*_plan` section naming convention. Optimized artifacts use
+capsule-owned names such as `optimized_runtime_artifacts/.../llm.engine`, so
+`--list-engines` can legitimately report `No engine sections found.` and exit
+nonzero for an otherwise valid optimized bundle.
+
 Depending on the command, shared load/run options include `--hf-python`,
 `--backend-dir`, repeatable `--model-plugin-dir`, `--runtime-cache`,
 `--cuda-graphs`, `--benchmark`, `--warmup`, `--config`, and repeatable

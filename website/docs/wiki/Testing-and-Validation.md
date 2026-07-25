@@ -10,6 +10,7 @@ model and current E2E contract.
 | --- | --- | --- |
 | Python builder | `tests/builder/` | Config, mapping, graph/build, bundle, and CLI units |
 | C++ runtime | `tests/cpp/` and model-declared runtime tests | Core and family runtime behavior |
+| Optimized implementation | Family adapter contract tests and `QUALIFICATION.*.toml` | Exact implementation/profile selection, embedded-DSO loading, parity, and performance proof |
 | Repository tools | `tests/tools/` | CI selection, isolation, comparison, packaging, reports |
 | E2E harness | `tests/e2e_harness/` | Manifest loading, orchestration, runner/comparator contracts |
 | Model E2E | `tests/e2e/models/<family>/` | Exact checkpoint/task integration and artifacts |
@@ -19,10 +20,10 @@ Counts change as models land. At this revision, all three ownership trees have
 78 descriptors and the E2E tree declares 203 JSON manifests. Derive future
 counts from descriptors; do not copy this snapshot into acceptance logic.
 
-## Manifest shape
+## Native manifest shape
 
-The following is a valid structural example; values come from the owning
-family:
+The following is a valid structural example for the native path; values come
+from the owning family:
 
 ```json
 {
@@ -49,7 +50,28 @@ family:
 
 The family `MODEL.toml` must list this file. A buildable manifest without a
 non-empty `testcases` array is rejected. Task defaults may be inherited from
-the model descriptor.
+the model descriptor. On this path, `runtime_strategy` must exactly match the
+family-owned model-plugin strategy and the run must load both its model DSO and
+selected backend DSO.
+
+## Optimized implementation shape
+
+Optimized-runtime evidence is not a second native strategy. It consists of:
+
+1. The family adapter's `IMPLEMENTATION.toml`, which declares the delegated
+   runtime identity and private `libtrtmc_impl_*.so`.
+2. An exact qualified `profiles/*.toml` entry binding the model revision,
+   target, build options, and semantic hash.
+3. A matching model-owned `QUALIFICATION.*.toml` producer descriptor and
+   retained parity/performance results.
+4. A self-contained bundle with `optimized_runtime.json`,
+   `implementation.json`, the integrity-bound artifacts, and the exact
+   embedded implementation DSO.
+
+The optimized descriptor claims the bundle before native strategy dispatch.
+Its `runtime_strategy` may therefore be empty; the implementation and profile
+IDs are the relevant selection identity. The host does not use the native
+model-plugin index or select a `libtrtmc_backend_*.so` for this path.
 
 ## Commands
 
@@ -68,7 +90,10 @@ PYTHONPATH=python:. python3 -m pytest \
 ```
 
 The final command requires literal family/manifest values and the declared
-checkpoint, GPU, TensorRT environment, binary, and model DSO.
+checkpoint, GPU, TensorRT environment, and binary. Native cases additionally
+require the owning model and backend DSOs. Optimized cases require the
+qualified implementation/profile evidence and a bundle carrying the exact
+embedded implementation DSO.
 
 ## Evidence rules
 
@@ -82,3 +107,7 @@ checkpoint, GPU, TensorRT environment, binary, and model DSO.
   merely to pass.
 - Performance claims require the exact hardware, software revision, inputs,
   warmups, repetitions, and retained result artifacts.
+- Treat `TextResult` phase timing as provider-reported evidence. If a provider
+  returns zero because a phase split is unavailable, record the phase as
+  unavailable and measure synchronized public-call wall time instead; do not
+  derive throughput from the zero value.

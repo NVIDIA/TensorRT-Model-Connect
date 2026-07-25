@@ -55,7 +55,8 @@ The example uses:
 Qwen/Qwen3-0.6B
 ```
 
-Decoder-only language models are the simplest place to learn this project because the runtime path is easy to see.
+Decoder-only language models are the simplest place to learn this project
+because the native runtime path is easy to see.
 
 | Concept | In this tutorial |
 | --- | --- |
@@ -163,7 +164,10 @@ Record the exact `runtime_strategy` and engine section names. If you cannot find
 :::
 
 :::tip Progress check
-You are ready to continue when you can explain why `runtime_strategy` is more important to C++ dispatch than the HuggingFace model name.
+You are ready to continue when you can explain why this native bundle uses
+`runtime_strategy`, not the HuggingFace model name, for C++ dispatch—and why a
+bundle containing `optimized_runtime.json` would take the separate embedded
+implementation path first.
 :::
 
 ## Stage 4: Run Deterministic Generation

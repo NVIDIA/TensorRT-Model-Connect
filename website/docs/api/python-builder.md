@@ -36,6 +36,13 @@ tensorrt_model_connect.build(
 
 `tensorrt_model_connect.__init__` lazily imports heavyweight builder helpers. That keeps TensorRT backend selection from happening too early when `--rtx` is used.
 
+Both this API and `trtmc build` first try a family-owned optimized-runtime
+provider after resolving the model and family. Exactly one qualified
+model/revision/active-target/options profile may claim the request and produce
+an optimized bundle. If no provider claims it, the normal native
+`FamilyPlugin` path handles the options below. A selected provider build
+failure is terminal rather than a native fallback.
+
 ## Build inputs
 
 | Input | Meaning |
@@ -66,11 +73,15 @@ tensorrt_model_connect.build(
 ## Family plugin protocol
 
 Family packages are discovered from
-`python/tensorrt_model_connect/families/<family>/MODEL.toml`; the selected
-descriptor identifies the package by its directory and family ID. The loader
-imports that package, whose `__init__.py` exposes the module-level `plugin`.
-The descriptor does not select an arbitrary import module. The protocol itself
-is defined in `python/tensorrt_model_connect/families/base.py`.
+`python/tensorrt_model_connect/families/<family>/MODEL.toml`. Alias/prefix and
+architecture metadata normally narrow imports to candidate packages; a direct
+family-ID lookup imports that descriptor's package. When those routes cannot
+resolve a full config, a legacy `pkgutil` fallback imports all non-private
+family modules/packages and evaluates their matching predicates. The
+descriptor does not select an arbitrary import module, and a loose module
+found only through compatibility scanning is not a complete supported family.
+The protocol itself is defined in
+`python/tensorrt_model_connect/families/base.py`.
 
 ```python
 class FamilyPlugin(Protocol):

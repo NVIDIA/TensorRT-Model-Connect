@@ -2,7 +2,7 @@
 title: Add a Model Family
 ---
 
-A current model family is a three-sided, model-owned unit:
+Native support for a current model family is a three-sided, model-owned unit:
 
 1. A Python build package.
 2. A C++ runtime model DSO with its own strategy key.
@@ -14,6 +14,12 @@ generation, do not reuse a retired generic runtime key such as
 `example_decoder_kv_cache` and keep its runtime implementation in its own DSO.
 Shared tooling groups compatible models through capabilities and
 `task_strategy`.
+
+An optional delegated optimized-runtime adapter is a separate, additive
+support path for exact model/revision/target/options tuples. Add it under the
+owning Python family only after the three native ownership surfaces are
+understood; it uses an implementation manifest/profile and embedded
+implementation DSO, not another native `runtime_strategy`.
 
 ## 1. Choose the closest existing owner
 
@@ -61,8 +67,11 @@ prefixes = ["example"]
 Use `architecture_patterns` for architecture-name matching,
 `diffusion_pipeline_classes` for Diffusers discovery, or the other metadata
 fields only when the family needs them. Discovery starts from
-`families/*/MODEL.toml`, narrows candidates using this metadata, and then
-imports the selected module-level `plugin`.
+`families/*/MODEL.toml`; a normal descriptor match narrows candidates using
+this metadata and imports the selected module-level `plugin`. For backward
+compatibility, a full config that cannot be resolved through those candidates
+can still trigger the all-package `pkgutil` fallback described in
+[Python Builder Units](../unit-design/python-builder.md#family-plugins).
 
 `plugin.py` must provide:
 
@@ -192,6 +201,7 @@ MODEL_REF=example-org/example-small
 ./build/trtmc inspect /tmp/example-small.trtfb --list-engines
 ./scripts/validate_family.sh "$MODEL_REF" \
   --binary ./build/trtmc \
+  --engine-dir /tmp/trtmc-example-engines \
   --isolate-model-plugin
 ```
 

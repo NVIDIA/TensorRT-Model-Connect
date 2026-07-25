@@ -2,8 +2,8 @@
 title: Source Layout
 ---
 
-This page is a map of the current repository. Model support is deliberately
-split across three matching, model-owned descriptors:
+This page is a map of the current repository. Native model support is
+deliberately split across three matching, model-owned descriptors:
 
 | Path | Authority |
 | --- | --- |
@@ -30,8 +30,10 @@ constant: the descriptor files are the source of truth.
 | `src/runtime/domains/` | Small modality helpers shared across model DSOs |
 | `src/runtime/models/` | Family-owned runtime implementations and descriptors |
 | `src/runtime/registry/` | DSO discovery, registry, and pipeline factory |
+| `src/runtime/providers/` | Generic optimized-runtime descriptor, artifact, and private factory host |
 | `src/tokenizer/` | Tokenizer implementations |
 | `python/tensorrt_model_connect/` | Python build package |
+| `python/tensorrt_model_connect/runtime_provider/` | Family-scoped optimized implementation discovery, isolated build, and generic bundle packaging |
 | `tests/builder/` | Python builder tests |
 | `tests/cpp/` | C++ runtime tests |
 | `tests/e2e/` | E2E entry points and model-owned cases |
@@ -41,12 +43,22 @@ constant: the descriptor files are the source of truth.
 | `scripts/` | Scaffolding and operator utilities |
 | `website/` | Docusaurus source |
 
-## Registration flow
+## Runtime selection
 
-CMake scans `src/runtime/models/*/MODEL.toml`; contributors do not maintain a
-central list of model plugins. At runtime, `PipelineFactory` reads the bundle's
-`runtime_strategy`, resolves the owning model DSO from generated manifest data,
-loads that DSO, and asks `PipelineRegistry` for the registered plugin.
+For a native bundle, CMake scans `src/runtime/models/*/MODEL.toml`;
+contributors do not maintain a central list of model plugins. At runtime,
+`PipelineFactory` reads `runtime_strategy`, resolves the owning model DSO from
+generated manifest data, loads that DSO, and asks `PipelineRegistry` for the
+registered plugin.
+
+For an optimized bundle, `PipelineFactory` first recognizes
+`optimized_runtime.json`. `src/runtime/providers/optimized_runtime_host.cpp`
+validates and materializes its embedded artifact tree, loads the exact
+`libtrtmc_impl_*.so`, and asks its private factory to return an `IPipeline`.
+The native strategy index, model DSO, and backend DSO are not part of that
+path. Build-side implementation manifests and exact qualification profiles
+live under the owning Python family; the current example is
+`python/tensorrt_model_connect/families/qwen/edge_llm_adapter/`.
 
 The generic task shape belongs in `task_strategy` (for example,
 `text_generation_causal`). The `runtime_strategy` is the concrete runtime

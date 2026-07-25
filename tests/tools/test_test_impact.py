@@ -930,6 +930,7 @@ class TestModelOwnedAdapterIsolation:
         if expected_tier is not None:
             assert expected_tier in match.unit_tiers
 
+
 class TestFamilyPlugin:
     def test_family_only_change(self, imap):
         """families/decoder_family/plugin.py -> exactly decoder_family models."""
@@ -1684,6 +1685,23 @@ class TestUnitTiers:
         assert match.rule == "unit_tools"
         assert match.models == []
         assert "tools" in match.unit_tiers
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "tools/check_doc_commands.py",
+            "tools/check_doc_file_references.py",
+            "tools/check_runtime_strategy_matrix.py",
+        ],
+    )
+    def test_documentation_validation_tools(self, imap, path):
+        """Documentation gates select tools tests instead of broad fallback."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "documentation_validation_tool"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
 
     def test_elf_flow_prepare_model_dir_is_family_owned(self, imap):
         """ELF model-dir preparation belongs to the elf_flow family boundary."""
@@ -3511,9 +3529,7 @@ class TestCoverageMapIntegration:
             ("tools/ci/e2e_schedule.py", ["tests/tools/test_schedule_e2e.py"]),
         ],
     )
-    def test_e2e_runner_selects_explicit_tools_tests(
-        self, imap, coverage_map, path, expected
-    ):
+    def test_e2e_runner_selects_explicit_tools_tests(self, imap, coverage_map, path, expected):
         """E2E scheduler edits select tests that coverage cannot discover."""
         result = test_impact.analyze_impact(
             [path],
@@ -3559,6 +3575,42 @@ class TestCoverageMapIntegration:
         assert result.e2e_models == []
         assert result.unit_tiers == ["tools"]
         assert result.tools_tests == ["tests/tools/test_model_ci.py"]
+        assert result.fallback_tiers == []
+
+    @pytest.mark.parametrize("coverage_map", [None, {}])
+    @pytest.mark.parametrize(
+        ("path", "expected_test"),
+        [
+            (
+                "tools/check_doc_commands.py",
+                "tests/tools/test_check_doc_commands.py",
+            ),
+            (
+                "tools/check_doc_file_references.py",
+                "tests/tools/test_check_doc_file_references.py",
+            ),
+            (
+                "tools/check_runtime_strategy_matrix.py",
+                "tests/tools/test_runtime_strategy_matrix_checker.py",
+            ),
+        ],
+    )
+    def test_documentation_validator_selects_focused_test(
+        self,
+        imap,
+        coverage_map,
+        path,
+        expected_test,
+    ):
+        result = test_impact.analyze_impact(
+            [path],
+            imap,
+            coverage_map=coverage_map,
+        )
+
+        assert result.e2e_models == []
+        assert result.unit_tiers == ["tools"]
+        assert result.tools_tests == [expected_test]
         assert result.fallback_tiers == []
 
     @pytest.mark.parametrize("coverage_map", [None, {}])

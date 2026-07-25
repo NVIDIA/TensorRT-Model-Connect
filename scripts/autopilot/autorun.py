@@ -126,41 +126,18 @@ WORKER_PROMPT = textwrap.dedent("""\
     ownership descriptors and implementations before treating the build as
     evidence.
 
-    ### Validate (3 mandatory gates — ALL must pass)
-    After the bundle builds, you MUST pass ALL THREE validation gates.
-    A bundle that builds but fails any gate is NOT done.
-
-    **Gate 1: C++ binary smoke test**
-    Run the model through the actual C++ binary and verify non-garbage output:
+    ### Preliminary build and smoke loop
+    After the preliminary bundle builds, run it through the actual C++ binary
+    to diagnose runtime behavior:
     ```
-    docker exec trtmc-dev-gb300-{agent_id} ./build/trtmc run /tmp/{family_name}.trtfb \
-        --prompt "The capital of France is" --max-new-tokens 10 \
+    docker exec trtmc-dev-gb300-{agent_id} ./build/trtmc run /tmp/{family_name}.trtfb \\
+        --prompt "The capital of France is" --max-new-tokens 10 \\
         --hf-python /opt/venv/bin/python
     ```
     The output must be coherent text (not empty, not garbage tokens).
-
-    **Gate 2: validate_family.sh (includes diff_logits, diff_layers, runner parity, E2E pytest)**
-    ```
-    docker exec trtmc-dev-gb300-{agent_id} ./scripts/validate_family.sh {hf_id}
-    ```
-    This runs: build → diff_logits battery → diff_layers → C++ runner parity → E2E pytest.
-    ALL steps must PASS. If validate_family.sh fails, the model is NOT done.
-
-    **Gate 3: declarative ownership and strategy consistency**
-    If you created a new runtime strategy, declare the same family-owned key in:
-    - `python/tensorrt_model_connect/families/{family_name}/MODEL.toml`
-    - `src/runtime/models/{family_name}/MODEL.toml`
-    - `tests/e2e/models/{family_name}/manifests/*.json`
-    - `tests/runtime_strategy_matrix.yaml`
-
-    Keep runner, comparator, and reference implementations under
-    `tests/e2e/models/{family_name}/e2e_plugins/`. Validate live repository
-    metadata instead of editing retired central strategy tables:
-    ```
-    docker exec trtmc-dev-gb300-{agent_id} python3 tools/model_ci.py validate
-    docker exec trtmc-dev-gb300-{agent_id} python3 tools/test_impact.py --validate
-    docker exec trtmc-dev-gb300-{agent_id} python3 tools/check_runtime_strategy_matrix.py
-    ```
+    This is preliminary evidence only. It cannot establish PASS before the
+    Python/runtime/E2E descriptors and E2E manifest are complete and every
+    final gate below succeeds.
 
     Reference code for understanding validation:
       tests/e2e/models/<family>/e2e_plugins/  (model-owned E2E behavior)
@@ -216,28 +193,60 @@ WORKER_PROMPT = textwrap.dedent("""\
     Do NOT skip this step. Do NOT mark the E2E manifest with "skip".
     The model must work end-to-end through the C++ binary.
 
-    Then rebuild and re-validate. Keep going until validation passes.
-    Do NOT stop at "build passes but validation fails".
+    Then rebuild and rerun the preliminary smoke check. Keep iterating until
+    the implementation is ready for the complete-capsule final gates below.
 
-    ### Done
-    When ALL THREE validation gates pass, create the E2E manifest at (HOST path):
+    ### Complete descriptors and E2E manifests
+    Before any final gate, complete these model-owned descriptors:
+    - python/tensorrt_model_connect/families/{family_name}/MODEL.toml
+    - src/runtime/models/{family_name}/MODEL.toml
+    - tests/e2e/models/{family_name}/MODEL.toml
+
+    Create the E2E manifest at (HOST path):
     /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/tests/e2e/models/{family_name}/manifests/{family_name}.json
     Also list it in tests/e2e/models/{family_name}/MODEL.toml.
     The manifest must NOT have a "skip" field.
-
-    Then run the final E2E test to confirm:
-    ```
-    docker exec trtmc-dev-gb300-{agent_id} /opt/venv/bin/python -m pytest \
-        tests/e2e/models/{family_name}/test_{family_name}_e2e.py -v \
-        --e2e-model {family_name} \
-        --engine-dir /tmp/trtmc-engines \
-        --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python \
-        --rebuild-engines
-    ```
-    This MUST pass. If it fails, debug and fix. Do NOT report success
-    unless this pytest command exits with 0.
+    If you created a new runtime strategy, declare the same family-owned key in
+    all three descriptors, the E2E manifest, the runtime registrar, and
+    tests/runtime_strategy_matrix.yaml.
 
     {optimize_section}
+
+    ### Final validation gates
+    Run these only after all descriptors and manifests above are complete.
+    First enforce that none are missing:
+    ```
+    docker exec trtmc-dev-gb300-{agent_id} test -f \\
+        python/tensorrt_model_connect/families/{family_name}/MODEL.toml
+    docker exec trtmc-dev-gb300-{agent_id} test -f \\
+        src/runtime/models/{family_name}/MODEL.toml
+    docker exec trtmc-dev-gb300-{agent_id} test -f \\
+        tests/e2e/models/{family_name}/MODEL.toml
+    docker exec trtmc-dev-gb300-{agent_id} test -f \\
+        tests/e2e/models/{family_name}/manifests/{family_name}.json
+    docker exec trtmc-dev-gb300-{agent_id} mkdir -p \\
+        /tmp/trtmc-engines/{family_name}
+    ```
+
+    Then run every gate in this order:
+    ```
+    docker exec trtmc-dev-gb300-{agent_id} ./scripts/validate_family.sh {hf_id} \\
+        --bundle-dir /tmp/trtmc-engines/{family_name} \\
+        --engine-dir /tmp/trtmc-engines/{family_name} \\
+        --max-cache-length 256 --isolate-model-plugin {trust_flag}
+    docker exec trtmc-dev-gb300-{agent_id} python3 tools/model_ci.py validate
+    docker exec trtmc-dev-gb300-{agent_id} python3 tools/test_impact.py --validate
+    docker exec trtmc-dev-gb300-{agent_id} \\
+        python3 tools/check_runtime_strategy_matrix.py
+    docker exec trtmc-dev-gb300-{agent_id} /opt/venv/bin/python -m pytest \\
+        tests/e2e/models/{family_name}/test_{family_name}_e2e.py -v \\
+        --e2e-model {family_name} \\
+        --engine-dir /tmp/trtmc-engines/{family_name} \\
+        --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python \\
+        --rebuild-engines
+    ```
+    If any command fails, debug and repeat the complete final-gate sequence.
+    Do not commit, push, open a PR, or report PASS until every command exits 0.
 
     ### Submit
     After validation passes, prepare a focused commit and GitHub PR:
@@ -385,7 +394,7 @@ def select_tasks(
 _OPTIMIZE_SECTION = """\
 ### Optimize (precision tuning)
 
-    After all validation gates pass, optimize the model for low precision:
+    Before the final validation gates, optimize the model for low precision:
 
     1. Use $optimize-model-precision. If it is not active, read:
        plugins/trtmc-agent-skills/skills/optimize-model-precision/SKILL.md

@@ -6,10 +6,12 @@
 Focus areas:
 
 - Pipeline option and handle validation with thread-local error reporting.
-- `.trtfb` validation followed by registry-based composition through
-  `PipelineFactory::from_bundle`.
+- `.trtfb` validation followed by bundle-kind selection through
+  `PipelineFactory::from_bundle`: embedded optimized-runtime factory or native
+  strategy/plugin composition.
 - C wrappers for pipeline creation and batch image generation.
 - Conversion and ownership rules for C ABI image-result buffers.
 
-Bundle parsing itself lives under `src/bundle/`; runtime strategy resolution
-and model-plugin loading live under `src/runtime/registry/`.
+Bundle parsing itself lives under `src/bundle/`. Optimized-runtime hosting
+lives under `src/runtime/providers/`; native runtime-strategy resolution and
+model-plugin loading live under `src/runtime/registry/`.

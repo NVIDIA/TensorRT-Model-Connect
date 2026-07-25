@@ -17,7 +17,8 @@ flowchart TD
 
 | Goal | Extension point |
 | --- | --- |
-| Add a supported model, even when its task resembles an existing model | Add a Python family package, a unique model-owned runtime strategy/DSO, and an E2E descriptor. |
+| Add native support for a model, even when its task resembles an existing model | Add a Python family package, a unique model-owned runtime strategy/DSO, and an E2E descriptor. |
+| Add a delegated optimized implementation for an existing family | Add a family-owned implementation manifest, exact qualified profile, isolated adapter/runtime DSO, and optimized-runtime producer proof. Do not add a synthetic native strategy for it. |
 | Add behavior or another strategy to an existing model | Extend `src/runtime/models/<owner>/` and its `MODEL.toml`. |
 | Run a new task contract or state model | Extend the public contract only if existing `IPipeline` methods cannot express it, then add the owning model implementation. |
 | Add a new user-facing knob | Add a config schema and consume it in the owning unit. |
@@ -26,6 +27,6 @@ flowchart TD
 
 Before adding a shared abstraction, verify that at least two real owners need
 it. Similar implementation does not mean shared runtime identity: every
-runtime strategy maps to exactly one model manifest and one model DSO. Use E2E
+native runtime strategy maps to exactly one model manifest and one model DSO. Use E2E
 `task_strategy` to group different model implementations of the same
 user-visible task.

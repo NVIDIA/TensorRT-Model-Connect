@@ -160,7 +160,13 @@ flowchart TD
   Bundle --> Assets["assets<br/>tokenizer, preprocessor, kernels, scales"]
 ```
 
-A bundle lets a C++ process load a model without rediscovering the original HuggingFace structure. The runtime still may need helper assets for tokenization or verification, but engine execution is driven by the bundle.
+A bundle lets a C++ process load a model without rediscovering the original
+HuggingFace structure. A native bundle carries `config.json`, TensorRT plans,
+assets, and a `runtime_strategy`; an optimized-runtime bundle carries
+`optimized_runtime.json`, opaque implementation metadata, and a
+content-addressed artifact tree containing its exact implementation DSO. The
+runtime still may need helper assets for tokenization or verification, but
+execution is driven by the bundle.
 
 ## Family, runtime strategy, and task strategy
 
@@ -169,11 +175,12 @@ Three names matter:
 | Name | Example | Meaning |
 | --- | --- | --- |
 | Family plugin | `qwen`, `llama`, `whisper`, `flux` | Python build-time adapter that understands one model family's config, weights, graphs, and bundle sections. |
-| Runtime strategy | `qwen_decoder_kv_cache`, `llama_decoder_kv_cache`, `whisper_speech_to_text`, `diffusion_flux` | Model-owned C++ dispatch key. It selects exactly one runtime model DSO and then one registered `IPipelinePlugin`. |
+| Native runtime strategy | `qwen_decoder_kv_cache`, `llama_decoder_kv_cache`, `whisper_speech_to_text`, `diffusion_flux` | Model-owned native C++ dispatch key. It selects exactly one runtime model DSO and then one registered `IPipelinePlugin`. |
+| Optimized implementation/profile | `qwen.tensorrt-edge-llm` plus an exact qualified profile | Delegated-runtime identity embedded in the bundle. It selects an integrity-checked implementation DSO without native strategy/registry/backend dispatch. |
 | Task strategy | `text_generation_causal`, `speech_to_text`, `diffusion_media_generation` | Shared E2E contract category used to choose runners, comparators, and CLI task shape. It is not runtime dispatch metadata. |
 
-Qwen and LLaMA both implement causal text generation, but they deliberately do
-not share one runtime strategy or DSO. Their E2E manifests share
+On the native path, Qwen and LLaMA both implement causal text generation, but
+they deliberately do not share one runtime strategy or DSO. Their E2E manifests share
 `task_strategy="text_generation_causal"` while their bundles carry
 `qwen_decoder_kv_cache` and `llama_decoder_kv_cache`, respectively.
 
@@ -187,9 +194,10 @@ flowchart LR
   WhisperRuntime --> SpeechTask["speech_to_text task contract"]
 ```
 
-This model-owned boundary is the key extensibility rule in the current
-repository: implementation details stay with the family, while shared tools
-reason about capability labels and task strategies.
+Both paths preserve the same ownership rule: implementation details stay with
+the family, while shared tools reason about capability labels and task
+strategies. Optimized profiles are exact model/revision/target qualifications,
+not generic task strategies.
 
 ## What to learn next
 

@@ -2,9 +2,17 @@
 title: Runtime Plugins
 ---
 
-Runtime plugins convert bundle metadata and model-owned engine sections into
-concrete `IPipeline` instances. Every runtime strategy is owned by one
+This page describes the **native runtime-plugin path**. Native runtime plugins
+convert bundle metadata and model-owned engine sections into concrete
+`IPipeline` instances. Every native runtime strategy is owned by one
 `src/runtime/models/<owner>/MODEL.toml` and loaded from that owner's DSO.
+
+An optimized-runtime bundle is the other supported path. Presence of
+`optimized_runtime.json` makes `PipelineFactory` load the exact embedded
+`libtrtmc_impl_*.so` through `optimized_runtime_host.cpp` before native
+strategy resolution. It does not use the model-plugin index, this registry, or
+a backend DSO. See [Architecture Overview](overview.md#runtime-phase) and
+[Bundle Format](bundle-format.md#optimized-runtime-descriptor).
 
 The model DSO boundary is deliberate. Qwen and LLaMA both implement causal
 generation, but the runtime loads `libtrtmc_model_qwen.so` for
@@ -150,7 +158,7 @@ flowchart LR
 
 | Unit | Owns | Must not own |
 | --- | --- | --- |
-| `PipelineFactory` | Bundle loading, strategy resolution, model/backend DSO loading, config resolution, and construction context. | Model section layouts or request loops. |
+| `PipelineFactory` | Bundle-kind selection; on the native path, strategy resolution, model/backend DSO loading, config resolution, and construction context. | Model section layouts or request loops. |
 | Model plugin DSO | Its declared strategies, construction logic, model helpers, and pipeline implementation. | Sibling-family behavior or undeclared strategies. |
 | `IPipeline` implementation | Request state, preprocessing, engine calls, sampling/scheduling, and typed results. | Global plugin discovery. |
 | Backend DSO | TensorRT runtime selection, engine deserialization, execution contexts, and tensor binding. | Tokenization or model/task policy. |

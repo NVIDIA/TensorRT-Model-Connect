@@ -35,6 +35,44 @@ options.set_tokens = {"runtime.prefer_gpu_greedy=true"};
 auto pipe = trtmc::load("/tmp/model.trtfb", options);
 ```
 
+`load()` supports both bundle shapes. A native bundle uses
+`runtime_strategy`, the model-plugin index, and a backend DSO. A bundle with
+`optimized_runtime.json` instead loads its exact embedded implementation DSO;
+`model_plugin_search_paths` and `backend_search_paths` do not select that
+implementation.
+
+## Concurrent requests
+
+Do not call request methods concurrently on one `IPipeline`. Pipeline
+instances own mutable execution-context, stream, cache/state, and
+adapter-binding data; the public interface does not promise per-instance
+thread safety.
+
+For native bundles, use independent instances or `PipelinePool`:
+
+```cpp
+#include <trtmc/runtime/pipeline_factory.h>
+#include <trtmc/runtime/pipeline_pool.h>
+
+auto pool = trtmc::PipelineFactory::from_bundle_pool(
+    "/tmp/native-model.trtfb", 4);
+
+// Each worker acquires one exclusive, move-only lane for one in-flight request.
+auto lease = pool->acquire();
+auto result = lease->generate("Hello");
+```
+
+`acquire()` waits for an available lane; `try_acquire()` reports exhaustion
+without waiting. Destroying or moving over a lease releases its lane.
+`PipelinePool` keeps mutable execution state isolated per lane and coordinates
+adapter maintenance across lanes.
+
+`from_bundle_pool()` does not support optimized-runtime bundles and throws
+before loading their implementation DSO. The delegated runtime owns its own
+batching and scheduling, so load those bundles with `trtmc::load()` or
+`PipelineFactory::from_bundle()` and follow that provider's concurrency
+contract.
+
 ## Result types
 
 | Type | Returned by |

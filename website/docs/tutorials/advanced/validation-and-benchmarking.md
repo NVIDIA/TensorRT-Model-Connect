@@ -21,18 +21,30 @@ flowchart TB
 ```bash
 ENGINE_DIR=/tmp/trtmc-engines
 mkdir -p "${ENGINE_DIR}"
-pytest 'tests/test_e2e.py::test_e2e[qwen3-0.6b-fp16]' -v \
+PYTHONPATH=python:. python3 -m pytest \
+  'tests/e2e/models/qwen/test_qwen_e2e.py::test_model_e2e[qwen3-0.6b-fp16]' -v \
   --engine-dir "${ENGINE_DIR}" \
-  --trtmc-binary ./build/trtmc
+  --trtmc-binary ./build/trtmc \
+  --model-plugin-dir ./build/models
 ```
 
-The model manifest supplies the family, runtime strategy, bundle name, prompt or modality input, thresholds, reference backend, and test contract.
+For this native case, the model manifest supplies the family, exact
+`runtime_strategy`, bundle name, prompt or modality input, thresholds,
+reference backend, and test contract.
+
+An optimized-runtime case uses a different selection chain:
+`IMPLEMENTATION.toml`, an exact qualified profile under `profiles/*.toml`, and
+a matching `QUALIFICATION.*.toml` producer descriptor. The resulting bundle
+contains `optimized_runtime.json`, implementation metadata, integrity-bound
+artifacts, and an embedded `libtrtmc_impl_*.so`. Its public
+`runtime_strategy` may be empty because it bypasses the native strategy,
+model-DSO, and backend-DSO selection path.
 
 Read the manifest before debugging a failure. It tells you what the test is trying to prove.
 
 | Manifest field category | Why it matters |
 | --- | --- |
-| Model and bundle fields | Identify the artifact and expected strategy. |
+| Model and bundle fields | Identify the artifact and the native strategy or optimized implementation/profile. |
 | Input fields | Define prompt, image, audio, numeric context, or generation settings. |
 | Oracle fields | Define what implementation or verifier is trusted for comparison. |
 | Threshold fields | Define acceptable numerical, textual, image, audio, or task-specific differences. |
@@ -80,7 +92,10 @@ Use tool tests when changing diff tools, report generation, performance comparis
 
 Report:
 
-- GPU, driver, CUDA, TensorRT version, and backend DSO.
+- GPU, driver, CUDA, and TensorRT version.
+- For a native bundle: exact `runtime_strategy`, model DSO, and backend DSO.
+- For an optimized bundle: implementation ID, profile ID,
+  `QUALIFICATION.*.toml` producer, and embedded implementation DSO.
 - Bundle path and build command.
 - Prompt length and generated token count.
 - Whether the number is wall-clock CLI latency, per-token decode time, or raw engine enqueue time.
@@ -94,10 +109,12 @@ flowchart LR
 
 These numbers answer different questions. Do not compare them as if they measure the same thing.
 
-The native `run` command reports a standard timing line with
-`prefill_ms`, `decode_ms`, and `total_ms`; no timing environment variable is
-required. For repeatable CLI-level measurements, use the same benchmark
-command with fixed prompt, warmup count, iteration count, and decoding flags:
+The `run` command prints `setup_ms`, `prefill_ms`, `decode_ms`, and the
+prefill-plus-decode total returned through `TextResult`; no timing environment
+variable is required. Those phase values are provider-reported, not guaranteed
+wall-clock measurements. For repeatable phase measurements when the selected
+pipeline populates them, use the same benchmark command with a fixed prompt,
+warmup count, iteration count, and decoding flags:
 
 ```bash
 ./build/trtmc run /tmp/qwen3.trtfb \
@@ -108,10 +125,18 @@ command with fixed prompt, warmup count, iteration count, and decoding flags:
   --warmup 3
 ```
 
-This timing includes the runtime's measured generation phases; it is not a raw
-TensorRT enqueue-only benchmark. Use a model-specific profiler or benchmark
-worker when engine-only timing is required, and identify that tool explicitly
-in the report.
+The CLI benchmark averages the phase values returned by the pipeline; it does
+not independently time each public call. Native text pipelines commonly
+populate these fields. A provider that cannot expose a trustworthy phase split
+may return zero. The qualified Qwen Edge-LLM adapter does exactly that, so its
+zero prefill/decode values and any throughput derived from them are
+unavailable—not zero-latency results.
+
+When phase timing is unavailable, use a benchmark worker or qualification
+runner that synchronizes the device and measures wall time around the public
+pipeline call. Record that result as public-call wall latency. Use a
+model-specific profiler for engine-only timing, and identify the exact tool and
+measurement boundary in the report.
 
 ## Validation taxonomy
 
@@ -133,12 +158,18 @@ Use this template in reports:
 Model:
 Bundle:
 Family:
+Execution path: native | optimized
 Runtime strategy:
+Implementation ID:
+Profile ID:
+Qualification descriptor:
 Build command:
 Run command:
 GPU:
 Driver/CUDA/TensorRT:
+Model DSO:
 Backend DSO:
+Embedded implementation DSO:
 Input:
 Output length or shape:
 Warmup iterations:

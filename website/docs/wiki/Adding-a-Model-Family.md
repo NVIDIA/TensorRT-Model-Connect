@@ -27,9 +27,15 @@ At minimum, provide:
 - family-local config, checkpoint mapping, graph construction, and debug
   support required by that model
 
-Python discovery scans `families/*/MODEL.toml`. Use an existing family with
-the same task and state shape as a structural example, but do not import
-model-semantic helpers from an unrelated family.
+Python discovery is descriptor-first: it scans `families/*/MODEL.toml` and
+imports bounded candidates selected by aliases, prefixes, or architecture
+patterns. When those routes cannot decide a full config, the current
+compatibility fallback uses `pkgutil` to import all non-private family
+modules/packages and run their matching predicates. A flat module can
+therefore be observed by the fallback, but it still does not satisfy the
+three-descriptor support contract. Use an existing family with the same task
+and state shape as a structural example, but do not import model-semantic
+helpers from an unrelated family.
 
 ## Runtime side
 

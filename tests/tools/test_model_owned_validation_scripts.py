@@ -12,10 +12,31 @@ isolated model-plugin validation.
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _render_autopilot_prompt(filename: str) -> str:
+    module_path = REPO_ROOT / "scripts" / "autopilot" / filename
+    spec = importlib.util.spec_from_file_location(
+        f"test_autopilot_{module_path.stem}",
+        module_path,
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.build_prompt(
+        {
+            "model_type": "unit",
+            "hf_id": "org/unit-model",
+            "family_name": "unit_family",
+        },
+        "agent-9",
+    )
 
 
 def test_validate_family_uses_model_owned_e2e_entrypoint() -> None:
@@ -63,3 +84,42 @@ def test_dispatch_prompt_uses_complete_model_owned_capsule() -> None:
     assert '"user_contract": "continuation_parity"' in text
     assert '"reference_family": "causal_lm"' not in text
     assert '"user_contract": "text_generation"' not in text
+
+
+def test_autopilot_final_gates_follow_manifest_and_precede_submission() -> None:
+    """Final evidence must cover the complete capsule before commit or PASS."""
+    for filename in ("dispatch.py", "autorun.py"):
+        prompt = _render_autopilot_prompt(filename)
+        manifest = "tests/e2e/models/unit_family/manifests/unit_family.json"
+        required_manifest = f"test -f \\\n    {manifest}"
+        prepare_engine_dir = "mkdir -p \\\n    /tmp/trtmc-engines/unit_family"
+        validate_family = "./scripts/validate_family.sh org/unit-model"
+        model_ci = "python3 tools/model_ci.py validate"
+        test_impact = "python3 tools/test_impact.py --validate"
+        runtime_matrix = "python3 tools/check_runtime_strategy_matrix.py"
+        final_e2e = "tests/e2e/models/unit_family/test_unit_family_e2e.py -v"
+        submit = "git fetch github main"
+
+        assert prompt.index(manifest) < prompt.index(required_manifest)
+        assert prompt.index(required_manifest) < prompt.index(prepare_engine_dir)
+        assert prompt.index(prepare_engine_dir) < prompt.index(validate_family)
+        assert prompt.index(validate_family) < prompt.index(model_ci)
+        assert prompt.index(model_ci) < prompt.index(test_impact)
+        assert prompt.index(test_impact) < prompt.index(runtime_matrix)
+        assert prompt.index(runtime_matrix) < prompt.index(final_e2e)
+        assert prompt.index(final_e2e) < prompt.index(submit)
+
+        validate_block = prompt[prompt.index(validate_family) : prompt.index(model_ci)]
+        assert "--bundle-dir /tmp/trtmc-engines/unit_family" in validate_block
+        assert "--engine-dir /tmp/trtmc-engines/unit_family" in validate_block
+        assert "--isolate-model-plugin" in validate_block
+
+        for descriptor in (
+            "python/tensorrt_model_connect/families/unit_family/MODEL.toml",
+            "src/runtime/models/unit_family/MODEL.toml",
+            "tests/e2e/models/unit_family/MODEL.toml",
+        ):
+            assert f"test -f \\\n    {descriptor}" in prompt
+
+        if filename == "dispatch.py":
+            assert prompt.index(runtime_matrix) < prompt.index('"status": "PASS"')

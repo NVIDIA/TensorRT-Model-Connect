@@ -1,7 +1,10 @@
 # Model E2E Task Checklist
 
-Use this checklist for single-model bring-up. The three model-owned
-descriptors, not a generic strategy table, define the contract.
+Use this checklist for a native single-model bring-up. The three model-owned
+descriptors, not a generic strategy table, define that contract. A delegated
+optimized-runtime qualification instead adds a family-owned implementation
+manifest/profile and `QUALIFICATION.*.toml`; use its producer proof in
+addition to, not as a replacement for, the native support inventory.
 
 ## Inputs
 
@@ -23,7 +26,7 @@ generation uses `qwen_decoder_kv_cache`.
 ## Required implementation evidence
 
 1. The Python descriptor resolves the intended checkpoint family.
-2. The bundle records the exact family-owned `runtime_strategy`.
+2. The native bundle records the exact family-owned `runtime_strategy`.
 3. The runtime descriptor maps that strategy to a model DSO and registration
    symbol.
 4. CMake discovers the descriptor without a central plugin-list edit.

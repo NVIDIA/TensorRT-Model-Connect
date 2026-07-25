@@ -139,8 +139,9 @@ Checks:
   `python/tensorrt_model_connect/...`, `tests/...`, and `include/...` exist.
   For moved paths, use `git log --follow --diff-filter=R -- <old_path>`.
 - Verify backtick-quoted class, function, and strategy names exist.
-- Update numeric claims, including runtime strategy count, family plugin count,
-  and E2E manifest count.
+- Update numeric claims while keeping inventories distinct: native runtime
+  strategy/family/E2E-manifest counts versus exact qualified optimized
+  implementation/profile counts.
 - Promote old `Proposed` ADRs to `Accepted` only when the described decision is
   clearly implemented.
 - Mark ADRs `Superseded` when a newer ADR describes the replacement.
@@ -154,6 +155,7 @@ Ground truth commands:
 ```bash
 rg -n "PluginRegistrar|trtmc_register_model_plugin" \
   include/trtmc/runtime src/runtime/registry src/runtime/models \
+  src/runtime/providers \
   --glob "*.h" --glob "*.cpp"
 find python/tensorrt_model_connect/families -mindepth 2 -maxdepth 2 \
   \( -name "MODEL.toml" -o -name "plugin.py" \) | sort
@@ -161,7 +163,19 @@ find src/runtime/models -mindepth 2 -maxdepth 2 \
   \( -name "MODEL.toml" -o -name "plugin.cpp" \) | sort
 find tests/e2e/models -mindepth 3 -maxdepth 3 \
   -path "*/manifests/*.json" | sort
+find python/tensorrt_model_connect/families -mindepth 3 -maxdepth 3 \
+  -name "IMPLEMENTATION.toml" | sort
+find python/tensorrt_model_connect/families -mindepth 4 -maxdepth 4 \
+  -path "*/profiles/*.toml" | sort
+find tests/e2e/models -mindepth 3 -maxdepth 3 \
+  -name "QUALIFICATION.*.toml" | sort
 ```
+
+The three `MODEL.toml` roots and `runtime_strategy` inventory define native
+support. A delegated optimized implementation for an existing family instead
+uses its family-local `IMPLEMENTATION.toml`, exact profile TOMLs, isolated
+adapter/runtime DSO, and `QUALIFICATION.*.toml`; do not require or document a
+synthetic native strategy for it.
 
 PR body should summarize changed ADR numbers, status changes, index updates, and
 any deprecated/superseded rationale.
@@ -181,7 +195,13 @@ find python/tensorrt_model_connect/families -mindepth 2 -maxdepth 2 \
 find src/runtime/models -mindepth 2 -maxdepth 2 -name "MODEL.toml" | sort
 find tests/e2e/models -mindepth 3 -maxdepth 3 \
   -path "*/manifests/*.json" | sort
-find src/runtime/models src/runtime/registry -type f \
+find python/tensorrt_model_connect/families -mindepth 3 -maxdepth 3 \
+  -name "IMPLEMENTATION.toml" | sort
+find python/tensorrt_model_connect/families -mindepth 4 -maxdepth 4 \
+  -path "*/profiles/*.toml" | sort
+find tests/e2e/models -mindepth 3 -maxdepth 3 \
+  -name "QUALIFICATION.*.toml" | sort
+find src/runtime/models src/runtime/registry src/runtime/providers -type f \
   \( -name "*.h" -o -name "*.cpp" \) | sort
 find tests/builder tests/tools -type f -name "test_*.py" | sort
 find tests/cpp -type f -name "test_*.cpp" | sort
@@ -198,6 +218,12 @@ find python/tensorrt_model_connect/families -mindepth 2 -maxdepth 2 \
 find src/runtime/models -mindepth 2 -maxdepth 2 -name "MODEL.toml" | wc -l
 find tests/e2e/models -mindepth 3 -maxdepth 3 \
   -path "*/manifests/*.json" | wc -l
+find python/tensorrt_model_connect/families -mindepth 3 -maxdepth 3 \
+  -name "IMPLEMENTATION.toml" | wc -l
+find python/tensorrt_model_connect/families -mindepth 4 -maxdepth 4 \
+  -path "*/profiles/*.toml" | wc -l
+find tests/e2e/models -mindepth 3 -maxdepth 3 \
+  -name "QUALIFICATION.*.toml" | wc -l
 find tests/builder -type f -name "test_*.py" | wc -l
 find tests/tools -type f -name "test_*.py" | wc -l
 find tests/cpp -type f -name "test_*.cpp" | wc -l
@@ -208,8 +234,18 @@ Rules:
 - Counts and file paths can be fixed mechanically.
 - Behavioral descriptions require reading the implementation first.
 - Strategy tables must match the actual registry.
-- Family/plugin lists must match current family files.
-- Manifest schema examples must match real manifests.
+- Native family/plugin lists must match the three current `MODEL.toml` roots.
+- Native E2E examples must match real JSON manifests. Optimized examples must
+  separately match `IMPLEMENTATION.toml`, profile TOMLs, and
+  `QUALIFICATION.*.toml`.
+- Python discovery descriptions must state the actual two-stage behavior:
+  descriptor-first candidate imports, followed by the all-package `pkgutil`
+  compatibility fallback when candidate resolution does not find a match.
+- Build descriptions must state that optimized discovery is bounded to the
+  selected family, zero claims continue to native, and a selected adapter's
+  failure is terminal.
+- Optimized bundles use `optimized_runtime.json` and an embedded
+  `libtrtmc_impl_*.so`; `runtime_strategy` may be empty.
 - File paths and symbols added to docs must exist.
 
 Page-specific checks:
@@ -217,6 +253,7 @@ Page-specific checks:
 | Page | Checks |
 |------|--------|
 | `Architecture-Overview.md` | Strategy/family counts, strategy tables, dispatch description, dead paths/symbols |
+| `Architecture-Extensibility-Assessment.md` | Native three-descriptor ownership versus exact optimized implementation/profile ownership; descriptor-first discovery plus `pkgutil` fallback |
 | `Source-Layout.md` | Directory tree, plugin/pipeline tables, file counts |
 | `Testing-and-Validation.md` | Test layers, key files, test counts, E2E manifest count/schema |
 | `Traceability-Matrix.md` | Trace IDs, source/test paths, strategy lists, E2E manifest references |
@@ -243,6 +280,13 @@ Scan E2E manifests and source files:
 ```bash
 find tests/e2e/models -mindepth 3 -maxdepth 3 \
   -path "*/manifests/*.json" | sort
+find python/tensorrt_model_connect/families -mindepth 3 -maxdepth 3 \
+  -name "IMPLEMENTATION.toml" | sort
+find python/tensorrt_model_connect/families -mindepth 4 -maxdepth 4 \
+  -path "*/profiles/*.toml" | sort
+find tests/e2e/models -mindepth 3 -maxdepth 3 \
+  -name "QUALIFICATION.*.toml" | sort
+find src/runtime/providers -type f \( -name "*.cpp" -o -name "*.h" \) | sort
 find src -type f \( -name "*.cpp" -o -name "*.h" \) | sort
 find python/tensorrt_model_connect -type f -name "*.py" \
   -not -name "__init__.py" | sort
@@ -256,6 +300,9 @@ Fixes:
 - Link unverified `ARCH-*` entries when tests exist; otherwise record a gap.
 - Add missing `UD-*` rows for uncovered source files.
 - Add missing `IT-E2E-*` rows for unlinked manifests.
+- Link optimized implementation/profile behavior to its capsule contract tests
+  and producer qualification descriptor; do not count those descriptors as
+  native E2E JSON manifests.
 - Fix malformed trace IDs.
 - Recalculate matrix coverage metrics after edits.
 

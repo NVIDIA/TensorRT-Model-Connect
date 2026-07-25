@@ -5,12 +5,12 @@ repository's validation loop.
 
 | Concern | Hugging Face reference | TensorRT-Model-Connect |
 | --- | --- | --- |
-| Model execution | Framework model executes eagerly/compiled | Python builds TensorRT; C++ executes bundle |
+| Model execution | Framework model executes eagerly/compiled | Python builds native TensorRT plans or invokes an exact qualified provider; C++ executes the bundle through `IPipeline` |
 | Family selection | Transformers auto classes/config | Family `MODEL.toml` plus plugin matching |
-| Weights | Framework modules load checkpoint tensors | Family checkpoint mapper feeds TensorRT graph |
+| Weights | Framework modules load checkpoint tensors | Native family mapper feeds a TensorRT graph, or a qualified family adapter owns conversion |
 | Artifact | Checkpoint/config/tokenizer | Self-describing `.trtfb` bundle |
-| Runtime dispatch | Python model class | Bundle strategy to model DSO/plugin |
-| State | Framework cache/model objects | Family-owned C++ runtime state |
+| Runtime dispatch | Python model class | Native strategy to model DSO/plugin, or `optimized_runtime.json` to the embedded implementation DSO |
+| State | Framework cache/model objects | Native family-owned state or delegated implementation-owned state behind `IPipeline` |
 | Validation role | External reference oracle | System under test |
 
 ## Build and run
@@ -26,8 +26,11 @@ PYTHONPATH=python python3 -m tensorrt_model_connect build \
 ```
 
 The first command needs the Python/TensorRT build environment and checkpoint
-access. The second needs the compiled CLI, TensorRT/CUDA, a compatible GPU, and
-the Qwen model DSO.
+access. On an exact qualified target it may produce an optimized-runtime
+bundle; otherwise it uses the native Qwen builder. The second needs the
+compiled CLI, TensorRT/CUDA, and a compatible GPU. A native bundle additionally
+needs the Qwen model/backend DSOs; an optimized bundle carries its exact
+implementation DSO and artifact tree.
 
 ## Parity
 

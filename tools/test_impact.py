@@ -1290,9 +1290,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="e2e_model_owned_test",
             # A public E2E family directory is an ownership boundary for every
             # file type; more specific manifest and asset rules run first.
-            matcher=_regex_rule(
-                r"tests/e2e/models/([^/]+)/.+$"
-            ),
+            matcher=_regex_rule(r"tests/e2e/models/([^/]+)/.+$"),
             resolver=_match_result("e2e_model_owned_test", _family_models),
             covered_by=(
                 "TestSafetyNet.test_e2e_model_owned_test_self",
@@ -1821,15 +1819,20 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ClassificationRule(
             priority=449,
             name="e2e_report_tool",
-            matcher=_path_in({
-                "scripts/generate_e2e_report.py",
-                "scripts/generate_e2e_report_assets/e2e_report.css",
-                "scripts/generate_e2e_report_assets/e2e_report.js",
-                "scripts/reporting/__init__.py",
-                "scripts/reporting/vlm_assessment.py",
-            }),
+            matcher=_path_in(
+                {
+                    "scripts/generate_e2e_report.py",
+                    "scripts/generate_e2e_report_assets/e2e_report.css",
+                    "scripts/generate_e2e_report_assets/e2e_report.js",
+                    "scripts/reporting/__init__.py",
+                    "scripts/reporting/vlm_assessment.py",
+                }
+            ),
             resolver=_match_result(
-                "e2e_report_tool", _no_models, ["tools"], False,
+                "e2e_report_tool",
+                _no_models,
+                ["tools"],
+                False,
             ),
             covered_by=("TestUnitTiers.test_e2e_report_tools",),
         ),
@@ -1883,11 +1886,32 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestE2EDataFiles.test_data_file_maps_to_manifest_users",),
         ),
         ClassificationRule(
+            priority=482,
+            name="documentation_validation_tool",
+            matcher=_path_in(
+                {
+                    "tools/check_doc_commands.py",
+                    "tools/check_doc_file_references.py",
+                    "tools/check_runtime_strategy_matrix.py",
+                }
+            ),
+            resolver=_match_result(
+                "documentation_validation_tool",
+                _no_models,
+                ["tools"],
+                False,
+            ),
+            covered_by=("TestUnitTiers.test_documentation_validation_tools",),
+        ),
+        ClassificationRule(
             priority=483,
             name="nightly_issue_tracker_tool",
             matcher=_path_equals("tools/nightly_issue_tracker.py"),
             resolver=_match_result(
-                "nightly_issue_tracker_tool", _no_models, ["tools"], False,
+                "nightly_issue_tracker_tool",
+                _no_models,
+                ["tools"],
+                False,
             ),
             covered_by=("TestUnitTiers.test_nightly_issue_tracker_tool",),
         ),
@@ -1896,7 +1920,10 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="nightly_artifact_selector_tool",
             matcher=_path_equals("tools/select_latest_attempt_artifact.py"),
             resolver=_match_result(
-                "nightly_artifact_selector_tool", _no_models, ["tools"], False,
+                "nightly_artifact_selector_tool",
+                _no_models,
+                ["tools"],
+                False,
             ),
             covered_by=("TestUnitTiers.test_nightly_artifact_selector_tool",),
         ),
@@ -1905,19 +1932,24 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="model_ci_tool",
             matcher=_path_equals("tools/model_ci.py"),
             resolver=_match_result(
-                "model_ci_tool", _no_models, ["tools"], False,
+                "model_ci_tool",
+                _no_models,
+                ["tools"],
+                False,
             ),
             covered_by=("TestUnitTiers.test_model_ci_tool",),
         ),
         ClassificationRule(
             priority=486,
             name="task_eval_tool",
-            matcher=_path_in({
-                "tools/task_eval.py",
-                "tools/elf_hf_reference.py",
-                "tools/prepare_elf_task_eval_datasets.py",
-                "tools/prepare_media_task_eval_datasets.py",
-            }),
+            matcher=_path_in(
+                {
+                    "tools/task_eval.py",
+                    "tools/elf_hf_reference.py",
+                    "tools/prepare_elf_task_eval_datasets.py",
+                    "tools/prepare_media_task_eval_datasets.py",
+                }
+            ),
             resolver=_match_result("task_eval_tool", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_task_eval_tool_triggers_tools_tier",),
         ),
@@ -2022,6 +2054,11 @@ def _direct_python_test_targets(changed_files: List[str]) -> tuple[List[str], Li
 
 
 _EXPLICIT_TOOLS_TEST_TARGETS = {
+    "tools/check_doc_commands.py": ("tests/tools/test_check_doc_commands.py",),
+    "tools/check_doc_file_references.py": ("tests/tools/test_check_doc_file_references.py",),
+    "tools/check_runtime_strategy_matrix.py": (
+        "tests/tools/test_runtime_strategy_matrix_checker.py",
+    ),
     "tools/nightly_issue_tracker.py": (
         "tests/tools/test_github_actions_ci.py",
         "tests/tools/test_nightly_issue_tracker.py",
@@ -2030,37 +2067,19 @@ _EXPLICIT_TOOLS_TEST_TARGETS = {
         "tests/tools/test_github_actions_ci.py",
         "tests/tools/test_select_latest_attempt_artifact.py",
     ),
-    "tools/model_ci.py": (
-        "tests/tools/test_model_ci.py",
-    ),
-    "scripts/generate_e2e_report.py": (
-        "tests/tools/test_generate_report.py",
-    ),
-    "scripts/generate_e2e_report_assets/e2e_report.css": (
-        "tests/tools/test_generate_report.py",
-    ),
-    "scripts/generate_e2e_report_assets/e2e_report.js": (
-        "tests/tools/test_generate_report.py",
-    ),
-    "scripts/reporting/__init__.py": (
-        "tests/tools/test_generate_report.py",
-    ),
-    "scripts/reporting/vlm_assessment.py": (
-        "tests/tools/test_generate_report.py",
-    ),
+    "tools/model_ci.py": ("tests/tools/test_model_ci.py",),
+    "scripts/generate_e2e_report.py": ("tests/tools/test_generate_report.py",),
+    "scripts/generate_e2e_report_assets/e2e_report.css": ("tests/tools/test_generate_report.py",),
+    "scripts/generate_e2e_report_assets/e2e_report.js": ("tests/tools/test_generate_report.py",),
+    "scripts/reporting/__init__.py": ("tests/tools/test_generate_report.py",),
+    "scripts/reporting/vlm_assessment.py": ("tests/tools/test_generate_report.py",),
     "tools/ci/e2e_scheduler.py": (
         "tests/tools/test_github_actions_ci.py",
         "tests/tools/test_schedule_e2e.py",
     ),
-    "tools/ci/e2e_schedule.py": (
-        "tests/tools/test_schedule_e2e.py",
-    ),
-    "scripts/hf_cache_download_worker.py": (
-        "tests/tools/test_warm_hf_cache_static.py",
-    ),
-    "scripts/warm_hf_cache.py": (
-        "tests/tools/test_warm_hf_cache_static.py",
-    ),
+    "tools/ci/e2e_schedule.py": ("tests/tools/test_schedule_e2e.py",),
+    "scripts/hf_cache_download_worker.py": ("tests/tools/test_warm_hf_cache_static.py",),
+    "scripts/warm_hf_cache.py": ("tests/tools/test_warm_hf_cache_static.py",),
     "tests/e2e_harness/model_runner.py": ("tests/tools/test_model_e2e_runner.py",),
 }
 

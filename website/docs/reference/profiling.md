@@ -2,8 +2,9 @@
 
 The supported profiling entry point is `tools/trtmc_profile.py`. It compares
 the repository's Python TensorRT runner with Hugging Face eager execution and,
-unless disabled, `torch.compile`. A prebuilt bundle can also be measured
-through the compiled C++ CLI.
+unless disabled, `torch.compile`. Its prebuilt-bundle loader currently supports
+only the native bundle shape described below; it is not a generic profiler for
+optimized-runtime bundles.
 
 Run profiling in the project development image or another environment that
 contains TensorRT, CUDA, PyTorch, Transformers, and the model checkpoint.
@@ -23,7 +24,7 @@ PYTHONPATH=python:. python3 tools/trtmc_profile.py \
   --json
 ```
 
-Profile an existing bundle and include the C++ runtime:
+Profile an existing native bundle and include the C++ runtime:
 
 ```bash
 PYTHONPATH=python:. python3 tools/trtmc_profile.py \
@@ -38,11 +39,33 @@ PYTHONPATH=python:. python3 tools/trtmc_profile.py \
   --json
 ```
 
-`--trtmc-binary` requires `--bundle`. Use `--hf-python /path/to/python` only
-when that runtime needs a Python helper. Add `--trust-remote-code` only after
-reviewing the checkpoint repository. `--no-compile` skips the
-`torch.compile` comparison, and `--no-layer-profile` skips the TensorRT
-`IProfiler` pass.
+The current `--bundle` path requires a top-level `engine_plan` section plus
+`config.json` with a nonempty native `runtime_strategy`; it explicitly rejects
+the `vision_language` strategy. Split-plan and optimized-runtime bundle shapes
+do not satisfy this loader. `--trtmc-binary` requires `--bundle` and does not
+bypass that Python-side load.
+
+Use `--hf-python /path/to/python` only when the native runtime needs a Python
+helper. Add `--trust-remote-code` only after reviewing the checkpoint
+repository. `--no-compile` skips the `torch.compile` comparison, and
+`--no-layer-profile` skips the TensorRT `IProfiler` pass.
+
+For an optimized-runtime bundle, use its family-owned qualification workflow
+and the public C++ benchmark path instead:
+
+```bash
+./build/trtmc run /path/to/optimized.trtfb \
+  --prompt "The capital of France is" \
+  --max-new-tokens 20 \
+  --warmup 1 \
+  --benchmark 3
+```
+
+Record the qualified implementation/profile identity, exact bundle and commit,
+target, downstream runtime, prompt, warmup/iteration counts, and the
+provider-owned timing artifact. The public inspector currently confirms
+optimized descriptor/artifact section presence but does not print descriptor
+identity values.
 
 With `--json`, the command writes:
 

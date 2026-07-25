@@ -5,9 +5,11 @@
 """Validate shell examples in Git-tracked Markdown documentation.
 
 The checker is deliberately non-executing: it parses every ``bash``, ``sh``,
-or ``shell`` fenced block with ``bash -n`` and verifies repository-local
-scripts and search/test input paths. Commands that need a GPU, model download,
-credentials, services, or generated artifacts remain runtime validation work.
+or ``shell`` fenced block with ``bash -n``; verifies repository-local scripts,
+search/test inputs, and explicit positional inputs; and checks statically
+discoverable CLI subcommands, option scope/arity, choices, and required inputs.
+Commands that need a GPU, model download, credentials, services, or generated
+artifacts remain runtime validation work.
 
 Usage:
     python3 tools/check_doc_commands.py
@@ -24,6 +26,7 @@ import subprocess
 import sys
 import textwrap
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -104,6 +107,50 @@ class Finding:
 
     def __str__(self) -> str:
         return f"{self.path}:{self.line}: {self.message}"
+
+
+@dataclass(frozen=True)
+class OptionSpec:
+    """Static command-line option contract."""
+
+    aliases: tuple[str, ...]
+    min_values: int = 1
+    max_values: int | None = 1
+    choices: frozenset[str] = frozenset()
+    required: bool = False
+    allow_inline_value: bool = True
+    consume_option_like_value: bool = False
+
+
+@dataclass(frozen=True)
+class PositionalSpec:
+    """Static positional-argument contract."""
+
+    name: str
+    min_values: int = 1
+    max_values: int | None = 1
+
+
+@dataclass
+class CommandSpec:
+    """Arguments accepted by one command or subcommand."""
+
+    options: dict[str, OptionSpec]
+    positionals: list[PositionalSpec]
+    required_any: list[tuple[frozenset[str], str]]
+
+    @classmethod
+    def empty(cls) -> CommandSpec:
+        return cls(options={}, positionals=[], required_any=[])
+
+
+@dataclass
+class ProgramSpec:
+    """Root and subcommand contracts extracted from one CLI implementation."""
+
+    root: CommandSpec
+    commands: dict[str, CommandSpec]
+    command_required: bool = False
 
 
 def is_vendored_fixture_document(path: Path) -> bool:
@@ -382,62 +429,354 @@ def check_local_inputs(block: ShellBlock, repo_root: Path) -> list[Finding]:
     return findings
 
 
-def _python_cli_contract(
-    repo_root: Path,
-) -> tuple[set[str], dict[str, set[str]]]:
-    source = repo_root / "python" / "tensorrt_model_connect" / "build_cli.py"
-    if not source.is_file():
-        return set(), {}
-    tree = ast.parse(source.read_text(encoding="utf-8"))
-    parser_variables: dict[str, str] = {}
-    flags: dict[str, set[str]] = {}
-    commands: set[str] = set()
+def _constant(node: ast.AST | None) -> object | None:
+    if isinstance(node, ast.Constant):
+        return node.value
+    return None
+
+
+def _call_keyword(call: ast.Call, name: str) -> ast.AST | None:
+    for keyword in call.keywords:
+        if keyword.arg == name:
+            return keyword.value
+    return None
+
+
+def _argument_spec(call: ast.Call) -> OptionSpec | PositionalSpec | None:
+    names = tuple(
+        argument.value
+        for argument in call.args
+        if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+    )
+    if not names:
+        return None
+
+    action = _constant(_call_keyword(call, "action"))
+    nargs = _constant(_call_keyword(call, "nargs"))
+    if action in {
+        "append_const",
+        "count",
+        "help",
+        "store_const",
+        "store_false",
+        "store_true",
+        "version",
+    }:
+        min_values, max_values = 0, 0
+    elif isinstance(nargs, int):
+        min_values = max_values = nargs
+    elif nargs == "?":
+        min_values, max_values = 0, 1
+    elif nargs == "*":
+        min_values, max_values = 0, None
+    elif nargs == "+":
+        min_values, max_values = 1, None
+    else:
+        min_values = max_values = 1
+
+    literal_choices = _literal_choices(_call_keyword(call, "choices") or ast.Constant(None))
+    is_option = any(name.startswith("-") for name in names)
+    if not is_option:
+        return PositionalSpec(names[0], min_values, max_values)
+
+    aliases = tuple(name for name in names if name.startswith("-"))
+    return OptionSpec(
+        aliases=aliases,
+        min_values=min_values,
+        max_values=max_values,
+        choices=frozenset(literal_choices),
+        required=_constant(_call_keyword(call, "required")) is True,
+    )
+
+
+def _assigned_name(node: ast.Assign | ast.AnnAssign) -> str | None:
+    if isinstance(node, ast.Assign):
+        if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            return None
+        return node.targets[0].id
+    return node.target.id if isinstance(node.target, ast.Name) else None
+
+
+def _assigned_call(node: ast.AST) -> tuple[str, ast.Call] | None:
+    if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+        return None
+    name = _assigned_name(node)
+    value = node.value
+    if name is None or not isinstance(value, ast.Call):
+        return None
+    return name, value
+
+
+def _is_call_named(call: ast.Call, name: str) -> bool:
+    if isinstance(call.func, ast.Name):
+        return call.func.id == name
+    return isinstance(call.func, ast.Attribute) and call.func.attr == name
+
+
+@lru_cache(maxsize=None)
+def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
+    """Extract root/subcommand argparse contracts without importing a script."""
+    if not script_path.is_file():
+        return None
+    try:
+        tree = ast.parse(script_path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return None
+
+    assignments = [
+        assigned for node in ast.walk(tree) if (assigned := _assigned_call(node)) is not None
+    ]
+    parser_variables: dict[str, str | None] = {}
+    for variable, call in assignments:
+        if _is_call_named(call, "ArgumentParser"):
+            parser_variables[variable] = None
+    subparser_variables: dict[str, str | None] = {}
+    for variable, call in assignments:
+        if not (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr == "add_subparsers"
+            and isinstance(call.func.value, ast.Name)
+        ):
+            continue
+        owner = call.func.value.id
+        if owner in parser_variables:
+            subparser_variables[variable] = parser_variables[owner]
     for node in ast.walk(tree):
         if (
-            isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-            and isinstance(node.value, ast.Call)
-            and isinstance(node.value.func, ast.Attribute)
-            and node.value.func.attr == "add_parser"
-            and node.value.args
-            and isinstance(node.value.args[0], ast.Constant)
-            and isinstance(node.value.args[0].value, str)
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_parser"
+            and isinstance(node.func.value, ast.Name)
         ):
-            command = node.value.args[0].value
-            commands.add(command)
-            parser_variables[node.targets[0].id] = command
-            flags.setdefault(command, set())
+            subparser_variables.setdefault(node.func.value.id, None)
+
+    commands: dict[str, CommandSpec] = {}
+    for variable, call in assignments:
+        if not (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr == "add_parser"
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id in subparser_variables
+            and call.args
+            and isinstance(call.args[0], ast.Constant)
+            and isinstance(call.args[0].value, str)
+        ):
             continue
-        if not isinstance(node, ast.Call):
-            continue
-        if not isinstance(node.func, ast.Attribute):
-            continue
-        if node.func.attr == "add_parser" and node.args:
-            argument = node.args[0]
-            if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
-                commands.add(argument.value)
-        if node.func.attr == "add_argument":
-            owner = node.func.value
-            if not isinstance(owner, ast.Name):
+        command = call.args[0].value
+        parser_variables[variable] = command
+        commands.setdefault(command, CommandSpec.empty())
+
+    argument_containers = dict(parser_variables)
+    mutually_exclusive_groups: dict[str, tuple[str | None, bool]] = {}
+    unresolved_groups = True
+    while unresolved_groups:
+        unresolved_groups = False
+        for variable, call in assignments:
+            if (
+                variable in argument_containers
+                or not isinstance(call.func, ast.Attribute)
+                or call.func.attr not in {"add_argument_group", "add_mutually_exclusive_group"}
+                or not isinstance(call.func.value, ast.Name)
+            ):
                 continue
-            command = parser_variables.get(owner.id)
-            if command is None:
+            owner = call.func.value.id
+            if owner not in argument_containers:
                 continue
-            for argument in node.args:
-                if (
-                    isinstance(argument, ast.Constant)
-                    and isinstance(argument.value, str)
-                    and argument.value.startswith("-")
-                ):
-                    flags.setdefault(command, set()).add(argument.value)
-    return commands, flags
+            command = argument_containers[owner]
+            argument_containers[variable] = command
+            if call.func.attr == "add_mutually_exclusive_group":
+                mutually_exclusive_groups[variable] = (
+                    command,
+                    _constant(_call_keyword(call, "required")) is True,
+                )
+            unresolved_groups = True
+
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_parser"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in subparser_variables
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            continue
+        commands.setdefault(node.args[0].value, CommandSpec.empty())
+
+    if not parser_variables and not commands:
+        return None
+
+    root = CommandSpec.empty()
+    mutually_exclusive_options: dict[str, list[OptionSpec]] = {
+        variable: [] for variable in mutually_exclusive_groups
+    }
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_argument"
+            and isinstance(node.func.value, ast.Name)
+        ):
+            continue
+        owner = node.func.value.id
+        if owner not in argument_containers:
+            continue
+        argument = _argument_spec(node)
+        if argument is None:
+            continue
+        command = argument_containers[owner]
+        target = root if command is None else commands.setdefault(command, CommandSpec.empty())
+        if isinstance(argument, OptionSpec):
+            for alias in argument.aliases:
+                target.options[alias] = argument
+            if owner in mutually_exclusive_options:
+                mutually_exclusive_options[owner].append(argument)
+        else:
+            target.positionals.append(argument)
+
+    for variable, (command, required) in mutually_exclusive_groups.items():
+        options = mutually_exclusive_options[variable]
+        if not required or not options:
+            continue
+        aliases = frozenset(alias for option in options for alias in option.aliases)
+        preferred = [option.aliases[-1] for option in options]
+        if len(preferred) == 1:
+            description = preferred[0]
+        elif len(preferred) == 2:
+            description = f"{preferred[0]} or {preferred[1]}"
+        else:
+            description = f"{', '.join(preferred[:-1])}, or {preferred[-1]}"
+        target = root if command is None else commands.setdefault(command, CommandSpec.empty())
+        target.required_any.append((aliases, description))
+
+    help_option = OptionSpec(aliases=("-h", "--help"), min_values=0, max_values=0)
+    root.options.setdefault("-h", help_option)
+    root.options.setdefault("--help", help_option)
+    command_required = any(
+        _constant(_call_keyword(call, "required")) is True
+        for _variable, call in assignments
+        if isinstance(call.func, ast.Attribute) and call.func.attr == "add_subparsers"
+    )
+    return ProgramSpec(
+        root=root,
+        commands=commands,
+        command_required=command_required,
+    )
 
 
-def _runtime_cli_contract(repo_root: Path) -> tuple[set[str], set[str]]:
+def _python_cli_contract(repo_root: Path) -> ProgramSpec | None:
+    source = repo_root / "python" / "tensorrt_model_connect" / "build_cli.py"
+    return _argparse_program_contract(source)
+
+
+_RUNTIME_FLAG_OPTIONS = {
+    "--background",
+    "--chat-template",
+    "--cuda-graphs",
+    "--greedy",
+    "--list-engines",
+    "--no-punctuation",
+    "--no-thinking",
+    "--no-timestamps",
+    "--pad-and-drop-preencoded",
+    "--punctuation",
+    "--stream",
+    "--timestamps",
+    "-h",
+    "--help",
+    "-v",
+    "--version",
+}
+_RUNTIME_COMMON_OPTIONS = {
+    "--backend-dir",
+    "--config",
+    "--cuda-graphs",
+    "--model-plugin-dir",
+    "--runtime-cache",
+    "--set",
+}
+_RUNTIME_REQUIRED_OPTIONS: dict[str, tuple[tuple[set[str], str], ...]] = {
+    "run": (
+        (
+            {"--prompt", "-p", "--prompts-file", "--initial-latents-raw"},
+            "--prompt, --prompts-file, or --initial-latents-raw",
+        ),
+    ),
+    "encode": (({"--prompt", "-p"}, "--prompt"),),
+    "segment": (({"--image"}, "--image"),),
+    "segment-prompted": (({"--image"}, "--image"),),
+    "classify": (({"--image"}, "--image"),),
+    "detect": (({"--image"}, "--image"),),
+    "generate-audio": (({"--prompt", "-p"}, "--prompt"),),
+    "generate-video": (({"--prompt", "-p"}, "--prompt"),),
+    "embed": (({"--prompt", "-p"}, "--prompt"),),
+    "rerank": (
+        ({"--prompt", "-p"}, "--prompt"),
+        ({"--document"}, "--document"),
+    ),
+    "solve": (({"--field-input", "--branch-input"}, "--field-input or --branch-input"),),
+    "speak": (({"--audio-in", "--audio"}, "--audio-in or --audio"),),
+    "transcribe": (({"--audio", "--audio-in"}, "--audio or --audio-in"),),
+}
+
+
+def _runtime_help_scopes(content: str) -> dict[str, set[str]]:
+    """Derive command option scopes from the native CLI's usage text."""
+    usage_function = re.search(
+        r"void print_usage\(\)\s*\{(?P<body>.*?)\n\}",
+        content,
+        re.DOTALL,
+    )
+    if usage_function is None:
+        return {}
+    fragments = re.findall(r'"((?:\\.|[^"\\])*)"', usage_function.group("body"))
+    help_text = "".join(bytes(fragment, "utf-8").decode("unicode_escape") for fragment in fragments)
+    scopes: dict[str, set[str]] = {}
+    current: str | None = None
+    in_global_options = False
+    global_options: set[str] = set()
+    for line in help_text.splitlines():
+        command_match = re.match(r"\s*trtmc\s+([a-z][a-z0-9-]*)\b", line)
+        if command_match:
+            current = command_match.group(1)
+            in_global_options = False
+            scopes.setdefault(current, set()).update(
+                re.findall(r"(?<![A-Za-z0-9_])--?[A-Za-z][A-Za-z0-9_-]*", line)
+            )
+            continue
+        if line.strip() == "Options:":
+            current = None
+            in_global_options = True
+            continue
+        options = set(re.findall(r"(?<![A-Za-z0-9_])--?[A-Za-z][A-Za-z0-9_-]*", line))
+        if in_global_options:
+            global_options.update(options)
+        elif current is not None:
+            scopes.setdefault(current, set()).update(options)
+
+    for options in scopes.values():
+        options.update(global_options)
+        options.update(_RUNTIME_COMMON_OPTIONS)
+        if "--prompt" in options:
+            options.add("-p")
+        if "--output" in options:
+            options.add("-o")
+        if "--kv-cache-size" in options:
+            options.add("--kv_cache_size")
+    scopes.setdefault("run", set()).add("--greedy")
+    scopes.setdefault("generate-video", set()).add("--seed")
+    scopes.setdefault("transcribe", set()).update({"--audio-in", "--no-timestamps"})
+    scopes.setdefault("speak", set()).add("--audio")
+    return scopes
+
+
+@lru_cache(maxsize=None)
+def _runtime_cli_contract(repo_root: Path) -> ProgramSpec | None:
     source = repo_root / "src" / "cli" / "args.cpp"
     if not source.is_file():
-        return set(), set()
+        return None
     content = source.read_text(encoding="utf-8")
     known_match = re.search(
         r"static const char\* known_cmds\[\]\s*=\s*\{(?P<body>.*?)nullptr\s*\};",
@@ -447,9 +786,36 @@ def _runtime_cli_contract(repo_root: Path) -> tuple[set[str], set[str]]:
     commands = {"build", "help", "version"}
     if known_match:
         commands.update(re.findall(r'"([a-z][a-z0-9-]+)"', known_match.group("body")))
-    flags = set(re.findall(r'"(--?[A-Za-z][A-Za-z0-9-]*)"', content))
-    flags.update({"-h", "--help", "-v", "--version"})
-    return commands, flags
+    all_options = set(re.findall(r'"(--?[A-Za-z][A-Za-z0-9_-]*)"', content))
+    all_options.update({"-h", "--help", "-v", "--version"})
+    option_specs = {
+        option: OptionSpec(
+            aliases=(option,),
+            min_values=0 if option in _RUNTIME_FLAG_OPTIONS else 1,
+            max_values=0 if option in _RUNTIME_FLAG_OPTIONS else 1,
+            choices=(frozenset({"transcribe", "translate"}) if option == "--task" else frozenset()),
+            allow_inline_value=option in {"--kv-cache-size", "--kv_cache_size"},
+            consume_option_like_value=True,
+        )
+        for option in all_options
+    }
+    scopes = _runtime_help_scopes(content)
+    specs: dict[str, CommandSpec] = {}
+    for command in commands:
+        scoped_options = scopes.get(command, set())
+        spec = CommandSpec(
+            options={
+                option: option_specs[option] for option in scoped_options if option in option_specs
+            },
+            positionals=[],
+            required_any=[],
+        )
+        if command not in {"build", "help", "version"}:
+            spec.positionals.append(PositionalSpec("bundle"))
+        for aliases, description in _RUNTIME_REQUIRED_OPTIONS.get(command, ()):
+            spec.required_any.append((frozenset(aliases), description))
+        specs[command] = spec
+    return ProgramSpec(root=CommandSpec.empty(), commands=specs)
 
 
 def _trtmc_tokens(tokens: list[str]) -> list[str] | None:
@@ -462,11 +828,205 @@ def _trtmc_tokens(tokens: list[str]) -> list[str] | None:
     return None
 
 
+def _merge_command_specs(root: CommandSpec, command: CommandSpec) -> CommandSpec:
+    options = dict(root.options)
+    options.update(command.options)
+    return CommandSpec(
+        options=options,
+        positionals=[*root.positionals, *command.positionals],
+        required_any=[*root.required_any, *command.required_any],
+    )
+
+
+def _parse_command_arguments(
+    tokens: list[str],
+    spec: CommandSpec,
+) -> tuple[list[str], set[str], list[tuple[str, str]], list[str]]:
+    """Parse tokens by static arity.
+
+    Returns positional values, seen option aliases, choice violations, and
+    human-readable arity/unknown-option errors. Known option values are
+    consumed even when they begin with ``-``; an exact known option spelling
+    still starts the next option.
+    """
+    positionals: list[str] = []
+    seen_options: set[str] = set()
+    choice_errors: list[tuple[str, str]] = []
+    errors: list[str] = []
+    index = 0
+    positional_only = False
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--" and not positional_only:
+            positional_only = True
+            index += 1
+            continue
+        option_name, separator, inline_value = token.partition("=")
+        option = None if positional_only else spec.options.get(option_name)
+        if option is None:
+            if (
+                not positional_only
+                and token.startswith("-")
+                and not re.match(r"^-\d", token)
+                and "DOC_PLACEHOLDER" not in token
+                and not token.startswith("[")
+            ):
+                errors.append(f"unknown option:{option_name}")
+            else:
+                positionals.append(token)
+            index += 1
+            continue
+
+        seen_options.update(option.aliases)
+        values: list[str] = []
+        if separator:
+            if not option.allow_inline_value:
+                errors.append(f"does not support inline value:{option_name}")
+            elif option.max_values == 0:
+                errors.append(f"does not take a value:{option_name}")
+            elif inline_value:
+                values.append(inline_value)
+            else:
+                errors.append(f"requires a value:{option_name}")
+        elif option.max_values != 0:
+            cursor = index + 1
+            while cursor < len(tokens) and (
+                option.max_values is None or len(values) < option.max_values
+            ):
+                candidate = tokens[cursor]
+                candidate_option = candidate.partition("=")[0]
+                if candidate_option in spec.options:
+                    break
+                if (
+                    candidate.startswith("-")
+                    and not re.match(r"^-\d", candidate)
+                    and not option.consume_option_like_value
+                ):
+                    break
+                values.append(candidate)
+                cursor += 1
+            if len(values) < option.min_values:
+                errors.append(f"requires a value:{option_name}")
+            else:
+                index = cursor - 1
+
+        if option.choices:
+            for value in values:
+                if "DOC_PLACEHOLDER" not in value and value not in option.choices:
+                    choice_errors.append((option_name, value))
+        index += 1
+
+    return positionals, seen_options, choice_errors, errors
+
+
+def _check_command_spec(
+    block: ShellBlock,
+    offset: int,
+    tokens: list[str],
+    spec: CommandSpec,
+    *,
+    label: str,
+    unknown_template: str,
+) -> list[Finding]:
+    positionals, seen_options, choice_errors, errors = _parse_command_arguments(tokens, spec)
+    line = _source_line(block, offset)
+    findings: list[Finding] = []
+    for error in errors:
+        kind, option = error.split(":", 1)
+        if kind == "unknown option":
+            message = unknown_template.format(option=option)
+        elif kind == "does not support inline value":
+            message = f"option for {label} does not support `=` form: {option}"
+        elif kind == "does not take a value":
+            message = f"option for {label} does not take a value: {option}"
+        else:
+            message = f"option for {label} requires a value: {option}"
+        findings.append(Finding(block.path, line, message))
+
+    for option, value in choice_errors:
+        choices = spec.options[option].choices
+        choice_label = (
+            f"`{label.strip('`')} {option}`"
+            if label.startswith("`") and label.endswith("`")
+            else f"{label} {option}"
+        )
+        findings.append(
+            Finding(
+                block.path,
+                line,
+                f"invalid value for {choice_label}: {value}; "
+                f"expected one of {', '.join(sorted(choices))}",
+            )
+        )
+
+    is_abstract = any(
+        token == "..." or token.startswith("[") or token.endswith("...]") for token in tokens
+    )
+    skip_required = (
+        block.language == "inline" or is_abstract or bool({"-h", "--help"} & seen_options)
+    )
+    if skip_required:
+        return findings
+
+    for option in dict.fromkeys(spec.options.values()):
+        if option.required and not set(option.aliases) & seen_options:
+            findings.append(
+                Finding(
+                    block.path,
+                    line,
+                    f"missing required option for {label}: {option.aliases[-1]}",
+                )
+            )
+    for aliases, description in spec.required_any:
+        if not aliases & seen_options:
+            findings.append(
+                Finding(
+                    block.path,
+                    line,
+                    f"missing required input for {label}: {description}",
+                )
+            )
+
+    minimum_positionals = sum(positional.min_values for positional in spec.positionals)
+    if len(positionals) < minimum_positionals:
+        missing = next(
+            (
+                positional.name
+                for position, positional in enumerate(spec.positionals)
+                if position >= len(positionals) and positional.min_values
+            ),
+            "positional argument",
+        )
+        findings.append(
+            Finding(
+                block.path,
+                line,
+                f"missing required positional for {label}: {missing}",
+            )
+        )
+    if (
+        spec.positionals
+        and not any(error.startswith("unknown option:") for error in errors)
+        and all(positional.max_values is not None for positional in spec.positionals)
+    ):
+        maximum_positionals = sum(positional.max_values or 0 for positional in spec.positionals)
+        if len(positionals) > maximum_positionals:
+            findings.append(
+                Finding(
+                    block.path,
+                    line,
+                    f"unexpected positional argument for {label}: "
+                    f"{positionals[maximum_positionals]}",
+                )
+            )
+    return findings
+
+
 def check_trtmc_contract(block: ShellBlock, repo_root: Path) -> list[Finding]:
-    """Validate documented native CLI subcommands and option spellings."""
-    commands, runtime_flags = _runtime_cli_contract(repo_root)
-    _python_commands, python_flags = _python_cli_contract(repo_root)
-    if not commands:
+    """Validate native CLI subcommands, option scope, arity, and requirements."""
+    runtime = _runtime_cli_contract(repo_root)
+    python_cli = _python_cli_contract(repo_root)
+    if runtime is None:
         return []
 
     findings: list[Finding] = []
@@ -479,7 +1039,7 @@ def check_trtmc_contract(block: ShellBlock, repo_root: Path) -> list[Finding]:
             continue
         if "DOC_PLACEHOLDER" in command:
             continue
-        if command not in commands:
+        if command not in runtime.commands:
             findings.append(
                 Finding(
                     block.path,
@@ -489,25 +1049,23 @@ def check_trtmc_contract(block: ShellBlock, repo_root: Path) -> list[Finding]:
             )
             continue
 
-        allowed_flags = (
-            python_flags.get("build", set()) | {"-h", "--help"}
-            if command == "build"
-            else runtime_flags
+        if command == "build" and python_cli is not None:
+            spec = _merge_command_specs(
+                python_cli.root,
+                python_cli.commands.get("build", CommandSpec.empty()),
+            )
+        else:
+            spec = runtime.commands[command]
+        findings.extend(
+            _check_command_spec(
+                block,
+                offset,
+                invocation[2:],
+                spec,
+                label=f"`trtmc {command}`",
+                unknown_template=f"unknown option for `trtmc {command}`: {{option}}",
+            )
         )
-        for token in invocation[2:]:
-            option = token.split("=", 1)[0]
-            if not option.startswith("-") or re.match(r"^-\d", option):
-                continue
-            if "DOC_PLACEHOLDER" in option or option.startswith("["):
-                continue
-            if option not in allowed_flags:
-                findings.append(
-                    Finding(
-                        block.path,
-                        _source_line(block, offset),
-                        f"unknown option for `trtmc {command}`: {option}",
-                    )
-                )
     return findings
 
 
@@ -516,8 +1074,8 @@ def check_python_module_contract(
     repo_root: Path,
 ) -> list[Finding]:
     """Validate ``python -m tensorrt_model_connect`` examples."""
-    commands, flags_by_command = _python_cli_contract(repo_root)
-    if not commands:
+    program = _python_cli_contract(repo_root)
+    if program is None:
         return []
 
     findings: list[Finding] = []
@@ -532,7 +1090,7 @@ def check_python_module_contract(
         command = tokens[3]
         if command.startswith("-") or "DOC_PLACEHOLDER" in command:
             continue
-        if command not in commands:
+        if command not in program.commands:
             findings.append(
                 Finding(
                     block.path,
@@ -541,19 +1099,61 @@ def check_python_module_contract(
                 )
             )
             continue
-        allowed_flags = flags_by_command.get(command, set()) | {"-h", "--help"}
-        for token in tokens[4:]:
-            option = token.split("=", 1)[0]
-            if not option.startswith("-") or re.match(r"^-\d", option):
-                continue
-            if "DOC_PLACEHOLDER" in option or option.startswith("["):
-                continue
-            if option not in allowed_flags:
+        spec = _merge_command_specs(program.root, program.commands[command])
+        findings.extend(
+            _check_command_spec(
+                block,
+                offset,
+                tokens[4:],
+                spec,
+                label=f"Python `{command}` command",
+                unknown_template=(f"unknown option for Python `{command}` command: {{option}}"),
+            )
+        )
+    return findings
+
+
+def check_positional_inputs(block: ShellBlock, repo_root: Path) -> list[Finding]:
+    """Verify explicit repo-local positional inputs for known public CLIs."""
+    runtime = _runtime_cli_contract(repo_root)
+    python_cli = _python_cli_contract(repo_root)
+    findings: list[Finding] = []
+    for offset, raw_tokens in _block_commands(block):
+        tokens = _strip_shell_wrappers(raw_tokens)
+        spec: CommandSpec | None = None
+        argument_tokens: list[str] = []
+
+        invocation = _trtmc_tokens(tokens)
+        if invocation and len(invocation) >= 2:
+            command = invocation[1]
+            if command == "build" and python_cli is not None:
+                spec = python_cli.commands.get("build")
+            elif runtime is not None:
+                spec = runtime.commands.get(command)
+            argument_tokens = invocation[2:]
+        elif (
+            len(tokens) >= 4
+            and Path(tokens[0]).name in {"python", "python3"}
+            and tokens[1:3] == ["-m", "tensorrt_model_connect"]
+            and python_cli is not None
+        ):
+            spec = python_cli.commands.get(tokens[3])
+            argument_tokens = tokens[4:]
+
+        if spec is None or not spec.positionals:
+            continue
+        positionals, _seen, _choices, _errors = _parse_command_arguments(
+            argument_tokens,
+            spec,
+        )
+        for value in positionals[: len(spec.positionals)]:
+            local = _clean_local_path(value)
+            if local and not (repo_root / local).exists():
                 findings.append(
                     Finding(
                         block.path,
                         _source_line(block, offset),
-                        f"unknown option for Python `{command}` command: {option}",
+                        f"positional command input does not exist: {local}",
                     )
                 )
     return findings
@@ -569,96 +1169,148 @@ def _literal_choices(node: ast.AST) -> set[str]:
     return values
 
 
-def _argparse_contract(
-    script_path: Path,
-) -> tuple[set[str], dict[str, set[str]]] | None:
-    """Return argparse flags and literal choices, or ``None`` if not argparse."""
-    if not script_path.is_file():
-        return None
-    try:
-        tree = ast.parse(script_path.read_text(encoding="utf-8"))
-    except (OSError, SyntaxError):
-        return None
-
-    uses_argparse = False
-    flags: set[str] = set()
-    choices: dict[str, set[str]] = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        if isinstance(node.func, ast.Attribute):
-            if node.func.attr == "ArgumentParser":
-                uses_argparse = True
-            if node.func.attr == "add_argument":
-                option_names: list[str] = []
-                for argument in node.args:
-                    if (
-                        isinstance(argument, ast.Constant)
-                        and isinstance(argument.value, str)
-                        and argument.value.startswith("-")
-                    ):
-                        flags.add(argument.value)
-                        option_names.append(argument.value)
-                literal_choices: set[str] = set()
-                for keyword in node.keywords:
-                    if keyword.arg == "choices":
-                        literal_choices = _literal_choices(keyword.value)
+def _find_subcommand(
+    tokens: list[str],
+    root: CommandSpec,
+    commands: set[str],
+) -> tuple[str | None, int | None]:
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in commands:
+            return token, index
+        option_name, separator, _inline_value = token.partition("=")
+        option = root.options.get(option_name)
+        if option is not None:
+            index += 1
+            if not separator and option.max_values != 0:
+                consumed = 0
+                while index < len(tokens) and (
+                    option.max_values is None or consumed < option.max_values
+                ):
+                    candidate_option = tokens[index].partition("=")[0]
+                    if candidate_option in root.options:
                         break
-                if literal_choices:
-                    for option_name in option_names:
-                        choices[option_name] = literal_choices
-        elif isinstance(node.func, ast.Name) and node.func.id == "ArgumentParser":
-            uses_argparse = True
-    return (flags, choices) if uses_argparse else None
+                    index += 1
+                    consumed += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return None, index
+    return None, None
 
 
-def _check_argparse_options(
+def _check_argparse_invocation(
     block: ShellBlock,
     offset: int,
     tokens: list[str],
     local: str,
-    contract: tuple[set[str], dict[str, set[str]]],
+    contract: ProgramSpec,
 ) -> list[Finding]:
-    """Validate option spellings and statically declared literal choices."""
-    flags, choices = contract
-    allowed_flags = flags | {"-h", "--help"}
-    findings: list[Finding] = []
-    for index, token in enumerate(tokens):
-        option, separator, inline_value = token.partition("=")
-        if not option.startswith("-") or re.match(r"^-\d", option):
-            continue
-        if "DOC_PLACEHOLDER" in option or option.startswith("["):
-            continue
-        if option not in allowed_flags:
-            findings.append(
-                Finding(
-                    block.path,
-                    _source_line(block, offset),
-                    f"unknown option for `{local}`: {option}",
-                )
-            )
-            continue
-        allowed_values = choices.get(option)
-        if not allowed_values:
-            continue
-        value = (
-            inline_value if separator else (tokens[index + 1] if index + 1 < len(tokens) else "")
+    """Validate an argparse script, including a selected subcommand."""
+    command: str | None = None
+    command_index: int | None = None
+    if contract.commands:
+        command, command_index = _find_subcommand(
+            tokens,
+            contract.root,
+            set(contract.commands),
+        )
+
+    if command_index is None:
+        findings = _check_command_spec(
+            block,
+            offset,
+            tokens,
+            contract.root,
+            label=f"`{local}`",
+            unknown_template=f"unknown option for `{local}`: {{option}}",
         )
         if (
-            value
-            and not value.startswith("-")
-            and "DOC_PLACEHOLDER" not in value
-            and value not in allowed_values
+            contract.command_required
+            and block.language != "inline"
+            and not any(token in {"-h", "--help"} for token in tokens)
         ):
             findings.append(
                 Finding(
                     block.path,
                     _source_line(block, offset),
-                    f"invalid value for `{local} {option}`: {value}; "
-                    f"expected one of {', '.join(sorted(allowed_values))}",
+                    f"missing required subcommand for `{local}`",
                 )
             )
+        return findings
+
+    if command is None:
+        token = tokens[command_index]
+        if "DOC_PLACEHOLDER" in token or token == "...":
+            return []
+        return [
+            Finding(
+                block.path,
+                _source_line(block, offset),
+                f"unknown subcommand for `{local}`: {token}",
+            )
+        ]
+
+    findings = _check_command_spec(
+        block,
+        offset,
+        tokens[:command_index],
+        contract.root,
+        label=f"`{local}`",
+        unknown_template=f"unknown option for `{local}`: {{option}}",
+    )
+    spec = _merge_command_specs(contract.root, contract.commands[command])
+    findings.extend(
+        _check_command_spec(
+            block,
+            offset,
+            tokens[command_index + 1 :],
+            spec,
+            label=f"`{local} {command}`",
+            unknown_template=f"unknown option for `{local} {command}`: {{option}}",
+        )
+    )
     return findings
+
+
+@lru_cache(maxsize=None)
+def _shell_script_contract(script_path: Path) -> ProgramSpec | None:
+    """Extract options from a conventional Bash ``case "$1"`` parser."""
+    if not script_path.is_file():
+        return None
+    try:
+        content = script_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    first_line = content.splitlines()[0] if content else ""
+    if script_path.suffix != ".sh" and not re.search(r"\b(?:ba)?sh\b", first_line):
+        return None
+
+    spec = CommandSpec.empty()
+    case_arm = re.compile(
+        r"^[ \t]*(?P<labels>--?[A-Za-z0-9][A-Za-z0-9-]*"
+        r"(?:\|--?[A-Za-z0-9][A-Za-z0-9-]*)*)\)"
+        r"(?P<body>.*?);;",
+        re.MULTILINE | re.DOTALL,
+    )
+    for match in case_arm.finditer(content):
+        aliases = tuple(match.group("labels").split("|"))
+        body = match.group("body")
+        takes_value = "$2" in body or re.search(r"\bshift\s+2\b", body) is not None
+        option = OptionSpec(
+            aliases=aliases,
+            min_values=1 if takes_value else 0,
+            max_values=1 if takes_value else 0,
+            allow_inline_value=False,
+            consume_option_like_value=True,
+        )
+        for alias in aliases:
+            spec.options[alias] = option
+    if not spec.options:
+        return None
+    return ProgramSpec(root=spec, commands={})
 
 
 def check_python_script_contract(
@@ -674,11 +1326,11 @@ def check_python_script_contract(
         local = _clean_local_path(tokens[1])
         if not local or not local.endswith(".py"):
             continue
-        contract = _argparse_contract(repo_root / local)
+        contract = _argparse_program_contract(repo_root / local)
         if contract is None:
             continue
         findings.extend(
-            _check_argparse_options(
+            _check_argparse_invocation(
                 block,
                 offset,
                 tokens[2:],
@@ -702,11 +1354,13 @@ def check_direct_script_contract(
         local = _clean_local_path(tokens[0])
         if not local:
             continue
-        contract = _argparse_contract(repo_root / local)
+        contract = _argparse_program_contract(repo_root / local)
+        if contract is None:
+            contract = _shell_script_contract(repo_root / local)
         if contract is None:
             continue
         findings.extend(
-            _check_argparse_options(
+            _check_argparse_invocation(
                 block,
                 offset,
                 tokens[1:],
@@ -832,6 +1486,7 @@ def main() -> int:
             if syntax_finding:
                 findings.append(syntax_finding)
             findings.extend(check_local_inputs(block, repo_root))
+            findings.extend(check_positional_inputs(block, repo_root))
             findings.extend(check_trtmc_contract(block, repo_root))
             findings.extend(check_python_module_contract(block, repo_root))
             findings.extend(check_python_script_contract(block, repo_root))
@@ -852,7 +1507,7 @@ def main() -> int:
     if findings:
         print("\nFAILED: documentation shell examples are not self-consistent.")
         return 1
-    print("\nAll documentation shell examples passed syntax and local-input checks.")
+    print("\nAll documentation shell examples passed syntax, CLI-contract, and local-input checks.")
     return 0
 
 

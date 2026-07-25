@@ -42,7 +42,11 @@ $TRTMC build Qwen/Qwen3-0.6B \
   --max-cache-length 256
 ```
 
-`trtmc build` resolves the HuggingFace model, selects the matching Python family plugin, builds TensorRT engine plan bytes, and writes a self-contained `.trtfb` bundle.
+`trtmc build` resolves the HuggingFace model and family. It first checks
+whether an exact qualified optimized-runtime profile claims the
+model/revision/active-target/options tuple. If none does, as expected for this
+native tutorial's option tuple, the matching Python family plugin builds
+TensorRT engine plan bytes and writes the `.trtfb` bundle.
 
 First builds can be slow because the builder may download model files and compile TensorRT engines. If the command fails before TensorRT starts, check model ID, HuggingFace auth, network/cache, and Python dependencies first.
 
@@ -64,7 +68,14 @@ Runtime strategy:   qwen_decoder_kv_cache
 Precision:          fp16
 ```
 
-Inspection should become the first debugging habit. The important fields are `family`, `precision`, `runtime_strategy`, engine sections, tokenizer assets, and TensorRT compatibility metadata.
+Inspection should become the first debugging habit. For this native bundle,
+the important fields are `family`, `precision`, `runtime_strategy`, engine
+sections, tokenizer assets, and TensorRT compatibility metadata. For an
+optimized bundle, the regular inspector can confirm that
+`optimized_runtime.json` and the embedded artifact section names are present.
+It does not currently decode the descriptor's implementation/profile identity,
+and `--list-engines` does not treat embedded optimized-runtime `.engine` files
+as native plan sections.
 
 ## 4. Run Deterministic Inference
 

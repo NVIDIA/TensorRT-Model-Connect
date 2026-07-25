@@ -11,23 +11,27 @@ Reference, Extend, and Operations. A Wiki page must not override a live
 
 ## Current architecture in one view
 
-TensorRT-Model-Connect has two phases:
+TensorRT-Model-Connect has two phases and two implementation paths:
 
-1. The Python package resolves a Hugging Face checkpoint, selects a
-   family-owned builder, creates TensorRT engines, and writes a `.trtfb`
-   bundle.
-2. The C++ runtime reads the bundle's exact `runtime_strategy`, loads the
-   owning model DSO, resolves its registered `IPipelinePlugin`, and serves the
-   operation through `IPipeline`.
+1. The Python package resolves a Hugging Face checkpoint and family. An exact
+   qualified optimized-runtime profile may delegate artifact construction to
+   that family's adapter; otherwise the native family plugin creates TensorRT
+   plans.
+2. The C++ runtime recognizes the resulting bundle shape. A native bundle uses
+   `runtime_strategy`, its owning model DSO, `IPipelinePlugin`, and a backend
+   DSO. A bundle with `optimized_runtime.json` loads its exact embedded
+   implementation DSO and bypasses native strategy/registry/backend dispatch.
+   Both paths return `IPipeline`.
 
-Model ownership is expressed by three matching descriptors:
+Native model ownership is expressed by three matching descriptors:
 
 - `python/tensorrt_model_connect/families/<family>/MODEL.toml`
 - `src/runtime/models/<family>/MODEL.toml`
 - `tests/e2e/models/<family>/MODEL.toml`
 
-The generic operation contract is `task_strategy`; the implementation-specific
-runtime contract is normally a family-qualified `runtime_strategy`.
+The generic operation contract is `task_strategy`. The native implementation
+contract is normally a family-qualified `runtime_strategy`; an optimized
+implementation instead uses an exact family-owned provider/profile contract.
 
 ## Use these current pages
 

@@ -13,12 +13,17 @@
 //
 // Design contract (see website/docs/context/config-registry-status.md):
 //   - Registration: catalogs *schemas* (field metadata + defaults). No values.
-//   - Session start: the pipeline factory resolves a ConfigBundle by merging
-//     layers (session > platform > bundle defaults > schema defaults) against
-//     registered schemas, then attaches it to PipelineContext.
-//   - Plugin create(ctx): queries ctx.config for its own namespace only.
-//   - Runtime never "overrides" the bundle; the bundle is the lowest-priority
-//     source, not ground truth.
+//   - Native session start: the pipeline factory resolves a ConfigBundle by
+//     merging layers (session > platform > bundle defaults > build time >
+//     schema defaults) against registered schemas, then attaches it to
+//     PipelineContext.
+//   - Native plugin create(ctx): queries ctx.runtime_config for its own
+//     namespace only.
+//   - A higher-priority layer overrides a lower-priority value only when the
+//     field's allowed_layers contract permits that source.
+//   - Optimized-runtime bundles bypass native ConfigBundle/plugin dispatch.
+//     Their embedded implementation receives LoadOptions through its private
+//     factory request and owns support or rejection of those options.
 
 #include <any>
 #include <cstdint>
@@ -67,7 +72,8 @@ struct Schema {
 
 // Singleton registry. Lookups by namespace are O(1). The registry itself
 // holds no values — it is a metadata catalog. Value resolution is handled by
-// ConfigBundle (see schema_registry.cpp, not yet implemented this tick).
+// the implemented ConfigBundle::build path in config_bundle.cpp; the pipeline
+// factory resolves that bundle and attaches it to PipelineContext.
 class SchemaRegistry {
   public:
     static SchemaRegistry& instance();

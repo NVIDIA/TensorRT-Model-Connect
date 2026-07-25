@@ -6,21 +6,27 @@ This page maps the abstract building blocks in TensorRT-Model-Connect to the cod
 
 ```mermaid
 flowchart LR
-  Family["Python family package"] --> Bundle[".trtfb bundle"]
+  Family["Python family package"] --> Route{"qualified optimized<br/>profile matches?"}
+  Route -->|no| Bundle["native .trtfb bundle"]
+  Route -->|yes| Optimized["optimized .trtfb<br/>embedded implementation DSO"]
   Bundle --> Loader["generated strategy-to-DSO index"]
   Loader --> ModelDSO["model-owned runtime DSO"]
   ModelDSO --> Pipeline["IPipeline implementation"]
   Backend["TensorRT backend DSO"] --> Pipeline
+  Optimized --> Provider["optimized-runtime host"]
+  Provider --> Pipeline
   Pipeline --> API["C++ API / CLI / C ABI"]
 ```
 
-Most model additions span the Python family, bundle metadata, model-owned
-runtime DSO, and E2E descriptor. Shared infrastructure supplies the contracts
-and loading path.
+Most native model additions span the Python family, bundle metadata,
+model-owned runtime DSO, and E2E descriptor. A qualified optimized
+implementation adds a family-owned provider manifest/profile and embedded
+implementation DSO instead of another native `runtime_strategy`. Shared
+infrastructure supplies both loading contracts.
 
 ## Beginner Map
 
-Start with these seven blocks before reading the full source-level map:
+Start with these eight blocks before reading the full source-level map:
 
 | Layer | Block | Question it answers |
 | --- | --- | --- |
@@ -28,7 +34,8 @@ Start with these seven blocks before reading the full source-level map:
 | Build adapter | `FamilyPlugin` | Which Python code understands this model family? |
 | Engine artifact | TensorRT engine plan | What optimized GPU execution bytes did we build? |
 | Bundle contract | `.trtfb` | What exactly crosses from Python build time to C++ run time? |
-| Runtime dispatch | `runtime_strategy` | Which model-owned DSO and plugin should load this bundle? |
+| Native runtime dispatch | `runtime_strategy` | Which model-owned DSO and plugin should load this native bundle? |
+| Optimized runtime dispatch | `optimized_runtime.json` | Which embedded implementation DSO and qualified profile own this optimized bundle? |
 | Runtime construction | `IPipelinePlugin` | Which plugin creates the concrete pipeline? |
 | User API | `IPipeline` | Which task method does the application call? |
 
@@ -38,7 +45,7 @@ The full map below expands those seven blocks into the concrete helper units use
 
 | Layer | Owns | Typical edit |
 | --- | --- | --- |
-| Beginner/core path | `FamilyPlugin`, `.trtfb`, model-owned `runtime_strategy`, `IPipeline` | Trace or debug one supported model. |
+| Beginner/core path | `FamilyPlugin`, `.trtfb`, native `runtime_strategy` or optimized descriptor, `IPipeline` | Trace or debug one supported model. |
 | Model extension path | Python family package, C++ model DSO, config schema, and E2E descriptor | Add a supported model or model-owned behavior. |
 | Infrastructure path | Backend DSOs, registration generation, CMake targets | Change loading, ABI isolation, or build ownership. |
 
@@ -48,6 +55,8 @@ The full map below expands those seven blocks into the concrete helper units use
 flowchart TB
   subgraph Python["Python build-time abstractions"]
     ModelConfig["ModelConfig"]
+    ProviderRoute["runtime_provider orchestrator"]
+    ProviderAdapter["family implementation/profile"]
     FamilyPlugin["FamilyPlugin"]
     GraphOps["graph_ops / graph_blocks"]
     EngineBuilder["engine builders"]
@@ -60,11 +69,15 @@ flowchart TB
     Header["BundleInfo header"]
     Section["BundleSection payloads"]
     ConfigJson["config.json"]
+    OptimizedDescriptor["optimized_runtime.json"]
+    EmbeddedArtifacts["embedded implementation DSO + artifacts"]
   end
 
   subgraph Cpp["C++ runtime abstractions"]
     API["IPipeline + result types"]
     Factory["PipelineFactory"]
+    OptimizedHost["OptimizedRuntimeHost"]
+    ImplDSO["libtrtmc_impl_*.so private factory"]
     Loader["PipelinePluginLoader"]
     ModelDSO["model-owned DSO"]
     Registry["PipelineRegistry"]
@@ -78,7 +91,10 @@ flowchart TB
     ConfigBundle["ConfigBundle"]
   end
 
-  ModelConfig --> FamilyPlugin
+  ModelConfig --> ProviderRoute
+  ProviderRoute -->|qualified claim| ProviderAdapter
+  ProviderAdapter --> BundleWriter
+  ProviderRoute -->|no claim| FamilyPlugin
   FamilyPlugin --> GraphOps
   FamilyPlugin --> EngineBuilder
   FamilyPlugin --> Quant
@@ -88,9 +104,15 @@ flowchart TB
   Trtfb --> Header
   Trtfb --> Section
   Trtfb --> ConfigJson
+  Trtfb --> OptimizedDescriptor
+  Trtfb --> EmbeddedArtifacts
   Trtfb --> Factory
-  Factory --> ConfigBundle
-  Factory --> Loader
+  Factory -->|optimized| OptimizedHost
+  OptimizedHost --> EmbeddedArtifacts
+  EmbeddedArtifacts --> ImplDSO
+  ImplDSO --> Pipeline
+  Factory -->|native| ConfigBundle
+  Factory -->|native| Loader
   Loader --> ModelDSO
   ModelDSO --> Registry
   Registry --> Plugin
@@ -115,6 +137,7 @@ flowchart TB
 | Family-owned builders | Files such as `python/tensorrt_model_connect/families/qwen/standard_decoder_builder.py` | Engine construction flows. | Different model shapes need different graph topology and profile handling without a central model switch. |
 | Quantization context | `python/tensorrt_model_connect/quantization/` | Calibration, scales, formats, exclusions. | Quantization needs model-aware policy without leaking into every builder. |
 | Python `ConfigBundle` mirror | `python/tensorrt_model_connect/runtime_config/` | Schema-controlled build/runtime config merge. | Python writes bundle defaults using the same conceptual layers as C++. |
+| Optimized provider orchestrator | `python/tensorrt_model_connect/runtime_provider/` | Family-bounded implementation discovery, exact profile selection, isolated adapter execution, and generic bundle packaging. | Delegated runtimes stay family-owned without changing the public build API. |
 | `BundleInfo` / `BundleSection` | `python/tensorrt_model_connect/bundle_writer.py` | Bundle metadata and named payloads. | The runtime needs a structured artifact, not a directory of unrelated files. |
 
 ## Artifact blocks
@@ -123,7 +146,8 @@ flowchart TB
 | --- | --- | --- |
 | `.trtfb` magic/header/sections | `python/tensorrt_model_connect/bundle_writer.py`, `src/bundle/bundle_format.cpp` | A portable container format for build output. |
 | `BundleInfo` | `include/trtmc/bundle.h`, internal `src/bundle/bundle_format.h` | Fast metadata inspection without constructing a pipeline. |
-| `config.json` section | Written by builder, read in `PipelineFactory` and plugins | Runtime strategy, IO map, backend name, and strategy-specific fields. |
+| `config.json` section | Written by the native builder, read in `PipelineFactory` and plugins | Native runtime strategy, IO map, backend name, and strategy-specific fields; optional for optimized bundles. |
+| `optimized_runtime.json` and embedded artifact tree | Written by `runtime_provider/bundle.py`, read by `optimized_runtime_host.cpp` | Exact delegated implementation/profile/factory identity and integrity-bound payload, including its implementation DSO. |
 | Engine sections | Bundle sections such as `engine_plan`, `vision_engine_plan`, `denoiser_plan` | Serialized TensorRT execution plans. |
 | Asset sections | Tokenizer, preprocessor, kernel, scale, and family metadata files | Data needed for preprocessing, postprocessing, or custom execution. |
 
@@ -134,7 +158,8 @@ flowchart TB
 | `IPipeline` | `include/trtmc/pipeline.h` | User-facing task interface and typed results. | Applications, CLI, C ABI, tests. |
 | `LoadOptions` | `include/trtmc/pipeline.h` | Bundle load-time knobs. | Applications and CLI. |
 | `PipelineFactory` | `src/runtime/registry/pipeline_factory.cpp` | Bundle-to-pipeline construction. | Public API and C ABI. |
-| `PipelinePluginLoader` | `src/runtime/registry/pipeline_plugin_loader.cpp` | Strategy-owner lookup, model DSO loading, and registration validation. | The factory and loader tests. |
+| Optimized-runtime host | `src/runtime/providers/optimized_runtime_host.cpp` | Embedded artifact verification and implementation-DSO factory loading. | Factory and optimized-runtime contract tests. |
+| `PipelinePluginLoader` | `src/runtime/registry/pipeline_plugin_loader.cpp` | Native strategy-owner lookup, model DSO loading, and registration validation. | The factory and loader tests. |
 | `PipelineRegistry` | `src/runtime/registry/pipeline_registry.cpp` | Strategy-to-plugin lookup. | Factory and registration tests. |
 | `IPipelinePlugin` | `include/trtmc/runtime/pipeline_plugin.h` | Strategy-specific pipeline construction. | Runtime plugin implementations. |
 | `PipelineContext` | `include/trtmc/runtime/pipeline_plugin.h` | The construction context passed to plugins. | Runtime plugin implementations. |

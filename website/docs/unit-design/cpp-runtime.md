@@ -7,12 +7,16 @@ The C++ runtime turns a `.trtfb` bundle into a task object. It owns native API s
 ```mermaid
 flowchart TD
   Public["trtmc::load / C ABI / CLI"] --> Factory["PipelineFactory"]
-  Factory --> Bundle["src/bundle"]
-  Factory --> Config["ConfigBundle resolution"]
-  Factory --> Backend["BackendLoader"]
-  Factory --> Loader["PipelinePluginLoader"]
+  Factory --> Bundle["read bundle header"]
+  Bundle --> Kind{"optimized_runtime.json?"}
+  Kind -->|yes| Provider["OptimizedRuntimeHost"]
+  Provider --> ImplDSO["embedded implementation DSO"]
+  ImplDSO --> Pipeline
+  Kind -->|no| Config["ConfigBundle resolution"]
+  Kind -->|no| Backend["BackendLoader"]
+  Kind -->|no| Loader["PipelinePluginLoader"]
   Loader --> DSO["model-owned DSO"]
-  Factory --> Registry["PipelineRegistry"]
+  Kind -->|no| Registry["PipelineRegistry"]
   DSO --> Registry
   Registry --> Plugin["IPipelinePlugin"]
   Backend --> Module["ITrtModule"]
@@ -23,19 +27,23 @@ flowchart TD
 
 ## Pipeline factory
 
-`src/runtime/registry/pipeline_factory.cpp` is the single creation path for runtime pipelines. It reads the bundle, resolves config, loads the backend, and delegates construction to a plugin.
+`src/runtime/registry/pipeline_factory.cpp` is the single public creation path
+for runtime pipelines. It reads the bundle header and chooses either the
+optimized-runtime host or the native strategy/plugin path.
 
 Factory responsibilities:
 
 - Read and validate the bundle container.
-- Extract `config.json`.
-- Ask the generated model-plugin index for the strategy owner and load that
-  owner's DSO. Manifest-declared legacy aliases are normalized during this
-  lookup.
-- Resolve layered runtime config.
-- Select and load a backend DSO.
-- Look up the plugin by `runtime_strategy`.
-- Create `PipelineContext` and call `IPipelinePlugin::create()`.
+- If `optimized_runtime.json` exists, validate its bounded descriptor,
+  integrity-check/materialize the embedded artifact tree, load its exact
+  implementation DSO, validate the private factory ABI and identities, and
+  return its `IPipeline`. A failure after this marker is terminal.
+- Otherwise extract `config.json`, ask the generated model-plugin index for the
+  strategy owner, and load that owner's DSO. Manifest-declared legacy aliases
+  are normalized during this lookup.
+- On the native path, resolve layered runtime config, select/load a backend
+  DSO, look up the plugin by `runtime_strategy`, create `PipelineContext`, and
+  call `IPipelinePlugin::create()`.
 
 Factory non-responsibilities:
 
@@ -43,8 +51,33 @@ Factory non-responsibilities:
 - It should not contain a central switch for every supported model.
 - It should not own per-request loops.
 
+## Optimized-runtime host
+
+`src/runtime/providers/optimized_runtime_host.cpp` recognizes an optimized
+bundle before native config materialization. `optimized_runtime.json` names
+the implementation, model, profile, downstream runtime, private factory ABI,
+metadata section, artifact prefix, exact `libtrtmc_impl_*.so`, and artifact
+tree hash. The generic host:
+
+1. validates descriptor keys, identities, sizes, and safe relative paths;
+2. materializes the exact embedded tree into a content-addressed cache and
+   verifies every payload hash;
+3. loads only the embedded implementation DSO rather than searching installed
+   model or backend paths;
+4. checks its factory ABI, C++ toolchain ABI, implementation identity, and
+   downstream runtime identity; and
+5. passes opaque implementation metadata, the artifact path, and
+   `LoadOptions` to the provider factory.
+
+The implementation DSO returns the same public `IPipeline` abstraction, but
+it owns downstream-runtime construction, batching, scheduling, and request
+translation. This path does not resolve a native `runtime_strategy`, load a
+`libtrtmc_model_*.so`, consult `PipelineRegistry`, or create `IBackend`.
+`config.json` may be absent.
+
 ## Pipeline registry
 
+On the native path,
 `src/runtime/registry/pipeline_plugin_loader.cpp` maps a runtime strategy to one
 manifest owner and DSO using the generated index. The DSO's generated registrar
 invokes the symbols declared by that owner's `MODEL.toml`, then
@@ -103,6 +136,38 @@ Examples:
 | `TimesFmPipeline` | `solve` | Numeric tensor preparation and forecast output. |
 
 The public `IPipeline` interface uses default throwing methods. That keeps the API broad without forcing every pipeline to implement every task.
+
+## Concurrency and pipeline pooling
+
+A single `IPipeline` owns mutable execution-context, CUDA stream, cache/state,
+and adapter-binding data. The public contract does not make concurrent calls on
+one instance safe. Serialize access to one pipeline, or use
+`PipelineFactory::from_bundle_pool()` for concurrent requests on a native
+bundle.
+
+`PipelinePool` owns independent lanes. `acquire()` blocks until one lane is
+available; `try_acquire()` returns no lease when exhausted. A move-only lease
+grants exclusive access to exactly one lane and releases it on destruction, so
+each in-flight request has isolated mutable state. Native plugins may override
+`IPipelinePlugin::create_pool()` to share immutable engine weights; the default
+creates one complete pipeline per lane.
+
+```cpp
+#include <trtmc/runtime/pipeline_factory.h>
+#include <trtmc/runtime/pipeline_pool.h>
+
+auto pool = trtmc::PipelineFactory::from_bundle_pool(
+    "/tmp/native-model.trtfb", 4);
+
+auto lease = pool->acquire();
+auto result = lease->generate("One request owns this lane");
+```
+
+`from_bundle_pool()` rejects `pool_size == 0`. It also rejects an
+optimized-runtime bundle before loading its implementation DSO because the
+delegated runtime owns batching and scheduling. Load that bundle with
+`from_bundle()` and follow the selected provider's request/concurrency
+contract; do not wrap it in the native `PipelinePool`.
 
 ## Core runtime
 

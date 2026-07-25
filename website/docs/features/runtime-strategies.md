@@ -2,10 +2,15 @@
 title: Runtime Strategies
 ---
 
-A runtime strategy is the model-owned C++ dispatch key stored in bundle
-`config.json`. Each key belongs to exactly one
+This page describes native runtime strategies. A runtime strategy is the
+model-owned C++ dispatch key stored in a native bundle's `config.json`. Each
+key belongs to exactly one
 `src/runtime/models/<owner>/MODEL.toml` and resolves to that owner's
 `libtrtmc_model_<owner>.so`.
+
+Optimized-runtime bundles are intentionally outside this inventory. They carry
+`optimized_runtime.json` and an embedded implementation DSO, and the factory
+selects that path before reading a native strategy.
 
 ## Strategy categories
 

@@ -32,7 +32,9 @@ If you are new to inference, start with this mental model:
 - A trained model is a function with learned weights.
 - Inference means running that function on new input.
 - TensorRT turns the model's math graph into an optimized GPU engine.
-- TensorRT-Model-Connect builds those engines from HuggingFace-style checkpoints and packages them into `.trtfb` bundles.
+- TensorRT-Model-Connect either builds native TensorRT engines or invokes an
+  exact qualified family-owned optimized-runtime provider, then packages the
+  result into a `.trtfb` bundle.
 - The C++ runtime loads a bundle and exposes task methods such as `generate`, `transcribe`, `generate_image`, `segment`, and `solve`.
 
 ```mermaid
@@ -46,27 +48,36 @@ flowchart LR
 
 The project is intentionally split into two phases:
 
-- Python builds TensorRT engine bundles from HuggingFace checkpoints.
-- C++ loads those `.trtfb` bundles and runs task-specific pipelines.
-- The bundle is the contract between build and runtime. It carries engine
-  plans, tokenizer assets, model metadata, and the `runtime_strategy` key used
-  by the generated model-DSO index and C++ registry.
+- Python resolves the checkpoint and family. A qualified provider profile can
+  build a delegated optimized artifact; otherwise a native family plugin
+  builds TensorRT plans.
+- C++ loads either `.trtfb` shape and returns a task-specific `IPipeline`.
+- The bundle is the contract between build and runtime. Native bundles carry
+  plans, assets, model metadata, and `runtime_strategy`; optimized bundles
+  carry `optimized_runtime.json` and an embedded implementation DSO/artifact
+  tree.
 
 ```mermaid
 flowchart TB
   subgraph Build["Build phase: Python"]
     HF["HuggingFace model directory"] --> Config["ModelConfig"]
-    Config --> Family["FamilyPlugin"]
+    Config --> Route{"qualified provider<br/>profile matches?"}
+    Route -->|no| Family["native FamilyPlugin"]
     Family --> TRT["TensorRT engine plans"]
-    TRT --> Bundle[".trtfb bundle"]
+    Route -->|yes| Provider["family provider adapter"]
+    Provider --> Bundle[".trtfb bundle"]
+    TRT --> Bundle
   end
 
   subgraph Run["Run phase: C++"]
     Bundle --> Factory["PipelineFactory"]
-    Factory --> Loader["model-plugin loader"]
+    Factory --> Kind{"optimized_runtime.json?"}
+    Kind -->|no| Loader["model-plugin loader"]
     Loader --> DSO["owning libtrtmc_model_*.so"]
     DSO --> Plugin["IPipelinePlugin"]
+    Kind -->|yes| Optimized["embedded libtrtmc_impl_*.so"]
     Plugin --> Runtime["Concrete IPipeline"]
+    Optimized --> Runtime
     Runtime --> Output["Task output"]
   end
 ```
@@ -84,7 +95,9 @@ This site is organized for users first:
   </div>
   <div class="trtmc-card">
     <strong>Reading the architecture</strong>
-    Follow the source-level path from Python family plugin to runtime strategy and concrete pipeline.
+    Follow both source-level paths: native family plugin to runtime strategy,
+    and qualified optimized adapter to embedded implementation and concrete
+    pipeline.
   </div>
   <div class="trtmc-card">
     <strong>Extending support</strong>

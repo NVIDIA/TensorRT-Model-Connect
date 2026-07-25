@@ -16,10 +16,15 @@ sequenceDiagram
   User->>CLI: build checkpoint
   CLI->>Families: resolve model metadata
   Families-->>CLI: family package
-  CLI->>Plugin: load config and weights
-  Plugin->>TRT: construct and compile network
-  TRT-->>Plugin: serialized engine plan
-  Plugin->>Bundle: engine sections plus config
+  alt exact qualified optimized profile matches
+    CLI->>Plugin: run selected family provider adapter
+    Plugin->>Bundle: embedded implementation DSO and artifact tree
+  else no optimized profile claims the tuple
+    CLI->>Plugin: load native config and weights
+    Plugin->>TRT: construct and compile network
+    TRT-->>Plugin: serialized engine plan
+    Plugin->>Bundle: engine sections plus config
+  end
   Bundle-->>User: .trtfb
 ```
 
@@ -39,19 +44,27 @@ sequenceDiagram
   participant Plugin as Model plugin
 
   Caller->>Factory: from_bundle(path, options)
-  Factory->>Bundle: read metadata and config
-  Bundle-->>Factory: runtime_strategy plus sections
-  Factory->>Loader: load DSO for strategy
-  Loader->>Registry: registration symbol registers plugin
-  Factory->>Registry: lookup strategy
-  Registry-->>Factory: IPipelinePlugin
-  Factory->>Plugin: validate and create(context)
-  Plugin-->>Caller: IPipeline
+  Factory->>Bundle: read header
+  alt optimized_runtime.json present
+    Bundle-->>Factory: descriptor plus embedded artifact tree
+    Factory->>Plugin: verify artifacts, load implementation DSO, call private factory
+    Plugin-->>Caller: IPipeline
+  else native bundle
+    Bundle-->>Factory: config, runtime_strategy, sections
+    Factory->>Loader: load DSO for strategy
+    Loader->>Registry: registration symbol registers plugin
+    Factory->>Registry: lookup strategy
+    Registry-->>Factory: IPipelinePlugin
+    Factory->>Plugin: validate and create(context)
+    Plugin-->>Caller: IPipeline
+  end
 ```
 
-If the bundle omits `runtime_strategy`, creation succeeds only when generated
-runtime-manifest data defines a default. An unknown strategy, missing DSO, or
-missing registration fails explicitly.
+For a native bundle, omission of `runtime_strategy` succeeds only when
+generated runtime-manifest data defines a default. An unknown strategy,
+missing DSO, or missing registration fails explicitly. For an optimized
+bundle, presence of `optimized_runtime.json` claims that path; an invalid
+descriptor, artifact, or implementation DSO fails without native fallback.
 
 ## Request sequence
 

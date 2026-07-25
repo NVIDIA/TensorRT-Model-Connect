@@ -95,15 +95,12 @@ WORKER_PROMPT = textwrap.dedent("""\
     complete builder helpers. Copy the nearest current family-owned capsule and
     adapt it; do not treat bootstrap success as onboarding success.
 
-    ## Step 2: Validate
-    Run inside the container:
-    ```
-    docker exec trtmc-dev-gb300-{agent_id} ./scripts/validate_family.sh {hf_id} \\
-        --max-cache-length 256 {trust_flag}
-    ```
+    ## Step 2: Implement and iterate
+    Before final validation, use builds and focused tests to diagnose the
+    implementation. These checks are preliminary only: they cannot establish
+    PASS until every descriptor and E2E manifest in Step 3 exists.
 
-    ## Step 3: Fix and retry (if validation failed)
-    If validation fails:
+    If a preliminary check fails:
     1. Read the error output carefully.
     2. Read the generated plugin at:
        python/tensorrt_model_connect/families/{family_name}/plugin.py
@@ -129,10 +126,10 @@ WORKER_PROMPT = textwrap.dedent("""\
          activation) if needed
        - Handle fused QKV/MLP projections if the model uses them
        - Look at similar existing plugins for reference patterns
-    5. Re-run validation (Step 2).
-    Repeat up to 3 times. Each cycle: read error → understand → fix → validate.
+    5. Re-run the focused check.
+    Repeat up to 3 times. Each cycle: read error → understand → fix → check.
 
-    ## Step 4: Create E2E manifest (after validation passes)
+    ## Step 3: Complete descriptors and E2E manifests
     Write the file tests/e2e/models/{family_name}/manifests/{family_name}.json:
     ```json
     {{
@@ -163,6 +160,45 @@ WORKER_PROMPT = textwrap.dedent("""\
     runtime descriptor, runtime registrar, E2E manifest, and
     tests/runtime_strategy_matrix.yaml.
 
+    {optimize_section}
+
+    ## Step 4: Run final gates after the capsule is complete
+    Do not run these final gates until all three MODEL.toml descriptors and the
+    E2E manifest above exist. First enforce that precondition:
+    ```
+    docker exec trtmc-dev-gb300-{agent_id} test -f \\
+        python/tensorrt_model_connect/families/{family_name}/MODEL.toml
+    docker exec trtmc-dev-gb300-{agent_id} test -f \\
+        src/runtime/models/{family_name}/MODEL.toml
+    docker exec trtmc-dev-gb300-{agent_id} test -f \\
+        tests/e2e/models/{family_name}/MODEL.toml
+    docker exec trtmc-dev-gb300-{agent_id} test -f \\
+        tests/e2e/models/{family_name}/manifests/{family_name}.json
+    docker exec trtmc-dev-gb300-{agent_id} mkdir -p \\
+        /tmp/trtmc-engines/{family_name}
+    ```
+
+    Then run every final gate in this order:
+    ```
+    docker exec trtmc-dev-gb300-{agent_id} ./scripts/validate_family.sh {hf_id} \\
+        --bundle-dir /tmp/trtmc-engines/{family_name} \\
+        --engine-dir /tmp/trtmc-engines/{family_name} \\
+        --max-cache-length 256 --isolate-model-plugin {trust_flag}
+    docker exec trtmc-dev-gb300-{agent_id} python3 tools/model_ci.py validate
+    docker exec trtmc-dev-gb300-{agent_id} python3 tools/test_impact.py --validate
+    docker exec trtmc-dev-gb300-{agent_id} \\
+        python3 tools/check_runtime_strategy_matrix.py
+    docker exec trtmc-dev-gb300-{agent_id} /opt/venv/bin/python -m pytest \\
+        tests/e2e/models/{family_name}/test_{family_name}_e2e.py -v \\
+        --e2e-model {family_name} \\
+        --engine-dir /tmp/trtmc-engines/{family_name} \\
+        --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python \\
+        --rebuild-engines
+    ```
+    If any gate fails, fix the implementation or metadata and repeat the entire
+    final-gate sequence. Never commit, open a PR, or write PASS before every
+    command above exits with status 0.
+
     ## Step 5: Commit, push, and open a PR
     ```
     cd /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect
@@ -188,8 +224,6 @@ WORKER_PROMPT = textwrap.dedent("""\
     If all retries failed, write status "FAIL" with the last error message instead.
     Write this file on the HOST filesystem, not via docker exec.
 
-    {optimize_section}
-
     ## Important rules
     - ALL commands run via `docker exec trtmc-dev-gb300-{agent_id}`.
     - Keep edits scoped to the model family, runtime strategy, manifest, CMake,
@@ -204,9 +238,9 @@ WORKER_PROMPT = textwrap.dedent("""\
 
 
 _OPTIMIZE_SECTION = """\
-## Step 4b: Optimize precision (optional)
+## Step 3b: Optimize precision (optional)
 
-    After validation passes, optimize the model for low precision:
+    Before final validation, optimize the model for low precision:
     1. Use $optimize-model-precision. If it is not active, read:
        plugins/trtmc-agent-skills/skills/optimize-model-precision/SKILL.md
     2. Follow the skill to find the best non-FP32 precision config

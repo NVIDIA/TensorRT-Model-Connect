@@ -9,7 +9,7 @@ bundle metadata.
 
 ## What a family plugin does
 
-Family plugins can:
+On the native path, family plugins can:
 
 - Match a HuggingFace `model_type` or diffusers pipeline class.
 - Load and normalize weights.
@@ -45,5 +45,22 @@ Common native TensorRT groups:
 - Time-series/operators: Chronos-Bolt, PatchTSMixer, PatchTST, and TimesFM.
 
 The package's module-level `plugin` object still supplies the Python protocol,
-but discovery begins with `MODEL.toml`; adding only a loose `.py` file does not
-create a current family entry.
+but discovery begins with `MODEL.toml`. Alias/prefix and architecture matches
+import bounded candidate packages; when those routes cannot decide a full
+config, a legacy `pkgutil` fallback imports all non-private family modules and
+runs their matching predicates. Adding only a loose `.py` file can therefore
+be seen by that compatibility scan, but it does not create a complete current
+family entry.
+
+## Qualified optimized implementations
+
+After family resolution, the public build path probes optimized
+implementations only below that family. A provider profile must match the
+exact model ID, immutable revision, active target, and requested options and
+must retain its qualification state and semantic-source binding. A successful
+claim packages its implementation DSO and opaque artifact tree into the
+bundle; no claim continues to the native plugin above.
+
+The current example is the Qwen TensorRT Edge-LLM adapter with three qualified
+Qwen3/A100 SM80/FP16 profiles. These profiles do not add native strategy keys
+or claim support for arbitrary Qwen checkpoints and targets.

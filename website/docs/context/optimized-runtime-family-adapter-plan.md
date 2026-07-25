@@ -490,8 +490,11 @@ Qwen3-1.7B, and Qwen3-4B:
    environment and verify it resolves TensorRT 11.1.0.106; do not use
    `--no-deps` or manually substitute another TensorRT/CUDA cohort.
 2. Build from the unchanged MC CLI using the model ID and current target.
-3. Inspect the bundle and verify the shared implementation ID/DSO plus the
-   profile-specific ID, revision, and engine tree.
+3. Use the normal inspector to verify the optimized descriptor and artifact
+   section names. In the E2E test, read `optimized_runtime.json` with the
+   test-owned bundle-section helper and verify the shared implementation ID/DSO
+   plus the profile-specific ID, revision, and engine tree; the current public
+   inspector does not print descriptor values.
 4. Run one CLI request and one Python request.
 5. Run the existing `trtmc run --benchmark 2 --warmup 1` path, which loads one
    C++ pipeline and calls `generate()` repeatedly, proving long-lived reuse
