@@ -23,7 +23,6 @@ from tensorrt_model_connect import trt_compat
 
 trt = trt_compat.get_trt()
 
-
 def build_engine_from_onnx(
     onnx_bytes: bytes,
     *,
@@ -52,16 +51,15 @@ def build_engine_from_onnx(
         errors = []
         for i in range(parser.num_errors):
             errors.append(str(parser.get_error(i)))
-        raise RuntimeError("ONNX parsing failed:\n" + "\n".join(errors))
+        raise RuntimeError(
+            "ONNX parsing failed:\n" + "\n".join(errors))
 
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
     if verbose:
-        print(
-            f"[trtmc build] Building vision TRT engine from ONNX ({network.num_layers} layers) ...",
-            file=sys.stderr,
-        )
+        print(f"[trtmc build] Building vision TRT engine from ONNX "
+              f"({network.num_layers} layers) ...", file=sys.stderr)
 
     plan = builder.build_serialized_network(network, config)
     if plan is None:
