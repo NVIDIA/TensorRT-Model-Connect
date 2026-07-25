@@ -45,6 +45,17 @@ void check_overflow(Function&& function, const char* message) {
     }
 }
 
+template <typename Function>
+void check_runtime_error(Function&& function, const char* message) {
+    try {
+        function();
+        check(false, message);
+    } catch (const std::runtime_error&) {
+    } catch (...) {
+        check(false, message);
+    }
+}
+
 void test_repeat_schema(std::size_t repeat) {
     auto samples = trtmc::qualification::make_sequential_request_samples();
     for (std::size_t index = 0; index < repeat; ++index) {
@@ -144,6 +155,46 @@ void test_runtime_phase_memory_schema() {
           "runtime phase sample preserves the visible process ledger");
 }
 
+void test_runtime_pre_engine_baseline_gate() {
+    using trtmc::qualification::RuntimePreEngineBaselineGate;
+    using trtmc::qualification::is_runtime_pre_engine_deserialization_phase;
+
+    check(is_runtime_pre_engine_deserialization_phase(
+              "before runtime-memory Qwen engine deserialization"),
+          "Qwen pre-engine phase is recognized");
+    check(is_runtime_pre_engine_deserialization_phase(
+              "before runtime-memory Llama engine deserialization"),
+          "Llama pre-engine phase is recognized");
+    check(!is_runtime_pre_engine_deserialization_phase("before runtime KV planning"),
+          "post-engine planning phase is not a pre-engine baseline");
+    check(!is_runtime_pre_engine_deserialization_phase(nullptr),
+          "null phase is not a pre-engine baseline");
+
+    RuntimePreEngineBaselineGate gate;
+    check(!gate.observe("before runtime KV planning"),
+          "irrelevant phases do not consume the pre-engine gate");
+    check(gate.observe("before runtime-memory Qwen engine deserialization"),
+          "the exact pre-engine phase consumes the gate once");
+    check(gate.observed(), "the pre-engine gate records its observation");
+    gate.require_observed();
+
+    check_runtime_error(
+        [] {
+            RuntimePreEngineBaselineGate missing;
+            missing.require_observed();
+        },
+        "missing pre-engine baseline fails closed");
+    check_runtime_error(
+        [] {
+            RuntimePreEngineBaselineGate duplicate;
+            (void)duplicate.observe(
+                "before runtime-memory Qwen engine deserialization");
+            (void)duplicate.observe(
+                "before runtime-memory Qwen engine deserialization");
+        },
+        "duplicate pre-engine baseline fails closed");
+}
+
 void test_single_warmup_argument_contract() {
     trtmc::qualification::validate_single_warmup_arguments(true, 1, 1, 0, 0);
     trtmc::qualification::validate_single_warmup_arguments(false, 2, 20, 4096, 8192);
@@ -165,7 +216,7 @@ void test_single_warmup_argument_contract() {
 void test_single_warmup_protocol_schema() {
     const auto protocol = trtmc::qualification::make_single_warmup_lifetime_protocol();
     const nlohmann::json expected = {
-        {"schema_version", 1},
+        {"schema_version", 2},
         {"execution_order", {"warmup", "measured"}},
         {"warmup_count", 1},
         {"measured_count", 1},
@@ -410,6 +461,7 @@ int main() {
     test_repeat_schema(1);
     test_repeat_schema(100);
     test_runtime_phase_memory_schema();
+    test_runtime_pre_engine_baseline_gate();
     test_single_warmup_argument_contract();
     test_single_warmup_protocol_schema();
     test_policy_schema();

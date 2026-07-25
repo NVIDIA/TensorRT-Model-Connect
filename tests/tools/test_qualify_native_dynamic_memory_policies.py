@@ -65,7 +65,7 @@ def _complete_persisted_warmup_evidence(
         "status": "passed",
         "passed": True,
         "lifetime_protocol": {
-            "schema_version": 1,
+            "schema_version": 2,
             "execution_order": ["warmup", "measured"],
             "warmup_count": 1,
             "measured_count": 1,

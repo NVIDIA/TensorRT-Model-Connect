@@ -73,6 +73,43 @@ inline void attach_runtime_phase_memory_samples(nlohmann::json& lifetime,
     lifetime["runtime_phase_memory_samples"] = samples;
 }
 
+inline bool is_runtime_pre_engine_deserialization_phase(const char* phase) {
+    if (phase == nullptr)
+        return false;
+    const std::string value = phase;
+    constexpr const char* prefix = "before runtime-memory ";
+    constexpr const char* suffix = " engine deserialization";
+    const std::size_t prefix_size = std::strlen(prefix);
+    const std::size_t suffix_size = std::strlen(suffix);
+    return value.size() >= prefix_size + suffix_size &&
+           value.compare(0, prefix_size, prefix) == 0 &&
+           value.compare(value.size() - suffix_size, suffix_size, suffix) == 0;
+}
+
+class RuntimePreEngineBaselineGate {
+  public:
+    bool observe(const char* phase) {
+        if (!is_runtime_pre_engine_deserialization_phase(phase))
+            return false;
+        if (observed_) {
+            throw std::runtime_error(
+                "runtime pre-engine baseline phase was observed more than once");
+        }
+        observed_ = true;
+        return true;
+    }
+
+    void require_observed() const {
+        if (!observed_)
+            throw std::runtime_error("runtime pre-engine baseline phase was not observed");
+    }
+
+    bool observed() const noexcept { return observed_; }
+
+  private:
+    bool observed_{false};
+};
+
 inline void validate_single_warmup_arguments(bool requested, std::uint32_t repeat,
                                              std::uint32_t load_cycles,
                                              std::uint64_t second_max_sequence_length,
@@ -88,7 +125,7 @@ inline void validate_single_warmup_arguments(bool requested, std::uint32_t repea
 
 inline nlohmann::json make_single_warmup_lifetime_protocol() {
     return {
-        {"schema_version", 1},
+        {"schema_version", 2},
         {"execution_order", {"warmup", "measured"}},
         {"warmup_count", 1},
         {"measured_count", 1},

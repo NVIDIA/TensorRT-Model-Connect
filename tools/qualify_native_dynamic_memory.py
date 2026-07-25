@@ -107,7 +107,7 @@ _GRAPH_MODEL_CONTRACT_FIELDS = {
     "kv_width",
 }
 _LIFETIME_PROTOCOL = {
-    "schema_version": 1,
+    "schema_version": 2,
     "execution_order": ["warmup", "measured"],
     "warmup_count": 1,
     "measured_count": 1,
@@ -6684,13 +6684,22 @@ def _validate_lifetime_endpoint_bindings(
         sampler_device=None,
         require_phase=False,
     )
+    pre_engine_baseline = _parse_attributed_memory_sample(
+        lifetime.get("pre_engine_baseline"),
+        sampler_pid=int(sampler_identity["pid"]),
+        sampler_device=None,
+        require_phase=False,
+    )
     after_requests = _parse_attributed_memory_sample(
         lifetime.get("after_requests"),
         sampler_pid=int(sampler_identity["pid"]),
         sampler_device=None,
         require_phase=False,
     )
-    before_binding = _signed_memory_attribution(before_load, phase_samples[0])
+    before_binding = _signed_memory_attribution(
+        pre_engine_baseline,
+        phase_samples[0],
+    )
     after_binding = _signed_memory_attribution(phase_samples[-1], after_requests)
 
     def endpoint_passed(attribution: Mapping[str, Any]) -> bool:
@@ -6727,7 +6736,7 @@ def _validate_lifetime_endpoint_bindings(
         )
     return {
         "schema_version": 1,
-        "before_load_to_pre_engine_baseline": {
+        "pre_engine_baseline_to_runtime_snapshot": {
             **before_binding,
             "passed": before_passed,
         },

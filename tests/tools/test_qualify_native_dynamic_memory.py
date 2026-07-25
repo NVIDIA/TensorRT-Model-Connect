@@ -5001,6 +5001,7 @@ def _load_lifetime(
         "kv_allocation_id": receipt["kv_allocation_id"],
         "runtime_memory_receipt": receipt,
         "before_load": before_load,
+        "pre_engine_baseline": copy.deepcopy(phase_samples[0]),
         "after_requests": phase_samples[-1],
         "after_unload": after_unload,
         "process_growth_bytes": (
@@ -5220,7 +5221,7 @@ def _attributed_peak_trace(tmp_path: Path) -> dict:
     )
     return {
         "lifetime_protocol": {
-            "schema_version": 1,
+            "schema_version": 2,
             "execution_order": ["warmup", "measured"],
             "warmup_count": 1,
             "measured_count": 1,
@@ -5885,6 +5886,7 @@ def test_warmup_evidence_rejects_unattributed_inter_lifetime_drift(
         sample["post_nvml_free_bytes"] -= unattributed_drift_bytes
     samples = measured["runtime_phase_memory_samples"]
     measured["before_load"] = copy.deepcopy(samples[0])
+    measured["pre_engine_baseline"] = copy.deepcopy(samples[0])
     measured["after_requests"] = copy.deepcopy(samples[-1])
     measured["after_unload"] = copy.deepcopy(samples[0])
     measured["process_growth_bytes"] = (
@@ -6008,16 +6010,16 @@ def test_warmup_evidence_requires_sampler_pid_in_every_process_ledger(
         _validate_warmup_evidence(trace)
 
 
-@pytest.mark.parametrize("endpoint", ("before_load", "after_requests"))
+@pytest.mark.parametrize("endpoint", ("pre_engine_baseline", "after_requests"))
 def test_warmup_evidence_binds_lifetime_endpoints_to_phase_samples(
     endpoint: str,
     tmp_path: Path,
 ) -> None:
     trace = _attributed_peak_trace(tmp_path)
     measured = trace["load_cycles"][0]
-    if endpoint == "before_load":
+    if endpoint == "pre_engine_baseline":
         measured[endpoint] = _attributed_phase_sample(
-            phase="detached-before-load",
+            phase="detached-pre-engine-baseline",
             cuda_free=650_000_000,
             current_process=100_000_000,
             other_process=50_000_000,

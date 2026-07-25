@@ -713,6 +713,7 @@ CudaModuleLoadingModeEvidence query_cuda_module_loading_mode() {
 }
 
 using RuntimePhaseAfterSnapshot = std::function<void(const char*, const DeviceMemorySample&)>;
+using RuntimePhaseBeforeSnapshot = std::function<void(const char*)>;
 
 class RuntimePhaseMemoryObserverScope {
   public:
@@ -949,18 +950,28 @@ QualificationCycle run_cycle(const Arguments& args, const trtmc::LoadOptionsV2& 
 struct QualificationLifetime {
     QualificationCycle cycle;
     DeviceMemorySample before_load;
+    DeviceMemorySample pre_engine_baseline;
     DeviceMemorySample after_unload;
     json runtime_phase_memory_samples = trtmc::qualification::make_runtime_phase_memory_samples();
 };
 
 QualificationLifetime run_lifetime(const Arguments& args, const trtmc::LoadOptionsV2& options,
                                    const trtmc::RuntimeMemoryQualificationRequestV1& request,
-                                   RuntimePhaseAfterSnapshot after_snapshot = {}) {
+                                   RuntimePhaseAfterSnapshot after_snapshot = {},
+                                   RuntimePhaseBeforeSnapshot before_snapshot = {}) {
     QualificationLifetime lifetime;
+    trtmc::qualification::RuntimePreEngineBaselineGate baseline_gate;
+    RuntimePreSnapshotActionScope pre_snapshot_action([&](const char* phase) {
+        if (before_snapshot)
+            before_snapshot(phase);
+        if (baseline_gate.observe(phase))
+            lifetime.pre_engine_baseline = sample_device_memory();
+    });
     RuntimePhaseMemoryObserverScope observer(lifetime.runtime_phase_memory_samples,
                                              std::move(after_snapshot));
     lifetime.before_load = sample_device_memory();
     lifetime.cycle = run_cycle(args, options, request);
+    baseline_gate.require_observed();
     lifetime.after_unload = sample_device_memory();
     return lifetime;
 }
@@ -1016,6 +1027,7 @@ json lifetime_json(const QualificationLifetime& lifetime, const json& policy, co
         {"selected_token_ids", lifetime.cycle.result.selected_token_ids},
         {"step_top1_token_ids", step_top1_token_ids(lifetime.cycle.result)},
         {"before_load", sample_json(lifetime.before_load)},
+        {"pre_engine_baseline", sample_json(lifetime.pre_engine_baseline)},
         {"after_requests", sample_json(lifetime.cycle.after_requests)},
         {"after_unload", sample_json(lifetime.after_unload)},
         {"process_growth_bytes", process_growth},
@@ -1679,7 +1691,7 @@ int main(int argc, char** argv) {
             };
             QualificationLifetime constrained;
             {
-                RuntimePreSnapshotActionScope pre_snapshot_action([&](const char* phase) {
+                auto controlled_pre_snapshot_action = [&](const char* phase) {
                     const std::string phase_name = phase;
                     if (phase_name == kBeforePlanningPhase) {
                         if (reservation_action_invoked) {
@@ -1855,7 +1867,7 @@ int main(int argc, char** argv) {
                         }
                     }
                     final_feedback_action_invoked = true;
-                });
+                };
                 constrained = run_lifetime(
                     args, options, request,
                     [&](const char* phase, const DeviceMemorySample& sample) {
@@ -1884,7 +1896,8 @@ int main(int argc, char** argv) {
                         guard->release();
                         after_guard_release = sample_device_memory();
                         guard_release_action_invoked = true;
-                    });
+                    },
+                    controlled_pre_snapshot_action);
             }
             if (!reservation_action_invoked || !bulk_reservation) {
                 throw std::logic_error("controlled post-load reservation action did not run");
