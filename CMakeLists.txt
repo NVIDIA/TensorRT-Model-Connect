@@ -18,6 +18,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(GNUInstallDirs)
+find_package(Threads REQUIRED)
 
 option(TRTMC_ENABLE_TRT "Enable TensorRT backend DSO integration" ON)
 option(TRTMC_BUILD_BACKEND_TRT "Build standard TensorRT backend DSO" ON)
@@ -606,7 +607,7 @@ add_executable(trtmc
   src/cli/args.cpp
   src/cli/main.cpp
 )
-target_link_libraries(trtmc PRIVATE trtmc_core)
+target_link_libraries(trtmc PRIVATE trtmc_core Threads::Threads)
 target_include_directories(trtmc PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_include_directories(trtmc SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb)
 set_target_properties(trtmc PROPERTIES

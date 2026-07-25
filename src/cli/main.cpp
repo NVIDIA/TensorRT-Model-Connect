@@ -39,6 +39,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <chrono>
@@ -48,6 +49,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <iterator>
@@ -61,6 +63,7 @@
 #include <string>
 #include <sys/wait.h>
 #include <system_error>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -710,6 +713,18 @@ int cmd_generate_video(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
+    std::optional<std::size_t> png_worker_override;
+    if (const char* raw = std::getenv("TRTMC_PNG_WRITE_WORKERS"); raw != nullptr && *raw != '\0') {
+        errno = 0;
+        char* end = nullptr;
+        const auto parsed = std::strtoul(raw, &end, 10);
+        if (errno != 0 || end == raw || *end != '\0' || parsed < 1 || parsed > 8) {
+            std::cerr << "Error: TRTMC_PNG_WRITE_WORKERS must be an integer in [1, 8]\n";
+            return EXIT_FAILURE;
+        }
+        png_worker_override = static_cast<std::size_t>(parsed);
+    }
+
     const std::string out_dir =
         args.output_dir.empty() ? "/tmp/trtmc_generate_video" : args.output_dir;
 
@@ -744,27 +759,90 @@ int cmd_generate_video(const CliArgs& args) {
     const auto frame_pixels =
         static_cast<std::size_t>(result.height) * static_cast<std::size_t>(result.width) * 3;
 
+    const auto output_begin = std::chrono::steady_clock::now();
+    std::vector<std::string> frame_paths(static_cast<std::size_t>(result.num_frames));
     for (int32_t f = 0; f < result.num_frames; ++f) {
-        // Convert float32 HWC [0,1] to uint8 HWC [0,255].
-        std::vector<unsigned char> rgb(frame_pixels);
-        const float* src = result.pixels.data() + static_cast<std::size_t>(f) * frame_pixels;
-        for (std::size_t i = 0; i < frame_pixels; ++i) {
-            const float v = std::max(0.0F, std::min(1.0F, src[i]));
-            rgb[i] = static_cast<unsigned char>(v * 255.0F + 0.5F);
-        }
-
-        // Build filename: frame_0000.png
         std::ostringstream fname;
         fname << out_dir << "/frame_" << std::setw(4) << std::setfill('0') << f << ".png";
+        frame_paths[static_cast<std::size_t>(f)] = fname.str();
+    }
 
-        const int stride = result.width * 3;
-        if (!stbi_write_png(fname.str().c_str(), result.width, result.height, 3, rgb.data(),
-                            stride)) {
-            std::cerr << "Error: failed to write " << fname.str() << '\n';
+    std::size_t workers_used = 0;
+    if (result.num_frames > 0) {
+        const auto hardware_threads = std::max(1U, std::thread::hardware_concurrency());
+        const auto automatic_workers =
+            std::min<std::size_t>(8, static_cast<std::size_t>(hardware_threads));
+        const auto requested_workers = png_worker_override.value_or(automatic_workers);
+        const auto worker_count =
+            std::min<std::size_t>(static_cast<std::size_t>(result.num_frames), requested_workers);
+
+        // Allocate all fallible per-worker storage before any threads start.
+        std::vector<std::vector<unsigned char>> rgb_buffers;
+        rgb_buffers.reserve(worker_count);
+        for (std::size_t worker = 0; worker < worker_count; ++worker)
+            rgb_buffers.emplace_back(frame_pixels);
+
+        std::vector<unsigned char> frame_status(static_cast<std::size_t>(result.num_frames), 0);
+        std::atomic<int32_t> next_frame{0};
+        const auto encode_frames = [&](std::vector<unsigned char>& rgb) noexcept {
+            while (true) {
+                const int32_t f = next_frame.fetch_add(1, std::memory_order_relaxed);
+                if (f >= result.num_frames)
+                    return;
+
+                try {
+                    const float* src =
+                        result.pixels.data() + static_cast<std::size_t>(f) * frame_pixels;
+                    for (std::size_t i = 0; i < frame_pixels; ++i) {
+                        const float v = std::max(0.0F, std::min(1.0F, src[i]));
+                        rgb[i] = static_cast<unsigned char>(v * 255.0F + 0.5F);
+                    }
+
+                    const auto& path = frame_paths[static_cast<std::size_t>(f)];
+                    const int stride = result.width * 3;
+                    if (!stbi_write_png(path.c_str(), result.width, result.height, 3, rgb.data(),
+                                        stride))
+                        frame_status[static_cast<std::size_t>(f)] = 1;
+                } catch (...) {
+                    frame_status[static_cast<std::size_t>(f)] = 2;
+                }
+            }
+        };
+
+        // Keep the calling thread as a worker. If a background thread cannot
+        // be created, safely continue with the smaller pool already started.
+        std::vector<std::thread> workers;
+        workers.reserve(worker_count - 1);
+        for (std::size_t worker = 0; worker + 1 < worker_count; ++worker) {
+            try {
+                workers.emplace_back(encode_frames, std::ref(rgb_buffers[worker]));
+            } catch (...) {
+                break;
+            }
+        }
+        workers_used = workers.size() + 1;
+        encode_frames(rgb_buffers[workers.size()]);
+        for (auto& worker : workers)
+            worker.join();
+
+        for (std::size_t f = 0; f < frame_status.size(); ++f) {
+            if (frame_status[f] == 0)
+                continue;
+            std::cerr << "Error: failed to " << (frame_status[f] == 1 ? "write " : "encode ")
+                      << frame_paths[f] << '\n';
             return EXIT_FAILURE;
         }
-        std::cout << "Saved " << fname.str() << '\n';
     }
+
+    for (const auto& path : frame_paths) {
+        std::cout << "Saved " << path << '\n';
+    }
+    const auto output_end = std::chrono::steady_clock::now();
+    const auto output_ms =
+        std::chrono::duration<double, std::milli>(output_end - output_begin).count();
+    std::cerr << "[trtmc.video_output_timing] frames=" << result.num_frames
+              << " workers=" << workers_used << " output_ms=" << std::fixed << std::setprecision(3)
+              << output_ms << '\n';
 
     return EXIT_SUCCESS;
 }

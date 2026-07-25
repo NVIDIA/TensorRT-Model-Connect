@@ -58,6 +58,10 @@ class Wan22TI2VPipeline final : public IPipeline {
                                     const std::vector<float>& context,
                                     const std::vector<float>& time,
                                     const Wan22TI2VRuntimeShape& shape, ITrtModule& denoiser);
+    void run_denoising(std::vector<float>& latents, const std::vector<float>& prompt_context,
+                       const std::vector<float>& negative_context, const Wan22TI2VRequest& request,
+                       const Wan22TI2VRuntimeShape& shape, double& denoiser_ms,
+                       double& scheduler_ms);
     ImageResult decode_video(const std::vector<float>& latents, const Wan22TI2VRuntimeShape& shape);
     std::unique_ptr<ITrtModule>
     load_module(const std::string& section_name,

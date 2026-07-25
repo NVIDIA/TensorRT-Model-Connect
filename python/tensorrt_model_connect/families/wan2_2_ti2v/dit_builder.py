@@ -43,6 +43,98 @@ def _ffn_fp8_layer_names(profile: Wan22TI2VConfig) -> tuple[str, ...]:
     )
 
 
+def _cross_qo_fp8_layer_names(profile: Wan22TI2VConfig) -> tuple[str, ...]:
+    """Return the exact qualified cross-attention FP8 projection set."""
+
+    return tuple(
+        name
+        for index in range(profile.num_layers)
+        for name in (
+            f"blocks.{index}.attn2.to_q",
+            f"blocks.{index}.attn2.to_out.0",
+        )
+    )
+
+
+def _validated_cross_qo_fp8_scales(
+    weights: dict[str, np.ndarray],
+    profile: Wan22TI2VConfig,
+    scales: dict | None,
+) -> dict[str, dict[str, float]] | None:
+    """Validate the complete, qualified cross-Q/O FP8 scale map."""
+
+    if scales is None:
+        return None
+    if not isinstance(scales, dict):
+        raise TypeError("Wan2.2 cross-Q/O FP8 scales must be a dictionary")
+
+    expected = set(_cross_qo_fp8_layer_names(profile))
+    provided = set(scales)
+    missing = sorted(expected - provided)
+    unexpected = sorted(provided - expected)
+    if missing or unexpected:
+        raise ValueError(
+            "Wan2.2 cross-Q/O FP8 scales must cover exactly the query and "
+            "output projections in every cross-attention block; "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+
+    result: dict[str, dict[str, float]] = {}
+    for name in sorted(expected):
+        entry = scales[name]
+        if not isinstance(entry, dict):
+            raise TypeError(f"Wan2.2 cross-Q/O FP8 scale entry for {name} must be a dictionary")
+        input_scale = float(entry.get("input_scale", 0.0))
+        if not math.isfinite(input_scale) or input_scale <= 0.0:
+            raise ValueError(
+                f"Wan2.2 cross-Q/O FP8 input_scale for {name} must be positive and finite"
+            )
+
+        weight = weights[f"{name}.weight"]
+        minimum_weight_scale = op.fp8_e4m3_weight_scale(weight)
+        weight_scale = float(entry.get("weight_scale", minimum_weight_scale))
+        if not math.isfinite(weight_scale) or weight_scale <= 0.0:
+            raise ValueError(
+                f"Wan2.2 cross-Q/O FP8 weight_scale for {name} must be positive and finite"
+            )
+        if weight_scale < minimum_weight_scale * (1.0 - 1.0e-6):
+            raise ValueError(
+                f"Wan2.2 cross-Q/O FP8 weight_scale for {name} would overflow E4M3: "
+                f"provided={weight_scale}, minimum={minimum_weight_scale}"
+            )
+        result[name] = {
+            "input_scale": input_scale,
+            "weight_scale": weight_scale,
+        }
+    return result
+
+
+def _cross_qo_linear(
+    network,
+    tensor,
+    weights: dict[str, np.ndarray],
+    name: str,
+    scales: dict[str, dict[str, float]] | None,
+    weight_refs: list[np.ndarray],
+):
+    if scales is None:
+        return op.linear(
+            network,
+            tensor,
+            weights[f"{name}.weight"],
+            weights[f"{name}.bias"],
+        )
+    return op.linear_fp8_e4m3(
+        network,
+        tensor,
+        weights[f"{name}.weight"],
+        weights[f"{name}.bias"],
+        input_scale=scales[name]["input_scale"],
+        weight_scale=scales[name]["weight_scale"],
+        weight_refs=weight_refs,
+    )
+
+
 def _validated_ffn_fp8_scales(
     weights: dict[str, np.ndarray],
     profile: Wan22TI2VConfig,
@@ -186,14 +278,22 @@ def build_dit_engine(
     *,
     profile: Wan22TI2VConfig = WAN22_TI2V_5B,
     ffn_fp8_scales: dict | None = None,
+    cross_qo_fp8_scales: dict | None = None,
     verbose: bool = False,
 ) -> bytes:
     """Build a DiT plan for an explicitly qualified profile."""
 
     if profile not in SUPPORTED_GENERATION_PROFILES:
         raise ValueError("Wan2.2 DiT profile is not one of the qualified generation profiles")
+    if cross_qo_fp8_scales is not None and ffn_fp8_scales is None:
+        raise ValueError("Wan2.2 cross-Q/O FP8 requires the complete FFN FP8 scale map")
     weights = _numpy_state(model_dir)
     ffn_fp8_scales = _validated_ffn_fp8_scales(weights, profile, ffn_fp8_scales)
+    cross_qo_fp8_scales = _validated_cross_qo_fp8_scales(
+        weights,
+        profile,
+        cross_qo_fp8_scales,
+    )
     # TensorRT consumes raw pointers for explicit FP8 constants. Keep their
     # NumPy owners alive until build_serialized_network() has returned.
     fp8_weight_refs: list[np.ndarray] = []
@@ -367,11 +467,14 @@ def build_dit_engine(
             profile.dim,
             profile.eps,
         )
-        cq = op.linear(
+        cross_q_name = f"{prefix}.attn2.to_q"
+        cq = _cross_qo_linear(
             network,
             cross_input,
-            weights[f"{prefix}.attn2.to_q.weight"],
-            weights[f"{prefix}.attn2.to_q.bias"],
+            weights,
+            cross_q_name,
+            cross_qo_fp8_scales,
+            fp8_weight_refs,
         )
         ck = op.linear(
             network,
@@ -409,11 +512,14 @@ def build_dit_engine(
             heads=profile.num_heads,
             head_dim=profile.head_dim,
         )
-        cross = op.linear(
+        cross_out_name = f"{prefix}.attn2.to_out.0"
+        cross = _cross_qo_linear(
             network,
             cross,
-            weights[f"{prefix}.attn2.to_out.0.weight"],
-            weights[f"{prefix}.attn2.to_out.0.bias"],
+            weights,
+            cross_out_name,
+            cross_qo_fp8_scales,
+            fp8_weight_refs,
         )
         hidden = op.add_fp32_residual(network, hidden, cross)
 
@@ -487,7 +593,8 @@ def build_dit_engine(
         f"[wan2.2-ti2v] building DiT: layers={profile.num_layers}, "
         f"patches={profile.num_patches}, "
         f"latent={profile.latent_frames}x{profile.latent_height}x{profile.latent_width}, "
-        f"ffn_fp8={'enabled' if ffn_fp8_scales is not None else 'disabled'}",
+        f"ffn_fp8={'enabled' if ffn_fp8_scales is not None else 'disabled'}, "
+        f"cross_qo_fp8={'enabled' if cross_qo_fp8_scales is not None else 'disabled'}",
         file=sys.stderr,
     )
     plan = builder.build_serialized_network(network, build_config)

@@ -5,6 +5,7 @@
 
 #include "runtime/models/wan2_2_ti2v/pipeline.h"
 
+#include "runtime/models/wan2_2_ti2v/easycache.h"
 #include "runtime/models/wan2_2_ti2v/prompt_cleaner.h"
 #include "runtime/models/wan2_2_ti2v/torch_cuda_normal.h"
 #include "runtime/models/wan2_2_ti2v/vae_cache_storage.h"
@@ -216,6 +217,97 @@ bool same_runtime_shape(const Wan22TI2VRuntimeShape& left, const Wan22TI2VRuntim
                     right.video_frames, right.video_height, right.video_width, right.latent_count);
 }
 
+template <typename DenoiserRunner>
+bool run_denoiser_step(int32_t step, int64_t timestep, const std::vector<float>& latents,
+                       const std::vector<float>& prompt_context,
+                       const std::vector<float>& negative_context, double guidance_scale,
+                       wan2_2_ti2v::EasyCacheController* easycache,
+                       wan2_2_ti2v::LateCfgController* late_cfg, DenoiserRunner&& run_denoiser,
+                       std::vector<float>& conditional, std::vector<float>& unconditional,
+                       std::vector<float>& guided) {
+    if (easycache == nullptr) {
+        conditional = run_denoiser(prompt_context);
+        unconditional = run_denoiser(negative_context);
+        return false;
+    }
+
+    const bool compute = easycache->decide(step, latents);
+    auto late_action = wan2_2_ti2v::LateCfgAction::kActualUnconditional;
+    if (late_cfg != nullptr)
+        late_action = late_cfg->decide(step, timestep, compute);
+    if (!compute) {
+        conditional = easycache->reuse_conditional(latents);
+        unconditional = easycache->reuse_unconditional(latents);
+        return false;
+    }
+
+    conditional = run_denoiser(prompt_context);
+    easycache->update_conditional(latents, conditional);
+    if (late_cfg != nullptr && late_action == wan2_2_ti2v::LateCfgAction::kPredictUnconditional) {
+        auto prediction = late_cfg->try_predict(conditional, guidance_scale);
+        if (prediction.has_value()) {
+            unconditional = std::move(prediction->synthetic_unconditional);
+            guided = std::move(prediction->guided);
+            easycache->update_unconditional(latents, unconditional);
+            return true;
+        }
+    }
+
+    unconditional = run_denoiser(negative_context);
+    if (late_cfg != nullptr)
+        late_cfg->record_actual(conditional, unconditional, guidance_scale);
+    easycache->update_unconditional(latents, unconditional);
+    return false;
+}
+
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC push_options
+#pragma GCC optimize("fp-contract=off")
+#endif
+void apply_cfg(const std::vector<float>& conditional, const std::vector<float>& unconditional,
+               double guidance_scale, std::vector<float>& guided) {
+    if (conditional.size() != unconditional.size() || conditional.size() != guided.size())
+        throw std::invalid_argument("Wan2.2 CFG tensors have inconsistent shapes");
+    for (std::size_t index = 0; index < guided.size(); ++index) {
+        guided[index] =
+            unconditional[index] + guidance_scale * (conditional[index] - unconditional[index]);
+    }
+}
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC pop_options
+#endif
+
+void print_cache_summaries(const wan2_2_ti2v::EasyCacheController* easycache,
+                           const wan2_2_ti2v::LateCfgController* late_cfg) {
+    if (easycache == nullptr)
+        return;
+    const auto& easy_stats = easycache->stats();
+    const int32_t late_saved =
+        late_cfg == nullptr ? 0 : late_cfg->stats().predicted_unconditional_reuses;
+    std::cerr << "[wan2.2-ti2v.easycache.summary] total_steps=" << easy_stats.total_steps
+              << " compute_steps=" << easy_stats.compute_steps
+              << " reuse_steps=" << easy_stats.reuse_steps
+              << " denoiser_calls=" << (2 * easy_stats.compute_steps - late_saved)
+              << " saved_denoiser_calls=" << (2 * easy_stats.reuse_steps + late_saved) << '\n';
+    if (late_cfg == nullptr)
+        return;
+
+    const auto& late_stats = late_cfg->stats();
+    if (late_stats.processed_steps != late_stats.total_steps ||
+        late_stats.actual_unconditional_calls + late_stats.predicted_unconditional_reuses !=
+            late_stats.easycache_compute_events) {
+        throw std::runtime_error("Wan2.2 late-CFG call accounting is inconsistent");
+    }
+    std::cerr << "[wan2.2-ti2v.late_cfg.summary] total_steps=" << late_stats.total_steps
+              << " easycache_compute_events=" << late_stats.easycache_compute_events
+              << " easycache_reuse_events=" << late_stats.easycache_reuse_events
+              << " actual_unconditional_calls=" << late_stats.actual_unconditional_calls
+              << " predicted_unconditional_reuses=" << late_stats.predicted_unconditional_reuses
+              << " prediction_fallbacks=" << late_stats.prediction_fallbacks << " denoiser_calls="
+              << (late_stats.easycache_compute_events + late_stats.actual_unconditional_calls)
+              << '\n';
+}
+
 } // namespace
 
 Wan22TI2VRuntimeShape make_wan22_runtime_shape(const Wan22TI2VRequest& request) {
@@ -371,6 +463,75 @@ std::vector<float> Wan22TI2VPipeline::run_denoiser(const std::vector<float>& lat
                          "DiT output");
 }
 
+void Wan22TI2VPipeline::run_denoising(std::vector<float>& latents,
+                                      const std::vector<float>& prompt_context,
+                                      const std::vector<float>& negative_context,
+                                      const Wan22TI2VRequest& request,
+                                      const Wan22TI2VRuntimeShape& shape, double& denoiser_ms,
+                                      double& scheduler_ms) {
+    std::vector<float> guided(shape.latent_count);
+    std::vector<float> next(shape.latent_count);
+    denoiser_ms = 0.0;
+    scheduler_ms = 0.0;
+
+    wan2_2_ti2v::FlowUniPCCuda scheduler(stream_, request.num_inference_steps, request.flow_shift,
+                                         1000);
+    auto denoiser = load_module("denoiser_plan");
+    validate_denoiser_contract(*denoiser, shape);
+
+    const auto easycache_config =
+        wan2_2_ti2v::easycache_config_from_environment(request.num_inference_steps);
+    std::unique_ptr<wan2_2_ti2v::EasyCacheController> easycache;
+    if (easycache_config.enabled) {
+        easycache = std::make_unique<wan2_2_ti2v::EasyCacheController>(easycache_config);
+        std::cerr << "[wan2.2-ti2v.easycache] enabled=1 threshold=" << easycache_config.threshold
+                  << " first_exact_steps=" << easycache_config.first_exact_steps
+                  << " last_exact_steps=" << easycache_config.last_exact_steps
+                  << " max_consecutive_reuse=" << easycache_config.max_consecutive_reuse << '\n';
+    }
+
+    std::unique_ptr<wan2_2_ti2v::LateCfgController> late_cfg;
+    if (wan2_2_ti2v::late_cfg_enabled_from_environment(easycache_config)) {
+        late_cfg = std::make_unique<wan2_2_ti2v::LateCfgController>();
+        std::cerr << "[wan2.2-ti2v.late_cfg] enabled=1 refresh_interval=2"
+                  << " first_exact_steps=20 last_exact_steps=2"
+                  << " cadence=easycache_compute_events\n";
+    }
+
+    try {
+        for (int32_t step = 0; step < request.num_inference_steps; ++step) {
+            const int64_t timestep = scheduler.timesteps()[static_cast<std::size_t>(step)];
+            const auto time = wan2_2_ti2v::torch_cuda_timestep_features(timestep);
+            std::vector<float> conditional;
+            std::vector<float> unconditional;
+            const auto denoiser_begin = Clock::now();
+            const auto runner = [&](const std::vector<float>& context) {
+                return run_denoiser(latents, context, time, shape, *denoiser);
+            };
+            const bool guided_ready = run_denoiser_step(
+                step, timestep, latents, prompt_context, negative_context, request.guidance_scale,
+                easycache.get(), late_cfg.get(), runner, conditional, unconditional, guided);
+            const auto denoiser_end = Clock::now();
+            denoiser_ms += milliseconds(denoiser_begin, denoiser_end);
+
+            const auto scheduler_begin = Clock::now();
+            if (!guided_ready)
+                apply_cfg(conditional, unconditional, request.guidance_scale, guided);
+            scheduler.step(guided.data(), latents.data(), next.data(), shape.latent_count);
+            latents.swap(next);
+            const auto scheduler_end = Clock::now();
+            scheduler_ms += milliseconds(scheduler_begin, scheduler_end);
+            std::cerr << "[wan2.2-ti2v] step " << (step + 1) << '/' << request.num_inference_steps
+                      << '\n';
+        }
+        synchronize_stream("finishing DiT denoising");
+        print_cache_summaries(easycache.get(), late_cfg.get());
+    } catch (...) {
+        synchronize_stream_noexcept();
+        throw;
+    }
+}
+
 ImageResult Wan22TI2VPipeline::decode_video(const std::vector<float>& latents,
                                             const Wan22TI2VRuntimeShape& shape) {
     if (latents.size() != shape.latent_count)
@@ -466,9 +627,6 @@ ImageResult Wan22TI2VPipeline::decode_video(const std::vector<float>& latents,
     return result;
 }
 
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC optimize("fp-contract=off")
-#endif
 ImageResult Wan22TI2VPipeline::generate_image(const std::string& prompt,
                                               const GenerateConfig& cfg) {
     std::lock_guard<std::mutex> generation_lock(generation_mutex_);
@@ -498,47 +656,12 @@ ImageResult Wan22TI2VPipeline::generate_image(const std::string& prompt,
     auto latents =
         wan2_2_ti2v::torch_cuda_normal(shape.latent_count, static_cast<uint64_t>(request.seed));
 
-    std::vector<float> guided(shape.latent_count);
-    std::vector<float> next(shape.latent_count);
+    // The scheduler, DiT, and their host workspaces are destroyed before VAE
+    // allocation, preserving the staged-memory contract on Thor.
     double denoiser_ms = 0.0;
     double scheduler_ms = 0.0;
-    {
-        // The official scheduler evaluates its tensor expressions on CUDA.
-        // Keeping UniPC state inside this stage both preserves those numeric
-        // semantics and releases its device workspaces before VAE allocation.
-        wan2_2_ti2v::FlowUniPCCuda scheduler(stream_, request.num_inference_steps,
-                                             request.flow_shift, 1000);
-        auto denoiser = load_module("denoiser_plan");
-        validate_denoiser_contract(*denoiser, shape);
-        try {
-            for (int32_t step = 0; step < request.num_inference_steps; ++step) {
-                const int64_t timestep = scheduler.timesteps()[static_cast<std::size_t>(step)];
-                const auto time = wan2_2_ti2v::torch_cuda_timestep_features(timestep);
-                const auto denoiser_begin = Clock::now();
-                auto conditional = run_denoiser(latents, prompt_context, time, shape, *denoiser);
-                auto unconditional =
-                    run_denoiser(latents, negative_context, time, shape, *denoiser);
-                const auto denoiser_end = Clock::now();
-                denoiser_ms += milliseconds(denoiser_begin, denoiser_end);
-
-                const auto scheduler_begin = Clock::now();
-                for (std::size_t index = 0; index < shape.latent_count; ++index)
-                    guided[index] =
-                        unconditional[index] +
-                        request.guidance_scale * (conditional[index] - unconditional[index]);
-                scheduler.step(guided.data(), latents.data(), next.data(), shape.latent_count);
-                latents.swap(next);
-                const auto scheduler_end = Clock::now();
-                scheduler_ms += milliseconds(scheduler_begin, scheduler_end);
-                std::cerr << "[wan2.2-ti2v] step " << (step + 1) << '/'
-                          << request.num_inference_steps << '\n';
-            }
-            synchronize_stream("finishing DiT denoising");
-        } catch (...) {
-            synchronize_stream_noexcept();
-            throw;
-        }
-    }
+    run_denoising(latents, prompt_context, negative_context, request, shape, denoiser_ms,
+                  scheduler_ms);
 
     // These host-side workspaces are no longer needed once DiT has been
     // destroyed. Release them before the recurrent VAE cache allocation.
@@ -546,10 +669,6 @@ ImageResult Wan22TI2VPipeline::generate_image(const std::string& prompt,
     prompt_context.shrink_to_fit();
     negative_context.clear();
     negative_context.shrink_to_fit();
-    guided.clear();
-    guided.shrink_to_fit();
-    next.clear();
-    next.shrink_to_fit();
 
     const auto vae_begin = Clock::now();
     auto result = decode_video(latents, shape);

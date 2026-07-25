@@ -28,11 +28,13 @@ struct VaeCacheLayout {
 // Pure helpers are public inside this model-owned header so policy, overflow,
 // and alignment can be tested without depending on the current CUDA device.
 VaeCacheLayout make_vae_cache_layout(const std::vector<std::size_t>& capacities);
-VaeCacheMemoryKind select_vae_cache_memory_kind(bool integrated, bool can_map_host_memory);
+VaeCacheMemoryKind select_vae_cache_memory_kind(bool integrated, bool can_map_host_memory,
+                                                int compute_capability_major,
+                                                int compute_capability_minor);
 
-// One contiguous recurrent-cache bank. Discrete GPUs retain the historical
-// cudaMalloc behavior. Integrated GPUs use a mapped pinned system allocation
-// and expose only its CUDA device alias to TensorRT.
+// One contiguous recurrent-cache bank. Discrete GPUs and qualified SM 11.0
+// integrated GPUs use cudaMalloc. Other integrated GPUs use a mapped pinned
+// system allocation and expose only its CUDA device alias to TensorRT.
 class VaeCacheBank final {
   public:
     static VaeCacheBank allocate_for_current_device(const std::vector<std::size_t>& capacities);

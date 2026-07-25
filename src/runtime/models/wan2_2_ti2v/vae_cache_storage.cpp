@@ -54,8 +54,10 @@ VaeCacheLayout make_vae_cache_layout(const std::vector<std::size_t>& capacities)
     return layout;
 }
 
-VaeCacheMemoryKind select_vae_cache_memory_kind(bool integrated, bool can_map_host_memory) {
-    if (!integrated)
+VaeCacheMemoryKind select_vae_cache_memory_kind(bool integrated, bool can_map_host_memory,
+                                                int compute_capability_major,
+                                                int compute_capability_minor) {
+    if (!integrated || (compute_capability_major == 11 && compute_capability_minor == 0))
         return VaeCacheMemoryKind::kDevice;
     if (!can_map_host_memory) {
         throw std::runtime_error(
@@ -71,6 +73,14 @@ VaeCacheBank VaeCacheBank::allocate_for_current_device(const std::vector<std::si
     int integrated = 0;
     require_cuda_success(cudaDeviceGetAttribute(&integrated, cudaDevAttrIntegrated, device),
                          "integrated-device query");
+    int compute_capability_major = 0;
+    require_cuda_success(cudaDeviceGetAttribute(&compute_capability_major,
+                                                cudaDevAttrComputeCapabilityMajor, device),
+                         "compute-capability-major query");
+    int compute_capability_minor = 0;
+    require_cuda_success(cudaDeviceGetAttribute(&compute_capability_minor,
+                                                cudaDevAttrComputeCapabilityMinor, device),
+                         "compute-capability-minor query");
     int can_map_host_memory = 0;
     if (integrated != 0) {
         require_cuda_success(
@@ -79,7 +89,9 @@ VaeCacheBank VaeCacheBank::allocate_for_current_device(const std::vector<std::si
     }
 
     auto layout = make_vae_cache_layout(capacities);
-    const auto kind = select_vae_cache_memory_kind(integrated != 0, can_map_host_memory != 0);
+    const auto kind =
+        select_vae_cache_memory_kind(integrated != 0, can_map_host_memory != 0,
+                                     compute_capability_major, compute_capability_minor);
     return VaeCacheBank(std::move(layout), kind);
 }
 

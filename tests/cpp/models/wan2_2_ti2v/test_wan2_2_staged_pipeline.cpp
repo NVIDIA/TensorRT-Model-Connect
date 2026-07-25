@@ -282,15 +282,19 @@ bool test_vae_cache_layout_and_policy() {
             return false;
         }
     }
-    if (select_vae_cache_memory_kind(false, false) != VaeCacheMemoryKind::kDevice ||
-        select_vae_cache_memory_kind(false, true) != VaeCacheMemoryKind::kDevice ||
-        select_vae_cache_memory_kind(true, true) != VaeCacheMemoryKind::kMappedHost) {
+    if (select_vae_cache_memory_kind(false, false, 8, 7) != VaeCacheMemoryKind::kDevice ||
+        select_vae_cache_memory_kind(false, true, 11, 0) != VaeCacheMemoryKind::kDevice ||
+        select_vae_cache_memory_kind(true, false, 11, 0) != VaeCacheMemoryKind::kDevice ||
+        select_vae_cache_memory_kind(true, true, 11, 0) != VaeCacheMemoryKind::kDevice ||
+        select_vae_cache_memory_kind(true, true, 8, 7) != VaeCacheMemoryKind::kMappedHost ||
+        select_vae_cache_memory_kind(true, true, 10, 0) != VaeCacheMemoryKind::kMappedHost ||
+        select_vae_cache_memory_kind(true, true, 12, 0) != VaeCacheMemoryKind::kMappedHost) {
         std::cerr << "FAIL: VAE cache memory policy changed\n";
         return false;
     }
     try {
-        (void)select_vae_cache_memory_kind(true, false);
-        std::cerr << "FAIL: integrated GPU without host mapping did not fail closed\n";
+        (void)select_vae_cache_memory_kind(true, false, 8, 7);
+        std::cerr << "FAIL: unsupported integrated GPU without host mapping did not fail closed\n";
         return false;
     } catch (const std::runtime_error&) {
     }
@@ -316,10 +320,16 @@ bool test_vae_cache_small_cuda_round_trip() {
     int device = 0;
     int integrated = 0;
     int can_map_host_memory = 0;
+    int compute_capability_major = 0;
+    int compute_capability_minor = 0;
     if (cudaGetDevice(&device) != cudaSuccess ||
         cudaDeviceGetAttribute(&integrated, cudaDevAttrIntegrated, device) != cudaSuccess ||
         cudaDeviceGetAttribute(&can_map_host_memory, cudaDevAttrCanMapHostMemory, device) !=
-            cudaSuccess) {
+            cudaSuccess ||
+        cudaDeviceGetAttribute(&compute_capability_major, cudaDevAttrComputeCapabilityMajor,
+                               device) != cudaSuccess ||
+        cudaDeviceGetAttribute(&compute_capability_minor, cudaDevAttrComputeCapabilityMinor,
+                               device) != cudaSuccess) {
         std::cerr << "FAIL: could not query CUDA cache-allocation policy\n";
         return false;
     }
@@ -328,10 +338,10 @@ bool test_vae_cache_small_cuda_round_trip() {
         VaeCacheBank::allocate_for_current_device({sizeof(uint32_t) * 4, sizeof(uint32_t) * 8});
     auto outputs =
         VaeCacheBank::allocate_for_current_device({sizeof(uint32_t) * 4, sizeof(uint32_t) * 8});
-    const auto expected_kind =
-        integrated != 0 ? VaeCacheMemoryKind::kMappedHost : VaeCacheMemoryKind::kDevice;
-    if ((integrated != 0 && can_map_host_memory == 0) || inputs.memory_kind() != expected_kind ||
-        outputs.memory_kind() != expected_kind) {
+    const auto expected_kind = trtmc::wan2_2_ti2v::select_vae_cache_memory_kind(
+        integrated != 0, can_map_host_memory != 0, compute_capability_major,
+        compute_capability_minor);
+    if (inputs.memory_kind() != expected_kind || outputs.memory_kind() != expected_kind) {
         std::cerr << "FAIL: current-device VAE cache allocation selected the wrong memory kind\n";
         return false;
     }

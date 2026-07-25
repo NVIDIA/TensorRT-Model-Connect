@@ -42,6 +42,54 @@ def load_vae_step_weights(*args, **kwargs):
     return implementation(*args, **kwargs)
 
 
+def _qualified_fp8_scale_names(profile) -> tuple[set[str], set[str]]:
+    ffn = {
+        name
+        for index in range(profile.num_layers)
+        for name in (
+            f"blocks.{index}.ffn.net.0.proj",
+            f"blocks.{index}.ffn.net.2",
+        )
+    }
+    cross_qo = {
+        name
+        for index in range(profile.num_layers)
+        for name in (
+            f"blocks.{index}.attn2.to_q",
+            f"blocks.{index}.attn2.to_out.0",
+        )
+    }
+    return ffn, cross_qo
+
+
+def _split_qualified_fp8_scales(
+    fp8_scales: dict | None,
+    profile,
+) -> tuple[dict | None, dict | None]:
+    if fp8_scales is None:
+        return None, None
+    if not isinstance(fp8_scales, dict):
+        raise TypeError("Wan2.2 FP8 scales must be a dictionary")
+
+    expected_ffn, expected_cross_qo = _qualified_fp8_scale_names(profile)
+    provided = set(fp8_scales)
+    if provided == expected_ffn:
+        return fp8_scales, None
+    if provided == expected_ffn | expected_cross_qo:
+        return (
+            {name: fp8_scales[name] for name in sorted(expected_ffn)},
+            {name: fp8_scales[name] for name in sorted(expected_cross_qo)},
+        )
+
+    raise ValueError(
+        "Wan2.2 FP8 scales must contain either the complete FFN map or the "
+        "complete FFN+cross-Q/O map; "
+        f"missing_ffn={sorted(expected_ffn - provided)}, "
+        f"missing_cross_qo={sorted(expected_cross_qo - provided)}, "
+        f"unexpected={sorted(provided - expected_ffn - expected_cross_qo)}"
+    )
+
+
 def build_wan22_components(
     model_dir: str,
     *,
@@ -59,9 +107,13 @@ def build_wan22_components(
     generation_profile = select_generation_profile(config.raw)
     if fp8_scales is not None and generation_profile != WAN22_TI2V_5B:
         raise ValueError(
-            "Wan2.2 FFN FP8 scales are qualified only for the official "
+            "Wan2.2 FP8 scales are qualified only for the official "
             "1280x704, 121-frame, 50-step profile"
         )
+    ffn_fp8_scales, cross_qo_fp8_scales = _split_qualified_fp8_scales(
+        fp8_scales,
+        generation_profile,
+    )
 
     text_encoder = build_native_umt5_encoder_engine(
         weights["_text_encoder_checkpoint"],
@@ -70,7 +122,8 @@ def build_wan22_components(
     denoiser = build_dit_engine(
         model_dir,
         profile=generation_profile,
-        ffn_fp8_scales=fp8_scales,
+        ffn_fp8_scales=ffn_fp8_scales,
+        cross_qo_fp8_scales=cross_qo_fp8_scales,
         verbose=verbose,
     )
 
