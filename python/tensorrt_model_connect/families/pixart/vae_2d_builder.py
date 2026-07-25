@@ -37,12 +37,14 @@ class _TimedWeightReaders(list):
 # Weight loading
 # ---------------------------------------------------------------------------
 
+
 def _open_vae_safetensors(model_dir: str) -> list:
     """Open safetensors files from a VAE model directory."""
     from safetensors import safe_open
 
     try:
         import torch  # noqa: F401
+
         fw = "torch"
     except ImportError:
         fw = "numpy"
@@ -65,8 +67,7 @@ def _open_vae_safetensors(model_dir: str) -> list:
     if single2.exists():
         return [safe_open(str(single2), framework=fw)]
 
-    raise FileNotFoundError(
-        f"No safetensors found in {model_dir}")
+    raise FileNotFoundError(f"No safetensors found in {model_dir}")
 
 
 def _get_weight(readers: list, name: str) -> np.ndarray:
@@ -89,6 +90,7 @@ def _get_weight(readers: list, name: str) -> np.ndarray:
 # 4D GroupNorm (for [N, C, H, W] tensors)
 # ---------------------------------------------------------------------------
 
+
 def _add_group_norm_4d(
     network,
     inp,
@@ -105,6 +107,7 @@ def _add_group_norm_4d(
     then applies affine transform.
     """
     from tensorrt_model_connect import trt_compat
+
     trt = trt_compat.get_trt()
     from .graph_ops import add_constant
 
@@ -121,33 +124,31 @@ def _add_group_norm_4d(
 
     # Reduce over dims 2,3,4 (group_size, H, W)
     reduce_axes = (1 << 2) | (1 << 3) | (1 << 4)
-    eps_t = add_constant(network, (1, 1, 1, 1, 1),
-                         np.array([eps], dtype=np.float32))
+    eps_t = add_constant(network, (1, 1, 1, 1, 1), np.array([eps], dtype=np.float32))
 
     sq = network.add_elementwise(x, x, trt.ElementWiseOperation.PROD)
-    mean = network.add_reduce(
-        x, trt.ReduceOperation.AVG, reduce_axes, keep_dims=True)
+    mean = network.add_reduce(x, trt.ReduceOperation.AVG, reduce_axes, keep_dims=True)
     mean_sq = network.add_reduce(
-        sq.get_output(0), trt.ReduceOperation.AVG,
-        reduce_axes, keep_dims=True)
+        sq.get_output(0), trt.ReduceOperation.AVG, reduce_axes, keep_dims=True
+    )
     var = network.add_elementwise(
         mean_sq.get_output(0),
         network.add_elementwise(
-            mean.get_output(0), mean.get_output(0),
-            trt.ElementWiseOperation.PROD).get_output(0),
-        trt.ElementWiseOperation.SUB)
+            mean.get_output(0), mean.get_output(0), trt.ElementWiseOperation.PROD
+        ).get_output(0),
+        trt.ElementWiseOperation.SUB,
+    )
     denom = network.add_unary(
-        network.add_elementwise(
-            var.get_output(0), eps_t,
-            trt.ElementWiseOperation.SUM).get_output(0),
-        trt.UnaryOperation.SQRT)
-    recip = network.add_unary(
-        denom.get_output(0), trt.UnaryOperation.RECIP)
-    centered = network.add_elementwise(
-        x, mean.get_output(0), trt.ElementWiseOperation.SUB)
+        network.add_elementwise(var.get_output(0), eps_t, trt.ElementWiseOperation.SUM).get_output(
+            0
+        ),
+        trt.UnaryOperation.SQRT,
+    )
+    recip = network.add_unary(denom.get_output(0), trt.UnaryOperation.RECIP)
+    centered = network.add_elementwise(x, mean.get_output(0), trt.ElementWiseOperation.SUB)
     normalized = network.add_elementwise(
-        centered.get_output(0), recip.get_output(0),
-        trt.ElementWiseOperation.PROD)
+        centered.get_output(0), recip.get_output(0), trt.ElementWiseOperation.PROD
+    )
 
     # Reshape back to [N, C, H, W]
     reshape_out = network.add_shuffle(normalized.get_output(0))
@@ -156,16 +157,15 @@ def _add_group_norm_4d(
 
     # Affine: gamma * result + beta
     gamma_t = add_constant(
-        network, (1, num_channels, 1, 1),
-        gamma.reshape(1, -1, 1, 1).astype(np.float32))
+        network, (1, num_channels, 1, 1), gamma.reshape(1, -1, 1, 1).astype(np.float32)
+    )
     beta_t = add_constant(
-        network, (1, num_channels, 1, 1),
-        beta.reshape(1, -1, 1, 1).astype(np.float32))
-    scaled = network.add_elementwise(
-        result, gamma_t, trt.ElementWiseOperation.PROD)
+        network, (1, num_channels, 1, 1), beta.reshape(1, -1, 1, 1).astype(np.float32)
+    )
+    scaled = network.add_elementwise(result, gamma_t, trt.ElementWiseOperation.PROD)
     result = network.add_elementwise(
-        scaled.get_output(0), beta_t,
-        trt.ElementWiseOperation.SUM).get_output(0)
+        scaled.get_output(0), beta_t, trt.ElementWiseOperation.SUM
+    ).get_output(0)
     if dtype != np.float32:
         result = network.add_cast(result, output_dtype).get_output(0)
     return result
@@ -175,56 +175,76 @@ def _add_group_norm_4d(
 # Building blocks
 # ---------------------------------------------------------------------------
 
-def _add_resnet_block_2d(network, inp, weights, prefix: str,
-                         in_ch: int, out_ch: int, h: int, w: int,
-                         dtype=np.float32):
+
+def _add_resnet_block_2d(
+    network, inp, weights, prefix: str, in_ch: int, out_ch: int, h: int, w: int, dtype=np.float32
+):
     """ResNetBlock2D: norm1 -> SiLU -> conv1 -> norm2 -> SiLU -> conv2 + shortcut."""
     from tensorrt_model_connect import trt_compat
+
     trt = trt_compat.get_trt()
     from .graph_ops import add_conv2d, add_silu
 
     # norm1 -> SiLU -> conv1
     x = _add_group_norm_4d(
-        network, inp, in_ch, 32,
+        network,
+        inp,
+        in_ch,
+        32,
         _get_weight(weights, f"{prefix}.norm1.weight"),
-        _get_weight(weights, f"{prefix}.norm1.bias"), dtype=dtype)
+        _get_weight(weights, f"{prefix}.norm1.bias"),
+        dtype=dtype,
+    )
     x = add_silu(network, x)
     x = add_conv2d(
-        network, x,
+        network,
+        x,
         weight=_get_weight(weights, f"{prefix}.conv1.weight"),
         bias=_get_weight(weights, f"{prefix}.conv1.bias"),
         out_channels=out_ch,
         kernel_size=(3, 3),
-        padding=(1, 1), dtype=dtype)
+        padding=(1, 1),
+        dtype=dtype,
+    )
 
     # norm2 -> SiLU -> conv2
     x = _add_group_norm_4d(
-        network, x, out_ch, 32,
+        network,
+        x,
+        out_ch,
+        32,
         _get_weight(weights, f"{prefix}.norm2.weight"),
-        _get_weight(weights, f"{prefix}.norm2.bias"), dtype=dtype)
+        _get_weight(weights, f"{prefix}.norm2.bias"),
+        dtype=dtype,
+    )
     x = add_silu(network, x)
     x = add_conv2d(
-        network, x,
+        network,
+        x,
         weight=_get_weight(weights, f"{prefix}.conv2.weight"),
         bias=_get_weight(weights, f"{prefix}.conv2.bias"),
         out_channels=out_ch,
         kernel_size=(3, 3),
-        padding=(1, 1), dtype=dtype)
+        padding=(1, 1),
+        dtype=dtype,
+    )
 
     # Shortcut
     if in_ch != out_ch:
         shortcut = add_conv2d(
-            network, inp,
+            network,
+            inp,
             weight=_get_weight(weights, f"{prefix}.conv_shortcut.weight"),
             bias=_get_weight(weights, f"{prefix}.conv_shortcut.bias"),
             out_channels=out_ch,
-            kernel_size=(1, 1), dtype=dtype)
+            kernel_size=(1, 1),
+            dtype=dtype,
+        )
     else:
         shortcut = inp
 
     # Residual sum
-    return network.add_elementwise(
-        shortcut, x, trt.ElementWiseOperation.SUM).get_output(0)
+    return network.add_elementwise(shortcut, x, trt.ElementWiseOperation.SUM).get_output(0)
 
 
 def _linear_weight_to_conv2d(w: np.ndarray) -> np.ndarray:
@@ -234,14 +254,16 @@ def _linear_weight_to_conv2d(w: np.ndarray) -> np.ndarray:
     return w  # already 4D
 
 
-def _add_self_attention_2d(network, inp, weights, prefix: str,
-                           ch: int, h: int, w: int, dtype=np.float32):
+def _add_self_attention_2d(
+    network, inp, weights, prefix: str, ch: int, h: int, w: int, dtype=np.float32
+):
     """SelfAttention2D (mid block): GroupNorm -> Q/K/V -> softmax(QK^T/sqrt(d)) @ V -> out + residual.
 
     Uses 1 attention head (head_dim = ch). Q/K/V are Linear layers stored as
     [out, in] in safetensors; we reshape to [out, in, 1, 1] for 1x1 Conv2d.
     """
     from tensorrt_model_connect import trt_compat
+
     trt = trt_compat.get_trt()
     from . import graph_ops
     from .graph_ops import add_conv2d
@@ -250,29 +272,43 @@ def _add_self_attention_2d(network, inp, weights, prefix: str,
 
     # Group norm
     x = _add_group_norm_4d(
-        network, inp, ch, 32,
+        network,
+        inp,
+        ch,
+        32,
         _get_weight(weights, f"{prefix}.group_norm.weight"),
-        _get_weight(weights, f"{prefix}.group_norm.bias"), dtype=dtype)
+        _get_weight(weights, f"{prefix}.group_norm.bias"),
+        dtype=dtype,
+    )
 
     # Q, K, V via 1x1 conv (Linear weights reshaped to Conv2d format)
     q = add_conv2d(
-        network, x,
-        weight=_linear_weight_to_conv2d(
-            _get_weight(weights, f"{prefix}.to_q.weight")),
+        network,
+        x,
+        weight=_linear_weight_to_conv2d(_get_weight(weights, f"{prefix}.to_q.weight")),
         bias=_get_weight(weights, f"{prefix}.to_q.bias"),
-        out_channels=ch, kernel_size=(1, 1), dtype=dtype)
+        out_channels=ch,
+        kernel_size=(1, 1),
+        dtype=dtype,
+    )
     k = add_conv2d(
-        network, x,
-        weight=_linear_weight_to_conv2d(
-            _get_weight(weights, f"{prefix}.to_k.weight")),
+        network,
+        x,
+        weight=_linear_weight_to_conv2d(_get_weight(weights, f"{prefix}.to_k.weight")),
         bias=_get_weight(weights, f"{prefix}.to_k.bias"),
-        out_channels=ch, kernel_size=(1, 1), dtype=dtype)
+        out_channels=ch,
+        kernel_size=(1, 1),
+        dtype=dtype,
+    )
     v = add_conv2d(
-        network, x,
-        weight=_linear_weight_to_conv2d(
-            _get_weight(weights, f"{prefix}.to_v.weight")),
+        network,
+        x,
+        weight=_linear_weight_to_conv2d(_get_weight(weights, f"{prefix}.to_v.weight")),
         bias=_get_weight(weights, f"{prefix}.to_v.bias"),
-        out_channels=ch, kernel_size=(1, 1), dtype=dtype)
+        out_channels=ch,
+        kernel_size=(1, 1),
+        dtype=dtype,
+    )
 
     # Reshape [1, ch, H, W] -> [1, ch, H*W] then transpose to [1, H*W, ch]
     seq_len = h * w
@@ -299,11 +335,8 @@ def _add_self_attention_2d(network, inp, weights, prefix: str,
     v_4d = network.add_shuffle(v_t.get_output(0))
     v_4d.reshape_dims = (1, 1, seq_len, ch)
     attn_out = graph_ops.add_attention_core(
-        network,
-        q_4d.get_output(0),
-        k_4d.get_output(0),
-        v_4d.get_output(0),
-        scale=1.0 / np.sqrt(ch))
+        network, q_4d.get_output(0), k_4d.get_output(0), v_4d.get_output(0), scale=1.0 / np.sqrt(ch)
+    )
 
     # Reshape back: [1, 1, seq, ch] -> [1, seq, ch] -> [1, ch, seq] -> [1, ch, H, W]
     attn_3d = network.add_shuffle(attn_out)
@@ -315,21 +348,23 @@ def _add_self_attention_2d(network, inp, weights, prefix: str,
 
     # Output projection (1x1 conv; Linear weights reshaped to Conv2d format)
     out = add_conv2d(
-        network, attn_4d.get_output(0),
-        weight=_linear_weight_to_conv2d(
-            _get_weight(weights, f"{prefix}.to_out.0.weight")),
+        network,
+        attn_4d.get_output(0),
+        weight=_linear_weight_to_conv2d(_get_weight(weights, f"{prefix}.to_out.0.weight")),
         bias=_get_weight(weights, f"{prefix}.to_out.0.bias"),
-        out_channels=ch, kernel_size=(1, 1), dtype=dtype)
+        out_channels=ch,
+        kernel_size=(1, 1),
+        dtype=dtype,
+    )
 
     # Residual
-    return network.add_elementwise(
-        residual, out, trt.ElementWiseOperation.SUM).get_output(0)
+    return network.add_elementwise(residual, out, trt.ElementWiseOperation.SUM).get_output(0)
 
 
-def _add_upsample_2d(network, inp, weights, prefix: str,
-                      ch: int, h: int, w: int, dtype=np.float32):
+def _add_upsample_2d(network, inp, weights, prefix: str, ch: int, h: int, w: int, dtype=np.float32):
     """Nearest-neighbor 2x upsample + Conv2d(3x3, pad=1)."""
     from tensorrt_model_connect import trt_compat
+
     trt = trt_compat.get_trt()
     from .graph_ops import add_conv2d
 
@@ -339,10 +374,15 @@ def _add_upsample_2d(network, inp, weights, prefix: str,
     resize.shape = (n, c, h * 2, w * 2)
 
     return add_conv2d(
-        network, resize.get_output(0),
+        network,
+        resize.get_output(0),
         weight=_get_weight(weights, f"{prefix}.conv.weight"),
         bias=_get_weight(weights, f"{prefix}.conv.bias"),
-        out_channels=ch, kernel_size=(3, 3), padding=(1, 1), dtype=dtype)
+        out_channels=ch,
+        kernel_size=(3, 3),
+        padding=(1, 1),
+        dtype=dtype,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +428,7 @@ def build_vae_2d_decoder_engine(
     so the runtime can bind shape ``(1, C, H, W)`` against the engine).
     """
     from tensorrt_model_connect import trt_compat
+
     trt = trt_compat.get_trt()
 
     if precision == "fp16":
@@ -395,8 +436,7 @@ def build_vae_2d_decoder_engine(
     elif precision == "fp32":
         work_np_dtype, work_trt_dtype = np.float32, trt.float32
     else:
-        raise ValueError(
-            f"Unsupported VAE precision {precision!r}; expected fp32 or fp16")
+        raise ValueError(f"Unsupported VAE precision {precision!r}; expected fp32 or fp16")
     if max_batch_size < 1:
         raise ValueError(f"max_batch_size must be >= 1 (got {max_batch_size})")
     # Decision E: VAE always caps at 1 regardless of the requested ceiling.
@@ -413,15 +453,17 @@ def build_vae_2d_decoder_engine(
     w_out = w_lat * 8
 
     print(f"[vae-2d] Loading VAE weights from {model_dir} ...", file=sys.stderr)
-    readers = _TimedWeightReaders(
-        _open_vae_safetensors(model_dir), build_timing, timing_component)
+    readers = _TimedWeightReaders(_open_vae_safetensors(model_dir), build_timing, timing_component)
 
     # Reversed block_out_channels for decoder (up path)
     reversed_channels = list(reversed(_BLOCK_OUT_CHANNELS))  # [512, 512, 256, 128]
     ch_last = reversed_channels[0]  # 512
 
-    print(f"[vae-2d] Building TRT graph: latent [{latent_channels},{h_lat},{w_lat}] "
-          f"-> image [3,{h_out},{w_out}]", file=sys.stderr)
+    print(
+        f"[vae-2d] Building TRT graph: latent [{latent_channels},{h_lat},{w_lat}] "
+        f"-> image [3,{h_out},{w_out}]",
+        file=sys.stderr,
+    )
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -435,11 +477,9 @@ def build_vae_2d_decoder_engine(
     # actual VAE cap at 1, but the input is still declared dynamic for
     # parity with the other components).
     if dynamic_batch:
-        inp = network.add_input("latent_input", trt.float32,
-                                (-1, latent_channels, h_lat, w_lat))
+        inp = network.add_input("latent_input", trt.float32, (-1, latent_channels, h_lat, w_lat))
     else:
-        inp = network.add_input("latent_input", trt.float32,
-                                (1, latent_channels, h_lat, w_lat))
+        inp = network.add_input("latent_input", trt.float32, (1, latent_channels, h_lat, w_lat))
     if work_trt_dtype != trt.float32:
         inp = network.add_cast(inp, work_trt_dtype).get_output(0)
 
@@ -449,42 +489,69 @@ def build_vae_2d_decoder_engine(
         pqc_w = _get_weight(readers, "post_quant_conv.weight")
         pqc_b = _get_weight(readers, "post_quant_conv.bias")
         x = add_conv2d(
-            network, inp,
-            weight=pqc_w, bias=pqc_b,
+            network,
+            inp,
+            weight=pqc_w,
+            bias=pqc_b,
             out_channels=latent_channels,
-            kernel_size=(1, 1), dtype=work_np_dtype)
+            kernel_size=(1, 1),
+            dtype=work_np_dtype,
+        )
     except KeyError:
         x = inp  # No post_quant_conv (some VAEs omit it)
 
     # decoder.conv_in: Conv2d(latent_channels, 512, 3x3, pad=1)
     x = add_conv2d(
-        network, x,
+        network,
+        x,
         weight=_get_weight(readers, "decoder.conv_in.weight"),
         bias=_get_weight(readers, "decoder.conv_in.bias"),
         out_channels=ch_last,
         kernel_size=(3, 3),
-        padding=(1, 1), dtype=work_np_dtype)
+        padding=(1, 1),
+        dtype=work_np_dtype,
+    )
 
     cur_h, cur_w = h_lat, w_lat
 
     # ---------- Mid block ----------
     # ResNetBlock2D(512, 512)
     x = _add_resnet_block_2d(
-        network, x, readers,
-        "decoder.mid_block.resnets.0", ch_last, ch_last, cur_h, cur_w,
-        dtype=work_np_dtype)
+        network,
+        x,
+        readers,
+        "decoder.mid_block.resnets.0",
+        ch_last,
+        ch_last,
+        cur_h,
+        cur_w,
+        dtype=work_np_dtype,
+    )
 
     # SelfAttention2D(512)
     x = _add_self_attention_2d(
-        network, x, readers,
-        "decoder.mid_block.attentions.0", ch_last, cur_h, cur_w,
-        dtype=work_np_dtype)
+        network,
+        x,
+        readers,
+        "decoder.mid_block.attentions.0",
+        ch_last,
+        cur_h,
+        cur_w,
+        dtype=work_np_dtype,
+    )
 
     # ResNetBlock2D(512, 512)
     x = _add_resnet_block_2d(
-        network, x, readers,
-        "decoder.mid_block.resnets.1", ch_last, ch_last, cur_h, cur_w,
-        dtype=work_np_dtype)
+        network,
+        x,
+        readers,
+        "decoder.mid_block.resnets.1",
+        ch_last,
+        ch_last,
+        cur_h,
+        cur_w,
+        dtype=work_np_dtype,
+    )
 
     # ---------- Up blocks ----------
     # 4 up blocks with reversed_channels = [512, 512, 256, 128]
@@ -503,16 +570,29 @@ def build_vae_2d_decoder_engine(
                 in_ch = out_ch
 
             x = _add_resnet_block_2d(
-                network, x, readers,
+                network,
+                x,
+                readers,
                 f"decoder.up_blocks.{block_idx}.resnets.{resnet_idx}",
-                in_ch, out_ch, cur_h, cur_w, dtype=work_np_dtype)
+                in_ch,
+                out_ch,
+                cur_h,
+                cur_w,
+                dtype=work_np_dtype,
+            )
 
         # Upsample for blocks 0,1,2 (not block 3)
         if block_idx < 3:
             x = _add_upsample_2d(
-                network, x, readers,
+                network,
+                x,
+                readers,
                 f"decoder.up_blocks.{block_idx}.upsamplers.0",
-                out_ch, cur_h, cur_w, dtype=work_np_dtype)
+                out_ch,
+                cur_h,
+                cur_w,
+                dtype=work_np_dtype,
+            )
             cur_h *= 2
             cur_w *= 2
 
@@ -522,20 +602,27 @@ def build_vae_2d_decoder_engine(
     final_ch = reversed_channels[-1]  # 128
 
     x = _add_group_norm_4d(
-        network, x, final_ch, _NUM_GROUPS,
+        network,
+        x,
+        final_ch,
+        _NUM_GROUPS,
         _get_weight(readers, "decoder.conv_norm_out.weight"),
         _get_weight(readers, "decoder.conv_norm_out.bias"),
-        dtype=work_np_dtype)
+        dtype=work_np_dtype,
+    )
 
     x = add_silu(network, x)
 
     x = add_conv2d(
-        network, x,
+        network,
+        x,
         weight=_get_weight(readers, "decoder.conv_out.weight"),
         bias=_get_weight(readers, "decoder.conv_out.bias"),
         out_channels=3,
         kernel_size=(3, 3),
-        padding=(1, 1), dtype=work_np_dtype)
+        padding=(1, 1),
+        dtype=work_np_dtype,
+    )
 
     # Mark output
     cast_x = network.add_cast(x, trt.float32)
@@ -545,8 +632,11 @@ def build_vae_2d_decoder_engine(
 
     if dynamic_batch:
         from ...engine_builder import add_dynamic_batch_profile
+
         add_dynamic_batch_profile(
-            builder, config, network,
+            builder,
+            config,
+            network,
             input_names=["latent_input"],
             max_batch=vae_max_batch,
             opt_batch=opt_batch_size,
@@ -555,8 +645,7 @@ def build_vae_2d_decoder_engine(
             },
         )
 
-    print(f"[vae-2d] Building TRT engine (max_batch={vae_max_batch}) ...",
-          file=sys.stderr)
+    print(f"[vae-2d] Building TRT engine (max_batch={vae_max_batch}) ...", file=sys.stderr)
     plan = builder.build_serialized_network(network, config)
     if plan is None:
         raise RuntimeError("TRT engine build failed for VAE decoder")
@@ -564,7 +653,8 @@ def build_vae_2d_decoder_engine(
     plan_bytes = bytes(plan)
     weights_after = _timing_phase(build_timing, "weights_loading_s")
     compile_elapsed = max(
-        0.0, time.monotonic() - total_t0 - max(0.0, weights_after - weights_before))
+        0.0, time.monotonic() - total_t0 - max(0.0, weights_after - weights_before)
+    )
     add_trt_compile_timing(build_timing, timing_component, compile_elapsed)
     print(f"[vae-2d] Engine built: {len(plan_bytes) / 1e6:.1f} MB", file=sys.stderr)
     return plan_bytes
@@ -578,46 +668,3 @@ def _timing_phase(timing: dict | None, key: str) -> float:
         return float(phases.get(key, 0.0))
     except (TypeError, ValueError):
         return 0.0
-
-
-# ---------------------------------------------------------------------------
-# Placeholder (for testing without real weights)
-# ---------------------------------------------------------------------------
-
-def build_vae_2d_placeholder(
-    latent_channels: int,
-    h_lat: int,
-    w_lat: int,
-    verbose: bool = False,
-) -> bytes:
-    """Build a minimal VAE placeholder engine (zeros output, for testing).
-
-    Used when the real VAE can't be built (no weights available).
-    """
-    from tensorrt_model_connect import trt_compat
-    trt = trt_compat.get_trt()
-
-    h_out = h_lat * 8
-    w_out = w_lat * 8
-
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    builder = trt.Builder(logger)
-    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-    config = builder.create_builder_config()
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 28)
-
-    network.add_input("latent_input", trt.float32,
-                      (1, latent_channels, h_lat, w_lat))
-
-    zeros = np.zeros((1, 3, h_out, w_out), dtype=np.float32)
-    const = network.add_constant((1, 3, h_out, w_out), trt.Weights(zeros))
-    out = const.get_output(0)
-    cast_out = network.add_cast(out, trt.float32)
-    out_final = cast_out.get_output(0)
-    out_final.name = "decoder_output"
-    network.mark_output(out_final)
-
-    plan = builder.build_serialized_network(network, config)
-    if plan is None:
-        raise RuntimeError("VAE placeholder engine build failed")
-    return bytes(plan)
