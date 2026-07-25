@@ -33,12 +33,14 @@ def _slice_first_dim(arr: np.ndarray, rank: int, tp_size: int) -> np.ndarray:
 
 def _take_last_dim_segments(arr: np.ndarray, segments: list[tuple[int, int]]) -> np.ndarray:
     return np.ascontiguousarray(
-        np.concatenate([arr[..., start:end] for start, end in segments], axis=-1))
+        np.concatenate([arr[..., start:end] for start, end in segments], axis=-1)
+    )
 
 
 def _take_first_dim_segments(arr: np.ndarray, segments: list[tuple[int, int]]) -> np.ndarray:
     return np.ascontiguousarray(
-        np.concatenate([arr[start:end, ...] for start, end in segments], axis=0))
+        np.concatenate([arr[start:end, ...] for start, end in segments], axis=0)
+    )
 
 
 def _mamba2_rank_dims(weights: "WeightDict", parallel: "ParallelConfig") -> dict[str, int]:
@@ -137,17 +139,20 @@ def _validate_nemotron_h_tp(
     if int(config.num_attention_heads) % tp != 0:
         raise ValueError(
             "Nemotron-H tensor parallel requires num_attention_heads divisible by tp_size "
-            f"({config.num_attention_heads} vs {tp})")
+            f"({config.num_attention_heads} vs {tp})"
+        )
     if int(config.num_key_value_heads) % tp != 0:
         raise ValueError(
             "Nemotron-H tensor parallel requires num_key_value_heads divisible by tp_size "
-            f"({config.num_key_value_heads} vs {tp})")
+            f"({config.num_key_value_heads} vs {tp})"
+        )
 
     for key in ("_d_inner", "_mamba_num_heads", "_n_groups", "_mlp_size"):
         if int(weights[key]) % tp != 0:
             raise ValueError(
                 f"Nemotron-H tensor parallel requires {key} divisible by tp_size "
-                f"({weights[key]} vs {tp})")
+                f"({weights[key]} vs {tp})"
+            )
 
 
 def shard_nemotron_h_weights(
@@ -221,86 +226,86 @@ def _add_mamba2_tp_layer(
     groups_state_size = n_groups * d_state
 
     normed = graph_ops.add_rms_norm(
-        network, hidden, hidden_size, weights[f"{prefix}.input_norm"], eps_tensor)
+        network, hidden, hidden_size, weights[f"{prefix}.input_norm"], eps_tensor
+    )
 
     proj_dim = d_inner + conv_dim + mamba_num_heads
     projected = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, proj_dim, weights[f"{prefix}.mamba_in_proj"])
+        network, normed, hidden_size, proj_dim, weights[f"{prefix}.mamba_in_proj"]
+    )
 
     offset = 0
-    gate_slice = network.add_slice(
-        projected, start=(0, offset), shape=(1, d_inner), stride=(1, 1))
+    gate_slice = network.add_slice(projected, start=(0, offset), shape=(1, d_inner), stride=(1, 1))
     gate = gate_slice.get_output(0)
     offset += d_inner
 
-    hbc_slice = network.add_slice(
-        projected, start=(0, offset), shape=(1, conv_dim), stride=(1, 1))
+    hbc_slice = network.add_slice(projected, start=(0, offset), shape=(1, conv_dim), stride=(1, 1))
     hidden_B_C = hbc_slice.get_output(0)
     offset += conv_dim
 
     dt_slice = network.add_slice(
-        projected, start=(0, offset), shape=(1, mamba_num_heads), stride=(1, 1))
+        projected, start=(0, offset), shape=(1, mamba_num_heads), stride=(1, 1)
+    )
     dt_raw = dt_slice.get_output(0)
 
     hbc_col = network.add_shuffle(hidden_B_C)
     hbc_col.reshape_dims = (conv_dim, 1)
     if d_conv > 1:
         slice_layer = network.add_slice(
-            conv_state_in,
-            start=(0, 1),
-            shape=(conv_dim, d_conv - 1),
-            stride=(1, 1))
+            conv_state_in, start=(0, 1), shape=(conv_dim, d_conv - 1), stride=(1, 1)
+        )
         new_conv_state = network.add_concatenation(
-            [slice_layer.get_output(0), hbc_col.get_output(0)])
+            [slice_layer.get_output(0), hbc_col.get_output(0)]
+        )
         new_conv_state.axis = 1
         present_conv = new_conv_state.get_output(0)
     else:
         present_conv = hbc_col.get_output(0)
 
-    conv_w = graph_ops.add_constant(
-        network, (conv_dim, d_conv), weights[f"{prefix}.conv1d_weight"])
-    conv_prod = network.add_elementwise(
-        present_conv, conv_w, trt.ElementWiseOperation.PROD)
+    conv_w = graph_ops.add_constant(network, (conv_dim, d_conv), weights[f"{prefix}.conv1d_weight"])
+    conv_prod = network.add_elementwise(present_conv, conv_w, trt.ElementWiseOperation.PROD)
     conv_sum = network.add_reduce(
-        conv_prod.get_output(0), trt.ReduceOperation.SUM, 1 << 1, keep_dims=True)
+        conv_prod.get_output(0), trt.ReduceOperation.SUM, 1 << 1, keep_dims=True
+    )
     conv_flat = network.add_shuffle(conv_sum.get_output(0))
     conv_flat.reshape_dims = (1, conv_dim)
     conv_out = graph_ops.add_bias_sum(
-        network, conv_flat.get_output(0), conv_dim, weights[f"{prefix}.conv1d_bias"])
+        network, conv_flat.get_output(0), conv_dim, weights[f"{prefix}.conv1d_bias"]
+    )
     hbc_activated = graph_ops.add_activation(network, conv_out, "silu")
 
     hidden_x_slice = network.add_slice(
-        hbc_activated, start=(0, 0), shape=(1, d_inner), stride=(1, 1))
+        hbc_activated, start=(0, 0), shape=(1, d_inner), stride=(1, 1)
+    )
     hidden_x = hidden_x_slice.get_output(0)
     B_raw_slice = network.add_slice(
-        hbc_activated, start=(0, d_inner), shape=(1, groups_state_size), stride=(1, 1))
+        hbc_activated, start=(0, d_inner), shape=(1, groups_state_size), stride=(1, 1)
+    )
     B_raw = B_raw_slice.get_output(0)
     C_raw_slice = network.add_slice(
         hbc_activated,
         start=(0, d_inner + groups_state_size),
         shape=(1, groups_state_size),
-        stride=(1, 1))
+        stride=(1, 1),
+    )
     C_raw = C_raw_slice.get_output(0)
 
     dt_bias_const = graph_ops.add_constant(
-        network, (1, mamba_num_heads), weights[f"{prefix}.dt_bias"])
-    dt_biased = network.add_elementwise(
-        dt_raw, dt_bias_const, trt.ElementWiseOperation.SUM)
+        network, (1, mamba_num_heads), weights[f"{prefix}.dt_bias"]
+    )
+    dt_biased = network.add_elementwise(dt_raw, dt_bias_const, trt.ElementWiseOperation.SUM)
     dt_exp = network.add_unary(dt_biased.get_output(0), trt.UnaryOperation.EXP)
-    one = graph_ops.add_constant(
-        network, (1, 1), np.array([1.0], dtype=np.float32))
-    dt_exp_p1 = network.add_elementwise(
-        dt_exp.get_output(0), one, trt.ElementWiseOperation.SUM)
+    one = graph_ops.add_constant(network, (1, 1), np.array([1.0], dtype=np.float32))
+    dt_exp_p1 = network.add_elementwise(dt_exp.get_output(0), one, trt.ElementWiseOperation.SUM)
     dt_softplus = network.add_unary(dt_exp_p1.get_output(0), trt.UnaryOperation.LOG)
     dt = dt_softplus.get_output(0)
 
     A_const = graph_ops.add_constant(
-        network, (mamba_num_heads, 1, 1),
-        weights[f"{prefix}.A"].reshape(mamba_num_heads, 1, 1))
+        network, (mamba_num_heads, 1, 1), weights[f"{prefix}.A"].reshape(mamba_num_heads, 1, 1)
+    )
     dt_col = network.add_shuffle(dt)
     dt_col.reshape_dims = (mamba_num_heads, 1, 1)
-    dtA = network.add_elementwise(
-        dt_col.get_output(0), A_const, trt.ElementWiseOperation.PROD)
+    dtA = network.add_elementwise(dt_col.get_output(0), A_const, trt.ElementWiseOperation.PROD)
     dA = network.add_unary(dtA.get_output(0), trt.UnaryOperation.EXP)
 
     B_grouped = network.add_shuffle(B_raw)
@@ -310,10 +315,11 @@ def _add_mamba2_tp_layer(
         B_3d = network.add_shuffle(B_grouped.get_output(0))
         B_3d.reshape_dims = (n_groups, 1, d_state)
         tile_ones = graph_ops.add_constant(
-            network, (1, heads_per_group, 1),
-            np.ones((1, heads_per_group, 1), dtype=np.float32))
+            network, (1, heads_per_group, 1), np.ones((1, heads_per_group, 1), dtype=np.float32)
+        )
         B_tiled = network.add_elementwise(
-            B_3d.get_output(0), tile_ones, trt.ElementWiseOperation.PROD)
+            B_3d.get_output(0), tile_ones, trt.ElementWiseOperation.PROD
+        )
         B_heads_s = network.add_shuffle(B_tiled.get_output(0))
         B_heads_s.reshape_dims = (mamba_num_heads, d_state)
         B_heads = B_heads_s.get_output(0)
@@ -326,7 +332,8 @@ def _add_mamba2_tp_layer(
         C_3d = network.add_shuffle(C_grouped.get_output(0))
         C_3d.reshape_dims = (n_groups, 1, d_state)
         C_tiled = network.add_elementwise(
-            C_3d.get_output(0), tile_ones, trt.ElementWiseOperation.PROD)
+            C_3d.get_output(0), tile_ones, trt.ElementWiseOperation.PROD
+        )
         C_heads_s = network.add_shuffle(C_tiled.get_output(0))
         C_heads_s.reshape_dims = (mamba_num_heads, d_state)
         C_heads = C_heads_s.get_output(0)
@@ -338,65 +345,67 @@ def _add_mamba2_tp_layer(
     B_3d_expand = network.add_shuffle(B_heads)
     B_3d_expand.reshape_dims = (mamba_num_heads, 1, d_state)
     dt_B = network.add_elementwise(
-        dt_col.get_output(0), B_3d_expand.get_output(0), trt.ElementWiseOperation.PROD)
+        dt_col.get_output(0), B_3d_expand.get_output(0), trt.ElementWiseOperation.PROD
+    )
     x_3d = network.add_shuffle(x_heads.get_output(0))
     x_3d.reshape_dims = (mamba_num_heads, mamba_head_dim, 1)
     dBx = network.add_elementwise(
-        x_3d.get_output(0), dt_B.get_output(0), trt.ElementWiseOperation.PROD)
+        x_3d.get_output(0), dt_B.get_output(0), trt.ElementWiseOperation.PROD
+    )
 
-    decay = network.add_elementwise(
-        dA.get_output(0), ssm_state_in, trt.ElementWiseOperation.PROD)
+    decay = network.add_elementwise(dA.get_output(0), ssm_state_in, trt.ElementWiseOperation.PROD)
     new_ssm = network.add_elementwise(
-        decay.get_output(0), dBx.get_output(0), trt.ElementWiseOperation.SUM)
+        decay.get_output(0), dBx.get_output(0), trt.ElementWiseOperation.SUM
+    )
     present_ssm = new_ssm.get_output(0)
 
     C_col = network.add_shuffle(C_heads)
     C_col.reshape_dims = (mamba_num_heads, d_state, 1)
     y_matmul = network.add_matrix_multiply(
-        present_ssm, trt.MatrixOperation.NONE,
-        C_col.get_output(0), trt.MatrixOperation.NONE)
+        present_ssm, trt.MatrixOperation.NONE, C_col.get_output(0), trt.MatrixOperation.NONE
+    )
     y_squeeze = network.add_shuffle(y_matmul.get_output(0))
     y_squeeze.reshape_dims = (mamba_num_heads, mamba_head_dim)
 
     D_const = graph_ops.add_constant(
-        network, (mamba_num_heads, 1),
-        weights[f"{prefix}.D"].reshape(mamba_num_heads, 1))
-    Dx = network.add_elementwise(
-        D_const, x_heads.get_output(0), trt.ElementWiseOperation.PROD)
+        network, (mamba_num_heads, 1), weights[f"{prefix}.D"].reshape(mamba_num_heads, 1)
+    )
+    Dx = network.add_elementwise(D_const, x_heads.get_output(0), trt.ElementWiseOperation.PROD)
     y_plus_D = network.add_elementwise(
-        y_squeeze.get_output(0), Dx.get_output(0), trt.ElementWiseOperation.SUM)
+        y_squeeze.get_output(0), Dx.get_output(0), trt.ElementWiseOperation.SUM
+    )
     y_flat = network.add_shuffle(y_plus_D.get_output(0))
     y_flat.reshape_dims = (1, d_inner)
 
     gate_activated = graph_ops.add_activation(network, gate, "silu")
     y_gated = network.add_elementwise(
-        y_flat.get_output(0), gate_activated, trt.ElementWiseOperation.PROD)
+        y_flat.get_output(0), gate_activated, trt.ElementWiseOperation.PROD
+    )
     group_size = d_inner // n_groups
     y_grouped = network.add_shuffle(y_gated.get_output(0))
     y_grouped.reshape_dims = (n_groups, group_size)
 
     sq = network.add_elementwise(
-        y_grouped.get_output(0), y_grouped.get_output(0), trt.ElementWiseOperation.PROD)
-    mean = network.add_reduce(
-        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
-    eps_small = graph_ops.add_constant(
-        network, (1, 1), np.array([1e-5], dtype=np.float32))
-    denom_in = network.add_elementwise(
-        mean.get_output(0), eps_small, trt.ElementWiseOperation.SUM)
+        y_grouped.get_output(0), y_grouped.get_output(0), trt.ElementWiseOperation.PROD
+    )
+    mean = network.add_reduce(sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
+    eps_small = graph_ops.add_constant(network, (1, 1), np.array([1e-5], dtype=np.float32))
+    denom_in = network.add_elementwise(mean.get_output(0), eps_small, trt.ElementWiseOperation.SUM)
     sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
     recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
     normalized = network.add_elementwise(
-        y_grouped.get_output(0), recip.get_output(0), trt.ElementWiseOperation.PROD)
+        y_grouped.get_output(0), recip.get_output(0), trt.ElementWiseOperation.PROD
+    )
     y_flat_normed = network.add_shuffle(normalized.get_output(0))
     y_flat_normed.reshape_dims = (1, d_inner)
-    gamma_t = graph_ops.add_constant(
-        network, (1, d_inner), weights[f"{prefix}.mamba_norm"])
+    gamma_t = graph_ops.add_constant(network, (1, d_inner), weights[f"{prefix}.mamba_norm"])
     gated = network.add_elementwise(
-        y_flat_normed.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
+        y_flat_normed.get_output(0), gamma_t, trt.ElementWiseOperation.PROD
+    )
 
     out = graph_ops.add_matmul_rhs_constant(
-        network, gated.get_output(0), d_inner, hidden_size,
-        weights[f"{prefix}.mamba_out_proj"])
+        network, gated.get_output(0), d_inner, hidden_size, weights[f"{prefix}.mamba_out_proj"]
+    )
     out = add_all_reduce_sum(network, out, tp_size)
     residual = network.add_elementwise(hidden, out, trt.ElementWiseOperation.SUM)
 
@@ -419,12 +428,15 @@ def _add_mlp_tp_layer(
     tp_size: int,
 ) -> dict[str, trt.ITensor]:
     normed = graph_ops.add_rms_norm(
-        network, hidden, hidden_size, weights[f"{prefix}.input_norm"], eps_tensor)
+        network, hidden, hidden_size, weights[f"{prefix}.input_norm"], eps_tensor
+    )
     up = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, mlp_size, weights[f"{prefix}.w_up"])
+        network, normed, hidden_size, mlp_size, weights[f"{prefix}.w_up"]
+    )
     activated = graph_ops.add_activation(network, up, "relu2")
     down = graph_ops.add_matmul_rhs_constant(
-        network, activated, mlp_size, hidden_size, weights[f"{prefix}.w_down"])
+        network, activated, mlp_size, hidden_size, weights[f"{prefix}.w_down"]
+    )
     down = add_all_reduce_sum(network, down, tp_size)
     residual = network.add_elementwise(hidden, down, trt.ElementWiseOperation.SUM)
     return {"hidden": residual.get_output(0)}
@@ -445,7 +457,8 @@ def build_nemotron_h_tp_engine(
     parallel = normalize_parallel_config(parallel_config)
     if not parallel.enabled:
         raise ValueError(
-            "build_nemotron_h_tp_engine requires tensor_parallel mode with tp_size > 1")
+            "build_nemotron_h_tp_engine requires tensor_parallel mode with tp_size > 1"
+        )
 
     rank_weights = shard_nemotron_h_weights(config, weights, parallel=parallel)
     hidden = int(config.hidden_size)
@@ -473,40 +486,52 @@ def build_nemotron_h_tp_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
     token_id = network.add_input("token_id", trt.int32, (1,))
     position_id = network.add_input("position_id", trt.int32, (1,))
-    attention_mask = network.add_input(
-        "attention_mask", trt.float32, (1, attention_window))
+    attention_mask = network.add_input("attention_mask", trt.float32, (1, attention_window))
 
     conv_state_inputs = []
     ssm_state_inputs = []
     for mi in range(num_mamba):
-        conv_state_inputs.append(network.add_input(
-            graph_ops.layer_tensor_name("conv_state", mi),
-            trt.float32, (conv_dim, d_conv)))
-        ssm_state_inputs.append(network.add_input(
-            graph_ops.layer_tensor_name("ssm_state", mi),
-            trt.float32, (mamba_num_heads, mamba_head_dim, d_state)))
+        conv_state_inputs.append(
+            network.add_input(
+                graph_ops.layer_tensor_name("conv_state", mi), trt.float32, (conv_dim, d_conv)
+            )
+        )
+        ssm_state_inputs.append(
+            network.add_input(
+                graph_ops.layer_tensor_name("ssm_state", mi),
+                trt.float32,
+                (mamba_num_heads, mamba_head_dim, d_state),
+            )
+        )
 
     cache_k_inputs = []
     cache_v_inputs = []
     for ai in range(num_attn):
-        cache_k_inputs.append(network.add_input(
-            graph_ops.layer_tensor_name("cache_k", ai),
-            trt.float32, (max_cache_length, kv_attention_size)))
-        cache_v_inputs.append(network.add_input(
-            graph_ops.layer_tensor_name("cache_v", ai),
-            trt.float32, (max_cache_length, kv_attention_size)))
+        cache_k_inputs.append(
+            network.add_input(
+                graph_ops.layer_tensor_name("cache_k", ai),
+                trt.float32,
+                (max_cache_length, kv_attention_size),
+            )
+        )
+        cache_v_inputs.append(
+            network.add_input(
+                graph_ops.layer_tensor_name("cache_v", ai),
+                trt.float32,
+                (max_cache_length, kv_attention_size),
+            )
+        )
 
-    embedding_table = graph_ops.add_constant(
-        network, (vocab, hidden), rank_weights["embedding"])
+    embedding_table = graph_ops.add_constant(network, (vocab, hidden), rank_weights["embedding"])
     eps_tensor = graph_ops.add_constant(
-        network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32))
+        network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32)
+    )
 
     hidden_state = network.add_gather(embedding_table, token_id, 0).get_output(0)
     if debug_layer_outputs:
@@ -559,10 +584,12 @@ def build_nemotron_h_tp_engine(
             hidden_state = result["hidden"]
         elif lt == "attention":
             result = graph_blocks.add_attention_block(
-                network, hidden_state,
+                network,
+                hidden_state,
                 cache_k_inputs[attn_counter],
                 cache_v_inputs[attn_counter],
-                attention_mask, position_id,
+                attention_mask,
+                position_id,
                 weights=rank_weights,
                 prefix=prefix,
                 hidden_size=hidden,
@@ -573,11 +600,9 @@ def build_nemotron_h_tp_engine(
                 head_dim=head_dim,
                 max_cache_length=max_cache_length,
                 eps_tensor=eps_tensor,
-                position_type="none",
             )
             attn_out = add_all_reduce_sum(network, result["attn_out"], parallel.tp_size)
-            residual = network.add_elementwise(
-                hidden_state, attn_out, trt.ElementWiseOperation.SUM)
+            residual = network.add_elementwise(hidden_state, attn_out, trt.ElementWiseOperation.SUM)
             hidden_state = residual.get_output(0)
             present_k_outputs.append(result["present_k"])
             present_v_outputs.append(result["present_v"])
@@ -588,13 +613,12 @@ def build_nemotron_h_tp_engine(
 
     final_norm = rank_weights.get("final_norm")
     if final_norm is not None and len(final_norm) > 0:
-        hidden_state = graph_ops.add_rms_norm(
-            network, hidden_state, hidden, final_norm, eps_tensor)
+        hidden_state = graph_ops.add_rms_norm(network, hidden_state, hidden, final_norm, eps_tensor)
 
     logits = graph_ops.add_matmul_rhs_constant(
-        network, hidden_state, hidden, vocab, rank_weights["w_lm_head"])
-    logits = graph_ops.add_bias_sum(
-        network, logits, vocab, np.zeros(vocab, dtype=np.float32))
+        network, hidden_state, hidden, vocab, rank_weights["w_lm_head"]
+    )
+    logits = graph_ops.add_bias_sum(network, logits, vocab, np.zeros(vocab, dtype=np.float32))
     logits.name = "logits"
     network.mark_output(logits)
 
