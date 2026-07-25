@@ -104,6 +104,7 @@ class RunOptions:
     runtime_dirs: tuple[Path, ...]
     local_files_only: bool
     minimum_free_space_gib: int
+    minimum_gpu_free_fraction: float
     timeout_seconds: int
 
 
@@ -247,6 +248,7 @@ def _read_environment(path: Path) -> dict[str, Any]:
     if bundle_cache is not None and not isinstance(bundle_cache, str):
         raise PerfMatrixError("environment storage.bundle_cache must be a path or null")
     timeout_seconds = execution.get("timeout_seconds")
+    minimum_gpu_free_fraction = execution.get("minimum_gpu_free_fraction", 0.45)
     minimum_free_space_gib = storage.get("minimum_free_space_gib", 0)
     if (
         isinstance(timeout_seconds, bool)
@@ -261,6 +263,14 @@ def _read_environment(path: Path) -> dict[str, Any]:
     ):
         raise PerfMatrixError(
             "environment storage.minimum_free_space_gib must be non-negative"
+        )
+    if (
+        isinstance(minimum_gpu_free_fraction, bool)
+        or not isinstance(minimum_gpu_free_fraction, (int, float))
+        or not 0 < float(minimum_gpu_free_fraction) <= 1
+    ):
+        raise PerfMatrixError(
+            "environment execution.minimum_gpu_free_fraction must be in (0, 1]"
         )
     local_files_only = execution.get("local_files_only", False)
     if not isinstance(local_files_only, bool):
@@ -318,6 +328,7 @@ def _read_environment(path: Path) -> dict[str, Any]:
         },
         "execution": {
             "local_files_only": local_files_only,
+            "minimum_gpu_free_fraction": float(minimum_gpu_free_fraction),
             "timeout_seconds": timeout_seconds,
         },
     }
@@ -341,6 +352,7 @@ def _run_options(environment: Mapping[str, Any], output: Path) -> RunOptions:
         runtime_dirs=tuple(Path(str(value)) for value in storage["runtime_dirs"]),
         local_files_only=bool(execution["local_files_only"]),
         minimum_free_space_gib=int(storage["minimum_free_space_gib"]),
+        minimum_gpu_free_fraction=float(execution["minimum_gpu_free_fraction"]),
         timeout_seconds=int(execution["timeout_seconds"]),
     )
 
@@ -1822,7 +1834,9 @@ def _run_supported_case(
     order = ("trtmc", "baseline") if _stable_even(str(case["id"])) else ("baseline", "trtmc")
     for side in order:
         argv = candidate_argv if side == "trtmc" else baseline_argv
-        _wait_for_gpu_memory_headroom()
+        _wait_for_gpu_memory_headroom(
+            minimum_free_fraction=options.minimum_gpu_free_fraction
+        )
         command = _run_command(argv, environment, options.timeout_seconds)
         command.pop("stdout", None)
         commands[side] = command

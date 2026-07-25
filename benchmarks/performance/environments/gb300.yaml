@@ -20,4 +20,5 @@ storage:
 
 execution:
   local_files_only: false
+  minimum_gpu_free_fraction: 0.25
   timeout_seconds: 7200

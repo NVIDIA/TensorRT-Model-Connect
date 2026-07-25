@@ -211,6 +211,7 @@ def _write_environment(
                 },
                 "execution": {
                     "local_files_only": False,
+                    "minimum_gpu_free_fraction": 0.25,
                     "timeout_seconds": 30,
                 },
             },
@@ -330,6 +331,7 @@ def test_checked_in_gb300_environment_is_ci_runnable() -> None:
     assert raw["storage"]["bundle_cache"] == "${TRTMC_PERF_BUNDLE_CACHE}"
     assert raw["storage"]["bundle_roots"] == "${TRTMC_PERF_BUNDLE_ROOTS}"
     assert raw["storage"]["runtime_dirs"] == "${TRTMC_PERF_RUNTIME_DIRS}"
+    assert raw["execution"]["minimum_gpu_free_fraction"] == 0.25
     assert raw["execution"]["timeout_seconds"] == 7200
 
 
@@ -499,7 +501,9 @@ def test_backend_waits_for_gpu_headroom_before_each_command(
     monkeypatch.setattr(
         perf_matrix,
         "_wait_for_gpu_memory_headroom",
-        lambda: events.append("wait"),
+        lambda **kwargs: events.append(
+            ("wait", kwargs["minimum_free_fraction"])
+        ),
     )
     monkeypatch.setattr(
         perf_matrix,
@@ -524,12 +528,17 @@ def test_backend_waits_for_gpu_headroom_before_each_command(
     perf_matrix._run_supported_case(
         {"id": "example"},
         {"model": {"precision": "fp16"}, "request": {}},
-        Namespace(timeout_seconds=30),
+        Namespace(timeout_seconds=30, minimum_gpu_free_fraction=0.25),
         tmp_path,
         row,
     )
 
-    assert events == ["wait", ("run", "candidate"), "wait", ("run", "baseline")]
+    assert events == [
+        ("wait", 0.25),
+        ("run", "candidate"),
+        ("wait", 0.25),
+        ("run", "baseline"),
+    ]
     assert row["status"] == "green"
 
 
@@ -845,6 +854,10 @@ def test_run_consolidates_results_and_records_replayable_commands(
     rows = {row["id"]: row for row in results["cases"]}
     assert len(rows) == 105
     assert results["environment_config"]["name"] == "test-gb300"
+    assert (
+        results["environment_config"]["execution"]["minimum_gpu_free_fraction"]
+        == 0.25
+    )
     assert results["environment_config"]["source"] == str(environment.resolve())
     assert results["catalog_coverage"] == {
         "total_profiles": 202,
@@ -1125,6 +1138,7 @@ def test_resolution_failure_is_recorded_without_stopping_other_entries(
         runtime_dirs=(),
         local_files_only=False,
         minimum_free_space_gib=0,
+        minimum_gpu_free_fraction=0.45,
         timeout_seconds=1,
     )
 
