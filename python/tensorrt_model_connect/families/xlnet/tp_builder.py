@@ -62,23 +62,6 @@ def _compute_sinusoidal_pos_emb(seq_len: int, d_model: int) -> np.ndarray:
     return pos_emb.astype(np.float32)
 
 
-def _compute_seg_mat(seq_len: int) -> np.ndarray:
-    r"""Compute default segment matrix for single-segment input.
-
-    When token_type_ids are all 0 (single segment), seg_mat is all zeros
-    (all tokens in same segment). Returns one-hot: [seq_len, seq_len, 2].
-
-    For seg_mat[i,j] = one_hot(token_type_ids[i] \!= token_type_ids[j]):
-      - If same segment: [1, 0]
-      - If different segment: [0, 1]
-
-    With all zeros token_type_ids: all same segment -> seg_mat[:,:,0]=1, seg_mat[:,:,1]=0.
-    """
-    seg_mat = np.zeros((seq_len, seq_len, 2), dtype=np.float32)
-    seg_mat[:, :, 0] = 1.0  # All same segment
-    return seg_mat
-
-
 def _add_seq_layer_norm(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
