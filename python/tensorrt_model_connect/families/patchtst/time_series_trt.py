@@ -6,8 +6,6 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 
@@ -15,12 +13,7 @@ from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
 from .checkpoint_mapper import (
-    WeightDict,
-    _has_tensor,
-    _load_tensor,
-    _open_safetensors,
     _target_np_dtype,
-    _transpose_2d,
 )
 
 
@@ -87,36 +80,6 @@ def create_network(*, verbose: bool = False) -> tuple[trt.Builder, trt.INetworkD
         trt_compat.network_creation_flags(explicit_batch=True, strongly_typed=True)
     )
     return builder, network
-
-
-def load_named_tensors(
-    model_dir: str | Path,
-    names: Iterable[str],
-    *,
-    precision: str = "fp32",
-    transpose_2d: bool = False,
-    optional: bool = False,
-) -> WeightDict:
-    readers = _open_safetensors(Path(model_dir))
-    target_dtype = _target_np_dtype(precision)
-    weights = WeightDict()
-    for name in names:
-        if not _has_tensor(readers, name):
-            if optional:
-                continue
-            raise KeyError(f"Tensor not found: {name}")
-        arr = _load_tensor(readers, name)
-        if transpose_2d and arr.ndim == 2:
-            weights[name] = _transpose_2d(arr, name, precision=precision)
-        else:
-            dtype = np.float32 if (
-                name.endswith(("running_mean", "running_var"))
-                or ".norm" in name
-                or "layernorm" in name
-                or "layer_norm" in name
-            ) else target_dtype
-            weights[name] = np.ascontiguousarray(arr, dtype=dtype)
-    return weights
 
 
 def add_linear(
