@@ -5,6 +5,8 @@
 
 #include "runtime/models/wan2_2_ti2v/easycache.h"
 
+#include "runtime/models/wan2_2_ti2v/options.h"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -98,7 +100,7 @@ void validate_config(const EasyCacheConfig& config) {
     }
 }
 
-bool is_qualified_late_cfg_profile(const EasyCacheConfig& config) noexcept {
+bool is_qualified_conservative_late_cfg_profile(const EasyCacheConfig& config) noexcept {
     return config.enabled && config.threshold == kQualifiedEasyCacheThreshold &&
            config.first_exact_steps == kQualifiedEasyCacheFirstExactSteps &&
            config.last_exact_steps == kQualifiedEasyCacheLastExactSteps &&
@@ -125,14 +127,34 @@ EasyCacheConfig easycache_config_from_environment(int32_t total_steps) {
     return config;
 }
 
-bool late_cfg_enabled_from_environment(const EasyCacheConfig& easycache) {
+bool is_thor_performance_easycache_config(const EasyCacheConfig& easycache) noexcept {
+    return easycache.enabled && easycache.threshold == kThorPerformanceEasyCacheThreshold &&
+           easycache.first_exact_steps == kThorPerformanceEasyCacheFirstExactSteps &&
+           easycache.last_exact_steps == kThorPerformanceEasyCacheLastExactSteps &&
+           easycache.max_consecutive_reuse == kThorPerformanceEasyCacheMaxConsecutiveReuse &&
+           easycache.total_steps == kThorPerformanceEasyCacheTotalSteps;
+}
+
+bool is_qualified_thor_performance_easycache_profile(
+    const EasyCacheConfig& easycache, const EasyCacheRuntimeProfile& runtime) noexcept {
+    return is_thor_performance_easycache_config(easycache) &&
+           runtime.video_height == trtmc::kWan22OfficialVideoHeight &&
+           runtime.video_width == trtmc::kWan22OfficialVideoWidth &&
+           runtime.video_frames == trtmc::kWan22OfficialVideoFrames &&
+           runtime.guidance_scale == trtmc::kWan22OfficialGuidanceScale && runtime.integrated_gpu &&
+           runtime.compute_capability_major == 11 && runtime.compute_capability_minor == 0;
+}
+
+bool late_cfg_enabled_from_environment(const EasyCacheConfig& easycache,
+                                       bool thor_performance_profile_qualified) {
     if (!parse_enabled(kLateCfgEnableEnvironment))
         return false;
-    if (!is_qualified_late_cfg_profile(easycache)) {
+    if (!is_qualified_conservative_late_cfg_profile(easycache) &&
+        !(thor_performance_profile_qualified && is_thor_performance_easycache_config(easycache))) {
         throw std::invalid_argument(
-            "TRTMC_WAN22_EASYCACHE_LATE_CFG requires the qualified 50-step EasyCache profile "
-            "(threshold=0.08, first_exact_steps=7, last_exact_steps=2, "
-            "max_consecutive_reuse=4)");
+            "TRTMC_WAN22_EASYCACHE_LATE_CFG requires either the conservative 50-step "
+            "EasyCache profile (threshold=0.08, first_exact_steps=7, last_exact_steps=2, "
+            "max_consecutive_reuse=4) or its runtime-qualified Thor performance profile");
     }
     return true;
 }

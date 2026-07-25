@@ -57,6 +57,39 @@ double milliseconds(Clock::time_point begin, Clock::time_point end) {
     return std::chrono::duration<double, std::milli>(end - begin).count();
 }
 
+void require_easycache_cuda_success(cudaError_t status, const char* operation) {
+    if (status != cudaSuccess) {
+        throw std::runtime_error(std::string("Wan2.2 EasyCache ") + operation +
+                                 " failed: " + cudaGetErrorString(status));
+    }
+}
+
+wan2_2_ti2v::EasyCacheRuntimeProfile
+current_easycache_runtime_profile(const Wan22TI2VRequest& request) {
+    wan2_2_ti2v::EasyCacheRuntimeProfile profile;
+    profile.video_height = request.video_height;
+    profile.video_width = request.video_width;
+    profile.video_frames = request.video_num_frames;
+    profile.guidance_scale = request.guidance_scale;
+
+    int device = 0;
+    require_easycache_cuda_success(cudaGetDevice(&device), "device query");
+    int integrated = 0;
+    require_easycache_cuda_success(
+        cudaDeviceGetAttribute(&integrated, cudaDevAttrIntegrated, device),
+        "integrated-device query");
+    require_easycache_cuda_success(cudaDeviceGetAttribute(&profile.compute_capability_major,
+                                                          cudaDevAttrComputeCapabilityMajor,
+                                                          device),
+                                   "compute-capability-major query");
+    require_easycache_cuda_success(cudaDeviceGetAttribute(&profile.compute_capability_minor,
+                                                          cudaDevAttrComputeCapabilityMinor,
+                                                          device),
+                                   "compute-capability-minor query");
+    profile.integrated_gpu = integrated != 0;
+    return profile;
+}
+
 std::vector<float> copy_as_float(const Tensor& tensor, std::size_t expected, const char* label) {
     if (tensor.data == nullptr || tensor.numel() != expected || tensor.dtype != DType::kFloat32)
         throw std::runtime_error(std::string("Wan2.2 ") + label + " has an invalid shape");
@@ -481,6 +514,18 @@ void Wan22TI2VPipeline::run_denoising(std::vector<float>& latents,
 
     const auto easycache_config =
         wan2_2_ti2v::easycache_config_from_environment(request.num_inference_steps);
+    bool thor_performance_profile_qualified = false;
+    if (wan2_2_ti2v::is_thor_performance_easycache_config(easycache_config)) {
+        const auto runtime_profile = current_easycache_runtime_profile(request);
+        thor_performance_profile_qualified =
+            wan2_2_ti2v::is_qualified_thor_performance_easycache_profile(easycache_config,
+                                                                         runtime_profile);
+        if (!thor_performance_profile_qualified) {
+            throw std::invalid_argument(
+                "Wan2.2 aggressive EasyCache is qualified only for the official "
+                "1280x704/121-frame/50-step/CFG5 profile on integrated SM 11.0 Thor");
+        }
+    }
     std::unique_ptr<wan2_2_ti2v::EasyCacheController> easycache;
     if (easycache_config.enabled) {
         easycache = std::make_unique<wan2_2_ti2v::EasyCacheController>(easycache_config);
@@ -491,7 +536,8 @@ void Wan22TI2VPipeline::run_denoising(std::vector<float>& latents,
     }
 
     std::unique_ptr<wan2_2_ti2v::LateCfgController> late_cfg;
-    if (wan2_2_ti2v::late_cfg_enabled_from_environment(easycache_config)) {
+    if (wan2_2_ti2v::late_cfg_enabled_from_environment(easycache_config,
+                                                       thor_performance_profile_qualified)) {
         late_cfg = std::make_unique<wan2_2_ti2v::LateCfgController>();
         std::cerr << "[wan2.2-ti2v.late_cfg] enabled=1 refresh_interval=2"
                   << " first_exact_steps=20 last_exact_steps=2"

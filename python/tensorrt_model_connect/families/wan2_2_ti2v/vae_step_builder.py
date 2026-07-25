@@ -59,6 +59,58 @@ class Wan22VaeStepProfile:
         )
 
 
+def _cuda_runtime():
+    try:
+        from cuda.bindings import runtime as cudart
+    except ImportError:
+        try:
+            from cuda import cudart
+        except ImportError as exc:
+            raise RuntimeError(
+                "Wan2.2 VAE build requires CUDA Python to query the active GPU"
+            ) from exc
+    return cudart
+
+
+def _current_cuda_device_profile() -> tuple[tuple[int, int], bool]:
+    cudart = _cuda_runtime()
+    success = getattr(getattr(cudart, "cudaError_t", None), "cudaSuccess", 0)
+    try:
+        status, device = cudart.cudaGetDevice()
+        if status not in (success, 0):
+            raise RuntimeError(f"cudaGetDevice failed with status {status}")
+        status, properties = cudart.cudaGetDeviceProperties(int(device))
+        if status not in (success, 0):
+            raise RuntimeError(f"cudaGetDeviceProperties failed with status {status}")
+        major = int(properties.major)
+        minor = int(properties.minor)
+        integrated = bool(getattr(properties, "integrated", False))
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Wan2.2 VAE could not query the active CUDA device: {exc}") from exc
+    if major <= 0 or minor < 0:
+        raise RuntimeError(f"Wan2.2 VAE received invalid CUDA compute capability {major}.{minor}")
+    return (major, minor), integrated
+
+
+def select_vae_convolution_precision(
+    profile: Wan22VaeStepProfile,
+    compute_capability: tuple[int, int],
+    *,
+    integrated: bool,
+) -> str:
+    """Return the qualified convolution precision for one VAE profile and GPU."""
+
+    if (
+        (profile.latent_height, profile.latent_width) == (44, 80)
+        and compute_capability == (11, 0)
+        and integrated
+    ):
+        return "bf16"
+    return "fp32"
+
+
 @dataclass(frozen=True)
 class Wan22VaeCacheSpec:
     """One source-ordered causal feature-cache tensor."""
@@ -248,6 +300,13 @@ def build_vae_step_engine(
     network = builder.create_network(flags)
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, OFFICIAL_VAE_WORKSPACE_GIB << 30)
+    compute_capability, integrated = _current_cuda_device_profile()
+    convolution_precision = select_vae_convolution_precision(
+        profile,
+        compute_capability,
+        integrated=integrated,
+    )
+    convolution_dtype = trt.bfloat16 if convolution_precision == "bf16" else trt.float32
 
     latent = network.add_input("latent_frame", trt.float32, profile.latent_shape)
     cache_inputs = [
@@ -292,6 +351,7 @@ def build_vae_step_engine(
         bias=weights["post_quant_conv.bias"],
         out_channels=48,
         kernel_size=(1, 1, 1),
+        convolution_dtype=convolution_dtype,
     )
 
     current_scale = 1
@@ -305,6 +365,7 @@ def build_vae_step_engine(
         out_channels=1024,
         kernel_size=(3, 3, 3),
         padding_hw=(1, 1),
+        convolution_dtype=convolution_dtype,
     )
 
     def add_resnet(tensor, *, prefix: str, input_channels: int, output_channels: int):
@@ -326,6 +387,7 @@ def build_vae_step_engine(
             out_channels=output_channels,
             kernel_size=(3, 3, 3),
             padding_hw=(1, 1),
+            convolution_dtype=convolution_dtype,
         )
         norm2 = graph_ops.add_l2_channel_norm(
             network,
@@ -345,6 +407,7 @@ def build_vae_step_engine(
             out_channels=output_channels,
             kernel_size=(3, 3, 3),
             padding_hw=(1, 1),
+            convolution_dtype=convolution_dtype,
         )
         if input_channels == output_channels:
             shortcut = tensor
@@ -356,6 +419,7 @@ def build_vae_step_engine(
                 bias=weights[f"{prefix}.conv_shortcut.bias"],
                 out_channels=output_channels,
                 kernel_size=(1, 1, 1),
+                convolution_dtype=convolution_dtype,
             )
         return network.add_elementwise(conv2, shortcut, trt.ElementWiseOperation.SUM).get_output(0)
 
@@ -407,6 +471,7 @@ def build_vae_step_engine(
                     bias=weights[f"{prefix}.bias"],
                     out_channels=output_channels * 2,
                     kernel_size=(3, 1, 1),
+                    convolution_dtype=convolution_dtype,
                 )
                 x = graph_ops.add_temporal_pixel_shuffle(network, x, factor=2)
 
@@ -418,6 +483,7 @@ def build_vae_step_engine(
                 weight=weights[f"{prefix}.weight"],
                 bias=weights[f"{prefix}.bias"],
                 scale=2,
+                convolution_dtype=convolution_dtype,
             )
             current_scale *= 2
 
@@ -450,6 +516,7 @@ def build_vae_step_engine(
         out_channels=12,
         kernel_size=(3, 3, 3),
         padding_hw=(1, 1),
+        convolution_dtype=convolution_dtype,
     )
     x = _add_unpatchify(trt, network, x)
 
@@ -477,7 +544,8 @@ def build_vae_step_engine(
     kind = "initializer" if first_frame_only else "recurrent"
     print(
         f"[wan22-vae-step] building {kind}: video={expected_video_shape}, "
-        f"caches={len(VAE_STEP_CACHE_SPECS)}",
+        f"caches={len(VAE_STEP_CACHE_SPECS)}, convolutions={convolution_precision}, "
+        f"sm={compute_capability[0]}{compute_capability[1]}",
         file=sys.stderr,
     )
     plan = builder.build_serialized_network(network, config)

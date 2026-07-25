@@ -75,6 +75,29 @@ EasyCacheConfig qualified_config() {
     return config;
 }
 
+EasyCacheConfig thor_performance_config() {
+    EasyCacheConfig config;
+    config.enabled = true;
+    config.threshold = trtmc::wan2_2_ti2v::kThorPerformanceEasyCacheThreshold;
+    config.first_exact_steps = trtmc::wan2_2_ti2v::kThorPerformanceEasyCacheFirstExactSteps;
+    config.last_exact_steps = trtmc::wan2_2_ti2v::kThorPerformanceEasyCacheLastExactSteps;
+    config.max_consecutive_reuse = trtmc::wan2_2_ti2v::kThorPerformanceEasyCacheMaxConsecutiveReuse;
+    config.total_steps = trtmc::wan2_2_ti2v::kThorPerformanceEasyCacheTotalSteps;
+    return config;
+}
+
+trtmc::wan2_2_ti2v::EasyCacheRuntimeProfile qualified_thor_runtime() {
+    trtmc::wan2_2_ti2v::EasyCacheRuntimeProfile runtime;
+    runtime.video_height = 704;
+    runtime.video_width = 1280;
+    runtime.video_frames = 121;
+    runtime.guidance_scale = 5.0F;
+    runtime.integrated_gpu = true;
+    runtime.compute_capability_major = 11;
+    runtime.compute_capability_minor = 0;
+    return runtime;
+}
+
 void test_defaults_are_inert() {
     ScopedEnvironment easycache("TRTMC_WAN22_EASYCACHE");
     ScopedEnvironment threshold("TRTMC_WAN22_EASYCACHE_THRESHOLD");
@@ -131,6 +154,69 @@ void test_qualified_profile_lock() {
     invalid.total_steps = 49;
     check_throws([&] { (void)trtmc::wan2_2_ti2v::late_cfg_enabled_from_environment(invalid); },
                  "late-CFG rejects an unqualified step count");
+}
+
+void test_thor_performance_profile_scope() {
+    ScopedEnvironment late_cfg("TRTMC_WAN22_EASYCACHE_LATE_CFG");
+    late_cfg.set("true");
+    const auto config = thor_performance_config();
+    const auto runtime = qualified_thor_runtime();
+
+    check(trtmc::wan2_2_ti2v::is_thor_performance_easycache_config(config),
+          "Thor performance EasyCache config is exact");
+    check(trtmc::wan2_2_ti2v::is_qualified_thor_performance_easycache_profile(config, runtime),
+          "Thor performance profile accepts official integrated SM110");
+    check(trtmc::wan2_2_ti2v::late_cfg_enabled_from_environment(config, true),
+          "late-CFG accepts runtime-qualified Thor performance profile");
+    check_throws(
+        [&] { (void)trtmc::wan2_2_ti2v::late_cfg_enabled_from_environment(config, false); },
+        "late-CFG rejects an unqualified Thor performance profile");
+
+    auto invalid_runtime = runtime;
+    invalid_runtime.video_height = 384;
+    check(!trtmc::wan2_2_ti2v::is_qualified_thor_performance_easycache_profile(config,
+                                                                               invalid_runtime),
+          "Thor performance profile rejects L0 height");
+    invalid_runtime = runtime;
+    invalid_runtime.video_width = 672;
+    check(!trtmc::wan2_2_ti2v::is_qualified_thor_performance_easycache_profile(config,
+                                                                               invalid_runtime),
+          "Thor performance profile rejects L0 width");
+    invalid_runtime = runtime;
+    invalid_runtime.video_frames = 5;
+    check(!trtmc::wan2_2_ti2v::is_qualified_thor_performance_easycache_profile(config,
+                                                                               invalid_runtime),
+          "Thor performance profile rejects L0 frame count");
+    invalid_runtime = runtime;
+    invalid_runtime.guidance_scale = 4.0F;
+    check(!trtmc::wan2_2_ti2v::is_qualified_thor_performance_easycache_profile(config,
+                                                                               invalid_runtime),
+          "Thor performance profile rejects non-qualified CFG");
+    invalid_runtime = runtime;
+    invalid_runtime.integrated_gpu = false;
+    check(!trtmc::wan2_2_ti2v::is_qualified_thor_performance_easycache_profile(config,
+                                                                               invalid_runtime),
+          "Thor performance profile rejects discrete SM110");
+    invalid_runtime = runtime;
+    invalid_runtime.compute_capability_major = 10;
+    invalid_runtime.compute_capability_minor = 3;
+    check(!trtmc::wan2_2_ti2v::is_qualified_thor_performance_easycache_profile(config,
+                                                                               invalid_runtime),
+          "Thor performance profile rejects SM103");
+    invalid_runtime = runtime;
+    invalid_runtime.compute_capability_minor = 1;
+    check(!trtmc::wan2_2_ti2v::is_qualified_thor_performance_easycache_profile(config,
+                                                                               invalid_runtime),
+          "Thor performance profile rejects non-Thor SM111");
+
+    auto invalid_config = config;
+    invalid_config.max_consecutive_reuse = 5;
+    check(!trtmc::wan2_2_ti2v::is_thor_performance_easycache_config(invalid_config),
+          "Thor performance profile rejects config drift");
+    invalid_config = config;
+    invalid_config.total_steps = 49;
+    check(!trtmc::wan2_2_ti2v::is_thor_performance_easycache_config(invalid_config),
+          "Thor performance profile rejects non-qualified step count");
 }
 
 void test_easycache_exact_and_reuse_paths() {
@@ -298,6 +384,7 @@ void test_synthetic_unconditional_updates_easycache() {
 int main() {
     test_defaults_are_inert();
     test_qualified_profile_lock();
+    test_thor_performance_profile_scope();
     test_easycache_exact_and_reuse_paths();
     test_late_cfg_exact_windows_cadence_and_prediction();
     test_prediction_falls_back_to_actual();

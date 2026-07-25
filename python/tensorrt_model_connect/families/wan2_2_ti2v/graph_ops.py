@@ -56,6 +56,55 @@ def add_silu(network, tensor):
     return network.add_elementwise(tensor, sigmoid, trt.ElementWiseOperation.PROD).get_output(0)
 
 
+def _add_convolution(
+    network,
+    tensor,
+    weight,
+    bias,
+    *,
+    out_channels: int,
+    kernel_shape: tuple[int, ...],
+    convolution_dtype,
+):
+    """Add one FP32 or BF16 convolution."""
+
+    if convolution_dtype == trt.float32:
+        weights = trt.Weights(weight)
+        biases = trt.Weights() if bias is None else trt.Weights(bias)
+        return network.add_convolution_nd(
+            tensor,
+            num_output_maps=out_channels,
+            kernel_shape=kernel_shape,
+            kernel=weights,
+            bias=biases,
+        )
+    if convolution_dtype != trt.bfloat16:
+        raise ValueError(f"Unsupported Wan2.2 VAE convolution dtype: {convolution_dtype}")
+    typed_input = network.add_cast(tensor, trt.bfloat16).get_output(0)
+    weight_tensor = add_constant(network, tuple(weight.shape), weight)
+    typed_weight = network.add_cast(weight_tensor, trt.bfloat16).get_output(0)
+    convolution = network.add_convolution_nd(
+        typed_input,
+        num_output_maps=out_channels,
+        kernel_shape=kernel_shape,
+        kernel=trt.Weights(),
+        bias=trt.Weights(),
+    )
+    convolution.set_input(1, typed_weight)
+    if bias is not None:
+        bias_tensor = add_constant(network, (out_channels,), bias)
+        typed_bias = network.add_cast(bias_tensor, trt.bfloat16).get_output(0)
+        convolution.set_input(2, typed_bias)
+    return convolution
+
+
+def _convolution_output(network, convolution, convolution_dtype):
+    output = convolution.get_output(0)
+    if convolution_dtype == trt.float32:
+        return output
+    return network.add_cast(output, trt.float32).get_output(0)
+
+
 def add_conv3d_as_conv2d(
     network,
     tensor,
@@ -65,6 +114,7 @@ def add_conv3d_as_conv2d(
     kernel_size: tuple[int, int, int],
     stride: tuple[int, int, int] = (1, 1, 1),
     padding: tuple[int, int, int] = (0, 0, 0),
+    convolution_dtype=None,
 ):
     """Apply a temporal-kernel-one Conv3D as per-frame Conv2D."""
 
@@ -76,31 +126,32 @@ def add_conv3d_as_conv2d(
         raise ValueError(
             "Wan2.2 Conv3D-as-Conv2D requires temporal kernel/stride 1 and no temporal padding"
         )
+    if convolution_dtype is None:
+        convolution_dtype = trt.float32
 
     reshape_input = network.add_shuffle(tensor)
     reshape_input.first_transpose = trt.Permutation([0, 2, 1, 3, 4])
     reshape_input.reshape_dims = (batch * frames, input_channels, height, width)
-    weights = trt.Weights(
-        np.ascontiguousarray(
-            np.asarray(weight).reshape(out_channels, input_channels, kh, kw),
-            dtype=np.float32,
-        )
+    weights = np.ascontiguousarray(
+        np.asarray(weight).reshape(out_channels, input_channels, kh, kw),
+        dtype=np.float32,
     )
-    biases = (
-        trt.Weights() if bias is None else trt.Weights(np.ascontiguousarray(bias, dtype=np.float32))
-    )
-    convolution = network.add_convolution_nd(
+    biases = None if bias is None else np.ascontiguousarray(bias, dtype=np.float32)
+    convolution = _add_convolution(
+        network,
         reshape_input.get_output(0),
-        num_output_maps=out_channels,
+        weights,
+        biases,
+        out_channels=out_channels,
         kernel_shape=(kh, kw),
-        kernel=weights,
-        bias=biases,
+        convolution_dtype=convolution_dtype,
     )
     convolution.stride_nd = (sh, sw)
     convolution.padding_nd = (ph, pw)
+    convolution_output = _convolution_output(network, convolution, convolution_dtype)
     output_height = (height + 2 * ph - kh) // sh + 1
     output_width = (width + 2 * pw - kw) // sw + 1
-    reshape_output = network.add_shuffle(convolution.get_output(0))
+    reshape_output = network.add_shuffle(convolution_output)
     reshape_output.reshape_dims = (
         batch,
         frames,
@@ -122,6 +173,7 @@ def add_causal_conv3d(
     kernel_size: tuple[int, int, int],
     stride: tuple[int, int, int] = (1, 1, 1),
     padding_hw: tuple[int, int] = (0, 0),
+    convolution_dtype=None,
 ):
     """Apply a causal Conv3D and return its two-frame updated cache."""
 
@@ -130,6 +182,8 @@ def add_causal_conv3d(
     ph, pw = padding_hw
     if kt != 3:
         raise ValueError(f"Wan2.2 causal Conv3D requires temporal kernel 3, got {kt}")
+    if convolution_dtype is None:
+        convolution_dtype = trt.float32
 
     concatenation = network.add_concatenation([cache, tensor])
     concatenation.axis = 2
@@ -137,29 +191,26 @@ def add_causal_conv3d(
     if input_frames == 1:
         reshape_input = network.add_shuffle(temporal)
         reshape_input.reshape_dims = (batch, input_channels * kt, height, width)
-        weights = trt.Weights(
-            np.ascontiguousarray(
-                np.asarray(weight).reshape(out_channels, input_channels * kt, kh, kw),
-                dtype=np.float32,
-            )
+        weights = np.ascontiguousarray(
+            np.asarray(weight).reshape(out_channels, input_channels * kt, kh, kw),
+            dtype=np.float32,
         )
-        biases = (
-            trt.Weights()
-            if bias is None
-            else trt.Weights(np.ascontiguousarray(bias, dtype=np.float32))
-        )
-        convolution = network.add_convolution_nd(
+        biases = None if bias is None else np.ascontiguousarray(bias, dtype=np.float32)
+        convolution = _add_convolution(
+            network,
             reshape_input.get_output(0),
-            num_output_maps=out_channels,
+            weights,
+            biases,
+            out_channels=out_channels,
             kernel_shape=(kh, kw),
-            kernel=weights,
-            bias=biases,
+            convolution_dtype=convolution_dtype,
         )
         convolution.stride_nd = (stride[1], stride[2])
         convolution.padding_nd = (ph, pw)
+        convolution_output = _convolution_output(network, convolution, convolution_dtype)
         output_height = (height + 2 * ph - kh) // stride[1] + 1
         output_width = (width + 2 * pw - kw) // stride[2] + 1
-        reshape_output = network.add_shuffle(convolution.get_output(0))
+        reshape_output = network.add_shuffle(convolution_output)
         reshape_output.reshape_dims = (
             batch,
             out_channels,
@@ -169,27 +220,23 @@ def add_causal_conv3d(
         )
         output = reshape_output.get_output(0)
     else:
-        weights = trt.Weights(
-            np.ascontiguousarray(
-                np.asarray(weight).reshape(out_channels, input_channels, kt, kh, kw),
-                dtype=np.float32,
-            )
+        weights = np.ascontiguousarray(
+            np.asarray(weight).reshape(out_channels, input_channels, kt, kh, kw),
+            dtype=np.float32,
         )
-        biases = (
-            trt.Weights()
-            if bias is None
-            else trt.Weights(np.ascontiguousarray(bias, dtype=np.float32))
-        )
-        convolution = network.add_convolution_nd(
+        biases = None if bias is None else np.ascontiguousarray(bias, dtype=np.float32)
+        convolution = _add_convolution(
+            network,
             temporal,
-            num_output_maps=out_channels,
+            weights,
+            biases,
+            out_channels=out_channels,
             kernel_shape=(kt, kh, kw),
-            kernel=weights,
-            bias=biases,
+            convolution_dtype=convolution_dtype,
         )
         convolution.stride_nd = stride
         convolution.padding_nd = (0, ph, pw)
-        output = convolution.get_output(0)
+        output = _convolution_output(network, convolution, convolution_dtype)
 
     updated_cache = network.add_slice(
         temporal,
@@ -220,6 +267,7 @@ def add_spatial_upsample_with_conv(
     weight,
     bias,
     scale: int = 2,
+    convolution_dtype=None,
 ):
     upsampled = add_spatial_upsample(network, tensor, scale)
     return add_conv3d_as_conv2d(
@@ -230,6 +278,7 @@ def add_spatial_upsample_with_conv(
         out_channels=int(weight.shape[0]),
         kernel_size=(1, 3, 3),
         padding=(0, 1, 1),
+        convolution_dtype=convolution_dtype,
     )
 
 

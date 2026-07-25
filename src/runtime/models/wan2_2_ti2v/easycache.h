@@ -18,6 +18,11 @@ constexpr int32_t kQualifiedEasyCacheFirstExactSteps = 7;
 constexpr int32_t kQualifiedEasyCacheLastExactSteps = 2;
 constexpr int32_t kQualifiedEasyCacheMaxConsecutiveReuse = 4;
 constexpr int32_t kQualifiedEasyCacheTotalSteps = 50;
+constexpr double kThorPerformanceEasyCacheThreshold = 1.0;
+constexpr int32_t kThorPerformanceEasyCacheFirstExactSteps = 7;
+constexpr int32_t kThorPerformanceEasyCacheLastExactSteps = 2;
+constexpr int32_t kThorPerformanceEasyCacheMaxConsecutiveReuse = 4;
+constexpr int32_t kThorPerformanceEasyCacheTotalSteps = 50;
 
 struct EasyCacheConfig {
     bool enabled{false};
@@ -34,8 +39,22 @@ struct EasyCacheStats {
     int32_t reuse_steps{0};
 };
 
+struct EasyCacheRuntimeProfile {
+    int32_t video_height{0};
+    int32_t video_width{0};
+    int32_t video_frames{0};
+    float guidance_scale{0.0F};
+    bool integrated_gpu{false};
+    int32_t compute_capability_major{0};
+    int32_t compute_capability_minor{0};
+};
+
 EasyCacheConfig easycache_config_from_environment(int32_t total_steps);
-bool late_cfg_enabled_from_environment(const EasyCacheConfig& easycache);
+bool is_thor_performance_easycache_config(const EasyCacheConfig& easycache) noexcept;
+bool is_qualified_thor_performance_easycache_profile(
+    const EasyCacheConfig& easycache, const EasyCacheRuntimeProfile& runtime) noexcept;
+bool late_cfg_enabled_from_environment(const EasyCacheConfig& easycache,
+                                       bool thor_performance_profile_qualified = false);
 
 class EasyCacheController {
   public:
