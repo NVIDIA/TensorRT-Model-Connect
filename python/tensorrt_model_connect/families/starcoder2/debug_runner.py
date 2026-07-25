@@ -20,6 +20,7 @@ except ImportError:
     except ImportError:  # pragma: no cover - exercised in TRT-free test envs
         cudart = None  # type: ignore[assignment]
 
+
 def _check_cuda(status):
     """Raise on CUDA error."""
     if cudart is None:
@@ -31,6 +32,7 @@ def _check_cuda(status):
     if status != success:
         raise RuntimeError(f"CUDA error: {status}")
 
+
 def _trt_nptype_safe(dtype: trt.DataType):
     """Resolve TRT dtype to a NumPy dtype, including BF16 fallback."""
     try:
@@ -40,67 +42,16 @@ def _trt_nptype_safe(dtype: trt.DataType):
             return np.uint16
         raise
 
+
 def _trt_itemsize(dtype: trt.DataType) -> int:
     return np.dtype(_trt_nptype_safe(dtype)).itemsize
+
 
 def _require_trt_runtime() -> None:
     if trt is None:
         raise ImportError("tensorrt is required for family debug_runner execution")
     if cudart is None:
         raise ImportError("cuda-python is required for family debug_runner execution")
-
-
-
-def load_engine_from_bundle(
-    bundle_path: str,
-    section_name: str = "engine_plan",
-) -> tuple[bytes, dict]:
-    """Load this family's engine plan bytes and bundle metadata."""
-    import json
-    import struct
-
-    with open(bundle_path, "rb") as f:
-        magic = f.read(8)
-        if magic != b"TRTFB\x00\x01\x00":
-            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
-        header_len = struct.unpack("<Q", f.read(8))[0]
-        header = json.loads(f.read(header_len).decode("utf-8"))
-        sections = header.get("sections", {})
-        engine_meta = sections.get(section_name)
-        if engine_meta is None:
-            raise KeyError(
-                f"Bundle {bundle_path!r} does not contain section {section_name!r}")
-        f.seek(16 + header_len + engine_meta["offset"])
-        engine_plan = f.read(engine_meta["size"])
-
-    return engine_plan, header
-
-def load_section_from_bundle(bundle_path: str, section_name: str) -> bytes | None:
-    """Load a named raw section from this family's .trtfb bundle."""
-    import json
-    import struct
-
-    with open(bundle_path, "rb") as f:
-        magic = f.read(8)
-        if magic != b"TRTFB\x00\x01\x00":
-            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
-        header_len = struct.unpack("<Q", f.read(8))[0]
-        header = json.loads(f.read(header_len).decode("utf-8"))
-        sections = header.get("sections", {})
-        meta = sections.get(section_name)
-        if meta is None:
-            return None
-        f.seek(16 + header_len + meta["offset"])
-        return f.read(meta["size"])
-
-def load_config_from_bundle(bundle_path: str) -> dict:
-    """Load and parse this family's config.json from a .trtfb bundle."""
-    import json
-
-    data = load_section_from_bundle(bundle_path, "config.json")
-    if data is None:
-        return {}
-    return json.loads(data.decode("utf-8"))
 
 
 class TrtRunner:
@@ -197,9 +148,11 @@ class TrtRunner:
                 self._output_names.append(name)
                 self._output_shapes[name] = shape
                 # Debug outputs: anything that's not logits/present_k/present_v
-                if (name != "logits"
-                        and not name.startswith("present_k_")
-                        and not name.startswith("present_v_")):
+                if (
+                    name != "logits"
+                    and not name.startswith("present_k_")
+                    and not name.startswith("present_v_")
+                ):
                     self._debug_output_names.append(name)
 
         # --- Persistent device cache buffers (not copied per step) ---
@@ -301,10 +254,8 @@ class TrtRunner:
 
         # Zero-init device cache
         for i in range(num_layers):
-            _check_cuda(cudart.cudaMemsetAsync(
-                self._d_cache_k[i], 0, cache_bytes, self.stream)[0])
-            _check_cuda(cudart.cudaMemsetAsync(
-                self._d_cache_v[i], 0, cache_bytes, self.stream)[0])
+            _check_cuda(cudart.cudaMemsetAsync(self._d_cache_k[i], 0, cache_bytes, self.stream)[0])
+            _check_cuda(cudart.cudaMemsetAsync(self._d_cache_v[i], 0, cache_bytes, self.stream)[0])
         cudart.cudaStreamSynchronize(self.stream)
 
     @property
@@ -350,15 +301,11 @@ class TrtRunner:
         self._h_position_id[0] = position_id
 
         # H2D: small inputs only
+        cudart.cudaMemcpyAsync(self._d_token_id, self._h_token_id.ctypes.data, 4, H2D, stream)
+        cudart.cudaMemcpyAsync(self._d_position_id, self._h_position_id.ctypes.data, 4, H2D, stream)
         cudart.cudaMemcpyAsync(
-            self._d_token_id, self._h_token_id.ctypes.data,
-            4, H2D, stream)
-        cudart.cudaMemcpyAsync(
-            self._d_position_id, self._h_position_id.ctypes.data,
-            4, H2D, stream)
-        cudart.cudaMemcpyAsync(
-            self._d_mask, self._h_mask.ctypes.data,
-            attention_window * 4, H2D, stream)
+            self._d_mask, self._h_mask.ctypes.data, attention_window * 4, H2D, stream
+        )
 
         # VL embed_input support
         if self._has_embed_input:
@@ -369,30 +316,39 @@ class TrtRunner:
                 self._h_input_embed[:] = 0.0
                 self._h_use_input_embed[0] = 0.0
             cudart.cudaMemcpyAsync(
-                self._d_input_embed, self._h_input_embed.ctypes.data,
-                self._h_input_embed.nbytes, H2D, stream)
+                self._d_input_embed,
+                self._h_input_embed.ctypes.data,
+                self._h_input_embed.nbytes,
+                H2D,
+                stream,
+            )
             cudart.cudaMemcpyAsync(
-                self._d_use_input_embed, self._h_use_input_embed.ctypes.data,
-                4, H2D, stream)
+                self._d_use_input_embed, self._h_use_input_embed.ctypes.data, 4, H2D, stream
+            )
 
         # DeepStack H2D transfers
         if self._deepstack_names:
             for idx, ds_name in enumerate(self._deepstack_names):
-                if (deepstack_embeds is not None and idx < len(deepstack_embeds)
-                        and deepstack_active > 0.5):
+                if (
+                    deepstack_embeds is not None
+                    and idx < len(deepstack_embeds)
+                    and deepstack_active > 0.5
+                ):
                     self._h_deepstack[ds_name][:] = deepstack_embeds[idx].astype(np.float32)
                 else:
                     self._h_deepstack[ds_name][:] = 0.0
                 cudart.cudaMemcpyAsync(
                     self._d_deepstack[ds_name],
                     self._h_deepstack[ds_name].ctypes.data,
-                    self._h_deepstack[ds_name].nbytes, H2D, stream)
+                    self._h_deepstack[ds_name].nbytes,
+                    H2D,
+                    stream,
+                )
             if self._h_deepstack_active is not None:
                 self._h_deepstack_active[0] = deepstack_active
                 cudart.cudaMemcpyAsync(
-                    self._d_deepstack_active,
-                    self._h_deepstack_active.ctypes.data,
-                    4, H2D, stream)
+                    self._d_deepstack_active, self._h_deepstack_active.ctypes.data, 4, H2D, stream
+                )
 
         # Set tensor addresses
         self.context.set_tensor_address("token_id", self._d_token_id)
@@ -402,15 +358,13 @@ class TrtRunner:
 
         if self._has_embed_input:
             self.context.set_tensor_address("input_embed", self._d_input_embed)
-            self.context.set_tensor_address(
-                "use_input_embed", self._d_use_input_embed)
+            self.context.set_tensor_address("use_input_embed", self._d_use_input_embed)
 
         # DeepStack tensor binding (zeroed by default, set during VL prefill)
         for ds_name in self._deepstack_names:
             self.context.set_tensor_address(ds_name, self._d_deepstack[ds_name])
         if self._d_deepstack_active:
-            self.context.set_tensor_address(
-                "deepstack_active", self._d_deepstack_active)
+            self.context.set_tensor_address("deepstack_active", self._d_deepstack_active)
 
         for i in range(self.num_layers):
             self.context.set_tensor_address(f"cache_k_{i}", self._d_cache_k[i])
@@ -443,28 +397,27 @@ class TrtRunner:
             ]:
                 if self.cache_length < self.max_cache_length:
                     offset = self.cache_length * row_bytes
-                    cudart.cudaMemcpyAsync(
-                        cache_buf + offset, present_buf,
-                        row_bytes, D2D, stream)
+                    cudart.cudaMemcpyAsync(cache_buf + offset, present_buf, row_bytes, D2D, stream)
                 else:
                     cudart.cudaMemcpyAsync(
-                        cache_buf, cache_buf + row_bytes,
+                        cache_buf,
+                        cache_buf + row_bytes,
                         (self.max_cache_length - 1) * row_bytes,
-                        D2D, stream)
+                        D2D,
+                        stream,
+                    )
                     offset = (self.max_cache_length - 1) * row_bytes
-                    cudart.cudaMemcpyAsync(
-                        cache_buf + offset, present_buf,
-                        row_bytes, D2D, stream)
+                    cudart.cudaMemcpyAsync(cache_buf + offset, present_buf, row_bytes, D2D, stream)
 
         # D2H: logits + debug outputs
         cudart.cudaMemcpyAsync(
-            self._h_logits.ctypes.data, self._d_logits,
-            self._logits_numel * 4, D2H, stream)
+            self._h_logits.ctypes.data, self._d_logits, self._logits_numel * 4, D2H, stream
+        )
         for name in self._debug_output_names:
             h_buf = self._h_debug[name]
             cudart.cudaMemcpyAsync(
-                h_buf.ctypes.data, self._d_debug[name],
-                h_buf.nbytes, D2H, stream)
+                h_buf.ctypes.data, self._d_debug[name], h_buf.nbytes, D2H, stream
+            )
 
         cudart.cudaStreamSynchronize(stream)
         self.cache_length = min(self.cache_length + 1, self.max_cache_length)
@@ -481,10 +434,8 @@ class TrtRunner:
         """Zero all device cache buffers and reset cache_length."""
         cache_bytes = self.max_cache_length * self.attention_size * self._cache_elem_bytes
         for i in range(self.num_layers):
-            _check_cuda(cudart.cudaMemsetAsync(
-                self._d_cache_k[i], 0, cache_bytes, self.stream)[0])
-            _check_cuda(cudart.cudaMemsetAsync(
-                self._d_cache_v[i], 0, cache_bytes, self.stream)[0])
+            _check_cuda(cudart.cudaMemsetAsync(self._d_cache_k[i], 0, cache_bytes, self.stream)[0])
+            _check_cuda(cudart.cudaMemsetAsync(self._d_cache_v[i], 0, cache_bytes, self.stream)[0])
         cudart.cudaStreamSynchronize(self.stream)
         self.cache_length = 0
 
@@ -525,8 +476,7 @@ class TrtRunner:
             return
         if not hasattr(self, "_d_token_id"):
             return
-        bufs = [self._d_token_id, self._d_position_id, self._d_mask,
-                self._d_logits]
+        bufs = [self._d_token_id, self._d_position_id, self._d_mask, self._d_logits]
         bufs.extend(self._d_cache_k)
         bufs.extend(self._d_cache_v)
         bufs.extend(self._d_present_k)
@@ -549,7 +499,6 @@ class TrtRunner:
             del self.context
         if hasattr(self, "engine"):
             del self.engine
-
 
 
 def runner_from_bundle(
