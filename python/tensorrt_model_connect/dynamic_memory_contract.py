@@ -264,7 +264,11 @@ _RUNTIME_MEMORY_V1_KEYS = frozenset(
     }
 )
 _RUNTIME_MEMORY_V2_KEYS = frozenset(
-    {*_RUNTIME_MEMORY_V1_KEYS, "module_residency_calibration"}
+    {
+        *_RUNTIME_MEMORY_V1_KEYS,
+        "runtime_config_sha256",
+        "module_residency_calibration",
+    }
 )
 _MODULE_RESIDENCY_CALIBRATION_KEYS = frozenset(
     {
@@ -944,6 +948,10 @@ def validate_runtime_memory_contract(
         "runtime_owned": True,
     }
     if version == 2:
+        normalized["runtime_config_sha256"] = _strict_sha256(
+            value["runtime_config_sha256"],
+            "runtime_config_sha256",
+        )
         normalized["module_residency_calibration"] = (
             _validate_module_residency_calibration(
                 value["module_residency_calibration"],
@@ -959,12 +967,16 @@ def seal_runtime_memory_contract(
     *,
     plan_sections: Mapping[str, bytes | bytearray | memoryview],
     module_residency_calibration: Mapping[str, Any],
+    runtime_config_bytes: bytes | bytearray | memoryview,
 ) -> dict[str, Any]:
     """Seal a provisional v1 qualification contract as strict v2.
 
     ``plan_sections`` must contain exactly the serialized ``engine_plan`` and
     ``prefill_engine_plan`` bytes.  Their actual SHA-256 values are checked
-    against the ordered calibration plan entries before v2 is returned.
+    against the ordered calibration plan entries before v2 is returned.  The
+    exact serialized bundle ``config.json`` bytes are independently bound so
+    runtime graph dimensions and I/O policy cannot drift from the sealed
+    qualification.
     """
 
     normalized_base = validate_runtime_memory_contract(base_contract)
@@ -972,6 +984,13 @@ def seal_runtime_memory_contract(
         raise DynamicMemoryContractError(
             "seal_runtime_memory_contract requires a provisional contract_version 1 base"
         )
+    if not isinstance(runtime_config_bytes, (bytes, bytearray, memoryview)):
+        raise DynamicMemoryContractError(
+            "runtime_memory.runtime_config_bytes must be bytes"
+        )
+    runtime_config_sha256 = hashlib.sha256(
+        bytes(runtime_config_bytes)
+    ).hexdigest()
     section_map = _require_exact_object_keys(
         plan_sections,
         expected=frozenset(section for section, _role in _MODULE_RESIDENCY_PLAN_ORDER),
@@ -1003,6 +1022,7 @@ def seal_runtime_memory_contract(
     sealed = {
         **normalized_base,
         "contract_version": 2,
+        "runtime_config_sha256": runtime_config_sha256,
         "module_residency_calibration": calibration,
     }
     return validate_runtime_memory_contract(sealed)
@@ -1013,6 +1033,7 @@ def seal_runtime_memory_contract_from_qualified_manifest(
     *,
     family: str,
     plan_sections: Mapping[str, bytes | bytearray | memoryview],
+    runtime_config_bytes: bytes | bytearray | memoryview,
     manifest_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Seal one exact plan set from the family-owned qualification manifest.
@@ -1128,6 +1149,7 @@ def seal_runtime_memory_contract_from_qualified_manifest(
         normalized_base,
         plan_sections=section_map,
         module_residency_calibration=candidates[0],
+        runtime_config_bytes=runtime_config_bytes,
     )
 
 
@@ -1414,11 +1436,7 @@ def qualification_for_model_ref(
         if record.qualified_model_id != model_id:
             continue
         if revision and record.qualified_model_revision != revision:
-            raise DynamicMemoryContractError(
-                "Recognized runtime-memory-qualified model revision mismatch: "
-                f"{model_id} requires {record.qualified_model_revision}, "
-                f"got {revision}"
-            )
+            return None
         return record
     return None
 
@@ -1471,9 +1489,10 @@ def resolve_model_only_qualification(
 ) -> ResolvedDynamicMemoryQualification | None:
     """Resolve and verify the exact no-build-flag qualification.
 
-    Unknown local directories and unqualified targets are not applicable and
-    return ``None``.  Once an exact identity is recognized, a corrupt or stale
-    config is an invalid candidate and raises rather than silently opting in.
+    Unknown local directories, unavailable target probes, and unqualified
+    targets are not applicable and return ``None``.  Once the model and live
+    target both match an exact qualification, a corrupt or stale config is an
+    invalid candidate and raises rather than silently opting in.
     """
 
     qualification = qualification_for_model_ref(
@@ -1485,24 +1504,10 @@ def resolve_model_only_qualification(
 
     try:
         target = probe_build_target()
-    except Exception as exc:
-        raise DynamicMemoryContractError(
-            "Recognized runtime-memory-qualified model, but the active "
-            "TensorRT/GPU target could not be verified"
-        ) from exc
+    except Exception:
+        return None
     if not qualification.matches_target(target):
-        expected_stack = qualification.qualified_runtime_stack()
-        actual_stack = target.runtime_stack()
-        mismatches = [
-            name
-            for name in expected_stack
-            if expected_stack[name] != actual_stack[name]
-        ]
-        raise DynamicMemoryContractError(
-            "Recognized runtime-memory-qualified model, but this build target "
-            "is not qualified: mismatched runtime-stack field(s) "
-            f"{mismatches}; expected {expected_stack}, got {actual_stack}"
-        )
+        return None
 
     local = Path(str(model_ref))
     if local.is_dir():

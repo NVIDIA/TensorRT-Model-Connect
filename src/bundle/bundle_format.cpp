@@ -444,8 +444,10 @@ void parse_runtime_memory_contract(const std::string& json, BundleInfo& info) {
         "runtime_owned",
     };
     auto expected_keys = kVersionOneKeys;
-    if (contract.contract_version == 2)
+    if (contract.contract_version == 2) {
+        expected_keys.insert("runtime_config_sha256");
         expected_keys.insert("module_residency_calibration");
+    }
     require_exact_keys(value, expected_keys, "runtime_memory");
 
     const auto& runtime_stack_value = value.at("qualified_runtime_stack");
@@ -467,6 +469,10 @@ void parse_runtime_memory_contract(const std::string& json, BundleInfo& info) {
             value.at("qualified_model_revision").get<std::string>();
         contract.qualified_config_sha256 =
             value.at("qualified_config_sha256").get<std::string>();
+        if (contract.contract_version == 2) {
+            contract.runtime_config_sha256 =
+                value.at("runtime_config_sha256").get<std::string>();
+        }
         contract.qualified_target = value.at("qualified_target").get<std::string>();
         runtime_stack.sm = runtime_stack_value.at("sm").get<std::string>();
         runtime_stack.tensorrt = runtime_stack_value.at("tensorrt").get<std::string>();
@@ -514,6 +520,10 @@ void parse_runtime_memory_contract(const std::string& json, BundleInfo& info) {
         invalid_runtime_memory("qualified_model_revision must be a lowercase 40-character SHA");
     if (!is_lower_hex(contract.qualified_config_sha256, 64))
         invalid_runtime_memory("qualified_config_sha256 must be a lowercase SHA-256");
+    if (contract.contract_version == 2 &&
+        !is_lower_hex(contract.runtime_config_sha256, 64)) {
+        invalid_runtime_memory("runtime_config_sha256 must be a lowercase SHA-256");
+    }
     if (contract.qualified_target.empty())
         invalid_runtime_memory("qualified_target is required");
     if (runtime_stack.sm.empty() || runtime_stack.tensorrt.empty() ||

@@ -21,8 +21,10 @@ namespace trtmc {
 // native Model Connect implementation.
 bool is_optimized_runtime_bundle(const BundleInfo& bundle_info);
 
-std::unique_ptr<IPipeline> try_make_optimized_runtime_pipeline(const std::string& bundle_path,
-                                                               const BundleInfo& bundle_info,
-                                                               const LoadOptions& options);
+std::unique_ptr<IPipeline>
+try_make_optimized_runtime_pipeline(const std::string& bundle_path,
+                                    const std::string& stable_bundle_read_path,
+                                    const BundleInfo& bundle_info,
+                                    const LoadOptions& options);
 
 } // namespace trtmc

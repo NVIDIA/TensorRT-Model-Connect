@@ -117,6 +117,7 @@ int main() {
       "qualified_model_id":"qwen",
       "qualified_model_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "qualified_config_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "runtime_config_sha256":"5a561babc42e111d612287a2d6cf4f2329c807d8c2d873e6256a357343da978e",
       "qualified_target":"gb300-trt-11.2",
       "qualified_runtime_stack":{"sm":"sm103","tensorrt":"11.2.0.113","cuda_runtime":"13.3","cudnn_backend":"9.20.0","cudnn_frontend_revision":"7b9b711c22b6823e87150213ecd8449260db8610","nvrtc":"13.3","driver":"580.105.08"},
       "native_kv_plugin_abi":2,

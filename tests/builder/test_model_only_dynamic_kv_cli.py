@@ -419,6 +419,46 @@ def test_unqualified_qwen_and_llama_snapshots_preserve_previous_optimized_routin
     assert "_runtime_memory_contract" not in options
 
 
+def test_unqualified_live_target_preserves_previous_optimized_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tensorrt_model_connect.build_cli as cli
+    import tensorrt_model_connect.engine_builder as engine_builder
+
+    optimized_calls: list[tuple[str, str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        cli,
+        "_model_only_native_dynamic_qualification",
+        lambda _args: None,
+    )
+    monkeypatch.setattr(
+        engine_builder,
+        "_try_build_optimized_runtime",
+        lambda model, output, options, **_kwargs: (
+            optimized_calls.append((model, output, options)) or object()
+        ),
+    )
+    monkeypatch.setattr(
+        engine_builder,
+        "_build_native_impl_qualified",
+        lambda **_kwargs: pytest.fail(
+            "an unqualified target must not enter the qualified native builder"
+        ),
+    )
+
+    args = _build_args("Qwen/Qwen3-0.6B")
+    args.precision = None
+
+    assert cli._cmd_build(args) == 0
+    assert len(optimized_calls) == 1
+    routed_model, output, options = optimized_calls[0]
+    assert routed_model == "Qwen/Qwen3-0.6B"
+    assert output == "qwen3-0.6b.trtfb"
+    assert options["max_cache_length"] == 256
+    assert options["dynamic_kv_cache"] is False
+    assert options["precision"] == "fp32"
+
+
 def test_model_only_native_preference_is_exact_qualification_gated(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

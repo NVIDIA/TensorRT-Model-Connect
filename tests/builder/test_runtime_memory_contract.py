@@ -29,6 +29,8 @@ pytestmark = pytest.mark.dynamic_memory
 
 QWEN_REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
 QWEN_CONFIG_SHA256 = "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd"
+RUNTIME_CONFIG_BYTES = b'{"model_type":"qwen3","num_hidden_layers":28}'
+RUNTIME_CONFIG_SHA256 = hashlib.sha256(RUNTIME_CONFIG_BYTES).hexdigest()
 
 
 def _valid_contract() -> dict:
@@ -172,12 +174,40 @@ def test_v2_sealing_binds_stack_plan_set_and_actual_plan_bytes() -> None:
         base,
         plan_sections=_plan_sections(),
         module_residency_calibration=calibration,
+        runtime_config_bytes=RUNTIME_CONFIG_BYTES,
     )
 
     assert base["contract_version"] == 1
     assert sealed["contract_version"] == 2
+    assert sealed["runtime_config_sha256"] == RUNTIME_CONFIG_SHA256
     assert sealed["module_residency_calibration"] == calibration
     assert validate_runtime_memory_contract(sealed) == sealed
+
+
+def test_v2_runtime_config_digest_is_required_and_strict() -> None:
+    base = _valid_contract()
+    sealed = seal_runtime_memory_contract(
+        base,
+        plan_sections=_plan_sections(),
+        module_residency_calibration=_valid_calibration(base),
+        runtime_config_bytes=RUNTIME_CONFIG_BYTES,
+    )
+
+    missing = dict(sealed)
+    missing.pop("runtime_config_sha256")
+    with pytest.raises(
+        DynamicMemoryContractError,
+        match="runtime_config_sha256",
+    ):
+        validate_runtime_memory_contract(missing)
+
+    malformed = dict(sealed)
+    malformed["runtime_config_sha256"] = RUNTIME_CONFIG_SHA256.upper()
+    with pytest.raises(
+        DynamicMemoryContractError,
+        match="runtime_config_sha256.*lowercase SHA-256",
+    ):
+        validate_runtime_memory_contract(malformed)
 
 
 def test_legacy_v2_calibration_without_provenance_defaults_to_external() -> None:
@@ -189,6 +219,7 @@ def test_legacy_v2_calibration_without_provenance_defaults_to_external() -> None
         base,
         plan_sections=_plan_sections(),
         module_residency_calibration=calibration,
+        runtime_config_bytes=RUNTIME_CONFIG_BYTES,
     )
 
     assert (
@@ -210,6 +241,7 @@ def test_v2_calibration_rejects_unknown_evidence_provenance() -> None:
             base,
             plan_sections=_plan_sections(),
             module_residency_calibration=calibration,
+            runtime_config_bytes=RUNTIME_CONFIG_BYTES,
         )
 
 
@@ -233,6 +265,7 @@ def test_qualified_manifest_rejects_embedded_evidence_provenance(
             base,
             family="qwen",
             plan_sections=_plan_sections(),
+            runtime_config_bytes=RUNTIME_CONFIG_BYTES,
             manifest_path=manifest,
         )
 
@@ -262,6 +295,7 @@ def test_qualified_manifest_sealing_selects_the_exact_plan(
         base,
         family="qwen",
         plan_sections=_plan_sections(),
+        runtime_config_bytes=RUNTIME_CONFIG_BYTES,
         manifest_path=manifest,
     )
 
@@ -295,6 +329,7 @@ def test_qualified_manifest_sealing_rejects_an_unqualified_plan(
                 **_plan_sections(),
                 "engine_plan": b"unqualified plan bytes",
             },
+            runtime_config_bytes=RUNTIME_CONFIG_BYTES,
             manifest_path=manifest,
         )
 
@@ -319,6 +354,7 @@ def test_qualified_manifest_distinguishes_malformed_record_from_exact_miss(
                 **_plan_sections(),
                 "engine_plan": b"unknown plan bytes",
             },
+            runtime_config_bytes=RUNTIME_CONFIG_BYTES,
             manifest_path=manifest,
         )
 
@@ -338,6 +374,7 @@ def test_v2_accepts_eager_cuda_module_loading_calibration() -> None:
         base,
         plan_sections=_plan_sections(),
         module_residency_calibration=calibration,
+        runtime_config_bytes=RUNTIME_CONFIG_BYTES,
     )
 
     assert (
@@ -349,6 +386,7 @@ def test_v2_accepts_eager_cuda_module_loading_calibration() -> None:
 def test_v2_requires_module_residency_calibration() -> None:
     contract = _valid_contract()
     contract["contract_version"] = 2
+    contract["runtime_config_sha256"] = RUNTIME_CONFIG_SHA256
 
     with pytest.raises(
         DynamicMemoryContractError,
@@ -475,6 +513,7 @@ def test_invalid_v2_calibration_fails_closed(
     mutation(calibration)
     contract.update(
         contract_version=2,
+        runtime_config_sha256=RUNTIME_CONFIG_SHA256,
         module_residency_calibration=calibration,
     )
 
@@ -488,6 +527,7 @@ def test_v2_rejects_outer_stack_drift_after_sealing() -> None:
         base,
         plan_sections=_plan_sections(),
         module_residency_calibration=_valid_calibration(base),
+        runtime_config_bytes=RUNTIME_CONFIG_BYTES,
     )
     sealed["qualified_runtime_stack"]["driver"] = "580.105.09"
 
@@ -531,6 +571,7 @@ def test_sealing_rejects_missing_extra_or_drifted_plan_bytes(
             base,
             plan_sections=sections,
             module_residency_calibration=_valid_calibration(base),
+            runtime_config_bytes=RUNTIME_CONFIG_BYTES,
         )
 
 

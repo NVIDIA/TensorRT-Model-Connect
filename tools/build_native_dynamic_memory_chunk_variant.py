@@ -604,18 +604,18 @@ def _read_bundle_header(path: Path) -> dict[str, Any]:
     return header
 
 
-def _bundle_plan_section_sha256(
+def _bundle_required_section_sha256(
     path: Path,
     header: Mapping[str, Any],
+    required_names: Sequence[str],
 ) -> dict[str, str]:
-    """Hash both split plans from their exact on-disk bundle ranges."""
+    """Hash required sections from their exact on-disk bundle ranges."""
 
     sections = header.get("sections")
     if not isinstance(sections, Mapping):
         raise ChunkVariantBuildError(
             "qualified C/2 bundle has no section table"
         )
-    required_names = ("engine_plan", "prefill_engine_plan")
     spans: dict[str, tuple[int, int]] = {}
     for name in required_names:
         section = sections.get(name)
@@ -640,10 +640,12 @@ def _bundle_plan_section_sha256(
         (offset, offset + size, name)
         for name, (offset, size) in spans.items()
     )
-    if ordered_spans[0][1] > ordered_spans[1][0]:
-        raise ChunkVariantBuildError(
-            "qualified C/2 split plan sections overlap"
-        )
+    for left, right in zip(ordered_spans, ordered_spans[1:]):
+        if left[1] > right[0]:
+            raise ChunkVariantBuildError(
+                "qualified C/2 required sections overlap: "
+                f"{left[2]} and {right[2]}"
+            )
 
     hashes: dict[str, str] = {}
     with path.open("rb") as bundle:
@@ -687,6 +689,8 @@ def _bundle_plan_section_sha256(
 
 def _expected_contract(
     qualification: ResolvedDynamicMemoryQualification,
+    *,
+    runtime_config_sha256: str,
 ) -> dict[str, Any]:
     record = qualification.qualification
     return {
@@ -716,6 +720,7 @@ def _expected_contract(
             record.active_kv_profile_limits
         ),
         "runtime_owned": True,
+        "runtime_config_sha256": runtime_config_sha256,
     }
 
 
@@ -724,6 +729,11 @@ def _validate_built_bundle(
     qualification: ResolvedDynamicMemoryQualification,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     header = _read_bundle_header(bundle)
+    actual_section_hashes = _bundle_required_section_sha256(
+        bundle,
+        header,
+        ("engine_plan", "prefill_engine_plan", "config.json"),
+    )
     raw_contract = header.get("runtime_memory")
     if not isinstance(raw_contract, Mapping):
         raise ChunkVariantBuildError(
@@ -735,7 +745,10 @@ def _validate_built_bundle(
         raise ChunkVariantBuildError(
             f"qualified C/2 bundle contract is invalid: {exc}"
         ) from exc
-    expected = _expected_contract(qualification)
+    expected = _expected_contract(
+        qualification,
+        runtime_config_sha256=actual_section_hashes["config.json"],
+    )
     mismatches = {
         field: {
             "expected": expected_value,
@@ -760,22 +773,25 @@ def _validate_built_bundle(
     sections = header.get("sections")
     if not isinstance(sections, Mapping):
         mismatches["sections"] = {
-            "expected": "engine_plan and prefill_engine_plan",
+            "expected": "engine_plan, prefill_engine_plan, and config.json",
             "actual": sections,
         }
     else:
         missing_sections = sorted(
-            {"engine_plan", "prefill_engine_plan"} - set(sections)
+            {"engine_plan", "prefill_engine_plan", "config.json"}
+            - set(sections)
         )
         if missing_sections:
             mismatches["sections"] = {
-                "expected": "engine_plan and prefill_engine_plan",
+                "expected":
+                    "engine_plan, prefill_engine_plan, and config.json",
                 "actual_missing": missing_sections,
             }
         else:
-            actual_plan_hashes = _bundle_plan_section_sha256(
-                bundle, header
-            )
+            actual_plan_hashes = {
+                name: actual_section_hashes[name]
+                for name in ("engine_plan", "prefill_engine_plan")
+            }
             calibration = contract.get(
                 "module_residency_calibration"
             )

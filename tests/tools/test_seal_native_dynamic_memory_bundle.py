@@ -73,6 +73,10 @@ def _section_payloads() -> dict[str, bytes]:
     return {
         "engine_plan": b"serialized decode engine plan",
         "prefill_engine_plan": b"serialized prefill engine plan",
+        "config.json": (
+            b'{\n  "model_type": "qwen3",\n'
+            b'  "runtime_strategy": "native"\n}\n'
+        ),
         "weights": (b"unchanged-model-weights-" * 4096) + b"tail",
     }
 
@@ -262,6 +266,9 @@ def test_reseal_streams_payload_and_preserves_every_non_runtime_field(
     assert output_non_runtime == input_non_runtime
     assert output_header["sections"] == input_header["sections"]
     assert output_header["runtime_memory"]["contract_version"] == 2
+    assert output_header["runtime_memory"]["runtime_config_sha256"] == (
+        hashlib.sha256(_section_payloads()["config.json"]).hexdigest()
+    )
     assert (
         output_header["runtime_memory"]["module_residency_calibration"]
         == calibration
@@ -292,9 +299,57 @@ def test_reseal_streams_payload_and_preserves_every_non_runtime_field(
     assert not list(tmp_path.glob(".output.trtfb.tmp.*"))
 
 
+def test_reseal_binds_exact_serialized_runtime_config_bytes(
+    tmp_path: Path,
+) -> None:
+    runtime_configs = (
+        b'{"model_type":"qwen3","runtime_strategy":"native"}',
+        b'{\n  "model_type": "qwen3",\n'
+        b'  "runtime_strategy": "native"\n}\n',
+    )
+    observed: list[str] = []
+    for index, runtime_config in enumerate(runtime_configs):
+        section_payloads = {
+            **_section_payloads(),
+            "config.json": runtime_config,
+        }
+        input_path = tmp_path / f"input-{index}.trtfb"
+        output_path = tmp_path / f"output-{index}.trtfb"
+        manifest_path = tmp_path / f"manifest-{index}.json"
+        header, _payload = _write_bundle(
+            input_path,
+            section_payloads=section_payloads,
+        )
+        _write_manifest(
+            manifest_path,
+            [_calibration(header["runtime_memory"], section_payloads)],
+        )
+
+        seal.reseal_bundle(
+            input_path,
+            output_path,
+            family="qwen",
+            manifest_path=manifest_path,
+        )
+        output_header, _output_payload = _read_bundle(output_path)
+        observed.append(
+            output_header["runtime_memory"]["runtime_config_sha256"]
+        )
+
+    assert observed == [
+        hashlib.sha256(runtime_config).hexdigest()
+        for runtime_config in runtime_configs
+    ]
+    assert observed[0] != observed[1]
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     (
+        (
+            lambda header, _payload: header["sections"].pop("config.json"),
+            "config.json runtime configuration",
+        ),
         (
             lambda header, _payload: header["sections"].pop(
                 "prefill_engine_plan"
@@ -346,6 +401,9 @@ def test_reseal_rejects_already_sealed_v2_input(tmp_path: Path) -> None:
     contract = {
         **contract,
         "contract_version": 2,
+        "runtime_config_sha256": hashlib.sha256(
+            section_payloads["config.json"]
+        ).hexdigest(),
         "module_residency_calibration": _calibration(
             contract,
             section_payloads,

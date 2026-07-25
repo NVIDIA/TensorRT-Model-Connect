@@ -335,6 +335,7 @@ static void test_runtime_memory_v2_module_residency_calibration() {
     "qualified_model_id": "Qwen/Qwen3-0.6B",
     "qualified_model_revision": "c1899de289a04d12100db370d81485cdf75e47ca",
     "qualified_config_sha256": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+    "runtime_config_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
     "qualified_target": "gb300-trt-11.2",
     "qualified_runtime_stack": {
       "sm": "sm103",
@@ -393,6 +394,9 @@ static void test_runtime_memory_v2_module_residency_calibration() {
     const auto info = trtmc::InspectBundle(path);
     const auto& memory = info.runtime_memory;
     check(memory.contract_version == 2, "runtime_memory v2 version");
+    check(memory.runtime_config_sha256 ==
+              "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "runtime_memory v2 runtime config digest");
     const auto& calibration = memory.module_residency_calibration;
     check(calibration.present, "module residency calibration present");
     check(calibration.schema_version == 1, "module residency calibration schema");

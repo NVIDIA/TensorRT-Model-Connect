@@ -115,6 +115,7 @@ def _runtime_memory_contract(
         "kv_bytes_per_token": 114688,
         "active_kv_profile_limits": list(PROFILE_LIMITS),
         "runtime_owned": True,
+        "runtime_config_sha256": hashlib.sha256(b"{}").hexdigest(),
         "module_residency_calibration": {
             "schema_version": 1,
             "measurement_kind": "nvml_process_cumulative_first_use",

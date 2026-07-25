@@ -32,8 +32,8 @@ For the exactly qualified `Qwen/Qwen3-0.6B` and
 `TinyLlama/TinyLlama-1.1B-Chat-v1.0` revisions, the model-only build
 automatically emits split prefill/decode engines with runtime-owned KV
 memory on the initial qualified target: GB300 (`sm103`) with TensorRT
-`11.2.0.113`. A recognized model on another target fails with the expected and
-actual target instead of silently producing a different kind of bundle.
+`11.2.0.113`. On another target, dynamic-memory qualification is not selected
+and the model keeps its existing provider/native build route.
 Runtime defaults to 90% of the safely usable free GPU memory measured after
 engine loading, capped by the model's context limit. Use
 `--kv-cache-memory 80%` or `--kv-cache-memory 8GiB` to override it, and

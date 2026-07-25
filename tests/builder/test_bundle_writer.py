@@ -187,6 +187,42 @@ class TestWriteBundle:
         assert not destination.exists()
         assert not list(tmp_path.glob(f".{destination.name}.tmp.*"))
 
+    @pytest.mark.parametrize("existing_payload", (None, b"existing-valid-bundle"))
+    def test_memory_backed_write_failure_is_not_published(
+        self,
+        tmp_path,
+        monkeypatch,
+        existing_payload,
+    ):
+        import tensorrt_model_connect.bundle_writer as bundle_writer
+
+        destination = tmp_path / "atomic-memory-backed.trtfb"
+        if existing_payload is not None:
+            destination.write_bytes(existing_payload)
+
+        def fail_during_section_write(output, _section, _expected_size):
+            output.write(b"partial-new-bundle")
+            raise OSError("injected section write failure")
+
+        monkeypatch.setattr(
+            bundle_writer,
+            "_write_section",
+            fail_during_section_write,
+        )
+
+        with pytest.raises(OSError, match="injected section write failure"):
+            write_bundle(
+                destination,
+                BundleInfo(model_id="atomic-memory-backed"),
+                [BundleSection("engine_plan", b"new-engine")],
+            )
+
+        if existing_payload is None:
+            assert not destination.exists()
+        else:
+            assert destination.read_bytes() == existing_payload
+        assert not list(tmp_path.glob(f".{destination.name}.tmp.*"))
+
     def test_all_info_fields(self, tmp_path):
         info = BundleInfo(
             model_id="full-test",

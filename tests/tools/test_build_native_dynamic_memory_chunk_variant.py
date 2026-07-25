@@ -275,14 +275,26 @@ def test_existing_qualified_builder_calls_the_fail_closed_guard(
         )
 
 
+_RUNTIME_CONFIG_BYTES = (
+    b'{\n  "model_type": "qwen3",\n'
+    b'  "runtime_strategy": "native"\n}\n'
+)
+
+
 def _bundle_bytes(
     qualification: ResolvedDynamicMemoryQualification,
     *,
     sealed: bool = True,
 ) -> bytes:
     record = qualification.qualification
-    contract = producer._expected_contract(qualification)
+    contract = producer._expected_contract(
+        qualification,
+        runtime_config_sha256=hashlib.sha256(
+            _RUNTIME_CONFIG_BYTES
+        ).hexdigest(),
+    )
     contract["contract_version"] = 1
+    contract.pop("runtime_config_sha256")
     contract["kv_bytes_per_token"] = 114_688
     plan_sections = {
         "engine_plan": b"1",
@@ -339,6 +351,7 @@ def _bundle_bytes(
             contract,
             plan_sections=plan_sections,
             module_residency_calibration=calibration,
+            runtime_config_bytes=_RUNTIME_CONFIG_BYTES,
         )
     header = {
         "model_id": record.qualified_model_id,
@@ -350,6 +363,10 @@ def _bundle_bytes(
         "sections": {
             "engine_plan": {"offset": 0, "size": 1},
             "prefill_engine_plan": {"offset": 1, "size": 1},
+            "config.json": {
+                "offset": 2,
+                "size": len(_RUNTIME_CONFIG_BYTES),
+            },
         },
     }
     payload = json.dumps(header).encode("utf-8")
@@ -358,6 +375,7 @@ def _bundle_bytes(
         + struct.pack("<Q", len(payload))
         + payload
         + b"".join(plan_sections.values())
+        + _RUNTIME_CONFIG_BYTES
     )
 
 
@@ -381,6 +399,9 @@ def test_final_bundle_validation_requires_sealed_v2_exact_plan_calibration(
         sealed_path, variant
     )
     assert sealed_contract["contract_version"] == 2
+    assert sealed_contract["runtime_config_sha256"] == hashlib.sha256(
+        _RUNTIME_CONFIG_BYTES
+    ).hexdigest()
     assert (
         sealed_contract["module_residency_calibration"]["plans"][0][
             "section_sha256"
@@ -401,13 +422,28 @@ def test_final_bundle_validation_requires_sealed_v2_exact_plan_calibration(
         )
 
     tampered_path = tmp_path / "tampered.trtfb"
-    valid_bytes = _bundle_bytes(variant)
-    tampered_path.write_bytes(valid_bytes[:-2] + b"x2")
+    valid_bytes = bytearray(_bundle_bytes(variant))
+    header_length = struct.unpack("<Q", valid_bytes[8:16])[0]
+    payload_offset = 16 + header_length
+    valid_bytes[payload_offset] = ord("x")
+    tampered_path.write_bytes(valid_bytes)
     with pytest.raises(
         producer.ChunkVariantBuildError,
         match="module_residency_calibration.plans",
     ):
         producer._validate_built_bundle(tampered_path, variant)
+
+    config_tampered_path = tmp_path / "config-tampered.trtfb"
+    config_tampered_bytes = bytearray(_bundle_bytes(variant))
+    config_tampered_bytes[payload_offset + 2] = ord("[")
+    config_tampered_path.write_bytes(config_tampered_bytes)
+    with pytest.raises(
+        producer.ChunkVariantBuildError,
+        match="runtime_config_sha256",
+    ):
+        producer._validate_built_bundle(
+            config_tampered_path, variant
+        )
 
 
 def _fake_plugin(

@@ -952,25 +952,30 @@ bool is_optimized_runtime_bundle(const BundleInfo& bundle_info) {
     return find_section(bundle_info, kDescriptorSection) != nullptr;
 }
 
-std::unique_ptr<IPipeline> try_make_optimized_runtime_pipeline(const std::string& bundle_path,
-                                                               const BundleInfo& bundle_info,
-                                                               const LoadOptions& options) {
+std::unique_ptr<IPipeline>
+try_make_optimized_runtime_pipeline(const std::string& bundle_path,
+                                    const std::string& stable_bundle_read_path,
+                                    const BundleInfo& bundle_info,
+                                    const LoadOptions& options) {
     if (!is_optimized_runtime_bundle(bundle_info))
         return nullptr;
 
     // Presence of optimized_runtime.json claims the generic capsule path. No
     // error below may be converted into native or alternate-runtime fallback.
     const std::string descriptor_json =
-        read_text_section(bundle_path, bundle_info, kDescriptorSection, kMaxDescriptorSize);
+        read_text_section(stable_bundle_read_path, bundle_info, kDescriptorSection,
+                          kMaxDescriptorSize);
     const OptimizedRuntimeDescriptor descriptor = parse_descriptor(descriptor_json, bundle_info);
     const std::string implementation_metadata =
-        read_text_section(bundle_path, bundle_info, descriptor.implementation_metadata_section,
+        read_text_section(stable_bundle_read_path, bundle_info,
+                          descriptor.implementation_metadata_section,
                           kMaxImplementationMetadataSize);
     // Private metadata validity and target/profile compatibility belong to the
     // model-owned capsule DSO. The host deliberately treats these bytes as
     // opaque and only owns their bounded transport.
     const fs::path artifacts =
-        materialize_artifacts(bundle_path, bundle_info, descriptor, options.runtime_cache_path);
+        materialize_artifacts(stable_bundle_read_path, bundle_info, descriptor,
+                              options.runtime_cache_path);
     DsoHandle dso(open_provider_dso(artifacts, descriptor));
     const internal::OptimizedRuntimeFactoryV1* factory = resolve_factory(dso.get(), descriptor);
     validate_factory(*factory, descriptor);

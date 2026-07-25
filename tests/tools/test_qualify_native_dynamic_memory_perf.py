@@ -78,6 +78,7 @@ def _dynamic_bundle_bytes() -> bytes:
     boundary = capture._load_boundary_module()
     engine_plan = b"decode-plan"
     prefill_plan = b"prefill-plan"
+    runtime_config = b"{}"
     plans = [
         {
             "section_name": "engine_plan",
@@ -108,6 +109,7 @@ def _dynamic_bundle_bytes() -> bytes:
         "kv_bytes_per_token": 114688,
         "active_kv_profile_limits": list(PROFILE_LIMITS),
         "runtime_owned": True,
+        "runtime_config_sha256": hashlib.sha256(runtime_config).hexdigest(),
         "module_residency_calibration": {
             "schema_version": 1,
             "measurement_kind": "nvml_process_cumulative_first_use",
@@ -137,6 +139,10 @@ def _dynamic_bundle_bytes() -> bytes:
             "offset": len(engine_plan),
             "size": len(prefill_plan),
         },
+        "config.json": {
+            "offset": len(engine_plan) + len(prefill_plan),
+            "size": len(runtime_config),
+        },
     }
     header = json.dumps(
         {
@@ -151,6 +157,7 @@ def _dynamic_bundle_bytes() -> bytes:
         + header
         + engine_plan
         + prefill_plan
+        + runtime_config
     )
 
 

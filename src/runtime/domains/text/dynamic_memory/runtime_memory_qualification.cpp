@@ -38,6 +38,14 @@ constexpr std::string_view kEmbeddedCalibrationEvidenceSection =
     "runtime_memory_calibration/evidence.json";
 constexpr std::string_view kEmbeddedCalibrationEvidenceSchema =
     "trtmc.native-dynamic-memory-build-calibration-evidence/v2";
+thread_local bool internal_calibration_bootstrap_allowed = false;
+
+bool is_lower_sha256_value(const std::string& value) {
+    return value.size() == 64 &&
+           std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+               return std::isdigit(ch) != 0 || (ch >= 'a' && ch <= 'f');
+           });
+}
 
 std::uint64_t checked_execution_attempt_sum(std::uint64_t total, std::uint64_t value) {
     if (value > std::numeric_limits<std::uint64_t>::max() - total) {
@@ -279,9 +287,47 @@ void validate_runtime_memory_qualified_tuple(const RuntimeMemoryContract& contra
     }
 }
 
+InternalRuntimeMemoryCalibrationBootstrapScope::
+    InternalRuntimeMemoryCalibrationBootstrapScope() noexcept
+    : previous_(internal_calibration_bootstrap_allowed) {
+    internal_calibration_bootstrap_allowed = true;
+}
+
+InternalRuntimeMemoryCalibrationBootstrapScope::
+    ~InternalRuntimeMemoryCalibrationBootstrapScope() {
+    internal_calibration_bootstrap_allowed = previous_;
+}
+
+void validate_runtime_memory_runtime_config(const RuntimeMemoryContract& contract,
+                                            const BundleFile& bundle) {
+    if (contract.contract_version != 2 ||
+        !is_lower_sha256_value(contract.runtime_config_sha256)) {
+        throw std::runtime_error(
+            "Qualified runtime-memory bundle has no valid runtime config digest");
+    }
+    const auto* config_bytes = find_section(bundle, "config.json");
+    if (config_bytes == nullptr || config_bytes->empty()) {
+        throw std::runtime_error(
+            "Qualified runtime-memory bundle is missing config.json");
+    }
+    internal::Sha256 config_digest;
+    config_digest.update(config_bytes->data(), config_bytes->size());
+    if (config_digest.hex_digest() != contract.runtime_config_sha256) {
+        throw std::runtime_error(
+            "Qualified runtime-memory config.json hash mismatch");
+    }
+}
+
 void validate_runtime_memory_embedded_calibration_evidence(
     const RuntimeMemoryContract& contract, const BundleFile& bundle) {
     const auto& calibration = contract.module_residency_calibration;
+    if (calibration.evidence_provenance == "external_manifest_v1") {
+        if (!internal_calibration_bootstrap_allowed) {
+            throw std::runtime_error(
+                "Product runtime requires embedded module-residency calibration evidence");
+        }
+        return;
+    }
     const auto* evidence_bytes =
         find_section(bundle, std::string(kEmbeddedCalibrationEvidenceSection));
     const bool requires_embedded =
@@ -389,6 +435,7 @@ void validate_runtime_memory_embedded_calibration_evidence(
             {"qualified_model_id", contract.qualified_model_id},
             {"qualified_model_revision", contract.qualified_model_revision},
             {"qualified_config_sha256", contract.qualified_config_sha256},
+            {"runtime_config_sha256", contract.runtime_config_sha256},
             {"qualified_target", contract.qualified_target},
             {"qualified_runtime_stack", expected_stack},
             {"native_kv_plugin_abi", contract.native_kv_plugin_abi},
@@ -475,6 +522,7 @@ void validate_runtime_memory_embedded_calibration_evidence(
 
 void validate_runtime_memory_module_residency_calibration(
     const RuntimeMemoryContract& contract, const BundleFile& bundle) {
+    validate_runtime_memory_runtime_config(contract, bundle);
     const auto& calibration = contract.module_residency_calibration;
     if (contract.contract_version != 2 || !calibration.present ||
         calibration.schema_version != 1 || calibration.plans.size() != 2 ||

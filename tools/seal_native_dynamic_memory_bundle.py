@@ -5,9 +5,10 @@
 """Qualification-only streaming reseal of a native dynamic-memory bundle.
 
 This tool bootstraps exact-plan qualification sweeps from an existing v1
-bundle.  It hashes only the two split TensorRT plans, replaces the JSON header
-with a validated v2 runtime-memory contract, and streams the existing payload
-unchanged into an atomic output file.  It is not a product build surface.
+bundle.  It hashes the two split TensorRT plans and the exact embedded runtime
+``config.json`` bytes, replaces the JSON header with a validated v2
+runtime-memory contract, and streams the existing payload unchanged into an
+atomic output file.  It is not a product build surface.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ _MAX_HEADER_BYTES = 100 * 1024 * 1024
 _MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 _IO_CHUNK_BYTES = 8 * 1024 * 1024
 _PLAN_SECTION_ORDER = ("engine_plan", "prefill_engine_plan")
+_RUNTIME_CONFIG_SECTION = "config.json"
 _QUALIFIED_FAMILIES = frozenset({"qwen", "llama"})
 
 
@@ -202,6 +204,10 @@ def _validated_section_ranges(
             "bundle must contain exactly engine_plan and "
             f"prefill_engine_plan; missing={missing}, extra={extra}"
         )
+    if _RUNTIME_CONFIG_SECTION not in raw_sections:
+        raise BundleResealError(
+            "bundle must contain a config.json runtime configuration section"
+        )
 
     ranges: dict[str, tuple[int, int]] = {}
     for name, raw_entry in raw_sections.items():
@@ -222,8 +228,10 @@ def _validated_section_ranges(
             raise BundleResealError(
                 f"bundle section {name!r} offset/size must be non-negative integers"
             )
-        if name in expected and size == 0:
-            raise BundleResealError(f"plan section {name!r} must be non-empty")
+        if name in {*expected, _RUNTIME_CONFIG_SECTION} and size == 0:
+            raise BundleResealError(
+                f"required section {name!r} must be non-empty"
+            )
         end = offset + size
         if end > payload_size:
             raise BundleResealError(
@@ -356,6 +364,7 @@ def _select_v2_contract(
     base_contract: Mapping[str, Any],
     *,
     plan_hashes: Mapping[str, str],
+    runtime_config_sha256: str,
     manifest_path: Path,
 ) -> dict[str, Any]:
     manifest = _read_json_regular(
@@ -417,6 +426,7 @@ def _select_v2_contract(
     candidate = {
         **base_contract,
         "contract_version": 2,
+        "runtime_config_sha256": runtime_config_sha256,
         "module_residency_calibration": matches[0],
     }
     try:
@@ -609,6 +619,14 @@ def reseal_bundle(
             )
             for name in _PLAN_SECTION_ORDER
         }
+        runtime_config_start, runtime_config_end = ranges[
+            _RUNTIME_CONFIG_SECTION
+        ]
+        runtime_config_sha256 = _stream_sha256(
+            input_descriptor,
+            offset=data_start + runtime_config_start,
+            size=runtime_config_end - runtime_config_start,
+        )
         selected_manifest = (
             Path(manifest_path).expanduser()
             if manifest_path is not None
@@ -624,6 +642,7 @@ def reseal_bundle(
         v2_contract = _select_v2_contract(
             base_contract,
             plan_hashes=plan_hashes,
+            runtime_config_sha256=runtime_config_sha256,
             manifest_path=selected_manifest,
         )
         resealed_header = dict(header)

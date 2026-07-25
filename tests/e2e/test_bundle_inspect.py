@@ -65,10 +65,12 @@ def _write_sealed_v2_bundle(path):
             "kv_bytes_per_token": 114688,
             "active_kv_profile_limits": profiles,
             "runtime_owned": True,
+            "runtime_config_sha256": "9" * 64,
             "module_residency_calibration": {
                 "schema_version": 1,
                 "measurement_kind": "nvml_process_cumulative_first_use",
                 "cuda_module_loading_mode": "lazy",
+                "evidence_provenance": "embedded_bundle_v1",
                 "qualified_runtime_stack_sha256":
                     qualified_runtime_stack_sha256(stack),
                 "plan_set_sha256": module_residency_plan_set_sha256(plans),
@@ -162,11 +164,13 @@ def test_inspect_sealed_v2_reports_complete_static_contract_without_cuda(
             "128, 256, 512, 1024, 2048, 8192, 32768, 40960",
         "qualified_model_revision": "a" * 40,
         "qualified_config_fingerprint": "b" * 64,
+        "runtime_config_sha256": "9" * 64,
         "module_residency_plan_set_sha256":
             header["runtime_memory"]["module_residency_calibration"][
                 "plan_set_sha256"
             ],
         "module_residency_cuda_module_loading_mode": "lazy",
+        "module_residency_evidence_provenance": "embedded_bundle_v1",
         "module_residency_evidence_sha256": "f" * 64,
     }
     for field, value in required.items():

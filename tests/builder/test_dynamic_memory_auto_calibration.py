@@ -354,6 +354,7 @@ def test_automatic_calibration_seals_current_raw_plans_and_guarded_rows(
     result = calibration.calibrate_unknown_plan_set(
         base_contract=_base_contract(),
         plan_sections=_plans(),
+        runtime_config_bytes=b'{"model_type":"qwen3"}',
         vocab_size=151_936,
         working_directory=tmp_path,
         write_bootstrap_bundle=write_bootstrap,
@@ -362,6 +363,9 @@ def test_automatic_calibration_seals_current_raw_plans_and_guarded_rows(
 
     contract = result.runtime_memory_contract
     assert contract["contract_version"] == 2
+    assert contract["runtime_config_sha256"] == hashlib.sha256(
+        b'{"model_type":"qwen3"}'
+    ).hexdigest()
     assert (
         contract["module_residency_calibration"]["evidence_provenance"]
         == "embedded_bundle_v1"
@@ -480,6 +484,7 @@ def test_automatic_calibration_failure_never_leaves_bootstrap(
         calibration.calibrate_unknown_plan_set(
             base_contract=_base_contract(),
             plan_sections=_plans(),
+            runtime_config_bytes=b'{"model_type":"qwen3"}',
             vocab_size=151_936,
             working_directory=tmp_path,
             write_bootstrap_bundle=write_bootstrap,

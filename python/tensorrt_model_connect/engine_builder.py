@@ -1336,41 +1336,6 @@ def build_bundle(
         time.monotonic() - tokenizer_t0)
     _write_build_timing(build_timing)
 
-    # 6. Resolve the plan-bound runtime-memory calibration.  A family manifest
-    # hit is the fast path.  TensorRT serialization is not byte-deterministic,
-    # so an otherwise valid new raw plan set is calibrated automatically after
-    # all bundle sections have been assembled below.
-    automatic_runtime_memory_calibration = False
-    if runtime_memory_contract is not None:
-        if prefill_engine_plan is None:
-            raise ValueError(
-                "Qualified runtime-memory bundle cannot be sealed without "
-                "prefill_engine_plan"
-            )
-        try:
-            runtime_memory_contract = (
-                seal_runtime_memory_contract_from_qualified_manifest(
-                    runtime_memory_contract,
-                    family=plugin.name,
-                    plan_sections={
-                        "engine_plan": engine_plan,
-                        "prefill_engine_plan": prefill_engine_plan,
-                    },
-                )
-            )
-        except UnknownModuleResidencyCalibrationError:
-            automatic_runtime_memory_calibration = True
-            print(
-                "[trtmc build] Runtime memory: new TensorRT plan bytes; "
-                "starting automatic module-residency calibration",
-                file=sys.stderr,
-            )
-        else:
-            print(
-                "[trtmc build] Runtime memory: sealed exact-plan module "
-                "residency calibration",
-                file=sys.stderr,
-            )
     trt_version = _get_trt_version()
     trt_abi = _trt_abi_from_version(trt_version)
     info = BundleInfo(
@@ -1520,7 +1485,7 @@ def build_bundle(
     # Embed tokenizer + config files. If the source model uses a family-owned
     # non-HF config adapter, synthesize config.json for the C++ runtime from
     # the parsed ModelConfig.
-    embedded_config_json = False
+    runtime_config_bytes: bytes | None = None
     for filename in ("config.json", "tokenizer.json", "tokenizer_config.json",
                      "chat_template.jinja", "vocab.json", "merges.txt",
                      "special_tokens_map.json", "tokenizer.model",
@@ -1530,11 +1495,66 @@ def build_bundle(
             data = file_path.read_bytes()
             # Inject runtime_strategy and VL fields into config.json.
             if filename == "config.json":
-                data = make_runtime_config_json(data)
-                embedded_config_json = True
+                if runtime_config_bytes is not None:
+                    raise AssertionError(
+                        "Runtime config.json was serialized more than once"
+                    )
+                runtime_config_bytes = make_runtime_config_json(data)
+                data = runtime_config_bytes
             sections.append(BundleSection(filename, data))
-    if not embedded_config_json:
-        sections.append(BundleSection("config.json", make_runtime_config_json(None)))
+    if runtime_config_bytes is None:
+        runtime_config_bytes = make_runtime_config_json(None)
+        sections.append(BundleSection("config.json", runtime_config_bytes))
+
+    # Resolve the plan-bound runtime-memory calibration only after the exact
+    # config.json bytes have been formed.  The same immutable bytes are sealed
+    # into the contract and embedded in both bootstrap and final bundles.
+    automatic_runtime_memory_calibration = False
+    if runtime_memory_contract is not None:
+        if prefill_engine_plan is None:
+            raise ValueError(
+                "Qualified runtime-memory bundle cannot be sealed without "
+                "prefill_engine_plan"
+            )
+        try:
+            manifest_contract = (
+                seal_runtime_memory_contract_from_qualified_manifest(
+                    runtime_memory_contract,
+                    family=plugin.name,
+                    plan_sections={
+                        "engine_plan": engine_plan,
+                        "prefill_engine_plan": prefill_engine_plan,
+                    },
+                    runtime_config_bytes=runtime_config_bytes,
+                )
+            )
+        except UnknownModuleResidencyCalibrationError:
+            automatic_runtime_memory_calibration = True
+            print(
+                "[trtmc build] Runtime memory: new TensorRT plan bytes; "
+                "starting automatic module-residency calibration",
+                file=sys.stderr,
+            )
+        else:
+            evidence_provenance = manifest_contract[
+                "module_residency_calibration"
+            ]["evidence_provenance"]
+            if evidence_provenance != "embedded_bundle_v1":
+                automatic_runtime_memory_calibration = True
+                print(
+                    "[trtmc build] Runtime memory: exact-plan manifest has "
+                    "external evidence; regenerating product-embedded "
+                    "module-residency calibration",
+                    file=sys.stderr,
+                )
+            else:
+                runtime_memory_contract = manifest_contract
+                info.runtime_memory = runtime_memory_contract
+                print(
+                    "[trtmc build] Runtime memory: sealed exact-plan embedded "
+                    "module-residency calibration",
+                    file=sys.stderr,
+                )
 
     # Package FFI kernel .so files into the bundle
     if kernel_artifacts:
@@ -1576,6 +1596,7 @@ def build_bundle(
                 "engine_plan": engine_plan,
                 "prefill_engine_plan": prefill_engine_plan,
             },
+            runtime_config_bytes=runtime_config_bytes,
             vocab_size=config.vocab_size,
             working_directory=Path(output_path).expanduser().resolve().parent,
             write_bootstrap_bundle=write_bootstrap_bundle,

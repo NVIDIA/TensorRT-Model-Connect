@@ -905,6 +905,7 @@ def calibrate_unknown_plan_set(
     *,
     base_contract: Mapping[str, Any],
     plan_sections: Mapping[str, bytes | bytearray | memoryview],
+    runtime_config_bytes: bytes | bytearray | memoryview,
     vocab_size: int,
     working_directory: Path,
     write_bootstrap_bundle: Callable[[Path, Mapping[str, Any]], None],
@@ -941,6 +942,7 @@ def calibrate_unknown_plan_set(
         normalized_base,
         plan_sections=plan_sections,
         module_residency_calibration=bootstrap_calibration,
+        runtime_config_bytes=runtime_config_bytes,
     )
     limits = tuple(normalized_base["active_kv_profile_limits"])
     prompt_lengths = _profile_prompt_lengths(
@@ -1088,6 +1090,7 @@ def calibrate_unknown_plan_set(
         normalized_base,
         plan_sections=plan_sections,
         module_residency_calibration=final_calibration,
+        runtime_config_bytes=runtime_config_bytes,
     )
     return AutomaticCalibrationResult(
         runtime_memory_contract=final_contract,

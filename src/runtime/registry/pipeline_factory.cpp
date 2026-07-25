@@ -24,12 +24,17 @@
 #include "utils/json_helpers.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
+#include <cstring>
 #include <exception>
+#include <fcntl.h>
 #include <iostream>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -77,20 +82,55 @@ void validate_staged_loading_policy(const BundleInfo& info, const std::string& m
 
 PipelineBundleMaterialization materialize_pipeline_bundle(const std::string& bundle_path) {
     const auto info = ReadBundleHeader(bundle_path);
+    // Optimized-runtime capsules own their artifact materialization. Preserve
+    // the header snapshot for routing without eagerly copying their potentially
+    // large opaque artifact tree into core-owned memory.
+    if (is_optimized_runtime_bundle(info)) {
+        BundleFile bundle;
+        bundle.info = info;
+        return PipelineBundleMaterialization{std::move(bundle), {}};
+    }
     const auto* config_info = find_nonempty_config_section(info);
 
     // Preserve compatibility with legacy bundles that did not carry a
     // config section (or carried an empty one). PipelineFactory will retain
     // its existing manifest-default strategy resolution for those bundles.
     if (config_info == nullptr) {
+        if (info.runtime_memory.present) {
+            throw std::runtime_error(
+                "Qualified runtime-memory bundle is missing a non-empty config.json");
+        }
         return PipelineBundleMaterialization{ReadBundleFile(bundle_path), {}};
     }
 
     auto config_data = ReadBundleSection(bundle_path, *config_info);
+    if (info.runtime_memory.present) {
+        BundleFile config_validation;
+        config_validation.info = info;
+        config_validation.sections.push_back(
+            BundleSection{"config.json", config_data});
+        validate_runtime_memory_runtime_config(
+            info.runtime_memory, config_validation);
+    }
     std::string config_text(config_data.begin(), config_data.end());
     const std::string policy_text = extract_json_object_text(config_text, "bundle_loading");
     if (policy_text.empty()) {
-        return PipelineBundleMaterialization{ReadBundleFile(bundle_path), std::move(config_text)};
+        auto bundle = ReadBundleFile(bundle_path);
+        const auto config_section =
+            std::find_if(bundle.sections.begin(), bundle.sections.end(),
+                         [](const BundleSection& entry) {
+                             return entry.name == "config.json";
+                         });
+        config_text =
+            config_section == bundle.sections.end()
+                ? std::string{}
+                : std::string(config_section->data.begin(),
+                              config_section->data.end());
+        if (bundle.info.runtime_memory.present)
+            validate_runtime_memory_runtime_config(
+                bundle.info.runtime_memory, bundle);
+        return PipelineBundleMaterialization{
+            std::move(bundle), std::move(config_text)};
     }
 
     const std::string mode = extract_json_string(policy_text, "mode", "");
@@ -423,10 +463,57 @@ try_resolve_runtime_config(const std::string& config_text, const std::string& bu
 
 namespace {
 
+class BundleLoadSnapshot {
+  public:
+    explicit BundleLoadSnapshot(const std::string& bundle_path) {
+        descriptor_ = open(bundle_path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (descriptor_ < 0) {
+            const int error = errno;
+            throw std::runtime_error("Unable to open bundle snapshot '" + bundle_path +
+                                     "': " + std::strerror(error));
+        }
+        struct stat metadata {};
+        if (fstat(descriptor_, &metadata) != 0) {
+            const int error = errno;
+            close(descriptor_);
+            descriptor_ = -1;
+            throw std::runtime_error(
+                "Unable to inspect bundle snapshot '" + bundle_path +
+                "': " + std::strerror(error));
+        }
+        if (!S_ISREG(metadata.st_mode)) {
+            close(descriptor_);
+            descriptor_ = -1;
+            throw std::runtime_error("Bundle snapshot is not a regular file: " +
+                                     bundle_path);
+        }
+        read_path_ = "/proc/self/fd/" + std::to_string(descriptor_);
+    }
+
+    ~BundleLoadSnapshot() {
+        if (descriptor_ >= 0)
+            close(descriptor_);
+    }
+
+    BundleLoadSnapshot(const BundleLoadSnapshot&) = delete;
+    BundleLoadSnapshot& operator=(const BundleLoadSnapshot&) = delete;
+
+    const std::string& read_path() const { return read_path_; }
+
+  private:
+    int descriptor_{-1};
+    std::string read_path_;
+};
+
 std::unique_ptr<IPipeline> from_bundle_with_options(const std::string& bundle_path,
                                                     const LoadOptions& options,
                                                     const LoadOptionsV2* versioned_options) {
-    const BundleInfo header = ReadBundleHeader(bundle_path);
+    BundleLoadSnapshot snapshot(bundle_path);
+    auto materialized =
+        detail::materialize_pipeline_bundle(snapshot.read_path());
+    BundleFile bundle = std::move(materialized.bundle);
+    std::string config_text = std::move(materialized.config_text);
+    const BundleInfo& header = bundle.info;
     const bool explicit_runtime_policy =
         versioned_options != nullptr && requests_runtime_kv_policy(*versioned_options);
     validate_runtime_kv_policy_support(header, explicit_runtime_policy);
@@ -435,12 +522,10 @@ std::unique_ptr<IPipeline> from_bundle_with_options(const std::string& bundle_pa
             "runtime_memory bundles are supported only by the native Model Connect runtime");
     }
     if (auto optimized_runtime_pipeline =
-            try_make_optimized_runtime_pipeline(bundle_path, header, options)) {
+            try_make_optimized_runtime_pipeline(
+                bundle_path, snapshot.read_path(), header, options)) {
         return optimized_runtime_pipeline;
     }
-    auto materialized = detail::materialize_pipeline_bundle(bundle_path);
-    BundleFile bundle = std::move(materialized.bundle);
-    std::string config_text = std::move(materialized.config_text);
     if (bundle.sections.empty())
         throw std::runtime_error("Failed to read bundle: " + bundle_path);
 
@@ -522,7 +607,12 @@ std::unique_ptr<PipelinePool> PipelineFactory::from_bundle_pool(const std::strin
     if (pool_size == 0)
         throw std::invalid_argument("Pipeline pool size must be positive");
 
-    const BundleInfo header = ReadBundleHeader(bundle_path);
+    BundleLoadSnapshot snapshot(bundle_path);
+    auto materialized =
+        detail::materialize_pipeline_bundle(snapshot.read_path());
+    BundleFile bundle = std::move(materialized.bundle);
+    std::string config_text = std::move(materialized.config_text);
+    const BundleInfo& header = bundle.info;
     if (header.runtime_memory.present) {
         throw std::invalid_argument(
             "PipelinePool does not yet support runtime-sized KV cache bundles; "
@@ -533,10 +623,6 @@ std::unique_ptr<PipelinePool> PipelineFactory::from_bundle_pool(const std::strin
         throw std::invalid_argument(
             "PipelineFactory::from_bundle_pool does not support optimized-runtime bundles; use "
             "from_bundle because the delegated runtime owns batching and scheduling");
-
-    auto materialized = detail::materialize_pipeline_bundle(bundle_path);
-    BundleFile bundle = std::move(materialized.bundle);
-    std::string config_text = std::move(materialized.config_text);
     if (bundle.sections.empty())
         throw std::runtime_error("Failed to read bundle: " + bundle_path);
 

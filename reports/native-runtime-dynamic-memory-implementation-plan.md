@@ -20,11 +20,13 @@ KV cache、context length 或 TensorRT profile。bundle 内部记录模型语义
 这些是可执行 contract，不是用户调参。builder 在 engine bytes 尚未生成时先
 构造内部 provisional contract v1；engine 序列化后，普通的 no-flag build
 会先按 exact plan hashes、完整 qualified runtime stack 和 CUDA module-loading
-mode 查找已有校准记录。TensorRT plan bytes 不是跨 build 稳定标识；若本次
-plan 没有 exact record，builder 会在内部用两个独立进程自动执行全 profile
-驻留校准，再把这一次实际 plan、guarded reserves 和可重放 evidence 一起
-封装为 sealed contract v2。用户仍然只得到一个 bundle，也不需要增加 flag。
-v1 和内部 bootstrap bundle 都不是可发布的产品 bundle。
+mode 查找已有校准记录。TensorRT plan bytes 不是跨 build 稳定标识；只有
+校准记录及其可重放 evidence bytes 都可用时才可以复用。仅有 external
+manifest 摘要，或本次 plan 没有 exact record 时，builder 都会在内部用两个
+独立进程自动执行全 profile 驻留校准，再把这一次实际 plan、guarded reserves
+和可重放 evidence 一起封装为 sealed contract v2。用户仍然只得到一个
+bundle，也不需要增加 flag。v1 和内部 bootstrap bundle 都不是可发布的产品
+bundle。
 
 runtime 才决定本次进程的物理 KV capacity `R`：
 
@@ -53,8 +55,9 @@ loading、TensorRT/Myelin tactic 以及 JIT kernel 会在某个 decode profile
 已经占满显存后失败，于是表现成一个隐藏的小 context cap。
 
 最终设计不再使用该经验 cap。每个实际生成的 exact split-plan set 都必须有
-两个独立冷进程的 all-profile two-sweep；已有 exact record 是快速路径，新的
-plan bytes 则在同一次 no-flag build 内自动生成该证据。每个进程在一个
+两个独立冷进程的 all-profile two-sweep；只有能把原始证据一并嵌入 bundle
+的 exact record 才是快速路径，只有摘要的 external record 和新的 plan bytes
+都会在同一次 no-flag build 内自动生成该证据。每个进程在一个
 pipeline、一个 KV allocation 内先按 profile 递增执行 Sweep A，再重复 Sweep
 B。Sweep A 以当前进程 NVML cumulative first-use high-water 得出逐 profile
 的非递减 reserve，两个冷进程逐行取最大值后再加 64 MiB guard；Sweep B
@@ -63,11 +66,13 @@ headroom，不是预先分配的另一块显存。
 
 显存分配时序如下：
 
-1. 读取 sealed v2 bundle contract，并验证 exact model/revision/config；
+1. 读取 sealed v2 bundle contract，并验证 exact model/revision/source
+   config；
 2. 在任何 engine deserialize 或 KV allocation 之前，重新 hash bundle 内的
-   `engine_plan`/`prefill_engine_plan` bytes，验证 plan topology、plan-set
-   digest、完整 live runtime stack，以及 `cuModuleGetLoadingMode()` 返回的
-   CUDA loading mode；
+   实际 `config.json`、`engine_plan` 和 `prefill_engine_plan` bytes，验证
+   runtime-config digest、plan topology、plan-set digest、完整 live runtime
+   stack、embedded evidence，以及 `cuModuleGetLoadingMode()` 返回的 CUDA
+   loading mode；
 3. 反序列化 split engines，使用 `kUSER_MANAGED` planning contexts 查询
    actual-shape context memory；此时不挂载 context device memory，也不分配 KV；
 4. 读取 post-load free memory，解析 `auto/%/bytes/U`，在每次候选 `R`
@@ -79,10 +84,10 @@ headroom，不是预先分配的另一块显存。
 
 本阶段严格只开放两个 qualified tuple：Qwen3-0.6B 用于 32K/40K
 long-context 证明，TinyLlama 用于跨 family 证明。其他 Qwen/Llama
-checkpoint 不会自动继承资格。EdgeLLM adapter、runtime DSO 和 tests 均不在
-修改范围内。1M context、多请求 continuous batching、paged KV、prefix cache
-和 offload 属于后续 device-level pool 阶段；本阶段不拿 contiguous prototype
-冒充这些能力。
+checkpoint 不会自动继承资格。EdgeLLM adapter、它的 runtime DSO 和它的
+tests 均不在修改范围内。1M context、多请求 continuous batching、paged KV、
+prefix cache 和 offload 属于后续 device-level pool 阶段；本阶段不拿
+contiguous prototype 冒充这些能力。
 
 review 时不要只看“能运行”。Section 10 的 producer 必须亲自执行 fresh build
 和真实 benchmark worker，记录 build 前后完整 source-state、bundle/request/
@@ -112,12 +117,11 @@ canonical model ID
 ```
 
 The Qwen/Llama family capability means the implementation is available; it
-does not qualify every checkpoint in those families. A different Qwen or
-Llama checkpoint retains its previous routing and behavior. Once one of the
-two exact qualified model identities is recognized, however, a target,
-revision, or config mismatch fails explicitly rather than silently producing
-a bundle with a different runtime contract. There is no wildcard family
-enablement in this milestone.
+does not qualify every checkpoint in those families. A different checkpoint,
+revision, or live target retains its previous routing and behavior. Only
+after model identity, revision, and target match an exact qualification does
+source snapshot or config-fingerprint drift become an invalid candidate that
+fails closed. There is no wildcard family enablement in this milestone.
 
 The first deliverable is a product-quality, single-pipeline beta using a
 runtime-sized contiguous KV allocation, read-only segmented fused attention,
@@ -354,12 +358,27 @@ There are two deliberately different contract states:
    created before TensorRT serialization because it contains only
    model/config/target facts, `M/C/B`, layout, and profile limits.
 2. `contract_version = 2` is the only product runtime contract. Once both
-   TensorRT plans have been serialized, the builder hashes their exact bytes.
-   It reuses one unique exact calibration record when present; otherwise it
-   invokes the product-owned internal two-process calibrator for those exact
-   bytes. It then adds `module_residency_calibration`, embeds the replayable
-   calibration evidence, validates the complete object, and only then writes
-   the user bundle.
+   TensorRT plans and the runtime-consumed `config.json` have been serialized,
+   the builder hashes their exact bytes. It can reuse a unique exact
+   calibration only when its replay evidence bytes are also available for
+   embedding; an external manifest digest alone is not a product fast path.
+   Otherwise it invokes the product-owned internal two-process calibrator for
+   those exact bytes. It then adds `runtime_config_sha256` and
+   `module_residency_calibration`, embeds the replayable calibration evidence,
+   validates the complete object, and only then atomically replaces the user
+   bundle.
+
+For the two-model beta, the native runtime opens the published bundle once,
+holds that regular-file descriptor through load, and reads the header,
+runtime-consumed config, calibration evidence, and eager Qwen/Llama plans
+through the same `/proc/self/fd` identity. An atomic path replacement during
+load therefore cannot splice sections from two bundle inodes. This guarantee
+is intentionally limited to the eager native dynamic-memory load path. It
+does not redefine the lifetime contract of existing staged pipelines that
+read sections during a later request, nor does it promise that an
+optimized-runtime provider DSO may retain and reread `bundle_path` after its
+factory returns; those interfaces require a separate versioned snapshot
+ownership design.
 
 The v1 base has the following shape:
 
@@ -400,9 +419,11 @@ The final no-flag product build automatically seals that object as v2:
   "runtime_memory": {
     "contract_version": 2,
     "...all validated v1 fields...": "...",
+    "runtime_config_sha256": "<sha256-of-exact-bundle-config.json>",
     "module_residency_calibration": {
       "schema_version": 1,
       "measurement_kind": "nvml_process_cumulative_first_use",
+      "evidence_provenance": "embedded_bundle_v1",
       "cuda_module_loading_mode": "lazy",
       "qualified_runtime_stack_sha256": "<sha256>",
       "plan_set_sha256": "<sha256>",
@@ -437,10 +458,10 @@ The final no-flag product build automatically seals that object as v2:
 }
 ```
 
-The exact dtype, byte count, plan hashes, profile count, loading mode, and
-reserve values come from the actual build and qualification evidence. The
-objects above illustrate the schema; they are not hard-coded Qwen policy or a
-claim that the displayed tuple has completed promotion.
+The exact runtime-config hash, dtype, byte count, plan hashes, profile count,
+loading mode, and reserve values come from the actual build and qualification
+evidence. The objects above illustrate the schema; they are not hard-coded
+Qwen policy or a claim that the displayed tuple has completed promotion.
 
 v2 validation is strict:
 
@@ -453,10 +474,13 @@ v2 validation is strict:
 - the runtime-stack digest uses the canonical ordered full stack tuple;
 - the plan-set digest uses the ordered section name, section hash, role, and
   profile count;
-- `evidence_sha256` is a required lowercase manifest-provenance digest; the
-  product runtime repeats it in schema-v4 receipts. Automatically calibrated
-  bundles also package the bound evidence and two raw captures so promotion
-  can reopen them without a sidecar;
+- `runtime_config_sha256` binds the exact `config.json` bytes that choose the
+  runtime strategy, graph dimensions, and KV I/O names; runtime verifies it
+  before either split engine is deserialized;
+- `evidence_sha256` is a required lowercase embedded-evidence digest; a product
+  bundle must declare `embedded_bundle_v1`, package the bound evidence and two
+  raw captures, and repeat the digest in schema-v4 receipts. The private
+  calibrator alone may load its ephemeral external-manifest bootstrap;
 - an unknown exact raw plan is not assigned a family-wide reserve: it must
   complete automatic calibration. Missing helpers, failed sweeps, malformed
   evidence, mismatched records, or ambiguously duplicated records fail the
@@ -558,11 +582,12 @@ calibration. A reserve measured for different plan bytes, profile topology,
 runtime stack, or loading mode is invalid even when the model ID is the same.
 
 The normal user command remains only `trtmc build <model>`. The builder creates
-the provisional object, takes the exact-record fast path when possible, and
-otherwise performs the private calibration plus v2 sealing internally without
-a context, KV, profile, calibration, or reseal flag. This can make the first
-build of previously unseen plan bytes slower, but it never turns a user memory
-choice into bundle metadata. The separate
+the provisional object, takes an exact-record fast path only when replayable
+evidence can also be embedded, and otherwise performs the private calibration
+plus v2 sealing internally without a context, KV, profile, calibration, or
+reseal flag. This can make a build with only an external manifest record or
+previously unseen plan bytes slower, but it never turns a user memory choice
+into bundle metadata. The separate
 `tools/seal_native_dynamic_memory_bundle.py` path exists only to bootstrap
 qualification of an already-produced provisional v1 artifact: it streams the
 unchanged payload into a new bundle while replacing the header, refuses to
@@ -1843,9 +1868,10 @@ Exit criteria:
 Implement:
 
 - provisional v1 metadata split into `M`, `C`, `B`, layout, and buckets;
-- automatic exact-plan sealed v2 product contract, an exact-record fast path,
-  private per-build calibration for new raw plans, and pre-deserialization
-  plan/stack/loading-mode validation;
+- automatic exact-plan sealed v2 product contract, an evidence-bearing
+  exact-record fast path, private per-build calibration whenever embedded
+  evidence is unavailable, and pre-deserialization
+  config/plan/stack/loading-mode/evidence validation;
 - exact model/revision/config/platform qualification records;
 - typed runtime memory policy;
 - shared budget/admission code;
@@ -1969,7 +1995,7 @@ output, or layout flags. Every runtime row reuses the same bundle SHA.
 
 | ID | Test | Required result |
 |---|---|---|
-| UX-01 | `trtmc build <model>` | One sealed-v2 output bundle bound to the actual serialized plans; provisional-v1 creation, exact-record lookup, optional private calibration, and final sealing are automatic, with no user build-time context or calibration decision. Raw TensorRT bytes are not falsely claimed to be reproducible across separate builds. |
+| UX-01 | `trtmc build <model>` | One atomically published sealed-v2 output bundle bound to the actual serialized runtime config and plans, with embedded replayable calibration evidence; provisional-v1 creation, exact-record lookup, private calibration when evidence is unavailable, and final sealing are automatic, with no user build-time context or calibration decision. Raw TensorRT bytes are not falsely claimed to be reproducible across separate builds. |
 | UX-02 | Static `trtmc inspect` | Shows v2 contract, `M/C/B/layout/buckets`, revision, fingerprint, plan-set/loading-mode provenance, and profile reserves without initializing CUDA; no runtime-budget claim or 4,096 Qwen product cap. |
 | UX-03 | Run `auto`, percentage, bytes, and runtime max sequence | Same bundle SHA and mtime; no rebuild; load-time receipt reports the resolved device values. |
 | UX-04 | Same greedy request under different sufficient budgets | Identical generated token IDs and qualified logits. |
@@ -1978,7 +2004,7 @@ output, or layout flags. Every runtime row reuses the same bundle SHA.
 | COMPAT-02 | Pass dynamic policy to unsupported/legacy bundle | Clear unsupported-contract error; no silent ignore. |
 | COMPAT-03 | Load the corresponding TensorRT-RTX path | Existing static allocation/routing remains unchanged; no accidental `USER_MANAGED` opt-in. |
 | QUAL-01 | Build an unqualified Qwen and Llama checkpoint | Previous routing remains unchanged; family capability alone does not select dynamic memory. |
-| QUAL-02 | Change target revision/config fingerprint | Qualification miss is explicit and cannot inherit another checkpoint's evidence. |
+| QUAL-02 | Change target or revision | Dynamic qualification is not applicable and the previous provider/native route remains available; it cannot inherit another tuple's evidence. Once an exact tuple matches, source snapshot or config-fingerprint drift fails closed. |
 | QUAL-03 | Cold-cache, warm-cache, and concurrent different-GPU process loads | A v2 aggregate receipt directly proves isolated cache/process behavior, overlapping different-GPU engine loads, and deterministic child token IDs. It must also bind passed full-matrix HF correctness and SPLIT-08/09 companion receipts to the exact same bundle SHA, clean source state, model revision, live runtime stack, and mapped runtime-library identity. |
 | SCOPE-01 | Diff scope check | No EdgeLLM adapter or EdgeLLM test file changed. |
 

@@ -56,12 +56,31 @@ void validate_runtime_memory_qualified_tuple(const RuntimeMemoryContract& contra
 void validate_runtime_memory_module_residency_calibration(
     const RuntimeMemoryContract& contract, const BundleFile& bundle);
 
+// Verify the exact config.json bytes consumed by PipelineFactory. This must run
+// before either split engine is deserialized.
+void validate_runtime_memory_runtime_config(const RuntimeMemoryContract& contract,
+                                            const BundleFile& bundle);
+
 // Validate the fixed embedded-evidence section without touching CUDA. This is
 // split out so bundle/schema tests can exercise the pre-deserialization gate.
-// Legacy exact-manifest bundles may omit the section; an embedded_bundle_v1
-// contract may not.
+// Product runtime accepts only embedded_bundle_v1. The private product-owned
+// build calibrator uses the scoped exception below for its ephemeral bootstrap.
 void validate_runtime_memory_embedded_calibration_evidence(
     const RuntimeMemoryContract& contract, const BundleFile& bundle);
+
+class InternalRuntimeMemoryCalibrationBootstrapScope {
+  public:
+    InternalRuntimeMemoryCalibrationBootstrapScope() noexcept;
+    ~InternalRuntimeMemoryCalibrationBootstrapScope();
+
+    InternalRuntimeMemoryCalibrationBootstrapScope(
+        const InternalRuntimeMemoryCalibrationBootstrapScope&) = delete;
+    InternalRuntimeMemoryCalibrationBootstrapScope&
+    operator=(const InternalRuntimeMemoryCalibrationBootstrapScope&) = delete;
+
+  private:
+    bool previous_{false};
+};
 
 struct RuntimeMemoryRuntimeTarget {
     std::int32_t cuda_device{-1};

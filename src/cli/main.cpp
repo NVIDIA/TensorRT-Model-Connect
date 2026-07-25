@@ -1492,6 +1492,7 @@ int cmd_inspect(const CliArgs& args) {
             std::cout << "qualified_model_revision: " << memory.qualified_model_revision << '\n';
             std::cout << "qualified_config_fingerprint: " << memory.qualified_config_sha256
                       << '\n';
+            std::cout << "runtime_config_sha256: " << memory.runtime_config_sha256 << '\n';
             std::cout << "qualified_target:   " << memory.qualified_target << '\n';
             const auto& stack = memory.qualified_runtime_stack;
             std::cout << "qualified_runtime_stack: "
@@ -1530,6 +1531,8 @@ int cmd_inspect(const CliArgs& args) {
                 std::cout << '\n';
                 std::cout << "module_residency_evidence_sha256: "
                           << calibration.evidence_sha256 << '\n';
+                std::cout << "module_residency_evidence_provenance: "
+                          << calibration.evidence_provenance << '\n';
             }
             std::cout << "runtime_owned_kv:   yes\n";
         } else {

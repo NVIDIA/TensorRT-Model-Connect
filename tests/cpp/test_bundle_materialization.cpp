@@ -10,11 +10,13 @@
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
+#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -126,12 +128,65 @@ void test_bundle_without_policy_preserves_read_all_behavior() {
     trtmc_test::remove_all_safe(directory);
 }
 
+void test_open_file_descriptor_snapshot_survives_atomic_path_replacement() {
+    const auto directory = temporary_directory();
+    const auto path = directory / "published.trtfb";
+    const auto replacement = directory / "replacement.trtfb";
+    const std::string original_config =
+        R"({"runtime_strategy":"snapshot_a"})";
+    const std::vector<char> original_plan = {'P', 'L', 'A', 'N', '_', 'A'};
+    std::vector<char> original_payload(original_config.begin(), original_config.end());
+    original_payload.insert(
+        original_payload.end(), original_plan.begin(), original_plan.end());
+    write_bundle(path, two_section_header(original_config.size(), original_plan.size()),
+                 original_payload);
+
+    const std::string replacement_config =
+        R"({"runtime_strategy":"snapshot_b","different":true})";
+    const std::vector<char> replacement_plan = {'P', 'L', 'A', 'N', '_', 'B'};
+    std::vector<char> replacement_payload(
+        replacement_config.begin(), replacement_config.end());
+    replacement_payload.insert(
+        replacement_payload.end(), replacement_plan.begin(), replacement_plan.end());
+    write_bundle(
+        replacement,
+        two_section_header(replacement_config.size(), replacement_plan.size()),
+        replacement_payload);
+
+    const int descriptor = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (descriptor < 0)
+        throw std::runtime_error(
+            std::string("open failed: ") + std::strerror(errno));
+    if (rename(replacement.c_str(), path.c_str()) != 0) {
+        const int error = errno;
+        close(descriptor);
+        throw std::runtime_error(
+            std::string("rename failed: ") + std::strerror(error));
+    }
+
+    const std::string snapshot_path =
+        "/proc/self/fd/" + std::to_string(descriptor);
+    const auto materialized =
+        trtmc::detail::materialize_pipeline_bundle(snapshot_path);
+    close(descriptor);
+
+    const auto* loaded_plan =
+        find_section(materialized.bundle, "denoiser_plan");
+    check(materialized.config_text == original_config,
+          "held descriptor retains original config after path replacement");
+    check(loaded_plan != nullptr && loaded_plan->data == original_plan,
+          "held descriptor retains original plan after path replacement");
+
+    trtmc_test::remove_all_safe(directory);
+}
+
 } // namespace
 
 int main() {
     test_staged_policy_leaves_plan_bytes_unread();
     test_invalid_partition_fails_before_plan_read();
     test_bundle_without_policy_preserves_read_all_behavior();
+    test_open_file_descriptor_snapshot_survives_atomic_path_replacement();
     if (failures != 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;

@@ -179,6 +179,7 @@ std::string runtime_memory_fixture_contract() {
     "qualified_model_id": "qwen",
     "qualified_model_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "qualified_config_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "runtime_config_sha256": "a8348c09e4b6ab8c8df3b22aaf84b1e8ab0ee33ccc6a07aa5845286f5982b1df",
     "qualified_target": "gb300-trt-11.2",
     "qualified_runtime_stack": {"sm":"sm103","tensorrt":"11.2.0.113","cuda_runtime":"13.3","cudnn_backend":"9.20.0","cudnn_frontend_revision":"7b9b711c22b6823e87150213ecd8449260db8610","nvrtc":"13.3","driver":"580.105.08"},
     "native_kv_plugin_abi": 2,
@@ -218,13 +219,17 @@ std::string runtime_memory_fixture_contract() {
   })";
 }
 
-void write_runtime_memory_fixture_bundle(const std::filesystem::path& path) {
-    const std::string config = R"({
+std::string runtime_memory_fixture_config() {
+    return R"({
   "runtime_strategy": "qwen_decoder_kv_cache",
   "hidden_size": 64,
   "num_attention_heads": 1,
   "num_key_value_heads": 1
 })";
+}
+
+void write_runtime_memory_fixture_bundle(const std::filesystem::path& path) {
+    const std::string config = runtime_memory_fixture_config();
     write_bundle_with_sections(path, {BundleSectionSpec{"config.json", config}}, "qwen",
                                runtime_memory_fixture_contract());
 }
@@ -587,6 +592,55 @@ void test_runtime_kv_policy_rejects_unsupported_and_static_bundles() {
     check(pool_rejected, "dynamic KV beta rejects ambiguous per-lane pool budgeting");
 }
 
+void test_runtime_memory_config_integrity_precedes_dispatch() {
+    trtmc_test::TempDirGuard dir;
+    const auto root = std::filesystem::path(dir.path());
+    const std::string contract = runtime_memory_fixture_contract();
+
+    const auto missing_path = root / "dynamic_missing_config.trtfb";
+    write_bundle_with_sections(missing_path, {}, "qwen", contract);
+
+    const auto empty_path = root / "dynamic_empty_config.trtfb";
+    write_bundle_with_sections(empty_path, {BundleSectionSpec{"config.json", ""}},
+                               "qwen", contract);
+
+    const auto tampered_path = root / "dynamic_tampered_config.trtfb";
+    write_bundle_with_sections(
+        tampered_path,
+        {BundleSectionSpec{"config.json", runtime_memory_fixture_config() + " "}},
+        "qwen", contract);
+
+    const auto expect_pre_dispatch_rejection =
+        [&](const std::filesystem::path& path, const std::string& expected,
+            const char* test_name) {
+            trtmc::LoadOptionsV2 options;
+            options.model_plugin_search_paths = {(root / "unused-model-plugins").string()};
+            options.backend_search_paths = {(root / "unused-backends").string()};
+            std::string message;
+            try {
+                (void)trtmc::load(path.string(), options);
+            } catch (const std::runtime_error& error) {
+                message = error.what();
+            }
+            const bool rejected =
+                message.find(expected) != std::string::npos &&
+                message.find("model plugin") == std::string::npos &&
+                message.find("Backend") == std::string::npos &&
+                message.find("engine") == std::string::npos;
+            check(rejected, test_name);
+        };
+
+    expect_pre_dispatch_rejection(
+        missing_path, "missing a non-empty config.json",
+        "runtime-memory bundle without config fails before dispatch");
+    expect_pre_dispatch_rejection(
+        empty_path, "missing a non-empty config.json",
+        "runtime-memory bundle with empty config fails before dispatch");
+    expect_pre_dispatch_rejection(
+        tampered_path, "config.json hash mismatch",
+        "runtime-memory bundle with tampered config fails before dispatch");
+}
+
 void test_cpp_v2_options_fail_before_bundle_io() {
     trtmc_test::TempDirGuard dir;
     const auto root = std::filesystem::path(dir.path());
@@ -841,6 +895,7 @@ int main(int argc, char** argv) {
     test_missing_engine_plan_bundle_reports_error();
     test_unknown_strategy_reports_new_runtime_unsupported_strategy_error();
     test_runtime_kv_policy_rejects_unsupported_and_static_bundles();
+    test_runtime_memory_config_integrity_precedes_dispatch();
     test_cpp_v2_options_fail_before_bundle_io();
     const auto executable = std::filesystem::canonical(argv[0]);
     expect_isolated_fixture_succeeds(executable, "--runtime-legacy-interface",

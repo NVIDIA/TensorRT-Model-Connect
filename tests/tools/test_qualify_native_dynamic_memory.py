@@ -3330,6 +3330,7 @@ def _write_base_bundle(
     *,
     spec=TEST_SPEC,
 ) -> tuple[Path, dict]:
+    runtime_config = b"{}"
     runtime_stack = {
         "sm": "sm103",
         "tensorrt": "11.2.0.113",
@@ -3370,6 +3371,9 @@ def _write_base_bundle(
         "kv_bytes_per_token": spec.kv_bytes_per_token,
         "active_kv_profile_limits": list(spec.buckets),
         "runtime_owned": True,
+        "runtime_config_sha256": hashlib.sha256(
+            runtime_config
+        ).hexdigest(),
         "module_residency_calibration": {
             "schema_version": 1,
             "measurement_kind": "nvml_process_cumulative_first_use",
@@ -3396,12 +3400,19 @@ def _write_base_bundle(
         "precision": "bf16",
         "vocab_size": spec.vocab_size,
         "runtime_memory": contract,
+        "sections": {
+            "config.json": {
+                "offset": 0,
+                "size": len(runtime_config),
+            },
+        },
     }
     payload = json.dumps(header, sort_keys=True).encode("utf-8")
     path.write_bytes(
         qualify.BUNDLE_MAGIC
         + struct.pack("<Q", len(payload))
         + payload
+        + runtime_config
     )
     return path, header
 

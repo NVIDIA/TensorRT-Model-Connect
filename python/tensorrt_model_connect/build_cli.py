@@ -814,6 +814,11 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
             )
             for label, key in static_memory_fields:
                 print(f"{label + ':':<48} {runtime_memory[key]}")
+            if "runtime_config_sha256" in runtime_memory:
+                print(
+                    f"{'runtime_config_sha256:':<48} "
+                    f"{runtime_memory['runtime_config_sha256']}"
+                )
             runtime_stack = runtime_memory.get(
                 "qualified_runtime_stack", {}
             )
@@ -843,6 +848,10 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
                 print(
                     f"{'module_residency_cuda_module_loading_mode:':<48} "
                     f"{calibration['cuda_module_loading_mode']}"
+                )
+                print(
+                    f"{'module_residency_evidence_provenance:':<48} "
+                    f"{calibration['evidence_provenance']}"
                 )
                 reserves = calibration["profile_reserves"]
                 print(

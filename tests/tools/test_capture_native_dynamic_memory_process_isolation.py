@@ -566,6 +566,7 @@ def _write_test_bundle(path: Path, spec) -> None:
     runtime_memory = seal_runtime_memory_contract(
         base_contract,
         plan_sections=plans,
+        runtime_config_bytes=b"{}",
         module_residency_calibration={
             "schema_version": 1,
             "measurement_kind": "nvml_process_cumulative_first_use",

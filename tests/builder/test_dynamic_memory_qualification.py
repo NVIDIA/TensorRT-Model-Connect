@@ -101,10 +101,12 @@ def _sealed_qwen_runtime_memory_header() -> dict:
             "kv_bytes_per_token": 114688,
             "active_kv_profile_limits": profile_limits,
             "runtime_owned": True,
+            "runtime_config_sha256": "9" * 64,
             "module_residency_calibration": {
                 "schema_version": 1,
                 "measurement_kind": "nvml_process_cumulative_first_use",
                 "cuda_module_loading_mode": "lazy",
+                "evidence_provenance": "embedded_bundle_v1",
                 "qualified_runtime_stack_sha256":
                     qualified_runtime_stack_sha256(runtime_stack),
                 "plan_set_sha256": module_residency_plan_set_sha256(plans),
@@ -161,6 +163,7 @@ def test_inspect_qwen_runtime_memory_bundle_reports_only_static_contract(
         "qualified_model_id": QWEN_ID,
         "qualified_model_revision": "a" * 40,
         "qualified_config_fingerprint": "b" * 64,
+        "runtime_config_sha256": "9" * 64,
         "model_context_limit": "40960",
         "prefill_chunk_limit": "1024",
         "kv_layout": "contiguous_runtime_v1",
@@ -171,6 +174,7 @@ def test_inspect_qwen_runtime_memory_bundle_reports_only_static_contract(
                 "plan_set_sha256"
             ],
         "module_residency_cuda_module_loading_mode": "lazy",
+        "module_residency_evidence_provenance": "embedded_bundle_v1",
         "module_residency_evidence_sha256": "f" * 64,
     }
     for label, value in expected_static_fields.items():
@@ -590,22 +594,18 @@ def test_family_or_name_similarity_never_inherits_qualification(
     )
 
 
-def test_canonical_model_id_revision_mismatch_is_explicit() -> None:
+def test_canonical_model_id_revision_mismatch_is_not_applicable() -> None:
     wrong_revision = "0" * 40
-    with pytest.raises(
-        DynamicMemoryContractError,
-        match=(
-            "Recognized runtime-memory-qualified model revision mismatch.*"
-            f"{wrong_revision}"
-        ),
-    ):
+    assert (
         qualification_for_model_ref(
             QWEN_ID,
             requested_revision=wrong_revision,
         )
+        is None
+    )
 
 
-def test_recognized_hf_snapshot_revision_mismatch_is_explicit(
+def test_recognized_hf_snapshot_revision_mismatch_is_not_applicable(
     tmp_path: Path,
 ) -> None:
     wrong_revision = "0" * 40
@@ -617,14 +617,7 @@ def test_recognized_hf_snapshot_revision_mismatch_is_explicit(
     )
     snapshot.mkdir(parents=True)
 
-    with pytest.raises(
-        DynamicMemoryContractError,
-        match=(
-            "Recognized runtime-memory-qualified model revision mismatch.*"
-            f"{wrong_revision}"
-        ),
-    ):
-        qualification_for_model_ref(str(snapshot))
+    assert qualification_for_model_ref(str(snapshot)) is None
 
 
 def test_recognized_hf_snapshot_conflicting_requested_revision_is_explicit(
@@ -703,7 +696,7 @@ def test_recognized_identity_with_config_drift_is_invalid(
         )
 
 
-def test_recognized_model_target_miss_fails_explicitly_without_download(
+def test_recognized_model_target_miss_is_not_applicable_without_download(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import tensorrt_model_connect.dynamic_memory_contract as contract_module
@@ -714,17 +707,12 @@ def test_recognized_model_target_miss_fails_explicitly_without_download(
         lambda: _target(gpu_architecture="sm90"),
     )
     calls: list[str] = []
-    with pytest.raises(
-        DynamicMemoryContractError,
-        match="build target is not qualified",
-    ):
-        resolve_model_only_qualification(
-            QWEN_ID,
-            requested_revision=None,
-            resolve_model=lambda model, **_kwargs: (
-                calls.append(model) or model
-            ),
-        )
+    resolved = resolve_model_only_qualification(
+        QWEN_ID,
+        requested_revision=None,
+        resolve_model=lambda model, **_kwargs: calls.append(model) or model,
+    )
+    assert resolved is None
     assert calls == []
 
 
@@ -744,7 +732,7 @@ def test_recognized_model_target_miss_fails_explicitly_without_download(
         ("driver", "driver", "580.105.07"),
     ),
 )
-def test_recognized_model_rejects_every_live_stack_mismatch(
+def test_recognized_model_treats_every_live_stack_mismatch_as_not_applicable(
     monkeypatch: pytest.MonkeyPatch,
     target_field: str,
     stack_field: str,
@@ -763,18 +751,17 @@ def test_recognized_model_rejects_every_live_stack_mismatch(
         "probe_build_target",
         lambda: _target(**values),
     )
-    with pytest.raises(
-        DynamicMemoryContractError,
-        match=rf"build target is not qualified.*{stack_field}",
-    ):
-        resolve_model_only_qualification(
-            QWEN_ID,
-            requested_revision=None,
-            resolve_model=lambda model, **_kwargs: model,
-        )
+    calls: list[str] = []
+    resolved = resolve_model_only_qualification(
+        QWEN_ID,
+        requested_revision=None,
+        resolve_model=lambda model, **_kwargs: calls.append(model) or model,
+    )
+    assert resolved is None, stack_field
+    assert calls == []
 
 
-def test_recognized_model_target_probe_failure_is_explicit(
+def test_recognized_model_target_probe_failure_is_not_applicable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import tensorrt_model_connect.dynamic_memory_contract as contract_module
@@ -783,12 +770,11 @@ def test_recognized_model_target_probe_failure_is_explicit(
         raise RuntimeError("probe failed")
 
     monkeypatch.setattr(contract_module, "probe_build_target", fail_probe)
-    with pytest.raises(
-        DynamicMemoryContractError,
-        match="could not be verified",
-    ):
-        resolve_model_only_qualification(
-            QWEN_ID,
-            requested_revision=None,
-            resolve_model=lambda model, **_kwargs: model,
-        )
+    calls: list[str] = []
+    resolved = resolve_model_only_qualification(
+        QWEN_ID,
+        requested_revision=None,
+        resolve_model=lambda model, **_kwargs: calls.append(model) or model,
+    )
+    assert resolved is None
+    assert calls == []

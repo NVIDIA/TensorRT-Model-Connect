@@ -1445,6 +1445,10 @@ int main(int argc, char** argv) {
                       << '\n';
             return 0;
         }
+        // The final product runtime rejects external-manifest evidence. This
+        // product-owned helper alone may load the ephemeral one-byte-reserve
+        // bootstrap used to measure and create embedded calibration evidence.
+        trtmc::InternalRuntimeMemoryCalibrationBootstrapScope bootstrap_scope;
         trtmc::LoadOptionsV2 options;
         append_default_search_paths(argv[0], options);
         options.backend_search_paths.insert(options.backend_search_paths.end(),

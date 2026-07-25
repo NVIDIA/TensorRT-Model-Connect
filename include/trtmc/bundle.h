@@ -58,10 +58,9 @@ struct ModuleResidencyCalibration {
     int32_t schema_version{0};
     std::string measurement_kind;
     std::string cuda_module_loading_mode;
-    // Old sealed-v2 bundles omitted this field and are interpreted as
-    // external_manifest_v1. Newly auto-calibrated bundles declare
-    // embedded_bundle_v1 so deleting the embedded evidence cannot silently
-    // downgrade them to the legacy manifest path.
+    // external_manifest_v1 is retained only for the product-owned calibrator's
+    // ephemeral bootstrap. Product runtime bundles must declare
+    // embedded_bundle_v1 and carry their hash-bound evidence sections.
     std::string evidence_provenance{"external_manifest_v1"};
     std::string qualified_runtime_stack_sha256;
     std::string plan_set_sha256;
@@ -76,6 +75,10 @@ struct RuntimeMemoryContract {
     std::string qualified_model_id;
     std::string qualified_model_revision;
     std::string qualified_config_sha256;
+    // SHA-256 of the exact config.json section consumed by the C++ runtime.
+    // This is distinct from qualified_config_sha256, which fingerprints the
+    // source model config before runtime-only fields are injected.
+    std::string runtime_config_sha256;
     std::string qualified_target;
     QualifiedRuntimeStack qualified_runtime_stack;
     int32_t native_kv_plugin_abi{0};

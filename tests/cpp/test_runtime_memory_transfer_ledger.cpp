@@ -87,6 +87,10 @@ trtmc::RuntimeMemoryContract embedded_evidence_contract() {
     contract.qualified_model_id = "Qwen/Qwen3-0.6B";
     contract.qualified_model_revision = std::string(40, '1');
     contract.qualified_config_sha256 = std::string(64, '2');
+    const std::string runtime_config = R"({"model_type":"qwen3"})";
+    trtmc::internal::Sha256 runtime_config_digest;
+    runtime_config_digest.update(runtime_config.data(), runtime_config.size());
+    contract.runtime_config_sha256 = runtime_config_digest.hex_digest();
     contract.qualified_target = "gb300-trt-11.2";
     contract.qualified_runtime_stack.sm = "sm103";
     contract.qualified_runtime_stack.tensorrt = "11.2.0.113";
@@ -175,6 +179,7 @@ nlohmann::json embedded_evidence_document(const trtmc::RuntimeMemoryContract& co
         {"qualified_model_id", contract.qualified_model_id},
         {"qualified_model_revision", contract.qualified_model_revision},
         {"qualified_config_sha256", contract.qualified_config_sha256},
+        {"runtime_config_sha256", contract.runtime_config_sha256},
         {"qualified_target", contract.qualified_target},
         {"qualified_runtime_stack", stack},
         {"native_kv_plugin_abi", contract.native_kv_plugin_abi},
@@ -223,6 +228,10 @@ trtmc::BundleFile bundle_with_embedded_evidence(
     trtmc::BundleFile bundle;
     bundle.sections.push_back(
         {"runtime_memory_calibration/evidence.json", std::move(bytes)});
+    const std::string runtime_config = R"({"model_type":"qwen3"})";
+    bundle.sections.push_back(
+        {"config.json",
+         std::vector<char>(runtime_config.begin(), runtime_config.end())});
     return bundle;
 }
 
@@ -242,15 +251,27 @@ void test_embedded_calibration_evidence_is_bound_before_deserialization() {
     external.module_residency_calibration.evidence_provenance =
         "external_manifest_v1";
     trtmc::BundleFile empty_bundle;
-    bool external_accepted = true;
+    bool external_rejected = false;
     try {
         trtmc::validate_runtime_memory_embedded_calibration_evidence(external,
                                                                     empty_bundle);
-    } catch (...) {
-        external_accepted = false;
+    } catch (const std::runtime_error& error) {
+        external_rejected =
+            std::string(error.what()).find("Product runtime requires embedded") !=
+            std::string::npos;
     }
-    check(external_accepted,
-          "legacy exact-manifest calibration may omit embedded evidence");
+    check(external_rejected,
+          "product runtime rejects legacy external calibration provenance");
+    bool internal_bootstrap_accepted = true;
+    try {
+        trtmc::InternalRuntimeMemoryCalibrationBootstrapScope bootstrap_scope;
+        trtmc::validate_runtime_memory_embedded_calibration_evidence(external,
+                                                                    empty_bundle);
+    } catch (...) {
+        internal_bootstrap_accepted = false;
+    }
+    check(internal_bootstrap_accepted,
+          "private calibrator scope accepts its ephemeral external bootstrap");
 
     auto contract = embedded_evidence_contract();
     check(rejects_embedded_evidence(contract, empty_bundle, "missing bundle section"),
@@ -290,6 +311,43 @@ void test_embedded_calibration_evidence_is_bound_before_deserialization() {
     check(rejects_embedded_evidence(wrong_schema_contract, wrong_schema_bundle,
                                     "invalid field"),
           "wrong-typed embedded evidence schema fails closed as runtime_error");
+}
+
+void test_runtime_config_bytes_are_bound_before_deserialization() {
+    auto contract = embedded_evidence_contract();
+    auto document = embedded_evidence_document(contract);
+    auto bundle = bundle_with_embedded_evidence(contract, document);
+
+    bool valid_accepted = true;
+    try {
+        trtmc::validate_runtime_memory_runtime_config(contract, bundle);
+    } catch (...) {
+        valid_accepted = false;
+    }
+    check(valid_accepted, "exact embedded config.json bytes are accepted");
+
+    auto tampered_bundle = bundle;
+    tampered_bundle.sections.back().data.back() ^= 1;
+    bool tamper_rejected = false;
+    try {
+        trtmc::validate_runtime_memory_runtime_config(contract, tampered_bundle);
+    } catch (const std::runtime_error& error) {
+        tamper_rejected =
+            std::string(error.what()).find("config.json hash mismatch") !=
+            std::string::npos;
+    }
+    check(tamper_rejected, "runtime config.json byte tamper is rejected");
+
+    auto missing_bundle = bundle;
+    missing_bundle.sections.pop_back();
+    bool missing_rejected = false;
+    try {
+        trtmc::validate_runtime_memory_runtime_config(contract, missing_bundle);
+    } catch (const std::runtime_error& error) {
+        missing_rejected =
+            std::string(error.what()).find("missing config.json") != std::string::npos;
+    }
+    check(missing_rejected, "qualified runtime-memory bundle requires config.json");
 }
 
 void test_exact_qualified_tuple_rejects_tampered_bundle_identity() {
@@ -868,6 +926,7 @@ void test_exact_m_observability_does_not_query_m_plus_one() {
 
 int main() {
     test_embedded_calibration_evidence_is_bound_before_deserialization();
+    test_runtime_config_bytes_are_bound_before_deserialization();
     test_exact_qualified_tuple_rejects_tampered_bundle_identity();
     test_developer_c_div_2_tuple_requires_exact_opt_in_and_buckets();
     test_exact_runtime_target_rejects_gpu_and_trt_drift();
