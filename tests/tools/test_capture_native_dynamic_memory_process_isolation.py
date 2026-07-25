@@ -524,6 +524,7 @@ def _write_test_bundle(path: Path, spec) -> None:
         "prefill_engine_plan": b"qualified-prefill-engine-plan",
         "engine_plan": b"qualified-decode-engine-plan",
     }
+    runtime_config = b"{}"
     runtime_stack = {
         key: value
         for key, value in RUNTIME_STACK.items()
@@ -566,7 +567,7 @@ def _write_test_bundle(path: Path, spec) -> None:
     runtime_memory = seal_runtime_memory_contract(
         base_contract,
         plan_sections=plans,
-        runtime_config_bytes=b"{}",
+        runtime_config_bytes=runtime_config,
         module_residency_calibration={
             "schema_version": 1,
             "measurement_kind": "nvml_process_cumulative_first_use",
@@ -595,12 +596,13 @@ def _write_test_bundle(path: Path, spec) -> None:
     )
     section_offset = 0
     sections = {}
-    for name, plan in plans.items():
+    section_payloads = {**plans, "config.json": runtime_config}
+    for name, payload in section_payloads.items():
         sections[name] = {
             "offset": section_offset,
-            "size": len(plan),
+            "size": len(payload),
         }
-        section_offset += len(plan)
+        section_offset += len(payload)
     header = {
         "model_id": MODEL_ID,
         "vocab_size": spec.vocab_size,
@@ -618,7 +620,7 @@ def _write_test_bundle(path: Path, spec) -> None:
         isolation.boundary.BUNDLE_MAGIC
         + struct.pack("<Q", len(header_bytes))
         + header_bytes
-        + b"".join(plans.values())
+        + b"".join(section_payloads.values())
     )
 
 

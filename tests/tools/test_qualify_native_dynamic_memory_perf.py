@@ -987,6 +987,23 @@ def test_independent_sealed_contract_replay_rejects_plan_tamper(
 ) -> None:
     bundle = tmp_path / "dynamic.trtfb"
     payload = bytearray(_dynamic_bundle_bytes())
+    header_length = struct.unpack_from("<Q", payload, 8)[0]
+    engine_plan_offset = 16 + header_length
+    payload[engine_plan_offset] ^= 1
+    bundle.write_bytes(payload)
+
+    with pytest.raises(
+        perf.QualificationError,
+        match="independently replay the sealed v2 bundle contract",
+    ):
+        perf._replay_sealed_runtime_memory_contract(bundle)
+
+
+def test_independent_sealed_contract_replay_rejects_runtime_config_tamper(
+    tmp_path: Path,
+) -> None:
+    bundle = tmp_path / "dynamic.trtfb"
+    payload = bytearray(_dynamic_bundle_bytes())
     payload[-1] ^= 1
     bundle.write_bytes(payload)
 

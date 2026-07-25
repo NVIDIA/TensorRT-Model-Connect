@@ -2298,6 +2298,14 @@ def _sealed_profile_sweep_contract(
             "profile sweep bundle does not match the expected sealed model/profile tuple"
         )
 
+    actual_runtime_config_sha = hashlib.sha256(
+        _read_bundle_section(bundle, header, "config.json")
+    ).hexdigest()
+    if contract["runtime_config_sha256"] != actual_runtime_config_sha:
+        raise RuntimeError(
+            "profile sweep contract does not bind the exact bundle config.json bytes"
+        )
+
     calibration = contract["module_residency_calibration"]
     expected_stack_sha = qualified_runtime_stack_sha256(
         contract["qualified_runtime_stack"]

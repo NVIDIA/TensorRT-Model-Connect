@@ -884,6 +884,7 @@ def test_qualification_model_resolution_requires_sealed_v2_bundle(
 
     provisional = copy.deepcopy(header)
     provisional["runtime_memory"]["contract_version"] = 1
+    del provisional["runtime_memory"]["runtime_config_sha256"]
     del provisional["runtime_memory"]["module_residency_calibration"]
     with pytest.raises(ValueError, match="contract_version"):
         qualify._resolve_spec(provisional)
