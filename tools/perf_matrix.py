@@ -535,6 +535,7 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
         "audio-shape",
         "exact-token-ids",
         "exact-text",
+        "generated-token-count",
         "media-shape",
         "normalized-text",
         "ocr-text",
@@ -846,6 +847,18 @@ def _candidate_timing_scope(case: Mapping[str, Any]) -> str:
     )
 
 
+def _candidate_build_python_profile(resolved: Mapping[str, Any]) -> tuple[str, str]:
+    model = resolved["model"]
+    profile = default_execution_profiles(family=str(model["family"]))["build"]
+    try:
+        python = resolve_profile_python(profile, sys.executable)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise PerfMatrixError(
+            f"candidate build Python profile {profile!r} is unavailable: {exc}"
+        ) from exc
+    return profile, python
+
+
 def _command_environment() -> dict[str, str]:
     environment = dict(os.environ)
     existing = environment.get("PYTHONPATH", "")
@@ -896,6 +909,8 @@ def _resolve_candidate(
         raise PerfMatrixError(
             f"case {case['id']} includes asset loading but resolves no timed asset path"
         )
+    profile, _ = _candidate_build_python_profile(value)
+    value["_candidate_build_python_profile"] = profile
     command.pop("stdout", None)
     return value, argv, command
 
@@ -1045,6 +1060,7 @@ def _preflight_evidence(
                 "id": case["id"],
                 "reference_timing_scope": expected["timing_scope"],
                 "candidate_timing_scope": resolved["measurement"]["timing_scope"],
+                "candidate_build_python_profile": resolved["_candidate_build_python_profile"],
                 "input_preparation_included": expected["input_preparation_included"],
                 "asset_loading_included": expected["asset_loading_included"],
                 "status": "aligned",
@@ -1272,6 +1288,11 @@ def _resolved_adapter_options(baseline: Mapping[str, Any]) -> dict[str, Any]:
         environment_value = os.environ.get(environment_name, "").strip()
         if option_name not in options and environment_value:
             options[option_name] = environment_value
+        if option_name not in options:
+            raise PerfMatrixError(
+                f"baseline adapter {adapter!r} requires adapter_options.{option_name} "
+                f"or {environment_name}"
+            )
     return options
 
 
@@ -1321,6 +1342,64 @@ def _run_command(
         "stdout_tail": stdout[-16000:],
         "stderr_tail": stderr[-16000:],
     }
+
+
+def _gpu_memory_usage_mib() -> list[tuple[int, int]]:
+    try:
+        process = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if process.returncode != 0:
+        return []
+    usage = []
+    for line in process.stdout.splitlines():
+        fields = [field.strip() for field in line.split(",")]
+        if len(fields) != 2:
+            return []
+        try:
+            used, total = (int(field) for field in fields)
+        except ValueError:
+            return []
+        if total <= 0 or used < 0:
+            return []
+        usage.append((used, total))
+    return usage
+
+
+def _wait_for_gpu_memory_headroom(
+    *,
+    timeout_seconds: float = 120.0,
+    minimum_free_fraction: float = 0.45,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    announced = False
+    while True:
+        usage = _gpu_memory_usage_mib()
+        if not usage or all(
+            (total - used) / total >= minimum_free_fraction for used, total in usage
+        ):
+            return
+        if time.monotonic() >= deadline:
+            rendered = ", ".join(f"{used}/{total} MiB" for used, total in usage)
+            raise PerfMatrixError(
+                "GPU memory did not recover enough free headroom after a backend "
+                f"process exited (required {minimum_free_fraction:.0%} free): {rendered}"
+            )
+        if not announced:
+            rendered = ", ".join(f"{used}/{total} MiB" for used, total in usage)
+            print(f"Waiting for GPU memory headroom: {rendered}", flush=True)
+            announced = True
+        time.sleep(1.0)
 
 
 def _decode_timeout_stream(value: bytes | str | None) -> str:
@@ -1419,11 +1498,13 @@ def _output_contract(
     case: Mapping[str, Any],
     candidate: Mapping[str, Any],
     baseline: Mapping[str, Any],
+    *,
+    request: Mapping[str, Any] | None = None,
 ) -> tuple[bool, str]:
     left = candidate.get("output_summary", {})
     right = baseline.get("output_summary", {})
     operation = str(case["operation"])
-    contract = case["baseline"].get("output_contract")
+    contract = _effective_output_contract(case, request)
     if contract == "segmentation-shape":
         left_shape = tuple(left.get(name) for name in ("num_masks", "height", "width"))
         right_shape = tuple(right.get(name) for name in ("num_masks", "height", "width"))
@@ -1442,8 +1523,19 @@ def _output_contract(
         return matched, "audio output shape differs" if not matched else ""
     if contract == "media-shape":
         names = ("height", "width", "channels")
+        media_type = right.get("media_type")
+        if media_type == "image":
+            left_count = left.get(
+                "batch_size",
+                left.get("media_count", left.get("num_frames")),
+            )
+        else:
+            left_count = left.get(
+                "num_frames",
+                left.get("media_count", left.get("batch_size")),
+            )
         left_shape = (
-            left.get("num_frames", left.get("media_count")),
+            left_count,
             *(left.get(name) for name in names),
         )
         right_shape = (
@@ -1453,6 +1545,20 @@ def _output_contract(
         matched = None not in left_shape and left_shape == right_shape
         return matched, "media output shape differs" if not matched else ""
     if operation == "generate":
+        if contract == "generated-token-count":
+            left_tokens = left.get("token_ids")
+            right_tokens = right.get("token_ids")
+            left_count = len(left_tokens) if isinstance(left_tokens, list) else None
+            right_count = (
+                int(right["output_tokens"])
+                if isinstance(right.get("output_tokens"), int)
+                and not isinstance(right["output_tokens"], bool)
+                else len(right_tokens)
+                if isinstance(right_tokens, list)
+                else None
+            )
+            matched = left_count is not None and left_count == right_count
+            return matched, "generated token count differs" if not matched else ""
         if contract == "exact-text":
             matched = left.get("text") == right.get("text")
             return matched, "generated text differs" if not matched else ""
@@ -1503,15 +1609,38 @@ def _output_contract(
     return True, ""
 
 
+def _effective_output_contract(
+    case: Mapping[str, Any],
+    request: Mapping[str, Any] | None = None,
+) -> str:
+    configured = case["baseline"].get("output_contract")
+    if configured is not None:
+        return str(configured)
+    if (
+        str(case["operation"]) == "generate"
+        and request is not None
+        and float(request.get("temperature", 0.0)) > 0.0
+    ):
+        return "generated-token-count"
+    return "exact-token-ids"
+
+
 def _classify(
     case: Mapping[str, Any],
     candidate: Mapping[str, Any],
     baseline: Mapping[str, Any],
+    *,
+    request: Mapping[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     mismatch = _baseline_contract_mismatch(case, candidate, baseline)
     if mismatch:
         return "contract-mismatch", {"reason": mismatch}
-    outputs_match, reason = _output_contract(case, candidate, baseline)
+    outputs_match, reason = _output_contract(
+        case,
+        candidate,
+        baseline,
+        request=request,
+    )
     if not outputs_match:
         return "contract-mismatch", {"reason": reason}
     candidate_p50 = _median(candidate)
@@ -1636,6 +1765,11 @@ def _case_row(
             "request": resolved["request"],
             "runtime": resolved["runtime"],
             "measurement": case["measurement"],
+            "candidate_build_python_profile": resolved["_candidate_build_python_profile"],
+            "output_contract": _effective_output_contract(
+                case,
+                resolved["request"],
+            ),
             "workload": {
                 "source": "testcase",
                 "testcase": case["workload"]["testcase"],
@@ -1675,6 +1809,7 @@ def _run_supported_case(
     order = ("trtmc", "baseline") if _stable_even(str(case["id"])) else ("baseline", "trtmc")
     for side in order:
         argv = candidate_argv if side == "trtmc" else baseline_argv
+        _wait_for_gpu_memory_headroom()
         command = _run_command(argv, environment, options.timeout_seconds)
         command.pop("stdout", None)
         commands[side] = command
@@ -1685,7 +1820,12 @@ def _run_supported_case(
     candidate = _candidate_result(candidate_dir, digest)
     candidate["precision"] = str(resolved["model"]["precision"])
     baseline = _read_baseline(baseline_path)
-    status, comparison = _classify(case, candidate, baseline)
+    status, comparison = _classify(
+        case,
+        candidate,
+        baseline,
+        request=resolved["request"],
+    )
     row["candidate"] = candidate
     row["baseline"] = baseline
     row["comparison"] = comparison
@@ -1749,7 +1889,7 @@ def _slug(value: str) -> str:
 
 
 def _should_skip(row: Mapping[str, Any]) -> bool:
-    return row.get("status") in {"green", "yellow", "red"}
+    return row.get("status") in {"green", "yellow", "red", "contract-mismatch"}
 
 
 def _final_status(rows: Iterable[Mapping[str, Any]]) -> str:

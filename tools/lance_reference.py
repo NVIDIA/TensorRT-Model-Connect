@@ -106,7 +106,7 @@ def _snapshot_revision(path: Path) -> str:
     return parts[index + 1] if index + 1 < len(parts) else "unresolved"
 
 
-def _model_paths(arguments: argparse.Namespace) -> tuple[Path, Path, str]:
+def _model_paths(arguments: argparse.Namespace) -> tuple[Path, Path, Path, str]:
     model_source = Path(arguments.model)
     if model_source.exists():
         root = model_source.resolve()
@@ -121,20 +121,23 @@ def _model_paths(arguments: argparse.Namespace) -> tuple[Path, Path, str]:
                 allow_patterns=[
                     f"{arguments.model_subdir}/**",
                     f"{arguments.vit_subdir}/**",
+                    "Wan2.2_VAE.pth",
                 ],
             )
         )
     model_path = root / arguments.model_subdir
     vit_path = root / arguments.vit_subdir
+    vae_path = root / "Wan2.2_VAE.pth"
     required = (
         model_path / "llm_config.json",
         model_path / "model.safetensors",
         vit_path / "vit.safetensors",
+        vae_path,
     )
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise FileNotFoundError("Lance snapshot is incomplete: " + ", ".join(missing))
-    return model_path, vit_path, _snapshot_revision(root)
+    return model_path, vit_path, vae_path, _snapshot_revision(root)
 
 
 def _dataset_payload(*, image: Path, prompt: str, instruction: str, count: int) -> dict[str, Any]:
@@ -186,6 +189,18 @@ def _load_upstream(reference_repo: Path) -> Any:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _configure_upstream_vae(reference_repo: Path, vae_path: Path) -> None:
+    sys.path.insert(0, str(reference_repo))
+    from config import config_factory
+
+    config = config_factory.get_model_path_config()
+    vae = config.get("vae")
+    if not isinstance(vae, dict):
+        raise RuntimeError("Lance path configuration has no vae mapping")
+    vae["wan"] = str(vae_path.resolve())
+    config_factory._MODEL_PATH_CONFIG_CACHE = config
 
 
 @contextmanager
@@ -288,6 +303,7 @@ def _run_upstream(
     arguments: argparse.Namespace,
     model_path: Path,
     vit_path: Path,
+    vae_path: Path,
     dataset: Path,
     result_directory: Path,
 ) -> tuple[list[float], list[str]]:
@@ -295,6 +311,7 @@ def _run_upstream(
 
     reference_repo = arguments.reference_repo.resolve()
     sys.path.insert(0, str(reference_repo))
+    _configure_upstream_vae(reference_repo, vae_path)
     upstream = _load_upstream(reference_repo)
     upstream.MAX_GENERATION_LENGTH = arguments.max_new_tokens
     original = upstream.validate_on_fixed_batch
@@ -335,7 +352,7 @@ def run(arguments: argparse.Namespace) -> int:
     reference_revision = _check_reference(
         arguments.reference_repo.resolve(), arguments.reference_commit
     )
-    model_path, vit_path, model_revision = _model_paths(arguments)
+    model_path, vit_path, vae_path, model_revision = _model_paths(arguments)
     count = arguments.warmup + arguments.iterations
     with tempfile.TemporaryDirectory(prefix="trtmc-perf-lance-") as temporary:
         root = Path(temporary)
@@ -353,7 +370,14 @@ def run(arguments: argparse.Namespace) -> int:
             ),
             encoding="utf-8",
         )
-        samples, answers = _run_upstream(arguments, model_path, vit_path, dataset, root / "results")
+        samples, answers = _run_upstream(
+            arguments,
+            model_path,
+            vit_path,
+            vae_path,
+            dataset,
+            root / "results",
+        )
     payload = {
         "samples_ms": samples,
         "text": answers[0] if answers else "",

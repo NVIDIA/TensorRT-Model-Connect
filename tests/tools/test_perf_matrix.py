@@ -461,6 +461,126 @@ def test_exact_text_contract_is_explicit_and_still_strict() -> None:
     assert status == "green"
 
 
+def test_generated_token_count_contract_allows_stochastic_token_content() -> None:
+    case = {
+        "operation": "generate",
+        "baseline": {"output_contract": "generated-token-count"},
+    }
+    candidate = {
+        "output_summary": {
+            "text": "sampled candidate",
+            "token_ids": [1, 2, 3],
+        }
+    }
+    reference = {
+        "output_summary": {
+            "output_tokens": 3,
+            "text": "different sampled reference",
+            "token_ids": [4, 5, 6],
+        }
+    }
+
+    assert perf_matrix._output_contract(case, candidate, reference) == (True, "")
+
+    case["baseline"] = {}
+    assert perf_matrix._output_contract(
+        case,
+        candidate,
+        reference,
+        request={"temperature": 0.7, "top_p": 0.9},
+    ) == (True, "")
+
+    case["baseline"] = {"output_contract": "generated-token-count"}
+    reference["output_summary"]["output_tokens"] = 2
+    reference["output_summary"]["token_ids"] = [4, 5]
+    assert perf_matrix._output_contract(case, candidate, reference) == (
+        False,
+        "generated token count differs",
+    )
+
+
+def test_gpu_memory_headroom_waits_for_reclaimable_capacity(monkeypatch) -> None:
+    snapshots = iter(
+        [
+            [(249_291, 256_703)],
+            [(135_401, 256_703)],
+        ]
+    )
+    sleeps = []
+    monkeypatch.setattr(
+        perf_matrix,
+        "_gpu_memory_usage_mib",
+        lambda: next(snapshots),
+    )
+    monkeypatch.setattr(perf_matrix.time, "sleep", sleeps.append)
+
+    perf_matrix._wait_for_gpu_memory_headroom(timeout_seconds=10.0)
+
+    assert sleeps == [1.0]
+
+
+def test_backend_waits_for_gpu_headroom_before_each_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = []
+    monkeypatch.setattr(perf_matrix, "_command_environment", lambda: {})
+    monkeypatch.setattr(perf_matrix, "_workload_digest", lambda _resolved: "digest")
+    monkeypatch.setattr(
+        perf_matrix,
+        "_candidate_base_argv",
+        lambda _case, _options: ["candidate"],
+    )
+    monkeypatch.setattr(
+        perf_matrix,
+        "_baseline_argv",
+        lambda _case, _resolved, _output, _options: (["baseline"], "base"),
+    )
+    monkeypatch.setattr(
+        perf_matrix,
+        "_wait_for_gpu_memory_headroom",
+        lambda: events.append("wait"),
+    )
+    monkeypatch.setattr(
+        perf_matrix,
+        "_run_command",
+        lambda argv, _environment, _timeout: events.append(("run", argv[0]))
+        or {"exit_code": 0, "stdout": ""},
+    )
+    monkeypatch.setattr(
+        perf_matrix,
+        "_candidate_result",
+        lambda _directory, _digest: {},
+    )
+    monkeypatch.setattr(perf_matrix, "_read_baseline", lambda _path: {})
+    monkeypatch.setattr(
+        perf_matrix,
+        "_classify",
+        lambda *_args, **_kwargs: ("green", {}),
+    )
+    monkeypatch.setattr(perf_matrix, "_stable_even", lambda _value: True)
+
+    row = {"resolved_settings": {}}
+    perf_matrix._run_supported_case(
+        {"id": "example"},
+        {"model": {"precision": "fp16"}, "request": {}},
+        Namespace(timeout_seconds=30),
+        tmp_path,
+        row,
+    )
+
+    assert events == ["wait", ("run", "candidate"), "wait", ("run", "baseline")]
+    assert row["status"] == "green"
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["green", "yellow", "red", "contract-mismatch"],
+)
+def test_resume_keeps_terminal_comparison_results(status: str) -> None:
+    assert perf_matrix._should_skip({"status": status})
+
+
 def test_timing_scope_details_state_measured_included_and_excluded_work() -> None:
     candidate = {
         "measurement_policy": {
@@ -657,6 +777,33 @@ def test_media_contract_compares_materialized_frame_geometry() -> None:
         False,
         "media output shape differs",
     )
+
+
+def test_media_contract_compares_image_batch_size_to_media_count() -> None:
+    case = {
+        "operation": "generate_image",
+        "baseline": {"output_contract": "media-shape"},
+    }
+    candidate = {
+        "output_summary": {
+            "batch_size": 2,
+            "num_frames": 1,
+            "height": 384,
+            "width": 384,
+            "channels": 3,
+        }
+    }
+    reference = {
+        "output_summary": {
+            "media_count": 2,
+            "media_type": "image",
+            "height": 384,
+            "width": 384,
+            "channels": 3,
+        }
+    }
+
+    assert perf_matrix._output_contract(case, candidate, reference) == (True, "")
 
 
 @pytest.mark.parametrize("configuration", ["", "Debug", "RelWithDebInfo"])
@@ -952,6 +1099,18 @@ def test_task_reference_commands_record_external_checkout_paths(
     ) == {"reference_repo": "/explicit/ELF"}
 
 
+def test_external_reference_adapter_rejects_a_missing_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TRTMC_ELF_REFERENCE_REPO", raising=False)
+
+    with pytest.raises(
+        perf_matrix.PerfMatrixError,
+        match="requires adapter_options.reference_repo or TRTMC_ELF_REFERENCE_REPO",
+    ):
+        perf_matrix._resolved_adapter_options({"adapter": "upstream-elf"})
+
+
 def test_suite_has_explicit_eager_and_task_reference_rows() -> None:
     raw = yaml.safe_load(SUITE.read_text(encoding="utf-8"))
     rows = {row["id"]: row for row in raw["entries"]}
@@ -1027,6 +1186,56 @@ def test_entry_is_the_only_run_selection() -> None:
     )
 
     assert [case["id"] for case in selected] == ["flux.generate_image"]
+
+
+def test_candidate_preflight_resolves_the_build_python_profile(monkeypatch) -> None:
+    calls = []
+
+    monkeypatch.setattr(
+        perf_matrix,
+        "default_execution_profiles",
+        lambda **_kwargs: {
+            "build": "family-build",
+            "runtime": "base",
+            "reference": "base",
+        },
+    )
+    monkeypatch.setattr(
+        perf_matrix,
+        "resolve_profile_python",
+        lambda profile, python: calls.append((profile, python)) or "/profile/python",
+    )
+
+    profile, python = perf_matrix._candidate_build_python_profile({"model": {"family": "example"}})
+
+    assert profile == "family-build"
+    assert python == "/profile/python"
+    assert calls == [("family-build", sys.executable)]
+
+
+def test_candidate_preflight_rejects_an_unavailable_build_python_profile(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        perf_matrix,
+        "default_execution_profiles",
+        lambda **_kwargs: {
+            "build": "family-build",
+            "runtime": "base",
+            "reference": "base",
+        },
+    )
+
+    def reject_profile(*_args):
+        raise RuntimeError("profile is not prebuilt")
+
+    monkeypatch.setattr(perf_matrix, "resolve_profile_python", reject_profile)
+
+    with pytest.raises(
+        perf_matrix.PerfMatrixError,
+        match="candidate build Python profile 'family-build' is unavailable",
+    ):
+        perf_matrix._candidate_build_python_profile({"model": {"family": "example"}})
 
 
 def test_seq2seq_token_framing_is_explicit_and_exact() -> None:
@@ -1393,6 +1602,82 @@ def test_diffusers_local_mode_loads_resolved_snapshot_path(tmp_path: Path, monke
     assert captured["kwargs"]["local_files_only"] is True
 
 
+def test_diffusers_adapter_uses_configured_pipeline_classes(monkeypatch) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    selected = []
+
+    class FluxPipeline:
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            selected.append(cls.__name__)
+            return cls()
+
+    class Flux2Pipeline:
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            selected.append(cls.__name__)
+            return cls()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "diffusers",
+        Namespace(FluxPipeline=FluxPipeline, Flux2Pipeline=Flux2Pipeline),
+    )
+    arguments = Namespace(
+        family="flux",
+        local_files_only=False,
+        model="black-forest-labs/FLUX.2-dev",
+        precision="fp16",
+        revision=None,
+        trust_remote_code=False,
+    )
+    torch_module = Namespace(float16="fp16", float32="fp32", bfloat16="bf16")
+
+    runner["_diffusion_pipeline"](
+        arguments,
+        torch_module,
+        {"pipeline_classes": ["Flux2Pipeline"]},
+    )
+
+    assert selected == ["Flux2Pipeline"]
+
+
+def test_diffusers_adapter_selects_flux2_pipeline_from_model_id(monkeypatch) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    selected = []
+
+    class FluxPipeline:
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            selected.append(cls.__name__)
+            return cls()
+
+    class Flux2Pipeline:
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            selected.append(cls.__name__)
+            return cls()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "diffusers",
+        Namespace(FluxPipeline=FluxPipeline, Flux2Pipeline=Flux2Pipeline),
+    )
+    arguments = Namespace(
+        family="flux",
+        local_files_only=False,
+        model="black-forest-labs/FLUX.2-dev",
+        precision="fp16",
+        revision=None,
+        trust_remote_code=False,
+    )
+    torch_module = Namespace(float16="fp16", float32="fp32", bfloat16="bf16")
+
+    runner["_diffusion_pipeline"](arguments, torch_module, {})
+
+    assert selected == ["Flux2Pipeline"]
+
+
 def test_wan22_diffusers_adapter_uses_pinned_conversion_and_fp32_vae(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1559,6 +1844,67 @@ def test_diffusers_adapter_uses_resolved_sana_runtime_controls(tmp_path: Path) -
     }
 
 
+def test_diffusers_adapter_preserves_batched_prompts_and_seeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    captured = []
+
+    class FakeGenerator:
+        def __init__(self, device):
+            assert device == "cuda"
+            self.seed = None
+
+        def manual_seed(self, seed):
+            self.seed = seed
+            return self
+
+    class FakePipeline:
+        def to(self, device):
+            assert device == "cuda"
+            return self
+
+        def __call__(self, *, prompt, generator):
+            captured.append(
+                {
+                    "prompt": prompt,
+                    "seeds": [value.seed for value in generator],
+                }
+            )
+            return Namespace(images=[object(), object()])
+
+    globals_ = runner["_load_diffusers"].__globals__
+    globals_["_diffusion_pipeline"] = lambda *_args: FakePipeline()
+    globals_["_resolved_revision"] = lambda *_args: "snapshot"
+    monkeypatch.setitem(sys.modules, "torch", Namespace(Generator=FakeGenerator))
+    arguments = Namespace(
+        family="flux",
+        precision="fp16",
+        model="black-forest-labs/FLUX.1-schnell",
+        revision=None,
+    )
+
+    session = runner["_load_diffusers"](
+        arguments,
+        {
+            "batch_size": 2,
+            "prompt": "unused",
+            "prompts": ["red cube", "blue sphere"],
+            "seed": 0,
+            "seeds": [41, 42],
+            "media_type": "image",
+        },
+        {},
+    )
+
+    assert session.invoke()["media_count"] == 2
+    assert session.invoke()["media_count"] == 2
+    assert captured == [
+        {"prompt": ["red cube", "blue sphere"], "seeds": [41, 42]},
+        {"prompt": ["red cube", "blue sphere"], "seeds": [41, 42]},
+    ]
+
+
 def test_diffusers_media_count_accepts_array_like_video_frames() -> None:
     runner = runpy.run_path(
         str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py")
@@ -1585,8 +1931,21 @@ def test_personaplex_loader_adds_vendored_moshi_package_root() -> None:
     assert 'str(Path(official_repo) / "moshi")' in source
 
 
-def test_patchtst_reference_runs_model_under_precision_autocast(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("architecture", "output_name"),
+    [
+        ("PatchTSTForRegression", "regression_outputs"),
+        ("PatchTSTForPrediction", "prediction_outputs"),
+        ("PatchTSTForClassification", "prediction_logits"),
+    ],
+)
+def test_patchtst_reference_runs_model_under_precision_autocast(
+    monkeypatch,
+    architecture: str,
+    output_name: str,
+) -> None:
     runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    selected = []
 
     class FakeTensor:
         shape = (1, 1)
@@ -1635,10 +1994,12 @@ def test_patchtst_reference_runs_model_under_precision_autocast(monkeypatch) -> 
 
     class FakePatchTST:
         config = Namespace(_commit_hash="snapshot")
+        architecture = ""
 
         @classmethod
         def from_pretrained(cls, _model, **kwargs):
             assert kwargs["torch_dtype"] == "fp16"
+            selected.append(cls.architecture)
             return cls()
 
         def eval(self):
@@ -1649,15 +2010,28 @@ def test_patchtst_reference_runs_model_under_precision_autocast(monkeypatch) -> 
 
         def __call__(self, **_kwargs):
             assert fake_torch.autocast_active
-            return Namespace(regression_outputs=FakeTensor())
+            return Namespace(**{output_name: FakeTensor()})
+
+    class FakePatchTSTForRegression(FakePatchTST):
+        architecture = "PatchTSTForRegression"
+
+    class FakePatchTSTForPrediction(FakePatchTST):
+        architecture = "PatchTSTForPrediction"
+
+    class FakePatchTSTForClassification(FakePatchTST):
+        architecture = "PatchTSTForClassification"
 
     fake_transformers = ModuleType("transformers")
     fake_transformers.AutoConfig = Namespace(
         from_pretrained=lambda *_args, **_kwargs: Namespace(
-            context_length=2, num_input_channels=1
+            architectures=[architecture],
+            context_length=2,
+            num_input_channels=1,
         )
     )
-    fake_transformers.PatchTSTForRegression = FakePatchTST
+    fake_transformers.PatchTSTForRegression = FakePatchTSTForRegression
+    fake_transformers.PatchTSTForPrediction = FakePatchTSTForPrediction
+    fake_transformers.PatchTSTForClassification = FakePatchTSTForClassification
     fake_transformers.PatchTSMixerForPrediction = object
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
@@ -1676,6 +2050,7 @@ def test_patchtst_reference_runs_model_under_precision_autocast(monkeypatch) -> 
     )
 
     assert session.invoke() == {"shape": [1, 1], "element_count": 1, "finite": True}
+    assert selected == [architecture]
 
 
 def test_qwen3_omni_supplies_text_chat_template_when_snapshot_omits_it() -> None:
@@ -1868,6 +2243,10 @@ def main():
     dataset = tmp_path / "dataset.json"
     dataset.write_text('{"0000":{},"0001":{},"0002":{}}', encoding="utf-8")
     monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    configured = []
+    runner["_run_upstream"].__globals__["_configure_upstream_vae"] = lambda repo, vae: (
+        configured.append((repo, vae))
+    )
     arguments = Namespace(
         reference_repo=reference_repo,
         max_new_tokens=10,
@@ -1882,6 +2261,7 @@ def main():
         arguments,
         tmp_path / "Lance_3B",
         tmp_path / "Qwen2.5-VL-ViT",
+        tmp_path / "Wan2.2_VAE.pth",
         dataset,
         tmp_path / "results",
     )
@@ -1889,6 +2269,39 @@ def main():
     assert len(samples) == 2
     assert all(value > 0 for value in samples)
     assert answers == ["blue", "blue"]
+    assert configured == [(reference_repo, tmp_path / "Wan2.2_VAE.pth")]
+
+
+def test_lance_reference_requires_the_upstream_vae(tmp_path: Path) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "tools/lance_reference.py"))
+    root = tmp_path / "Lance"
+    model = root / "Lance_3B"
+    vit = root / "Qwen2.5-VL-ViT"
+    model.mkdir(parents=True)
+    vit.mkdir()
+    (model / "llm_config.json").write_text("{}", encoding="utf-8")
+    (model / "model.safetensors").write_bytes(b"model")
+    (vit / "vit.safetensors").write_bytes(b"vit")
+    arguments = Namespace(
+        model=str(root),
+        revision=None,
+        local_files_only=True,
+        model_subdir="Lance_3B",
+        vit_subdir="Qwen2.5-VL-ViT",
+    )
+
+    with pytest.raises(FileNotFoundError, match="Wan2.2_VAE.pth"):
+        runner["_model_paths"](arguments)
+
+    vae = root / "Wan2.2_VAE.pth"
+    vae.write_bytes(b"vae")
+
+    assert runner["_model_paths"](arguments) == (
+        model,
+        vit,
+        vae,
+        "local-path",
+    )
 
 
 def test_lance_adapter_records_pinned_upstream_and_model_revisions(

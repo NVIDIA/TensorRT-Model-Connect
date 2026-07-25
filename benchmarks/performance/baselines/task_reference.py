@@ -1173,8 +1173,13 @@ def _diffusion_pipeline(
 ) -> Any:
     import diffusers
 
-    classes = {
-        "flux": ("FluxPipeline",),
+    model_id = str(options.get("model_id", arguments.model))
+    default_classes = {
+        "flux": (
+            ("Flux2Pipeline",)
+            if "FLUX.2" in model_id.upper()
+            else ("FluxPipeline",)
+        ),
         "ltx_video": ("LTXPipeline", "LTXVideoPipeline", "DiffusionPipeline"),
         "pixart": ("PixArtSigmaPipeline", "DiffusionPipeline"),
         "qwen_image": ("QwenImagePipeline", "DiffusionPipeline"),
@@ -1183,7 +1188,17 @@ def _diffusion_pipeline(
         "wan2_2_ti2v": ("WanPipeline", "DiffusionPipeline"),
         "z_image": ("ZImagePipeline", "DiffusionPipeline"),
     }[arguments.family]
-    model_id = str(options.get("model_id", arguments.model))
+    configured_classes = options.get("pipeline_classes")
+    if configured_classes is None:
+        classes = default_classes
+    elif (
+        not isinstance(configured_classes, list)
+        or not configured_classes
+        or any(not isinstance(name, str) or not name for name in configured_classes)
+    ):
+        raise ValueError("pipeline_classes must be a non-empty list of class names")
+    else:
+        classes = tuple(configured_classes)
     requested_revision = str(
         options.get("model_revision", getattr(arguments, "revision", None) or "")
     ) or None
@@ -1254,7 +1269,22 @@ def _load_diffusers(
         parameter.kind is inspect.Parameter.VAR_KEYWORD
         for parameter in signature.parameters.values()
     )
-    values: dict[str, Any] = {"prompt": str(request.get("prompt", ""))}
+    batch_size = int(request.get("batch_size", 1))
+    prompt = str(request.get("prompt", ""))
+    raw_prompts = request.get("prompts")
+    if raw_prompts is not None:
+        if (
+            not isinstance(raw_prompts, list)
+            or len(raw_prompts) != batch_size
+            or any(not isinstance(value, str) for value in raw_prompts)
+        ):
+            raise ValueError("prompts must contain one string per batch item")
+        prompt_value: str | list[str] = list(raw_prompts)
+    elif batch_size > 1:
+        prompt_value = [prompt] * batch_size
+    else:
+        prompt_value = prompt
+    values: dict[str, Any] = {"prompt": prompt_value}
     negative_prompt = str(request.get("negative_prompt", ""))
     if negative_prompt:
         values["negative_prompt"] = negative_prompt
@@ -1310,12 +1340,31 @@ def _load_diffusers(
             + ", ".join(missing)
         )
     seed = int(request.get("seed", 42))
+    raw_seeds = request.get("seeds")
+    if raw_seeds is not None:
+        if not isinstance(raw_seeds, list) or len(raw_seeds) != batch_size:
+            raise ValueError("seeds must contain one integer per batch item")
+        seeds: int | list[int] = [int(value) for value in raw_seeds]
+    elif batch_size > 1:
+        seeds = [seed] * batch_size
+    else:
+        seeds = seed
     if "generator" in accepted or accepts_extra:
-        call_values["generator"] = torch.Generator("cuda").manual_seed(seed)
+        if isinstance(seeds, list):
+            call_values["generator"] = [
+                torch.Generator("cuda").manual_seed(value) for value in seeds
+            ]
+        else:
+            call_values["generator"] = torch.Generator("cuda").manual_seed(seeds)
 
     def invoke() -> Mapping[str, Any]:
         if "generator" in call_values:
-            call_values["generator"].manual_seed(seed)
+            generators = call_values["generator"]
+            if isinstance(generators, list):
+                for generator, value in zip(generators, seeds, strict=True):
+                    generator.manual_seed(value)
+            else:
+                generators.manual_seed(seeds)
         result = pipeline(**call_values)
         media = getattr(result, "images", None)
         if media is None:
@@ -1411,6 +1460,30 @@ def _align(values: Sequence[float], length: int, fill: float) -> list[float]:
     return result
 
 
+def _patchtst_task(config: Any) -> str:
+    for attribute in ("patchtst_task", "task_type", "problem_type"):
+        value = str(getattr(config, attribute, "") or "").lower()
+        if "class" in value:
+            return "classification"
+        if "regress" in value:
+            return "regression"
+        if "forecast" in value or "predict" in value:
+            return "forecast"
+
+    architectures = getattr(config, "architectures", []) or []
+    if isinstance(architectures, str):
+        architectures = [architectures]
+    for architecture in architectures:
+        value = str(architecture).lower()
+        if "class" in value:
+            return "classification"
+        if "regress" in value:
+            return "regression"
+        if "forecast" in value or "predict" in value:
+            return "forecast"
+    return "regression"
+
+
 def _load_timeseries(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
@@ -1479,11 +1552,20 @@ def _load_timeseries(
 
     else:
         is_mixer = arguments.family == "patchtsmixer"
-        model_class = (
-            transformers.PatchTSMixerForPrediction
-            if is_mixer
-            else transformers.PatchTSTForRegression
-        )
+        if is_mixer:
+            model_class = transformers.PatchTSMixerForPrediction
+            output_name = "prediction_outputs"
+        else:
+            task = _patchtst_task(config)
+            class_name, output_name = {
+                "classification": (
+                    "PatchTSTForClassification",
+                    "prediction_logits",
+                ),
+                "forecast": ("PatchTSTForPrediction", "prediction_outputs"),
+                "regression": ("PatchTSTForRegression", "regression_outputs"),
+            }[task]
+            model_class = getattr(transformers, class_name)
         if not hasattr(model_class, "all_tied_weights_keys"):
             model_class.all_tied_weights_keys = {}
         model = (
@@ -1531,7 +1613,7 @@ def _load_timeseries(
                         past_observed_mask=observed.gt(0.5),
                         return_dict=True,
                     )
-                    output = outputs.regression_outputs
+                    output = getattr(outputs, output_name)
             if isinstance(output, (tuple, list)):
                 output = torch.stack(list(output), dim=-1)
             return _tensor_summary(output)
