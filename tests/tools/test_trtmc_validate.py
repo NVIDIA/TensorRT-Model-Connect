@@ -48,6 +48,9 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
     assert configured == declared
     assert min(catalog["sample_limits"].values()) >= 2
     assert max(catalog["sample_limits"].values()) == 100
+    assert catalog["sample_limits"]["mmlu_five_shot_mcq"] == 20
+    assert catalog["sample_limits"]["dpg_bench_diffusion_image"] == 5
+    assert catalog["sample_limits"]["gedit_bench_image_edit"] == 5
 
 
 def test_every_dataset_backed_validation_binding_has_native_reference_runner():
