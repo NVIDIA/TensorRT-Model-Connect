@@ -1119,6 +1119,10 @@ def _source_revision() -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def write_run_metadata(output: Path) -> Path:
     metadata = {
         "schema_version": "trtmc.validation-run/v1",
@@ -1126,7 +1130,7 @@ def write_run_metadata(output: Path) -> Path:
         "hostname": platform.node(),
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
         "command": shlex.join(sys.argv),
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": _utc_now().isoformat(),
     }
     path = output / "run.json"
     path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
@@ -1140,6 +1144,30 @@ def _report_provenance(run: Mapping[str, Any]) -> str:
         ("CUDA_VISIBLE_DEVICES", run.get("cuda_visible_devices")),
     )
     return " · ".join(f"{name}={value}" for name, value in fields if value)
+
+
+def _elapsed_seconds(
+    started_at: Any,
+    finished_at: datetime,
+) -> float | None:
+    if not isinstance(started_at, str) or not started_at:
+        return None
+    try:
+        started = datetime.fromisoformat(started_at)
+    except ValueError:
+        return None
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return round(max(0.0, (finished_at - started).total_seconds()), 3)
+
+
+def _format_duration(seconds: Any) -> str:
+    if not isinstance(seconds, (int, float)) or isinstance(seconds, bool):
+        return ""
+    total_seconds = max(0, round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours}h {minutes:02d}m {seconds:02d}s"
 
 
 def _merge_commands_from_result_logs(result: dict[str, Any]) -> None:
@@ -1629,6 +1657,8 @@ def _report_document(
     execution_errors: int,
 ) -> str:
     provenance = _report_provenance(report.get("run", {}))
+    duration = _format_duration(report["summary"].get("duration_seconds"))
+    duration_summary = f" · {html.escape(duration)} total duration" if duration else ""
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>TRTMC Reference Consistency Report</title>
@@ -1688,7 +1718,7 @@ pre {{ margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
 {comparison_counts["agreement"]} agreements ·
 {comparison_counts["disagreement"]} disagreements ·
 {execution_errors} execution errors ·
-{report["summary"]["selected_samples"]} samples<br>
+{report["summary"]["selected_samples"]} samples{duration_summary}<br>
 {html.escape(provenance)}</div>
 <table><thead><tr><th>Model</th><th>Workload</th><th>Samples</th><th>Execution</th>
 <th>Reference</th><th>Comparison</th><th>Agreement metrics</th>
@@ -1703,9 +1733,10 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
     results = _normalize_result_files(result_paths)
     validation_counts, comparison_counts, execution_errors = _report_counts(results)
     sample_limits = [_dataset_reproduction(result)[1] for result in results]
+    generated_at = _utc_now()
     report = {
         "schema_version": "trtmc.validation-report/v2",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": generated_at.isoformat(),
         "validation_status": (
             "passed" if results and validation_counts["failed"] == 0 else "failed"
         ),
@@ -1726,6 +1757,12 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
     run_path = output / "run.json"
     if run_path.is_file():
         report["run"] = json.loads(run_path.read_text(encoding="utf-8"))
+        duration_seconds = _elapsed_seconds(
+            report["run"].get("started_at"),
+            generated_at,
+        )
+        if duration_seconds is not None:
+            report["summary"]["duration_seconds"] = duration_seconds
     json_path = output / "report.json"
     html_path = output / "report.html"
     json_path.write_text(

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 
@@ -650,6 +651,25 @@ def test_write_report_links_each_comparison(tmp_path):
     assert "$ python tools/trtmc_validate.py model-a" in document
     assert "$ python hf.py" in document
     assert "$ trtmc run" in document
+
+
+def test_write_report_records_total_duration(tmp_path, monkeypatch):
+    started_at = "2026-07-25T01:02:03+00:00"
+    finished_at = datetime(2026, 7, 25, 4, 4, 6, 500000, tzinfo=timezone.utc)
+    (tmp_path / "run.json").write_text(
+        json.dumps({"started_at": started_at}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_utc_now",
+        lambda: finished_at,
+    )
+
+    _, html_path, report = trtmc_validate.write_report(tmp_path)
+
+    assert report["summary"]["duration_seconds"] == 10_923.5
+    assert "3h 02m 04s total duration" in html_path.read_text(encoding="utf-8")
 
 
 def test_write_report_does_not_render_validation_wrapper(tmp_path):
