@@ -39,6 +39,7 @@ directory this plugin can build:
 ``config.json`` (model_type=lance), ``model.safetensors``, the tokenizer files,
 and the ViT at ``vision/model.safetensors``.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -50,6 +51,7 @@ from .checkpoint_mapper import (
     _open_safetensors,
     _load_tensor,
 )
+
 # Reuse the Qwen-VL vision encoder shape. The decoder builder is local so the
 # Lance family does not depend on another family's text-builder package.
 from .default_decoder import build_standard_decoder_engine
@@ -87,28 +89,43 @@ class LancePlugin:
         )
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
         return build_standard_decoder_engine(
-            config, weights, max_cache_length, precision=precision,
-            verbose=verbose, quant_ctx=quant_ctx, embed_input=True,
+            config,
+            weights,
+            max_cache_length,
+            precision=precision,
+            verbose=verbose,
+            quant_ctx=quant_ctx,
             debug_layer_outputs=debug_layer_outputs,
         )
 
     def build_vision_engine(
-        self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, precision: str = "fp32", verbose: bool = False,
+        self,
+        model_dir: str,
+        config: ModelConfig,
+        weights: WeightDict,
+        *,
+        precision: str = "fp32",
+        verbose: bool = False,
     ) -> bytes | None:
         vision_config = config.raw.get("vision_config")
         if vision_config is None:
             return None
         vision_weights = _load_lance_vision_weights(model_dir)
         return build_qwen_vl_vision_engine(
-            vision_config, vision_weights,
+            vision_config,
+            vision_weights,
             fixed_image_size=_DEFAULT_FIXED_IMAGE_SIZE,
             verbose=verbose,
         )
