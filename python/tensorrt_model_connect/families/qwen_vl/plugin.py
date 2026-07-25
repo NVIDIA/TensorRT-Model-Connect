@@ -693,19 +693,30 @@ def _build_qwen3_vl_decoder(
 
         # DeepStack injection: add visual features after attention residual
         if layer_idx < deepstack_num_levels and ds_active_tensor is not None:
-            # deepstack_contribution = deepstack_embed[i] * deepstack_active
             layer_ds_active = (
                 fp32_ds_active_tensor if layer_is_fp32 else ds_active_tensor)
             layer_ds_embed = (
                 fp32_ds_embed_inputs[layer_idx]
                 if layer_is_fp32 else ds_embed_inputs[layer_idx])
             assert layer_ds_active is not None
-            ds_scaled = network.add_elementwise(
-                layer_ds_embed, layer_ds_active,
-                trt.ElementWiseOperation.PROD)
+            # NaN-safe gate: select(active > 0, deepstack_embed, 0) instead of
+            # deepstack_embed * active. On text/decode steps the embed buffer can
+            # carry uninitialized/NaN residue; a plain multiply propagates it as
+            # NaN * 0 = NaN and poisons every logit. The hard-zero branch keeps
+            # the inactive contribution exactly 0 regardless of the buffer.
+            ds_zero = graph_ops.add_constant(
+                network, (1, 1), np.zeros((1, 1), dtype=np.float32),
+                dtype=np.float32)
+            if ds_zero.dtype != layer_ds_active.dtype:
+                ds_zero = network.add_cast(
+                    ds_zero, layer_ds_active.dtype).get_output(0)
+            ds_cond = network.add_elementwise(
+                layer_ds_active, ds_zero,
+                trt.ElementWiseOperation.GREATER).get_output(0)
+            ds_gated = network.add_select(
+                ds_cond, layer_ds_embed, ds_zero).get_output(0)
             post_attn_ds = network.add_elementwise(
-                post_attn, ds_scaled.get_output(0),
-                trt.ElementWiseOperation.SUM)
+                post_attn, ds_gated, trt.ElementWiseOperation.SUM)
             post_attn = post_attn_ds.get_output(0)
 
         # Post-attention norm
