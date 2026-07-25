@@ -41,9 +41,7 @@ class StarCoder2Plugin:
         return model_type.lower() == "starcoder2"
 
     def load_weights(
-        self,
-        model_dir: str,
-        config: ModelConfig,
+        self, model_dir: str, config: ModelConfig,
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -61,8 +59,7 @@ class StarCoder2Plugin:
         # Embedding
         embedding = _load_tensor(readers, "model.embed_tokens.weight")
         assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
-        )
+            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
         weights["embedding"] = embedding.astype(np.float32)
 
         mlp_size = 0
@@ -73,10 +70,14 @@ class StarCoder2Plugin:
             hf_prefix = f"model.layers.{layer_idx}"
 
             # LayerNorm weights + biases
-            input_norm = _load_tensor(readers, f"{hf_prefix}.input_layernorm.weight")
-            input_norm_beta = _load_tensor(readers, f"{hf_prefix}.input_layernorm.bias")
-            post_norm = _load_tensor(readers, f"{hf_prefix}.post_attention_layernorm.weight")
-            post_norm_beta = _load_tensor(readers, f"{hf_prefix}.post_attention_layernorm.bias")
+            input_norm = _load_tensor(
+                readers, f"{hf_prefix}.input_layernorm.weight")
+            input_norm_beta = _load_tensor(
+                readers, f"{hf_prefix}.input_layernorm.bias")
+            post_norm = _load_tensor(
+                readers, f"{hf_prefix}.post_attention_layernorm.weight")
+            post_norm_beta = _load_tensor(
+                readers, f"{hf_prefix}.post_attention_layernorm.bias")
 
             weights[f"{prefix}.input_norm"] = input_norm.astype(np.float32)
             weights[f"{prefix}.input_norm_beta"] = input_norm_beta.astype(np.float32)
@@ -84,10 +85,14 @@ class StarCoder2Plugin:
             weights[f"{prefix}.post_attn_norm_beta"] = post_norm_beta.astype(np.float32)
 
             # Q/K/V projections (separate)
-            q_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.q_proj.weight")
-            k_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.k_proj.weight")
-            v_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.v_proj.weight")
-            o_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.o_proj.weight")
+            q_raw = _load_tensor(
+                readers, f"{hf_prefix}.self_attn.q_proj.weight")
+            k_raw = _load_tensor(
+                readers, f"{hf_prefix}.self_attn.k_proj.weight")
+            v_raw = _load_tensor(
+                readers, f"{hf_prefix}.self_attn.v_proj.weight")
+            o_raw = _load_tensor(
+                readers, f"{hf_prefix}.self_attn.o_proj.weight")
 
             if attention_size == 0:
                 attention_size = q_raw.shape[0]
@@ -105,9 +110,12 @@ class StarCoder2Plugin:
             weights[f"{prefix}.w_o"] = o_t
 
             # QKV biases
-            q_bias = _load_tensor(readers, f"{hf_prefix}.self_attn.q_proj.bias")
-            k_bias_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.k_proj.bias")
-            v_bias_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.v_proj.bias")
+            q_bias = _load_tensor(
+                readers, f"{hf_prefix}.self_attn.q_proj.bias")
+            k_bias_raw = _load_tensor(
+                readers, f"{hf_prefix}.self_attn.k_proj.bias")
+            v_bias_raw = _load_tensor(
+                readers, f"{hf_prefix}.self_attn.v_proj.bias")
 
             weights[f"{prefix}.q_bias"] = q_bias.astype(np.float32)
 
@@ -117,7 +125,8 @@ class StarCoder2Plugin:
             # Output projection bias
             o_bias_key = f"{hf_prefix}.self_attn.o_proj.bias"
             if _has_tensor(readers, o_bias_key):
-                weights[f"{prefix}.o_bias"] = _load_tensor(readers, o_bias_key).astype(np.float32)
+                weights[f"{prefix}.o_bias"] = _load_tensor(
+                    readers, o_bias_key).astype(np.float32)
 
             # MLP: fc1 (c_fc) and fc2 (c_proj)
             fc1_raw = _load_tensor(readers, f"{hf_prefix}.mlp.c_fc.weight")
@@ -132,31 +141,30 @@ class StarCoder2Plugin:
             fc1_bias_key = f"{hf_prefix}.mlp.c_fc.bias"
             fc2_bias_key = f"{hf_prefix}.mlp.c_proj.bias"
             if _has_tensor(readers, fc1_bias_key):
-                weights[f"{prefix}.fc1_bias"] = _load_tensor(readers, fc1_bias_key).astype(
-                    np.float32
-                )
+                weights[f"{prefix}.fc1_bias"] = _load_tensor(
+                    readers, fc1_bias_key).astype(np.float32)
             if _has_tensor(readers, fc2_bias_key):
-                weights[f"{prefix}.fc2_bias"] = _load_tensor(readers, fc2_bias_key).astype(
-                    np.float32
-                )
+                weights[f"{prefix}.fc2_bias"] = _load_tensor(
+                    readers, fc2_bias_key).astype(np.float32)
 
         # Final LayerNorm
         final_norm_key = "model.norm.weight"
         if _has_tensor(readers, final_norm_key):
-            weights["final_norm"] = _load_tensor(readers, final_norm_key).astype(np.float32)
+            weights["final_norm"] = _load_tensor(
+                readers, final_norm_key).astype(np.float32)
         else:
             weights["final_norm"] = np.ones(hidden, dtype=np.float32)
 
         final_norm_beta_key = "model.norm.bias"
         if _has_tensor(readers, final_norm_beta_key):
-            weights["final_norm_beta"] = _load_tensor(readers, final_norm_beta_key).astype(
-                np.float32
-            )
+            weights["final_norm_beta"] = _load_tensor(
+                readers, final_norm_beta_key).astype(np.float32)
 
         # LM head
         lm_head_key = "lm_head.weight"
         if _has_tensor(readers, lm_head_key):
-            weights["w_out"] = _transpose_2d(_load_tensor(readers, lm_head_key), "lm_head")
+            weights["w_out"] = _transpose_2d(
+                _load_tensor(readers, lm_head_key), "lm_head")
         else:
             weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied")
 
@@ -167,47 +175,41 @@ class StarCoder2Plugin:
         return weights
 
     def build_engine(
-        self,
-        config: ModelConfig,
-        weights: WeightDict,
-        max_cache_length: int,
-        *,
-        precision: str = "fp32",
-        quant_ctx=None,
-        verbose: bool = False,
+        self, config: ModelConfig, weights: WeightDict,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="StarCoder2 tensor-parallel builds"
-            )
+                parallel, feature="StarCoder2 tensor-parallel builds")
             if quant_ctx is not None:
-                raise ValueError("StarCoder2 tensor-parallel builds do not support quantization")
+                raise ValueError(
+                    "StarCoder2 tensor-parallel builds do not support quantization")
             if debug_layer_outputs:
                 raise ValueError(
-                    "StarCoder2 tensor-parallel builds do not support debug_layer_outputs"
-                )
+                    "StarCoder2 tensor-parallel builds do not support debug_layer_outputs")
             return build_dual_profile_tp_decoder_engine(
-                config,
-                weights,
-                max_cache_length,
-                precision=precision,
-                quant_ctx=quant_ctx,
+                config, weights, max_cache_length,
+                precision=precision, quant_ctx=quant_ctx,
+                norm_type="layernorm",
+                mlp_type="gelu_fc",
+                position_type="rope",
+                activation="gelu_new",
                 verbose=verbose,
-                parallel_config=parallel,
-            )
+                parallel_config=parallel)
 
         return build_standard_decoder_engine(
-            config,
-            weights,
-            max_cache_length,
-            precision=precision,
-            quant_ctx=quant_ctx,
+            config, weights, max_cache_length,
+            precision=precision, quant_ctx=quant_ctx,
+            norm_type="layernorm",
+            mlp_type="gelu_fc",
+            position_type="rope",
+            activation="gelu_new",
             verbose=verbose,
-            debug_layer_outputs=debug_layer_outputs,
-        )
+            debug_layer_outputs=debug_layer_outputs)
 
 
 plugin = StarCoder2Plugin()
