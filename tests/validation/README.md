@@ -29,8 +29,8 @@ python tools/trtmc_validate.py --all
 Dataset-backed workloads use the task-specific sample limits declared in
 `model_workloads.yaml`. Fast encoder and classification workloads use larger
 slices, while generation-heavy image, video, and audio workloads use smaller
-slices. The selected limit is printed before execution and recorded next to the
-actual prepared-input count in `comparison.json` and `report.html`.
+slices. The selected limit is printed before execution and shown in the
+`Samples` column of `report.html`.
 
 Override the configured limit for one run, or request the complete dataset
 explicitly:
@@ -43,7 +43,7 @@ python tools/trtmc_validate.py gpt2-125m --limit 0
 The command creates a reference environment only when one does not already
 exist, then prints the environment it used. Reference inference runs through
 `tools/trtmc_reference.py`, outside the task-eval CLI. Its result is keyed by
-the prepared inputs and inference settings and reused from the shared reference
+the input slice and inference settings and reused from the shared reference
 cache when the key already exists.
 
 TRTMC bundles live in one shared validation engine directory. A required
@@ -68,7 +68,7 @@ representative commands per backend. The first disagreement is preferred when
 one exists.
 
 When per-sample differences exist, the model row also shows up to 20 affected
-samples. Each sample contains the prepared input, both raw prediction records,
+samples. Each sample contains the exact input, both raw prediction records,
 the comparison evidence, and native single-sample commands when the backends
 provide them. The reference command invokes a standalone upstream-framework
 entrypoint and the TRTMC command invokes the model executable directly; neither

@@ -286,7 +286,6 @@ def test_write_report_links_each_comparison(tmp_path):
         "validation_failed": 0,
         "validation_skipped": 0,
         "selected_samples": 500,
-        "prepared_inputs": 1000,
     }
     assert report["validation_status"] == "passed"
     assert report["results"][0]["execution"]["status"] == "completed"
@@ -302,11 +301,11 @@ def test_write_report_links_each_comparison(tmp_path):
     assert "TRTMC Reference Consistency Report" in document
     assert "Vanilla reproduction" in document
     assert "Dataset · Reference 1/1 · TRTMC 1/1" in document
-    assert "Dataset slice (500 selected samples; 1000 prepared inputs)" in document
+    assert "Dataset slice (500 samples)" in document
     assert "<th>Samples</th>" in document
-    assert "500 selected<br><span class=\"detail\">1000 prepared inputs</span>" in document
+    assert "<td>500</td>" in document
     assert report["summary"]["selected_samples"] == 500
-    assert report["summary"]["prepared_inputs"] == 1000
+    assert "prepared inputs" not in document
     assert "$ python tools/trtmc_validate.py model-a" in document
     assert "$ python hf.py" in document
     assert "$ trtmc run" in document

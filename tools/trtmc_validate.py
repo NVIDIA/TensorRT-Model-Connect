@@ -1396,26 +1396,14 @@ def _render_reproduction(
 ) -> str:
     reference_commands = _result_commands(result, "hf")
     trtmc_commands = _result_commands(result, "trtmc")
-    dataset_command, sample_limit, prepared_input_count = _dataset_reproduction(result)
+    dataset_command, sample_limit, _ = _dataset_reproduction(result)
     reference_total = _reproduction_count(result, "hf")
     trtmc_total = _reproduction_count(result, "trtmc")
-    input_label = "input" if prepared_input_count == 1 else "inputs"
     if sample_limit:
         sample_label = "sample" if sample_limit == 1 else "samples"
-        prepared_label = (
-            f"; {prepared_input_count} prepared {input_label}"
-            if prepared_input_count
-            else ""
-        )
-        dataset_label = (
-            f"Dataset slice ({sample_limit} selected {sample_label}{prepared_label})"
-        )
+        dataset_label = f"Dataset slice ({sample_limit} {sample_label})"
     else:
-        dataset_label = (
-            f"Full dataset ({prepared_input_count} prepared {input_label})"
-            if prepared_input_count
-            else "Full dataset"
-        )
+        dataset_label = "Full dataset"
     summary = (
         f"Dataset · Reference {len(reference_commands)}/{reference_total} · "
         f"TRTMC {len(trtmc_commands)}/{trtmc_total}"
@@ -1558,25 +1546,12 @@ def _render_validation(result: Mapping[str, Any]) -> str:
 
 
 def _render_samples(result: Mapping[str, Any]) -> str:
-    _command, sample_limit, prepared_input_count = _dataset_reproduction(result)
+    _command, sample_limit, _ = _dataset_reproduction(result)
     if sample_limit:
-        selected = f"{sample_limit} selected"
-        if prepared_input_count and prepared_input_count != sample_limit:
-            input_label = "input" if prepared_input_count == 1 else "inputs"
-            return (
-                f'{selected}<br><span class="detail">'
-                f"{prepared_input_count} prepared {input_label}</span>"
-            )
-        return selected
-    if prepared_input_count:
-        input_label = "input" if prepared_input_count == 1 else "inputs"
-        return (
-            f'Full<br><span class="detail">'
-            f"{prepared_input_count} prepared {input_label}</span>"
-        )
+        return str(sample_limit)
     if result.get("workload") == "e2e":
         return "E2E"
-    return '<span class="unavailable">Unavailable</span>'
+    return "Full"
 
 
 def _normalize_result_files(
@@ -1711,8 +1686,7 @@ pre {{ margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
 {comparison_counts["agreement"]} agreements ·
 {comparison_counts["disagreement"]} disagreements ·
 {execution_errors} execution errors ·
-{report["summary"]["selected_samples"]} selected samples ·
-{report["summary"]["prepared_inputs"]} prepared inputs<br>
+{report["summary"]["selected_samples"]} samples<br>
 {html.escape(provenance)}</div>
 <table><thead><tr><th>Model</th><th>Workload</th><th>Samples</th><th>Execution</th>
 <th>Reference</th><th>Comparison</th><th>Agreement metrics</th>
@@ -1726,7 +1700,7 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
     result_paths = sorted(output.glob("*/*/comparison.json"))
     results = _normalize_result_files(result_paths)
     validation_counts, comparison_counts, execution_errors = _report_counts(results)
-    sampling = [_dataset_reproduction(result)[1:] for result in results]
+    sample_limits = [_dataset_reproduction(result)[1] for result in results]
     report = {
         "schema_version": "trtmc.validation-report/v2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1743,8 +1717,7 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
             "validation_passed": validation_counts["passed"],
             "validation_failed": validation_counts["failed"],
             "validation_skipped": validation_counts["skipped"],
-            "selected_samples": sum(limit for limit, _prepared in sampling),
-            "prepared_inputs": sum(prepared for _limit, prepared in sampling),
+            "selected_samples": sum(sample_limits),
         },
         "results": results,
     }
