@@ -17,7 +17,8 @@ Goal reference:
 
 ## Goal
 
-Keep the TensorRT Model Connect (MC) CLI, Python, C++, and C APIs unchanged,
+Keep the TensorRT Model Connect (MC) CLI, Python, C++, and C-linkage subset
+unchanged,
 while allowing a qualified model deployment to use a third-party optimized
 runtime such as TensorRT Edge-LLM.
 
@@ -361,10 +362,11 @@ API validation must reflect the APIs that exist today:
   consecutive `generate()` calls on that same long-lived instance. The A100
   test also compiles a temporary installed-SDK client that calls the unchanged
   `trtmc::load()` and `generate()` API; no model-specific runner is shipped;
-- C ABI: create/load the pipeline, proving bundle validation, materialization,
-  and DSO loading only. The current C ABI exposes neither text generation nor
-  pipeline destruction; `trtmc_generate_batch` is image generation and is not
-  an Edge-LLM text test. A validation probe therefore terminates after a
+- C-linkage C++ subset: create/load the pipeline, proving bundle validation,
+  materialization, and DSO loading only. The current subset exposes neither
+  text generation nor pipeline destruction and is not a complete pure-C
+  ownership API; `trtmc_generate_batch` is image generation and is not an
+  Edge-LLM text test. A validation probe therefore terminates after a
   successful create instead of inventing a new public API.
 
 ## Private Toolchain Compatibility
@@ -502,8 +504,9 @@ Qwen3-1.7B, and Qwen3-4B:
 6. Compile a temporary client against the installed C++ headers/library, call
    `trtmc::load()` and `generate()`, and keep two different Qwen profile
    pipelines alive in the same process while generating with both.
-7. Use a small C ABI probe to create the pipeline and then exit, proving load
-   and materialization without claiming C text generation or a destroy API.
+7. Use a small C-linkage C++ probe to create the pipeline and then exit,
+   proving load and materialization without claiming C text generation or a
+   destroy API.
 8. Run Edge-LLM's official `llm_inference` executable directly against the
    same materialized `engine.dir`, prompt, and greedy generation settings;
    compare deterministic functional output with the MC delegated path.
@@ -558,7 +561,7 @@ Adapter, runtime, or shared changes run the full target qualification.
 
 ## Exit Criteria
 
-- [ ] Public CLI, Python, C++, and C API signatures are unchanged.
+- [ ] Public CLI, Python, C++, and C-linkage subset signatures are unchanged.
 - [ ] PR #477 remains the only generic delegation foundation.
 - [ ] Adapter identity is model family + optimized runtime; profile identity is
       the exact qualified deployment.

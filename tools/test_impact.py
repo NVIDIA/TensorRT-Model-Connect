@@ -1716,6 +1716,24 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestNoImpact.test_ci_orchestration_triggers_all_models",),
         ),
         ClassificationRule(
+            priority=402,
+            name="model_owned_validation_script",
+            matcher=_path_in(
+                {
+                    "scripts/autopilot/autorun.py",
+                    "scripts/autopilot/dispatch.py",
+                    "scripts/validate_family.sh",
+                }
+            ),
+            resolver=_match_result(
+                "model_owned_validation_script",
+                _no_models,
+                ["tools"],
+                False,
+            ),
+            covered_by=("TestNoImpact.test_model_owned_validation_scripts_trigger_tools",),
+        ),
+        ClassificationRule(
             priority=405,
             name="legacy_e2e_test_support",
             matcher=_regex_rule(r"tests/e2e/(?:__init__|conftest|test_[\w_]+)\.py$"),
@@ -2054,6 +2072,9 @@ def _direct_python_test_targets(changed_files: List[str]) -> tuple[List[str], Li
 
 
 _EXPLICIT_TOOLS_TEST_TARGETS = {
+    "scripts/autopilot/autorun.py": ("tests/tools/test_model_owned_validation_scripts.py",),
+    "scripts/autopilot/dispatch.py": ("tests/tools/test_model_owned_validation_scripts.py",),
+    "scripts/validate_family.sh": ("tests/tools/test_model_owned_validation_scripts.py",),
     "tools/check_doc_commands.py": ("tests/tools/test_check_doc_commands.py",),
     "tools/check_doc_file_references.py": ("tests/tools/test_check_doc_file_references.py",),
     "tools/check_runtime_strategy_matrix.py": (

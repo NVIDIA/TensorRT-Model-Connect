@@ -64,9 +64,13 @@ Optimized-runtime evidence is not a second native strategy. It consists of:
    target, build options, and semantic hash.
 3. A matching model-owned `QUALIFICATION.*.toml` producer descriptor and
    retained parity/performance results.
-4. A self-contained bundle with `optimized_runtime.json`,
-   `implementation.json`, the integrity-bound artifacts, and the exact
-   embedded implementation DSO.
+4. A bundle that is self-contained for the implementation DSO and
+   provider-produced artifacts: `optimized_runtime.json`,
+   `implementation.json`, the integrity-bound artifact tree, and the exact
+   embedded implementation DSO. The host still supplies a matching NVIDIA
+   driver (`libcuda.so.1`), versioned CUDA runtime
+   (`libcudart.so.<major>`), TensorRT (`libnvinfer.so.<major>`), dynamic
+   loader, and compatible system libraries.
 
 The optimized descriptor claims the bundle before native strategy dispatch.
 Its `runtime_strategy` may therefore be empty; the implementation and profile

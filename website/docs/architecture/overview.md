@@ -165,15 +165,24 @@ flowchart TB
   end
 
   subgraph BundleTime["Bundle metadata"]
-    Family --> Strategy["runtime_strategy"]
-    Family --> Sections["engine and asset sections"]
+    Family --> BuildPath{"Selected build path"}
+    BuildPath -->|native| Strategy["runtime_strategy"]
+    Strategy --> Sections["engine and asset sections"]
+    BuildPath -->|qualified optimized profile| Descriptor["optimized_runtime.json<br/>implementation/profile identity"]
+    Descriptor --> ProviderLibrary["embedded libtrtmc_impl_*.so"]
+    Descriptor --> ProviderArtifacts["provider artifact tree"]
   end
 
   subgraph RunTime["Runtime identity"]
     Strategy --> DSO["Owning libtrtmc_model_*.so"]
     DSO --> CppPlugin["C++ IPipelinePlugin"]
     Sections --> CppPlugin
+    Descriptor --> ProviderDSO["Exact embedded implementation DSO"]
+    ProviderLibrary --> ProviderDSO
+    ProviderArtifacts --> ProviderDSO
+    ProviderDSO --> Delegated["Delegated IPipeline"]
     CppPlugin --> Pipeline["Concrete IPipeline"]
+    Delegated --> Pipeline
   end
 ```
 
@@ -273,7 +282,7 @@ The important runtime abstractions are:
 | `IPipeline` | `include/trtmc/pipeline.h` | User-facing task interface. Methods unsupported by a concrete pipeline throw with the pipeline type. |
 | `LoadOptions` | `include/trtmc/pipeline.h` | Runtime load knobs: HF Python helper path, runtime cache path, CUDA graphs, KV cache budget, config file, `--set` overrides, backend search paths. |
 | `PipelineFactory` | `include/trtmc/runtime/pipeline_factory.h`, `src/runtime/registry/pipeline_factory.cpp` | Single creation path from bundle file to pipeline instance. |
-| Optimized-runtime host/factory contract | `src/runtime/providers/optimized_runtime_host.cpp`, `src/runtime/providers/optimized_runtime_factory.h` | Recognize optimized bundles before native materialization, verify their self-contained payload and factory identity, and create the delegated pipeline. |
+| Optimized-runtime host/factory contract | `src/runtime/providers/optimized_runtime_host.cpp`, `src/runtime/providers/optimized_runtime_factory.h` | Recognize optimized bundles before native materialization, verify the integrity-bound implementation DSO/provider artifacts and factory identity, and create the delegated pipeline. Host driver, CUDA, TensorRT, loader, and system-library dependencies remain external. |
 | Model plugin index/loader | `include/trtmc/runtime/pipeline_plugin_loader.h`, `src/runtime/registry/pipeline_plugin_loader.cpp` | Maps a strategy to its manifest owner, loads that model DSO, and verifies the DSO registers only its declared strategies. |
 | `PipelineRegistry` | `include/trtmc/runtime/pipeline_registry.h` | Maps loaded `runtime_strategy` strings to registered `IPipelinePlugin` implementations. |
 | `IPipelinePlugin` | `include/trtmc/runtime/pipeline_plugin.h` | Strategy-specific constructor that reads bundle sections and returns a concrete `IPipeline`. |

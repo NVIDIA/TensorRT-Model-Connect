@@ -537,7 +537,13 @@ std::unique_ptr<IPipeline> load(const std::string& bundle_path, const LoadOption
 
 } // namespace trtmc
 
-// --- C ABI ---
+// --- C-linkage C++ subset ---
+//
+// These declarations have C linkage but are not a C-compatible or complete
+// stable C ABI. This public header uses C++ types (including trtmc::IPipeline*
+// and std::uint64_t), and the subset does not export a pipeline-destroy
+// function. Use it from C++ shims only; a pure-C/FFI ownership API needs a
+// separately designed opaque handle and matching destroy entry point.
 
 extern "C" {
 
@@ -551,18 +557,18 @@ struct TrtmcPipelineOptions {
     int cuda_graphs;           // 0 = disabled
 };
 
-// --- C ABI error codes ---
+// --- C-linkage subset error codes ---
 //
-// Returned by C-ABI functions that yield an int (e.g. trtmc_generate_batch).
+// Returned by C-linkage functions that yield an int (e.g. trtmc_generate_batch).
 // On any non-zero return, callers may inspect trtmc_last_error() for a
 // descriptive message. Codes are stable and additive — new codes get new
 // non-zero integers; existing callers must treat unknown codes as a generic
-// failure.
+// failure. That error-code rule does not make the full surface a stable C ABI.
 #define TRTMC_OK 0
 #define TRTMC_ERR_INVALID_ARG 1
 #define TRTMC_ERR_RUNTIME 2
 
-// --- C ABI image result ---
+// --- C-linkage subset image result ---
 //
 // Plain-old-data image result returned by trtmc_generate_batch. The caller
 // owns the trtmc_image_result_t array (typically a fixed-size stack/heap
@@ -577,9 +583,10 @@ struct trtmc_image_result_t {
     std::uint64_t num_pixels; // total floats in `pixels` (channels*height*width*num_frames)
 };
 
-// Opaque-style handle accepted by the implemented C-ABI batch-generation
-// entry point. In the current ABI it aliases the IPipeline pointer returned by
-// trtmc_create_pipeline or trtmc_create_pipeline_ex.
+// Opaque-style handle accepted by the implemented C-linkage batch-generation
+// entry point. It is actually a C++ IPipeline pointer returned by
+// trtmc_create_pipeline or trtmc_create_pipeline_ex, and no matching public
+// pipeline-destroy function exists.
 typedef trtmc::IPipeline* trtmc_pipeline_t;
 
 trtmc::IPipeline* trtmc_create_pipeline(const char* bundle_path, int flags);

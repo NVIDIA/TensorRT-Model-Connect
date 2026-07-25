@@ -18,19 +18,24 @@ flowchart LR
 
 The CLI is implemented by
 `python/tensorrt_model_connect/build_cli.py`. Family discovery is implemented
-by `python/tensorrt_model_connect/families/__init__.py`; it uses descriptors to
-narrow candidate packages, with a `pkgutil` all-package compatibility fallback
-when descriptor/config matching cannot decide. After family resolution,
-`runtime_provider/` probes only that family's optimized implementations. One
-exact qualified profile may claim the model/revision/target/options tuple;
-otherwise the native family plugin owns checkpoint mapping and graph
-semantics.
+by `python/tensorrt_model_connect/families/__init__.py`, with three distinct
+flows. A full config tries architecture-pattern descriptor candidates before
+the all-package `pkgutil` compatibility fallback. A string or `model_type`
+tries a direct descriptor ID, then alias/prefix candidates, then that fallback.
+A Diffusers pipeline class uses descriptor `diffusion_pipeline_classes` only
+and has no `pkgutil` fallback. In every descriptor route, discovery imports the
+family package and reads its package-level `plugin`; descriptor `module` is
+specialization/tooling metadata, not an arbitrary import selector. After family
+resolution, `runtime_provider/` probes only that family's optimized
+implementations. One exact qualified profile may claim the
+model/revision/target/options tuple; otherwise the native family plugin owns
+checkpoint mapping and graph semantics.
 
 ## Runtime phase
 
 ```mermaid
 flowchart LR
-  Entry["CLI, C API, or C++ API"] --> Factory["PipelineFactory"]
+  Entry["CLI, C-linkage C++ subset, or C++ API"] --> Factory["PipelineFactory"]
   Factory --> Bundle["Read bundle header"]
   Bundle --> Kind{"optimized_runtime.json?"}
   Kind -->|yes| Provider["Verify/materialize artifacts<br/>load embedded implementation DSO"]

@@ -114,7 +114,8 @@ _BARE_PATH_RE = re.compile(
 _OPEN_FENCE_RE = re.compile(r"^[ \t]*(?P<fence>`{3,}|~{3,})[ \t]*(?P<info>.*)$")
 _SHELL_FENCE_LANGUAGES = {"bash", "sh", "shell"}
 _SHELL_OUTPUT_PATH_PREFIX_RE = re.compile(
-    r"(?:^|\s)(?:-o|--output|--output-dir|--output-json|--json)(?:=|\s+)$"
+    r"(?:(?:^|\s)(?:-o|--output|--output-dir|--output-json|--json)(?:=|\s+)"
+    r"|(?:\d+|&)?>{1,2}\s*)$"
 )
 
 # Paths containing angle-bracket placeholders like <family> or <model-name>
@@ -221,6 +222,7 @@ def _shell_fence_path_references(content: str) -> List[Tuple[int, str]]:
     fence_char = ""
     fence_length = 0
     shell_fence = False
+    continuation_prefix = ""
 
     for line_no, line in enumerate(content.splitlines(), start=1):
         if not fence_char:
@@ -235,6 +237,7 @@ def _shell_fence_path_references(content: str) -> List[Tuple[int, str]]:
             fence_char = fence[0]
             fence_length = len(fence)
             shell_fence = language in _SHELL_FENCE_LANGUAGES
+            continuation_prefix = ""
             continue
 
         if re.match(
@@ -244,6 +247,7 @@ def _shell_fence_path_references(content: str) -> List[Tuple[int, str]]:
             fence_char = ""
             fence_length = 0
             shell_fence = False
+            continuation_prefix = ""
             continue
 
         if not shell_fence:
@@ -253,13 +257,19 @@ def _shell_fence_path_references(content: str) -> List[Tuple[int, str]]:
             # runs.  Keep validating the same path when it is mentioned as
             # prose or used as an input, but do not classify an explicit
             # output argument as a phantom input reference.
-            if _SHELL_OUTPUT_PATH_PREFIX_RE.search(line[: match.start()]):
+            prefix = continuation_prefix + line[: match.start()]
+            if _SHELL_OUTPUT_PATH_PREFIX_RE.search(prefix):
                 continue
             raw = _clean_extracted_path(match.group(0))
             if "*" in raw or "?" in raw or _PLACEHOLDER_RE.search(raw):
                 continue
             for expanded in _expand_path(raw):
                 results.append((line_no, expanded))
+
+        if line.endswith("\\"):
+            continuation_prefix += line[:-1] + " "
+        else:
+            continuation_prefix = ""
 
     return results
 

@@ -59,6 +59,7 @@ A minimal Python descriptor is:
 ```toml
 id = "example"
 plugin = "example"
+# Specialization/tooling metadata; runtime discovery imports the package.
 module = "plugin"
 aliases = ["example", "ExampleModel"]
 prefixes = ["example"]
@@ -66,12 +67,26 @@ prefixes = ["example"]
 
 Use `architecture_patterns` for architecture-name matching,
 `diffusion_pipeline_classes` for Diffusers discovery, or the other metadata
-fields only when the family needs them. Discovery starts from
-`families/*/MODEL.toml`; a normal descriptor match narrows candidates using
-this metadata and imports the selected module-level `plugin`. For backward
-compatibility, a full config that cannot be resolved through those candidates
-can still trigger the all-package `pkgutil` fallback described in
-[Python Builder Units](../unit-design/python-builder.md#family-plugins).
+fields only when the family needs them. The descriptor's `module` field is
+specialization/tooling metadata; it does not select an arbitrary discovery
+module. Runtime discovery imports the family package and reads the package-level
+`plugin` exported by `__init__.py`.
+
+Keep the three discovery flows distinct:
+
+1. A full config first uses `architecture_patterns` to import bounded
+   descriptor candidates and evaluate `matches_config()`. If that does not
+   resolve a plugin, the compatibility path imports every non-private family
+   module/package with `pkgutil` and evaluates its predicates.
+2. A string or `model_type` first attempts a direct descriptor-ID lookup, then
+   alias/prefix candidates, and finally the same all-package compatibility
+   fallback.
+3. A Diffusers pipeline class uses only
+   `diffusion_pipeline_classes` from descriptors. It imports matching packages
+   and has no `pkgutil` fallback.
+
+See [Python Builder Units](../unit-design/python-builder.md#family-plugins) for
+the live flow.
 
 `plugin.py` must provide:
 
@@ -137,10 +152,17 @@ Create:
 tests/e2e/models/<family>/
   MODEL.toml
   manifests/<case-name>.json
+  test_<family>_e2e.py
   runner.py
   e2e_plugins/
   <focused family tests and optional thresholds>
 ```
+
+Copy the small `test_<family>_e2e.py` shim from the closest current family,
+rename it for the new family, and keep its import of the sibling `runner.py`.
+This entry point is required: `tools/test_impact.py` selects
+`test_<family>_e2e.py::test_model_e2e[<manifest-name>]` for model-owned E2E
+coverage. The descriptor and `runner.py` alone do not create that pytest node.
 
 The E2E index declares every JSON manifest and the defaults for each task
 strategy:

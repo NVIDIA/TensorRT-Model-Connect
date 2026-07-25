@@ -20,22 +20,33 @@ Each directory requires a `MODEL.toml`. Do not create a flat
 
 At minimum, provide:
 
-- `MODEL.toml` with `id`, `module`, aliases/prefixes, and capabilities needed
-  for discovery
+- `MODEL.toml` with `id`, aliases/prefixes, and capabilities needed for
+  discovery; `module` may remain as specialization/tooling metadata but does
+  not select the runtime discovery import
 - `plugin.py` with matching logic, checkpoint/config handling, the exact
   family-owned `runtime_strategy`, and the build entry point
+- `__init__.py` exporting that package's `plugin`
 - family-local config, checkpoint mapping, graph construction, and debug
   support required by that model
 
-Python discovery is descriptor-first: it scans `families/*/MODEL.toml` and
-imports bounded candidates selected by aliases, prefixes, or architecture
-patterns. When those routes cannot decide a full config, the current
-compatibility fallback uses `pkgutil` to import all non-private family
-modules/packages and run their matching predicates. A flat module can
-therefore be observed by the fallback, but it still does not satisfy the
-three-descriptor support contract. Use an existing family with the same task
-and state shape as a structural example, but do not import model-semantic
-helpers from an unrelated family.
+Python discovery indexes `families/*/MODEL.toml` and then follows one of three
+flows:
+
+1. A full config tries bounded `architecture_patterns` candidates before the
+   compatibility fallback imports all non-private family modules/packages with
+   `pkgutil` and runs their predicates.
+2. A string or `model_type` tries a direct descriptor ID, then alias/prefix
+   candidates, then the same all-package fallback.
+3. A Diffusers pipeline class uses descriptor
+   `diffusion_pipeline_classes` only and has no `pkgutil` fallback.
+
+Descriptor routes import the family package and read the package-level `plugin`
+exported by `__init__.py`; `module` is specialization/tooling metadata, not an
+arbitrary runtime import selector. A flat module can therefore be observed by
+the two compatibility flows, but it still does not satisfy the three-descriptor
+support contract. Use an existing family with the same task and state shape as
+a structural example, but do not import model-semantic helpers from an
+unrelated family.
 
 ## Runtime side
 

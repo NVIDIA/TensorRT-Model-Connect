@@ -1434,11 +1434,21 @@ class TestNoImpact:
         assert match.models == imap.all_model_names
         assert match.unit_tiers == ["tools"]
 
-    def test_scripts_no_impact(self, imap):
-        """scripts/ -> no E2E tests."""
-        match = test_impact.classify_file("scripts/validate_family.sh", imap)
-        assert match.rule == "no_impact"
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "scripts/autopilot/autorun.py",
+            "scripts/autopilot/dispatch.py",
+            "scripts/validate_family.sh",
+        ],
+    )
+    def test_model_owned_validation_scripts_trigger_tools(self, imap, path):
+        """Model-owned validation orchestration must run its focused tools tests."""
+        match = test_impact.classify_file(path, imap)
+        assert match.rule == "model_owned_validation_script"
         assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
 
     def test_markdown_no_impact(self, imap):
         """*.md files -> no E2E tests."""
@@ -3611,6 +3621,32 @@ class TestCoverageMapIntegration:
         assert result.e2e_models == []
         assert result.unit_tiers == ["tools"]
         assert result.tools_tests == [expected_test]
+        assert result.fallback_tiers == []
+
+    @pytest.mark.parametrize("coverage_map", [None, {}])
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "scripts/autopilot/autorun.py",
+            "scripts/autopilot/dispatch.py",
+            "scripts/validate_family.sh",
+        ],
+    )
+    def test_model_owned_validation_script_selects_focused_test(
+        self,
+        imap,
+        coverage_map,
+        path,
+    ):
+        result = test_impact.analyze_impact(
+            [path],
+            imap,
+            coverage_map=coverage_map,
+        )
+
+        assert result.e2e_models == []
+        assert result.unit_tiers == ["tools"]
+        assert result.tools_tests == ["tests/tools/test_model_owned_validation_scripts.py"]
         assert result.fallback_tiers == []
 
     @pytest.mark.parametrize("coverage_map", [None, {}])

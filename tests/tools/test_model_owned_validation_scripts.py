@@ -13,6 +13,8 @@ isolated model-plugin validation.
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
 from pathlib import Path
 
 
@@ -53,6 +55,82 @@ def test_validate_family_uses_model_owned_e2e_entrypoint() -> None:
     assert "--isolate-model-plugin" in text
     assert 'export TRTMC_MODEL_PLUGIN_DIR="$MODEL_PLUGIN_DIR"' in text
     assert "export TRTMC_MODEL_PLUGIN_STRICT=1" in text
+
+
+def test_validate_family_forwards_trust_remote_code_to_bundle_build() -> None:
+    """Remote-code models must receive the flag before any downstream checks."""
+    text = (REPO_ROOT / "scripts" / "validate_family.sh").read_text(encoding="utf-8")
+
+    assert "TRUST_REMOTE_CODE_ARGS=()" in text
+    assert "TRUST_REMOTE_CODE_ARGS+=(--trust-remote-code)" in text
+    assert "BUILD_ARGS=(" in text
+    assert '"${TRUST_REMOTE_CODE_ARGS[@]}"' in text
+    assert 'run_step "Build bundle" "$BINARY" "${BUILD_ARGS[@]}"' in text
+
+
+def test_validate_family_build_invocation_includes_trust_remote_code(
+    tmp_path: Path,
+) -> None:
+    """Exercise argument forwarding without requiring a real model build."""
+    argument_log = tmp_path / "build-arguments.txt"
+    fake_binary = tmp_path / "fake-trtmc"
+    fake_binary.write_text(
+        """#!/usr/bin/env bash
+if [[ "$1" == "build" ]]; then
+    : > "$ARGUMENT_LOG"
+    printf '%s\\n' "$@" >> "$ARGUMENT_LOG"
+fi
+exit 1
+""",
+        encoding="utf-8",
+    )
+    fake_binary.chmod(0o755)
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text(
+        """#!/usr/bin/env bash
+if [[ "$1" == "-" ]]; then
+    cat >/dev/null
+    exit 1
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(REPO_ROOT / "scripts" / "validate_family.sh"),
+            "org/definitely-not-a-model",
+            "--binary",
+            str(fake_binary),
+            "--bundle-dir",
+            str(tmp_path),
+            "--trust-remote-code",
+        ],
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "ARGUMENT_LOG": str(argument_log),
+            "HF_PYTHON": str(fake_python),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert argument_log.read_text(encoding="utf-8").splitlines() == [
+        "build",
+        "org/definitely-not-a-model",
+        "-o",
+        str(tmp_path / "org_definitely-not-a-model.trtfb"),
+        "--max-cache-length",
+        "256",
+        "--trust-remote-code",
+    ]
 
 
 def test_autopilot_prompt_uses_model_owned_e2e_entrypoint() -> None:

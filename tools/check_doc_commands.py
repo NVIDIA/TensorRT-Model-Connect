@@ -25,7 +25,7 @@ import shlex
 import subprocess
 import sys
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -43,7 +43,8 @@ _OPEN_FENCE_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<fence>`{3,}|~{3,})[ \t]*(?P
 _PLACEHOLDER_RE = re.compile(r"<[^>\n]+>")
 _PROMPT_RE = re.compile(r"^(?P<indent>[ \t]*)\$\s+")
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-_INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
+_BACKTICK_RUN_RE = re.compile(r"`+")
+_ARGPARSE_NEGATIVE_NUMBER_RE = re.compile(r"(?:-\d+|-\d*\.\d+)\Z")
 _COMMAND_HEAD_RE = re.compile(
     r"^(?:\$\s+)?(?:env\s+)?"
     r"(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
@@ -129,6 +130,7 @@ class PositionalSpec:
     name: str
     min_values: int = 1
     max_values: int | None = 1
+    choices: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -151,6 +153,7 @@ class ProgramSpec:
     root: CommandSpec
     commands: dict[str, CommandSpec]
     command_required: bool = False
+    nested: dict[str, ProgramSpec] = field(default_factory=dict)
 
 
 def is_vendored_fixture_document(path: Path) -> bool:
@@ -214,11 +217,40 @@ def extract_shell_blocks(path: Path, content: str) -> list[ShellBlock]:
 
         body.append(line)
 
+    # CommonMark treats an unclosed fence as extending through end of file.
+    if opener_char and language in SHELL_LANGUAGES:
+        blocks.append(
+            ShellBlock(
+                path=path,
+                line=opener_line,
+                language=language,
+                body="\n".join(body) + "\n",
+            )
+        )
+
     return blocks
 
 
+def _inline_code_spans(line: str) -> Iterable[str]:
+    """Yield CommonMark-style inline code spans for every backtick run length."""
+    runs = list(_BACKTICK_RUN_RE.finditer(line))
+    index = 0
+    while index < len(runs):
+        opener = runs[index]
+        closer_index = index + 1
+        while closer_index < len(runs):
+            closer = runs[closer_index]
+            if len(closer.group(0)) == len(opener.group(0)):
+                yield line[opener.end() : closer.start()]
+                index = closer_index + 1
+                break
+            closer_index += 1
+        else:
+            index += 1
+
+
 def extract_inline_commands(path: Path, content: str) -> list[ShellBlock]:
-    """Return command-like single-backtick spans outside fenced blocks."""
+    """Return command-like inline code spans outside fenced blocks."""
     commands: list[ShellBlock] = []
     opener_char = ""
     opener_length = 0
@@ -241,8 +273,8 @@ def extract_inline_commands(path: Path, content: str) -> list[ShellBlock]:
             opener_length = len(fence)
             continue
 
-        for match in _INLINE_CODE_RE.finditer(line):
-            body = match.group(1).strip()
+        for span in _inline_code_spans(line):
+            body = span.strip()
             if _COMMAND_HEAD_RE.match(body):
                 commands.append(
                     ShellBlock(
@@ -279,12 +311,24 @@ def check_shell_syntax(block: ShellBlock) -> Finding | None:
     return Finding(block.path, block.line, f"invalid shell syntax: {message}")
 
 
-def _logical_lines(body: str) -> Iterable[str]:
-    normalized = normalize_shell(body).replace("\\\n", " ")
-    for line in normalized.splitlines():
-        stripped = line.strip()
+def _logical_lines(body: str) -> Iterable[tuple[int, str]]:
+    """Yield physical start offsets and continuation-joined shell lines."""
+    pending = ""
+    start_offset = 0
+    for offset, line in enumerate(normalize_shell(body).splitlines(), start=1):
+        if not pending:
+            start_offset = offset
+        if line.endswith("\\"):
+            pending += line[:-1] + " "
+            continue
+        stripped = (pending + line).strip()
+        pending = ""
         if stripped and not stripped.startswith("#"):
-            yield stripped
+            yield start_offset, stripped
+    if pending:
+        stripped = pending.strip()
+        if stripped and not stripped.startswith("#"):
+            yield start_offset, stripped
 
 
 def _source_line(block: ShellBlock, offset: int) -> int:
@@ -332,7 +376,7 @@ def _tokenized_commands(line: str) -> list[list[str]]:
 
 def _block_commands(block: ShellBlock) -> Iterable[tuple[int, list[str]]]:
     """Yield source-line offsets and tokens for every simple shell command."""
-    for offset, line in enumerate(_logical_lines(block.body), start=1):
+    for offset, line in _logical_lines(block.body):
         for tokens in _tokenized_commands(line):
             yield offset, tokens
 
@@ -477,7 +521,12 @@ def _argument_spec(call: ast.Call) -> OptionSpec | PositionalSpec | None:
     literal_choices = _literal_choices(_call_keyword(call, "choices") or ast.Constant(None))
     is_option = any(name.startswith("-") for name in names)
     if not is_option:
-        return PositionalSpec(names[0], min_values, max_values)
+        return PositionalSpec(
+            names[0],
+            min_values,
+            max_values,
+            frozenset(literal_choices),
+        )
 
     aliases = tuple(name for name in names if name.startswith("-"))
     return OptionSpec(
@@ -489,12 +538,22 @@ def _argument_spec(call: ast.Call) -> OptionSpec | PositionalSpec | None:
     )
 
 
+def _expression_reference(node: ast.AST) -> str | None:
+    """Return a stable dotted reference for a simple name or attribute."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        owner = _expression_reference(node.value)
+        return f"{owner}.{node.attr}" if owner else None
+    return None
+
+
 def _assigned_name(node: ast.Assign | ast.AnnAssign) -> str | None:
     if isinstance(node, ast.Assign):
-        if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+        if len(node.targets) != 1:
             return None
-        return node.targets[0].id
-    return node.target.id if isinstance(node.target, ast.Name) else None
+        return _expression_reference(node.targets[0])
+    return _expression_reference(node.target)
 
 
 def _assigned_call(node: ast.AST) -> tuple[str, ast.Call] | None:
@@ -526,48 +585,66 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
     assignments = [
         assigned for node in ast.walk(tree) if (assigned := _assigned_call(node)) is not None
     ]
-    parser_variables: dict[str, str | None] = {}
+    parser_paths: dict[str, tuple[str, ...]] = {}
     for variable, call in assignments:
         if _is_call_named(call, "ArgumentParser"):
-            parser_variables[variable] = None
-    subparser_variables: dict[str, str | None] = {}
-    for variable, call in assignments:
-        if not (
-            isinstance(call.func, ast.Attribute)
-            and call.func.attr == "add_subparsers"
-            and isinstance(call.func.value, ast.Name)
-        ):
-            continue
-        owner = call.func.value.id
-        if owner in parser_variables:
-            subparser_variables[variable] = parser_variables[owner]
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "add_parser"
-            and isinstance(node.func.value, ast.Name)
-        ):
-            subparser_variables.setdefault(node.func.value.id, None)
+            parser_paths[variable] = ()
 
-    commands: dict[str, CommandSpec] = {}
-    for variable, call in assignments:
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    subparser_paths: dict[str, tuple[str, ...]] = {}
+    # Preserve the previous permissive behavior for small test/utility scripts
+    # that construct a subparser through a variable defined elsewhere.
+    for call in calls:
+        if (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr == "add_parser"
+            and (owner := _expression_reference(call.func.value)) is not None
+        ):
+            subparser_paths.setdefault(owner, ())
+
+    # Resolve parser/subparser ownership to arbitrary depth. This also handles
+    # class-owned parsers such as ``self.parser`` without importing the module.
+    changed = True
+    while changed:
+        changed = False
+        for variable, call in assignments:
+            if not isinstance(call.func, ast.Attribute):
+                continue
+            owner = _expression_reference(call.func.value)
+            if owner is None:
+                continue
+            if call.func.attr == "add_subparsers" and owner in parser_paths:
+                path = parser_paths[owner]
+                if subparser_paths.get(variable) != path:
+                    subparser_paths[variable] = path
+                    changed = True
+            elif (
+                call.func.attr == "add_parser"
+                and owner in subparser_paths
+                and call.args
+                and isinstance(call.args[0], ast.Constant)
+                and isinstance(call.args[0].value, str)
+            ):
+                path = (*subparser_paths[owner], call.args[0].value)
+                if parser_paths.get(variable) != path:
+                    parser_paths[variable] = path
+                    changed = True
+
+    command_paths: set[tuple[str, ...]] = set()
+    for call in calls:
         if not (
             isinstance(call.func, ast.Attribute)
             and call.func.attr == "add_parser"
-            and isinstance(call.func.value, ast.Name)
-            and call.func.value.id in subparser_variables
+            and (owner := _expression_reference(call.func.value)) in subparser_paths
             and call.args
             and isinstance(call.args[0], ast.Constant)
             and isinstance(call.args[0].value, str)
         ):
             continue
-        command = call.args[0].value
-        parser_variables[variable] = command
-        commands.setdefault(command, CommandSpec.empty())
+        command_paths.add((*subparser_paths[owner], call.args[0].value))
 
-    argument_containers = dict(parser_variables)
-    mutually_exclusive_groups: dict[str, tuple[str | None, bool]] = {}
+    argument_containers = dict(parser_paths)
+    mutually_exclusive_groups: dict[str, tuple[tuple[str, ...], bool]] = {}
     unresolved_groups = True
     while unresolved_groups:
         unresolved_groups = False
@@ -576,58 +653,40 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
                 variable in argument_containers
                 or not isinstance(call.func, ast.Attribute)
                 or call.func.attr not in {"add_argument_group", "add_mutually_exclusive_group"}
-                or not isinstance(call.func.value, ast.Name)
             ):
                 continue
-            owner = call.func.value.id
+            owner = _expression_reference(call.func.value)
             if owner not in argument_containers:
                 continue
-            command = argument_containers[owner]
-            argument_containers[variable] = command
+            path = argument_containers[owner]
+            argument_containers[variable] = path
             if call.func.attr == "add_mutually_exclusive_group":
                 mutually_exclusive_groups[variable] = (
-                    command,
+                    path,
                     _constant(_call_keyword(call, "required")) is True,
                 )
             unresolved_groups = True
 
-    for node in ast.walk(tree):
-        if not (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "add_parser"
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id in subparser_variables
-            and node.args
-            and isinstance(node.args[0], ast.Constant)
-            and isinstance(node.args[0].value, str)
-        ):
-            continue
-        commands.setdefault(node.args[0].value, CommandSpec.empty())
-
-    if not parser_variables and not commands:
+    if not parser_paths and not command_paths:
         return None
 
-    root = CommandSpec.empty()
+    specs: dict[tuple[str, ...], CommandSpec] = {
+        path: CommandSpec.empty() for path in {(), *command_paths}
+    }
     mutually_exclusive_options: dict[str, list[OptionSpec]] = {
         variable: [] for variable in mutually_exclusive_groups
     }
-    for node in ast.walk(tree):
-        if not (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "add_argument"
-            and isinstance(node.func.value, ast.Name)
-        ):
+    for node in calls:
+        if not (isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument"):
             continue
-        owner = node.func.value.id
+        owner = _expression_reference(node.func.value)
         if owner not in argument_containers:
             continue
         argument = _argument_spec(node)
         if argument is None:
             continue
-        command = argument_containers[owner]
-        target = root if command is None else commands.setdefault(command, CommandSpec.empty())
+        path = argument_containers[owner]
+        target = specs.setdefault(path, CommandSpec.empty())
         if isinstance(argument, OptionSpec):
             for alias in argument.aliases:
                 target.options[alias] = argument
@@ -636,7 +695,7 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
         else:
             target.positionals.append(argument)
 
-    for variable, (command, required) in mutually_exclusive_groups.items():
+    for variable, (path, required) in mutually_exclusive_groups.items():
         options = mutually_exclusive_options[variable]
         if not required or not options:
             continue
@@ -648,22 +707,49 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
             description = f"{preferred[0]} or {preferred[1]}"
         else:
             description = f"{', '.join(preferred[:-1])}, or {preferred[-1]}"
-        target = root if command is None else commands.setdefault(command, CommandSpec.empty())
+        target = specs.setdefault(path, CommandSpec.empty())
         target.required_any.append((aliases, description))
 
     help_option = OptionSpec(aliases=("-h", "--help"), min_values=0, max_values=0)
-    root.options.setdefault("-h", help_option)
-    root.options.setdefault("--help", help_option)
-    command_required = any(
-        _constant(_call_keyword(call, "required")) is True
-        for _variable, call in assignments
-        if isinstance(call.func, ast.Attribute) and call.func.attr == "add_subparsers"
-    )
-    return ProgramSpec(
-        root=root,
-        commands=commands,
-        command_required=command_required,
-    )
+    for spec in specs.values():
+        spec.options.setdefault("-h", help_option)
+        spec.options.setdefault("--help", help_option)
+
+    required_subcommands: set[tuple[str, ...]] = set()
+    for call in calls:
+        if not (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr == "add_subparsers"
+            and _constant(_call_keyword(call, "required")) is True
+        ):
+            continue
+        owner = _expression_reference(call.func.value)
+        if owner in parser_paths:
+            required_subcommands.add(parser_paths[owner])
+
+    def build_program(path: tuple[str, ...]) -> ProgramSpec:
+        children = sorted(
+            command_path
+            for command_path in command_paths
+            if len(command_path) == len(path) + 1 and command_path[:-1] == path
+        )
+        commands = {child[-1]: specs.setdefault(child, CommandSpec.empty()) for child in children}
+        nested = {
+            child[-1]: build_program(child)
+            for child in children
+            if any(
+                len(descendant) > len(child) and descendant[: len(child)] == child
+                for descendant in command_paths
+            )
+        }
+        return ProgramSpec(
+            root=specs.setdefault(path, CommandSpec.empty()),
+            commands=commands,
+            command_required=path in required_subcommands,
+            nested=nested,
+        )
+
+    return build_program(())
 
 
 def _python_cli_contract(repo_root: Path) -> ProgramSpec | None:
@@ -841,7 +927,12 @@ def _merge_command_specs(root: CommandSpec, command: CommandSpec) -> CommandSpec
 def _parse_command_arguments(
     tokens: list[str],
     spec: CommandSpec,
-) -> tuple[list[str], set[str], list[tuple[str, str]], list[str]]:
+) -> tuple[
+    list[str],
+    set[str],
+    list[tuple[str, str, frozenset[str], bool]],
+    list[str],
+]:
     """Parse tokens by static arity.
 
     Returns positional values, seen option aliases, choice violations, and
@@ -851,7 +942,7 @@ def _parse_command_arguments(
     """
     positionals: list[str] = []
     seen_options: set[str] = set()
-    choice_errors: list[tuple[str, str]] = []
+    choice_errors: list[tuple[str, str, frozenset[str], bool]] = []
     errors: list[str] = []
     index = 0
     positional_only = False
@@ -867,7 +958,7 @@ def _parse_command_arguments(
             if (
                 not positional_only
                 and token.startswith("-")
-                and not re.match(r"^-\d", token)
+                and _ARGPARSE_NEGATIVE_NUMBER_RE.fullmatch(token) is None
                 and "DOC_PLACEHOLDER" not in token
                 and not token.startswith("[")
             ):
@@ -899,7 +990,7 @@ def _parse_command_arguments(
                     break
                 if (
                     candidate.startswith("-")
-                    and not re.match(r"^-\d", candidate)
+                    and _ARGPARSE_NEGATIVE_NUMBER_RE.fullmatch(candidate) is None
                     and not option.consume_option_like_value
                 ):
                     break
@@ -913,10 +1004,39 @@ def _parse_command_arguments(
         if option.choices:
             for value in values:
                 if "DOC_PLACEHOLDER" not in value and value not in option.choices:
-                    choice_errors.append((option_name, value))
+                    choice_errors.append((option_name, value, option.choices, True))
         index += 1
 
+    assigned, _extras = _assign_positional_values(positionals, spec.positionals)
+    for positional, values in zip(spec.positionals, assigned):
+        if not positional.choices:
+            continue
+        for value in values:
+            if "DOC_PLACEHOLDER" not in value and value not in positional.choices:
+                choice_errors.append((positional.name, value, positional.choices, False))
+
     return positionals, seen_options, choice_errors, errors
+
+
+def _assign_positional_values(
+    values: Sequence[str],
+    specs: Sequence[PositionalSpec],
+) -> tuple[list[list[str]], list[str]]:
+    """Assign flat positional values using argparse-compatible ``nargs`` greed."""
+    assigned: list[list[str]] = []
+    cursor = 0
+    for index, positional in enumerate(specs):
+        available = len(values) - cursor
+        later_minimum = sum(item.min_values for item in specs[index + 1 :])
+        minimum_here = min(positional.min_values, available)
+        extra = max(0, available - minimum_here - later_minimum)
+        if positional.max_values is None:
+            count = minimum_here + extra
+        else:
+            count = min(positional.max_values, minimum_here + extra)
+        assigned.append(list(values[cursor : cursor + count]))
+        cursor += count
+    return assigned, list(values[cursor:])
 
 
 def _check_command_spec(
@@ -943,13 +1063,15 @@ def _check_command_spec(
             message = f"option for {label} requires a value: {option}"
         findings.append(Finding(block.path, line, message))
 
-    for option, value in choice_errors:
-        choices = spec.options[option].choices
-        choice_label = (
-            f"`{label.strip('`')} {option}`"
-            if label.startswith("`") and label.endswith("`")
-            else f"{label} {option}"
-        )
+    for argument, value, choices, is_option in choice_errors:
+        if is_option:
+            choice_label = (
+                f"`{label.strip('`')} {argument}`"
+                if label.startswith("`") and label.endswith("`")
+                else f"{label} {argument}"
+            )
+        else:
+            choice_label = f"positional `{argument}` for {label}"
         findings.append(
             Finding(
                 block.path,
@@ -987,16 +1109,19 @@ def _check_command_spec(
                 )
             )
 
-    minimum_positionals = sum(positional.min_values for positional in spec.positionals)
-    if len(positionals) < minimum_positionals:
-        missing = next(
-            (
-                positional.name
-                for position, positional in enumerate(spec.positionals)
-                if position >= len(positionals) and positional.min_values
-            ),
-            "positional argument",
-        )
+    assigned_positionals, extra_positionals = _assign_positional_values(
+        positionals,
+        spec.positionals,
+    )
+    missing = next(
+        (
+            positional.name
+            for positional, values in zip(spec.positionals, assigned_positionals)
+            if len(values) < positional.min_values
+        ),
+        None,
+    )
+    if missing is not None:
         findings.append(
             Finding(
                 block.path,
@@ -1006,19 +1131,16 @@ def _check_command_spec(
         )
     if (
         spec.positionals
+        and extra_positionals
         and not any(error.startswith("unknown option:") for error in errors)
-        and all(positional.max_values is not None for positional in spec.positionals)
     ):
-        maximum_positionals = sum(positional.max_values or 0 for positional in spec.positionals)
-        if len(positionals) > maximum_positionals:
-            findings.append(
-                Finding(
-                    block.path,
-                    line,
-                    f"unexpected positional argument for {label}: "
-                    f"{positionals[maximum_positionals]}",
-                )
+        findings.append(
+            Finding(
+                block.path,
+                line,
+                f"unexpected positional argument for {label}: {extra_positionals[0]}",
             )
+        )
     return findings
 
 
@@ -1073,44 +1195,80 @@ def check_python_module_contract(
     block: ShellBlock,
     repo_root: Path,
 ) -> list[Finding]:
-    """Validate ``python -m tensorrt_model_connect`` examples."""
-    program = _python_cli_contract(repo_root)
-    if program is None:
-        return []
-
+    """Validate project-local ``python -m`` argparse examples."""
+    tensorrt_program = _python_cli_contract(repo_root)
     findings: list[Finding] = []
     for offset, raw_tokens in _block_commands(block):
         tokens = _strip_shell_wrappers(raw_tokens)
-        if len(tokens) < 4:
+        if len(tokens) < 3:
             continue
         if Path(tokens[0]).name not in {"python", "python3"}:
             continue
-        if tokens[1:3] != ["-m", "tensorrt_model_connect"]:
+        if tokens[1] != "-m":
             continue
-        command = tokens[3]
-        if command.startswith("-") or "DOC_PLACEHOLDER" in command:
-            continue
-        if command not in program.commands:
-            findings.append(
-                Finding(
-                    block.path,
-                    _source_line(block, offset),
-                    f"unknown `python -m tensorrt_model_connect` subcommand: {command}",
+        module = tokens[2]
+        if module == "tensorrt_model_connect":
+            if tensorrt_program is None or len(tokens) < 4:
+                continue
+            command = tokens[3]
+            if command.startswith("-") or "DOC_PLACEHOLDER" in command:
+                continue
+            if command not in tensorrt_program.commands:
+                findings.append(
+                    Finding(
+                        block.path,
+                        _source_line(block, offset),
+                        f"unknown `python -m tensorrt_model_connect` subcommand: {command}",
+                    )
+                )
+                continue
+            spec = _merge_command_specs(
+                tensorrt_program.root,
+                tensorrt_program.commands[command],
+            )
+            findings.extend(
+                _check_command_spec(
+                    block,
+                    offset,
+                    tokens[4:],
+                    spec,
+                    label=f"Python `{command}` command",
+                    unknown_template=(f"unknown option for Python `{command}` command: {{option}}"),
                 )
             )
             continue
-        spec = _merge_command_specs(program.root, program.commands[command])
+
+        module_path = _local_python_module_path(repo_root, module)
+        if module_path is None:
+            continue
+        program = _argparse_program_contract(module_path)
+        if program is None:
+            continue
         findings.extend(
-            _check_command_spec(
+            _check_argparse_invocation(
                 block,
                 offset,
-                tokens[4:],
-                spec,
-                label=f"Python `{command}` command",
-                unknown_template=(f"unknown option for Python `{command}` command: {{option}}"),
+                tokens[3:],
+                f"python -m {module}",
+                program,
             )
         )
     return findings
+
+
+def _local_python_module_path(repo_root: Path, module: str) -> Path | None:
+    """Resolve a dotted module to its repository-local ``-m`` entry point."""
+    parts = module.split(".")
+    if not parts or any(not part.isidentifier() for part in parts):
+        return None
+    relative = Path(*parts)
+    module_file = (repo_root / relative).with_suffix(".py")
+    if module_file.is_file():
+        return module_file
+    package_main = repo_root / relative / "__main__.py"
+    if package_main.is_file():
+        return package_main
+    return None
 
 
 def check_positional_inputs(block: ShellBlock, repo_root: Path) -> list[Finding]:
@@ -1146,7 +1304,7 @@ def check_positional_inputs(block: ShellBlock, repo_root: Path) -> list[Finding]
             argument_tokens,
             spec,
         )
-        for value in positionals[: len(spec.positionals)]:
+        for value in positionals:
             local = _clean_local_path(value)
             if local and not (repo_root / local).exists():
                 findings.append(
@@ -1262,6 +1420,25 @@ def _check_argparse_invocation(
         unknown_template=f"unknown option for `{local}`: {{option}}",
     )
     spec = _merge_command_specs(contract.root, contract.commands[command])
+    nested = contract.nested.get(command)
+    if nested is not None:
+        nested_contract = ProgramSpec(
+            root=spec,
+            commands=nested.commands,
+            command_required=nested.command_required,
+            nested=nested.nested,
+        )
+        findings.extend(
+            _check_argparse_invocation(
+                block,
+                offset,
+                tokens[command_index + 1 :],
+                f"{local} {command}",
+                nested_contract,
+            )
+        )
+        return findings
+
     findings.extend(
         _check_command_spec(
             block,

@@ -34,9 +34,7 @@ harness_shared tests/e2e_harness/runtime_config.py # shared E2E harness surface;
 harness_shared tests/e2e_harness/runtime_strategy_metadata.py # shared E2E strategy metadata surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/thresholds/__init__.py # shared E2E harness surface; broad E2E impact is intentional
 no_impact scripts/autopilot/__init__.py # developer utility script; no CI test impact is intentional
-no_impact scripts/autopilot/autorun.py # developer utility script; no CI test impact is intentional
 no_impact scripts/autopilot/discover.py # developer utility script; no CI test impact is intentional
-no_impact scripts/autopilot/dispatch.py # developer utility script; no CI test impact is intentional
 no_impact scripts/autopilot/optimize_supervisor.sh # developer utility script; no CI test impact is intentional
 no_impact scripts/autopilot/run.sh # developer utility script; no CI test impact is intentional
 no_impact scripts/bootstrap_workspace.sh # developer utility script; no CI test impact is intentional
@@ -54,7 +52,6 @@ no_impact scripts/perf_evolve_prompt.py # developer utility script; no CI test i
 no_impact scripts/publish_tensorrt_sdk.sh # temporary maintainer-only SDK publisher; CI consumes the separately pinned GHCR digest
 no_impact scripts/repro_trt_fp8_mha.py # standalone TensorRT FP8 MHA repro helper; no CI test impact is intentional
 no_impact scripts/templates/model_family/registration.cpp # developer utility script; no CI test impact is intentional
-no_impact scripts/validate_family.sh # developer utility script; no CI test impact is intentional
 no_impact tools/__init__.py # developer utility script; no CI test impact is intentional
 no_impact tools/ai_agent_system.py # developer utility script; no CI test impact is intentional
 no_impact tools/ai_staging.py # developer utility script; no CI test impact is intentional

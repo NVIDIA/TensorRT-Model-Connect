@@ -60,9 +60,15 @@ Inspect the bundle before selecting tooling:
   `tests/e2e/models/<family>/<adapter>/QUALIFICATION.*.toml`.
 
 The public inspector confirms optimized section and artifact presence but does
-not currently print descriptor identity values. Obtain and verify those values
-through the implementation-owned bundle-section helper and qualification
-artifacts; do not infer them from a filename.
+not currently print descriptor identity values. There is no public generic
+bundle-section decoder. Verify identity through the exact producer
+qualification. For the current Qwen Edge-LLM implementation,
+`tests/e2e/models/qwen/edge_llm_adapter/QUALIFICATION.a100.toml` declares
+`tests/e2e/models/qwen/edge_llm_adapter/run_a100_ci.sh`; that entrypoint runs
+`test_a100_e2e.py::test_public_build_inspect_and_run_delegate_to_edgellm`,
+whose test-owned `_read_json_section()` asserts the implementation, profile,
+model, and runtime identity. Do not copy that private helper into public
+tooling or infer identity from a filename.
 
 `tools/trtmc_profile.py` is native-only in this revision. Its prebuilt-bundle
 loader requires a top-level `engine_plan`, `config.json`, and a nonempty native
@@ -184,6 +190,20 @@ entrypoint in the required digest-pinned environment and exact target. Use that
 implementation's performance harness for comparisons with its direct-runtime
 baseline. The public benchmark proves C++ pipeline reuse, but it does not expose
 private layer timings or replace the producer proof.
+
+For the current Qwen/A100 qualification, the supported producer command is:
+
+```bash
+TRTMC_QUALIFICATION_ROOT=/absolute/path/outside/source \
+TRTMC_QUALIFICATION_IMAGE='<container_image from QUALIFICATION.a100.toml>' \
+tests/e2e/models/qwen/edge_llm_adapter/run_a100_ci.sh
+```
+
+The descriptor entrypoint runs the complete A100 file, including the identity
+node
+`tests/e2e/models/qwen/edge_llm_adapter/test_a100_e2e.py::test_public_build_inspect_and_run_delegate_to_edgellm`.
+Use the descriptor's exact digest and target; running the node outside that
+entrypoint is not qualification.
 
 ## Report Generation
 

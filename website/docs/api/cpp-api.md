@@ -1,5 +1,5 @@
 ---
-title: C++ and C ABI
+title: C++ API and C-Linkage Subset
 ---
 
 The public C++ API is centered on `include/trtmc/pipeline.h`.
@@ -152,7 +152,7 @@ returns results in request order. Canary overrides it with native batches of up
 to 16 encoder inputs and a 32-lane decoder, including batched beam search. The
 legacy max-token/sample-rate overload is still supported.
 
-## C ABI
+## C-linkage C++ subset
 
 The current C-linkage subset is a starting point for C++ shims and FFI
 experiments:
@@ -176,10 +176,11 @@ per-image cleanup through `trtmc_image_result_free()`. The caller owns the
 output array, and must free each successful result's pixel buffer.
 
 There is no exported pipeline-destroy function. Creation returns an
-`IPipeline*`, and the public header uses C++ types even for its C-linkage
-declarations. Do not expose that handle as a complete pure-C or
-foreign-language ownership contract; wrap it in C++ or add a matching destroy
-entry point first.
+`IPipeline*`, and the public header uses C++ types such as `std::uint64_t` even
+for its C-linkage declarations. This is not a C-compatible header or a
+complete stable C ABI. Do not expose that handle as a pure-C or
+foreign-language ownership contract; wrap it in C++ or first design an opaque
+C handle with a matching destroy entry point.
 
 `TrtmcPipelineOptions::hf_python`, `runtime_cache`, and `cuda_graphs` are
 consumed during creation. The current implementation does not consume the

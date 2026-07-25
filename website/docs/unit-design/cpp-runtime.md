@@ -6,7 +6,7 @@ The C++ runtime turns a `.trtfb` bundle into a task object. It owns native API s
 
 ```mermaid
 flowchart TD
-  Public["trtmc::load / C ABI / CLI"] --> Factory["PipelineFactory"]
+  Public["trtmc::load / C-linkage C++ subset / CLI"] --> Factory["PipelineFactory"]
   Factory --> Bundle["read bundle header"]
   Bundle --> Kind{"optimized_runtime.json?"}
   Kind -->|yes| Provider["OptimizedRuntimeHost"]

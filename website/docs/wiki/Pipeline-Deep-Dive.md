@@ -4,8 +4,9 @@ Status: current implementation summary.
 
 ## Creation path
 
-1. A CLI, C ABI, or C++ caller provides a `.trtfb` path and optional runtime
-   configuration.
+1. A CLI, C-linkage C++ shim, or C++ caller provides a `.trtfb` path and
+   optional runtime configuration. The C-linkage subset is not a complete
+   pure-C ownership API.
 2. `PipelineFactory` reads the bundle header. If `optimized_runtime.json` is
    present, the optimized host validates the descriptor and artifact hash,
    materializes the embedded artifact tree, loads the exact implementation

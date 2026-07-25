@@ -53,17 +53,22 @@ Think of `engine_builder.py` as the build coordinator:
 ## Family plugins
 
 `python/tensorrt_model_connect/families/` owns raw TRT family support. Each
-family package has a `MODEL.toml` descriptor and a module, normally
-`plugin.py`. Discovery in `families/__init__.py` is descriptor-first, not
-selected-package-only in every case:
+family package has a `MODEL.toml` descriptor and exports its package-level
+`plugin` from `__init__.py`; the implementation normally lives in `plugin.py`.
+The descriptor's `module` field is specialization/tooling metadata and does
+not select an arbitrary runtime-discovery module. Discovery in
+`families/__init__.py` has three input-specific flows:
 
-1. Alias/prefix metadata and architecture patterns narrow candidate packages;
-   only those candidates are imported and checked.
-2. A direct family-ID lookup imports only that descriptor's package.
-3. If those routes do not find a plugin for a full config,
-   `_ensure_discovered()` preserves a legacy compatibility fallback:
+1. A full config uses `architecture_patterns` to import bounded candidates and
+   check `matches_config()` first. If none matches, `_ensure_discovered()`
+   preserves the legacy compatibility fallback:
    `pkgutil.iter_modules()` imports every non-private module/package under
    `families/` and runs its `matches_config()`/`matches()` predicates.
+2. A string or `model_type` tries a direct descriptor ID first, then
+   alias/prefix candidates, and finally the same all-package fallback.
+3. A Diffusers pipeline class uses descriptor
+   `diffusion_pipeline_classes` only; matching packages are imported, and
+   there is no `pkgutil` fallback.
 
 A loose `families/<family>.py` file can therefore be observed by the legacy
 scan, but it does not participate in the complete descriptor contract and is
@@ -130,10 +135,15 @@ model-owned provider profile must match all of these:
 - a current qualification state and semantic-source hash.
 
 One successful claim invokes that adapter in an isolated process and writes a
-self-contained bundle with `optimized_runtime.json`, opaque implementation
-metadata, and `optimized_runtime_artifacts/...`, including the exact
-`libtrtmc_impl_*.so`. More than one claim is an error. No claim returns control
-to the native build; a selected adapter's build failure is terminal.
+bundle that is self-contained for the implementation DSO and provider-produced
+artifacts: `optimized_runtime.json`, opaque implementation metadata,
+`optimized_runtime_artifacts/...`, and the exact `libtrtmc_impl_*.so`. It is
+not a hermetic operating-system or GPU-runtime image. The host must still
+supply the matching NVIDIA driver (`libcuda.so.1`), versioned CUDA runtime
+(`libcudart.so.<major>`), TensorRT (`libnvinfer.so.<major>`), dynamic loader,
+and compatible system libraries. More than one claim is an error. No claim
+returns control to the native build; a selected adapter's build failure is
+terminal.
 
 The current Qwen TensorRT Edge-LLM adapter owns three qualified Qwen3/A100
 SM80/FP16 profiles. This is exact profile support, not a generic preference for

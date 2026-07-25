@@ -2,6 +2,45 @@
 title: Testing Reference
 ---
 
+## Documentation validation
+
+`.github/workflows/docs-validation.yml` is the required documentation gate on
+every pull request, pushes to `main`, and manual runs. Its `Validate
+documentation` job uses Python 3.12 and Node 20 and runs all of these checks:
+
+1. Unit tests for the file-reference, command, runtime-strategy-matrix, and
+   selective-impact validators.
+2. `tools/test_impact.py --validate` to prove documentation and validator
+   changes still select the intended focused checks.
+3. Strict tracked-document references and checked numeric claims.
+4. Documented shell-command syntax and local CLI/argument contracts.
+5. The live runtime-strategy matrix against descriptors, source, tests, and
+   runner commands.
+6. A clean lockfile install followed by a production Docusaurus build.
+
+Reproduce the full job from the repository root:
+
+```bash
+python3 -m pytest \
+  tests/tools/test_check_doc_file_references.py \
+  tests/tools/test_check_doc_commands.py \
+  tests/tools/test_runtime_strategy_matrix_checker.py \
+  tests/tools/test_model_owned_validation_scripts.py \
+  tests/tools/test_test_impact.py -q
+PYTHONPATH=python:. python3 tools/test_impact.py --validate
+python3 tools/check_doc_file_references.py --strict --tracked
+python3 tools/check_doc_commands.py
+PYTHONPATH=python:. python3 tools/check_runtime_strategy_matrix.py
+npm --prefix website ci
+npm --prefix website run build
+git diff --check
+```
+
+Install `pytest` first if the Python environment does not provide it. `npm ci`
+uses `website/package-lock.json` and replaces that workspace's installed
+dependency tree; use Node 20 to match CI. `git diff --check` is an additional
+local patch-quality check rather than a step in the GitHub job.
+
 ## CPU and repository checks
 
 Run Python tests with both the package and repository root importable:

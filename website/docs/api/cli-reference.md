@@ -96,7 +96,9 @@ nonzero for an otherwise valid optimized bundle.
 Depending on the command, shared load/run options include `--hf-python`,
 `--backend-dir`, repeatable `--model-plugin-dir`, `--runtime-cache`,
 `--cuda-graphs`, `--benchmark`, `--warmup`, `--config`, and repeatable
-`--set`. Use `trtmc --help` for the exact options accepted by each command.
+`--set`. `trtmc --help` prints one combined synopsis for all commands; it is
+not separate per-command help. Read the relevant command section in that
+combined output and this reference for the accepted options.
 
 Text-generation options include `--max-new-tokens`, `--greedy`, `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--seed`, `--chat-template`, and `--no-thinking`.
 

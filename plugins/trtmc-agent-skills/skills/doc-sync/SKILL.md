@@ -238,9 +238,14 @@ Rules:
 - Native E2E examples must match real JSON manifests. Optimized examples must
   separately match `IMPLEMENTATION.toml`, profile TOMLs, and
   `QUALIFICATION.*.toml`.
-- Python discovery descriptions must state the actual two-stage behavior:
-  descriptor-first candidate imports, followed by the all-package `pkgutil`
-  compatibility fallback when candidate resolution does not find a match.
+- Python discovery descriptions must keep the three actual flows distinct:
+  a full config tries architecture-pattern descriptor candidates and then the
+  all-package `pkgutil` compatibility fallback; a string or `model_type` tries
+  direct descriptor ID, alias/prefix candidates, then that fallback; a
+  Diffusers pipeline class uses descriptor `diffusion_pipeline_classes` only
+  and never falls back to `pkgutil`. Descriptor routes import the package-level
+  `plugin` exported by `__init__.py`; descriptor `module` is
+  specialization/tooling metadata, not an arbitrary runtime import selector.
 - Build descriptions must state that optimized discovery is bounded to the
   selected family, zero claims continue to native, and a selected adapter's
   failure is terminal.
@@ -253,7 +258,7 @@ Page-specific checks:
 | Page | Checks |
 |------|--------|
 | `Architecture-Overview.md` | Strategy/family counts, strategy tables, dispatch description, dead paths/symbols |
-| `Architecture-Extensibility-Assessment.md` | Native three-descriptor ownership versus exact optimized implementation/profile ownership; descriptor-first discovery plus `pkgutil` fallback |
+| `Architecture-Extensibility-Assessment.md` | Native three-descriptor ownership versus exact optimized implementation/profile ownership; full-config, string/model-type, and Diffusers discovery flows |
 | `Source-Layout.md` | Directory tree, plugin/pipeline tables, file counts |
 | `Testing-and-Validation.md` | Test layers, key files, test counts, E2E manifest count/schema |
 | `Traceability-Matrix.md` | Trace IDs, source/test paths, strategy lists, E2E manifest references |
@@ -311,17 +316,37 @@ fits, read the source and matrix context before creating or assigning one.
 
 ## Validation
 
-Run at minimum:
+The repository has a required documentation workflow at
+`.github/workflows/docs-validation.yml`; do not describe documentation
+validation as absent or optional. Reproduce every gate from the repository
+root:
 
 ```bash
+python3 -m pytest \
+  tests/tools/test_check_doc_file_references.py \
+  tests/tools/test_check_doc_commands.py \
+  tests/tools/test_runtime_strategy_matrix_checker.py \
+  tests/tools/test_model_owned_validation_scripts.py \
+  tests/tools/test_test_impact.py -q
+PYTHONPATH=python:. python3 tools/test_impact.py --validate
 python3 tools/check_doc_file_references.py --strict --tracked
 python3 tools/check_doc_commands.py
+PYTHONPATH=python:. python3 tools/check_runtime_strategy_matrix.py
+npm --prefix website ci
+npm --prefix website run build
 git diff --check
 ```
 
-Then run any documentation generation, link, formatting, or focused tests
-available for the files touched. If no doc validation exists, state that
-explicitly in the PR body and describe the manual checks performed.
+The validator tests protect the checkers themselves;
+`tools/test_impact.py --validate` protects selective-test ownership; the strict
+reference checker verifies tracked paths and numeric claims; the command
+checker validates documented shell syntax and known argument contracts; the
+matrix checker compares strategies with descriptors, source, tests, and runner
+commands; and the clean install plus production build validates the complete
+Docusaurus site. Use Node 20 to match CI. Run additional focused tests when a
+behavioral rewrite depends on another contract, and record any
+environment-dependent gate that could not run rather than calling the
+mandatory workflow nonexistent.
 
 ## Summary Report
 

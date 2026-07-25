@@ -24,7 +24,7 @@ MAX_CACHE_LENGTH=256
 BINARY="${PROJECT_DIR}/build/trtmc"
 BUNDLE_DIR="/tmp"
 ENGINE_DIR="${ENGINE_DIR:-}"
-TRUST_REMOTE_CODE=""
+TRUST_REMOTE_CODE_ARGS=()
 MODEL_PLUGIN_DIR=""
 ISOLATE_MODEL_PLUGIN="false"
 
@@ -38,7 +38,7 @@ while [[ $# -gt 0 ]]; do
         --engine-dir) ENGINE_DIR="$2"; shift 2 ;;
         --model-plugin-dir) MODEL_PLUGIN_DIR="$2"; shift 2 ;;
         --isolate-model-plugin) ISOLATE_MODEL_PLUGIN="true"; shift ;;
-        --trust-remote-code) TRUST_REMOTE_CODE="--trust-remote-code"; shift ;;
+        --trust-remote-code) TRUST_REMOTE_CODE_ARGS+=(--trust-remote-code); shift ;;
         -h|--help)
             echo "Usage: $0 <model-id-or-path> [--max-cache-length N] [--binary PATH] [--bundle-dir DIR] [--engine-dir DIR] [--model-plugin-dir DIR] [--isolate-model-plugin] [--trust-remote-code]"
             exit 0
@@ -177,9 +177,13 @@ run_step() {
 }
 
 # Step 1: Build bundle
-run_step "Build bundle" \
-    "$BINARY" build "$MODEL" -o "$BUNDLE_PATH" \
-        --max-cache-length "$MAX_CACHE_LENGTH"
+BUILD_ARGS=(
+    build "$MODEL"
+    -o "$BUNDLE_PATH"
+    --max-cache-length "$MAX_CACHE_LENGTH"
+    "${TRUST_REMOTE_CODE_ARGS[@]}"
+)
+run_step "Build bundle" "$BINARY" "${BUILD_ARGS[@]}"
 
 # Detect runtime strategy from the built bundle to skip decoder-only tools
 # for encoder-only / seq2seq models (diff_logits, diff_layers, parity only
@@ -231,12 +235,12 @@ if [[ "$IS_DECODER" == "true" ]]; then
     run_step "diff_logits (battery)" \
         "$HF_PYTHON" "${PROJECT_DIR}/tools/diff_logits.py" \
             --model "$MODEL" --atol 1e-3 --battery \
-            --max-cache-length "$MAX_CACHE_LENGTH" $TRUST_REMOTE_CODE
+            --max-cache-length "$MAX_CACHE_LENGTH" "${TRUST_REMOTE_CODE_ARGS[@]}"
 
     run_step "diff_layers" \
         "$HF_PYTHON" "${PROJECT_DIR}/tools/diff_layers.py" \
             --model "$MODEL" --atol 0.05 \
-            --max-cache-length "$MAX_CACHE_LENGTH" $TRUST_REMOTE_CODE
+            --max-cache-length "$MAX_CACHE_LENGTH" "${TRUST_REMOTE_CODE_ARGS[@]}"
 
     if [[ -x "$BINARY" ]]; then
         run_step "test_runner_parity" \

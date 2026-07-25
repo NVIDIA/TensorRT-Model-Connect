@@ -12,6 +12,7 @@ import json
 import re
 import sys
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -197,129 +198,242 @@ def extract_native_cli_commands(path: Path) -> set[str]:
     return commands
 
 
-def _plugin_contract_nodes(
-    plugin_dir: Path,
-) -> tuple[dict[str, list[ast.ClassDef]], dict[str, list[ast.FunctionDef]]]:
-    classes: dict[str, list[ast.ClassDef]] = {}
-    functions: dict[str, list[ast.FunctionDef]] = {}
+@dataclass(frozen=True, order=True)
+class _SymbolRef:
+    module: str
+    name: str
+
+
+@dataclass
+class _ModuleContract:
+    tree: ast.Module
+    is_package: bool
+    classes: dict[str, ast.ClassDef]
+    functions: dict[str, ast.FunctionDef]
+    assignments: dict[str, ast.expr]
+    imported_symbols: dict[str, _SymbolRef]
+    imported_modules: dict[str, str]
+
+
+def _module_name(plugin_dir: Path, python_path: Path) -> tuple[str, bool]:
+    relative = python_path.relative_to(plugin_dir)
+    is_package = relative.name == "__init__.py"
+    parts = list(relative.with_suffix("").parts)
+    if is_package:
+        parts.pop()
+    return ".".join(parts), is_package
+
+
+def _resolve_import_module(
+    current_module: str,
+    *,
+    is_package: bool,
+    level: int,
+    imported_module: str | None,
+) -> str:
+    if level == 0:
+        return imported_module or ""
+
+    package_parts = current_module.split(".") if is_package else current_module.split(".")[:-1]
+    parent_count = level - 1
+    if parent_count > len(package_parts):
+        return imported_module or ""
+    base_parts = package_parts[: len(package_parts) - parent_count]
+    if imported_module:
+        base_parts.extend(imported_module.split("."))
+    return ".".join(part for part in base_parts if part)
+
+
+def _plugin_contract_modules(plugin_dir: Path) -> dict[str, _ModuleContract]:
+    modules: dict[str, _ModuleContract] = {}
     if not plugin_dir.is_dir():
-        return classes, functions
+        return modules
 
     for python_path in sorted(plugin_dir.rglob("*.py")):
+        module_name, is_package = _module_name(plugin_dir, python_path)
         tree = ast.parse(
             python_path.read_text(encoding="utf-8"),
             filename=str(python_path),
         )
+        classes: dict[str, ast.ClassDef] = {}
+        functions: dict[str, ast.FunctionDef] = {}
+        assignments: dict[str, ast.expr] = {}
+        imported_symbols: dict[str, _SymbolRef] = {}
+        imported_modules: dict[str, str] = {}
         for node in tree.body:
             if isinstance(node, ast.ClassDef):
-                classes.setdefault(node.name, []).append(node)
-            elif isinstance(node, ast.FunctionDef):
-                functions.setdefault(node.name, []).append(node)
-    return classes, functions
-
-
-def _active_runner_class_names(
-    plugin_dir: Path,
-    classes: dict[str, list[ast.ClassDef]],
-) -> set[str]:
-    """Extract classes instantiated by the model-local ``runner`` entrypoint."""
-    runner_path = plugin_dir / "runner.py"
-    if not runner_path.is_file():
-        return set()
-    tree = ast.parse(
-        runner_path.read_text(encoding="utf-8"),
-        filename=str(runner_path),
-    )
-    imported_symbols: dict[str, tuple[str, str]] = {}
-    for node in tree.body:
-        if not isinstance(node, ast.ImportFrom) or not node.module:
-            continue
-        for imported_name in node.names:
-            local_name = imported_name.asname or imported_name.name
-            imported_symbols[local_name] = (node.module, imported_name.name)
-
-    def resolve_imported_instance(local_name: str) -> set[str]:
-        source = imported_symbols.get(local_name)
-        if source is None:
-            return set()
-        module_name, symbol_name = source
-        module_path = plugin_dir / f"{module_name.replace('.', '/')}.py"
-        if not module_path.is_file():
-            return set()
-        module_tree = ast.parse(
-            module_path.read_text(encoding="utf-8"),
-            filename=str(module_path),
+                classes[node.name] = node
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if isinstance(node, ast.FunctionDef):
+                    functions[node.name] = node
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        assignments[target.id] = node.value
+            elif isinstance(node, ast.ImportFrom):
+                source_module = _resolve_import_module(
+                    module_name,
+                    is_package=is_package,
+                    level=node.level,
+                    imported_module=node.module,
+                )
+                for imported_name in node.names:
+                    if imported_name.name == "*":
+                        continue
+                    local_name = imported_name.asname or imported_name.name
+                    imported_symbols[local_name] = _SymbolRef(
+                        source_module,
+                        imported_name.name,
+                    )
+            elif isinstance(node, ast.Import):
+                for imported_name in node.names:
+                    local_name = imported_name.asname or imported_name.name.split(".", 1)[0]
+                    imported_modules[local_name] = imported_name.name
+        modules[module_name] = _ModuleContract(
+            tree=tree,
+            is_package=is_package,
+            classes=classes,
+            functions=functions,
+            assignments=assignments,
+            imported_symbols=imported_symbols,
+            imported_modules=imported_modules,
         )
-        resolved: set[str] = set()
-        for module_node in module_tree.body:
-            if not isinstance(module_node, (ast.Assign, ast.AnnAssign)):
-                continue
-            module_targets = (
-                module_node.targets if isinstance(module_node, ast.Assign) else [module_node.target]
-            )
-            if not any(
-                isinstance(target, ast.Name) and target.id == symbol_name
-                for target in module_targets
-            ):
-                continue
-            if module_node.value is None:
-                continue
-            for child in ast.walk(module_node.value):
-                if not isinstance(child, ast.Call):
-                    continue
-                if isinstance(child.func, ast.Name):
-                    class_name = child.func.id
-                elif isinstance(child.func, ast.Attribute):
-                    class_name = child.func.attr
-                else:
-                    continue
-                if class_name in classes:
-                    resolved.add(class_name)
-        return resolved
+    return modules
 
-    active_classes: set[str] = set()
-    for node in tree.body:
-        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
-            continue
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        if not any(isinstance(target, ast.Name) and target.id == "runner" for target in targets):
-            continue
-        value = node.value
-        if value is None:
-            continue
-        for child in ast.walk(value):
-            if isinstance(child, ast.Name):
-                active_classes.update(resolve_imported_instance(child.id))
-        for child in ast.walk(value):
-            if not isinstance(child, ast.Call):
-                continue
-            if isinstance(child.func, ast.Name):
-                class_name = child.func.id
-            elif isinstance(child.func, ast.Attribute):
-                class_name = child.func.attr
-            else:
-                continue
-            if class_name in classes:
-                active_classes.add(class_name)
+
+def _resolve_reference(
+    expression: ast.expr,
+    *,
+    current_module: str,
+    modules: dict[str, _ModuleContract],
+) -> _SymbolRef | None:
+    contract = modules.get(current_module)
+    if contract is None:
+        return None
+    if isinstance(expression, ast.Name):
+        if (
+            expression.id in contract.classes
+            or expression.id in contract.functions
+            or expression.id in contract.assignments
+        ):
+            return _SymbolRef(current_module, expression.id)
+        return contract.imported_symbols.get(expression.id)
+    if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
+        imported_module = contract.imported_modules.get(expression.value.id)
+        if imported_module is not None:
+            return _SymbolRef(imported_module, expression.attr)
+    return None
+
+
+def _resolve_definition(
+    reference: _SymbolRef,
+    *,
+    modules: dict[str, _ModuleContract],
+    kind: str,
+    seen: set[_SymbolRef] | None = None,
+) -> _SymbolRef | None:
+    if seen is None:
+        seen = set()
+    if reference in seen:
+        return None
+    seen.add(reference)
+
+    contract = modules.get(reference.module)
+    if contract is None:
+        return None
+    definitions = getattr(contract, kind)
+    if reference.name in definitions:
+        return reference
+    imported = contract.imported_symbols.get(reference.name)
+    if imported is None:
+        return None
+    return _resolve_definition(imported, modules=modules, kind=kind, seen=seen)
+
+
+def _active_runner_class_refs(
+    modules: dict[str, _ModuleContract],
+) -> set[_SymbolRef]:
+    """Extract module-qualified classes instantiated by the ``runner`` entrypoint."""
+    runner_contract = modules.get("runner")
+    if runner_contract is None or "runner" not in runner_contract.assignments:
+        return set()
+
+    active_classes: set[_SymbolRef] = set()
+    visited_assignments: set[_SymbolRef] = set()
+
+    def visit_expression(expression: ast.expr, current_module: str) -> None:
+        if isinstance(expression, ast.Call):
+            reference = _resolve_reference(
+                expression.func,
+                current_module=current_module,
+                modules=modules,
+            )
+            if reference is not None:
+                class_ref = _resolve_definition(
+                    reference,
+                    modules=modules,
+                    kind="classes",
+                )
+                if class_ref is not None:
+                    active_classes.add(class_ref)
+            for argument in (*expression.args, *expression.keywords):
+                value = argument.value if isinstance(argument, ast.keyword) else argument
+                visit_expression(value, current_module)
+            return
+
+        if isinstance(expression, ast.Name):
+            reference = _resolve_reference(
+                expression,
+                current_module=current_module,
+                modules=modules,
+            )
+            if reference is None or reference in visited_assignments:
+                return
+            assignment_ref = _resolve_definition(
+                reference,
+                modules=modules,
+                kind="assignments",
+            )
+            if assignment_ref is None:
+                return
+            visited_assignments.add(assignment_ref)
+            assignment_contract = modules[assignment_ref.module]
+            visit_expression(
+                assignment_contract.assignments[assignment_ref.name],
+                assignment_ref.module,
+            )
+            return
+
+        for child in ast.iter_child_nodes(expression):
+            if isinstance(child, ast.expr):
+                visit_expression(child, current_module)
+
+    visit_expression(runner_contract.assignments["runner"], "runner")
     return active_classes
 
 
 def _runner_class_lineage(
-    runner_class: str,
-    classes: dict[str, list[ast.ClassDef]],
-) -> set[str]:
-    lineage: set[str] = set()
+    runner_class: _SymbolRef,
+    modules: dict[str, _ModuleContract],
+) -> set[_SymbolRef]:
+    lineage: set[_SymbolRef] = set()
 
-    def visit(name: str) -> None:
-        if name in lineage:
+    def visit(reference: _SymbolRef) -> None:
+        class_ref = _resolve_definition(reference, modules=modules, kind="classes")
+        if class_ref is None or class_ref in lineage:
             return
-        lineage.add(name)
-        for class_node in classes.get(name, []):
-            for base in class_node.bases:
-                if isinstance(base, ast.Name):
-                    visit(base.id)
-                elif isinstance(base, ast.Attribute):
-                    visit(base.attr)
+        lineage.add(class_ref)
+        contract = modules[class_ref.module]
+        class_node = contract.classes[class_ref.name]
+        for base in class_node.bases:
+            base_ref = _resolve_reference(
+                base,
+                current_module=class_ref.module,
+                modules=modules,
+            )
+            if base_ref is not None:
+                visit(base_ref)
 
     visit(runner_class)
     return lineage
@@ -342,54 +456,81 @@ def _native_commands_in_node(
     return commands
 
 
-def _called_symbol_names(node: ast.AST) -> set[str]:
-    symbols: set[str] = set()
+def _called_function_refs(
+    node: ast.AST,
+    *,
+    current_module: str,
+    modules: dict[str, _ModuleContract],
+) -> set[_SymbolRef]:
+    symbols: set[_SymbolRef] = set()
     for child in ast.walk(node):
         if not isinstance(child, ast.Call):
             continue
-        if isinstance(child.func, ast.Name):
-            symbols.add(child.func.id)
-        elif isinstance(child.func, ast.Attribute):
-            symbols.add(child.func.attr)
+        reference = _resolve_reference(
+            child.func,
+            current_module=current_module,
+            modules=modules,
+        )
+        if reference is None:
+            continue
+        function_ref = _resolve_definition(
+            reference,
+            modules=modules,
+            kind="functions",
+        )
+        if function_ref is not None:
+            symbols.add(function_ref)
     return symbols
 
 
 def _commands_for_runner_class(
-    runner_class: str,
+    runner_class: _SymbolRef,
     *,
-    classes: dict[str, list[ast.ClassDef]],
-    functions: dict[str, list[ast.FunctionDef]],
+    modules: dict[str, _ModuleContract],
     native_cli_commands: set[str],
 ) -> set[str]:
     """Resolve commands from one runner class, its bases, and called helpers."""
     commands: set[str] = set()
-    visited_classes: set[str] = set()
-    visited_functions: set[str] = set()
+    visited_classes: set[_SymbolRef] = set()
+    visited_functions: set[_SymbolRef] = set()
 
-    def visit_function(name: str) -> None:
-        if name in visited_functions:
+    def visit_function(reference: _SymbolRef) -> None:
+        function_ref = _resolve_definition(reference, modules=modules, kind="functions")
+        if function_ref is None or function_ref in visited_functions:
             return
-        visited_functions.add(name)
-        for function_node in functions.get(name, []):
-            commands.update(_native_commands_in_node(function_node, native_cli_commands))
-            for called_name in _called_symbol_names(function_node):
-                if called_name in functions:
-                    visit_function(called_name)
+        visited_functions.add(function_ref)
+        contract = modules[function_ref.module]
+        function_node = contract.functions[function_ref.name]
+        commands.update(_native_commands_in_node(function_node, native_cli_commands))
+        for called_ref in _called_function_refs(
+            function_node,
+            current_module=function_ref.module,
+            modules=modules,
+        ):
+            visit_function(called_ref)
 
-    def visit_class(name: str) -> None:
-        if name in visited_classes:
+    def visit_class(reference: _SymbolRef) -> None:
+        class_ref = _resolve_definition(reference, modules=modules, kind="classes")
+        if class_ref is None or class_ref in visited_classes:
             return
-        visited_classes.add(name)
-        for class_node in classes.get(name, []):
-            commands.update(_native_commands_in_node(class_node, native_cli_commands))
-            for base in class_node.bases:
-                if isinstance(base, ast.Name):
-                    visit_class(base.id)
-                elif isinstance(base, ast.Attribute):
-                    visit_class(base.attr)
-            for called_name in _called_symbol_names(class_node):
-                if called_name in functions:
-                    visit_function(called_name)
+        visited_classes.add(class_ref)
+        contract = modules[class_ref.module]
+        class_node = contract.classes[class_ref.name]
+        commands.update(_native_commands_in_node(class_node, native_cli_commands))
+        for base in class_node.bases:
+            base_ref = _resolve_reference(
+                base,
+                current_module=class_ref.module,
+                modules=modules,
+            )
+            if base_ref is not None:
+                visit_class(base_ref)
+        for called_ref in _called_function_refs(
+            class_node,
+            current_module=class_ref.module,
+            modules=modules,
+        ):
+            visit_function(called_ref)
 
     visit_class(runner_class)
     return commands
@@ -405,9 +546,8 @@ def extract_runtime_cli_commands_from_e2e_plugins(
     owner_contracts: dict[
         Path,
         tuple[
-            dict[str, list[ast.ClassDef]],
-            dict[str, list[ast.FunctionDef]],
-            set[str],
+            dict[str, _ModuleContract],
+            set[_SymbolRef],
         ],
     ] = {}
 
@@ -433,26 +573,25 @@ def extract_runtime_cli_commands_from_e2e_plugins(
 
         if owner_dir not in owner_contracts:
             plugin_dir = owner_dir / "e2e_plugins"
-            classes, functions = _plugin_contract_nodes(plugin_dir)
+            modules = _plugin_contract_modules(plugin_dir)
             owner_contracts[owner_dir] = (
-                classes,
-                functions,
-                _active_runner_class_names(plugin_dir, classes),
+                modules,
+                _active_runner_class_refs(modules),
             )
-        classes, functions, active_runner_classes = owner_contracts[owner_dir]
+        modules, active_runner_classes = owner_contracts[owner_dir]
         declared_runner_class = _class_basename(runner_class_ref)
         matching_active_classes = {
             active_class
             for active_class in active_runner_classes
-            if declared_runner_class in _runner_class_lineage(active_class, classes)
+            if declared_runner_class
+            in {item.name for item in _runner_class_lineage(active_class, modules)}
         }
         runtime_commands.setdefault(runtime_strategy, set()).update(
             command
             for active_class in matching_active_classes
             for command in _commands_for_runner_class(
                 active_class,
-                classes=classes,
-                functions=functions,
+                modules=modules,
                 native_cli_commands=native_cli_commands,
             )
         )
@@ -674,6 +813,13 @@ def validate_matrix_data(
                         f"{runtime_strategy}: cli_commands {unsupported_cli_commands} "
                         "are not used by the model-owned E2E runner/command builders; "
                         f"discovered native commands: {sorted(runner_cli_commands)}."
+                    )
+                undeclared_runner_commands = sorted(runner_cli_commands - set(cli_commands))
+                if undeclared_runner_commands:
+                    errors.append(
+                        f"{runtime_strategy}: model-owned E2E runner/command builders use "
+                        f"native commands missing from cli_commands: "
+                        f"{undeclared_runner_commands}."
                     )
 
         performance_mode = entry.get("performance_mode")

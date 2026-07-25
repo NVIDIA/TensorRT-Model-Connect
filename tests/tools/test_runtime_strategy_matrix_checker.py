@@ -349,6 +349,64 @@ runner = plugin
     ) == {"video_runtime": {"generate-video"}}
 
 
+def test_runtime_command_discovery_is_module_qualified_for_duplicate_symbols(
+    tmp_path: Path,
+):
+    mod = _import_checker()
+    models_dir = tmp_path / "tests" / "e2e" / "models"
+    owner_dir = models_dir / "duplicate_symbols"
+    manifest_dir = owner_dir / "manifests"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "active.json").write_text(
+        """
+{
+  "family": "duplicate_symbols",
+  "runtime_strategy": "active_runtime",
+  "task_strategy": "text_generation_causal"
+}
+        """,
+        encoding="utf-8",
+    )
+    runners_dir = owner_dir / "e2e_plugins" / "runners"
+    runners_dir.mkdir(parents=True)
+    (runners_dir / "active.py").write_text(
+        """
+def build_command(binary, bundle):
+    return [binary, "run", bundle]
+
+class DuplicateNameRunner:
+    def run_stage(self, binary, bundle):
+        return build_command(binary, bundle)
+        """,
+        encoding="utf-8",
+    )
+    (runners_dir / "inactive.py").write_text(
+        """
+def build_command(binary, bundle):
+    return [binary, "segment", bundle]
+
+class DuplicateNameRunner:
+    def run_stage(self, binary, bundle):
+        return build_command(binary, bundle)
+        """,
+        encoding="utf-8",
+    )
+    (owner_dir / "e2e_plugins" / "runner.py").write_text(
+        """
+from .runners.active import DuplicateNameRunner
+
+runner = DuplicateNameRunner()
+        """,
+        encoding="utf-8",
+    )
+
+    assert mod.extract_runtime_cli_commands_from_e2e_plugins(
+        {"active_runtime": {"runner_class": "active.DuplicateNameRunner"}},
+        models_dir,
+        {"run", "segment"},
+    ) == {"active_runtime": {"run"}}
+
+
 def test_validate_matrix_data_requires_exemption_when_no_diff_check():
     mod = _import_checker()
     errors = mod.validate_matrix_data(
@@ -477,12 +535,41 @@ def test_validate_matrix_data_rejects_command_not_used_by_runtime_runner():
     )
 
 
+def test_validate_matrix_data_rejects_runner_command_missing_from_matrix():
+    mod = _import_checker()
+    errors = mod.validate_matrix_data(
+        matrix={
+            "diffusion_flux": {
+                "task_strategy": "diffusion_media_generation",
+                "cli_commands": ["generate-video"],
+                "runner_class": "DiffusionMediaRunner",
+                "comparator_class": "DiffusionComparator",
+                "diff_framework_check_classes": [],
+                "diff_framework_exemption": "No active diff check.",
+                "performance_mode": "diffusion",
+            }
+        },
+        cpp_runtime_strategies={"diffusion_flux"},
+        runtime_to_task_strategy={"diffusion_flux": "diffusion_media_generation"},
+        diff_check_classes=set(),
+        runner_classes_by_task={"diffusion_media_generation": {"DiffusionMediaRunner"}},
+        comparator_classes_by_task={"diffusion_media_generation": {"DiffusionComparator"}},
+        native_cli_commands={"generate-video", "run"},
+        runner_cli_commands_by_runtime={"diffusion_flux": {"generate-video", "run"}},
+    )
+
+    assert any(
+        "native commands missing from cli_commands: ['run']" in message for message in errors
+    )
+
+
 def test_prompted_segmentation_matrix_uses_prompted_native_cli():
     mod = _import_checker()
     matrix = mod.load_runtime_strategy_matrix(mod.DEFAULT_MATRIX_PATH)
 
     assert matrix["sam_prompted_segmentation"]["cli_commands"] == ["segment-prompted"]
     assert matrix["sam3_prompted_segmentation"]["cli_commands"] == ["segment-prompted"]
+    assert matrix["diffusion_flux"]["cli_commands"] == ["generate-video", "run"]
 
 
 def test_checker_rejects_injected_non_native_command(tmp_path: Path):

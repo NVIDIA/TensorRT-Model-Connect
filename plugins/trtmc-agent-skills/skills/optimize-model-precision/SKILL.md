@@ -80,8 +80,14 @@ so a successful build may be a native fallback rather than a successful
 optimized attempt. Before comparing size, output, or performance, record the
 execution-path identity for both bundles and reject an accidental cross-path
 comparison. The public inspector confirms optimized section presence but does
-not print descriptor identity values; verify those through the
-implementation-owned bundle helper and qualification artifacts.
+not print descriptor identity values, and there is no public generic
+bundle-section decoder. Verify identity through the selected producer
+qualification. For the current Qwen Edge-LLM implementation, the entrypoint in
+`tests/e2e/models/qwen/edge_llm_adapter/QUALIFICATION.a100.toml` runs
+`test_a100_e2e.py::test_public_build_inspect_and_run_delegate_to_edgellm`;
+that node's private, test-owned `_read_json_section()` checks implementation,
+profile, model, and runtime identity. Do not treat that helper as public
+tooling or infer identity from the bundle filename.
 
 Validate through the E2E harness:
 
@@ -193,6 +199,19 @@ python3 tools/ci/optimized_runtime_qualifications.py \
 The selector emits the producer matrix; it does not run GPU qualification.
 Execute the entrypoint declared by the selected `QUALIFICATION.*.toml` in its
 digest-pinned environment and exact target before marking the attempt verified.
+
+For the current Qwen/A100 producer, use the declared entrypoint:
+
+```bash
+TRTMC_QUALIFICATION_ROOT=/absolute/path/outside/source \
+TRTMC_QUALIFICATION_IMAGE='<container_image from QUALIFICATION.a100.toml>' \
+tests/e2e/models/qwen/edge_llm_adapter/run_a100_ci.sh
+```
+
+It runs the complete A100 qualification file, including
+`tests/e2e/models/qwen/edge_llm_adapter/test_a100_e2e.py::test_public_build_inspect_and_run_delegate_to_edgellm`.
+Use the exact digest and target from the descriptor; a direct host-side node run
+does not replace the producer command.
 
 ## Progress File
 

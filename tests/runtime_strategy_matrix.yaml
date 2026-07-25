@@ -496,7 +496,8 @@
     "diffusion_flux": {
       "task_strategy": "diffusion_media_generation",
       "cli_commands": [
-        "generate-video"
+        "generate-video",
+        "run"
       ],
       "runner_class": "diffusion.DiffusionMediaRunner",
       "comparator_class": "diffusion.DiffusionComparator",

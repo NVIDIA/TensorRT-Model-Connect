@@ -46,13 +46,16 @@ exact implementation/profile with `optimized_runtime.json`.
 
 ## Current mechanism
 
-- Python family discovery is descriptor-first. It scans
-  `python/tensorrt_model_connect/families/*/MODEL.toml`, uses aliases, prefixes,
-  architecture patterns, and diffusion pipeline classes to import narrow
-  candidate packages, and checks those candidates first. When descriptor
-  candidates cannot resolve a full config, `find_plugin()` preserves a
-  compatibility fallback: `pkgutil.iter_modules()` imports every non-private
-  family module/package and runs its matching predicates.
+- Python family discovery indexes
+  `python/tensorrt_model_connect/families/*/MODEL.toml` but keeps three lookup
+  flows separate. A full config tries architecture-pattern candidates before
+  `pkgutil.iter_modules()` imports every non-private family module/package as a
+  compatibility fallback. A string or `model_type` tries a direct descriptor
+  ID, then alias/prefix candidates, then that fallback. A Diffusers pipeline
+  class uses descriptor `diffusion_pipeline_classes` only and has no `pkgutil`
+  fallback. Descriptor routes import the package-level `plugin` from
+  `__init__.py`; `module` is specialization/tooling metadata rather than an
+  arbitrary runtime import selector.
 - Native Runtime CMake scans `src/runtime/models/*/MODEL.toml`; those model DSOs
   register unique strategy keys with `PipelineRegistry`.
 - Native E2E discovery scans `tests/e2e/models/*/MODEL.toml`.

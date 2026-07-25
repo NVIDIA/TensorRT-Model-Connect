@@ -1,6 +1,7 @@
 # Bundle Helpers
 
-No behavior-bearing C ABI bundle helpers remain in this directory.
+No behavior-bearing helpers for the public C-linkage C++ subset remain in this
+directory.
 
 Current owners:
 

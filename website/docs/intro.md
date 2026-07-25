@@ -122,7 +122,8 @@ This site is organized for users first:
 
 Most modern AI models are released as Python-first artifacts: a `config.json`, tokenizer files, model weights, and Python model code or library classes. That format is excellent for research and experimentation, but production inference often needs different properties:
 
-- Native runtime integration from C or C++.
+- Native runtime integration from C++, including the current C-linkage C++
+  subset for shims; the header is not yet a complete pure-C ownership API.
 - Predictable GPU execution.
 - A deployable artifact that does not require the full original Python model stack at request time.
 - Clear compatibility with CUDA, TensorRT, GPU architecture, quantization format, and runtime settings.

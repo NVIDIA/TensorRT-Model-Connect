@@ -15,7 +15,7 @@ flowchart LR
   Backend["TensorRT backend DSO"] --> Pipeline
   Optimized --> Provider["optimized-runtime host"]
   Provider --> Pipeline
-  Pipeline --> API["C++ API / CLI / C ABI"]
+  Pipeline --> API["C++ API / CLI / C-linkage C++ subset"]
 ```
 
 Most native model additions span the Python family, bundle metadata,
@@ -155,9 +155,9 @@ flowchart TB
 
 | Block | Source | What it abstracts | Who should use it |
 | --- | --- | --- | --- |
-| `IPipeline` | `include/trtmc/pipeline.h` | User-facing task interface and typed results. | Applications, CLI, C ABI, tests. |
+| `IPipeline` | `include/trtmc/pipeline.h` | User-facing task interface and typed results. | Applications, CLI, C-linkage C++ shims, tests. |
 | `LoadOptions` | `include/trtmc/pipeline.h` | Bundle load-time knobs. | Applications and CLI. |
-| `PipelineFactory` | `src/runtime/registry/pipeline_factory.cpp` | Bundle-to-pipeline construction. | Public API and C ABI. |
+| `PipelineFactory` | `src/runtime/registry/pipeline_factory.cpp` | Bundle-to-pipeline construction. | Public C++ API and C-linkage C++ subset. |
 | Optimized-runtime host | `src/runtime/providers/optimized_runtime_host.cpp` | Embedded artifact verification and implementation-DSO factory loading. | Factory and optimized-runtime contract tests. |
 | `PipelinePluginLoader` | `src/runtime/registry/pipeline_plugin_loader.cpp` | Native strategy-owner lookup, model DSO loading, and registration validation. | The factory and loader tests. |
 | `PipelineRegistry` | `src/runtime/registry/pipeline_registry.cpp` | Strategy-to-plugin lookup. | Factory and registration tests. |
@@ -204,7 +204,7 @@ flowchart TD
   NewModel -- no --> Runtime{"New runtime behavior for an existing owner?"}
   Runtime -- yes --> Owner["Extend that src/runtime/models/owner directory and MODEL.toml"]
   Runtime -- no --> Public{"New user-visible task contract?"}
-  Public -- yes --> API["Extend IPipeline + CLI and C ABI as appropriate"]
+  Public -- yes --> API["Extend IPipeline + CLI; design a complete C ABI separately if needed"]
   Public -- no --> Config["Use the owning shared or model config schema"]
   Capsule --> Tests["Builder + C++ + exact-model E2E evidence"]
   Owner --> Tests

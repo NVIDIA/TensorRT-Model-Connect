@@ -50,6 +50,16 @@ def test_four_backtick_markdown_wrapper_does_not_create_inner_shell_block() -> N
     assert cdc.extract_shell_blocks(Path("README.md"), content) == []
 
 
+def test_unclosed_shell_fence_extends_through_end_of_file() -> None:
+    content = "Intro.\n\n```bash\npython3 tools/check.py --help\n"
+
+    blocks = cdc.extract_shell_blocks(Path("README.md"), content)
+
+    assert len(blocks) == 1
+    assert blocks[0].line == 3
+    assert blocks[0].body == "python3 tools/check.py --help\n"
+
+
 def test_extract_inline_commands_skips_fences_and_non_commands() -> None:
     content = (
         "Run `python3 tools/check.py --help`, not `PipelineFactory::load()`.\n"
@@ -61,6 +71,20 @@ def test_extract_inline_commands_skips_fences_and_non_commands() -> None:
     commands = cdc.extract_inline_commands(Path("README.md"), content)
 
     assert [command.body for command in commands] == ["python3 tools/check.py --help\n"]
+
+
+def test_extract_inline_commands_supports_arbitrary_backtick_run_lengths() -> None:
+    content = (
+        "Run ``python3 tools/check.py --value `literal` tail`` and "
+        "```python3 tools/other.py --value ``nested`` tail```.\n"
+    )
+
+    commands = cdc.extract_inline_commands(Path("README.md"), content)
+
+    assert [command.body for command in commands] == [
+        "python3 tools/check.py --value `literal` tail\n",
+        "python3 tools/other.py --value ``nested`` tail\n",
+    ]
 
 
 def test_placeholder_is_safe_for_shell_syntax_check() -> None:
@@ -123,6 +147,22 @@ def test_every_command_in_shell_chain_is_checked(tmp_path: Path) -> None:
         "command input does not exist: tools/missing.py",
         "command input does not exist: tools/also-missing.py",
     ]
+
+
+def test_command_finding_uses_physical_line_across_blanks_comments_and_continuation(
+    tmp_path: Path,
+) -> None:
+    block = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=10,
+        language="bash",
+        body=("# explanatory comment\n\npython3 tools/missing.py \\\n  --help\n"),
+    )
+
+    findings = cdc.check_local_inputs(block, tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0].line == 13
 
 
 def test_existing_pytest_node_path_is_accepted(tmp_path: Path) -> None:
@@ -502,6 +542,115 @@ def test_python_script_contract_rejects_invalid_literal_choice(
     ]
 
 
+def test_python_script_contract_checks_nargs_positional_choices(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "profile.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        'parser.add_argument("modes", nargs="+", choices=["fast", "safe"])\n'
+        'parser.add_argument("output")\n',
+        encoding="utf-8",
+    )
+    block = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body="python3 tools/profile.py fast broken reports/result.json\n",
+    )
+
+    findings = cdc.check_python_script_contract(block, tmp_path)
+
+    assert [finding.message for finding in findings] == [
+        "invalid value for positional `modes` for `tools/profile.py`: "
+        "broken; expected one of fast, safe"
+    ]
+
+
+def test_python_script_negative_numbers_match_default_argparse(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "profile.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        'import argparse\nparser = argparse.ArgumentParser()\nparser.add_argument("--threshold")\n',
+        encoding="utf-8",
+    )
+    decimal = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body="python3 tools/profile.py --threshold -.5\n",
+    )
+    scientific = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body="python3 tools/profile.py --threshold -1e-3\n",
+    )
+
+    assert cdc.check_python_script_contract(decimal, tmp_path) == []
+    assert [
+        finding.message for finding in cdc.check_python_script_contract(scientific, tmp_path)
+    ] == [
+        "option for `tools/profile.py` requires a value: --threshold",
+        "unknown option for `tools/profile.py`: -1e-3",
+    ]
+
+
+def test_local_python_module_contract_checks_nested_subcommands(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "tools" / "ci"
+    package.mkdir(parents=True)
+    (tmp_path / "tools" / "__init__.py").write_text("", encoding="utf-8")
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "__main__.py").write_text(
+        "import argparse\n"
+        "class Command:\n"
+        "    def __init__(self):\n"
+        "        self.parser = argparse.ArgumentParser()\n"
+        '        commands = self.parser.add_subparsers(dest="command", required=True)\n'
+        '        image = commands.add_parser("image")\n'
+        "        image_commands = image.add_subparsers(required=True)\n"
+        '        image_commands.add_parser("ensure")\n'
+        '        coverage = commands.add_parser("coverage")\n'
+        '        coverage.add_argument("language", choices=("cpp", "python"))\n',
+        encoding="utf-8",
+    )
+    valid = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body="python3 -m tools.ci image ensure\n",
+    )
+    invalid_nested = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body="python3 -m tools.ci image removed\n",
+    )
+    invalid_choice = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body="python3 -m tools.ci coverage rust\n",
+    )
+
+    assert cdc.check_python_module_contract(valid, tmp_path) == []
+    assert [
+        finding.message for finding in cdc.check_python_module_contract(invalid_nested, tmp_path)
+    ] == ["unknown subcommand for `python -m tools.ci image`: removed"]
+    assert [
+        finding.message for finding in cdc.check_python_module_contract(invalid_choice, tmp_path)
+    ] == [
+        "invalid value for positional `language` for `python -m tools.ci coverage`: "
+        "rust; expected one of cpp, python"
+    ]
+
+
 def test_direct_python_wrapper_contract_is_checked(tmp_path: Path) -> None:
     script = tmp_path / "scripts" / "bench"
     script.parent.mkdir(parents=True)
@@ -656,3 +805,33 @@ def test_filtered_ctest_with_nonempty_selection_guard_is_accepted() -> None:
     )
 
     assert cdc.check_ctest_contract(block) == []
+
+
+def test_docs_validation_workflow_gates_are_discoverable_in_docs_and_skill() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    workflow = (repo_root / ".github/workflows/docs-validation.yml").read_text(encoding="utf-8")
+    human_docs = (repo_root / "website/docs/reference/testing.md").read_text(encoding="utf-8")
+    agent_skill = (repo_root / "plugins/trtmc-agent-skills/skills/doc-sync/SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    gates = (
+        "tests/tools/test_check_doc_file_references.py",
+        "tests/tools/test_check_doc_commands.py",
+        "tests/tools/test_runtime_strategy_matrix_checker.py",
+        "tests/tools/test_model_owned_validation_scripts.py",
+        "tests/tools/test_test_impact.py",
+        "tools/test_impact.py --validate",
+        "tools/check_doc_file_references.py --strict --tracked",
+        "tools/check_doc_commands.py",
+        "tools/check_runtime_strategy_matrix.py",
+    )
+
+    for gate in gates:
+        assert gate in workflow, f"workflow is missing documentation gate: {gate}"
+        assert gate in human_docs, f"testing reference is missing workflow gate: {gate}"
+        assert gate in agent_skill, f"doc-sync skill is missing workflow gate: {gate}"
+    assert "npm ci" in workflow
+    assert "npm run build" in workflow
+    for surface in (human_docs, agent_skill):
+        assert "npm --prefix website ci" in surface
+        assert "npm --prefix website run build" in surface

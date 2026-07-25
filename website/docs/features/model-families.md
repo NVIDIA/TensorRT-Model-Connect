@@ -44,13 +44,16 @@ Common native TensorRT groups:
 - Perception: SegFormer, SAM, SAM3, and timm ViT classification.
 - Time-series/operators: Chronos-Bolt, PatchTSMixer, PatchTST, and TimesFM.
 
-The package's module-level `plugin` object still supplies the Python protocol,
-but discovery begins with `MODEL.toml`. Alias/prefix and architecture matches
-import bounded candidate packages; when those routes cannot decide a full
-config, a legacy `pkgutil` fallback imports all non-private family modules and
-runs their matching predicates. Adding only a loose `.py` file can therefore
-be seen by that compatibility scan, but it does not create a complete current
-family entry.
+The package-level `plugin` exported by `__init__.py` supplies the Python
+protocol, while `MODEL.toml` indexes discovery. The lookup route depends on
+the input: a full config tries bounded `architecture_patterns` candidates
+before the all-package `pkgutil` compatibility fallback; a string or
+`model_type` tries a direct descriptor ID, then alias/prefix candidates, then
+that fallback; a Diffusers pipeline class uses descriptor
+`diffusion_pipeline_classes` only and never runs the fallback. The descriptor
+`module` field is specialization/tooling metadata, not a runtime import
+selector. Adding only a loose `.py` file can therefore be seen by the two
+compatibility flows, but it does not create a complete current family entry.
 
 ## Qualified optimized implementations
 

@@ -81,15 +81,24 @@ An API method or CLI command alone is not model-support evidence.
 
 ## How build and runtime dispatch are resolved
 
-The Python builder reads family metadata from `families/*/MODEL.toml`. It first
-narrows candidates by aliases, prefixes, architecture patterns, or diffusion
-pipeline classes. Descriptor and architecture matches import only their
-candidate packages. When descriptor matching cannot decide a full config,
-`find_plugin()` retains a compatibility fallback that uses `pkgutil` to import
-all non-private family modules/packages and calls their matching predicates.
-Loose `families/<family>.py` files can therefore participate only through this
-legacy fallback; they are not complete support because the three ownership
-descriptors are still required.
+The Python builder reads family metadata from `families/*/MODEL.toml`, but its
+three lookup flows are deliberately different:
+
+1. A full config first narrows candidates with `architecture_patterns` and
+   evaluates `matches_config()`. If no candidate resolves the config,
+   `find_plugin()` uses the compatibility fallback: `pkgutil` imports every
+   non-private family module/package and evaluates its predicates.
+2. A string or `model_type` first tries a direct descriptor-ID lookup, then
+   alias/prefix candidates, and finally the all-package `pkgutil` fallback.
+3. A Diffusers pipeline class is matched only through descriptor
+   `diffusion_pipeline_classes`; it imports matching packages and does not use
+   the `pkgutil` fallback.
+
+Each selected package exposes its package-level `plugin` from `__init__.py`.
+The descriptor `module` field is specialization/tooling metadata, not an
+arbitrary runtime-discovery selector. Loose `families/<family>.py` files can
+therefore participate only in the two compatibility flows; they are not
+complete support because the three ownership descriptors are still required.
 
 After family resolution, build dispatch probes optimized implementations only
 inside that family's directory. Exactly one qualified profile may claim the

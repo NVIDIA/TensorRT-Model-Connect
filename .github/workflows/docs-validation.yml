@@ -40,6 +40,7 @@ jobs:
           tests/tools/test_check_doc_file_references.py
           tests/tools/test_check_doc_commands.py
           tests/tools/test_runtime_strategy_matrix_checker.py
+          tests/tools/test_model_owned_validation_scripts.py
           tests/tools/test_test_impact.py
           -q
 

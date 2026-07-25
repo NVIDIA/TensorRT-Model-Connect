@@ -190,6 +190,41 @@ def test_extract_path_references_skips_explicit_shell_output_destination() -> No
     assert cdfr.extract_path_references(content, "README.md") == [(2, "tools/generate.py")]
 
 
+def test_shell_output_destinations_cover_continuations_and_redirections() -> None:
+    content = (
+        "```bash\n"
+        "python3 tools/generate.py \\\n"
+        "  --output \\\n"
+        "  reports/generated.json\n"
+        "python3 tools/generate.py > reports/stdout.txt\n"
+        "python3 tools/generate.py 1> reports/fd-one.txt\n"
+        "python3 tools/generate.py &>reports/combined.txt\n"
+        "```\n"
+    )
+
+    assert cdfr.extract_path_references(content, "README.md") == [
+        (2, "tools/generate.py"),
+        (5, "tools/generate.py"),
+        (6, "tools/generate.py"),
+        (7, "tools/generate.py"),
+    ]
+
+
+def test_shell_continuation_keeps_non_output_inputs_visible() -> None:
+    content = (
+        "```bash\n"
+        "python3 tools/generate.py \\\n"
+        "  tests/fixtures/input.json \\\n"
+        "  > reports/generated.json\n"
+        "```\n"
+    )
+
+    assert cdfr.extract_path_references(content, "README.md") == [
+        (2, "tools/generate.py"),
+        (3, "tests/fixtures/input.json"),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # retired truth surfaces
 # ---------------------------------------------------------------------------

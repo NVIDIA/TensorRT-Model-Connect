@@ -72,15 +72,23 @@ failure is terminal rather than a native fallback.
 
 ## Family plugin protocol
 
-Family packages are discovered from
-`python/tensorrt_model_connect/families/<family>/MODEL.toml`. Alias/prefix and
-architecture metadata normally narrow imports to candidate packages; a direct
-family-ID lookup imports that descriptor's package. When those routes cannot
-resolve a full config, a legacy `pkgutil` fallback imports all non-private
-family modules/packages and evaluates their matching predicates. The
-descriptor does not select an arbitrary import module, and a loose module
-found only through compatibility scanning is not a complete supported family.
-The protocol itself is defined in
+Family packages are indexed from
+`python/tensorrt_model_connect/families/<family>/MODEL.toml`. The lookup route
+depends on the input:
+
+1. For a full config, `architecture_patterns` select bounded candidates whose
+   `matches_config()` predicates run first. No match triggers the legacy
+   `pkgutil` fallback over every non-private family module/package.
+2. For a string or `model_type`, discovery tries a direct descriptor ID,
+   alias/prefix candidates, then the same all-package fallback.
+3. For a Diffusers pipeline class, discovery uses only descriptor
+   `diffusion_pipeline_classes`; there is no `pkgutil` fallback.
+
+Discovery imports the selected package and reads the package-level `plugin`
+exported by `__init__.py`. The descriptor's `module` field is
+specialization/tooling metadata, not an arbitrary runtime import selector, and
+a loose module found only through compatibility scanning is not a complete
+supported family. The protocol itself is defined in
 `python/tensorrt_model_connect/families/base.py`.
 
 ```python
