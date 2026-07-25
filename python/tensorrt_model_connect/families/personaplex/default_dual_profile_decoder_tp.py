@@ -1,23 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Dual-profile decoder engine builder — single engine, two optimization profiles.
+"""Tensor-parallel dual-profile decoder engine builder.
 
-Produces one TensorRT engine that handles both prefill (multi-token) and
-decode (single-token) phases by switching between two optimization profiles
-at runtime:
+Produces one rank-local TensorRT engine that handles both prefill
+(multi-token) and decode (single-token) phases by switching between two
+optimization profiles at runtime:
   * Profile 0 (prefill): Sq ranges over [1, opt=opt_prefill_length, max=max_prefill_length].
     TensorRT picks batched MHA kernels (e.g. ``_gemm_mha_v2``) at opt Sq.
   * Profile 1 (decode): Sq fixed to 1. TensorRT picks the GEMV fast-path
     (``_gemv_mha_v1``).
 
-Both profiles use the same graph and weights — only the optimization
-profile differs, so the engine's weights live once in GPU memory and the
-C++ runtime creates two ``IExecutionContext``s (one per profile) that
-share the engine.
+The build path intentionally duplicates most of the single-device
+dual-profile graph so tensor-parallel shape decisions stay explicit here:
+Q/K/V and MLP expansion projections are column-sharded, output/down
+projections are row-sharded, and each row-parallel join inserts a TensorRT
+distributed ALL_REDUCE collective.
 
 Scope: covers the same architectural variants the legacy
-``standard_decoder_builder`` supports — RMSNorm or LayerNorm; SwiGLU or
+``standard_decoder_builder`` supports - RMSNorm or LayerNorm; SwiGLU or
 GeluFC MLP; RoPE (full / partial / interleaved), learned absolute, or
 ALiBi position; sequential or parallel residual; optional q/k_norm,
 QKV/output/MLP biases, and a Bloom-style embedding LayerNorm. Quantized
@@ -28,7 +29,7 @@ on ``standard_decoder_builder`` for now and are dispatched there from
 inside ``build_standard_decoder_engine``.
 
 Tensor contract (matches the C++ runtime KvCache naming):
-  Inputs (dynamic shapes — Sq varies by profile)
+  Inputs (dynamic shapes - Sq varies by profile)
     token_id        int32   (-1,)
     position_id     int32   (-1,)
     attention_mask  float32 (-1, -1)                 # (Sq, max_cache + Sq)
@@ -56,6 +57,11 @@ from .utils import (
     norm_multi as _norm_multi,
     with_builder_context,
 )
+from ...parallel_config import (
+    add_all_reduce_sum,
+    normalize_parallel_config,
+    shard_standard_decoder_weights,
+)
 
 trt = trt_compat.get_trt()
 
@@ -66,6 +72,14 @@ if TYPE_CHECKING:
 
 
 _make_matmul_fn = graph_blocks.make_matmul_fn
+
+
+def _validate_tp_quantization(quant_ctx: "QuantContext | None") -> None:
+    if quant_ctx is None:
+        return
+    format_name = getattr(getattr(quant_ctx, "profile", None), "format", None)
+    if getattr(format_name, "name", None) != "fp8":
+        raise ValueError("Tensor-parallel decoder quantization currently supports fp8 only")
 
 
 # ---------------------------------------------------------------------------
@@ -117,9 +131,6 @@ def _gelu_fc_mlp(
     activated = graph_ops.add_activation(network, fc1, activation, dtype=work_np_dtype)
     fc2 = matmul(activated, mlp_size, hidden,
                  weights[f"{prefix}.w_fc2"], f"{prefix}.w_fc2")
-    fc2_bias = weights.get(f"{prefix}.fc2_bias")
-    if fc2_bias is not None:
-        fc2 = graph_ops.add_bias_sum(network, fc2, hidden, fc2_bias, dtype=work_np_dtype)
     return fc2
 
 
@@ -146,7 +157,7 @@ def _supports_config(config: "ModelConfig", weights: "WeightDict") -> None:
 
 
 @with_builder_context(workspace_bytes=1 << 30)
-def build_dual_profile_decoder_engine(
+def build_dual_profile_tp_decoder_engine(
     config: "ModelConfig",
     weights: "WeightDict",
     max_cache_length: int,
@@ -165,39 +176,38 @@ def build_dual_profile_decoder_engine(
     scale_attn_weights: bool = True,
     verbose: bool = False,
     dynamic_kv_profile_rows: list[int] | None = None,
-    profile_mode: str = "dual_profile",
+    parallel_config=None,
     _builder_context_factory: BuilderContextFactory,
 ) -> bytes:
-    """Build a prefill/decode-capable dynamic-Sq decoder engine.
+    """Build a rank-local tensor-parallel engine with prefill/decode profiles.
 
     ``norm_type`` / ``mlp_type`` / ``position_type`` / ``activation`` /
     ``partial_rotary_factor`` / ``interleaved_rope`` / ``parallel_residual`` /
     ``scale_attn_weights`` mirror the same parameters on
     ``build_standard_decoder_engine``.
 
-    ``quant_ctx`` (optional) routes every projection matmul through
-    ``QuantContext.maybe_quantized_matmul`` for fp8 / int8 Q/DQ insertion;
-    when ``None`` the matmuls are plain fp16 / bf16 / fp32.
+    The current TP implementation supports tp_size 2, 4, and 8. The caller
+    invokes this builder once per rank and packages the rank-local plans into
+    one bundle.
 
-    ``profile_mode`` controls which optimization profiles are emitted:
-
-    * ``"dual_profile"``: one prefill profile followed by one or more decode
-      profiles. When ``dynamic_kv_profile_rows`` is provided, the decode side
-      gets one profile per bucket — letting TriAttention pick the smallest
-      active KV cache bucket at runtime while still benefitting from batched
-      prefill on the prompt.
-    * ``"prefill"``: one prefill profile only. This is used by split-engine
-      bundles, where decode is served by a separate fixed-Sq=1 engine.
-
-    Dynamic-KV cache bucket profiles are only meaningful in ``dual_profile``
-    mode. In either mode, cache_k/cache_v inputs are declared dynamic when
-    bucket profiles are requested so each profile can constrain their row count.
+    When ``dynamic_kv_profile_rows`` is provided, the engine carries one
+    prefill profile (profile 0) followed by N decode profiles (profile 1..N),
+    one per bucket - letting TriAttention pick the smallest active KV cache
+    bucket at runtime while still benefitting from batched prefill on the
+    prompt. The cache_k/cache_v inputs are declared dynamic so each profile
+    can constrain their row count independently.
     """
     _supports_config(config, weights)
-    if profile_mode not in ("dual_profile", "prefill"):
+    parallel = normalize_parallel_config(parallel_config)
+    if not parallel.enabled:
         raise ValueError(
-            "profile_mode must be 'dual_profile' or 'prefill', "
-            f"got {profile_mode!r}")
+            "dual_profile_decoder_tp_builder requires "
+            "parallel.mode=tensor_parallel and tp_size > 1")
+    _validate_tp_quantization(quant_ctx)
+    if mlp_type not in {"swiglu", "gelu_fc"}:
+        raise NotImplementedError(
+            "Tensor-parallel decoder builds currently support SwiGLU and GeluFC MLPs only")
+    weights = shard_standard_decoder_weights(config, weights, parallel)
 
     if max_prefill_length is None:
         max_prefill_length = max_cache_length
@@ -223,8 +233,8 @@ def build_dual_profile_decoder_engine(
     hidden = config.hidden_size
     vocab = config.vocab_size
     num_layers = config.num_hidden_layers
-    num_heads = config.num_attention_heads
-    num_kv_heads = config.num_key_value_heads
+    num_heads = config.num_attention_heads // parallel.tp_size
+    num_kv_heads = config.num_key_value_heads // parallel.tp_size
     head_dim = attention_size // num_heads
     kv_attention_size = graph_blocks.infer_kv_attention_size(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
@@ -271,7 +281,7 @@ def build_dual_profile_decoder_engine(
     else:
         attention_mask_work = attention_mask
 
-    # Two (or 1+N) optimization profiles — same graph, different Sq / cache.
+    # Two (or 1+N) optimization profiles - same graph, different Sq / cache.
     def _add_profile(opt_sq: int, max_sq: int, *, fixed: bool = False,
                      cache_rows_min: int | None = None,
                      cache_rows_opt: int | None = None,
@@ -299,42 +309,16 @@ def build_dual_profile_decoder_engine(
                         (cmx, kv_attention_size))
         trt_config.add_optimization_profile(prof)
 
-    import os as _os_dbg
-    if profile_mode == "prefill":
-        _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
-                     cache_rows_min=1, cache_rows_opt=max_cache_length,
-                     cache_rows_max=max_cache_length)
-    elif _os_dbg.environ.get("TRTMC_DECODE_ONLY_DEBUG") == "1":
-        # Diagnostic: build a one-profile engine with dynamic-shape inputs
-        # but Sq pinned to 1. Lets us isolate dynamic-shape enqueueV3
-        # overhead from per-profile kernel specialisation.
-        _add_profile(1, 1, fixed=True)
+    _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
+                 cache_rows_min=1, cache_rows_opt=max_cache_length,
+                 cache_rows_max=max_cache_length)
+    if multi_bucket_decode:
+        for bucket in decode_buckets:
+            _add_profile(1, 1, fixed=True,
+                         cache_rows_min=1, cache_rows_opt=bucket,
+                         cache_rows_max=bucket)
     else:
-        _reverse = _os_dbg.environ.get("TRTMC_REVERSE_PROFILE_ORDER", "0") == "1"
-        if _reverse:
-            # Decode profile registered first so it commits its preferred
-            # weight layout before the prefill profile compiles.
-            if multi_bucket_decode:
-                for bucket in decode_buckets:
-                    _add_profile(1, 1, fixed=True,
-                                 cache_rows_min=1, cache_rows_opt=bucket,
-                                 cache_rows_max=bucket)
-            else:
-                _add_profile(1, 1, fixed=True)
-            _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
-                         cache_rows_min=1, cache_rows_opt=max_cache_length,
-                         cache_rows_max=max_cache_length)
-        else:
-            _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
-                         cache_rows_min=1, cache_rows_opt=max_cache_length,
-                         cache_rows_max=max_cache_length)
-            if multi_bucket_decode:
-                for bucket in decode_buckets:
-                    _add_profile(1, 1, fixed=True,
-                                 cache_rows_min=1, cache_rows_opt=bucket,
-                                 cache_rows_max=bucket)
-            else:
-                _add_profile(1, 1, fixed=True)
+        _add_profile(1, 1, fixed=True)
 
     # ---- Shared constants ------------------------------------------------
     embedding_table = _const_in_work_dtype(
@@ -430,7 +414,7 @@ def build_dual_profile_decoder_engine(
             network, hidden_state, hidden, embed_norm, embed_norm_beta,
             eps_tensor, "layernorm", work_np_dtype)
 
-    # Build the 4D additive mask once — shared across layers. ALiBi
+    # Build the 4D additive mask once - shared across layers. ALiBi
     # variants augment the mask with per-head linear bias.
     if position_type == "alibi":
         mask_4d = graph_ops.add_alibi_mask_4d(
@@ -522,6 +506,7 @@ def build_dual_profile_decoder_engine(
 
         attn_out = matmul(context, attention_size, hidden,
                           weights[f"{prefix}.w_o"], f"{prefix}.w_o")
+        attn_out = add_all_reduce_sum(network, attn_out, parallel.tp_size)
         o_bias = weights.get(f"{prefix}.o_bias")
         if o_bias is not None:
             attn_out = graph_ops.add_bias_sum(
@@ -548,7 +533,7 @@ def build_dual_profile_decoder_engine(
                 weights.get(f"{prefix}.post_attn_norm_beta"),
                 eps_tensor, norm_type, work_np_dtype)
 
-        # MLP — SwiGLU (Llama-style) or GeluFC (GPT-2-style).
+        # MLP - SwiGLU (Llama-style) or GeluFC (GPT-2-style).
         if mlp_type == "gelu_fc":
             mlp_out = _gelu_fc_mlp(
                 network, norm2,
@@ -560,6 +545,13 @@ def build_dual_profile_decoder_engine(
                 network, norm2,
                 matmul=matmul, weights=weights, prefix=prefix,
                 hidden=hidden, mlp_size=mlp_size)
+        mlp_out = add_all_reduce_sum(network, mlp_out, parallel.tp_size)
+        if mlp_type == "gelu_fc":
+            fc2_bias = weights.get(f"{prefix}.fc2_bias")
+            if fc2_bias is not None:
+                mlp_out = graph_ops.add_bias_sum(
+                    network, mlp_out, hidden, fc2_bias,
+                    dtype=work_np_dtype)
 
         # Final residual.
         if parallel_residual:
@@ -626,17 +618,16 @@ def build_dual_profile_decoder_engine(
         network.mark_output(pv)
 
     if verbose:
-        mode_label = "prefill-profile" if profile_mode == "prefill" else "dual-profile"
-        print(f"[trtmc build] Building {mode_label} engine "
+        print(f"[trtmc-build] Building tensor-parallel decoder engine "
               f"(layers={num_layers}, hidden={hidden}, attn={attention_size}, "
               f"kv={kv_attention_size}, "
               f"mlp={mlp_size}, cache={max_cache_length}, "
               f"opt_prefill={opt_prefill_length}, max_prefill={max_prefill_length}, "
               f"norm={norm_type}, mlp_type={mlp_type}, pos={position_type}, "
-              f"precision={precision}) ...",
+              f"precision={precision}, tp={parallel.tp_size}, rank={parallel.rank}) ...",
               file=sys.stderr)
 
     plan = builder.build_serialized_network(network, trt_config)
     if plan is None:
-        raise RuntimeError("dual-profile decoder engine build failed")
+        raise RuntimeError("Tensor-parallel decoder engine build failed")
     return bytes(plan)
