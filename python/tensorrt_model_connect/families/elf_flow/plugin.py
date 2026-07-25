@@ -180,10 +180,6 @@ def _load_local_elf_arrays(model_path: Path) -> dict[str, np.ndarray] | None:
     return None
 
 
-def _target_np_dtype(precision: str) -> np.dtype:
-    return np.float16 if precision in ("fp16", "bf16") else np.float32
-
-
 def _name_variants(name: str) -> list[str]:
     variants = [name]
     if "." in name:
