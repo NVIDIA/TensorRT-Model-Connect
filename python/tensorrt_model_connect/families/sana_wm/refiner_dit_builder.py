@@ -995,13 +995,6 @@ def _add_timestep_embedding_rows(
     return embed.get_output(0)
 
 
-def _streaming_self_attention_mask(total_tokens: int, context_tokens: int) -> np.ndarray:
-    mask = np.zeros((1, 1, total_tokens, total_tokens), dtype=np.float32)
-    if 0 < context_tokens < total_tokens:
-        mask[:, :, :context_tokens, context_tokens:] = -10000.0
-    return mask
-
-
 def _slice_attention_4d(
     network: trt.INetworkDefinition,
     tensor: trt.ITensor,

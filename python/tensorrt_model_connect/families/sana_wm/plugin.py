@@ -738,9 +738,7 @@ def _tokenizer_adds_special_tokens(tokenizer_dir: Path) -> bool:
         from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir, local_files_only=True)
-        return tokenizer.encode("hello") != tokenizer.encode(
-            "hello", add_special_tokens=False
-        )
+        return tokenizer.encode("hello") != tokenizer.encode("hello", add_special_tokens=False)
     except Exception:  # noqa: BLE001 - lightweight builds use the JSON fallback
         config_path = tokenizer_dir / "tokenizer_config.json"
         if not config_path.is_file():
@@ -772,11 +770,6 @@ def _stage1_text_encoder_conditioning_length(
 
     chi_tokens = _stage1_chi_prompt_token_count(text_encoder_dir, str(chi_prompt))
     return max(model_max_length, model_max_length + max(0, chi_tokens - 2))
-
-
-def _append_unique_path(candidates: list[Path], path: Path | None) -> None:
-    if path is not None and path not in candidates:
-        candidates.append(path)
 
 
 def _discover_tokenizer_sections(
@@ -948,12 +941,14 @@ def _make_exact_gemma_rope_tables(
 
     if not torch.cuda.is_available():
         raise RuntimeError("SANA-WM exact Gemma RoPE table generation requires CUDA")
-    head_dim = int(text_config.raw.get("head_dim", text_config.attention_size //
-                                       text_config.num_attention_heads))
+    head_dim = int(
+        text_config.raw.get(
+            "head_dim", text_config.attention_size // text_config.num_attention_heads
+        )
+    )
     rope_theta = float(text_config.rope_theta)
     inv_freq = 1.0 / (
-        rope_theta
-        ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float() / head_dim)
+        rope_theta ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float() / head_dim)
     )
     position_ids = torch.arange(table_length, device="cuda", dtype=torch.long).unsqueeze(0)
     inv_freq_expanded = inv_freq.cuda()[None, :, None].float()
