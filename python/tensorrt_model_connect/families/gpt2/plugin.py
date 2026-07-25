@@ -53,9 +53,7 @@ class GPT2Plugin:
         return f"{prefix}.{name}" if prefix else name
 
     def load_weights(
-        self,
-        model_dir: str,
-        config: ModelConfig,
+        self, model_dir: str, config: ModelConfig,
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -72,8 +70,7 @@ class GPT2Plugin:
         # Token embedding (wte)
         embedding = _load_tensor(readers, self._key(root, "wte.weight"))
         assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
-        )
+            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
         weights["embedding"] = embedding.astype(np.float32)
 
         # Position embedding (wpe) — learned absolute positions
@@ -101,13 +98,15 @@ class GPT2Plugin:
 
             # Fused QKV: c_attn is Conv1D with shape [in, 3*out] = [hidden, 3*hidden]
             # Conv1D stores as [in_features, out_features] — already transposed!
-            c_attn_weight = _load_tensor(readers, f"{hf_prefix}.attn.c_attn.weight")
-            c_attn_bias = _load_tensor(readers, f"{hf_prefix}.attn.c_attn.bias")
+            c_attn_weight = _load_tensor(
+                readers, f"{hf_prefix}.attn.c_attn.weight")
+            c_attn_bias = _load_tensor(
+                readers, f"{hf_prefix}.attn.c_attn.bias")
 
             # Split fused QKV: [hidden, 3*hidden] -> Q, K, V each [hidden, hidden]
             q_w = c_attn_weight[:, :hidden].astype(np.float32)
-            k_w = c_attn_weight[:, hidden : 2 * hidden].astype(np.float32)
-            v_w = c_attn_weight[:, 2 * hidden :].astype(np.float32)
+            k_w = c_attn_weight[:, hidden:2*hidden].astype(np.float32)
+            v_w = c_attn_weight[:, 2*hidden:].astype(np.float32)
 
             # Conv1D stores [in, out] which is exactly what we need (no transpose)
             weights[f"{prefix}.w_q"] = np.ascontiguousarray(q_w)
@@ -116,32 +115,41 @@ class GPT2Plugin:
 
             # QKV biases
             q_bias = c_attn_bias[:hidden].astype(np.float32)
-            k_bias = c_attn_bias[hidden : 2 * hidden].astype(np.float32)
-            v_bias = c_attn_bias[2 * hidden :].astype(np.float32)
+            k_bias = c_attn_bias[hidden:2*hidden].astype(np.float32)
+            v_bias = c_attn_bias[2*hidden:].astype(np.float32)
             weights[f"{prefix}.q_bias"] = q_bias
             weights[f"{prefix}.k_bias"] = k_bias
             weights[f"{prefix}.v_bias"] = v_bias
 
             # Output projection: c_proj Conv1D [hidden, hidden]
-            c_proj_weight = _load_tensor(readers, f"{hf_prefix}.attn.c_proj.weight")
-            c_proj_bias = _load_tensor(readers, f"{hf_prefix}.attn.c_proj.bias")
+            c_proj_weight = _load_tensor(
+                readers, f"{hf_prefix}.attn.c_proj.weight")
+            c_proj_bias = _load_tensor(
+                readers, f"{hf_prefix}.attn.c_proj.bias")
             # Conv1D: [in, out] = [hidden, hidden], already the right layout
-            weights[f"{prefix}.w_o"] = np.ascontiguousarray(c_proj_weight.astype(np.float32))
+            weights[f"{prefix}.w_o"] = np.ascontiguousarray(
+                c_proj_weight.astype(np.float32))
             weights[f"{prefix}.o_bias"] = c_proj_bias.astype(np.float32)
 
             # MLP: c_fc and c_proj (both Conv1D)
-            mlp_fc_weight = _load_tensor(readers, f"{hf_prefix}.mlp.c_fc.weight")
-            mlp_fc_bias = _load_tensor(readers, f"{hf_prefix}.mlp.c_fc.bias")
-            mlp_proj_weight = _load_tensor(readers, f"{hf_prefix}.mlp.c_proj.weight")
-            mlp_proj_bias = _load_tensor(readers, f"{hf_prefix}.mlp.c_proj.bias")
+            mlp_fc_weight = _load_tensor(
+                readers, f"{hf_prefix}.mlp.c_fc.weight")
+            mlp_fc_bias = _load_tensor(
+                readers, f"{hf_prefix}.mlp.c_fc.bias")
+            mlp_proj_weight = _load_tensor(
+                readers, f"{hf_prefix}.mlp.c_proj.weight")
+            mlp_proj_bias = _load_tensor(
+                readers, f"{hf_prefix}.mlp.c_proj.bias")
 
             if mlp_size == 0:
                 mlp_size = mlp_fc_weight.shape[1]
 
             # Conv1D: [in, out] — already transposed
-            weights[f"{prefix}.w_fc1"] = np.ascontiguousarray(mlp_fc_weight.astype(np.float32))
+            weights[f"{prefix}.w_fc1"] = np.ascontiguousarray(
+                mlp_fc_weight.astype(np.float32))
             weights[f"{prefix}.fc1_bias"] = mlp_fc_bias.astype(np.float32)
-            weights[f"{prefix}.w_fc2"] = np.ascontiguousarray(mlp_proj_weight.astype(np.float32))
+            weights[f"{prefix}.w_fc2"] = np.ascontiguousarray(
+                mlp_proj_weight.astype(np.float32))
             weights[f"{prefix}.fc2_bias"] = mlp_proj_bias.astype(np.float32)
 
         # Final LayerNorm
@@ -154,10 +162,12 @@ class GPT2Plugin:
         if _has_tensor(readers, "lm_head.weight"):
             lm_head = _load_tensor(readers, "lm_head.weight")
             # lm_head is a Linear [vocab, hidden], transpose to [hidden, vocab]
-            weights["w_out"] = np.ascontiguousarray(lm_head.T.astype(np.float32))
+            weights["w_out"] = np.ascontiguousarray(
+                lm_head.T.astype(np.float32))
         else:
             # Tied: reuse embedding [vocab, hidden] -> transpose to [hidden, vocab]
-            weights["w_out"] = np.ascontiguousarray(embedding.T.astype(np.float32))
+            weights["w_out"] = np.ascontiguousarray(
+                embedding.T.astype(np.float32))
 
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
         weights["_kv_attention_size"] = attention_size  # type: ignore[assignment]
@@ -166,37 +176,32 @@ class GPT2Plugin:
         return weights
 
     def build_engine(
-        self,
-        config: ModelConfig,
-        weights: WeightDict,
-        max_cache_length: int,
-        *,
-        precision: str = "fp32",
-        quant_ctx=None,
-        verbose: bool = False,
+        self, config: ModelConfig, weights: WeightDict,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             return build_dual_profile_tp_decoder_engine(
-                config,
-                weights,
-                max_cache_length,
-                precision=precision,
-                quant_ctx=quant_ctx,
+                config, weights, max_cache_length,
+                precision=precision, quant_ctx=quant_ctx,
+                norm_type="layernorm",
+                mlp_type="gelu_fc",
+                position_type="learned",
+                activation="gelu_new",
                 verbose=verbose,
-                parallel_config=parallel,
-            )
+                parallel_config=parallel)
         return build_standard_decoder_engine(
-            config,
-            weights,
-            max_cache_length,
-            precision=precision,
-            quant_ctx=quant_ctx,
+            config, weights, max_cache_length,
+            precision=precision, quant_ctx=quant_ctx,
+            norm_type="layernorm",
+            mlp_type="gelu_fc",
+            position_type="learned",
+            activation="gelu_new",
             verbose=verbose,
-            debug_layer_outputs=debug_layer_outputs,
-        )
+            debug_layer_outputs=debug_layer_outputs)
 
 
 plugin = GPT2Plugin()
