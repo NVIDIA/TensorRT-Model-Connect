@@ -25,7 +25,6 @@ def _cast_back_to_trt_dtype(
         return tensor
     return network.add_cast(tensor, target_dtype).get_output(0)
 
-
 def layer_tensor_name(stem: str, layer: int) -> str:
     return f"{stem}_{layer}"
 
@@ -52,7 +51,11 @@ def add_matmul_rhs_constant(
 ) -> trt.ITensor:
     """Matrix multiply: lhs @ rhs_constant.  rhs is [lhs_width, rhs_width]."""
     rank = len(tuple(lhs.shape))
-    rhs_shape = (lhs_width, rhs_width) if rank <= 2 else (1,) * (rank - 2) + (lhs_width, rhs_width)
+    rhs_shape = (
+        (lhs_width, rhs_width)
+        if rank <= 2
+        else (1,) * (rank - 2) + (lhs_width, rhs_width)
+    )
     rhs = add_constant(
         network,
         rhs_shape,
@@ -61,10 +64,8 @@ def add_matmul_rhs_constant(
     )
     rhs = _cast_back_to_trt_dtype(network, rhs, lhs.dtype)
     mm = network.add_matrix_multiply(
-        lhs,
-        trt.MatrixOperation.NONE,
-        rhs,
-        trt.MatrixOperation.NONE,
+        lhs, trt.MatrixOperation.NONE,
+        rhs, trt.MatrixOperation.NONE,
     )
     return _cast_back_to_trt_dtype(network, mm.get_output(0), lhs.dtype)
 
@@ -79,7 +80,8 @@ def add_bias_sum(
     """Element-wise add a bias broadcast over all non-feature axes."""
     rank = len(tuple(inp.shape))
     bias_shape = (width,) if rank <= 1 else (1,) * (rank - 1) + (width,)
-    bias_t = add_constant(network, bias_shape, np.asarray(bias).reshape(bias_shape), dtype=dtype)
+    bias_t = add_constant(
+        network, bias_shape, np.asarray(bias).reshape(bias_shape), dtype=dtype)
     bias_t = _cast_back_to_trt_dtype(network, bias_t, inp.dtype)
     s = network.add_elementwise(inp, bias_t, trt.ElementWiseOperation.SUM)
     return _cast_back_to_trt_dtype(network, s.get_output(0), inp.dtype)
@@ -101,21 +103,23 @@ def add_rms_norm(
     TRT's native normalization API implements mean-centered LayerNorm, not
     RMSNorm, so this remains a manual shared implementation.
     """
-    need_cast = dtype != np.float32
+    need_cast = (dtype != np.float32)
     output_dtype = inp.dtype
     if need_cast:
         inp = network.add_cast(inp, trt.float32).get_output(0)
         eps_tensor = network.add_cast(eps_tensor, trt.float32).get_output(0)
     sq = network.add_elementwise(inp, inp, trt.ElementWiseOperation.PROD)
-    mean = network.add_reduce(sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
-    denom_in = network.add_elementwise(mean.get_output(0), eps_tensor, trt.ElementWiseOperation.SUM)
+    mean = network.add_reduce(
+        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
+    denom_in = network.add_elementwise(
+        mean.get_output(0), eps_tensor, trt.ElementWiseOperation.SUM)
     sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
     recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
-    normalized = network.add_elementwise(inp, recip.get_output(0), trt.ElementWiseOperation.PROD)
+    normalized = network.add_elementwise(
+        inp, recip.get_output(0), trt.ElementWiseOperation.PROD)
     gamma_t = add_constant(network, (1, hidden_size), gamma, dtype=np.float32)
     scaled = network.add_elementwise(
-        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD
-    )
+        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
     result = scaled.get_output(0)
     if need_cast:
         result = _cast_back_to_trt_dtype(network, result, output_dtype)
@@ -139,7 +143,7 @@ def add_rms_norm_per_head(
     ``sequence_length=None`` means runtime-dynamic Sq.
     ``gamma`` may be [num_heads * head_dim] or [head_dim] broadcast to heads.
     """
-    need_cast = dtype != np.float32
+    need_cast = (dtype != np.float32)
     output_dtype = inp.dtype
     seq_dim = -1 if sequence_length is None else sequence_length
     reshape_in = network.add_shuffle(inp)
@@ -152,30 +156,25 @@ def add_rms_norm_per_head(
     eps_3d = network.add_shuffle(eps_tensor)
     eps_3d.reshape_dims = (1, 1, 1)
     sq = network.add_elementwise(reshaped, reshaped, trt.ElementWiseOperation.PROD)
-    mean = network.add_reduce(sq.get_output(0), trt.ReduceOperation.AVG, 1 << 2, keep_dims=True)
+    mean = network.add_reduce(
+        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 2, keep_dims=True)
     denom_in = network.add_elementwise(
-        mean.get_output(0), eps_3d.get_output(0), trt.ElementWiseOperation.SUM
-    )
+        mean.get_output(0), eps_3d.get_output(0), trt.ElementWiseOperation.SUM)
     sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
     recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
     normalized = network.add_elementwise(
-        reshaped, recip.get_output(0), trt.ElementWiseOperation.PROD
-    )
+        reshaped, recip.get_output(0), trt.ElementWiseOperation.PROD)
     gamma_arr = np.asarray(gamma, dtype=np.float32)
     if gamma_arr.size == head_dim:
         gamma_t = add_constant(
-            network, (1, 1, head_dim), gamma_arr.reshape(1, 1, head_dim), dtype=np.float32
-        )
+            network, (1, 1, head_dim), gamma_arr.reshape(1, 1, head_dim),
+            dtype=np.float32)
     else:
         gamma_t = add_constant(
-            network,
-            (1, num_heads, head_dim),
-            gamma_arr.reshape(num_heads, head_dim),
-            dtype=np.float32,
-        )
+            network, (1, num_heads, head_dim),
+            gamma_arr.reshape(num_heads, head_dim), dtype=np.float32)
     scaled = network.add_elementwise(
-        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD
-    )
+        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
 
     result = scaled.get_output(0)
     if need_cast:
@@ -199,35 +198,39 @@ def add_layer_norm(
     FP32 precision boundary: when dtype != float32, casts to FP32 before
     norm computation for numerical stability, then casts back.
     """
-    need_cast = dtype != np.float32
+    need_cast = (dtype != np.float32)
     output_dtype = inp.dtype
     if need_cast:
         inp = network.add_cast(inp, trt.float32).get_output(0)
         eps_tensor = network.add_cast(eps_tensor, trt.float32).get_output(0)
     # mean = reduce_mean(x)
-    mean = network.add_reduce(inp, trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
+    mean = network.add_reduce(
+        inp, trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
     # x - mean
-    centered = network.add_elementwise(inp, mean.get_output(0), trt.ElementWiseOperation.SUB)
+    centered = network.add_elementwise(
+        inp, mean.get_output(0), trt.ElementWiseOperation.SUB)
     # variance = mean((x - mean)^2)
     sq = network.add_elementwise(
-        centered.get_output(0), centered.get_output(0), trt.ElementWiseOperation.PROD
-    )
-    var = network.add_reduce(sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
+        centered.get_output(0), centered.get_output(0),
+        trt.ElementWiseOperation.PROD)
+    var = network.add_reduce(
+        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
     # sqrt(var + eps)
-    denom_in = network.add_elementwise(var.get_output(0), eps_tensor, trt.ElementWiseOperation.SUM)
+    denom_in = network.add_elementwise(
+        var.get_output(0), eps_tensor, trt.ElementWiseOperation.SUM)
     sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
     recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
     # normalized = (x - mean) / sqrt(var + eps)
     normalized = network.add_elementwise(
-        centered.get_output(0), recip.get_output(0), trt.ElementWiseOperation.PROD
-    )
+        centered.get_output(0), recip.get_output(0),
+        trt.ElementWiseOperation.PROD)
     # gamma * normalized + beta
     gamma_t = add_constant(network, (1, hidden_size), gamma, dtype=np.float32)
     scaled = network.add_elementwise(
-        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD
-    )
+        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
     beta_t = add_constant(network, (1, hidden_size), beta, dtype=np.float32)
-    result = network.add_elementwise(scaled.get_output(0), beta_t, trt.ElementWiseOperation.SUM)
+    result = network.add_elementwise(
+        scaled.get_output(0), beta_t, trt.ElementWiseOperation.SUM)
     result = result.get_output(0)
     if need_cast:
         result = _cast_back_to_trt_dtype(network, result, output_dtype)
@@ -249,36 +252,41 @@ def add_gelu_new(
     const_shape = (1,) * max(1, len(tuple(inp.shape)))
 
     def _const(name, value):
-        c = add_constant(network, const_shape, np.array([value], dtype=np.float32), dtype=dtype)
+        c = add_constant(
+            network, const_shape, np.array([value], dtype=np.float32), dtype=dtype)
         return _cast_back_to_trt_dtype(network, c, target_dtype)
 
     # x^3
     x_sq = network.add_elementwise(inp, inp, trt.ElementWiseOperation.PROD)
-    x_cu = network.add_elementwise(x_sq.get_output(0), inp, trt.ElementWiseOperation.PROD)
+    x_cu = network.add_elementwise(
+        x_sq.get_output(0), inp, trt.ElementWiseOperation.PROD)
     # 0.044715 * x^3
     coeff = _const("coeff", 0.044715)
-    scaled_cube = network.add_elementwise(x_cu.get_output(0), coeff, trt.ElementWiseOperation.PROD)
+    scaled_cube = network.add_elementwise(
+        x_cu.get_output(0), coeff, trt.ElementWiseOperation.PROD)
     # x + 0.044715 * x^3
     inner_sum = network.add_elementwise(
-        inp, scaled_cube.get_output(0), trt.ElementWiseOperation.SUM
-    )
+        inp, scaled_cube.get_output(0), trt.ElementWiseOperation.SUM)
     # sqrt(2/pi) * (x + 0.044715 * x^3)
     sqrt_2_over_pi = _const("sqrt_2_over_pi", np.sqrt(2.0 / np.pi))
     tanh_arg = network.add_elementwise(
-        sqrt_2_over_pi, inner_sum.get_output(0), trt.ElementWiseOperation.PROD
-    )
+        sqrt_2_over_pi, inner_sum.get_output(0),
+        trt.ElementWiseOperation.PROD)
     # tanh(...)
-    tanh_l = network.add_activation(tanh_arg.get_output(0), trt.ActivationType.TANH)
+    tanh_l = network.add_activation(
+        tanh_arg.get_output(0), trt.ActivationType.TANH)
     # 1 + tanh(...)
     one = _const("one", 1.0)
-    one_plus_tanh = network.add_elementwise(one, tanh_l.get_output(0), trt.ElementWiseOperation.SUM)
+    one_plus_tanh = network.add_elementwise(
+        one, tanh_l.get_output(0), trt.ElementWiseOperation.SUM)
     # 0.5 * x
     half = _const("half", 0.5)
-    half_x = network.add_elementwise(half, inp, trt.ElementWiseOperation.PROD)
+    half_x = network.add_elementwise(
+        half, inp, trt.ElementWiseOperation.PROD)
     # 0.5 * x * (1 + tanh(...))
     result = network.add_elementwise(
-        half_x.get_output(0), one_plus_tanh.get_output(0), trt.ElementWiseOperation.PROD
-    )
+        half_x.get_output(0), one_plus_tanh.get_output(0),
+        trt.ElementWiseOperation.PROD)
     return result.get_output(0)
 
 
@@ -297,12 +305,13 @@ def add_activation(
     elif activation_type in ("relu2", "squared_relu"):
         relu = network.add_activation(inp, trt.ActivationType.RELU)
         sq = network.add_elementwise(
-            relu.get_output(0), relu.get_output(0), trt.ElementWiseOperation.PROD
-        )
+            relu.get_output(0), relu.get_output(0),
+            trt.ElementWiseOperation.PROD)
         return sq.get_output(0)
     elif activation_type == "silu":
         sigmoid = network.add_activation(inp, trt.ActivationType.SIGMOID)
-        swish = network.add_elementwise(inp, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+        swish = network.add_elementwise(
+            inp, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
         return swish.get_output(0)
     else:
         raise ValueError(f"Unsupported activation: {activation_type}")
@@ -316,10 +325,9 @@ def compute_alibi_slopes(num_heads: int) -> np.ndarray:
 
     Returns: [num_heads] float32 array.
     """
-
     def _get_slopes_power_of_2(n: int) -> list[float]:
         start = 2 ** (-(2 ** -(np.log2(n) - 3)))
-        return [start * (start**i) for i in range(n)]
+        return [start * (start ** i) for i in range(n)]
 
     if num_heads > 0 and (num_heads & (num_heads - 1)) == 0:
         # Power of 2
@@ -344,7 +352,6 @@ add_gelu_tanh = add_gelu_new
 #   add_apply_rope_native  → IRotaryEmbeddingLayer
 #   add_attention_core     → IAttention           (replaces score+softmax+V)
 # ---------------------------------------------------------------------------
-
 
 def add_layer_norm_native(
     network: trt.INetworkDefinition,
@@ -376,11 +383,13 @@ def add_layer_norm_native(
     """
     inp_shape = getattr(inp, "shape", None)
     rank = len(tuple(inp_shape)) if inp_shape is not None else 2
-    param_shape = (hidden_size,) if rank <= 1 else (1,) * (rank - 1) + (hidden_size,)
-    gamma_t = add_constant(
-        network, param_shape, np.asarray(gamma).reshape(param_shape), dtype=dtype
+    param_shape = (
+        (hidden_size,) if rank <= 1 else (1,) * (rank - 1) + (hidden_size,)
     )
-    beta_t = add_constant(network, param_shape, np.asarray(beta).reshape(param_shape), dtype=dtype)
+    gamma_t = add_constant(
+        network, param_shape, np.asarray(gamma).reshape(param_shape), dtype=dtype)
+    beta_t = add_constant(
+        network, param_shape, np.asarray(beta).reshape(param_shape), dtype=dtype)
     gamma_t = _cast_back_to_trt_dtype(network, gamma_t, inp.dtype)
     beta_t = _cast_back_to_trt_dtype(network, beta_t, inp.dtype)
     # axesMask bit i selects axis i as a reduction axis. The normalized
@@ -404,8 +413,7 @@ def validate_native_rope_dim(
     if rotary_embedding_dim < 2 or rotary_embedding_dim % 2 != 0:
         raise ValueError(
             f"TRT native RoPE requires {field_name} to be an even value >= 2; "
-            f"got {rotary_embedding_dim}"
-        )
+            f"got {rotary_embedding_dim}")
     return rotary_embedding_dim
 
 
@@ -441,7 +449,8 @@ def make_rope_table_half_dim(
     half = rotary_ndims // 2
     default = 1.0 if cosine else 0.0
     if max_cache_length <= 0 or rope_theta <= 0.0:
-        return np.full((max(max_cache_length, 1), max(half, 1)), default, dtype=np.float32)
+        return np.full((max(max_cache_length, 1), max(half, 1)),
+                       default, dtype=np.float32)
     table = np.full((max_cache_length, half), default, dtype=np.float32)
     for pos in range(max_cache_length):
         for d in range(half):
@@ -505,7 +514,8 @@ def add_2d_mask_to_4d(
 ) -> trt.ITensor:
     """Reshape additive attention mask [Sq, K] to [1, 1, Sq, K]."""
     mask_shape = network.add_shape(mask_2d).get_output(0)
-    ones = add_constant(network, (2,), np.array([1, 1], dtype=np.int64), dtype=np.int64)
+    ones = add_constant(
+        network, (2,), np.array([1, 1], dtype=np.int64), dtype=np.int64)
     target = network.add_concatenation([ones, mask_shape])
     target.axis = 0
     mask_4d = network.add_shuffle(mask_2d)
@@ -545,7 +555,8 @@ def add_alibi_mask_4d(
     key_pos.axis = 0
 
     mask_shape = network.add_shape(mask_2d).get_output(0)
-    one_const = add_constant(network, (1,), np.array([1], dtype=np.int64), dtype=np.int64)
+    one_const = add_constant(
+        network, (1,), np.array([1], dtype=np.int64), dtype=np.int64)
     sq_size = network.add_slice(mask_shape, start=(0,), shape=(1,), stride=(1,))
     k_size = network.add_slice(mask_shape, start=(1,), shape=(1,), stride=(1,))
     sq_size_t = sq_size.get_output(0)
@@ -562,10 +573,11 @@ def add_alibi_mask_4d(
     query_pos_2d.set_input(1, query_pos_shape.get_output(0))
 
     rel_pos = network.add_elementwise(
-        key_pos_2d.get_output(0), query_pos_2d.get_output(0), trt.ElementWiseOperation.SUB
-    )
+        key_pos_2d.get_output(0), query_pos_2d.get_output(0),
+        trt.ElementWiseOperation.SUB)
 
-    one_const2 = add_constant(network, (1,), np.array([1], dtype=np.int64), dtype=np.int64)
+    one_const2 = add_constant(
+        network, (1,), np.array([1], dtype=np.int64), dtype=np.int64)
     rel_shape = network.add_concatenation([one_const, one_const2, sq_size_t, k_size_t])
     rel_shape.axis = 0
     rel_4d = network.add_shuffle(rel_pos.get_output(0))
@@ -578,8 +590,8 @@ def add_alibi_mask_4d(
     slopes_4d.reshape_dims = (1, num_heads, 1, 1)
 
     alibi_bias = network.add_elementwise(
-        slopes_4d.get_output(0), rel_4d.get_output(0), trt.ElementWiseOperation.PROD
-    )
+        slopes_4d.get_output(0), rel_4d.get_output(0),
+        trt.ElementWiseOperation.PROD)
     alibi_bias_t = alibi_bias.get_output(0)
 
     mask_4d = add_2d_mask_to_4d(network, mask_2d)
@@ -587,7 +599,8 @@ def add_alibi_mask_4d(
     if alibi_bias_t.dtype != out_dtype:
         alibi_bias_t = network.add_cast(alibi_bias_t, out_dtype).get_output(0)
 
-    combined = network.add_elementwise(mask_4d, alibi_bias_t, trt.ElementWiseOperation.SUM)
+    combined = network.add_elementwise(
+        mask_4d, alibi_bias_t, trt.ElementWiseOperation.SUM)
     return combined.get_output(0)
 
 
@@ -633,7 +646,8 @@ def add_apply_rope_native(
     rotary_embedding_dim = validate_native_rope_dim(rotary_embedding_dim)
     attention_size = num_heads * head_dim
 
-    inp_4d = reshape_rows_to_heads_4d(network, inp, num_heads, head_dim, sequence_length)
+    inp_4d = reshape_rows_to_heads_4d(
+        network, inp, num_heads, head_dim, sequence_length)
 
     # Reshape position_id [Sq] -> [1, Sq] (batch=1).
     seq_dim = -1 if sequence_length is None else sequence_length
@@ -649,7 +663,8 @@ def add_apply_rope_native(
     )
     rope.set_input(3, pos_2d.get_output(0))
 
-    return reshape_heads_4d_to_rows(network, rope.get_output(0), attention_size, sequence_length)
+    return reshape_heads_4d_to_rows(
+        network, rope.get_output(0), attention_size, sequence_length)
 
 
 def add_attention_core(
@@ -716,9 +731,7 @@ def add_attention_core(
     q_scaled = network.add_elementwise(q_4d, scale_t, trt.ElementWiseOperation.PROD)
 
     attn = network.add_attention(
-        q_scaled.get_output(0),
-        k_4d,
-        v_4d,
+        q_scaled.get_output(0), k_4d, v_4d,
         trt.AttentionNormalizationOp.SOFTMAX,
         causal,
     )
@@ -738,7 +751,9 @@ def _scalar_constant_for_trt_dtype(
     dtype: trt.DataType,
 ) -> trt.ITensor:
     np_dtype = np.float16 if dtype == trt.float16 else np.float32
-    const = add_constant(network, shape, np.full(shape, value, dtype=np_dtype), dtype=np_dtype)
+    const = add_constant(
+        network, shape, np.full(shape, value, dtype=np_dtype),
+        dtype=np_dtype)
     if dtype == trt.bfloat16:
         const = network.add_cast(const, trt.bfloat16).get_output(0)
     return const
@@ -752,10 +767,14 @@ def add_tanh_softcap(
     scalar_shape: tuple[int, ...],
 ) -> trt.ITensor:
     """Apply ``tanh(tensor / cap) * cap`` using scalar broadcasting."""
-    cap_t = _scalar_constant_for_trt_dtype(network, scalar_shape, float(cap), tensor.dtype)
-    scaled = network.add_elementwise(tensor, cap_t, trt.ElementWiseOperation.DIV).get_output(0)
-    capped = network.add_activation(scaled, trt.ActivationType.TANH).get_output(0)
-    return network.add_elementwise(capped, cap_t, trt.ElementWiseOperation.PROD).get_output(0)
+    cap_t = _scalar_constant_for_trt_dtype(
+        network, scalar_shape, float(cap), tensor.dtype)
+    scaled = network.add_elementwise(
+        tensor, cap_t, trt.ElementWiseOperation.DIV).get_output(0)
+    capped = network.add_activation(
+        scaled, trt.ActivationType.TANH).get_output(0)
+    return network.add_elementwise(
+        capped, cap_t, trt.ElementWiseOperation.PROD).get_output(0)
 
 
 def _repeat_kv_heads_4d(
@@ -769,7 +788,9 @@ def _repeat_kv_heads_4d(
     if num_kv_heads == num_heads:
         return x_4d
     if num_kv_heads <= 0 or num_heads % num_kv_heads != 0:
-        raise ValueError(f"num_heads={num_heads} must be divisible by num_kv_heads={num_kv_heads}")
+        raise ValueError(
+            f"num_heads={num_heads} must be divisible by "
+            f"num_kv_heads={num_kv_heads}")
 
     repeat = num_heads // num_kv_heads
     if num_kv_heads == 1:
@@ -778,17 +799,19 @@ def _repeat_kv_heads_4d(
         return concat.get_output(0)
 
     x_shape = network.add_shape(x_4d).get_output(0)
-    one = add_constant(network, (1,), np.array([1], dtype=np.int64), dtype=np.int64)
+    one = add_constant(
+        network, (1,), np.array([1], dtype=np.int64), dtype=np.int64)
     seq = network.add_slice(x_shape, start=(2,), shape=(1,), stride=(1,))
-    dim = add_constant(network, (1,), np.array([head_dim], dtype=np.int64), dtype=np.int64)
+    dim = add_constant(
+        network, (1,), np.array([head_dim], dtype=np.int64), dtype=np.int64)
     slice_shape = network.add_concatenation([one, one, seq.get_output(0), dim])
     slice_shape.axis = 0
 
     repeated = []
     for head_idx in range(num_kv_heads):
         head_slice = network.add_slice(
-            x_4d, start=(0, head_idx, 0, 0), shape=(1, 1, 1, head_dim), stride=(1, 1, 1, 1)
-        )
+            x_4d, start=(0, head_idx, 0, 0),
+            shape=(1, 1, 1, head_dim), stride=(1, 1, 1, 1))
         head_slice.set_input(2, slice_shape.get_output(0))
         repeated.extend([head_slice.get_output(0)] * repeat)
 
@@ -812,11 +835,11 @@ def _add_attention_core_with_logit_softcap(
 ) -> trt.ITensor:
     output_dtype = q_4d.dtype
     k_4d = _repeat_kv_heads_4d(
-        network, k_4d, num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim
-    )
+        network, k_4d, num_heads=num_heads, num_kv_heads=num_kv_heads,
+        head_dim=head_dim)
     v_4d = _repeat_kv_heads_4d(
-        network, v_4d, num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim
-    )
+        network, v_4d, num_heads=num_heads, num_kv_heads=num_kv_heads,
+        head_dim=head_dim)
 
     score_q = q_4d
     score_k = k_4d
@@ -827,18 +850,20 @@ def _add_attention_core_with_logit_softcap(
         if score_mask is not None and score_mask.dtype != trt.float32:
             score_mask = network.add_cast(score_mask, trt.float32).get_output(0)
 
-    scale_t = _scalar_constant_for_trt_dtype(network, (1, 1, 1, 1), scale, score_q.dtype)
+    scale_t = _scalar_constant_for_trt_dtype(
+        network, (1, 1, 1, 1), scale, score_q.dtype)
     scores = network.add_matrix_multiply(
-        score_q, trt.MatrixOperation.NONE, score_k, trt.MatrixOperation.TRANSPOSE
-    ).get_output(0)
-    scores = network.add_elementwise(scores, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
+        score_q, trt.MatrixOperation.NONE,
+        score_k, trt.MatrixOperation.TRANSPOSE).get_output(0)
+    scores = network.add_elementwise(
+        scores, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
 
-    scores = add_tanh_softcap(network, scores, logit_softcap, scalar_shape=(1, 1, 1, 1))
+    scores = add_tanh_softcap(
+        network, scores, logit_softcap, scalar_shape=(1, 1, 1, 1))
 
     if score_mask is not None:
         scores = network.add_elementwise(
-            scores, score_mask, trt.ElementWiseOperation.SUM
-        ).get_output(0)
+            scores, score_mask, trt.ElementWiseOperation.SUM).get_output(0)
 
     probs = network.add_softmax(scores)
     probs.axes = 1 << 3
@@ -847,8 +872,8 @@ def _add_attention_core_with_logit_softcap(
         probs_t = network.add_cast(probs_t, output_dtype).get_output(0)
 
     context = network.add_matrix_multiply(
-        probs_t, trt.MatrixOperation.NONE, v_4d, trt.MatrixOperation.NONE
-    ).get_output(0)
+        probs_t, trt.MatrixOperation.NONE,
+        v_4d, trt.MatrixOperation.NONE).get_output(0)
     return _cast_back_to_trt_dtype(network, context, output_dtype)
 
 
@@ -879,64 +904,31 @@ def add_attention_from_rows(
     attention_size = num_heads * head_dim
     kv_heads = num_heads if num_kv_heads is None else num_kv_heads
     q_4d = reshape_rows_to_heads_4d(
-        network,
-        q,
-        num_heads,
-        head_dim,
-        sequence_length=q_seq,
-        tag=None if tag is None else tag + ".q",
-    )
+        network, q, num_heads, head_dim, sequence_length=q_seq,
+        tag=None if tag is None else tag + ".q")
     k_4d = reshape_rows_to_heads_4d(
-        network,
-        k,
-        kv_heads,
-        head_dim,
-        sequence_length=kv_seq,
-        tag=None if tag is None else tag + ".k",
-    )
+        network, k, kv_heads, head_dim, sequence_length=kv_seq,
+        tag=None if tag is None else tag + ".k")
     v_4d = reshape_rows_to_heads_4d(
-        network,
-        v,
-        kv_heads,
-        head_dim,
-        sequence_length=kv_seq,
-        tag=None if tag is None else tag + ".v",
-    )
+        network, v, kv_heads, head_dim, sequence_length=kv_seq,
+        tag=None if tag is None else tag + ".v")
     if scale is None:
         scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
     if logit_softcap is not None and float(logit_softcap) > 0.0:
         if causal:
-            raise NotImplementedError("logit_softcap attention requires an explicit additive mask")
+            raise NotImplementedError(
+                "logit_softcap attention requires an explicit additive mask")
         ctx_4d = _add_attention_core_with_logit_softcap(
-            network,
-            q_4d,
-            k_4d,
-            v_4d,
-            num_heads=num_heads,
-            num_kv_heads=kv_heads,
-            head_dim=head_dim,
-            mask=mask,
-            scale=scale,
-            logit_softcap=float(logit_softcap),
-        )
+            network, q_4d, k_4d, v_4d,
+            num_heads=num_heads, num_kv_heads=kv_heads, head_dim=head_dim,
+            mask=mask, scale=scale, logit_softcap=float(logit_softcap))
     else:
         ctx_4d = add_attention_core(
-            network,
-            q_4d,
-            k_4d,
-            v_4d,
-            causal=causal,
-            mask=mask,
-            scale=scale,
-            fp32_accumulation=fp32_accumulation,
-        )
+            network, q_4d, k_4d, v_4d, causal=causal, mask=mask, scale=scale,
+            fp32_accumulation=fp32_accumulation)
     return reshape_heads_4d_to_rows(
-        network,
-        ctx_4d,
-        attention_size,
-        sequence_length=q_seq,
-        tag=None if tag is None else tag + ".ctx",
-    )
+        network, ctx_4d, attention_size, sequence_length=q_seq,
+        tag=None if tag is None else tag + ".ctx")
 
 
 # Backward-compatible name used by existing tests and call sites.
@@ -973,22 +965,23 @@ def add_decoder_attention_ffi(
     v_3d = network.add_shuffle(all_v)
     v_3d.reshape_dims = (attention_window, num_heads, head_dim)
 
-    scale_val = 1.0 / (head_dim**0.5)
+    scale_val = 1.0 / (head_dim ** 0.5)
     ffi_outputs = add_tvm_ffi_kernel(
         network,
         kernel_name=kernel_name,
-        inputs=[q_2d.get_output(0), k_3d.get_output(0), v_3d.get_output(0)],
+        inputs=[q_2d.get_output(0), k_3d.get_output(0),
+                v_3d.get_output(0)],
         output_specs=[{"dims": [num_heads, head_dim], "dtype": "float16"}],
         workspace_bytes=32 * 1024 * 1024,  # 32MB for FlashInfer tmp
         extra_args=[
-            {"type": "none"},  # maybe_lse
-            {"type": "int", "value": 0},  # kv_layout_code (NHD)
-            {"type": "int", "value": -1},  # window_left
-            {"type": "none"},  # alibi_slopes
-            {"type": "float", "value": 0.0},  # logits_soft_cap
-            {"type": "float", "value": scale_val},  # sm_scale
-            {"type": "float", "value": 1.0},  # rope_rcp_scale
-            {"type": "float", "value": 0.0001},  # rope_rcp_theta
+            {"type": "none"},              # maybe_lse
+            {"type": "int", "value": 0},    # kv_layout_code (NHD)
+            {"type": "int", "value": -1},   # window_left
+            {"type": "none"},              # alibi_slopes
+            {"type": "float", "value": 0.0},     # logits_soft_cap
+            {"type": "float", "value": scale_val}, # sm_scale
+            {"type": "float", "value": 1.0},      # rope_rcp_scale
+            {"type": "float", "value": 0.0001},   # rope_rcp_theta
         ],
     )
     context_flat = network.add_shuffle(ffi_outputs[0])
@@ -999,7 +992,6 @@ def add_decoder_attention_ffi(
 # ---------------------------------------------------------------------------
 # TVM-FFI kernel bridge
 # ---------------------------------------------------------------------------
-
 
 def add_tvm_ffi_kernel(
     network: trt.INetworkDefinition,
@@ -1047,8 +1039,10 @@ def add_tvm_ffi_kernel(
     shape_spec = json.dumps(spec_dict)
 
     fields = [
-        trt.PluginField("kernel_name", kernel_name.encode("utf-8"), trt.PluginFieldType.CHAR),
-        trt.PluginField("shape_spec", shape_spec.encode("utf-8"), trt.PluginFieldType.CHAR),
+        trt.PluginField("kernel_name", kernel_name.encode("utf-8"),
+                         trt.PluginFieldType.CHAR),
+        trt.PluginField("shape_spec", shape_spec.encode("utf-8"),
+                         trt.PluginFieldType.CHAR),
     ]
     fc = trt.PluginFieldCollection(fields)
     plugin = creator.create_plugin("tvm_ffi_kernel", fc)
