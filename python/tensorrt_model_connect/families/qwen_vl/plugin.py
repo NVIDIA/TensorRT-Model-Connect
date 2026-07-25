@@ -174,9 +174,16 @@ class QwenVLPlugin:
             for index in selected_fp32
             if index >= _VISION_LAYER_OFFSET
         }
-        vision_precision = (
-            "fp32" if precision == "fp16" and _VISION_COMPONENT in selected_fp32
-            else precision)
+        # The vision tower is a separate, unquantized engine at a fixed
+        # precision and does not follow the decoder's bf16 work dtype (it has no
+        # bf16 path). Keep it at fp32 for a bf16 decoder — matching the deployed
+        # baseline, where the ViT is not affected by --precision.
+        if precision == "bf16":
+            vision_precision = "fp32"
+        elif precision == "fp16" and _VISION_COMPONENT in selected_fp32:
+            vision_precision = "fp32"
+        else:
+            vision_precision = precision
         fixed_h, fixed_w = _fixed_image_dimensions(config)
 
         if _is_qwen3_vl(config):
@@ -432,16 +439,29 @@ def _build_qwen3_vl_decoder(
 
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "bf16":
+        # numpy has no bfloat16, so constants are staged as float16 and the
+        # network computes in bfloat16 (the model's native training dtype).
+        work_np_dtype, work_trt_dtype = np.float16, trt.bfloat16
     elif precision == "fp32":
         work_np_dtype, work_trt_dtype = np.float32, trt.float32
     else:
         raise ValueError(
-            f"Unsupported Qwen3-VL precision {precision!r}; expected fp32 or fp16")
+            f"Unsupported Qwen3-VL precision {precision!r}; "
+            "expected fp32, fp16 or bf16")
     selected_fp32_layers = {
         int(index)
         for index in config.raw.get("_fp32_layers", ())
         if 0 <= int(index) < config.num_hidden_layers
     }
+
+    def _cast_work_dtype(tensor: trt.ITensor) -> trt.ITensor:
+        # Constants are staged in numpy as float16 (numpy has no bfloat16); with a
+        # bfloat16 work dtype they must be cast so strongly-typed elementwise ops
+        # don't mix Half with BFloat16. No-op when the dtype already matches.
+        if tensor.dtype == work_trt_dtype:
+            return tensor
+        return network.add_cast(tensor, work_trt_dtype).get_output(0)
 
     attention_size: int = weights.get("_attention_size", config.attention_size)
     mlp_size: int = weights.get("_mlp_size", config.intermediate_size)
@@ -483,16 +503,19 @@ def _build_qwen3_vl_decoder(
         ds_active_tensor = network.add_input(
             "deepstack_active", trt.float32, (-1, 1))
 
-    # KV cache inputs
+    # KV cache inputs, declared at the work dtype so the runtime KV buffer
+    # matches the decode precision (bf16/fp16 halves KV size and speeds up
+    # decode); the C++ runtime sizes the cache from the engine input dtype.
+    # Mirrors the whisper/canary decoder builders.
     cache_k_inputs = []
     cache_v_inputs = []
     for i in range(num_layers):
         ck = network.add_input(
             graph_ops.layer_tensor_name("cache_k", i),
-            trt.float32, (max_cache_length, kv_attention_size))
+            work_trt_dtype, (max_cache_length, kv_attention_size))
         cv = network.add_input(
             graph_ops.layer_tensor_name("cache_v", i),
-            trt.float32, (max_cache_length, kv_attention_size))
+            work_trt_dtype, (max_cache_length, kv_attention_size))
         cache_k_inputs.append(ck)
         cache_v_inputs.append(cv)
 
@@ -527,20 +550,28 @@ def _build_qwen3_vl_decoder(
     fp32_attention_mask = attention_mask
     fp32_ds_embed_inputs = list(ds_embed_inputs)
     fp32_ds_active_tensor = ds_active_tensor
-    fp32_cache_k_inputs = list(cache_k_inputs)
-    fp32_cache_v_inputs = list(cache_v_inputs)
+    # KV inputs are already at the work dtype. The fp16 mixed-precision fp32
+    # layers read them through an up-cast; bf16/fp32 leave selected_fp32_layers
+    # empty, so these views go unused there.
+    if work_trt_dtype != trt.float32 and selected_fp32_layers:
+        fp32_cache_k_inputs = [
+            network.add_cast(ck, trt.float32).get_output(0)
+            for ck in cache_k_inputs]
+        fp32_cache_v_inputs = [
+            network.add_cast(cv, trt.float32).get_output(0)
+            for cv in cache_v_inputs]
+    else:
+        fp32_cache_k_inputs = list(cache_k_inputs)
+        fp32_cache_v_inputs = list(cache_v_inputs)
     float_inputs = [attention_mask, input_embed_tensor, use_input_embed_tensor]
     float_inputs.extend(ds_embed_inputs)
     if ds_active_tensor is not None:
         float_inputs.append(ds_active_tensor)
-    float_inputs.extend(cache_k_inputs)
-    float_inputs.extend(cache_v_inputs)
     if work_trt_dtype != trt.float32:
         cast_inputs = [
             network.add_cast(value, work_trt_dtype).get_output(0)
             for value in float_inputs
         ]
-        cursor = 0
         attention_mask, input_embed_tensor, use_input_embed_tensor = cast_inputs[:3]
         cursor = 3
         ds_embed_inputs = cast_inputs[cursor:cursor + len(ds_embed_inputs)]
@@ -548,9 +579,6 @@ def _build_qwen3_vl_decoder(
         if ds_active_tensor is not None:
             ds_active_tensor = cast_inputs[cursor]
             cursor += 1
-        cache_k_inputs = cast_inputs[cursor:cursor + num_layers]
-        cursor += num_layers
-        cache_v_inputs = cast_inputs[cursor:cursor + num_layers]
 
     # --- Shared constants ---
     embedding_table = graph_ops.add_constant(
@@ -561,13 +589,13 @@ def _build_qwen3_vl_decoder(
         attention_window, head_dim, config.rope_theta, True)
     sin_half_np = graph_ops.make_rope_table_half_dim(
         attention_window, head_dim, config.rope_theta, False)
-    cos_half_tensor = graph_ops.add_constant(
-        network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
-    sin_half_tensor = graph_ops.add_constant(
-        network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
-    eps_tensor = graph_ops.add_constant(
+    cos_half_tensor = _cast_work_dtype(graph_ops.add_constant(
+        network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype))
+    sin_half_tensor = _cast_work_dtype(graph_ops.add_constant(
+        network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype))
+    eps_tensor = _cast_work_dtype(graph_ops.add_constant(
         network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype),
-        dtype=work_np_dtype)
+        dtype=work_np_dtype))
     fp32_cos_half_tensor = None
     fp32_sin_half_tensor = None
     fp32_eps_tensor = None
@@ -583,12 +611,12 @@ def _build_qwen3_vl_decoder(
 
     # --- Embedding (with input_embed override for VL) ---
     gather = network.add_gather(embedding_table, token_id, 0)
-    token_embed = gather.get_output(0)
+    token_embed = _cast_work_dtype(gather.get_output(0))
 
     # Conditional: (1 - flag) * token_embed + flag * input_embed
-    one_const = graph_ops.add_constant(
+    one_const = _cast_work_dtype(graph_ops.add_constant(
         network, (1, 1), np.array([1.0], dtype=work_np_dtype),
-        dtype=work_np_dtype)
+        dtype=work_np_dtype))
     inv_flag = network.add_elementwise(
         one_const, use_input_embed_tensor,
         trt.ElementWiseOperation.SUB)
@@ -736,14 +764,15 @@ def _build_qwen3_vl_decoder(
     logits.name = "logits"
     network.mark_output(logits)
 
-    # --- Present K/V outputs ---
+    # --- Present K/V outputs, marked at the work dtype so they round-trip with
+    # the work-dtype KV cache inputs (fp16 fp32-layers emit fp32 and cast down).
     for i in range(num_layers):
         pk = present_k_outputs[i]
         pv = present_v_outputs[i]
-        if pk.dtype != trt.float32:
-            pk = network.add_cast(pk, trt.float32).get_output(0)
-        if pv.dtype != trt.float32:
-            pv = network.add_cast(pv, trt.float32).get_output(0)
+        if pk.dtype != work_trt_dtype:
+            pk = network.add_cast(pk, work_trt_dtype).get_output(0)
+        if pv.dtype != work_trt_dtype:
+            pv = network.add_cast(pv, work_trt_dtype).get_output(0)
         pk.name = graph_ops.layer_tensor_name("present_k", i)
         pv.name = graph_ops.layer_tensor_name("present_v", i)
         network.mark_output(pk)
