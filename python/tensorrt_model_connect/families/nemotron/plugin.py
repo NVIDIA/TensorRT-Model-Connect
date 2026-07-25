@@ -48,7 +48,11 @@ class NemotronPlugin:
         return model_type.lower() == "nemotron"
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig, *, precision: str = "fp32",
+        self,
+        model_dir: str,
+        config: ModelConfig,
+        *,
+        precision: str = "fp32",
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -69,7 +73,8 @@ class NemotronPlugin:
         # Embedding
         embedding = _load_tensor(readers, "model.embed_tokens.weight")
         assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
+        )
         weights["embedding"] = embedding.astype(target_dtype)
 
         mlp_size = 0
@@ -82,10 +87,8 @@ class NemotronPlugin:
             # LayerNorm1P: gamma offset (+1) is applied here so the engine
             # can use standard LayerNorm. HF stores the raw weight; the +1 is
             # applied in NemotronLayerNorm1P.forward().
-            input_norm = _load_tensor(
-                readers, f"{hf_prefix}.input_layernorm.weight")
-            post_norm = _load_tensor(
-                readers, f"{hf_prefix}.post_attention_layernorm.weight")
+            input_norm = _load_tensor(readers, f"{hf_prefix}.input_layernorm.weight")
+            post_norm = _load_tensor(readers, f"{hf_prefix}.post_attention_layernorm.weight")
             weights[f"{prefix}.input_norm"] = input_norm.astype(np.float32) + 1.0
             weights[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32) + 1.0
 
@@ -94,20 +97,18 @@ class NemotronPlugin:
             post_norm_bias_key = f"{hf_prefix}.post_attention_layernorm.bias"
             if _has_tensor(readers, input_norm_bias_key):
                 weights[f"{prefix}.input_norm_beta"] = _load_tensor(
-                    readers, input_norm_bias_key).astype(np.float32)
+                    readers, input_norm_bias_key
+                ).astype(np.float32)
             if _has_tensor(readers, post_norm_bias_key):
                 weights[f"{prefix}.post_attn_norm_beta"] = _load_tensor(
-                    readers, post_norm_bias_key).astype(np.float32)
+                    readers, post_norm_bias_key
+                ).astype(np.float32)
 
             # Q/K/V/O projections (separate, standard Linear [out, in])
-            q_raw = _load_tensor(
-                readers, f"{hf_prefix}.self_attn.q_proj.weight")
-            k_raw = _load_tensor(
-                readers, f"{hf_prefix}.self_attn.k_proj.weight")
-            v_raw = _load_tensor(
-                readers, f"{hf_prefix}.self_attn.v_proj.weight")
-            o_raw = _load_tensor(
-                readers, f"{hf_prefix}.self_attn.o_proj.weight")
+            q_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.q_proj.weight")
+            k_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.k_proj.weight")
+            v_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.v_proj.weight")
+            o_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.o_proj.weight")
 
             if attention_size == 0:
                 attention_size = q_raw.shape[0]
@@ -125,18 +126,17 @@ class NemotronPlugin:
             weights[f"{prefix}.w_o"] = o_t
 
             # Optional attention biases (attention_bias=True in config)
-            for proj, dim in [("q_proj", q_dim), ("k_proj", kv_dim),
-                              ("v_proj", kv_dim)]:
+            for proj, dim in [("q_proj", q_dim), ("k_proj", kv_dim), ("v_proj", kv_dim)]:
                 bias_key = f"{hf_prefix}.self_attn.{proj}.bias"
                 short = proj[0]  # q, k, v
                 if _has_tensor(readers, bias_key):
-                    weights[f"{prefix}.{short}_bias"] = _load_tensor(
-                        readers, bias_key).astype(target_dtype)
+                    weights[f"{prefix}.{short}_bias"] = _load_tensor(readers, bias_key).astype(
+                        target_dtype
+                    )
 
             o_bias_key = f"{hf_prefix}.self_attn.o_proj.bias"
             if _has_tensor(readers, o_bias_key):
-                weights[f"{prefix}.o_bias"] = _load_tensor(
-                    readers, o_bias_key).astype(target_dtype)
+                weights[f"{prefix}.o_bias"] = _load_tensor(readers, o_bias_key).astype(target_dtype)
 
             # 2-projection MLP: up_proj → relu² → down_proj
             # Maps to gelu_fc MLP type: up_proj → w_fc1, down_proj → w_fc2
@@ -145,43 +145,44 @@ class NemotronPlugin:
             if mlp_size == 0:
                 mlp_size = up_raw.shape[0]
 
-            weights[f"{prefix}.w_fc1"] = _transpose_2d(
-                up_raw, "up_proj", precision=precision)
-            weights[f"{prefix}.w_fc2"] = _transpose_2d(
-                down_raw, "down_proj", precision=precision)
+            weights[f"{prefix}.w_fc1"] = _transpose_2d(up_raw, "up_proj", precision=precision)
+            weights[f"{prefix}.w_fc2"] = _transpose_2d(down_raw, "down_proj", precision=precision)
 
             # Optional MLP biases (mlp_bias=True in config)
             up_bias_key = f"{hf_prefix}.mlp.up_proj.bias"
             down_bias_key = f"{hf_prefix}.mlp.down_proj.bias"
             if _has_tensor(readers, up_bias_key):
-                weights[f"{prefix}.fc1_bias"] = _load_tensor(
-                    readers, up_bias_key).astype(target_dtype)
+                weights[f"{prefix}.fc1_bias"] = _load_tensor(readers, up_bias_key).astype(
+                    target_dtype
+                )
             if _has_tensor(readers, down_bias_key):
-                weights[f"{prefix}.fc2_bias"] = _load_tensor(
-                    readers, down_bias_key).astype(target_dtype)
+                weights[f"{prefix}.fc2_bias"] = _load_tensor(readers, down_bias_key).astype(
+                    target_dtype
+                )
 
         # Final LayerNorm1P (+1 gamma offset)
         final_norm_key = "model.norm.weight"
         if _has_tensor(readers, final_norm_key):
-            weights["final_norm"] = _load_tensor(
-                readers, final_norm_key).astype(np.float32) + 1.0
+            weights["final_norm"] = _load_tensor(readers, final_norm_key).astype(np.float32) + 1.0
         else:
             weights["final_norm"] = np.ones(hidden, dtype=np.float32)
 
         final_norm_bias_key = "model.norm.bias"
         if _has_tensor(readers, final_norm_bias_key):
-            weights["final_norm_beta"] = _load_tensor(
-                readers, final_norm_bias_key).astype(np.float32)
+            weights["final_norm_beta"] = _load_tensor(readers, final_norm_bias_key).astype(
+                np.float32
+            )
 
         # LM head
         lm_head_key = "lm_head.weight"
         if _has_tensor(readers, lm_head_key):
             weights["w_out"] = _transpose_2d(
-                _load_tensor(readers, lm_head_key), "lm_head",
-                precision=precision)
+                _load_tensor(readers, lm_head_key), "lm_head", precision=precision
+            )
         else:
             weights["w_out"] = _transpose_2d(
-                embedding.copy(), "embedding_tied", precision=precision)
+                embedding.copy(), "embedding_tied", precision=precision
+            )
 
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
         weights["_mlp_size"] = mlp_size  # type: ignore[assignment]
@@ -189,22 +190,27 @@ class NemotronPlugin:
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         debug_layer_outputs: bool = False,
     ) -> bytes:
         partial_rotary = config.raw.get("partial_rotary_factor", 0.5)
         return build_standard_decoder_engine(
-            config, weights, max_cache_length,
-            precision=precision, quant_ctx=quant_ctx,
-            norm_type="layernorm",
-            mlp_type="gelu_fc",
-            position_type="rope",
-            activation="relu2",
+            config,
+            weights,
+            max_cache_length,
+            precision=precision,
+            quant_ctx=quant_ctx,
             partial_rotary_factor=partial_rotary,
             verbose=verbose,
-            debug_layer_outputs=debug_layer_outputs)
+            debug_layer_outputs=debug_layer_outputs,
+        )
 
 
 plugin = NemotronPlugin()
