@@ -14,6 +14,8 @@ import re
 from dataclasses import dataclass
 
 
+
+
 PEFT_TO_WEIGHT_NAME = {
     "q_proj": "w_q",
     "k_proj": "w_k",
@@ -48,8 +50,7 @@ def _parse_target_modules(raw: object) -> tuple[str, ...]:
         if name not in PEFT_TO_WEIGHT_NAME:
             supported = ", ".join(DEFAULT_TARGET_MODULES)
             raise ValueError(
-                f"Unsupported Qwen-VL LoRA target module {name!r}; supported: {supported}"
-            )
+                f"Unsupported Qwen-VL LoRA target module {name!r}; supported: {supported}")
         if name not in modules:
             modules.append(name)
     if not modules:
@@ -82,8 +83,7 @@ class DynamicLoraConfig:
         if max_rank <= 0 or max_rank > _MAX_SUPPORTED_RANK:
             raise ValueError(
                 "qwen_vl_lora.max_rank must be between 1 and "
-                f"{_MAX_SUPPORTED_RANK} when dynamic LoRA is enabled"
-            )
+                f"{_MAX_SUPPORTED_RANK} when dynamic LoRA is enabled")
         return cls(enabled=True, max_rank=max_rank, target_modules=target_modules)
 
     @property

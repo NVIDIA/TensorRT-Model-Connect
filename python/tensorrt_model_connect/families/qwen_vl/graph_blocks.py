@@ -42,33 +42,34 @@ if TYPE_CHECKING:
 # blocks themselves).
 # ---------------------------------------------------------------------------
 
-
 def make_matmul_fn(network, dtype, quant_ctx, lora_config=None):
     """Create a matmul callable that routes through quant_ctx if present.
 
     Returns a function: (lhs, lhs_w, rhs_w, rhs_weights, weight_name) -> ITensor
     """
-
     def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
         if quant_ctx is None:
             base = graph_ops.add_matmul_rhs_constant(
-                network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype
-            )
+                network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype)
         else:
             base = quant_ctx.maybe_quantized_matmul(
-                network, lhs, lhs_w, rhs_w, rhs_weights, weight_name, dtype=dtype
-            )
+                network, lhs, lhs_w, rhs_w, rhs_weights, weight_name,
+                dtype=dtype)
 
         if lora_config is None or not lora_config.targets_weight(weight_name):
             return base
 
         a_name, b_name = lora_config.input_names(weight_name)
-        lora_a = network.add_input(a_name, lhs.dtype, (lhs_w, lora_config.max_rank))
-        lora_b = network.add_input(b_name, lhs.dtype, (lora_config.max_rank, rhs_w))
+        lora_a = network.add_input(
+            a_name, lhs.dtype, (lhs_w, lora_config.max_rank))
+        lora_b = network.add_input(
+            b_name, lhs.dtype, (lora_config.max_rank, rhs_w))
         if lora_a is None or lora_b is None:
-            raise RuntimeError(f"Failed to add dynamic LoRA inputs for projection {weight_name}")
+            raise RuntimeError(
+                f"Failed to add dynamic LoRA inputs for projection {weight_name}")
         delta = graph_ops.add_lora_delta(network, lhs, lora_a, lora_b)
-        return network.add_elementwise(base, delta, trt.ElementWiseOperation.SUM).get_output(0)
+        return network.add_elementwise(
+            base, delta, trt.ElementWiseOperation.SUM).get_output(0)
 
     return matmul
 
@@ -89,13 +90,14 @@ def infer_kv_attention_size(
     if explicit is not None and int(explicit) != expected:
         raise ValueError(
             f"Compact K/V cache width must be num_kv_heads * head_dim "
-            f"({expected}), got _kv_attention_size={int(explicit)}"
-        )
+            f"({expected}), got _kv_attention_size={int(explicit)}")
     w_k = weights.get(f"{prefix}.w_k")
     if isinstance(w_k, np.ndarray) and w_k.ndim == 2:
         actual = int(w_k.shape[1])
         if actual != expected:
-            raise ValueError(f"{prefix}.w_k must use compact K/V width {expected}, got {actual}")
+            raise ValueError(
+                f"{prefix}.w_k must use compact K/V width {expected}, "
+                f"got {actual}")
     return expected
 
 
@@ -127,16 +129,15 @@ def apply_norm(
             beta = np.zeros(hidden_size, dtype=np.float32)
         if eps is not None:
             return graph_ops.add_layer_norm_native(
-                network, inp, hidden_size, gamma, beta, eps, dtype=dtype
-            )
+                network, inp, hidden_size, gamma, beta, eps, dtype=dtype)
         # Native INormalizationLayer requires a build-time scalar epsilon.
         # Some callers only pass epsilon as an ITensor, so keep the manual
         # shared fallback until those builders thread the scalar too.
         return graph_ops.add_layer_norm(
-            network, inp, hidden_size, gamma, beta, eps_tensor, dtype=dtype
-        )
+            network, inp, hidden_size, gamma, beta, eps_tensor, dtype=dtype)
     else:
-        return graph_ops.add_rms_norm(network, inp, hidden_size, gamma, eps_tensor, dtype=dtype)
+        return graph_ops.add_rms_norm(
+            network, inp, hidden_size, gamma, eps_tensor, dtype=dtype)
 
 
 def add_attention_block(
@@ -202,21 +203,18 @@ def add_attention_block(
 
     # Pre-attention norm
     normed = apply_norm(
-        network,
-        hidden,
-        hidden_size,
+        network, hidden, hidden_size,
         weights[f"{prefix}.input_norm"],
         weights.get(f"{prefix}.input_norm_beta"),
-        eps_tensor,
-        norm_type,
-        dtype=dtype,
-        eps=eps,
-    )
+        eps_tensor, norm_type, dtype=dtype, eps=eps)
 
     # QKV projections
-    q = matmul(normed, hidden_size, attention_size, weights[f"{prefix}.w_q"], f"{_lp}.w_q")
-    k = matmul(normed, hidden_size, kv_attention_size, weights[f"{prefix}.w_k"], f"{_lp}.w_k")
-    v = matmul(normed, hidden_size, kv_attention_size, weights[f"{prefix}.w_v"], f"{_lp}.w_v")
+    q = matmul(normed, hidden_size, attention_size,
+               weights[f"{prefix}.w_q"], f"{_lp}.w_q")
+    k = matmul(normed, hidden_size, kv_attention_size,
+               weights[f"{prefix}.w_k"], f"{_lp}.w_k")
+    v = matmul(normed, hidden_size, kv_attention_size,
+               weights[f"{prefix}.w_v"], f"{_lp}.w_v")
 
     # Optional QKV biases
     q_bias = weights.get(f"{prefix}.q_bias")
@@ -233,27 +231,13 @@ def add_attention_block(
     q_norm = weights.get(f"{prefix}.q_norm")
     if q_norm is not None:
         q = graph_ops.add_rms_norm_per_head(
-            network,
-            q,
-            num_heads,
-            head_dim,
-            q_norm,
-            eps_tensor,
-            dtype=dtype,
-            sequence_length=sequence_length,
-        )
+            network, q, num_heads, head_dim, q_norm, eps_tensor, dtype=dtype,
+            sequence_length=sequence_length)
     k_norm = weights.get(f"{prefix}.k_norm")
     if k_norm is not None:
         k = graph_ops.add_rms_norm_per_head(
-            network,
-            k,
-            num_kv_heads,
-            head_dim,
-            k_norm,
-            eps_tensor,
-            dtype=dtype,
-            sequence_length=sequence_length,
-        )
+            network, k, num_kv_heads, head_dim, k_norm, eps_tensor, dtype=dtype,
+            sequence_length=sequence_length)
 
     # ------------------------------------------------------------------ #
     # RoPE via native IRotaryEmbeddingLayer                              #
@@ -264,64 +248,30 @@ def add_attention_block(
         if cos_half_tensor is None or sin_half_tensor is None:
             raise ValueError(
                 "RoPE attention requires half-dimension cos/sin tensors for "
-                "TRT native IRotaryEmbeddingLayer"
-            )
+                "TRT native IRotaryEmbeddingLayer")
         rope_dim = rotary_embedding_dim or head_dim
         rope_dim = graph_ops.validate_native_rope_dim(rope_dim)
         if mrope_position_ids is not None and mrope_section is not None:
             if sequence_length != 1:
                 raise NotImplementedError(
-                    "graph_blocks mRoPE currently supports single-token execution"
-                )
+                    "graph_blocks mRoPE currently supports single-token execution")
             q = graph_ops.add_apply_mrope_native(
-                network,
-                q,
-                num_heads,
-                head_dim,
-                cos_half_tensor,
-                sin_half_tensor,
-                mrope_position_ids,
-                mrope_section,
-                rope_dim,
-                interleaved_rope,
-            )
+                network, q, num_heads, head_dim,
+                cos_half_tensor, sin_half_tensor, mrope_position_ids,
+                mrope_section, rope_dim, interleaved_rope)
             k = graph_ops.add_apply_mrope_native(
-                network,
-                k,
-                num_kv_heads,
-                head_dim,
-                cos_half_tensor,
-                sin_half_tensor,
-                mrope_position_ids,
-                mrope_section,
-                rope_dim,
-                interleaved_rope,
-            )
+                network, k, num_kv_heads, head_dim,
+                cos_half_tensor, sin_half_tensor, mrope_position_ids,
+                mrope_section, rope_dim, interleaved_rope)
         else:
             q = graph_ops.add_apply_rope_native(
-                network,
-                q,
-                num_heads,
-                head_dim,
-                cos_half_tensor,
-                sin_half_tensor,
-                position_id,
-                rope_dim,
-                interleaved_rope,
-                sequence_length=sequence_length,
-            )
+                network, q, num_heads, head_dim,
+                cos_half_tensor, sin_half_tensor, position_id,
+                rope_dim, interleaved_rope, sequence_length=sequence_length)
             k = graph_ops.add_apply_rope_native(
-                network,
-                k,
-                num_kv_heads,
-                head_dim,
-                cos_half_tensor,
-                sin_half_tensor,
-                position_id,
-                rope_dim,
-                interleaved_rope,
-                sequence_length=sequence_length,
-            )
+                network, k, num_kv_heads, head_dim,
+                cos_half_tensor, sin_half_tensor, position_id,
+                rope_dim, interleaved_rope, sequence_length=sequence_length)
 
     # Save present K/V (before concatenation, this is the raw projection output)
     present_k = k
@@ -339,9 +289,11 @@ def add_attention_block(
         current_v = v_reshape.get_output(0)
 
     # Concatenate with cache
-    all_k = network.add_concatenation([cache_k, current_k])
+    all_k = network.add_concatenation(
+        [cache_k, current_k])
     all_k.axis = 0
-    all_v = network.add_concatenation([cache_v, current_v])
+    all_v = network.add_concatenation(
+        [cache_v, current_v])
     all_v.axis = 0
 
     # ------------------------------------------------------------------ #
@@ -383,22 +335,18 @@ def add_attention_block(
         if num_kv_heads != num_heads:
             raise ValueError(
                 "FFI decoder attention requires num_kv_heads == num_heads; "
-                "use TRT native attention for compact GQA/MQA KV cache"
-            )
+                "use TRT native attention for compact GQA/MQA KV cache")
         # Fused attention kernel via TVM-FFI plugin
         context = graph_ops.add_decoder_attention_ffi(
-            network,
-            q,
-            all_k.get_output(0),
-            all_v.get_output(0),
+            network, q, all_k.get_output(0), all_v.get_output(0),
             kernel_name=ffi_attention_kernel,
-            num_heads=num_heads,
-            head_dim=head_dim,
-            attention_window=attention_window,
-        )
+            num_heads=num_heads, head_dim=head_dim,
+            attention_window=attention_window)
 
     # Output projection
-    attn_out = matmul(context, attention_size, hidden_size, weights[f"{prefix}.w_o"], f"{_lp}.w_o")
+    attn_out = matmul(context,
+                      attention_size, hidden_size,
+                      weights[f"{prefix}.w_o"], f"{_lp}.w_o")
 
     # Optional output projection bias
     o_bias = weights.get(f"{prefix}.o_bias")
@@ -430,16 +378,19 @@ def add_swiglu_mlp(
     matmul = _make_matmul_fn(network, dtype, quant_ctx, lora_config)
     _lp = layer_prefix or prefix
 
-    gate = matmul(inp, hidden_size, mlp_size, weights[f"{prefix}.w_gate"], f"{_lp}.w_gate")
-    up = matmul(inp, hidden_size, mlp_size, weights[f"{prefix}.w_up"], f"{_lp}.w_up")
+    gate = matmul(inp, hidden_size, mlp_size,
+                  weights[f"{prefix}.w_gate"], f"{_lp}.w_gate")
+    up = matmul(inp, hidden_size, mlp_size,
+                weights[f"{prefix}.w_up"], f"{_lp}.w_up")
 
     sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
-    gated = network.add_elementwise(swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+    swish = network.add_elementwise(
+        gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+    gated = network.add_elementwise(
+        swish.get_output(0), up, trt.ElementWiseOperation.PROD)
 
-    mlp_out = matmul(
-        gated.get_output(0), mlp_size, hidden_size, weights[f"{prefix}.w_down"], f"{_lp}.w_down"
-    )
+    mlp_out = matmul(gated.get_output(0), mlp_size, hidden_size,
+                     weights[f"{prefix}.w_down"], f"{_lp}.w_down")
     return mlp_out
 
 
@@ -460,14 +411,16 @@ def add_gelu_fc_mlp(
     matmul = _make_matmul_fn(network, dtype, quant_ctx)
     _lp = layer_prefix or prefix
 
-    fc1 = matmul(inp, hidden_size, mlp_size, weights[f"{prefix}.w_fc1"], f"{_lp}.w_fc1")
+    fc1 = matmul(inp, hidden_size, mlp_size,
+                 weights[f"{prefix}.w_fc1"], f"{_lp}.w_fc1")
     fc1_bias = weights.get(f"{prefix}.fc1_bias")
     if fc1_bias is not None:
         fc1 = graph_ops.add_bias_sum(network, fc1, mlp_size, fc1_bias, dtype=dtype)
 
     activated = graph_ops.add_activation(network, fc1, activation, dtype=dtype)
 
-    fc2 = matmul(activated, mlp_size, hidden_size, weights[f"{prefix}.w_fc2"], f"{_lp}.w_fc2")
+    fc2 = matmul(activated, mlp_size, hidden_size,
+                 weights[f"{prefix}.w_fc2"], f"{_lp}.w_fc2")
     fc2_bias = weights.get(f"{prefix}.fc2_bias")
     if fc2_bias is not None:
         fc2 = graph_ops.add_bias_sum(network, fc2, hidden_size, fc2_bias, dtype=dtype)

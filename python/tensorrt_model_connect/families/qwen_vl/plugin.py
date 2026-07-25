@@ -62,7 +62,8 @@ def _fixed_image_dimensions(config: ModelConfig) -> tuple[int, int]:
     """Resolve and validate the fixed Qwen-VL vision profile dimensions."""
     family_options = config.raw.get("_family_build_options", {})
     vision_options = (
-        family_options.get("qwen_vl_vision", {}) if isinstance(family_options, dict) else {}
+        family_options.get("qwen_vl_vision", {})
+        if isinstance(family_options, dict) else {}
     )
     if not isinstance(vision_options, dict):
         raise ValueError("qwen_vl_vision build options must be an object")
@@ -78,10 +79,10 @@ def _fixed_image_dimensions(config: ModelConfig) -> tuple[int, int]:
     if height % alignment or width % alignment:
         raise ValueError(
             "Qwen-VL image dimensions must be divisible by patch_size * "
-            f"spatial_merge_size ({alignment}); got {height}x{width}"
-        )
+            f"spatial_merge_size ({alignment}); got {height}x{width}")
     if _is_qwen3_vl(config) and height != width:
-        raise ValueError("Rectangular vision profiles currently support Qwen2.5-VL only")
+        raise ValueError(
+            "Rectangular vision profiles currently support Qwen2.5-VL only")
     return height, width
 
 
@@ -96,23 +97,16 @@ class QwenVLPlugin:
         return "qwen" in mt and "vl" in mt
 
     def load_weights(
-        self,
-        model_dir: str,
-        config: ModelConfig,
+        self, model_dir: str, config: ModelConfig,
     ) -> WeightDict:
         if _is_qwen3_vl(config):
             return _load_qwen3_vl_weights(model_dir, config)
         return load_standard_weights(model_dir, config)
 
     def build_engine(
-        self,
-        config: ModelConfig,
-        weights: WeightDict,
-        max_cache_length: int,
-        *,
-        precision: str = "fp32",
-        quant_ctx=None,
-        verbose: bool = False,
+        self, config: ModelConfig, weights: WeightDict,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
@@ -120,15 +114,16 @@ class QwenVLPlugin:
         lora_config = DynamicLoraConfig.from_model_config(config)
         if lora_config.enabled:
             if _is_qwen3_vl(config):
-                raise NotImplementedError("Dynamic LoRA binding currently supports Qwen2.5-VL only")
+                raise NotImplementedError(
+                    "Dynamic LoRA binding currently supports Qwen2.5-VL only")
             if parallel.enabled:
                 raise NotImplementedError(
-                    "Dynamic LoRA binding is not yet supported with tensor parallelism"
-                )
+                    "Dynamic LoRA binding is not yet supported with tensor parallelism")
         if _is_qwen3_vl(config):
             vc = config.raw.get("vision_config", {})
             deepstack_indexes = vc.get("deepstack_visual_indexes", [])
-            selected_fp32 = {int(index) for index in config.raw.get("_fp32_layers", ())}
+            selected_fp32 = {
+                int(index) for index in config.raw.get("_fp32_layers", ())}
             decoder_precision = (
                 "fp32"
                 if precision == "fp16" and _TEXT_DECODER_COMPONENT in selected_fp32
@@ -136,56 +131,38 @@ class QwenVLPlugin:
             )
             if parallel.enabled:
                 return build_qwen_vl_tp_decoder_engine(
-                    config,
-                    weights,
-                    max_cache_length,
+                    config, weights, max_cache_length,
                     precision=decoder_precision,
                     quant_ctx=quant_ctx,
+                    embed_input=True,
                     deepstack_num_levels=len(deepstack_indexes),
                     verbose=verbose,
                     debug_layer_outputs=debug_layer_outputs,
-                    parallel_config=parallel,
-                )
+                    parallel_config=parallel)
             return _build_qwen3_vl_decoder(
-                config,
-                weights,
-                max_cache_length,
+                config, weights, max_cache_length,
                 deepstack_num_levels=len(deepstack_indexes),
                 precision=decoder_precision,
-                quant_ctx=quant_ctx,
-                verbose=verbose,
-                debug_layer_outputs=debug_layer_outputs,
-            )
+                quant_ctx=quant_ctx, verbose=verbose,
+                debug_layer_outputs=debug_layer_outputs)
         if parallel.enabled:
             return build_qwen_vl_tp_decoder_engine(
-                config,
-                weights,
-                max_cache_length,
+                config, weights, max_cache_length,
                 precision=precision,
                 quant_ctx=quant_ctx,
+                embed_input=True,
                 deepstack_num_levels=0,
                 verbose=verbose,
                 debug_layer_outputs=debug_layer_outputs,
-                parallel_config=parallel,
-            )
+                parallel_config=parallel)
         return build_standard_decoder_engine(
-            config,
-            weights,
-            max_cache_length,
-            precision=precision,
-            verbose=verbose,
-            quant_ctx=quant_ctx,
-            debug_layer_outputs=debug_layer_outputs,
-        )
+            config, weights, max_cache_length, precision=precision, verbose=verbose,
+            quant_ctx=quant_ctx, embed_input=True,
+            debug_layer_outputs=debug_layer_outputs)
 
     def build_vision_engine(
-        self,
-        model_dir: str,
-        config: ModelConfig,
-        weights: WeightDict,
-        *,
-        precision: str = "fp32",
-        verbose: bool = False,
+        self, model_dir: str, config: ModelConfig, weights: WeightDict,
+        *, precision: str = "fp32", verbose: bool = False,
     ) -> bytes | None:
         vision_config = config.raw.get("vision_config")
         if vision_config is None:
@@ -194,36 +171,32 @@ class QwenVLPlugin:
         vision_weights = _load_vision_weights(model_dir, config)
         selected_fp32 = {int(index) for index in config.raw.get("_fp32_layers", ())}
         vision_fp32_layers = {
-            index - _VISION_LAYER_OFFSET for index in selected_fp32 if index >= _VISION_LAYER_OFFSET
+            index - _VISION_LAYER_OFFSET
+            for index in selected_fp32
+            if index >= _VISION_LAYER_OFFSET
         }
         vision_precision = (
-            "fp32" if precision == "fp16" and _VISION_COMPONENT in selected_fp32 else precision
-        )
+            "fp32" if precision == "fp16" and _VISION_COMPONENT in selected_fp32
+            else precision)
         fixed_h, fixed_w = _fixed_image_dimensions(config)
 
         if _is_qwen3_vl(config):
             from .qwen_vl_vision_builder import build_qwen3_vl_vision_engine
-
             return build_qwen3_vl_vision_engine(
-                vision_config,
-                vision_weights,
+                vision_config, vision_weights,
                 fixed_image_size=fixed_h,
                 precision=vision_precision,
                 fp32_layers=vision_fp32_layers,
-                verbose=verbose,
-            )
+                verbose=verbose)
         else:
             from .qwen_vl_vision_builder import build_qwen_vl_vision_engine
-
             return build_qwen_vl_vision_engine(
-                vision_config,
-                vision_weights,
+                vision_config, vision_weights,
                 fixed_image_size=_DEFAULT_FIXED_IMAGE_SIZE,
                 fixed_image_height=fixed_h,
                 fixed_image_width=fixed_w,
                 precision=vision_precision,
-                verbose=verbose,
-            )
+                verbose=verbose)
 
     def get_vl_config(self, config: ModelConfig) -> dict | None:
         vision_config = config.raw.get("vision_config")
@@ -242,7 +215,10 @@ class QwenVLPlugin:
         # Rectangular buckets preserve the source aspect ratio before applying
         # Qwen's required merge-group pixel ordering. Square profiles retain
         # the established direct-resize behavior for compatibility.
-        preproc = "aspect_preserve_merge_group_chw" if fixed_h != fixed_w else "merge_group_chw"
+        preproc = (
+            "aspect_preserve_merge_group_chw"
+            if fixed_h != fixed_w else "merge_group_chw"
+        )
 
         vl_cfg = {
             "image_token_id": 151655,
@@ -282,7 +258,6 @@ class QwenVLPlugin:
 # Vision weight loading (shared)
 # ---------------------------------------------------------------------------
 
-
 def _load_vision_weights(model_dir: str, config: ModelConfig) -> WeightDict:
     """Load vision encoder weights (visual.* prefix) from safetensors."""
     from pathlib import Path
@@ -297,7 +272,7 @@ def _load_vision_weights(model_dir: str, config: ModelConfig) -> WeightDict:
                 weights[key] = _load_tensor([reader], key)
             elif key.startswith("model.visual."):
                 # Qwen3-VL uses "model.visual.*" prefix — strip "model." prefix
-                canon = key[len("model.") :]
+                canon = key[len("model."):]
                 weights[canon] = _load_tensor([reader], key)
 
     return weights
@@ -306,7 +281,6 @@ def _load_vision_weights(model_dir: str, config: ModelConfig) -> WeightDict:
 # ---------------------------------------------------------------------------
 # Qwen3-VL text decoder weight loading
 # ---------------------------------------------------------------------------
-
 
 def _load_qwen3_vl_weights(model_dir: str, config: ModelConfig) -> WeightDict:
     """Load Qwen3-VL text decoder weights.
@@ -333,8 +307,7 @@ def _load_qwen3_vl_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         embed_key = "model.embed_tokens.weight"
     embedding = _load_tensor(readers, embed_key)
     assert embedding.shape == (vocab, hidden), (
-        f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
-    )
+        f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
     weights["embedding"] = embedding.astype(np.float32)
 
     attention_size = 0
@@ -369,6 +342,7 @@ def _load_qwen3_vl_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         k_t = _transpose_2d(k_raw, "k_proj")
         v_t = _transpose_2d(v_raw, "v_proj")
         o_t = _transpose_2d(o_raw, "o_proj")
+
 
         weights[f"{prefix}.w_q"] = q_t
         weights[f"{prefix}.w_k"] = k_t
@@ -410,7 +384,8 @@ def _load_qwen3_vl_weights(model_dir: str, config: ModelConfig) -> WeightDict:
     # LM head (may be tied to embedding)
     lm_head_key = "lm_head.weight"
     if _has_tensor(readers, lm_head_key):
-        weights["w_out"] = _transpose_2d(_load_tensor(readers, lm_head_key), "lm_head")
+        weights["w_out"] = _transpose_2d(
+            _load_tensor(readers, lm_head_key), "lm_head")
     else:
         weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied")
 
@@ -424,7 +399,6 @@ def _load_qwen3_vl_weights(model_dir: str, config: ModelConfig) -> WeightDict:
 # ---------------------------------------------------------------------------
 # Qwen3-VL DeepStack text decoder builder (via graph_blocks composition)
 # ---------------------------------------------------------------------------
-
 
 def _build_qwen3_vl_decoder(
     config: ModelConfig,
@@ -454,7 +428,8 @@ def _build_qwen3_vl_decoder(
     elif precision == "fp32":
         work_np_dtype, work_trt_dtype = np.float32, trt.float32
     else:
-        raise ValueError(f"Unsupported Qwen3-VL precision {precision!r}; expected fp32 or fp16")
+        raise ValueError(
+            f"Unsupported Qwen3-VL precision {precision!r}; expected fp32 or fp16")
     selected_fp32_layers = {
         int(index)
         for index in config.raw.get("_fp32_layers", ())
@@ -470,8 +445,7 @@ def _build_qwen3_vl_decoder(
     num_kv_heads = config.num_key_value_heads
     head_dim = attention_size // num_heads
     kv_attention_size = graph_blocks.infer_kv_attention_size(
-        weights, num_kv_heads=num_kv_heads, head_dim=head_dim
-    )
+        weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     attention_window = max_cache_length + 1
     opt_prefill_length = min(64, max_cache_length)
 
@@ -484,7 +458,8 @@ def _build_qwen3_vl_decoder(
     # --- Inputs ---
     token_id = network.add_input("token_id", trt.int32, (-1,))
     position_id = network.add_input("position_id", trt.int32, (-1,))
-    attention_mask = network.add_input("attention_mask", trt.float32, (-1, -1))
+    attention_mask = network.add_input(
+        "attention_mask", trt.float32, (-1, -1))
 
     # VL embed_input
     input_embed_tensor = network.add_input("input_embed", trt.float32, (-1, hidden))
@@ -495,9 +470,11 @@ def _build_qwen3_vl_decoder(
     ds_active_tensor = None
     if deepstack_num_levels > 0:
         for i in range(deepstack_num_levels):
-            ds_in = network.add_input(f"deepstack_embed_{i}", trt.float32, (-1, hidden))
+            ds_in = network.add_input(
+                f"deepstack_embed_{i}", trt.float32, (-1, hidden))
             ds_embed_inputs.append(ds_in)
-        ds_active_tensor = network.add_input("deepstack_active", trt.float32, (-1, 1))
+        ds_active_tensor = network.add_input(
+            "deepstack_active", trt.float32, (-1, 1))
 
     # KV cache inputs
     cache_k_inputs = []
@@ -505,14 +482,10 @@ def _build_qwen3_vl_decoder(
     for i in range(num_layers):
         ck = network.add_input(
             graph_ops.layer_tensor_name("cache_k", i),
-            trt.float32,
-            (max_cache_length, kv_attention_size),
-        )
+            trt.float32, (max_cache_length, kv_attention_size))
         cv = network.add_input(
             graph_ops.layer_tensor_name("cache_v", i),
-            trt.float32,
-            (max_cache_length, kv_attention_size),
-        )
+            trt.float32, (max_cache_length, kv_attention_size))
         cache_k_inputs.append(ck)
         cache_v_inputs.append(cv)
 
@@ -525,16 +498,18 @@ def _build_qwen3_vl_decoder(
             "attention_mask",
             (min_sq, max_cache_length + min_sq),
             (opt_sq, max_cache_length + opt_sq),
-            (max_sq, max_cache_length + max_sq),
-        )
-        profile.set_shape("input_embed", (min_sq, hidden), (opt_sq, hidden), (max_sq, hidden))
-        profile.set_shape("use_input_embed", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
+            (max_sq, max_cache_length + max_sq))
+        profile.set_shape(
+            "input_embed", (min_sq, hidden), (opt_sq, hidden), (max_sq, hidden))
+        profile.set_shape(
+            "use_input_embed", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
         for level in range(deepstack_num_levels):
             profile.set_shape(
-                f"deepstack_embed_{level}", (min_sq, hidden), (opt_sq, hidden), (max_sq, hidden)
-            )
+                f"deepstack_embed_{level}",
+                (min_sq, hidden), (opt_sq, hidden), (max_sq, hidden))
         if deepstack_num_levels > 0:
-            profile.set_shape("deepstack_active", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
+            profile.set_shape(
+                "deepstack_active", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
         trt_config.add_optimization_profile(profile)
 
     decoder_engine_role = str(config.raw.get("_decoder_engine_role", "dual_profile"))
@@ -555,54 +530,49 @@ def _build_qwen3_vl_decoder(
     float_inputs.extend(cache_v_inputs)
     if work_trt_dtype != trt.float32:
         cast_inputs = [
-            network.add_cast(value, work_trt_dtype).get_output(0) for value in float_inputs
+            network.add_cast(value, work_trt_dtype).get_output(0)
+            for value in float_inputs
         ]
         cursor = 0
         attention_mask, input_embed_tensor, use_input_embed_tensor = cast_inputs[:3]
         cursor = 3
-        ds_embed_inputs = cast_inputs[cursor : cursor + len(ds_embed_inputs)]
+        ds_embed_inputs = cast_inputs[cursor:cursor + len(ds_embed_inputs)]
         cursor += len(ds_embed_inputs)
         if ds_active_tensor is not None:
             ds_active_tensor = cast_inputs[cursor]
             cursor += 1
-        cache_k_inputs = cast_inputs[cursor : cursor + num_layers]
+        cache_k_inputs = cast_inputs[cursor:cursor + num_layers]
         cursor += num_layers
-        cache_v_inputs = cast_inputs[cursor : cursor + num_layers]
+        cache_v_inputs = cast_inputs[cursor:cursor + num_layers]
 
     # --- Shared constants ---
     embedding_table = graph_ops.add_constant(
-        network, (vocab, hidden), weights["embedding"], dtype=work_np_dtype
-    )
+        network, (vocab, hidden), weights["embedding"], dtype=work_np_dtype)
 
     graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
     cos_half_np = graph_ops.make_rope_table_half_dim(
-        attention_window, head_dim, config.rope_theta, True
-    )
+        attention_window, head_dim, config.rope_theta, True)
     sin_half_np = graph_ops.make_rope_table_half_dim(
-        attention_window, head_dim, config.rope_theta, False
-    )
+        attention_window, head_dim, config.rope_theta, False)
     cos_half_tensor = graph_ops.add_constant(
-        network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype
-    )
+        network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
     sin_half_tensor = graph_ops.add_constant(
-        network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype
-    )
+        network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
     eps_tensor = graph_ops.add_constant(
-        network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype), dtype=work_np_dtype
-    )
+        network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype),
+        dtype=work_np_dtype)
     fp32_cos_half_tensor = None
     fp32_sin_half_tensor = None
     fp32_eps_tensor = None
     if precision == "fp16" and selected_fp32_layers:
         fp32_cos_half_tensor = graph_ops.add_constant(
-            network, cos_half_np.shape, cos_half_np, dtype=np.float32
-        )
+            network, cos_half_np.shape, cos_half_np, dtype=np.float32)
         fp32_sin_half_tensor = graph_ops.add_constant(
-            network, sin_half_np.shape, sin_half_np, dtype=np.float32
-        )
+            network, sin_half_np.shape, sin_half_np, dtype=np.float32)
         fp32_eps_tensor = graph_ops.add_constant(
-            network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32), dtype=np.float32
-        )
+            network, (1, 1),
+            np.array([config.rms_norm_eps], dtype=np.float32),
+            dtype=np.float32)
 
     # --- Embedding (with input_embed override for VL) ---
     gather = network.add_gather(embedding_table, token_id, 0)
@@ -610,20 +580,20 @@ def _build_qwen3_vl_decoder(
 
     # Conditional: (1 - flag) * token_embed + flag * input_embed
     one_const = graph_ops.add_constant(
-        network, (1, 1), np.array([1.0], dtype=work_np_dtype), dtype=work_np_dtype
-    )
+        network, (1, 1), np.array([1.0], dtype=work_np_dtype),
+        dtype=work_np_dtype)
     inv_flag = network.add_elementwise(
-        one_const, use_input_embed_tensor, trt.ElementWiseOperation.SUB
-    )
+        one_const, use_input_embed_tensor,
+        trt.ElementWiseOperation.SUB)
     tok_part = network.add_elementwise(
-        inv_flag.get_output(0), token_embed, trt.ElementWiseOperation.PROD
-    )
+        inv_flag.get_output(0), token_embed,
+        trt.ElementWiseOperation.PROD)
     embed_part = network.add_elementwise(
-        use_input_embed_tensor, input_embed_tensor, trt.ElementWiseOperation.PROD
-    )
+        use_input_embed_tensor, input_embed_tensor,
+        trt.ElementWiseOperation.PROD)
     hidden_sum = network.add_elementwise(
-        tok_part.get_output(0), embed_part.get_output(0), trt.ElementWiseOperation.SUM
-    )
+        tok_part.get_output(0), embed_part.get_output(0),
+        trt.ElementWiseOperation.SUM)
     hidden_state = hidden_sum.get_output(0)
 
     if debug_layer_outputs:
@@ -638,41 +608,37 @@ def _build_qwen3_vl_decoder(
         layer_is_fp32 = precision == "fp16" and layer_idx in selected_fp32_layers
         layer_np_dtype = np.float32 if layer_is_fp32 else work_np_dtype
         layer_trt_dtype = trt.float32 if layer_is_fp32 else work_trt_dtype
-        layer_hidden = graph_blocks.cast_to_dtype(network, hidden_state, layer_trt_dtype)
+        layer_hidden = graph_blocks.cast_to_dtype(
+            network, hidden_state, layer_trt_dtype)
         layer_cache_k = (
-            fp32_cache_k_inputs[layer_idx] if layer_is_fp32 else cache_k_inputs[layer_idx]
-        )
+            fp32_cache_k_inputs[layer_idx]
+            if layer_is_fp32 else cache_k_inputs[layer_idx])
         layer_cache_v = (
-            fp32_cache_v_inputs[layer_idx] if layer_is_fp32 else cache_v_inputs[layer_idx]
-        )
-        layer_attention_mask = fp32_attention_mask if layer_is_fp32 else attention_mask
+            fp32_cache_v_inputs[layer_idx]
+            if layer_is_fp32 else cache_v_inputs[layer_idx])
+        layer_attention_mask = (
+            fp32_attention_mask if layer_is_fp32 else attention_mask)
         layer_eps_tensor = fp32_eps_tensor if layer_is_fp32 else eps_tensor
-        layer_cos_half_tensor = fp32_cos_half_tensor if layer_is_fp32 else cos_half_tensor
-        layer_sin_half_tensor = fp32_sin_half_tensor if layer_is_fp32 else sin_half_tensor
+        layer_cos_half_tensor = (
+            fp32_cos_half_tensor if layer_is_fp32 else cos_half_tensor)
+        layer_sin_half_tensor = (
+            fp32_sin_half_tensor if layer_is_fp32 else sin_half_tensor)
         assert layer_eps_tensor is not None
         assert layer_cos_half_tensor is not None
         assert layer_sin_half_tensor is not None
 
         # Attention block via graph_blocks
         attn = graph_blocks.add_attention_block(
-            network,
-            layer_hidden,
-            layer_cache_k,
-            layer_cache_v,
-            layer_attention_mask,
-            position_id,
-            weights=weights,
-            prefix=prefix,
-            hidden_size=hidden,
-            attention_size=attention_size,
+            network, layer_hidden, layer_cache_k,
+            layer_cache_v, layer_attention_mask, position_id,
+            weights=weights, prefix=prefix,
+            hidden_size=hidden, attention_size=attention_size,
             kv_attention_size=kv_attention_size,
-            num_heads=num_heads,
-            head_dim=head_dim,
+            num_heads=num_heads, head_dim=head_dim,
             num_kv_heads=num_kv_heads,
             max_cache_length=max_cache_length,
             eps_tensor=layer_eps_tensor,
-            norm_type="rmsnorm",
-            position_type="rope",
+            norm_type="rmsnorm", position_type="rope",
             cos_half_tensor=layer_cos_half_tensor,
             sin_half_tensor=layer_sin_half_tensor,
             rotary_embedding_dim=head_dim,
@@ -686,91 +652,77 @@ def _build_qwen3_vl_decoder(
         present_v_outputs.append(attn["present_v"])
 
         # Residual after attention
-        residual1 = network.add_elementwise(layer_hidden, attn_out, trt.ElementWiseOperation.SUM)
+        residual1 = network.add_elementwise(
+            layer_hidden, attn_out, trt.ElementWiseOperation.SUM)
         post_attn = residual1.get_output(0)
 
         # DeepStack injection: add visual features after attention residual
         if layer_idx < deepstack_num_levels and ds_active_tensor is not None:
             # deepstack_contribution = deepstack_embed[i] * deepstack_active
-            layer_ds_active = fp32_ds_active_tensor if layer_is_fp32 else ds_active_tensor
+            layer_ds_active = (
+                fp32_ds_active_tensor if layer_is_fp32 else ds_active_tensor)
             layer_ds_embed = (
-                fp32_ds_embed_inputs[layer_idx] if layer_is_fp32 else ds_embed_inputs[layer_idx]
-            )
+                fp32_ds_embed_inputs[layer_idx]
+                if layer_is_fp32 else ds_embed_inputs[layer_idx])
             assert layer_ds_active is not None
             ds_scaled = network.add_elementwise(
-                layer_ds_embed, layer_ds_active, trt.ElementWiseOperation.PROD
-            )
+                layer_ds_embed, layer_ds_active,
+                trt.ElementWiseOperation.PROD)
             post_attn_ds = network.add_elementwise(
-                post_attn, ds_scaled.get_output(0), trt.ElementWiseOperation.SUM
-            )
+                post_attn, ds_scaled.get_output(0),
+                trt.ElementWiseOperation.SUM)
             post_attn = post_attn_ds.get_output(0)
 
         # Post-attention norm
         norm2 = graph_blocks.apply_norm(
-            network,
-            post_attn,
-            hidden,
+            network, post_attn, hidden,
             weights[f"{prefix}.post_attn_norm"],
             weights.get(f"{prefix}.post_attn_norm_beta"),
-            layer_eps_tensor,
-            "rmsnorm",
-            dtype=layer_np_dtype,
-        )
+            layer_eps_tensor, "rmsnorm", dtype=layer_np_dtype)
 
         # SwiGLU MLP via graph_blocks
         mlp_out = graph_blocks.add_swiglu_mlp(
-            network,
-            norm2,
-            weights=weights,
-            prefix=prefix,
-            hidden_size=hidden,
-            mlp_size=mlp_size,
-            dtype=layer_np_dtype,
-            quant_ctx=quant_ctx,
-        )
+            network, norm2, weights=weights, prefix=prefix,
+            hidden_size=hidden, mlp_size=mlp_size,
+            dtype=layer_np_dtype, quant_ctx=quant_ctx)
 
         # Final residual
-        residual2 = network.add_elementwise(post_attn, mlp_out, trt.ElementWiseOperation.SUM)
-        hidden_state = graph_blocks.cast_to_dtype(network, residual2.get_output(0), work_trt_dtype)
+        residual2 = network.add_elementwise(
+            post_attn, mlp_out, trt.ElementWiseOperation.SUM)
+        hidden_state = graph_blocks.cast_to_dtype(
+            network, residual2.get_output(0), work_trt_dtype)
 
         if debug_layer_outputs:
-            _mark_debug_output(network, residual1.get_output(0), f"debug_post_attn_{layer_idx}")
-            _mark_debug_output(network, hidden_state, f"debug_hidden_{layer_idx}")
+            _mark_debug_output(network, residual1.get_output(0),
+                               f"debug_post_attn_{layer_idx}")
+            _mark_debug_output(network, hidden_state,
+                               f"debug_hidden_{layer_idx}")
 
     # --- Final norm ---
     final_norm = weights.get("final_norm")
     if final_norm is not None and len(final_norm) > 0:
         hidden_state = graph_blocks.apply_norm(
-            network,
-            hidden_state,
-            hidden,
-            final_norm,
-            None,
-            eps_tensor,
-            "rmsnorm",
-            dtype=work_np_dtype,
-        )
+            network, hidden_state, hidden, final_norm, None,
+            eps_tensor, "rmsnorm", dtype=work_np_dtype)
 
     # --- LM head (last prompt row only) ---
     hidden_shape = network.add_shape(hidden_state).get_output(0)
     one_hidden = graph_ops.add_constant(
-        network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64
-    )
+        network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64)
     last_start = network.add_elementwise(
-        hidden_shape, one_hidden, trt.ElementWiseOperation.SUB
-    ).get_output(0)
+        hidden_shape, one_hidden, trt.ElementWiseOperation.SUB).get_output(0)
     last_size = graph_ops.add_constant(
-        network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64
-    )
+        network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64)
     last_slice = network.add_slice(hidden_state, start=(0, 0), shape=(0, 0), stride=(1, 1))
     last_slice.set_input(1, last_start)
     last_slice.set_input(2, last_size)
     last_hidden = last_slice.get_output(0)
     logits = graph_ops.add_matmul_rhs_constant(
-        network, last_hidden, hidden, vocab, weights["w_out"], dtype=work_np_dtype
-    )
+        network, last_hidden, hidden, vocab, weights["w_out"],
+        dtype=work_np_dtype)
     b_out = np.zeros(vocab, dtype=work_np_dtype)
-    logits = graph_ops.add_bias_sum(network, logits, vocab, b_out, dtype=work_np_dtype)
+    logits = graph_ops.add_bias_sum(
+        network, logits, vocab, b_out, dtype=work_np_dtype)
     if logits.dtype != trt.float32:
         logits = network.add_cast(logits, trt.float32).get_output(0)
 
@@ -792,13 +744,11 @@ def _build_qwen3_vl_decoder(
 
     # --- Build ---
     if verbose:
-        print(
-            f"[trtmc build] Building Qwen3-VL decoder engine "
-            f"({num_layers} layers, hidden={hidden}, attn={attention_size}, "
-            f"mlp={mlp_size}, cache={max_cache_length}, "
-            f"deepstack_levels={deepstack_num_levels}) ...",
-            file=sys.stderr,
-        )
+        print(f"[trtmc build] Building Qwen3-VL decoder engine "
+              f"({num_layers} layers, hidden={hidden}, attn={attention_size}, "
+              f"mlp={mlp_size}, cache={max_cache_length}, "
+              f"deepstack_levels={deepstack_num_levels}) ...",
+              file=sys.stderr)
 
     plan = builder.build_serialized_network(network, trt_config)
     if plan is None:
