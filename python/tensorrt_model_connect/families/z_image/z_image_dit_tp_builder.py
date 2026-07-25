@@ -40,13 +40,12 @@ HF architecture per main layer:
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
-from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor
+from .checkpoint_mapper import WeightDict
 from ...parallel_config import (
     ParallelConfig,
     _slice_first_dim,
@@ -58,115 +57,6 @@ from ...parallel_config import (
 
 
 trt = trt_compat.get_trt()
-
-def load_z_image_dit_weights(
-    model_dir: str,
-    *,
-    dim: int,
-    num_heads: int,
-    num_layers: int,
-    num_refiner_layers: int,
-    ffn_dim: int,
-) -> WeightDict:
-    """Load Z-Image DiT weights from HF safetensors."""
-    model_path = Path(model_dir)
-    readers = _open_safetensors(model_path)
-    weights = WeightDict()
-
-    def _t(name: str) -> np.ndarray:
-        w = _load_tensor(readers, name)
-        return np.ascontiguousarray(w.T, dtype=np.float32)
-
-    def _f(name: str) -> np.ndarray:
-        return _load_tensor(readers, name).astype(np.float32)
-
-    # Main layers
-    for i in range(num_layers):
-        p = f"layers.{i}"
-        _load_dit_block(weights, readers, p, f"main.{i}", _t, _f, has_adaln=True)
-
-    # Noise refiner layers (same as main, with AdaLN)
-    for i in range(num_refiner_layers):
-        p = f"noise_refiner.{i}"
-        _load_dit_block(weights, readers, p, f"noise_refiner.{i}", _t, _f, has_adaln=True)
-
-    # Context refiner layers (no AdaLN)
-    for i in range(num_refiner_layers):
-        p = f"context_refiner.{i}"
-        _load_dit_block(weights, readers, p, f"context_refiner.{i}", _t, _f, has_adaln=False)
-
-    # Patch embedder: all_x_embedder.2-1 [dim, patch_dim]
-    weights["x_embedder.weight"] = _t("all_x_embedder.2-1.weight")
-    weights["x_embedder.bias"] = _f("all_x_embedder.2-1.bias")
-
-    # Final layer: all_final_layer.2-1
-    # Note: adaLN_modulation is nn.Sequential(SiLU(), Linear(adaln_dim, dim))
-    # So weight index is .1. not .0.
-    weights["final_adaLN.weight"] = _t("all_final_layer.2-1.adaLN_modulation.1.weight")
-    weights["final_adaLN.bias"] = _f("all_final_layer.2-1.adaLN_modulation.1.bias")
-    weights["final_linear.weight"] = _t("all_final_layer.2-1.linear.weight")
-    weights["final_linear.bias"] = _f("all_final_layer.2-1.linear.bias")
-
-    # Caption embedder: cap_embedder.0.weight (RMSNorm gamma), cap_embedder.1 (Linear)
-    weights["cap_norm.weight"] = _f("cap_embedder.0.weight")
-    weights["cap_proj.weight"] = _t("cap_embedder.1.weight")
-    weights["cap_proj.bias"] = _f("cap_embedder.1.bias")
-
-    # Padding tokens
-    weights["cap_pad_token"] = _f("cap_pad_token")
-    weights["x_pad_token"] = _f("x_pad_token")
-
-    # Timestep embedder: t_embedder.mlp.0, t_embedder.mlp.2
-    weights["t_emb.0.weight"] = _t("t_embedder.mlp.0.weight")
-    weights["t_emb.0.bias"] = _f("t_embedder.mlp.0.bias")
-    weights["t_emb.2.weight"] = _t("t_embedder.mlp.2.weight")
-    weights["t_emb.2.bias"] = _f("t_embedder.mlp.2.bias")
-
-    return weights
-
-
-def _load_dit_block(
-    weights: WeightDict,
-    readers,
-    hf_prefix: str,
-    trt_prefix: str,
-    _t,
-    _f,
-    has_adaln: bool,
-):
-    """Load weights for one Z-Image DiT block."""
-    p = hf_prefix
-    tp = trt_prefix
-
-    # Attention (diffusers Attention class uses to_q/to_k/to_v/to_out.0)
-    weights[f"{tp}.to_q"] = _t(f"{p}.attention.to_q.weight")
-    weights[f"{tp}.to_k"] = _t(f"{p}.attention.to_k.weight")
-    weights[f"{tp}.to_v"] = _t(f"{p}.attention.to_v.weight")
-    weights[f"{tp}.to_out"] = _t(f"{p}.attention.to_out.0.weight")
-
-    # QK norm (per-head RMSNorm)
-    weights[f"{tp}.norm_q"] = _f(f"{p}.attention.norm_q.weight")
-    weights[f"{tp}.norm_k"] = _f(f"{p}.attention.norm_k.weight")
-
-    # Pre-attention norm (attention_norm1 = pre-norm)
-    weights[f"{tp}.attn_norm1"] = _f(f"{p}.attention_norm1.weight")
-    # Post-attention norm (attention_norm2 = post-norm on attn output)
-    weights[f"{tp}.attn_norm2"] = _f(f"{p}.attention_norm2.weight")
-
-    # SwiGLU FFN: w1 (gate), w2 (down), w3 (up)
-    weights[f"{tp}.ff_w1"] = _t(f"{p}.feed_forward.w1.weight")
-    weights[f"{tp}.ff_w2"] = _t(f"{p}.feed_forward.w2.weight")
-    weights[f"{tp}.ff_w3"] = _t(f"{p}.feed_forward.w3.weight")
-
-    # FFN norms: ffn_norm1 = pre-norm, ffn_norm2 = post-norm
-    weights[f"{tp}.ffn_norm1"] = _f(f"{p}.ffn_norm1.weight")
-    weights[f"{tp}.ffn_norm2"] = _f(f"{p}.ffn_norm2.weight")
-
-    # AdaLN modulation: nn.Sequential(nn.Linear(adaln_dim, 4*dim))
-    # HF key is adaLN_modulation.0.weight (index 0 in Sequential)
-    if has_adaln:
-        weights[f"{tp}.adaln.weight"] = _t(f"{p}.adaLN_modulation.0.weight")
-        weights[f"{tp}.adaln.bias"] = _f(f"{p}.adaLN_modulation.0.bias")
 
 
 def build_z_image_dit_engine(
