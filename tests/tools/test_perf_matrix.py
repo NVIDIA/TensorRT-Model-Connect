@@ -29,12 +29,10 @@ TASK_ADAPTERS = {
     "deepseek_ocr.generate": "hf-transformers-vlm",
     "eagle_vlm.embed": "hf-transformers-embedding",
     "eagle_vlm.rerank": "hf-transformers-reranking",
-    "elf_flow.generate": "upstream-elf",
     "flux.generate_image": "hf-diffusers",
     "internvl.generate": "hf-transformers-vlm",
     "lance.generate": "upstream-lance",
     "locateanything.generate": "hf-transformers-vlm",
-    "ltx_video.generate_image": "hf-diffusers",
     "magpie_tts.generate_audio": "nemo-tts",
     "nemotron_speech_streaming.transcribe": "nemo-asr",
     "patchtsmixer.solve": "pytorch-timeseries",
@@ -222,7 +220,7 @@ def _write_environment(
     )
 
 
-def test_release_suite_covers_every_ready_model_profile() -> None:
+def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     from tensorrt_model_connect.families.wan2_2_ti2v.model_config import (
         OFFICIAL_NEGATIVE_PROMPT,
     )
@@ -235,28 +233,29 @@ def test_release_suite_covers_every_ready_model_profile() -> None:
     ready_profiles = {
         entry.name
         for entry in perf_matrix.ManifestCatalog().entries()
-        if entry.status == "ready"
+        if entry.status == "ready" and not perf_matrix._is_l0_profile(entry.name)
     }
 
     perf_matrix._validate_coverage(cases)
 
-    assert len(cases) == 126
-    assert len(raw_entries) == 79
-    assert len(raw_additional) == 47
+    assert len(cases) == 105
+    assert len(raw_entries) == 77
+    assert len(raw_additional) == 28
     assert all(set(entry["workload"]) <= {"testcase", "request"} for entry in raw_entries)
     assert all(entry["workload"].get("testcase") for entry in raw_entries)
     assert all(entry.get("model") and entry.get("inherit") for entry in raw_additional)
     assert not any("priority" in entry for entry in raw_entries)
     assert {case["model"] for case in cases} == ready_profiles
-    assert len({(case["family"], case["operation"]) for case in cases}) == 79
-    assert len({case["family"] for case in cases}) == 78
+    assert not any(perf_matrix._is_l0_profile(case["model"]) for case in cases)
+    assert len({(case["family"], case["operation"]) for case in cases}) == 77
+    assert len({case["family"] for case in cases}) == 76
     assert [case["operation"] for case in cases if case["family"] == "eagle_vlm"] == [
         "embed",
         "rerank",
     ]
     assert Counter(perf_matrix._candidate_timing_scope(case) for case in cases) == {
-        "model_call_wall": 25,
-        "public_pipeline_call_wall": 101,
+        "model_call_wall": 22,
+        "public_pipeline_call_wall": 83,
     }
     assert {
         case["id"]
@@ -267,27 +266,11 @@ def test_release_suite_covers_every_ready_model_profile() -> None:
         "deepseek_ocr.generate",
         "lance.generate",
         "nemotron_speech_streaming.transcribe",
-        "deepseek_ocr.generate@deepseek-ocr-l0",
         "nemotron_speech_streaming.transcribe@nemotron-speech-streaming-en-0.6b",
     }
     by_id = {case["id"]: case for case in cases}
     assert by_id["deberta.encode"]["baseline"]["precision"] == "fp32"
     assert by_id["fnet.encode"]["baseline"]["padding"] == "max-length"
-    assert by_id["elf_flow.generate"]["baseline"]["python_profile"] == (
-        "elf_flow_reference"
-    )
-    assert by_id["elf_flow.generate"]["baseline"]["adapter_options"][
-        "reference_commit"
-    ] == "b29d8833609e9ab7f67cd9da39435ac5cea04837"
-    assert by_id["elf_flow.generate"]["baseline"]["precision"] == "bf16"
-    assert by_id["elf_flow.generate"]["baseline"]["output_contract"] == "token-agreement"
-    assert by_id["elf_flow.generate"]["workload"]["request"] == {
-        "seed": 42,
-        "initial_latents_path": "data/elf-b-de-en-replay/initial_latents.f32",
-        "sampling_steps_path": "data/elf-b-de-en-replay/sampling_steps.f32",
-        "condition_latents_path": "data/elf-b-de-en-replay/condition_latents.f32",
-        "condition_mask_path": "data/elf-b-de-en-replay/condition_mask.f32",
-    }
     assert by_id["lance.generate"]["baseline"]["python_profile"] == "lance_reference"
     assert by_id["sana_wm.generate_image"]["baseline"]["adapter_options"] == {
         "reference_commit": "59629fdf790850797cb657bad014fce432bd713d",
@@ -330,29 +313,6 @@ def test_release_suite_covers_every_ready_model_profile() -> None:
     assert (
         by_id["wan2_2_ti2v.generate_image"]["workload"]["request"]["negative_prompt"]
         == OFFICIAL_NEGATIVE_PROMPT
-    )
-    wan_full = by_id["wan2_2_ti2v.generate_image@wan22-ti2v-5b"]
-    assert wan_full["workload"]["testcase"] == "wan22-ti2v-5b"
-    assert wan_full["workload"]["request"]["negative_prompt"] == OFFICIAL_NEGATIVE_PROMPT
-    elf_owt = by_id["elf_flow.generate@elf-b-owt-l0"]
-    assert elf_owt["baseline"]["precision"] == "fp32"
-    assert (
-        elf_owt["baseline"]["adapter_options"]["checkpoint"]
-        == "embedded-language-flows/ELF-B-owt-torch"
-    )
-    assert elf_owt["workload"]["request"] == {
-        "seed": 42,
-        "generation_mode": "unconditional",
-        "num_inference_steps": 32,
-        "cfg_scale": 1.0,
-        "initial_latents_path": "data/elf-b-owt-replay/initial_latents.f32",
-        "sampling_steps_path": "data/elf-b-owt-replay/sampling_steps.f32",
-    }
-    elf_xsum = by_id["elf_flow.generate@elf-b-xsum-l0"]
-    assert elf_xsum["baseline"]["precision"] == "fp16"
-    assert (
-        elf_xsum["baseline"]["adapter_options"]["checkpoint"]
-        == "embedded-language-flows/ELF-B-xsum-torch"
     )
     diffusion_baseline = by_id["nemotron_labs_diffusion.generate"]["baseline"]
     assert diffusion_baseline["mode"] == "hf-eager"
@@ -883,12 +843,14 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert not scratch_root.exists()
     results = json.loads((output / "results.json").read_text(encoding="utf-8"))
     rows = {row["id"]: row for row in results["cases"]}
-    assert len(rows) == 126
+    assert len(rows) == 105
     assert results["environment_config"]["name"] == "test-gb300"
     assert results["environment_config"]["source"] == str(environment.resolve())
     assert results["catalog_coverage"] == {
         "total_profiles": 202,
         "ready_profiles": 126,
+        "release_profiles": 105,
+        "excluded_l0_profiles": 21,
         "distributed_profiles": 76,
         "other_profiles": 0,
     }
@@ -908,9 +870,11 @@ def test_run_consolidates_results_and_records_replayable_commands(
     report = (output / "report.html").read_text(encoding="utf-8")
     assert ">gpt2<" in report
     assert "HF eager" in report
-    assert "78 families" in report
-    assert "126 model-profile comparisons" in report
-    assert "126 ready single-process profiles" in report
+    assert "76 families" in report
+    assert "105 model-profile comparisons" in report
+    assert "105 single-process profiles" in report
+    assert "21 duplicate L0 profiles are excluded" in report
+    assert "126 ready catalog profiles" in report
     assert "76 distributed profiles" in report
     assert "0 other or unsupported profiles" in report
     assert "<th>Model profile</th>" in report

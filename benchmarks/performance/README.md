@@ -10,12 +10,14 @@ entry in `release.yaml`. TRTMC measurements always use `trtmc-bench`; reference
 frameworks run in separate Python processes and do not add dependencies to
 `trtmc-bench`.
 
-The suite contains one row for every single-process model profile marked `ready`
-in the benchmark catalog. It currently has 126 model-profile comparisons across
-78 families and 79 `(family, operation)` contracts because some families expose
-multiple profiles and `eagle_vlm` exposes both `embed` and `rerank`. Catalog
-profiles marked `distributed` require their own multi-process launch and are not
-silently included in this single-GPU matrix.
+The suite contains one row for every release-relevant single-process model
+profile marked `ready` in the benchmark catalog. Profiles whose names contain an
+`l0` segment are shorter PR-smoke duplicates and are deliberately excluded. The
+suite currently has 105 model-profile comparisons across 76 families and 77
+`(family, operation)` contracts because some families expose multiple profiles
+and `eagle_vlm` exposes both `embed` and `rerank`. Catalog profiles marked
+`distributed` require their own multi-process launch and are not silently
+included in this single-GPU matrix.
 
 ## Commands
 
@@ -107,8 +109,9 @@ additional_profiles:
 The resolved row uses `qwen3-0.6b-fp8` as both its model profile and testcase,
 while retaining the reviewed Qwen timing, reference, and output contracts. A
 profile with different replay inputs or reference assets declares those
-overrides in the same block. The coverage check requires every ready
-single-process catalog profile exactly once.
+overrides in the same block. The coverage check requires every non-L0 ready
+single-process catalog profile exactly once and rejects L0 entries in the suite
+as extras.
 
 Suite-level `defaults.measurement` avoids repeating warmup and iteration counts.
 The fully resolved workload and measurement values are recorded in `results.json`.

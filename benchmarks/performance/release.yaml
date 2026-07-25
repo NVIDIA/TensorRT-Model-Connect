@@ -219,38 +219,6 @@ entries:
       runner: hf-transformers
       mode: torch-compile
       compile_scope: model.forward
-  - id: elf_flow.generate
-    family: elf_flow
-    operation: generate
-    model: elf-b-de-en-l0
-    workload:
-      testcase: elf-b-de-en-l0
-      request:
-        seed: 42
-        initial_latents_path: data/elf-b-de-en-replay/initial_latents.f32
-        sampling_steps_path: data/elf-b-de-en-replay/sampling_steps.f32
-        condition_latents_path: data/elf-b-de-en-replay/condition_latents.f32
-        condition_mask_path: data/elf-b-de-en-replay/condition_mask.f32
-    baseline:
-      runner: task-reference
-      adapter: upstream-elf
-      mode: pytorch-eager
-      precision: bf16
-      reference_backend: torch_reference
-      timing_scope: task-model-call-wall
-      input_preparation_included: false
-      python_profile: elf_flow_reference
-      output_contract: token-agreement
-      min_positional_token_agreement: 0.85
-      max_normalized_edit_distance: 0.2
-      adapter_options:
-        reference_commit: b29d8833609e9ab7f67cd9da39435ac5cea04837
-        checkpoint: embedded-language-flows/ELF-B-de-en-torch
-        config: src/configs/training_configs/train_de-en_ELF-B.yml
-        sampling_method: ode
-        self_cond_cfg_scale: 1.0
-        sde_gamma: 0.0
-        seed: 42
   - id: falcon.generate
     family: falcon
     operation: generate
@@ -264,9 +232,9 @@ entries:
   - id: flux.generate_image
     family: flux
     operation: generate_image
-    model: flux-schnell-l0
+    model: flux-schnell
     workload:
-      testcase: flux-schnell-l0
+      testcase: flux-schnell
     baseline:
       runner: task-reference
       adapter: hf-diffusers
@@ -425,19 +393,6 @@ entries:
       timing_scope: task-model-call-wall
       input_preparation_included: false
       output_contract: exact-token-ids
-  - id: ltx_video.generate_image
-    family: ltx_video
-    operation: generate_image
-    model: ltx-video-l0
-    workload:
-      testcase: ltx-video-l0
-    baseline:
-      runner: task-reference
-      adapter: hf-diffusers
-      mode: hf-eager
-      reference_backend: hf_diffusers
-      timing_scope: task-pipeline-call-wall
-      output_contract: media-shape
   - id: m2m_100.generate
     family: m2m_100
     operation: generate
@@ -630,9 +585,9 @@ entries:
   - id: personaplex.speak
     family: personaplex
     operation: speak
-    model: personaplex-7b-l0
+    model: personaplex-7b
     workload:
-      testcase: personaplex-7b-l0
+      testcase: personaplex-7b
     baseline:
       runner: task-reference
       adapter: pytorch-personaplex
@@ -682,9 +637,9 @@ entries:
   - id: pixart.generate_image
     family: pixart
     operation: generate_image
-    model: pixart-sigma-1024-l0
+    model: pixart-sigma-1024
     workload:
-      testcase: pixart-sigma-1024-l0
+      testcase: pixart-sigma-1024
     baseline:
       runner: task-reference
       adapter: hf-diffusers
@@ -733,9 +688,9 @@ entries:
   - id: qwen_image.generate_image
     family: qwen_image
     operation: generate_image
-    model: qwen-image-l0
+    model: qwen-image
     workload:
-      testcase: qwen-image-l0
+      testcase: qwen-image
     baseline:
       runner: task-reference
       adapter: hf-diffusers
@@ -907,9 +862,9 @@ entries:
   - id: wan_t2v.generate_image
     family: wan_t2v
     operation: generate_image
-    model: wan21-t2v-1.3b-l0
+    model: wan21-t2v-1.3b
     workload:
-      testcase: wan21-t2v-1.3b-l0
+      testcase: wan21-t2v-1.3b
     baseline:
       runner: task-reference
       adapter: hf-diffusers
@@ -920,9 +875,9 @@ entries:
   - id: wan2_2_ti2v.generate_image
     family: wan2_2_ti2v
     operation: generate_image
-    model: wan22-ti2v-5b-l0
+    model: wan22-ti2v-5b
     workload:
-      testcase: wan22-ti2v-5b-l0
+      testcase: wan22-ti2v-5b
       request:
         negative_prompt: 色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走
     baseline:
@@ -971,9 +926,9 @@ entries:
   - id: z_image.generate_image
     family: z_image
     operation: generate_image
-    model: z-image-turbo-l0
+    model: z-image-turbo
     workload:
-      testcase: z-image-turbo-l0
+      testcase: z-image-turbo
     baseline:
       runner: task-reference
       adapter: hf-diffusers
@@ -989,70 +944,12 @@ additional_profiles:
     inherit: bert.encode
   - model: bge-small-en-v1.5
     inherit: bert.encode
-  - model: deepseek-ocr-l0
-    inherit: deepseek_ocr.generate
   - model: deepseek-v2-tiny
     inherit: deepseek_v2.generate
-  - model: elf-b-owt-l0
-    inherit: elf_flow.generate
-    workload:
-      request:
-        seed: 42
-        generation_mode: unconditional
-        num_inference_steps: 32
-        cfg_scale: 1.0
-        initial_latents_path: data/elf-b-owt-replay/initial_latents.f32
-        sampling_steps_path: data/elf-b-owt-replay/sampling_steps.f32
-    baseline:
-      precision: fp32
-      min_positional_token_agreement: 0.99
-      max_normalized_edit_distance: 0.01
-      adapter_options:
-        reference_commit: b29d8833609e9ab7f67cd9da39435ac5cea04837
-        checkpoint: embedded-language-flows/ELF-B-owt-torch
-        config: src/configs/training_configs/train_owt_ELF-B.yml
-        sampling_method: ode
-        self_cond_cfg_scale: 3.0
-        sde_gamma: 0.0
-        seed: 42
-  - model: elf-b-xsum-l0
-    inherit: elf_flow.generate
-    workload:
-      request:
-        seed: 42
-        generation_mode: conditional
-        num_inference_steps: 64
-        cfg_scale: 2.0
-        initial_latents_path: data/elf-b-xsum-replay/initial_latents.f32
-        sampling_steps_path: data/elf-b-xsum-replay/sampling_steps.f32
-        condition_latents_path: data/elf-b-xsum-replay/condition_latents.f32
-        condition_mask_path: data/elf-b-xsum-replay/condition_mask.f32
-    baseline:
-      precision: fp16
-      adapter_options:
-        reference_commit: b29d8833609e9ab7f67cd9da39435ac5cea04837
-        checkpoint: embedded-language-flows/ELF-B-xsum-torch
-        config: src/configs/training_configs/train_xsum_ELF-B.yml
-        sampling_method: ode
-        self_cond_cfg_scale: 1.0
-        sde_gamma: 0.0
-        seed: 42
   - model: flux-2-dev
     inherit: flux.generate_image
   - model: flux-2-dev-fp8
     inherit: flux.generate_image
-  - model: flux-2-dev-fp8-l0
-    inherit: flux.generate_image
-  - model: flux-2-dev-l0
-    inherit: flux.generate_image
-  - model: flux-schnell
-    inherit: flux.generate_image
-  - model: flux-schnell-l0-batch2
-    inherit: flux.generate_image
-  - model: glm-4-9b-l0
-    inherit: glm.generate
-  - model: gpt-oss-20b-l0
-    inherit: gpt_oss.generate
   - model: gpt2-125m
     inherit: gpt2.generate
   - model: internvl3-8b
@@ -1061,12 +958,6 @@ additional_profiles:
     inherit: llama.generate
   - model: minitron-4b-width
     inherit: llama.generate
-  - model: minitron-4b-width-l0
-    inherit: llama.generate
-  - model: mistral-7b-l0
-    inherit: mistral.generate
-  - model: nemotron-labs-diffusion-8b-l0
-    inherit: nemotron_labs_diffusion.generate
   - model: nemotron-mini-4b
     inherit: nemotron.generate
   - model: nemotron-nano-4b
@@ -1077,14 +968,6 @@ additional_profiles:
     inherit: bert.encode
   - model: patchtst-granite-official
     inherit: patchtst.solve
-  - model: personaplex-7b
-    inherit: personaplex.speak
-  - model: phi-moe-l0
-    inherit: phi_moe.generate
-  - model: pixart-sigma-1024
-    inherit: pixart.generate_image
-  - model: qwen-image
-    inherit: qwen_image.generate_image
   - model: qwen-image-2512
     inherit: qwen_image.generate_image
   - model: qwen-image-edit-2511
@@ -1107,13 +990,7 @@ additional_profiles:
     inherit: roberta.encode
   - model: tinyllama-1.1b
     inherit: llama.generate
-  - model: wan21-t2v-1.3b
-    inherit: wan_t2v.generate_image
-  - model: wan22-ti2v-5b
-    inherit: wan2_2_ti2v.generate_image
   - model: whisper-large-v3-turbo
     inherit: whisper.transcribe
   - model: xlm-roberta-base
     inherit: roberta.encode
-  - model: z-image-turbo
-    inherit: z_image.generate_image

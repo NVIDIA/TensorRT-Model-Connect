@@ -52,6 +52,7 @@ from tensorrt_model_connect.python_profiles import (  # noqa: E402
 RESULT_SCHEMA = "trtmc.perf-matrix/v1"
 SUITE_SCHEMA = "trtmc.perf-suite/v2"
 ENVIRONMENT_SCHEMA = "trtmc.perf-environment/v1"
+L0_PROFILE_PATTERN = re.compile(r"(?:^|-)l0(?:-|$)", re.IGNORECASE)
 SEQUENCE_RUNTIME_MARKERS = ("bart_", "marian_", "m2m_100_", "t5_")
 TASK_REFERENCE_ADAPTERS = {
     "hf-diffusers",
@@ -604,11 +605,15 @@ def _validate_unique_ids(cases: Sequence[Mapping[str, Any]]) -> None:
         raise PerfMatrixError(f"duplicate entry ids: {', '.join(duplicates)}")
 
 
+def _is_l0_profile(name: str) -> bool:
+    return L0_PROFILE_PATTERN.search(name) is not None
+
+
 def _validate_coverage(cases: Sequence[Mapping[str, Any]]) -> None:
     expected = {
         entry.name: (entry.family, entry.operation)
         for entry in ManifestCatalog().entries()
-        if entry.status == "ready"
+        if entry.status == "ready" and not _is_l0_profile(entry.name)
     }
     actual_models = [str(case["model"]) for case in cases]
     actual = set(actual_models)
@@ -630,7 +635,8 @@ def _validate_coverage(cases: Sequence[Mapping[str, Any]]) -> None:
     if missing or extra or duplicates or mismatched:
         details = _coverage_details(missing, extra, duplicates, mismatched)
         raise PerfMatrixError(
-            "suite profile coverage does not match ready catalog: " + "; ".join(details)
+            "suite profile coverage does not match the release-ready catalog "
+            "(L0 duplicates excluded): " + "; ".join(details)
         )
 
 
@@ -727,7 +733,12 @@ def _initial_results(
     selected: Sequence[Mapping[str, Any]],
     environment_config: Mapping[str, Any],
 ) -> dict[str, Any]:
-    catalog_counts = Counter(entry.status for entry in ManifestCatalog().entries())
+    catalog_entries = ManifestCatalog().entries()
+    catalog_counts = Counter(entry.status for entry in catalog_entries)
+    excluded_l0_profiles = sum(
+        entry.status == "ready" and _is_l0_profile(entry.name)
+        for entry in catalog_entries
+    )
     environment = {
         "hostname": platform.node(),
         "platform": platform.platform(),
@@ -749,6 +760,8 @@ def _initial_results(
         "catalog_coverage": {
             "total_profiles": sum(catalog_counts.values()),
             "ready_profiles": catalog_counts["ready"],
+            "release_profiles": catalog_counts["ready"] - excluded_l0_profiles,
+            "excluded_l0_profiles": excluded_l0_profiles,
             "distributed_profiles": catalog_counts["distributed"],
             "other_profiles": sum(
                 count
@@ -2159,6 +2172,8 @@ def _report_html(results: Mapping[str, Any]) -> str:
     )
     catalog = results.get("catalog_coverage", {})
     ready_profiles = int(catalog.get("ready_profiles", len(rows)))
+    release_profiles = int(catalog.get("release_profiles", len(rows)))
+    excluded_l0_profiles = int(catalog.get("excluded_l0_profiles", 0))
     distributed_profiles = int(catalog.get("distributed_profiles", 0))
     other_profiles = int(catalog.get("other_profiles", 0))
     return f"""<!doctype html>
@@ -2176,7 +2191,7 @@ th{{background:#e5e7eb}} tr:nth-child(even){{background:#f9fafb}} code{{font-siz
 </style></head><body>
 <h1>TRTMC performance matrix</h1>
 <p class="meta">Generated {generated}. {family_count} families across {len(rows)} model-profile comparisons.{repeated_note}</p>
-<p class="meta">Catalog coverage: {ready_profiles} ready single-process profiles. {distributed_profiles} distributed profiles require a separate multi-process run and are outside this report. {other_profiles} other or unsupported profiles.</p>
+<p class="meta">Release matrix coverage: {release_profiles} single-process profiles. {excluded_l0_profiles} duplicate L0 profiles are excluded from the {ready_profiles} ready catalog profiles. {distributed_profiles} distributed profiles require a separate multi-process run and are outside this report. {other_profiles} other or unsupported profiles.</p>
 <p class="meta">Timing contracts were validated before execution for {preflight_count} comparisons. A row is classified only when its recorded TRTMC and reference policies match that contract.</p>
 <p class="meta">Times are the p50 wall time from the recorded timed samples. Measured scope states the exact recorded boundary and the work included and excluded on each side.</p>
 <p><strong>{summary}</strong></p>
