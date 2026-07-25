@@ -15,11 +15,9 @@ def _load_plugin_module():
     global _plugin
     if _plugin is None:
         _plugin = importlib.import_module(f"{__name__}.plugin")
-        globals().update({
-            _name: _value
-            for _name, _value in vars(_plugin).items()
-            if not _name.startswith("__")
-        })
+        globals().update(
+            {_name: _value for _name, _value in vars(_plugin).items() if not _name.startswith("__")}
+        )
     return _plugin
 
 
@@ -37,9 +35,9 @@ def __getattr__(name: str) -> Any:
 
 def __dir__() -> list[str]:
     plugin_module = _load_plugin_module()
-    return sorted(set(globals()) | {
-        _name for _name in vars(plugin_module) if not _name.startswith("__")
-    })
+    return sorted(
+        set(globals()) | {_name for _name in vars(plugin_module) if not _name.startswith("__")}
+    )
 
 
 class _FamilyModule(types.ModuleType):
