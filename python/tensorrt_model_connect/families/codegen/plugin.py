@@ -44,7 +44,9 @@ class CodeGenPlugin:
         return model_type.lower() == "codegen"
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -60,7 +62,8 @@ class CodeGenPlugin:
         # Token embedding (wte) — no position embedding (uses RoPE)
         embedding = _load_tensor(readers, "transformer.wte.weight")
         assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
+        )
         weights["embedding"] = embedding.astype(np.float32)
 
         attention_size = hidden
@@ -82,17 +85,16 @@ class CodeGenPlugin:
             # CodeGen uses mp_num=4 interleaving with Q, V, K order:
             # The 3*hidden output rows are grouped into 4 chunks of 3*local_dim,
             # and within each chunk: [Q_local, V_local, K_local].
-            qkv_w = _load_tensor(
-                readers, f"{hf_prefix}.attn.qkv_proj.weight")
+            qkv_w = _load_tensor(readers, f"{hf_prefix}.attn.qkv_proj.weight")
             mp_num = 4
             local_dim = head_dim * num_heads // mp_num
             chunk_size = 3 * local_dim  # 768 per chunk
             q_parts, k_parts, v_parts = [], [], []
             for c in range(mp_num):
                 base = c * chunk_size
-                q_parts.append(qkv_w[base:base+local_dim])
-                v_parts.append(qkv_w[base+local_dim:base+2*local_dim])
-                k_parts.append(qkv_w[base+2*local_dim:base+3*local_dim])
+                q_parts.append(qkv_w[base : base + local_dim])
+                v_parts.append(qkv_w[base + local_dim : base + 2 * local_dim])
+                k_parts.append(qkv_w[base + 2 * local_dim : base + 3 * local_dim])
             q_w = np.concatenate(q_parts, axis=0)
             k_w = np.concatenate(k_parts, axis=0)
             v_w = np.concatenate(v_parts, axis=0)
@@ -103,19 +105,14 @@ class CodeGenPlugin:
             weights[f"{prefix}.w_v"] = _transpose_2d(v_w, "v_proj")
 
             # Output projection (Linear, no bias in CodeGen attention)
-            o_w = _load_tensor(
-                readers, f"{hf_prefix}.attn.out_proj.weight")
+            o_w = _load_tensor(readers, f"{hf_prefix}.attn.out_proj.weight")
             weights[f"{prefix}.w_o"] = _transpose_2d(o_w, "o_proj")
 
             # MLP: fc_in and fc_out (Linear layout — needs transpose)
-            fc_in_w = _load_tensor(
-                readers, f"{hf_prefix}.mlp.fc_in.weight")
-            fc_in_b = _load_tensor(
-                readers, f"{hf_prefix}.mlp.fc_in.bias")
-            fc_out_w = _load_tensor(
-                readers, f"{hf_prefix}.mlp.fc_out.weight")
-            fc_out_b = _load_tensor(
-                readers, f"{hf_prefix}.mlp.fc_out.bias")
+            fc_in_w = _load_tensor(readers, f"{hf_prefix}.mlp.fc_in.weight")
+            fc_in_b = _load_tensor(readers, f"{hf_prefix}.mlp.fc_in.bias")
+            fc_out_w = _load_tensor(readers, f"{hf_prefix}.mlp.fc_out.weight")
+            fc_out_b = _load_tensor(readers, f"{hf_prefix}.mlp.fc_out.bias")
 
             if mlp_size == 0:
                 mlp_size = fc_in_w.shape[0]
@@ -136,8 +133,7 @@ class CodeGenPlugin:
         lm_head_w = _load_tensor(readers, "lm_head.weight")
         weights["w_out"] = _transpose_2d(lm_head_w, "lm_head")
         if _has_tensor(readers, "lm_head.bias"):
-            weights["lm_head_bias"] = _load_tensor(
-                readers, "lm_head.bias").astype(np.float32)
+            weights["lm_head_bias"] = _load_tensor(readers, "lm_head.bias").astype(np.float32)
 
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
         weights["_kv_attention_size"] = attention_size  # type: ignore[assignment]
@@ -146,9 +142,14 @@ class CodeGenPlugin:
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
@@ -160,38 +161,35 @@ class CodeGenPlugin:
 
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="CodeGen tensor-parallel builds")
+                parallel, feature="CodeGen tensor-parallel builds"
+            )
             if quant_ctx is not None:
-                raise ValueError(
-                    "CodeGen tensor-parallel builds do not support quantization")
+                raise ValueError("CodeGen tensor-parallel builds do not support quantization")
             if debug_layer_outputs:
                 raise ValueError(
-                    "CodeGen tensor-parallel builds do not support debug_layer_outputs")
+                    "CodeGen tensor-parallel builds do not support debug_layer_outputs"
+                )
             return build_dual_profile_tp_decoder_engine(
-                config, weights, max_cache_length,
-                precision=precision, quant_ctx=quant_ctx,
-                norm_type="layernorm",
-                mlp_type="gelu_fc",
-                position_type="rope",
-                activation="gelu_new",
+                config,
+                weights,
+                max_cache_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
                 partial_rotary_factor=partial_rotary_factor,
-                interleaved_rope=True,
-                parallel_residual=True,
                 verbose=verbose,
-                parallel_config=parallel)
+                parallel_config=parallel,
+            )
 
         return build_standard_decoder_engine(
-            config, weights, max_cache_length,
-            precision=precision, quant_ctx=quant_ctx,
-            norm_type="layernorm",
-            mlp_type="gelu_fc",
-            position_type="rope",
-            activation="gelu_new",
+            config,
+            weights,
+            max_cache_length,
+            precision=precision,
+            quant_ctx=quant_ctx,
             partial_rotary_factor=partial_rotary_factor,
-            interleaved_rope=True,
-            parallel_residual=True,
             verbose=verbose,
-            debug_layer_outputs=debug_layer_outputs)
+            debug_layer_outputs=debug_layer_outputs,
+        )
 
 
 plugin = CodeGenPlugin()

@@ -80,7 +80,5 @@ def norm_multi(
     if norm_type == "layernorm":
         if beta is None:
             beta = np.zeros(hidden, dtype=np.float32)
-        return graph_ops.add_layer_norm(
-            network, inp, hidden, gamma, beta, eps_tensor, dtype=dtype)
-    return graph_ops.add_rms_norm(
-        network, inp, hidden, gamma, eps_tensor, dtype=dtype)
+        return graph_ops.add_layer_norm(network, inp, hidden, gamma, beta, eps_tensor, dtype=dtype)
+    return graph_ops.add_rms_norm(network, inp, hidden, gamma, eps_tensor, dtype=dtype)
