@@ -113,7 +113,9 @@ def ready_model_names(models_root: Path = DEFAULT_MODELS) -> tuple[str, ...]:
         sorted(
             str(model["name"])
             for model in models
-            if not model["requires_multi_device"] and not model.get("skip")
+            if not model["requires_multi_device"]
+            and not model.get("skip")
+            and model.get("ci_tier") != "l0_only"
         )
     )
 

@@ -27,7 +27,6 @@ sample_limits:
   sana_wm_benchmark_diffusion_video: 2
   seedtts_en_tts_intelligibility: 3
   stsbenchmark_encoder_embedding_parity: 50
-  vbench_t2v_diffusion_video: 2
   vlm_mmmu_pro_vision_fixed_mcq: 5
   vlm_mmmu_pro_vision_mcq: 5
   wikitext103_distilgpt2_continuation_parity: 20
@@ -88,9 +87,6 @@ models:
   deepseek-ocr:
     default: ocrbench_v2_unified
     workloads: [ocrbench_v2_unified]
-  deepseek-ocr-l0:
-    default: ocrbench_v2_unified
-    workloads: [ocrbench_v2_unified]
   deepseek-v2-lite:
     default: mmlu_continuation_parity
     workloads: [mmlu_continuation_parity]
@@ -130,19 +126,7 @@ models:
   flux-2-dev-fp8:
     default: dpg_bench_diffusion_image
     workloads: [dpg_bench_diffusion_image]
-  flux-2-dev-fp8-l0:
-    default: dpg_bench_diffusion_image
-    workloads: [dpg_bench_diffusion_image]
-  flux-2-dev-l0:
-    default: dpg_bench_diffusion_image
-    workloads: [dpg_bench_diffusion_image]
   flux-schnell:
-    default: dpg_bench_diffusion_image
-    workloads: [dpg_bench_diffusion_image]
-  flux-schnell-l0:
-    default: dpg_bench_diffusion_image
-    workloads: [dpg_bench_diffusion_image]
-  flux-schnell-l0-batch2:
     default: dpg_bench_diffusion_image
     workloads: [dpg_bench_diffusion_image]
   fnet-base:
@@ -154,16 +138,10 @@ models:
   glm-4-9b:
     default: mmlu_continuation_parity
     workloads: [mmlu_continuation_parity]
-  glm-4-9b-l0:
-    default: mmlu_continuation_parity
-    workloads: [mmlu_continuation_parity]
   gpt-neo-125m:
     default: mmlu_continuation_parity
     workloads: [mmlu_continuation_parity]
   gpt-oss-20b:
-    default: mmlu_five_shot_mcq
-    workloads: [mmlu_five_shot_mcq]
-  gpt-oss-20b-l0:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]
   gpt2-125m:
@@ -175,21 +153,12 @@ models:
   internlm2-1.8b:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]
-  internvl3-2b:
-    default: vlm_mmmu_pro_vision_fixed_mcq
-    workloads: [vlm_mmmu_pro_vision_fixed_mcq, vlm_mmmu_pro_vision_mcq]
   internvl3-8b:
     default: vlm_mmmu_pro_vision_fixed_mcq
     workloads: [vlm_mmmu_pro_vision_fixed_mcq, vlm_mmmu_pro_vision_mcq]
   lance-3b-x2t-image:
     default: e2e
     workloads: [e2e]
-  locateanything-3b:
-    default: e2e
-    workloads: [e2e]
-  ltx-video-l0:
-    default: vbench_t2v_diffusion_video
-    workloads: [vbench_t2v_diffusion_video]
   magpie-tts-357m:
     default: seedtts_en_tts_intelligibility
     workloads: [seedtts_en_tts_intelligibility]
@@ -205,13 +174,7 @@ models:
   minitron-4b-width:
     default: mmlu_continuation_parity
     workloads: [mmlu_continuation_parity]
-  minitron-4b-width-l0:
-    default: mmlu_continuation_parity
-    workloads: [mmlu_continuation_parity]
   mistral-7b:
-    default: mmlu_five_shot_mcq
-    workloads: [mmlu_five_shot_mcq]
-  mistral-7b-l0:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]
   mixtral-stories-15m:
@@ -233,9 +196,6 @@ models:
     default: mmlu_continuation_parity
     workloads: [mmlu_continuation_parity]
   nemotron-labs-diffusion-8b:
-    default: e2e
-    workloads: [e2e]
-  nemotron-labs-diffusion-8b-l0:
     default: e2e
     workloads: [e2e]
   nemotron-mini-4b:
@@ -277,13 +237,7 @@ models:
   personaplex-7b:
     default: e2e
     workloads: [e2e]
-  personaplex-7b-l0:
-    default: e2e
-    workloads: [e2e]
   phi-moe:
-    default: mmlu_five_shot_mcq
-    workloads: [mmlu_five_shot_mcq]
-  phi-moe-l0:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]
   phi3-mini:
@@ -293,9 +247,6 @@ models:
     default: e2e
     workloads: [e2e]
   pixart-sigma-1024:
-    default: dpg_bench_diffusion_image
-    workloads: [dpg_bench_diffusion_image]
-  pixart-sigma-1024-l0:
     default: dpg_bench_diffusion_image
     workloads: [dpg_bench_diffusion_image]
   pythia-70m:
@@ -310,9 +261,6 @@ models:
   qwen-image-edit-2511:
     default: gedit_bench_image_edit
     workloads: [gedit_bench_image_edit]
-  qwen-image-l0:
-    default: dpg_bench_diffusion_image
-    workloads: [dpg_bench_diffusion_image]
   qwen25vl-3b:
     default: vlm_mmmu_pro_vision_fixed_mcq
     workloads: [vlm_mmmu_pro_vision_fixed_mcq, vlm_mmmu_pro_vision_mcq]
@@ -331,9 +279,6 @@ models:
   qwen3-moe-30b-a3b:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]
-  qwen3-moe-tiny-random:
-    default: e2e
-    workloads: [e2e]
   qwen3-omni-30b-a3b-instruct:
     default: e2e
     workloads: [e2e]
@@ -388,13 +333,7 @@ models:
   wan21-t2v-1.3b:
     default: e2e
     workloads: [e2e]
-  wan21-t2v-1.3b-l0:
-    default: vbench_t2v_diffusion_video
-    workloads: [vbench_t2v_diffusion_video]
   wan22-ti2v-5b:
-    default: e2e
-    workloads: [e2e]
-  wan22-ti2v-5b-l0:
     default: e2e
     workloads: [e2e]
   whisper-large-v3-turbo:
@@ -413,8 +352,5 @@ models:
     default: stsbenchmark_encoder_embedding_parity
     workloads: [stsbenchmark_encoder_embedding_parity]
   z-image-turbo:
-    default: dpg_bench_diffusion_image
-    workloads: [dpg_bench_diffusion_image]
-  z-image-turbo-l0:
     default: dpg_bench_diffusion_image
     workloads: [dpg_bench_diffusion_image]

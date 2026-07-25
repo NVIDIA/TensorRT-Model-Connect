@@ -20,10 +20,11 @@ def test_model_workload_catalog_covers_every_ready_model():
     catalog = trtmc_validate.load_catalog()
     suites = task_eval.load_suites()
     task_models = trtmc_validate._task_eval_models(trtmc_validate.DEFAULT_MODELS)
+    ready_models = trtmc_validate.ready_model_names()
 
     trtmc_validate.audit_catalog(
         catalog,
-        ready_models=trtmc_validate.ready_model_names(),
+        ready_models=ready_models,
         suite_names=(suite["id"] for suite in suites),
     )
     trtmc_validate.audit_workload_compatibility(
@@ -32,7 +33,25 @@ def test_model_workload_catalog_covers_every_ready_model():
         task_models=task_models,
     )
 
-    assert len(catalog["models"]) == len(trtmc_validate.ready_model_names())
+    assert len(catalog["models"]) == len(ready_models) == 105
+
+
+def test_validation_ready_models_exclude_l0_only_profiles():
+    records = task_eval.load_manifest_records(trtmc_validate.DEFAULT_MODELS)
+    eligible = {
+        str(record["name"])
+        for record in records
+        if not record["requires_multi_device"] and not record.get("skip")
+    }
+    l0_only = {
+        str(record["name"])
+        for record in records
+        if record.get("ci_tier") == "l0_only"
+    }
+    selected = set(trtmc_validate.ready_model_names())
+
+    assert l0_only
+    assert selected == eligible - l0_only
 
 
 def test_catalog_defines_sample_limit_for_every_dataset_workload():
@@ -71,7 +90,7 @@ def test_every_dataset_backed_validation_binding_has_native_reference_runner():
             missing.append((model_name, workload, dataset_kind))
 
     assert not missing
-    assert len({model for model, _workload in bindings}) == 111
+    assert len({model for model, _workload in bindings}) == 95
 
 
 def test_resolve_binding_defaults_and_rejects_undeclared_workload():
