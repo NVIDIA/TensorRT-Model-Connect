@@ -291,20 +291,25 @@ def _patch_tensorrt(monkeypatch):
     monkeypatch.setattr(dit_mod, "_to_fp32",
                         lambda _network, t: t if isinstance(t, _FakeTensor)
                         else _FakeTensor("fp32"))
-    # ``_precompute_qwen_rope_tables`` returns two (n_img + n_text, head_dim)
-    # arrays. Stub with a tuple of matching-shape numpy arrays so the assert
-    # downstream is happy.
+    # ``_precompute_qwen_rope_tables_for_shapes`` returns two
+    # (sum(n_img) + n_text, head_dim) arrays. Stub the helper used by the
+    # current batch-aware production path so the downstream shape checks still
+    # exercise the real call boundary.
     import numpy as np
 
-    def _stub_rope(axes_dim, h_lat, w_lat, n_text, theta):
+    def _stub_rope(axes_dim, image_shapes, n_text, theta):
         head_dim = sum(axes_dim)
-        seq_total = h_lat * w_lat + n_text
+        seq_total = sum(h_lat * w_lat for h_lat, w_lat in image_shapes) + n_text
         return (
             np.zeros((seq_total, head_dim), dtype=np.float32),
             np.zeros((seq_total, head_dim), dtype=np.float32),
         )
 
-    monkeypatch.setattr(dit_mod, "_precompute_qwen_rope_tables", _stub_rope)
+    monkeypatch.setattr(
+        dit_mod,
+        "_precompute_qwen_rope_tables_for_shapes",
+        _stub_rope,
+    )
 
     calls: list[dict] = []
 
