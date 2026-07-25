@@ -86,14 +86,6 @@ def _to_fp32(network, tensor):
     return network.add_cast(tensor, trt.float32).get_output(0)
 
 
-def _np_reduced_dtype():
-    """Get numpy dtype matching _CAST_DTYPE."""
-    if _CAST_DTYPE == trt.bfloat16:
-        import ml_dtypes
-        return ml_dtypes.bfloat16
-    return np.float16
-
-
 def _fp16_compute() -> bool:
     """True when strongly typed FLUX.2 is using FP16 as its compute dtype."""
     return _CAST_DTYPE == trt.float16
@@ -695,22 +687,6 @@ def build_flux2_dit_engine(
     if plan is None:
         raise RuntimeError("TRT engine serialization failed for FLUX.2 DiT")
     return bytes(plan)
-
-
-# ============================================================================
-# Helper functions
-# ============================================================================
-
-def _matmul_bias_1d(network, inp, in_dim, out_dim, weight, bias):
-    """Matmul + bias for 1D input: [in_dim] -> [out_dim]."""
-    inp_2d = network.add_shuffle(inp)
-    inp_2d.reshape_dims = (1, in_dim)
-    out = graph_ops.add_matmul_rhs_constant(
-        network, inp_2d.get_output(0), in_dim, out_dim, weight)
-    out = graph_ops.add_bias_sum(network, out, out_dim, bias)
-    flat = network.add_shuffle(out)
-    flat.reshape_dims = (out_dim,)
-    return flat.get_output(0)
 
 
 def _matmul_bias_1d_opt(network, inp, in_dim, out_dim, weight, bias=None):

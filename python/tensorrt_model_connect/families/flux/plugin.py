@@ -1163,37 +1163,6 @@ def _serialize_flux2_preprocessor(
     return result
 
 
-def _build_vae_placeholder(latent_channels, h_lat, w_lat, verbose):
-    """Build a minimal VAE placeholder engine.
-
-    Actual VAE decoding for FLUX is done via Python subprocess
-    using diffusers AutoencoderKL. This placeholder engine exists
-    only to satisfy the bundle format requirement for a vae_decoder_plan.
-    """
-    from tensorrt_model_connect import trt_compat
-    trt = trt_compat.get_trt()
-
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    builder = trt.Builder(logger)
-    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-    config = builder.create_builder_config()
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 28)
-
-    # Simple identity: input [C, H, W] -> output [C, H, W]
-    inp = network.add_input("latents", trt.float32, (latent_channels, h_lat, w_lat))
-    identity = network.add_identity(inp)
-    out = identity.get_output(0)
-    cast_out = network.add_cast(out, trt.float32)
-    out_final = cast_out.get_output(0)
-    out_final.name = "output"
-    network.mark_output(out_final)
-
-    plan = builder.build_serialized_network(network, config)
-    if plan is None:
-        raise RuntimeError("VAE placeholder engine build failed")
-    return bytes(plan)
-
-
 def _serialize_flux_preprocessor(dit_weights: dict, guidance_embeds: bool) -> bytes:
     """Serialize FLUX preprocessor weights.
 
