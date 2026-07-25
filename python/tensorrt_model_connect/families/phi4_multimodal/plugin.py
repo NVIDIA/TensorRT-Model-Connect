@@ -26,7 +26,9 @@ from .checkpoint_mapper import (
 
 
 def _load_vision_adapted_weight(
-    readers, base_key: str, config: ModelConfig,
+    readers,
+    base_key: str,
+    config: ModelConfig,
 ) -> np.ndarray:
     """Return a base projection with the checkpoint's vision LoRA merged."""
     base = _load_tensor(readers, base_key).astype(np.float32)
@@ -47,7 +49,8 @@ def _load_vision_adapted_weight(
     if rank <= 0 or lora_a.shape[0] != rank or lora_b.shape[1] != rank:
         raise ValueError(
             f"Invalid Phi-4 vision LoRA shapes for {projection_prefix}: "
-            f"A={lora_a.shape}, B={lora_b.shape}, configured rank={rank}")
+            f"A={lora_a.shape}, B={lora_b.shape}, configured rank={rank}"
+        )
     return base + (lora_b @ lora_a) * (alpha / rank)
 
 
@@ -61,7 +64,9 @@ class Phi4MultimodalPlugin:
         return mt in ("phi4mm", "phi4_multimodal")
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         """Load Phi-4-multimodal weights with the vision LoRA merged."""
         model_dir_path = Path(model_dir)
@@ -82,7 +87,8 @@ class Phi4MultimodalPlugin:
         # Embedding
         embedding = _load_tensor(readers, "model.embed_tokens.weight")
         assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
+        )
         weights["embedding"] = embedding.astype(np.float32)
 
         mlp_size = 0
@@ -93,28 +99,26 @@ class Phi4MultimodalPlugin:
             hf_prefix = f"model.layers.{layer_idx}"
 
             # Norms (1D, no transpose, no LoRA)
-            input_norm = _load_tensor(
-                readers, f"{hf_prefix}.input_layernorm.weight")
-            post_norm = _load_tensor(
-                readers, f"{hf_prefix}.post_attention_layernorm.weight")
+            input_norm = _load_tensor(readers, f"{hf_prefix}.input_layernorm.weight")
+            post_norm = _load_tensor(readers, f"{hf_prefix}.post_attention_layernorm.weight")
             weights[f"{prefix}.input_norm"] = input_norm.astype(np.float32)
             weights[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
 
             # ---- Fused QKV projection (base_layer) ----
             # Shape: [q_dim + 2*kv_dim, hidden]
             qkv_raw = _load_vision_adapted_weight(
-                readers,
-                f"{hf_prefix}.self_attn.qkv_proj.base_layer.weight",
-                config)
+                readers, f"{hf_prefix}.self_attn.qkv_proj.base_layer.weight", config
+            )
             total_qkv = qkv_raw.shape[0]
             expected_qkv = q_dim + 2 * kv_dim
             assert total_qkv == expected_qkv, (
                 f"Layer {layer_idx} qkv_proj rows {total_qkv} != "
-                f"expected {expected_qkv} (q={q_dim}, kv={kv_dim})")
+                f"expected {expected_qkv} (q={q_dim}, kv={kv_dim})"
+            )
 
             q_raw = qkv_raw[:q_dim, :]
-            k_raw = qkv_raw[q_dim:q_dim + kv_dim, :]
-            v_raw = qkv_raw[q_dim + kv_dim:, :]
+            k_raw = qkv_raw[q_dim : q_dim + kv_dim, :]
+            v_raw = qkv_raw[q_dim + kv_dim :, :]
             del qkv_raw
 
             if attention_size == 0:
@@ -132,18 +136,16 @@ class Phi4MultimodalPlugin:
 
             # Output projection (base_layer)
             o_raw = _load_vision_adapted_weight(
-                readers,
-                f"{hf_prefix}.self_attn.o_proj.base_layer.weight",
-                config)
+                readers, f"{hf_prefix}.self_attn.o_proj.base_layer.weight", config
+            )
             weights[f"{prefix}.w_o"] = _transpose_2d(o_raw, "o_proj")
             del o_raw
 
             # ---- Fused gate_up projection (base_layer) ----
             # Shape: [2 * intermediate_size, hidden]
             gate_up_raw = _load_vision_adapted_weight(
-                readers,
-                f"{hf_prefix}.mlp.gate_up_proj.base_layer.weight",
-                config)
+                readers, f"{hf_prefix}.mlp.gate_up_proj.base_layer.weight", config
+            )
             intermediate = gate_up_raw.shape[0] // 2
             if mlp_size == 0:
                 mlp_size = intermediate
@@ -158,25 +160,22 @@ class Phi4MultimodalPlugin:
 
             # Down projection (base_layer)
             down_raw = _load_vision_adapted_weight(
-                readers,
-                f"{hf_prefix}.mlp.down_proj.base_layer.weight",
-                config)
+                readers, f"{hf_prefix}.mlp.down_proj.base_layer.weight", config
+            )
             weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down_proj")
             del down_raw
 
         # Final norm
         final_norm_key = "model.norm.weight"
         if _has_tensor(readers, final_norm_key):
-            weights["final_norm"] = _load_tensor(
-                readers, final_norm_key).astype(np.float32)
+            weights["final_norm"] = _load_tensor(readers, final_norm_key).astype(np.float32)
         else:
             weights["final_norm"] = np.ones(hidden, dtype=np.float32)
 
         # LM head (tied embeddings — no lm_head.weight in this model)
         lm_head_key = "lm_head.weight"
         if _has_tensor(readers, lm_head_key):
-            weights["w_out"] = _transpose_2d(
-                _load_tensor(readers, lm_head_key), "lm_head")
+            weights["w_out"] = _transpose_2d(_load_tensor(readers, lm_head_key), "lm_head")
         else:
             weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied")
 
@@ -190,32 +189,45 @@ class Phi4MultimodalPlugin:
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         debug_layer_outputs: bool = False,
     ) -> bytes:
         from .standard_decoder_builder import build_standard_decoder_engine
 
         partial_rotary = config.raw.get("partial_rotary_factor", 1.0)
         return build_standard_decoder_engine(
-            config, weights, max_cache_length,
+            config,
+            weights,
+            max_cache_length,
             precision=precision,
-            quant_ctx=quant_ctx, partial_rotary_factor=partial_rotary,
-            embed_input=True,
+            quant_ctx=quant_ctx,
+            partial_rotary_factor=partial_rotary,
             verbose=verbose,
-            debug_layer_outputs=debug_layer_outputs)
+            debug_layer_outputs=debug_layer_outputs,
+        )
 
     def build_vision_engine(
-        self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, precision: str = "fp32", verbose: bool = False,
+        self,
+        model_dir: str,
+        config: ModelConfig,
+        weights: WeightDict,
+        *,
+        precision: str = "fp32",
+        verbose: bool = False,
     ) -> bytes:
         from .phi4mm_vision_builder import build_phi4mm_vision_engine
 
         del config, weights
         return build_phi4mm_vision_engine(
-            _load_vision_weights(model_dir), precision=precision,
-            verbose=verbose)
+            _load_vision_weights(model_dir), precision=precision, verbose=verbose
+        )
 
     def get_vl_config(self, config: ModelConfig) -> dict:
         return {
@@ -228,8 +240,7 @@ class Phi4MultimodalPlugin:
             "image_mean": [0.5, 0.5, 0.5],
             "image_std": [0.5, 0.5, 0.5],
             "interpolation": "bilinear",
-            "vl_prompt_template": (
-                "<|user|>{image_pads}{prompt}<|end|><|assistant|>"),
+            "vl_prompt_template": ("<|user|>{image_pads}{prompt}<|end|><|assistant|>"),
             "image_token_str": "<|endoftext10|>",
         }
 
@@ -242,8 +253,7 @@ def _load_vision_weights(model_dir: str) -> WeightDict:
     for reader in readers:
         for key in reader.keys():
             if key.startswith(checkpoint_prefix):
-                weights[key.removeprefix(checkpoint_prefix)] = _load_tensor(
-                    [reader], key)
+                weights[key.removeprefix(checkpoint_prefix)] = _load_tensor([reader], key)
     if not weights:
         raise RuntimeError("Phi-4 checkpoint contains no image tower weights")
     return weights
