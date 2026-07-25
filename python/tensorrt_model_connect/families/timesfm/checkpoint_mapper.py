@@ -10,8 +10,6 @@ standard_decoder_builder.py. All projections are transposed from HF
 
 from __future__ import annotations
 
-import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -24,30 +22,12 @@ except ImportError:
 
 from safetensors import safe_open
 
-from .config import ModelConfig
-
 
 def _target_np_dtype(precision: str) -> np.dtype:
     """Map precision string to numpy dtype for weight storage."""
     if precision in ("fp16", "bf16"):
         return np.float16
     return np.float32
-
-
-def _layer_key(layer_idx: int, suffix: str, model_prefix: str = "model") -> str:
-    return f"{model_prefix}.layers.{layer_idx}.{suffix}"
-
-
-def _transpose_2d(arr: np.ndarray, name: str, precision: str = "fp32") -> np.ndarray:
-    """Transpose [rows, cols] -> [cols, rows] in C-contiguous target dtype."""
-    if arr.ndim != 2:
-        raise ValueError(f"Expected rank-2 tensor for transpose: {name}")
-    return np.ascontiguousarray(arr.T, dtype=_target_np_dtype(precision))
-
-
-def _repeat_head_norm(norm: np.ndarray, num_heads: int) -> np.ndarray:
-    """Repeat per-head norm [head_dim] -> [num_heads * head_dim]."""
-    return np.tile(norm, num_heads).astype(np.float32)
 
 
 class WeightDict(dict):
@@ -72,165 +52,6 @@ class WeightDict(dict):
       - final_norm: [hidden]
       - w_out: [hidden, vocab]
     """
-
-
-def load_standard_weights(
-    model_dir: str | Path,
-    config: ModelConfig,
-    *,
-    precision: str = "fp32",
-    model_prefix: str = "model",
-    embedding_key: str | None = None,
-    final_norm_key: str | None = None,
-    lm_head_key: str = "lm_head.weight",
-) -> WeightDict:
-    """Load HF safetensors and map to standard weight dict."""
-    model_dir = Path(model_dir)
-    readers = _open_safetensors(model_dir)
-
-    hidden = config.hidden_size
-    vocab = config.vocab_size
-    num_layers = config.num_hidden_layers
-    num_heads = config.num_attention_heads
-    num_kv_heads = config.num_key_value_heads
-    target_dtype = _target_np_dtype(precision)
-
-    weights = WeightDict()
-
-    # Embedding
-    if embedding_key is None:
-        embedding_key = f"{model_prefix}.embed_tokens.weight"
-    embedding = _load_tensor(readers, embedding_key)
-    assert embedding.shape == (vocab, hidden), (
-        f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
-    weights["embedding"] = embedding.astype(target_dtype)
-
-    def _load_layer(layer_idx: int) -> tuple[int, WeightDict, int, int]:
-        prefix = f"layer.{layer_idx}"
-        layer = WeightDict()
-
-        # Norms
-        input_norm = _load_tensor(
-            readers, _layer_key(layer_idx, "input_layernorm.weight", model_prefix))
-        post_norm = _load_tensor(
-            readers,
-            _layer_key(layer_idx, "post_attention_layernorm.weight", model_prefix))
-        layer[f"{prefix}.input_norm"] = input_norm.astype(np.float32)
-        layer[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
-
-        # Q/K/V/O projections
-        q_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.q_proj.weight", model_prefix))
-        k_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.k_proj.weight", model_prefix))
-        v_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.v_proj.weight", model_prefix))
-        o_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.o_proj.weight", model_prefix))
-
-        q_hidden = q_raw.shape[0]
-        gate_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "mlp.gate_proj.weight", model_prefix))
-        layer_mlp_size = gate_raw.shape[0]
-
-        # Transpose all projections [out, in] -> [in, out]
-        q_t = _transpose_2d(q_raw, "q_proj", precision=precision)
-        k_t = _transpose_2d(k_raw, "k_proj", precision=precision)
-        v_t = _transpose_2d(v_raw, "v_proj", precision=precision)
-        o_t = _transpose_2d(o_raw, "o_proj", precision=precision)
-
-        layer[f"{prefix}.w_q"] = q_t
-        layer[f"{prefix}.w_k"] = k_t
-        layer[f"{prefix}.w_v"] = v_t
-        layer[f"{prefix}.w_o"] = o_t
-
-        # Optional QKV biases (Qwen2 style)
-        q_bias_key = _layer_key(layer_idx, "self_attn.q_proj.bias", model_prefix)
-        k_bias_key = _layer_key(layer_idx, "self_attn.k_proj.bias", model_prefix)
-        v_bias_key = _layer_key(layer_idx, "self_attn.v_proj.bias", model_prefix)
-        if _has_tensor(readers, q_bias_key):
-            layer[f"{prefix}.q_bias"] = _load_tensor(
-                readers, q_bias_key).astype(target_dtype)
-        if _has_tensor(readers, k_bias_key):
-            layer[f"{prefix}.k_bias"] = _load_tensor(
-                readers, k_bias_key).astype(target_dtype)
-        if _has_tensor(readers, v_bias_key):
-            layer[f"{prefix}.v_bias"] = _load_tensor(
-                readers, v_bias_key).astype(target_dtype)
-
-        # Optional per-head q/k norm (Qwen3 style)
-        q_norm_key = _layer_key(layer_idx, "self_attn.q_norm.weight", model_prefix)
-        k_norm_key = _layer_key(layer_idx, "self_attn.k_norm.weight", model_prefix)
-        if _has_tensor(readers, q_norm_key):
-            layer[f"{prefix}.q_norm"] = _repeat_head_norm(
-                _load_tensor(readers, q_norm_key).astype(np.float32),
-                num_heads)
-        if _has_tensor(readers, k_norm_key):
-            layer[f"{prefix}.k_norm"] = _repeat_head_norm(
-                _load_tensor(readers, k_norm_key).astype(np.float32),
-                num_kv_heads)
-
-        # MLP projections
-        up_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "mlp.up_proj.weight", model_prefix))
-        down_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "mlp.down_proj.weight", model_prefix))
-
-        layer[f"{prefix}.w_gate"] = _transpose_2d(
-            gate_raw, "gate_proj", precision=precision)
-        layer[f"{prefix}.w_up"] = _transpose_2d(
-            up_raw, "up_proj", precision=precision)
-        layer[f"{prefix}.w_down"] = _transpose_2d(
-            down_raw, "down_proj", precision=precision)
-
-        return layer_idx, layer, q_hidden, layer_mlp_size
-
-    layer_results: list[tuple[int, WeightDict, int, int] | None] = [None] * num_layers
-    max_workers = min(8, max(1, os.cpu_count() or 1))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(_load_layer, i) for i in range(num_layers)]
-        for future in as_completed(futures):
-            layer_idx, layer, attention_size, mlp_size = future.result()
-            layer_results[layer_idx] = (layer_idx, layer, attention_size, mlp_size)
-
-    attention_size = 0
-    kv_attention_size = 0
-    mlp_size = 0
-    for result in layer_results:
-        if result is None:
-            continue
-        _layer_idx, layer, layer_attention_size, layer_mlp_size = result
-        weights.update(layer)
-        if attention_size == 0:
-            attention_size = layer_attention_size
-            first_k = layer[f"layer.{_layer_idx}.w_k"]
-            kv_attention_size = int(first_k.shape[1])
-        if mlp_size == 0:
-            mlp_size = layer_mlp_size
-
-    # Final norm
-    if final_norm_key is None:
-        final_norm_key = f"{model_prefix}.norm.weight"
-    if _has_tensor(readers, final_norm_key):
-        weights["final_norm"] = _load_tensor(
-            readers, final_norm_key).astype(np.float32)
-    else:
-        weights["final_norm"] = np.ones(hidden, dtype=np.float32)
-
-    # LM head
-    if _has_tensor(readers, lm_head_key):
-        weights["w_out"] = _transpose_2d(
-            _load_tensor(readers, lm_head_key), "lm_head", precision=precision)
-    else:
-        # Tied embeddings
-        weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied",
-                                         precision=precision)
-
-    weights["_attention_size"] = attention_size  # type: ignore[assignment]
-    weights["_kv_attention_size"] = kv_attention_size  # type: ignore[assignment]
-    weights["_mlp_size"] = mlp_size  # type: ignore[assignment]
-
-    return weights
 
 
 # ---------------------------------------------------------------------------
@@ -331,16 +152,6 @@ def _open_safetensors(model_dir: Path) -> list:
 
     raise FileNotFoundError(
         f"No model.safetensors, index.json, or pytorch_model.bin in {model_dir}")
-
-
-def _has_tensor(readers: list, name: str) -> bool:
-    tensor_map = getattr(readers, "tensor_map", None)
-    if tensor_map is not None:
-        return name in tensor_map
-    for r in readers:
-        if name in r.keys():
-            return True
-    return False
 
 
 def _to_numpy_fp32(t) -> np.ndarray:

@@ -34,13 +34,6 @@ from .time_series_trt import (
 trt = trt_compat.get_trt()
 
 
-def _context_length(config, fallback: int) -> int:
-    value = getattr(config, "context_length", 0) or fallback
-    if value <= 0:
-        value = fallback
-    return int(value)
-
-
 def _load_all_tensors(
     model_dir: str | Path,
     *,
