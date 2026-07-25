@@ -28,17 +28,19 @@ trtmc run qwen3-0.6b.trtfb \
   --greedy
 ```
 
-For the exactly qualified `Qwen/Qwen3-0.6B` and
-`TinyLlama/TinyLlama-1.1B-Chat-v1.0` revisions, the model-only build
-automatically emits split prefill/decode engines with runtime-owned KV
-memory on the initial qualified target: GB300 (`sm103`) with TensorRT
-`11.2.0.113`. On another target, dynamic-memory qualification is not selected
-and the model keeps its existing provider/native build route.
-Runtime defaults to 90% of the safely usable free GPU memory measured after
-engine loading, capped by the model's context limit. Use
-`--kv-cache-memory 80%` or `--kv-cache-memory 8GiB` to override it, and
-optionally add the runtime-only `--max-sequence-length 4K` admission cap.
-Other checkpoints retain their existing build and runtime route.
+This branch contains an implementation candidate for
+`Qwen/Qwen3-0.6B` and `TinyLlama/TinyLlama-1.1B-Chat-v1.0`. For those exact
+candidate revisions, a model-only build can emit split prefill/decode engines
+with runtime-owned KV memory on GB300 (`sm103`) with TensorRT `11.2.0.113`.
+The candidate is not release-qualified yet; source-bound qualification,
+representative compatibility jobs, and consecutive nightlies remain required.
+On another target, the model keeps its existing provider/native build route.
+When the candidate route is selected, runtime defaults to 90% of the safely
+usable free GPU memory measured after engine loading, capped by the model's
+context limit. Use `--kv-cache-memory 80%` or
+`--kv-cache-memory 8GiB` to override it, and optionally add the runtime-only
+`--max-sequence-length 4K` admission cap. Other checkpoints retain their
+existing build and runtime route.
 
 The wheel installs the native `trtmc` executable into the environment, the
 Python builder dependencies including TensorRT, and the TensorRT backend DSO.
