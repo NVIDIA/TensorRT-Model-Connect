@@ -138,17 +138,25 @@ class FP8Format:
         # the fast bf16 path sees no perf regression.
         acc_dtype = trt.float32 if out_trt_dtype == trt.float16 else out_trt_dtype
 
-        # Weight Q/DQ: constant -> quantize(FP8) -> dequantize(acc_dtype)
+        # Weight Q/DQ: constant -> quantize(FP8) -> dequantize(acc_dtype).
+        # STRONGLY_TYPED networks require a quantize's input+scale to share a
+        # dtype and a dequantize's scale to match its output dtype, so cast the
+        # weight const to the work dtype and give each role its own scale cast.
+        # All casts are no-ops for an fp32 base (regression-safe); required for
+        # a bf16/fp16 base, where an fp32 scale would fail the build (arith.divf).
         weight_const = graph_ops.add_constant(
             network, (lhs_width, rhs_width), weight_array, dtype=dtype)
+        weight_const = _cast_output_dtype(network, weight_const, out_trt_dtype)
         w_scale = np.array(
             [scales.weight_scale] if np.isscalar(scales.weight_scale)
             else scales.weight_scale, dtype=np.float32)
         w_scale_t = graph_ops.add_constant(
             network, w_scale.shape, w_scale, dtype=np.float32)
-        q_w = network.add_quantize(weight_const, w_scale_t, trt.fp8)
+        w_scale_q = _cast_output_dtype(network, w_scale_t, out_trt_dtype)
+        w_scale_dq = _cast_output_dtype(network, w_scale_t, acc_dtype)
+        q_w = network.add_quantize(weight_const, w_scale_q, trt.fp8)
         dq_w = network.add_dequantize(
-            q_w.get_output(0), w_scale_t, acc_dtype)
+            q_w.get_output(0), w_scale_dq, acc_dtype)
 
         # Activation Q/DQ: input -> quantize(FP8) -> dequantize(acc_dtype)
         a_scale = np.array(
@@ -156,9 +164,11 @@ class FP8Format:
             else scales.input_scale, dtype=np.float32)
         a_scale_t = graph_ops.add_constant(
             network, a_scale.shape, a_scale, dtype=np.float32)
-        q_a = network.add_quantize(activation, a_scale_t, trt.fp8)
+        a_scale_q = _cast_output_dtype(network, a_scale_t, out_trt_dtype)
+        a_scale_dq = _cast_output_dtype(network, a_scale_t, acc_dtype)
+        q_a = network.add_quantize(activation, a_scale_q, trt.fp8)
         dq_a = network.add_dequantize(
-            q_a.get_output(0), a_scale_t, acc_dtype)
+            q_a.get_output(0), a_scale_dq, acc_dtype)
 
         # Matmul on dequantized tensors (TRT fuses Q/DQ + matmul)
         mm = network.add_matrix_multiply(
