@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import html
@@ -80,6 +81,19 @@ def _validate_model_spec(path: Path, name: Any, spec: Any) -> None:
         raise ValidationError(f"{path}: {name}.default must be one of {name}.workloads")
 
 
+def _validate_sample_limits(path: Path, raw: Mapping[str, Any]) -> None:
+    sample_limits = raw.get("sample_limits")
+    if not isinstance(sample_limits, dict) or not sample_limits:
+        raise ValidationError(f"{path}: sample_limits must be a non-empty mapping")
+    for workload, limit in sample_limits.items():
+        if not isinstance(workload, str) or not workload:
+            raise ValidationError(f"{path}: invalid sample-limit workload {workload!r}")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValidationError(
+                f"{path}: sample_limits.{workload} must be a positive integer"
+            )
+
+
 def load_catalog(path: Path = DEFAULT_CATALOG) -> dict[str, Any]:
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict) or raw.get("version") != 1:
@@ -87,6 +101,7 @@ def load_catalog(path: Path = DEFAULT_CATALOG) -> dict[str, Any]:
     models = raw.get("models")
     if not isinstance(models, dict) or not models:
         raise ValidationError(f"{path}: models must be a non-empty mapping")
+    _validate_sample_limits(path, raw)
     for name, spec in models.items():
         _validate_model_spec(path, name, spec)
     return raw
@@ -134,6 +149,23 @@ def audit_catalog(
     if unknown:
         raise ValidationError(f"unknown workloads: {', '.join(unknown)}")
 
+    declared_sampled = {
+        workload
+        for spec in models.values()
+        for workload in spec["workloads"]
+        if workload != "e2e"
+    }
+    configured_sampled = set(catalog["sample_limits"])
+    missing_limits = sorted(declared_sampled - configured_sampled)
+    stale_limits = sorted(configured_sampled - declared_sampled)
+    if missing_limits or stale_limits:
+        details = []
+        if missing_limits:
+            details.append(f"missing sample limits: {', '.join(missing_limits)}")
+        if stale_limits:
+            details.append(f"unused sample limits: {', '.join(stale_limits)}")
+        raise ValidationError("; ".join(details))
+
 
 def audit_workload_compatibility(
     catalog: Mapping[str, Any],
@@ -172,6 +204,20 @@ def resolve_binding(
             f"model {model} does not declare workload {selected}; available: {available}"
         )
     return Binding(model=model, workload=selected)
+
+
+def resolve_sample_limit(
+    catalog: Mapping[str, Any],
+    binding: Binding,
+    explicit_limit: int | None,
+) -> int:
+    if explicit_limit is not None:
+        if explicit_limit < 0:
+            raise ValidationError("--limit must be zero or greater")
+        return explicit_limit
+    if binding.workload == "e2e":
+        return 0
+    return int(catalog["sample_limits"][binding.workload])
 
 
 def _task_eval_models(models_root: Path) -> dict[str, dict[str, Any]]:
@@ -855,11 +901,13 @@ def _normalize_reproduction(value: Any) -> dict[str, Any]:
 def _add_dataset_reproduction(
     reproduce: Mapping[str, Any],
     command: str,
+    sample_limit: int = 0,
 ) -> dict[str, Any]:
     result = dict(reproduce)
     prepared_input_count = int(result.pop("prepared_input_count", 0) or 0)
     result["dataset"] = {
         "command": command,
+        "sample_limit": sample_limit,
         "prepared_input_count": prepared_input_count,
     }
     return result
@@ -898,6 +946,7 @@ def _comparison_result(
     returncode: int,
     reference_environment: EnvironmentSelection,
     dataset_command: str,
+    sample_limit: int = 0,
 ) -> dict[str, Any]:
     summary_path = case_dir / "validation" / binding.workload / "eval_summary.json"
     raw_result: dict[str, Any] = {}
@@ -939,6 +988,7 @@ def _comparison_result(
         "reproduce": _add_dataset_reproduction(
             _commands_from_logs(work_dir),
             dataset_command,
+            sample_limit,
         ),
         "raw_result": raw_result,
         "raw_result_path": str(summary_path),
@@ -1042,6 +1092,7 @@ def run_binding(
             returncode=returncode,
             reference_environment=environment,
             dataset_command=dataset_command,
+            sample_limit=int(arguments.limit or 0),
         )
 
     comparison = case_dir / "comparison.json"
@@ -1172,17 +1223,19 @@ def _reproduction_logs(result: Mapping[str, Any], kind: str) -> list[str]:
     return _string_list(logs.get(kind, [])) if isinstance(logs, dict) else []
 
 
-def _dataset_reproduction(result: Mapping[str, Any]) -> tuple[str, int]:
+def _dataset_reproduction(result: Mapping[str, Any]) -> tuple[str, int, int]:
     reproduce = result.get("reproduce", {})
     dataset = reproduce.get("dataset", {}) if isinstance(reproduce, dict) else {}
     if not isinstance(dataset, dict):
-        return "", 0
+        return "", 0, 0
     command = str(dataset.get("command", "") or "")
     try:
+        sample_limit = int(dataset.get("sample_limit", 0) or 0)
         prepared = int(dataset.get("prepared_input_count", 0) or 0)
     except (TypeError, ValueError):
+        sample_limit = 0
         prepared = 0
-    return command, prepared
+    return command, sample_limit, prepared
 
 
 def _representative_note(result: Mapping[str, Any]) -> str:
@@ -1343,15 +1396,26 @@ def _render_reproduction(
 ) -> str:
     reference_commands = _result_commands(result, "hf")
     trtmc_commands = _result_commands(result, "trtmc")
-    dataset_command, prepared_input_count = _dataset_reproduction(result)
+    dataset_command, sample_limit, prepared_input_count = _dataset_reproduction(result)
     reference_total = _reproduction_count(result, "hf")
     trtmc_total = _reproduction_count(result, "trtmc")
     input_label = "input" if prepared_input_count == 1 else "inputs"
-    dataset_label = (
-        f"Full dataset ({prepared_input_count} prepared {input_label})"
-        if prepared_input_count
-        else "Full dataset"
-    )
+    if sample_limit:
+        sample_label = "sample" if sample_limit == 1 else "samples"
+        prepared_label = (
+            f"; {prepared_input_count} prepared {input_label}"
+            if prepared_input_count
+            else ""
+        )
+        dataset_label = (
+            f"Dataset slice ({sample_limit} selected {sample_label}{prepared_label})"
+        )
+    else:
+        dataset_label = (
+            f"Full dataset ({prepared_input_count} prepared {input_label})"
+            if prepared_input_count
+            else "Full dataset"
+        )
     summary = (
         f"Dataset · Reference {len(reference_commands)}/{reference_total} · "
         f"TRTMC {len(trtmc_commands)}/{trtmc_total}"
@@ -1493,6 +1557,28 @@ def _render_validation(result: Mapping[str, Any]) -> str:
     )
 
 
+def _render_samples(result: Mapping[str, Any]) -> str:
+    _command, sample_limit, prepared_input_count = _dataset_reproduction(result)
+    if sample_limit:
+        selected = f"{sample_limit} selected"
+        if prepared_input_count and prepared_input_count != sample_limit:
+            input_label = "input" if prepared_input_count == 1 else "inputs"
+            return (
+                f'{selected}<br><span class="detail">'
+                f"{prepared_input_count} prepared {input_label}</span>"
+            )
+        return selected
+    if prepared_input_count:
+        input_label = "input" if prepared_input_count == 1 else "inputs"
+        return (
+            f'Full<br><span class="detail">'
+            f"{prepared_input_count} prepared {input_label}</span>"
+        )
+    if result.get("workload") == "e2e":
+        return "E2E"
+    return '<span class="unavailable">Unavailable</span>'
+
+
 def _normalize_result_files(
     result_paths: Sequence[Path],
 ) -> list[dict[str, Any]]:
@@ -1545,6 +1631,7 @@ def _report_rows(
             "<tr>"
             f"<td>{html.escape(str(result.get('model', '')))}</td>"
             f"<td>{html.escape(str(result.get('workload', '')))}</td>"
+            f"<td>{_render_samples(result)}</td>"
             f"<td>{_render_execution(result)}</td>"
             f"<td>{_render_reference(result)}</td>"
             f"<td>{_render_comparison(result)}</td>"
@@ -1623,9 +1710,11 @@ pre {{ margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
 <div class="summary">{report["summary"]["cases"]} cases ·
 {comparison_counts["agreement"]} agreements ·
 {comparison_counts["disagreement"]} disagreements ·
-{execution_errors} execution errors<br>
+{execution_errors} execution errors ·
+{report["summary"]["selected_samples"]} selected samples ·
+{report["summary"]["prepared_inputs"]} prepared inputs<br>
 {html.escape(provenance)}</div>
-<table><thead><tr><th>Model</th><th>Workload</th><th>Execution</th>
+<table><thead><tr><th>Model</th><th>Workload</th><th>Samples</th><th>Execution</th>
 <th>Reference</th><th>Comparison</th><th>Agreement metrics</th>
 <th>Validation</th><th>Vanilla reproduction</th><th>Result</th></tr></thead>
 <tbody>{rows}</tbody></table>
@@ -1637,6 +1726,7 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
     result_paths = sorted(output.glob("*/*/comparison.json"))
     results = _normalize_result_files(result_paths)
     validation_counts, comparison_counts, execution_errors = _report_counts(results)
+    sampling = [_dataset_reproduction(result)[1:] for result in results]
     report = {
         "schema_version": "trtmc.validation-report/v2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1653,6 +1743,8 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
             "validation_passed": validation_counts["passed"],
             "validation_failed": validation_counts["failed"],
             "validation_skipped": validation_counts["skipped"],
+            "selected_samples": sum(limit for limit, _prepared in sampling),
+            "prepared_inputs": sum(prepared for _limit, prepared in sampling),
         },
         "results": results,
     }
@@ -1679,9 +1771,9 @@ def _print_result(result: Mapping[str, Any], comparison: Path, report: Path) -> 
     reproduce = result.get("reproduce", {})
     hf_commands = reproduce.get("hf", []) if isinstance(reproduce, dict) else []
     trtmc_commands = reproduce.get("trtmc", []) if isinstance(reproduce, dict) else []
-    dataset_command, _ = _dataset_reproduction(result)
+    dataset_command, _, _ = _dataset_reproduction(result)
     print()
-    print("Reproduce full dataset:")
+    print("Reproduce dataset run:")
     print(f"  {dataset_command}" if dataset_command else "  unavailable; see comparison result")
     print()
     print("Reproduce representative HF:")
@@ -1733,7 +1825,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-plugin-dir", type=Path)
     parser.add_argument("--cuda-visible-devices", default="")
     parser.add_argument("--platform", default="")
-    parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help=(
+            "override the workload sample limit; use 0 for the complete dataset"
+        ),
+    )
     parser.add_argument("--force-hf", action="store_true")
     parser.add_argument("--force-build", action="store_true")
     parser.add_argument("--no-build", action="store_true")
@@ -1778,10 +1877,26 @@ def _select_bindings(
     return [resolve_binding(catalog, arguments.model, arguments.workload)]
 
 
-def _print_bindings(bindings: Iterable[Binding]) -> None:
+def _print_bindings(
+    bindings: Iterable[Binding],
+    *,
+    catalog: Mapping[str, Any],
+    explicit_limit: int | None,
+) -> None:
     print(
         json.dumps(
-            [{"model": binding.model, "workload": binding.workload} for binding in bindings],
+            [
+                {
+                    "model": binding.model,
+                    "workload": binding.workload,
+                    "sample_limit": resolve_sample_limit(
+                        catalog,
+                        binding,
+                        explicit_limit,
+                    ),
+                }
+                for binding in bindings
+            ],
             indent=2,
         )
     )
@@ -1791,6 +1906,7 @@ def _run_bindings(
     bindings: Iterable[Binding],
     *,
     arguments: argparse.Namespace,
+    catalog: Mapping[str, Any],
     task_models: Mapping[str, dict[str, Any]],
     suites: Mapping[str, dict[str, Any]],
 ) -> int:
@@ -1801,10 +1917,28 @@ def _run_bindings(
     write_run_metadata(arguments.output)
     failed = False
     for binding in bindings:
-        print(f"\n{binding.model} / {binding.workload}", flush=True)
+        binding_arguments = copy.copy(arguments)
+        binding_arguments.limit = resolve_sample_limit(
+            catalog,
+            binding,
+            arguments.limit,
+        )
+        sample_note = (
+            "full dataset"
+            if binding.workload != "e2e" and binding_arguments.limit == 0
+            else (
+                f"{binding_arguments.limit} samples"
+                if binding.workload != "e2e"
+                else "e2e"
+            )
+        )
+        print(
+            f"\n{binding.model} / {binding.workload} / {sample_note}",
+            flush=True,
+        )
         result = run_binding(
             binding,
-            arguments=arguments,
+            arguments=binding_arguments,
             task_models=task_models,
             e2e_models=e2e_models,
             suites=suites,
@@ -1820,15 +1954,27 @@ def _main(arguments: argparse.Namespace) -> int:
     catalog, suites, ready, task_models = _load_validation_inputs(arguments)
     if arguments.list:
         for name, spec in catalog["models"].items():
-            print(f"{name}: {', '.join(spec['workloads'])}")
+            workloads = []
+            for workload in spec["workloads"]:
+                if workload == "e2e":
+                    workloads.append("e2e")
+                else:
+                    limit = catalog["sample_limits"][workload]
+                    workloads.append(f"{workload} ({limit} samples)")
+            print(f"{name}: {', '.join(workloads)}")
         return 0
     bindings = _select_bindings(arguments, catalog, ready)
     if arguments.dry_run:
-        _print_bindings(bindings)
+        _print_bindings(
+            bindings,
+            catalog=catalog,
+            explicit_limit=arguments.limit,
+        )
         return 0
     return _run_bindings(
         bindings,
         arguments=arguments,
+        catalog=catalog,
         task_models=task_models,
         suites=suites,
     )

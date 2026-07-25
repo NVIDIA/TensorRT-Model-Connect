@@ -35,6 +35,21 @@ def test_model_workload_catalog_covers_every_ready_model():
     assert len(catalog["models"]) == len(trtmc_validate.ready_model_names())
 
 
+def test_catalog_defines_sample_limit_for_every_dataset_workload():
+    catalog = trtmc_validate.load_catalog()
+    configured = set(catalog["sample_limits"])
+    declared = {
+        workload
+        for spec in catalog["models"].values()
+        for workload in spec["workloads"]
+        if workload != "e2e"
+    }
+
+    assert configured == declared
+    assert min(catalog["sample_limits"].values()) >= 2
+    assert max(catalog["sample_limits"].values()) == 100
+
+
 def test_every_dataset_backed_validation_binding_has_native_reference_runner():
     catalog = trtmc_validate.load_catalog()
     suites = {suite["id"]: suite for suite in task_eval.load_suites()}
@@ -74,6 +89,55 @@ def test_resolve_binding_defaults_and_rejects_undeclared_workload():
     )
     with pytest.raises(trtmc_validate.ValidationError, match="does not declare"):
         trtmc_validate.resolve_binding(catalog, "model-a", "workload-c")
+
+
+def test_resolve_sample_limit_uses_workload_policy_and_cli_override():
+    catalog = {
+        "sample_limits": {"workload-a": 50},
+        "models": {
+            "model-a": {
+                "default": "workload-a",
+                "workloads": ["workload-a"],
+            },
+            "model-e2e": {
+                "default": "e2e",
+                "workloads": ["e2e"],
+            },
+        },
+    }
+
+    assert (
+        trtmc_validate.resolve_sample_limit(
+            catalog,
+            trtmc_validate.Binding("model-a", "workload-a"),
+            None,
+        )
+        == 50
+    )
+    assert (
+        trtmc_validate.resolve_sample_limit(
+            catalog,
+            trtmc_validate.Binding("model-a", "workload-a"),
+            7,
+        )
+        == 7
+    )
+    assert (
+        trtmc_validate.resolve_sample_limit(
+            catalog,
+            trtmc_validate.Binding("model-a", "workload-a"),
+            0,
+        )
+        == 0
+    )
+    assert (
+        trtmc_validate.resolve_sample_limit(
+            catalog,
+            trtmc_validate.Binding("model-e2e", "e2e"),
+            None,
+        )
+        == 0
+    )
 
 
 @pytest.mark.parametrize(
@@ -131,6 +195,7 @@ def test_print_result_only_exposes_raw_commands_and_result_locations(tmp_path, c
             "reproduce": {
                 "dataset": {
                     "command": "python tools/trtmc_validate.py model-a --limit 1000",
+                    "sample_limit": 1000,
                     "prepared_input_count": 1000,
                 },
                 "hf": ["python hf_reference.py --model model-a"],
@@ -144,7 +209,7 @@ def test_print_result_only_exposes_raw_commands_and_result_locations(tmp_path, c
     output = capsys.readouterr().out
     assert output == (
         "\n"
-        "Reproduce full dataset:\n"
+        "Reproduce dataset run:\n"
         "  python tools/trtmc_validate.py model-a --limit 1000\n"
         "\n"
         "Reproduce representative HF:\n"
@@ -199,6 +264,7 @@ def test_write_report_links_each_comparison(tmp_path):
                     "trtmc": ["trtmc run"],
                     "dataset": {
                         "command": "python tools/trtmc_validate.py model-a",
+                        "sample_limit": 500,
                         "prepared_input_count": 1000,
                     },
                 },
@@ -219,6 +285,8 @@ def test_write_report_links_each_comparison(tmp_path):
         "validation_passed": 1,
         "validation_failed": 0,
         "validation_skipped": 0,
+        "selected_samples": 500,
+        "prepared_inputs": 1000,
     }
     assert report["validation_status"] == "passed"
     assert report["results"][0]["execution"]["status"] == "completed"
@@ -234,7 +302,11 @@ def test_write_report_links_each_comparison(tmp_path):
     assert "TRTMC Reference Consistency Report" in document
     assert "Vanilla reproduction" in document
     assert "Dataset · Reference 1/1 · TRTMC 1/1" in document
-    assert "Full dataset (1000 prepared inputs)" in document
+    assert "Dataset slice (500 selected samples; 1000 prepared inputs)" in document
+    assert "<th>Samples</th>" in document
+    assert "500 selected<br><span class=\"detail\">1000 prepared inputs</span>" in document
+    assert report["summary"]["selected_samples"] == 500
+    assert report["summary"]["prepared_inputs"] == 1000
     assert "$ python tools/trtmc_validate.py model-a" in document
     assert "$ python hf.py" in document
     assert "$ trtmc run" in document

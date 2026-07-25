@@ -26,6 +26,20 @@ Run every single-device model whose catalog status is `ready`:
 python tools/trtmc_validate.py --all
 ```
 
+Dataset-backed workloads use the task-specific sample limits declared in
+`model_workloads.yaml`. Fast encoder and classification workloads use larger
+slices, while generation-heavy image, video, and audio workloads use smaller
+slices. The selected limit is printed before execution and recorded next to the
+actual prepared-input count in `comparison.json` and `report.html`.
+
+Override the configured limit for one run, or request the complete dataset
+explicitly:
+
+```bash
+python tools/trtmc_validate.py gpt2-125m --limit 100
+python tools/trtmc_validate.py gpt2-125m --limit 0
+```
+
 The command creates a reference environment only when one does not already
 exist, then prints the environment it used. Reference inference runs through
 `tools/trtmc_reference.py`, outside the task-eval CLI. Its result is keyed by
@@ -49,7 +63,7 @@ as migrated task-eval workloads.
 
 The HTML artifact is named **TRTMC Reference Consistency Report** because it
 covers task accuracy as well as token, embedding, and numerical agreement.
-For large datasets it shows one full-dataset command and at most three
+For large datasets it shows one dataset-run command and at most three
 representative commands per backend. The first disagreement is preferred when
 one exists.
 
@@ -88,7 +102,8 @@ the primary agreement metric next to it.
 1. Reuse or add a dataset workload in
    `tests/task_eval/validation_suites.yaml`.
 2. Add that workload under the model in `model_workloads.yaml`.
-3. Select one workload as the model default.
+3. Add a workload sample limit if the workload is new.
+4. Select one workload as the model default.
 
 Use `e2e` only when the model cannot use a dataset-backed workload yet. A model
 may list multiple workloads; callers select one by passing it after the model
