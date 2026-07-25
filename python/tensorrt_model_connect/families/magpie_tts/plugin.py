@@ -127,60 +127,6 @@ def _validate_supported_checkpoint_architecture(state_dict) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# Strongly-typed FP16 compute + FP32 accumulation helpers
-#
-# From TRT docs: "When using strongly typed mode, you can enforce FP32
-# precision for FP16 GEMMs by casting the inputs to FP32. TensorRT
-# recognizes this pattern and fuses the casts with the GEMM, resulting
-# in a single kernel with FP16 inputs and FP32 accumulation."
-#
-# Pattern: FP16 tensor → cast FP32 → matmul (FP32 inputs)
-#   → TRT fuses into: FP16 tensor core compute + FP32 accumulation
-# ---------------------------------------------------------------------------
-
-def _add_matmul_fp16_compute_fp32_accum(  # pragma: no cover
-    network, lhs_fp32, lhs_width, rhs_width, rhs_weights,
-):
-    """Matmul with FP16 compute and FP32 accumulation (strongly-typed pattern).
-
-    Both inputs pass through the FP16→FP32 cast pattern so TRT fuses into a
-    single kernel: FP16 tensor core compute + FP32 accumulation. Result is FP32.
-
-    Args:
-        lhs_fp32: FP32 activation tensor (e.g., from LayerNorm)
-        rhs_weights: numpy array with weight values (stored as FP16 constant)
-    """
-    # LHS: FP32 → FP16 → FP32 (triggers TRT fusion pattern)
-    lhs_fp16 = network.add_cast(lhs_fp32, trt.float16).get_output(0)
-    lhs_cast = network.add_cast(lhs_fp16, trt.float32).get_output(0)
-
-    # RHS: FP16 constant → FP32 (triggers TRT fusion pattern)
-    fp16_vals = np.ascontiguousarray(rhs_weights, dtype=np.float32).astype(np.float16)
-    rhs_fp16 = network.add_constant(
-        (lhs_width, rhs_width), trt.Weights(fp16_vals)).get_output(0)
-    rhs_cast = network.add_cast(rhs_fp16, trt.float32).get_output(0)
-
-    # FP32 matmul — TRT fuses the casts into FP16 compute + FP32 accum
-    mm = network.add_matrix_multiply(
-        lhs_cast, trt.MatrixOperation.NONE,
-        rhs_cast, trt.MatrixOperation.NONE)
-    return mm.get_output(0)
-
-
-def _cast_matmul_inputs_fp16_fp32(network, lhs_fp32, rhs_fp32):  # pragma: no cover
-    """Cast both matmul inputs through FP16→FP32 for tensor core fusion.
-
-    Use this for activation×activation matmuls (e.g., Q@K^T, softmax@V)
-    where both inputs are already FP32 tensors (not weight constants).
-    """
-    lhs_fp16 = network.add_cast(lhs_fp32, trt.float16).get_output(0)
-    lhs_cast = network.add_cast(lhs_fp16, trt.float32).get_output(0)
-    rhs_fp16 = network.add_cast(rhs_fp32, trt.float16).get_output(0)
-    rhs_cast = network.add_cast(rhs_fp16, trt.float32).get_output(0)
-    return lhs_cast, rhs_cast
-
-
 def _split_fused_qkv(fused_weight, hidden: int):
     """Split fused QKV weight [3H, H] into Q[H,H], K[H,H], V[H,H].
 
