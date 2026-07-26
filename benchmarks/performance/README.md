@@ -195,8 +195,10 @@ report.html
 ```
 
 `results.json` contains resolved configuration, raw samples, timing policies,
-commands, and bounded diagnostic output. `report.html` shows the family matrix,
-both p50 times, measured scopes, and traffic lights.
+commands, bundle-preparation status and build time, and bounded diagnostic
+output. `report.html` shows the family matrix, both infer-time p50 values,
+TRTMC bundle preparation, measured scopes, and traffic lights. Bundle build time
+is reported for run observability but is excluded from the infer-time comparison.
 
 Each report row shows the exact leaf commands that were executed:
 

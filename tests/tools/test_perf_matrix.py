@@ -107,6 +107,10 @@ result={{'schema_version':'trtmc.benchmark-run/v1','run_id':'fake','status':'com
  'measurement_policy':{{'timing_scope':timing_scope,
                        'input_preparation_included':timing_scope=='public_pipeline_call_wall',
                        'asset_loading_included':asset_loading}},
+ 'preparation':{{'included_in_performance_metrics':False,
+                 'bundles':[{{'model':'distilgpt2','status':'built',
+                             'build_time_s':83.125,
+                             'included_in_performance_metrics':False}}]}},
  'environment':{{'gpu':'fake',
                 'worker_build':json.loads(subprocess.run(
                     [a.worker, '--metadata'], check=True, capture_output=True, text=True
@@ -878,6 +882,17 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert results["candidate_worker_preflight"]["validated_against"] == "tested-commit"
     assert rows["gpt2.generate"]["status"] == "green"
     assert rows["gpt2.generate"]["candidate"]["backend"] == "trtmc-bench"
+    assert rows["gpt2.generate"]["candidate"]["preparation"] == {
+        "included_in_performance_metrics": False,
+        "bundles": [
+            {
+                "model": "distilgpt2",
+                "status": "built",
+                "build_time_s": 83.125,
+                "included_in_performance_metrics": False,
+            }
+        ],
+    }
     assert rows["gpt2.generate"]["baseline"]["mode"] == "torch-compile"
     assert rows["mamba.generate"]["baseline_contract"]["mode"] == "hf-eager"
     report = (output / "report.html").read_text(encoding="utf-8")
@@ -891,8 +906,13 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert "76 distributed profiles" in report
     assert "0 other or unsupported profiles" in report
     assert "<th>Model profile</th>" in report
-    assert "TRTMC p50 (ms)" in report
-    assert "Baseline p50 (ms)" in report
+    assert "TRTMC infer p50 (ms)" in report
+    assert "Baseline infer p50 (ms)" in report
+    assert "TRTMC bundle preparation" in report
+    assert "Built · 1m 23.1s" in report
+    assert "83.125 s" in report
+    assert "1 built in this run (1m 23.1s total)" in report
+    assert "excluded from the infer-time traffic-light comparison" in report
     assert ">10.450<" in report
     assert ">20.450<" in report
     assert "<th>Status</th>" not in report

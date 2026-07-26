@@ -1454,12 +1454,31 @@ def _candidate_result(run_dir: Path, workload_digest: str) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as exc:
         raise PerfMatrixError(f"cannot read trtmc-bench observations: {exc}") from exc
     samples = [float(item["runtime_e2e_wall_ms"]) for item in observations]
+    preparation = result.get("preparation", {})
+    if not isinstance(preparation, Mapping):
+        raise PerfMatrixError("trtmc-bench returned invalid preparation evidence")
+    if preparation.get("included_in_performance_metrics", False) is not False:
+        raise PerfMatrixError("trtmc-bench included preparation in performance metrics")
+    bundles = preparation.get("bundles", [])
+    if not isinstance(bundles, list) or not all(
+        isinstance(bundle, Mapping) for bundle in bundles
+    ):
+        raise PerfMatrixError("trtmc-bench returned invalid bundle preparation evidence")
+    if any(
+        bundle.get("included_in_performance_metrics", False) is not False
+        for bundle in bundles
+    ):
+        raise PerfMatrixError("trtmc-bench included a bundle build in performance metrics")
     return {
         "schema_version": result["schema_version"],
         "status": "completed",
         "backend": "trtmc-bench",
         "workload_digest": workload_digest,
         "measurement_policy": result.get("measurement_policy", {}),
+        "preparation": {
+            "included_in_performance_metrics": False,
+            "bundles": [dict(bundle) for bundle in bundles],
+        },
         "samples_ms": samples,
         "metrics": cell["metrics"],
         "output_summary": cell.get("output_summary", {}),
@@ -2096,6 +2115,75 @@ def _timing_value_html(result: Any) -> str:
     return f"{value:,.3f}<div class='timing-meta'>n={len(samples)}</div>"
 
 
+def _duration_html(seconds: float) -> str:
+    if seconds < 60.0:
+        return f"{seconds:,.3f} s"
+    if seconds < 3600.0:
+        minutes, remaining = divmod(seconds, 60.0)
+        return f"{int(minutes)}m {remaining:.1f}s"
+    hours, remaining = divmod(seconds, 3600.0)
+    minutes, remaining = divmod(remaining, 60.0)
+    return f"{int(hours)}h {int(minutes)}m {remaining:.0f}s"
+
+
+def _bundle_preparation_records(row: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    candidate = row.get("candidate")
+    if not isinstance(candidate, Mapping):
+        return []
+    preparation = candidate.get("preparation")
+    if not isinstance(preparation, Mapping):
+        return []
+    bundles = preparation.get("bundles")
+    if not isinstance(bundles, list):
+        return []
+    return [bundle for bundle in bundles if isinstance(bundle, Mapping)]
+
+
+def _bundle_preparation_html(row: Mapping[str, Any]) -> str:
+    bundles = _bundle_preparation_records(row)
+    if not bundles:
+        return "—<div class='timing-meta'>Not recorded</div>"
+    labels = {
+        "built": "Built",
+        "cache_hit": "Cache hit",
+        "reused": "Existing bundle",
+        "would_build": "Would build",
+    }
+    parts = []
+    for bundle in bundles:
+        status = str(bundle.get("status", "unknown"))
+        label = labels.get(status, status.replace("_", " ").title())
+        build_time = bundle.get("build_time_s")
+        if isinstance(build_time, (int, float)) and math.isfinite(build_time):
+            parts.append(
+                f"{html.escape(label)} · {_duration_html(float(build_time))}"
+                f"<div class='timing-meta'>{float(build_time):,.3f} s</div>"
+            )
+        else:
+            parts.append(html.escape(label))
+    parts.append("<div class='timing-meta'>Excluded from comparison</div>")
+    return "<br>".join(parts)
+
+
+def _bundle_preparation_summary(rows: list[Mapping[str, Any]]) -> str:
+    records = [record for row in rows for record in _bundle_preparation_records(row)]
+    built = [record for record in records if record.get("status") == "built"]
+    build_seconds = sum(
+        float(record["build_time_s"])
+        for record in built
+        if isinstance(record.get("build_time_s"), (int, float))
+        and math.isfinite(float(record["build_time_s"]))
+    )
+    prebuilt = sum(record.get("status") in {"cache_hit", "reused"} for record in records)
+    unrecorded = sum(not _bundle_preparation_records(row) for row in rows)
+    return (
+        f"Bundle preparation: {len(built)} built in this run "
+        f"({_duration_html(build_seconds)} total), {prebuilt} cache hits or existing "
+        f"bundles, and {unrecorded} rows not recorded. Preparation is reported for "
+        "run observability and is excluded from the infer-time traffic-light comparison."
+    )
+
+
 def _raw_commands_html(row: Mapping[str, Any], default_cwd: str) -> str:
     commands = row.get("commands", {})
     if not isinstance(commands, Mapping):
@@ -2158,6 +2246,7 @@ def _report_html(results: Mapping[str, Any]) -> str:
         commands = _raw_commands_html(row, default_cwd)
         candidate_timing = _timing_value_html(row.get("candidate"))
         baseline_timing = _timing_value_html(row.get("baseline"))
+        bundle_preparation = _bundle_preparation_html(row)
         timing_scope = _timing_scope_html(row)
         body.append(
             "<tr>"
@@ -2167,6 +2256,7 @@ def _report_html(results: Mapping[str, Any]) -> str:
             f"<td>{html.escape(_baseline_label(row))}</td>"
             f"<td class='timing-value'>{candidate_timing}</td>"
             f"<td class='timing-value'>{baseline_timing}</td>"
+            f"<td class='timing-value'>{bundle_preparation}</td>"
             f"<td>{timing_scope}</td>"
             f"<td class='light'>{_light(status)}</td>"
             f"<td>{reason}</td>"
@@ -2190,6 +2280,7 @@ def _report_html(results: Mapping[str, Any]) -> str:
     excluded_l0_profiles = int(catalog.get("excluded_l0_profiles", 0))
     distributed_profiles = int(catalog.get("distributed_profiles", 0))
     other_profiles = int(catalog.get("other_profiles", 0))
+    bundle_preparation_summary = html.escape(_bundle_preparation_summary(rows))
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TRTMC performance matrix</title>
@@ -2208,8 +2299,9 @@ th{{background:#e5e7eb}} tr:nth-child(even){{background:#f9fafb}} code{{font-siz
 <p class="meta">Release matrix coverage: {release_profiles} single-process profiles. {excluded_l0_profiles} duplicate L0 profiles are excluded from the {ready_profiles} ready catalog profiles. {distributed_profiles} distributed profiles require a separate multi-process run and are outside this report. {other_profiles} other or unsupported profiles.</p>
 <p class="meta">Timing contracts were validated before execution for {preflight_count} comparisons. A row is classified only when its recorded TRTMC and reference policies match that contract.</p>
 <p class="meta">Times are the p50 wall time from the recorded timed samples. Measured scope states the exact recorded boundary and the work included and excluded on each side.</p>
+<p class="meta">{bundle_preparation_summary}</p>
 <p><strong>{summary}</strong></p>
-<div class="table-wrap"><table><thead><tr><th>Family</th><th>Operation</th><th>Model profile</th><th>Baseline</th><th>TRTMC p50 (ms)</th><th>Baseline p50 (ms)</th><th>Measured scope</th><th>Light</th><th>Note</th><th>Commands</th></tr></thead>
+<div class="table-wrap"><table><thead><tr><th>Family</th><th>Operation</th><th>Model profile</th><th>Baseline</th><th>TRTMC infer p50 (ms)</th><th>Baseline infer p50 (ms)</th><th>TRTMC bundle preparation</th><th>Measured scope</th><th>Light</th><th>Note</th><th>Commands</th></tr></thead>
 <tbody>{"".join(body)}</tbody></table></div>
 <p class="meta">Green: TRTMC is more than the configured margin faster. Yellow: within the margin. Red: TRTMC is more than the margin slower. White: not run, partial, or invalid comparison. Commands are the original recorded argv and must be run from the displayed working directory with the same model cache and dependencies.</p>
 </body></html>"""
