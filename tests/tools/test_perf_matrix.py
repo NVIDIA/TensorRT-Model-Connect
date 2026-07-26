@@ -1327,6 +1327,7 @@ def test_task_reference_runner_measures_loaded_public_operation(
 ) -> None:
     runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
     calls: list[int] = []
+    environment_calls: list[int] = []
 
     def load_session(*_args):
         def invoke():
@@ -1340,9 +1341,14 @@ def test_task_reference_runner_measures_loaded_public_operation(
             reference_source={"repository": "official", "revision": "source-revision"},
         )
 
-    runner["LOADERS"]["hf-transformers-asr"] = load_session
-    runner["_synchronize"] = lambda: None
-    runner["_environment"] = lambda: {"gpu": "fake"}
+    def fake_environment():
+        environment_calls.append(1)
+        return {"gpu": "fake"}
+
+    run_globals = runner["run"].__globals__
+    monkeypatch.setitem(run_globals["LOADERS"], "hf-transformers-asr", load_session)
+    monkeypatch.setitem(run_globals, "_synchronize", lambda: None)
+    monkeypatch.setitem(run_globals, "_environment", fake_environment)
     output = tmp_path / "baseline.json"
     arguments = runner["build_parser"]().parse_args(
         [
@@ -1376,6 +1382,7 @@ def test_task_reference_runner_measures_loaded_public_operation(
     assert runner["run"](arguments) == 0
     result = json.loads(output.read_text(encoding="utf-8"))
     assert len(calls) == 3
+    assert environment_calls == [1]
     assert result["adapter"] == "hf-transformers-asr"
     assert result["timing_scope"] == "task-model-call-wall"
     assert result["input_preparation_included"] is False
