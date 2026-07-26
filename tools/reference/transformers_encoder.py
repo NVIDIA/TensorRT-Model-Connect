@@ -100,6 +100,7 @@ def _reproduction_command(arguments: argparse.Namespace) -> list[str]:
         "{sample_id}",
     ]
     for flag, value in (
+        ("--model-revision", arguments.model_revision),
         ("--reference-family", arguments.reference_family),
         ("--device-map", arguments.device_map),
     ):
@@ -183,10 +184,15 @@ def _load_runtime(
         arguments.reference_family,
     )
     transformers_module.logging.set_verbosity_error()
+    tokenizer_kwargs = {
+        "trust_remote_code": arguments.trust_remote_code,
+        "local_files_only": arguments.local_files_only,
+    }
+    if arguments.model_revision:
+        tokenizer_kwargs["revision"] = arguments.model_revision
     tokenizer = tokenizer_class.from_pretrained(
         arguments.model,
-        trust_remote_code=arguments.trust_remote_code,
-        local_files_only=arguments.local_files_only,
+        **tokenizer_kwargs,
     )
     model_kwargs = {
         "torch_dtype": _model_dtype(torch_module, arguments.dtype),
@@ -195,6 +201,8 @@ def _load_runtime(
     }
     if arguments.device_map:
         model_kwargs["device_map"] = arguments.device_map
+    if arguments.model_revision:
+        model_kwargs["revision"] = arguments.model_revision
     model = model_class.from_pretrained(arguments.model, **model_kwargs).eval()
     if arguments.device_map:
         device = model.device
@@ -279,6 +287,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run an encoder model directly through Transformers."
     )
     parser.add_argument("--model", required=True)
+    parser.add_argument("--model-revision", default="")
     parser.add_argument("--reference-family", default="")
     parser.add_argument("--prompts", type=Path, required=True)
     parser.add_argument("--answers", type=Path, required=True)

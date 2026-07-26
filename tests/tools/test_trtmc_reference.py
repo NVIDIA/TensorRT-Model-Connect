@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import stat
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 from tools.reference import (
     elf_prepared,
@@ -17,7 +17,17 @@ from tools.reference import (
     transformers_text,
     transformers_vlm,
 )
-from tools import trtmc_reference
+from tools import elf_hf_reference, trtmc_reference
+
+
+def test_elf_reference_uses_canonical_t5_cache_id() -> None:
+    assert elf_hf_reference._canonical_hf_model_id("t5-small") == "google-t5/t5-small"
+    assert elf_hf_reference._canonical_hf_model_id("org/custom") == "org/custom"
+
+
+def test_elf_reference_ignores_training_only_optimizer_state() -> None:
+    optimizer = elf_hf_reference._InferenceOptimizer()
+    assert optimizer.load_state_dict({"state": {"unused": True}}) is None
 
 
 def test_tts_transcriber_passes_local_files_only_once(monkeypatch) -> None:
@@ -231,6 +241,44 @@ def test_reference_cache_key_changes_with_inference_setting(
     assert len([path for path in cache_dir.iterdir() if not path.name.startswith(".")]) == 2
 
 
+def test_reference_cache_key_changes_with_model_revision(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cache_dir = tmp_path / "cache"
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _prepare_work(first)
+    _prepare_work(second)
+    calls = 0
+
+    def fake_reference(args) -> None:
+        nonlocal calls
+        calls += 1
+        Path(args.work_dir, "hf_predictions.json").write_text(
+            json.dumps(
+                {"responses": [{"sample_id": "one", "output_text": "A"}]}
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        trtmc_reference.task_eval,
+        "run_hf_reference",
+        fake_reference,
+    )
+
+    trtmc_reference.run_reference(
+        _args(first, cache_dir, "--model-revision", "revision-one")
+    )
+    trtmc_reference.run_reference(
+        _args(second, cache_dir, "--model-revision", "revision-two")
+    )
+
+    assert calls == 2
+    assert len([path for path in cache_dir.iterdir() if not path.name.startswith(".")]) == 2
+
+
 def test_reference_cache_can_adopt_an_existing_result(
     tmp_path: Path,
     monkeypatch,
@@ -264,7 +312,12 @@ def test_causal_reference_uses_native_transformers_entrypoint(
     cache_dir = tmp_path / "cache"
     work_dir = tmp_path / "native"
     _prepare_work(work_dir)
-    arguments = _args(work_dir, cache_dir)
+    arguments = _args(
+        work_dir,
+        cache_dir,
+        "--model-revision",
+        "0123456789abcdef",
+    )
     arguments.reference_family = "causal_base_continuation"
     manifest_path = work_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -311,6 +364,7 @@ def test_causal_reference_uses_native_transformers_entrypoint(
 
     command = captured["command"]
     assert command[1].endswith("tools/reference/transformers_text.py")
+    assert command[command.index("--model-revision") + 1] == "0123456789abcdef"
     assert "task_eval.py" not in " ".join(command)
     assert (work_dir / "hf_native_run.log").is_symlink()
     assert (work_dir / "hf_native_repro.json").is_symlink()
@@ -614,6 +668,8 @@ def test_speech_reference_metadata_is_direct_and_sample_selectable(
         [
             "--model",
             "openai/whisper-tiny",
+            "--model-revision",
+            "0123456789abcdef",
             "--family",
             "whisper",
             "--reference-family",
@@ -639,9 +695,100 @@ def test_speech_reference_metadata_is_direct_and_sample_selectable(
     payload = json.loads(metadata.read_text(encoding="utf-8"))
     command = payload["command"]
     assert command[1].endswith("tools/reference/speech.py")
+    assert command[command.index("--model-revision") + 1] == "0123456789abcdef"
     assert command[command.index("--sample-id") + 1] == "{sample_id}"
     assert command[command.index("--manifest") + 1] == "{work_dir}/manifest.json"
     assert "task_eval.py" not in " ".join(command)
+
+
+def test_magpie_reference_restores_exact_pinned_archive(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    archive = tmp_path / "magpie_tts_multilingual_357m.nemo"
+    archive.write_bytes(b"checkpoint")
+    speaker_checkpoint = tmp_path / "speaker.bin"
+    speaker_checkpoint.write_bytes(b"speaker")
+    download_calls: list[dict[str, object]] = []
+    opened_paths: list[object] = []
+    restore_kwargs: dict[str, object] = {}
+
+    def fake_hf_hub_download(**kwargs):
+        download_calls.append(kwargs)
+        if kwargs["repo_id"] == speech.MAGPIE_SPEAKER_ENCODER_REPO:
+            return str(speaker_checkpoint)
+        return str(archive)
+
+    def fake_fsspec_open(path, *_args, **_kwargs):
+        opened_paths.append(path)
+        return object()
+
+    class FakeModel:
+        @classmethod
+        def restore_from(cls, **kwargs):
+            import fsspec
+
+            fsspec.open(speech.MAGPIE_SPEAKER_ENCODER_URL)
+            restore_kwargs.update(kwargs)
+            return cls()
+
+        def eval(self):
+            return self
+
+        def to(self, device):
+            restore_kwargs["device"] = device
+            return self
+
+    huggingface_hub = ModuleType("huggingface_hub")
+    huggingface_hub.hf_hub_download = fake_hf_hub_download
+    fsspec = ModuleType("fsspec")
+    fsspec.open = fake_fsspec_open
+    nemo = ModuleType("nemo")
+    nemo.__path__ = []
+    collections = ModuleType("nemo.collections")
+    collections.__path__ = []
+    tts = ModuleType("nemo.collections.tts")
+    tts.__path__ = []
+    models = ModuleType("nemo.collections.tts.models")
+    models.MagpieTTSModel = FakeModel
+    monkeypatch.setitem(sys.modules, "huggingface_hub", huggingface_hub)
+    monkeypatch.setitem(sys.modules, "fsspec", fsspec)
+    monkeypatch.setitem(sys.modules, "nemo", nemo)
+    monkeypatch.setitem(sys.modules, "nemo.collections", collections)
+    monkeypatch.setitem(sys.modules, "nemo.collections.tts", tts)
+    monkeypatch.setitem(sys.modules, "nemo.collections.tts.models", models)
+
+    arguments = SimpleNamespace(
+        model="nvidia/magpie_tts_multilingual_357m",
+        model_revision="34d7e40da85cabc97f92198889b65cea27bc7fd1",
+        local_files_only=True,
+        device="cuda",
+    )
+    processor, model = speech._load_tts_runtime(
+        arguments,
+        SimpleNamespace(device=lambda name: f"device:{name}"),
+    )
+
+    assert processor is None
+    assert isinstance(model, FakeModel)
+    assert download_calls == [
+        {
+            "repo_id": speech.MAGPIE_SPEAKER_ENCODER_REPO,
+            "filename": speech.MAGPIE_SPEAKER_ENCODER_FILENAME,
+            "local_files_only": True,
+        },
+        {
+            "repo_id": "nvidia/magpie_tts_multilingual_357m",
+            "filename": "magpie_tts_multilingual_357m.nemo",
+            "local_files_only": True,
+            "revision": "34d7e40da85cabc97f92198889b65cea27bc7fd1",
+        },
+    ]
+    assert opened_paths == [str(speaker_checkpoint)]
+    assert restore_kwargs == {
+        "restore_path": str(archive),
+        "device": "device:cuda",
+    }
 
 
 def test_elf_metadata_points_to_official_reference_entrypoint(tmp_path: Path) -> None:
@@ -756,6 +903,94 @@ def test_speech_runner_dispatches_asr_without_task_eval(
         "output_text"
     ] == "hello"
     assert "task_eval.py" not in metadata.read_text(encoding="utf-8")
+
+
+def test_nemotron35_asr_restores_nemo_archive_and_uses_language_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    archive = tmp_path / "nemotron.nemo"
+    archive.write_bytes(b"archive")
+    transcribe_calls: list[tuple[str, int]] = []
+
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+        @staticmethod
+        def empty_cache() -> None:
+            return None
+
+    fake_torch = SimpleNamespace(cuda=FakeCuda())
+
+    class FakeModel:
+        def transcribe(self, manifest_path, *, batch_size, verbose):
+            rows = [
+                json.loads(line)
+                for line in Path(manifest_path)
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            expected_audio = (
+                tmp_path
+                / "predictions"
+                / "hf_canary_audio"
+                / "asr-1.wav"
+            )
+            assert rows == [
+                {
+                    "audio_filepath": str(expected_audio),
+                    "duration": 0.5,
+                    "text": "",
+                    "lang": "en-US",
+                }
+            ]
+            transcribe_calls.append((manifest_path, batch_size))
+            assert verbose is False
+            return [SimpleNamespace(text="CONCORD RETURNED")]
+
+    monkeypatch.setattr(
+        speech,
+        "_load_nemotron35_model",
+        lambda _arguments, resolved_archive: (
+            fake_torch,
+            FakeModel(),
+        ),
+    )
+    monkeypatch.setattr(
+        speech,
+        "_resolve_nemotron35_archive",
+        lambda _arguments: archive,
+    )
+    monkeypatch.setattr(
+        speech,
+        "_audio_for_prompt",
+        lambda _prompt, _rate: ([0.0] * 8000, Path("source.wav")),
+    )
+
+    def write_fake_wav(path, _audio, _rate):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"wav")
+
+    monkeypatch.setattr(speech, "_write_wav_pcm16", write_fake_wav)
+    arguments = SimpleNamespace(
+        model="nvidia/nemotron-3.5-asr-streaming-0.6b",
+        device="cuda",
+        dtype="auto",
+        local_files_only=True,
+        predictions=tmp_path / "predictions" / "hf_predictions.json",
+    )
+
+    responses = speech._run_nemotron35_asr(
+        arguments,
+        [{"sample_id": "asr-1", "language": "en-US"}],
+        {"sample_rate": 16000},
+    )
+
+    assert len(transcribe_calls) == 1
+    assert responses[0]["output_text"] == "CONCORD RETURNED"
+    assert responses[0]["generated_token_ids"] is None
 
 
 def test_plugin_reference_records_actual_command_during_inference(

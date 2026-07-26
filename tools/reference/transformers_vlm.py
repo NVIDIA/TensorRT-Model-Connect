@@ -88,6 +88,7 @@ def _reproduction_command(arguments: argparse.Namespace) -> list[str]:
         "{sample_id}",
     ]
     for flag, value in (
+        ("--model-revision", arguments.model_revision),
         ("--reference-family", arguments.reference_family),
         ("--device-map", arguments.device_map),
         ("--attn-impl", arguments.attn_impl),
@@ -296,6 +297,11 @@ def _load_runtime(
         arguments.model,
         trust_remote_code=arguments.trust_remote_code,
         local_files_only=arguments.local_files_only,
+        **(
+            {"revision": arguments.model_revision}
+            if arguments.model_revision
+            else {}
+        ),
     )
     model_kwargs = {
         "torch_dtype": _model_dtype(torch_module, arguments.dtype),
@@ -306,6 +312,8 @@ def _load_runtime(
         model_kwargs["device_map"] = arguments.device_map
     if arguments.attn_impl:
         model_kwargs["attn_implementation"] = arguments.attn_impl
+    if arguments.model_revision:
+        model_kwargs["revision"] = arguments.model_revision
     model = _load_model(
         transformers_module,
         arguments.model,
@@ -527,6 +535,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run a VLM directly through Transformers."
     )
     parser.add_argument("--model", required=True)
+    parser.add_argument("--model-revision", default="")
     parser.add_argument("--reference-family", default="")
     parser.add_argument("--prompts", type=Path, required=True)
     parser.add_argument("--answers", type=Path, required=True)

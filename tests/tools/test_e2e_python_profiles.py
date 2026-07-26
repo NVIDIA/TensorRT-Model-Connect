@@ -177,6 +177,19 @@ def test_profile_lock_rejects_non_exact_or_duplicate_requirements():
         )
 
 
+def test_exact_profile_pin_accepts_only_local_builds_of_same_public_version():
+    assert shared_profiles._pinned_version_matches(
+        "3.1.0",
+        "3.1.0+c9040511b",
+    )
+    assert shared_profiles._pinned_version_matches("3.1.0", "3.1.0")
+    assert not shared_profiles._pinned_version_matches("3.1.0", "3.1.1")
+    assert not shared_profiles._pinned_version_matches(
+        "3.1.0+expected",
+        "3.1.0+different",
+    )
+
+
 def test_prebuilt_only_profile_fails_before_creating_a_runtime_cache(
     monkeypatch, tmp_path
 ):

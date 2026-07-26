@@ -61,14 +61,17 @@ def _load_model(
     model_id: str,
     *,
     model_kwargs: dict[str, Any],
+    model_revision: str,
     trust_remote_code: bool,
     local_files_only: bool,
 ) -> tuple[Any, bool]:
-    config = transformers_module.AutoConfig.from_pretrained(
-        model_id,
-        trust_remote_code=trust_remote_code,
-        local_files_only=local_files_only,
-    )
+    config_kwargs = {
+        "trust_remote_code": trust_remote_code,
+        "local_files_only": local_files_only,
+    }
+    if model_revision:
+        config_kwargs["revision"] = model_revision
+    config = transformers_module.AutoConfig.from_pretrained(model_id, **config_kwargs)
     is_encoder_decoder = bool(getattr(config, "is_encoder_decoder", False))
     model_class = (
         transformers_module.AutoModelForSeq2SeqLM
@@ -140,6 +143,7 @@ def _reproduction_command(arguments: argparse.Namespace) -> list[str]:
     if arguments.reference_family:
         command.extend(["--reference-family", arguments.reference_family])
     for flag, value in (
+        ("--model-revision", arguments.model_revision),
         ("--device-map", arguments.device_map),
         ("--attn-impl", arguments.attn_impl),
         ("--max-new-tokens", arguments.max_new_tokens),
@@ -229,10 +233,15 @@ def _load_runtime(
     transformers_module: Any,
 ) -> tuple[Any, Any, Any, bool]:
     transformers_module.logging.set_verbosity_error()
+    tokenizer_kwargs = {
+        "trust_remote_code": arguments.trust_remote_code,
+        "local_files_only": arguments.local_files_only,
+    }
+    if arguments.model_revision:
+        tokenizer_kwargs["revision"] = arguments.model_revision
     tokenizer = transformers_module.AutoTokenizer.from_pretrained(
         arguments.model,
-        trust_remote_code=arguments.trust_remote_code,
-        local_files_only=arguments.local_files_only,
+        **tokenizer_kwargs,
     )
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -245,10 +254,13 @@ def _load_runtime(
         model_kwargs["device_map"] = arguments.device_map
     if arguments.attn_impl:
         model_kwargs["attn_implementation"] = arguments.attn_impl
+    if arguments.model_revision:
+        model_kwargs["revision"] = arguments.model_revision
     model, is_encoder_decoder = _load_model(
         transformers_module,
         arguments.model,
         model_kwargs=model_kwargs,
+        model_revision=arguments.model_revision,
         trust_remote_code=arguments.trust_remote_code,
         local_files_only=arguments.local_files_only,
     )
@@ -407,6 +419,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run a text model directly through Transformers."
     )
     parser.add_argument("--model", required=True)
+    parser.add_argument("--model-revision", default="")
     parser.add_argument("--reference-family", default="")
     parser.add_argument("--prompts", type=Path, required=True)
     parser.add_argument("--answers", type=Path, required=True)

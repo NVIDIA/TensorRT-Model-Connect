@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import subprocess
 
 from tests.e2e.models.magpie_tts.e2e_plugins.references.nemo_reference import (
@@ -14,6 +15,20 @@ from tests.e2e.models.magpie_tts.e2e_plugins.references.nemo_reference import (
     NemoReference,
 )
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageSpec
+
+
+def test_reference_profile_matches_pinned_magpie_checkpoint() -> None:
+    family_root = Path(__file__).resolve().parents[4] / (
+        "python/tensorrt_model_connect/families/magpie_tts"
+    )
+    lock = (
+        family_root
+        / "python_profile_requirements/magpie_tts_reference.lock.txt"
+    ).read_text(encoding="utf-8")
+    verify = (family_root / "python_profile_verify.py").read_text(encoding="utf-8")
+
+    assert "nemo_toolkit==2.7.3" in lock
+    assert 'startswith("2.7.")' in verify
 
 
 def test_magpie_reference_maps_upstream_url_to_pre_warmed_file(monkeypatch, tmp_path) -> None:

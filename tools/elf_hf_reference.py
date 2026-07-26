@@ -81,6 +81,18 @@ def _validate_replay_arguments(args: argparse.Namespace) -> bool:
     return bool(args.initial_latents)
 
 
+def _canonical_hf_model_id(model_id: str) -> str:
+    """Resolve legacy aliases to the repository IDs used by TRTMC cache warming."""
+    return {"t5-small": "google-t5/t5-small"}.get(model_id, model_id)
+
+
+class _InferenceOptimizer:
+    """Accept checkpoint optimizer state without installing training-only packages."""
+
+    def load_state_dict(self, _state) -> None:
+        return None
+
+
 def main() -> int:
     args = _parse_args()
     replay_inputs = _validate_replay_arguments(args)
@@ -104,7 +116,7 @@ def main() -> int:
         shift_left,
     )
     from utils.sampling_utils import _ode_step, _forward_sample, restore_cond
-    from utils.train_utils import TrainState, get_optimizer
+    from utils.train_utils import TrainState
 
     if args.local_files_only:
         import os
@@ -124,8 +136,12 @@ def main() -> int:
         torch.backends.cuda.enable_flash_sdp(False)
         torch.backends.cuda.enable_mem_efficient_sdp(True)
         torch.backends.cuda.enable_math_sdp(True)
+    encoder_model_id = _canonical_hf_model_id(config.encoder_model_name)
+    tokenizer_model_id = _canonical_hf_model_id(
+        config.tokenizer_name or config.encoder_model_name
+    )
     tokenizer = __import__("transformers").AutoTokenizer.from_pretrained(
-        config.tokenizer_name or config.encoder_model_name,
+        tokenizer_model_id,
         local_files_only=args.local_files_only,
     )
     pad_token_id = get_pad_token_id(tokenizer, config.pad_token)
@@ -138,7 +154,7 @@ def main() -> int:
             raise ValueError("initial replay latents do not divide evenly by config.max_length")
         text_encoder_dim = replay_initial.numel() // int(config.max_length)
     elif args.generation_mode == "conditional":
-        encoder_config, encoder = get_encoder(config.encoder_model_name, torch.float32)
+        encoder_config, encoder = get_encoder(encoder_model_id, torch.float32)
         encoder = encoder.to(device).eval()
         for parameter in encoder.parameters():
             parameter.requires_grad_(False)
@@ -157,10 +173,9 @@ def main() -> int:
         num_model_mode_tokens=config.num_model_mode_tokens,
         bottleneck_dim=config.bottleneck_dim,
     ).to(device)
-    optimizer = get_optimizer(model, config, lr=1e-4)
     state = TrainState(
         model=model,
-        optimizer=optimizer,
+        optimizer=_InferenceOptimizer(),
         lr_scheduler=None,
         ema_params1=TrainState.init_ema(model),
         step=0,

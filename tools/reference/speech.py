@@ -22,6 +22,12 @@ import wave
 
 
 SCHEMA_VERSION = "trtmc.native-reference-reproduction/v1"
+MAGPIE_SPEAKER_ENCODER_REPO = "Edresson/Speaker_Encoder_H_ASP"
+MAGPIE_SPEAKER_ENCODER_FILENAME = "pytorch_model.bin"
+MAGPIE_SPEAKER_ENCODER_URL = (
+    "https://huggingface.co/Edresson/Speaker_Encoder_H_ASP/resolve/main/"
+    "pytorch_model.bin"
+)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -241,11 +247,13 @@ def _load_whisper_runtime(
     from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, logging
 
     logging.set_verbosity_error()
-    processor = AutoProcessor.from_pretrained(
-        arguments.model,
-        trust_remote_code=arguments.trust_remote_code,
-        local_files_only=arguments.local_files_only,
-    )
+    processor_kwargs = {
+        "trust_remote_code": arguments.trust_remote_code,
+        "local_files_only": arguments.local_files_only,
+    }
+    if arguments.model_revision:
+        processor_kwargs["revision"] = arguments.model_revision
+    processor = AutoProcessor.from_pretrained(arguments.model, **processor_kwargs)
     model_kwargs = {
         "torch_dtype": _model_dtype(torch, arguments.dtype),
         "trust_remote_code": arguments.trust_remote_code,
@@ -255,6 +263,8 @@ def _load_whisper_runtime(
         model_kwargs["device_map"] = arguments.device_map
     if arguments.attn_impl:
         model_kwargs["attn_implementation"] = arguments.attn_impl
+    if arguments.model_revision:
+        model_kwargs["revision"] = arguments.model_revision
     model = AutoModelForSpeechSeq2Seq.from_pretrained(
         arguments.model,
         **model_kwargs,
@@ -344,52 +354,49 @@ def _run_nemotron35_asr(
     prompts: Sequence[Mapping[str, Any]],
     generation: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
-    import torch
-    from transformers import AutoModel, AutoProcessor
-
-    device = torch.device(arguments.device)
-    common = {
-        "trust_remote_code": arguments.trust_remote_code,
-        "local_files_only": arguments.local_files_only,
-    }
-    processor = AutoProcessor.from_pretrained(arguments.model, **common)
-    model = AutoModel.from_pretrained(
-        arguments.model,
-        torch_dtype=_model_dtype(torch, arguments.dtype),
-        **common,
-    ).eval().to(device)
+    archive = _resolve_nemotron35_archive(arguments)
+    torch, model = _load_nemotron35_model(arguments, archive)
     target_rate = int(generation.get("sample_rate", 16000) or 16000)
-    max_new_tokens = arguments.max_new_tokens or int(
-        generation.get("max_new_tokens", 256)
-    )
     output_dir = arguments.predictions.parent / "hf_canary_audio"
     responses = []
     for prompt in prompts:
         audio, _source = _audio_for_prompt(prompt, target_rate)
-        wav_path = output_dir / _safe_sample_filename(
-            str(prompt.get("sample_id", "")),
-            ".wav",
-        )
+        sample_id = str(prompt.get("sample_id", ""))
+        wav_path = output_dir / _safe_sample_filename(sample_id, ".wav")
         _write_wav_pcm16(wav_path, audio, target_rate)
-        inputs = processor(
-            audio,
-            sampling_rate=target_rate,
-            language=str(prompt.get("language") or generation.get("language", "en-US")),
-            return_tensors="pt",
+        manifest_path = output_dir / _safe_sample_filename(
+            sample_id,
+            ".manifest.jsonl",
+        )
+        language = str(
+            prompt.get("language")
+            or generation.get("language")
+            or "auto"
+        )
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "audio_filepath": str(wav_path),
+                    "duration": len(audio) / target_rate,
+                    "text": "",
+                    "lang": language,
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
         )
         started = time.perf_counter()
-        with torch.inference_mode():
-            generated = model.generate(
-                **_to_device(inputs, device),
-                max_new_tokens=max_new_tokens,
-            )
-        sequences = generated.sequences if hasattr(generated, "sequences") else generated
+        transcriptions = model.transcribe(
+            str(manifest_path),
+            batch_size=1,
+            verbose=False,
+        )
         responses.append(
             _asr_row(
                 prompt,
-                processor.batch_decode(sequences, skip_special_tokens=True)[0],
+                _transcription_text(transcriptions),
                 (time.perf_counter() - started) * 1000.0,
-                sequences[0].detach().cpu().tolist(),
             )
         )
     del model
@@ -397,6 +404,53 @@ def _run_nemotron35_asr(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     return responses
+
+
+def _resolve_nemotron35_archive(arguments: argparse.Namespace) -> Path:
+    model_path = Path(arguments.model)
+    if model_path.is_file() and model_path.suffix == ".nemo":
+        return model_path
+    if model_path.is_dir():
+        archives = sorted(model_path.glob("*.nemo"))
+    else:
+        from huggingface_hub import snapshot_download
+
+        snapshot = Path(
+            snapshot_download(
+                arguments.model,
+                allow_patterns=["*.nemo"],
+                local_files_only=arguments.local_files_only,
+                **(
+                    {"revision": arguments.model_revision}
+                    if arguments.model_revision
+                    else {}
+                ),
+            )
+        )
+        archives = sorted(snapshot.glob("*.nemo"))
+    if not archives:
+        raise FileNotFoundError(
+            f"Nemotron 3.5 ASR NeMo archive is missing for {arguments.model}"
+        )
+    return archives[0]
+
+
+def _load_nemotron35_model(
+    arguments: argparse.Namespace,
+    archive: Path,
+) -> tuple[Any, Any]:
+    import torch
+    from nemo.collections.asr.models import EncDecRNNTBPEModelWithPrompt
+
+    device = torch.device(arguments.device)
+    model = EncDecRNNTBPEModelWithPrompt.restore_from(
+        str(archive),
+        map_location=device,
+    )
+    model.eval()
+    if hasattr(model, "to"):
+        model.to(device)
+    return torch, model
 
 
 def _run_nemo_asr(
@@ -490,25 +544,68 @@ def _run_pipeline_asr(
     return responses
 
 
+def _resolve_magpie_archive(arguments: argparse.Namespace) -> Path:
+    model_path = Path(arguments.model)
+    if model_path.is_file() and model_path.suffix == ".nemo":
+        return model_path
+    if model_path.is_dir():
+        archives = sorted(model_path.glob("*.nemo"))
+        if not archives:
+            raise FileNotFoundError(
+                f"Magpie NeMo archive is missing under {arguments.model}"
+            )
+        return archives[0]
+
+    from huggingface_hub import hf_hub_download
+
+    download_kwargs = {
+        "repo_id": arguments.model,
+        "filename": "magpie_tts_multilingual_357m.nemo",
+        "local_files_only": arguments.local_files_only,
+    }
+    if arguments.model_revision:
+        download_kwargs["revision"] = arguments.model_revision
+    return Path(hf_hub_download(**download_kwargs))
+
+
 def _load_tts_runtime(arguments: argparse.Namespace, torch: Any) -> tuple[Any, Any]:
     if "magpie" in arguments.model.lower():
+        import fsspec
+        from huggingface_hub import hf_hub_download
         from nemo.collections.tts.models import MagpieTTSModel
 
-        model = MagpieTTSModel.from_pretrained(arguments.model)
+        speaker_checkpoint = hf_hub_download(
+            repo_id=MAGPIE_SPEAKER_ENCODER_REPO,
+            filename=MAGPIE_SPEAKER_ENCODER_FILENAME,
+            local_files_only=arguments.local_files_only,
+        )
+        original_fsspec_open = fsspec.open
+
+        def offline_fsspec_open(path: Any, *args: Any, **kwargs: Any) -> Any:
+            normalized = str(path).split("?", 1)[0]
+            if normalized == MAGPIE_SPEAKER_ENCODER_URL:
+                path = speaker_checkpoint
+            return original_fsspec_open(path, *args, **kwargs)
+
+        fsspec.open = offline_fsspec_open
+        model = MagpieTTSModel.restore_from(
+            restore_path=str(_resolve_magpie_archive(arguments))
+        )
         return None, model.eval().to(torch.device(arguments.device))
     from transformers import AutoProcessor, BarkModel, logging
 
     logging.set_verbosity_error()
-    processor = AutoProcessor.from_pretrained(
-        arguments.model,
-        trust_remote_code=arguments.trust_remote_code,
-        local_files_only=arguments.local_files_only,
-    )
+    load_kwargs = {
+        "trust_remote_code": arguments.trust_remote_code,
+        "local_files_only": arguments.local_files_only,
+    }
+    if arguments.model_revision:
+        load_kwargs["revision"] = arguments.model_revision
+    processor = AutoProcessor.from_pretrained(arguments.model, **load_kwargs)
     model = BarkModel.from_pretrained(
         arguments.model,
-        trust_remote_code=arguments.trust_remote_code,
-        local_files_only=arguments.local_files_only,
         torch_dtype=_model_dtype(torch, arguments.dtype),
+        **load_kwargs,
     )
     return processor, model.eval().to(torch.device(arguments.device))
 
@@ -674,6 +771,7 @@ def _reproduction_command(arguments: argparse.Namespace) -> list[str]:
         "{sample_id}",
     ]
     for flag, value in (
+        ("--model-revision", arguments.model_revision),
         ("--device-map", arguments.device_map),
         ("--attn-impl", arguments.attn_impl),
         ("--max-new-tokens", arguments.max_new_tokens),
@@ -736,6 +834,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run ASR or TTS directly through its upstream runtime."
     )
     parser.add_argument("--model", required=True)
+    parser.add_argument("--model-revision", default="")
     parser.add_argument("--family", default="")
     parser.add_argument("--reference-family", default="")
     parser.add_argument("--prompts", type=Path, required=True)

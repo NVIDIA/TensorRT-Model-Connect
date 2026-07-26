@@ -7,6 +7,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import shlex
 
 import pytest
 
@@ -498,6 +499,25 @@ def test_default_reference_backends_share_common_environment(reference_backend):
     )
 
 
+def test_model_specific_reference_environment_keeps_common_validation_base() -> None:
+    profiles = trtmc_validate._binding_profiles(
+        trtmc_validate.Binding("elf", "dataset"),
+        task_models={
+            "elf": {
+                "family": "elf_flow",
+                "runtime_strategy": "elf_flow",
+                "reference_backend": "hf_transformers",
+            }
+        },
+        e2e_models={},
+    )
+
+    assert profiles == (
+        trtmc_validate.COMMON_REFERENCE_PROFILE,
+        "elf_flow_reference",
+    )
+
+
 def test_ensure_environments_reports_create_only_when_resolver_creates(monkeypatch, capsys):
     calls = 0
 
@@ -527,6 +547,90 @@ def test_ensure_environments_reports_create_only_when_resolver_creates(monkeypat
     assert "Using reference environment: /profiles/reference_common/bin/python" in (warm_output)
     assert cold.base_python == "/profiles/reference_common/bin/python"
     assert warm.base_python == cold.base_python
+
+
+def test_reference_sources_create_once_then_reuse(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    source = trtmc_validate.ReferenceSource(
+        name="ELF",
+        repository="https://example.invalid/ELF.git",
+        revision="0123456789abcdef",
+        relative_checkout=Path("elf/reference/ELF-0123456789ab"),
+        entrypoint=Path("src/entrypoint.py"),
+    )
+    commands: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(list(command))
+        if command[1] == "-C":
+            checkout = Path(command[2])
+            entrypoint = checkout / source.entrypoint
+            entrypoint.parent.mkdir(parents=True)
+            entrypoint.write_text("# reference\n", encoding="utf-8")
+        return argparse.Namespace(returncode=0)
+
+    monkeypatch.setattr(trtmc_validate.subprocess, "run", fake_run)
+
+    cold = trtmc_validate._ensure_reference_source(source, tmp_path)
+    cold_output = capsys.readouterr().out
+    command_count = len(commands)
+    warm = trtmc_validate._ensure_reference_source(source, tmp_path)
+    warm_output = capsys.readouterr().out
+
+    assert cold == warm == tmp_path / source.relative_checkout
+    assert command_count == 2
+    assert len(commands) == command_count
+    assert "Creating reference source: ELF" in cold_output
+    assert f"Using reference source: {cold}" in cold_output
+    assert "Creating reference source" not in warm_output
+    assert f"Using reference source: {warm}" in warm_output
+
+
+def test_elf_reference_source_is_pinned_to_upstream_pytorch_implementation() -> None:
+    assert trtmc_validate.ELF_SOURCE.revision == (
+        "b29d8833609e9ab7f67cd9da39435ac5cea04837"
+    )
+    assert trtmc_validate.ELF_SOURCE.relative_checkout == Path(
+        "elf/reference/ELF-b29d8833609e"
+    )
+
+
+def test_reference_sources_select_model_specific_inputs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared: list[str] = []
+
+    def prepare(source, cache_root):
+        prepared.append(source.name)
+        checkout = cache_root / source.relative_checkout
+        entrypoint = checkout / source.entrypoint
+        entrypoint.parent.mkdir(parents=True)
+        entrypoint.write_text("# reference\n", encoding="utf-8")
+        return checkout
+
+    monkeypatch.setattr(trtmc_validate, "_ensure_reference_source", prepare)
+
+    elf = trtmc_validate.ensure_reference_sources("elf_flow", tmp_path)
+    sana = trtmc_validate.ensure_reference_sources("sana_wm", tmp_path)
+    common = trtmc_validate.ensure_reference_sources("bert", tmp_path)
+
+    assert prepared == ["ELF", "SANA-WM"]
+    assert (
+        elf.elf_reference_repo
+        == tmp_path / trtmc_validate.ELF_SOURCE.relative_checkout
+    )
+    assert elf.environment["TRTMC_STORAGE_ROOT"] == str(tmp_path)
+    assert sana.environment["SANA_WM_SCRIPT"] == str(
+        tmp_path
+        / trtmc_validate.SANA_WM_SOURCE.relative_checkout
+        / trtmc_validate.SANA_WM_SOURCE.entrypoint
+    )
+    assert common.elf_reference_repo is None
+    assert common.environment == {"TRTMC_STORAGE_ROOT": str(tmp_path)}
 
 
 def test_print_result_only_exposes_raw_commands_and_result_locations(tmp_path, capsys):
@@ -961,6 +1065,32 @@ def test_report_adds_failed_sample_results_and_native_commands(tmp_path):
         assert wrapper not in json.dumps(records)
 
 
+def test_cached_reference_command_is_relocated_to_current_work_dir(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "current run"
+    work_dir.mkdir()
+    (work_dir / "prompts.jsonl").write_text(
+        json.dumps({"sample_id": "sample-1"}) + "\n",
+        encoding="utf-8",
+    )
+    old_work_dir = Path("/runs/results/old-run/model/workload")
+    (work_dir / "hf_native_run.log").write_text(
+        "$ python reference.py "
+        f"--prompts {shlex.quote(str(old_work_dir / 'prompts.jsonl'))} "
+        f"--answers {shlex.quote(str(old_work_dir / 'answers.json'))} "
+        f"--manifest {shlex.quote(str(old_work_dir / 'manifest.json'))} "
+        f"--output {shlex.quote(str(old_work_dir / 'hf_predictions.json'))}\n",
+        encoding="utf-8",
+    )
+
+    command = trtmc_validate._commands_from_logs(work_dir)["hf"][0]
+
+    assert str(old_work_dir) not in command
+    assert shlex.quote(str(work_dir / "prompts.jsonl")) in command
+    assert shlex.quote(str(work_dir / "hf_predictions.json")) in command
+
+
 def test_failed_sample_uses_recorded_trtmc_command_and_copies_media(tmp_path):
     case_dir = tmp_path / "model-a" / "workload-a"
     work_dir = case_dir / "validation" / "workload-a" / "model-a"
@@ -1305,7 +1435,7 @@ def test_comparison_command_uses_validation_entrypoint(tmp_path):
     )
 
     assert command[:2] == [
-        trtmc_validate.sys.executable,
+        "/profiles/python",
         str(trtmc_validate.REPO_ROOT / "tools" / "trtmc_compare.py"),
     ]
     assert "task_eval.py" not in " ".join(command)
@@ -1322,6 +1452,109 @@ def test_comparison_command_uses_validation_entrypoint(tmp_path):
     assert "--force-hf" in command
     assert "--require-prebuilt-bundles" in command
     assert "--local-files-only" in command
+
+
+def test_comparison_command_passes_elf_reference_checkout(tmp_path):
+    arguments = trtmc_validate.build_parser().parse_args([])
+    arguments.engine_dir = tmp_path / "engines"
+    arguments.reference_cache_dir = tmp_path / "references"
+    arguments.trtmc_binary = tmp_path / "trtmc"
+    arguments.benchmark_binary = tmp_path / "trtmc_dataset_benchmark"
+    arguments.limit = 1
+    reference_sources = trtmc_validate.ReferenceSourceSelection(
+        environment={},
+        elf_reference_repo=tmp_path / "sources" / "elf",
+    )
+
+    command = trtmc_validate._comparison_command(
+        trtmc_validate.Binding("elf-b", "elf-workload"),
+        case_dir=tmp_path / "case",
+        dataset=tmp_path / "dataset.json",
+        arguments=arguments,
+        reference_python="/profiles/python",
+        reference_sources=reference_sources,
+    )
+
+    assert command[command.index("--elf-reference-repo") + 1] == str(
+        reference_sources.elf_reference_repo
+    )
+
+
+def test_run_binding_wires_reference_source_command_and_environment(
+    tmp_path,
+    monkeypatch,
+):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "elf-b",
+            "elf-workload",
+            "--output",
+            str(tmp_path / "results"),
+            "--dataset",
+            str(tmp_path / "dataset.json"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    selection = trtmc_validate.ReferenceSourceSelection(
+        environment={
+            "TRTMC_STORAGE_ROOT": str(tmp_path / "references"),
+            "EXTERNAL_REFERENCE_SENTINEL": "present",
+        },
+        elf_reference_repo=tmp_path / "references" / "elf",
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "ensure_environments",
+        lambda _profiles, _base: trtmc_validate.EnvironmentSelection(
+            base_python="/profiles/python",
+            names_and_paths=(),
+            overrides={},
+        ),
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "ensure_reference_sources",
+        lambda _family, _cache: selection,
+    )
+
+    def run(command, _log_path, environment):
+        captured["command"] = command
+        captured["environment"] = environment
+        return 0
+
+    monkeypatch.setattr(trtmc_validate, "_run_subprocess", run)
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_comparison_result",
+        lambda binding, **_kwargs: {
+            "model": binding.model,
+            "workload": binding.workload,
+        },
+    )
+
+    trtmc_validate.run_binding(
+        trtmc_validate.Binding("elf-b", "elf-workload"),
+        arguments=arguments,
+        task_models={
+            "elf-b": {
+                "family": "elf_flow",
+                "runtime_strategy": "elf_flow",
+                "reference_backend": "torch_reference",
+                "execution_profiles": {},
+            }
+        },
+        e2e_models={},
+        suites={"elf-workload": {}},
+    )
+
+    command = captured["command"]
+    assert command[command.index("--elf-reference-repo") + 1] == str(
+        selection.elf_reference_repo
+    )
+    assert captured["environment"]["EXTERNAL_REFERENCE_SENTINEL"] == "present"
 
 
 def test_compare_entrypoint_forwards_to_validation_backend(monkeypatch):

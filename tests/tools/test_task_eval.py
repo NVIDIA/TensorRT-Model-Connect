@@ -1275,6 +1275,7 @@ def test_load_manifest_records_discovers_model_owned_manifests(tmp_path: Path) -
             {
                 "name": "example-decoder",
                 "hf_id": "example-org/example-decoder",
+                "hf_revision": "0123456789abcdef",
                 "bundle": "example-decoder.trtfb",
                 "family": "example_decoder",
                 "runtime_strategy": "example_decoder_decoder_kv_cache",
@@ -1293,6 +1294,7 @@ def test_load_manifest_records_discovers_model_owned_manifests(tmp_path: Path) -
 
     assert [record["name"] for record in records] == ["example-decoder"]
     assert records[0]["manifest"].endswith("example_decoder/manifests/example-decoder.json")
+    assert records[0]["hf_revision"] == "0123456789abcdef"
     assert records[0]["task_eval"] == {
         "vlm_fallback_prompt_template": "<image>{prompt}",
     }
@@ -2469,6 +2471,23 @@ def test_convert_trtfb_uses_generated_text_field(tmp_path: Path) -> None:
     assert payload["responses"][0]["source"] == "trtfb"
 
 
+def test_convert_trtfb_replaces_invalid_utf8_in_generated_text(
+    tmp_path: Path,
+) -> None:
+    raw = tmp_path / "trtfb_raw.jsonl"
+    raw.write_bytes(
+        b'{"sample_id":"sample-0","text":"bad \x88 text",'
+        b'"generated_token_ids":[7]}\n'
+    )
+    predictions = tmp_path / "predictions.json"
+
+    task_eval.convert_trtfb_jsonl_to_predictions(raw, predictions)
+
+    payload = json.loads(predictions.read_text(encoding="utf-8"))
+    assert payload["responses"][0]["output_text"] == "bad \ufffd text"
+    assert payload["responses"][0]["generated_token_ids"] == [7]
+
+
 def test_score_and_compare_mmlu_predictions(tmp_path: Path) -> None:
     dataset = tmp_path / "mmlu.json"
     _write_mmlu(dataset)
@@ -3125,6 +3144,27 @@ def test_build_bundle_command_uses_manifest_build_settings(tmp_path: Path) -> No
     assert "--verbose" in cmd
 
 
+def test_build_bundle_command_passes_manifest_hf_revision(tmp_path: Path) -> None:
+    model = {
+        "name": "case",
+        "hf_id": "org/model",
+        "hf_revision": "0123456789abcdef",
+        "max_cache_length": 256,
+        "precision": "fp32",
+    }
+
+    cmd = task_eval.build_bundle_command(
+        model,
+        trtmc_binary="build/trtmc",
+        bundle_path=tmp_path / "case.trtfb",
+    )
+
+    assert cmd[cmd.index("--model-revision") : cmd.index("--model-revision") + 2] == [
+        "--model-revision",
+        "0123456789abcdef",
+    ]
+
+
 def test_build_bundle_command_passes_manifest_fp32_layers(tmp_path: Path) -> None:
     """Reduced-precision selectors must reach the build, matching the E2E harness."""
     model = {
@@ -3369,12 +3409,19 @@ def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch)
         min_p=None,
         seed=None,
     )
-    model = {"hf_id": "org/model", "trust_remote_code": False}
+    model = {
+        "hf_id": "org/model",
+        "hf_revision": "0123456789abcdef",
+        "trust_remote_code": False,
+    }
 
     task_eval.run_hf_reference_subprocess(args, model, work_dir)
 
     assert captured["cmd"][0] == "/opt/deepseek-hf/bin/python3"
     assert captured["cmd"][1:3] == [str(task_eval.REFERENCE_RUNNER), "run"]
+    assert captured["cmd"][captured["cmd"].index("--model-revision") + 1] == (
+        "0123456789abcdef"
+    )
     assert captured["cmd"][captured["cmd"].index("--cache-dir") + 1] == str(
         tmp_path / "references"
     )
@@ -5563,6 +5610,46 @@ def test_diffusion_text_hf_parity_uses_token_agreement_only() -> None:
     assert result["shared_sampling_inputs_match_rate"] == 1.0
     assert "normalized_text_exact_match_rate" not in result
     assert "text_ned" not in result["samples"][0]
+
+
+def test_diffusion_text_shared_inputs_match_through_reference_cache_symlink(
+    tmp_path: Path,
+) -> None:
+    cached_dir = tmp_path / "cache" / "hf_shared_inputs" / "sample"
+    cached_dir.mkdir(parents=True)
+    cached_input = cached_dir / "initial_latents.f32"
+    cached_input.write_bytes(b"latents")
+    materialized_root = tmp_path / "work" / "hf_shared_inputs"
+    materialized_root.parent.mkdir()
+    materialized_root.symlink_to(cached_dir.parent, target_is_directory=True)
+    materialized_input = materialized_root / "sample" / "initial_latents.f32"
+
+    result = task_eval.compare_diffusion_text_prediction_sets(
+        {
+            "responses": [
+                {
+                    "sample_id": "sample",
+                    "generated_token_ids": [1],
+                    "shared_sampling_inputs": {
+                        "initial_latents": str(cached_input),
+                    },
+                }
+            ]
+        },
+        {
+            "responses": [
+                {
+                    "sample_id": "sample",
+                    "generated_token_ids": [1],
+                    "shared_sampling_inputs": {
+                        "initial_latents": str(materialized_input),
+                    },
+                }
+            ]
+        },
+    )
+
+    assert result["shared_sampling_inputs_match_rate"] == 1.0
 
 
 def test_diffusion_text_hf_parity_requires_token_ids() -> None:

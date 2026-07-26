@@ -451,6 +451,7 @@ def manifest_record(path: Path) -> dict[str, Any]:
         "name": model_name,
         "manifest": str(path.relative_to(REPO_ROOT) if path.is_relative_to(REPO_ROOT) else path),
         "hf_id": raw.get("hf_id") or raw.get("model_id", ""),
+        "hf_revision": str(raw.get("hf_revision", "") or ""),
         "bundle": raw.get("bundle", f"{path.stem}.trtfb"),
         "family": raw.get("family", ""),
         "runtime_strategy": runtime_strategy,
@@ -2758,9 +2759,9 @@ def prepare_task_dataset(
     raise ValueError(f"Unsupported task-eval dataset kind {dataset_kind!r}")
 
 
-def load_jsonl(path: Path) -> list[dict[str, Any]]:
+def load_jsonl(path: Path, *, errors: str = "strict") -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as f:
+    with path.open("r", encoding="utf-8", errors=errors) as f:
         for line in f:
             line = line.strip()
             if line:
@@ -2999,7 +3000,7 @@ def _parse_transcribe_stdout(text: str) -> str:
 
 def convert_trtfb_jsonl_to_predictions(raw_path: Path, predictions_path: Path) -> None:
     rows = []
-    for row in load_jsonl(raw_path):
+    for row in load_jsonl(raw_path, errors="replace"):
         rows.append(
             {
                 "sample_id": row.get("sample_id", ""),
@@ -4760,7 +4761,10 @@ def _first_token_divergence(reference: list[int], actual: list[int]) -> int:
 def _diffusion_text_shared_sampling_inputs(row: dict[str, Any]) -> dict[str, str]:
     explicit = row.get("shared_sampling_inputs", {})
     if isinstance(explicit, dict) and explicit:
-        return {str(key): str(value) for key, value in explicit.items()}
+        return {
+            str(key): str(Path(str(value)).resolve())
+            for key, value in explicit.items()
+        }
     shared_dir = str(row.get("shared_inputs_dir", "") or "")
     if not shared_dir:
         return {}
@@ -8383,11 +8387,16 @@ def build_bundle_command(
         trtmc_binary,
         "build",
         str(model["hf_id"]),
+    ]
+    hf_revision = str(model.get("hf_revision", "") or "")
+    if hf_revision:
+        cmd.extend(["--model-revision", hf_revision])
+    cmd.extend([
         "-o",
         str(bundle_path),
         "--max-cache-length",
         str(cache_length),
-    ]
+    ])
     build_args = model.get("build_args", {})
     method = _manifest_build_method(build_args)
     if method:
@@ -8616,6 +8625,7 @@ def _namespace_for_run_hf(
 ) -> argparse.Namespace:
     return argparse.Namespace(
         model=model["hf_id"],
+        model_revision=str(model.get("hf_revision", "") or ""),
         family=model.get("family", ""),
         reference_family=model.get("reference_family", ""),
         work_dir=str(work_dir),
@@ -8711,6 +8721,8 @@ def run_hf_reference_subprocess(
         "--device",
         str(hf_args.device),
     ]
+    if hf_args.model_revision:
+        cmd.extend(["--model-revision", str(hf_args.model_revision)])
     reference_cache_dir = str(
         getattr(args, "reference_cache_dir", "") or ""
     )

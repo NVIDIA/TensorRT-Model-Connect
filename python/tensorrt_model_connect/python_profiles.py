@@ -142,6 +142,12 @@ def _exact_pinned_requirements(requirements_text: str) -> dict[str, str]:
     return pinned
 
 
+def _pinned_version_matches(expected: str, actual: str) -> bool:
+    if actual == expected:
+        return True
+    return "+" not in expected and actual.partition("+")[0] == expected
+
+
 def _verify_exact_requirements(
     profile_name: str,
     profile_python: str,
@@ -151,10 +157,12 @@ def _verify_exact_requirements(
         return
     script = (
         "import importlib.metadata as m, json, sys; "
+        "from tensorrt_model_connect.python_profiles "
+        "import _pinned_version_matches as matches; "
         "expected=json.loads(sys.argv[1]); "
         "actual={name:m.version(name) for name in expected}; "
         "bad={name:(expected[name], actual[name]) for name in expected "
-        "if actual[name] != expected[name]}; "
+        "if not matches(expected[name], actual[name])}; "
         "assert not bad, f'exact profile pins do not match: {bad}'"
     )
     _run_profile_command(

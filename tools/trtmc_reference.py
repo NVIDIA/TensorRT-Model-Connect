@@ -123,6 +123,7 @@ def _settings(args: argparse.Namespace) -> dict[str, Any]:
         "native_runner": _native_runner_identity(native_runner),
         "python": str(Path(sys.executable).resolve()),
         "model": args.model,
+        "model_revision": args.model_revision,
         "family": args.family,
         "reference_family": args.reference_family,
         "dtype": args.dtype,
@@ -358,6 +359,14 @@ def _native_reference_command(
     ]
     if args.reference_family:
         command.extend(["--reference-family", str(args.reference_family)])
+    revision_runners = {
+        _TRANSFORMERS_TEXT_RUNNER,
+        _TRANSFORMERS_ENCODER_RUNNER,
+        _TRANSFORMERS_VLM_RUNNER,
+        _SPEECH_REFERENCE_RUNNER,
+    }
+    if runner in revision_runners and args.model_revision:
+        command.extend(["--model-revision", str(args.model_revision)])
     if runner == _ELF_PREPARED_RUNNER and args.elf_reference_repo:
         command.extend(["--elf-reference-repo", str(args.elf_reference_repo)])
     if runner == _SPEECH_REFERENCE_RUNNER and args.family:
@@ -474,6 +483,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run and cache a model reference.")
     parser.add_argument("command", choices=("run",))
     parser.add_argument("--model", required=True)
+    parser.add_argument("--model-revision", default="")
     parser.add_argument("--family", default="")
     parser.add_argument("--reference-family", default="")
     parser.add_argument("--work-dir", required=True)

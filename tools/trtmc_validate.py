@@ -18,6 +18,7 @@ import platform
 import shlex
 import subprocess
 import sys
+import tempfile
 from typing import Any, Iterable, Mapping, Sequence
 
 import yaml
@@ -63,6 +64,37 @@ class EnvironmentSelection:
     base_python: str
     names_and_paths: tuple[tuple[str, str], ...]
     overrides: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class ReferenceSource:
+    name: str
+    repository: str
+    revision: str
+    relative_checkout: Path
+    entrypoint: Path
+
+
+@dataclass(frozen=True)
+class ReferenceSourceSelection:
+    environment: Mapping[str, str]
+    elf_reference_repo: Path | None = None
+
+
+ELF_SOURCE = ReferenceSource(
+    name="ELF",
+    repository="https://github.com/lillian039/ELF.git",
+    revision="b29d8833609e9ab7f67cd9da39435ac5cea04837",
+    relative_checkout=Path("elf/reference/ELF-b29d8833609e"),
+    entrypoint=Path("src"),
+)
+SANA_WM_SOURCE = ReferenceSource(
+    name="SANA-WM",
+    repository="https://github.com/NVlabs/Sana.git",
+    revision="59629fdf790850797cb657bad014fce432bd713d",
+    relative_checkout=Path("sana_wm/reference/Sana-59629fdf7908"),
+    entrypoint=Path("inference_video_scripts/wm/inference_sana_wm.py"),
+)
 
 
 def _validate_model_spec(path: Path, name: Any, spec: Any) -> None:
@@ -257,16 +289,19 @@ def _binding_profiles(
 ) -> tuple[str, ...]:
     if binding.workload != "e2e":
         model = task_models[binding.model]
+        profile = _declared_profile(
+            family=str(model.get("family", "") or ""),
+            runtime_strategy=str(model.get("runtime_strategy", "") or ""),
+            reference_backend=str(model.get("reference_backend", "") or ""),
+            execution_profiles=model.get("execution_profiles"),
+        )
         return (
-            _declared_profile(
-                family=str(model.get("family", "") or ""),
-                runtime_strategy=str(model.get("runtime_strategy", "") or ""),
-                reference_backend=str(model.get("reference_backend", "") or ""),
-                execution_profiles=model.get("execution_profiles"),
-            ),
+            (COMMON_REFERENCE_PROFILE,)
+            if profile == COMMON_REFERENCE_PROFILE
+            else (COMMON_REFERENCE_PROFILE, profile)
         )
 
-    profiles = []
+    profiles = [COMMON_REFERENCE_PROFILE]
     for case in e2e_models[binding.model].testcases:
         profile = _declared_profile(
             family=case.family,
@@ -307,6 +342,79 @@ def ensure_environments(
         names_and_paths=tuple(names_and_paths),
         overrides=overrides,
     )
+
+
+def _ensure_reference_source(source: ReferenceSource, cache_root: Path) -> Path:
+    checkout = cache_root / source.relative_checkout
+    entrypoint = checkout / source.entrypoint
+    if entrypoint.exists():
+        print(f"Using reference source: {checkout}", flush=True)
+        return checkout
+    if checkout.exists():
+        raise ValidationError(f"Incomplete cached {source.name} reference: {checkout}")
+
+    checkout.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Creating reference source: {source.name}", flush=True)
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=f".{checkout.name}-",
+            dir=checkout.parent,
+        ) as temporary:
+            staged = Path(temporary) / "checkout"
+            subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "--filter=blob:none",
+                    "--no-checkout",
+                    source.repository,
+                    str(staged),
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(staged),
+                    "checkout",
+                    "--detach",
+                    source.revision,
+                ],
+                check=True,
+            )
+            if not (staged / source.entrypoint).exists():
+                raise ValidationError(
+                    f"Pinned {source.name} checkout is missing "
+                    f"{source.entrypoint}"
+                )
+            staged.rename(checkout)
+    except subprocess.CalledProcessError as exc:
+        raise ValidationError(
+            f"Could not prepare pinned {source.name} reference "
+            f"{source.revision}: git exited with code {exc.returncode}"
+        ) from exc
+    print(f"Using reference source: {checkout}", flush=True)
+    return checkout
+
+
+def ensure_reference_sources(
+    family: str,
+    cache_root: Path,
+) -> ReferenceSourceSelection:
+    environment = {"TRTMC_STORAGE_ROOT": str(cache_root)}
+    if family == "elf_flow":
+        checkout = _ensure_reference_source(ELF_SOURCE, cache_root)
+        return ReferenceSourceSelection(
+            environment=environment,
+            elf_reference_repo=checkout,
+        )
+    if family == "sana_wm":
+        checkout = _ensure_reference_source(SANA_WM_SOURCE, cache_root)
+        environment["SANA_WM_SCRIPT"] = str(
+            checkout / SANA_WM_SOURCE.entrypoint
+        )
+    return ReferenceSourceSelection(environment=environment)
 
 
 def _dataset_path(suite: Mapping[str, Any], dataset_root: Path | None) -> Path:
@@ -356,10 +464,11 @@ def _comparison_command(
     dataset: Path,
     arguments: argparse.Namespace,
     reference_python: str,
+    reference_sources: ReferenceSourceSelection | None = None,
 ) -> list[str]:
     work_root = case_dir / "validation"
     command = [
-        sys.executable,
+        reference_python,
         str(REPO_ROOT / "tools" / "trtmc_compare.py"),
         "--suite",
         binding.workload,
@@ -400,6 +509,13 @@ def _comparison_command(
         command.extend(["--model-plugin-dir", str(arguments.model_plugin_dir)])
     if arguments.cuda_visible_devices:
         command.extend(["--cuda-visible-devices", arguments.cuda_visible_devices])
+    if reference_sources and reference_sources.elf_reference_repo:
+        command.extend(
+            [
+                "--elf-reference-repo",
+                str(reference_sources.elf_reference_repo),
+            ]
+        )
     return command
 
 
@@ -411,7 +527,7 @@ def _e2e_command(
     reference_python: str,
 ) -> list[str]:
     command = [
-        sys.executable,
+        reference_python,
         "-m",
         "pytest",
         "tests/test_e2e.py",
@@ -583,6 +699,36 @@ def _command_log_kind(path: Path, *, has_native_reference: bool) -> str | None:
     return "hf" if "hf" in path.name.lower() else "trtmc"
 
 
+def _relocate_cached_reference_command(command: str, work_dir: Path) -> str:
+    """Point a cached native reference command at the current materialized run."""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return command
+    original_work_dir = None
+    for flag in ("--manifest", "--prompts", "--answers"):
+        if flag in tokens:
+            index = tokens.index(flag)
+            if index + 1 < len(tokens):
+                candidate = Path(tokens[index + 1])
+                if candidate.is_absolute():
+                    original_work_dir = candidate.parent
+                    break
+    if original_work_dir is None:
+        return command
+    original_prefix = str(original_work_dir)
+    current_prefix = str(work_dir.resolve())
+    relocated = [
+        (
+            current_prefix + token[len(original_prefix) :]
+            if token == original_prefix or token.startswith(original_prefix + os.sep)
+            else token
+        )
+        for token in tokens
+    ]
+    return shlex.join(relocated)
+
+
 def _collect_command_logs(
     root: Path,
     *,
@@ -604,6 +750,11 @@ def _collect_command_logs(
             sample_ids=indexed_sample_ids,
             target_sample_id=representative_id,
         )
+        if path.name == "hf_native_run.log":
+            representative = _relocate_cached_reference_command(
+                representative,
+                root,
+            )
         counts[kind] += count
         if count:
             logs[kind].append(str(path.relative_to(root)))
@@ -1054,8 +1205,13 @@ def run_binding(
         e2e_models=e2e_models,
     )
     environment = ensure_environments(profiles, str(arguments.hf_python))
+    reference_sources = ensure_reference_sources(
+        str(task_models[binding.model].get("family", "") or ""),
+        Path(arguments.reference_cache_dir),
+    )
     process_env = _source_environment()
     process_env.update(environment.overrides)
+    process_env.update(reference_sources.environment)
     dataset_command = shlex.join([sys.executable, *sys.argv])
 
     if binding.workload == "e2e":
@@ -1086,6 +1242,7 @@ def run_binding(
             dataset=dataset,
             arguments=arguments,
             reference_python=environment.base_python,
+            reference_sources=reference_sources,
         )
         returncode = _run_subprocess(command, case_dir / "execution.log", process_env)
         result = _comparison_result(

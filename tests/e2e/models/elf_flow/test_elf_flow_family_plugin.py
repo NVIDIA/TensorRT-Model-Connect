@@ -36,6 +36,45 @@ except (ImportError, ModuleNotFoundError):
 RNG = np.random.RandomState(7)
 
 
+def test_elf_reference_uses_upstream_compatible_python_profile() -> None:
+    from tensorrt_model_connect.python_profiles import normalize_execution_profiles
+
+    profiles = normalize_execution_profiles(
+        None,
+        family="elf_flow",
+        runtime_strategy="elf_flow",
+        reference_backend="hf_transformers",
+    )
+
+    assert profiles["build"] == "elf_flow"
+    assert profiles["reference"] == "elf_flow_reference"
+
+
+def test_elf_reference_profile_pins_upstream_transformers_version() -> None:
+    family_root = (
+        Path(__file__).resolve().parents[4]
+        / "python"
+        / "tensorrt_model_connect"
+        / "families"
+        / "elf_flow"
+    )
+    lock = (
+        family_root
+        / "python_profile_requirements"
+        / "elf_flow_reference.lock.txt"
+    ).read_text(encoding="utf-8")
+    verify = (family_root / "python_profile_reference_verify.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "transformers==4.44.2" in lock
+    assert "tokenizers==0.19.1" in lock
+    assert "huggingface-hub==0.24.7" in lock
+    assert 'transformers.__version__ == "4.44.2"' in verify
+    assert 'tokenizers.__version__ == "0.19.1"' in verify
+    assert 'huggingface_hub.__version__ == "0.24.7"' in verify
+
+
 def _rand(*shape: int) -> np.ndarray:
     return RNG.randn(*shape).astype(np.float32)
 
