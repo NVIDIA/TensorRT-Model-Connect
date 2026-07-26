@@ -64,7 +64,22 @@ def _optimized_cli_public_options(args: argparse.Namespace) -> dict:
     }
     if public_options.get("precision") is None:
         public_options["precision"] = "fp32"
+    # Keep the existing optimized-runtime request contract unchanged. Native
+    # Qwen/Llama builders interpret an omitted capacity from the model config,
+    # while legacy capsules still own their established 256-token profile.
+    if public_options.get("max_cache_length") is None:
+        public_options["max_cache_length"] = 256
     return public_options
+
+
+def _default_bundle_path(model: str) -> str:
+    """Derive the no-flag CLI output name from an HF id or local model path."""
+    model_name = Path(model.rstrip("/")).name or "model"
+    safe_name = "".join(
+        ch if ch.isalnum() or ch in (".", "-", "_") else "-"
+        for ch in model_name
+    ).strip(".-_")
+    return f"{safe_name or 'model'}.trtfb"
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
@@ -73,8 +88,11 @@ def _cmd_build(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
     if not args.output:
-        print("Error: -o / --output required", file=sys.stderr)
-        return 1
+        args.output = _default_bundle_path(args.model)
+        print(
+            f"[trtmc build] Output: {args.output} (derived from model)",
+            file=sys.stderr,
+        )
 
     # Optimized dispatch resolves the model family internally and scans only
     # that family's Builder folder. The current platform remains implicit; no
@@ -90,6 +108,11 @@ def _cmd_build(args: argparse.Namespace) -> int:
             args.model,
             args.output,
             _optimized_cli_public_options(args),
+            explicit_public_options=frozenset(
+                name
+                for name in ("precision", "max_cache_length")
+                if getattr(args, name, None) is not None
+            ),
             **revision_kwargs,
         )
     except Exception as exc:
@@ -590,7 +613,7 @@ def main() -> None:
     )
     subparsers = parser.add_subparsers(dest="command")
 
-    # trtmc build <model> -o <out.trtfb>
+    # trtmc build <model> [-o <out.trtfb>]
     build_p = subparsers.add_parser("build", help="Build a .trtfb bundle")
     build_p.add_argument("model",
                          help="HF repo ID (for example, org/model-name) or local directory")
@@ -599,12 +622,20 @@ def main() -> None:
         default=None,
         help="Hugging Face model revision (commit, tag, or branch) to build",
     )
-    build_p.add_argument("-o", "--output", required=True,
-                         help="Output .trtfb file path")
+    build_p.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Output .trtfb path (default: <model-name>.trtfb)",
+    )
     build_p.add_argument("--trust-remote-code", action="store_true",
                          help="Allow Hugging Face model code that requires trust_remote_code")
-    build_p.add_argument("--max-cache-length", type=int, default=256,
-                         help="KV cache length (default: 256)")
+    build_p.add_argument(
+        "--max-cache-length",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     build_p.add_argument(
         "--decoder-engine-layout",
         choices=["split", "dual_profile"],

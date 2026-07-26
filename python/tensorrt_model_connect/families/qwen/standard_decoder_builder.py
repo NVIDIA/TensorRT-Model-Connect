@@ -70,6 +70,7 @@ def build_standard_decoder_engine(
     debug_layer_outputs: bool = False,
     hidden_state_output: bool = False,
     full_logits_output: bool = False,
+    native_kv_cache: bool = False,
 ) -> bytes:
     """Build a TRT engine plan (serialized bytes) for a standard decoder.
 
@@ -97,6 +98,9 @@ def build_standard_decoder_engine(
         verbose: Print TRT builder logs.
         debug_layer_outputs: If True, mark per-layer hidden states as network
             outputs for diff testing.
+        native_kv_cache: Internal Qwen3-family switch for TensorRT's native
+            fixed-capacity KV cache API. This is selected by ``QwenPlugin``;
+            it is not a user-facing build option.
 
     Returns:
         Serialized engine plan bytes.
@@ -131,11 +135,22 @@ def build_standard_decoder_engine(
         or bool(config.raw.get("dynamic_kv_cache", False))
         or _os.environ.get("TRTMC_NO_DUAL_PROFILE") == "1"
     )
-    if decoder_engine_role == "prefill" and _dual_profile_disabled_for:
+    if (
+        decoder_engine_role == "prefill"
+        or (native_kv_cache and decoder_engine_role == "decode")
+    ) and _dual_profile_disabled_for:
         raise NotImplementedError(
-            "split prefill engine is not supported for this standard decoder "
+            "split decoder engine is not supported for this standard decoder "
             "configuration")
-    if not _dual_profile_disabled_for and decoder_engine_role in ("dual_profile", "prefill"):
+    native_role_supported = (
+        native_kv_cache
+        and decoder_engine_role in ("dual_profile", "prefill", "decode")
+    )
+    legacy_dual_role_supported = decoder_engine_role in ("dual_profile", "prefill")
+    if (
+        not _dual_profile_disabled_for
+        and (native_role_supported or legacy_dual_role_supported)
+    ):
         return build_dual_profile_decoder_engine(
             config, weights, max_cache_length,
             precision=precision,
@@ -149,8 +164,9 @@ def build_standard_decoder_engine(
             parallel_residual=parallel_residual,
             scale_attn_weights=scale_attn_weights,
             verbose=verbose,
-            profile_mode=("prefill" if decoder_engine_role == "prefill" else "dual_profile"),
+            profile_mode=decoder_engine_role,
             full_logits_output=full_logits_output,
+            native_kv_cache=native_kv_cache,
         )
 
     if full_logits_output:

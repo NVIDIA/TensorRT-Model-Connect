@@ -44,6 +44,42 @@ def _make_standard_decoder_tensors(vocab, hidden, layers, heads, kv_heads, mlp):
 class TestLlamaPlugin:
     VOCAB, HIDDEN, LAYERS, HEADS, KV_HEADS, MLP = 32, 16, 2, 4, 2, 32
 
+    def test_default_capacity_uses_full_context_only_for_native_kv(self):
+        from tensorrt_model_connect.families.llama import plugin
+
+        config = ModelConfig(
+            model_type="llama",
+            hidden_size=4096,
+            intermediate_size=14336,
+            num_hidden_layers=16,
+            num_attention_heads=32,
+            num_key_value_heads=8,
+            max_position_embeddings=131072,
+            raw={
+                "rope_scaling": {
+                    "rope_type": "llama3",
+                    "factor": 8.0,
+                    "original_max_position_embeddings": 8192,
+                }
+            },
+        )
+        config.raw["_resolved_build_precision"] = "bf16"
+        assert plugin.default_max_cache_length(config) == 131072
+        assert plugin.default_build_precision(config) == "bf16"
+
+        config.raw["_fp32_layers"] = [1]
+        assert plugin.default_max_cache_length(config) == 256
+        config.raw["_fp32_layers"] = []
+        config.raw["_runtime_dynamic_kv_requested"] = True
+        assert plugin.default_max_cache_length(config) == 256
+        config.raw["_runtime_dynamic_kv_requested"] = False
+        config.raw["_resolved_build_precision"] = "fp32"
+        assert plugin.default_max_cache_length(config) == 256
+
+        generic_llama = ModelConfig.create_tiny("llama")
+        assert plugin.default_max_cache_length(generic_llama) == 256
+        assert plugin.default_build_precision(generic_llama) == "fp32"
+
     def test_selected_fp32_layers_use_single_engine_layout(self):
         from tensorrt_model_connect.families.llama import plugin
 

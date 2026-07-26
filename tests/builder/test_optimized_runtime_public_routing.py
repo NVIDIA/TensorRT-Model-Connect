@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import json
 import os
 import subprocess
 import sys
@@ -88,8 +89,15 @@ def test_python_build_delegates_before_native_with_explicit_options(
 
     calls: list[tuple[str, str, dict]] = []
 
-    def delegated(model: str, output: str, options: dict):
+    def delegated(
+        model: str,
+        output: str,
+        options: dict,
+        *,
+        explicit_public_options: frozenset[str],
+    ):
         calls.append((model, output, options))
+        assert explicit_public_options == {"precision", "max_cache_length"}
         return object()
 
     monkeypatch.setattr(engine_builder, "_try_build_optimized_runtime", delegated)
@@ -122,8 +130,15 @@ def test_python_build_treats_omitted_and_explicit_defaults_identically(
 
     calls: list[dict] = []
 
-    def delegated(_model: str, _output: str, options: dict):
+    def delegated(
+        _model: str,
+        _output: str,
+        options: dict,
+        *,
+        explicit_public_options: frozenset[str],
+    ):
         calls.append(options)
+        calls.append({"_explicit": explicit_public_options})
         return object()
 
     monkeypatch.setattr(engine_builder, "_try_build_optimized_runtime", delegated)
@@ -142,10 +157,12 @@ def test_python_build_treats_omitted_and_explicit_defaults_identically(
         max_batch_size=1,
     )
 
-    assert calls[0] == calls[1]
+    assert calls[0] == calls[2]
     assert calls[0]["max_batch_size"] == 1
     assert calls[0]["max_cache_length"] == 256
     assert calls[0]["precision"] == "fp32"
+    assert calls[1]["_explicit"] == frozenset()
+    assert calls[3]["_explicit"] == {"precision", "max_cache_length"}
 
 
 def test_python_build_preserves_native_call_when_no_capsule_matches(monkeypatch) -> None:
@@ -169,7 +186,7 @@ def test_python_build_preserves_native_call_when_no_capsule_matches(monkeypatch)
     assert native_calls[0]["model_id_or_path"] == "native/model"
     assert native_calls[0]["output_path"] == "native.trtfb"
     assert native_calls[0]["precision"] is None
-    assert native_calls[0]["max_cache_length"] == 256
+    assert native_calls[0]["max_cache_length"] is None
 
 
 def test_cli_delegation_uses_existing_options_without_native_discovery(monkeypatch) -> None:
@@ -178,8 +195,15 @@ def test_cli_delegation_uses_existing_options_without_native_discovery(monkeypat
 
     calls: list[tuple[str, str, dict]] = []
 
-    def delegated(model: str, output: str, options: dict):
+    def delegated(
+        model: str,
+        output: str,
+        options: dict,
+        *,
+        explicit_public_options: frozenset[str],
+    ):
         calls.append((model, output, options))
+        assert explicit_public_options == {"precision", "max_cache_length"}
         return object()
 
     monkeypatch.setattr(engine_builder, "_try_build_optimized_runtime", delegated)
@@ -212,8 +236,15 @@ def test_cli_delegation_preserves_explicit_default_options(monkeypatch) -> None:
 
     calls: list[dict] = []
 
-    def delegated(_model: str, _output: str, options: dict):
+    def delegated(
+        _model: str,
+        _output: str,
+        options: dict,
+        *,
+        explicit_public_options: frozenset[str],
+    ):
         calls.append(options)
+        assert explicit_public_options == {"precision", "max_cache_length"}
         return object()
 
     monkeypatch.setattr(engine_builder, "_try_build_optimized_runtime", delegated)
@@ -260,12 +291,20 @@ def test_cli_treats_model_revision_as_identity_not_plugin_option(monkeypatch) ->
 
     captured: dict[str, object] = {}
 
-    def delegated(model: str, output: str, options: dict, *, model_revision: str):
+    def delegated(
+        model: str,
+        output: str,
+        options: dict,
+        *,
+        model_revision: str,
+        explicit_public_options: frozenset[str],
+    ):
         captured.update(
             model=model,
             output=output,
             options=options,
             model_revision=model_revision,
+            explicit_public_options=explicit_public_options,
         )
         return object()
 
@@ -281,6 +320,10 @@ def test_cli_treats_model_revision_as_identity_not_plugin_option(monkeypatch) ->
 
     assert build_cli._cmd_build(args) == 0
     assert captured["model_revision"] == args.model_revision
+    assert captured["explicit_public_options"] == {
+        "precision",
+        "max_cache_length",
+    }
     assert "model_revision" not in captured["options"]
 
 
@@ -291,8 +334,15 @@ def test_cli_native_fallback_does_not_probe_capsules_twice(monkeypatch) -> None:
     probe_calls: list[str] = []
     native_calls: list[dict] = []
 
-    def no_delegation(model: str, _output: str, _options: dict):
+    def no_delegation(
+        model: str,
+        _output: str,
+        _options: dict,
+        *,
+        explicit_public_options: frozenset[str],
+    ):
         probe_calls.append(model)
+        assert explicit_public_options == {"precision", "max_cache_length"}
         return None
 
     monkeypatch.setattr(engine_builder, "_try_build_optimized_runtime", no_delegation)
@@ -328,6 +378,117 @@ def test_cli_native_fallback_does_not_probe_capsules_twice(monkeypatch) -> None:
     assert native_calls[0]["model_id_or_path"] == "native/model"
 
 
+def _write_qwen3_06b_config(path: Path, *, hidden_size: int = 1024) -> None:
+    path.mkdir()
+    (path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "qwen3",
+                "architectures": ["Qwen3ForCausalLM"],
+                "hidden_size": hidden_size,
+                "intermediate_size": 3072,
+                "num_hidden_layers": 28,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "max_position_embeddings": 40960,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_qwen3_06b_model_only_request_prefers_native_without_plugin_import(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import tensorrt_model_connect.engine_builder as engine_builder
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
+
+    model = tmp_path / "qwen3-06b"
+    _write_qwen3_06b_config(model)
+    delegated: list[object] = []
+    monkeypatch.setattr(engine_builder, "_resolve_model", lambda _model: str(model))
+    monkeypatch.setattr(
+        engine_builder,
+        "find_plugin",
+        lambda _config: (_ for _ in ()).throw(
+            AssertionError("default routing imported the native Qwen plugin")
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "try_build_optimized_runtime",
+        lambda *_args, **_kwargs: delegated.append(object()),
+    )
+
+    result = engine_builder._try_build_optimized_runtime(
+        "Qwen/Qwen3-0.6B",
+        tmp_path / "qwen.trtfb",
+        {"precision": "fp32", "max_cache_length": 256},
+        explicit_public_options=frozenset(),
+    )
+
+    assert result is None
+    assert delegated == []
+
+
+def test_qwen3_06b_explicit_deployment_option_preserves_optimized_probe(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import tensorrt_model_connect.engine_builder as engine_builder
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
+
+    model = tmp_path / "qwen3-06b"
+    _write_qwen3_06b_config(model)
+    selected = object()
+    calls: list[dict] = []
+    monkeypatch.setattr(engine_builder, "_resolve_model", lambda _model: str(model))
+
+    def delegated(*_args, **kwargs):
+        calls.append(kwargs)
+        return selected
+
+    monkeypatch.setattr(orchestrator, "try_build_optimized_runtime", delegated)
+    result = engine_builder._try_build_optimized_runtime(
+        "Qwen/Qwen3-0.6B",
+        tmp_path / "qwen.trtfb",
+        {"precision": "fp16", "max_cache_length": 4096},
+        explicit_public_options=frozenset({"precision", "max_cache_length"}),
+    )
+
+    assert result is selected
+    assert len(calls) == 1
+
+
+def test_other_qwen3_model_only_request_keeps_existing_optimized_probe(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import tensorrt_model_connect.engine_builder as engine_builder
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
+
+    model = tmp_path / "other-qwen3"
+    _write_qwen3_06b_config(model, hidden_size=2048)
+    selected = object()
+    monkeypatch.setattr(engine_builder, "_resolve_model", lambda _model: str(model))
+    monkeypatch.setattr(
+        orchestrator,
+        "try_build_optimized_runtime",
+        lambda *_args, **_kwargs: selected,
+    )
+
+    result = engine_builder._try_build_optimized_runtime(
+        "Qwen/Other-Qwen3",
+        tmp_path / "qwen.trtfb",
+        {"precision": "fp32", "max_cache_length": 256},
+        explicit_public_options=frozenset(),
+    )
+
+    assert result is selected
+
+
 def test_build_cli_does_not_expose_runtime_selection_or_target_flags() -> None:
     repository = Path(__file__).resolve().parents[2]
     environment = os.environ.copy()
@@ -346,7 +507,7 @@ def test_build_cli_does_not_expose_runtime_selection_or_target_flags() -> None:
     assert "--target" not in result.stdout
     assert "--runtime" not in result.stdout
     assert "optimized-runtime" not in result.stdout.lower()
-    assert "--max-cache-length" in result.stdout
+    assert "--max-cache-length" not in result.stdout
 
 
 def test_optimized_factory_header_is_private() -> None:

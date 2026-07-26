@@ -149,6 +149,79 @@ class TestMainParser:
         assert captured["args"].build_timing_json == str(tmp_path / "timing.json")
         assert not hasattr(captured["args"], "_explicit_public_options")
 
+    def test_build_model_only_uses_optional_output(self, monkeypatch):
+        """The public parser accepts the model as the only build argument."""
+        import tensorrt_model_connect.build_cli as cli
+
+        captured: dict[str, argparse.Namespace] = {}
+
+        def _fake_cmd_build(args):
+            captured["args"] = args
+            return 0
+
+        monkeypatch.setattr(cli, "_cmd_build", _fake_cmd_build)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["trtmc", "build", "Qwen/Qwen3-0.6B"],
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+
+        assert exc_info.value.code == 0
+        assert captured["args"].output is None
+        assert captured["args"].max_cache_length is None
+
+
+def test_default_bundle_path_uses_model_name():
+    from tensorrt_model_connect.build_cli import _default_bundle_path
+
+    assert _default_bundle_path("Qwen/Qwen3-0.6B") == "Qwen3-0.6B.trtfb"
+    assert _default_bundle_path("/models/My Model/") == "My-Model.trtfb"
+
+
+def test_cmd_build_derives_output_and_keeps_native_capacity_unset(monkeypatch):
+    import tensorrt_model_connect.build_cli as cli
+    import tensorrt_model_connect.engine_builder as engine_builder
+
+    captured = {}
+
+    optimized_call = {}
+
+    def _no_optimized(*_args, **kwargs):
+        optimized_call.update(kwargs)
+        return None
+
+    monkeypatch.setattr(
+        engine_builder,
+        "_try_build_optimized_runtime",
+        _no_optimized,
+    )
+
+    def _fake_native_build(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(engine_builder, "_build_native_impl", _fake_native_build)
+    args = argparse.Namespace(
+        model="Qwen/Qwen3-0.6B",
+        output=None,
+        max_cache_length=None,
+        precision=None,
+        quantize=None,
+        quant_scales=None,
+        quant_calibration_samples=512,
+        verbose=False,
+        method="trt",
+        tensor_parallel_size=1,
+        _skip_profile_resolution=True,
+    )
+
+    assert cli._cmd_build(args) == 0
+    assert captured["output_path"] == "Qwen3-0.6B.trtfb"
+    assert captured["max_cache_length"] is None
+    assert optimized_call["explicit_public_options"] == frozenset()
+
 
 class TestInspectArgs:
     def test_inspect_parses(self):

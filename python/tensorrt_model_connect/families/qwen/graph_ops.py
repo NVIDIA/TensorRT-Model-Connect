@@ -527,17 +527,18 @@ def make_rope_table_half_dim(
     default = 1.0 if cosine else 0.0
     if max_cache_length <= 0 or rope_theta <= 0.0:
         return np.full((max(max_cache_length, 1), max(half, 1)), default, dtype=np.float32)
-    table = np.full((max_cache_length, half), default, dtype=np.float32)
-    for pos in range(max_cache_length):
-        for d in range(half):
-            # For both interleaved and rotate-half the frequency index is d
-            # (the distinction only affects which input pair is rotated; the
-            # freq assignment per half-dim is the same).
-            exponent = (2.0 * d) / rotary_ndims
-            inv_freq = rope_theta ** (-exponent)
-            angle = pos * inv_freq
-            table[pos, d] = np.cos(angle) if cosine else np.sin(angle)
-    return table
+    # Match the HF runtime path: construct inverse frequencies and multiply
+    # positions in FP32. Computing phase in Python FP64 and rounding only the
+    # final table causes visible error near the end of a 40K context.
+    dims = np.arange(0, rotary_ndims, 2, dtype=np.float32)
+    inv_freq = np.float32(1.0) / np.power(
+        np.float32(rope_theta),
+        dims / np.float32(rotary_ndims),
+    )
+    positions = np.arange(max_cache_length, dtype=np.float32)
+    angles = positions[:, None] * inv_freq[None, :]
+    table = np.cos(angles) if cosine else np.sin(angles)
+    return np.asarray(table, dtype=np.float32)
 
 
 def reshape_rows_to_heads_4d(
@@ -1022,6 +1023,134 @@ def add_attention_from_rows(
         sequence_length=q_seq,
         tag=None if tag is None else tag + ".ctx",
     )
+
+
+def add_native_kv_cache_attention_from_rows(
+    network: trt.INetworkDefinition,
+    q: trt.ITensor,
+    k_update: trt.ITensor,
+    v_update: trt.ITensor,
+    cache_k: trt.ITensor,
+    cache_v: trt.ITensor,
+    cache_write_indices: trt.ITensor,
+    key_value_lengths: trt.ITensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    q_seq: int | None,
+    scale: float | None = None,
+    tag: str | None = None,
+) -> dict[str, trt.ITensor]:
+    """Update a user-owned KV cache and attend over its active prefix.
+
+    ``IKVCacheUpdateLayer`` writes this step's K/V rows into the static,
+    full-capacity cache in place. ``IAttention`` consumes the aliased cache
+    outputs, while ``key_value_lengths`` limits work to the valid prefix.
+    ``LOWER_RIGHT`` causal alignment gives correct autoregressive semantics
+    when the query sequence is shorter than the active KV sequence.
+
+    Cache inputs and outputs have shape ``[1, Hkv, capacity, D]``. The caller
+    must bind each output to the same device address as its corresponding
+    input, as required by TensorRT's KV-cache aliasing contract.
+    """
+    if not hasattr(network, "add_kv_cache_update") or not hasattr(
+        network, "add_attention_v2"
+    ):
+        raise RuntimeError(
+            "Qwen native KV cache requires TensorRT add_kv_cache_update "
+            "and add_attention_v2 support"
+        )
+
+    k_update_4d = reshape_rows_to_heads_4d(
+        network,
+        k_update,
+        num_kv_heads,
+        head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".k_update",
+    )
+    v_update_4d = reshape_rows_to_heads_4d(
+        network,
+        v_update,
+        num_kv_heads,
+        head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".v_update",
+    )
+
+    update_k = network.add_kv_cache_update(
+        cache_k,
+        k_update_4d,
+        cache_write_indices,
+        trt.KVCacheMode.LINEAR,
+    )
+    update_v = network.add_kv_cache_update(
+        cache_v,
+        v_update_4d,
+        cache_write_indices,
+        trt.KVCacheMode.LINEAR,
+    )
+    if update_k is None or update_v is None:
+        raise RuntimeError("TensorRT failed to create Qwen KV-cache update layers")
+    if tag:
+        update_k.name = tag + ".cache_k_update"
+        update_v.name = tag + ".cache_v_update"
+    updated_k = update_k.get_output(0)
+    updated_v = update_v.get_output(0)
+
+    q_4d = reshape_rows_to_heads_4d(
+        network,
+        q,
+        num_heads,
+        head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".q",
+    )
+    if scale is None:
+        scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
+    scale_np_dtype = np.float16 if q_4d.dtype == trt.float16 else np.float32
+    scale_t = add_constant(
+        network,
+        (1, 1, 1, 1),
+        np.array([[[[scale]]]]),
+        dtype=scale_np_dtype,
+    )
+    if q_4d.dtype == trt.bfloat16:
+        scale_t = network.add_cast(scale_t, trt.bfloat16).get_output(0)
+    q_scaled = network.add_elementwise(
+        q_4d, scale_t, trt.ElementWiseOperation.PROD
+    ).get_output(0)
+
+    attention = network.add_attention_v2(
+        q_scaled,
+        updated_k,
+        updated_v,
+        trt.AttentionNormalizationOp.SOFTMAX,
+        trt.CausalMaskKind.LOWER_RIGHT,
+    )
+    if attention is None:
+        raise RuntimeError("TensorRT failed to create Qwen native attention")
+    # The prototype deliberately requires TensorRT's fused attention tactic.
+    # Unsupported dtype/head geometries fail at build time instead of silently
+    # falling back to a primitive graph with materially lower decode speed.
+    attention.decomposable = False
+    attention.key_value_lengths = key_value_lengths
+    if tag:
+        attention.name = tag
+
+    context = reshape_heads_4d_to_rows(
+        network,
+        attention.get_output(0),
+        num_heads * head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".ctx",
+    )
+    return {
+        "context": context,
+        "present_k": updated_k,
+        "present_v": updated_v,
+    }
 
 
 # Backward-compatible name used by existing tests and call sites.

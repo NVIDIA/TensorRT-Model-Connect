@@ -25,6 +25,40 @@ class TestQwenPlugin:
 
     VOCAB, HIDDEN, LAYERS, HEADS, KV_HEADS, MLP = 32, 16, 2, 4, 4, 32
 
+    def test_default_capacity_uses_full_context_only_for_native_qwen3(self):
+        from tensorrt_model_connect.families.qwen import plugin
+
+        config = ModelConfig(
+            model_type="qwen3",
+            hidden_size=1024,
+            intermediate_size=3072,
+            num_hidden_layers=28,
+            num_attention_heads=16,
+            num_key_value_heads=8,
+            _head_dim=128,
+            max_position_embeddings=40960,
+        )
+        config.raw["_resolved_build_precision"] = "bf16"
+        assert plugin.default_max_cache_length(config) == 40960
+        assert plugin.default_build_precision(config) == "bf16"
+
+        config.model_type = "qwen2"
+        assert plugin.default_max_cache_length(config) == 256
+        assert plugin.default_build_precision(config) == "fp32"
+        config.model_type = "qwen3"
+        config.raw["_parallel_build_enabled"] = True
+        assert plugin.default_max_cache_length(config) == 256
+        config.raw["_parallel_build_enabled"] = False
+        config.raw["_runtime_dynamic_kv_requested"] = True
+        assert plugin.default_max_cache_length(config) == 256
+        config.raw["_runtime_dynamic_kv_requested"] = False
+        config.raw["_resolved_build_precision"] = "fp32"
+        assert plugin.default_max_cache_length(config) == 256
+
+        generic_qwen3 = ModelConfig.create_tiny("qwen3")
+        assert plugin.default_max_cache_length(generic_qwen3) == 256
+        assert plugin.default_build_precision(generic_qwen3) == "fp32"
+
     def test_dense_qwen_matcher_excludes_moe_model_types(self):
         """The dense Qwen owner must not claim Qwen-MoE configurations."""
         from tensorrt_model_connect.families.qwen import plugin

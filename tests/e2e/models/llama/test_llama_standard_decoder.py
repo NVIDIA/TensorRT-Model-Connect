@@ -21,24 +21,35 @@ pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect req
 from tests.builder.conftest import requires_trt
 
 
+_MINITRON_LLAMA3_ROPE_SCALING = {
+    "rope_type": "llama3",
+    "factor": 8.0,
+    "high_freq_factor": 4.0,
+    "low_freq_factor": 1.0,
+    "original_max_position_embeddings": 8192,
+}
+
+
 def _make_weights(hidden: int, vocab: int, num_layers: int,
                   attention_size: int, mlp_size: int,
                   *, mlp_type: str = "swiglu",
                   position_type: str = "rope",
-                  has_bias: bool = False) -> dict:
+                  has_bias: bool = False,
+                  kv_attention_size: int | None = None) -> dict:
     """Create a minimal synthetic weight dict for the standard decoder builder."""
     from tensorrt_model_connect.checkpoint_mapper import WeightDict
     rng = np.random.RandomState(42)
     w = WeightDict()
     w["embedding"] = rng.randn(vocab, hidden).astype(np.float32)
+    kv_attention_size = kv_attention_size or attention_size
 
     for i in range(num_layers):
         p = f"layer.{i}"
         w[f"{p}.input_norm"] = rng.randn(hidden).astype(np.float32)
         w[f"{p}.post_attn_norm"] = rng.randn(hidden).astype(np.float32)
         w[f"{p}.w_q"] = rng.randn(hidden, attention_size).astype(np.float32)
-        w[f"{p}.w_k"] = rng.randn(hidden, attention_size).astype(np.float32)
-        w[f"{p}.w_v"] = rng.randn(hidden, attention_size).astype(np.float32)
+        w[f"{p}.w_k"] = rng.randn(hidden, kv_attention_size).astype(np.float32)
+        w[f"{p}.w_v"] = rng.randn(hidden, kv_attention_size).astype(np.float32)
         w[f"{p}.w_o"] = rng.randn(attention_size, hidden).astype(np.float32)
 
         if mlp_type == "swiglu":
@@ -83,6 +94,137 @@ def _deserialize_engine(engine_plan: bytes):
     logger = trt.Logger(trt.Logger.WARNING)
     runtime = trt.Runtime(logger)
     return runtime.deserialize_cuda_engine(engine_plan)
+
+
+def test_llama3_rope_table_matches_hf_reference():
+    """Minitron's 131K RoPE cache follows the HF Llama 3 frequency formula."""
+    from tensorrt_model_connect.families.llama import graph_ops
+
+    head_dim = 128
+    rope_theta = 500000.0
+    table_rows = 131072
+    sample_positions = np.asarray(
+        [0, 1, 2048, 8192, 32768, 65536, 131071],
+        dtype=np.int64,
+    )
+
+    parameters = graph_ops.resolve_llama3_rope_parameters({
+        "rope_scaling": _MINITRON_LLAMA3_ROPE_SCALING,
+    })
+    assert parameters == {
+        "factor": 8.0,
+        "high_freq_factor": 4.0,
+        "low_freq_factor": 1.0,
+        "original_max_position_embeddings": 8192,
+    }
+
+    # Independent NumPy transcription of transformers'
+    # _compute_llama3_parameters. Keep this reference in the test so a change
+    # to the production helper cannot update both sides of the comparison.
+    dims = np.arange(0, head_dim, 2, dtype=np.float32)
+    inv_freq = np.float32(1.0) / np.power(
+        np.float32(rope_theta), dims / np.float32(head_dim))
+    wavelengths = np.float32(2.0 * np.pi) / inv_freq
+    low_wavelength = np.float32(8192.0)
+    high_wavelength = np.float32(8192.0 / 4.0)
+
+    reference_inv_freq = np.where(
+        wavelengths > low_wavelength,
+        inv_freq / np.float32(8.0),
+        inv_freq,
+    )
+    smooth = (
+        np.float32(8192.0) / wavelengths - np.float32(1.0)
+    ) / np.float32(3.0)
+    smoothed_inv_freq = (
+        (np.float32(1.0) - smooth) * inv_freq / np.float32(8.0)
+        + smooth * inv_freq
+    )
+    medium = (
+        (wavelengths >= high_wavelength)
+        & (wavelengths <= low_wavelength)
+    )
+    reference_inv_freq = np.where(
+        medium, smoothed_inv_freq, reference_inv_freq)
+    reference_angles = (
+        sample_positions.astype(np.float32)[:, None]
+        * reference_inv_freq[None, :]
+    )
+
+    actual_cos = graph_ops.make_llama3_rope_table_half_dim(
+        table_rows,
+        head_dim,
+        rope_theta,
+        True,
+        **parameters,
+    )
+    actual_sin = graph_ops.make_llama3_rope_table_half_dim(
+        table_rows,
+        head_dim,
+        rope_theta,
+        False,
+        **parameters,
+    )
+
+    assert np.any(wavelengths < high_wavelength)
+    assert np.any(medium)
+    assert np.any(wavelengths > low_wavelength)
+    np.testing.assert_allclose(
+        actual_cos[sample_positions],
+        np.cos(reference_angles),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        actual_sin[sample_positions],
+        np.sin(reference_angles),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_llama_plugin_selects_native_kv_cache(monkeypatch):
+    """The native graph is a model-owned default, not a user build flag."""
+    import importlib
+
+    plugin_module = importlib.import_module(
+        "tensorrt_model_connect.families.llama.plugin")
+
+    captured = {}
+
+    def _fake_build(config, weights, max_cache_length, **kwargs):
+        captured.update(kwargs)
+        return b"plan"
+
+    monkeypatch.setattr(
+        plugin_module, "build_standard_decoder_engine", _fake_build)
+    from tensorrt_model_connect.config import ModelConfig
+    config = ModelConfig(
+        model_type="llama",
+        hidden_size=4096,
+        intermediate_size=14336,
+        num_hidden_layers=16,
+        num_attention_heads=32,
+        num_key_value_heads=8,
+        max_position_embeddings=131072,
+        raw={
+            "rope_scaling": {
+                "rope_type": "llama3",
+                "factor": 8.0,
+                "original_max_position_embeddings": 8192,
+            }
+        },
+    )
+    result = plugin_module.LlamaPlugin().build_engine(
+        config, {}, 131072, precision="bf16")
+
+    assert result == b"plan"
+    assert captured["native_kv_cache"] is True
+
+    generic = ModelConfig.create_tiny("llama")
+    plugin_module.LlamaPlugin().build_engine(
+        generic, {}, 256, precision="bf16")
+    assert captured["native_kv_cache"] is False
 
 
 @requires_trt
@@ -226,6 +368,77 @@ class TestTensorNamingContract:
         plan = self._build_engine(partial_rotary_factor=0.5)
         inputs, outputs = _get_io_names(plan)
         assert "logits" in outputs
+
+    @pytest.mark.parametrize(
+        ("engine_role", "expected_profiles"),
+        [("dual_profile", 2), ("prefill", 1), ("decode", 1)],
+    )
+    def test_native_kv_cache_contract(self, engine_role, expected_profiles):
+        """Llama native cache uses fixed model capacity and engine aliases."""
+        from tensorrt_model_connect.config import ModelConfig
+        from tensorrt_model_connect.families.llama.standard_decoder_builder import (
+            build_standard_decoder_engine,
+        )
+
+        # Use a production-supported fused-attention geometry. The native KV
+        # path is deliberately non-decomposable, so toy head_dim=4 shapes must
+        # fail rather than silently falling back to primitive attention.
+        hidden, vocab, num_layers = 512, 32, 1
+        num_heads = 4
+        num_kv_heads = 2
+        head_dim = hidden // num_heads
+        kv_attention_size = num_kv_heads * head_dim
+        capacity = 8
+        config = ModelConfig(
+            model_type="llama",
+            hidden_size=hidden,
+            vocab_size=vocab,
+            num_hidden_layers=num_layers,
+            num_attention_heads=num_heads,
+            num_key_value_heads=num_kv_heads,
+            rms_norm_eps=1e-5,
+            rope_theta=500000.0,
+            max_position_embeddings=131072,
+        )
+        config.raw["rope_scaling"] = dict(_MINITRON_LLAMA3_ROPE_SCALING)
+        config.raw["_decoder_engine_role"] = engine_role
+        weights = _make_weights(
+            hidden, vocab, num_layers, hidden, 1024,
+            kv_attention_size=kv_attention_size)
+
+        plan = build_standard_decoder_engine(
+            config,
+            weights,
+            capacity,
+            precision="bf16",
+            native_kv_cache=True,
+        )
+        engine = _deserialize_engine(plan)
+        inputs, outputs = _get_io_names(plan)
+
+        assert engine is not None
+        assert engine.num_optimization_profiles == expected_profiles
+        assert "cache_write_indices" in inputs
+        assert "key_value_lengths" in inputs
+        assert "attention_mask" not in inputs
+        assert tuple(engine.get_tensor_shape("cache_k_0")) == (
+            1, num_kv_heads, capacity, head_dim)
+        assert tuple(engine.get_tensor_shape("cache_v_0")) == (
+            1, num_kv_heads, capacity, head_dim)
+        assert tuple(engine.get_tensor_shape("present_k_0")) == (
+            1, num_kv_heads, capacity, head_dim)
+        assert tuple(engine.get_tensor_shape("present_v_0")) == (
+            1, num_kv_heads, capacity, head_dim)
+        assert "present_k_0" in outputs
+        assert "present_v_0" in outputs
+        assert (
+            engine.get_aliased_input_tensor("present_k_0")
+            == "cache_k_0"
+        )
+        assert (
+            engine.get_aliased_input_tensor("present_v_0")
+            == "cache_v_0"
+        )
 
     def test_dynamic_kv_cache_shapes(self):
         from tensorrt_model_connect.config import ModelConfig

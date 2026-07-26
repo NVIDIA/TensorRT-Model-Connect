@@ -47,6 +47,11 @@ LlamaKvCache::LlamaKvCache(int32_t num_layers, int32_t max_length, int32_t kv_di
             names_.present_v.push_back("present_v" + suffix);
         }
     }
+    const auto expected_names = static_cast<std::size_t>(num_layers);
+    if (names_.cache_k.size() != expected_names || names_.cache_v.size() != expected_names ||
+        names_.present_k.size() != expected_names || names_.present_v.size() != expected_names) {
+        throw std::invalid_argument("LlamaKvCache: per-layer tensor name count mismatch");
+    }
 
     cache_k_.reserve(static_cast<std::size_t>(num_layers));
     cache_v_.reserve(static_cast<std::size_t>(num_layers));
@@ -56,14 +61,98 @@ LlamaKvCache::LlamaKvCache(int32_t num_layers, int32_t max_length, int32_t kv_di
     for (int32_t i = 0; i < num_layers; ++i) {
         cache_k_.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype_, stream);
         cache_v_.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype_, stream);
-        present_k_.emplace_back(std::vector<int64_t>{1, kv_dim}, cache_dtype_, stream);
-        present_v_.emplace_back(std::vector<int64_t>{1, kv_dim}, cache_dtype_, stream);
     }
 
     // Pre-allocate mask buffer: [max_length + 1] for dense causal mask.
     mask_buf_.resize(static_cast<std::size_t>(max_length) + 1);
 
     reset();
+}
+
+bool LlamaKvCache::configure_binding_mode(TrtModule& module) {
+    const bool has_write_indices = module.has_input(names_.cache_write_indices);
+    const bool has_kv_lengths = module.has_input(names_.key_value_lengths);
+    if (has_write_indices != has_kv_lengths) {
+        throw std::runtime_error("Llama native KV engine must expose both cache_write_indices and "
+                                 "key_value_lengths");
+    }
+
+    const bool native_mode = has_write_indices && has_kv_lengths;
+    if (binding_mode_initialized_ && native_mode != native_kv_update_enabled_) {
+        throw std::runtime_error(
+            "Llama prefill and decode engines use incompatible KV cache contracts");
+    }
+    binding_mode_initialized_ = true;
+    native_kv_update_enabled_ = native_mode;
+    if (native_mode)
+        validate_native_kv_contract(module);
+    return native_mode;
+}
+
+void LlamaKvCache::validate_native_kv_contract(TrtModule& module) const {
+    const auto validate_scalar = [&](const std::string& name) {
+        if (module.tensor_dtype(name) != DType::kInt32 ||
+            module.tensor_shape(name) != std::vector<int64_t>{1}) {
+            throw std::runtime_error("Llama native KV input '" + name + "' must be int32 [1]");
+        }
+    };
+    validate_scalar(names_.cache_write_indices);
+    validate_scalar(names_.key_value_lengths);
+
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        const auto li = static_cast<std::size_t>(i);
+        const auto validate_cache = [&](const std::string& cache_name,
+                                        const std::string& present_name) {
+            if (!module.has_input(cache_name) || !module.has_output(present_name)) {
+                throw std::runtime_error("Llama native KV engine is missing cache/present pair '" +
+                                         cache_name + "'/'" + present_name + "'");
+            }
+            const auto cache_shape = module.tensor_shape(cache_name);
+            const auto present_shape = module.tensor_shape(present_name);
+            const bool valid_shape = cache_shape.size() == 4 && cache_shape[0] == 1 &&
+                                     cache_shape[2] == static_cast<int64_t>(max_length_) &&
+                                     cache_shape[1] > 0 && cache_shape[3] > 0 &&
+                                     cache_shape[1] * cache_shape[3] == kv_dim_;
+            if (!valid_shape || present_shape != cache_shape) {
+                throw std::runtime_error("Llama native KV cache/present tensors must share static "
+                                         "[1,Hkv,max_length,D] shape");
+            }
+            if (module.tensor_dtype(cache_name) != cache_dtype_ ||
+                module.tensor_dtype(present_name) != cache_dtype_) {
+                throw std::runtime_error(
+                    "Llama native KV cache dtype does not match model precision");
+            }
+        };
+        validate_cache(names_.cache_k[li], names_.present_k[li]);
+        validate_cache(names_.cache_v[li], names_.present_v[li]);
+    }
+}
+
+void LlamaKvCache::ensure_legacy_present_buffers() {
+    if (!present_k_.empty())
+        return;
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        present_k_.emplace_back(std::vector<int64_t>{1, kv_dim_}, cache_dtype_, stream_);
+        present_v_.emplace_back(std::vector<int64_t>{1, kv_dim_}, cache_dtype_, stream_);
+    }
+}
+
+void LlamaKvCache::bind_native_cache(TrtModule& module) {
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        const auto li = static_cast<std::size_t>(i);
+        module.bind_external(names_.cache_k[li], cache_k_[li].data());
+        module.bind_external(names_.cache_v[li], cache_v_[li].data());
+    }
+}
+
+void LlamaKvCache::write_native_kv_inputs(TensorMap& inputs, int32_t seq_len) {
+    if (seq_len > max_length_ - position_) {
+        throw std::runtime_error("Llama sequence exceeds the model's fixed KV cache capacity");
+    }
+    cache_write_index_ = position_;
+    key_value_length_ = position_ + seq_len;
+    inputs[names_.cache_write_indices] = Tensor{&cache_write_index_, {1}, DType::kInt32};
+    inputs[names_.key_value_lengths] = Tensor{&key_value_length_, {1}, DType::kInt32};
 }
 
 // Masked score constant is model-local.
@@ -199,6 +288,10 @@ void LlamaKvCache::prepare_step(TensorMap& inputs, int32_t seq_len) {
     if (seq_len <= 0)
         seq_len = 1;
     write_position_input(inputs, seq_len);
+    if (native_kv_update_enabled_) {
+        write_native_kv_inputs(inputs, seq_len);
+        return;
+    }
     if (seq_len > 1)
         write_batched_mask(inputs, seq_len);
     else
@@ -208,6 +301,10 @@ void LlamaKvCache::prepare_step(TensorMap& inputs, int32_t seq_len) {
 void LlamaKvCache::prepare_bidirectional_step(TensorMap& inputs, int32_t seq_len) {
     if (seq_len <= 0)
         seq_len = 1;
+    if (native_kv_update_enabled_) {
+        throw std::runtime_error("Llama native TensorRT KV cache supports causal attention only; "
+                                 "bidirectional block decoding is unsupported");
+    }
     write_position_input(inputs, seq_len);
     write_bidirectional_mask(inputs, seq_len);
 }
@@ -215,6 +312,13 @@ void LlamaKvCache::prepare_bidirectional_step(TensorMap& inputs, int32_t seq_len
 void LlamaKvCache::bind_to(TrtModule& module) {
     bound_module_ = &module;
     has_position_input_ = module.has_input(names_.position_id);
+    if (configure_binding_mode(module)) {
+        dynamic_binding_enabled_ = false;
+        bound_cache_rows_ = max_length_;
+        bind_native_cache(module);
+        return;
+    }
+    ensure_legacy_present_buffers();
     // Enable dynamic row binding only when cache_k[0] itself is dynamic.
     // Static-shape engines with fixed [max_length, kv_dim] cache reject
     // setInputShape on cache inputs even when other inputs are dynamic.
@@ -241,7 +345,14 @@ void LlamaKvCache::bind_to(TrtModule& module) {
 }
 
 void LlamaKvCache::bind_cache_inputs(TrtModule& module) {
+    bound_module_ = &module;
     has_position_input_ = module.has_input(names_.position_id);
+    if (configure_binding_mode(module)) {
+        dynamic_binding_enabled_ = false;
+        bound_cache_rows_ = max_length_;
+        bind_native_cache(module);
+        return;
+    }
     for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);
         module.bind_external(names_.cache_k[li], cache_k_[li].data());
@@ -259,6 +370,17 @@ void LlamaKvCache::write_prefill_kv(const std::vector<const void*>& prefill_k,
         static_cast<int32_t>(prefill_v.size()) != num_layers_) {
         throw std::runtime_error(
             "LlamaKvCache::write_prefill_kv: per-layer pointer count mismatch");
+    }
+    if (native_kv_update_enabled_) {
+        for (int32_t i = 0; i < num_layers_; ++i) {
+            const auto li = static_cast<std::size_t>(i);
+            if (prefill_k[li] != cache_k_[li].data() || prefill_v[li] != cache_v_[li].data()) {
+                throw std::runtime_error(
+                    "Llama native prefill present tensors must alias the KV cache");
+            }
+        }
+        position_ = seq_len;
+        return;
     }
     const auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
     const auto block_bytes = static_cast<std::size_t>(seq_len) * row_bytes;
@@ -283,6 +405,17 @@ void LlamaKvCache::append_prefill_kv(const std::vector<const void*>& prefill_k,
         throw std::runtime_error(
             "LlamaKvCache::append_prefill_kv: per-layer pointer count mismatch");
     }
+    if (native_kv_update_enabled_) {
+        for (int32_t i = 0; i < num_layers_; ++i) {
+            const auto li = static_cast<std::size_t>(i);
+            if (prefill_k[li] != cache_k_[li].data() || prefill_v[li] != cache_v_[li].data()) {
+                throw std::runtime_error(
+                    "Llama native prefill present tensors must alias the KV cache");
+            }
+        }
+        position_ += seq_len;
+        return;
+    }
     const auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
     const auto block_bytes = static_cast<std::size_t>(seq_len) * row_bytes;
     const auto offset = static_cast<std::size_t>(position_) * row_bytes;
@@ -305,6 +438,14 @@ void LlamaKvCache::advance(int32_t n_tokens) {
     // n_tokens > 1 reserved for future batched prefill (TASK-10).
     assert(n_tokens == 1 && "LlamaKvCache::advance: only n_tokens==1 supported");
     (void)n_tokens;
+
+    if (native_kv_update_enabled_) {
+        if (position_ >= max_length_) {
+            throw std::runtime_error("Llama sequence exceeds the model's fixed KV cache capacity");
+        }
+        ++position_;
+        return;
+    }
 
     // Copy present K/V (single row) into cache at current position.
     // present_k_[layer] is [1, kv_dim] → copy to cache_k_[layer][position_, :]
@@ -344,6 +485,8 @@ void LlamaKvCache::reset() {
     // Reset only the logical sequence length. Attention masks hide every
     // stale cache row, and each present row is overwritten before use.
     position_ = 0;
+    cache_write_index_ = 0;
+    key_value_length_ = 0;
 }
 
 std::size_t LlamaKvCache::device_memory_bytes() const {
@@ -360,9 +503,22 @@ std::size_t LlamaKvCache::device_memory_bytes() const {
 }
 
 bool LlamaKvCache::ok() const {
-    if (cache_k_.size() != static_cast<std::size_t>(num_layers_))
+    if (cache_k_.size() != static_cast<std::size_t>(num_layers_) ||
+        cache_v_.size() != static_cast<std::size_t>(num_layers_))
         return false;
     for (const auto& t : cache_k_) {
+        if (!t.ok())
+            return false;
+    }
+    for (const auto& t : cache_v_) {
+        if (!t.ok())
+            return false;
+    }
+    for (const auto& t : present_k_) {
+        if (!t.ok())
+            return false;
+    }
+    for (const auto& t : present_v_) {
         if (!t.ok())
             return false;
     }

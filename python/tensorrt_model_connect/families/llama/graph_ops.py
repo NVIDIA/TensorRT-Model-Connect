@@ -487,6 +487,156 @@ def make_rope_table_half_dim(
     return table
 
 
+def resolve_llama3_rope_parameters(raw_config: dict) -> dict[str, float | int] | None:
+    """Resolve and validate HF Llama 3.1 frequency-scaling parameters.
+
+    Transformers historically serialized these values as ``rope_scaling`` and
+    now also accepts ``rope_parameters``. Only ``rope_type="llama3"`` selects
+    this path; all other RoPE variants keep the existing builder behavior.
+    """
+    rope_params = raw_config.get("rope_parameters")
+    if not isinstance(rope_params, dict):
+        rope_params = raw_config.get("rope_scaling")
+    if not isinstance(rope_params, dict):
+        return None
+
+    rope_type = str(
+        rope_params.get("rope_type", rope_params.get("type", "default"))
+    ).lower()
+    if rope_type != "llama3":
+        return None
+
+    missing = [
+        key
+        for key in (
+            "factor",
+            "low_freq_factor",
+            "high_freq_factor",
+            "original_max_position_embeddings",
+        )
+        if key not in rope_params
+    ]
+    if missing:
+        raise ValueError(
+            "Llama 3 RoPE scaling is missing required fields: "
+            + ", ".join(missing)
+        )
+
+    factor = float(rope_params["factor"])
+    low_freq_factor = float(rope_params["low_freq_factor"])
+    high_freq_factor = float(rope_params["high_freq_factor"])
+    original_max_position_embeddings = int(
+        rope_params["original_max_position_embeddings"])
+    if factor < 1.0:
+        raise ValueError(
+            f"Llama 3 RoPE factor must be >= 1, got {factor}")
+    if low_freq_factor <= 0.0:
+        raise ValueError(
+            "Llama 3 low_freq_factor must be > 0, "
+            f"got {low_freq_factor}")
+    if high_freq_factor <= low_freq_factor:
+        raise ValueError(
+            "Llama 3 high_freq_factor must be greater than low_freq_factor, "
+            f"got high={high_freq_factor}, low={low_freq_factor}")
+    if original_max_position_embeddings < 1:
+        raise ValueError(
+            "Llama 3 original_max_position_embeddings must be >= 1, "
+            f"got {original_max_position_embeddings}")
+
+    return {
+        "factor": factor,
+        "low_freq_factor": low_freq_factor,
+        "high_freq_factor": high_freq_factor,
+        "original_max_position_embeddings": original_max_position_embeddings,
+    }
+
+
+def make_llama3_rope_table_half_dim(
+    max_cache_length: int,
+    head_dim: int,
+    rope_theta: float,
+    cosine: bool,
+    *,
+    factor: float,
+    low_freq_factor: float,
+    high_freq_factor: float,
+    original_max_position_embeddings: int,
+    partial_rotary_factor: float = 1.0,
+) -> np.ndarray:
+    """Build an HF-compatible Llama 3.1 RoPE table for native TensorRT.
+
+    Llama 3.1 leaves short wavelengths unchanged, divides long-wavelength
+    inverse frequencies by ``factor``, and smoothly interpolates the middle
+    band. The output is the half-dimension cache expected by
+    ``IRotaryEmbeddingLayer``.
+    """
+    rotary_ndims = validate_native_rope_dim(
+        int(head_dim * partial_rotary_factor))
+    half = rotary_ndims // 2
+    default = 1.0 if cosine else 0.0
+    if max_cache_length <= 0 or rope_theta <= 0.0:
+        return np.full(
+            (max(max_cache_length, 1), max(half, 1)),
+            default,
+            dtype=np.float32,
+        )
+
+    factor = float(factor)
+    low_freq_factor = float(low_freq_factor)
+    high_freq_factor = float(high_freq_factor)
+    old_context = int(original_max_position_embeddings)
+    if factor < 1.0:
+        raise ValueError(
+            f"Llama 3 RoPE factor must be >= 1, got {factor}")
+    if low_freq_factor <= 0.0 or high_freq_factor <= low_freq_factor:
+        raise ValueError(
+            "Llama 3 RoPE requires 0 < low_freq_factor < high_freq_factor")
+    if old_context < 1:
+        raise ValueError(
+            "Llama 3 original_max_position_embeddings must be >= 1")
+
+    # Match Transformers' runtime path exactly: both inverse-frequency
+    # construction and position multiplication are performed in FP32.
+    # Computing these values in FP64 and rounding only the final table causes
+    # visible phase differences near the end of a 131K context.
+    dims = np.arange(0, rotary_ndims, 2, dtype=np.float32)
+    rope_theta_f = np.float32(rope_theta)
+    rotary_ndims_f = np.float32(rotary_ndims)
+    factor_f = np.float32(factor)
+    low_freq_factor_f = np.float32(low_freq_factor)
+    high_freq_factor_f = np.float32(high_freq_factor)
+    old_context_f = np.float32(old_context)
+    inv_freq = np.float32(1.0) / np.power(
+        rope_theta_f, dims / rotary_ndims_f)
+    wavelength = np.float32(2.0 * np.pi) / inv_freq
+    low_freq_wavelength = old_context_f / low_freq_factor_f
+    high_freq_wavelength = old_context_f / high_freq_factor_f
+
+    scaled_inv_freq = np.where(
+        wavelength > low_freq_wavelength,
+        inv_freq / factor_f,
+        inv_freq,
+    )
+    smooth = (
+        old_context_f / wavelength - low_freq_factor_f
+    ) / (high_freq_factor_f - low_freq_factor_f)
+    smoothed_inv_freq = (
+        (np.float32(1.0) - smooth) * scaled_inv_freq / factor_f
+        + smooth * scaled_inv_freq
+    )
+    medium = (
+        (wavelength >= high_freq_wavelength)
+        & (wavelength <= low_freq_wavelength)
+    )
+    scaled_inv_freq = np.where(
+        medium, smoothed_inv_freq, scaled_inv_freq)
+
+    positions = np.arange(max_cache_length, dtype=np.float32)
+    angles = positions[:, None] * scaled_inv_freq[None, :]
+    table = np.cos(angles) if cosine else np.sin(angles)
+    return np.asarray(table, dtype=np.float32)
+
+
 def reshape_rows_to_heads_4d(
     network: trt.INetworkDefinition,
     x: trt.ITensor,
@@ -765,6 +915,131 @@ def add_attention_core(
     if mask is not None and not causal:
         attn.mask = mask
     return _cast_back_to_trt_dtype(network, attn.get_output(0), output_dtype)
+
+
+def add_native_kv_cache_attention_from_rows(
+    network: trt.INetworkDefinition,
+    q: trt.ITensor,
+    k_update: trt.ITensor,
+    v_update: trt.ITensor,
+    cache_k: trt.ITensor,
+    cache_v: trt.ITensor,
+    cache_write_indices: trt.ITensor,
+    key_value_lengths: trt.ITensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    q_seq: int | None,
+    scale: float | None = None,
+    tag: str | None = None,
+) -> dict[str, trt.ITensor]:
+    """Update a user-owned KV cache and attend over its active prefix.
+
+    ``IKVCacheUpdateLayer`` writes this step's K/V rows into the static,
+    full-capacity cache in place. ``IAttention`` consumes the aliased cache
+    outputs, while ``key_value_lengths`` limits work to the valid prefix.
+    ``LOWER_RIGHT`` causal alignment gives correct autoregressive semantics
+    when the query sequence is shorter than the active KV sequence.
+
+    Cache inputs and outputs have shape ``[1, Hkv, capacity, D]``. The runtime
+    must bind each output to the same device address as its corresponding
+    input, as required by TensorRT's KV-cache aliasing contract.
+    """
+    if not hasattr(network, "add_kv_cache_update") or not hasattr(
+        network, "add_attention_v2"
+    ):
+        raise RuntimeError(
+            "Llama native KV cache requires TensorRT add_kv_cache_update "
+            "and add_attention_v2 support"
+        )
+
+    k_update_4d = reshape_rows_to_heads_4d(
+        network,
+        k_update,
+        num_kv_heads,
+        head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".k_update",
+    )
+    v_update_4d = reshape_rows_to_heads_4d(
+        network,
+        v_update,
+        num_kv_heads,
+        head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".v_update",
+    )
+
+    update_k = network.add_kv_cache_update(
+        cache_k,
+        k_update_4d,
+        cache_write_indices,
+        trt.KVCacheMode.LINEAR,
+    )
+    update_v = network.add_kv_cache_update(
+        cache_v,
+        v_update_4d,
+        cache_write_indices,
+        trt.KVCacheMode.LINEAR,
+    )
+    if update_k is None or update_v is None:
+        raise RuntimeError("TensorRT failed to create Llama KV-cache update layers")
+    if tag:
+        update_k.name = tag + ".cache_k_update"
+        update_v.name = tag + ".cache_v_update"
+    updated_k = update_k.get_output(0)
+    updated_v = update_v.get_output(0)
+
+    q_4d = reshape_rows_to_heads_4d(
+        network,
+        q,
+        num_heads,
+        head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".q",
+    )
+    if scale is None:
+        scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
+    scale_np_dtype = np.float16 if q_4d.dtype == trt.float16 else np.float32
+    scale_t = add_constant(
+        network,
+        (1, 1, 1, 1),
+        np.array([[[[scale]]]]),
+        dtype=scale_np_dtype,
+    )
+    if q_4d.dtype == trt.bfloat16:
+        scale_t = network.add_cast(scale_t, trt.bfloat16).get_output(0)
+    q_scaled = network.add_elementwise(
+        q_4d, scale_t, trt.ElementWiseOperation.PROD
+    ).get_output(0)
+
+    attention = network.add_attention_v2(
+        q_scaled,
+        updated_k,
+        updated_v,
+        trt.AttentionNormalizationOp.SOFTMAX,
+        trt.CausalMaskKind.LOWER_RIGHT,
+    )
+    if attention is None:
+        raise RuntimeError("TensorRT failed to create Llama native attention")
+    attention.decomposable = False
+    attention.key_value_lengths = key_value_lengths
+    if tag:
+        attention.name = tag
+
+    context = reshape_heads_4d_to_rows(
+        network,
+        attention.get_output(0),
+        num_heads * head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".ctx",
+    )
+    return {
+        "context": context,
+        "present_k": updated_k,
+        "present_v": updated_v,
+    }
 
 
 def _scalar_constant_for_trt_dtype(

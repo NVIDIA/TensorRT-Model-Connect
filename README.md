@@ -21,8 +21,8 @@ python3.12 -m venv .venv-trtmc
 pip install ./tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl
 
 trtmc version
-trtmc build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
-trtmc run /tmp/qwen3.trtfb \
+trtmc build Qwen/Qwen3-0.6B
+trtmc run Qwen3-0.6B.trtfb \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
   --greedy
@@ -60,8 +60,8 @@ pip install -e . -C py-only=true
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
-./build/trtmc build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
-./build/trtmc run /tmp/qwen3.trtfb \
+./build/trtmc build Qwen/Qwen3-0.6B
+./build/trtmc run Qwen3-0.6B.trtfb \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
   --greedy

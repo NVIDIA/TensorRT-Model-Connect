@@ -69,13 +69,27 @@ int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
 }
 
 int32_t cache_row_dim_from_module(const TrtModule& module, const std::string& tensor_name) {
-    const int32_t static_dim = dim_at(module.tensor_shape(tensor_name), 1);
+    const auto row_dim = [](const std::vector<int64_t>& shape) -> int32_t {
+        if (shape.size() == 2)
+            return dim_at(shape, 1);
+        if (shape.size() == 4) {
+            const int32_t heads = dim_at(shape, 1);
+            const int32_t head_dim = dim_at(shape, 3);
+            if (heads > 0 && head_dim > 0 &&
+                heads <= std::numeric_limits<int32_t>::max() / head_dim) {
+                return heads * head_dim;
+            }
+        }
+        return -1;
+    };
+
+    const int32_t static_dim = row_dim(module.tensor_shape(tensor_name));
     if (static_dim > 0)
         return static_dim;
     const int32_t profile_count = module.optimization_profile_count();
     for (int32_t profile_idx = 0; profile_idx < profile_count; ++profile_idx) {
-        const int32_t profile_dim = dim_at(
-            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax), 1);
+        const int32_t profile_dim = row_dim(
+            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax));
         if (profile_dim > 0)
             return profile_dim;
     }
@@ -125,13 +139,16 @@ int32_t profile_token_max_length(const TrtModule& module, const std::string& tok
 
 int32_t profile_cache_rows(const TrtModule& module, const std::string& cache_name,
                            int32_t profile_idx, int32_t fallback_rows) {
-    const int32_t static_rows = dim_at(module.tensor_shape(cache_name), 0);
+    const auto cache_rows = [](const std::vector<int64_t>& shape) {
+        return dim_at(shape, shape.size() == 4 ? 2 : 0);
+    };
+    const int32_t static_rows = cache_rows(module.tensor_shape(cache_name));
     if (static_rows > 0)
         return static_rows;
 
     if (profile_idx >= 0 && profile_idx < module.optimization_profile_count()) {
-        const int32_t max_rows = dim_at(
-            module.input_profile_shape(cache_name, profile_idx, ProfileShapeSelector::kMax), 0);
+        const int32_t max_rows = cache_rows(
+            module.input_profile_shape(cache_name, profile_idx, ProfileShapeSelector::kMax));
         if (max_rows > 0)
             return max_rows;
     }
@@ -208,6 +225,21 @@ resolve_kv_cache_runtime_sizing(const PipelineContext& ctx, const TrtModule& mod
     const int32_t bundle_max_rows = ctx.config.max_cache_length;
     sizing.runtime_rows = bundle_max_rows;
     sizing.cache_bytes = static_cast<std::uint64_t>(bundle_max_rows) * sizing.row_bytes;
+
+    const bool has_write_indices = module.has_input(kv_names.cache_write_indices);
+    const bool has_kv_lengths = module.has_input(kv_names.key_value_lengths);
+    if (has_write_indices != has_kv_lengths) {
+        throw std::runtime_error("Llama native KV engine must expose both cache_write_indices and "
+                                 "key_value_lengths");
+    }
+    if (has_write_indices) {
+        if (ctx.kv_cache_size_bytes != 0) {
+            throw std::invalid_argument(
+                "Llama native TensorRT KV cache allocates the model's complete fixed "
+                "capacity; kv_cache_size_bytes is not supported");
+        }
+        return sizing;
+    }
 
     if (ctx.kv_cache_size_bytes == 0)
         return sizing;
@@ -309,9 +341,8 @@ class DecoderPlugin final : public IPipelinePlugin {
         LlamaTextGenConfig tgc;
         populate_text_gen_config(ctx, tgc, io, decoders.front(), ctx.runtime_config);
         apply_chat_template_format(ctx.bundle, tgc);
-        // Wire batched prefill: the pipeline forwards the whole prompt
-        // through `prefill_module` (TRT optimization profile 0) and copies
-        // per-layer K/V into the shared cache via write_prefill_kv.
+        // Wire batched prefill. Native TensorRT KV engines update the shared
+        // aliased cache in place; legacy engines copy prefill outputs into it.
         tgc.prefill_max_length = prefill_max_length;
         tgc.prefill_profile_index = prefill_profile_idx;
         tgc.prefill_log_label = std::move(prefill_log_label);

@@ -70,6 +70,7 @@ def build_standard_decoder_engine(
     verbose: bool = False,
     debug_layer_outputs: bool = False,
     hidden_state_output: bool = False,
+    native_kv_cache: bool = False,
 ) -> bytes:
     """Build a TRT engine plan (serialized bytes) for a standard decoder.
 
@@ -100,6 +101,9 @@ def build_standard_decoder_engine(
         verbose: Print TRT builder logs.
         debug_layer_outputs: If True, mark per-layer hidden states as network
             outputs for diff testing.
+        native_kv_cache: Internal Llama-family switch for TensorRT's native
+            fixed-capacity KV cache API. This is selected by ``LlamaPlugin``;
+            it is not a user-facing build option.
 
     Returns:
         Serialized engine plan bytes.
@@ -140,7 +144,15 @@ def build_standard_decoder_engine(
         raise NotImplementedError(
             "split prefill engine is not supported for this standard decoder "
             "configuration")
-    if not _dual_profile_disabled_for and decoder_engine_role in ("dual_profile", "prefill"):
+    native_role_supported = (
+        native_kv_cache
+        and decoder_engine_role in ("dual_profile", "prefill", "decode")
+    )
+    legacy_dual_role_supported = decoder_engine_role in ("dual_profile", "prefill")
+    if (
+        not _dual_profile_disabled_for
+        and (native_role_supported or legacy_dual_role_supported)
+    ):
         return build_dual_profile_decoder_engine(
             config, weights, max_cache_length,
             precision=precision,
@@ -155,7 +167,8 @@ def build_standard_decoder_engine(
             scale_attn_weights=scale_attn_weights,
             alibi_bias_scale=alibi_bias_scale,
             verbose=verbose,
-            profile_mode=("prefill" if decoder_engine_role == "prefill" else "dual_profile"),
+            profile_mode=decoder_engine_role,
+            native_kv_cache=native_kv_cache,
         )
 
     attention_size: int = weights.get("_attention_size", config.attention_size)
@@ -312,17 +325,34 @@ def build_standard_decoder_engine(
 
     if position_type == "rope":
         graph_ops.validate_native_rope_dim(rotary_embedding_dim)
-        cos_half_np = graph_ops.make_rope_table_half_dim(
-            attention_window, head_dim, config.rope_theta, True,
-            partial_rotary_factor, interleaved=interleaved_rope)
-        sin_half_np = graph_ops.make_rope_table_half_dim(
-            attention_window, head_dim, config.rope_theta, False,
-            partial_rotary_factor, interleaved=interleaved_rope)
+        llama3_rope = graph_ops.resolve_llama3_rope_parameters(config.raw)
+        if llama3_rope is not None:
+            cos_half_np = graph_ops.make_llama3_rope_table_half_dim(
+                attention_window, head_dim, config.rope_theta, True,
+                partial_rotary_factor=partial_rotary_factor,
+                **llama3_rope)
+            sin_half_np = graph_ops.make_llama3_rope_table_half_dim(
+                attention_window, head_dim, config.rope_theta, False,
+                partial_rotary_factor=partial_rotary_factor,
+                **llama3_rope)
+        else:
+            cos_half_np = graph_ops.make_rope_table_half_dim(
+                attention_window, head_dim, config.rope_theta, True,
+                partial_rotary_factor, interleaved=interleaved_rope)
+            sin_half_np = graph_ops.make_rope_table_half_dim(
+                attention_window, head_dim, config.rope_theta, False,
+                partial_rotary_factor, interleaved=interleaved_rope)
+        # Preserve HF's direct FP32 -> BF16 rounding for RoPE. The generic
+        # BF16 weight path stores arrays as FP16 first, which would double
+        # round these long-context phase values.
+        rope_np_dtype = (
+            np.float32 if work_trt_dtype == trt.bfloat16 else work_np_dtype
+        )
         cos_half_tensor = graph_ops.add_constant(
-            network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
+            network, cos_half_np.shape, cos_half_np, dtype=rope_np_dtype)
         cos_half_tensor = _cast_work_dtype(cos_half_tensor)
         sin_half_tensor = graph_ops.add_constant(
-            network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
+            network, sin_half_np.shape, sin_half_np, dtype=rope_np_dtype)
         sin_half_tensor = _cast_work_dtype(sin_half_tensor)
     elif position_type == "learned":
         pos_embed_np = weights["position_embedding"]

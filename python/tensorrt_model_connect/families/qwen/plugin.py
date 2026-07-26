@@ -16,6 +16,7 @@ from .config import ModelConfig
 from .checkpoint_mapper import WeightDict, load_standard_weights
 from ...parallel_config import normalize_parallel_config
 from ...quantization.adapters import StandardDecoderCalibrationAdapter
+from .build_routing import is_qwen3_06b_native_kv_prototype
 from .standard_decoder_builder import build_standard_decoder_engine
 from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
 
@@ -73,6 +74,24 @@ class QwenPlugin:
             return False
         return mt.startswith("qwen") or mt.startswith("qwq")
 
+    def default_build_precision(self, config: ModelConfig) -> str:
+        return (
+            "bf16"
+            if is_qwen3_06b_native_kv_prototype(config)
+            else "fp32"
+        )
+
+    def default_max_cache_length(self, config: ModelConfig) -> int:
+        """Use full capacity only for the native Qwen3 execution contract."""
+        native_eligible = (
+            is_qwen3_06b_native_kv_prototype(config)
+            and not bool(config.raw.get("_parallel_build_enabled", False))
+            and not bool(config.raw.get("_runtime_dynamic_kv_requested", False))
+            and str(config.raw.get("_resolved_build_precision", "bf16"))
+            in ("fp16", "bf16")
+        )
+        return int(config.max_position_embeddings) if native_eligible else 256
+
     def load_weights(
         self, model_dir: str, config: ModelConfig,
         *, precision: str = "fp32",
@@ -107,6 +126,12 @@ class QwenPlugin:
             quant_ctx=quant_ctx,
             verbose=verbose,
             debug_layer_outputs=debug_layer_outputs,
+            native_kv_cache=(
+                is_qwen3_06b_native_kv_prototype(config)
+                and not bool(config.raw.get("dynamic_kv_cache", False))
+                and not debug_layer_outputs
+                and str(precision).lower() in ("fp16", "bf16")
+            ),
         )
 
     def calibration_data(self, format_name: str) -> list[str] | None:

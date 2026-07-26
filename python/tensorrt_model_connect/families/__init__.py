@@ -52,6 +52,7 @@ class _FamilyMetadata:
     hf_warm_files: tuple[str, ...] = ()
     config_adapter: str = ""
     model_dir_adapter: str = ""
+    default_build_route: str = ""
     debug_runner: str = ""
     debug_runtime_strategies: frozenset[str] = frozenset()
     python_profile_specs: tuple[str, ...] = ()
@@ -221,6 +222,8 @@ def _load_family_metadata() -> list[_FamilyMetadata]:
             if isinstance(raw.get("config_adapter"), str) else "",
             model_dir_adapter=raw.get("model_dir_adapter", "")
             if isinstance(raw.get("model_dir_adapter"), str) else "",
+            default_build_route=raw.get("default_build_route", "")
+            if isinstance(raw.get("default_build_route"), str) else "",
             debug_runner=raw.get("debug_runner", "")
             if isinstance(raw.get("debug_runner"), str) else "",
             debug_runtime_strategies=_metadata_strings(
@@ -616,6 +619,31 @@ def resolve_family_model_dir(model_dir: str | Path) -> str | None:
             )
         return str(result)
     return None
+
+
+def family_prefers_native_default_build(
+    config: object,
+    *,
+    explicit_public_options: frozenset[str],
+) -> bool:
+    """Ask model-owned metadata whether a flag-free build should stay native."""
+    metadata = _matching_family_metadata(config)
+    if not metadata or not metadata[0].default_build_route:
+        return False
+    route = _load_metadata_callable_from_file(
+        metadata[0],
+        metadata[0].default_build_route,
+    )
+    result = route(
+        config,
+        explicit_public_options=explicit_public_options,
+    )
+    if not isinstance(result, bool):
+        raise TypeError(
+            f"Default build route {metadata[0].default_build_route!r} for "
+            f"family {metadata[0].id} must return bool"
+        )
+    return result
 
 
 def resolve_nemo_archive_model_dir(nemo_path: str | Path) -> str | None:

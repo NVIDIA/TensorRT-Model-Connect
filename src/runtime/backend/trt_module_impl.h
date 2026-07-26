@@ -77,6 +77,7 @@ class TrtModuleImpl final : public ITrtModule {
         std::size_t nbytes{0};
         bool is_input{true};
         bool is_external{false};
+        bool owns_device_memory{false};
         bool is_dynamic{false};
     };
     struct TimingEvent {
@@ -91,19 +92,26 @@ class TrtModuleImpl final : public ITrtModule {
     void* distributed_communicator_{nullptr};
     bool has_dynamic_shapes_{false};
     bool use_cuda_graph_{false};
+    bool alias_groups_ready_{true};
     std::unique_ptr<CudaGraphExec> cuda_graph_;
     std::vector<std::shared_ptr<void>> keep_alive_;
     std::unordered_map<std::string, void*> initial_external_bindings_;
     std::unordered_map<std::string, BufferEntry> buffers_;
+    std::unordered_map<std::string, std::string> alias_input_by_output_;
+    std::unordered_map<std::string, std::vector<std::string>> alias_outputs_by_input_;
     std::unordered_map<std::string, std::vector<uint8_t>> host_output_staging_;
     std::unordered_map<std::string, DeviceTensor> output_device_tensors_;
     std::string timing_label_{"engine"};
     std::vector<TimingEvent> timing_events_;
 
     void allocate_buffers(nvinfer1::ICudaEngine* engine);
+    void discover_tensor_aliases(nvinfer1::ICudaEngine* engine);
     void
     validate_initial_external_bindings(nvinfer1::ICudaEngine* engine,
                                        const std::vector<ModuleExternalBinding>& external_bindings);
+    bool ensure_alias_group_buffer(const std::string& input_name);
+    bool bind_alias_group(const std::string& input_name, void* ptr, bool external);
+    std::string canonical_alias_input(const std::string& name) const;
     void free_buffers();
     void detect_dynamic_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io);
     void allocate_input_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io,
