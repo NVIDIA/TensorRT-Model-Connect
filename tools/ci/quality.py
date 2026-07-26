@@ -235,58 +235,61 @@ class UnitTestRunner:
                 updates={"PYTHONPATH": python_path},
             )
 
-        if build.exists():
-            shutil.rmtree(build)
-        self.context.run(
-            [
-                "cmake",
-                "-S",
-                source,
-                "-B",
-                build,
-                "-G",
-                "Ninja",
-                "-DCMAKE_BUILD_TYPE=Release",
-                "-DTRTMC_BUILD_TESTS=ON",
-                "-DTRTMC_BUILD_BENCHMARKS=OFF",
-                "-DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL=OFF",
-                "-DTRTMC_BUILD_DIFFUSION_KERNELS=OFF",
-                "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
-            ]
-        )
-        self.context.run(
-            [
-                "cmake",
-                "--build",
-                build,
-                "--parallel",
-                str(build_jobs),
-                "--target",
-                *native_targets,
-            ],
-            limit=self.context.env.get("BUILD_ALL_TIMEOUT", "15m"),
-        )
-        if scope == "cli":
-            self.context.run([build / "trtmc", "version"], limit="1m")
-            self.context.run([build / "trtmc", "--help"], limit="1m")
-        leaked = next(build.rglob("libtrtmc_model_*.so*"), None)
-        if leaked:
-            raise CiError(f"source-only unit build produced a model plugin: {leaked}")
-        self.context.run(
-            [
-                "ctest",
-                "--test-dir",
-                build,
-                "--output-on-failure",
-                "--stop-on-failure",
-                *ctest_selector,
-                "-j",
-                str(test_jobs),
-            ],
-            limit=self.context.env.get("CPP_UNIT_TIMEOUT", "20m"),
-        )
+        if native_targets:
+            if build.exists():
+                shutil.rmtree(build)
+            self.context.run(
+                [
+                    "cmake",
+                    "-S",
+                    source,
+                    "-B",
+                    build,
+                    "-G",
+                    "Ninja",
+                    "-DCMAKE_BUILD_TYPE=Release",
+                    "-DTRTMC_BUILD_TESTS=ON",
+                    "-DTRTMC_BUILD_BENCHMARKS=OFF",
+                    "-DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL=OFF",
+                    "-DTRTMC_BUILD_DIFFUSION_KERNELS=OFF",
+                    "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+                ]
+            )
+            self.context.run(
+                [
+                    "cmake",
+                    "--build",
+                    build,
+                    "--parallel",
+                    str(build_jobs),
+                    "--target",
+                    *native_targets,
+                ],
+                limit=self.context.env.get("BUILD_ALL_TIMEOUT", "15m"),
+            )
+            if scope == "cli":
+                self.context.run([build / "trtmc", "version"], limit="1m")
+                self.context.run([build / "trtmc", "--help"], limit="1m")
+            leaked = next(build.rglob("libtrtmc_model_*.so*"), None)
+            if leaked:
+                raise CiError(f"source-only unit build produced a model plugin: {leaked}")
+            self.context.run(
+                [
+                    "ctest",
+                    "--test-dir",
+                    build,
+                    "--output-on-failure",
+                    "--stop-on-failure",
+                    *ctest_selector,
+                    "-j",
+                    str(test_jobs),
+                ],
+                limit=self.context.env.get("CPP_UNIT_TIMEOUT", "20m"),
+            )
 
     def _premerge_scope(self, scope: str) -> tuple[list[str], list[str], list[str]]:
+        if scope == "builder":
+            return (["tests/builder/"], [], [])
         if scope == "cli":
             return (
                 [
@@ -312,7 +315,7 @@ class UnitTestRunner:
                 ["trtmc", "trtmc_platform_cpp_tests"],
                 ["-L", "platform"],
             )
-        raise CiError("TRTMC_PREMERGE_UNIT_SCOPE must be cli or all")
+        raise CiError("TRTMC_PREMERGE_UNIT_SCOPE must be builder, cli, or all")
 
     def cpp_targets(self) -> list[str]:
         if self.context.env.get("FULL_E2E", "false") == "true":

@@ -399,8 +399,70 @@ def test_impact_selects_only_model_a(tmp_path: Path) -> None:
     assert result["direct_models"] == ["model_a"]
     assert result["fallback_models"] == []
     assert result["matrix"] == {"include": [{"model": "model_a", "selection_kind": "direct"}]}
-    assert result["run_unit_tests"] is False
-    assert result["unit_scope"] == "none"
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "builder"
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "python/tensorrt_model_connect/families/model_a/graph_ops.py",
+        "python/tensorrt_model_connect/families/model_a/graph_blocks.py",
+        "python/tensorrt_model_connect/families/model_a/model/model.py",
+        "python/tensorrt_model_connect/families/model_a/debug_runner.py",
+        "tests/e2e/models/model_a/model.l0.json",
+        "src/runtime/models/model_a/model_a.cpp",
+    ),
+)
+def test_model_owned_change_runs_builder_units(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(repo, path, "# graph implementation\n")
+    head = _commit(repo, "change family graph source")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "models"
+    assert result["affected_models"] == ["model_a"]
+    assert result["direct_models"] == ["model_a"]
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "builder"
+
+
+def test_model_owned_deletion_runs_builder_units(tmp_path: Path) -> None:
+    repo, _ = _make_repo(tmp_path)
+    path = "python/tensorrt_model_connect/families/model_a/graph_ops.py"
+    _write(repo, path, "# graph implementation\n")
+    base = _commit(repo, "add family graph source")
+    (repo / path).unlink()
+    head = _commit(repo, "delete family graph source")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "models"
+    assert result["affected_models"] == ["model_a"]
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "builder"
+
+
+def test_mixed_model_and_cli_change_runs_all_units(tmp_path: Path) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(
+        repo,
+        "python/tensorrt_model_connect/families/model_a/graph_ops.py",
+        "# graph implementation\n",
+    )
+    _write(repo, "src/runtime/config/cli_support.cpp", "// CLI implementation\n")
+    head = _commit(repo, "change graph and CLI sources")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "models"
+    assert result["affected_models"] == ["model_a"]
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "all"
 
 
 @pytest.mark.parametrize(

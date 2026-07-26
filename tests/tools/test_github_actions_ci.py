@@ -16,6 +16,8 @@ import textwrap
 import time
 from pathlib import Path
 
+from tools.ci.quality import UnitTestRunner
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -1559,6 +1561,9 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
     assert '["trtmc", "trtmc_platform_cpp_tests"]' in script
     assert '"TRTMC_PREMERGE_UNIT_SCOPE", "all"' in stage
     assert "tests/builder/test_cli.py" in script
+    assert 'if scope == "builder"' in script
+    assert '["tests/builder/"]' in script
+    assert "if native_targets:" in stage
     assert '[build / "trtmc", "version"]' in stage
     assert '[build / "trtmc", "--help"]' in stage
     assert "--stop-on-failure" in stage
@@ -1585,6 +1590,41 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
         "test_tvm_ffi_module_loader REQUIRES_TRT REQUIRES_GPU",
     ):
         assert f"trtmc_add_test({gpu_test})" in cmake
+
+
+def test_builder_unit_scope_runs_python_without_native_build(tmp_path: Path) -> None:
+    class RecordingContext:
+        repository = tmp_path
+        env = {
+            "GITHUB_WORKSPACE": str(tmp_path),
+            "TRTMC_PREMERGE_UNIT_SCOPE": "builder",
+            "TRTMC_UNIT_BUILD_JOBS": "8",
+            "TRTMC_UNIT_TEST_JOBS": "8",
+        }
+
+        def __init__(self) -> None:
+            self.commands: list[list[object]] = []
+
+        def positive_integer(self, value: str, _name: str) -> int:
+            return int(value)
+
+        def run(self, command: list[object], **_kwargs: object) -> subprocess.CompletedProcess:
+            self.commands.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    context = RecordingContext()
+    UnitTestRunner(context).premerge()
+
+    pytest_commands = [
+        command
+        for command in context.commands
+        if command[:3] == ["python", "-m", "pytest"]
+    ]
+    assert len(pytest_commands) == 1
+    assert "tests/builder/" in pytest_commands[0]
+    assert not [
+        command for command in context.commands if command[0] in {"cmake", "ctest"}
+    ]
 
 
 def test_premerge_unit_container_is_unprivileged_offline_and_cpu_only() -> None:

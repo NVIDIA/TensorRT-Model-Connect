@@ -603,6 +603,16 @@ def _is_legal_or_docs(path: str) -> bool:
     )
 
 
+def _merge_unit_scope(current: str, requested: str) -> str:
+    if current == requested or requested == "none":
+        return current
+    if current == "none":
+        return requested
+    if current == "all" or requested == "all":
+        return "all"
+    return "all"
+
+
 def _classify_path(path: str, catalog: OwnershipCatalog) -> tuple[str, str | None]:
     if path in MODEL_ROOT_PLATFORM_FILES:
         return "platform", None
@@ -947,14 +957,14 @@ def calculate_impact(
             if owner is not None:
                 item["model"] = owner
                 affected.add(owner)
+                unit_scope = _merge_unit_scope(unit_scope, "builder")
             elif kind == "unit_cli":
-                if unit_scope == "none":
-                    unit_scope = "cli"
+                unit_scope = _merge_unit_scope(unit_scope, "cli")
             elif kind == "unit_tests":
-                unit_scope = "all"
+                unit_scope = _merge_unit_scope(unit_scope, "all")
             elif kind in {"platform", "ci_tooling", "unknown"}:
                 broad_change = True
-                unit_scope = "all"
+                unit_scope = _merge_unit_scope(unit_scope, "all")
             classifications.append(item)
         serialized_changes.append(
             {

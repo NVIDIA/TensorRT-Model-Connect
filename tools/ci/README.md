@@ -76,6 +76,11 @@ base and tested revisions. It emits:
 This is why a model-only change validates that model, while a CI-platform change
 selects a small representative set instead of all models.
 
+Every model-owned change also selects the `builder` unit scope. That scope runs
+the Python `tests/builder/` suite without a native build. CLI-only changes
+select `cli`; changes that need both scopes, or any broad source/tooling change,
+select `all`.
+
 ### 3. Reject cheap failures first
 
 Source Quality runs `python3 -m tools.ci pipeline source-quality` on a CPU runner
