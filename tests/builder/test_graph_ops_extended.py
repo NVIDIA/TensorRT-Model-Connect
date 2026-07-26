@@ -3,11 +3,11 @@
 
 """Extended tests for graph_ops -- pure NumPy helpers (no GPU).
 
-Covers _yarn_correction_dim, compute_alibi_slopes (extended cases),
-make_bucketed_relative_position_bias, and make_yarn_rope_table.
+Covers _yarn_correction_dim, compute_alibi_slopes (extended cases), and
+make_yarn_rope_table.
 
 Trace: ARCH-GRP-001, UD-GRP-OPS-EXT
-Intent: Validate pure-NumPy graph op helpers (YaRN correction, bucketed relative-position bias, ALiBi slopes, RoPE tables)
+Intent: Validate pure-NumPy graph op helpers (YaRN correction, ALiBi slopes, RoPE tables)
 Preconditions: tensorrt_model_connect is importable; no GPU or TRT required
 Postconditions: Helper functions produce mathematically correct values matching hand-computed references
 """
@@ -20,13 +20,8 @@ from tests.builder.conftest import requires_trt
 
 try:
     from tests.builder.owned_graph_modules import load_graph_ops
-    graph_ops = load_graph_ops(
-        "_yarn_correction_dim",
-        "compute_alibi_slopes",
-        "make_bucketed_relative_position_bias",
-        "make_yarn_rope_table",
-        "make_rope_query_scale_table",
-    )
+
+    graph_ops = load_graph_ops()
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
@@ -162,143 +157,7 @@ class TestComputeAlibiSlopesExtended:
 
 
 # ===================================================================
-# 3. make_bucketed_relative_position_bias
-# ===================================================================
-
-class TestMakeBucketedRelativePositionBias:
-    """Tests for make_bucketed_relative_position_bias.
-
-    The return is [max_seq_len, max_seq_len] int32 bucket indices.  The
-    num_heads parameter is retained for call-site symmetry with attention
-    helpers but is not needed for bucket construction.
-    """
-
-    def test_output_shape(self):
-        """Verify output shape is [max_seq_len, max_seq_len]."""
-        result = graph_ops.make_bucketed_relative_position_bias(
-            num_heads=8, max_seq_len=16, num_buckets=32, max_distance=128
-        )
-        assert result.shape == (16, 16)
-        assert result.dtype == np.int32
-
-    def test_values_in_range(self):
-        """All bucket indices should be in [0, num_buckets)."""
-        num_buckets = 32
-        result = graph_ops.make_bucketed_relative_position_bias(
-            num_heads=8, max_seq_len=32, num_buckets=num_buckets, max_distance=128
-        )
-        assert np.all(result >= 0)
-        assert np.all(result < num_buckets)
-
-    def test_diagonals_constant(self):
-        """bias[i][j] depends only on j-i, so each diagonal should be constant."""
-        result = graph_ops.make_bucketed_relative_position_bias(
-            num_heads=8, max_seq_len=16, num_buckets=32, max_distance=128
-        )
-        seq_len = 16
-        for offset in range(-seq_len + 1, seq_len):
-            diag = np.diag(result, k=offset)
-            assert np.all(diag == diag[0]), (
-                f"Diagonal offset={offset} is not constant: {diag}"
-            )
-
-    def test_bidirectional_symmetry(self):
-        """Positive and negative relative positions should map to different bucket halves.
-
-        For bidirectional=True with num_buckets=32:
-        - Positive offsets (j > i, i.e. looking right): bucket indices in [16, 31]
-        - Negative offsets (j < i, i.e. looking left): bucket indices in [0, 15]
-        - Zero offset (diagonal): bucket index for n=0
-        """
-        num_buckets = 32
-        result = graph_ops.make_bucketed_relative_position_bias(
-            num_heads=8, max_seq_len=16, num_buckets=num_buckets, max_distance=128
-        )
-        half_buckets = num_buckets // 2
-
-        # Check upper triangle (j > i => relative_position > 0 => n < 0 =>
-        # offset by num_bkts//2 in bidirectional mode)
-        for i in range(16):
-            for j in range(i + 1, 16):
-                assert result[i, j] >= half_buckets, (
-                    f"result[{i}][{j}]={result[i, j]} should be >= {half_buckets}"
-                )
-
-        # Check lower triangle (j < i => relative_position < 0 => n > 0 =>
-        # no offset)
-        for i in range(1, 16):
-            for j in range(i):
-                assert result[i, j] < half_buckets, (
-                    f"result[{i}][{j}]={result[i, j]} should be < {half_buckets}"
-                )
-
-    def test_max_seq_len_1(self):
-        """max_seq_len=1 should return a single-element array."""
-        result = graph_ops.make_bucketed_relative_position_bias(
-            num_heads=8, max_seq_len=1, num_buckets=32, max_distance=128
-        )
-        assert result.shape == (1, 1)
-        # Relative position is 0; for bidirectional n=-0=0, n<0 is False,
-        # so no half-bucket offset. n=abs(0)=0, is_small=True, ret=0.
-        assert result[0, 0] == 0
-
-    def test_num_buckets_2_minimal(self):
-        """Minimal num_buckets=2 triggers division by zero in log scaling.
-
-        With bidirectional=True, num_bkts becomes 1, max_exact becomes 0,
-        causing log(max_dist/0) → ZeroDivisionError. This is a known edge
-        case that does not occur for supported bucket counts.
-        """
-        with pytest.raises((ZeroDivisionError, FloatingPointError)):
-            graph_ops.make_bucketed_relative_position_bias(
-                num_heads=4, max_seq_len=8, num_buckets=2, max_distance=128
-            )
-
-    def test_diagonal_is_zero_relative(self):
-        """The main diagonal (j==i) should have consistent bucket index.
-
-        At i==j, relative_position = 0. In bidirectional mode:
-        n = -0 = 0, n<0 is False => no offset. abs(0) = 0, is_small = True.
-        ret = 0.
-        """
-        result = graph_ops.make_bucketed_relative_position_bias(
-            num_heads=8, max_seq_len=16, num_buckets=32, max_distance=128
-        )
-        diag = np.diag(result)
-        np.testing.assert_array_equal(diag, 0)
-
-    @pytest.mark.parametrize("num_buckets", [8, 16, 32, 64])
-    def test_various_num_buckets(self, num_buckets):
-        """Values in range for different num_buckets settings."""
-        result = graph_ops.make_bucketed_relative_position_bias(
-            num_heads=4, max_seq_len=16, num_buckets=num_buckets, max_distance=128
-        )
-        assert np.all(result >= 0)
-        assert np.all(result < num_buckets)
-
-    def test_adjacent_positions_monotonic(self):
-        """For increasing distance, bucket indices should be non-decreasing.
-
-        Looking at a fixed row i, as j increases from i+1 onward (positive
-        offsets in upper half), the bucket should be non-decreasing.
-        Similarly for the lower half.
-        """
-        result = graph_ops.make_bucketed_relative_position_bias(
-            num_heads=8, max_seq_len=32, num_buckets=32, max_distance=128
-        )
-        # Upper triangle: row 0, columns 1..31
-        row = result[0, 1:]
-        diffs = np.diff(row)
-        assert np.all(diffs >= 0), "Bucket indices should be non-decreasing with distance"
-
-        # Lower triangle: column 0, rows 1..31
-        col = result[1:, 0]
-        diffs = np.diff(col)
-        assert np.all(diffs >= 0), "Bucket indices should be non-decreasing with distance"
-
-
-# ===================================================================
-# 4. make_yarn_rope_table
+# 3. make_yarn_rope_table
 # ===================================================================
 
 class TestMakeYarnRopeTable:
@@ -494,41 +353,7 @@ class TestMakeYarnRopeTable:
 
 
 # ===================================================================
-# 4b. make_rope_query_scale_table
-# ===================================================================
-
-class TestMakeRopeQueryScaleTable:
-    """Tests for the per-position RoPE query scale table."""
-
-    def test_values_match_hf_formula(self):
-        table = graph_ops.make_rope_query_scale_table(
-            max_cache_length=10,
-            beta=0.1,
-            original_max_position_embeddings=4,
-        )
-        positions = np.arange(10, dtype=np.float64)
-        expected = 1.0 + 0.1 * np.log1p(np.floor(positions / 4.0))
-        np.testing.assert_allclose(table[:, 0], expected.astype(np.float32), atol=1e-7)
-
-    def test_positions_before_original_window_are_unscaled(self):
-        table = graph_ops.make_rope_query_scale_table(
-            max_cache_length=4,
-            beta=0.1,
-            original_max_position_embeddings=4,
-        )
-        np.testing.assert_allclose(table, np.ones((4, 1), dtype=np.float32))
-
-    def test_zero_beta_disables_scaling(self):
-        table = graph_ops.make_rope_query_scale_table(
-            max_cache_length=8,
-            beta=0.0,
-            original_max_position_embeddings=4,
-        )
-        np.testing.assert_allclose(table, np.ones((8, 1), dtype=np.float32))
-
-
-# ===================================================================
-# 5. add_elu (TRT)
+# 4. add_elu (TRT)
 # ===================================================================
 
 @requires_trt

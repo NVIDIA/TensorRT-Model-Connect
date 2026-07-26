@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 
@@ -35,6 +36,22 @@ def _builder_contract_text(path: Path, *, local_module: str) -> str:
     return text
 
 
+def _selects_prefill_or_dual_profile(text: str) -> bool:
+    """Return whether a call chooses between the two supported profile modes."""
+    tree = ast.parse(text)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.keyword) or node.arg != "profile_mode":
+            continue
+        values = {
+            child.value
+            for child in ast.walk(node.value)
+            if isinstance(child, ast.Constant) and isinstance(child.value, str)
+        }
+        if {"prefill", "dual_profile"} <= values:
+            return True
+    return False
+
+
 def test_shared_builder_modules_are_removed() -> None:
     """Shared builder package must not retain concrete model builder logic."""
     violations = [
@@ -54,7 +71,7 @@ def test_family_standard_decoder_builders_honor_split_roles() -> None:
         if (
             "_decoder_engine_role" not in text
             or "_decoder_engine_layout_supported" not in text
-            or "profile_mode=(" not in text
+            or not _selects_prefill_or_dual_profile(text)
         ):
             missing.append(str(path.relative_to(ROOT)))
 
