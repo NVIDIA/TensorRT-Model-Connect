@@ -48,9 +48,12 @@ class QuantPlan:
             scale_source = "none"
         elif quant_scales:
             scale_source = "precomputed"
-        elif quant_format == "nvfp4":
-            scale_source = "dynamic"
         else:
+            # nvfp4 (like fp8/int8) calibrates a per-tensor amax via ModelOpt:
+            # the NVFP4 format builds an FP4 double-quantization (dynamic per-block
+            # scales + a static per-tensor global) and needs that calibrated
+            # activation global scale — an empty/dynamic provider leaves it
+            # unset, which collapses the activation quantization to garbage.
             scale_source = "modelopt"
         return cls(
             base_precision=precision,

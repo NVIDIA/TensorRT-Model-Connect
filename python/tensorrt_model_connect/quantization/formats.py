@@ -20,6 +20,10 @@ if TYPE_CHECKING:
 
 from .scales import LayerScales
 
+# Packed NVFP4 weight buffers must outlive the engine build (TRT holds the raw
+# pointers until serialization); keep references alive here.
+_NVFP4_WEIGHT_KEEPALIVE: list = []
+
 
 @runtime_checkable
 class QuantFormat(Protocol):
@@ -404,10 +408,10 @@ class INT4AWQFormat:
         w_scale_t = graph_ops.add_constant(
             network, w_scale.shape, w_scale, dtype=np.float32)
         q_w = network.add_quantize(weight_const, w_scale_t, trt.int4)
-        q_w.set_block_shape(trt.Dims([block_size]))
+        q_w.block_shape = trt.Dims([block_size])
         dq_w = network.add_dequantize(
             q_w.get_output(0), w_scale_t, out_trt_dtype)
-        dq_w.set_block_shape(trt.Dims([block_size]))
+        dq_w.block_shape = trt.Dims([block_size])
 
         # Activation: stays in working dtype (no activation quantization)
         mm = network.add_matrix_multiply(
@@ -444,10 +448,10 @@ class INT4AWQFormat:
         w_scale_t = graph_ops.add_constant(
             network, w_scale.shape, w_scale, dtype=np.float32)
         q_w = network.add_quantize(w_const, w_scale_t, trt.int4)
-        q_w.set_block_shape(trt.Dims([block_size]))
+        q_w.block_shape = trt.Dims([block_size])
         dq_w = network.add_dequantize(
             q_w.get_output(0), w_scale_t, out_trt_dtype)
-        dq_w.set_block_shape(trt.Dims([block_size]))
+        dq_w.block_shape = trt.Dims([block_size])
 
         # Activation: stays in working dtype (weight-only quantization)
         b_trt = trt.Weights(np.ascontiguousarray(
@@ -487,29 +491,81 @@ class NVFP4Format:
         out_trt_dtype = activation.dtype
         block_size = scales.block_size or 16
 
-        # Weight: static FP4 quantization with block shape
-        weight_const = graph_ops.add_constant(
-            network, (lhs_width, rhs_width), weight_array, dtype=dtype)
-        w_scale = np.asarray(scales.weight_scale, dtype=np.float32)
-        w_scale_t = graph_ops.add_constant(
-            network, w_scale.shape, w_scale, dtype=np.float32)
-        q_w = network.add_quantize(weight_const, w_scale_t, trt.DataType.FP4)
-        q_w.set_block_shape(trt.Dims([block_size]))
-        dq_w = network.add_dequantize(
-            q_w.get_output(0), w_scale_t, out_trt_dtype)
-        dq_w.set_block_shape(trt.Dims([block_size]))
+        # NVFP4 = FP4 (E2M1) values + FP8 (E4M3) per-block scales + FP32 per-tensor
+        # "double" scale. The block structure comes from the dynamic-quantize layer;
+        # we deliberately do NOT set block_shape on the dequantizes — that kNDBLOCKED
+        # path triggers a Myelin quantize-op fusion failure inside the full decoder.
+        def _nvfp4_dynamic(t, axis, amax):
+            # Per-block scales computed at runtime; per-tensor global = amax.
+            ds = graph_ops.add_constant(
+                network, (1,),
+                np.array([max(amax / (6.0 * 448.0), 1e-8)], dtype=np.float32),
+                dtype=np.float32)
+            dq = network.add_dynamic_quantize(
+                t, axis, block_size, trt.DataType.FP4, trt.fp8)
+            dq.set_input(1, ds)
+            sc = network.add_dequantize(
+                dq.get_output(1), ds, out_trt_dtype).get_output(0)
+            return network.add_dequantize(
+                dq.get_output(0), sc, out_trt_dtype).get_output(0)
 
-        # Activation: dynamic quantization (scales computed at runtime)
-        dq_a = network.add_dynamic_quantize_v2(
-            activation,
-            trt.Dims([block_size]),
-            trt.DataType.FP4,
-            trt.float32,  # scale type
-        )
+        wf = np.ascontiguousarray(np.asarray(weight_array, dtype=np.float32))
+        w_amax = float(np.abs(wf).max())
 
+        # Weight: static packed FP4 + FP8 per-block scales + FP32 global, so the
+        # engine stores 4-bit weights (~2-3x smaller). Falls back to the dynamic
+        # (correct but uncompressed) weight path on any failure.
+        try:
+            import ml_dtypes
+            if lhs_width % block_size:
+                raise ValueError(
+                    "in-dim %d not divisible by block %d" % (lhs_width, block_size))
+            nb = lhs_width // block_size
+            w_global = np.float32(max(w_amax / (6.0 * 448.0), 1e-8))
+            woi = np.ascontiguousarray(wf.T)                       # [out, in]
+            wob = woi.reshape(rhs_width, nb, block_size)           # [out, nb, blk]
+            real_blk = np.maximum(np.abs(wob).max(axis=2) / 6.0, 1e-8)
+            fp8_blk = (real_blk / w_global).astype(ml_dtypes.float8_e4m3fn)
+            wq = (wob / real_blk[:, :, None]).reshape(
+                rhs_width, lhs_width).astype(ml_dtypes.float4_e2m1fn)
+            raw = wq.view(np.uint8).reshape(-1)
+            packed = np.ascontiguousarray(
+                (raw[0::2] & 0x0F) | ((raw[1::2] & 0x0F) << 4))    # 2 fp4/byte
+            fp8_bytes = np.ascontiguousarray(fp8_blk.view(np.uint8))
+            g_arr = np.ascontiguousarray([w_global], dtype=np.float32)
+            _NVFP4_WEIGHT_KEEPALIVE.extend([packed, fp8_bytes, g_arr])
+            w_const = network.add_constant(
+                (rhs_width, lhs_width),
+                trt.Weights(trt.DataType.FP4, packed.ctypes.data,
+                            rhs_width * lhs_width)).get_output(0)
+            s8_const = network.add_constant(
+                (rhs_width, nb),
+                trt.Weights(trt.DataType.FP8, fp8_bytes.ctypes.data,
+                            rhs_width * nb)).get_output(0)
+            g_const = graph_ops.add_constant(network, (1,), g_arr, dtype=np.float32)
+            real_scale = network.add_dequantize(
+                s8_const, g_const, out_trt_dtype).get_output(0)
+            dq_w = network.add_dequantize(
+                w_const, real_scale, out_trt_dtype).get_output(0)
+            weight_transposed = True
+        except Exception:
+            weight_const = graph_ops.add_constant(
+                network, (lhs_width, rhs_width), weight_array, dtype=dtype)
+            dq_w = _nvfp4_dynamic(weight_const, 0, w_amax)
+            weight_transposed = False
+
+        # Activation: dynamic per-block; per-tensor global = calibrated amax.
+        NVFP4_MAXBOUND = 6.0
+        a_amax = (float(scales.input_scale) * NVFP4_MAXBOUND
+                  if np.isscalar(scales.input_scale)
+                  and float(scales.input_scale) not in (0.0, 1.0)
+                  else w_amax)
+        dq_a = _nvfp4_dynamic(activation, len(activation.shape) - 1, a_amax)
+
+        w_op = (trt.MatrixOperation.TRANSPOSE if weight_transposed
+                else trt.MatrixOperation.NONE)
         mm = network.add_matrix_multiply(
-            dq_a.get_output(0), trt.MatrixOperation.NONE,
-            dq_w.get_output(0), trt.MatrixOperation.NONE)
+            dq_a, trt.MatrixOperation.NONE, dq_w, w_op)
         return _cast_output_dtype(network, mm.get_output(0), out_trt_dtype)
 
     def wrap_conv2d(
@@ -541,10 +597,10 @@ class NVFP4Format:
         w_scale_t = graph_ops.add_constant(
             network, w_scale.shape, w_scale, dtype=np.float32)
         q_w = network.add_quantize(w_const, w_scale_t, trt.DataType.FP4)
-        q_w.set_block_shape(trt.Dims([block_size]))
+        q_w.block_shape = trt.Dims([block_size])
         dq_w = network.add_dequantize(
             q_w.get_output(0), w_scale_t, out_trt_dtype)
-        dq_w.set_block_shape(trt.Dims([block_size]))
+        dq_w.block_shape = trt.Dims([block_size])
 
         # Activation: dynamic quantization (scales computed at runtime)
         dq_a = network.add_dynamic_quantize_v2(
@@ -599,10 +655,10 @@ class W4A8Format:
         w_scale_t = graph_ops.add_constant(
             network, w_scale.shape, w_scale, dtype=np.float32)
         q_w = network.add_quantize(weight_const, w_scale_t, trt.int4)
-        q_w.set_block_shape(trt.Dims([block_size]))
+        q_w.block_shape = trt.Dims([block_size])
         dq_w = network.add_dequantize(
             q_w.get_output(0), w_scale_t, out_trt_dtype)
-        dq_w.set_block_shape(trt.Dims([block_size]))
+        dq_w.block_shape = trt.Dims([block_size])
 
         # Activation: INT8 per-tensor quantization
         a_scale = np.array(
@@ -648,10 +704,10 @@ class W4A8Format:
         w_scale_t = graph_ops.add_constant(
             network, w_scale.shape, w_scale, dtype=np.float32)
         q_w = network.add_quantize(w_const, w_scale_t, trt.int4)
-        q_w.set_block_shape(trt.Dims([block_size]))
+        q_w.block_shape = trt.Dims([block_size])
         dq_w = network.add_dequantize(
             q_w.get_output(0), w_scale_t, out_trt_dtype)
-        dq_w.set_block_shape(trt.Dims([block_size]))
+        dq_w.block_shape = trt.Dims([block_size])
 
         # Activation: INT8 per-tensor quantization
         a_scale = np.array(
