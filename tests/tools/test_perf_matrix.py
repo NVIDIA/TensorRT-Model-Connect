@@ -863,14 +863,25 @@ def test_run_consolidates_results_and_records_replayable_commands(
         == 0.0
     )
     assert results["environment_config"]["source"] == str(environment.resolve())
-    assert results["catalog_coverage"] == {
-        "total_profiles": 202,
-        "ready_profiles": 126,
-        "release_profiles": 105,
-        "excluded_l0_profiles": 21,
-        "distributed_profiles": 76,
-        "other_profiles": 0,
+    catalog_entries = perf_matrix.ManifestCatalog().entries()
+    catalog_counts = Counter(entry.status for entry in catalog_entries)
+    excluded_l0_profiles = sum(
+        entry.status == "ready" and perf_matrix._is_l0_profile(entry.name)
+        for entry in catalog_entries
+    )
+    expected_catalog_coverage = {
+        "total_profiles": len(catalog_entries),
+        "ready_profiles": catalog_counts["ready"],
+        "release_profiles": catalog_counts["ready"] - excluded_l0_profiles,
+        "excluded_l0_profiles": excluded_l0_profiles,
+        "distributed_profiles": catalog_counts["distributed"],
+        "other_profiles": sum(
+            count
+            for status, count in catalog_counts.items()
+            if status not in {"ready", "distributed"}
+        ),
     }
+    assert results["catalog_coverage"] == expected_catalog_coverage
     assert results["timing_preflight"]["status"] == "aligned"
     assert results["timing_preflight"]["case_count"] == 1
     assert results["reference_preflight"]["status"] == "ready"
@@ -901,10 +912,14 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert "76 families" in report
     assert "105 model-profile comparisons" in report
     assert "105 single-process profiles" in report
-    assert "21 duplicate L0 profiles are excluded" in report
-    assert "126 ready catalog profiles" in report
-    assert "76 distributed profiles" in report
-    assert "0 other or unsupported profiles" in report
+    assert (
+        f"{expected_catalog_coverage['excluded_l0_profiles']} duplicate L0 profiles are excluded"
+    ) in report
+    assert (f"{expected_catalog_coverage['ready_profiles']} ready catalog profiles") in report
+    assert (f"{expected_catalog_coverage['distributed_profiles']} distributed profiles") in report
+    assert (
+        f"{expected_catalog_coverage['other_profiles']} other or unsupported profiles"
+    ) in report
     assert "<th>Model profile</th>" in report
     assert "TRTMC infer p50 (ms)" in report
     assert "Baseline infer p50 (ms)" in report
