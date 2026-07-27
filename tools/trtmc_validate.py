@@ -809,6 +809,7 @@ _PRIMARY_COMPARISON_METRICS = (
 _PRIMARY_METRIC_BY_MODE = {
     "asr_transcript": "prediction_agreement_rate",
     "continuation": "token_prefix_agreement",
+    "diffusion_image_clip_parity": "overall_pass_rate",
     "diffusion_text_parity": "token_agreement_rate",
     "encoder_embedding_parity": "vector_pass_rate",
     "image_classification_parity": "top1_agreement",
@@ -819,6 +820,10 @@ _PRIMARY_METRIC_BY_MODE = {
 }
 _COMPARISON_METRICS = (
     *_PRIMARY_COMPARISON_METRICS,
+    "overall_pass_rate",
+    "passed_count",
+    "valid_count",
+    "skipped_count",
     "token_id_prefix_agreement",
     "normalized_transcript_exact_agreement_rate",
     "correctness_agreement_rate",
@@ -881,11 +886,20 @@ def _execution_details(
 
 
 def _comparison_metrics(raw_result: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+    metrics = {
         name: raw_result[name]
         for name in _COMPARISON_METRICS
         if raw_result.get(name) is not None
     }
+    nested = raw_result.get("metrics", {})
+    if isinstance(nested, Mapping):
+        for name, summary in nested.items():
+            if not isinstance(summary, Mapping):
+                continue
+            mean = summary.get("mean")
+            if isinstance(mean, (int, float)) and not isinstance(mean, bool):
+                metrics[str(name)] = mean
+    return metrics
 
 
 def _primary_metric(

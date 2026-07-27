@@ -431,10 +431,22 @@ def manifest_record(path: Path) -> dict[str, Any]:
             raw = {**raw, **canonical, "name": model_name}
     build_args = raw.get("build_args", {})
     task_eval_config = raw.get("task_eval", {})
+    if not isinstance(task_eval_config, dict):
+        task_eval_config = {}
     runtime_strategy = str(raw.get("runtime_strategy") or "")
     task_strategy = str(raw.get("task_strategy") or runtime_strategy)
-    reference_family = infer_reference_family(raw)
-    reference_backend = str(raw.get("reference_backend", "") or "")
+    # A model's E2E testcase may exercise a different contract from its
+    # dataset-backed validation workload (for example seeded top-p sampling
+    # versus deterministic MMLU). Keep the E2E fields intact and let the
+    # task-eval section declare validation-specific reference semantics.
+    reference_family = str(
+        task_eval_config.get("reference_family") or infer_reference_family(raw)
+    )
+    reference_backend = str(
+        task_eval_config.get("reference_backend")
+        or raw.get("reference_backend", "")
+        or ""
+    )
     if not reference_backend:
         try:
             with warnings.catch_warnings():
@@ -442,7 +454,10 @@ def manifest_record(path: Path) -> dict[str, Any]:
                 reference_backend = load_manifest(path).reference_backend
         except Exception:
             reference_backend = "hf_transformers"
-    user_contract = infer_user_contract(raw, reference_family)
+    user_contract = str(
+        task_eval_config.get("user_contract")
+        or infer_user_contract(raw, reference_family)
+    )
     distributed = raw.get("distributed_runtime", {})
     requires_multi_device = bool(distributed.get("enabled")) or (
         str(raw.get("ci_tier", "")) == "multi_device"
@@ -484,7 +499,7 @@ def manifest_record(path: Path) -> dict[str, Any]:
         "video_height": raw.get("video_height"),
         "video_width": raw.get("video_width"),
         "num_inference_steps": raw.get("num_inference_steps"),
-        "task_eval": task_eval_config if isinstance(task_eval_config, dict) else {},
+        "task_eval": task_eval_config,
         "runtime_config": raw.get("runtime_config", {})
         if isinstance(raw.get("runtime_config", {}), dict)
         else {},

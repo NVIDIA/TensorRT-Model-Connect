@@ -264,9 +264,11 @@ models:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]
   qwen3-0.6b-fp8:
-    not_compared_reason: Aligned reference workload and output comparator are not implemented.
+    default: mmlu_five_shot_mcq
+    workloads: [mmlu_five_shot_mcq]
   qwen3-0.6b-topp:
-    not_compared_reason: Aligned reference workload and output comparator are not implemented.
+    default: mmlu_five_shot_mcq
+    workloads: [mmlu_five_shot_mcq]
   qwen3-4b-instruct-2507:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]

@@ -22,6 +22,8 @@ suites:
       - phi3-mini
       - phi-moe
       - qwen3-0.6b-fp16
+      - qwen3-0.6b-fp8
+      - qwen3-0.6b-topp
       - qwen3-4b-instruct-2507
       - qwen35-9b
       - qwen3-moe-30b-a3b

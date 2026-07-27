@@ -21,6 +21,11 @@
       "top_p": 0.9,
       "top_k": 50,
       "seed": 42,
+      "task_eval": {
+        "reference_backend": "hf_transformers",
+        "reference_family": "chat_qwen3_posttrained",
+        "user_contract": "chat_response"
+      },
       "determinism_reruns": 1,
       "test_note": "Validates host-side top-p nucleus sampling on an fp16 Qwen3 bundle: with temperature=0.7/top_p=0.9/top_k=50/seed=42, the runtime CLI must forward sampling flags, produce non-empty output, and reproduce the same seeded output on rerun. Device placement is not asserted by this E2E contract; top-p filtering is implemented on CPU via HOST sampler logits."
     }

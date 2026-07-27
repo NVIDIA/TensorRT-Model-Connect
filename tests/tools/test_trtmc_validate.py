@@ -38,7 +38,7 @@ def test_model_workload_catalog_covers_every_ready_model():
     assert len(catalog["models"]) == len(ready_models) == 105
     assert sum(
         "not_compared_reason" in spec for spec in catalog["models"].values()
-    ) == 10
+    ) == 8
     assert all(
         "e2e" not in spec.get("workloads", [])
         for spec in catalog["models"].values()
@@ -97,7 +97,7 @@ def test_every_dataset_backed_validation_binding_has_native_reference_runner():
             missing.append((model_name, workload, dataset_kind))
 
     assert not missing
-    assert len({model for model, _workload in bindings}) == 95
+    assert len({model for model, _workload in bindings}) == 97
 
 
 def test_resolve_binding_defaults_and_rejects_undeclared_workload():
@@ -905,6 +905,44 @@ def test_traffic_light_counts_are_mutually_exclusive():
         "red": 1,
         "white": 1,
     }
+
+
+def test_diffusion_report_flattens_nested_reference_metrics():
+    comparison = trtmc_validate._comparison_details(
+        {
+            "status": "passed",
+            "mode": "diffusion_image_clip_parity",
+            "overall_pass_rate": 1.0,
+            "passed_count": 5,
+            "valid_count": 5,
+            "skipped_count": 0,
+            "metrics": {
+                "trt_hf_image_clip_cosine": {
+                    "mean": 0.91,
+                    "min": 0.87,
+                    "max": 0.95,
+                    "count": 5,
+                },
+                "psnr": {
+                    "mean": 12.5,
+                    "min": 11.0,
+                    "max": 14.0,
+                    "count": 5,
+                },
+            },
+        },
+        {"status": "completed"},
+    )
+
+    assert comparison["primary_metric"] == {
+        "name": "overall_pass_rate",
+        "value": 1.0,
+    }
+    assert comparison["metrics"]["trt_hf_image_clip_cosine"] == 0.91
+    assert comparison["metrics"]["psnr"] == 12.5
+    assert "No metrics" not in trtmc_validate._render_metrics(
+        {"comparison": comparison}
+    )
 
 
 def test_legacy_e2e_result_is_not_reported_as_reference_agreement(tmp_path):
