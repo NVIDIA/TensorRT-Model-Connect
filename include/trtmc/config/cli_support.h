@@ -113,18 +113,17 @@ try_write_effective_config_next_to(const ConfigBundle& bundle, const std::string
 // ordering so two identical bundles produce byte-identical output.
 std::string bundle_to_effective_json(const ConfigBundle& bundle);
 
-// Scan a bundle's header JSON text for the ``"defaults": { ... }`` object
-// value and return its contents as a parsed LayeredFileValues. Returns an
-// empty map when the key is absent, so old bundles with no ``defaults:``
-// block continue to load unchanged.
+// Scan a JSON config document for the top-level ``"defaults": { ... }``
+// object and return its contents as parsed LayeredFileValues. Returns an
+// empty map when the key is absent.
 //
 // This is intentionally a targeted scanner rather than a general JSON DOM:
-// the header already has many top-level fields (``model_id``, ``sections``,
-// …) and we only need the ``defaults`` subtree.
-LayeredFileValues extract_bundle_defaults(const std::string& header_json);
+// the materialized ``config.json`` section has many top-level fields and
+// runtime config resolution only needs its ``defaults`` subtree.
+LayeredFileValues extract_bundle_defaults(const std::string& config_json);
 
 // Convenience: wrap ``extract_bundle_defaults`` as a BundleDefault layer.
-LayerContribution bundle_defaults_contribution(const std::string& header_json);
+LayerContribution bundle_defaults_contribution(const std::string& config_json);
 
 // Drop namespaces from ``contrib`` that aren't known to ``registry`` —
 // typically used for the BundleDefault layer so old bundles carrying
@@ -137,17 +136,20 @@ std::vector<std::string>
 filter_to_registered_namespaces(LayerContribution& contrib,
                                 const SchemaRegistry& registry = SchemaRegistry::instance());
 
-// High-level helper used by PipelineFactory. Takes the bundle's raw
-// header JSON plus the session-layer CLI inputs and produces a merged
-// ConfigBundle ready to attach to PipelineContext. Also returns the
-// full contribution list so callers can feed it into
-// ``write_effective_config_next_to``.
+// High-level helper used by PipelineFactory. It receives the materialized
+// ``config.json`` section plus session-layer CLI inputs and produces a merged
+// ConfigBundle ready to attach to PipelineContext. A top-level ``defaults``
+// object contributes BundleDefault; ``--config``/``--set`` contribute
+// SessionRequest. The current factory does not pass ``BundleInfo.defaults``
+// from the binary header or inject separate BuildTime or PlatformProfile
+// contributions. Also returns the full contribution list so callers can feed
+// it into ``write_effective_config_next_to``.
 struct PipelineConfigResolution {
     ConfigBundle bundle;
     std::vector<LayerContribution> contributions;
 };
 PipelineConfigResolution
-resolve_pipeline_config(const std::string& header_json, const std::string& config_path,
+resolve_pipeline_config(const std::string& config_json, const std::string& config_path,
                         const std::vector<std::string>& set_tokens,
                         const SchemaRegistry& registry = SchemaRegistry::instance());
 

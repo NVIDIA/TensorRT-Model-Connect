@@ -36,6 +36,9 @@ from .families import (
 )
 from .hf_snapshot import GENERIC_HF_ALLOW_PATTERNS, hf_snapshot_allow_patterns
 from .bundle_writer import BundleInfo, BundleSection, write_bundle
+from .tokenizer_validation import (
+    native_tokenizer_json_error as _native_tokenizer_json_error,
+)
 from . import trt_compat
 from .triattention_export import (
     TriAttentionBundleConfig,
@@ -786,19 +789,35 @@ def _ensure_tokenizer_json(
     plugin=None,
     trust_remote_code: bool = False,
 ) -> None:
-    """If the model directory lacks tokenizer.json, generate it from the
-    slow tokenizer using HF transformers. This ensures the C++ runtime can
-    always load the tokenizer natively.
+    """Ensure the model directory has a native-compatible tokenizer.json.
+
+    Missing or incompatible files are regenerated from the slow tokenizer
+    using HF transformers and then offered to the family-owned fallback. This
+    prevents a required-tokenizer bundle from deferring a structural tokenizer
+    failure to the C++ runtime.
     """
     _validate_trust_remote_code(trust_remote_code)
     tokenizer_path = model_dir / "tokenizer.json"
-    rebuild_wordpiece = _wordpiece_tokenizer_needs_rebuild(model_dir)
-    if tokenizer_path.exists() and not rebuild_wordpiece:
+    existing_error = (
+        _native_tokenizer_json_error(tokenizer_path)
+        if tokenizer_path.exists()
+        else "tokenizer.json is missing"
+    )
+    rebuild_wordpiece = (
+        existing_error is None
+        and _wordpiece_tokenizer_needs_rebuild(model_dir)
+    )
+    if existing_error is None and not rebuild_wordpiece:
         return
     if rebuild_wordpiece:
         print(
             "[trtmc build] Rebuilding undersized WordPiece tokenizer.json "
             "from vocab.txt",
+            file=sys.stderr,
+        )
+    elif tokenizer_path.exists():
+        print(
+            f"[trtmc build] Rebuilding incompatible tokenizer.json: {existing_error}",
             file=sys.stderr,
         )
 
@@ -826,6 +845,12 @@ def _ensure_tokenizer_json(
                 raise RuntimeError(
                     "tokenizer conversion did not create tokenizer.json"
                 )
+            generated_error = _native_tokenizer_json_error(generated_path)
+            if generated_error is not None:
+                raise RuntimeError(
+                    "slow tokenizer conversion did not produce a "
+                    f"native-compatible tokenizer.json: {generated_error}"
+                )
             with tempfile.NamedTemporaryFile(
                 dir=model_dir,
                 prefix=".trtmc-tokenizer-",
@@ -835,9 +860,26 @@ def _ensure_tokenizer_json(
                 temporary_path = Path(output.name)
                 output.write(generated_path.read_bytes())
             temporary_path.replace(tokenizer_path)
-        print("[trtmc build] Generated tokenizer.json from source tokenizer",
-              file=sys.stderr)
-        return
+        generated_error = (
+            _native_tokenizer_json_error(tokenizer_path)
+            if tokenizer_path.exists()
+            else "tokenizer.json is missing"
+        )
+        if (
+            generated_error is None
+            and _wordpiece_tokenizer_needs_rebuild(model_dir)
+        ):
+            generated_error = "generated WordPiece tokenizer.json is undersized"
+        if (
+            generated_error is None
+        ):
+            print("[trtmc build] Generated tokenizer.json from slow tokenizer",
+                  file=sys.stderr)
+            return
+        slow_tokenizer_error = (
+            "slow tokenizer conversion did not produce a native-compatible "
+            f"tokenizer.json: {generated_error}"
+        )
     except Exception as e:
         slow_tokenizer_error = f"slow tokenizer conversion failed: {e}"
 
@@ -851,16 +893,21 @@ def _ensure_tokenizer_json(
             kwargs["trust_remote_code"] = trust_remote_code
         try:
             family_reported_success = bool(family_ensure(model_dir, **kwargs))
+            family_error = (
+                _native_tokenizer_json_error(tokenizer_path)
+                if tokenizer_path.exists()
+                else "tokenizer.json is missing"
+            )
             if (
                 family_reported_success
-                and tokenizer_path.exists()
+                and family_error is None
                 and not _wordpiece_tokenizer_needs_rebuild(model_dir)
             ):
                 return
             if family_reported_success:
                 family_tokenizer_error = (
                     "family tokenizer hook reported success without producing "
-                    "a usable tokenizer.json"
+                    f"a native-compatible tokenizer.json: {family_error}"
                 )
             else:
                 family_tokenizer_error = "family tokenizer hook could not generate tokenizer.json"

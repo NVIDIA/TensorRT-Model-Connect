@@ -20,10 +20,11 @@ suite row in a separate Python process, and checks that both sides used the
 same workload and timing boundary.
 
 The checked-in suite at `benchmarks/performance/release.yaml` currently covers
-104 release-relevant, ready, single-process model profiles. Short `l0` smoke
-duplicates are excluded by rule; any other omission must appear in
-`excluded_profiles` with a reason. Validate coverage and all machine
-prerequisites without measuring a model:
+105 release-relevant, ready, single-process model-profile comparisons across
+76 families and 77 `(family, operation)` contracts. Short `l0` smoke duplicates
+are excluded by rule; any other omission must appear in `excluded_profiles`
+with a reason. Validate coverage and all machine prerequisites without
+measuring a model:
 
 ```bash
 python3 tools/perf_matrix.py check \

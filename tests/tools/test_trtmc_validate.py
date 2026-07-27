@@ -685,14 +685,14 @@ def test_all_dry_run_emits_machine_readable_ci_cases(monkeypatch, capsys):
         ),
     )
 
-    returncode = trtmc_validate.main(["--all", "--dry-run"])
+    returncode = trtmc_validate.main(["--all", "--dry-run", "--limit", "7"])
 
     assert returncode == 0
     assert json.loads(capsys.readouterr().out) == [
         {
             "model": "model-a",
             "workload": "workload-a",
-            "sample_limit": 5,
+            "sample_limit": 7,
         },
         {
             "model": "model-not-compared",

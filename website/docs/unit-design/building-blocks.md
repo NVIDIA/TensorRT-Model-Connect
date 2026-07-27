@@ -39,7 +39,7 @@ Start with these eight blocks before reading the full source-level map:
 | Runtime construction | `IPipelinePlugin` | Which plugin creates the concrete pipeline? |
 | User API | `IPipeline` | Which task method does the application call? |
 
-The full map below expands those seven blocks into the concrete helper units used by builders, bundles, plugins, backends, tensors, and tests.
+The full map below expands those eight blocks into the concrete helper units used by builders, bundles, plugins, backends, tensors, and tests.
 
 ## Ownership Layers
 
@@ -136,7 +136,7 @@ flowchart TB
 | Family-owned graph helpers | `python/tensorrt_model_connect/families/<family>/graph_ops.py` and `graph_blocks.py` when present | TensorRT graph operations and reusable blocks for one family. | Helpers stay beside the model code that defines their assumptions; there are no repository-root graph helper modules. |
 | Family-owned builders | Files such as `python/tensorrt_model_connect/families/qwen/standard_decoder_builder.py` | Engine construction flows. | Different model shapes need different graph topology and profile handling without a central model switch. |
 | Quantization context | `python/tensorrt_model_connect/quantization/` | Calibration, scales, formats, exclusions. | Quantization needs model-aware policy without leaking into every builder. |
-| Python `ConfigBundle` mirror | `python/tensorrt_model_connect/runtime_config/` | Schema-controlled build/runtime config merge. | Python writes bundle defaults using the same conceptual layers as C++. |
+| Python `ConfigBundle` mirror | `python/tensorrt_model_connect/runtime_config/` | Schema-controlled config helpers. | A producer may explicitly write a top-level `defaults` object in `config.json`, but the ordinary builder does not automatically persist build-time `--config`/`--set` values as `BundleDefault`. `PipelineFactory` currently combines optional `config.json` defaults with runtime `SessionRequest`; binary header defaults and separate `BuildTime`/`PlatformProfile` contributions are not wired. |
 | Optimized provider orchestrator | `python/tensorrt_model_connect/runtime_provider/` | Family-bounded implementation discovery, exact profile selection, isolated adapter execution, and generic bundle packaging. | Delegated runtimes stay family-owned without changing the public build API. |
 | `BundleInfo` / `BundleSection` | `python/tensorrt_model_connect/bundle_writer.py` | Bundle metadata and named payloads. | The runtime needs a structured artifact, not a directory of unrelated files. |
 

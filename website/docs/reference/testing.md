@@ -26,7 +26,10 @@ python3 -m pytest \
   tests/tools/test_check_doc_commands.py \
   tests/tools/test_runtime_strategy_matrix_checker.py \
   tests/tools/test_model_owned_validation_scripts.py \
-  tests/tools/test_test_impact.py -q
+  tests/tools/test_test_impact.py \
+  tests/tools/test_trtmc_validate.py \
+  tests/tools/test_perf_matrix.py::test_release_suite_covers_every_non_l0_ready_model_profile \
+  -q
 PYTHONPATH=python:. python3 tools/test_impact.py --validate
 python3 tools/check_doc_file_references.py --strict --tracked
 python3 tools/check_doc_commands.py
@@ -36,10 +39,10 @@ npm --prefix website run build
 git diff --check
 ```
 
-Install `pytest` first if the Python environment does not provide it. `npm ci`
-uses `website/package-lock.json` and replaces that workspace's installed
-dependency tree; use Node 20 to match CI. `git diff --check` is an additional
-local patch-quality check rather than a step in the GitHub job.
+Install `pytest` and `PyYAML` first if the Python environment does not provide
+them. `npm ci` uses `website/package-lock.json` and replaces that workspace's
+installed dependency tree; use Node 20 to match CI. `git diff --check` is an
+additional local patch-quality check rather than a step in the GitHub job.
 
 ## CPU and repository checks
 
@@ -114,6 +117,10 @@ one run with `--limit`, where zero requests the complete dataset:
 python3 tools/trtmc_validate.py gpt2-125m --limit 100
 python3 tools/trtmc_validate.py gpt2-125m --limit 0
 ```
+
+`--limit` applies only to dataset-backed workloads. E2E bindings have no
+dataset slice, always report `sample_limit: 0` in a dry-run plan, and do not
+forward this option to pytest.
 
 This workflow needs the model checkpoint, its reference environment and
 dataset, a compatible TRTMC bundle/runtime, and usually target GPU hardware.

@@ -234,6 +234,9 @@ fi
 PASS=0
 FAIL=0
 STEPS=()
+BUILD_STAGE_DIR=""
+CANDIDATE_BUNDLE_PATH=""
+BUNDLE_INSPECTION=""
 
 run_step() {
     local name="$1"
@@ -249,25 +252,55 @@ run_step() {
     fi
 }
 
+cleanup_build_stage() {
+    if [[ -z "$BUILD_STAGE_DIR" ]] || [[ ! -d "$BUILD_STAGE_DIR" ]]; then
+        return
+    fi
+    rm -f -- \
+        "$CANDIDATE_BUNDLE_PATH" \
+        "${CANDIDATE_BUNDLE_PATH%.trtfb}.effective_config.json"
+    rmdir -- "$BUILD_STAGE_DIR" 2>/dev/null || true
+}
+
 # Step 1: Build bundle
+mkdir -p "$BUNDLE_DIR"
+BUILD_STAGE_DIR="$(mktemp -d "${BUNDLE_DIR%/}/.validate-family-build.XXXXXX")"
+CANDIDATE_BUNDLE_PATH="${BUILD_STAGE_DIR}/$(basename "$BUNDLE_PATH")"
+trap cleanup_build_stage EXIT
 BUILD_ARGS=(
     build "$MODEL"
-    -o "$BUNDLE_PATH"
+    -o "$CANDIDATE_BUNDLE_PATH"
     --max-cache-length "$MAX_CACHE_LENGTH"
     "${TRUST_REMOTE_CODE_ARGS[@]}"
 )
+
+build_candidate_bundle() {
+    if ! "$BINARY" "${BUILD_ARGS[@]}"; then
+        return 1
+    fi
+    if [[ ! -s "$CANDIDATE_BUNDLE_PATH" ]]; then
+        echo "ERROR: build returned success without writing a non-empty bundle: $CANDIDATE_BUNDLE_PATH" >&2
+        return 1
+    fi
+    if ! BUNDLE_INSPECTION="$("$BINARY" inspect "$CANDIDATE_BUNDLE_PATH")"; then
+        echo "ERROR: the bundle produced by this invocation cannot be inspected: $CANDIDATE_BUNDLE_PATH" >&2
+        return 1
+    fi
+    return 0
+}
+
 BUILD_FAILURES_BEFORE="$FAIL"
-run_step "Build bundle" "$BINARY" "${BUILD_ARGS[@]}"
+run_step "Build bundle" build_candidate_bundle
 BUILD_SUCCEEDED="false"
-if [[ "$FAIL" -eq "$BUILD_FAILURES_BEFORE" ]] && [[ -f "$BUNDLE_PATH" ]]; then
+if [[ "$FAIL" -eq "$BUILD_FAILURES_BEFORE" ]]; then
     BUILD_SUCCEEDED="true"
 fi
 
 # Detect runtime strategy from the built bundle to skip decoder-only tools
 # for encoder-only / seq2seq models (diff_logits, diff_layers, parity only
 # work with decoder models that use TrtRunner).
-if [[ -x "$BINARY" ]]; then
-    RUNTIME_STRATEGY=$("$BINARY" inspect "$BUNDLE_PATH" 2>/dev/null \
+if [[ "$BUILD_SUCCEEDED" == "true" ]]; then
+    RUNTIME_STRATEGY=$(printf '%s\n' "$BUNDLE_INSPECTION" \
         | grep -i "runtime strategy" | awk '{print $NF}' || true)
 else
     RUNTIME_STRATEGY=""
@@ -323,7 +356,7 @@ if [[ "$IS_DECODER" == "true" ]]; then
     if [[ -x "$BINARY" ]]; then
         run_step "test_runner_parity" \
             "$HF_PYTHON" "${PROJECT_DIR}/tools/test_runner_parity.py" \
-                --bundle "$BUNDLE_PATH" --binary "$BINARY" \
+                --bundle "$CANDIDATE_BUNDLE_PATH" --binary "$BINARY" \
                 --hf-python "$HF_PYTHON" --max-new-tokens 20
     else
         echo ""
@@ -354,7 +387,7 @@ fi
 if [[ -n "$E2E_MODEL" ]] && [[ -x "$BINARY" ]] && [[ "$BUILD_SUCCEEDED" == "true" ]]; then
     mkdir -p "$ENGINE_DIR"
     E2E_PROOF_DIR="$(mktemp -d "${ENGINE_DIR%/}/validate-current.XXXXXX")"
-    BUNDLE_SOURCE="$(cd "$(dirname "$BUNDLE_PATH")" && pwd)/$(basename "$BUNDLE_PATH")"
+    BUNDLE_SOURCE="$(cd "$(dirname "$CANDIDATE_BUNDLE_PATH")" && pwd)/$(basename "$CANDIDATE_BUNDLE_PATH")"
     ln -s "$BUNDLE_SOURCE" "${E2E_PROOF_DIR}/${E2E_BUNDLE}"
     E2E_NODE="${PROJECT_DIR}/tests/e2e/models/${E2E_FAMILY}/test_${E2E_FAMILY}_e2e.py::test_model_e2e[${E2E_MODEL}]"
     E2E_ARGS=(
@@ -381,7 +414,7 @@ elif [[ -z "$E2E_MODEL" ]]; then
 elif [[ "$BUILD_SUCCEEDED" != "true" ]]; then
     echo ""
     echo "==== E2E pytest ===="
-    echo "FAIL: current bundle was not built successfully at $BUNDLE_PATH -- refusing to rebuild from manifest hf_id"
+    echo "FAIL: this invocation did not produce a usable bundle -- refusing to rebuild from manifest hf_id"
     STEPS+=("FAIL  E2E pytest (current bundle unavailable)")
     FAIL=$((FAIL + 1))
 elif [[ ! -x "$BINARY" ]]; then
@@ -390,6 +423,18 @@ elif [[ ! -x "$BINARY" ]]; then
     echo "FAIL: C++ binary not found at $BINARY -- cannot validate E2E"
     STEPS+=("FAIL  E2E pytest (no binary)")
     FAIL=$((FAIL + 1))
+fi
+
+if [[ "$FAIL" -eq 0 ]]; then
+    if mv -f -- "$CANDIDATE_BUNDLE_PATH" "$BUNDLE_PATH"; then
+        echo ""
+        echo "Published validated bundle: $BUNDLE_PATH"
+    else
+        echo ""
+        echo "FAIL: unable to publish validated bundle to $BUNDLE_PATH"
+        STEPS+=("FAIL  publish validated bundle")
+        FAIL=$((FAIL + 1))
+    fi
 fi
 
 # Summary

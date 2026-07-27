@@ -29,7 +29,9 @@ Applied rules:
 - Reference pages are separated from conceptual architecture pages.
 - Extension docs are task-oriented and name exact files to edit.
 - Architecture and unit design pages use diagrams first, then source-level tables.
-- Core diagrams have static SVG versions so they render even if client-side Mermaid fails.
+- Selected high-traffic surfaces use standalone SVG illustrations. These are
+  maintained assets, not automatic fallbacks for Mermaid blocks; Mermaid-only
+  diagrams depend on the client-side renderer.
 - Beginner material teaches inference vocabulary before asking users to debug TensorRT runtime behavior.
 - The visual style favors technical documentation over marketing: square corners, light borders, neutral surfaces, concise tables, and NVIDIA-green accents.
 - Source-derived counts and strategy names are taken from the current checkout, not copied from older wiki text.

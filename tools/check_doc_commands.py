@@ -45,7 +45,9 @@ _LIST_MARKER_RE = re.compile(
     r"^(?P<indent> {0,3})(?P<marker>[-+*]|\d{1,9}[.)])"
     r"(?P<spacing>[ \t]{1,4})"
 )
-_PLACEHOLDER_RE = re.compile(r"<[^>\n]+>")
+_PLACEHOLDER_RE = re.compile(
+    r"<[^>\n]+>|(?<!\$)\{[A-Za-z][A-Za-z0-9_.-]*\}"
+)
 _PROMPT_RE = re.compile(r"^(?P<indent>[ \t]*)\$\s+")
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _BACKTICK_RUN_RE = re.compile(r"`+")
@@ -673,6 +675,8 @@ def _clean_local_path(token: str) -> str | None:
         or "*" in token
         or "?" in token
         or "[" in token
+        or "{" in token
+        or "}" in token
         or "DOC_PLACEHOLDER" in token
     ):
         return None
@@ -1178,6 +1182,42 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
                         changed = True
 
     command_paths: set[tuple[tuple[object, ...], tuple[str, ...]]] = set()
+    command_aliases: dict[
+        tuple[tuple[object, ...], tuple[str, ...]],
+        list[str],
+    ] = {}
+    parent_paths: dict[
+        tuple[tuple[object, ...], tuple[str, ...]],
+        list[tuple[tuple[object, ...], tuple[str, ...]]],
+    ] = {}
+
+    def record_command_aliases(
+        path: tuple[tuple[object, ...], tuple[str, ...]],
+        call: ast.Call,
+        binding: dict[str, object] | None = None,
+    ) -> None:
+        raw_aliases = _literal_value(_call_keyword(call, "aliases"), binding)
+        if not isinstance(raw_aliases, (list, tuple)):
+            return
+        aliases = command_aliases.setdefault(path, [])
+        for alias in raw_aliases:
+            if isinstance(alias, str) and alias and alias not in aliases:
+                aliases.append(alias)
+
+    def resolved_parent_paths(
+        call: ast.Call,
+        scope: tuple[tuple[str, str, int], ...],
+    ) -> list[tuple[tuple[object, ...], tuple[str, ...]]]:
+        parents = _call_keyword(call, "parents")
+        if not isinstance(parents, (ast.List, ast.Tuple)):
+            return []
+        resolved: list[tuple[tuple[object, ...], tuple[str, ...]]] = []
+        for expression in parents.elts:
+            path = resolve_parser_expression(expression, scope)
+            if path is not None and path not in resolved:
+                resolved.append(path)
+        return resolved
+
     for call in calls:
         if not (
             isinstance(call.func, ast.Attribute)
@@ -1193,7 +1233,22 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
         )
         name = _literal_value(call.args[0])
         if isinstance(parent, tuple) and isinstance(name, str):
-            command_paths.add((parent[0], (*parent[1], name)))
+            path = (parent[0], (*parent[1], name))
+            command_paths.add(path)
+            record_command_aliases(path, call)
+            inherited = resolved_parent_paths(call, scope_by_node[id(call)])
+            if inherited:
+                parent_paths[path] = inherited
+
+    for variable, call, node in assignments:
+        if not _is_call_named(call, "ArgumentParser"):
+            continue
+        path = parser_paths.get(variable)
+        if path is None:
+            continue
+        inherited = resolved_parent_paths(call, scope_by_node[id(node)])
+        if inherited:
+            parent_paths[path] = inherited
 
     loop_generated: dict[
         int,
@@ -1247,6 +1302,13 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
                 path = (parent[0], (*parent[1], name))
                 generated.setdefault(variable, []).append((binding, path))
                 command_paths.add(path)
+                record_command_aliases(path, call, binding)
+                inherited = resolved_parent_paths(
+                    call,
+                    scope_by_node[id(statement)],
+                )
+                if inherited:
+                    parent_paths[path] = inherited
             if generated.get(variable):
                 parser_paths[variable] = generated[variable][-1][1]
         loop_generated[id(loop)] = generated
@@ -1535,9 +1597,14 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
 
     selected_roots = set(parse_modes)
     if not selected_roots:
-        if len(root_ids) != 1:
+        inherited_roots = {
+            parent[0]
+            for inherited in parent_paths.values()
+            for parent in inherited
+        }
+        selected_roots = root_ids - inherited_roots
+        if len(selected_roots) != 1:
             return None
-        selected_roots = set(root_ids)
     if len(selected_roots) != 1:
         return None
     selected_root = next(iter(selected_roots))
@@ -1545,6 +1612,34 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
     allow_extras = modes == {True}
 
     selected_commands = {path for path in command_paths if path[0] == selected_root}
+
+    effective_specs: dict[
+        tuple[tuple[object, ...], tuple[str, ...]],
+        CommandSpec,
+    ] = {}
+    resolving_specs: set[
+        tuple[tuple[object, ...], tuple[str, ...]],
+    ] = set()
+
+    def effective_spec(
+        full_path: tuple[tuple[object, ...], tuple[str, ...]],
+    ) -> CommandSpec:
+        cached = effective_specs.get(full_path)
+        if cached is not None:
+            return cached
+        if full_path in resolving_specs:
+            return specs.setdefault(full_path, CommandSpec.empty())
+        resolving_specs.add(full_path)
+        merged = CommandSpec.empty()
+        for parent in parent_paths.get(full_path, []):
+            merged = _merge_command_specs(merged, effective_spec(parent))
+        merged = _merge_command_specs(
+            merged,
+            specs.setdefault(full_path, CommandSpec.empty()),
+        )
+        resolving_specs.remove(full_path)
+        effective_specs[full_path] = merged
+        return merged
 
     def build_program(path: tuple[str, ...]) -> ProgramSpec:
         full_path = (selected_root, path)
@@ -1554,7 +1649,7 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
             if len(command_path[1]) == len(path) + 1 and command_path[1][:-1] == path
         )
         commands = {
-            child[1][-1]: specs.setdefault(child, CommandSpec.empty()) for child in children
+            child[1][-1]: effective_spec(child) for child in children
         }
         nested = {
             child[1][-1]: build_program(child[1])
@@ -1564,8 +1659,14 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
                 for descendant in selected_commands
             )
         }
+        for child in children:
+            canonical = child[1][-1]
+            for alias in command_aliases.get(child, []):
+                commands.setdefault(alias, commands[canonical])
+                if canonical in nested:
+                    nested.setdefault(alias, nested[canonical])
         return ProgramSpec(
-            root=specs.setdefault(full_path, CommandSpec.empty()),
+            root=effective_spec(full_path),
             commands=commands,
             command_required=required_state.get(full_path, False),
             nested=nested,
@@ -1864,10 +1965,13 @@ def _parse_command_arguments(
                 errors.append(f"does not support inline value:{option_name}")
             elif option.max_values == 0:
                 errors.append(f"does not take a value:{option_name}")
-            elif inline_value:
-                values.append(inline_value)
             else:
-                errors.append(f"requires a value:{option_name}")
+                # argparse treats ``--option=value`` as exactly one attached
+                # value.  The value may be an empty string, and it is not
+                # supplemented with following tokens when nargs requires more.
+                values.append(inline_value)
+                if len(values) < option.min_values:
+                    errors.append(f"requires a value:{option_name}")
         elif option.max_values != 0:
             cursor = index + 1
             while cursor < len(tokens) and (

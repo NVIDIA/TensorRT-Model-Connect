@@ -257,6 +257,29 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert not any(perf_matrix._is_l0_profile(case["model"]) for case in cases)
     assert len({(case["family"], case["operation"]) for case in cases}) == 77
     assert len({case["family"] for case in cases}) == 76
+    family_count = len({case["family"] for case in cases})
+    contract_count = len({(case["family"], case["operation"]) for case in cases})
+    performance_readme = " ".join(
+        (REPOSITORY / "benchmarks/performance/README.md")
+        .read_text(encoding="utf-8")
+        .split()
+    )
+    website_reference = " ".join(
+        (REPOSITORY / "website/docs/reference/benchmarking.md")
+        .read_text(encoding="utf-8")
+        .split()
+    )
+    assert (
+        f"{len(cases)} model-profile comparisons across {family_count} families "
+        f"and {contract_count} `(family, operation)` contracts"
+        in performance_readme
+    )
+    assert (
+        f"{len(cases)} release-relevant, ready, single-process model-profile "
+        f"comparisons across {family_count} families and {contract_count} "
+        "`(family, operation)` contracts"
+        in website_reference
+    )
     assert [case["operation"] for case in cases if case["family"] == "eagle_vlm"] == [
         "embed",
         "rerank",

@@ -107,15 +107,21 @@ _GENERATED_DIRECTORY_REFERENCES = {"website/build", "website/build/"}
 # Handles:
 #   `src/foo/bar.cpp`           (backtick-quoted)
 #   `src/foo/bar.h/cpp`         (h/cpp shorthand -- we handle this specially)
-_PATH_RE = re.compile(r"`(" + "|".join(re.escape(p) for p in _PATH_PREFIXES) + r")[^`\s]*`")
-_ROOT_PATH_RE = re.compile(r"`(" + "|".join(re.escape(path) for path in _ROOT_PATHS) + r")`")
+_PATH_RE = re.compile(
+    r"`((?:\./)?(?:" + "|".join(re.escape(p) for p in _PATH_PREFIXES) + r")[^`\s]*)`"
+)
+_ROOT_PATH_RE = re.compile(
+    r"`((?:\./)?(?:" + "|".join(re.escape(path) for path in _ROOT_PATHS) + r"))`"
+)
 
 # Repository paths embedded in shell fences do not normally have an individual
 # pair of backticks, for example ``python3 tools/check.py``.  Scan tokens from
 # shell fences as a second source without treating arbitrary prose as a shell
 # command.
 _BARE_PATH_RE = re.compile(
-    r"(?<![A-Za-z0-9_./-])(" + "|".join(re.escape(p) for p in _PATH_PREFIXES) + r")[^\s`'\"|]+"
+    r"(?<![A-Za-z0-9_./-])((?:\./)?(?:"
+    + "|".join(re.escape(p) for p in _PATH_PREFIXES)
+    + r")[^\s`'\"|]+)"
 )
 _SHELL_FENCE_LANGUAGES = {"bash", "sh", "shell"}
 _SHELL_OUTPUT_PATH_PREFIX_RE = re.compile(
@@ -224,7 +230,8 @@ def _expand_path(raw: str) -> List[str]:
 
 def _clean_extracted_path(raw: str) -> str:
     """Remove Markdown/shell punctuation adjacent to a path token."""
-    return raw.split("::", 1)[0].split("#", 1)[0].rstrip("\\.,;:)]}")
+    cleaned = raw.split("::", 1)[0].split("#", 1)[0].rstrip("\\.,;:)]}")
+    return cleaned.removeprefix("./")
 
 
 @lru_cache(maxsize=None)
@@ -324,7 +331,7 @@ def extract_path_references(
                 expanded = _clean_extracted_path(expanded)
                 results.append((line_no, expanded))
         for match in _ROOT_PATH_RE.finditer(line):
-            results.append((line_no, match.group(1)))
+            results.append((line_no, match.group(1).removeprefix("./")))
 
     results.extend(_shell_fence_path_references(content, repo_root))
     # A path-only code span inside a shell fence can be found by both passes.

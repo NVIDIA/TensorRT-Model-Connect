@@ -701,6 +701,156 @@ def test_python_script_contract_accepts_attached_short_option_value(
     assert cdc.check_python_script_contract(block, tmp_path) == []
 
 
+def test_python_script_inline_values_match_argparse_arity_and_empty_string(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "inline_values.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        'parser.add_argument("--pair", nargs=2)\n'
+        'parser.add_argument("--name", choices=("", "set"))\n'
+        'parser.add_argument("--items", nargs="+")\n'
+        'parser.add_argument("--flag", action="store_true")\n'
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+
+    valid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/inline_values.py --pair left right --name= --items=\n",
+    )
+    short_pair = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/inline_values.py --pair=left\n",
+    )
+    flag_value = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/inline_values.py --flag=\n",
+    )
+
+    assert cdc.check_python_script_contract(valid, tmp_path) == []
+    assert [
+        finding.message
+        for finding in cdc.check_python_script_contract(short_pair, tmp_path)
+    ] == ["option for `tools/inline_values.py` requires a value: --pair"]
+    assert [
+        finding.message
+        for finding in cdc.check_python_script_contract(flag_value, tmp_path)
+    ] == ["option for `tools/inline_values.py` does not take a value: --flag"]
+
+
+def test_argparse_subcommand_aliases_share_options_and_nested_contracts(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "aliases.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        "commands = parser.add_subparsers(required=True)\n"
+        'checkout = commands.add_parser("checkout", aliases=["co"])\n'
+        'checkout.add_argument("--mode", required=True)\n'
+        "children = checkout.add_subparsers(required=True)\n"
+        'add = children.add_parser("add", aliases=["a"])\n'
+        'add.add_argument("--name", required=True)\n'
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+    valid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/aliases.py co --mode safe a --name item\n",
+    )
+    missing = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/aliases.py co a --name item\n",
+    )
+
+    assert cdc.check_python_script_contract(valid, tmp_path) == []
+    assert [
+        finding.message for finding in cdc.check_python_script_contract(missing, tmp_path)
+    ] == ["missing required option for `tools/aliases.py co`: --mode"]
+
+
+def test_argparse_parent_parsers_are_merged_at_root_and_subcommand(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "parents.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "common = argparse.ArgumentParser(add_help=False)\n"
+        'common.add_argument("--profile", choices=("fast", "safe"), required=True)\n'
+        "run_common = argparse.ArgumentParser(add_help=False)\n"
+        'run_common.add_argument("--count", type=int, required=True)\n'
+        "parser = argparse.ArgumentParser(parents=[common])\n"
+        "commands = parser.add_subparsers(required=True)\n"
+        'commands.add_parser("run", parents=[run_common])\n'
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+    valid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/parents.py --profile fast run --count 2\n",
+    )
+    invalid_choice = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/parents.py --profile broken run --count 2\n",
+    )
+    missing_child = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/parents.py --profile fast run\n",
+    )
+
+    assert cdc.check_python_script_contract(valid, tmp_path) == []
+    assert [
+        finding.message
+        for finding in cdc.check_python_script_contract(invalid_choice, tmp_path)
+    ] == [
+        "invalid value for `tools/parents.py --profile`: "
+        "broken; expected one of fast, safe"
+    ]
+    assert [
+        finding.message
+        for finding in cdc.check_python_script_contract(missing_child, tmp_path)
+    ] == ["missing required option for `tools/parents.py run`: --count"]
+
+
+def test_dynamic_curly_paths_are_not_treated_as_literal_inputs(
+    tmp_path: Path,
+) -> None:
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        (
+            "python3 tools/{family}/validate.py --help\n"
+            "python3 tools/definitely-missing.py --help\n"
+        ),
+    )
+
+    assert [finding.message for finding in cdc.check_local_inputs(block, tmp_path)] == [
+        "command input does not exist: tools/definitely-missing.py"
+    ]
+
+
 def test_local_python_module_contract_checks_nested_subcommands(
     tmp_path: Path,
 ) -> None:
@@ -1421,6 +1571,8 @@ def test_docs_validation_workflow_gates_are_discoverable_in_docs_and_skill() -> 
         "tests/tools/test_runtime_strategy_matrix_checker.py",
         "tests/tools/test_model_owned_validation_scripts.py",
         "tests/tools/test_test_impact.py",
+        "tests/tools/test_trtmc_validate.py",
+        "tests/tools/test_perf_matrix.py::test_release_suite_covers_every_non_l0_ready_model_profile",
         "tools/test_impact.py --validate",
         "tools/check_doc_file_references.py --strict --tracked",
         "tools/check_doc_commands.py",
@@ -1489,8 +1641,11 @@ def test_public_config_docs_match_pipeline_factory_contribution_layers() -> None
     assert "detail::resolve_runtime_config(config_text" in factory_body
 
     public_surfaces = (
+        repo_root / "include/trtmc/config/cli_support.h",
         repo_root / "include/trtmc/config/schema_registry.h",
         repo_root / "website/docs/features/config-and-backends.md",
+        repo_root / "website/docs/unit-design/python-builder.md",
+        repo_root / "website/docs/unit-design/building-blocks.md",
     )
     for path in public_surfaces:
         compact = " ".join(path.read_text(encoding="utf-8").split())
@@ -1499,6 +1654,14 @@ def test_public_config_docs_match_pipeline_factory_contribution_layers() -> None
         assert "SessionRequest" in compact
         assert "binary header" in compact
         assert "PlatformProfile" in compact
+    cli_support = " ".join(public_surfaces[0].read_text(encoding="utf-8").split())
+    assert "materialized ``config.json`` section" in cli_support
+    assert "bundle's raw header JSON" not in cli_support
+    assert "resolve_pipeline_config(const std::string& config_json" in cli_support
+
+    for path in public_surfaces[3:]:
+        compact = " ".join(path.read_text(encoding="utf-8").split())
+        assert "does not automatically" in compact
 
     architecture = " ".join(
         (repo_root / "website/docs/wiki/Architecture-Overview.md")
@@ -1508,3 +1671,46 @@ def test_public_config_docs_match_pipeline_factory_contribution_layers() -> None
     assert "passes the materialized `config.json` section" in architecture
     assert "does not pass `BundleInfo.defaults` from the binary header" in architecture
     assert "No separate build-time or platform-profile contribution is wired" in architecture
+
+
+def test_public_visual_docs_cover_native_and_optimized_bundle_paths() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    readme = (repo_root / "README.md").read_text(encoding="utf-8")
+    system_map_path = repo_root / "website/static/img/diagrams/trtmc-system-map.svg"
+    system_map = system_map_path.read_text(encoding="utf-8")
+
+    assert "website/static/img/diagrams/trtmc-system-map.svg" in readme
+    assert "trtmc-landing.png" not in readme
+    assert not (repo_root / "website/static/img/trtmc-landing.png").exists()
+    for required in (
+        "trtmc build",
+        "runtime_strategy",
+        "optimized_runtime.json",
+        "model + backend DSO",
+        "implementation DSO",
+        "NVIDIA driver",
+        "CUDA/TensorRT",
+        "system libraries",
+    ):
+        assert required in system_map
+    assert "trtmc-build" not in system_map
+    assert "everything the runtime needs" not in system_map
+
+
+def test_diagram_policy_and_beginner_block_count_are_self_consistent() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    research = " ".join(
+        (repo_root / "website/docs/reference/documentation-research.md")
+        .read_text(encoding="utf-8")
+        .split()
+    )
+    building_blocks = " ".join(
+        (repo_root / "website/docs/unit-design/building-blocks.md")
+        .read_text(encoding="utf-8")
+        .split()
+    )
+
+    assert "not automatic fallbacks for Mermaid blocks" in research
+    assert "Core diagrams have static SVG versions" not in research
+    assert "these eight blocks" in building_blocks
+    assert "those seven blocks" not in building_blocks

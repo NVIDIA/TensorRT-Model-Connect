@@ -681,17 +681,17 @@ std::string find_object_value_for_key(const std::string& text, const std::string
 
 } // namespace
 
-LayeredFileValues extract_bundle_defaults(const std::string& header_json) {
-    std::string sub = find_object_value_for_key(header_json, "defaults");
+LayeredFileValues extract_bundle_defaults(const std::string& config_json) {
+    std::string sub = find_object_value_for_key(config_json, "defaults");
     if (sub.empty())
         return {};
     return parse_layered_json(sub);
 }
 
-LayerContribution bundle_defaults_contribution(const std::string& header_json) {
+LayerContribution bundle_defaults_contribution(const std::string& config_json) {
     LayerContribution out;
     out.layer = Layer::BundleDefault;
-    out.values = extract_bundle_defaults(header_json);
+    out.values = extract_bundle_defaults(config_json);
     return out;
 }
 
@@ -712,7 +712,7 @@ std::vector<std::string> filter_to_registered_namespaces(LayerContribution& cont
     return dropped;
 }
 
-PipelineConfigResolution resolve_pipeline_config(const std::string& header_json,
+PipelineConfigResolution resolve_pipeline_config(const std::string& config_json,
                                                  const std::string& config_path,
                                                  const std::vector<std::string>& set_tokens,
                                                  const SchemaRegistry& registry) {
@@ -720,7 +720,7 @@ PipelineConfigResolution resolve_pipeline_config(const std::string& header_json,
 
     // BundleDefault layer. Filter unknown namespaces so old bundles whose
     // clusters haven't been migrated yet don't fail-fast at load time.
-    LayerContribution bundle_defaults = bundle_defaults_contribution(header_json);
+    LayerContribution bundle_defaults = bundle_defaults_contribution(config_json);
     filter_to_registered_namespaces(bundle_defaults, registry);
     if (!bundle_defaults.values.empty())
         out.contributions.push_back(bundle_defaults);

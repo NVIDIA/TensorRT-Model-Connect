@@ -88,6 +88,19 @@ def test_extract_path_references_captures_backtick_path_with_1_based_line_no() -
     assert refs == [(2, "src/runtime/models/qwen/plugin.cpp")]
 
 
+def test_extract_path_references_normalizes_dot_slash_in_code_spans() -> None:
+    content = (
+        "See `./tools/definitely-missing.py`, "
+        "`./scripts/definitely-missing.sh`, and `./README.md`.\n"
+    )
+
+    assert cdfr.extract_path_references(content, "README.md") == [
+        (1, "tools/definitely-missing.py"),
+        (1, "scripts/definitely-missing.sh"),
+        (1, "README.md"),
+    ]
+
+
 def test_extract_path_references_skips_wildcard_glob() -> None:
     # Wildcard paths like `src/foo/*.cpp` are glob patterns, not literal
     # paths, and cannot be checked for filesystem existence. They must be
@@ -156,6 +169,20 @@ def test_extract_path_references_captures_paths_inside_shell_fence() -> None:
     assert refs == [
         (2, "tools/nsight_collect.py"),
         (3, "src/runtime/plugins"),
+    ]
+
+
+def test_extract_path_references_normalizes_dot_slash_in_shell_fence() -> None:
+    content = (
+        "```bash\n"
+        "python3 ./tools/definitely-missing.py\n"
+        "./scripts/definitely-missing.sh\n"
+        "```\n"
+    )
+
+    assert cdfr.extract_path_references(content, "README.md") == [
+        (2, "tools/definitely-missing.py"),
+        (3, "scripts/definitely-missing.sh"),
     ]
 
 

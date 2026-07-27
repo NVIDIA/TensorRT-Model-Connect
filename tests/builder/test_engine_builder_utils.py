@@ -155,7 +155,15 @@ class TestDetectTokenizerAddSpecialTokens:
             def save_pretrained(self, path):
                 state["converted"] = True
                 (Path(path) / "tokenizer.json").write_text(
-                    json.dumps({"model": {"type": "BPE"}}),
+                    json.dumps(
+                        {
+                            "model": {
+                                "type": "BPE",
+                                "vocab": {"hello": 0},
+                                "merges": [],
+                            }
+                        }
+                    ),
                     encoding="utf-8",
                 )
 
@@ -186,7 +194,15 @@ class TestDetectTokenizerAddSpecialTokens:
         monkeypatch,
     ):
         (tmp_path / "tokenizer.json").write_text(
-            json.dumps({"model": {"type": "BPE"}}),
+            json.dumps(
+                {
+                    "model": {
+                        "type": "BPE",
+                        "vocab": {"hello": 0},
+                        "merges": [],
+                    }
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -231,7 +247,15 @@ class TestDetectTokenizerAddSpecialTokens:
         class BackendTokenizer:
             def save(self, path):
                 Path(path).write_text(
-                    json.dumps({"model": {"type": "BPE"}}),
+                    json.dumps(
+                        {
+                            "model": {
+                                "type": "BPE",
+                                "vocab": {"hello": 0},
+                                "merges": [],
+                            }
+                        }
+                    ),
                     encoding="utf-8",
                 )
 
@@ -598,10 +622,93 @@ class TestEnsureTokenizerJson:
     """Test _ensure_tokenizer_json skips when tokenizer.json exists."""
 
     def test_skips_if_exists(self, tmp_path):
-        (tmp_path / "tokenizer.json").write_text("{}")
+        payload = {
+            "model": {
+                "type": "BPE",
+                "vocab": {"a": 0},
+                "merges": [],
+            }
+        }
+        (tmp_path / "tokenizer.json").write_text(json.dumps(payload))
         # Should not raise or modify
         _ensure_tokenizer_json(tmp_path)
-        assert (tmp_path / "tokenizer.json").read_text() == "{}"
+        assert json.loads((tmp_path / "tokenizer.json").read_text()) == payload
+
+    @pytest.mark.parametrize(
+        "payload",
+        (
+            {"model": {"type": "BPE", "vocab": {"a": 0}, "merges": []}},
+            {"model": {"type": "WordPiece", "vocab": {"[UNK]": 0}}},
+            {"model": {"type": "Unigram", "vocab": [["<unk>", -1.0]]}},
+            {"model": {"vocab": {"a": 0}, "merges": []}},
+            {
+                "model": {
+                    "vocab": {"[UNK]": 0},
+                    "continuing_subword_prefix": "##",
+                }
+            },
+            {"model": {"vocab": [["<unk>", -1.0]]}},
+        ),
+        ids=(
+            "bpe",
+            "wordpiece",
+            "unigram",
+            "legacy-bpe",
+            "legacy-wordpiece",
+            "legacy-unigram",
+        ),
+    )
+    def test_native_compatibility_accepts_supported_minimal_models(
+        self,
+        tmp_path,
+        payload,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        tokenizer_path.write_text(json.dumps(payload))
+
+        assert engine_builder._native_tokenizer_json_error(tokenizer_path) is None
+
+    @pytest.mark.parametrize(
+        ("raw", "message"),
+        (
+            ("{}", "object-valued model"),
+            ("{", "invalid tokenizer.json"),
+            (
+                json.dumps({"model": {"type": "WordLevel", "vocab": {"a": 0}}}),
+                "unsupported tokenizer model.type",
+            ),
+            (
+                json.dumps({"model": {"type": "BPE", "vocab": {"a": 1}, "merges": []}}),
+                "must cover 0..0",
+            ),
+            (
+                json.dumps({"model": {"type": "BPE", "vocab": {"a": 0}}}),
+                "model.merges must be an array",
+            ),
+            (
+                json.dumps({"model": {"type": "Unigram", "vocab": [["a", True]]}}),
+                "string token and numeric score",
+            ),
+        ),
+        ids=(
+            "missing-model",
+            "invalid-json",
+            "unknown-type",
+            "noncontiguous-vocab",
+            "missing-merges",
+            "invalid-unigram-score",
+        ),
+    )
+    def test_native_compatibility_rejects_runtime_invalid_models(
+        self,
+        tmp_path,
+        raw,
+        message,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        tokenizer_path.write_text(raw)
+
+        assert message in engine_builder._native_tokenizer_json_error(tokenizer_path)
 
     @pytest.mark.parametrize(
         "invalid_trust",
@@ -613,7 +720,13 @@ class TestEnsureTokenizerJson:
         tmp_path,
         invalid_trust,
     ):
-        (tmp_path / "tokenizer.json").write_text("{}")
+        (tmp_path / "tokenizer.json").write_text(json.dumps({
+            "model": {
+                "type": "BPE",
+                "vocab": {"a": 0},
+                "merges": [],
+            },
+        }))
 
         with pytest.raises(TypeError, match="trust_remote_code must be a bool"):
             _ensure_tokenizer_json(
@@ -718,7 +831,12 @@ class TestEnsureTokenizerJson:
                 captured["model_dir"] = Path(model_dir)
                 captured["previous_error"] = previous_error
                 captured["trust_remote_code"] = trust_remote_code
-                (Path(model_dir) / "tokenizer.json").write_text("{}")
+                (Path(model_dir) / "tokenizer.json").write_text(json.dumps({
+                    "model": {
+                        "type": "Unigram",
+                        "vocab": [["<unk>", -1.0]],
+                    },
+                }))
                 return True
 
         _ensure_tokenizer_json(
@@ -731,6 +849,72 @@ class TestEnsureTokenizerJson:
         assert "slow tokenizer conversion failed" in captured["previous_error"]
         assert captured["trust_remote_code"] is True
         assert (tmp_path / "tokenizer.json").exists()
+
+    def test_family_hook_cannot_approve_incompatible_tokenizer(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                raise RuntimeError("slow tokenizer unavailable")
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+        )
+
+        class InvalidPlugin:
+            @staticmethod
+            def ensure_tokenizer_json(model_dir, **kwargs):
+                (Path(model_dir) / "tokenizer.json").write_text("{}")
+                return True
+
+        with pytest.raises(RuntimeError, match="native-compatible tokenizer.json"):
+            _ensure_tokenizer_json(tmp_path, plugin=InvalidPlugin())
+
+    def test_invalid_existing_tokenizer_fails_closed_when_rebuild_is_unavailable(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        (tmp_path / "tokenizer.json").write_text("{}")
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                raise RuntimeError("slow tokenizer unavailable")
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+        )
+
+        with pytest.raises(RuntimeError, match="refusing to write a bundle"):
+            _ensure_tokenizer_json(tmp_path)
+
+    def test_diffusion_plugins_validate_existing_tokenizers_through_callback(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        plugin_paths = (
+            "python/tensorrt_model_connect/families/flux/plugin.py",
+            "python/tensorrt_model_connect/families/ltx_video/plugin.py",
+            "python/tensorrt_model_connect/families/pixart/plugin.py",
+            "python/tensorrt_model_connect/families/qwen_image/plugin.py",
+            "python/tensorrt_model_connect/families/wan_t2v/plugin.py",
+            "python/tensorrt_model_connect/families/z_image/plugin.py",
+            (
+                "python/tensorrt_model_connect/families/sana_wm/"
+                "components/ltx_video/plugin.py"
+            ),
+        )
+
+        for relative in plugin_paths:
+            source = (repo_root / relative).read_text(encoding="utf-8")
+            assert "ensure_tokenizer_json(tokenizer_dir)" in source
+            assert 'if not (tokenizer_dir / "tokenizer.json").exists()' not in source
 
 
 class TestBuildBundleErrors:

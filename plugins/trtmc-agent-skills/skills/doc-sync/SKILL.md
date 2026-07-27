@@ -327,7 +327,10 @@ python3 -m pytest \
   tests/tools/test_check_doc_commands.py \
   tests/tools/test_runtime_strategy_matrix_checker.py \
   tests/tools/test_model_owned_validation_scripts.py \
-  tests/tools/test_test_impact.py -q
+  tests/tools/test_test_impact.py \
+  tests/tools/test_trtmc_validate.py \
+  tests/tools/test_perf_matrix.py::test_release_suite_covers_every_non_l0_ready_model_profile \
+  -q
 PYTHONPATH=python:. python3 tools/test_impact.py --validate
 python3 tools/check_doc_file_references.py --strict --tracked
 python3 tools/check_doc_commands.py
@@ -336,6 +339,9 @@ npm --prefix website ci
 npm --prefix website run build
 git diff --check
 ```
+
+Install `pytest` and `PyYAML` first if the validation environment does not
+provide them. Use Node 20 for the website commands to match CI.
 
 The validator tests protect the checkers themselves;
 `tools/test_impact.py --validate` protects selective-test ownership; the strict

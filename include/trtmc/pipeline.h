@@ -548,13 +548,13 @@ std::unique_ptr<IPipeline> load(const std::string& bundle_path, const LoadOption
 extern "C" {
 
 struct TrtmcPipelineOptions {
-    int max_new_tokens;        // 0 = use model default
-    const char* hf_python;     // nullptr = auto-detect
-    const char* image_path;    // nullptr = text-only
+    int max_new_tokens;     // 0 = use model default
+    const char* hf_python;  // nullptr = auto-detect
+    const char* image_path; // nullptr = text-only
     // nullptr = default cache behavior. Native TRT-RTX uses this as its JIT
     // cache path; optimized runtime uses it as the artifact-cache root.
     const char* runtime_cache;
-    int cuda_graphs;           // 0 = disabled
+    int cuda_graphs; // 0 = disabled
 };
 
 // --- C-linkage subset error codes ---

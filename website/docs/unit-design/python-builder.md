@@ -159,7 +159,10 @@ the C++ native loader. That key must match one strategy declared by a single
 
 ## Runtime config
 
-`python/tensorrt_model_connect/runtime_config/` mirrors C++ config schema logic for build-time and bundle-time config resolution.
+`python/tensorrt_model_connect/runtime_config/` provides Python mirrors of the
+C++ schema and merge helpers. The five layers below are the general
+`ConfigBundle` model, not a claim that every layer is wired into the current
+native build/load path.
 
 The merge order is:
 
@@ -172,7 +175,14 @@ flowchart BT
 ```
 
 Higher layers override lower layers only where the schema allows them. The
-builder writes bundle defaults; successful runtime resolution writes
+ordinary native builder does not automatically write build-time `--config` or
+`--set` values into `config.json.defaults`, and binary header
+`BundleInfo.defaults` is not passed to the runtime resolver. A producer supplies
+`BundleDefault` only by explicitly writing a top-level `defaults` object into
+the materialized `config.json` section. `PipelineFactory` currently combines
+that optional `BundleDefault` with `SessionRequest` from runtime
+`--config`/`--set`; it does not inject separate `BuildTime` or
+`PlatformProfile` contributions. Successful runtime resolution writes
 `<bundle>.effective_config.json` next to the bundle.
 
 ## Builder unit test strategy

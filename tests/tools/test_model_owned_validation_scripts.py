@@ -67,7 +67,8 @@ def test_validate_family_forwards_trust_remote_code_to_bundle_build() -> None:
     assert "TRUST_REMOTE_CODE_ARGS+=(--trust-remote-code)" in text
     assert "BUILD_ARGS=(" in text
     assert '"${TRUST_REMOTE_CODE_ARGS[@]}"' in text
-    assert 'run_step "Build bundle" "$BINARY" "${BUILD_ARGS[@]}"' in text
+    assert 'run_step "Build bundle" build_candidate_bundle' in text
+    assert '-o "$CANDIDATE_BUNDLE_PATH"' in text
 
 
 def test_validate_family_build_invocation_includes_trust_remote_code(
@@ -124,11 +125,18 @@ exit 0
     )
 
     assert result.returncode == 1
-    assert argument_log.read_text(encoding="utf-8").splitlines() == [
+    arguments = argument_log.read_text(encoding="utf-8").splitlines()
+    assert arguments[:3] == [
         "build",
         "org/definitely-not-a-model",
         "-o",
-        str(tmp_path / "org_definitely-not-a-model.trtfb"),
+    ]
+    candidate = Path(arguments[3])
+    assert candidate.name == "org_definitely-not-a-model.trtfb"
+    assert candidate.parent.parent == tmp_path
+    assert candidate.parent.name.startswith(".validate-family-build.")
+    assert candidate != tmp_path / "org_definitely-not-a-model.trtfb"
+    assert arguments[4:] == [
         "--max-cache-length",
         "256",
         "--trust-remote-code",
@@ -153,6 +161,16 @@ def test_validate_family_fails_when_non_decoder_has_no_e2e_manifest(
     fake_binary.write_text(
         """#!/usr/bin/env bash
 if [[ "$1" == "build" ]]; then
+    output=""
+    previous=""
+    for argument in "$@"; do
+        if [[ "$previous" == "-o" ]]; then
+            output="$argument"
+        fi
+        previous="$argument"
+    done
+    mkdir -p "$(dirname "$output")"
+    printf '%s' "built" > "$output"
     exit 0
 fi
 if [[ "$1" == "inspect" ]]; then
@@ -235,6 +253,9 @@ def test_validate_family_e2e_consumes_only_the_current_bundle(
     fake_binary.write_text(
         """#!/usr/bin/env bash
 if [[ "$1" == "build" ]]; then
+    if [[ "${NOOP_BUILD:-}" == "1" ]]; then
+        exit 0
+    fi
     output=""
     previous=""
     for argument in "$@"; do
@@ -304,6 +325,25 @@ exec "$REAL_PYTHON" "$@"
         "PROVEN_BUNDLE_LOG": str(proven_bundle_log),
     }
 
+    bundle_dir.mkdir(parents=True)
+    final_bundle = bundle_dir / "org_unit-model.trtfb"
+    final_bundle.write_text("STALE-BUNDLE", encoding="utf-8")
+    stale = subprocess.run(
+        [*common_command[:2], "org/unit-model", *common_command[2:]],
+        cwd=project_dir,
+        env={**environment, "NOOP_BUILD": "1"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert stale.returncode == 1
+    assert "FAIL  Build bundle" in stale.stdout
+    assert final_bundle.read_text(encoding="utf-8") == "STALE-BUNDLE"
+    assert not pytest_argument_log.exists()
+    assert not list(bundle_dir.glob(".validate-family-build.*"))
+
     exact = subprocess.run(
         [*common_command[:2], "org/unit-model", *common_command[2:]],
         cwd=project_dir,
@@ -316,7 +356,9 @@ exec "$REAL_PYTHON" "$@"
 
     assert exact.returncode == 0, exact.stdout + exact.stderr
     assert proven_bundle_log.read_text(encoding="utf-8") == "org/unit-model"
+    assert final_bundle.read_text(encoding="utf-8") == "org/unit-model"
     assert "--rebuild-engines" not in pytest_argument_log.read_text(encoding="utf-8")
+    assert not list(bundle_dir.glob(".validate-family-build.*"))
 
     pytest_argument_log.unlink()
     local_model = tmp_path / "unit-model-local-checkpoint"

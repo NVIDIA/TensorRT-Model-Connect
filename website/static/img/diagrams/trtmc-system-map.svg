@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1120" height="520" viewBox="0 0 1120 520" role="img" aria-labelledby="title desc">
   <title id="title">TensorRT-Model-Connect build and runtime system map</title>
-  <desc id="desc">A left to right system map from HuggingFace checkpoints through the Python builder, bundle, C++ runtime, and typed task result.</desc>
+  <desc id="desc">A left to right system map from HuggingFace checkpoints through trtmc build, native or optimized bundles, the C++ runtime, and typed task results. Native bundles use runtime strategy and model and backend DSOs. Optimized bundles use optimized runtime metadata and an embedded implementation DSO. Compatible driver, CUDA, TensorRT, loader, and system libraries remain external.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M0 0 10 5 0 10Z" fill="#64748b"/>
@@ -16,7 +16,7 @@
   </defs>
   <rect x="1" y="1" width="1118" height="518" rx="18" fill="#fbfcfe" stroke="#d0d7e2"/>
   <text x="48" y="58" class="title">Build -> bundle -> runtime</text>
-  <text x="48" y="88" class="subtitle">Python converts checkpoints. C++ loads bundles and serves typed task APIs.</text>
+  <text x="48" y="88" class="subtitle">trtmc build selects a native family or an exact qualified optimized adapter. C++ serves typed task APIs.</text>
 
   <g>
     <rect x="48" y="150" width="184" height="190" rx="16" fill="#eef6ff" stroke="#93c5fd" stroke-width="2"/>
@@ -29,33 +29,33 @@
 
   <g>
     <rect x="276" y="150" width="184" height="190" rx="16" class="card"/>
-    <text x="368" y="190" text-anchor="middle" class="label">Python builder</text>
-    <text x="368" y="220" text-anchor="middle" class="small">ModelConfig</text>
-    <text x="368" y="242" text-anchor="middle" class="small">FamilyPlugin</text>
-    <text x="368" y="264" text-anchor="middle" class="small">TensorRT export</text>
+    <text x="368" y="190" text-anchor="middle" class="label">trtmc build</text>
+    <text x="368" y="220" text-anchor="middle" class="small">native: FamilyPlugin</text>
+    <text x="368" y="242" text-anchor="middle" class="small">optimized: exact profile</text>
+    <text x="368" y="264" text-anchor="middle" class="small">TensorRT artifact build</text>
     <rect x="300" y="286" width="136" height="28" rx="14" fill="#dcfce7"/>
-    <text x="368" y="305" text-anchor="middle" class="pill">build-time logic</text>
+    <text x="368" y="305" text-anchor="middle" class="pill">build-time selection</text>
   </g>
 
   <g>
     <rect x="504" y="132" width="184" height="226" rx="18" fill="#fff7ed" stroke="#f59e0b" stroke-width="3"/>
     <text x="596" y="176" text-anchor="middle" class="label">.trtfb bundle</text>
-    <text x="596" y="208" text-anchor="middle" class="small">engine plans</text>
-    <text x="596" y="230" text-anchor="middle" class="small">tokenizer assets</text>
-    <text x="596" y="252" text-anchor="middle" class="small">model metadata</text>
-    <text x="596" y="274" text-anchor="middle" class="small">runtime_strategy</text>
+    <text x="596" y="208" text-anchor="middle" class="small">native: plans + assets</text>
+    <text x="596" y="230" text-anchor="middle" class="small">runtime_strategy + config</text>
+    <text x="596" y="252" text-anchor="middle" class="small">optimized_runtime.json</text>
+    <text x="596" y="274" text-anchor="middle" class="small">embedded implementation DSO</text>
     <rect x="534" y="306" width="124" height="28" rx="14" fill="#fef3c7"/>
-    <text x="596" y="325" text-anchor="middle" class="pill">handoff contract</text>
+    <text x="596" y="325" text-anchor="middle" class="pill">artifact contract</text>
   </g>
 
   <g>
     <rect x="732" y="150" width="184" height="190" rx="16" class="card"/>
     <text x="824" y="190" text-anchor="middle" class="label">C++ runtime</text>
     <text x="824" y="220" text-anchor="middle" class="small">PipelineFactory</text>
-    <text x="824" y="242" text-anchor="middle" class="small">Registry + plugin</text>
-    <text x="824" y="264" text-anchor="middle" class="small">Backend DSO</text>
+    <text x="824" y="242" text-anchor="middle" class="small">native: model + backend DSO</text>
+    <text x="824" y="264" text-anchor="middle" class="small">optimized: implementation DSO</text>
     <rect x="758" y="286" width="132" height="28" rx="14" fill="#ede9fe"/>
-    <text x="824" y="305" text-anchor="middle" class="pill">request-time API</text>
+    <text x="824" y="305" text-anchor="middle" class="pill">task-specific API</text>
   </g>
 
   <g>
@@ -73,7 +73,8 @@
   <line x1="916" y1="245" x2="960" y2="245" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
 
   <rect x="72" y="390" width="976" height="64" rx="14" fill="#f8fafc" stroke="#d0d7e2"/>
-  <text x="98" y="416" class="small">Key idea:</text>
-  <text x="166" y="416" class="small">the bundle is the stable build/runtime boundary. It lets model-specific Python conversion stay separate from native deployment code.</text>
-  <text x="98" y="440" class="small">Runtime dispatch uses `runtime_strategy` to choose the C++ plugin and task pipeline for that artifact.</text>
+  <text x="98" y="416" class="small">Dispatch:</text>
+  <text x="166" y="416" class="small">native bundles use runtime_strategy; optimized bundles use optimized_runtime.json before native materialization.</text>
+  <text x="98" y="440" class="small">External runtime:</text>
+  <text x="206" y="440" class="small">compatible NVIDIA driver, CUDA/TensorRT cohort, dynamic loader, and system libraries.</text>
 </svg>

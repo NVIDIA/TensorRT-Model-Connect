@@ -359,8 +359,7 @@ class WanT2VPlugin:
             tokenizer_dir = model_dir / tok_subdir
             if not tokenizer_dir.is_dir():
                 continue
-            if not (tokenizer_dir / "tokenizer.json").exists():
-                ensure_tokenizer_json(tokenizer_dir)
+            ensure_tokenizer_json(tokenizer_dir)
             for filename in token_filenames:
                 if filename in embedded:
                     continue
