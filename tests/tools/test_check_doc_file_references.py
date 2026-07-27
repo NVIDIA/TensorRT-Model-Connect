@@ -225,6 +225,102 @@ def test_shell_continuation_keeps_non_output_inputs_visible() -> None:
     ]
 
 
+def test_quoted_shell_outputs_are_skipped_but_later_inputs_are_kept() -> None:
+    content = (
+        "```bash\n"
+        'python3 tools/generate.py --output "reports/generated.json" '
+        "tests/fixtures/first.json\n"
+        "python3 tools/generate.py \\\n"
+        "  > \\\n"
+        '  "reports/stdout.txt" tests/fixtures/second.json\n'
+        "python3 tools/generate.py 1> 'reports/fd-one.txt' "
+        "tests/fixtures/third.json\n"
+        'python3 tools/generate.py &>"reports/combined.txt" '
+        "tests/fixtures/fourth.json\n"
+        'python3 tools/generate.py -o"reports/attached.txt" '
+        "tests/fixtures/fifth.json\n"
+        "```\n"
+    )
+
+    assert cdfr.extract_path_references(content, "README.md") == [
+        (2, "tools/generate.py"),
+        (2, "tests/fixtures/first.json"),
+        (3, "tools/generate.py"),
+        (5, "tests/fixtures/second.json"),
+        (6, "tools/generate.py"),
+        (6, "tests/fixtures/third.json"),
+        (7, "tools/generate.py"),
+        (7, "tests/fixtures/fourth.json"),
+        (8, "tools/generate.py"),
+        (8, "tests/fixtures/fifth.json"),
+    ]
+
+
+def test_boolean_json_flag_does_not_hide_following_input(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "count_diffusion_frame_pairs.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        'parser.add_argument("artifacts_dir")\n'
+        'parser.add_argument("--json", action="store_true")\n',
+        encoding="utf-8",
+    )
+    doc = tmp_path / "README.md"
+    doc.write_text(
+        "```bash\n"
+        "python3 tools/count_diffusion_frame_pairs.py --json "
+        "tests/e2e/definitely-missing-artifacts\n"
+        "```\n",
+        encoding="utf-8",
+    )
+
+    report = cdfr.check_markdown_files([doc], tmp_path)
+
+    assert [finding.message for finding in report.findings] == [
+        "Path does not exist: tests/e2e/definitely-missing-artifacts"
+    ]
+
+
+def test_value_taking_json_option_exempts_only_its_output(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "diff.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        'parser.add_argument("--json")\n'
+        'parser.add_argument("input")\n',
+        encoding="utf-8",
+    )
+    input_path = tmp_path / "tests" / "fixtures" / "input.json"
+    input_path.parent.mkdir(parents=True)
+    input_path.write_text("{}\n", encoding="utf-8")
+    doc = tmp_path / "README.md"
+    doc.write_text(
+        "```bash\n"
+        'python3 tools/diff.py --json "reports/generated.json" '
+        "tests/fixtures/input.json\n"
+        "```\n",
+        encoding="utf-8",
+    )
+
+    report = cdfr.check_markdown_files([doc], tmp_path)
+
+    assert report.findings == []
+    assert cdfr.extract_path_references(
+        doc.read_text(encoding="utf-8"),
+        "README.md",
+        tmp_path,
+    ) == [
+        (2, "tools/diff.py"),
+        (2, "tests/fixtures/input.json"),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # retired truth surfaces
 # ---------------------------------------------------------------------------

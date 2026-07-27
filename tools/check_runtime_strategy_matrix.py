@@ -45,10 +45,6 @@ def _is_nonempty_str(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def _class_basename(class_ref: str) -> str:
-    return class_ref.rsplit(".", 1)[-1].strip()
-
-
 def load_yaml_like(path: Path) -> Any:
     """Load YAML if available, otherwise require JSON-compatible YAML."""
     text = path.read_text(encoding="utf-8")
@@ -203,6 +199,48 @@ class _SymbolRef:
     module: str
     name: str
 
+    def qualified_name(self) -> str:
+        return f"{self.module}.{self.name}"
+
+
+def _canonical_plugin_class_ref(
+    value: str,
+    *,
+    entrypoint_module: str,
+    implementation_package: str,
+) -> _SymbolRef | None:
+    """Normalize the matrix's one-module shorthand without dropping identity."""
+    if "." not in value:
+        return None
+    module, class_name = value.rsplit(".", 1)
+    module = module.strip()
+    class_name = class_name.strip()
+    if not module or not class_name:
+        return None
+    if module != entrypoint_module and not module.startswith(f"{implementation_package}."):
+        # Existing matrix rows use ``diffusion.Runner`` as a stable shorthand
+        # for ``runners.diffusion.Runner``. Multi-segment module paths are
+        # already explicit and must not be rewritten.
+        if "." not in module:
+            module = f"{implementation_package}.{module}"
+    return _SymbolRef(module, class_name)
+
+
+def _canonical_runner_class_ref(value: str) -> _SymbolRef | None:
+    return _canonical_plugin_class_ref(
+        value,
+        entrypoint_module="runner",
+        implementation_package="runners",
+    )
+
+
+def _canonical_comparator_class_ref(value: str) -> _SymbolRef | None:
+    return _canonical_plugin_class_ref(
+        value,
+        entrypoint_module="comparator",
+        implementation_package="comparators",
+    )
+
 
 @dataclass
 class _ModuleContract:
@@ -319,11 +357,62 @@ def _resolve_reference(
         ):
             return _SymbolRef(current_module, expression.id)
         return contract.imported_symbols.get(expression.id)
-    if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
-        imported_module = contract.imported_modules.get(expression.value.id)
+    if isinstance(expression, ast.Attribute):
+        imported_module = _resolve_module_expression(
+            expression.value,
+            current_module=current_module,
+            modules=modules,
+        )
         if imported_module is not None:
             return _SymbolRef(imported_module, expression.attr)
     return None
+
+
+def _resolve_module_expression(
+    expression: ast.expr,
+    *,
+    current_module: str,
+    modules: dict[str, _ModuleContract],
+) -> str | None:
+    """Resolve imported modules, including recursive package re-exports."""
+    contract = modules.get(current_module)
+    if contract is None:
+        return None
+    if isinstance(expression, ast.Name):
+        imported_module = contract.imported_modules.get(expression.id)
+        if imported_module in modules:
+            return imported_module
+        imported_symbol = contract.imported_symbols.get(expression.id)
+        if imported_symbol is None:
+            return None
+        candidate_module = ".".join(
+            part for part in (imported_symbol.module, imported_symbol.name) if part
+        )
+        return candidate_module if candidate_module in modules else None
+    if not isinstance(expression, ast.Attribute):
+        return None
+
+    parent_module = _resolve_module_expression(
+        expression.value,
+        current_module=current_module,
+        modules=modules,
+    )
+    if parent_module is None:
+        return None
+    parent_contract = modules.get(parent_module)
+    if parent_contract is None:
+        return None
+
+    imported_module = parent_contract.imported_modules.get(expression.attr)
+    if imported_module in modules:
+        return imported_module
+    imported_symbol = parent_contract.imported_symbols.get(expression.attr)
+    if imported_symbol is None:
+        return None
+    candidate_module = ".".join(
+        part for part in (imported_symbol.module, imported_symbol.name) if part
+    )
+    return candidate_module if candidate_module in modules else None
 
 
 def _resolve_definition(
@@ -351,12 +440,15 @@ def _resolve_definition(
     return _resolve_definition(imported, modules=modules, kind=kind, seen=seen)
 
 
-def _active_runner_class_refs(
+def _active_entrypoint_class_refs(
     modules: dict[str, _ModuleContract],
+    *,
+    entrypoint_module: str,
+    assignment_name: str,
 ) -> set[_SymbolRef]:
-    """Extract module-qualified classes instantiated by the ``runner`` entrypoint."""
-    runner_contract = modules.get("runner")
-    if runner_contract is None or "runner" not in runner_contract.assignments:
+    """Extract module-qualified classes instantiated by a plugin entrypoint."""
+    entrypoint_contract = modules.get(entrypoint_module)
+    if entrypoint_contract is None or assignment_name not in entrypoint_contract.assignments:
         return set()
 
     active_classes: set[_SymbolRef] = set()
@@ -409,12 +501,35 @@ def _active_runner_class_refs(
             if isinstance(child, ast.expr):
                 visit_expression(child, current_module)
 
-    visit_expression(runner_contract.assignments["runner"], "runner")
+    visit_expression(
+        entrypoint_contract.assignments[assignment_name],
+        entrypoint_module,
+    )
     return active_classes
 
 
-def _runner_class_lineage(
-    runner_class: _SymbolRef,
+def _active_runner_class_refs(
+    modules: dict[str, _ModuleContract],
+) -> set[_SymbolRef]:
+    return _active_entrypoint_class_refs(
+        modules,
+        entrypoint_module="runner",
+        assignment_name="runner",
+    )
+
+
+def _active_comparator_class_refs(
+    modules: dict[str, _ModuleContract],
+) -> set[_SymbolRef]:
+    return _active_entrypoint_class_refs(
+        modules,
+        entrypoint_module="comparator",
+        assignment_name="comparator",
+    )
+
+
+def _class_lineage(
+    class_reference: _SymbolRef,
     modules: dict[str, _ModuleContract],
 ) -> set[_SymbolRef]:
     lineage: set[_SymbolRef] = set()
@@ -435,7 +550,7 @@ def _runner_class_lineage(
             if base_ref is not None:
                 visit(base_ref)
 
-    visit(runner_class)
+    visit(class_reference)
     return lineage
 
 
@@ -579,12 +694,14 @@ def extract_runtime_cli_commands_from_e2e_plugins(
                 _active_runner_class_refs(modules),
             )
         modules, active_runner_classes = owner_contracts[owner_dir]
-        declared_runner_class = _class_basename(runner_class_ref)
+        declared_runner_class = _canonical_runner_class_ref(runner_class_ref)
+        if declared_runner_class is None:
+            runtime_commands.setdefault(runtime_strategy, set())
+            continue
         matching_active_classes = {
             active_class
             for active_class in active_runner_classes
-            if declared_runner_class
-            in {item.name for item in _runner_class_lineage(active_class, modules)}
+            if declared_runner_class in _class_lineage(active_class, modules)
         }
         runtime_commands.setdefault(runtime_strategy, set()).update(
             command
@@ -597,6 +714,69 @@ def extract_runtime_cli_commands_from_e2e_plugins(
         )
 
     return runtime_commands
+
+
+def extract_active_comparator_classes_by_runtime(
+    models_dir: Path,
+) -> dict[str, set[str]]:
+    """Map each manifest runtime to its owner's active comparator lineage."""
+    runtime_classes: dict[str, set[str]] = {}
+    owner_contracts: dict[
+        Path,
+        tuple[dict[str, _ModuleContract], set[_SymbolRef]],
+    ] = {}
+
+    for manifest_path in _iter_e2e_manifest_paths(models_dir):
+        try:
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        runtime_strategy = raw.get("runtime_strategy")
+        task_strategy = raw.get("task_strategy")
+        if not _is_nonempty_str(runtime_strategy) or not _is_nonempty_str(task_strategy):
+            continue
+
+        if manifest_path.parent.name == "manifests":
+            owner_dir = manifest_path.parent.parent
+        else:
+            family = raw.get("family")
+            if not _is_nonempty_str(family):
+                continue
+            owner_dir = models_dir / family
+
+        if owner_dir not in owner_contracts:
+            modules = _plugin_contract_modules(owner_dir / "e2e_plugins")
+            owner_contracts[owner_dir] = (
+                modules,
+                _active_comparator_class_refs(modules),
+            )
+        modules, active_comparator_classes = owner_contracts[owner_dir]
+        owner_runtime_lineage: set[str] = set()
+        for active_class in active_comparator_classes:
+            lineage = _class_lineage(active_class, modules)
+            lineage_tasks = {
+                task
+                for class_ref in lineage
+                if (
+                    task := _extract_constant_return(
+                        modules[class_ref.module].classes[class_ref.name],
+                        "task_strategy",
+                    )
+                )
+                is not None
+            }
+            if task_strategy not in lineage_tasks:
+                continue
+            owner_runtime_lineage.update(class_ref.qualified_name() for class_ref in lineage)
+        if runtime_strategy not in runtime_classes:
+            runtime_classes[runtime_strategy] = owner_runtime_lineage
+        else:
+            # One matrix row governs every owner of a runtime. Requiring the
+            # shared intersection prevents one owner from lending its active
+            # comparator to another owner that does not expose that lineage.
+            runtime_classes[runtime_strategy].intersection_update(owner_runtime_lineage)
+
+    return runtime_classes
 
 
 def extract_runtime_to_task_strategy_from_manifests(models_dir: Path) -> dict[str, str]:
@@ -660,7 +840,25 @@ def _iter_plugin_python_files(root: Path, kind: str) -> Iterable[Path]:
             yield entrypoint
 
 
-def _extract_class_map_by_method(root: Path, kind: str, method_name: str) -> dict[str, set[str]]:
+def _qualified_plugin_class_name(
+    file_path: Path,
+    *,
+    kind: str,
+    class_name: str,
+) -> str:
+    entrypoint_module = "runner" if kind == "runners" else "comparator"
+    if file_path.name == f"{entrypoint_module}.py":
+        module = entrypoint_module
+    else:
+        module = f"{kind}.{file_path.stem}"
+    return f"{module}.{class_name}"
+
+
+def _extract_class_map_by_method(
+    root: Path,
+    kind: str,
+    method_name: str,
+) -> dict[str, set[str]]:
     mapping: dict[str, set[str]] = {}
     for file_path in _iter_plugin_python_files(root, kind):
         if file_path.name.startswith("_"):
@@ -672,7 +870,13 @@ def _extract_class_map_by_method(root: Path, kind: str, method_name: str) -> dic
             key = _extract_constant_return(node, method_name)
             if key is None:
                 continue
-            mapping.setdefault(key, set()).add(node.name)
+            mapping.setdefault(key, set()).add(
+                _qualified_plugin_class_name(
+                    file_path,
+                    kind=kind,
+                    class_name=node.name,
+                )
+            )
     return mapping
 
 
@@ -738,6 +942,7 @@ def validate_matrix_data(
     comparator_classes_by_task: dict[str, set[str]],
     native_cli_commands: set[str],
     runner_cli_commands_by_runtime: dict[str, set[str]],
+    active_comparator_classes_by_runtime: dict[str, set[str]],
 ) -> list[str]:
     """Validate matrix consistency and coverage requirements."""
     errors: list[str] = []
@@ -831,11 +1036,15 @@ def validate_matrix_data(
             errors.append(f"{runtime_strategy}: 'runner_class' must be a non-empty string.")
         else:
             expected_runner_classes = runner_classes_by_task.get(expected_task, set())
+            canonical_runner_ref = _canonical_runner_class_ref(runner_class_ref)
             if not expected_runner_classes:
                 errors.append(
                     f"{runtime_strategy}: no runner class found for task_strategy '{expected_task}'."
                 )
-            elif _class_basename(runner_class_ref) not in expected_runner_classes:
+            elif (
+                canonical_runner_ref is None
+                or canonical_runner_ref.qualified_name() not in expected_runner_classes
+            ):
                 errors.append(
                     f"{runtime_strategy}: runner_class '{runner_class_ref}' "
                     f"not in discovered runner classes {sorted(expected_runner_classes)}."
@@ -850,15 +1059,33 @@ def validate_matrix_data(
 
         if _is_nonempty_str(comparator_class_ref):
             expected_comparator_classes = comparator_classes_by_task.get(expected_task, set())
+            canonical_comparator_ref = _canonical_comparator_class_ref(comparator_class_ref)
             if not expected_comparator_classes:
                 errors.append(
                     f"{runtime_strategy}: no comparator class found for task_strategy '{expected_task}'."
                 )
-            elif _class_basename(comparator_class_ref) not in expected_comparator_classes:
+            elif (
+                canonical_comparator_ref is None
+                or canonical_comparator_ref.qualified_name() not in expected_comparator_classes
+            ):
                 errors.append(
                     f"{runtime_strategy}: comparator_class '{comparator_class_ref}' "
                     f"not in discovered comparator classes {sorted(expected_comparator_classes)}."
                 )
+            if runtime_strategy in manifest_strategies:
+                active_owner_comparators = active_comparator_classes_by_runtime.get(
+                    runtime_strategy, set()
+                )
+                if (
+                    canonical_comparator_ref is None
+                    or canonical_comparator_ref.qualified_name() not in active_owner_comparators
+                ):
+                    errors.append(
+                        f"{runtime_strategy}: comparator_class '{comparator_class_ref}' "
+                        "is not in the active comparator lineage for its manifest "
+                        "owner/runtime; discovered active comparator classes: "
+                        f"{sorted(active_owner_comparators)}."
+                    )
 
         matrix_diff_checks = entry.get("diff_framework_check_classes", [])
         if not isinstance(matrix_diff_checks, list):
@@ -924,6 +1151,9 @@ def validate_matrix_paths(
         e2e_models_dir,
         native_cli_commands,
     )
+    active_comparator_classes_by_runtime = extract_active_comparator_classes_by_runtime(
+        e2e_models_dir
+    )
     candidate_strategies = set(matrix.keys()) | set(runtime_to_task_strategy.keys())
 
     runtime_cpp_files = discover_runtime_strategy_source_files(
@@ -951,6 +1181,7 @@ def validate_matrix_paths(
         comparator_classes_by_task=comparator_classes_by_task,
         native_cli_commands=native_cli_commands,
         runner_cli_commands_by_runtime=runner_cli_commands_by_runtime,
+        active_comparator_classes_by_runtime=active_comparator_classes_by_runtime,
     )
 
 

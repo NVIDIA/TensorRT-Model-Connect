@@ -147,10 +147,10 @@ class TextComparator:
 
     models_dir = tmp_path / "tests" / "e2e" / "models"
     assert mod.extract_runner_classes_by_task_strategy(models_dir) == {
-        "text_generation_causal": {"TextGenerationCausalRunner"},
+        "text_generation_causal": {"runners.text_generation.TextGenerationCausalRunner"},
     }
     assert mod.extract_comparator_classes_by_task_strategy(models_dir) == {
-        "text_generation_causal": {"TextComparator"},
+        "text_generation_causal": {"comparators.text.TextComparator"},
     }
 
 
@@ -181,8 +181,8 @@ class ActiveSpeechRunner:
 
     models_dir = tmp_path / "tests" / "e2e" / "models"
     assert mod.extract_runner_classes_by_task_strategy(models_dir) == {
-        "example_speech_runtime": {"RuntimeSpecificRunner"},
-        "speech_to_text": {"ActiveSpeechRunner"},
+        "example_speech_runtime": {"runners.audio.RuntimeSpecificRunner"},
+        "speech_to_text": {"runner.ActiveSpeechRunner"},
     }
 
 
@@ -245,7 +245,7 @@ runner = PromptedSegmentationRunner()
     )
 
     assert mod.extract_runtime_cli_commands_from_e2e_plugins(
-        {"sam3_prompted_segmentation": {"runner_class": "segmentation.PromptedSegmentationRunner"}},
+        {"sam3_prompted_segmentation": {"runner_class": "runner.PromptedSegmentationRunner"}},
         models_dir,
         {"segment", "segment-prompted"},
     ) == {"sam3_prompted_segmentation": {"segment-prompted"}}
@@ -292,8 +292,8 @@ runner = [EmbeddingRunner(), RerankingRunner()]
 
     commands = mod.extract_runtime_cli_commands_from_e2e_plugins(
         {
-            "dual_embedding": {"runner_class": "embedding.EmbeddingRunner"},
-            "dual_reranking": {"runner_class": "reranking.RerankingRunner"},
+            "dual_embedding": {"runner_class": "runner.EmbeddingRunner"},
+            "dual_reranking": {"runner_class": "runner.RerankingRunner"},
         },
         models_dir,
         {"embed", "rerank"},
@@ -347,6 +347,167 @@ runner = plugin
         models_dir,
         {"generate-video"},
     ) == {"video_runtime": {"generate-video"}}
+
+
+def test_runtime_command_discovery_resolves_package_module_aliases(tmp_path: Path):
+    mod = _import_checker()
+    models_dir = tmp_path / "tests" / "e2e" / "models"
+    owner_dir = models_dir / "module_alias"
+    manifest_dir = owner_dir / "manifests"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "module-alias.json").write_text(
+        """
+{
+  "family": "module_alias",
+  "runtime_strategy": "module_alias_runtime",
+  "task_strategy": "text_generation_causal"
+}
+        """,
+        encoding="utf-8",
+    )
+    plugin_dir = owner_dir / "e2e_plugins"
+    runners_dir = plugin_dir / "runners"
+    runners_dir.mkdir(parents=True)
+    (runners_dir / "base.py").write_text(
+        """
+class Parent:
+    def run_stage(self, binary, bundle):
+        return [binary, "run", bundle]
+        """,
+        encoding="utf-8",
+    )
+    (runners_dir / "active.py").write_text(
+        """
+from . import base
+
+class ActiveRunner(base.Parent):
+    pass
+        """,
+        encoding="utf-8",
+    )
+    (plugin_dir / "runner.py").write_text(
+        """
+from .runners import active as selected
+
+runner = selected.ActiveRunner()
+        """,
+        encoding="utf-8",
+    )
+
+    assert mod.extract_runtime_cli_commands_from_e2e_plugins(
+        {"module_alias_runtime": {"runner_class": "active.ActiveRunner"}},
+        models_dir,
+        {"run"},
+    ) == {"module_alias_runtime": {"run"}}
+
+
+def test_runtime_command_discovery_resolves_recursive_package_reexport(
+    tmp_path: Path,
+):
+    mod = _import_checker()
+    models_dir = tmp_path / "tests" / "e2e" / "models"
+    owner_dir = models_dir / "package_reexport"
+    manifest_dir = owner_dir / "manifests"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "package-reexport.json").write_text(
+        """
+{
+  "family": "package_reexport",
+  "runtime_strategy": "package_reexport_runtime",
+  "task_strategy": "text_generation_causal"
+}
+        """,
+        encoding="utf-8",
+    )
+    plugin_dir = owner_dir / "e2e_plugins"
+    runners_dir = plugin_dir / "runners"
+    runners_dir.mkdir(parents=True)
+    (runners_dir / "__init__.py").write_text(
+        "from . import active\n",
+        encoding="utf-8",
+    )
+    (runners_dir / "active.py").write_text(
+        """
+class ActiveRunner:
+    def run_stage(self, binary, bundle):
+        return [binary, "run", bundle]
+        """,
+        encoding="utf-8",
+    )
+    (plugin_dir / "runner.py").write_text(
+        """
+from . import runners
+
+runner = runners.active.ActiveRunner()
+        """,
+        encoding="utf-8",
+    )
+
+    assert mod.extract_runtime_cli_commands_from_e2e_plugins(
+        {"package_reexport_runtime": {"runner_class": "active.ActiveRunner"}},
+        models_dir,
+        {"run"},
+    ) == {"package_reexport_runtime": {"run"}}
+
+
+def test_runtime_command_discovery_distinguishes_two_active_same_name_runners(
+    tmp_path: Path,
+):
+    mod = _import_checker()
+    models_dir = tmp_path / "tests" / "e2e" / "models"
+    owner_dir = models_dir / "same_name"
+    manifest_dir = owner_dir / "manifests"
+    manifest_dir.mkdir(parents=True)
+    for runtime_strategy in ("alpha_runtime", "beta_runtime"):
+        (manifest_dir / f"{runtime_strategy}.json").write_text(
+            f"""
+{{
+  "family": "same_name",
+  "runtime_strategy": "{runtime_strategy}",
+  "task_strategy": "text_generation_causal"
+}}
+            """,
+            encoding="utf-8",
+        )
+    plugin_dir = owner_dir / "e2e_plugins"
+    runners_dir = plugin_dir / "runners"
+    runners_dir.mkdir(parents=True)
+    (runners_dir / "alpha.py").write_text(
+        """
+class SameNameRunner:
+    def run_stage(self, binary, bundle):
+        return [binary, "run", bundle]
+        """,
+        encoding="utf-8",
+    )
+    (runners_dir / "beta.py").write_text(
+        """
+class SameNameRunner:
+    def run_stage(self, binary, bundle):
+        return [binary, "segment", bundle]
+        """,
+        encoding="utf-8",
+    )
+    (plugin_dir / "runner.py").write_text(
+        """
+from .runners import alpha, beta
+
+runner = [alpha.SameNameRunner(), beta.SameNameRunner()]
+        """,
+        encoding="utf-8",
+    )
+
+    assert mod.extract_runtime_cli_commands_from_e2e_plugins(
+        {
+            "alpha_runtime": {"runner_class": "alpha.SameNameRunner"},
+            "beta_runtime": {"runner_class": "beta.SameNameRunner"},
+        },
+        models_dir,
+        {"run", "segment"},
+    ) == {
+        "alpha_runtime": {"run"},
+        "beta_runtime": {"segment"},
+    }
 
 
 def test_runtime_command_discovery_is_module_qualified_for_duplicate_symbols(
@@ -405,6 +566,11 @@ runner = DuplicateNameRunner()
         models_dir,
         {"run", "segment"},
     ) == {"active_runtime": {"run"}}
+    assert mod.extract_runtime_cli_commands_from_e2e_plugins(
+        {"active_runtime": {"runner_class": "inactive.DuplicateNameRunner"}},
+        models_dir,
+        {"run", "segment"},
+    ) == {"active_runtime": set()}
 
 
 def test_validate_matrix_data_requires_exemption_when_no_diff_check():
@@ -414,18 +580,23 @@ def test_validate_matrix_data_requires_exemption_when_no_diff_check():
             "unit_recurrent": {
                 "task_strategy": "text_generation_causal",
                 "cli_commands": ["run"],
-                "runner_class": "TextGenerationCausalRunner",
-                "comparator_class": "TextComparator",
+                "runner_class": "text_generation.TextGenerationCausalRunner",
+                "comparator_class": "text.TextComparator",
                 "diff_framework_check_classes": [],
             }
         },
         cpp_runtime_strategies={"unit_recurrent"},
         runtime_to_task_strategy={"unit_recurrent": "text_generation_causal"},
         diff_check_classes=set(),
-        runner_classes_by_task={"text_generation_causal": {"TextGenerationCausalRunner"}},
-        comparator_classes_by_task={"text_generation_causal": {"TextComparator"}},
+        runner_classes_by_task={
+            "text_generation_causal": {"runners.text_generation.TextGenerationCausalRunner"}
+        },
+        comparator_classes_by_task={"text_generation_causal": {"comparators.text.TextComparator"}},
         native_cli_commands={"run"},
         runner_cli_commands_by_runtime={"unit_recurrent": {"run"}},
+        active_comparator_classes_by_runtime={
+            "unit_recurrent": {"comparators.text.TextComparator"}
+        },
     )
 
     assert any("diff_framework_exemption" in message for message in errors)
@@ -438,18 +609,25 @@ def test_validate_matrix_data_detects_runtime_source_mismatch():
             "qwen_vl_vision_language": {
                 "task_strategy": "vision_language_generation",
                 "cli_commands": ["run"],
-                "runner_class": "VisionLanguageRunner",
-                "comparator_class": "VisionLanguageComparator",
+                "runner_class": "vision_language.VisionLanguageRunner",
+                "comparator_class": "vision_language.VisionLanguageComparator",
                 "diff_framework_check_classes": ["VLPipelineTest"],
             }
         },
         cpp_runtime_strategies={"qwen_vl_vision_language", "future_runtime_strategy"},
         runtime_to_task_strategy={"qwen_vl_vision_language": "vision_language_generation"},
         diff_check_classes={"VLPipelineTest"},
-        runner_classes_by_task={"vision_language_generation": {"VisionLanguageRunner"}},
-        comparator_classes_by_task={"vision_language_generation": {"VisionLanguageComparator"}},
+        runner_classes_by_task={
+            "vision_language_generation": {"runners.vision_language.VisionLanguageRunner"}
+        },
+        comparator_classes_by_task={
+            "vision_language_generation": {"comparators.vision_language.VisionLanguageComparator"}
+        },
         native_cli_commands={"run"},
         runner_cli_commands_by_runtime={"qwen_vl_vision_language": {"run"}},
+        active_comparator_classes_by_runtime={
+            "qwen_vl_vision_language": {"comparators.vision_language.VisionLanguageComparator"}
+        },
     )
 
     assert any("missing runtime strategies from runtime sources" in message for message in errors)
@@ -462,8 +640,8 @@ def test_validate_matrix_data_rejects_source_less_matrix_row():
             "retired_runtime": {
                 "task_strategy": "text_generation_causal",
                 "cli_commands": ["run"],
-                "runner_class": "TextGenerationCausalRunner",
-                "comparator_class": "TextComparator",
+                "runner_class": "text_generation.TextGenerationCausalRunner",
+                "comparator_class": "text.TextComparator",
                 "diff_framework_check_classes": [],
                 "diff_framework_exemption": "No active diff check.",
                 "performance_mode": "decode",
@@ -472,10 +650,13 @@ def test_validate_matrix_data_rejects_source_less_matrix_row():
         cpp_runtime_strategies=set(),
         runtime_to_task_strategy={},
         diff_check_classes=set(),
-        runner_classes_by_task={"text_generation_causal": {"TextGenerationCausalRunner"}},
-        comparator_classes_by_task={"text_generation_causal": {"TextComparator"}},
+        runner_classes_by_task={
+            "text_generation_causal": {"runners.text_generation.TextGenerationCausalRunner"}
+        },
+        comparator_classes_by_task={"text_generation_causal": {"comparators.text.TextComparator"}},
         native_cli_commands={"run"},
         runner_cli_commands_by_runtime={},
+        active_comparator_classes_by_runtime={},
     )
 
     assert any("absent from runtime sources and E2E manifests" in message for message in errors)
@@ -488,8 +669,8 @@ def test_validate_matrix_data_rejects_non_native_cli_command():
             "unit_recurrent": {
                 "task_strategy": "text_generation_causal",
                 "cli_commands": ["definitely-not-a-command"],
-                "runner_class": "TextGenerationCausalRunner",
-                "comparator_class": "TextComparator",
+                "runner_class": "text_generation.TextGenerationCausalRunner",
+                "comparator_class": "text.TextComparator",
                 "diff_framework_check_classes": [],
                 "diff_framework_exemption": "No active diff check.",
                 "performance_mode": "decode",
@@ -498,10 +679,15 @@ def test_validate_matrix_data_rejects_non_native_cli_command():
         cpp_runtime_strategies={"unit_recurrent"},
         runtime_to_task_strategy={"unit_recurrent": "text_generation_causal"},
         diff_check_classes=set(),
-        runner_classes_by_task={"text_generation_causal": {"TextGenerationCausalRunner"}},
-        comparator_classes_by_task={"text_generation_causal": {"TextComparator"}},
+        runner_classes_by_task={
+            "text_generation_causal": {"runners.text_generation.TextGenerationCausalRunner"}
+        },
+        comparator_classes_by_task={"text_generation_causal": {"comparators.text.TextComparator"}},
         native_cli_commands={"run"},
         runner_cli_commands_by_runtime={"unit_recurrent": {"run"}},
+        active_comparator_classes_by_runtime={
+            "unit_recurrent": {"comparators.text.TextComparator"}
+        },
     )
 
     assert any("not accepted by the native CLI" in message for message in errors)
@@ -514,8 +700,8 @@ def test_validate_matrix_data_rejects_command_not_used_by_runtime_runner():
             "sam3_prompted_segmentation": {
                 "task_strategy": "prompted_segmentation",
                 "cli_commands": ["segment"],
-                "runner_class": "PromptedSegmentationRunner",
-                "comparator_class": "PromptedSegmentationComparator",
+                "runner_class": "segmentation.PromptedSegmentationRunner",
+                "comparator_class": "segmentation.PromptedSegmentationComparator",
                 "diff_framework_check_classes": [],
                 "diff_framework_exemption": "No active diff check.",
                 "performance_mode": "single_pass",
@@ -524,10 +710,19 @@ def test_validate_matrix_data_rejects_command_not_used_by_runtime_runner():
         cpp_runtime_strategies={"sam3_prompted_segmentation"},
         runtime_to_task_strategy={"sam3_prompted_segmentation": "prompted_segmentation"},
         diff_check_classes=set(),
-        runner_classes_by_task={"prompted_segmentation": {"PromptedSegmentationRunner"}},
-        comparator_classes_by_task={"prompted_segmentation": {"PromptedSegmentationComparator"}},
+        runner_classes_by_task={
+            "prompted_segmentation": {"runners.segmentation.PromptedSegmentationRunner"}
+        },
+        comparator_classes_by_task={
+            "prompted_segmentation": {"comparators.segmentation.PromptedSegmentationComparator"}
+        },
         native_cli_commands={"segment", "segment-prompted"},
         runner_cli_commands_by_runtime={"sam3_prompted_segmentation": {"segment-prompted"}},
+        active_comparator_classes_by_runtime={
+            "sam3_prompted_segmentation": {
+                "comparators.segmentation.PromptedSegmentationComparator"
+            }
+        },
     )
 
     assert any(
@@ -542,8 +737,8 @@ def test_validate_matrix_data_rejects_runner_command_missing_from_matrix():
             "diffusion_flux": {
                 "task_strategy": "diffusion_media_generation",
                 "cli_commands": ["generate-video"],
-                "runner_class": "DiffusionMediaRunner",
-                "comparator_class": "DiffusionComparator",
+                "runner_class": "diffusion.DiffusionMediaRunner",
+                "comparator_class": "diffusion.DiffusionComparator",
                 "diff_framework_check_classes": [],
                 "diff_framework_exemption": "No active diff check.",
                 "performance_mode": "diffusion",
@@ -552,14 +747,86 @@ def test_validate_matrix_data_rejects_runner_command_missing_from_matrix():
         cpp_runtime_strategies={"diffusion_flux"},
         runtime_to_task_strategy={"diffusion_flux": "diffusion_media_generation"},
         diff_check_classes=set(),
-        runner_classes_by_task={"diffusion_media_generation": {"DiffusionMediaRunner"}},
-        comparator_classes_by_task={"diffusion_media_generation": {"DiffusionComparator"}},
+        runner_classes_by_task={
+            "diffusion_media_generation": {"runners.diffusion.DiffusionMediaRunner"}
+        },
+        comparator_classes_by_task={
+            "diffusion_media_generation": {"comparators.diffusion.DiffusionComparator"}
+        },
         native_cli_commands={"generate-video", "run"},
         runner_cli_commands_by_runtime={"diffusion_flux": {"generate-video", "run"}},
+        active_comparator_classes_by_runtime={
+            "diffusion_flux": {"comparators.diffusion.DiffusionComparator"}
+        },
     )
 
     assert any(
         "native commands missing from cli_commands: ['run']" in message for message in errors
+    )
+
+
+def test_validate_matrix_data_rejects_wrong_runner_module_with_same_class_name():
+    mod = _import_checker()
+    errors = mod.validate_matrix_data(
+        matrix={
+            "unit_runtime": {
+                "task_strategy": "text_generation_causal",
+                "cli_commands": ["run"],
+                "runner_class": "inactive.TextGenerationCausalRunner",
+                "comparator_class": "text.TextComparator",
+                "diff_framework_check_classes": [],
+                "diff_framework_exemption": "No active diff check.",
+                "performance_mode": "decode",
+            }
+        },
+        cpp_runtime_strategies={"unit_runtime"},
+        runtime_to_task_strategy={"unit_runtime": "text_generation_causal"},
+        diff_check_classes=set(),
+        runner_classes_by_task={
+            "text_generation_causal": {"runners.text_generation.TextGenerationCausalRunner"}
+        },
+        comparator_classes_by_task={"text_generation_causal": {"comparators.text.TextComparator"}},
+        native_cli_commands={"run"},
+        runner_cli_commands_by_runtime={"unit_runtime": {"run"}},
+        active_comparator_classes_by_runtime={"unit_runtime": {"comparators.text.TextComparator"}},
+    )
+
+    assert any(
+        "runner_class 'inactive.TextGenerationCausalRunner' not in discovered runner classes"
+        in message
+        for message in errors
+    )
+
+
+def test_validate_matrix_data_rejects_wrong_comparator_module_with_same_class_name():
+    mod = _import_checker()
+    errors = mod.validate_matrix_data(
+        matrix={
+            "unit_runtime": {
+                "task_strategy": "text_generation_causal",
+                "cli_commands": ["run"],
+                "runner_class": "text_generation.TextGenerationCausalRunner",
+                "comparator_class": "inactive.TextComparator",
+                "diff_framework_check_classes": [],
+                "diff_framework_exemption": "No active diff check.",
+                "performance_mode": "decode",
+            }
+        },
+        cpp_runtime_strategies={"unit_runtime"},
+        runtime_to_task_strategy={"unit_runtime": "text_generation_causal"},
+        diff_check_classes=set(),
+        runner_classes_by_task={
+            "text_generation_causal": {"runners.text_generation.TextGenerationCausalRunner"}
+        },
+        comparator_classes_by_task={"text_generation_causal": {"comparators.text.TextComparator"}},
+        native_cli_commands={"run"},
+        runner_cli_commands_by_runtime={"unit_runtime": {"run"}},
+        active_comparator_classes_by_runtime={"unit_runtime": {"comparators.text.TextComparator"}},
+    )
+
+    assert any(
+        "comparator_class 'inactive.TextComparator' not in discovered comparator classes" in message
+        for message in errors
     )
 
 
@@ -584,6 +851,154 @@ def test_checker_rejects_injected_non_native_command(tmp_path: Path):
     assert mod.main(["--matrix", str(matrix_path)]) == 1
 
 
+def test_validate_matrix_paths_requires_comparator_for_every_runtime_owner(
+    tmp_path: Path,
+):
+    mod = _import_checker()
+    matrix_path = tmp_path / "tests" / "runtime_strategy_matrix.yaml"
+    matrix_path.parent.mkdir(parents=True)
+    matrix_path.write_text(
+        json.dumps(
+            {
+                "runtime_strategies": {
+                    "diffusion_flux": {
+                        "task_strategy": "diffusion_media_generation",
+                        "performance_mode": "diffusion",
+                        "cli_commands": ["generate-video"],
+                        "runner_class": "diffusion.DiffusionMediaRunner",
+                        "comparator_class": "borrowed.BorrowedComparator",
+                        "diff_framework_check_classes": [],
+                        "diff_framework_exemption": "Synthetic owner check.",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    models_dir = tmp_path / "tests" / "e2e" / "models"
+    owner_dir = models_dir / "flux"
+    manifest_dir = owner_dir / "manifests"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "flux.json").write_text(
+        """
+{
+  "family": "flux",
+  "runtime_strategy": "diffusion_flux",
+  "task_strategy": "diffusion_media_generation"
+}
+        """,
+        encoding="utf-8",
+    )
+    plugin_dir = owner_dir / "e2e_plugins"
+    runners_dir = plugin_dir / "runners"
+    runners_dir.mkdir(parents=True)
+    (runners_dir / "diffusion.py").write_text(
+        """
+class DiffusionMediaRunner:
+    def strategy_name(self):
+        return "diffusion_media_generation"
+
+    def run_stage(self, binary, bundle):
+        return [binary, "generate-video", bundle]
+        """,
+        encoding="utf-8",
+    )
+    (plugin_dir / "runner.py").write_text(
+        """
+from .runners.diffusion import DiffusionMediaRunner
+
+runner = DiffusionMediaRunner()
+        """,
+        encoding="utf-8",
+    )
+    owner_comparators = plugin_dir / "comparators"
+    owner_comparators.mkdir()
+    (owner_comparators / "local.py").write_text(
+        """
+class LocalComparator:
+    def task_strategy(self):
+        return "diffusion_media_generation"
+        """,
+        encoding="utf-8",
+    )
+    (plugin_dir / "comparator.py").write_text(
+        """
+from .comparators.local import LocalComparator
+
+comparator = LocalComparator()
+        """,
+        encoding="utf-8",
+    )
+
+    borrower_dir = models_dir / "sana_wm"
+    borrower_manifest_dir = borrower_dir / "manifests"
+    borrower_manifest_dir.mkdir(parents=True)
+    (borrower_manifest_dir / "sana.json").write_text(
+        """
+{
+  "family": "sana_wm",
+  "runtime_strategy": "diffusion_flux",
+  "task_strategy": "diffusion_media_generation"
+}
+        """,
+        encoding="utf-8",
+    )
+    borrower_plugin_dir = borrower_dir / "e2e_plugins"
+    borrower_comparators = borrower_plugin_dir / "comparators"
+    borrower_comparators.mkdir(parents=True)
+    (borrower_comparators / "borrowed.py").write_text(
+        """
+class BorrowedComparator:
+    def task_strategy(self):
+        return "diffusion_media_generation"
+        """,
+        encoding="utf-8",
+    )
+    (borrower_plugin_dir / "comparator.py").write_text(
+        """
+from .comparators.borrowed import BorrowedComparator
+
+comparator = BorrowedComparator()
+        """,
+        encoding="utf-8",
+    )
+
+    cpp_path = tmp_path / "src" / "cabi" / "api" / "trtmc_c.cpp"
+    cpp_path.parent.mkdir(parents=True)
+    cpp_path.write_text(
+        'static const char* runtime_strategy = "diffusion_flux";\n',
+        encoding="utf-8",
+    )
+    cli_args_path = tmp_path / "src" / "cli" / "args.cpp"
+    cli_args_path.parent.mkdir(parents=True)
+    cli_args_path.write_text(
+        'static const char* known_cmds[] = {"generate-video", nullptr};\n',
+        encoding="utf-8",
+    )
+
+    errors = mod.validate_matrix_paths(
+        matrix_path=matrix_path,
+        cpp_path=cpp_path,
+        builders_dir=tmp_path / "missing_builders",
+        runtime_registry_path=tmp_path / "missing_pipeline_factory.cpp",
+        runtime_models_dir=tmp_path / "missing_runtime_models",
+        cli_args_path=cli_args_path,
+        torchtrt_strategies_dir=tmp_path / "missing_torchtrt_strategies",
+        e2e_models_dir=models_dir,
+        diff_checks_dir=tmp_path / "missing_diff_checks",
+        runners_dir=models_dir,
+        comparators_dir=models_dir,
+    )
+
+    assert any(
+        "comparator_class 'borrowed.BorrowedComparator' is not in the active "
+        "comparator lineage for its manifest owner/runtime" in message
+        for message in errors
+    )
+    assert not any("not in discovered comparator classes" in message for message in errors)
+
+
 def test_validate_matrix_paths_supports_builder_source_extraction(tmp_path: Path):
     mod = _import_checker()
 
@@ -597,16 +1012,16 @@ def test_validate_matrix_paths_supports_builder_source_extraction(tmp_path: Path
               "task_strategy": "text_generation_causal",
               "performance_mode": "decode",
               "cli_commands": ["run"],
-              "runner_class": "pkg.TextGenerationCausalRunner",
-              "comparator_class": "pkg.TextComparator",
+              "runner_class": "text_generation.TextGenerationCausalRunner",
+              "comparator_class": "text.TextComparator",
               "diff_framework_check_classes": ["LogitDiffTest"]
             },
             "qwen_vl_vision_language": {
               "task_strategy": "vision_language_generation",
               "performance_mode": "enc_dec",
               "cli_commands": ["run"],
-              "runner_class": "pkg.VisionLanguageRunner",
-              "comparator_class": "pkg.VisionLanguageComparator",
+              "runner_class": "vision_language.VisionLanguageRunner",
+              "comparator_class": "vision_language.VisionLanguageComparator",
               "diff_framework_check_classes": ["VLPipelineTest"]
             }
           }
@@ -644,19 +1059,65 @@ def test_validate_matrix_paths_supports_builder_source_extraction(tmp_path: Path
         """,
         encoding="utf-8",
     )
-    for owner, runner_class in (
-        ("text", "TextGenerationCausalRunner"),
-        ("vl", "VisionLanguageRunner"),
+    for (
+        owner,
+        runner_module,
+        runner_class,
+        comparator_module,
+        comparator_class,
+        task_strategy,
+    ) in (
+        (
+            "text",
+            "text_generation",
+            "TextGenerationCausalRunner",
+            "text",
+            "TextComparator",
+            "text_generation_causal",
+        ),
+        (
+            "vl",
+            "vision_language",
+            "VisionLanguageRunner",
+            "vision_language",
+            "VisionLanguageComparator",
+            "vision_language_generation",
+        ),
     ):
         plugin_dir = e2e_models_dir / owner / "e2e_plugins"
-        plugin_dir.mkdir()
-        (plugin_dir / "runner.py").write_text(
+        plugin_runners_dir = plugin_dir / "runners"
+        plugin_runners_dir.mkdir(parents=True)
+        (plugin_runners_dir / f"{runner_module}.py").write_text(
             f"""
 class {runner_class}:
     def run_stage(self, binary, bundle):
         return [binary, "run", bundle]
+            """,
+            encoding="utf-8",
+        )
+        (plugin_dir / "runner.py").write_text(
+            f"""
+from .runners.{runner_module} import {runner_class}
 
 runner = {runner_class}()
+            """,
+            encoding="utf-8",
+        )
+        plugin_comparators_dir = plugin_dir / "comparators"
+        plugin_comparators_dir.mkdir()
+        (plugin_comparators_dir / f"{comparator_module}.py").write_text(
+            f"""
+class {comparator_class}:
+    def task_strategy(self):
+        return "{task_strategy}"
+            """,
+            encoding="utf-8",
+        )
+        (plugin_dir / "comparator.py").write_text(
+            f"""
+from .comparators.{comparator_module} import {comparator_class}
+
+comparator = {comparator_class}()
             """,
             encoding="utf-8",
         )

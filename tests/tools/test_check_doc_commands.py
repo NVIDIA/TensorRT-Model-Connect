@@ -87,6 +87,33 @@ def test_extract_inline_commands_supports_arbitrary_backtick_run_lengths() -> No
     ]
 
 
+def test_extract_inline_commands_supports_multiline_code_spans() -> None:
+    content = (
+        "Intro.\n"
+        "Run ``python3 tools/check.py\n"
+        "--value `literal` tail`` after the build.\n"
+        "```bash\n"
+        "python3 tools/fenced.py\n"
+        "```\n"
+    )
+
+    commands = cdc.extract_inline_commands(Path("README.md"), content)
+
+    assert [(command.line, command.body) for command in commands] == [
+        (2, "python3 tools/check.py --value `literal` tail\n")
+    ]
+
+
+def test_extract_inline_commands_does_not_cross_paragraph_boundaries() -> None:
+    content = (
+        "Run `python3 tools/definitely-missing.py\n"
+        "\n"
+        "This is a separate paragraph ending with `ordinary prose.\n"
+    )
+
+    assert cdc.extract_inline_commands(Path("README.md"), content) == []
+
+
 def test_placeholder_is_safe_for_shell_syntax_check() -> None:
     block = cdc.ShellBlock(
         path=Path("README.md"),
@@ -600,6 +627,27 @@ def test_python_script_negative_numbers_match_default_argparse(
     ]
 
 
+def test_python_script_contract_accepts_attached_short_option_value(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "generate.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        'parser.add_argument("-o", "--output")\n',
+        encoding="utf-8",
+    )
+    block = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body='python3 tools/generate.py -o"reports/generated.json"\n',
+    )
+
+    assert cdc.check_python_script_contract(block, tmp_path) == []
+
+
 def test_local_python_module_contract_checks_nested_subcommands(
     tmp_path: Path,
 ) -> None:
@@ -648,6 +696,141 @@ def test_local_python_module_contract_checks_nested_subcommands(
     ] == [
         "invalid value for positional `language` for `python -m tools.ci coverage`: "
         "rust; expected one of cpp, python"
+    ]
+
+
+def test_nested_argparse_checks_parent_required_options_only_at_parent_level(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "nested.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        'commands = parser.add_subparsers(dest="command", required=True)\n'
+        'parent = commands.add_parser("parent")\n'
+        'parent.add_argument("--profile", required=True, choices=("fast", "safe"))\n'
+        "children = parent.add_subparsers(required=True)\n"
+        'child = children.add_parser("child")\n'
+        'child.add_argument("--count")\n',
+        encoding="utf-8",
+    )
+    exact = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body="python3 tools/nested.py parent --profile fast child\n",
+    )
+    combined = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body=("python3 tools/nested.py parent --profile safe child --count 2\n"),
+    )
+    missing_parent = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body="python3 tools/nested.py parent child --count 2\n",
+    )
+
+    assert cdc.check_python_script_contract(exact, tmp_path) == []
+    assert cdc.check_python_script_contract(combined, tmp_path) == []
+    assert [
+        finding.message for finding in cdc.check_python_script_contract(missing_parent, tmp_path)
+    ] == ["missing required option for `tools/nested.py parent`: --profile"]
+
+
+def test_argparse_root_positionals_are_consumed_before_subcommand(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "root_positionals.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        'parser.add_argument("--profile", choices=("fast", "safe"))\n'
+        'parser.add_argument("environments", nargs="+", '
+        'choices=("default", "staging"))\n'
+        "commands = parser.add_subparsers(required=True)\n"
+        'run = commands.add_parser("run")\n'
+        'run.add_argument("target", choices=("deploy", "test"))\n',
+        encoding="utf-8",
+    )
+    exact = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body="python3 tools/root_positionals.py default run deploy\n",
+    )
+    combined = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body=("python3 tools/root_positionals.py --profile fast default staging run deploy\n"),
+    )
+    invalid_choice = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body=("python3 tools/root_positionals.py default broken --profile safe run test\n"),
+    )
+
+    assert cdc.check_python_script_contract(exact, tmp_path) == []
+    assert cdc.check_python_script_contract(combined, tmp_path) == []
+    assert [
+        finding.message for finding in cdc.check_python_script_contract(invalid_choice, tmp_path)
+    ] == [
+        "invalid value for positional `environments` for "
+        "`tools/root_positionals.py`: broken; expected one of default, staging"
+    ]
+
+
+def test_argparse_negative_root_positional_is_consumed_before_subcommand(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "root_threshold.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        'parser.add_argument("threshold", type=float)\n'
+        "commands = parser.add_subparsers(required=True)\n"
+        'run = commands.add_parser("run")\n'
+        'run.add_argument("target", choices=("deploy", "test"))\n',
+        encoding="utf-8",
+    )
+    block = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body="python3 tools/root_threshold.py -.5 run test\n",
+    )
+
+    assert cdc.check_python_script_contract(block, tmp_path) == []
+
+
+def test_argparse_double_dash_is_not_skipped_before_required_subcommand(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "queue.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        "commands = parser.add_subparsers(required=True)\n"
+        'commands.add_parser("run")\n',
+        encoding="utf-8",
+    )
+    block = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body="python3 tools/queue.py -- run\n",
+    )
+
+    assert [finding.message for finding in cdc.check_python_script_contract(block, tmp_path)] == [
+        "unknown subcommand for `tools/queue.py`: --"
     ]
 
 

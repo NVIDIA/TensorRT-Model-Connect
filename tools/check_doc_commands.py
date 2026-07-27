@@ -231,9 +231,9 @@ def extract_shell_blocks(path: Path, content: str) -> list[ShellBlock]:
     return blocks
 
 
-def _inline_code_spans(line: str) -> Iterable[str]:
-    """Yield CommonMark-style inline code spans for every backtick run length."""
-    runs = list(_BACKTICK_RUN_RE.finditer(line))
+def _inline_code_spans(content: str) -> Iterable[tuple[int, str]]:
+    """Yield opening offsets and CommonMark code spans for each run length."""
+    runs = list(_BACKTICK_RUN_RE.finditer(content))
     index = 0
     while index < len(runs):
         opener = runs[index]
@@ -241,7 +241,7 @@ def _inline_code_spans(line: str) -> Iterable[str]:
         while closer_index < len(runs):
             closer = runs[closer_index]
             if len(closer.group(0)) == len(opener.group(0)):
-                yield line[opener.end() : closer.start()]
+                yield opener.start(), content[opener.end() : closer.start()]
                 index = closer_index + 1
                 break
             closer_index += 1
@@ -254,6 +254,24 @@ def extract_inline_commands(path: Path, content: str) -> list[ShellBlock]:
     commands: list[ShellBlock] = []
     opener_char = ""
     opener_length = 0
+    chunk_start_line = 0
+    chunk_lines: list[str] = []
+
+    def append_chunk_commands() -> None:
+        if not chunk_lines:
+            return
+        chunk = "\n".join(chunk_lines)
+        for opening_offset, span in _inline_code_spans(chunk):
+            body = span.replace("\n", " ").strip()
+            if _COMMAND_HEAD_RE.match(body):
+                commands.append(
+                    ShellBlock(
+                        path=path,
+                        line=chunk_start_line + chunk.count("\n", 0, opening_offset),
+                        language="inline",
+                        body=body + "\n",
+                    )
+                )
 
     for line_no, line in enumerate(content.splitlines(), start=1):
         if opener_char:
@@ -268,22 +286,24 @@ def extract_inline_commands(path: Path, content: str) -> list[ShellBlock]:
 
         fence_match = _OPEN_FENCE_RE.match(line)
         if fence_match:
+            append_chunk_commands()
+            chunk_lines = []
+            chunk_start_line = 0
             fence = fence_match.group("fence")
             opener_char = fence[0]
             opener_length = len(fence)
             continue
 
-        for span in _inline_code_spans(line):
-            body = span.strip()
-            if _COMMAND_HEAD_RE.match(body):
-                commands.append(
-                    ShellBlock(
-                        path=path,
-                        line=line_no,
-                        language="inline",
-                        body=body + "\n",
-                    )
-                )
+        if not line.strip():
+            append_chunk_commands()
+            chunk_lines = []
+            chunk_start_line = 0
+            continue
+        if not chunk_lines:
+            chunk_start_line = line_no
+        chunk_lines.append(line)
+
+    append_chunk_commands()
     return commands
 
 
@@ -924,6 +944,31 @@ def _merge_command_specs(root: CommandSpec, command: CommandSpec) -> CommandSpec
     )
 
 
+def _match_option_token(
+    token: str,
+    spec: CommandSpec,
+    *,
+    positional_only: bool = False,
+) -> tuple[str, OptionSpec | None, bool, str]:
+    """Resolve exact, ``--long=value``, and argparse ``-ovalue`` forms."""
+    option_name, separator, inline_value = token.partition("=")
+    option = None if positional_only else spec.options.get(option_name)
+    if option is not None:
+        return option_name, option, bool(separator), inline_value
+    if positional_only or not token.startswith("-") or token.startswith("--"):
+        return option_name, None, False, ""
+    for alias, candidate in spec.options.items():
+        if (
+            len(alias) == 2
+            and token.startswith(alias)
+            and len(token) > len(alias)
+            and candidate.max_values != 0
+            and candidate.allow_inline_value
+        ):
+            return alias, candidate, True, token[len(alias) :]
+    return option_name, None, False, ""
+
+
 def _parse_command_arguments(
     tokens: list[str],
     spec: CommandSpec,
@@ -952,8 +997,11 @@ def _parse_command_arguments(
             positional_only = True
             index += 1
             continue
-        option_name, separator, inline_value = token.partition("=")
-        option = None if positional_only else spec.options.get(option_name)
+        option_name, option, inline_form, inline_value = _match_option_token(
+            token,
+            spec,
+            positional_only=positional_only,
+        )
         if option is None:
             if (
                 not positional_only
@@ -970,7 +1018,7 @@ def _parse_command_arguments(
 
         seen_options.update(option.aliases)
         values: list[str] = []
-        if separator:
+        if inline_form:
             if not option.allow_inline_value:
                 errors.append(f"does not support inline value:{option_name}")
             elif option.max_values == 0:
@@ -985,8 +1033,10 @@ def _parse_command_arguments(
                 option.max_values is None or len(values) < option.max_values
             ):
                 candidate = tokens[cursor]
-                candidate_option = candidate.partition("=")[0]
-                if candidate_option in spec.options:
+                _candidate_name, candidate_option, _inline, _value = _match_option_token(
+                    candidate, spec
+                )
+                if candidate_option is not None:
                     break
                 if (
                     candidate.startswith("-")
@@ -1332,30 +1382,63 @@ def _find_subcommand(
     root: CommandSpec,
     commands: set[str],
 ) -> tuple[str | None, int | None]:
+    positional_values: list[str] = []
     index = 0
+    positional_only = False
     while index < len(tokens):
         token = tokens[index]
-        if token in commands:
+        if token == "--" and not positional_only:
+            if not root.positionals:
+                return None, index
+            positional_only = True
+            index += 1
+            continue
+        assigned, _extras = _assign_positional_values(
+            positional_values,
+            root.positionals,
+        )
+        positionals_complete = all(
+            len(values) >= positional.min_values
+            for positional, values in zip(root.positionals, assigned)
+        )
+        if token in commands and positionals_complete:
             return token, index
-        option_name, separator, _inline_value = token.partition("=")
-        option = root.options.get(option_name)
+        _option_name, option, inline_form, _inline_value = _match_option_token(
+            token,
+            root,
+            positional_only=positional_only,
+        )
         if option is not None:
             index += 1
-            if not separator and option.max_values != 0:
+            if not inline_form and option.max_values != 0:
                 consumed = 0
                 while index < len(tokens) and (
                     option.max_values is None or consumed < option.max_values
                 ):
-                    candidate_option = tokens[index].partition("=")[0]
-                    if candidate_option in root.options:
+                    _candidate_name, candidate_option, _inline, _value = _match_option_token(
+                        tokens[index], root
+                    )
+                    if candidate_option is not None:
                         break
                     index += 1
                     consumed += 1
             continue
-        if token.startswith("-"):
+        if (
+            not positional_only
+            and token.startswith("-")
+            and _ARGPARSE_NEGATIVE_NUMBER_RE.fullmatch(token) is None
+        ):
             index += 1
             continue
-        return None, index
+        candidate_values = [*positional_values, token]
+        _assigned, extras = _assign_positional_values(
+            candidate_values,
+            root.positionals,
+        )
+        if not root.positionals or extras:
+            return None, index
+        positional_values.append(token)
+        index += 1
     return None, None
 
 
@@ -1419,22 +1502,16 @@ def _check_argparse_invocation(
         label=f"`{local}`",
         unknown_template=f"unknown option for `{local}`: {{option}}",
     )
-    spec = _merge_command_specs(contract.root, contract.commands[command])
+    spec = contract.commands[command]
     nested = contract.nested.get(command)
     if nested is not None:
-        nested_contract = ProgramSpec(
-            root=spec,
-            commands=nested.commands,
-            command_required=nested.command_required,
-            nested=nested.nested,
-        )
         findings.extend(
             _check_argparse_invocation(
                 block,
                 offset,
                 tokens[command_index + 1 :],
                 f"{local} {command}",
-                nested_contract,
+                nested,
             )
         )
         return findings

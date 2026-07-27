@@ -19,11 +19,13 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import ast
 import os
 import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, List, Tuple
 
@@ -114,9 +116,24 @@ _BARE_PATH_RE = re.compile(
 _OPEN_FENCE_RE = re.compile(r"^[ \t]*(?P<fence>`{3,}|~{3,})[ \t]*(?P<info>.*)$")
 _SHELL_FENCE_LANGUAGES = {"bash", "sh", "shell"}
 _SHELL_OUTPUT_PATH_PREFIX_RE = re.compile(
-    r"(?:(?:^|\s)(?:-o|--output|--output-dir|--output-json|--json)(?:=|\s+)"
-    r"|(?:\d+|&)?>{1,2}\s*)$"
+    r"(?:(?:^|\s)(?:-o(?:=|\s+)?|--output(?:=|\s+)|"
+    r"--output-dir(?:=|\s+)|--output-json(?:=|\s+))"
+    r"|(?:\d+|&)?>{1,2}\s*)[\"']?$"
 )
+_SHELL_JSON_PATH_PREFIX_RE = re.compile(r"(?:^|\s)--json(?:=|\s+)[\"']?$")
+_LOCAL_PYTHON_SCRIPT_RE = re.compile(
+    r"(?:python3?|python)\s+"
+    r"(?P<script>(?:\./)?(?:scripts|tools)/[A-Za-z0-9_./-]+\.py)\b"
+)
+_ARGPARSE_NO_VALUE_ACTIONS = {
+    "append_const",
+    "count",
+    "help",
+    "store_const",
+    "store_false",
+    "store_true",
+    "version",
+}
 
 # Paths containing angle-bracket placeholders like <family> or <model-name>
 # are intentional templates, not real file paths.
@@ -216,7 +233,80 @@ def _clean_extracted_path(raw: str) -> str:
     return raw.split("::", 1)[0].split("#", 1)[0].rstrip("\\.,;:)]}")
 
 
-def _shell_fence_path_references(content: str) -> List[Tuple[int, str]]:
+def _keyword_value(call: ast.Call, name: str) -> ast.AST | None:
+    for keyword in call.keywords:
+        if keyword.arg == name:
+            return keyword.value
+    return None
+
+
+def _action_name(node: ast.AST | None) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+@lru_cache(maxsize=None)
+def _argparse_option_always_consumes_value(
+    script_path: Path,
+    alias: str,
+) -> bool:
+    """Return whether every static argparse definition consumes one value."""
+    try:
+        tree = ast.parse(script_path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return False
+
+    contracts: list[bool] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_argument"
+            and alias
+            in {
+                argument.value
+                for argument in node.args
+                if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+            }
+        ):
+            continue
+        action_node = _keyword_value(node, "action")
+        action = _action_name(action_node)
+        if action_node is not None and action is None:
+            contracts.append(False)
+            continue
+        if action in _ARGPARSE_NO_VALUE_ACTIONS or action == "BooleanOptionalAction":
+            contracts.append(False)
+            continue
+        nargs_node = _keyword_value(node, "nargs")
+        nargs = nargs_node.value if isinstance(nargs_node, ast.Constant) else None
+        contracts.append(nargs != 0)
+    return bool(contracts) and all(contracts)
+
+
+def _json_option_is_output(prefix: str, repo_root: Path | None) -> bool:
+    """Resolve local ``--json`` arity before classifying its value as output."""
+    if repo_root is None:
+        return False
+    matches = list(_LOCAL_PYTHON_SCRIPT_RE.finditer(prefix))
+    if not matches:
+        return False
+    relative = Path(matches[-1].group("script").removeprefix("./"))
+    if relative.is_absolute() or ".." in relative.parts:
+        return False
+    return _argparse_option_always_consumes_value(
+        (repo_root / relative).resolve(),
+        "--json",
+    )
+
+
+def _shell_fence_path_references(
+    content: str,
+    repo_root: Path | None = None,
+) -> List[Tuple[int, str]]:
     """Extract repo-local path tokens from bash/sh/shell fenced blocks."""
     results: List[Tuple[int, str]] = []
     fence_char = ""
@@ -258,7 +348,10 @@ def _shell_fence_path_references(content: str) -> List[Tuple[int, str]]:
             # prose or used as an input, but do not classify an explicit
             # output argument as a phantom input reference.
             prefix = continuation_prefix + line[: match.start()]
-            if _SHELL_OUTPUT_PATH_PREFIX_RE.search(prefix):
+            if _SHELL_OUTPUT_PATH_PREFIX_RE.search(prefix) or (
+                _SHELL_JSON_PATH_PREFIX_RE.search(prefix)
+                and _json_option_is_output(prefix, repo_root)
+            ):
                 continue
             raw = _clean_extracted_path(match.group(0))
             if "*" in raw or "?" in raw or _PLACEHOLDER_RE.search(raw):
@@ -274,7 +367,11 @@ def _shell_fence_path_references(content: str) -> List[Tuple[int, str]]:
     return results
 
 
-def extract_path_references(content: str, doc_file: str) -> List[Tuple[int, str]]:
+def extract_path_references(
+    content: str,
+    doc_file: str,
+    repo_root: Path | None = None,
+) -> List[Tuple[int, str]]:
     """Return (line_number, path) pairs found in the document."""
     results: List[Tuple[int, str]] = []
     for line_no, line in enumerate(content.splitlines(), start=1):
@@ -292,7 +389,7 @@ def extract_path_references(content: str, doc_file: str) -> List[Tuple[int, str]
         for match in _ROOT_PATH_RE.finditer(line):
             results.append((line_no, match.group(1)))
 
-    results.extend(_shell_fence_path_references(content))
+    results.extend(_shell_fence_path_references(content, repo_root))
     # A path-only code span inside a shell fence can be found by both passes.
     return list(dict.fromkeys(results))
 
@@ -601,7 +698,7 @@ def check_markdown_files(md_files: Iterable[Path], repo_root: Path) -> CheckRepo
         retired_lines = {finding.line_no for finding in retired_findings}
 
         # --- Check file path references ---
-        refs = extract_path_references(content, rel_doc)
+        refs = extract_path_references(content, rel_doc, repo_root)
         for line_no, ref_path in refs:
             report.paths_checked += 1
             if explicitly_noncurrent:
