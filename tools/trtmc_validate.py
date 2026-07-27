@@ -741,8 +741,15 @@ def _summarize_command_log(
     return count, selected or first
 
 
-def _command_log_kind(path: Path, *, has_native_reference: bool) -> str | None:
+def _command_log_kind(
+    path: Path,
+    *,
+    has_native_reference: bool,
+    has_native_trtmc: bool,
+) -> str | None:
     if has_native_reference and path.name == "hf_run.log":
+        return None
+    if has_native_trtmc and path.name == "trtfb_run.log":
         return None
     return "hf" if "hf" in path.name.lower() else "trtmc"
 
@@ -787,9 +794,19 @@ def _collect_command_logs(
     commands: dict[str, list[str]] = {"hf": [], "trtmc": []}
     counts = {"hf": 0, "trtmc": 0}
     logs: dict[str, list[str]] = {"hf": [], "trtmc": []}
-    has_native_reference = any(path.name == "hf_native_run.log" for path in log_paths)
+    has_native_reference = any(
+        path.name in {"hf_native_run.log", "hf_native_commands.jsonl"}
+        for path in log_paths
+    )
+    has_native_trtmc = any(
+        path.name == "trtfb_native_commands.jsonl" for path in log_paths
+    )
     for path in log_paths:
-        kind = _command_log_kind(path, has_native_reference=has_native_reference)
+        kind = _command_log_kind(
+            path,
+            has_native_reference=has_native_reference,
+            has_native_trtmc=has_native_trtmc,
+        )
         if kind is None:
             continue
         indexed_sample_ids = sample_ids if path.name == "trtfb_run.log" else ()
@@ -814,7 +831,12 @@ def _commands_from_logs(root: Path) -> dict[str, Any]:
     sample_ids = _prepared_sample_ids(root)
     disagreement_id = _first_disagreement_id(root)
     representative_id = disagreement_id or (sample_ids[0] if sample_ids else "")
-    log_paths = sorted(root.rglob("*.log"))
+    log_paths = sorted(
+        {
+            *root.rglob("*.log"),
+            *root.rglob("*_native_commands.jsonl"),
+        }
+    )
     commands, counts, logs = _collect_command_logs(
         root,
         log_paths=log_paths,

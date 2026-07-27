@@ -1420,6 +1420,47 @@ def test_cached_reference_command_is_relocated_to_current_work_dir(
     assert shlex.quote(str(work_dir / "hf_predictions.json")) in command
 
 
+def test_commands_from_logs_use_native_trtmc_jsonl(tmp_path: Path) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "prompts.jsonl").write_text(
+        "\n".join(
+            json.dumps({"sample_id": sample_id})
+            for sample_id in ("sample-1", "sample-2")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (work_dir / "trtfb_run.log").write_text(
+        "$ python task_eval.py run-trtfb\n",
+        encoding="utf-8",
+    )
+    commands = (
+        {
+            "sample_id": "sample-1",
+            "command": ["trtmc", "segment-prompted", "model.trtfb", "--prompt", "cat"],
+        },
+        {
+            "sample_id": "sample-2",
+            "command": ["trtmc", "segment-prompted", "model.trtfb", "--prompt", "dog"],
+        },
+    )
+    (work_dir / "trtfb_native_commands.jsonl").write_text(
+        "".join(json.dumps(command) + "\n" for command in commands),
+        encoding="utf-8",
+    )
+
+    reproduction = trtmc_validate._commands_from_logs(work_dir)
+
+    assert reproduction["trtmc"] == [
+        "trtmc segment-prompted model.trtfb --prompt cat"
+    ]
+    assert reproduction["command_count"]["trtmc"] == 2
+    assert reproduction["command_logs"]["trtmc"] == [
+        "trtfb_native_commands.jsonl"
+    ]
+
+
 def test_failed_sample_uses_recorded_trtmc_command_and_copies_media(tmp_path):
     case_dir = tmp_path / "model-a" / "workload-a"
     work_dir = case_dir / "validation" / "workload-a" / "model-a"
