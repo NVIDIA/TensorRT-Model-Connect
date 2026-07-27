@@ -164,7 +164,10 @@ def build_standard_decoder_engine(
             parallel_residual=parallel_residual,
             scale_attn_weights=scale_attn_weights,
             verbose=verbose,
-            profile_mode=decoder_engine_role,
+            profile_mode=(
+                "decode" if decoder_engine_role == "decode"
+                else "prefill" if decoder_engine_role == "prefill"
+                else "dual_profile"),
             full_logits_output=full_logits_output,
             native_kv_cache=native_kv_cache,
         )

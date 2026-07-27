@@ -167,7 +167,10 @@ def build_standard_decoder_engine(
             scale_attn_weights=scale_attn_weights,
             alibi_bias_scale=alibi_bias_scale,
             verbose=verbose,
-            profile_mode=decoder_engine_role,
+            profile_mode=(
+                "decode" if decoder_engine_role == "decode"
+                else "prefill" if decoder_engine_role == "prefill"
+                else "dual_profile"),
             native_kv_cache=native_kv_cache,
         )
 
