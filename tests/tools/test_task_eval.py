@@ -3854,6 +3854,24 @@ def test_run_diffusion_hf_reference_writes_image_artifact_predictions(
     assert predictions["responses"][0]["source"] == "hf"
 
 
+def test_captured_utf8_subprocess_replaces_invalid_native_output() -> None:
+    result = task_eval._run_captured_utf8_subprocess(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os; "
+                "os.write(1, b'answer:\\x93A'); "
+                "os.write(2, b'warning:\\xff')"
+            ),
+        ]
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "answer:\ufffdA"
+    assert result.stderr == "warning:\ufffd"
+
+
 def test_run_trtfb_dispatches_diffusion_prompt_workdir(
     tmp_path: Path, monkeypatch
 ) -> None:

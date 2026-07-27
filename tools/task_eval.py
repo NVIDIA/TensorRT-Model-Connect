@@ -3005,6 +3005,20 @@ def _parse_generated_token_ids(text: str) -> list[int] | None:
     return None
 
 
+def _run_captured_utf8_subprocess(
+    command: Sequence[str],
+    **kwargs: Any,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        list(command),
+        check=False,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        **kwargs,
+    )
+
+
 def _parse_transcribe_stdout(text: str) -> str:
     for line in str(text or "").splitlines():
         cleaned = re.sub(r"<\|[^|]+\|>", "", line).strip()
@@ -3200,11 +3214,8 @@ def run_vlm_trtfb(args: argparse.Namespace) -> None:
             )
             log_f.write(f"$ {' '.join(cmd)}\n")
             start = time.perf_counter()
-            proc = subprocess.run(
+            proc = _run_captured_utf8_subprocess(
                 cmd,
-                check=False,
-                text=True,
-                capture_output=True,
                 env=env,
             )
             wall_ms = (time.perf_counter() - start) * 1000.0
@@ -3286,11 +3297,8 @@ def run_asr_trtfb(args: argparse.Namespace) -> None:
             )
             log_f.write(f"$ {' '.join(cmd)}\n")
             start = time.perf_counter()
-            proc = subprocess.run(
+            proc = _run_captured_utf8_subprocess(
                 cmd,
-                check=False,
-                text=True,
-                capture_output=True,
                 env=env,
             )
             wall_ms = (time.perf_counter() - start) * 1000.0
