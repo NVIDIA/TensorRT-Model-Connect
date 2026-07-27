@@ -745,6 +745,8 @@ def test_write_report_links_each_comparison(tmp_path):
     assert "Agreement" in document
     assert "Completed" in document
     assert "TRTMC Reference Consistency Report" in document
+    assert "🟢 1 &nbsp; 🟡 0 &nbsp;" in document
+    assert "🔴 0 &nbsp; ⚪ 0" in document
     assert "Vanilla reproduction" in document
     assert "Dataset · Reference 1/1 · TRTMC 1/1" in document
     assert "Dataset slice (500 samples)" in document
@@ -755,6 +757,28 @@ def test_write_report_links_each_comparison(tmp_path):
     assert "$ python tools/trtmc_validate.py model-a" in document
     assert "$ python hf.py" in document
     assert "$ trtmc run" in document
+
+
+def test_traffic_light_counts_are_mutually_exclusive():
+    def result(validation, comparison):
+        return {
+            "validation": {"status": validation},
+            "comparison": {"status": comparison},
+        }
+
+    assert trtmc_validate._traffic_light_counts(
+        [
+            result("passed", "agreement"),
+            result("skipped", "not_run"),
+            result("failed", "disagreement"),
+            result("failed", "not_run"),
+        ]
+    ) == {
+        "green": 1,
+        "yellow": 1,
+        "red": 1,
+        "white": 1,
+    }
 
 
 def test_write_report_records_total_duration(tmp_path, monkeypatch):

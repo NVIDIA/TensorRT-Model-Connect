@@ -3356,6 +3356,124 @@ def test_suite_build_cache_minimum_overrides_manifest_cache() -> None:
     assert task_eval.requested_build_max_cache_length(suite, model, 512) == 512
 
 
+def test_continuation_reserves_generation_cache_headroom() -> None:
+    assert (
+        task_eval.generation_cache_headroom(
+            scorer="continuation",
+            task_eval_config={},
+            generation={"max_new_tokens": 64},
+            max_new_tokens=None,
+        )
+        == 64
+    )
+    assert (
+        task_eval.generation_cache_headroom(
+            scorer="continuation",
+            task_eval_config={},
+            generation={"max_new_tokens": 64},
+            max_new_tokens=8,
+        )
+        == 8
+    )
+
+
+def test_non_continuation_only_reserves_explicit_generation_headroom() -> None:
+    generation = {"max_new_tokens": 8}
+
+    assert (
+        task_eval.generation_cache_headroom(
+            scorer="mcq",
+            task_eval_config={},
+            generation=generation,
+            max_new_tokens=None,
+        )
+        == 0
+    )
+    assert (
+        task_eval.generation_cache_headroom(
+            scorer="mcq",
+            task_eval_config={"build_generation_headroom": True},
+            generation=generation,
+            max_new_tokens=None,
+        )
+        == 8
+    )
+
+
+def test_eval_continuation_builds_for_prompt_and_generated_tokens(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dataset = tmp_path / "mmlu.json"
+    _write_mmlu(dataset)
+    suite = task_eval.suite_by_id(
+        task_eval.load_suites(), "mmlu_continuation_parity"
+    )
+    model = {
+        "name": "decoder-small",
+        "hf_id": "example-org/decoder-small",
+        "bundle": "decoder-small.trtfb",
+        "max_cache_length": 256,
+        "precision": "fp32",
+        "trust_remote_code": False,
+        "build_args": {},
+        "quantization": {},
+    }
+    responses = [
+        {
+            "sample_id": "mmlu_000000",
+            "output_text": " A",
+            "generated_token_ids": [1],
+        },
+        {
+            "sample_id": "mmlu_000001",
+            "output_text": " B",
+            "generated_token_ids": [2],
+        },
+    ]
+
+    def fake_run_hf(_args, _model, work_dir):
+        task_eval.write_predictions(work_dir / "hf_predictions.json", responses)
+
+    def fake_ensure_bundle(*_args, **kwargs):
+        assert kwargs["max_cache_length"] == 445
+        bundle = kwargs["bundle_path"]
+        bundle.parent.mkdir(parents=True, exist_ok=True)
+        bundle.write_bytes(b"bundle")
+        return bundle, True
+
+    def fake_run_trtfb(args):
+        task_eval.write_predictions(
+            Path(args.work_dir) / "trtfb_predictions.json", responses
+        )
+
+    monkeypatch.setattr(task_eval, "max_prompt_token_length", lambda **_kwargs: 381)
+    monkeypatch.setattr(
+        task_eval, "run_hf_reference_subprocess", fake_run_hf
+    )
+    monkeypatch.setattr(task_eval, "ensure_bundle", fake_ensure_bundle)
+    monkeypatch.setattr(task_eval, "run_trtfb", fake_run_trtfb)
+    args = task_eval.build_arg_parser().parse_args(
+        [
+            "eval",
+            "--dataset",
+            str(dataset),
+            "--work-root",
+            str(tmp_path / "work"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--model",
+            model["name"],
+            "--local-files-only",
+        ]
+    )
+
+    result = task_eval.eval_one_model(suite=suite, model=model, args=args)
+
+    assert result["build_max_cache_length"] == 445
+    assert result["generation_cache_headroom"] == 64
+    assert result["status"] == "passed"
+
+
 def test_prompt_length_validation_rejects_over_cache(tmp_path: Path, monkeypatch) -> None:
     work_dir = tmp_path / "work"
     work_dir.mkdir()

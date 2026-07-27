@@ -8459,6 +8459,25 @@ def requested_build_max_cache_length(
     return max(model_cache, suite_cache, prompt_cache)
 
 
+def generation_cache_headroom(
+    *,
+    scorer: str,
+    task_eval_config: dict[str, Any],
+    generation: dict[str, Any],
+    max_new_tokens: int | None,
+) -> int:
+    reserve_headroom = scorer == "continuation" or bool(
+        task_eval_config.get("build_generation_headroom", False)
+    )
+    if not reserve_headroom:
+        return 0
+    return int(
+        max_new_tokens
+        if max_new_tokens is not None
+        else generation.get("max_new_tokens", 0)
+    )
+
+
 def bundle_inspection(
     bundle_path: Path,
     trtmc_binary: str,
@@ -9688,13 +9707,12 @@ def eval_one_model(
             trust_remote_code=args.trust_remote_code or bool(model.get("trust_remote_code", False)),
         )
     generation = generation_defaults(work_dir)
-    generation_headroom = 0
-    if bool(task_eval_config.get("build_generation_headroom", False)):
-        generation_headroom = int(
-            args.max_new_tokens
-            if args.max_new_tokens is not None
-            else generation.get("max_new_tokens", 0)
-        )
+    generation_headroom = generation_cache_headroom(
+        scorer=scorer,
+        task_eval_config=task_eval_config,
+        generation=generation,
+        max_new_tokens=args.max_new_tokens,
+    )
     required_prompt_cache = (
         int(max_prompt_len or 0) + generation_headroom if max_prompt_len is not None else None
     )
@@ -9704,10 +9722,13 @@ def eval_one_model(
         args.build_max_cache_length,
         prompt_max_tokens=required_prompt_cache,
     )
-    if max_prompt_len is not None and max_prompt_len > max_cache_length:
+    if required_prompt_cache is not None and required_prompt_cache > max_cache_length:
         raise RuntimeError(
-            f"Dataset prompt length exceeds bundle cache for {model['name']}: "
-            f"max_prompt_tokens={max_prompt_len}, build_max_cache_length={max_cache_length}. "
+            f"Dataset prompt and generation exceed bundle cache for {model['name']}: "
+            f"max_prompt_tokens={max_prompt_len}, "
+            f"generation_cache_headroom={generation_headroom}, "
+            f"required_cache_length={required_prompt_cache}, "
+            f"build_max_cache_length={max_cache_length}. "
             "Use a smaller dataset slice/subject or set --build-max-cache-length high enough "
             "for this model and TensorRT target."
         )
@@ -9736,6 +9757,7 @@ def eval_one_model(
         "bundle": str(bundle_path),
         "build_max_cache_length": max_cache_length,
         "max_prompt_tokens": max_prompt_len,
+        "generation_cache_headroom": generation_headroom,
         "reference_backend": reference_backend,
         "hf_reference_status": reference_mode
         if no_hf_reference

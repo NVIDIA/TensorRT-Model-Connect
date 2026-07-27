@@ -1774,6 +1774,24 @@ def _report_counts(
     return validation_counts, comparison_counts, execution_errors
 
 
+def _traffic_light_counts(
+    results: Sequence[Mapping[str, Any]],
+) -> dict[str, int]:
+    counts = {"green": 0, "yellow": 0, "red": 0, "white": 0}
+    for result in results:
+        validation_status = str(result["validation"]["status"])
+        comparison_status = str(result["comparison"]["status"])
+        if validation_status == "skipped":
+            counts["yellow"] += 1
+        elif comparison_status == "agreement":
+            counts["green"] += 1
+        elif comparison_status == "disagreement":
+            counts["red"] += 1
+        else:
+            counts["white"] += 1
+    return counts
+
+
 def _report_rows(
     output: Path,
     results: Sequence[Mapping[str, Any]],
@@ -1812,6 +1830,7 @@ def _report_document(
     rows: str,
     comparison_counts: Mapping[str, int],
     execution_errors: int,
+    traffic_light_counts: Mapping[str, int],
 ) -> str:
     provenance = _report_provenance(report.get("run", {}))
     duration = _format_duration(report["summary"].get("duration_seconds"))
@@ -1823,6 +1842,7 @@ def _report_document(
 body {{ font: 14px system-ui, sans-serif; margin: 32px; color: #202124; }}
 h1 {{ margin-bottom: 4px; }}
 .purpose {{ color: #5f6368; margin-bottom: 8px; }}
+.traffic-summary {{ font-size: 20px; font-weight: 650; margin: 14px 0 8px; }}
 .summary {{ color: #5f6368; margin-bottom: 24px; }}
 table {{ border-collapse: collapse; width: 100%; }}
 th, td {{ border: 1px solid #dadce0; padding: 8px 10px; text-align: left; }}
@@ -1871,6 +1891,10 @@ pre {{ margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
 </style></head><body>
 <h1>TRTMC Reference Consistency Report</h1>
 <div class="purpose">Accuracy and output agreement against the model reference.</div>
+<div class="traffic-summary" title="Agreement · Skipped · Disagreement · Not compared">
+🟢 {traffic_light_counts["green"]} &nbsp; 🟡 {traffic_light_counts["yellow"]} &nbsp;
+🔴 {traffic_light_counts["red"]} &nbsp; ⚪ {traffic_light_counts["white"]}
+</div>
 <div class="summary">{report["summary"]["cases"]} cases ·
 {comparison_counts["agreement"]} agreements ·
 {comparison_counts["disagreement"]} disagreements ·
@@ -1889,6 +1913,7 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
     result_paths = sorted(output.glob("*/*/comparison.json"))
     results = _normalize_result_files(result_paths)
     validation_counts, comparison_counts, execution_errors = _report_counts(results)
+    traffic_light_counts = _traffic_light_counts(results)
     sample_limits = [_dataset_reproduction(result)[1] for result in results]
     generated_at = _utc_now()
     report = {
@@ -1931,6 +1956,7 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
         rows=_report_rows(output, results, result_paths),
         comparison_counts=comparison_counts,
         execution_errors=execution_errors,
+        traffic_light_counts=traffic_light_counts,
     )
     html_path.write_text(document, encoding="utf-8")
     return json_path, html_path, report
