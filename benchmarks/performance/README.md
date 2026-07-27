@@ -22,6 +22,11 @@ included in this single-GPU matrix.
 
 ## Commands
 
+These commands use the checked-in GB300 CI environment. Export the four
+`TRTMC_PERF_*` paths listed under [Environment configuration](#environment-configuration)
+before running them; `check` performs the same worker, storage, bundle, and
+reference preflight as `run`.
+
 Validate the complete matrix without running performance measurements:
 
 ```bash

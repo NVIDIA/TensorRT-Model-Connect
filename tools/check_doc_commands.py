@@ -592,6 +592,38 @@ def _is_call_named(call: ast.Call, name: str) -> bool:
     return isinstance(call.func, ast.Attribute) and call.func.attr == name
 
 
+def _literal_loop_bindings(node: ast.For) -> list[dict[str, object]]:
+    """Expand a finite loop whose targets and iterable are literal values."""
+    if isinstance(node.target, ast.Name):
+        target_names = (node.target.id,)
+    elif isinstance(node.target, (ast.Tuple, ast.List)) and all(
+        isinstance(element, ast.Name) for element in node.target.elts
+    ):
+        target_names = tuple(element.id for element in node.target.elts)
+    else:
+        return []
+    if not isinstance(node.iter, (ast.Tuple, ast.List)):
+        return []
+
+    bindings: list[dict[str, object]] = []
+    for item in node.iter.elts:
+        values = item.elts if isinstance(item, (ast.Tuple, ast.List)) else (item,)
+        if len(values) != len(target_names) or not all(
+            isinstance(value, ast.Constant) for value in values
+        ):
+            return []
+        bindings.append({name: value.value for name, value in zip(target_names, values)})
+    return bindings
+
+
+def _bound_loop_value(node: ast.AST, binding: dict[str, object]) -> object | None:
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        return binding.get(node.id)
+    return None
+
+
 @lru_cache(maxsize=None)
 def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
     """Extract root/subcommand argparse contracts without importing a script."""
@@ -651,6 +683,42 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
                     changed = True
 
     command_paths: set[tuple[str, ...]] = set()
+    loop_argument_paths: dict[int, set[tuple[str, ...]]] = {}
+    for loop in (node for node in ast.walk(tree) if isinstance(node, ast.For)):
+        bindings = _literal_loop_bindings(loop)
+        if not bindings:
+            continue
+        generated_containers: dict[str, set[tuple[str, ...]]] = {}
+        for statement in loop.body:
+            assigned = _assigned_call(statement)
+            if assigned is None:
+                continue
+            variable, call = assigned
+            if not (
+                isinstance(call.func, ast.Attribute)
+                and call.func.attr == "add_parser"
+                and (owner := _expression_reference(call.func.value)) in subparser_paths
+                and call.args
+            ):
+                continue
+            names = [_bound_loop_value(call.args[0], binding) for binding in bindings]
+            if not names or not all(isinstance(name, str) for name in names):
+                continue
+            paths = {(*subparser_paths[owner], name) for name in names if isinstance(name, str)}
+            generated_containers.setdefault(variable, set()).update(paths)
+            command_paths.update(paths)
+        for statement in loop.body:
+            if not (
+                isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Call)
+                and isinstance(statement.value.func, ast.Attribute)
+                and statement.value.func.attr == "add_argument"
+            ):
+                continue
+            owner = _expression_reference(statement.value.func.value)
+            if owner in generated_containers:
+                loop_argument_paths[id(statement.value)] = generated_containers[owner]
+
     for call in calls:
         if not (
             isinstance(call.func, ast.Attribute)
@@ -700,20 +768,24 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
         if not (isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument"):
             continue
         owner = _expression_reference(node.func.value)
-        if owner not in argument_containers:
+        if id(node) in loop_argument_paths:
+            paths = loop_argument_paths[id(node)]
+        elif owner in argument_containers:
+            paths = {argument_containers[owner]}
+        else:
             continue
         argument = _argument_spec(node)
         if argument is None:
             continue
-        path = argument_containers[owner]
-        target = specs.setdefault(path, CommandSpec.empty())
-        if isinstance(argument, OptionSpec):
-            for alias in argument.aliases:
-                target.options[alias] = argument
-            if owner in mutually_exclusive_options:
-                mutually_exclusive_options[owner].append(argument)
-        else:
-            target.positionals.append(argument)
+        for path in paths:
+            target = specs.setdefault(path, CommandSpec.empty())
+            if isinstance(argument, OptionSpec):
+                for alias in argument.aliases:
+                    target.options[alias] = argument
+                if owner in mutually_exclusive_options:
+                    mutually_exclusive_options[owner].append(argument)
+            else:
+                target.positionals.append(argument)
 
     for variable, (path, required) in mutually_exclusive_groups.items():
         options = mutually_exclusive_options[variable]

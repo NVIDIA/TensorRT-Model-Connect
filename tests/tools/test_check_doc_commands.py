@@ -699,6 +699,81 @@ def test_local_python_module_contract_checks_nested_subcommands(
     ]
 
 
+def test_argparse_contract_expands_literal_loop_subcommands(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "matrix.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        "commands = parser.add_subparsers(required=True)\n"
+        "for name, help_text in (\n"
+        '    ("check", "validate entries"),\n'
+        '    ("run", "execute entries"),\n'
+        "):\n"
+        "    command = commands.add_parser(name, help=help_text)\n"
+        '    command.add_argument("suite")\n'
+        '    command.add_argument("--environment", required=True)\n'
+        '    command.add_argument("--entry", action="append")\n'
+        'resume = commands.add_parser("resume")\n'
+        'resume.add_argument("run_directory")\n',
+        encoding="utf-8",
+    )
+    check = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body=(
+            "python3 tools/matrix.py check benchmarks/suite.yaml "
+            "--environment benchmarks/environment.yaml --entry alpha\n"
+        ),
+    )
+    run = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body=(
+            "python3 tools/matrix.py run benchmarks/suite.yaml "
+            "--environment benchmarks/environment.yaml\n"
+        ),
+    )
+    missing_environment = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body="python3 tools/matrix.py check benchmarks/suite.yaml\n",
+    )
+    missing_suite = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body=("python3 tools/matrix.py run --environment benchmarks/environment.yaml\n"),
+    )
+    wrong_scope = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body="python3 tools/matrix.py resume artifacts/run --entry alpha\n",
+    )
+
+    assert cdc.check_python_script_contract(check, tmp_path) == []
+    assert cdc.check_python_script_contract(run, tmp_path) == []
+    assert [
+        finding.message
+        for finding in cdc.check_python_script_contract(
+            missing_environment,
+            tmp_path,
+        )
+    ] == ["missing required option for `tools/matrix.py check`: --environment"]
+    assert [
+        finding.message for finding in cdc.check_python_script_contract(missing_suite, tmp_path)
+    ] == ["missing required positional for `tools/matrix.py run`: suite"]
+    assert [
+        finding.message for finding in cdc.check_python_script_contract(wrong_scope, tmp_path)
+    ] == ["unknown option for `tools/matrix.py resume`: --entry"]
+
+
 def test_nested_argparse_checks_parent_required_options_only_at_parent_level(
     tmp_path: Path,
 ) -> None:
