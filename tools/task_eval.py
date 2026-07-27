@@ -8762,6 +8762,13 @@ def run_hf_reference_subprocess(
     )
     if reference_cache_dir:
         cmd.extend(["--cache-dir", reference_cache_dir])
+    reference_cache_identity = str(
+        getattr(args, "reference_cache_identity", "") or ""
+    )
+    if reference_cache_identity:
+        cmd.extend(
+            ["--reference-cache-identity", reference_cache_identity]
+        )
     if hf_args.device_map:
         cmd.extend(["--device-map", str(hf_args.device_map)])
     if hf_args.attn_impl:
@@ -10813,6 +10820,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--reference-cache-dir",
         default="",
         help="Shared setting-keyed cache managed by tools/trtmc_reference.py.",
+    )
+    p.add_argument(
+        "--reference-cache-identity",
+        default="",
+        help=(
+            "Explicit identity for TRTMC variants that share one reference "
+            "contract and may reuse the same cached reference result."
+        ),
     )
     p.add_argument("--force-build", action="store_true", help="Rebuild the .trtfb bundle.")
     p.add_argument(

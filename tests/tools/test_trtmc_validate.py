@@ -43,6 +43,19 @@ def test_model_workload_catalog_covers_every_ready_model():
         "e2e" not in spec.get("workloads", [])
         for spec in catalog["models"].values()
     )
+    assert (
+        catalog["models"]["flux-2-dev"]["reference_cache_identity"]
+        == catalog["models"]["flux-2-dev-fp8"]["reference_cache_identity"]
+    )
+    qwen_identities = {
+        catalog["models"][name]["reference_cache_identity"]
+        for name in (
+            "qwen3-0.6b-fp16",
+            "qwen3-0.6b-fp8",
+            "qwen3-0.6b-topp",
+        )
+    }
+    assert len(qwen_identities) == 1
 
 
 def test_validation_ready_models_exclude_l0_only_profiles():
@@ -106,15 +119,24 @@ def test_resolve_binding_defaults_and_rejects_undeclared_workload():
             "model-a": {
                 "default": "workload-a",
                 "workloads": ["workload-a", "workload-b"],
+                "reference_cache_identity": "org/model/reference-contract-v1",
             }
         }
     }
 
     assert trtmc_validate.resolve_binding(catalog, "model-a") == (
-        trtmc_validate.Binding("model-a", "workload-a")
+        trtmc_validate.Binding(
+            "model-a",
+            "workload-a",
+            reference_cache_identity="org/model/reference-contract-v1",
+        )
     )
     assert trtmc_validate.resolve_binding(catalog, "model-a", "workload-b") == (
-        trtmc_validate.Binding("model-a", "workload-b")
+        trtmc_validate.Binding(
+            "model-a",
+            "workload-b",
+            reference_cache_identity="org/model/reference-contract-v1",
+        )
     )
     with pytest.raises(trtmc_validate.ValidationError, match="does not declare"):
         trtmc_validate.resolve_binding(catalog, "model-a", "workload-c")
@@ -164,6 +186,54 @@ models:
         match="cannot use e2e",
     ):
         trtmc_validate.load_catalog(catalog_path)
+
+
+def test_catalog_rejects_cache_identity_across_different_reference_contracts(
+    monkeypatch,
+) -> None:
+    catalog = {
+        "models": {
+            "model-a": {
+                "default": "workload-a",
+                "workloads": ["workload-a"],
+                "reference_cache_identity": "shared-reference",
+            },
+            "model-b": {
+                "default": "workload-a",
+                "workloads": ["workload-a"],
+                "reference_cache_identity": "shared-reference",
+            },
+        }
+    }
+    task_models = {
+        "model-a": {
+            "hf_id": "org/model-a",
+            "family": "family",
+            "reference_backend": "hf_transformers",
+            "reference_family": "causal",
+        },
+        "model-b": {
+            "hf_id": "org/model-b",
+            "family": "family",
+            "reference_backend": "hf_transformers",
+            "reference_family": "causal",
+        },
+    }
+    monkeypatch.setattr(
+        trtmc_validate.task_eval,
+        "suite_match_reason",
+        lambda _suite, _model: (True, ""),
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="spans different reference contracts",
+    ):
+        trtmc_validate.audit_workload_compatibility(
+            catalog,
+            suites={"workload-a": {}},
+            task_models=task_models,
+        )
 
 
 def test_resolve_sample_limit_uses_workload_policy_and_cli_override():
@@ -1686,7 +1756,11 @@ def test_comparison_command_uses_validation_entrypoint(tmp_path):
     )
 
     command = trtmc_validate._comparison_command(
-        trtmc_validate.Binding("model-a", "workload-a"),
+        trtmc_validate.Binding(
+            "model-a",
+            "workload-a",
+            reference_cache_identity="org/model/reference-contract-v1",
+        ),
         case_dir=tmp_path / "case",
         dataset=tmp_path / "dataset.json",
         arguments=arguments,
@@ -1707,6 +1781,9 @@ def test_comparison_command_uses_validation_entrypoint(tmp_path):
     assert command[command.index("--reference-cache-dir") + 1] == str(
         tmp_path / "references"
     )
+    assert command[
+        command.index("--reference-cache-identity") + 1
+    ] == "org/model/reference-contract-v1"
     assert "--replace-bundle-on-build" in command
     assert "--force-hf" in command
     assert "--require-prebuilt-bundles" in command

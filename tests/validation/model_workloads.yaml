@@ -124,9 +124,11 @@ models:
   flux-2-dev:
     default: dpg_bench_diffusion_image
     workloads: [dpg_bench_diffusion_image]
+    reference_cache_identity: flux-2-dev-dpg-v1
   flux-2-dev-fp8:
     default: dpg_bench_diffusion_image
     workloads: [dpg_bench_diffusion_image]
+    reference_cache_identity: flux-2-dev-dpg-v1
   flux-schnell:
     default: dpg_bench_diffusion_image
     workloads: [dpg_bench_diffusion_image]
@@ -263,12 +265,15 @@ models:
   qwen3-0.6b-fp16:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]
+    reference_cache_identity: qwen3-0.6b-mmlu-five-shot-v1
   qwen3-0.6b-fp8:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]
+    reference_cache_identity: qwen3-0.6b-mmlu-five-shot-v1
   qwen3-0.6b-topp:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]
+    reference_cache_identity: qwen3-0.6b-mmlu-five-shot-v1
   qwen3-4b-instruct-2507:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]

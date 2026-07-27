@@ -61,6 +61,7 @@ class Binding:
     model: str
     workload: str | None
     not_compared_reason: str = ""
+    reference_cache_identity: str = ""
 
     @property
     def runnable(self) -> bool:
@@ -149,6 +150,14 @@ def _validate_model_spec(path: Path, name: Any, spec: Any) -> None:
         )
     if default not in workloads:
         raise ValidationError(f"{path}: {name}.default must be one of {name}.workloads")
+    reference_cache_identity = spec.get("reference_cache_identity")
+    if reference_cache_identity is not None and (
+        not isinstance(reference_cache_identity, str)
+        or not reference_cache_identity.strip()
+    ):
+        raise ValidationError(
+            f"{path}: {name}.reference_cache_identity must be a non-empty string"
+        )
 
 
 def _validate_sample_limits(path: Path, raw: Mapping[str, Any]) -> None:
@@ -245,6 +254,7 @@ def audit_workload_compatibility(
     task_models: Mapping[str, dict[str, Any]],
 ) -> None:
     incompatible = []
+    reference_cache_contracts: dict[str, set[tuple[str, ...]]] = {}
     for model_name, spec in catalog["models"].items():
         for workload in spec.get("workloads", []):
             matched, reason = task_eval.suite_match_reason(
@@ -253,6 +263,29 @@ def audit_workload_compatibility(
             )
             if not matched:
                 incompatible.append(f"{model_name}/{workload}: {reason}")
+            reference_cache_identity = str(
+                spec.get("reference_cache_identity", "") or ""
+            )
+            if reference_cache_identity:
+                model = task_models[model_name]
+                contract = (
+                    str(model.get("hf_id", "") or ""),
+                    str(model.get("hf_revision", "") or ""),
+                    str(model.get("family", "") or ""),
+                    str(model.get("reference_backend", "") or ""),
+                    str(model.get("reference_family", "") or ""),
+                    workload,
+                )
+                reference_cache_contracts.setdefault(
+                    reference_cache_identity,
+                    set(),
+                ).add(contract)
+    for identity, contracts in sorted(reference_cache_contracts.items()):
+        if len(contracts) > 1:
+            incompatible.append(
+                f"reference cache identity {identity!r} spans "
+                "different reference contracts"
+            )
     if incompatible:
         raise ValidationError("incompatible model/workload bindings: " + "; ".join(incompatible))
 
@@ -284,7 +317,13 @@ def resolve_binding(
         raise ValidationError(
             f"model {model} does not declare workload {selected}; available: {available}"
         )
-    return Binding(model=model, workload=selected)
+    return Binding(
+        model=model,
+        workload=selected,
+        reference_cache_identity=str(
+            spec.get("reference_cache_identity", "") or ""
+        ),
+    )
 
 
 def resolve_sample_limit(
@@ -530,6 +569,13 @@ def _comparison_command(
     ]
     if arguments.limit:
         command.extend(["--limit", str(arguments.limit)])
+    if binding.reference_cache_identity:
+        command.extend(
+            [
+                "--reference-cache-identity",
+                binding.reference_cache_identity,
+            ]
+        )
     if arguments.force_hf:
         command.append("--force-hf")
     if arguments.force_build:

@@ -3512,6 +3512,7 @@ def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch)
     args = argparse.Namespace(
         hf_python="/opt/deepseek-hf/bin/python3",
         reference_cache_dir=str(tmp_path / "references"),
+        reference_cache_identity="org/model/reference-contract-v1",
         hf_dtype="auto",
         hf_device="cuda",
         hf_device_map="",
@@ -3543,6 +3544,9 @@ def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch)
     assert captured["cmd"][captured["cmd"].index("--cache-dir") + 1] == str(
         tmp_path / "references"
     )
+    assert captured["cmd"][
+        captured["cmd"].index("--reference-cache-identity") + 1
+    ] == "org/model/reference-contract-v1"
 
 
 def test_run_hf_reference_subprocess_passes_asr_family_metadata(

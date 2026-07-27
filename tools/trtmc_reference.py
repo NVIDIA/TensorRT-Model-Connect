@@ -104,11 +104,28 @@ def _input_files(work_dir: Path) -> Iterable[Path]:
         yield path
 
 
-def _hash_file(hasher: Any, path: Path, work_dir: Path) -> None:
+def _hash_file(
+    hasher: Any,
+    path: Path,
+    work_dir: Path,
+    *,
+    reference_cache_identity: str = "",
+) -> None:
     relative = path.relative_to(work_dir)
     hasher.update(str(relative).encode())
     if path.suffix.lower() in _TEXT_SUFFIXES and path.stat().st_size <= 32 * 1024 * 1024:
         content = path.read_text(encoding="utf-8", errors="replace")
+        if relative == Path("manifest.json"):
+            if reference_cache_identity:
+                manifest = json.loads(content)
+                task_config = manifest.get("task_eval", {})
+                if isinstance(task_config, dict) and "model_manifest" in task_config:
+                    task_config["model_manifest"] = "<REFERENCE_CACHE_IDENTITY>"
+                    content = json.dumps(
+                        manifest,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
         hasher.update(content.replace(str(work_dir), "<WORK_DIR>").encode())
         return
     with path.open("rb") as stream:
@@ -118,7 +135,7 @@ def _hash_file(hasher: Any, path: Path, work_dir: Path) -> None:
 
 def _settings(args: argparse.Namespace) -> dict[str, Any]:
     native_runner = _native_reference_runner(args)
-    return {
+    settings = {
         "implementation": CACHE_IMPLEMENTATION,
         "native_runner": _native_runner_identity(native_runner),
         "python": str(Path(sys.executable).resolve()),
@@ -142,6 +159,12 @@ def _settings(args: argparse.Namespace) -> dict[str, Any]:
         "min_p": args.min_p,
         "seed": args.seed,
     }
+    reference_cache_identity = str(
+        getattr(args, "reference_cache_identity", "") or ""
+    )
+    if reference_cache_identity:
+        settings["reference_cache_identity"] = reference_cache_identity
+    return settings
 
 
 def native_reference_runner_for_dataset_kind(dataset_kind: str) -> Path | None:
@@ -180,8 +203,16 @@ def reference_key(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
     settings = _settings(args)
     hasher = hashlib.sha256()
     hasher.update(json.dumps(settings, sort_keys=True, separators=(",", ":")).encode())
+    reference_cache_identity = str(
+        getattr(args, "reference_cache_identity", "") or ""
+    )
     for path in _input_files(work_dir):
-        _hash_file(hasher, path, work_dir)
+        _hash_file(
+            hasher,
+            path,
+            work_dir,
+            reference_cache_identity=reference_cache_identity,
+        )
     return hasher.hexdigest(), settings
 
 
@@ -488,6 +519,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reference-family", default="")
     parser.add_argument("--work-dir", required=True)
     parser.add_argument("--cache-dir", default="")
+    parser.add_argument(
+        "--reference-cache-identity",
+        default="",
+        help=(
+            "Explicit identity shared by TRTMC variants with the same reference "
+            "contract. This replaces task_eval.model_manifest only in the cache key."
+        ),
+    )
     parser.add_argument("--predictions", default="hf_predictions.json")
     parser.add_argument("--raw-output", default="hf_raw.jsonl")
     parser.add_argument("--dtype", choices=("auto", "float16", "bfloat16"), default="auto")

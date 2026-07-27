@@ -73,7 +73,11 @@ The command creates a reference environment only when one does not already
 exist, then prints the environment it used. Reference inference runs through
 `tools/trtmc_reference.py`, outside the task-eval CLI. Its result is keyed by
 the input slice and inference settings and reused from the shared reference
-cache when the key already exists.
+cache when the key already exists. TRTMC variants may declare the same
+`reference_cache_identity` in `model_workloads.yaml` only when they use the
+same reference model, prepared inputs, and inference contract. The explicit
+identity lets those variants share one cached reference result without
+weakening cache isolation for other models.
 
 TRTMC bundles live in one shared validation engine directory. A required
 rebuild removes the existing bundle and writes the replacement at the same

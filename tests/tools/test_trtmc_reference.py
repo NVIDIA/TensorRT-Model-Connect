@@ -106,7 +106,7 @@ def test_tts_transcriber_passes_local_files_only_once(monkeypatch) -> None:
     }
 
 
-def _prepare_work(path: Path) -> None:
+def _prepare_work(path: Path, *, model_manifest: str = "") -> None:
     path.mkdir(parents=True)
     (path / "answers.json").write_text(
         json.dumps({"requests": [{"sample_id": "one", "answer": "A"}]}),
@@ -116,18 +116,16 @@ def _prepare_work(path: Path) -> None:
         json.dumps({"sample_id": "one", "prompt": "question"}) + "\n",
         encoding="utf-8",
     )
-    (path / "manifest.json").write_text(
-        json.dumps(
-            {
-                "dataset_kind": "mmlu_json",
-                "files": {
-                    "answers": str(path / "answers.json"),
-                    "prompts": str(path / "prompts.jsonl"),
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
+    manifest = {
+        "dataset_kind": "mmlu_json",
+        "files": {
+            "answers": str(path / "answers.json"),
+            "prompts": str(path / "prompts.jsonl"),
+        },
+    }
+    if model_manifest:
+        manifest["task_eval"] = {"model_manifest": model_manifest}
+    (path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
 
 def _args(work_dir: Path, cache_dir: Path, *extra: str):
@@ -205,6 +203,71 @@ def test_reference_cache_reuses_same_settings_across_work_directories(
     entries = [path for path in cache_dir.iterdir() if not path.name.startswith(".")]
     assert len(entries) == 1
     assert stat.S_IMODE(entries[0].stat().st_mode) & 0o055 == 0o055
+
+
+def test_reference_cache_identity_shares_equivalent_trtmc_variants(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cache_dir = tmp_path / "cache"
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _prepare_work(first, model_manifest="manifests/model-fp16.json")
+    _prepare_work(second, model_manifest="manifests/model-fp8.json")
+    calls = 0
+
+    def fake_reference(args) -> None:
+        nonlocal calls
+        calls += 1
+        Path(args.work_dir, "hf_predictions.json").write_text(
+            json.dumps(
+                {"responses": [{"sample_id": "one", "output_text": "A"}]}
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        trtmc_reference.task_eval,
+        "run_hf_reference",
+        fake_reference,
+    )
+
+    identity = "org/model/reference-contract-v1"
+    first_args = _args(
+        first,
+        cache_dir,
+        "--reference-cache-identity",
+        identity,
+    )
+    second_args = _args(
+        second,
+        cache_dir,
+        "--reference-cache-identity",
+        identity,
+    )
+
+    assert trtmc_reference.run_reference(first_args) == "generated"
+    assert trtmc_reference.run_reference(second_args) == "reused"
+    assert calls == 1
+    entries = [
+        path for path in cache_dir.iterdir() if not path.name.startswith(".")
+    ]
+    assert len(entries) == 1
+
+
+def test_reference_cache_keeps_variant_manifests_separate_without_identity(
+    tmp_path: Path,
+) -> None:
+    cache_dir = tmp_path / "cache"
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _prepare_work(first, model_manifest="manifests/model-fp16.json")
+    _prepare_work(second, model_manifest="manifests/model-fp8.json")
+
+    first_key, _ = trtmc_reference.reference_key(_args(first, cache_dir))
+    second_key, _ = trtmc_reference.reference_key(_args(second, cache_dir))
+
+    assert first_key != second_key
 
 
 def test_reference_cache_key_changes_with_inference_setting(
