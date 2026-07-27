@@ -30,6 +30,7 @@ from tools import task_eval  # noqa: E402
 
 CACHE_SCHEMA = "trtmc.reference-cache/v1"
 CACHE_IMPLEMENTATION = 1
+REFERENCE_CACHE_IDENTITY_IMPLEMENTATION = 2
 _CACHE_METADATA = "reference.json"
 _WORK_METADATA = "hf_cache.json"
 _NATIVE_RUN_LOG = "hf_native_run.log"
@@ -71,6 +72,13 @@ _IGNORED_INPUT_NAMES = {
     "trtfb_run.log",
     "visual_review.html",
 }
+_NATIVE_RUNNER_VARIANT_TASK_KEYS = {
+    "family",
+    "model_max_new_tokens",
+    "reference_backend",
+    "reference_family",
+    "user_contract",
+}
 
 
 class ReferenceError(RuntimeError):
@@ -104,6 +112,24 @@ def _input_files(work_dir: Path) -> Iterable[Path]:
         yield path
 
 
+def _normalize_identity_manifest(content: str) -> str:
+    manifest = json.loads(content)
+    task_config = manifest.get("task_eval", {})
+    if not isinstance(task_config, dict):
+        return content
+    if "model_manifest" in task_config:
+        task_config["model_manifest"] = "<REFERENCE_CACHE_IDENTITY>"
+    dataset_kind = str(manifest.get("dataset_kind", "") or "")
+    if native_reference_runner_for_dataset_kind(dataset_kind) is not None:
+        for name in _NATIVE_RUNNER_VARIANT_TASK_KEYS:
+            task_config.pop(name, None)
+    return json.dumps(
+        manifest,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def _hash_file(
     hasher: Any,
     path: Path,
@@ -117,15 +143,7 @@ def _hash_file(
         content = path.read_text(encoding="utf-8", errors="replace")
         if relative == Path("manifest.json"):
             if reference_cache_identity:
-                manifest = json.loads(content)
-                task_config = manifest.get("task_eval", {})
-                if isinstance(task_config, dict) and "model_manifest" in task_config:
-                    task_config["model_manifest"] = "<REFERENCE_CACHE_IDENTITY>"
-                    content = json.dumps(
-                        manifest,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
+                content = _normalize_identity_manifest(content)
         hasher.update(content.replace(str(work_dir), "<WORK_DIR>").encode())
         return
     with path.open("rb") as stream:
@@ -164,6 +182,9 @@ def _settings(args: argparse.Namespace) -> dict[str, Any]:
     )
     if reference_cache_identity:
         settings["reference_cache_identity"] = reference_cache_identity
+        settings["reference_cache_identity_implementation"] = (
+            REFERENCE_CACHE_IDENTITY_IMPLEMENTATION
+        )
     return settings
 
 
@@ -524,7 +545,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help=(
             "Explicit identity shared by TRTMC variants with the same reference "
-            "contract. This replaces task_eval.model_manifest only in the cache key."
+            "contract. Native-runner cache keys normalize variant-only task metadata "
+            "while preserving prepared inputs and effective inference settings."
         ),
     )
     parser.add_argument("--predictions", default="hf_predictions.json")

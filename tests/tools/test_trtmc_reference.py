@@ -255,6 +255,79 @@ def test_reference_cache_identity_shares_equivalent_trtmc_variants(
     assert len(entries) == 1
 
 
+def test_reference_cache_identity_ignores_native_runner_variant_metadata(
+    tmp_path: Path,
+) -> None:
+    cache_dir = tmp_path / "cache"
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _prepare_work(first, model_manifest="manifests/model-fp16.json")
+    _prepare_work(second, model_manifest="manifests/model-fp8.json")
+    for work_dir in (first, second):
+        manifest_path = work_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["dataset_kind"] = "mmlu_five_shot_json"
+        manifest["generation"] = {"max_new_tokens": 1, "do_sample": False}
+        manifest["task_eval"].update(
+            {
+                "family": "qwen",
+                "model_max_new_tokens": 10,
+                "task_strategy": "text_generation_causal",
+            }
+        )
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    second_manifest_path = second / "manifest.json"
+    second_manifest = json.loads(second_manifest_path.read_text(encoding="utf-8"))
+    second_manifest["task_eval"].update(
+        {
+            "model_max_new_tokens": 20,
+            "reference_backend": "hf_transformers",
+            "reference_family": "chat_qwen3_posttrained",
+            "user_contract": "chat_response",
+        }
+    )
+    second_manifest_path.write_text(
+        json.dumps(second_manifest),
+        encoding="utf-8",
+    )
+    identity = "qwen3-0.6b-mmlu-five-shot-v1"
+
+    first_key, _ = trtmc_reference.reference_key(
+        _args(first, cache_dir, "--reference-cache-identity", identity)
+    )
+    second_key, _ = trtmc_reference.reference_key(
+        _args(second, cache_dir, "--reference-cache-identity", identity)
+    )
+
+    assert first_key == second_key
+
+
+def test_reference_cache_identity_keeps_effective_generation_separate(
+    tmp_path: Path,
+) -> None:
+    cache_dir = tmp_path / "cache"
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _prepare_work(first, model_manifest="manifests/model-fp16.json")
+    _prepare_work(second, model_manifest="manifests/model-fp8.json")
+    for work_dir, max_new_tokens in ((first, 1), (second, 2)):
+        manifest_path = work_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["dataset_kind"] = "mmlu_five_shot_json"
+        manifest["generation"] = {"max_new_tokens": max_new_tokens}
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    identity = "org/model/reference-contract-v1"
+
+    first_key, _ = trtmc_reference.reference_key(
+        _args(first, cache_dir, "--reference-cache-identity", identity)
+    )
+    second_key, _ = trtmc_reference.reference_key(
+        _args(second, cache_dir, "--reference-cache-identity", identity)
+    )
+
+    assert first_key != second_key
+
+
 def test_reference_cache_keeps_variant_manifests_separate_without_identity(
     tmp_path: Path,
 ) -> None:
