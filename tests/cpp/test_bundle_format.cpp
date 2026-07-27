@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -41,7 +42,15 @@
 #include <stdlib.h>
 #include <streambuf>
 #include <string>
+#include <thread>
 #include <vector>
+
+#if defined(__linux__)
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 static int failures = 0;
 
@@ -331,6 +340,103 @@ static void test_copy_section_streams_in_bounded_chunks() {
     trtmc_test::remove_all_safe(tmp);
 }
 
+#if defined(__linux__)
+static std::filesystem::path make_cache_test_temp_dir() {
+    const auto pattern_path = std::filesystem::current_path() / "trtfb_cache_test_XXXXXX";
+    const std::string pattern = pattern_path.string();
+    std::vector<char> mutable_pattern(pattern.begin(), pattern.end());
+    mutable_pattern.push_back('\0');
+    char* dir = mkdtemp(mutable_pattern.data());
+    if (dir == nullptr) {
+        throw std::runtime_error(std::string("mkdtemp failed: ") + std::strerror(errno));
+    }
+    return std::filesystem::path(dir);
+}
+
+static double resident_fraction(const std::string& path, std::uint64_t offset, std::uint64_t size) {
+    const int descriptor = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (descriptor < 0)
+        throw std::runtime_error("open failed while checking bundle residency");
+
+    struct stat metadata{};
+    if (fstat(descriptor, &metadata) != 0 || metadata.st_size <= 0) {
+        close(descriptor);
+        throw std::runtime_error("fstat failed while checking bundle residency");
+    }
+
+    const auto file_size = static_cast<std::size_t>(metadata.st_size);
+    void* mapping = mmap(nullptr, file_size, PROT_NONE, MAP_SHARED, descriptor, 0);
+    if (mapping == MAP_FAILED) {
+        close(descriptor);
+        throw std::runtime_error("mmap failed while checking bundle residency");
+    }
+
+    const auto page_size = static_cast<std::uint64_t>(sysconf(_SC_PAGESIZE));
+    std::vector<unsigned char> residency((file_size + page_size - 1) / page_size);
+    if (mincore(mapping, file_size, residency.data()) != 0) {
+        munmap(mapping, file_size);
+        close(descriptor);
+        throw std::runtime_error("mincore failed while checking bundle residency");
+    }
+
+    munmap(mapping, file_size);
+    close(descriptor);
+
+    const std::uint64_t first_page = (offset + page_size - 1) / page_size;
+    const std::uint64_t end_page = (offset + size) / page_size;
+    if (first_page >= end_page)
+        throw std::runtime_error("bundle residency range has no complete pages");
+
+    std::size_t resident_pages = 0;
+    for (std::uint64_t page = first_page; page < end_page; ++page)
+        resident_pages += residency[page] & 1U;
+    return static_cast<double>(resident_pages) / static_cast<double>(end_page - first_page);
+}
+
+static bool cache_residency_drops_below(const std::string& path, std::uint64_t offset,
+                                        std::uint64_t size, double threshold) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    do {
+        if (resident_fraction(path, offset, size) < threshold)
+            return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    } while (std::chrono::steady_clock::now() < deadline);
+    return false;
+}
+
+static void test_read_bundle_file_drops_payload_cache() {
+    // Use the CTest build volume instead of the container overlay filesystem:
+    // overlayfs may accept POSIX_FADV_DONTNEED without exposing eviction through
+    // mincore, while production bundles live on a regular mounted filesystem.
+    const auto tmp = make_cache_test_temp_dir();
+    const auto path = (tmp / "cache-drop.trtfb").string();
+    std::vector<char> payload(8 * 1024 * 1024, 'C');
+    const std::string header =
+        "{\"model_id\":\"cache-drop\",\"sections\":{\"engine_plan\":{\"offset\":0,\"size\":" +
+        std::to_string(payload.size()) + "}}}";
+    write_bundle_with_sections(path, header, {payload});
+
+    // DONTNEED discards clean pages. Make the freshly written fixture match a
+    // stable model bundle before checking the runtime's cache release.
+    const int descriptor = open(path.c_str(), O_RDWR | O_CLOEXEC);
+    check(descriptor >= 0 && fsync(descriptor) == 0, "cache-drop fixture synced");
+    if (descriptor >= 0)
+        close(descriptor);
+
+    const std::uint64_t payload_offset = trtmc::kBundleHeaderOffset + header.size();
+    check(resident_fraction(path, payload_offset, payload.size()) > 0.9,
+          "cache-drop fixture starts resident");
+
+    const auto loaded = trtmc::ReadBundleFile(path);
+    check(loaded.sections.size() == 1 && loaded.sections.front().data == payload,
+          "cache-drop read preserves section data");
+    check(cache_residency_drops_below(path, payload_offset, payload.size(), 0.1),
+          "bundle payload cache dropped after read");
+
+    trtmc_test::remove_all_safe(tmp);
+}
+#endif
+
 static void test_sha256_known_vectors() {
     trtmc::internal::Sha256 empty;
     check(empty.hex_digest() == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -417,6 +523,9 @@ int main() {
     test_truncated_bundle_throws();
     test_max_batch_size_parse_and_back_compat();
     test_copy_section_streams_in_bounded_chunks();
+#if defined(__linux__)
+    test_read_bundle_file_drops_payload_cache();
+#endif
     test_sha256_known_vectors();
     test_sha256_boundaries_and_chunking();
 

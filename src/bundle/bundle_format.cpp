@@ -12,9 +12,15 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
+
+#if defined(__linux__)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace trtmc {
 
@@ -212,7 +218,8 @@ std::uint64_t checked_section_file_offset(const BundleSectionInfo& section,
     return data_start + section.offset;
 }
 
-std::ifstream open_bundle_section(const std::string& path, const BundleSectionInfo& section) {
+std::ifstream open_bundle_section(const std::string& path, const BundleSectionInfo& section,
+                                  std::uint64_t& file_offset_out) {
     std::ifstream in(path, std::ios::binary | std::ios::ate);
     if (!in)
         throw std::runtime_error("Failed to open bundle file: " + path);
@@ -226,12 +233,70 @@ std::ifstream open_bundle_section(const std::string& path, const BundleSectionIn
     const std::uint64_t data_start = read_bundle_data_start(in, path, file_size);
     const std::uint64_t file_offset =
         checked_section_file_offset(section, data_start, file_size, path);
+    file_offset_out = file_offset;
     in.seekg(static_cast<std::streamoff>(file_offset));
     if (!in) {
         throw std::runtime_error("Failed to seek to bundle section '" + section.name +
                                  "' in: " + path);
     }
     return in;
+}
+
+#if defined(__linux__)
+struct FileCacheRange {
+    off_t offset;
+    off_t size;
+};
+
+std::optional<FileCacheRange> aligned_file_cache_range(std::uint64_t file_offset,
+                                                       std::uint64_t size) noexcept {
+    const long raw_page_size = sysconf(_SC_PAGESIZE);
+    if (size == 0 || raw_page_size <= 0 ||
+        file_offset > std::numeric_limits<std::uint64_t>::max() - size) {
+        return std::nullopt;
+    }
+
+    const auto page_size = static_cast<std::uint64_t>(raw_page_size);
+    const std::uint64_t aligned_offset = file_offset - (file_offset % page_size);
+    std::uint64_t aligned_end = file_offset + size;
+    const std::uint64_t end_remainder = aligned_end % page_size;
+    if (end_remainder != 0) {
+        const std::uint64_t padding = page_size - end_remainder;
+        if (aligned_end > std::numeric_limits<std::uint64_t>::max() - padding)
+            return std::nullopt;
+        aligned_end += padding;
+    }
+
+    const std::uint64_t aligned_size = aligned_end - aligned_offset;
+    const auto max_advice_value = static_cast<std::uint64_t>(std::numeric_limits<off_t>::max());
+    if (aligned_offset > max_advice_value || aligned_size > max_advice_value)
+        return std::nullopt;
+    return FileCacheRange{static_cast<off_t>(aligned_offset), static_cast<off_t>(aligned_size)};
+}
+#endif
+
+void release_bundle_section_cache(const std::string& path, std::uint64_t file_offset,
+                                  std::uint64_t size) noexcept {
+#if defined(__linux__)
+    const auto range = aligned_file_cache_range(file_offset, size);
+    if (!range)
+        return;
+
+    const int descriptor = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (descriptor < 0)
+        return;
+
+    // Bundle data has already been copied into an owned buffer (or output
+    // stream), so retaining a second copy in the Linux page cache only raises
+    // peak memory. This is especially costly when GPU framebuffer is exposed
+    // as an OS-managed NUMA node.
+    (void)posix_fadvise(descriptor, range->offset, range->size, POSIX_FADV_DONTNEED);
+    close(descriptor);
+#else
+    (void)path;
+    (void)file_offset;
+    (void)size;
+#endif
 }
 
 } // namespace
@@ -285,10 +350,11 @@ BundleFile ReadBundleFile(const std::string& path) {
         if (!in) {
             throw std::runtime_error("Failed to read bundle section '" + name + "' from: " + path);
         }
-
         bundle.sections.push_back(std::move(section));
     }
 
+    in.close();
+    release_bundle_section_cache(path, 0, file_size);
     return bundle;
 }
 
@@ -320,7 +386,8 @@ BundleInfo ReadBundleHeader(const std::string& path) {
 }
 
 std::vector<char> ReadBundleSection(const std::string& path, const BundleSectionInfo& section) {
-    std::ifstream in = open_bundle_section(path, section);
+    std::uint64_t file_offset = 0;
+    std::ifstream in = open_bundle_section(path, section, file_offset);
     std::vector<char> data(static_cast<std::size_t>(section.size));
     if (!data.empty()) {
         in.read(data.data(), static_cast<std::streamsize>(data.size()));
@@ -329,12 +396,15 @@ std::vector<char> ReadBundleSection(const std::string& path, const BundleSection
         throw std::runtime_error("Failed to read bundle section '" + section.name +
                                  "' from: " + path);
     }
+    in.close();
+    release_bundle_section_cache(path, file_offset, section.size);
     return data;
 }
 
 void CopyBundleSection(const std::string& path, const BundleSectionInfo& section,
                        std::ostream& output) {
-    std::ifstream in = open_bundle_section(path, section);
+    std::uint64_t file_offset = 0;
+    std::ifstream in = open_bundle_section(path, section, file_offset);
     std::array<char, 1024 * 1024> buffer{};
     std::uint64_t remaining = section.size;
     while (remaining != 0) {
@@ -352,6 +422,8 @@ void CopyBundleSection(const std::string& path, const BundleSectionInfo& section
         }
         remaining -= static_cast<std::uint64_t>(chunk_size);
     }
+    in.close();
+    release_bundle_section_cache(path, file_offset, section.size);
 }
 
 bool HasBundleMagic(const std::string& path) {
