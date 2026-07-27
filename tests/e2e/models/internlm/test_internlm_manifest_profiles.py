@@ -12,6 +12,10 @@ from tests.e2e_harness.manifest_loader import load_manifest
 
 
 _MANIFEST_DIR = Path(__file__).with_name("manifests")
+_FAMILY_DIR = (
+    Path(__file__).resolve().parents[4]
+    / "python/tensorrt_model_connect/families/internlm"
+)
 
 
 def _write_manifest(tmp_path, data: dict) -> str:
@@ -70,3 +74,15 @@ def test_internlm_builds_reserve_an_exclusive_gpu() -> None:
             (_MANIFEST_DIR / manifest_name).read_text(encoding="utf-8"))
 
         assert manifest["e2e_parallel_resource"] == "exclusive_gpu"
+
+
+def test_reference_profile_supports_current_internlm_dynamic_cache_api() -> None:
+    lock = (
+        _FAMILY_DIR / "python_profile_requirements/internlm.lock.txt"
+    ).read_text(encoding="utf-8")
+    verify = (_FAMILY_DIR / "python_profile_verify.py").read_text(encoding="utf-8")
+
+    assert "huggingface-hub==0.26.5" in lock
+    assert "tokenizers==0.20.3" in lock
+    assert "transformers==4.46.3" in lock
+    assert 'hasattr(DynamicCache, "get_max_cache_shape")' in verify
