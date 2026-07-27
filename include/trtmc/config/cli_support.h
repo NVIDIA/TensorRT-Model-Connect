@@ -26,6 +26,7 @@
 
 #include <any>
 #include <iosfwd>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -96,6 +97,17 @@ ConfigBundle resolve_cli_config(const std::string& config_path,             // e
 std::string write_effective_config_next_to(const ConfigBundle& bundle,
                                            const std::string& artifact_path,
                                            const std::string& suffix = ".effective_config.json");
+
+// Best-effort variant for runtime paths where the artifact may be read-only.
+// Resolution remains authoritative even when the diagnostic sidecar cannot
+// be written; callers can surface ``error`` without changing behavior.
+struct EffectiveConfigWriteResult {
+    std::optional<std::string> path;
+    std::string error;
+};
+EffectiveConfigWriteResult
+try_write_effective_config_next_to(const ConfigBundle& bundle, const std::string& artifact_path,
+                                   const std::string& suffix = ".effective_config.json");
 
 // Low-level: serialize a bundle to JSON text. Stable field/namespace
 // ordering so two identical bundles produce byte-identical output.

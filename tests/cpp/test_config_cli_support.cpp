@@ -354,6 +354,18 @@ void test_write_effective_config_next_to_places_file(std::string tmp_dir) {
           "write_effective: sibling filename");
 }
 
+void test_try_write_effective_config_reports_unwritable_sidecar() {
+    register_demo_schema();
+    auto bundle = trtmc::config::resolve_cli_config("", {"triattention.kv_budget=8192"});
+
+    const auto result =
+        trtmc::config::try_write_effective_config_next_to(bundle, "/dev/null/bundle.trtfb");
+
+    check(!result.path.has_value(), "try_write_effective: unwritable path is non-fatal");
+    check(result.error.find("cannot create directories") != std::string::npos,
+          "try_write_effective: write error remains observable");
+}
+
 void test_runtime_resolution_survives_unwritable_effective_config_sidecar() {
     register_demo_schema();
     auto resolved = trtmc::detail::resolve_runtime_config(
@@ -518,6 +530,7 @@ int main() {
     test_resolve_session_beats_platform();
 
     test_bundle_to_effective_json_contains_source();
+    test_try_write_effective_config_reports_unwritable_sidecar();
     test_runtime_resolution_survives_unwritable_effective_config_sidecar();
 
     test_extract_bundle_defaults_finds_block();

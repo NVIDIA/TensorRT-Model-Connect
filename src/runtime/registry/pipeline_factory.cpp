@@ -263,11 +263,11 @@ detail::resolve_runtime_config(const std::string& config_text, const std::string
                                const std::vector<std::string>& set_tokens) {
     try {
         auto resolution = config::resolve_pipeline_config(config_text, config_path, set_tokens);
-        try {
-            config::write_effective_config_next_to(resolution.bundle, bundle_path);
-        } catch (const std::exception& e) {
-            std::cerr << "[trtmc.config] Failed to write effective config sidecar: " << e.what()
-                      << "\n          Resolved runtime config remains active.\n";
+        const auto sidecar =
+            config::try_write_effective_config_next_to(resolution.bundle, bundle_path);
+        if (!sidecar.path) {
+            std::cerr << "[trtmc.config] Failed to write effective config sidecar: "
+                      << sidecar.error << "\n          Resolved runtime config remains active.\n";
         }
         apply_platform_config(resolution.bundle);
         return std::move(resolution.bundle);

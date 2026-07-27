@@ -1566,9 +1566,16 @@ int apply_cli_config(const CliArgs& args) {
     try {
         auto bundle = trtmc::config::resolve_cli_config(args.config_path, args.set_tokens);
         if (!args.bundle_path.empty()) {
-            std::string path =
-                trtmc::config::write_effective_config_next_to(bundle, args.bundle_path);
-            std::cerr << "[trtmc] Wrote effective config: " << path << '\n';
+            const auto sidecar =
+                trtmc::config::try_write_effective_config_next_to(bundle, args.bundle_path);
+            if (sidecar.path) {
+                std::cerr << "[trtmc] Wrote effective config: " << *sidecar.path << '\n';
+            } else {
+                std::cerr << "[trtmc.config] Failed to write effective config sidecar: "
+                          << sidecar.error
+                          << "\n          Command will continue with resolved "
+                             "runtime config.\n";
+            }
         }
     } catch (const std::exception& e) {
         std::cerr << "Error resolving config: " << e.what() << '\n';

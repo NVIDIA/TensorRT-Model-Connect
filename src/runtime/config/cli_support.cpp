@@ -511,9 +511,10 @@ LayeredFileValues load_layered_file(const std::string& path) {
     if (ext_low == ".json")
         return parse_layered_json(body);
     if (ext_low == ".yaml" || ext_low == ".yml") {
-        throw std::invalid_argument("--config " + path +
-                                    ": YAML is not supported by the C++ loader; convert to JSON or "
-                                    "load via a wrapper (tensorrt_model_connect/cli.py accepts YAML).");
+        throw std::invalid_argument(
+            "--config " + path +
+            ": YAML is not supported by the C++ loader; convert to JSON or "
+            "load via a wrapper (tensorrt_model_connect/cli.py accepts YAML).");
     }
     throw std::invalid_argument("--config " + path + ": unsupported extension '" + ext +
                                 "' (expected .json)");
@@ -750,6 +751,17 @@ std::string write_effective_config_next_to(const ConfigBundle& bundle,
         throw std::invalid_argument("cannot write effective_config to: " + p.string());
     out << bundle_to_effective_json(bundle);
     return p.string();
+}
+
+EffectiveConfigWriteResult try_write_effective_config_next_to(const ConfigBundle& bundle,
+                                                              const std::string& artifact_path,
+                                                              const std::string& suffix) {
+    try {
+        return EffectiveConfigWriteResult{
+            write_effective_config_next_to(bundle, artifact_path, suffix), ""};
+    } catch (const std::exception& e) {
+        return EffectiveConfigWriteResult{std::nullopt, e.what()};
+    }
 }
 
 } // namespace trtmc::config
