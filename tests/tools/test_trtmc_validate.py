@@ -308,6 +308,8 @@ def test_all_defaults_to_continue_and_accepts_stop_policy():
 
     assert default.on_model_failure == "continue"
     assert stop.on_model_failure == "stop"
+    assert default.model_attempts == 2
+    assert default.model_retry_delay_seconds == 5.0
 
 
 @pytest.mark.parametrize(
@@ -354,10 +356,15 @@ def test_all_supervisor_applies_model_failure_policy(
         return {
             "model": binding.model,
             "workload": binding.workload,
+            "execution": {"status": "completed"},
             "validation": {"status": status},
         }
 
-    monkeypatch.setattr(trtmc_validate, "_run_supervised_binding", run_worker)
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_run_supervised_binding_with_retries",
+        run_worker,
+    )
     monkeypatch.setattr(trtmc_validate, "write_run_metadata", lambda output: output)
     monkeypatch.setattr(
         trtmc_validate,
@@ -378,6 +385,88 @@ def test_all_supervisor_applies_model_failure_policy(
 
     assert returncode == 1
     assert attempted == expected_models
+
+
+def test_supervisor_retries_execution_error_but_not_disagreement(
+    tmp_path,
+    monkeypatch,
+):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--model-retry-delay-seconds",
+            "0",
+            "--output",
+            str(tmp_path / "results"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "workload-a")
+    attempts = []
+
+    def run_worker(binding, *, arguments, catalog, attempt):
+        attempts.append(attempt)
+        execution_status = "error" if attempt == 1 else "completed"
+        validation_status = "failed" if attempt == 1 else "passed"
+        result = {
+            "model": binding.model,
+            "workload": binding.workload,
+            "execution": {"status": execution_status, "exit_code": 1 if attempt == 1 else 0},
+            "validation": {"status": validation_status},
+            "raw_result": {
+                "status": validation_status,
+                "error_type": "WorkerProcessError" if attempt == 1 else "",
+            },
+            "worker_log": str(tmp_path / f"worker-{attempt}.log"),
+        }
+        case_dir = trtmc_validate._case_directory(arguments.output, binding)
+        case_dir.mkdir(parents=True, exist_ok=True)
+        (case_dir / "comparison.json").write_text(
+            json.dumps(result),
+            encoding="utf-8",
+        )
+        return result
+
+    monkeypatch.setattr(trtmc_validate, "_run_supervised_binding", run_worker)
+
+    result = trtmc_validate._run_supervised_binding_with_retries(
+        binding,
+        arguments=arguments,
+        catalog={"sample_limits": {"workload-a": 5}},
+    )
+
+    assert attempts == [1, 2]
+    assert result["execution"]["status"] == "completed"
+    assert result["execution"]["attempt_count"] == 2
+    assert result["execution"]["retry_count"] == 1
+
+    attempts.clear()
+
+    def disagree(binding, *, arguments, catalog, attempt):
+        attempts.append(attempt)
+        return {
+            "model": binding.model,
+            "workload": binding.workload,
+            "execution": {"status": "completed", "exit_code": 1},
+            "validation": {"status": "failed"},
+            "raw_result": {"status": "failed"},
+            "worker_log": str(tmp_path / "worker-disagreement.log"),
+        }
+
+    monkeypatch.setattr(trtmc_validate, "_run_supervised_binding", disagree)
+
+    disagreement = trtmc_validate._run_supervised_binding_with_retries(
+        binding,
+        arguments=arguments,
+        catalog={"sample_limits": {"workload-a": 5}},
+    )
+
+    assert attempts == [1]
+    assert disagreement["execution"]["status"] == "completed"
+    assert disagreement["execution"]["attempt_count"] == 1
 
 
 def test_all_supervisor_records_not_compared_without_launching_worker(
@@ -406,7 +495,7 @@ def test_all_supervisor_records_not_compared_without_launching_worker(
 
     monkeypatch.setattr(
         trtmc_validate,
-        "_run_supervised_binding",
+        "_run_supervised_binding_with_retries",
         unexpected_worker,
     )
     monkeypatch.setattr(trtmc_validate, "write_run_metadata", lambda output: output)

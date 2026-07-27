@@ -16,9 +16,11 @@ import os
 from pathlib import Path
 import platform
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any, Iterable, Mapping, Sequence
 
 import yaml
@@ -1677,10 +1679,15 @@ def _signal(status: str, labels: Mapping[str, str]) -> str:
 def _render_execution(result: Mapping[str, Any]) -> str:
     execution = result.get("execution", {})
     status = str(execution.get("status", "error")) if isinstance(execution, dict) else "error"
-    return _signal(
+    rendered = _signal(
         status,
         {"completed": "Completed", "error": "Error", "not_run": "Not run"},
     )
+    attempts = int(execution.get("attempt_count", 1)) if isinstance(execution, dict) else 1
+    if attempts > 1:
+        outcome = "recovered" if status == "completed" else "failed"
+        rendered += f'<div class="detail">{outcome} after {attempts} attempts</div>'
+    return rendered
 
 
 def _render_reference(result: Mapping[str, Any]) -> str:
@@ -2088,6 +2095,20 @@ def _print_result(result: Mapping[str, Any], comparison: Path, report: Path) -> 
     print(f"Report:         {report}")
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def _nonnegative_float(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be nonnegative")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Validate TRTMC against model reference implementations."
@@ -2099,7 +2120,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--on-model-failure",
         choices=("continue", "stop"),
         default="continue",
-        help=("with --all, continue after a failed model or stop after recording it"),
+        help="continue after a failed model or stop after recording it",
+    )
+    parser.add_argument(
+        "--model-attempts",
+        type=_positive_int,
+        default=2,
+        help="maximum worker attempts for execution errors; comparisons are not retried",
+    )
+    parser.add_argument(
+        "--model-retry-delay-seconds",
+        type=_nonnegative_float,
+        default=5.0,
+        help="delay before retrying a model worker after an execution error",
     )
     parser.add_argument(
         "--model-worker",
@@ -2244,6 +2277,8 @@ def _worker_command(
         ("--trtmc-binary", arguments.trtmc_binary),
         ("--benchmark-binary", arguments.benchmark_binary),
         ("--hf-python", arguments.hf_python),
+        ("--model-attempts", arguments.model_attempts),
+        ("--model-retry-delay-seconds", arguments.model_retry_delay_seconds),
     ):
         command.extend([option, str(value)])
     for option, value in (
@@ -2319,12 +2354,15 @@ def _run_supervised_binding(
     *,
     arguments: argparse.Namespace,
     catalog: Mapping[str, Any],
+    attempt: int = 1,
 ) -> dict[str, Any]:
     case_dir = _case_directory(arguments.output, binding)
     case_dir.mkdir(parents=True, exist_ok=True)
     comparison_path = case_dir / "comparison.json"
     comparison_path.unlink(missing_ok=True)
-    worker_log = case_dir / "worker.log"
+    worker_log = case_dir / (
+        "worker.log" if attempt == 1 else f"worker.attempt-{attempt}.log"
+    )
     command = _worker_command(binding, arguments)
     launch_error = ""
     try:
@@ -2365,6 +2403,115 @@ def _run_supervised_binding(
     return result
 
 
+def _archive_failed_attempt(case_dir: Path, attempt: int) -> dict[str, str]:
+    archived = {}
+    for name in ("comparison.json", "execution.log", "disagreements.jsonl"):
+        source = case_dir / name
+        if not source.is_file():
+            continue
+        path = case_dir / f"{source.stem}.attempt-{attempt}{source.suffix}"
+        shutil.copy2(source, path)
+        archived[name] = str(path)
+    return archived
+
+
+def _attempt_record(
+    result: Mapping[str, Any],
+    *,
+    attempt: int,
+    archived: Mapping[str, str],
+) -> dict[str, Any]:
+    execution = result.get("execution", {})
+    validation = result.get("validation", {})
+    raw_result = result.get("raw_result", {})
+    execution_log = archived.get(
+        "execution.log",
+        str(result.get("execution_log", "") or ""),
+    )
+    return {
+        "attempt": attempt,
+        "execution_status": (
+            str(execution.get("status", "")) if isinstance(execution, Mapping) else ""
+        ),
+        "validation_status": (
+            str(validation.get("status", "")) if isinstance(validation, Mapping) else ""
+        ),
+        "worker_log": str(result.get("worker_log", "") or ""),
+        "execution_log": execution_log,
+        "comparison_result": archived.get("comparison.json", ""),
+        "error_type": (
+            str(raw_result.get("error_type", ""))
+            if isinstance(raw_result, Mapping)
+            else ""
+        ),
+        "error": (
+            str(raw_result.get("error", ""))
+            if isinstance(raw_result, Mapping)
+            else ""
+        ),
+    }
+
+
+def _run_supervised_binding_with_retries(
+    binding: Binding,
+    *,
+    arguments: argparse.Namespace,
+    catalog: Mapping[str, Any],
+) -> dict[str, Any]:
+    case_dir = _case_directory(arguments.output, binding)
+    attempts = []
+    result: dict[str, Any] = {}
+    for attempt in range(1, arguments.model_attempts + 1):
+        result = _run_supervised_binding(
+            binding,
+            arguments=arguments,
+            catalog=catalog,
+            attempt=attempt,
+        )
+        execution = result.get("execution", {})
+        execution_error = (
+            isinstance(execution, Mapping)
+            and execution.get("status") == "error"
+        )
+        archived = (
+            _archive_failed_attempt(case_dir, attempt)
+            if execution_error and attempt < arguments.model_attempts
+            else {}
+        )
+        attempts.append(
+            _attempt_record(
+                result,
+                attempt=attempt,
+                archived=archived,
+            )
+        )
+        if not execution_error or attempt == arguments.model_attempts:
+            break
+        print(
+            f"Retrying worker after execution error: {binding.model} "
+            f"(attempt {attempt + 1}/{arguments.model_attempts})",
+            flush=True,
+        )
+        if arguments.model_retry_delay_seconds:
+            time.sleep(arguments.model_retry_delay_seconds)
+    execution = dict(result.get("execution", {}))
+    execution.update(
+        {
+            "attempt_count": len(attempts),
+            "max_attempts": arguments.model_attempts,
+            "retry_count": max(0, len(attempts) - 1),
+            "attempts": attempts,
+        }
+    )
+    result["execution"] = execution
+    comparison_path = case_dir / "comparison.json"
+    comparison_path.write_text(
+        json.dumps(result, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return result
+
+
 def _run_all_bindings(
     bindings: Iterable[Binding],
     *,
@@ -2374,6 +2521,7 @@ def _run_all_bindings(
     _prepare_run_directories(arguments)
     write_run_metadata(arguments.output)
     failed = False
+    not_compared = False
     for binding in bindings:
         if not binding.runnable:
             print(
@@ -2385,6 +2533,7 @@ def _run_all_bindings(
                 binding,
                 arguments.output,
             )
+            not_compared = True
             _, report_path, _ = write_report(arguments.output)
             _print_result(result, comparison, report_path)
             continue
@@ -2398,7 +2547,7 @@ def _run_all_bindings(
             f"\nStarting worker: {binding.model} / {binding.workload} / {sample_note}",
             flush=True,
         )
-        result = _run_supervised_binding(
+        result = _run_supervised_binding_with_retries(
             binding,
             arguments=arguments,
             catalog=catalog,
@@ -2414,7 +2563,9 @@ def _run_all_bindings(
                 flush=True,
             )
             break
-    return 1 if failed else 0
+    if failed:
+        return 1
+    return 2 if not_compared and not arguments.all else 0
 
 
 def _run_bindings(
@@ -2499,7 +2650,7 @@ def _main(arguments: argparse.Namespace) -> int:
             explicit_limit=arguments.limit,
         )
         return 0
-    if arguments.all:
+    if not arguments.model_worker:
         return _run_all_bindings(
             bindings,
             arguments=arguments,
