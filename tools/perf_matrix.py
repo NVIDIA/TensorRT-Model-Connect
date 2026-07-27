@@ -564,6 +564,10 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
         raise PerfMatrixError(f"case {case['id']} baseline model class is invalid")
     if baseline.get("generation_method", "generate") not in {"generate", "ar-generate"}:
         raise PerfMatrixError(f"case {case['id']} baseline generation method is invalid")
+    if not isinstance(baseline.get("local_files_only", False), bool):
+        raise PerfMatrixError(
+            f"case {case['id']} baseline local_files_only must be boolean"
+        )
     if baseline.get("experts_implementation") not in {
         None,
         "eager",
@@ -1281,7 +1285,7 @@ def _baseline_argv(
         argv.extend(["--model-class", str(baseline["model_class"])])
     if baseline.get("generation_method"):
         argv.extend(["--generation-method", str(baseline["generation_method"])])
-    if options.local_files_only:
+    if baseline.get("local_files_only", options.local_files_only):
         argv.append("--local-files-only")
     if mode == "torch-compile":
         argv.extend(["--compile-mode", str(baseline.get("compile_mode", "default"))])
@@ -1359,7 +1363,7 @@ def _task_reference_argv(
         argv.extend(["--revision", str(revision)])
     if bool(manifest.get("trust_remote_code", False)):
         argv.append("--trust-remote-code")
-    if options.local_files_only:
+    if baseline.get("local_files_only", options.local_files_only):
         argv.append("--local-files-only")
     return argv
 

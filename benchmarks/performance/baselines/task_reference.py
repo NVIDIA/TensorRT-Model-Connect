@@ -1665,6 +1665,7 @@ def _load_vision(
 
     device = torch.device("cuda")
     image = Image.open(_asset_path(arguments, request, "image_path")).convert("RGB")
+    width, height = image.size
     kwargs = _load_kwargs(arguments, torch)
     processor_kwargs = _processor_kwargs(arguments)
 
@@ -1746,7 +1747,6 @@ def _load_vision(
     else:
         processor = transformers.SamProcessor.from_pretrained(arguments.model, **processor_kwargs)
         model = transformers.SamModel.from_pretrained(arguments.model, **kwargs).eval().to(device)
-        width, height = image.size
         points = [
             [
                 [

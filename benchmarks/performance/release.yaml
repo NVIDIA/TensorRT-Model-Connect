@@ -17,10 +17,6 @@ defaults:
     input_preparation_included: true
     asset_loading_included: false
 
-excluded_profiles:
-  - model: qwen3-moe-30b-a3b
-    reason: Excluded while its single-process TensorRT engine deserialization failure is unresolved.
-
 entries:
   - id: albert.encode
     family: albert
@@ -712,9 +708,9 @@ entries:
   - id: qwen_moe.generate
     family: qwen_moe
     operation: generate
-    model: qwen3-moe-tiny-random
+    model: qwen3-moe-30b-a3b
     workload:
-      testcase: qwen3-moe-tiny-random
+      testcase: qwen3-moe-30b-a3b
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -781,6 +777,7 @@ entries:
       timing_scope: task-model-call-wall
       input_preparation_included: false
       output_contract: segmentation-shape
+      local_files_only: true
   - id: sana_wm.generate_image
     family: sana_wm
     operation: generate_image
@@ -989,6 +986,8 @@ additional_profiles:
     inherit: qwen.generate
   - model: qwen3-4b-instruct-2507
     inherit: qwen.generate
+  - model: qwen3-moe-tiny-random
+    inherit: qwen_moe.generate
   - model: riva-translate-4b
     inherit: mistral.generate
   - model: roberta-base

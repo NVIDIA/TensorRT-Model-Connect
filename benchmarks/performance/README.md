@@ -116,8 +116,8 @@ A ready profile can be omitted only with an explicit reason:
 
 ```yaml
 excluded_profiles:
-  - model: qwen3-moe-30b-a3b
-    reason: Excluded while its single-process TensorRT engine deserialization failure is unresolved.
+  - model: model-profile-name
+    reason: Excluded while its documented single-process blocker is unresolved.
 ```
 
 The coverage check requires every non-L0 ready single-process catalog profile to
@@ -137,6 +137,10 @@ The environment file owns machine-specific execution settings:
 - results and scratch roots;
 - command timeout and local-files-only mode;
 - minimum free disk space.
+
+An individual baseline can set `local_files_only: true` when that reference must
+use an already-provisioned model snapshot even if the rest of the matrix may
+access its configured model source.
 
 The checked-in `environments/gb300.yaml` is the CI configuration. Repository files
 use repository-relative paths. Stable runner paths are supplied through the same

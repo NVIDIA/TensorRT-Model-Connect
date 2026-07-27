@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import nullcontext
 import json
 from argparse import Namespace
 from pathlib import Path
@@ -244,20 +245,15 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
 
     perf_matrix._validate_coverage(cases, excluded_profiles)
 
-    assert len(cases) == 104
+    assert len(cases) == 105
     assert len(raw_entries) == 77
-    assert len(raw_additional) == 27
-    assert excluded_profiles == {
-        "qwen3-moe-30b-a3b": (
-            "Excluded while its single-process TensorRT engine deserialization "
-            "failure is unresolved."
-        )
-    }
+    assert len(raw_additional) == 28
+    assert excluded_profiles == {}
     assert all(set(entry["workload"]) <= {"testcase", "request"} for entry in raw_entries)
     assert all(entry["workload"].get("testcase") for entry in raw_entries)
     assert all(entry.get("model") and entry.get("inherit") for entry in raw_additional)
     assert not any("priority" in entry for entry in raw_entries)
-    assert {case["model"] for case in cases} == ready_profiles - set(excluded_profiles)
+    assert {case["model"] for case in cases} == ready_profiles
     assert not any(perf_matrix._is_l0_profile(case["model"]) for case in cases)
     assert len({(case["family"], case["operation"]) for case in cases}) == 77
     assert len({case["family"] for case in cases}) == 76
@@ -267,7 +263,7 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     ]
     assert Counter(perf_matrix._candidate_timing_scope(case) for case in cases) == {
         "model_call_wall": 22,
-        "public_pipeline_call_wall": 82,
+        "public_pipeline_call_wall": 83,
     }
     assert {
         case["id"]
@@ -298,8 +294,9 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     )
     assert by_id["mixtral.generate"]["baseline"]["experts_implementation"] == "batched_mm"
     assert by_id["phi_moe.generate"]["baseline"]["experts_implementation"] == "batched_mm"
-    assert by_id["qwen_moe.generate"]["model"] == "qwen3-moe-tiny-random"
+    assert by_id["qwen_moe.generate"]["model"] == "qwen3-moe-30b-a3b"
     assert by_id["qwen_moe.generate"]["baseline"]["experts_implementation"] == "batched_mm"
+    assert by_id["sam3.segment_prompted"]["baseline"]["local_files_only"] is True
     assert by_id["phi_moe.generate"]["baseline"]["output_contract"] == "exact-text"
     assert by_id["opt.generate"]["workload"]["request"]["max_new_tokens"] == 10
     assert by_id["deepseek_ocr.generate"]["baseline"]["precision"] == "bf16"
@@ -366,21 +363,15 @@ def test_release_suite_rejects_unknown_explicit_exclusion() -> None:
 def test_release_suite_rejects_a_configured_explicit_exclusion() -> None:
     suite = perf_matrix._read_yaml(SUITE)
     cases = perf_matrix._cases(suite)
-    qwen_moe = next(case for case in cases if case["id"] == "qwen_moe.generate")
-    cases.append(
-        {
-            **qwen_moe,
-            "id": "qwen_moe.generate@qwen3-moe-30b-a3b",
-            "model": "qwen3-moe-30b-a3b",
-            "workload": {"testcase": "qwen3-moe-30b-a3b"},
-        }
-    )
 
     with pytest.raises(
         perf_matrix.PerfMatrixError,
         match="excluded-and-configured=qwen3-moe-30b-a3b",
     ):
-        perf_matrix._validate_coverage(cases, perf_matrix._excluded_profiles(suite))
+        perf_matrix._validate_coverage(
+            cases,
+            {"qwen3-moe-30b-a3b": "Temporary test exclusion."},
+        )
 
 
 def test_checked_in_gb300_environment_is_ci_runnable() -> None:
@@ -454,6 +445,27 @@ def test_suite_timing_contract_drift_is_rejected_before_execution() -> None:
     with pytest.raises(
         perf_matrix.PerfMatrixError,
         match=r"baseline\.timing_scope must be 'task-model-call-wall'",
+    ):
+        perf_matrix._validate_baseline(drifted)
+
+
+def test_suite_rejects_non_boolean_baseline_local_files_only() -> None:
+    case = next(
+        value
+        for value in perf_matrix._cases(perf_matrix._read_yaml(SUITE))
+        if value["id"] == "sam3.segment_prompted"
+    )
+    drifted = {
+        **case,
+        "baseline": {
+            **case["baseline"],
+            "local_files_only": "true",
+        },
+    }
+
+    with pytest.raises(
+        perf_matrix.PerfMatrixError,
+        match="baseline local_files_only must be boolean",
     ):
         perf_matrix._validate_baseline(drifted)
 
@@ -914,7 +926,7 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert not scratch_root.exists()
     results = json.loads((output / "results.json").read_text(encoding="utf-8"))
     rows = {row["id"]: row for row in results["cases"]}
-    assert len(rows) == 104
+    assert len(rows) == 105
     assert results["environment_config"]["name"] == "test-gb300"
     assert (
         results["environment_config"]["execution"]["minimum_gpu_free_fraction"]
@@ -930,17 +942,9 @@ def test_run_consolidates_results_and_records_replayable_commands(
     expected_catalog_coverage = {
         "total_profiles": len(catalog_entries),
         "ready_profiles": catalog_counts["ready"],
-        "release_profiles": catalog_counts["ready"] - excluded_l0_profiles - 1,
-        "explicitly_excluded_profiles": 1,
-        "explicit_exclusions": [
-            {
-                "model": "qwen3-moe-30b-a3b",
-                "reason": (
-                    "Excluded while its single-process TensorRT engine "
-                    "deserialization failure is unresolved."
-                ),
-            }
-        ],
+        "release_profiles": catalog_counts["ready"] - excluded_l0_profiles,
+        "explicitly_excluded_profiles": 0,
+        "explicit_exclusions": [],
         "excluded_l0_profiles": excluded_l0_profiles,
         "distributed_profiles": catalog_counts["distributed"],
         "other_profiles": sum(
@@ -978,9 +982,9 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert ">gpt2<" in report
     assert "HF eager" in report
     assert "76 families" in report
-    assert "104 model-profile comparisons" in report
-    assert "104 single-process profiles" in report
-    assert "1 explicitly excluded profile" in report
+    assert "105 model-profile comparisons" in report
+    assert "105 single-process profiles" in report
+    assert "0 explicitly excluded profiles" in report
     assert (
         f"{expected_catalog_coverage['excluded_l0_profiles']} duplicate L0 profiles are excluded"
     ) in report
@@ -1259,6 +1263,48 @@ def test_resolution_failure_is_recorded_without_stopping_other_entries(
     assert failures[case["id"]]["argv"][-1] == "--dry-run"
 
 
+def test_task_reference_can_require_local_model_files_per_case(tmp_path: Path) -> None:
+    case = {
+        "baseline": {
+            "adapter": "hf-transformers-vision",
+            "local_files_only": True,
+            "timing_scope": "task-model-call-wall",
+            "input_preparation_included": False,
+            "asset_loading_included": False,
+        },
+        "measurement": {"warmup": 1, "iterations": 2},
+    }
+    resolved = {
+        "operation": "segment_prompted",
+        "request": {"image_path": "input.png", "prompt": "object"},
+        "runtime": {},
+        "model": {
+            "family": "sam3",
+            "hf_id": "facebook/sam3",
+            "manifest_path": str(tmp_path / "manifest.json"),
+            "precision": "fp32",
+            "task_strategy": "vision_segmentation",
+        },
+    }
+    options = Namespace(
+        local_files_only=False,
+        task_reference_runner=tmp_path / "task_reference.py",
+    )
+
+    argv = perf_matrix._task_reference_argv(
+        case=case,
+        resolved=resolved,
+        manifest={},
+        output=tmp_path / "baseline.json",
+        options=options,
+        profile="default",
+        python="python",
+        mode="hf-eager",
+    )
+
+    assert "--local-files-only" in argv
+
+
 def test_entry_is_the_only_run_selection() -> None:
     cases = perf_matrix._cases(perf_matrix._read_yaml(SUITE))
 
@@ -1512,6 +1558,95 @@ def test_vlm_adapter_routes_non_generic_families_to_owned_loaders() -> None:
 
     assert runner["_load_vlm"](Namespace(family="deepseek_ocr"), {}, {}) is deepseek
     assert runner["_load_vlm"](Namespace(family="locateanything"), {}, {}) is locateanything
+
+
+def test_sam3_reference_reports_source_image_dimensions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PIL import Image
+
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    image = tmp_path / "input.png"
+    Image.new("RGB", (6, 4)).save(image)
+
+    class FakeTensor:
+        def __init__(self, value=None):
+            self.value = value
+
+        def is_floating_point(self):
+            return False
+
+        def to(self, *_args, **_kwargs):
+            return self
+
+        def cpu(self):
+            return self
+
+        def tolist(self):
+            return self.value
+
+    class FakeMasks:
+        shape = (2, 4, 6)
+        ndim = 3
+
+    class FakeProcessor:
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return cls()
+
+        def __call__(self, **_kwargs):
+            return {"original_sizes": FakeTensor([[4, 6]])}
+
+        def post_process_instance_segmentation(self, *_args, **_kwargs):
+            return [{"masks": FakeMasks()}]
+
+    class FakeModel:
+        config = Namespace(_commit_hash="model-revision")
+
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return cls()
+
+        def eval(self):
+            return self
+
+        def to(self, *_args, **_kwargs):
+            return self
+
+        def parameters(self):
+            return iter([Namespace(dtype="fp32")])
+
+        def __call__(self, **_kwargs):
+            return Namespace()
+
+    fake_torch = ModuleType("torch")
+    fake_torch.device = lambda value: value
+    fake_torch.float16 = "fp16"
+    fake_torch.float32 = "fp32"
+    fake_torch.bfloat16 = "bf16"
+    fake_torch.inference_mode = nullcontext
+    fake_transformers = ModuleType("transformers")
+    fake_transformers.Sam3Processor = FakeProcessor
+    fake_transformers.Sam3Model = FakeModel
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    arguments = Namespace(
+        family="sam3",
+        model="facebook/sam3",
+        precision="fp32",
+        trust_remote_code=False,
+        local_files_only=True,
+        revision=None,
+        manifest=tmp_path / "manifest.json",
+    )
+
+    session = runner["_load_vision"](
+        arguments,
+        {"image_path": str(image), "prompt": "the object"},
+        {},
+    )
+
+    assert session.invoke() == {"num_masks": 2, "height": 4, "width": 6}
 
 
 def test_locateanything_fallback_tokenizer_supports_batch_decode(
