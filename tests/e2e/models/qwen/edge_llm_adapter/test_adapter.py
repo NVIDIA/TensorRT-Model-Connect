@@ -1066,7 +1066,7 @@ def test_native_python_default_leaves_precision_to_the_model_family() -> None:
     assert defaults["max_batch_size"] == MC_DEFAULT_DEPLOYMENT["max_batch_size"]
 
 
-def test_public_python_explicit_legacy_defaults_dispatch_without_native_fallback(
+def test_public_python_model_id_default_dispatches_without_native_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1075,12 +1075,7 @@ def test_public_python_explicit_legacy_defaults_dispatch_without_native_fallback
     bundle = tmp_path / "qwen-default.trtfb"
     captured: dict[str, object] = {}
 
-    def select_optimized(
-        model_id: str,
-        output_path: str,
-        public_options: dict,
-        **_kwargs,
-    ):
+    def select_optimized(model_id: str, output_path: str, public_options: dict):
         captured.update(
             model_id=model_id,
             output_path=output_path,
@@ -1096,12 +1091,7 @@ def test_public_python_explicit_legacy_defaults_dispatch_without_native_fallback
         lambda **_kwargs: pytest.fail("qualified default request must not use MC native"),
     )
 
-    engine_builder.build(
-        MODEL_ID,
-        str(bundle),
-        max_cache_length=MC_DEFAULT_DEPLOYMENT["max_cache_length"],
-        precision=MC_DEFAULT_DEPLOYMENT["precision"],
-    )
+    engine_builder.build(MODEL_ID, str(bundle))
 
     assert bundle.read_bytes() == b"delegated"
     assert captured["model_id"] == MODEL_ID

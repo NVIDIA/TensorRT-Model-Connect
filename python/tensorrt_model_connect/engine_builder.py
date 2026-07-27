@@ -1721,7 +1721,7 @@ def _build_diffusion_bundle(
 def _build_native_impl(
     model_id_or_path: str,
     output_path: str,
-    max_cache_length: int | None = None,
+    max_cache_length: int = 256,
     *,
     model_revision: str | None = None,
     decoder_engine_layout: str = "split",
@@ -1897,7 +1897,7 @@ def _try_build_optimized_runtime(
 def build(
     model_id_or_path: str,
     output_path: str,
-    max_cache_length: int | None = None,
+    max_cache_length: int = 256,
     *,
     model_revision: str | None = None,
     decoder_engine_layout: str = "split",
@@ -1954,14 +1954,6 @@ def build(
         model_id_or_path,
         output_path,
         public_options,
-        explicit_public_options=frozenset(
-            name
-            for name, value in (
-                ("precision", precision),
-                ("max_cache_length", max_cache_length),
-            )
-            if value is not None
-        ),
         **revision_kwargs,
     )
     if optimized is not None:

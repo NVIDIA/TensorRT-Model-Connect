@@ -93,11 +93,8 @@ def test_python_build_delegates_before_native_with_explicit_options(
         model: str,
         output: str,
         options: dict,
-        *,
-        explicit_public_options: frozenset[str],
     ):
         calls.append((model, output, options))
-        assert explicit_public_options == {"precision", "max_cache_length"}
         return object()
 
     monkeypatch.setattr(engine_builder, "_try_build_optimized_runtime", delegated)
@@ -134,11 +131,8 @@ def test_python_build_treats_omitted_and_explicit_defaults_identically(
         _model: str,
         _output: str,
         options: dict,
-        *,
-        explicit_public_options: frozenset[str],
     ):
         calls.append(options)
-        calls.append({"_explicit": explicit_public_options})
         return object()
 
     monkeypatch.setattr(engine_builder, "_try_build_optimized_runtime", delegated)
@@ -157,12 +151,10 @@ def test_python_build_treats_omitted_and_explicit_defaults_identically(
         max_batch_size=1,
     )
 
-    assert calls[0] == calls[2]
+    assert calls[0] == calls[1]
     assert calls[0]["max_batch_size"] == 1
     assert calls[0]["max_cache_length"] == 256
     assert calls[0]["precision"] == "fp32"
-    assert calls[1]["_explicit"] == frozenset()
-    assert calls[3]["_explicit"] == {"precision", "max_cache_length"}
 
 
 def test_python_build_preserves_native_call_when_no_capsule_matches(monkeypatch) -> None:
@@ -186,7 +178,7 @@ def test_python_build_preserves_native_call_when_no_capsule_matches(monkeypatch)
     assert native_calls[0]["model_id_or_path"] == "native/model"
     assert native_calls[0]["output_path"] == "native.trtfb"
     assert native_calls[0]["precision"] is None
-    assert native_calls[0]["max_cache_length"] is None
+    assert native_calls[0]["max_cache_length"] == 256
 
 
 def test_cli_delegation_uses_existing_options_without_native_discovery(monkeypatch) -> None:
