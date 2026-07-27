@@ -34,6 +34,9 @@ entries:
     model: bark-small
     workload:
       testcase: bark-small
+      request:
+        # Stop before either backend's sampled EOS so both run exactly 128 semantic steps.
+        max_new_tokens: 128
     baseline:
       runner: task-reference
       adapter: hf-transformers-tts
@@ -41,9 +44,7 @@ entries:
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
-      output_contract: audio-duration
-      # Fixed-seed backends may stop at adjacent AR steps; keep workloads within 2%.
-      max_audio_duration_relative_difference: 0.02
+      output_contract: audio-shape
   - id: bart.generate
     family: bart
     operation: generate

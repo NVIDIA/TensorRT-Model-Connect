@@ -190,6 +190,15 @@ def _request_seed(request: Mapping[str, Any], fallback: Any = 42) -> int:
     return value
 
 
+def _bark_generation_options(request: Mapping[str, Any]) -> dict[str, int]:
+    max_new_tokens = request.get("max_new_tokens", 0)
+    if isinstance(max_new_tokens, bool) or not isinstance(max_new_tokens, int):
+        raise ValueError("Bark request max_new_tokens must be an integer")
+    if max_new_tokens <= 0:
+        return {}
+    return {"semantic_max_new_tokens": max_new_tokens}
+
+
 def _load_kwargs(arguments: argparse.Namespace, torch_module: Any) -> dict[str, Any]:
     values: dict[str, Any] = {
         "trust_remote_code": arguments.trust_remote_code,
@@ -428,11 +437,12 @@ def _load_tts(
             request,
             _runtime_config(arguments).get("audio_bark.seed", 42),
         )
+        generation_options = _bark_generation_options(request)
 
         def invoke() -> Mapping[str, Any]:
             _seed_all(torch, seed)
             with torch.inference_mode():
-                audio = model.generate(**inputs)
+                audio = model.generate(**inputs, **generation_options)
             return {
                 "audio_samples": int(audio.numel()),
                 "sample_rate": int(model.generation_config.sample_rate),
