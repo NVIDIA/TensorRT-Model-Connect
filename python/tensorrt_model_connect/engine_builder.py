@@ -8,7 +8,10 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+import os
 import re
+import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -412,6 +415,48 @@ def _diffusion_tokenizer_bundle_sections_from_plugin(
     )
 
 
+def _reconcile_diffusion_config_tokenizer_metadata(
+    plugin,
+    config_data: bytes | bytearray,
+    *,
+    add_special_tokens: bool,
+    special_frame: tuple[list[int], list[int]] | None,
+) -> bytes:
+    """Reconcile pre-rendered config with repaired tokenizer metadata."""
+    try:
+        config = json.loads(bytes(config_data))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"Plugin {plugin.name} returned invalid components['config_json']: {exc}"
+        ) from exc
+    if not isinstance(config, dict):
+        raise TypeError(
+            f"Plugin {plugin.name} returned components['config_json'] "
+            "whose root is not an object"
+        )
+
+    config["tokenizer_add_special_tokens"] = int(add_special_tokens)
+    if special_frame is None:
+        config.pop("tokenizer_special_prefix_ids", None)
+        config.pop("tokenizer_special_suffix_ids", None)
+    else:
+        prefix_ids, suffix_ids = special_frame
+        config["tokenizer_special_prefix_ids"] = prefix_ids
+        config["tokenizer_special_suffix_ids"] = suffix_ids
+
+    # Qwen-Image and other family-owned schemas may carry the same policy in
+    # a nested tokenizer object. Keep that already-declared field coherent
+    # without imposing a nested schema on plugins that do not use one.
+    tokenizer_config = config.get("tokenizer")
+    if (
+        isinstance(tokenizer_config, dict)
+        and "add_special_tokens" in tokenizer_config
+    ):
+        tokenizer_config["add_special_tokens"] = bool(add_special_tokens)
+
+    return json.dumps(config, indent=2).encode("utf-8")
+
+
 def _quant_format_name(quant_ctx) -> str | None:
     quant_format = getattr(getattr(quant_ctx, "profile", None), "format", None)
     return getattr(quant_format, "name", None)
@@ -783,6 +828,119 @@ def _wordpiece_tokenizer_needs_rebuild(model_dir: Path) -> bool:
         return False
 
 
+def _tokenizer_path_is_present(path: Path) -> bool:
+    """Treat dangling symlinks as present repair inputs."""
+    return path.exists() or path.is_symlink()
+
+
+def _remove_tokenizer_candidate(path: Path) -> None:
+    """Remove only the exact generated candidate path, regardless of its type."""
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _generated_tokenizer_file_error(path: Path) -> str | None:
+    """Reject relocatable or empty generated candidates before validation."""
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        return f"generated tokenizer.json is missing or inaccessible: {exc}"
+    if not stat.S_ISREG(metadata.st_mode):
+        return (
+            "generated tokenizer.json must be a regular, non-symlink file"
+        )
+    if metadata.st_size == 0:
+        return "generated tokenizer.json must be a non-empty regular file"
+    return None
+
+
+def _generate_standard_tokenizer_json_transactionally(
+    model_dir: Path,
+    tokenizer_path: Path,
+    *,
+    trust_remote_code: bool,
+) -> str | None:
+    """Generate and install tokenizer.json without clobbering the original."""
+    had_original = _tokenizer_path_is_present(tokenizer_path)
+    installed = False
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=".trtmc-tokenizer-repair-",
+            dir=model_dir,
+        ) as temporary_dir:
+            temporary_path = Path(temporary_dir)
+            quarantined_path = temporary_path / "original-tokenizer.json"
+            generated_dir = temporary_path / "generated"
+            generated_dir.mkdir()
+            if had_original:
+                os.replace(tokenizer_path, quarantined_path)
+
+            try:
+                from transformers import AutoTokenizer
+
+                tok = AutoTokenizer.from_pretrained(
+                    str(model_dir),
+                    use_fast=False,
+                    trust_remote_code=trust_remote_code,
+                )
+                candidate_path = generated_dir / "tokenizer.json"
+                backend_tokenizer = getattr(tok, "backend_tokenizer", None)
+                if backend_tokenizer is None:
+                    backend_tokenizer = getattr(tok, "_tokenizer", None)
+                if (
+                    backend_tokenizer is not None
+                    and hasattr(backend_tokenizer, "save")
+                ):
+                    backend_tokenizer.save(str(candidate_path))
+                if not candidate_path.exists():
+                    tok.save_pretrained(str(generated_dir))
+                generated_error = _generated_tokenizer_file_error(
+                    candidate_path
+                )
+                if generated_error is None:
+                    generated_error = _native_tokenizer_json_error(
+                        candidate_path
+                    )
+                if generated_error is not None:
+                    return (
+                        "slow tokenizer conversion did not produce a "
+                        "native-compatible tokenizer.json: "
+                        f"{generated_error}"
+                    )
+
+                os.replace(candidate_path, tokenizer_path)
+                installed_error = _generated_tokenizer_file_error(
+                    tokenizer_path
+                )
+                if installed_error is None:
+                    installed_error = _native_tokenizer_json_error(
+                        tokenizer_path
+                    )
+                if installed_error is not None:
+                    return (
+                        "slow tokenizer conversion installed an incompatible "
+                        f"tokenizer.json: {installed_error}"
+                    )
+                if _wordpiece_tokenizer_needs_rebuild(model_dir):
+                    return (
+                        "slow tokenizer conversion produced an undersized "
+                        "WordPiece tokenizer.json"
+                    )
+                installed = True
+                return None
+            except Exception as exc:
+                return f"slow tokenizer conversion failed: {exc}"
+            finally:
+                if not installed:
+                    _remove_tokenizer_candidate(tokenizer_path)
+                    if _tokenizer_path_is_present(quarantined_path):
+                        os.replace(quarantined_path, tokenizer_path)
+    except Exception as exc:
+        return f"slow tokenizer conversion failed: {exc}"
+
+
 def _ensure_tokenizer_json(
     model_dir: Path,
     *,
@@ -798,9 +956,10 @@ def _ensure_tokenizer_json(
     """
     _validate_trust_remote_code(trust_remote_code)
     tokenizer_path = model_dir / "tokenizer.json"
+    tokenizer_present = _tokenizer_path_is_present(tokenizer_path)
     existing_error = (
         _native_tokenizer_json_error(tokenizer_path)
-        if tokenizer_path.exists()
+        if tokenizer_present
         else "tokenizer.json is missing"
     )
     rebuild_wordpiece = (
@@ -815,121 +974,123 @@ def _ensure_tokenizer_json(
             "from vocab.txt",
             file=sys.stderr,
         )
-    elif tokenizer_path.exists():
+    elif tokenizer_present:
         print(
             f"[trtmc build] Rebuilding incompatible tokenizer.json: {existing_error}",
             file=sys.stderr,
         )
 
-    slow_tokenizer_error: str | None = None
+    # Keep the rejected file quarantined across both repair attempts. Some
+    # family-owned tokenizer adapters intentionally shortcut when tokenizer.json
+    # exists, so restoring it between attempts would prevent their fallback
+    # from running. The outer transaction also rolls back any partial family
+    # output if the hook raises, reports failure, or writes an invalid file.
+    original_present = tokenizer_present
+    repair_committed = False
+    with tempfile.TemporaryDirectory(
+        prefix=".trtmc-required-tokenizer-repair-",
+        dir=model_dir,
+    ) as temporary_dir:
+        quarantined_path = Path(temporary_dir) / "original-tokenizer.json"
+        if original_present:
+            os.replace(tokenizer_path, quarantined_path)
 
-    # --- Attempt 1: standard HF conversion in an isolated directory ---
-    try:
-        from transformers import AutoTokenizer
-
-        tok = AutoTokenizer.from_pretrained(
-            str(model_dir),
-            use_fast=False,
-            trust_remote_code=trust_remote_code,
-        )
-        with tempfile.TemporaryDirectory(prefix="trtmc-tokenizer-") as temporary_dir:
-            generated_path = Path(temporary_dir) / "tokenizer.json"
-            backend_tokenizer = getattr(tok, "backend_tokenizer", None)
-            if backend_tokenizer is None:
-                backend_tokenizer = getattr(tok, "_tokenizer", None)
-            if backend_tokenizer is not None and hasattr(backend_tokenizer, "save"):
-                backend_tokenizer.save(str(generated_path))
-            if not generated_path.exists():
-                tok.save_pretrained(temporary_dir)
-            if not generated_path.exists():
-                raise RuntimeError(
-                    "tokenizer conversion did not create tokenizer.json"
-                )
-            generated_error = _native_tokenizer_json_error(generated_path)
-            if generated_error is not None:
-                raise RuntimeError(
-                    "slow tokenizer conversion did not produce a "
-                    f"native-compatible tokenizer.json: {generated_error}"
-                )
-            with tempfile.NamedTemporaryFile(
-                dir=model_dir,
-                prefix=".trtmc-tokenizer-",
-                suffix=".json",
-                delete=False,
-            ) as output:
-                temporary_path = Path(output.name)
-                output.write(generated_path.read_bytes())
-            temporary_path.replace(tokenizer_path)
-        generated_error = (
-            _native_tokenizer_json_error(tokenizer_path)
-            if tokenizer_path.exists()
-            else "tokenizer.json is missing"
-        )
-        if (
-            generated_error is None
-            and _wordpiece_tokenizer_needs_rebuild(model_dir)
-        ):
-            generated_error = "generated WordPiece tokenizer.json is undersized"
-        if (
-            generated_error is None
-        ):
-            print("[trtmc build] Generated tokenizer.json from slow tokenizer",
-                  file=sys.stderr)
-            return
-        slow_tokenizer_error = (
-            "slow tokenizer conversion did not produce a native-compatible "
-            f"tokenizer.json: {generated_error}"
-        )
-    except Exception as e:
-        slow_tokenizer_error = f"slow tokenizer conversion failed: {e}"
-
-    family_tokenizer_error: str | None = None
-    family_ensure = getattr(plugin, "ensure_tokenizer_json", None)
-    if callable(family_ensure):
-        kwargs = {}
-        if _call_supports_kwarg(family_ensure, "previous_error"):
-            kwargs["previous_error"] = slow_tokenizer_error
-        if _call_supports_kwarg(family_ensure, "trust_remote_code"):
-            kwargs["trust_remote_code"] = trust_remote_code
         try:
-            family_reported_success = bool(family_ensure(model_dir, **kwargs))
-            family_error = (
-                _native_tokenizer_json_error(tokenizer_path)
-                if tokenizer_path.exists()
-                else "tokenizer.json is missing"
-            )
-            if (
-                family_reported_success
-                and family_error is None
-                and not _wordpiece_tokenizer_needs_rebuild(model_dir)
-            ):
-                return
-            if family_reported_success:
-                family_tokenizer_error = (
-                    "family tokenizer hook reported success without producing "
-                    f"a native-compatible tokenizer.json: {family_error}"
+            # --- Attempt 1: standard HF slow → fast conversion ---
+            slow_tokenizer_error = (
+                _generate_standard_tokenizer_json_transactionally(
+                    model_dir,
+                    tokenizer_path,
+                    trust_remote_code=trust_remote_code,
                 )
-            else:
-                family_tokenizer_error = "family tokenizer hook could not generate tokenizer.json"
-        except Exception as exc:
-            family_tokenizer_error = f"family tokenizer hook failed: {exc}"
+            )
+            if slow_tokenizer_error is None:
+                repair_committed = True
+                print(
+                    "[trtmc build] Generated tokenizer.json from slow tokenizer",
+                    file=sys.stderr,
+                )
+                return
 
-    errors = "; ".join(
-        error
-        for error in (slow_tokenizer_error, family_tokenizer_error)
-        if error
-    )
-    if not errors:
-        errors = "no family tokenizer generator is available"
-    raise RuntimeError(
-        f"Could not generate required tokenizer.json for '{model_dir}'; "
-        "refusing to write a bundle without its required tokenizer. "
-        "Review any repository-provided tokenizer code before explicitly "
-        "setting trust_remote_code=True. Pin the model revision through "
-        "build(model_revision=...), or call build_bundle() only with an "
-        "immutable local snapshot whose contents you reviewed. "
-        f"Details: {errors}"
-    )
+            family_tokenizer_error: str | None = None
+            family_ensure = getattr(plugin, "ensure_tokenizer_json", None)
+            if callable(family_ensure):
+                kwargs = {}
+                if _call_supports_kwarg(family_ensure, "previous_error"):
+                    kwargs["previous_error"] = slow_tokenizer_error
+                if _call_supports_kwarg(family_ensure, "trust_remote_code"):
+                    kwargs["trust_remote_code"] = trust_remote_code
+                try:
+                    family_reported_success = bool(
+                        family_ensure(model_dir, **kwargs)
+                    )
+                    if _tokenizer_path_is_present(tokenizer_path):
+                        family_error = _generated_tokenizer_file_error(
+                            tokenizer_path
+                        )
+                        if family_error is None:
+                            family_error = _native_tokenizer_json_error(
+                                tokenizer_path
+                            )
+                    else:
+                        family_error = "tokenizer.json is missing"
+                    family_wordpiece_needs_rebuild = (
+                        family_error is None
+                        and _wordpiece_tokenizer_needs_rebuild(model_dir)
+                    )
+                    if (
+                        family_reported_success
+                        and family_error is None
+                        and not family_wordpiece_needs_rebuild
+                    ):
+                        repair_committed = True
+                        return
+                    if family_reported_success:
+                        family_failure = (
+                            "undersized WordPiece tokenizer.json"
+                            if family_wordpiece_needs_rebuild
+                            else family_error
+                        )
+                        family_tokenizer_error = (
+                            "family tokenizer hook reported success without "
+                            "producing a native-compatible tokenizer.json: "
+                            f"{family_failure}"
+                        )
+                    else:
+                        family_tokenizer_error = (
+                            "family tokenizer hook could not generate "
+                            "tokenizer.json"
+                        )
+                except Exception as exc:
+                    family_tokenizer_error = (
+                        f"family tokenizer hook failed: {exc}"
+                    )
+
+            errors = "; ".join(
+                error
+                for error in (
+                    slow_tokenizer_error,
+                    family_tokenizer_error,
+                )
+                if error
+            )
+            if not errors:
+                errors = "no family tokenizer generator is available"
+            raise RuntimeError(
+                f"Could not generate required tokenizer.json for "
+                f"'{model_dir}'; refusing to write a bundle without its "
+                "required tokenizer. Review any repository-provided tokenizer "
+                "code before explicitly setting trust_remote_code=True. Pin "
+                "the model revision through build(model_revision=...), or "
+                "call build_bundle() only with an immutable local snapshot "
+                "whose contents you reviewed. "
+                f"Details: {errors}"
+            )
+        finally:
+            if not repair_committed:
+                _remove_tokenizer_candidate(tokenizer_path)
+                if _tokenizer_path_is_present(quarantined_path):
+                    os.replace(quarantined_path, tokenizer_path)
 
 
 def _prepare_tokenizer_special_frame(
@@ -1819,6 +1980,20 @@ def _build_diffusion_bundle(
             file=sys.stderr,
         )
 
+    # Tokenizer hooks may repair an incompatible tokenizer.json. Run that
+    # repair and collect the resulting sections before deriving any tokenizer
+    # metadata or config fields from the model directory.
+    tokenizer_json_t0 = time.monotonic()
+    tokenizer_sections = _diffusion_tokenizer_bundle_sections_from_plugin(
+        plugin,
+        model_dir_path,
+        trust_remote_code=trust_remote_code,
+    )
+    _add_build_timing(
+        build_timing, "tokenizer_json_ensure_s",
+        time.monotonic() - tokenizer_json_t0)
+    _write_build_timing(build_timing)
+
     trt_version = _get_trt_version()
     trt_abi = _trt_abi_from_version(trt_version)
     tokenizer_t0 = time.monotonic()
@@ -1854,6 +2029,12 @@ def _build_diffusion_bundle(
                 f"Plugin {plugin.name} returned components['config_json'] "
                 f"as {type(cfg_data).__name__}; expected bytes."
             )
+        cfg_data = _reconcile_diffusion_config_tokenizer_metadata(
+            plugin,
+            cfg_data,
+            add_special_tokens=tokenizer_add_special_tokens,
+            special_frame=tokenizer_special_frame,
+        )
     else:
         _effective_precision = "bf16" if fp8_scales else precision
         cfg_dict = {
@@ -1887,17 +2068,7 @@ def _build_diffusion_bundle(
         cfg_data = json.dumps(cfg_dict, indent=2).encode("utf-8")
 
     sections.append(BundleSection("config.json", cfg_data))
-
-    tokenizer_json_t0 = time.monotonic()
-    sections.extend(_diffusion_tokenizer_bundle_sections_from_plugin(
-        plugin,
-        model_dir_path,
-        trust_remote_code=trust_remote_code,
-    ))
-    _add_build_timing(
-        build_timing, "tokenizer_json_ensure_s",
-        time.monotonic() - tokenizer_json_t0)
-    _write_build_timing(build_timing)
+    sections.extend(tokenizer_sections)
 
     # Resolve per-component batch envelope. Plugins that batchified record
     # the envelope on components["max_batch_size_envelope"]. When absent

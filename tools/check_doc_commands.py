@@ -8,6 +8,8 @@ The checker is deliberately non-executing: it parses every ``bash``, ``sh``,
 or ``shell`` fenced block with ``bash -n``; verifies repository-local scripts,
 search/test inputs, and explicit positional inputs; and checks statically
 discoverable CLI subcommands, option scope/arity, choices, and required inputs.
+Literal ``bash``/``sh -c`` payloads, including ``docker exec`` wrappers, are
+checked recursively with bounded depth.
 Commands that need a GPU, model download, credentials, services, or generated
 artifacts remain runtime validation work.
 
@@ -45,9 +47,7 @@ _LIST_MARKER_RE = re.compile(
     r"^(?P<indent> {0,3})(?P<marker>[-+*]|\d{1,9}[.)])"
     r"(?P<spacing>[ \t]{1,4})"
 )
-_PLACEHOLDER_RE = re.compile(
-    r"<[^>\n]+>|(?<!\$)\{[A-Za-z][A-Za-z0-9_.-]*\}"
-)
+_PLACEHOLDER_RE = re.compile(r"<[^>\n]+>|(?<!\$)\{[A-Za-z][A-Za-z0-9_.-]*\}")
 _PROMPT_RE = re.compile(r"^(?P<indent>[ \t]*)\$\s+")
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _BACKTICK_RUN_RE = re.compile(r"`+")
@@ -97,6 +97,8 @@ _SHELL_ONLY_WORDS = {
     "select",
 }
 _VENDORED_FIXTURE_DOC_RE = re.compile(r"^tests/e2e/models/[^/]+/data/hf/[^/]+/README\.md$")
+_NESTED_SHELL_LANGUAGE = "_nested-shell"
+_MAX_NESTED_SHELL_DEPTH = 4
 
 
 @dataclass(frozen=True)
@@ -479,7 +481,11 @@ def _logical_lines(body: str) -> Iterable[tuple[int, str]]:
 
 
 def _source_line(block: ShellBlock, offset: int) -> int:
-    return block.line if block.language == "inline" else block.line + offset
+    if block.language == "inline":
+        return block.line
+    if block.language == _NESTED_SHELL_LANGUAGE:
+        return block.line + offset - 1
+    return block.line + offset
 
 
 _OUTPUT_REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&"}
@@ -659,6 +665,143 @@ def _strip_shell_wrappers(tokens: list[str]) -> list[str]:
     while remaining and _ENV_ASSIGNMENT_RE.match(remaining[0]):
         remaining.pop(0)
     return remaining
+
+
+def _shell_c_payload(tokens: Sequence[str]) -> str | None:
+    """Return the command string from a literal ``bash``/``sh -c`` invocation."""
+    if not tokens or Path(tokens[0]).name not in {"bash", "sh"}:
+        return None
+
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            return None
+        if token == "-c" or (
+            token.startswith("-") and not token.startswith("--") and "c" in token.removeprefix("-")
+        ):
+            return tokens[index + 1] if index + 1 < len(tokens) else None
+        if token in {"-o", "-O"}:
+            index += 2
+            continue
+        if token in {"--init-file", "--rcfile"}:
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return None
+    return None
+
+
+_DOCKER_EXEC_VALUE_OPTIONS = {
+    "--detach-keys",
+    "--env",
+    "--env-file",
+    "--user",
+    "--workdir",
+    "-e",
+    "-u",
+    "-w",
+}
+
+
+def _docker_exec_command(tokens: Sequence[str]) -> list[str] | None:
+    """Return ``docker exec``'s command tokens after options and container."""
+    try:
+        index = tokens.index("exec", 1) + 1
+    except ValueError:
+        return None
+
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            index += 1
+            break
+        option, separator, _value = token.partition("=")
+        if option in _DOCKER_EXEC_VALUE_OPTIONS:
+            index += 1 if separator or len(option) == 2 and token != option else 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        break
+
+    # The first non-option is the container; the remainder is its command.
+    return list(tokens[index + 1 :]) if index + 1 < len(tokens) else None
+
+
+def _nested_shell_payload(tokens: Sequence[str]) -> str | None:
+    """Extract a statically knowable shell payload from supported wrappers."""
+    remaining = _strip_shell_wrappers(list(tokens))
+    if not remaining:
+        return None
+
+    payload = _shell_c_payload(remaining)
+    if payload is None and Path(remaining[0]).name == "docker":
+        docker_command = _docker_exec_command(remaining)
+        payload = (
+            _shell_c_payload(_strip_shell_wrappers(docker_command))
+            if docker_command is not None
+            else None
+        )
+
+    if (
+        payload is None
+        or not payload.strip()
+        or "\x00" in payload
+        or "$" in payload
+        or "`" in payload
+        or "DOC_PLACEHOLDER" in payload
+    ):
+        return None
+    return payload
+
+
+def shell_validation_blocks(
+    block: ShellBlock,
+    *,
+    max_nested_depth: int = _MAX_NESTED_SHELL_DEPTH,
+) -> Iterable[ShellBlock]:
+    """Yield ``block`` and literal nested ``bash``/``sh -c`` payloads.
+
+    Payloads are parsed but never executed. Dynamic strings are skipped because
+    their runtime command cannot be reconstructed safely. The depth and
+    ancestry guards keep adversarial wrapper chains bounded.
+    """
+    if max_nested_depth < 0:
+        raise ValueError("max_nested_depth must be non-negative")
+
+    def visit(
+        current: ShellBlock,
+        depth: int,
+        ancestors: frozenset[str],
+    ) -> Iterable[ShellBlock]:
+        yield current
+        if depth >= max_nested_depth:
+            return
+        for offset, command in _block_shell_commands(current):
+            payload = _nested_shell_payload(command.tokens)
+            if payload is None:
+                continue
+            body = payload + ("" if payload.endswith("\n") else "\n")
+            signature = normalize_shell(body).strip()
+            if not signature or signature in ancestors:
+                continue
+            nested = ShellBlock(
+                path=current.path,
+                line=_source_line(current, offset),
+                language=_NESTED_SHELL_LANGUAGE,
+                body=body,
+            )
+            yield from visit(
+                nested,
+                depth + 1,
+                ancestors | {signature},
+            )
+
+    root_signature = normalize_shell(block.body).strip()
+    yield from visit(block, 0, frozenset({root_signature}))
 
 
 def _clean_local_path(token: str) -> str | None:
@@ -1597,11 +1740,7 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
 
     selected_roots = set(parse_modes)
     if not selected_roots:
-        inherited_roots = {
-            parent[0]
-            for inherited in parent_paths.values()
-            for parent in inherited
-        }
+        inherited_roots = {parent[0] for inherited in parent_paths.values() for parent in inherited}
         selected_roots = root_ids - inherited_roots
         if len(selected_roots) != 1:
             return None
@@ -1617,9 +1756,7 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
         tuple[tuple[object, ...], tuple[str, ...]],
         CommandSpec,
     ] = {}
-    resolving_specs: set[
-        tuple[tuple[object, ...], tuple[str, ...]],
-    ] = set()
+    resolving_specs: set[tuple[tuple[object, ...], tuple[str, ...]],] = set()
 
     def effective_spec(
         full_path: tuple[tuple[object, ...], tuple[str, ...]],
@@ -1648,9 +1785,7 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
             for command_path in selected_commands
             if len(command_path[1]) == len(path) + 1 and command_path[1][:-1] == path
         )
-        commands = {
-            child[1][-1]: effective_spec(child) for child in children
-        }
+        commands = {child[1][-1]: effective_spec(child) for child in children}
         nested = {
             child[1][-1]: build_program(child[1])
             for child in children
@@ -2609,6 +2744,31 @@ def check_ctest_contract(block: ShellBlock) -> list[Finding]:
     return findings
 
 
+def check_command_block(
+    block: ShellBlock,
+    repo_root: Path,
+    *,
+    max_nested_depth: int = _MAX_NESTED_SHELL_DEPTH,
+) -> list[Finding]:
+    """Apply every non-executing command check to a block and nested payloads."""
+    findings: list[Finding] = []
+    for candidate in shell_validation_blocks(
+        block,
+        max_nested_depth=max_nested_depth,
+    ):
+        syntax_finding = check_shell_syntax(candidate)
+        if syntax_finding:
+            findings.append(syntax_finding)
+        findings.extend(check_local_inputs(candidate, repo_root))
+        findings.extend(check_positional_inputs(candidate, repo_root))
+        findings.extend(check_trtmc_contract(candidate, repo_root))
+        findings.extend(check_python_module_contract(candidate, repo_root))
+        findings.extend(check_python_script_contract(candidate, repo_root))
+        findings.extend(check_direct_script_contract(candidate, repo_root))
+        findings.extend(check_ctest_contract(candidate))
+    return findings
+
+
 def _fallback_markdown_files(root: Path) -> list[Path]:
     return sorted(
         path
@@ -2697,16 +2857,7 @@ def main() -> int:
         fenced_blocks.extend(document_fences)
         inline_commands.extend(document_inline)
         for block in [*document_fences, *document_inline]:
-            syntax_finding = check_shell_syntax(block)
-            if syntax_finding:
-                findings.append(syntax_finding)
-            findings.extend(check_local_inputs(block, repo_root))
-            findings.extend(check_positional_inputs(block, repo_root))
-            findings.extend(check_trtmc_contract(block, repo_root))
-            findings.extend(check_python_module_contract(block, repo_root))
-            findings.extend(check_python_script_contract(block, repo_root))
-            findings.extend(check_direct_script_contract(block, repo_root))
-            findings.extend(check_ctest_contract(block))
+            findings.extend(check_command_block(block, repo_root))
 
     all_commands = [*fenced_blocks, *inline_commands]
     unique_bodies = {normalize_shell(block.body).strip() for block in all_commands}

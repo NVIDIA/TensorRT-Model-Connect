@@ -113,13 +113,13 @@ try_write_effective_config_next_to(const ConfigBundle& bundle, const std::string
 // ordering so two identical bundles produce byte-identical output.
 std::string bundle_to_effective_json(const ConfigBundle& bundle);
 
-// Scan a JSON config document for the top-level ``"defaults": { ... }``
-// object and return its contents as parsed LayeredFileValues. Returns an
-// empty map when the key is absent.
-//
-// This is intentionally a targeted scanner rather than a general JSON DOM:
-// the materialized ``config.json`` section has many top-level fields and
-// runtime config resolution only needs its ``defaults`` subtree.
+// Parse the materialized ``config.json`` section and return the direct
+// top-level ``"defaults": { ... }`` object as LayeredFileValues. Returns an
+// empty map when the document is malformed, the root is not an object, or the
+// direct key is absent or not object-valued. Nested keys named ``defaults`` do
+// not contribute runtime defaults. Duplicate object keys are rejected before
+// the JSON DOM can collapse them; invalid defaults values retain the fail-fast
+// behavior of parse_layered_json.
 LayeredFileValues extract_bundle_defaults(const std::string& config_json);
 
 // Convenience: wrap ``extract_bundle_defaults`` as a BundleDefault layer.

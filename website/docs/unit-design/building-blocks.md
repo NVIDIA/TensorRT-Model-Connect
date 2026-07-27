@@ -15,7 +15,7 @@ flowchart LR
   Backend["TensorRT backend DSO"] --> Pipeline
   Optimized --> Provider["optimized-runtime host"]
   Provider --> Pipeline
-  Pipeline --> API["C++ API / CLI / C-linkage C++ subset"]
+  Pipeline --> API["C++ API / CLI / C++ shim for C-facing callers"]
 ```
 
 Most native model additions span the Python family, bundle metadata,
@@ -31,12 +31,12 @@ Start with these eight blocks before reading the full source-level map:
 | Layer | Block | Question it answers |
 | --- | --- | --- |
 | Source model | HuggingFace checkpoint | What model files did we start from? |
-| Build adapter | `FamilyPlugin` | Which Python code understands this model family? |
-| Engine artifact | TensorRT engine plan | What optimized GPU execution bytes did we build? |
+| Build adapter | Native `FamilyPlugin` or exact-qualified optimized adapter | Which family-owned code claims this build request? |
+| Build artifact | Native TensorRT plans or optimized provider artifacts | What execution payload did the selected path produce? |
 | Bundle contract | `.trtfb` | What exactly crosses from Python build time to C++ run time? |
 | Native runtime dispatch | `runtime_strategy` | Which model-owned DSO and plugin should load this native bundle? |
 | Optimized runtime dispatch | `optimized_runtime.json` | Which embedded implementation DSO and qualified profile own this optimized bundle? |
-| Runtime construction | `IPipelinePlugin` | Which plugin creates the concrete pipeline? |
+| Runtime construction | Native `IPipelinePlugin` or optimized private factory | Which path creates the concrete pipeline? |
 | User API | `IPipeline` | Which task method does the application call? |
 
 The full map below expands those eight blocks into the concrete helper units used by builders, bundles, plugins, backends, tensors, and tests.
@@ -45,8 +45,9 @@ The full map below expands those eight blocks into the concrete helper units use
 
 | Layer | Owns | Typical edit |
 | --- | --- | --- |
-| Beginner/core path | `FamilyPlugin`, `.trtfb`, native `runtime_strategy` or optimized descriptor, `IPipeline` | Trace or debug one supported model. |
-| Model extension path | Python family package, C++ model DSO, config schema, and E2E descriptor | Add a supported model or model-owned behavior. |
+| Beginner/core path | Native `FamilyPlugin` or optimized adapter, `.trtfb`, path-specific dispatch, `IPipeline` | Trace or debug one supported model. |
+| Native model extension | Python family package, C++ model DSO, config schema, and native E2E JSON manifest | Add native support or native model-owned behavior. |
+| Exact-qualified optimized extension | Existing family adapter subtree, implementation/profile manifests, embedded implementation DSO, and qualification TOML | Add a delegated implementation for one qualified model/revision/target/options tuple without a synthetic native strategy. |
 | Infrastructure path | Backend DSOs, registration generation, CMake targets | Change loading, ABI isolation, or build ownership. |
 
 ## End-to-end building-block map
@@ -103,9 +104,9 @@ flowchart TB
   BundleWriter --> Trtfb
   Trtfb --> Header
   Trtfb --> Section
-  Trtfb --> ConfigJson
-  Trtfb --> OptimizedDescriptor
-  Trtfb --> EmbeddedArtifacts
+  Trtfb -->|native| ConfigJson
+  Trtfb -->|optimized| OptimizedDescriptor
+  OptimizedDescriptor --> EmbeddedArtifacts
   Trtfb --> Factory
   Factory -->|optimized| OptimizedHost
   OptimizedHost --> EmbeddedArtifacts
@@ -150,6 +151,11 @@ flowchart TB
 | `optimized_runtime.json` and embedded artifact tree | Written by `runtime_provider/bundle.py`, read by `optimized_runtime_host.cpp` | Exact delegated implementation/profile/factory identity and integrity-bound payload, including its implementation DSO. |
 | Engine sections | Bundle sections such as `engine_plan`, `vision_engine_plan`, `denoiser_plan` | Serialized TensorRT execution plans. |
 | Asset sections | Tokenizer, preprocessor, kernel, scale, and family metadata files | Data needed for preprocessing, postprocessing, or custom execution. |
+
+Neither artifact path is a complete operating-system or GPU-runtime image.
+Native bundles rely on installed model/backend DSOs; optimized bundles embed
+their exact implementation DSO. Both still rely on the host's compatible
+NVIDIA driver, CUDA runtime, TensorRT, dynamic loader, and system libraries.
 
 ## Runtime blocks
 
@@ -199,20 +205,27 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-  Start["What are you changing?"] --> NewModel{"New supported model?"}
-  NewModel -- yes --> Capsule["Add Python family + unique strategy + model DSO + E2E descriptor"]
-  NewModel -- no --> Runtime{"New runtime behavior for an existing owner?"}
+  Start["What are you changing?"] --> NewModel{"Adding model support?"}
+  NewModel -- yes --> ModelPath{"Which qualified path owns it?"}
+  ModelPath -- "native" --> NativeCapsule["Python family + unique native strategy + model DSO + E2E JSON"]
+  ModelPath -- "exact optimized" --> OptimizedCapsule["Existing-family implementation/profile + adapter + embedded DSO + qualification TOML"]
+  NewModel -- no --> Runtime{"New native runtime behavior for an existing owner?"}
   Runtime -- yes --> Owner["Extend that src/runtime/models/owner directory and MODEL.toml"]
   Runtime -- no --> Public{"New user-visible task contract?"}
-  Public -- yes --> API["Extend IPipeline + CLI; design a complete C ABI separately if needed"]
+  Public -- yes --> API["Extend IPipeline + CLI; C-facing consumers use a C++ shim until a complete C ABI is designed"]
   Public -- no --> Config["Use the owning shared or model config schema"]
-  Capsule --> Tests["Builder + C++ + exact-model E2E evidence"]
+  NativeCapsule --> NativeTests["Builder + C++ + native exact-model E2E evidence"]
+  OptimizedCapsule --> OptimizedTests["Adapter/bundle/host tests + exact producer qualification"]
   Owner --> Tests
   API --> Tests
   Config --> Tests
+  NativeTests --> Tests["Relevant unit + integration evidence"]
+  OptimizedTests --> Tests
 ```
 
 Do not point a new family at another model's runtime strategy. Similar models
-may reuse source patterns, but each supported model owns a unique strategy key,
-DSO, and registration manifest. E2E `task_strategy` is where models with the
-same user-visible task are grouped.
+may reuse source patterns, but each natively supported model owns a unique
+strategy key, DSO, and registration manifest. Exact-qualified optimized
+support instead owns an implementation/profile, embedded implementation DSO,
+and qualification record; it does not need a synthetic native strategy. E2E
+`task_strategy` is where models with the same user-visible task are grouped.

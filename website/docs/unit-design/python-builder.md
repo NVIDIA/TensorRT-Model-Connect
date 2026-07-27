@@ -2,7 +2,11 @@
 title: Python Builder Units
 ---
 
-The Python builder turns a Python-first checkpoint into a native runtime bundle. It owns model understanding, graph construction, quantization preparation, and bundle serialization.
+The Python builder turns a Python-first checkpoint into either a native TRT
+bundle or an exact-qualified optimized-runtime bundle. Native family plugins
+own model understanding, graph construction, and quantization preparation;
+family-owned optimized adapters own the provider-specific artifact path. The
+shared coordinator selects one path and serializes its bundle.
 
 ```mermaid
 flowchart TD
@@ -52,6 +56,9 @@ Think of `engine_builder.py` as the build coordinator:
 
 ## Family plugins
 
+This section describes the native build path; exact-qualified optimized
+implementations use the separate adapter contract below.
+
 `python/tensorrt_model_connect/families/` owns raw TRT family support. Each
 family package has a `MODEL.toml` descriptor and exports its package-level
 `plugin` from `__init__.py`; the implementation normally lives in `plugin.py`.
@@ -76,7 +83,8 @@ not sufficient for supported model ownership. Keep aliases and architecture
 patterns accurate so normal requests remain on the bounded descriptor-first
 route.
 
-The `FamilyPlugin` protocol is the contract. Required methods are:
+For native builds, the `FamilyPlugin` protocol is the contract. Required
+methods are:
 
 | Method | Purpose |
 | --- | --- |
@@ -144,6 +152,11 @@ supply the matching NVIDIA driver (`libcuda.so.1`), versioned CUDA runtime
 and compatible system libraries. More than one claim is an error. No claim
 returns control to the native build; a selected adapter's build failure is
 terminal.
+
+This optimized path does not require a synthetic native `runtime_strategy`,
+`src/runtime/models/<owner>/MODEL.toml`, or model DSO. Its exact
+implementation/profile/qualification records and embedded implementation DSO
+are the support contract.
 
 The current Qwen TensorRT Edge-LLM adapter owns three qualified Qwen3/A100
 SM80/FP16 profiles. This is exact profile support, not a generic preference for

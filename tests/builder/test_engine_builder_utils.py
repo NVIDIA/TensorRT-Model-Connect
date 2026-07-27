@@ -43,6 +43,22 @@ except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect not importable", allow_module_level=True)
 
 
+def _native_tokenizer_payload(
+    model_type,
+    *,
+    model_fields=None,
+    **document_fields,
+):
+    if model_type == "BPE":
+        model = {"type": "BPE", "vocab": {"a": 0}, "merges": []}
+    elif model_type == "WordPiece":
+        model = {"type": "WordPiece", "vocab": {"[UNK]": 0}}
+    else:
+        model = {"type": "Unigram", "vocab": [["<unk>", -1.0]]}
+    model.update(model_fields or {})
+    return {"model": model, **document_fields}
+
+
 class TestIsHfModelDir:
     """Test _is_hf_model_dir detection."""
 
@@ -668,6 +684,473 @@ class TestEnsureTokenizerJson:
 
         assert engine_builder._native_tokenizer_json_error(tokenizer_path) is None
 
+    def test_native_compatibility_distinguishes_absent_and_null_model_type(
+        self,
+        tmp_path,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        payload = {"model": {"vocab": {"a": 0}, "merges": []}}
+        tokenizer_path.write_text(json.dumps(payload))
+        assert engine_builder._native_tokenizer_json_error(tokenizer_path) is None
+
+        payload["model"]["type"] = None
+        tokenizer_path.write_text(json.dumps(payload))
+        assert (
+            "model.type must be a string when present"
+            in engine_builder._native_tokenizer_json_error(tokenizer_path)
+        )
+
+    @pytest.mark.parametrize(
+        ("raw", "message"),
+        (
+            (
+                '{"model":{"type":"BPE","vocab":{"a":0},"merges":[]},'
+                '"ignored":NaN}',
+                "invalid tokenizer.json",
+            ),
+            (
+                '{"model":{"type":"BPE","vocab":{"a":0},"merges":[]},'
+                '"ignored":Infinity}',
+                "invalid tokenizer.json",
+            ),
+            (
+                '{"model":{"type":"BPE","vocab":{"a":0},"merges":[]},'
+                '"ignored":-Infinity}',
+                "invalid tokenizer.json",
+            ),
+            (
+                '{"model":{"type":"BPE","vocab":{"a":0},"merges":[]},'
+                '"ignored":1e400}',
+                "JSON-overflow",
+            ),
+            (
+                '{"model":{"type":"BPE","vocab":{"a":0},"merges":[]},'
+                f'"ignored":{10**309}' + "}",
+                "native JSON number envelope",
+            ),
+            (
+                '{"model":{"type":"BPE","vocab":{"a":0},"merges":[]},'
+                '"ignored":"\\ud800"}',
+                "unpaired UTF-16 surrogate",
+            ),
+            (
+                '{"model":{"type":"BPE","vocab":{"a":0},"merges":[]},'
+                '"\\udc00":"ignored"}',
+                "key with an unpaired UTF-16 surrogate",
+            ),
+        ),
+        ids=(
+            "nan",
+            "infinity",
+            "negative-infinity",
+            "float-parse-overflow",
+            "integer-parse-overflow",
+            "lone-high-surrogate",
+            "lone-low-surrogate-key",
+        ),
+    )
+    def test_native_compatibility_rejects_values_native_json_cannot_parse(
+        self,
+        tmp_path,
+        raw,
+        message,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        tokenizer_path.write_text(raw)
+
+        assert message in engine_builder._native_tokenizer_json_error(tokenizer_path)
+
+    @pytest.mark.parametrize(
+        ("payload", "message"),
+        (
+            (
+                _native_tokenizer_payload(
+                    "BPE", model_fields={"byte_fallback": "false"}
+                ),
+                "byte_fallback must be a boolean",
+            ),
+            (
+                _native_tokenizer_payload("BPE", added_tokens=[{"id": 1}]),
+                "content is required",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "BPE",
+                    added_tokens=[{"content": "<s>", "id": 1, "special": 1}],
+                ),
+                "special must be a boolean",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "BPE",
+                    added_tokens=[{"content": "<s>", "id": 2**31 - 1}],
+                ),
+                "contiguous native vocabulary allocation bound",
+            ),
+            (
+                _native_tokenizer_payload("BPE", pre_tokenizer=[]),
+                "pre_tokenizer must be an object",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "BPE", pre_tokenizer={"type": None}
+                ),
+                "pre_tokenizer.type must be a string",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "BPE",
+                    pre_tokenizer={
+                        "type": "Split",
+                        "pattern": {"Regex": "ignored"},
+                    },
+                ),
+                "direct Split requires",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "BPE",
+                    pre_tokenizer={
+                        "type": "Sequence",
+                        "pretokenizers": [
+                            {
+                                "type": "Split",
+                                "pattern": {
+                                    "Regex": r"[^\r\n]\p{N}{1,３}"
+                                },
+                            }
+                        ],
+                    },
+                ),
+                "std::stoi",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "BPE",
+                    normalizer={
+                        "type": "Replace",
+                        "pattern": {"String": 1},
+                    },
+                ),
+                "pattern.String must be a string",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "BPE",
+                    decoder={
+                        "type": "Sequence",
+                        "decoders": [
+                            {"type": "Replace", "pattern": None, "content": 1}
+                        ],
+                    },
+                ),
+                "content must be a string",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "BPE",
+                    decoder={
+                        "type": "Sequence",
+                        "decoders": [
+                            {"type": "Strip", "content": " ", "start": 2**31}
+                        ],
+                    },
+                ),
+                "start must be a signed 32-bit integer",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "BPE",
+                    post_processor={
+                        "type": "TemplateProcessing",
+                        "single": [{"SpecialToken": {"id": 1}}],
+                    },
+                ),
+                "SpecialToken.id must be a string",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "BPE",
+                    post_processor={
+                        "type": "TemplateProcessing",
+                        "single": {
+                            "entry": {"SpecialToken": {"id": 1}},
+                        },
+                    },
+                ),
+                "SpecialToken.id must be a string",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "BPE",
+                    post_processor={
+                        "type": "RobertaProcessing",
+                        "cls": ["<s>", "0"],
+                    },
+                ),
+                "cls[1] must be a signed 32-bit integer",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "WordPiece", model_fields={"unk_token": None}
+                ),
+                "unk_token must be a string",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "WordPiece",
+                    model_fields={"max_input_chars_per_word": 2**31},
+                ),
+                "max_input_chars_per_word must be a signed 32-bit integer",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "WordPiece",
+                    normalizer={
+                        "type": "BertNormalizer",
+                        "lowercase": 1,
+                    },
+                ),
+                "lowercase must be a boolean",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "WordPiece",
+                    normalizer={
+                        "type": "Sequence",
+                        "normalizers": [{"type": None}],
+                    },
+                ),
+                "normalizers[0].type must be a string",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "WordPiece",
+                    post_processor={
+                        "type": "BertProcessing",
+                        "sep": ["[SEP]", None],
+                    },
+                ),
+                "sep[1] must be a signed 32-bit integer",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "Unigram", model_fields={"vocab": [["<unk>", 10**100]]}
+                ),
+                "finite float32",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "Unigram", model_fields={"unk_id": True}
+                ),
+                "signed 32-bit index",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "Unigram",
+                    added_tokens=[{"content": "<s>", "id": 2**31 - 1}],
+                ),
+                "contiguous native vocabulary allocation bound",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "Unigram", added_tokens=[{"id": "1"}]
+                ),
+                "added_tokens[0].id must be a signed 32-bit integer",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "Unigram",
+                    pre_tokenizer={
+                        "type": "Metaspace",
+                        "add_prefix_space": "true",
+                    },
+                ),
+                "add_prefix_space must be a boolean",
+            ),
+            (
+                _native_tokenizer_payload(
+                    "Unigram",
+                    post_processor={
+                        "type": "TemplateProcessing",
+                        "single": [{"SpecialToken": None}],
+                    },
+                ),
+                "SpecialToken must be an object",
+            ),
+        ),
+        ids=(
+            "bpe-byte-fallback",
+            "bpe-added-token-required-content",
+            "bpe-added-token-special",
+            "bpe-added-token-allocation",
+            "bpe-pretokenizer-object",
+            "bpe-pretokenizer-type",
+            "bpe-direct-split",
+            "bpe-ascii-stoi",
+            "bpe-normalizer-replace",
+            "bpe-decoder-replace",
+            "bpe-decoder-strip",
+            "bpe-template-token",
+            "bpe-template-object-values",
+            "bpe-roberta-id",
+            "wordpiece-unk-token",
+            "wordpiece-max-chars",
+            "wordpiece-normalizer-bool",
+            "wordpiece-sequence-child",
+            "wordpiece-postprocessor-id",
+            "unigram-score-overflow",
+            "unigram-unk-id",
+            "unigram-added-token-allocation",
+            "unigram-added-token-id",
+            "unigram-metaspace-bool",
+            "unigram-template-token",
+        ),
+    )
+    def test_native_compatibility_rejects_consumed_runtime_field_mismatches(
+        self,
+        tmp_path,
+        payload,
+        message,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        tokenizer_path.write_text(json.dumps(payload))
+
+        assert message in engine_builder._native_tokenizer_json_error(tokenizer_path)
+
+    @pytest.mark.parametrize(
+        "payload",
+        (
+            {
+                **_native_tokenizer_payload("BPE"),
+                "ignored": 1e100,
+            },
+            {
+                **_native_tokenizer_payload("BPE"),
+                "ignored": "\ud83d\ude00",
+            },
+            _native_tokenizer_payload(
+                "BPE",
+                pre_tokenizer={
+                    "type": "Sequence",
+                    "pretokenizers": [
+                        {"type": "Split"},
+                        {"type": "Split", "pattern": None},
+                        {
+                            "type": "Split",
+                            "pattern": {"String": 1},
+                        },
+                        {
+                            "type": "Split",
+                            "pattern": {"Regex": r"\p{N}{1,3}"},
+                        },
+                        None,
+                    ],
+                },
+            ),
+            _native_tokenizer_payload(
+                "BPE",
+                pre_tokenizer={
+                    "type": "Sequence",
+                    "pretokenizers": [
+                        {
+                            "type": "Split",
+                            "pattern": {"Regex": r"\p{N}{1,３}"},
+                        },
+                    ],
+                },
+            ),
+            _native_tokenizer_payload(
+                "BPE",
+                normalizer={
+                    "type": "Replace",
+                    "pattern": None,
+                    "content": None,
+                },
+                decoder={
+                    "type": "Sequence",
+                    "decoders": [
+                        {"type": "Replace", "pattern": None, "content": ""},
+                        {"type": "Strip", "content": "x", "start": None},
+                    ],
+                },
+            ),
+            _native_tokenizer_payload(
+                "BPE",
+                normalizer={
+                    "type": "Sequence",
+                    "normalizers": [{"type": "Prepend"}, None],
+                },
+                post_processor={
+                    "type": "Sequence",
+                    "processors": [
+                        {"type": "TemplateProcessing", "single": None},
+                        None,
+                    ],
+                },
+            ),
+            _native_tokenizer_payload(
+                "BPE",
+                post_processor={
+                    "type": "TemplateProcessing",
+                    "single": [
+                        {
+                            "Sequence": {"id": "A"},
+                            "SpecialToken": None,
+                        }
+                    ],
+                },
+            ),
+            _native_tokenizer_payload(
+                "WordPiece",
+                normalizer={"type": "Sequence", "normalizers": None},
+                post_processor={
+                    "type": "RobertaProcessing",
+                    "cls": None,
+                    "sep": [],
+                },
+            ),
+            _native_tokenizer_payload(
+                "Unigram",
+                added_tokens=[{"content": "", "id": 2**31 - 1}],
+                normalizer={"type": "Sequence", "normalizers": None},
+                pre_tokenizer={
+                    "type": "Sequence",
+                    "pretokenizers": [
+                        {"type": "Metaspace", "add_prefix_space": True},
+                        None,
+                    ],
+                },
+                post_processor={
+                    "type": "TemplateProcessing",
+                    "single": {
+                        "entry": {"SpecialToken": {"id": 1}},
+                    },
+                },
+            ),
+        ),
+        ids=(
+            "ignored-large-finite-double",
+            "valid-surrogate-pair",
+            "bpe-first-consumed-split-regex",
+            "bpe-non-qwen-regex-skips-digit-group",
+            "bpe-replace-and-strip-short-circuits",
+            "bpe-first-prepend-and-template",
+            "template-sequence-priority",
+            "wordpiece-null-and-short-sections",
+            "unigram-object-template-is-ignored",
+        ),
+    )
+    def test_native_compatibility_allows_native_short_circuit_shapes(
+        self,
+        tmp_path,
+        payload,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        tokenizer_path.write_text(json.dumps(payload))
+
+        assert engine_builder._native_tokenizer_json_error(tokenizer_path) is None
+
     @pytest.mark.parametrize(
         ("raw", "message"),
         (
@@ -850,6 +1333,104 @@ class TestEnsureTokenizerJson:
         assert captured["trust_remote_code"] is True
         assert (tmp_path / "tokenizer.json").exists()
 
+    @pytest.mark.parametrize(
+        "symlink_kind",
+        ("relative", "absolute-to-temporary-file"),
+    )
+    def test_generated_symlink_is_rejected_before_family_fallback(
+        self,
+        tmp_path,
+        monkeypatch,
+        symlink_kind,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        original = b'{"malformed":"quarantined before both attempts"}'
+        tokenizer_path.write_bytes(original)
+
+        class SymlinkTokenizer:
+            @staticmethod
+            def save_pretrained(path):
+                generated_dir = Path(path)
+                real_path = generated_dir / "real-tokenizer.json"
+                real_path.write_text(
+                    json.dumps(_native_tokenizer_payload("BPE")),
+                    encoding="utf-8",
+                )
+                link_target = (
+                    real_path.name
+                    if symlink_kind == "relative"
+                    else real_path.resolve()
+                )
+                (generated_dir / "tokenizer.json").symlink_to(link_target)
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                assert not tokenizer_path.exists()
+                assert not tokenizer_path.is_symlink()
+                return SymlinkTokenizer()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+        )
+        captured = {}
+
+        class FamilyFallback:
+            @staticmethod
+            def ensure_tokenizer_json(model_dir, *, previous_error=None):
+                assert not tokenizer_path.exists()
+                assert not tokenizer_path.is_symlink()
+                captured["previous_error"] = previous_error
+                tokenizer_path.write_text(
+                    json.dumps(_native_tokenizer_payload("Unigram")),
+                    encoding="utf-8",
+                )
+                return True
+
+        _ensure_tokenizer_json(tmp_path, plugin=FamilyFallback())
+
+        assert "regular, non-symlink file" in captured["previous_error"]
+        assert tokenizer_path.is_file()
+        assert not tokenizer_path.is_symlink()
+        assert json.loads(tokenizer_path.read_text())["model"]["type"] == "Unigram"
+        assert not (tmp_path / "real-tokenizer.json").exists()
+        assert not list(tmp_path.glob(".trtmc-*"))
+
+    def test_empty_generated_file_is_rejected_and_original_is_restored(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        original = b'{"malformed":"restore after empty generation"}'
+        tokenizer_path.write_bytes(original)
+
+        class EmptyTokenizer:
+            @staticmethod
+            def save_pretrained(path):
+                (Path(path) / "tokenizer.json").write_bytes(b"")
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                assert not tokenizer_path.exists()
+                return EmptyTokenizer()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+        )
+
+        with pytest.raises(RuntimeError, match="non-empty regular file"):
+            _ensure_tokenizer_json(tmp_path)
+
+        assert tokenizer_path.read_bytes() == original
+        assert not tokenizer_path.is_symlink()
+        assert not list(tmp_path.glob(".trtmc-*"))
+
     def test_family_hook_cannot_approve_incompatible_tokenizer(
         self,
         tmp_path,
@@ -874,6 +1455,257 @@ class TestEnsureTokenizerJson:
 
         with pytest.raises(RuntimeError, match="native-compatible tokenizer.json"):
             _ensure_tokenizer_json(tmp_path, plugin=InvalidPlugin())
+
+        assert not (tmp_path / "tokenizer.json").exists()
+
+    @pytest.mark.parametrize(
+        "symlink_kind",
+        ("relative", "absolute"),
+    )
+    def test_family_symlink_output_is_rejected_and_original_is_restored(
+        self,
+        tmp_path,
+        monkeypatch,
+        symlink_kind,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        original = b'{"malformed":"restore after family symlink"}'
+        tokenizer_path.write_bytes(original)
+        source_path = tmp_path / "preexisting-tokenizer-source.json"
+        source_payload = _native_tokenizer_payload("BPE")
+        source_path.write_text(
+            json.dumps(source_payload),
+            encoding="utf-8",
+        )
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                assert not tokenizer_path.exists()
+                raise RuntimeError("slow tokenizer unavailable")
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+        )
+
+        class SymlinkPlugin:
+            @staticmethod
+            def ensure_tokenizer_json(model_dir, **kwargs):
+                assert not tokenizer_path.exists()
+                link_target = (
+                    source_path.name
+                    if symlink_kind == "relative"
+                    else source_path.resolve()
+                )
+                tokenizer_path.symlink_to(link_target)
+                return True
+
+        with pytest.raises(RuntimeError, match="regular, non-symlink file"):
+            _ensure_tokenizer_json(tmp_path, plugin=SymlinkPlugin())
+
+        assert tokenizer_path.read_bytes() == original
+        assert not tokenizer_path.is_symlink()
+        assert json.loads(source_path.read_text()) == source_payload
+        assert not list(tmp_path.glob(".trtmc-*"))
+
+    @pytest.mark.parametrize(
+        "failure_mode",
+        ("raises", "reports-failure", "invalid-success", "directory-output"),
+    )
+    def test_family_failure_restores_quarantined_tokenizer_bytes(
+        self,
+        tmp_path,
+        monkeypatch,
+        failure_mode,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        original = b'{"malformed":"preserve these exact bytes"}'
+        tokenizer_path.write_bytes(original)
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                assert not tokenizer_path.exists()
+                raise RuntimeError("slow tokenizer unavailable")
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+        )
+
+        class FailingPlugin:
+            @staticmethod
+            def ensure_tokenizer_json(model_dir, **kwargs):
+                assert not tokenizer_path.exists()
+                if failure_mode == "directory-output":
+                    tokenizer_path.mkdir()
+                    (tokenizer_path / "partial.json").write_text(
+                        "{}",
+                        encoding="utf-8",
+                    )
+                else:
+                    tokenizer_path.write_text(
+                        '{"malformed":"partial family output"}',
+                        encoding="utf-8",
+                    )
+                if failure_mode == "raises":
+                    raise RuntimeError("family conversion failed after writing")
+                return failure_mode in {"invalid-success", "directory-output"}
+
+        with pytest.raises(RuntimeError, match="refusing to write a bundle"):
+            _ensure_tokenizer_json(tmp_path, plugin=FailingPlugin())
+
+        assert tokenizer_path.read_bytes() == original
+        assert not list(tmp_path.glob(".trtmc-*"))
+
+    def test_failed_repair_restores_dangling_tokenizer_symlink(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        tokenizer_path.symlink_to("missing-original-tokenizer.json")
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                assert not tokenizer_path.exists()
+                assert not tokenizer_path.is_symlink()
+                raise RuntimeError("slow tokenizer unavailable")
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+        )
+
+        class FailingPlugin:
+            @staticmethod
+            def ensure_tokenizer_json(model_dir, **kwargs):
+                assert not tokenizer_path.exists()
+                assert not tokenizer_path.is_symlink()
+                return False
+
+        with pytest.raises(RuntimeError, match="refusing to write a bundle"):
+            _ensure_tokenizer_json(tmp_path, plugin=FailingPlugin())
+
+        assert tokenizer_path.is_symlink()
+        assert tokenizer_path.readlink() == Path(
+            "missing-original-tokenizer.json"
+        )
+        assert not list(tmp_path.glob(".trtmc-*"))
+
+    def test_rejected_file_does_not_shortcut_t5_unigram_fallback(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from tensorrt_model_connect.families.t5.tokenizer_json import (
+            ensure_tokenizer_json as ensure_t5_tokenizer_json,
+        )
+
+        tokenizer_path = tmp_path / "tokenizer.json"
+        tokenizer_path.write_bytes(b'{"malformed":"quarantine before T5 hook"}')
+        sentencepiece_path = tmp_path / "spiece.model"
+        sentencepiece_path.write_bytes(b"fake sentencepiece model")
+        calls = {}
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                assert not tokenizer_path.exists()
+                raise RuntimeError("standard slow conversion unavailable")
+
+        class FakeSentencePieceProcessor:
+            _pieces = ("<unk>", "\u2581hello")
+            _scores = (-1.0, -2.0)
+
+            def Load(self, path):
+                assert not tokenizer_path.exists()
+                calls["sentencepiece_path"] = Path(path)
+
+            def GetPieceSize(self):
+                return len(self._pieces)
+
+            def IdToPiece(self, index):
+                return self._pieces[index]
+
+            def GetScore(self, index):
+                return self._scores[index]
+
+        class FakeUnigram:
+            def __init__(self, vocab, unk_id):
+                calls["vocab"] = list(vocab)
+                calls["unk_id"] = unk_id
+
+        class FakeTokenizer:
+            def __init__(self, model):
+                self.model = model
+
+            def save(self, path):
+                Path(path).write_text(
+                    json.dumps({
+                        "model": {
+                            "type": "Unigram",
+                            "vocab": calls["vocab"],
+                            "unk_id": calls["unk_id"],
+                        },
+                    }),
+                    encoding="utf-8",
+                )
+
+        tokenizers_module = types.ModuleType("tokenizers")
+        tokenizers_models_module = types.ModuleType("tokenizers.models")
+        tokenizers_models_module.Unigram = FakeUnigram
+        tokenizers_module.Tokenizer = FakeTokenizer
+        tokenizers_module.models = tokenizers_models_module
+        tokenizers_module.decoders = types.SimpleNamespace(
+            Metaspace=lambda: object(),
+        )
+        tokenizers_module.normalizers = types.SimpleNamespace(
+            Sequence=lambda items: tuple(items),
+            Prepend=lambda **kwargs: kwargs,
+            Replace=lambda *args: args,
+        )
+        tokenizers_module.pre_tokenizers = types.SimpleNamespace(
+            Sequence=lambda items: tuple(items),
+        )
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "sentencepiece",
+            types.SimpleNamespace(
+                SentencePieceProcessor=FakeSentencePieceProcessor,
+            ),
+        )
+        monkeypatch.setitem(sys.modules, "tokenizers", tokenizers_module)
+        monkeypatch.setitem(
+            sys.modules,
+            "tokenizers.models",
+            tokenizers_models_module,
+        )
+
+        _ensure_tokenizer_json(
+            tmp_path,
+            plugin=types.SimpleNamespace(
+                ensure_tokenizer_json=ensure_t5_tokenizer_json,
+            ),
+        )
+
+        tokenizer = json.loads(tokenizer_path.read_text(encoding="utf-8"))
+        assert tokenizer["model"]["type"] == "Unigram"
+        assert calls["sentencepiece_path"] == sentencepiece_path
+        assert calls["vocab"] == [("<unk>", -1.0), ("\u2581hello", -2.0)]
+        assert calls["unk_id"] == 0
+        assert not list(tmp_path.glob(".trtmc-*"))
 
     def test_invalid_existing_tokenizer_fails_closed_when_rebuild_is_unavailable(
         self,
@@ -1018,6 +1850,133 @@ class TestBuildBundleErrors:
 
         ensure_tokenizer.assert_not_called()
         write_bundle_mock.assert_called_once()
+
+    def test_diffusion_repairs_tokenizer_before_reconciling_prebuilt_config(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        (tmp_path / "model_index.json").write_text(json.dumps({
+            "_class_name": "SyntheticDiffusionPipeline",
+        }))
+        (tmp_path / "tokenizer.json").write_text("{}")
+        events = []
+
+        class RepairedTokenizer:
+            @staticmethod
+            def save_pretrained(path):
+                (Path(path) / "tokenizer.json").write_text(json.dumps({
+                    "model": {
+                        "type": "BPE",
+                        "vocab": {"a": 0},
+                        "merges": [],
+                    },
+                }))
+
+        class AutoTokenizer:
+            @staticmethod
+            def from_pretrained(path, **kwargs):
+                assert Path(path) == tmp_path
+                assert kwargs == {
+                    "use_fast": False,
+                    "trust_remote_code": False,
+                }
+                return RepairedTokenizer()
+
+        class DiffusionPlugin:
+            name = "synthetic_diffusion"
+            runtime_strategy = "diffusion_synthetic"
+
+            @staticmethod
+            def load_weights(model_dir, config):
+                return {}
+
+            @staticmethod
+            def build_components(
+                model_dir,
+                config,
+                weights,
+                *,
+                verbose=False,
+                fp8_scales=None,
+            ):
+                return {
+                    "config_json": json.dumps({
+                        "runtime_strategy": "diffusion_synthetic",
+                        "tokenizer": {"add_special_tokens": False},
+                    }).encode("utf-8"),
+                }
+
+            @staticmethod
+            def diffusion_bundle_sections(components, **kwargs):
+                return []
+
+            @staticmethod
+            def diffusion_tokenizer_bundle_sections(
+                model_dir_path,
+                *,
+                ensure_tokenizer_json,
+            ):
+                events.append("tokenizer_sections")
+                ensure_tokenizer_json(Path(model_dir_path))
+                tokenizer_path = Path(model_dir_path) / "tokenizer.json"
+                return [("tokenizer.json", tokenizer_path.read_bytes())]
+
+            @staticmethod
+            def diffusion_tokenizer_special_frame(
+                model_dir_path,
+                *,
+                detect_tokenizer_special_frame,
+            ):
+                events.append("special_frame")
+                tokenizer = json.loads(
+                    (Path(model_dir_path) / "tokenizer.json").read_text()
+                )
+                assert tokenizer["model"]["type"] == "BPE"
+                return [11], [12]
+
+            @staticmethod
+            def diffusion_bundle_config(config, *, components):
+                raise AssertionError(
+                    "pre-rendered config_json must stay on its dedicated path"
+                )
+
+        write_bundle_mock = Mock()
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=AutoTokenizer),
+        )
+        monkeypatch.setattr(
+            engine_builder,
+            "find_diffusion_plugin",
+            lambda _pipeline_class: DiffusionPlugin(),
+        )
+        monkeypatch.setattr(
+            engine_builder.trt_compat,
+            "resolved_summary",
+            lambda: "test TensorRT",
+        )
+        monkeypatch.setattr(engine_builder, "_get_trt_version", lambda: "10.0")
+        monkeypatch.setattr(engine_builder, "_get_gpu_name", lambda: "")
+        monkeypatch.setattr(engine_builder, "write_bundle", write_bundle_mock)
+
+        build_bundle(
+            str(tmp_path),
+            str(tmp_path / "out.trtfb"),
+        )
+
+        info = write_bundle_mock.call_args.args[1]
+        sections = write_bundle_mock.call_args.args[2]
+        section_map = {section.name: section.data for section in sections}
+        config = json.loads(section_map["config.json"])
+        assert events == ["tokenizer_sections", "special_frame"]
+        assert json.loads(section_map["tokenizer.json"])["model"]["type"] == "BPE"
+        assert config["tokenizer_add_special_tokens"] == 1
+        assert config["tokenizer_special_prefix_ids"] == [11]
+        assert config["tokenizer_special_suffix_ids"] == [12]
+        assert config["tokenizer"]["add_special_tokens"] is True
+        assert info.tokenizer_add_special_tokens is True
 
     def test_unsupported_model_type(self, tmp_path):
         config = {

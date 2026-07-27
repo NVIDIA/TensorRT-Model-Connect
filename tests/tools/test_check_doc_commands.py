@@ -12,7 +12,8 @@ Postconditions:
     Nested/indented Markdown fences, placeholders, syntax failures, and local
     command inputs are classified without executing the examples. Static
     native, argparse, and Bash-wrapper contracts enforce subcommand scope,
-    option arity/choices, and required inputs.
+    option arity/choices, and required inputs. Literal nested shell payloads
+    reuse the same checks under depth and cycle guards.
 
 Trace IDs:
     - ARCH-CI-QUALITY-GATES
@@ -23,6 +24,7 @@ Trace IDs:
 from __future__ import annotations
 
 from pathlib import Path
+import shlex
 
 from tools import check_doc_commands as cdc
 
@@ -188,6 +190,139 @@ def test_invalid_shell_syntax_is_reported() -> None:
 
     assert finding is not None
     assert "invalid shell syntax" in finding.message
+
+
+def test_literal_shell_c_payloads_reuse_cli_contracts_and_source_lines() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    direct = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=40,
+        language="bash",
+        body=(
+            "# Run in a clean shell.\n"
+            "bash -c 'python3 tools/trtmc_validate.py --definitely-invalid'\n"
+        ),
+    )
+    docker = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=70,
+        language="bash",
+        body=(
+            "docker exec --env MODE=test trtmc-dev /bin/sh -c "
+            "'python3 tools/trtmc_validate.py --definitely-invalid'\n"
+        ),
+    )
+
+    direct_findings = cdc.check_command_block(direct, repo_root)
+    docker_findings = cdc.check_command_block(docker, repo_root)
+
+    assert [(finding.line, finding.message) for finding in direct_findings] == [
+        (
+            42,
+            "unknown option for `tools/trtmc_validate.py`: --definitely-invalid",
+        )
+    ]
+    assert [(finding.line, finding.message) for finding in docker_findings] == [
+        (
+            71,
+            "unknown option for `tools/trtmc_validate.py`: --definitely-invalid",
+        )
+    ]
+
+
+def test_literal_shell_c_payload_syntax_and_local_inputs_are_checked(
+    tmp_path: Path,
+) -> None:
+    syntax = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=20,
+        language="bash",
+        body="bash -lc 'if true; then'\n",
+    )
+    missing = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=30,
+        language="bash",
+        body="sh -c 'python3 tools/definitely-missing.py --help'\n",
+    )
+
+    syntax_findings = cdc.check_command_block(syntax, tmp_path)
+    missing_findings = cdc.check_command_block(missing, tmp_path)
+
+    assert len(syntax_findings) == 1
+    assert syntax_findings[0].line == 21
+    assert syntax_findings[0].message.startswith("invalid shell syntax:")
+    assert [(finding.line, finding.message) for finding in missing_findings] == [
+        (31, "command input does not exist: tools/definitely-missing.py")
+    ]
+
+
+def test_valid_and_dynamic_shell_c_wrappers_are_safe() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    valid = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body=(
+            "bash -lc 'python3 tools/trtmc_validate.py --list'\n"
+            "docker exec trtmc-dev bash -c "
+            "'python3 tools/trtmc_validate.py --all --dry-run'\n"
+        ),
+    )
+    dynamic = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=10,
+        language="bash",
+        body=(
+            'bash -c "$VALIDATION_COMMAND"\ndocker exec trtmc-dev sh -c "${VALIDATION_COMMAND}"\n'
+        ),
+    )
+
+    assert cdc.check_command_block(valid, repo_root) == []
+    assert cdc.check_command_block(dynamic, repo_root) == []
+    assert list(cdc.shell_validation_blocks(dynamic)) == [dynamic]
+
+
+def test_nested_shell_c_recursion_is_depth_bounded() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    payload = "python3 tools/trtmc_validate.py --definitely-invalid"
+    for _level in range(3):
+        payload = f"bash -c {shlex.quote(payload)}"
+    block = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body=f"{payload}\n",
+    )
+
+    bounded = list(cdc.shell_validation_blocks(block, max_nested_depth=2))
+
+    assert len(bounded) == 3
+    assert cdc.check_command_block(block, repo_root, max_nested_depth=2) == []
+    assert [
+        finding.message
+        for finding in cdc.check_command_block(
+            block,
+            repo_root,
+            max_nested_depth=3,
+        )
+    ] == ["unknown option for `tools/trtmc_validate.py`: --definitely-invalid"]
+
+
+def test_nested_shell_c_recursion_rejects_an_ancestor_cycle(monkeypatch) -> None:
+    block = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=1,
+        language="bash",
+        body="echo literal\n",
+    )
+    monkeypatch.setattr(
+        cdc,
+        "_nested_shell_payload",
+        lambda _tokens: block.body,
+    )
+
+    assert list(cdc.shell_validation_blocks(block)) == [block]
 
 
 def test_missing_python_script_is_reported_without_execution(tmp_path: Path) -> None:
@@ -738,12 +873,10 @@ def test_python_script_inline_values_match_argparse_arity_and_empty_string(
 
     assert cdc.check_python_script_contract(valid, tmp_path) == []
     assert [
-        finding.message
-        for finding in cdc.check_python_script_contract(short_pair, tmp_path)
+        finding.message for finding in cdc.check_python_script_contract(short_pair, tmp_path)
     ] == ["option for `tools/inline_values.py` requires a value: --pair"]
     assert [
-        finding.message
-        for finding in cdc.check_python_script_contract(flag_value, tmp_path)
+        finding.message for finding in cdc.check_python_script_contract(flag_value, tmp_path)
     ] == ["option for `tools/inline_values.py` does not take a value: --flag"]
 
 
@@ -778,9 +911,9 @@ def test_argparse_subcommand_aliases_share_options_and_nested_contracts(
     )
 
     assert cdc.check_python_script_contract(valid, tmp_path) == []
-    assert [
-        finding.message for finding in cdc.check_python_script_contract(missing, tmp_path)
-    ] == ["missing required option for `tools/aliases.py co`: --mode"]
+    assert [finding.message for finding in cdc.check_python_script_contract(missing, tmp_path)] == [
+        "missing required option for `tools/aliases.py co`: --mode"
+    ]
 
 
 def test_argparse_parent_parsers_are_merged_at_root_and_subcommand(
@@ -821,15 +954,10 @@ def test_argparse_parent_parsers_are_merged_at_root_and_subcommand(
 
     assert cdc.check_python_script_contract(valid, tmp_path) == []
     assert [
-        finding.message
-        for finding in cdc.check_python_script_contract(invalid_choice, tmp_path)
-    ] == [
-        "invalid value for `tools/parents.py --profile`: "
-        "broken; expected one of fast, safe"
-    ]
+        finding.message for finding in cdc.check_python_script_contract(invalid_choice, tmp_path)
+    ] == ["invalid value for `tools/parents.py --profile`: broken; expected one of fast, safe"]
     assert [
-        finding.message
-        for finding in cdc.check_python_script_contract(missing_child, tmp_path)
+        finding.message for finding in cdc.check_python_script_contract(missing_child, tmp_path)
     ] == ["missing required option for `tools/parents.py run`: --count"]
 
 
@@ -840,10 +968,7 @@ def test_dynamic_curly_paths_are_not_treated_as_literal_inputs(
         Path("README.md"),
         1,
         "bash",
-        (
-            "python3 tools/{family}/validate.py --help\n"
-            "python3 tools/definitely-missing.py --help\n"
-        ),
+        ("python3 tools/{family}/validate.py --help\npython3 tools/definitely-missing.py --help\n"),
     )
 
     assert [finding.message for finding in cdc.check_local_inputs(block, tmp_path)] == [

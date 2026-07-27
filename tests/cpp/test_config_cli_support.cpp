@@ -405,14 +405,70 @@ void test_extract_bundle_defaults_absent_block() {
 }
 
 void test_extract_bundle_defaults_key_in_string_not_confused() {
-    // "defaults" appears inside a string literal; must be ignored.
+    // A complete key-like fragment appears inside a string literal; it must
+    // not be mistaken for a root-object member.
     std::string header = R"({
-        "comment": "default key: defaults",
+        "comment": "literal \"defaults\": {\"fake\": {\"f\": 99}}",
         "defaults": { "ns": { "f": 1 } }
     })";
     auto out = trtmc::config::extract_bundle_defaults(header);
     check(out.size() == 1 && out.count("ns") == 1,
           "extract_defaults: skips key-like string literal");
+}
+
+void test_extract_bundle_defaults_ignores_nested_block() {
+    std::string config = R"({
+        "metadata": {
+            "defaults": { "nested_ns": { "value": 7 } }
+        },
+        "sections": {}
+    })";
+    auto out = trtmc::config::extract_bundle_defaults(config);
+    check(out.empty(), "extract_defaults: nested defaults are not bundle defaults");
+}
+
+void test_extract_bundle_defaults_prefers_direct_member_after_nested_block() {
+    std::string config = R"({
+        "metadata": {
+            "defaults": { "nested_ns": { "value": 7 } }
+        },
+        "defaults": { "top_ns": { "value": 11 } }
+    })";
+    auto out = trtmc::config::extract_bundle_defaults(config);
+    check(out.size() == 1 && out.count("top_ns") == 1 && out.count("nested_ns") == 0,
+          "extract_defaults: only the direct root member contributes");
+}
+
+void test_extract_bundle_defaults_rejects_malformed_root_object() {
+    const std::vector<std::string> malformed = {
+        R"({"metadata": true "defaults": {"ns": {"value": 1}}})",
+        R"({,"defaults": {"ns": {"value": 1}}})",
+        R"({"defaults": {"ns": {"value": 1}},})",
+        R"({"defaults": {"ns": {"value": 1}}} trailing)",
+        R"({"metadata": truth, "defaults": {"ns": {"value": 1}}})",
+        R"({"metadata": [1,,2], "defaults": {"ns": {"value": 1}}})",
+        R"({"metadata": "bad\q", "defaults": {"ns": {"value": 1}}})",
+        R"({"defaults": {"ns": {"value": 1}}, "metadata": truth})",
+    };
+    for (const auto& config : malformed) {
+        auto out = trtmc::config::extract_bundle_defaults(config);
+        check(out.empty(), "extract_defaults: malformed root object is rejected");
+    }
+}
+
+void test_extract_bundle_defaults_rejects_duplicate_keys() {
+    expect_throws(
+        [] {
+            (void)trtmc::config::extract_bundle_defaults(
+                R"({"defaults":{"ns":{"value":1,"value":2}}})");
+        },
+        "duplicate JSON object key: value", "extract_defaults: duplicate field key is rejected");
+    expect_throws(
+        [] {
+            (void)trtmc::config::extract_bundle_defaults(
+                R"({"defaults":{"ns":{"value":1},"ns":{"value":2}}})");
+        },
+        "duplicate JSON object key: ns", "extract_defaults: duplicate namespace key is rejected");
 }
 
 void test_filter_drops_unregistered_namespaces() {
@@ -536,6 +592,10 @@ int main() {
     test_extract_bundle_defaults_finds_block();
     test_extract_bundle_defaults_absent_block();
     test_extract_bundle_defaults_key_in_string_not_confused();
+    test_extract_bundle_defaults_ignores_nested_block();
+    test_extract_bundle_defaults_prefers_direct_member_after_nested_block();
+    test_extract_bundle_defaults_rejects_malformed_root_object();
+    test_extract_bundle_defaults_rejects_duplicate_keys();
     test_bundle_defaults_contribution_produces_bundle_default_layer();
     test_filter_drops_unregistered_namespaces();
     test_resolve_pipeline_config_tolerates_unknown_defaults();

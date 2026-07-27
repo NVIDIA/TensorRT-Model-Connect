@@ -154,3 +154,4 @@ shared_builder_module python/tensorrt_model_connect/triattention_export.py # sha
 shared_builder_module python/tensorrt_model_connect/triattention_runtime.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/trt_compat.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/tokenizer_conversion.py # shared tokenizer conversion primitives used by family adapters; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/tokenizer_validation.py # shared native-tokenizer artifact validation gates every required-tokenizer build; broad all-model builder impact is intentional

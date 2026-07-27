@@ -265,7 +265,14 @@ if [[ "$1" == "build" ]]; then
         previous="$argument"
     done
     mkdir -p "$(dirname "$output")"
-    printf '%s' "$2" > "$output"
+    if [[ "${CANDIDATE_KIND:-}" == "symlink" ]]; then
+        ln -s "$CANDIDATE_TARGET" "$output"
+    elif [[ "${CANDIDATE_KIND:-}" == "directory" ]]; then
+        mkdir -p "$output"
+        printf '%s' "$2" > "$output/nested-bundle"
+    else
+        printf '%s' "$2" > "$output"
+    fi
     exit 0
 fi
 if [[ "$1" == "inspect" ]]; then
@@ -344,6 +351,90 @@ exec "$REAL_PYTHON" "$@"
     assert not pytest_argument_log.exists()
     assert not list(bundle_dir.glob(".validate-family-build.*"))
 
+    candidate_target = tmp_path / "candidate-target.trtfb"
+    candidate_target.write_text("NONEMPTY-SYMLINK-TARGET", encoding="utf-8")
+    symlink_candidate = subprocess.run(
+        [*common_command[:2], "org/unit-model", *common_command[2:]],
+        cwd=project_dir,
+        env={
+            **environment,
+            "CANDIDATE_KIND": "symlink",
+            "CANDIDATE_TARGET": str(candidate_target),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert symlink_candidate.returncode == 1
+    assert "non-empty regular, non-symlink bundle" in symlink_candidate.stderr
+    assert final_bundle.read_text(encoding="utf-8") == "STALE-BUNDLE"
+    assert not pytest_argument_log.exists()
+    assert not list(bundle_dir.glob(".validate-family-build.*"))
+
+    directory_candidate = subprocess.run(
+        [*common_command[:2], "org/unit-model", *common_command[2:]],
+        cwd=project_dir,
+        env={**environment, "CANDIDATE_KIND": "directory"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert directory_candidate.returncode == 1
+    assert "non-empty regular, non-symlink bundle" in directory_candidate.stderr
+    assert final_bundle.read_text(encoding="utf-8") == "STALE-BUNDLE"
+    assert not pytest_argument_log.exists()
+    assert not list(bundle_dir.glob(".validate-family-build.*"))
+
+    final_bundle.unlink()
+    final_bundle.mkdir()
+    directory_destination = subprocess.run(
+        [*common_command[:2], "org/unit-model", *common_command[2:]],
+        cwd=project_dir,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert directory_destination.returncode == 1
+    assert "bundle destination exists but is not a regular file" in (
+        directory_destination.stderr
+    )
+    assert final_bundle.is_dir()
+    assert not any(final_bundle.iterdir())
+    assert not pytest_argument_log.exists()
+    assert not list(bundle_dir.glob(".validate-family-build.*"))
+
+    final_bundle.rmdir()
+    directory_target = tmp_path / "bundle-directory-target"
+    directory_target.mkdir()
+    final_bundle.symlink_to(directory_target, target_is_directory=True)
+    symlink_destination = subprocess.run(
+        [*common_command[:2], "org/unit-model", *common_command[2:]],
+        cwd=project_dir,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert symlink_destination.returncode == 1
+    assert "bundle destination exists but is not a regular file" in (
+        symlink_destination.stderr
+    )
+    assert final_bundle.is_symlink()
+    assert not any(directory_target.iterdir())
+    assert not pytest_argument_log.exists()
+    assert not list(bundle_dir.glob(".validate-family-build.*"))
+
+    final_bundle.unlink()
+    directory_target.rmdir()
     exact = subprocess.run(
         [*common_command[:2], "org/unit-model", *common_command[2:]],
         cwd=project_dir,

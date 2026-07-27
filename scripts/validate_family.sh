@@ -217,6 +217,11 @@ SAFE_NAME="$(echo "$MODEL" | tr '/' '_' | tr ' ' '_')"
 BUNDLE_PATH="${BUNDLE_DIR}/${SAFE_NAME}.trtfb"
 ENGINE_DIR="${ENGINE_DIR:-${BUNDLE_DIR}/engines}"
 
+if [[ ( -e "$BUNDLE_PATH" || -L "$BUNDLE_PATH" ) && ! -f "$BUNDLE_PATH" ]]; then
+    echo "ERROR: bundle destination exists but is not a regular file: $BUNDLE_PATH" >&2
+    exit 1
+fi
+
 # Container-baked Python with HF/TRT deps
 HF_PYTHON="${HF_PYTHON:-/opt/venv/bin/python}"
 if [[ ! -x "$HF_PYTHON" ]]; then
@@ -256,9 +261,12 @@ cleanup_build_stage() {
     if [[ -z "$BUILD_STAGE_DIR" ]] || [[ ! -d "$BUILD_STAGE_DIR" ]]; then
         return
     fi
-    rm -f -- \
-        "$CANDIDATE_BUNDLE_PATH" \
-        "${CANDIDATE_BUNDLE_PATH%.trtfb}.effective_config.json"
+    if [[ -d "$CANDIDATE_BUNDLE_PATH" && ! -L "$CANDIDATE_BUNDLE_PATH" ]]; then
+        rm -rf -- "$CANDIDATE_BUNDLE_PATH"
+    else
+        rm -f -- "$CANDIDATE_BUNDLE_PATH"
+    fi
+    rm -f -- "${CANDIDATE_BUNDLE_PATH%.trtfb}.effective_config.json"
     rmdir -- "$BUILD_STAGE_DIR" 2>/dev/null || true
 }
 
@@ -278,8 +286,10 @@ build_candidate_bundle() {
     if ! "$BINARY" "${BUILD_ARGS[@]}"; then
         return 1
     fi
-    if [[ ! -s "$CANDIDATE_BUNDLE_PATH" ]]; then
-        echo "ERROR: build returned success without writing a non-empty bundle: $CANDIDATE_BUNDLE_PATH" >&2
+    if [[ ! -f "$CANDIDATE_BUNDLE_PATH" \
+        || -L "$CANDIDATE_BUNDLE_PATH" \
+        || ! -s "$CANDIDATE_BUNDLE_PATH" ]]; then
+        echo "ERROR: build returned success without writing a non-empty regular, non-symlink bundle: $CANDIDATE_BUNDLE_PATH" >&2
         return 1
     fi
     if ! BUNDLE_INSPECTION="$("$BINARY" inspect "$CANDIDATE_BUNDLE_PATH")"; then
@@ -426,7 +436,10 @@ elif [[ ! -x "$BINARY" ]]; then
 fi
 
 if [[ "$FAIL" -eq 0 ]]; then
-    if mv -f -- "$CANDIDATE_BUNDLE_PATH" "$BUNDLE_PATH"; then
+    if mv -fT -- "$CANDIDATE_BUNDLE_PATH" "$BUNDLE_PATH" \
+        && [[ -f "$BUNDLE_PATH" ]] \
+        && [[ ! -L "$BUNDLE_PATH" ]] \
+        && [[ -s "$BUNDLE_PATH" ]]; then
         echo ""
         echo "Published validated bundle: $BUNDLE_PATH"
     else

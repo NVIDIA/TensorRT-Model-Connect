@@ -6,38 +6,806 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 from pathlib import Path
+from typing import Any, Callable
+
+_FLOAT32_MAX = 3.4028234663852886e38
+_INT32_MIN = -(2**31)
+_INT32_MAX = 2**31 - 1
+_NATIVE_MODEL_TYPES = {"BPE", "WordPiece", "Unigram"}
+
+
+def _is_int32(value: object) -> bool:
+    return type(value) is int and _INT32_MIN <= value <= _INT32_MAX
+
+
+def _is_finite_float32_number(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value) and abs(value) <= _FLOAT32_MAX
+
+
+def _optional_field_error(
+    node: dict[str, Any],
+    key: str,
+    *,
+    predicate: Callable[[object], bool],
+    expected: str,
+    path: str,
+    allow_null: bool = False,
+) -> str | None:
+    if key not in node:
+        return None
+    value = node[key]
+    if allow_null and value is None:
+        return None
+    if not predicate(value):
+        return f"{path}.{key} must be {expected}"
+    return None
+
+
+def _string_field_error(
+    node: dict[str, Any],
+    key: str,
+    path: str,
+    *,
+    allow_null: bool = False,
+) -> str | None:
+    return _optional_field_error(
+        node,
+        key,
+        predicate=lambda value: isinstance(value, str),
+        expected="a string",
+        path=path,
+        allow_null=allow_null,
+    )
+
+
+def _bool_field_error(
+    node: dict[str, Any],
+    key: str,
+    path: str,
+    *,
+    allow_null: bool = False,
+) -> str | None:
+    return _optional_field_error(
+        node,
+        key,
+        predicate=lambda value: type(value) is bool,
+        expected="a boolean",
+        path=path,
+        allow_null=allow_null,
+    )
+
+
+def _int32_field_error(
+    node: dict[str, Any],
+    key: str,
+    path: str,
+) -> str | None:
+    return _optional_field_error(
+        node,
+        key,
+        predicate=_is_int32,
+        expected="a signed 32-bit integer",
+        path=path,
+    )
+
+
+def _typed_section(
+    document: dict[str, Any],
+    key: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if key not in document or document[key] is None:
+        return None, None
+    section = document[key]
+    if not isinstance(section, dict):
+        return None, f"tokenizer.json {key} must be an object or null"
+    error = _string_field_error(section, "type", key)
+    if error:
+        return None, error
+    return section, None
+
+
+def _object_array(
+    node: dict[str, Any],
+    key: str,
+    path: str,
+    *,
+    allow_null: bool = False,
+) -> tuple[list[Any] | None, str | None]:
+    if key not in node:
+        return None, None
+    values = node[key]
+    if allow_null and values is None:
+        return None, None
+    if not isinstance(values, list):
+        return None, f"{path}.{key} must be an array"
+    return values, None
+
+
+def _has_unpaired_surrogate(value: str) -> bool:
+    index = 0
+    while index < len(value):
+        codepoint = ord(value[index])
+        if 0xD800 <= codepoint <= 0xDBFF:
+            if index + 1 >= len(value):
+                return True
+            next_codepoint = ord(value[index + 1])
+            if not 0xDC00 <= next_codepoint <= 0xDFFF:
+                return True
+            index += 2
+            continue
+        if 0xDC00 <= codepoint <= 0xDFFF:
+            return True
+        index += 1
+    return False
+
+
+def _invalid_json_scalar_error(
+    value: object,
+    path: str = "tokenizer.json",
+) -> str | None:
+    if type(value) is float and not math.isfinite(value):
+        return f"{path} contains a non-finite or JSON-overflow number"
+    if type(value) is int:
+        try:
+            native_float = float(value)
+        except OverflowError:
+            return f"{path} contains an integer outside the native JSON number envelope"
+        if not math.isfinite(native_float):
+            return f"{path} contains an integer outside the native JSON number envelope"
+    if isinstance(value, str) and _has_unpaired_surrogate(value):
+        return f"{path} contains an unpaired UTF-16 surrogate"
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if _has_unpaired_surrogate(key):
+                return f"{path} contains a key with an unpaired UTF-16 surrogate"
+            error = _invalid_json_scalar_error(child, f"{path}[{key!r}]")
+            if error:
+                return error
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            error = _invalid_json_scalar_error(child, f"{path}[{index}]")
+            if error:
+                return error
+    return None
+
+
+def _added_tokens_error(
+    document: dict[str, Any],
+    model_type: str,
+    base_vocab_size: int,
+) -> str | None:
+    if "added_tokens" not in document:
+        return None
+    added_tokens = document["added_tokens"]
+    if not isinstance(added_tokens, list):
+        return "tokenizer.json added_tokens must be an array"
+    required = model_type in {"BPE", "WordPiece"}
+    for index, token in enumerate(added_tokens):
+        path = f"added_tokens[{index}]"
+        if not isinstance(token, dict):
+            return f"{path} must be an object"
+        for key, predicate, expected in (
+            ("content", lambda value: isinstance(value, str), "a string"),
+            ("id", _is_int32, "a signed 32-bit integer"),
+        ):
+            if required and key not in token:
+                return f"{path}.{key} is required"
+            if key in token and not predicate(token[key]):
+                return f"{path}.{key} must be {expected}"
+        if model_type in {"BPE", "WordPiece"}:
+            error = _bool_field_error(token, "special", path)
+            if error:
+                return error
+        token_id = token.get("id", -1)
+        content = token.get("content", "")
+        resizes_native_vocab = (
+            token_id >= 0
+            and (model_type in {"BPE", "WordPiece"} or bool(content))
+        )
+        max_contiguous_id = base_vocab_size + len(added_tokens) - 1
+        if resizes_native_vocab and token_id > max_contiguous_id:
+            return (
+                f"{path}.id={token_id} exceeds the contiguous native vocabulary "
+                f"allocation bound {max_contiguous_id}"
+            )
+    return None
+
+
+def _roberta_pair_ids_error(section: dict[str, Any], path: str) -> str | None:
+    for key in ("cls", "sep"):
+        if key not in section:
+            continue
+        pair = section[key]
+        if isinstance(pair, list) and len(pair) >= 2 and not _is_int32(pair[1]):
+            return f"{path}.{key}[1] must be a signed 32-bit integer"
+    return None
+
+
+def _template_single_error(
+    section: dict[str, Any],
+    path: str,
+    *,
+    iterate_object_values: bool = False,
+) -> str | None:
+    single = section.get("single")
+    if isinstance(single, list):
+        entries = single
+    elif iterate_object_values and isinstance(single, dict):
+        entries = list(single.values())
+    else:
+        return None
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        if "Sequence" in entry:
+            continue
+        if "SpecialToken" not in entry:
+            continue
+        special = entry["SpecialToken"]
+        special_path = f"{path}.single[{index}].SpecialToken"
+        if not isinstance(special, dict):
+            return f"{special_path} must be an object"
+        error = _string_field_error(special, "id", special_path)
+        if error:
+            return error
+    return None
+
+
+def _bpe_digit_group_error(pattern: str, path: str) -> str | None:
+    marker_position = pattern.find(r"\p{N}{")
+    if marker_position < 0:
+        return None
+    number_start = marker_position + len(r"\p{N}{")
+    close = pattern.find("}", number_start)
+    if close < 0:
+        return None
+    comma = pattern.find(",", number_start)
+    if comma < 0 or comma >= close:
+        return None
+    candidate = pattern[comma + 1 : close]
+    match = re.match(r"^[ \t\n\r\f\v]*([+-]?[0-9]+)", candidate, re.ASCII)
+    if match is None:
+        return f"{path} has a digit-group bound that native std::stoi cannot parse"
+    try:
+        value = int(match.group(1))
+    except ValueError:
+        return f"{path} has a digit-group bound outside signed 32-bit range"
+    if not _INT32_MIN <= value <= _INT32_MAX:
+        return f"{path} has a digit-group bound outside signed 32-bit range"
+    return None
+
+
+def _bpe_split_error(
+    split: dict[str, Any],
+    path: str,
+    *,
+    direct: bool,
+) -> str | None:
+    pattern = split.get("pattern")
+    if not isinstance(pattern, dict):
+        if direct:
+            return (
+                f"{path} is unsupported by the native BPE tokenizer; direct "
+                'Split requires pattern.String == " "'
+            )
+        return None
+    if direct:
+        error = _string_field_error(pattern, "String", f"{path}.pattern")
+        if error:
+            return error
+        if pattern.get("String") != " ":
+            return (
+                f"{path} is unsupported by the native BPE tokenizer; direct "
+                'Split requires pattern.String == " "'
+            )
+        return None
+    if "Regex" in pattern:
+        error = _string_field_error(pattern, "Regex", f"{path}.pattern")
+        if error:
+            return error
+        regex = pattern["Regex"]
+        if "[^\r\n" in regex or r"[^\r\n" in regex:
+            error = _bpe_digit_group_error(
+                regex,
+                f"{path}.pattern.Regex",
+            )
+            if error:
+                return error
+    return None
+
+
+def _bpe_decoder_replace_error(
+    replace: dict[str, Any],
+    path: str,
+) -> str | None:
+    pattern = replace.get("pattern")
+    if isinstance(pattern, dict) and "String" in pattern:
+        error = _string_field_error(pattern, "String", f"{path}.pattern")
+        if error:
+            return error
+    return _string_field_error(replace, "content", path)
+
+
+def _bpe_normalizer_replace_error(
+    replace: dict[str, Any],
+    path: str,
+) -> str | None:
+    pattern = replace.get("pattern")
+    if not isinstance(pattern, dict) or "String" not in pattern:
+        return None
+    error = _string_field_error(pattern, "String", f"{path}.pattern")
+    if error:
+        return error
+    if pattern["String"] != " ":
+        return None
+    return _string_field_error(replace, "content", path)
+
+
+def _bpe_normalizer_replace_scan(
+    normalizer: dict[str, Any],
+    path: str,
+) -> tuple[bool, str | None]:
+    error = _string_field_error(normalizer, "type", path)
+    if error:
+        return False, error
+    normalizer_type = normalizer.get("type", "")
+    if normalizer_type == "Replace":
+        error = _bpe_normalizer_replace_error(normalizer, path)
+        if error:
+            return False, error
+        pattern = normalizer.get("pattern")
+        matched = (
+            isinstance(pattern, dict)
+            and pattern.get("String") == " "
+            and normalizer.get("content", "") == "▁"
+        )
+        return matched, None
+    if normalizer_type != "Sequence":
+        return False, None
+    children, error = _object_array(
+        normalizer,
+        "normalizers",
+        path,
+        allow_null=True,
+    )
+    if error or children is None:
+        return False, error
+    for index, child in enumerate(children):
+        child_path = f"{path}.normalizers[{index}]"
+        if not isinstance(child, dict):
+            return False, f"{child_path} must be an object"
+        matched, error = _bpe_normalizer_replace_scan(
+            child,
+            child_path,
+        )
+        if error:
+            return False, error
+        if matched:
+            return True, None
+    return False, None
+
+
+def _bpe_normalizer_error(document: dict[str, Any]) -> str | None:
+    normalizer, error = _typed_section(document, "normalizer")
+    if error or normalizer is None:
+        return error
+    if normalizer.get("type", "") == "Sequence":
+        children, error = _object_array(
+            normalizer,
+            "normalizers",
+            "normalizer",
+            allow_null=True,
+        )
+        if error or children is None:
+            return error
+        for index, child in enumerate(children):
+            path = f"normalizer.normalizers[{index}]"
+            if not isinstance(child, dict):
+                return f"{path} must be an object"
+            error = _string_field_error(child, "type", path)
+            if error:
+                return error
+            if child.get("type", "") == "Prepend":
+                return None
+    _, error = _bpe_normalizer_replace_scan(normalizer, "normalizer")
+    return error
+
+
+def _bpe_pre_tokenizer_error(document: dict[str, Any]) -> str | None:
+    pre_tokenizer, error = _typed_section(document, "pre_tokenizer")
+    if error or pre_tokenizer is None:
+        return error
+    pre_type = pre_tokenizer.get("type", "")
+    if pre_type == "Split":
+        return _bpe_split_error(pre_tokenizer, "pre_tokenizer", direct=True)
+    if pre_type == "Sequence":
+        children, error = _object_array(
+            pre_tokenizer,
+            "pretokenizers",
+            "pre_tokenizer",
+            allow_null=True,
+        )
+        if error or children is None:
+            return error
+        for index, child in enumerate(children):
+            child_path = f"pre_tokenizer.pretokenizers[{index}]"
+            if not isinstance(child, dict):
+                return f"{child_path} must be an object"
+            error = _string_field_error(child, "type", child_path)
+            if error:
+                return error
+            if child.get("type", "") == "Split":
+                error = _bpe_split_error(child, child_path, direct=False)
+                if error:
+                    return error
+                pattern = child.get("pattern")
+                if isinstance(pattern, dict) and "Regex" in pattern:
+                    break
+        return None
+    if pre_type not in {"", "ByteLevel", "Metaspace"}:
+        return f"unsupported native BPE pre_tokenizer.type: {pre_type!r}"
+    return None
+
+
+def _bpe_decoder_error(document: dict[str, Any]) -> str | None:
+    decoder, error = _typed_section(document, "decoder")
+    if error or decoder is None or decoder.get("type", "") != "Sequence":
+        return error
+    children, error = _object_array(
+        decoder,
+        "decoders",
+        "decoder",
+        allow_null=True,
+    )
+    if error or children is None:
+        return error
+    for index, child in enumerate(children):
+        path = f"decoder.decoders[{index}]"
+        if not isinstance(child, dict):
+            return f"{path} must be an object"
+        error = _string_field_error(child, "type", path)
+        if error:
+            return error
+        child_type = child.get("type", "")
+        if child_type == "Replace":
+            error = _bpe_decoder_replace_error(child, path)
+        elif child_type == "Strip":
+            error = _string_field_error(child, "content", path)
+            if not error and child.get("content", " ") == " ":
+                error = _int32_field_error(child, "start", path)
+        if error:
+            return error
+    return None
+
+
+def _bpe_post_processor_error(document: dict[str, Any]) -> str | None:
+    processor, error = _typed_section(document, "post_processor")
+    if error or processor is None:
+        return error
+    processor_type = processor.get("type", "")
+    if processor_type == "TemplateProcessing":
+        return _template_single_error(
+            processor,
+            "post_processor",
+            iterate_object_values=True,
+        )
+    if processor_type == "RobertaProcessing":
+        return _roberta_pair_ids_error(processor, "post_processor")
+    if processor_type != "Sequence":
+        return None
+    children, error = _object_array(
+        processor,
+        "processors",
+        "post_processor",
+        allow_null=True,
+    )
+    if error or children is None:
+        return error
+    for index, child in enumerate(children):
+        path = f"post_processor.processors[{index}]"
+        if not isinstance(child, dict):
+            return f"{path} must be an object"
+        error = _string_field_error(child, "type", path)
+        if error:
+            return error
+        if child.get("type", "") == "TemplateProcessing":
+            error = _template_single_error(
+                child,
+                path,
+                iterate_object_values=True,
+            )
+            if error:
+                return error
+            break
+    return None
+
+
+def _bpe_error(document: dict[str, Any], model: dict[str, Any]) -> str | None:
+    error = _bool_field_error(model, "byte_fallback", "model")
+    if error:
+        return error
+    vocab = model.get("vocab")
+    error = _object_vocab_error(vocab, "BPE")
+    if error:
+        return error
+    merges = model.get("merges")
+    if not isinstance(merges, list):
+        return "BPE model.merges must be an array"
+    for index, merge in enumerate(merges):
+        if isinstance(merge, str):
+            continue
+        if (
+            isinstance(merge, list)
+            and len(merge) == 2
+            and all(isinstance(token, str) for token in merge)
+        ):
+            continue
+        return (
+            f"BPE model.merges entries must be strings or two-string arrays (invalid entry {index})"
+        )
+    for validator in (
+        _bpe_pre_tokenizer_error,
+        _bpe_normalizer_error,
+        _bpe_decoder_error,
+        _bpe_post_processor_error,
+    ):
+        error = validator(document)
+        if error:
+            return error
+    return None
+
+
+def _object_vocab_error(vocab: object, model_type: str) -> str | None:
+    if not isinstance(vocab, dict) or not vocab:
+        return f"{model_type} model.vocab must be a non-empty object"
+    token_ids = list(vocab.values())
+    if any(type(token_id) is not int for token_id in token_ids):
+        return f"{model_type} model.vocab IDs must be integers"
+    if len(set(token_ids)) != len(token_ids):
+        return f"{model_type} model.vocab IDs must be unique"
+    if set(token_ids) != set(range(len(token_ids))):
+        return f"{model_type} model.vocab IDs must cover 0..{len(token_ids) - 1}"
+    return None
+
+
+def _wordpiece_bert_normalizer_error(
+    normalizer: dict[str, Any],
+    path: str,
+) -> str | None:
+    for key in ("clean_text", "handle_chinese_chars", "lowercase"):
+        error = _bool_field_error(normalizer, key, path)
+        if error:
+            return error
+    return _bool_field_error(
+        normalizer,
+        "strip_accents",
+        path,
+        allow_null=True,
+    )
+
+
+def _wordpiece_normalizer_error(document: dict[str, Any]) -> str | None:
+    normalizer, error = _typed_section(document, "normalizer")
+    if error or normalizer is None:
+        return error
+    normalizer_type = normalizer.get("type", "")
+    if normalizer_type == "BertNormalizer":
+        return _wordpiece_bert_normalizer_error(normalizer, "normalizer")
+    if normalizer_type != "Sequence":
+        return None
+    children, error = _object_array(
+        normalizer,
+        "normalizers",
+        "normalizer",
+        allow_null=True,
+    )
+    if error or children is None:
+        return error
+    for index, child in enumerate(children):
+        path = f"normalizer.normalizers[{index}]"
+        if not isinstance(child, dict):
+            return f"{path} must be an object"
+        error = _string_field_error(child, "type", path)
+        if error:
+            return error
+        if child.get("type", "") == "BertNormalizer":
+            error = _wordpiece_bert_normalizer_error(child, path)
+            if error:
+                return error
+    return None
+
+
+def _wordpiece_post_processor_error(document: dict[str, Any]) -> str | None:
+    processor, error = _typed_section(document, "post_processor")
+    if error or processor is None:
+        return error
+    if processor.get("type", "") not in {
+        "TemplateProcessing",
+        "BertProcessing",
+        "RobertaProcessing",
+    }:
+        return None
+    return _roberta_pair_ids_error(processor, "post_processor")
+
+
+def _wordpiece_error(
+    document: dict[str, Any],
+    model: dict[str, Any],
+) -> str | None:
+    for key in ("unk_token", "continuing_subword_prefix"):
+        error = _string_field_error(model, key, "model")
+        if error:
+            return error
+    error = _int32_field_error(model, "max_input_chars_per_word", "model")
+    if error:
+        return error
+    error = _object_vocab_error(model.get("vocab"), "WordPiece")
+    if error:
+        return error
+    for validator in (
+        _wordpiece_normalizer_error,
+        _wordpiece_post_processor_error,
+    ):
+        error = validator(document)
+        if error:
+            return error
+    return None
+
+
+def _unigram_normalizer_error(document: dict[str, Any]) -> str | None:
+    normalizer, error = _typed_section(document, "normalizer")
+    if error or normalizer is None or normalizer.get("type", "") != "Sequence":
+        return error
+    children, error = _object_array(
+        normalizer,
+        "normalizers",
+        "normalizer",
+        allow_null=True,
+    )
+    if error or children is None:
+        return error
+    for index, child in enumerate(children):
+        path = f"normalizer.normalizers[{index}]"
+        if not isinstance(child, dict):
+            return f"{path} must be an object"
+        error = _string_field_error(
+            child,
+            "type",
+            path,
+        )
+        if error:
+            return error
+    return None
+
+
+def _unigram_pre_tokenizer_error(document: dict[str, Any]) -> str | None:
+    pre_tokenizer, error = _typed_section(document, "pre_tokenizer")
+    if error or pre_tokenizer is None:
+        return error
+    pre_type = pre_tokenizer.get("type", "")
+    if pre_type == "Metaspace":
+        return _bool_field_error(
+            pre_tokenizer,
+            "add_prefix_space",
+            "pre_tokenizer",
+        )
+    if pre_type != "Sequence":
+        return None
+    children, error = _object_array(
+        pre_tokenizer,
+        "pretokenizers",
+        "pre_tokenizer",
+        allow_null=True,
+    )
+    if error or children is None:
+        return error
+    for index, child in enumerate(children):
+        path = f"pre_tokenizer.pretokenizers[{index}]"
+        if not isinstance(child, dict):
+            return f"{path} must be an object"
+        error = _string_field_error(child, "type", path)
+        if error:
+            return error
+        if child.get("type", "") == "Metaspace":
+            error = _bool_field_error(child, "add_prefix_space", path)
+            if error:
+                return error
+            break
+    return None
+
+
+def _unigram_post_processor_error(document: dict[str, Any]) -> str | None:
+    processor, error = _typed_section(document, "post_processor")
+    if error or processor is None:
+        return error
+    processor_type = processor.get("type", "")
+    if processor_type == "TemplateProcessing":
+        return _template_single_error(processor, "post_processor")
+    if processor_type == "RobertaProcessing":
+        return _roberta_pair_ids_error(processor, "post_processor")
+    return None
+
+
+def _unigram_error(
+    document: dict[str, Any],
+    model: dict[str, Any],
+) -> str | None:
+    vocab = model.get("vocab")
+    if not isinstance(vocab, list) or not vocab:
+        return "Unigram model.vocab must be a non-empty array"
+    for index, entry in enumerate(vocab):
+        if (
+            not isinstance(entry, list)
+            or len(entry) < 2
+            or not isinstance(entry[0], str)
+            or isinstance(entry[1], bool)
+            or not isinstance(entry[1], (int, float))
+        ):
+            return (
+                "Unigram model.vocab entries must contain a string token and "
+                f"numeric score (invalid entry {index})"
+            )
+        if not _is_finite_float32_number(entry[1]):
+            return (
+                f"Unigram model.vocab scores must be finite float32 numbers (invalid entry {index})"
+            )
+    unk_id = model.get("unk_id", 0)
+    if not _is_int32(unk_id) or not 0 <= unk_id < len(vocab):
+        return "Unigram model.unk_id must be a signed 32-bit index into model.vocab"
+    for validator in (
+        _unigram_normalizer_error,
+        _unigram_pre_tokenizer_error,
+        _unigram_post_processor_error,
+    ):
+        error = validator(document)
+        if error:
+            return error
+    return None
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard numeric constant {value}")
 
 
 def native_tokenizer_json_error(tokenizer_path: Path) -> str | None:
     """Return why ``tokenizer.json`` is incompatible with native tokenizers.
 
-    This validates the minimum model structure consumed by the native BPE,
-    WordPiece, and Unigram implementations. Optional normalization,
-    pre-tokenization, decoding, and special-token sections remain optional.
+    The validation mirrors every JSON field that the native BPE, WordPiece,
+    and Unigram constructors type-convert. Unknown fields that those
+    constructors safely ignore remain allowed.
     """
     try:
-        document = json.loads(tokenizer_path.read_text(encoding="utf-8"))
+        document = json.loads(
+            tokenizer_path.read_text(encoding="utf-8"),
+            parse_constant=_reject_json_constant,
+        )
     except OSError as exc:
         return f"cannot read tokenizer.json: {exc}"
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, ValueError) as exc:
         return f"invalid tokenizer.json: {exc}"
 
+    scalar_error = _invalid_json_scalar_error(document)
+    if scalar_error:
+        return scalar_error
     if not isinstance(document, dict):
         return "tokenizer.json root must be an object"
     model = document.get("model")
     if not isinstance(model, dict):
         return "tokenizer.json must contain an object-valued model"
 
-    model_type = model.get("type")
-    if model_type is not None and (
-        not isinstance(model_type, str)
-        or model_type not in {"BPE", "WordPiece", "Unigram"}
-    ):
-        return f"unsupported tokenizer model.type: {model_type!r}"
-
-    vocab = model.get("vocab")
-    if model_type is None:
+    if "type" in model:
+        model_type = model["type"]
+        if not isinstance(model_type, str):
+            return "tokenizer.json model.type must be a string when present"
+        if model_type not in _NATIVE_MODEL_TYPES:
+            return f"unsupported tokenizer model.type: {model_type!r}"
+    else:
+        vocab = model.get("vocab")
         if isinstance(vocab, dict) and isinstance(model.get("merges"), list):
             model_type = "BPE"
         elif (
@@ -55,48 +823,12 @@ def native_tokenizer_json_error(tokenizer_path: Path) -> str | None:
         else:
             return "cannot identify a native BPE, WordPiece, or Unigram model"
 
-    if model_type in {"BPE", "WordPiece"}:
-        if not isinstance(vocab, dict) or not vocab:
-            return f"{model_type} model.vocab must be a non-empty object"
-        token_ids = list(vocab.values())
-        if any(type(token_id) is not int for token_id in token_ids):
-            return f"{model_type} model.vocab IDs must be integers"
-        if len(set(token_ids)) != len(token_ids):
-            return f"{model_type} model.vocab IDs must be unique"
-        if set(token_ids) != set(range(len(token_ids))):
-            return f"{model_type} model.vocab IDs must cover 0..{len(token_ids) - 1}"
-
     if model_type == "BPE":
-        merges = model.get("merges")
-        if not isinstance(merges, list):
-            return "BPE model.merges must be an array"
-        for merge in merges:
-            if isinstance(merge, str):
-                continue
-            if (
-                isinstance(merge, list)
-                and len(merge) == 2
-                and all(isinstance(token, str) for token in merge)
-            ):
-                continue
-            return "BPE model.merges entries must be strings or two-string arrays"
-        return None
-
-    if model_type == "WordPiece":
-        return None
-
-    if not isinstance(vocab, list) or not vocab:
-        return "Unigram model.vocab must be a non-empty array"
-    for entry in vocab:
-        if (
-            not isinstance(entry, list)
-            or len(entry) < 2
-            or not isinstance(entry[0], str)
-            or isinstance(entry[1], bool)
-            or not isinstance(entry[1], (int, float))
-        ):
-            return "Unigram model.vocab entries must contain a string token and numeric score"
-    unk_id = model.get("unk_id", 0)
-    if type(unk_id) is not int or not 0 <= unk_id < len(vocab):
-        return "Unigram model.unk_id must index model.vocab"
-    return None
+        error = _bpe_error(document, model)
+    elif model_type == "WordPiece":
+        error = _wordpiece_error(document, model)
+    else:
+        error = _unigram_error(document, model)
+    if error:
+        return error
+    return _added_tokens_error(document, model_type, len(model["vocab"]))
