@@ -13,9 +13,15 @@
 //
 // Design contract (see website/docs/context/config-registry-status.md):
 //   - Registration: catalogs *schemas* (field metadata + defaults). No values.
-//   - Native session start: the pipeline factory resolves a ConfigBundle by
-//     merging layers (session > platform > bundle defaults > build time >
-//     schema defaults) against registered schemas, then attaches it to
+//   - ConfigBundle supports the general precedence session > platform >
+//     bundle defaults > build time > schema defaults. The current native
+//     pipeline factory passes the materialized config.json section to the
+//     resolver. A top-level "defaults" object in that section can contribute
+//     BundleDefault, and LoadOptions can contribute SessionRequest. The
+//     factory does not pass BundleInfo.defaults from the binary header to the
+//     resolver, nor does it inject BuildTime or PlatformProfile.
+//   - LoadOptions.config_path and CLI --config/--set all contribute to the
+//     current SessionRequest layer before the bundle is attached to
 //     PipelineContext.
 //   - Native plugin create(ctx): queries ctx.runtime_config for its own
 //     namespace only.
@@ -43,10 +49,10 @@ namespace trtmc::config {
 // allowlist is a fail-fast error with the exact namespace/field name.
 enum class Layer : std::uint8_t {
     SchemaDefault = 0,   // Hard-coded fallback baked into the schema.
-    BuildTime = 1,       // Set at bundle build time; baked into defaults:.
-    BundleDefault = 2,   // Read from the bundle's defaults: block.
-    PlatformProfile = 3, // --config <file> specifying a platform.
-    SessionRequest = 4,  // --config <file> or --set for this invocation.
+    BuildTime = 1,       // General resolver layer; not factory-wired today.
+    BundleDefault = 2,   // Factory reads config.json's top-level defaults object.
+    PlatformProfile = 3, // General resolver layer; not factory-wired today.
+    SessionRequest = 4,  // Factory config_path / CLI --config or --set.
 };
 
 // Metadata for one field inside a namespaced schema. The validator is

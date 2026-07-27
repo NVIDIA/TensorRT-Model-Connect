@@ -6,15 +6,22 @@ Validation should prove that the runtime under test matches an appropriate oracl
 
 ```mermaid
 flowchart TB
-  Bundle["Bundle under test"] --> Runtime["TRTF runtime"]
+  Bundle["Bundle under test"] --> Runtime["TRTMC runtime"]
   Input["Canonical input"] --> Runtime
   Input --> Oracle["Reference oracle"]
-  Runtime --> Output["TRTF output"]
+  Runtime --> Output["TRTMC output"]
   Oracle --> Reference["Reference output"]
   Output --> Compare["Comparator and thresholds"]
   Reference --> Compare
   Compare --> Report["Pass/fail + artifacts"]
 ```
+
+For catalog-wide reference consistency and the exact model/workload binding,
+report, and exit-code contracts, use the
+[Testing Reference](../../reference/testing.md#model-first-reference-consistency).
+For release model-profile comparisons, GB300 prerequisites, traffic-light
+semantics, and retained performance evidence, use the
+[Performance Benchmarking Reference](../../reference/benchmarking.md#release-performance-matrix).
 
 ## Focused E2E validation
 

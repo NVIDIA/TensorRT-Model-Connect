@@ -77,11 +77,17 @@ not synthesize a native strategy.
 ## Configuration
 
 Runtime configuration is resolved through schemas in `src/runtime/config/`
-and optional model-owned schemas declared in runtime descriptors. Bundle
-defaults, config files, CLI overrides, and platform/session layers are
-resolved before plugin creation. Documentation should not invent an
-environment-variable contract unless a current parser or source reader proves
-it.
+and optional model-owned schemas declared in runtime descriptors. The general
+`ConfigBundle` type supports schema-default, build-time, bundle-default,
+platform-profile, and session-request provenance. The current
+`PipelineFactory` instead passes the materialized `config.json` section to the
+resolver: a top-level `defaults` object there can contribute bundle defaults,
+and `LoadOptions.config_path`, CLI `--config`, and CLI `--set` can contribute a
+session request. It does not pass `BundleInfo.defaults` from the binary header,
+and the native builders do not currently add `config.json.defaults`
+automatically. No separate build-time or platform-profile contribution is
+wired. Documentation should not invent an environment-variable or
+platform-layer contract unless a current parser or source reader proves it.
 
 This page is descriptive, not ISO 26262 certification evidence. See the live
 [Architecture section](../architecture/overview.md) for user-facing details.

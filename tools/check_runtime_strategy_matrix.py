@@ -434,6 +434,16 @@ def _resolve_definition(
     definitions = getattr(contract, kind)
     if reference.name in definitions:
         return reference
+    assignment = contract.assignments.get(reference.name)
+    if assignment is not None:
+        alias = _resolve_reference(
+            assignment,
+            current_module=reference.module,
+            modules=modules,
+        )
+        if alias is None:
+            return None
+        return _resolve_definition(alias, modules=modules, kind=kind, seen=seen)
     imported = contract.imported_symbols.get(reference.name)
     if imported is None:
         return None
@@ -656,8 +666,8 @@ def extract_runtime_cli_commands_from_e2e_plugins(
     models_dir: Path,
     native_cli_commands: set[str],
 ) -> dict[str, set[str]]:
-    """Map runtimes to native commands used by their declared runner class."""
-    runtime_commands: dict[str, set[str]] = {}
+    """Map runtimes to native commands shared by every manifest owner."""
+    runtime_owner_commands: dict[str, dict[Path, set[str]]] = {}
     owner_contracts: dict[
         Path,
         tuple[
@@ -694,16 +704,19 @@ def extract_runtime_cli_commands_from_e2e_plugins(
                 _active_runner_class_refs(modules),
             )
         modules, active_runner_classes = owner_contracts[owner_dir]
+        owner_commands = runtime_owner_commands.setdefault(runtime_strategy, {}).setdefault(
+            owner_dir,
+            set(),
+        )
         declared_runner_class = _canonical_runner_class_ref(runner_class_ref)
         if declared_runner_class is None:
-            runtime_commands.setdefault(runtime_strategy, set())
             continue
         matching_active_classes = {
             active_class
             for active_class in active_runner_classes
             if declared_runner_class in _class_lineage(active_class, modules)
         }
-        runtime_commands.setdefault(runtime_strategy, set()).update(
+        owner_commands.update(
             command
             for active_class in matching_active_classes
             for command in _commands_for_runner_class(
@@ -713,6 +726,13 @@ def extract_runtime_cli_commands_from_e2e_plugins(
             )
         )
 
+    runtime_commands: dict[str, set[str]] = {}
+    for runtime_strategy, commands_by_owner in runtime_owner_commands.items():
+        owner_command_sets = iter(commands_by_owner.values())
+        shared_commands = set(next(owner_command_sets))
+        for owner_commands in owner_command_sets:
+            shared_commands.intersection_update(owner_commands)
+        runtime_commands[runtime_strategy] = shared_commands
     return runtime_commands
 
 

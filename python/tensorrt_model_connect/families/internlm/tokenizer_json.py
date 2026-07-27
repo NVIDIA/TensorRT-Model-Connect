@@ -12,7 +12,13 @@ def ensure_tokenizer_json(
     model_dir: str | Path,
     *,
     previous_error: str | None = None,
+    trust_remote_code: bool = False,
 ) -> bool:
+    if type(trust_remote_code) is not bool:
+        raise TypeError(
+            "trust_remote_code must be a bool, got "
+            f"{type(trust_remote_code).__name__}"
+        )
     del previous_error
     path = Path(model_dir)
     if (path / "tokenizer.json").exists():
@@ -23,7 +29,7 @@ def ensure_tokenizer_json(
 
         tokenizer = AutoTokenizer.from_pretrained(
             str(path),
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
             use_fast=True,
         )
         if not getattr(tokenizer, "is_fast", False):

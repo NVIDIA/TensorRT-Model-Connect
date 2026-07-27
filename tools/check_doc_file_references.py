@@ -19,7 +19,6 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
-import ast
 import os
 import re
 import subprocess
@@ -28,6 +27,11 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, List, Tuple
+
+try:
+    from tools.check_doc_commands import _argparse_program_contract, markdown_fence_blocks
+except ModuleNotFoundError:  # Direct ``python tools/check_doc_file_references.py``.
+    from check_doc_commands import _argparse_program_contract, markdown_fence_blocks
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +117,6 @@ _ROOT_PATH_RE = re.compile(r"`(" + "|".join(re.escape(path) for path in _ROOT_PA
 _BARE_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_./-])(" + "|".join(re.escape(p) for p in _PATH_PREFIXES) + r")[^\s`'\"|]+"
 )
-_OPEN_FENCE_RE = re.compile(r"^[ \t]*(?P<fence>`{3,}|~{3,})[ \t]*(?P<info>.*)$")
 _SHELL_FENCE_LANGUAGES = {"bash", "sh", "shell"}
 _SHELL_OUTPUT_PATH_PREFIX_RE = re.compile(
     r"(?:(?:^|\s)(?:-o(?:=|\s+)?|--output(?:=|\s+)|"
@@ -125,15 +128,6 @@ _LOCAL_PYTHON_SCRIPT_RE = re.compile(
     r"(?:python3?|python)\s+"
     r"(?P<script>(?:\./)?(?:scripts|tools)/[A-Za-z0-9_./-]+\.py)\b"
 )
-_ARGPARSE_NO_VALUE_ACTIONS = {
-    "append_const",
-    "count",
-    "help",
-    "store_const",
-    "store_false",
-    "store_true",
-    "version",
-}
 
 # Paths containing angle-bracket placeholders like <family> or <model-name>
 # are intentional templates, not real file paths.
@@ -233,58 +227,29 @@ def _clean_extracted_path(raw: str) -> str:
     return raw.split("::", 1)[0].split("#", 1)[0].rstrip("\\.,;:)]}")
 
 
-def _keyword_value(call: ast.Call, name: str) -> ast.AST | None:
-    for keyword in call.keywords:
-        if keyword.arg == name:
-            return keyword.value
-    return None
-
-
-def _action_name(node: ast.AST | None) -> str | None:
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value
-    if isinstance(node, ast.Attribute):
-        return node.attr
-    return None
-
-
 @lru_cache(maxsize=None)
-def _argparse_option_always_consumes_value(
+def _argparse_option_is_output_path(
     script_path: Path,
     alias: str,
 ) -> bool:
-    """Return whether every static argparse definition consumes one value."""
-    try:
-        tree = ast.parse(script_path.read_text(encoding="utf-8"))
-    except (OSError, SyntaxError):
+    """Return whether every live definition is an explicit output path."""
+    program = _argparse_program_contract(script_path)
+    if program is None:
         return False
 
-    contracts: list[bool] = []
-    for node in ast.walk(tree):
-        if not (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "add_argument"
-            and alias
-            in {
-                argument.value
-                for argument in node.args
-                if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
-            }
-        ):
-            continue
-        action_node = _keyword_value(node, "action")
-        action = _action_name(action_node)
-        if action_node is not None and action is None:
-            contracts.append(False)
-            continue
-        if action in _ARGPARSE_NO_VALUE_ACTIONS or action == "BooleanOptionalAction":
-            contracts.append(False)
-            continue
-        nargs_node = _keyword_value(node, "nargs")
-        nargs = nargs_node.value if isinstance(nargs_node, ast.Constant) else None
-        contracts.append(nargs != 0)
-    return bool(contracts) and all(contracts)
+    contracts = []
+    pending = [program]
+    while pending:
+        current = pending.pop()
+        specs = [current.root, *current.commands.values()]
+        for spec in specs:
+            option = spec.options.get(alias)
+            if option is not None:
+                contracts.append(option)
+        pending.extend(current.nested.values())
+    return bool(contracts) and all(
+        option.max_values != 0 and option.output_path for option in contracts
+    )
 
 
 def _json_option_is_output(prefix: str, repo_root: Path | None) -> bool:
@@ -297,7 +262,7 @@ def _json_option_is_output(prefix: str, repo_root: Path | None) -> bool:
     relative = Path(matches[-1].group("script").removeprefix("./"))
     if relative.is_absolute() or ".." in relative.parts:
         return False
-    return _argparse_option_always_consumes_value(
+    return _argparse_option_is_output_path(
         (repo_root / relative).resolve(),
         "--json",
     )
@@ -309,60 +274,32 @@ def _shell_fence_path_references(
 ) -> List[Tuple[int, str]]:
     """Extract repo-local path tokens from bash/sh/shell fenced blocks."""
     results: List[Tuple[int, str]] = []
-    fence_char = ""
-    fence_length = 0
-    shell_fence = False
-    continuation_prefix = ""
-
-    for line_no, line in enumerate(content.splitlines(), start=1):
-        if not fence_char:
-            match = _OPEN_FENCE_RE.match(line)
-            if not match:
-                continue
-            fence = match.group("fence")
-            info = match.group("info").strip()
-            language = (
-                info.split(maxsplit=1)[0].strip("{}").removeprefix(".").lower() if info else ""
-            )
-            fence_char = fence[0]
-            fence_length = len(fence)
-            shell_fence = language in _SHELL_FENCE_LANGUAGES
-            continuation_prefix = ""
+    for block in markdown_fence_blocks(content):
+        if block.language not in _SHELL_FENCE_LANGUAGES:
             continue
+        continuation_prefix = ""
+        for offset, line in enumerate(block.body.splitlines(), start=1):
+            line_no = block.line + offset
+            for match in _BARE_PATH_RE.finditer(line):
+                # Output destinations need not exist before a documented
+                # command runs. Keep validating the same path when it is used
+                # as an input.
+                prefix = continuation_prefix + line[: match.start()]
+                if _SHELL_OUTPUT_PATH_PREFIX_RE.search(prefix) or (
+                    _SHELL_JSON_PATH_PREFIX_RE.search(prefix)
+                    and _json_option_is_output(prefix, repo_root)
+                ):
+                    continue
+                raw = _clean_extracted_path(match.group(0))
+                if "*" in raw or "?" in raw or _PLACEHOLDER_RE.search(raw):
+                    continue
+                for expanded in _expand_path(raw):
+                    results.append((line_no, expanded))
 
-        if re.match(
-            rf"^[ \t]*{re.escape(fence_char)}{{{fence_length},}}[ \t]*$",
-            line,
-        ):
-            fence_char = ""
-            fence_length = 0
-            shell_fence = False
-            continuation_prefix = ""
-            continue
-
-        if not shell_fence:
-            continue
-        for match in _BARE_PATH_RE.finditer(line):
-            # Output destinations need not exist before a documented command
-            # runs.  Keep validating the same path when it is mentioned as
-            # prose or used as an input, but do not classify an explicit
-            # output argument as a phantom input reference.
-            prefix = continuation_prefix + line[: match.start()]
-            if _SHELL_OUTPUT_PATH_PREFIX_RE.search(prefix) or (
-                _SHELL_JSON_PATH_PREFIX_RE.search(prefix)
-                and _json_option_is_output(prefix, repo_root)
-            ):
-                continue
-            raw = _clean_extracted_path(match.group(0))
-            if "*" in raw or "?" in raw or _PLACEHOLDER_RE.search(raw):
-                continue
-            for expanded in _expand_path(raw):
-                results.append((line_no, expanded))
-
-        if line.endswith("\\"):
-            continuation_prefix += line[:-1] + " "
-        else:
-            continuation_prefix = ""
+            if line.endswith("\\"):
+                continuation_prefix += line[:-1] + " "
+            else:
+                continuation_prefix = ""
 
     return results
 
@@ -691,6 +628,16 @@ def check_markdown_files(md_files: Iterable[Path], repo_root: Path) -> CheckRepo
     report.docs_scanned = len(selected_files)
 
     for md_path in selected_files:
+        if not md_path.is_file():
+            report.findings.append(
+                Finding(
+                    level="ERROR",
+                    doc_file=str(md_path.relative_to(repo_root)),
+                    line_no=1,
+                    message="Git-tracked Markdown file is missing from the worktree",
+                )
+            )
+            continue
         content = md_path.read_text(encoding="utf-8", errors="replace")
         rel_doc = str(md_path.relative_to(repo_root))
         explicitly_noncurrent = is_explicitly_noncurrent_document(content)

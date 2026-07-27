@@ -476,6 +476,53 @@ class TestCmdBuildMocked:
         finally:
             eb._build_native_impl = original_build
 
+    def test_trust_remote_code_propagated(self, tmp_path):
+        """Verify the explicit flag reaches routing and the native fallback."""
+        from tensorrt_model_connect.build_cli import _cmd_build
+        import tensorrt_model_connect.engine_builder as eb
+
+        received = []
+        routed = []
+
+        def mock_build(
+            model_id_or_path,
+            output_path,
+            max_cache_length,
+            *,
+            trust_remote_code=False,
+            **kwargs,
+        ):
+            received.append(trust_remote_code)
+
+        def no_optimized_runtime(model, output, public_options):
+            routed.append((model, output, public_options))
+            return None
+
+        original_build = eb._build_native_impl
+        original_optimized = eb._try_build_optimized_runtime
+        eb._build_native_impl = mock_build
+        eb._try_build_optimized_runtime = no_optimized_runtime
+        try:
+            args = argparse.Namespace(
+                model="some-model",
+                output=str(tmp_path / "out.trtfb"),
+                max_cache_length=256,
+                trust_remote_code=True,
+                precision="fp32",
+                quantize=None,
+                quant_scales=None,
+                quant_calibration_samples=512,
+                verbose=False,
+                method="trt",
+                _skip_profile_resolution=True,
+            )
+            _cmd_build(args)
+            assert received == [True]
+            assert routed[0][2]["trust_remote_code"] is True
+        finally:
+            eb._build_native_impl = original_build
+            eb._try_build_optimized_runtime = original_optimized
+
     def test_dynamic_kv_profile_rows_propagated(self, tmp_path):
         """Verify explicit dynamic-KV profile rows are forwarded to build()."""
         from tensorrt_model_connect.build_cli import _cmd_build

@@ -62,6 +62,65 @@ Some C++ tests require TensorRT, CUDA, a GPU, or model plugins; configure the
 build in the supported development environment and inspect CTest labels before
 assuming the whole suite is CPU-only.
 
+## Model-first reference consistency
+
+`tools/trtmc_validate.py` is the Dev/QA entry point for proving that one TRTMC
+model agrees with its original reference implementation. Model-to-workload
+ownership is declared in `tests/validation/model_workloads.yaml`; the command
+does not infer a generic task from the model name.
+
+Run a model's default binding, choose another declared workload, inspect the
+current all-model plan without executing it, or run every validation-eligible
+ready single-device model:
+
+```bash
+python3 tools/trtmc_validate.py gpt2-125m
+python3 tools/trtmc_validate.py internvl3-8b vlm_mmmu_pro_vision_mcq
+python3 tools/trtmc_validate.py --all --dry-run
+python3 tools/trtmc_validate.py --all
+```
+
+Eligibility excludes manifests that require multiple devices, are marked
+`skip`, or use `ci_tier: l0_only`; readiness alone does not select a model. At
+this audited repository snapshot, the dry run resolves 105 eligible bindings:
+97 use dataset-backed reference workloads and 8 are explicitly marked
+`not_compared_reason` because no independent comparator is currently
+available. Treat those numbers as a repository snapshot, not a permanent API
+promise; rerun `--all --dry-run` after catalog changes. Every runnable binding
+must select an independent native reference runner and cannot silently fall
+back to either model-owned E2E or the `tools/task_eval.py` CLI.
+
+The all-model supervisor uses one isolated worker process per model and, by
+default, records a failed worker before continuing. Use
+`--all --on-model-failure stop` to stop after the first failed model. Both
+policies return nonzero when any attempted model fails.
+
+Each case writes
+`<output>/<model>/<workload>/comparison.json`; the output root receives
+`report.json` and the **TRTMC Reference Consistency Report** in `report.html`.
+A not-compared entry writes
+`<output>/<model>/not-compared/comparison.json` without launching a worker.
+Exit status `0` means all attempted comparisons passed, `1` means execution
+completed but validation failed, and `2` means CLI/setup validation failed or
+a single requested model is explicitly not compared. During `--all`,
+not-compared entries make the aggregate report incomplete but do not by
+themselves fail the process. The report keeps execution, comparison, and final
+validation status separate and records bounded reproduction evidence.
+
+Dataset-backed workloads use the sample limit declared for their task. Override
+one run with `--limit`, where zero requests the complete dataset:
+
+```bash
+python3 tools/trtmc_validate.py gpt2-125m --limit 100
+python3 tools/trtmc_validate.py gpt2-125m --limit 0
+```
+
+This workflow needs the model checkpoint, its reference environment and
+dataset, a compatible TRTMC bundle/runtime, and usually target GPU hardware.
+`--dry-run` proves binding and planning only; documentation CI does not execute
+the 97 runnable comparisons in the 105-entry plan. See
+`tests/validation/README.md` for the artifact and model-onboarding contracts.
+
 ## Model-owned E2E
 
 Replace placeholders with literal values:
@@ -149,7 +208,7 @@ measurement and label that metric explicitly.
 | Native runtime model DSO | Focused C++ tests, strategy/descriptor checks, backend-load evidence, and matching E2E |
 | Optimized implementation | Implementation/profile/qualification contract tests, embedded-DSO host tests, and matching qualified E2E/performance artifacts |
 | Shared runtime/config | Focused unit tests plus affected-model selection |
-| Public C/C++ API | API/ABI tests and CLI smoke |
+| Public C++ API / C-linkage subset | API/ABI tests and CLI smoke |
 | E2E runner/comparator | Focused harness tests and representative artifact |
 | Quantization | Builder checks plus model/modality parity and health evidence |
 | Documentation commands | Parser/help check, path check, and execution where dependencies permit |

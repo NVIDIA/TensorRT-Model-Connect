@@ -18,15 +18,15 @@ from tools import trtmc_reference
 from tools import trtmc_validate
 
 
-def test_model_workload_catalog_covers_every_ready_model():
+def test_model_workload_catalog_covers_every_validation_eligible_model():
     catalog = trtmc_validate.load_catalog()
     suites = task_eval.load_suites()
     task_models = trtmc_validate._task_eval_models(trtmc_validate.DEFAULT_MODELS)
-    ready_models = trtmc_validate.ready_model_names()
+    eligible_models = trtmc_validate.ready_model_names()
 
     trtmc_validate.audit_catalog(
         catalog,
-        ready_models=ready_models,
+        ready_models=eligible_models,
         suite_names=(suite["id"] for suite in suites),
     )
     trtmc_validate.audit_workload_compatibility(
@@ -35,7 +35,7 @@ def test_model_workload_catalog_covers_every_ready_model():
         task_models=task_models,
     )
 
-    assert len(catalog["models"]) == len(ready_models) == 105
+    assert len(catalog["models"]) == len(eligible_models) == 105
     assert sum(
         "not_compared_reason" in spec for spec in catalog["models"].values()
     ) == 8
@@ -58,22 +58,41 @@ def test_model_workload_catalog_covers_every_ready_model():
     assert len(qwen_identities) == 1
 
 
-def test_validation_ready_models_exclude_l0_only_profiles():
+def test_validation_eligible_models_apply_all_selection_boundaries():
     records = task_eval.load_manifest_records(trtmc_validate.DEFAULT_MODELS)
     eligible = {
         str(record["name"])
         for record in records
         if not record["requires_multi_device"] and not record.get("skip")
     }
-    l0_only = {
-        str(record["name"])
-        for record in records
-        if record.get("ci_tier") == "l0_only"
-    }
+    l0_only = {str(record["name"]) for record in records if record.get("ci_tier") == "l0_only"}
     selected = set(trtmc_validate.ready_model_names())
 
     assert l0_only
     assert selected == eligible - l0_only
+
+
+def test_all_help_and_docs_name_validation_eligibility_boundaries():
+    help_text = " ".join(trtmc_validate.build_parser().format_help().split())
+    assert "run every validation-eligible ready single-device non-l0-only model" in help_text
+
+    repo_root = Path(__file__).resolve().parents[2]
+    for relative_path in (
+        "website/docs/reference/testing.md",
+        "tests/validation/README.md",
+    ):
+        text = " ".join((repo_root / relative_path).read_text(encoding="utf-8").split())
+        assert "validation-eligible ready single-device model" in text
+        assert "`ci_tier: l0_only`" in text
+        assert "readiness alone does not select a model" in text
+    website_text = " ".join(
+        (repo_root / "website/docs/reference/testing.md")
+        .read_text(encoding="utf-8")
+        .split()
+    )
+    assert "97 use dataset-backed reference workloads" in website_text
+    assert "8 are explicitly marked `not_compared_reason`" in website_text
+    assert "explicit E2E fallback" not in website_text
 
 
 def test_catalog_defines_sample_limit_for_every_dataset_workload():
@@ -104,9 +123,7 @@ def test_every_dataset_backed_validation_binding_has_native_reference_runner():
     missing = []
     for model_name, workload in bindings:
         dataset_kind = str(suites[workload]["dataset"]["kind"])
-        if trtmc_reference.native_reference_runner_for_dataset_kind(
-            dataset_kind
-        ) is None:
+        if trtmc_reference.native_reference_runner_for_dataset_kind(dataset_kind) is None:
             missing.append((model_name, workload, dataset_kind))
 
     assert not missing
@@ -605,9 +622,7 @@ def test_supervised_binding_accepts_fresh_worker_result(tmp_path, monkeypatch):
     )
     binding = trtmc_validate.Binding("model-a", "workload-a")
     catalog = {"sample_limits": {"workload-a": 5}}
-    comparison = (
-        arguments.output / binding.model / binding.workload / "comparison.json"
-    )
+    comparison = arguments.output / binding.model / binding.workload / "comparison.json"
 
     def pass_worker(command, log_path, env):
         comparison.write_text(
@@ -885,12 +900,8 @@ def test_reference_sources_create_once_then_reuse(
 
 
 def test_elf_reference_source_is_pinned_to_upstream_pytorch_implementation() -> None:
-    assert trtmc_validate.ELF_SOURCE.revision == (
-        "b29d8833609e9ab7f67cd9da39435ac5cea04837"
-    )
-    assert trtmc_validate.ELF_SOURCE.relative_checkout == Path(
-        "elf/reference/ELF-b29d8833609e"
-    )
+    assert trtmc_validate.ELF_SOURCE.revision == ("b29d8833609e9ab7f67cd9da39435ac5cea04837")
+    assert trtmc_validate.ELF_SOURCE.relative_checkout == Path("elf/reference/ELF-b29d8833609e")
 
 
 def test_reference_sources_select_model_specific_inputs(
@@ -914,10 +925,7 @@ def test_reference_sources_select_model_specific_inputs(
     common = trtmc_validate.ensure_reference_sources("bert", tmp_path)
 
     assert prepared == ["ELF", "SANA-WM"]
-    assert (
-        elf.elf_reference_repo
-        == tmp_path / trtmc_validate.ELF_SOURCE.relative_checkout
-    )
+    assert elf.elf_reference_repo == tmp_path / trtmc_validate.ELF_SOURCE.relative_checkout
     assert elf.environment["TRTMC_STORAGE_ROOT"] == str(tmp_path)
     assert sana.environment["SANA_WM_SCRIPT"] == str(
         tmp_path
@@ -1339,9 +1347,7 @@ def test_write_report_recovers_json_logged_runner_command(tmp_path):
         "trtmc build",
         "trtmc solve model.trtfb --field-input 1,2",
     ]
-    assert "$ trtmc solve model.trtfb --field-input 1,2" in html_path.read_text(
-        encoding="utf-8"
-    )
+    assert "$ trtmc solve model.trtfb --field-input 1,2" in html_path.read_text(encoding="utf-8")
 
 
 def test_report_bounds_large_sample_commands_and_selects_disagreement(tmp_path):
@@ -1351,16 +1357,14 @@ def test_report_bounds_large_sample_commands_and_selects_disagreement(tmp_path):
     sample_count = 10_000
     (work_dir / "prompts.jsonl").write_text(
         "".join(
-            json.dumps({"sample_id": f"sample-{index}", "prompt": f"prompt-{index}"})
-            + "\n"
+            json.dumps({"sample_id": f"sample-{index}", "prompt": f"prompt-{index}"}) + "\n"
             for index in range(sample_count)
         ),
         encoding="utf-8",
     )
     (work_dir / "trtfb_run.log").write_text(
         "".join(
-            f"$ trtmc run model.trtfb --prompt prompt-{index}\n"
-            for index in range(sample_count)
+            f"$ trtmc run model.trtfb --prompt prompt-{index}\n" for index in range(sample_count)
         ),
         encoding="utf-8",
     )
@@ -1380,9 +1384,7 @@ def test_report_bounds_large_sample_commands_and_selects_disagreement(tmp_path):
                 },
                 "reproduce": {
                     "dataset": {
-                        "command": (
-                            "python tools/trtmc_validate.py model-a --limit 10000"
-                        ),
+                        "command": ("python tools/trtmc_validate.py model-a --limit 10000"),
                         "prepared_input_count": sample_count,
                     },
                     "hf": [],
@@ -1398,9 +1400,7 @@ def test_report_bounds_large_sample_commands_and_selects_disagreement(tmp_path):
     reproduction = report["results"][0]["reproduce"]
     assert reproduction["command_count"]["trtmc"] == sample_count
     assert reproduction["commands_shown"]["trtmc"] == 1
-    assert reproduction["trtmc"] == [
-        "trtmc run model.trtfb --prompt prompt-9999"
-    ]
+    assert reproduction["trtmc"] == ["trtmc run model.trtfb --prompt prompt-9999"]
     assert reproduction["representative"] == {
         "sample_id": "sample-9999",
         "reason": "first_disagreement",
@@ -1522,16 +1522,12 @@ def test_report_adds_failed_sample_results_and_native_commands(tmp_path):
     metadata = report["results"][0]["disagreements"]
     assert metadata["count"] == 1
     artifact = case_dir / metadata["path"]
-    records = [
-        json.loads(line)
-        for line in artifact.read_text(encoding="utf-8").splitlines()
-    ]
+    records = [json.loads(line) for line in artifact.read_text(encoding="utf-8").splitlines()]
     assert records[0]["input"] == prompt
     assert records[0]["reference_result"]["output_text"] == "reference answer"
     assert records[0]["trtmc_result"]["output_text"] == "TRTMC answer"
     assert records[0]["reproduce"]["reference"].startswith(
-        "/profiles/reference/bin/python "
-        "/workspace/trtmc/tools/reference/transformers_text.py"
+        "/profiles/reference/bin/python /workspace/trtmc/tools/reference/transformers_text.py"
     )
     assert records[0]["reproduce"]["trtmc"].startswith(
         "/workspace/build/trtmc_dataset_benchmark model.trtfb"
@@ -1749,10 +1745,7 @@ def test_failed_sample_uses_recorded_trtmc_command_and_copies_media(tmp_path):
         str(input_image),
     ]
     (work_dir / "hf_native_commands.jsonl").write_text(
-        json.dumps(
-            {"sample_id": "sample-9", "command": reference_command}
-        )
-        + "\n",
+        json.dumps({"sample_id": "sample-9", "command": reference_command}) + "\n",
         encoding="utf-8",
     )
 
@@ -1761,12 +1754,9 @@ def test_failed_sample_uses_recorded_trtmc_command_and_copies_media(tmp_path):
         case_dir=case_dir,
     )
 
-    record = json.loads(
-        (case_dir / metadata["path"]).read_text(encoding="utf-8")
-    )
+    record = json.loads((case_dir / metadata["path"]).read_text(encoding="utf-8"))
     assert record["reproduce"]["trtmc"] == (
-        "/workspace/build/trtmc run /runs/engines/model.trtfb "
-        "--prompt Describe"
+        "/workspace/build/trtmc run /runs/engines/model.trtfb --prompt Describe"
     )
     assert record["reproduce"]["reference"].startswith(
         "/profiles/reference/bin/python /workspace/model/reference.py"
@@ -1865,8 +1855,7 @@ def test_report_bounds_inline_failed_samples_but_keeps_full_artifact(tmp_path):
         json.dumps(
             {
                 "disagreements": [
-                    {"sample_id": row["sample_id"], "reason": "token_mismatch"}
-                    for row in prompts
+                    {"sample_id": row["sample_id"], "reason": "token_mismatch"} for row in prompts
                 ]
             }
         ),
@@ -1934,9 +1923,7 @@ def test_report_does_not_treat_shared_task_failure_as_disagreement(tmp_path):
             {
                 "disagreements": [],
                 "hf": {"samples": [{"sample_id": "sample-0", "passed": False}]},
-                "trtfb": {
-                    "samples": [{"sample_id": "sample-0", "passed": False}]
-                },
+                "trtfb": {"samples": [{"sample_id": "sample-0", "passed": False}]},
             }
         ),
         encoding="utf-8",
@@ -2029,9 +2016,7 @@ def test_comparison_command_uses_validation_entrypoint(tmp_path):
         str(trtmc_validate.REPO_ROOT / "tools" / "trtmc_compare.py"),
     ]
     assert "task_eval.py" not in " ".join(command)
-    assert command[command.index("--work-root") + 1] == str(
-        tmp_path / "case" / "validation"
-    )
+    assert command[command.index("--work-root") + 1] == str(tmp_path / "case" / "validation")
     assert command[command.index("--model") + 1] == "model-a"
     assert command[command.index("--suite") + 1] == "workload-a"
     assert command[command.index("--hf-python") + 1] == "/profiles/python"
@@ -2143,9 +2128,7 @@ def test_run_binding_wires_reference_source_command_and_environment(
     )
 
     command = captured["command"]
-    assert command[command.index("--elf-reference-repo") + 1] == str(
-        selection.elf_reference_repo
-    )
+    assert command[command.index("--elf-reference-repo") + 1] == str(selection.elf_reference_repo)
     assert captured["environment"]["EXTERNAL_REFERENCE_SENTINEL"] == "present"
 
 
@@ -2189,10 +2172,7 @@ def test_compare_entrypoint_forwards_to_validation_backend(monkeypatch):
                     }
                 ],
                 "error_type": "BenchmarkGateError",
-                "error": (
-                    "min_prediction_agreement_rate "
-                    "actual=0.5 required=0.98"
-                ),
+                "error": ("min_prediction_agreement_rate actual=0.5 required=0.98"),
             },
             "completed",
             "disagreement",

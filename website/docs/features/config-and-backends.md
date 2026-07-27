@@ -40,8 +40,28 @@ At runtime, the two paths differ:
 
 | Bundle path | Config behavior |
 | --- | --- |
-| Native | `PipelineFactory` merges `SessionRequest > PlatformProfile > BundleDefault > BuildTime > SchemaDefault` and attaches the result as `PipelineContext::runtime_config`. |
+| Native | `ConfigBundle` can represent `SessionRequest > PlatformProfile > BundleDefault > BuildTime > SchemaDefault`. The current `PipelineFactory` passes the materialized `config.json` section to the resolver. A top-level `defaults` object there can contribute `BundleDefault`; load options can add `SessionRequest`. |
 | Optimized | `optimized_runtime.json` claims the bundle before native config/plugin/backend dispatch. The embedded implementation receives `LoadOptions` through its private factory request and decides which options it supports; the current Qwen Edge-LLM implementation rejects runtime `--config`/`--set`. |
+
+The five-layer order is the general resolver model, not a claim that every
+factory call currently injects five independent contributions. In the current
+native factory:
+
+- schema defaults are supplied by the registered schema;
+- a top-level `defaults` object in the materialized `config.json` section can
+  contribute `BundleDefault`;
+- the native builders do not currently add that object automatically, so
+  normal builder-produced bundles usually contribute no `BundleDefault`;
+- `BundleInfo.defaults` in the binary header is not passed to runtime config
+  resolution;
+- `LoadOptions.config_path` and CLI `--config`/`--set` all contribute
+  `SessionRequest`;
+- no separate `BuildTime` contribution is injected;
+- no separate `PlatformProfile` contribution is injected.
+
+Callers that build a `ConfigBundle` directly may use the other allowed layers.
+Do not infer `BuildTime` or `PlatformProfile` provenance merely because a
+config file contains build- or machine-specific values.
 
 The C++ CLI pre-validates explicit `--config`/`--set` values against registered
 schemas and exits nonzero on invalid input. That validation does not turn the

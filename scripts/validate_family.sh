@@ -10,6 +10,7 @@
 #   ./scripts/validate_family.sh org/example-decoder --max-cache-length 512
 #   ./scripts/validate_family.sh org/example-decoder --binary ./build/trtmc
 #   ./scripts/validate_family.sh org/example-decoder --engine-dir /tmp/trtmc-engines
+#   ./scripts/validate_family.sh ./local-model --e2e-model example-decoder
 #   ./scripts/validate_family.sh org/example-decoder --isolate-model-plugin
 #
 # Requirements: torch, tensorrt_model_connect installed, C++ binary built.
@@ -27,6 +28,7 @@ ENGINE_DIR="${ENGINE_DIR:-}"
 TRUST_REMOTE_CODE_ARGS=()
 MODEL_PLUGIN_DIR=""
 ISOLATE_MODEL_PLUGIN="false"
+E2E_MODEL_SELECTOR=""
 
 # Parse args
 MODEL=""
@@ -36,11 +38,12 @@ while [[ $# -gt 0 ]]; do
         --binary) BINARY="$2"; shift 2 ;;
         --bundle-dir) BUNDLE_DIR="$2"; shift 2 ;;
         --engine-dir) ENGINE_DIR="$2"; shift 2 ;;
+        --e2e-model) E2E_MODEL_SELECTOR="$2"; shift 2 ;;
         --model-plugin-dir) MODEL_PLUGIN_DIR="$2"; shift 2 ;;
         --isolate-model-plugin) ISOLATE_MODEL_PLUGIN="true"; shift ;;
         --trust-remote-code) TRUST_REMOTE_CODE_ARGS+=(--trust-remote-code); shift ;;
         -h|--help)
-            echo "Usage: $0 <model-id-or-path> [--max-cache-length N] [--binary PATH] [--bundle-dir DIR] [--engine-dir DIR] [--model-plugin-dir DIR] [--isolate-model-plugin] [--trust-remote-code]"
+            echo "Usage: $0 <model-id-or-path> [--max-cache-length N] [--binary PATH] [--bundle-dir DIR] [--engine-dir DIR] [--e2e-model MANIFEST_NAME] [--model-plugin-dir DIR] [--isolate-model-plugin] [--trust-remote-code]"
             exit 0
             ;;
         *)
@@ -57,7 +60,7 @@ done
 
 if [[ -z "$MODEL" ]]; then
     echo "ERROR: model ID or path required." >&2
-    echo "Usage: $0 <model-id-or-path> [--max-cache-length N] [--binary PATH] [--bundle-dir DIR] [--engine-dir DIR] [--model-plugin-dir DIR] [--isolate-model-plugin] [--trust-remote-code]" >&2
+    echo "Usage: $0 <model-id-or-path> [--max-cache-length N] [--binary PATH] [--bundle-dir DIR] [--engine-dir DIR] [--e2e-model MANIFEST_NAME] [--model-plugin-dir DIR] [--isolate-model-plugin] [--trust-remote-code]" >&2
     exit 1
 fi
 
@@ -139,6 +142,76 @@ raise SystemExit(1)
 PY
 }
 
+resolve_e2e_manifest() {
+    "$HF_PYTHON" - "$PROJECT_DIR" "$MODEL" "$E2E_MODEL_SELECTOR" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path, PurePosixPath
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib  # type: ignore
+
+project = Path(sys.argv[1])
+model = sys.argv[2]
+selector = sys.argv[3]
+models_dir = project / "tests" / "e2e" / "models"
+matches: list[tuple[str, str, str]] = []
+
+for index_path in sorted(models_dir.glob("*/MODEL.toml")):
+    index = tomllib.loads(index_path.read_text(encoding="utf-8"))
+    family = str(index.get("id") or index_path.parent.name)
+    entries = index.get("test_manifests") or []
+    if not isinstance(entries, list):
+        raise SystemExit(f"{index_path}: test_manifests must be a list")
+    for entry in entries:
+        if not isinstance(entry, str):
+            raise SystemExit(f"{index_path}: test_manifests entries must be strings")
+        relative = PurePosixPath(entry.replace("\\", "/"))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise SystemExit(f"{index_path}: invalid manifest path {entry!r}")
+        manifest_path = index_path.parent / Path(*relative.parts)
+        if not manifest_path.is_file():
+            raise SystemExit(f"{index_path}: missing indexed manifest {entry!r}")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("skip"):
+            continue
+        name = str(manifest.get("name") or "")
+        hf_id = str(manifest.get("hf_id") or manifest.get("model_id") or "")
+        bundle = str(manifest.get("bundle") or (f"{name}.trtfb" if name else ""))
+        if not name or not bundle:
+            raise SystemExit(f"{manifest_path}: name and bundle must be non-empty")
+        bundle_path = PurePosixPath(bundle.replace("\\", "/"))
+        if bundle_path.is_absolute() or len(bundle_path.parts) != 1 or ".." in bundle_path.parts:
+            raise SystemExit(f"{manifest_path}: bundle must be a plain filename")
+        if (selector and name == selector) or (not selector and hf_id == model):
+            matches.append((name, family, bundle))
+
+if not matches:
+    if selector:
+        raise SystemExit(f"No active indexed E2E manifest has name={selector!r}")
+    raise SystemExit(
+        f"No active indexed E2E manifest has exact hf_id={model!r}; "
+        "local checkpoints require --e2e-model MANIFEST_NAME"
+    )
+if len(matches) > 1:
+    names = ", ".join(sorted(name for name, _family, _bundle in matches))
+    raise SystemExit(
+        f"E2E manifest selection is ambiguous for {selector or model!r}: {names}; "
+        "select one with --e2e-model MANIFEST_NAME"
+    )
+
+name, family, bundle = matches[0]
+for value in (name, family, bundle):
+    if any(character in value for character in "\t\r\n"):
+        raise SystemExit("E2E manifest fields must not contain tabs or newlines")
+print(f"{name}\t{family}\t{bundle}")
+PY
+}
+
 # Derive a safe bundle filename from the model ID.
 SAFE_NAME="$(echo "$MODEL" | tr '/' '_' | tr ' ' '_')"
 BUNDLE_PATH="${BUNDLE_DIR}/${SAFE_NAME}.trtfb"
@@ -183,7 +256,12 @@ BUILD_ARGS=(
     --max-cache-length "$MAX_CACHE_LENGTH"
     "${TRUST_REMOTE_CODE_ARGS[@]}"
 )
+BUILD_FAILURES_BEFORE="$FAIL"
 run_step "Build bundle" "$BINARY" "${BUILD_ARGS[@]}"
+BUILD_SUCCEEDED="false"
+if [[ "$FAIL" -eq "$BUILD_FAILURES_BEFORE" ]] && [[ -f "$BUNDLE_PATH" ]]; then
+    BUILD_SUCCEEDED="true"
+fi
 
 # Detect runtime strategy from the built bundle to skip decoder-only tools
 # for encoder-only / seq2seq models (diff_logits, diff_layers, parity only
@@ -263,46 +341,49 @@ else
     STEPS+=("SKIP  test_runner_parity (non-decoder: ${RUNTIME_STRATEGY})")
 fi
 
-# Step 5: E2E pytest (if a manifest exists for this model)
-# Find manifest by matching hf_id or model name in supported E2E manifest layouts.
+# Step 5: E2E pytest. The harness must consume the bundle built above; it must
+# never rebuild the manifest's canonical hf_id as a substitute for this model.
 E2E_MODEL=""
 E2E_FAMILY=""
-while IFS= read -r -d '' manifest; do
-    hf_id=$("$HF_PYTHON" -c 'import json, sys; d=json.load(open(sys.argv[1])); print(d.get("hf_id",""))' "$manifest" 2>/dev/null || true)
-    manifest_name=$("$HF_PYTHON" -c 'import json, sys; d=json.load(open(sys.argv[1])); print(d.get("name",""))' "$manifest" 2>/dev/null || true)
-    skip=$("$HF_PYTHON" -c 'import json, sys; d=json.load(open(sys.argv[1])); print(d.get("skip",""))' "$manifest" 2>/dev/null || true)
-    if [[ -n "$skip" ]]; then
-        continue
-    fi
-    if [[ "$hf_id" == "$MODEL" ]] || [[ "$MODEL" == *"$manifest_name"* ]]; then
-        E2E_MODEL="$manifest_name"
-        E2E_FAMILY="$(basename "$(dirname "$(dirname "$manifest")")")"
-        break
-    fi
-done < <(find "${PROJECT_DIR}/tests/e2e/models" -maxdepth 3 -type f -name "*.json" -print0 | sort -z)
+E2E_BUNDLE=""
+E2E_METADATA=""
+if E2E_METADATA="$(resolve_e2e_manifest)"; then
+    IFS=$'\t' read -r E2E_MODEL E2E_FAMILY E2E_BUNDLE <<<"$E2E_METADATA"
+fi
 
-if [[ -n "$E2E_MODEL" ]] && [[ -x "$BINARY" ]]; then
+if [[ -n "$E2E_MODEL" ]] && [[ -x "$BINARY" ]] && [[ "$BUILD_SUCCEEDED" == "true" ]]; then
     mkdir -p "$ENGINE_DIR"
+    E2E_PROOF_DIR="$(mktemp -d "${ENGINE_DIR%/}/validate-current.XXXXXX")"
+    BUNDLE_SOURCE="$(cd "$(dirname "$BUNDLE_PATH")" && pwd)/$(basename "$BUNDLE_PATH")"
+    ln -s "$BUNDLE_SOURCE" "${E2E_PROOF_DIR}/${E2E_BUNDLE}"
     E2E_NODE="${PROJECT_DIR}/tests/e2e/models/${E2E_FAMILY}/test_${E2E_FAMILY}_e2e.py::test_model_e2e[${E2E_MODEL}]"
     E2E_ARGS=(
         "$E2E_NODE"
         -v
-        --engine-dir "$ENGINE_DIR"
+        --engine-dir "$E2E_PROOF_DIR"
         --trtmc-binary "$BINARY"
         --hf-python "$HF_PYTHON"
-        --rebuild-engines
     )
     if [[ -n "$MODEL_PLUGIN_DIR" ]]; then
         E2E_ARGS+=(--model-plugin-dir "$MODEL_PLUGIN_DIR")
     fi
     run_step "E2E pytest [${E2E_MODEL}]" \
         "$HF_PYTHON" -m pytest "${E2E_ARGS[@]}"
+    rm -f "${E2E_PROOF_DIR}/${E2E_BUNDLE}"
+    rmdir "$E2E_PROOF_DIR" 2>/dev/null || true
 elif [[ -z "$E2E_MODEL" ]]; then
     echo ""
     echo "==== E2E pytest ===="
-    echo "WARN: no matching E2E manifest found for $MODEL"
+    echo "FAIL: no matching E2E manifest found for $MODEL"
     echo "Create a manifest at tests/e2e/models/<family>/manifests/<name>.json and list it in tests/e2e/models/<family>/MODEL.toml before declaring success."
-    STEPS+=("WARN  E2E pytest (no manifest -- create one)")
+    STEPS+=("FAIL  E2E pytest (no manifest -- create one)")
+    FAIL=$((FAIL + 1))
+elif [[ "$BUILD_SUCCEEDED" != "true" ]]; then
+    echo ""
+    echo "==== E2E pytest ===="
+    echo "FAIL: current bundle was not built successfully at $BUNDLE_PATH -- refusing to rebuild from manifest hf_id"
+    STEPS+=("FAIL  E2E pytest (current bundle unavailable)")
+    FAIL=$((FAIL + 1))
 elif [[ ! -x "$BINARY" ]]; then
     echo ""
     echo "==== E2E pytest ===="

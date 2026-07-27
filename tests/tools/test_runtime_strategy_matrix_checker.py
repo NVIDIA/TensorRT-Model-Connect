@@ -450,6 +450,163 @@ runner = runners.active.ActiveRunner()
     ) == {"package_reexport_runtime": {"run"}}
 
 
+def test_runtime_command_discovery_resolves_assignment_reexport_alias(
+    tmp_path: Path,
+):
+    mod = _import_checker()
+    models_dir = tmp_path / "tests" / "e2e" / "models"
+    owner_dir = models_dir / "assignment_reexport"
+    manifest_dir = owner_dir / "manifests"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "assignment-reexport.json").write_text(
+        """
+{
+  "family": "assignment_reexport",
+  "runtime_strategy": "assignment_reexport_runtime",
+  "task_strategy": "text_generation_causal"
+}
+        """,
+        encoding="utf-8",
+    )
+    plugin_dir = owner_dir / "e2e_plugins"
+    runners_dir = plugin_dir / "runners"
+    runners_dir.mkdir(parents=True)
+    (runners_dir / "active.py").write_text(
+        """
+class ActiveRunner:
+    def run_stage(self, binary, bundle):
+        return [binary, "run", bundle]
+        """,
+        encoding="utf-8",
+    )
+    (runners_dir / "__init__.py").write_text(
+        """
+from .active import ActiveRunner
+
+PublicRunner = ActiveRunner
+        """,
+        encoding="utf-8",
+    )
+    (plugin_dir / "runner.py").write_text(
+        """
+from .runners import PublicRunner
+
+runner = PublicRunner()
+        """,
+        encoding="utf-8",
+    )
+
+    assert mod.extract_runtime_cli_commands_from_e2e_plugins(
+        {
+            "assignment_reexport_runtime": {
+                "runner_class": "active.ActiveRunner",
+            }
+        },
+        models_dir,
+        {"run"},
+    ) == {"assignment_reexport_runtime": {"run"}}
+
+
+def test_runtime_command_discovery_stops_assignment_reexport_cycles(
+    tmp_path: Path,
+):
+    mod = _import_checker()
+    models_dir = tmp_path / "tests" / "e2e" / "models"
+    owner_dir = models_dir / "assignment_cycle"
+    manifest_dir = owner_dir / "manifests"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "assignment-cycle.json").write_text(
+        """
+{
+  "family": "assignment_cycle",
+  "runtime_strategy": "assignment_cycle_runtime",
+  "task_strategy": "text_generation_causal"
+}
+        """,
+        encoding="utf-8",
+    )
+    plugin_dir = owner_dir / "e2e_plugins"
+    runners_dir = plugin_dir / "runners"
+    runners_dir.mkdir(parents=True)
+    (runners_dir / "__init__.py").write_text(
+        """
+FirstRunner = SecondRunner
+SecondRunner = FirstRunner
+        """,
+        encoding="utf-8",
+    )
+    (plugin_dir / "runner.py").write_text(
+        """
+from .runners import FirstRunner
+
+runner = FirstRunner()
+        """,
+        encoding="utf-8",
+    )
+
+    assert mod.extract_runtime_cli_commands_from_e2e_plugins(
+        {
+            "assignment_cycle_runtime": {
+                "runner_class": "runners.FirstRunner",
+            }
+        },
+        models_dir,
+        {"run"},
+    ) == {"assignment_cycle_runtime": set()}
+
+
+def test_runtime_command_discovery_intersects_commands_across_runtime_owners(
+    tmp_path: Path,
+):
+    mod = _import_checker()
+    models_dir = tmp_path / "tests" / "e2e" / "models"
+    for owner, owner_command in (
+        ("alpha_owner", "embed"),
+        ("beta_owner", "rerank"),
+    ):
+        owner_dir = models_dir / owner
+        manifest_dir = owner_dir / "manifests"
+        manifest_dir.mkdir(parents=True)
+        (manifest_dir / f"{owner}.json").write_text(
+            f"""
+{{
+  "family": "{owner}",
+  "runtime_strategy": "shared_runtime",
+  "task_strategy": "text_generation_causal"
+}}
+            """,
+            encoding="utf-8",
+        )
+        plugin_dir = owner_dir / "e2e_plugins"
+        runners_dir = plugin_dir / "runners"
+        runners_dir.mkdir(parents=True)
+        (runners_dir / "shared.py").write_text(
+            f"""
+class SharedRunner:
+    def run_stage(self, binary, bundle):
+        return [binary, "run", bundle]
+
+    def owner_stage(self, binary, bundle):
+        return [binary, "{owner_command}", bundle]
+            """,
+            encoding="utf-8",
+        )
+        (plugin_dir / "runner.py").write_text(
+            """
+from .runners.shared import SharedRunner
+
+runner = SharedRunner()
+            """,
+            encoding="utf-8",
+        )
+
+    assert mod.extract_runtime_cli_commands_from_e2e_plugins(
+        {"shared_runtime": {"runner_class": "shared.SharedRunner"}},
+        models_dir,
+        {"embed", "rerank", "run"},
+    ) == {"shared_runtime": {"run"}}
+
+
 def test_runtime_command_discovery_distinguishes_two_active_same_name_runners(
     tmp_path: Path,
 ):

@@ -104,7 +104,9 @@ const sidebars = {
       items: [
         'context/triattention-native-cpp-worklog',
         'context/config-registry-status',
-        'context/architecture-decision-records'
+        'context/model-plugin-encapsulation-plan',
+        'context/optimized-runtime-family-adapter-plan',
+        'context/adr/README'
       ]
     },
     {

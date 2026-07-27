@@ -179,6 +179,58 @@ def test_extract_path_references_does_not_scan_non_shell_fence() -> None:
     assert cdfr.extract_path_references(content, "README.md") == []
 
 
+def test_shell_fence_reference_parser_matches_commonmark_containers() -> None:
+    content = (
+        "> ```bash\n"
+        "> python3 tools/quoted.py\n"
+        "> ```\n"
+        "- ```shell\n"
+        "  python3 tools/listed.py\n"
+        "  ```\n"
+        "    ```bash\n"
+        "    python3 tools/root-four-space.py\n"
+        "    ```\n"
+    )
+
+    assert cdfr.extract_path_references(content, "README.md") == [
+        (2, "tools/quoted.py"),
+        (5, "tools/listed.py"),
+    ]
+
+
+def test_shell_fence_parser_covers_four_space_list_continuations() -> None:
+    content = (
+        "- Run the check:\n"
+        "\n"
+        "    ```bash\n"
+        "    python3 tools/listed.py tests/listed-input.json\n"
+        "    ```\n"
+        "\n"
+        "> - Run the quoted check:\n"
+        ">\n"
+        ">     ```shell\n"
+        ">     cat tests/quoted-input.json\n"
+        ">     ```\n"
+    )
+
+    assert cdfr.extract_path_references(content, "README.md") == [
+        (4, "tools/listed.py"),
+        (4, "tests/listed-input.json"),
+        (10, "tests/quoted-input.json"),
+    ]
+
+
+def test_shell_fence_parser_keeps_process_substitution_inputs_visible() -> None:
+    content = (
+        "```bash\ndiff <(python3 tools/definitely-missing.py) <(cat tests/also-missing.json)\n```\n"
+    )
+
+    assert cdfr.extract_path_references(content, "README.md") == [
+        (2, "tools/definitely-missing.py"),
+        (2, "tests/also-missing.json"),
+    ]
+
+
 def test_extract_path_references_skips_explicit_shell_output_destination() -> None:
     content = (
         "```bash\n"
@@ -256,6 +308,24 @@ def test_quoted_shell_outputs_are_skipped_but_later_inputs_are_kept() -> None:
     ]
 
 
+def test_shell_redirection_outputs_are_skipped_and_input_is_retained() -> None:
+    content = (
+        "```bash\n"
+        "python3 tools/generate.py "
+        '>"reports/stdout.txt" '
+        "1>>'reports/one.txt' "
+        '2>"reports/two.txt" '
+        "&>reports/all.txt "
+        "< tests/fixtures/input.json\n"
+        "```\n"
+    )
+
+    assert cdfr.extract_path_references(content, "README.md") == [
+        (2, "tools/generate.py"),
+        (2, "tests/fixtures/input.json"),
+    ]
+
+
 def test_boolean_json_flag_does_not_hide_following_input(
     tmp_path: Path,
 ) -> None:
@@ -292,7 +362,8 @@ def test_value_taking_json_option_exempts_only_its_output(
     script.write_text(
         "import argparse\n"
         "parser = argparse.ArgumentParser()\n"
-        'parser.add_argument("--json")\n'
+        'parser.add_argument("--json", dest="json_path", '
+        'help="Save JSON results")\n'
         'parser.add_argument("input")\n',
         encoding="utf-8",
     )
@@ -319,6 +390,61 @@ def test_value_taking_json_option_exempts_only_its_output(
         (2, "tools/diff.py"),
         (2, "tests/fixtures/input.json"),
     ]
+
+
+def test_value_taking_json_input_is_never_misclassified_as_output(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "consume.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        'parser.add_argument("--json", required=True, '
+        'help="Input JSON manifest to validate")\n'
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+    doc = tmp_path / "README.md"
+    doc.write_text(
+        "```bash\npython3 tools/consume.py --json tests/fixtures/missing-input.json\n```\n",
+        encoding="utf-8",
+    )
+
+    report = cdfr.check_markdown_files([doc], tmp_path)
+
+    assert [finding.message for finding in report.findings] == [
+        "Path does not exist: tests/fixtures/missing-input.json"
+    ]
+
+
+def test_report_noun_alone_does_not_make_json_path_an_output(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "consume_report.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        'parser.add_argument("--json", help="Input report path")\n'
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+
+    assert not cdfr._argparse_option_is_output_path(script, "--json")
+
+
+def test_real_json_report_options_have_explicit_output_semantics() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+
+    assert cdfr._argparse_option_is_output_path(
+        repo_root / "tools" / "diff_logits.py",
+        "--json",
+    )
+    assert cdfr._argparse_option_is_output_path(
+        repo_root / "tools" / "cpu_profile.py",
+        "--json",
+    )
 
 
 # ---------------------------------------------------------------------------

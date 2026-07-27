@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 def test_public_python_build_signature_is_unchanged() -> None:
     import tensorrt_model_connect as trtmc
@@ -29,6 +31,39 @@ def test_public_python_build_signature_is_unchanged() -> None:
         "ModelConfig",
         "Pipeline",
     ]
+
+
+@pytest.mark.parametrize(
+    "invalid_trust",
+    ("false", 1, None),
+    ids=("string-false", "integer-one", "none"),
+)
+def test_python_build_rejects_non_boolean_remote_code_trust_before_dispatch(
+    monkeypatch,
+    invalid_trust,
+) -> None:
+    import tensorrt_model_connect.engine_builder as engine_builder
+
+    dispatches: list[str] = []
+    monkeypatch.setattr(
+        engine_builder,
+        "_try_build_optimized_runtime",
+        lambda *_args, **_kwargs: dispatches.append("optimized"),
+    )
+    monkeypatch.setattr(
+        engine_builder,
+        "_build_native_impl",
+        lambda **_kwargs: dispatches.append("native"),
+    )
+
+    with pytest.raises(TypeError, match="trust_remote_code must be a bool"):
+        engine_builder.build(
+            "example/model",
+            "model.trtfb",
+            trust_remote_code=invalid_trust,
+        )
+
+    assert dispatches == []
 
 
 def test_internal_dispatch_resolves_exactly_one_model_family_before_discovery(
@@ -146,6 +181,7 @@ def test_python_build_treats_omitted_and_explicit_defaults_identically(
     assert calls[0]["max_batch_size"] == 1
     assert calls[0]["max_cache_length"] == 256
     assert calls[0]["precision"] == "fp32"
+    assert calls[0]["trust_remote_code"] is False
 
 
 def test_python_build_preserves_native_call_when_no_capsule_matches(monkeypatch) -> None:
@@ -170,6 +206,7 @@ def test_python_build_preserves_native_call_when_no_capsule_matches(monkeypatch)
     assert native_calls[0]["output_path"] == "native.trtfb"
     assert native_calls[0]["precision"] is None
     assert native_calls[0]["max_cache_length"] == 256
+    assert native_calls[0]["trust_remote_code"] is False
 
 
 def test_cli_delegation_uses_existing_options_without_native_discovery(monkeypatch) -> None:

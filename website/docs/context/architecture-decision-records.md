@@ -1,6 +1,14 @@
-# Architecture Decision Records
+---
+title: Architecture Decision Records
+slug: /context/architecture-decision-records
+unlisted: true
+pagination_next: null
+pagination_prev: null
+---
 
-| Number | Title | Status | Date |
-|--------|-------|--------|------|
+import {Redirect} from '@docusaurus/router';
 
-*This index is auto-maintained by the doc-sync and submit-github-pr skills.*
+<Redirect to="/context/adr/" />
+
+The Architecture Decision Records index moved to the
+[current ADR index](./adr/).

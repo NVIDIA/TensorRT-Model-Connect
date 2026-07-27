@@ -88,7 +88,7 @@ class TestDetectTokenizerAddSpecialTokens:
             @staticmethod
             def from_pretrained(path, trust_remote_code=True):
                 assert Path(path) == tmp_path
-                assert trust_remote_code is True
+                assert trust_remote_code is False
                 return FakeTokenizer()
 
         monkeypatch.setitem(
@@ -109,7 +109,7 @@ class TestDetectTokenizerAddSpecialTokens:
             @staticmethod
             def from_pretrained(path, trust_remote_code=True):
                 assert Path(path) == tmp_path
-                assert trust_remote_code is True
+                assert trust_remote_code is False
                 return FakeTokenizer()
 
         monkeypatch.setitem(
@@ -130,7 +130,7 @@ class TestDetectTokenizerAddSpecialTokens:
             @staticmethod
             def from_pretrained(path, trust_remote_code=True):
                 assert Path(path) == tmp_path
-                assert trust_remote_code is True
+                assert trust_remote_code is False
                 return FakeTokenizer()
 
         monkeypatch.setitem(
@@ -265,6 +265,32 @@ class TestDetectTokenizerAddSpecialTokens:
         result = _detect_tokenizer_add_special_tokens(tmp_path)
         assert result is False
 
+    def test_explicit_trust_remote_code_reaches_tokenizer(self, tmp_path, monkeypatch):
+        captured = []
+
+        class FakeTokenizer:
+            def encode(self, text, add_special_tokens=True):
+                return [1, 2] if add_special_tokens else [2]
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(path, trust_remote_code=False):
+                assert Path(path) == tmp_path
+                captured.append(trust_remote_code)
+                return FakeTokenizer()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+        )
+
+        assert _detect_tokenizer_special_frame(
+            tmp_path,
+            trust_remote_code=True,
+        ) == ([1], [])
+        assert captured == [True]
+
     def test_invalid_json(self, tmp_path):
         (tmp_path / "tokenizer_config.json").write_text("not json{{{")
         # Should not crash, falls through to fallback
@@ -340,6 +366,49 @@ class TestDetectTokenizerAddSpecialTokens:
         ) == ([], [1])
         assert detector_calls == [tokenizer_dir]
 
+    def test_diffusion_probe_forwards_explicit_remote_code_trust(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        tokenizer_dir = tmp_path / "tokenizer"
+        tokenizer_dir.mkdir()
+        captured = []
+
+        class FakeTokenizer:
+            def encode(self, text, add_special_tokens=True):
+                return [1, 2] if add_special_tokens else [2]
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(path, trust_remote_code=False):
+                assert Path(path) == tokenizer_dir
+                captured.append(trust_remote_code)
+                return FakeTokenizer()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+        )
+
+        class FakeDiffusionPlugin:
+            def diffusion_tokenizer_special_frame(
+                self,
+                model_dir_path,
+                *,
+                detect_tokenizer_special_frame,
+            ):
+                assert Path(model_dir_path) == tmp_path
+                return detect_tokenizer_special_frame(tokenizer_dir)
+
+        assert engine_builder._diffusion_tokenizer_special_frame_from_plugin(
+            FakeDiffusionPlugin(),
+            tmp_path,
+            trust_remote_code=True,
+        ) == ([1], [])
+        assert captured == [True]
+
 
 class TestResolveModel:
     """Test _resolve_model with local directories."""
@@ -351,6 +420,53 @@ class TestResolveModel:
     def test_local_dir_with_model_index(self, tmp_path):
         (tmp_path / "model_index.json").write_text("{}")
         assert _resolve_model(str(tmp_path)) == str(tmp_path)
+
+    def test_native_builder_forwards_remote_code_trust_to_bundle(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        captured = []
+        monkeypatch.setattr(
+            engine_builder,
+            "_resolve_model",
+            lambda _model, **_kwargs: str(tmp_path),
+        )
+        monkeypatch.setattr(
+            engine_builder,
+            "build_bundle",
+            lambda *_args, **kwargs: captured.append(kwargs["trust_remote_code"]),
+        )
+
+        engine_builder._build_native_impl(
+            "example/model",
+            str(tmp_path / "out.trtfb"),
+            trust_remote_code=True,
+        )
+
+        assert captured == [True]
+
+    @pytest.mark.parametrize(
+        "invalid_trust",
+        ("false", 1, None),
+        ids=("string-false", "integer-one", "none"),
+    )
+    def test_native_builder_rejects_non_boolean_remote_code_trust_before_resolution(
+        self,
+        monkeypatch,
+        invalid_trust,
+    ):
+        resolver = Mock()
+        monkeypatch.setattr(engine_builder, "_resolve_model", resolver)
+
+        with pytest.raises(TypeError, match="trust_remote_code must be a bool"):
+            engine_builder._build_native_impl(
+                "example/model",
+                "out.trtfb",
+                trust_remote_code=invalid_trust,
+            )
+
+        resolver.assert_not_called()
 
 
 class TestGetTrtVersion:
@@ -487,6 +603,24 @@ class TestEnsureTokenizerJson:
         _ensure_tokenizer_json(tmp_path)
         assert (tmp_path / "tokenizer.json").read_text() == "{}"
 
+    @pytest.mark.parametrize(
+        "invalid_trust",
+        ("false", 1, None),
+        ids=("string-false", "integer-one", "none"),
+    )
+    def test_rejects_non_boolean_remote_code_trust_before_existing_file_shortcut(
+        self,
+        tmp_path,
+        invalid_trust,
+    ):
+        (tmp_path / "tokenizer.json").write_text("{}")
+
+        with pytest.raises(TypeError, match="trust_remote_code must be a bool"):
+            _ensure_tokenizer_json(
+                tmp_path,
+                trust_remote_code=invalid_trust,
+            )
+
     def test_rebuilds_undersized_wordpiece_from_complete_vocab(
         self,
         tmp_path,
@@ -528,9 +662,14 @@ class TestEnsureTokenizerJson:
 
         class FakeAutoTokenizer:
             @staticmethod
-            def from_pretrained(path, use_fast=False):
+            def from_pretrained(
+                path,
+                use_fast=False,
+                trust_remote_code=True,
+            ):
                 assert Path(path) == tmp_path
                 assert use_fast is False
+                assert trust_remote_code is False
                 return FakeTokenizer()
 
         monkeypatch.setitem(
@@ -551,9 +690,14 @@ class TestEnsureTokenizerJson:
     ):
         class FakeAutoTokenizer:
             @staticmethod
-            def from_pretrained(path, use_fast=False):
+            def from_pretrained(
+                path,
+                use_fast=False,
+                trust_remote_code=True,
+            ):
                 assert Path(path) == tmp_path
                 assert use_fast is False
+                assert trust_remote_code is True
                 raise RuntimeError("slow tokenizer unavailable")
 
         monkeypatch.setitem(
@@ -564,21 +708,132 @@ class TestEnsureTokenizerJson:
         captured = {}
 
         class FakePlugin:
-            def ensure_tokenizer_json(self, model_dir, *, previous_error=None):
+            def ensure_tokenizer_json(
+                self,
+                model_dir,
+                *,
+                previous_error=None,
+                trust_remote_code=False,
+            ):
                 captured["model_dir"] = Path(model_dir)
                 captured["previous_error"] = previous_error
+                captured["trust_remote_code"] = trust_remote_code
                 (Path(model_dir) / "tokenizer.json").write_text("{}")
                 return True
 
-        _ensure_tokenizer_json(tmp_path, plugin=FakePlugin())
+        _ensure_tokenizer_json(
+            tmp_path,
+            plugin=FakePlugin(),
+            trust_remote_code=True,
+        )
 
         assert captured["model_dir"] == tmp_path
         assert "slow tokenizer conversion failed" in captured["previous_error"]
+        assert captured["trust_remote_code"] is True
         assert (tmp_path / "tokenizer.json").exists()
 
 
 class TestBuildBundleErrors:
     """Test build_bundle error handling."""
+
+    @pytest.mark.parametrize(
+        "invalid_trust",
+        ("false", 1, None),
+        ids=("string-false", "integer-one", "none"),
+    )
+    def test_rejects_non_boolean_remote_code_trust_before_setup(
+        self,
+        monkeypatch,
+        invalid_trust,
+    ):
+        setup_trt = Mock()
+        monkeypatch.setattr(engine_builder, "_setup_trt_import", setup_trt)
+
+        with pytest.raises(TypeError, match="trust_remote_code must be a bool"):
+            build_bundle(
+                "unused-model-dir",
+                "unused.trtfb",
+                trust_remote_code=invalid_trust,
+            )
+
+        setup_trt.assert_not_called()
+
+    def test_family_without_required_tokenizer_still_builds(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        (tmp_path / "config.json").write_text(json.dumps({
+            "model_type": "image_family",
+            "architectures": ["ImageFamilyModel"],
+            "vocab_size": 32,
+            "hidden_size": 16,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+        }))
+
+        class ImagePlugin:
+            name = "image_family"
+            runtime_strategy = "image_family_runtime"
+            runtime_capabilities = set()
+            requires_tokenizer = False
+
+            @staticmethod
+            def load_weights(model_dir, config, *, precision="fp32"):
+                return {}
+
+            @staticmethod
+            def build_engine(
+                config,
+                weights,
+                max_cache_length,
+                *,
+                precision="fp32",
+                verbose=False,
+            ):
+                return b"PLAN"
+
+        ensure_tokenizer = Mock(
+            side_effect=AssertionError("tokenizer generation must be skipped")
+        )
+        write_bundle_mock = Mock()
+        monkeypatch.setattr(
+            engine_builder,
+            "_apply_family_builder_capabilities",
+            lambda _config: None,
+        )
+        monkeypatch.setattr(
+            engine_builder,
+            "find_plugin",
+            lambda _config: ImagePlugin(),
+        )
+        monkeypatch.setattr(
+            engine_builder,
+            "_ensure_tokenizer_json",
+            ensure_tokenizer,
+        )
+        monkeypatch.setattr(
+            engine_builder,
+            "_detect_tokenizer_special_frame",
+            lambda *_args, **_kwargs: ([], []),
+        )
+        monkeypatch.setattr(engine_builder, "_get_trt_version", lambda: "10.0")
+        monkeypatch.setattr(engine_builder, "_get_gpu_name", lambda: "")
+        monkeypatch.setattr(engine_builder, "write_bundle", write_bundle_mock)
+        monkeypatch.setattr(
+            engine_builder.trt_compat,
+            "resolved_summary",
+            lambda: "test TensorRT",
+        )
+
+        build_bundle(
+            str(tmp_path),
+            str(tmp_path / "out.trtfb"),
+        )
+
+        ensure_tokenizer.assert_not_called()
+        write_bundle_mock.assert_called_once()
 
     def test_unsupported_model_type(self, tmp_path):
         config = {

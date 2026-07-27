@@ -215,6 +215,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             quant_scales=args.quant_scales,
             quant_calibration_samples=args.quant_calibration_samples,
             verbose=args.verbose,
+            trust_remote_code=getattr(args, "trust_remote_code", False),
             fp8_scales=fp8_scales,
             save_fp8_scales=save_fp8_scales,
             rtx=getattr(args, 'rtx', False),
@@ -602,7 +603,9 @@ def main() -> None:
     build_p.add_argument("-o", "--output", required=True,
                          help="Output .trtfb file path")
     build_p.add_argument("--trust-remote-code", action="store_true",
-                         help="Allow Hugging Face model code that requires trust_remote_code")
+                         help="Permit native tokenizer discovery/generation to load "
+                              "reviewed Hugging Face repository code "
+                              "(default: disabled)")
     build_p.add_argument("--max-cache-length", type=int, default=256,
                          help="KV cache length (default: 256)")
     build_p.add_argument(

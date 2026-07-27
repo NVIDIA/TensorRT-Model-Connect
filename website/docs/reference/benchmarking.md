@@ -11,6 +11,72 @@ command:
 trtmc-bench run --model distilgpt2
 ```
 
+## Release performance matrix
+
+`trtmc-bench` measures one resolved workload. The release performance matrix
+adds a repository-owned comparison layer around it: `tools/perf_matrix.py`
+runs TRTMC through `trtmc-bench`, runs the reference backend declared by each
+suite row in a separate Python process, and checks that both sides used the
+same workload and timing boundary.
+
+The checked-in suite at `benchmarks/performance/release.yaml` currently covers
+104 release-relevant, ready, single-process model profiles. Short `l0` smoke
+duplicates are excluded by rule; any other omission must appear in
+`excluded_profiles` with a reason. Validate coverage and all machine
+prerequisites without measuring a model:
+
+```bash
+python3 tools/perf_matrix.py check \
+  benchmarks/performance/release.yaml \
+  --environment benchmarks/performance/environments/gb300.yaml
+```
+
+The checked-in GB300 environment requires these repository variables to point
+at the installed worker, caches, bundles, and runtime libraries:
+
+```text
+TRTMC_PERF_WORKER
+TRTMC_PERF_BUNDLE_CACHE
+TRTMC_PERF_BUNDLE_ROOTS
+TRTMC_PERF_RUNTIME_DIRS
+```
+
+Both `check` and `run` perform the same preflight: suite coverage, expanded
+environment, free storage, required executables, candidate Release-build
+revision, selected `trtmc-bench` testcases, and candidate/reference timing
+contracts. Reference-specific upstream checkout paths and prebuilt Python
+profiles described in `benchmarks/performance/README.md` are additional
+operator prerequisites; dependency installation is outside the measured
+campaign.
+
+Run the complete matrix, one exact row, or resume an interrupted run:
+
+```bash
+python3 tools/perf_matrix.py run \
+  benchmarks/performance/release.yaml \
+  --environment benchmarks/performance/environments/gb300.yaml
+python3 tools/perf_matrix.py run \
+  benchmarks/performance/release.yaml \
+  --environment benchmarks/performance/environments/gb300.yaml \
+  --entry gpt2.generate
+python3 tools/perf_matrix.py resume artifacts/perf/<run-id>
+```
+
+Every new run writes `results.json` and `report.html` below the configured
+results root. The JSON records resolved configuration, provenance, raw
+samples, exact leaf commands, timing policies, and bundle preparation; the
+HTML shows candidate/reference p50 values and the traffic light. Green,
+yellow, and red are completed comparison results and therefore return zero.
+Configuration errors, command failures, incomplete measurements, and timing or
+output-contract mismatches return nonzero and do not receive a performance
+light.
+
+`.github/workflows/performance.yml` exposes the same matrix as a manual or
+reusable workflow and retains the unique run directory as an artifact. A
+green documentation build or host-only matrix `check` is not target-hardware
+performance evidence: a release claim requires the retained GB300 run,
+reference result, exact revision, and report.
+
 List the model profiles currently supported by the installed benchmark catalog:
 
 ```bash

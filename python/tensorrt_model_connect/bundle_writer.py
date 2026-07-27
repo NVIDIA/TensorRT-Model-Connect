@@ -46,11 +46,12 @@ class BundleInfo:
     quantization: str = "none"
     tokenizer_add_special_tokens: bool = False
     io_map: dict | None = None  # tensor name mapping; None = TRT API defaults
-    # Namespaced defaults produced at build time. When non-empty, serialized
-    # into the header as `defaults: {namespace: {field: value, ...}}` and
-    # read back at runtime as the BUNDLE_DEFAULT layer — the lowest-priority
-    # input to the config registry merge. None/empty → no block emitted, so
-    # old readers continue to work untouched.
+    # Namespaced metadata produced at build time. When non-empty, serialized
+    # into the binary header as `defaults: {namespace: {field: value, ...}}`
+    # and preserved for header readers. PipelineFactory does not currently
+    # pass binary-header defaults to runtime config resolution; producers that
+    # need a BundleDefault contribution must place `defaults` in config.json.
+    # None/empty → no header block emitted, so old readers remain compatible.
     defaults: dict | None = None
     # Per-component batch-size envelope for diffusion bundles. Shape:
     # `{"dit": N, "text_encoder": N, "vae": N}`. None → field is omitted from

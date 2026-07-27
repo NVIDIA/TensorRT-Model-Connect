@@ -52,10 +52,15 @@ class InternLMPlugin:
         model_dir: str | Path,
         *,
         previous_error: str | None = None,
+        trust_remote_code: bool = False,
     ) -> bool:
         from .tokenizer_json import ensure_tokenizer_json
 
-        return ensure_tokenizer_json(model_dir, previous_error=previous_error)
+        return ensure_tokenizer_json(
+            model_dir,
+            previous_error=previous_error,
+            trust_remote_code=trust_remote_code,
+        )
 
     def load_weights(
         self, model_dir: str, config: ModelConfig,

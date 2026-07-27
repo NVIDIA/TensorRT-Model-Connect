@@ -13,8 +13,10 @@ isolated model-plugin validation.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -131,6 +133,227 @@ exit 0
         "256",
         "--trust-remote-code",
     ]
+
+
+def test_validate_family_fails_when_non_decoder_has_no_e2e_manifest(
+    tmp_path: Path,
+) -> None:
+    """A successful build is insufficient when no model-owned E2E gate exists."""
+    project_dir = tmp_path / "repo"
+    scripts_dir = project_dir / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (project_dir / "tests" / "e2e" / "models").mkdir(parents=True)
+    script = scripts_dir / "validate_family.sh"
+    script.write_text(
+        (REPO_ROOT / "scripts" / "validate_family.sh").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    fake_binary = tmp_path / "fake-trtmc"
+    fake_binary.write_text(
+        """#!/usr/bin/env bash
+if [[ "$1" == "build" ]]; then
+    exit 0
+fi
+if [[ "$1" == "inspect" ]]; then
+    echo "Runtime strategy: unit_non_decoder"
+    exit 0
+fi
+exit 1
+""",
+        encoding="utf-8",
+    )
+    fake_binary.chmod(0o755)
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text(
+        """#!/usr/bin/env bash
+if [[ "$1" == "-" ]]; then
+    cat >/dev/null
+    exit 1
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "org/no-e2e-manifest",
+            "--binary",
+            str(fake_binary),
+            "--bundle-dir",
+            str(tmp_path),
+        ],
+        cwd=project_dir,
+        env={**os.environ, "HF_PYTHON": str(fake_python)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "PASS  Build bundle" in result.stdout
+    assert "SKIP  diff_logits (non-decoder: unit_non_decoder)" in result.stdout
+    assert "FAIL  E2E pytest (no manifest -- create one)" in result.stdout
+    assert "1 passed, 1 failed" in result.stdout
+
+
+def test_validate_family_e2e_consumes_only_the_current_bundle(
+    tmp_path: Path,
+) -> None:
+    """Exact or explicit manifest selection must never rebuild the canonical ID."""
+    project_dir = tmp_path / "repo"
+    scripts_dir = project_dir / "scripts"
+    manifest_dir = project_dir / "tests" / "e2e" / "models" / "unit" / "manifests"
+    scripts_dir.mkdir(parents=True)
+    manifest_dir.mkdir(parents=True)
+    script = scripts_dir / "validate_family.sh"
+    script.write_text(
+        (REPO_ROOT / "scripts" / "validate_family.sh").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (manifest_dir.parent / "MODEL.toml").write_text(
+        'id = "unit"\ntest_manifests = ["manifests/unit-model.json"]\n',
+        encoding="utf-8",
+    )
+    (manifest_dir / "unit-model.json").write_text(
+        json.dumps(
+            {
+                "name": "unit-model",
+                "hf_id": "org/unit-model",
+                "bundle": "unit-model.trtfb",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fake_binary = tmp_path / "fake-trtmc"
+    fake_binary.write_text(
+        """#!/usr/bin/env bash
+if [[ "$1" == "build" ]]; then
+    output=""
+    previous=""
+    for argument in "$@"; do
+        if [[ "$previous" == "-o" ]]; then
+            output="$argument"
+        fi
+        previous="$argument"
+    done
+    mkdir -p "$(dirname "$output")"
+    printf '%s' "$2" > "$output"
+    exit 0
+fi
+if [[ "$1" == "inspect" ]]; then
+    echo "Runtime strategy: unit_non_decoder"
+    exit 0
+fi
+exit 1
+""",
+        encoding="utf-8",
+    )
+    fake_binary.chmod(0o755)
+
+    pytest_argument_log = tmp_path / "pytest-arguments.txt"
+    proven_bundle_log = tmp_path / "proven-bundle.txt"
+    python_wrapper = tmp_path / "python-wrapper"
+    python_wrapper.write_text(
+        """#!/usr/bin/env bash
+if [[ "$1" == "-m" && "$2" == "pytest" ]]; then
+    printf '%s\\n' "$@" > "$PYTEST_ARGUMENT_LOG"
+    engine_dir=""
+    previous=""
+    for argument in "$@"; do
+        if [[ "$previous" == "--engine-dir" ]]; then
+            engine_dir="$argument"
+        fi
+        if [[ "$argument" == "--rebuild-engines" ]]; then
+            exit 91
+        fi
+        previous="$argument"
+    done
+    [[ -L "$engine_dir/unit-model.trtfb" ]] || exit 92
+    cat "$engine_dir/unit-model.trtfb" > "$PROVEN_BUNDLE_LOG"
+    exit 0
+fi
+exec "$REAL_PYTHON" "$@"
+""",
+        encoding="utf-8",
+    )
+    python_wrapper.chmod(0o755)
+    bundle_dir = tmp_path / "bundles"
+    engine_dir = tmp_path / "engines"
+    common_command = [
+        "bash",
+        str(script),
+        "--binary",
+        str(fake_binary),
+        "--bundle-dir",
+        str(bundle_dir),
+        "--engine-dir",
+        str(engine_dir),
+    ]
+    environment = {
+        **os.environ,
+        "HF_PYTHON": str(python_wrapper),
+        "REAL_PYTHON": sys.executable,
+        "PYTEST_ARGUMENT_LOG": str(pytest_argument_log),
+        "PROVEN_BUNDLE_LOG": str(proven_bundle_log),
+    }
+
+    exact = subprocess.run(
+        [*common_command[:2], "org/unit-model", *common_command[2:]],
+        cwd=project_dir,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert exact.returncode == 0, exact.stdout + exact.stderr
+    assert proven_bundle_log.read_text(encoding="utf-8") == "org/unit-model"
+    assert "--rebuild-engines" not in pytest_argument_log.read_text(encoding="utf-8")
+
+    pytest_argument_log.unlink()
+    local_model = tmp_path / "unit-model-local-checkpoint"
+    local_model.mkdir()
+    implicit_local = subprocess.run(
+        [*common_command[:2], str(local_model), *common_command[2:]],
+        cwd=project_dir,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert implicit_local.returncode == 1
+    assert "local checkpoints require --e2e-model MANIFEST_NAME" in implicit_local.stderr
+    assert not pytest_argument_log.exists()
+
+    explicit_local = subprocess.run(
+        [
+            *common_command[:2],
+            str(local_model),
+            *common_command[2:],
+            "--e2e-model",
+            "unit-model",
+        ],
+        cwd=project_dir,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert explicit_local.returncode == 0, explicit_local.stdout + explicit_local.stderr
+    assert proven_bundle_log.read_text(encoding="utf-8") == str(local_model)
+    assert "--rebuild-engines" not in pytest_argument_log.read_text(encoding="utf-8")
 
 
 def test_autopilot_prompt_uses_model_owned_e2e_entrypoint() -> None:

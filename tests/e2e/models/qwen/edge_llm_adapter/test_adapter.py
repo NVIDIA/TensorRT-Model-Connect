@@ -1151,6 +1151,14 @@ def test_future_non_inert_public_option_remains_fail_closed() -> None:
     assert "does not recognize public option(s): future_option" in reason
 
 
+def test_remote_code_trust_is_rejected_by_optimized_adapter() -> None:
+    assert _public_reason({**MC_DEFAULT_DEPLOYMENT, "trust_remote_code": False}) == ""
+    assert (
+        _public_reason({**MC_DEFAULT_DEPLOYMENT, "trust_remote_code": True})
+        == "Qwen Edge-LLM capsule requires public option trust_remote_code=False"
+    )
+
+
 def test_public_cli_default_and_explicit_profiles_select_edgellm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

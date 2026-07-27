@@ -170,9 +170,7 @@ def _validate_sample_limits(path: Path, raw: Mapping[str, Any]) -> None:
         if not isinstance(workload, str) or not workload:
             raise ValidationError(f"{path}: invalid sample-limit workload {workload!r}")
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
-            raise ValidationError(
-                f"{path}: sample_limits.{workload} must be a positive integer"
-            )
+            raise ValidationError(f"{path}: sample_limits.{workload} must be a positive integer")
 
 
 def load_catalog(path: Path = DEFAULT_CATALOG) -> dict[str, Any]:
@@ -460,8 +458,7 @@ def _ensure_reference_source(source: ReferenceSource, cache_root: Path) -> Path:
             )
             if not (staged / source.entrypoint).exists():
                 raise ValidationError(
-                    f"Pinned {source.name} checkout is missing "
-                    f"{source.entrypoint}"
+                    f"Pinned {source.name} checkout is missing {source.entrypoint}"
                 )
             staged.rename(checkout)
     except subprocess.CalledProcessError as exc:
@@ -486,9 +483,7 @@ def ensure_reference_sources(
         )
     if family == "sana_wm":
         checkout = _ensure_reference_source(SANA_WM_SOURCE, cache_root)
-        environment["SANA_WM_SCRIPT"] = str(
-            checkout / SANA_WM_SOURCE.entrypoint
-        )
+        environment["SANA_WM_SCRIPT"] = str(checkout / SANA_WM_SOURCE.entrypoint)
     return ReferenceSourceSelection(environment=environment)
 
 
@@ -1062,13 +1057,9 @@ def _normalized_command_logs(reproduce: Mapping[str, Any], kind: str) -> list[st
 
 def _normalize_reproduction(value: Any) -> dict[str, Any]:
     reproduce = value if isinstance(value, dict) else {}
-    all_commands = {
-        kind: _string_list(reproduce.get(kind, []))
-        for kind in ("hf", "trtmc")
-    }
+    all_commands = {kind: _string_list(reproduce.get(kind, [])) for kind in ("hf", "trtmc")}
     commands = {
-        kind: values[:MAX_REPRO_COMMANDS_PER_BACKEND]
-        for kind, values in all_commands.items()
+        kind: values[:MAX_REPRO_COMMANDS_PER_BACKEND] for kind, values in all_commands.items()
     }
     dataset = reproduce.get("dataset", {})
     if not isinstance(dataset, dict):
@@ -1084,9 +1075,7 @@ def _normalize_reproduction(value: Any) -> dict[str, Any]:
             for kind in commands
         },
         "commands_shown": {kind: len(values) for kind, values in commands.items()},
-        "command_logs": {
-            kind: _normalized_command_logs(reproduce, kind) for kind in commands
-        },
+        "command_logs": {kind: _normalized_command_logs(reproduce, kind) for kind in commands},
         "representative": representative,
     }
 
@@ -1232,27 +1221,30 @@ def _comparison_result(
         work_dir=work_dir,
         case_dir=case_dir,
     )
-    return _normalize_result({
-        "schema_version": "trtmc.validation-result/v2",
-        "model": binding.model,
-        "workload": binding.workload,
-        "executor": "trtmc_compare",
-        "status": status,
-        "returncode": returncode,
-        "reference_environment": [
-            {"name": name, "python": path} for name, path in reference_environment.names_and_paths
-        ],
-        "reproduce": _add_dataset_reproduction(
-            _commands_from_logs(work_dir),
-            dataset_command,
-            sample_limit,
-        ),
-        "raw_result": raw_result,
-        "raw_result_path": str(summary_path),
-        "disagreements": disagreements,
-        "execution_log": str(case_dir / "execution.log"),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
+    return _normalize_result(
+        {
+            "schema_version": "trtmc.validation-result/v2",
+            "model": binding.model,
+            "workload": binding.workload,
+            "executor": "trtmc_compare",
+            "status": status,
+            "returncode": returncode,
+            "reference_environment": [
+                {"name": name, "python": path}
+                for name, path in reference_environment.names_and_paths
+            ],
+            "reproduce": _add_dataset_reproduction(
+                _commands_from_logs(work_dir),
+                dataset_command,
+                sample_limit,
+            ),
+            "raw_result": raw_result,
+            "raw_result_path": str(summary_path),
+            "disagreements": disagreements,
+            "execution_log": str(case_dir / "execution.log"),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
 
 
 def run_binding(
@@ -1463,7 +1455,9 @@ def _reproduction_count(result: Mapping[str, Any], kind: str) -> int:
     counts = reproduce.get("command_count", {}) if isinstance(reproduce, dict) else {}
     commands = _result_commands(result, kind)
     try:
-        return max(int(counts.get(kind)), len(commands)) if isinstance(counts, dict) else len(commands)
+        return (
+            max(int(counts.get(kind)), len(commands)) if isinstance(counts, dict) else len(commands)
+        )
     except (TypeError, ValueError):
         return len(commands)
 
@@ -1491,9 +1485,7 @@ def _dataset_reproduction(result: Mapping[str, Any]) -> tuple[str, int, int]:
 
 def _representative_note(result: Mapping[str, Any]) -> str:
     reproduce = result.get("reproduce", {})
-    representative = (
-        reproduce.get("representative", {}) if isinstance(reproduce, dict) else {}
-    )
+    representative = reproduce.get("representative", {}) if isinstance(reproduce, dict) else {}
     if not isinstance(representative, dict):
         return ""
     sample_id = str(representative.get("sample_id", "") or "")
@@ -1546,9 +1538,7 @@ def _render_failure_media(
         body = _failure_media_tag(str(item.get("kind", "")), href, label)
         if not body:
             continue
-        rendered.append(
-            f'<figure><figcaption>{label}</figcaption>{body}</figure>'
-        )
+        rendered.append(f"<figure><figcaption>{label}</figcaption>{body}</figure>")
     if not rendered:
         return ""
     return '<h5>Failure media</h5><div class="failure-media">' + "".join(rendered) + "</div>"
@@ -1616,15 +1606,11 @@ def _render_disagreements(
         limit=limit,
     )
     comparison = result.get("comparison", {})
-    failed = (
-        isinstance(comparison, dict)
-        and comparison.get("status") == "disagreement"
-    )
+    failed = isinstance(comparison, dict) and comparison.get("status") == "disagreement"
     noun = "failed samples" if failed else "sample differences"
     asset_base = Path(artifact_href).parent
     records = "".join(
-        _render_disagreement_record(record, asset_base=asset_base)
-        for record in preview
+        _render_disagreement_record(record, asset_base=asset_base) for record in preview
     )
     more = ""
     if count > len(preview):
@@ -1682,11 +1668,7 @@ def _reference_result_status(result: Mapping[str, Any]) -> str:
     raw_result = result.get("raw_result", {})
     if not isinstance(raw_result, dict):
         return ""
-    return str(
-        raw_result.get("hf_cache_status")
-        or raw_result.get("hf_reference_status")
-        or ""
-    )
+    return str(raw_result.get("hf_cache_status") or raw_result.get("hf_reference_status") or "")
 
 
 def _signal(status: str, labels: Mapping[str, str]) -> str:
@@ -1831,11 +1813,7 @@ def _render_metrics(result: Mapping[str, Any]) -> str:
 
 def _render_validation(result: Mapping[str, Any]) -> str:
     validation = result.get("validation", {})
-    status = (
-        str(validation.get("status", "failed"))
-        if isinstance(validation, dict)
-        else "failed"
-    )
+    status = str(validation.get("status", "failed")) if isinstance(validation, dict) else "failed"
     return _signal(
         status,
         {
@@ -1903,9 +1881,7 @@ def _report_counts(
         name: sum(result["comparison"]["status"] == name for result in results)
         for name in ("agreement", "disagreement", "not_run")
     }
-    execution_errors = sum(
-        result["execution"]["status"] == "error" for result in results
-    )
+    execution_errors = sum(result["execution"]["status"] == "error" for result in results)
     return validation_counts, comparison_counts, execution_errors
 
 
@@ -2161,7 +2137,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("model", nargs="?")
     parser.add_argument("workload", nargs="?")
-    parser.add_argument("--all", action="store_true", help="run every ready model")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="run every validation-eligible ready single-device non-l0-only model",
+    )
     parser.add_argument(
         "--on-model-failure",
         choices=("continue", "stop"),
@@ -2212,9 +2192,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit",
         type=int,
         default=None,
-        help=(
-            "override the workload sample limit; use 0 for the complete dataset"
-        ),
+        help=("override the workload sample limit; use 0 for the complete dataset"),
     )
     parser.add_argument("--force-hf", action="store_true")
     parser.add_argument("--force-build", action="store_true")

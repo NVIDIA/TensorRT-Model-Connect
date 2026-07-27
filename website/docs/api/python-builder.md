@@ -56,6 +56,7 @@ failure is terminal rather than a native fallback.
 | Option | Purpose |
 | --- | --- |
 | `model_revision` | Hugging Face commit, tag, or branch to resolve. |
+| `trust_remote_code` | Strict `bool`, default `False`. Permit reviewed repository-provided tokenizer code. With `build()`, pin `model_revision`; with `build_bundle()`, use a reviewed immutable local snapshot. |
 | `max_cache_length` | Default KV cache length for decoder-style bundles. |
 | `decoder_engine_layout` | `split` or `dual_profile` for supported decoders. |
 | `precision` | Engine precision: `fp32`, `fp16`, or `bf16`. |
@@ -69,6 +70,15 @@ failure is terminal rather than a native fallback.
 | `max_batch_size` | Maximum supported diffusion batch size, subject to family component policy. |
 | `family_build_options` | Opaque model-family build options for the selected plugin. |
 | `build_timing_path` | Structured build-timing JSON output path. |
+
+Both `build()` and `build_bundle()` reject non-boolean
+`trust_remote_code` values, including strings such as `"false"`. When the
+selected family requires a tokenizer, the builder also refuses to write a
+bundle if it cannot reuse or generate `tokenizer.json`. Review any
+repository-provided tokenizer code before explicitly setting
+`trust_remote_code=True`. For `build()`, pin `model_revision` to the reviewed
+commit. Because `build_bundle()` accepts a local directory rather than a
+revision, pass it an immutable local snapshot whose contents you reviewed.
 
 ## Family plugin protocol
 

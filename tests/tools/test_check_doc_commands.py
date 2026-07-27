@@ -60,6 +60,57 @@ def test_unclosed_shell_fence_extends_through_end_of_file() -> None:
     assert blocks[0].body == "python3 tools/check.py --help\n"
 
 
+def test_commonmark_fences_support_containers_and_reject_root_four_space_indent() -> None:
+    content = (
+        "> ```bash\n"
+        "> python3 tools/quoted.py\n"
+        "> ```\n"
+        "\n"
+        "- ```sh\n"
+        "  python3 tools/listed.py\n"
+        "  ```\n"
+        "\n"
+        "   ~~~shell\n"
+        "   python3 tools/three-space.py\n"
+        "   ~~~\n"
+        "\n"
+        "    ```bash\n"
+        "    python3 tools/indented-code.py\n"
+        "    ```\n"
+    )
+
+    blocks = cdc.extract_shell_blocks(Path("README.md"), content)
+
+    assert [(block.line, block.language, block.body) for block in blocks] == [
+        (1, "bash", "python3 tools/quoted.py\n"),
+        (5, "sh", "python3 tools/listed.py\n"),
+        (9, "shell", "python3 tools/three-space.py\n"),
+    ]
+
+
+def test_commonmark_four_space_list_continuation_fences_are_shell_blocks() -> None:
+    content = (
+        "- Run the check:\n"
+        "\n"
+        "    ```bash\n"
+        "    python3 tools/listed.py\n"
+        "    ```\n"
+        "\n"
+        "> - Run the quoted check:\n"
+        ">\n"
+        ">     ```sh\n"
+        ">     python3 tools/quoted-list.py\n"
+        ">     ```\n"
+    )
+
+    blocks = cdc.extract_shell_blocks(Path("README.md"), content)
+
+    assert [(block.line, block.language, block.body) for block in blocks] == [
+        (3, "bash", "python3 tools/listed.py\n"),
+        (9, "sh", "python3 tools/quoted-list.py\n"),
+    ]
+
+
 def test_extract_inline_commands_skips_fences_and_non_commands() -> None:
     content = (
         "Run `python3 tools/check.py --help`, not `PipelineFactory::load()`.\n"
@@ -258,7 +309,9 @@ def test_python_module_contract_reads_argparse_commands_and_flags(
     build_cli = tmp_path / "python" / "tensorrt_model_connect" / "build_cli.py"
     build_cli.parent.mkdir(parents=True)
     build_cli.write_text(
-        'build_p = sub.add_parser("build")\nbuild_p.add_argument("-o", "--output")\n',
+        'build_p = sub.add_parser("build")\n'
+        'build_p.add_argument("model")\n'
+        'build_p.add_argument("-o", "--output")\n',
         encoding="utf-8",
     )
     block = cdc.ShellBlock(
@@ -774,6 +827,296 @@ def test_argparse_contract_expands_literal_loop_subcommands(
     ] == ["unknown option for `tools/matrix.py resume`: --entry"]
 
 
+def test_argparse_literal_loop_preserves_each_argument_binding(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "bound_matrix.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        "commands = parser.add_subparsers(required=True)\n"
+        "for name, flag, values, needed, arity in (\n"
+        '    ("check", "--mode", ("fast", "safe"), True, 1),\n'
+        '    ("run", "--tag", ("gpu", "cpu"), False, "+"),\n'
+        "):\n"
+        "    command = commands.add_parser(name)\n"
+        "    command.add_argument(\n"
+        "        flag, choices=values, required=needed, nargs=arity\n"
+        "    )\n"
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+    valid_check = cdc.ShellBlock(
+        Path("README.md"), 1, "bash", "python3 tools/bound_matrix.py check --mode fast\n"
+    )
+    valid_run = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/bound_matrix.py run --tag gpu cpu\n",
+    )
+    missing = cdc.ShellBlock(Path("README.md"), 1, "bash", "python3 tools/bound_matrix.py check\n")
+    wrong_choice = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/bound_matrix.py run --tag safe\n",
+    )
+    crossed = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/bound_matrix.py run --mode fast\n",
+    )
+
+    assert cdc.check_python_script_contract(valid_check, tmp_path) == []
+    assert cdc.check_python_script_contract(valid_run, tmp_path) == []
+    assert [finding.message for finding in cdc.check_python_script_contract(missing, tmp_path)] == [
+        "missing required option for `tools/bound_matrix.py check`: --mode"
+    ]
+    assert [
+        finding.message for finding in cdc.check_python_script_contract(wrong_choice, tmp_path)
+    ] == ["invalid value for `tools/bound_matrix.py run --tag`: safe; expected one of cpu, gpu"]
+    assert [finding.message for finding in cdc.check_python_script_contract(crossed, tmp_path)] == [
+        "unknown option for `tools/bound_matrix.py run`: --mode"
+    ]
+
+
+def test_argparse_selects_reachable_parse_root_without_dead_parser_pollution(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "scoped.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "def dead():\n"
+        "    parser = argparse.ArgumentParser()\n"
+        '    parser.add_argument("--dead", required=True)\n'
+        "    parser.parse_args()\n"
+        "    return parser\n"
+        "def build_parser():\n"
+        "    parser = argparse.ArgumentParser()\n"
+        '    parser.add_argument("--live", required=True)\n'
+        "    return parser\n"
+        "def main():\n"
+        "    selected = build_parser()\n"
+        "    return selected.parse_args()\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    live = cdc.ShellBlock(Path("README.md"), 1, "bash", "python3 tools/scoped.py --live yes\n")
+    dead = cdc.ShellBlock(Path("README.md"), 1, "bash", "python3 tools/scoped.py --dead yes\n")
+
+    assert cdc.check_python_script_contract(live, tmp_path) == []
+    assert [finding.message for finding in cdc.check_python_script_contract(dead, tmp_path)] == [
+        "unknown option for `tools/scoped.py`: --dead",
+        "missing required option for `tools/scoped.py`: --live",
+    ]
+
+
+def test_argparse_helper_arguments_attach_to_the_called_parser(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "helper_args.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "def add_common_args(parser):\n"
+        '    parser.add_argument("--remote")\n'
+        "def build_parser():\n"
+        "    parser = argparse.ArgumentParser()\n"
+        "    add_common_args(parser)\n"
+        "    commands = parser.add_subparsers(required=True)\n"
+        '    commands.add_parser("list")\n'
+        "    return parser\n"
+        "def main():\n"
+        "    return build_parser().parse_args()\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/helper_args.py --remote $DOC_REMOTE list\n",
+    )
+
+    assert cdc.check_python_script_contract(block, tmp_path) == []
+
+
+def test_parse_known_args_allows_unknowns_but_checks_known_contracts(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "known.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        'parser.add_argument("--mode", choices=("fast", "safe"), required=True)\n'
+        "parser.parse_known_args()\n",
+        encoding="utf-8",
+    )
+    extras = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/known.py --mode fast extra --future value\n",
+    )
+    invalid = cdc.ShellBlock(Path("README.md"), 1, "bash", "python3 tools/known.py --mode broken\n")
+
+    assert cdc.check_python_script_contract(extras, tmp_path) == []
+    assert [finding.message for finding in cdc.check_python_script_contract(invalid, tmp_path)] == [
+        "invalid value for `tools/known.py --mode`: broken; expected one of fast, safe"
+    ]
+
+
+def test_argparse_subparsers_required_assignment_covers_nested_levels(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "assigned_required.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        "commands = parser.add_subparsers()\n"
+        "commands.required = True\n"
+        'parent = commands.add_parser("parent")\n'
+        "children = parent.add_subparsers()\n"
+        "children.required = True\n"
+        'children.add_parser("child")\n'
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+    root_missing = cdc.ShellBlock(
+        Path("README.md"), 1, "bash", "python3 tools/assigned_required.py\n"
+    )
+    child_missing = cdc.ShellBlock(
+        Path("README.md"), 1, "bash", "python3 tools/assigned_required.py parent\n"
+    )
+    valid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/assigned_required.py parent child\n",
+    )
+
+    assert [
+        finding.message for finding in cdc.check_python_script_contract(root_missing, tmp_path)
+    ] == ["missing required subcommand for `tools/assigned_required.py`"]
+    assert [
+        finding.message for finding in cdc.check_python_script_contract(child_missing, tmp_path)
+    ] == ["missing required subcommand for `tools/assigned_required.py parent`"]
+    assert cdc.check_python_script_contract(valid, tmp_path) == []
+
+
+def test_argparse_strict_parser_rejects_extras_without_positionals(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "strict.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\nparser = argparse.ArgumentParser()\nparser.parse_args()\n",
+        encoding="utf-8",
+    )
+
+    for suffix, expected in (
+        ("extra", "extra"),
+        ("--", "--"),
+        ("-- extra", "--"),
+    ):
+        block = cdc.ShellBlock(
+            Path("README.md"),
+            1,
+            "bash",
+            f"python3 tools/strict.py {suffix}\n",
+        )
+        assert [
+            finding.message for finding in cdc.check_python_script_contract(block, tmp_path)
+        ] == [f"unexpected positional argument for `tools/strict.py`: {expected}"]
+
+
+def test_argparse_short_clusters_and_attached_value_match_runtime(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "clustered.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        'parser.add_argument("-v", action="store_true", required=True)\n'
+        'parser.add_argument("-q", action="store_true")\n'
+        'parser.add_argument("-o", required=True)\n'
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+    valid = cdc.ShellBlock(
+        Path("README.md"), 1, "bash", "python3 tools/clustered.py -vqoout.json\n"
+    )
+    unknown = cdc.ShellBlock(
+        Path("README.md"), 1, "bash", "python3 tools/clustered.py -vxoout.json\n"
+    )
+
+    assert cdc.check_python_script_contract(valid, tmp_path) == []
+    assert [finding.message for finding in cdc.check_python_script_contract(unknown, tmp_path)] == [
+        "unknown option for `tools/clustered.py`: -vxoout.json",
+        "missing required option for `tools/clustered.py`: -v",
+        "missing required option for `tools/clustered.py`: -o",
+    ]
+
+
+def test_shell_output_redirections_do_not_reach_cli_contract_and_input_is_checked(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "redirected.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        'parser.add_argument("--value", required=True)\n'
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+    outputs = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/redirected.py --value ok "
+        '> "reports/out.txt" 1>>reports/one.txt '
+        "2> reports/two.txt &>reports/all.txt\n",
+    )
+    missing_input = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/redirected.py --value ok < tests/fixtures/missing-input.txt\n",
+    )
+
+    assert cdc.check_python_script_contract(outputs, tmp_path) == []
+    assert cdc.check_local_inputs(outputs, tmp_path) == []
+    assert [finding.message for finding in cdc.check_local_inputs(missing_input, tmp_path)] == [
+        "command input does not exist: tests/fixtures/missing-input.txt"
+    ]
+
+
+def test_process_substitution_inner_commands_and_inputs_are_checked(
+    tmp_path: Path,
+) -> None:
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "diff <(python3 tools/definitely-missing.py) <(cat tests/also-missing.json)\n",
+    )
+
+    assert [finding.message for finding in cdc.check_local_inputs(block, tmp_path)] == [
+        "command input does not exist: tools/definitely-missing.py",
+        "command input does not exist: tests/also-missing.json",
+    ]
+
+
 def test_nested_argparse_checks_parent_required_options_only_at_parent_level(
     tmp_path: Path,
 ) -> None:
@@ -1093,3 +1436,75 @@ def test_docs_validation_workflow_gates_are_discoverable_in_docs_and_skill() -> 
     for surface in (human_docs, agent_skill):
         assert "npm --prefix website ci" in surface
         assert "npm --prefix website run build" in surface
+
+
+def test_public_config_docs_match_pipeline_factory_contribution_layers() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    resolver_implementation = (repo_root / "src/runtime/config/cli_support.cpp").read_text(
+        encoding="utf-8"
+    )
+    function_start = resolver_implementation.index(
+        "PipelineConfigResolution resolve_pipeline_config"
+    )
+    function_end = resolver_implementation.index(
+        "std::string write_effective_config_next_to",
+        function_start,
+    )
+    resolver = resolver_implementation[function_start:function_end]
+
+    assert "bundle_defaults_contribution" in resolver
+    assert "Layer::SessionRequest" in resolver
+    assert "Layer::BuildTime" not in resolver
+    assert "Layer::PlatformProfile" not in resolver
+
+    factory_implementation = (repo_root / "src/runtime/registry/pipeline_factory.cpp").read_text(
+        encoding="utf-8"
+    )
+    materialization_start = factory_implementation.index(
+        "const BundleSectionInfo* find_nonempty_config_section"
+    )
+    materialization_end = factory_implementation.index(
+        "} // namespace detail",
+        materialization_start,
+    )
+    materialization = factory_implementation[materialization_start:materialization_end]
+    assert 'entry.name == "config.json"' in materialization
+    assert "const auto info = ReadBundleHeader(bundle_path)" in materialization
+    assert "ReadBundleSection(bundle_path, *config_info)" in materialization
+    assert "std::string config_text(config_data.begin(), config_data.end())" in materialization
+
+    runtime_resolution_start = factory_implementation.index("detail::resolve_runtime_config")
+    runtime_resolution_end = factory_implementation.index(
+        "std::unique_ptr<IPipeline> PipelineFactory::from_bundle",
+        runtime_resolution_start,
+    )
+    runtime_resolution = factory_implementation[runtime_resolution_start:runtime_resolution_end]
+    assert "resolve_pipeline_config(config_text, config_path, set_tokens)" in runtime_resolution
+
+    factory_start = factory_implementation.index(
+        "std::unique_ptr<IPipeline> PipelineFactory::from_bundle"
+    )
+    factory_body = factory_implementation[factory_start:]
+    assert "std::string config_text = std::move(materialized.config_text)" in factory_body
+    assert "detail::resolve_runtime_config(config_text" in factory_body
+
+    public_surfaces = (
+        repo_root / "include/trtmc/config/schema_registry.h",
+        repo_root / "website/docs/features/config-and-backends.md",
+    )
+    for path in public_surfaces:
+        compact = " ".join(path.read_text(encoding="utf-8").split())
+        assert "config.json" in compact
+        assert "BundleDefault" in compact
+        assert "SessionRequest" in compact
+        assert "binary header" in compact
+        assert "PlatformProfile" in compact
+
+    architecture = " ".join(
+        (repo_root / "website/docs/wiki/Architecture-Overview.md")
+        .read_text(encoding="utf-8")
+        .split()
+    )
+    assert "passes the materialized `config.json` section" in architecture
+    assert "does not pass `BundleInfo.defaults` from the binary header" in architecture
+    assert "No separate build-time or platform-profile contribution is wired" in architecture

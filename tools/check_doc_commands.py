@@ -39,7 +39,12 @@ SKIPPED_DIRS = {
     "build",
     "node_modules",
 }
-_OPEN_FENCE_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<fence>`{3,}|~{3,})[ \t]*(?P<info>.*)$")
+_FENCE_OPEN_RE = re.compile(r"^(?P<indent> {0,3})(?P<fence>`{3,}|~{3,})[ \t]*(?P<info>.*)$")
+_BLOCK_QUOTE_RE = re.compile(r"^ {0,3}>[ \t]?")
+_LIST_MARKER_RE = re.compile(
+    r"^(?P<indent> {0,3})(?P<marker>[-+*]|\d{1,9}[.)])"
+    r"(?P<spacing>[ \t]{1,4})"
+)
 _PLACEHOLDER_RE = re.compile(r"<[^>\n]+>")
 _PROMPT_RE = re.compile(r"^(?P<indent>[ \t]*)\$\s+")
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -101,6 +106,28 @@ class ShellBlock:
 
 
 @dataclass(frozen=True)
+class MarkdownFenceBlock:
+    """One CommonMark fenced block with container prefixes removed."""
+
+    line: int
+    end_line: int
+    language: str
+    body: str
+
+
+@dataclass(frozen=True)
+class _MarkdownContainer:
+    kind: str
+    indent: int = 0
+
+
+@dataclass(frozen=True)
+class _ShellCommand:
+    tokens: tuple[str, ...]
+    input_redirections: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Finding:
     path: Path
     line: int
@@ -121,6 +148,7 @@ class OptionSpec:
     required: bool = False
     allow_inline_value: bool = True
     consume_option_like_value: bool = False
+    output_path: bool = False
 
 
 @dataclass(frozen=True)
@@ -154,6 +182,7 @@ class ProgramSpec:
     commands: dict[str, CommandSpec]
     command_required: bool = False
     nested: dict[str, ProgramSpec] = field(default_factory=dict)
+    allow_extras: bool = False
 
 
 def is_vendored_fixture_document(path: Path) -> bool:
@@ -167,68 +196,175 @@ def _language(info: str) -> str:
     return token.strip("{}").removeprefix(".").lower()
 
 
+def _fence_opener(
+    line: str,
+) -> tuple[re.Match[str], tuple[_MarkdownContainer, ...]] | None:
+    """Return a CommonMark fence opener after blockquote/list containers."""
+    rest = line
+    containers: list[_MarkdownContainer] = []
+    while True:
+        quote = _BLOCK_QUOTE_RE.match(rest)
+        if quote is not None:
+            containers.append(_MarkdownContainer("quote"))
+            rest = rest[quote.end() :]
+            continue
+        marker = _LIST_MARKER_RE.match(rest)
+        if marker is not None:
+            containers.append(
+                _MarkdownContainer(
+                    "list",
+                    len(marker.group("indent"))
+                    + len(marker.group("marker"))
+                    + len(marker.group("spacing")),
+                )
+            )
+            rest = rest[marker.end() :]
+            continue
+        break
+    match = _FENCE_OPEN_RE.match(rest)
+    if match is None:
+        return None
+    return match, tuple(containers)
+
+
+def _quote_containers(line: str) -> tuple[str, tuple[_MarkdownContainer, ...]]:
+    """Strip leading blockquote markers and return their container shape."""
+    rest = line
+    containers: list[_MarkdownContainer] = []
+    while (quote := _BLOCK_QUOTE_RE.match(rest)) is not None:
+        containers.append(_MarkdownContainer("quote"))
+        rest = rest[quote.end() :]
+    return rest, tuple(containers)
+
+
+def _list_continuation_fence_opener(
+    lines: Sequence[str],
+    index: int,
+) -> tuple[re.Match[str], tuple[_MarkdownContainer, ...]] | None:
+    """Find a fence indented as content of a preceding CommonMark list item."""
+    rest, quote_containers = _quote_containers(lines[index])
+    leading = len(rest) - len(rest.lstrip(" "))
+    if leading < 2:
+        return None
+
+    for previous_index in range(index - 1, -1, -1):
+        previous, previous_quotes = _quote_containers(lines[previous_index])
+        if not previous.strip():
+            continue
+        if previous_quotes != quote_containers:
+            break
+        marker = _LIST_MARKER_RE.match(previous)
+        if marker is None and _FENCE_OPEN_RE.match(previous) is not None:
+            break
+        if marker is not None:
+            if _FENCE_OPEN_RE.match(previous[marker.end() :]) is not None:
+                break
+            content_indent = (
+                len(marker.group("indent"))
+                + len(marker.group("marker"))
+                + len(marker.group("spacing"))
+            )
+            if leading >= content_indent:
+                opener = _FENCE_OPEN_RE.match(rest[content_indent:])
+                if opener is not None:
+                    return opener, (
+                        *quote_containers,
+                        _MarkdownContainer("list", content_indent),
+                    )
+        previous_leading = len(previous) - len(previous.lstrip(" "))
+        if previous_leading == 0 and marker is None:
+            break
+    return None
+
+
+def _strip_fence_containers(
+    line: str,
+    containers: Sequence[_MarkdownContainer],
+) -> str | None:
+    """Remove the containers that own a fenced block from one physical line."""
+    rest = line
+    for container in containers:
+        if not rest.strip():
+            return ""
+        if container.kind == "quote":
+            match = _BLOCK_QUOTE_RE.match(rest)
+            if match is None:
+                return None
+            rest = rest[match.end() :]
+            continue
+        leading = len(rest) - len(rest.lstrip(" "))
+        if leading < container.indent:
+            return None
+        rest = rest[container.indent :]
+    return rest
+
+
+def markdown_fence_blocks(content: str) -> list[MarkdownFenceBlock]:
+    """Parse CommonMark-style fenced blocks, including list/quote containers."""
+    lines = content.splitlines()
+    blocks: list[MarkdownFenceBlock] = []
+    index = 0
+    while index < len(lines):
+        parsed = _fence_opener(lines[index])
+        if parsed is None:
+            parsed = _list_continuation_fence_opener(lines, index)
+        if parsed is None:
+            index += 1
+            continue
+        opener, containers = parsed
+        fence = opener.group("fence")
+        opener_char = fence[0]
+        opener_length = len(fence)
+        opener_indent = len(opener.group("indent"))
+        start_line = index + 1
+        language = _language(opener.group("info"))
+        body: list[str] = []
+        cursor = index + 1
+        end_line = len(lines)
+        while cursor < len(lines):
+            normalized = _strip_fence_containers(lines[cursor], containers)
+            if normalized is None:
+                end_line = cursor
+                break
+            closing = re.match(
+                rf"^ {{0,3}}{re.escape(opener_char)}"
+                rf"{{{opener_length},}}[ \t]*$",
+                normalized,
+            )
+            if closing is not None:
+                end_line = cursor + 1
+                cursor += 1
+                break
+            removable = min(
+                opener_indent,
+                len(normalized) - len(normalized.lstrip(" ")),
+            )
+            normalized = normalized[removable:]
+            body.append(normalized)
+            cursor += 1
+        blocks.append(
+            MarkdownFenceBlock(
+                line=start_line,
+                end_line=end_line,
+                language=language,
+                body="\n".join(body) + "\n",
+            )
+        )
+        index = max(cursor, index + 1)
+    return blocks
+
+
 def extract_shell_blocks(path: Path, content: str) -> list[ShellBlock]:
     """Parse shell fences while respecting the opening fence length.
 
     Matching by delimiter length matters for Markdown examples that use four
     backticks around an inner three-backtick example.
     """
-    blocks: list[ShellBlock] = []
-    opener_char = ""
-    opener_length = 0
-    opener_line = 0
-    language = ""
-    body: list[str] = []
-
-    for line_no, line in enumerate(content.splitlines(), start=1):
-        if not opener_char:
-            match = _OPEN_FENCE_RE.match(line)
-            if not match:
-                continue
-            fence = match.group("fence")
-            opener_char = fence[0]
-            opener_length = len(fence)
-            opener_line = line_no
-            language = _language(match.group("info"))
-            body = []
-            continue
-
-        stripped = line.lstrip()
-        closing = re.match(
-            rf"^{re.escape(opener_char)}{{{opener_length},}}[ \t]*$",
-            stripped,
-        )
-        if closing:
-            if language in SHELL_LANGUAGES:
-                blocks.append(
-                    ShellBlock(
-                        path=path,
-                        line=opener_line,
-                        language=language,
-                        body="\n".join(body) + "\n",
-                    )
-                )
-            opener_char = ""
-            opener_length = 0
-            opener_line = 0
-            language = ""
-            body = []
-            continue
-
-        body.append(line)
-
-    # CommonMark treats an unclosed fence as extending through end of file.
-    if opener_char and language in SHELL_LANGUAGES:
-        blocks.append(
-            ShellBlock(
-                path=path,
-                line=opener_line,
-                language=language,
-                body="\n".join(body) + "\n",
-            )
-        )
-
-    return blocks
+    return [
+        ShellBlock(path=path, line=block.line, language=block.language, body=block.body)
+        for block in markdown_fence_blocks(content)
+        if block.language in SHELL_LANGUAGES
+    ]
 
 
 def _inline_code_spans(content: str) -> Iterable[tuple[int, str]]:
@@ -252,10 +388,13 @@ def _inline_code_spans(content: str) -> Iterable[tuple[int, str]]:
 def extract_inline_commands(path: Path, content: str) -> list[ShellBlock]:
     """Return command-like inline code spans outside fenced blocks."""
     commands: list[ShellBlock] = []
-    opener_char = ""
-    opener_length = 0
     chunk_start_line = 0
     chunk_lines: list[str] = []
+    fenced_lines = {
+        line
+        for block in markdown_fence_blocks(content)
+        for line in range(block.line, block.end_line + 1)
+    }
 
     def append_chunk_commands() -> None:
         if not chunk_lines:
@@ -274,24 +413,10 @@ def extract_inline_commands(path: Path, content: str) -> list[ShellBlock]:
                 )
 
     for line_no, line in enumerate(content.splitlines(), start=1):
-        if opener_char:
-            stripped = line.lstrip()
-            if re.match(
-                rf"^{re.escape(opener_char)}{{{opener_length},}}[ \t]*$",
-                stripped,
-            ):
-                opener_char = ""
-                opener_length = 0
-            continue
-
-        fence_match = _OPEN_FENCE_RE.match(line)
-        if fence_match:
+        if line_no in fenced_lines:
             append_chunk_commands()
             chunk_lines = []
             chunk_start_line = 0
-            fence = fence_match.group("fence")
-            opener_char = fence[0]
-            opener_length = len(fence)
             continue
 
         if not line.strip():
@@ -355,34 +480,145 @@ def _source_line(block: ShellBlock, offset: int) -> int:
     return block.line if block.language == "inline" else block.line + offset
 
 
-def _tokenized_commands(line: str) -> list[list[str]]:
+_OUTPUT_REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&"}
+_INPUT_REDIRECTS = {"<", "<>"}
+_NON_FILE_INPUT_REDIRECTS = {"<<", "<<<"}
+_PROCESS_SUBSTITUTION_OPENERS = {"<(", ">("}
+_PROCESS_SUBSTITUTION_PLACEHOLDER = "DOC_PROCESS_SUBSTITUTION"
+_SHELL_PUNCTUATION_OPERATORS = (
+    "<(",
+    ">(",
+    "<<<",
+    "&>>",
+    ";;&",
+    "&&",
+    "||",
+    ";;",
+    ";&",
+    "|&",
+    "<<",
+    ">>",
+    ">|",
+    "&>",
+    ">&",
+    "<&",
+    "<>",
+    ";",
+    "|",
+    "&",
+    "(",
+    ")",
+    "<",
+    ">",
+)
+
+
+def _strip_redirections(tokens: Sequence[str]) -> _ShellCommand:
+    """Remove shell redirections while retaining file-backed input paths."""
+    cleaned: list[str] = []
+    inputs: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        operator_index = index
+        if (
+            token.isdigit()
+            and index + 1 < len(tokens)
+            and tokens[index + 1] in _OUTPUT_REDIRECTS | _INPUT_REDIRECTS
+        ):
+            operator_index = index + 1
+            token = tokens[operator_index]
+        if token in _OUTPUT_REDIRECTS | _INPUT_REDIRECTS | _NON_FILE_INPUT_REDIRECTS:
+            destination_index = operator_index + 1
+            if destination_index < len(tokens):
+                destination = tokens[destination_index]
+                if token in _INPUT_REDIRECTS:
+                    inputs.append(destination)
+                index = destination_index + 1
+            else:
+                index = destination_index
+            continue
+        cleaned.append(token)
+        index += 1
+    return _ShellCommand(tuple(cleaned), tuple(inputs))
+
+
+def _normalize_shell_punctuation(tokens: Sequence[str]) -> list[str]:
+    """Split compound shlex punctuation runs into shell operator tokens."""
+    normalized: list[str] = []
+    punctuation = set(";&|()<>")
+    for token in tokens:
+        if not token or any(character not in punctuation for character in token):
+            normalized.append(token)
+            continue
+        remainder = token
+        while remainder:
+            operator = next(
+                (
+                    candidate
+                    for candidate in _SHELL_PUNCTUATION_OPERATORS
+                    if remainder.startswith(candidate)
+                ),
+                remainder[0],
+            )
+            normalized.append(operator)
+            remainder = remainder[len(operator) :]
+    return normalized
+
+
+def _shell_command_groups(
+    stream: Sequence[str],
+    start: int = 0,
+    *,
+    stop_at_close: bool = False,
+) -> tuple[list[list[str]], int]:
+    """Split simple commands while recursively exposing process substitutions."""
+    groups: list[list[str]] = []
+    nested_groups: list[list[str]] = []
+    current: list[str] = []
+    index = start
+    while index < len(stream):
+        token = stream[index]
+        if token in _PROCESS_SUBSTITUTION_OPENERS:
+            inner, index = _shell_command_groups(stream, index + 1, stop_at_close=True)
+            nested_groups.extend(inner)
+            current.append(_PROCESS_SUBSTITUTION_PLACEHOLDER)
+            continue
+        if token == ")" and stop_at_close:
+            if current:
+                groups.append(current)
+            return [*groups, *nested_groups], index + 1
+        if token in _SHELL_SEPARATORS:
+            if current:
+                groups.append(current)
+                current = []
+            index += 1
+            continue
+        current.append(token)
+        index += 1
+    if current:
+        groups.append(current)
+    return [*groups, *nested_groups], index
+
+
+def _shell_commands(line: str) -> list[_ShellCommand]:
     """Split one shell line into simple commands without executing it.
 
     ``shlex.split`` returns one token list for an entire pipeline or ``&&``
     chain. Using shell punctuation lets the contract checks inspect every
     command in the chain while ``bash -n`` remains the syntax authority.
     """
-    lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|()")
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|()<>")
     lexer.whitespace_split = True
     lexer.commenters = "#"
     try:
-        stream = list(lexer)
+        stream = _normalize_shell_punctuation(list(lexer))
     except ValueError:
         return []
 
-    groups: list[list[str]] = []
-    current: list[str] = []
-    for token in stream:
-        if token in _SHELL_SEPARATORS:
-            if current:
-                groups.append(current)
-                current = []
-            continue
-        current.append(token)
-    if current:
-        groups.append(current)
+    groups, _index = _shell_command_groups(stream)
 
-    commands: list[list[str]] = []
+    commands: list[_ShellCommand] = []
     for tokens in groups:
         while tokens and tokens[0] in _SHELL_PREFIX_WORDS:
             tokens = tokens[1:]
@@ -390,15 +626,27 @@ def _tokenized_commands(line: str) -> list[list[str]]:
             tokens = tokens[:-1]
         if not tokens or tokens[0] in _SHELL_ONLY_WORDS:
             continue
-        commands.append(tokens)
+        command = _strip_redirections(tokens)
+        if command.tokens or command.input_redirections:
+            commands.append(command)
     return commands
+
+
+def _tokenized_commands(line: str) -> list[list[str]]:
+    """Compatibility wrapper returning redirection-free command tokens."""
+    return [list(command.tokens) for command in _shell_commands(line)]
+
+
+def _block_shell_commands(block: ShellBlock) -> Iterable[tuple[int, _ShellCommand]]:
+    for offset, line in _logical_lines(block.body):
+        for command in _shell_commands(line):
+            yield offset, command
 
 
 def _block_commands(block: ShellBlock) -> Iterable[tuple[int, list[str]]]:
     """Yield source-line offsets and tokens for every simple shell command."""
-    for offset, line in _logical_lines(block.body):
-        for tokens in _tokenized_commands(line):
-            yield offset, tokens
+    for offset, command in _block_shell_commands(block):
+        yield offset, list(command.tokens)
 
 
 def _strip_shell_wrappers(tokens: list[str]) -> list[str]:
@@ -458,6 +706,9 @@ def _candidate_input_paths(tokens: list[str]) -> list[str]:
     if command_name == "find" and len(tokens) > 1:
         candidates.append(tokens[1])
 
+    if command_name == "cat":
+        candidates.extend(tokens[1:])
+
     if command_name == "rg":
         # Search roots are repo inputs. Quoted patterns and option values do
         # not start with a known repository prefix and are ignored.
@@ -480,8 +731,15 @@ def _candidate_input_paths(tokens: list[str]) -> list[str]:
 def check_local_inputs(block: ShellBlock, repo_root: Path) -> list[Finding]:
     """Check commands whose repo-local inputs must already exist."""
     findings: list[Finding] = []
-    for offset, tokens in _block_commands(block):
-        for local in _candidate_input_paths(tokens):
+    for offset, command in _block_shell_commands(block):
+        candidates = [
+            *_candidate_input_paths(list(command.tokens)),
+            *command.input_redirections,
+        ]
+        for candidate in candidates:
+            local = _clean_local_path(candidate)
+            if local is None:
+                continue
             if not (repo_root / local).exists():
                 findings.append(
                     Finding(
@@ -506,17 +764,50 @@ def _call_keyword(call: ast.Call, name: str) -> ast.AST | None:
     return None
 
 
-def _argument_spec(call: ast.Call) -> OptionSpec | PositionalSpec | None:
+_UNRESOLVED = object()
+
+
+def _literal_value(
+    node: ast.AST | None,
+    binding: dict[str, object] | None = None,
+) -> object:
+    """Evaluate the literal subset used by static argparse declarations."""
+    if node is None:
+        return _UNRESOLVED
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name) and binding is not None and node.id in binding:
+        return binding[node.id]
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        values = [_literal_value(element, binding) for element in node.elts]
+        if any(value is _UNRESOLVED for value in values):
+            return _UNRESOLVED
+        if isinstance(node, ast.Tuple):
+            return tuple(values)
+        if isinstance(node, ast.Set):
+            return frozenset(values)
+        return values
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        operand = _literal_value(node.operand, binding)
+        if isinstance(operand, (int, float, complex)):
+            return -operand if isinstance(node.op, ast.USub) else operand
+    return _UNRESOLVED
+
+
+def _argument_spec(
+    call: ast.Call,
+    binding: dict[str, object] | None = None,
+) -> OptionSpec | PositionalSpec | None:
     names = tuple(
-        argument.value
+        value
         for argument in call.args
-        if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+        if isinstance((value := _literal_value(argument, binding)), str)
     )
     if not names:
         return None
 
-    action = _constant(_call_keyword(call, "action"))
-    nargs = _constant(_call_keyword(call, "nargs"))
+    action = _literal_value(_call_keyword(call, "action"), binding)
+    nargs = _literal_value(_call_keyword(call, "nargs"), binding)
     if action in {
         "append_const",
         "count",
@@ -538,7 +829,12 @@ def _argument_spec(call: ast.Call) -> OptionSpec | PositionalSpec | None:
     else:
         min_values = max_values = 1
 
-    literal_choices = _literal_choices(_call_keyword(call, "choices") or ast.Constant(None))
+    raw_choices = _literal_value(_call_keyword(call, "choices"), binding)
+    literal_choices = (
+        {str(value) for value in raw_choices}
+        if isinstance(raw_choices, (list, tuple, set, frozenset))
+        else set()
+    )
     is_option = any(name.startswith("-") for name in names)
     if not is_option:
         return PositionalSpec(
@@ -549,12 +845,33 @@ def _argument_spec(call: ast.Call) -> OptionSpec | PositionalSpec | None:
         )
 
     aliases = tuple(name for name in names if name.startswith("-"))
+    destination = _literal_value(_call_keyword(call, "dest"), binding)
+    help_text = _literal_value(_call_keyword(call, "help"), binding)
+    destination_text = destination if isinstance(destination, str) else ""
+    help_semantics = help_text if isinstance(help_text, str) else ""
+    explicit_output_destination = re.search(
+        r"(?:^|_)(?:output|write|save|emit)(?:_|$)",
+        destination_text,
+        re.IGNORECASE,
+    )
+    output_help = re.search(
+        r"\b(?:output|write|save|emit)\b",
+        help_semantics,
+        re.IGNORECASE,
+    )
+    input_help = re.search(
+        r"\b(?:input|read|load|source)\b",
+        help_semantics,
+        re.IGNORECASE,
+    )
+    output_path = bool(explicit_output_destination or (output_help and not input_help))
     return OptionSpec(
         aliases=aliases,
         min_values=min_values,
         max_values=max_values,
         choices=frozenset(literal_choices),
-        required=_constant(_call_keyword(call, "required")) is True,
+        required=_literal_value(_call_keyword(call, "required"), binding) is True,
+        output_path=output_path,
     )
 
 
@@ -607,21 +924,23 @@ def _literal_loop_bindings(node: ast.For) -> list[dict[str, object]]:
 
     bindings: list[dict[str, object]] = []
     for item in node.iter.elts:
-        values = item.elts if isinstance(item, (ast.Tuple, ast.List)) else (item,)
-        if len(values) != len(target_names) or not all(
-            isinstance(value, ast.Constant) for value in values
+        if len(target_names) == 1:
+            raw_values = (_literal_value(item),)
+        elif isinstance(item, (ast.Tuple, ast.List)):
+            raw_values = tuple(_literal_value(value) for value in item.elts)
+        else:
+            return []
+        if len(raw_values) != len(target_names) or any(
+            value is _UNRESOLVED for value in raw_values
         ):
             return []
-        bindings.append({name: value.value for name, value in zip(target_names, values)})
+        bindings.append(dict(zip(target_names, raw_values)))
     return bindings
 
 
 def _bound_loop_value(node: ast.AST, binding: dict[str, object]) -> object | None:
-    if isinstance(node, ast.Constant):
-        return node.value
-    if isinstance(node, ast.Name):
-        return binding.get(node.id)
-    return None
+    value = _literal_value(node, binding)
+    return None if value is _UNRESOLVED else value
 
 
 @lru_cache(maxsize=None)
@@ -634,161 +953,475 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
     except (OSError, SyntaxError):
         return None
 
-    assignments = [
-        assigned for node in ast.walk(tree) if (assigned := _assigned_call(node)) is not None
+    scope_by_node: dict[int, tuple[tuple[str, str, int], ...]] = {}
+    function_scopes: dict[
+        tuple[tuple[tuple[str, str, int], ...], str],
+        tuple[tuple[str, str, int], ...],
+    ] = {}
+    function_parameters: dict[
+        tuple[tuple[str, str, int], ...],
+        tuple[str, ...],
+    ] = {}
+
+    def normalize_reference(reference: str) -> str:
+        if reference.startswith(("self.", "cls.")):
+            return "$class." + reference.split(".", 1)[1]
+        return reference
+
+    def class_scope(
+        scope: tuple[tuple[str, str, int], ...],
+    ) -> tuple[tuple[str, str, int], ...]:
+        last_class = next(
+            (index for index in range(len(scope) - 1, -1, -1) if scope[index][0] == "class"),
+            None,
+        )
+        return scope if last_class is None else scope[: last_class + 1]
+
+    def binding_key(
+        reference: str,
+        scope: tuple[tuple[str, str, int], ...],
+    ) -> tuple[tuple[tuple[str, str, int], ...], str]:
+        normalized = normalize_reference(reference)
+        if normalized.startswith("$class."):
+            scope = class_scope(scope)
+        return scope, normalized
+
+    def walk_scopes(
+        node: ast.AST,
+        scope: tuple[tuple[str, str, int], ...] = (),
+    ) -> None:
+        scope_by_node[id(node)] = scope
+        if isinstance(node, ast.ClassDef):
+            nested_scope = (*scope, ("class", node.name, node.lineno))
+            for expression in [
+                *node.decorator_list,
+                *node.bases,
+                *(keyword.value for keyword in node.keywords),
+            ]:
+                walk_scopes(expression, scope)
+            for statement in node.body:
+                walk_scopes(statement, nested_scope)
+            return
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            nested_scope = (*scope, ("function", node.name, node.lineno))
+            function_scopes[binding_key(node.name, scope)] = nested_scope
+            function_parameters[nested_scope] = tuple(
+                argument.arg
+                for argument in [
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                    *node.args.kwonlyargs,
+                ]
+            )
+            if scope and scope[-1][0] == "class":
+                function_scopes[binding_key(f"$class.{node.name}", scope)] = nested_scope
+            for expression in [*node.decorator_list, node.args]:
+                walk_scopes(expression, scope)
+            if node.returns is not None:
+                walk_scopes(node.returns, scope)
+            for statement in node.body:
+                walk_scopes(statement, nested_scope)
+            return
+        for child in ast.iter_child_nodes(node):
+            walk_scopes(child, scope)
+
+    walk_scopes(tree)
+
+    def resolve_reference(
+        mapping: dict[tuple[tuple[tuple[str, str, int], ...], str], object],
+        reference: str,
+        scope: tuple[tuple[str, str, int], ...],
+    ) -> object | None:
+        normalized = normalize_reference(reference)
+        if normalized.startswith("$class."):
+            return mapping.get(binding_key(normalized, scope))
+        for length in range(len(scope), -1, -1):
+            key = (scope[:length], normalized)
+            if key in mapping:
+                return mapping[key]
+        return None
+
+    assignment_nodes = [
+        node for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.AnnAssign))
     ]
-    parser_paths: dict[str, tuple[str, ...]] = {}
-    for variable, call in assignments:
-        if _is_call_named(call, "ArgumentParser"):
-            parser_paths[variable] = ()
+    assignments = [
+        (
+            binding_key(variable, scope_by_node[id(node)]),
+            call,
+            node,
+        )
+        for node in assignment_nodes
+        if (assigned := _assigned_call(node)) is not None
+        for variable, call in (assigned,)
+    ]
+    calls = sorted(
+        (node for node in ast.walk(tree) if isinstance(node, ast.Call)),
+        key=lambda node: (node.lineno, node.col_offset),
+    )
 
-    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
-    subparser_paths: dict[str, tuple[str, ...]] = {}
-    # Preserve the previous permissive behavior for small test/utility scripts
-    # that construct a subparser through a variable defined elsewhere.
-    for call in calls:
-        if (
-            isinstance(call.func, ast.Attribute)
-            and call.func.attr == "add_parser"
-            and (owner := _expression_reference(call.func.value)) is not None
-        ):
-            subparser_paths.setdefault(owner, ())
-
-    # Resolve parser/subparser ownership to arbitrary depth. This also handles
-    # class-owned parsers such as ``self.parser`` without importing the module.
-    changed = True
-    while changed:
-        changed = False
-        for variable, call in assignments:
-            if not isinstance(call.func, ast.Attribute):
-                continue
-            owner = _expression_reference(call.func.value)
-            if owner is None:
-                continue
-            if call.func.attr == "add_subparsers" and owner in parser_paths:
-                path = parser_paths[owner]
-                if subparser_paths.get(variable) != path:
-                    subparser_paths[variable] = path
-                    changed = True
-            elif (
-                call.func.attr == "add_parser"
-                and owner in subparser_paths
-                and call.args
-                and isinstance(call.args[0], ast.Constant)
-                and isinstance(call.args[0].value, str)
-            ):
-                path = (*subparser_paths[owner], call.args[0].value)
-                if parser_paths.get(variable) != path:
-                    parser_paths[variable] = path
-                    changed = True
-
-    command_paths: set[tuple[str, ...]] = set()
-    loop_argument_paths: dict[int, set[tuple[str, ...]]] = {}
-    for loop in (node for node in ast.walk(tree) if isinstance(node, ast.For)):
-        bindings = _literal_loop_bindings(loop)
-        if not bindings:
+    # A parser path is ``(root parser identity, command-name tuple)``.
+    parser_paths: dict[
+        tuple[tuple[tuple[str, str, int], ...], str],
+        tuple[tuple[object, ...], tuple[str, ...]],
+    ] = {}
+    root_ids: set[tuple[object, ...]] = set()
+    for variable, call, _node in assignments:
+        if not _is_call_named(call, "ArgumentParser"):
             continue
-        generated_containers: dict[str, set[tuple[str, ...]]] = {}
-        for statement in loop.body:
-            assigned = _assigned_call(statement)
-            if assigned is None:
-                continue
-            variable, call = assigned
-            if not (
-                isinstance(call.func, ast.Attribute)
-                and call.func.attr == "add_parser"
-                and (owner := _expression_reference(call.func.value)) in subparser_paths
-                and call.args
-            ):
-                continue
-            names = [_bound_loop_value(call.args[0], binding) for binding in bindings]
-            if not names or not all(isinstance(name, str) for name in names):
-                continue
-            paths = {(*subparser_paths[owner], name) for name in names if isinstance(name, str)}
-            generated_containers.setdefault(variable, set()).update(paths)
-            command_paths.update(paths)
-        for statement in loop.body:
-            if not (
-                isinstance(statement, ast.Expr)
-                and isinstance(statement.value, ast.Call)
-                and isinstance(statement.value.func, ast.Attribute)
-                and statement.value.func.attr == "add_argument"
-            ):
-                continue
-            owner = _expression_reference(statement.value.func.value)
-            if owner in generated_containers:
-                loop_argument_paths[id(statement.value)] = generated_containers[owner]
+        root_id = (variable, call.lineno, call.col_offset)
+        root_ids.add(root_id)
+        parser_paths[variable] = (root_id, ())
 
+    returns_by_scope: dict[
+        tuple[tuple[str, str, int], ...],
+        list[ast.AST],
+    ] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Return) and node.value is not None:
+            returns_by_scope.setdefault(scope_by_node[id(node)], []).append(node.value)
+
+    def resolve_function(
+        expression: ast.AST,
+        scope: tuple[tuple[str, str, int], ...],
+    ) -> tuple[tuple[str, str, int], ...] | None:
+        reference = _expression_reference(expression)
+        if reference is None:
+            return None
+        resolved = resolve_reference(function_scopes, reference, scope)
+        return resolved if isinstance(resolved, tuple) else None
+
+    function_return_paths: dict[
+        tuple[tuple[str, str, int], ...],
+        tuple[tuple[object, ...], tuple[str, ...]],
+    ] = {}
+
+    def resolve_parser_expression(
+        expression: ast.AST,
+        scope: tuple[tuple[str, str, int], ...],
+    ) -> tuple[tuple[object, ...], tuple[str, ...]] | None:
+        reference = _expression_reference(expression)
+        if reference is not None:
+            resolved = resolve_reference(parser_paths, reference, scope)
+            if isinstance(resolved, tuple):
+                return resolved
+        if isinstance(expression, ast.Call):
+            function_scope = resolve_function(expression.func, scope)
+            if function_scope is not None:
+                return function_return_paths.get(function_scope)
+        return None
+
+    subparser_paths: dict[
+        tuple[tuple[tuple[str, str, int], ...], str],
+        tuple[tuple[object, ...], tuple[str, ...]],
+    ] = {}
+    declared_subparser_symbols = {
+        variable
+        for variable, call, _node in assignments
+        if isinstance(call.func, ast.Attribute) and call.func.attr == "add_subparsers"
+    }
+    # Tiny compatibility fixtures and generated entry points sometimes expose
+    # only ``sub.add_parser(...)``. Keep that permissive shape isolated to the
+    # exact scoped ``sub`` object instead of merging every unresolved owner.
     for call in calls:
         if not (
             isinstance(call.func, ast.Attribute)
             and call.func.attr == "add_parser"
-            and (owner := _expression_reference(call.func.value)) in subparser_paths
-            and call.args
-            and isinstance(call.args[0], ast.Constant)
-            and isinstance(call.args[0].value, str)
+            and (owner := _expression_reference(call.func.value)) is not None
         ):
             continue
-        command_paths.add((*subparser_paths[owner], call.args[0].value))
+        owner_key = binding_key(owner, scope_by_node[id(call)])
+        if owner_key in subparser_paths or owner_key in declared_subparser_symbols:
+            continue
+        synthetic_root = ("synthetic", owner_key)
+        root_ids.add(synthetic_root)
+        subparser_paths[owner_key] = (synthetic_root, ())
+
+    changed = True
+    while changed:
+        changed = False
+        for function_scope, expressions in returns_by_scope.items():
+            resolved = {
+                path
+                for expression in expressions
+                if (path := resolve_parser_expression(expression, function_scope)) is not None
+            }
+            if len(resolved) == 1:
+                path = next(iter(resolved))
+                if function_return_paths.get(function_scope) != path:
+                    function_return_paths[function_scope] = path
+                    changed = True
+        for variable, call, node in assignments:
+            scope = scope_by_node[id(node)]
+            if not isinstance(call.func, ast.Attribute):
+                function_scope = resolve_function(call.func, scope)
+                if function_scope is not None and function_scope in function_return_paths:
+                    path = function_return_paths[function_scope]
+                    if parser_paths.get(variable) != path:
+                        parser_paths[variable] = path
+                        changed = True
+                continue
+            owner = _expression_reference(call.func.value)
+            if owner is None:
+                continue
+            if call.func.attr == "add_subparsers":
+                path = resolve_reference(parser_paths, owner, scope)
+                if isinstance(path, tuple) and subparser_paths.get(variable) != path:
+                    subparser_paths[variable] = path
+                    changed = True
+            elif call.func.attr == "add_parser" and call.args:
+                parent = resolve_reference(subparser_paths, owner, scope)
+                name = _literal_value(call.args[0])
+                if isinstance(parent, tuple) and isinstance(name, str):
+                    path = (parent[0], (*parent[1], name))
+                    if parser_paths.get(variable) != path:
+                        parser_paths[variable] = path
+                        changed = True
+
+    command_paths: set[tuple[tuple[object, ...], tuple[str, ...]]] = set()
+    for call in calls:
+        if not (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr == "add_parser"
+            and call.args
+            and (owner := _expression_reference(call.func.value)) is not None
+        ):
+            continue
+        parent = resolve_reference(
+            subparser_paths,
+            owner,
+            scope_by_node[id(call)],
+        )
+        name = _literal_value(call.args[0])
+        if isinstance(parent, tuple) and isinstance(name, str):
+            command_paths.add((parent[0], (*parent[1], name)))
+
+    loop_generated: dict[
+        int,
+        dict[
+            tuple[tuple[tuple[str, str, int], ...], str],
+            list[
+                tuple[
+                    dict[str, object],
+                    tuple[tuple[object, ...], tuple[str, ...]],
+                ]
+            ],
+        ],
+    ] = {}
+    for loop in (node for node in ast.walk(tree) if isinstance(node, ast.For)):
+        bindings = _literal_loop_bindings(loop)
+        if not bindings:
+            continue
+        generated: dict[
+            tuple[tuple[tuple[str, str, int], ...], str],
+            list[
+                tuple[
+                    dict[str, object],
+                    tuple[tuple[object, ...], tuple[str, ...]],
+                ]
+            ],
+        ] = {}
+        for statement in loop.body:
+            assigned = _assigned_call(statement)
+            if assigned is None:
+                continue
+            variable_name, call = assigned
+            if not (
+                isinstance(call.func, ast.Attribute)
+                and call.func.attr == "add_parser"
+                and call.args
+                and (owner := _expression_reference(call.func.value)) is not None
+            ):
+                continue
+            parent = resolve_reference(
+                subparser_paths,
+                owner,
+                scope_by_node[id(statement)],
+            )
+            if not isinstance(parent, tuple):
+                continue
+            variable = binding_key(variable_name, scope_by_node[id(statement)])
+            for binding in bindings:
+                name = _bound_loop_value(call.args[0], binding)
+                if not isinstance(name, str):
+                    continue
+                path = (parent[0], (*parent[1], name))
+                generated.setdefault(variable, []).append((binding, path))
+                command_paths.add(path)
+            if generated.get(variable):
+                parser_paths[variable] = generated[variable][-1][1]
+        loop_generated[id(loop)] = generated
 
     argument_containers = dict(parser_paths)
-    mutually_exclusive_groups: dict[str, tuple[tuple[str, ...], bool]] = {}
+    mutually_exclusive_groups: dict[
+        tuple[tuple[tuple[str, str, int], ...], str],
+        tuple[tuple[tuple[object, ...], tuple[str, ...]], bool],
+    ] = {}
     unresolved_groups = True
     while unresolved_groups:
         unresolved_groups = False
-        for variable, call in assignments:
-            if (
-                variable in argument_containers
-                or not isinstance(call.func, ast.Attribute)
-                or call.func.attr not in {"add_argument_group", "add_mutually_exclusive_group"}
-            ):
+        for variable, call, node in assignments:
+            if variable in argument_containers or not isinstance(call.func, ast.Attribute):
+                continue
+            if call.func.attr not in {"add_argument_group", "add_mutually_exclusive_group"}:
                 continue
             owner = _expression_reference(call.func.value)
-            if owner not in argument_containers:
+            if owner is None:
                 continue
-            path = argument_containers[owner]
+            path = resolve_reference(
+                argument_containers,
+                owner,
+                scope_by_node[id(node)],
+            )
+            if not isinstance(path, tuple):
+                continue
             argument_containers[variable] = path
             if call.func.attr == "add_mutually_exclusive_group":
                 mutually_exclusive_groups[variable] = (
                     path,
-                    _constant(_call_keyword(call, "required")) is True,
+                    _literal_value(_call_keyword(call, "required")) is True,
                 )
             unresolved_groups = True
 
-    if not parser_paths and not command_paths:
+    if not root_ids:
         return None
 
-    specs: dict[tuple[str, ...], CommandSpec] = {
-        path: CommandSpec.empty() for path in {(), *command_paths}
+    loop_arguments: dict[
+        int,
+        list[
+            tuple[
+                tuple[tuple[object, ...], tuple[str, ...]],
+                dict[str, object],
+            ]
+        ],
+    ] = {}
+    for loop in (node for node in ast.walk(tree) if isinstance(node, ast.For)):
+        bindings = _literal_loop_bindings(loop)
+        if not bindings:
+            continue
+        generated = loop_generated.get(id(loop), {})
+        for statement in loop.body:
+            for node in ast.walk(statement):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "add_argument"
+                    and (owner := _expression_reference(node.func.value)) is not None
+                ):
+                    continue
+                owner_key = binding_key(owner, scope_by_node[id(node)])
+                if owner_key in generated:
+                    loop_arguments[id(node)] = [
+                        (path, binding) for binding, path in generated[owner_key]
+                    ]
+                    continue
+                path = resolve_reference(
+                    argument_containers,
+                    owner,
+                    scope_by_node[id(node)],
+                )
+                if isinstance(path, tuple):
+                    loop_arguments[id(node)] = [(path, binding) for binding in bindings]
+
+    helper_argument_paths: dict[
+        int,
+        set[tuple[tuple[object, ...], tuple[str, ...]]],
+    ] = {}
+    for node in calls:
+        if not (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_argument"
+            and isinstance(node.func.value, ast.Name)
+        ):
+            continue
+        scope = scope_by_node[id(node)]
+        parameters = function_parameters.get(scope, ())
+        if node.func.value.id not in parameters:
+            continue
+        parameter_index = parameters.index(node.func.value.id)
+        for invocation in calls:
+            function_scope = resolve_function(
+                invocation.func,
+                scope_by_node[id(invocation)],
+            )
+            if function_scope != scope:
+                continue
+            argument_expression: ast.AST | None = None
+            if parameter_index < len(invocation.args):
+                argument_expression = invocation.args[parameter_index]
+            else:
+                argument_expression = next(
+                    (
+                        keyword.value
+                        for keyword in invocation.keywords
+                        if keyword.arg == node.func.value.id
+                    ),
+                    None,
+                )
+            if argument_expression is None:
+                continue
+            path = resolve_parser_expression(
+                argument_expression,
+                scope_by_node[id(invocation)],
+            )
+            if path is not None:
+                helper_argument_paths.setdefault(id(node), set()).add(path)
+
+    all_paths = {
+        *((root_id, ()) for root_id in root_ids),
+        *command_paths,
     }
-    mutually_exclusive_options: dict[str, list[OptionSpec]] = {
-        variable: [] for variable in mutually_exclusive_groups
-    }
+    specs: dict[
+        tuple[tuple[object, ...], tuple[str, ...]],
+        CommandSpec,
+    ] = {path: CommandSpec.empty() for path in all_paths}
+    for path, spec in specs.items():
+        if path[0] and path[0][0] == "synthetic" and path[1]:
+            spec.positionals.append(PositionalSpec("arguments", min_values=0, max_values=None))
+    mutually_exclusive_options: dict[
+        tuple[tuple[tuple[str, str, int], ...], str],
+        list[OptionSpec],
+    ] = {variable: [] for variable in mutually_exclusive_groups}
     for node in calls:
         if not (isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument"):
             continue
         owner = _expression_reference(node.func.value)
-        if id(node) in loop_argument_paths:
-            paths = loop_argument_paths[id(node)]
-        elif owner in argument_containers:
-            paths = {argument_containers[owner]}
+        if owner is None:
+            continue
+        declarations: list[
+            tuple[
+                tuple[tuple[object, ...], tuple[str, ...]],
+                dict[str, object] | None,
+            ]
+        ]
+        if id(node) in loop_arguments:
+            declarations = list(loop_arguments[id(node)])
+        elif id(node) in helper_argument_paths:
+            declarations = [
+                (path, None) for path in sorted(helper_argument_paths[id(node)], key=repr)
+            ]
         else:
-            continue
-        argument = _argument_spec(node)
-        if argument is None:
-            continue
-        for path in paths:
+            path = resolve_reference(
+                argument_containers,
+                owner,
+                scope_by_node[id(node)],
+            )
+            declarations = [(path, None)] if isinstance(path, tuple) else []
+        for path, binding in declarations:
+            argument = _argument_spec(node, binding)
+            if argument is None:
+                continue
             target = specs.setdefault(path, CommandSpec.empty())
             if isinstance(argument, OptionSpec):
                 for alias in argument.aliases:
                     target.options[alias] = argument
-                if owner in mutually_exclusive_options:
-                    mutually_exclusive_options[owner].append(argument)
+                group = binding_key(owner, scope_by_node[id(node)])
+                if group in mutually_exclusive_options:
+                    mutually_exclusive_options[group].append(argument)
             else:
                 target.positionals.append(argument)
 
     for variable, (path, required) in mutually_exclusive_groups.items():
-        options = mutually_exclusive_options[variable]
+        options = list(dict.fromkeys(mutually_exclusive_options[variable]))
         if not required or not options:
             continue
         aliases = frozenset(alias for option in options for alias in option.aliases)
@@ -799,46 +1432,144 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
             description = f"{preferred[0]} or {preferred[1]}"
         else:
             description = f"{', '.join(preferred[:-1])}, or {preferred[-1]}"
-        target = specs.setdefault(path, CommandSpec.empty())
-        target.required_any.append((aliases, description))
+        specs.setdefault(path, CommandSpec.empty()).required_any.append((aliases, description))
 
     help_option = OptionSpec(aliases=("-h", "--help"), min_values=0, max_values=0)
     for spec in specs.values():
         spec.options.setdefault("-h", help_option)
         spec.options.setdefault("--help", help_option)
 
-    required_subcommands: set[tuple[str, ...]] = set()
+    required_state: dict[
+        tuple[tuple[object, ...], tuple[str, ...]],
+        bool,
+    ] = {}
+    required_events: list[tuple[int, int, tuple[tuple[object, ...], tuple[str, ...]], bool]] = []
     for call in calls:
         if not (
             isinstance(call.func, ast.Attribute)
             and call.func.attr == "add_subparsers"
-            and _constant(_call_keyword(call, "required")) is True
+            and (owner := _expression_reference(call.func.value)) is not None
         ):
             continue
-        owner = _expression_reference(call.func.value)
-        if owner in parser_paths:
-            required_subcommands.add(parser_paths[owner])
+        path = resolve_reference(parser_paths, owner, scope_by_node[id(call)])
+        required = _literal_value(_call_keyword(call, "required"))
+        if isinstance(path, tuple) and isinstance(required, bool):
+            required_events.append((call.lineno, call.col_offset, path, required))
+    for node in assignment_nodes:
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        value = _literal_value(node.value)
+        if not isinstance(value, bool):
+            continue
+        for target in targets:
+            if not isinstance(target, ast.Attribute) or target.attr != "required":
+                continue
+            owner = _expression_reference(target.value)
+            if owner is None:
+                continue
+            path = resolve_reference(
+                subparser_paths,
+                owner,
+                scope_by_node[id(node)],
+            )
+            if isinstance(path, tuple):
+                required_events.append((node.lineno, node.col_offset, path, value))
+    for _line, _column, path, required in sorted(required_events):
+        required_state[path] = required
+
+    parse_modes: dict[tuple[object, ...], set[bool]] = {}
+    parse_calls: list[
+        tuple[
+            tuple[tuple[str, str, int], ...],
+            tuple[object, ...],
+            bool,
+        ]
+    ] = []
+    parse_method_names = {
+        "parse_args": False,
+        "parse_intermixed_args": False,
+        "parse_known_args": True,
+        "parse_known_intermixed_args": True,
+    }
+    for call in calls:
+        if not isinstance(call.func, ast.Attribute):
+            continue
+        if call.func.attr not in parse_method_names:
+            continue
+        path = resolve_parser_expression(
+            call.func.value,
+            scope_by_node[id(call)],
+        )
+        if path is not None:
+            parse_calls.append(
+                (
+                    scope_by_node[id(call)],
+                    path[0],
+                    parse_method_names[call.func.attr],
+                )
+            )
+
+    reachable_scopes = {
+        (),
+        *(
+            scope
+            for scope in function_scopes.values()
+            if scope and scope[-1][0] == "function" and scope[-1][1] == "main"
+        ),
+    }
+    reachability_changed = True
+    while reachability_changed:
+        reachability_changed = False
+        for call in calls:
+            if scope_by_node[id(call)] not in reachable_scopes:
+                continue
+            function_scope = resolve_function(call.func, scope_by_node[id(call)])
+            if function_scope is not None and function_scope not in reachable_scopes:
+                reachable_scopes.add(function_scope)
+                reachability_changed = True
+
+    selected_calls = [item for item in parse_calls if item[0] in reachable_scopes]
+    if not selected_calls:
+        selected_calls = parse_calls
+    for _scope, root_id, allow_extras in selected_calls:
+        parse_modes.setdefault(root_id, set()).add(allow_extras)
+
+    selected_roots = set(parse_modes)
+    if not selected_roots:
+        if len(root_ids) != 1:
+            return None
+        selected_roots = set(root_ids)
+    if len(selected_roots) != 1:
+        return None
+    selected_root = next(iter(selected_roots))
+    modes = parse_modes.get(selected_root, {False})
+    allow_extras = modes == {True}
+
+    selected_commands = {path for path in command_paths if path[0] == selected_root}
 
     def build_program(path: tuple[str, ...]) -> ProgramSpec:
+        full_path = (selected_root, path)
         children = sorted(
             command_path
-            for command_path in command_paths
-            if len(command_path) == len(path) + 1 and command_path[:-1] == path
+            for command_path in selected_commands
+            if len(command_path[1]) == len(path) + 1 and command_path[1][:-1] == path
         )
-        commands = {child[-1]: specs.setdefault(child, CommandSpec.empty()) for child in children}
+        commands = {
+            child[1][-1]: specs.setdefault(child, CommandSpec.empty()) for child in children
+        }
         nested = {
-            child[-1]: build_program(child)
+            child[1][-1]: build_program(child[1])
             for child in children
             if any(
-                len(descendant) > len(child) and descendant[: len(child)] == child
-                for descendant in command_paths
+                len(descendant[1]) > len(child[1]) and descendant[1][: len(child[1])] == child[1]
+                for descendant in selected_commands
             )
         }
         return ProgramSpec(
-            root=specs.setdefault(path, CommandSpec.empty()),
+            root=specs.setdefault(full_path, CommandSpec.empty()),
             commands=commands,
-            command_required=path in required_subcommands,
+            command_required=required_state.get(full_path, False),
             nested=nested,
+            allow_extras=allow_extras,
         )
 
     return build_program(())
@@ -1041,6 +1772,38 @@ def _match_option_token(
     return option_name, None, False, ""
 
 
+def _expand_short_option_token(token: str, spec: CommandSpec) -> list[str]:
+    """Expand argparse short-flag clusters while preserving attached values."""
+    if (
+        token in spec.options
+        or not token.startswith("-")
+        or token.startswith("--")
+        or len(token) <= 2
+        or _ARGPARSE_NEGATIVE_NUMBER_RE.fullmatch(token) is not None
+        or "=" in token
+    ):
+        return [token]
+    expanded: list[str] = []
+    cursor = 1
+    while cursor < len(token):
+        alias = f"-{token[cursor]}"
+        option = spec.options.get(alias)
+        if option is None:
+            return [token]
+        if option.max_values == 0:
+            expanded.append(alias)
+            cursor += 1
+            continue
+        remainder = token[cursor + 1 :]
+        expanded.append(f"{alias}{remainder}" if remainder else alias)
+        return expanded
+    return expanded or [token]
+
+
+def _expand_short_options(tokens: Sequence[str], spec: CommandSpec) -> list[str]:
+    return [expanded for token in tokens for expanded in _expand_short_option_token(token, spec)]
+
+
 def _parse_command_arguments(
     tokens: list[str],
     spec: CommandSpec,
@@ -1057,6 +1820,7 @@ def _parse_command_arguments(
     consumed even when they begin with ``-``; an exact known option spelling
     still starts the next option.
     """
+    tokens = _expand_short_options(tokens, spec)
     positionals: list[str] = []
     seen_options: set[str] = set()
     choice_errors: list[tuple[str, str, frozenset[str], bool]] = []
@@ -1066,6 +1830,11 @@ def _parse_command_arguments(
     while index < len(tokens):
         token = tokens[index]
         if token == "--" and not positional_only:
+            if not spec.positionals:
+                positionals.append(token)
+                positional_only = True
+                index += 1
+                continue
             positional_only = True
             index += 1
             continue
@@ -1169,12 +1938,15 @@ def _check_command_spec(
     *,
     label: str,
     unknown_template: str,
+    allow_extras: bool = False,
 ) -> list[Finding]:
     positionals, seen_options, choice_errors, errors = _parse_command_arguments(tokens, spec)
     line = _source_line(block, offset)
     findings: list[Finding] = []
     for error in errors:
         kind, option = error.split(":", 1)
+        if kind == "unknown option" and allow_extras:
+            continue
         if kind == "unknown option":
             message = unknown_template.format(option=option)
         elif kind == "does not support inline value":
@@ -1252,7 +2024,7 @@ def _check_command_spec(
             )
         )
     if (
-        spec.positionals
+        not allow_extras
         and extra_positionals
         and not any(error.startswith("unknown option:") for error in errors)
     ):
@@ -1475,11 +2247,18 @@ def _find_subcommand(
         )
         if token in commands and positionals_complete:
             return token, index
-        _option_name, option, inline_form, _inline_value = _match_option_token(
-            token,
-            root,
-            positional_only=positional_only,
-        )
+        expanded_options = _expand_short_option_token(token, root)
+        matched_options = [
+            _match_option_token(
+                expanded,
+                root,
+                positional_only=positional_only,
+            )
+            for expanded in expanded_options
+        ]
+        _option_name, option, inline_form, _inline_value = matched_options[-1]
+        if any(candidate is None for _name, candidate, _inline, _value in matched_options):
+            option = None
         if option is not None:
             index += 1
             if not inline_form and option.max_values != 0:
@@ -1539,6 +2318,7 @@ def _check_argparse_invocation(
             contract.root,
             label=f"`{local}`",
             unknown_template=f"unknown option for `{local}`: {{option}}",
+            allow_extras=contract.allow_extras,
         )
         if (
             contract.command_required
@@ -1573,6 +2353,7 @@ def _check_argparse_invocation(
         contract.root,
         label=f"`{local}`",
         unknown_template=f"unknown option for `{local}`: {{option}}",
+        allow_extras=contract.allow_extras,
     )
     spec = contract.commands[command]
     nested = contract.nested.get(command)
@@ -1596,6 +2377,7 @@ def _check_argparse_invocation(
             spec,
             label=f"`{local} {command}`",
             unknown_template=f"unknown option for `{local} {command}`: {{option}}",
+            allow_extras=contract.allow_extras,
         )
     )
     return findings
@@ -1636,6 +2418,9 @@ def _shell_script_contract(script_path: Path) -> ProgramSpec | None:
             spec.options[alias] = option
     if not spec.options:
         return None
+    # Conventional shell wrappers commonly accept one or more positional
+    # selectors that cannot be recovered reliably from ``case "$1"`` arms.
+    spec.positionals.append(PositionalSpec("arguments", min_values=0, max_values=None))
     return ProgramSpec(root=spec, commands={})
 
 

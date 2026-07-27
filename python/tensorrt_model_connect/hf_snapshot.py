@@ -7,6 +7,11 @@ Model Connect intentionally caches only files used by its builders and
 references.  Every local snapshot probe must use this same positive allowlist;
 an unfiltered ``snapshot_download`` would require unrelated upstream files and
 reject an otherwise complete Model Connect cache.
+
+The shared cache may contain repository Python files needed by explicit
+reference workflows. Caching a file does not authorize importing it: native
+tokenizer loads pass the public ``trust_remote_code`` value explicitly and
+default it to false.
 """
 
 from __future__ import annotations

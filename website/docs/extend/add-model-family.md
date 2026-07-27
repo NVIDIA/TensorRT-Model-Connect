@@ -232,8 +232,12 @@ Inspect the bundle before inference. Confirm that `family`,
 three descriptors. `--isolate-model-plugin` proves the requested strategy can
 be satisfied by the owning DSO rather than a stale installed plugin.
 
-Add `--trust-remote-code` only after reviewing the model repository and only
-when the checkpoint actually requires it.
+Add `--trust-remote-code` only after reviewing and pinning the model repository
+and only when native tokenizer discovery or generation actually requires its
+custom Hugging Face code. The native path forwards the flag to every shared
+tokenizer probe and to family fallbacks that can load repository code; it is
+false by default. An optimized adapter receives the public option separately
+and may reject it.
 
 ## 7. Run the declared E2E case
 

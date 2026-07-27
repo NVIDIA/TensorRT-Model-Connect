@@ -17,14 +17,17 @@ python tools/trtmc_validate.py gpt2-125m
 Run a different workload declared for that model:
 
 ```bash
-python tools/trtmc_validate.py internvl3-2b vlm_mmmu_pro_vision_mcq
+python tools/trtmc_validate.py internvl3-8b vlm_mmmu_pro_vision_mcq
 ```
 
-Run every single-device model whose catalog status is `ready`:
+Run every validation-eligible ready single-device model:
 
 ```bash
 python tools/trtmc_validate.py --all
 ```
+
+Eligibility excludes manifests that require multiple devices, are marked
+`skip`, or use `ci_tier: l0_only`; readiness alone does not select a model.
 
 The all-model command supervises one isolated worker process per model. By
 default it records a failed worker and continues with the remaining models.

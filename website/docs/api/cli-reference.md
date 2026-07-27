@@ -29,7 +29,7 @@ python -m tensorrt_model_connect build <hf-repo-or-local-dir> -o <output.trtfb>
 | Option | Purpose |
 | --- | --- |
 | `--model-revision REV` | Build a Hugging Face commit, tag, or branch instead of its default revision. |
-| `--trust-remote-code` | Allow model repositories that require Hugging Face remote code. |
+| `--trust-remote-code` | Permit native tokenizer discovery/generation to load repository-provided Hugging Face code. Off by default; review and pin the model repository first. Model-owned optimized adapters may reject it. |
 | `--max-cache-length N` | KV cache length, default `256`. |
 | `--decoder-engine-layout split|dual_profile` | Select separate prefill/decode engines or one multi-profile decoder engine. |
 | `--dynamic-kv-cache` | Enable runtime-resizable KV cache support. |
@@ -52,6 +52,12 @@ python -m tensorrt_model_connect build <hf-repo-or-local-dir> -o <output.trtfb>
 | `--set NS.FIELD=VALUE` | Override a config field; repeatable. |
 | `--build-timing-json PATH` | Write structured build timing. |
 | `--verbose` | Enable verbose TensorRT builder output. |
+
+For families that require a tokenizer, `trtmc build` fails instead of writing
+an unusable bundle when `tokenizer.json` cannot be reused or generated. If
+generation needs repository-provided code, review that code and pin
+`--model-revision` to the reviewed commit before passing
+`--trust-remote-code`.
 
 TriAttention options are also exposed for experimental KV compaction: `--triattention-stats`, `--triattention-kv-budget`, `--triattention-divide-length`, `--triattention-recent-window`, score aggregation, prompt-token accounting, prefill protection, and MLR/trig disable flags.
 

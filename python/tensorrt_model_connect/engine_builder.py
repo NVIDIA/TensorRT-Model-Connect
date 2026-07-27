@@ -254,6 +254,15 @@ def _call_supports_kwarg(func, name: str) -> bool:
     )
 
 
+def _validate_trust_remote_code(trust_remote_code: object) -> None:
+    """Reject truthy non-bools before they can reach Hugging Face loaders."""
+    if type(trust_remote_code) is not bool:
+        raise TypeError(
+            "trust_remote_code must be a bool, got "
+            f"{type(trust_remote_code).__name__}"
+        )
+
+
 def _normalize_bundle_sections(
     plugin,
     raw_sections,
@@ -314,6 +323,8 @@ def _diffusion_bundle_sections_from_plugin(
 def _diffusion_tokenizer_add_special_tokens_from_plugin(
     plugin,
     model_dir_path: Path,
+    *,
+    trust_remote_code: bool = False,
 ) -> bool:
     detector = getattr(plugin, "diffusion_tokenizer_add_special_tokens", None)
     if not callable(detector):
@@ -324,7 +335,12 @@ def _diffusion_tokenizer_add_special_tokens_from_plugin(
         )
     kwargs = {}
     if _call_supports_kwarg(detector, "detect_tokenizer_add_special_tokens"):
-        kwargs["detect_tokenizer_add_special_tokens"] = _detect_tokenizer_add_special_tokens
+        kwargs["detect_tokenizer_add_special_tokens"] = (
+            lambda tokenizer_dir: _detect_tokenizer_add_special_tokens(
+                tokenizer_dir,
+                trust_remote_code=trust_remote_code,
+            )
+        )
     return bool(detector(model_dir_path, **kwargs))
 
 
@@ -333,12 +349,17 @@ def _diffusion_tokenizer_special_frame_from_plugin(
     model_dir_path: Path,
     *,
     detect_tokenizer_special_frame=None,
+    trust_remote_code: bool = False,
 ) -> tuple[list[int], list[int]] | None:
     detector = getattr(plugin, "diffusion_tokenizer_special_frame", None)
     if not callable(detector):
         return None
     if detect_tokenizer_special_frame is None:
-        detect_tokenizer_special_frame = _detect_tokenizer_special_frame
+        def detect_tokenizer_special_frame(tokenizer_dir):
+            return _detect_tokenizer_special_frame(
+                tokenizer_dir,
+                trust_remote_code=trust_remote_code,
+            )
     kwargs = {}
     if _call_supports_kwarg(detector, "detect_tokenizer_special_frame"):
         kwargs["detect_tokenizer_special_frame"] = detect_tokenizer_special_frame
@@ -357,6 +378,8 @@ def _diffusion_tokenizer_special_frame_from_plugin(
 def _diffusion_tokenizer_bundle_sections_from_plugin(
     plugin,
     model_dir_path: Path,
+    *,
+    trust_remote_code: bool = False,
 ) -> list[BundleSection]:
     tokenizer_sections = getattr(plugin, "diffusion_tokenizer_bundle_sections", None)
     if not callable(tokenizer_sections):
@@ -368,7 +391,11 @@ def _diffusion_tokenizer_bundle_sections_from_plugin(
     kwargs = {}
     if _call_supports_kwarg(tokenizer_sections, "ensure_tokenizer_json"):
         kwargs["ensure_tokenizer_json"] = (
-            lambda tokenizer_dir: _ensure_tokenizer_json(tokenizer_dir, plugin=plugin)
+            lambda tokenizer_dir: _ensure_tokenizer_json(
+                tokenizer_dir,
+                plugin=plugin,
+                trust_remote_code=trust_remote_code,
+            )
         )
     raw_sections = tokenizer_sections(model_dir_path, **kwargs)
     if raw_sections is None:
@@ -638,7 +665,11 @@ def _apply_generation_config_eos(model_dir: Path, config: dict) -> None:
         config["eos_token_id"] = generation_config["eos_token_id"]
 
 
-def _detect_tokenizer_add_special_tokens(model_dir: Path) -> bool:
+def _detect_tokenizer_add_special_tokens(
+    model_dir: Path,
+    *,
+    trust_remote_code: bool = False,
+) -> bool:
     """Detect whether the HF tokenizer adds special tokens (BOS/EOS) by default.
 
     The C++ runtime calls the native tokenizer with a single add-special flag,
@@ -650,7 +681,10 @@ def _detect_tokenizer_add_special_tokens(model_dir: Path) -> bool:
     try:
         from transformers import AutoTokenizer
 
-        tok = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
+        tok = AutoTokenizer.from_pretrained(
+            str(model_dir),
+            trust_remote_code=trust_remote_code,
+        )
         ids_default = tok.encode("hello")
         ids_without = tok.encode("hello", add_special_tokens=False)
         return ids_default != ids_without
@@ -677,6 +711,7 @@ def _detect_tokenizer_special_frame(
     *,
     revision: str | None = None,
     local_files_only: bool = False,
+    trust_remote_code: bool = False,
 ) -> tuple[list[int], list[int]] | None:
     """Return exact HF add-special prefix/suffix IDs when they are representable.
 
@@ -688,7 +723,7 @@ def _detect_tokenizer_special_frame(
     try:
         from transformers import AutoTokenizer
 
-        tokenizer_kwargs = {"trust_remote_code": True}
+        tokenizer_kwargs = {"trust_remote_code": trust_remote_code}
         if revision:
             tokenizer_kwargs["revision"] = revision
         if local_files_only:
@@ -745,11 +780,17 @@ def _wordpiece_tokenizer_needs_rebuild(model_dir: Path) -> bool:
         return False
 
 
-def _ensure_tokenizer_json(model_dir: Path, *, plugin=None) -> None:
+def _ensure_tokenizer_json(
+    model_dir: Path,
+    *,
+    plugin=None,
+    trust_remote_code: bool = False,
+) -> None:
     """If the model directory lacks tokenizer.json, generate it from the
     slow tokenizer using HF transformers. This ensures the C++ runtime can
     always load the tokenizer natively.
     """
+    _validate_trust_remote_code(trust_remote_code)
     tokenizer_path = model_dir / "tokenizer.json"
     rebuild_wordpiece = _wordpiece_tokenizer_needs_rebuild(model_dir)
     if tokenizer_path.exists() and not rebuild_wordpiece:
@@ -767,7 +808,11 @@ def _ensure_tokenizer_json(model_dir: Path, *, plugin=None) -> None:
     try:
         from transformers import AutoTokenizer
 
-        tok = AutoTokenizer.from_pretrained(str(model_dir), use_fast=False)
+        tok = AutoTokenizer.from_pretrained(
+            str(model_dir),
+            use_fast=False,
+            trust_remote_code=trust_remote_code,
+        )
         with tempfile.TemporaryDirectory(prefix="trtmc-tokenizer-") as temporary_dir:
             generated_path = Path(temporary_dir) / "tokenizer.json"
             backend_tokenizer = getattr(tok, "backend_tokenizer", None)
@@ -796,16 +841,48 @@ def _ensure_tokenizer_json(model_dir: Path, *, plugin=None) -> None:
     except Exception as e:
         slow_tokenizer_error = f"slow tokenizer conversion failed: {e}"
 
+    family_tokenizer_error: str | None = None
     family_ensure = getattr(plugin, "ensure_tokenizer_json", None)
     if callable(family_ensure):
         kwargs = {}
         if _call_supports_kwarg(family_ensure, "previous_error"):
             kwargs["previous_error"] = slow_tokenizer_error
-        if bool(family_ensure(model_dir, **kwargs)):
-            return
+        if _call_supports_kwarg(family_ensure, "trust_remote_code"):
+            kwargs["trust_remote_code"] = trust_remote_code
+        try:
+            family_reported_success = bool(family_ensure(model_dir, **kwargs))
+            if (
+                family_reported_success
+                and tokenizer_path.exists()
+                and not _wordpiece_tokenizer_needs_rebuild(model_dir)
+            ):
+                return
+            if family_reported_success:
+                family_tokenizer_error = (
+                    "family tokenizer hook reported success without producing "
+                    "a usable tokenizer.json"
+                )
+            else:
+                family_tokenizer_error = "family tokenizer hook could not generate tokenizer.json"
+        except Exception as exc:
+            family_tokenizer_error = f"family tokenizer hook failed: {exc}"
 
-    print("[trtmc build] Warning: could not generate tokenizer.json "
-          "(C++ runtime may fail to create tokenizer)", file=sys.stderr)
+    errors = "; ".join(
+        error
+        for error in (slow_tokenizer_error, family_tokenizer_error)
+        if error
+    )
+    if not errors:
+        errors = "no family tokenizer generator is available"
+    raise RuntimeError(
+        f"Could not generate required tokenizer.json for '{model_dir}'; "
+        "refusing to write a bundle without its required tokenizer. "
+        "Review any repository-provided tokenizer code before explicitly "
+        "setting trust_remote_code=True. Pin the model revision through "
+        "build(model_revision=...), or call build_bundle() only with an "
+        "immutable local snapshot whose contents you reviewed. "
+        f"Details: {errors}"
+    )
 
 
 def _prepare_tokenizer_special_frame(
@@ -814,6 +891,7 @@ def _prepare_tokenizer_special_frame(
     plugin=None,
     source_model_id_or_path: str | None = None,
     source_revision: str | None = None,
+    trust_remote_code: bool = False,
 ) -> tuple[list[int], list[int]] | None:
     """Generate tokenizer.json without changing the source tokenizer contract."""
 
@@ -823,11 +901,19 @@ def _prepare_tokenizer_special_frame(
         source,
         revision=source_revision,
         local_files_only=source_is_remote,
+        trust_remote_code=trust_remote_code,
     )
-    _ensure_tokenizer_json(model_dir, plugin=plugin)
+    _ensure_tokenizer_json(
+        model_dir,
+        plugin=plugin,
+        trust_remote_code=trust_remote_code,
+    )
     if source_frame is not None:
         return source_frame
-    return _detect_tokenizer_special_frame(model_dir)
+    return _detect_tokenizer_special_frame(
+        model_dir,
+        trust_remote_code=trust_remote_code,
+    )
 
 
 @enforce_single_full_bundle_build
@@ -845,6 +931,7 @@ def build_bundle(
     quant_scales: str | None = None,
     quant_calibration_samples: int = 512,
     verbose: bool = False,
+    trust_remote_code: bool = False,
     kernel_artifacts: list[tuple[str, str]] | None = None,
     rtx: bool = False,
     triattention_stats_path: str | None = None,
@@ -873,8 +960,11 @@ def build_bundle(
         decoder_engine_layout: ``"split"`` builds separate prefill/decode
             engines for supported decoder LLMs. ``"dual_profile"`` keeps the
             low-VRAM single-engine/multi-profile layout.
+        trust_remote_code: Permit reviewed model-repository code while loading
+            or generating a Hugging Face tokenizer. Disabled by default.
         verbose: Print detailed logs.
     """
+    _validate_trust_remote_code(trust_remote_code)
     if decoder_engine_layout not in ("split", "dual_profile"):
         raise ValueError(
             "decoder_engine_layout must be 'split' or 'dual_profile', "
@@ -910,7 +1000,7 @@ def build_bundle(
         _build_diffusion_bundle(
             model_dir_path, output_path, max_cache_length,
             precision=precision, fp32_layers=fp32_layers,
-            verbose=verbose, t0=t0,
+            verbose=verbose, trust_remote_code=trust_remote_code, t0=t0,
             fp8_scales=fp8_scales, save_fp8_scales=save_fp8_scales,
             rtx=rtx,
             diffusion_overrides=diffusion_overrides,
@@ -1284,6 +1374,7 @@ def build_bundle(
             plugin=plugin,
             source_model_id_or_path=tokenizer_source_model_id_or_path,
             source_revision=tokenizer_source_revision,
+            trust_remote_code=trust_remote_code,
         )
         _add_build_timing(
             build_timing, "tokenizer_json_ensure_s",
@@ -1291,7 +1382,9 @@ def build_bundle(
         _write_build_timing(build_timing)
     else:
         tokenizer_special_frame = _detect_tokenizer_special_frame(
-            model_dir_path)
+            model_dir_path,
+            trust_remote_code=trust_remote_code,
+        )
 
     # 5b. Detect tokenizer special-tokens behavior from HF config
     tokenizer_t0 = time.monotonic()
@@ -1299,7 +1392,9 @@ def build_bundle(
         tokenizer_special_prefix_ids: list[int] = []
         tokenizer_special_suffix_ids: list[int] = []
         tokenizer_add_special_tokens = _detect_tokenizer_add_special_tokens(
-            model_dir_path)
+            model_dir_path,
+            trust_remote_code=trust_remote_code,
+        )
     else:
         tokenizer_special_prefix_ids, tokenizer_special_suffix_ids = (
             tokenizer_special_frame)
@@ -1506,6 +1601,7 @@ def _build_diffusion_bundle(
     precision: str = "fp32",
     fp32_layers: list[int] | None = None,
     verbose: bool = False,
+    trust_remote_code: bool = False,
     t0: float = 0.0,
     fp8_scales: dict | None = None,
     save_fp8_scales: str | None = None,
@@ -1680,12 +1776,18 @@ def _build_diffusion_bundle(
     trt_abi = _trt_abi_from_version(trt_version)
     tokenizer_t0 = time.monotonic()
     tokenizer_special_frame = _diffusion_tokenizer_special_frame_from_plugin(
-        plugin, model_dir_path)
+        plugin,
+        model_dir_path,
+        trust_remote_code=trust_remote_code,
+    )
     if tokenizer_special_frame is None:
         tokenizer_special_prefix_ids: list[int] = []
         tokenizer_special_suffix_ids: list[int] = []
         tokenizer_add_special_tokens = _diffusion_tokenizer_add_special_tokens_from_plugin(
-            plugin, model_dir_path)
+            plugin,
+            model_dir_path,
+            trust_remote_code=trust_remote_code,
+        )
     else:
         tokenizer_special_prefix_ids, tokenizer_special_suffix_ids = tokenizer_special_frame
         tokenizer_add_special_tokens = bool(
@@ -1741,7 +1843,10 @@ def _build_diffusion_bundle(
 
     tokenizer_json_t0 = time.monotonic()
     sections.extend(_diffusion_tokenizer_bundle_sections_from_plugin(
-        plugin, model_dir_path))
+        plugin,
+        model_dir_path,
+        trust_remote_code=trust_remote_code,
+    ))
     _add_build_timing(
         build_timing, "tokenizer_json_ensure_s",
         time.monotonic() - tokenizer_json_t0)
@@ -1803,6 +1908,7 @@ def _build_native_impl(
     quant_scales: str | None = None,
     quant_calibration_samples: int = 512,
     verbose: bool = False,
+    trust_remote_code: bool = False,
     fp8_scales: dict | str | None = None,
     save_fp8_scales: str | None = None,
     rtx: bool = False,
@@ -1833,10 +1939,13 @@ def _build_native_impl(
         model_revision: Optional Hugging Face revision to resolve for remote model IDs.
         max_cache_length: KV cache length for the engine.
         decoder_engine_layout: ``"split"`` or ``"dual_profile"``.
+        trust_remote_code: Permit reviewed model-repository code while loading
+            or generating a Hugging Face tokenizer. Disabled by default.
         verbose: Print detailed TRT builder logs.
         fp8_scales: Per-layer FP8 scales dict, or ``"auto"`` for auto-calibration.
         save_fp8_scales: Path to save calibrated FP8 scales JSON.
     """
+    _validate_trust_remote_code(trust_remote_code)
     revision_kwargs = {"revision": model_revision} if model_revision else {}
     model_dir = _resolve_model(model_id_or_path, **revision_kwargs)
     build_bundle._model_id_or_path_orig = model_id_or_path
@@ -1852,6 +1961,7 @@ def _build_native_impl(
                  quant_scales=quant_scales,
                  quant_calibration_samples=quant_calibration_samples,
                  verbose=verbose,
+                 trust_remote_code=trust_remote_code,
                  rtx=rtx,
                  triattention_stats_path=triattention_stats_path,
                  triattention_kv_budget=triattention_kv_budget,
@@ -1965,6 +2075,7 @@ def build(
     quant_scales: str | None = None,
     quant_calibration_samples: int = 512,
     verbose: bool = False,
+    trust_remote_code: bool = False,
     fp8_scales: dict | str | None = None,
     save_fp8_scales: str | None = None,
     rtx: bool = False,
@@ -1991,6 +2102,7 @@ def build(
     the caller leaves ``precision`` unset.
     """
 
+    _validate_trust_remote_code(trust_remote_code)
     build_arguments = dict(locals())
     public_options = {
         name: value
