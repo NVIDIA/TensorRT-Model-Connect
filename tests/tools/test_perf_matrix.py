@@ -10,7 +10,7 @@ from pathlib import Path
 import runpy
 import subprocess
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import yaml
@@ -311,6 +311,10 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert (
         by_id["bark.generate_audio"]["workload"]["request"]["max_new_tokens"]
         == 128
+    )
+    assert (
+        by_id["magpie_tts.generate_audio"]["workload"]["request"]["max_new_tokens"]
+        == 256
     )
     for case_id in (
         "bark.generate_audio",
@@ -1350,6 +1354,16 @@ def test_bark_reference_maps_public_token_cap_to_semantic_stage() -> None:
         "semantic_max_new_tokens": 128
     }
     assert runner["_bark_generation_options"]({"max_new_tokens": 0}) == {}
+
+
+def test_magpie_reference_maps_public_token_cap_to_decoder_steps() -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    inference_parameters = SimpleNamespace(max_decoder_steps=750)
+    model = SimpleNamespace(inference_parameters=inference_parameters)
+
+    runner["_apply_magpie_generation_options"](model, {"max_new_tokens": 256})
+
+    assert inference_parameters.max_decoder_steps == 256
 
 
 def test_task_reference_runner_measures_loaded_public_operation(

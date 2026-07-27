@@ -11,6 +11,7 @@
 #include "runtime/core/trt_common.h"
 #include "runtime/providers/optimized_runtime_host.h"
 #include "runtime/registry/bundle_materialization.h"
+#include "runtime/registry/runtime_config_resolution.h"
 #include "trtmc/config/cli_support.h"
 #include "trtmc/config/config_bundle.h"
 #include "trtmc/config/schema_registry.h"
@@ -151,7 +152,7 @@ IPipelinePlugin* lookup_plugin_or_throw(const std::string& strategy,
 
 // Apply platform.* values to their process-wide sinks. Replaces the old
 // TRTMC_DATA_DIR and TRTMC_TRT_LOG_{STDERR,MIN_SEVERITY} env-var reads.
-// Called from try_resolve_runtime_config once a bundle has resolved.
+// Called once a bundle's layered runtime config has resolved.
 void apply_platform_config(const config::ConfigBundle& bundle) {
     try {
         const std::string source = bundle.get<std::string>("platform", "source_dir");
@@ -254,13 +255,20 @@ IBackend* load_backend_for_bundle(const BundleFile& bundle, const std::string& c
     return backend;
 }
 
+} // namespace
+
 std::optional<config::ConfigBundle>
-try_resolve_runtime_config(const std::string& config_text, const std::string& bundle_path,
-                           const std::string& config_path,
-                           const std::vector<std::string>& set_tokens) {
+detail::resolve_runtime_config(const std::string& config_text, const std::string& bundle_path,
+                               const std::string& config_path,
+                               const std::vector<std::string>& set_tokens) {
     try {
         auto resolution = config::resolve_pipeline_config(config_text, config_path, set_tokens);
-        config::write_effective_config_next_to(resolution.bundle, bundle_path);
+        try {
+            config::write_effective_config_next_to(resolution.bundle, bundle_path);
+        } catch (const std::exception& e) {
+            std::cerr << "[trtmc.config] Failed to write effective config sidecar: " << e.what()
+                      << "\n          Resolved runtime config remains active.\n";
+        }
         apply_platform_config(resolution.bundle);
         return std::move(resolution.bundle);
     } catch (const std::exception& e) {
@@ -269,8 +277,6 @@ try_resolve_runtime_config(const std::string& config_text, const std::string& bu
         return std::nullopt;
     }
 }
-
-} // namespace
 
 std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundle_path,
                                                         const std::string& hf_python,
@@ -314,8 +320,8 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
     // Best-effort: a malformed input prints to stderr and falls back to
     // schema defaults so plugin construction isn't blocked.
     std::optional<config::ConfigBundle> resolved =
-        try_resolve_runtime_config(config_text, bundle_path, /*config_path=*/"",
-                                   /*set_tokens=*/{});
+        detail::resolve_runtime_config(config_text, bundle_path, /*config_path=*/"",
+                                       /*set_tokens=*/{});
 
     PipelineContext ctx{bundle,
                         base_cfg,
@@ -358,7 +364,7 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
     BaseConfig base_cfg = parse_base_config(config_text, bundle.info.max_cache_length);
     base_cfg.runtime_strategy = strategy;
 
-    std::optional<config::ConfigBundle> resolved = try_resolve_runtime_config(
+    std::optional<config::ConfigBundle> resolved = detail::resolve_runtime_config(
         config_text, bundle_path, options.config_path, options.set_tokens);
 
     PipelineContext ctx{bundle,
@@ -404,7 +410,7 @@ std::unique_ptr<PipelinePool> PipelineFactory::from_bundle_pool(const std::strin
 
     BaseConfig base_cfg = parse_base_config(config_text, bundle.info.max_cache_length);
     base_cfg.runtime_strategy = strategy;
-    std::optional<config::ConfigBundle> resolved = try_resolve_runtime_config(
+    std::optional<config::ConfigBundle> resolved = detail::resolve_runtime_config(
         config_text, bundle_path, options.config_path, options.set_tokens);
 
     PipelineContext ctx{bundle,

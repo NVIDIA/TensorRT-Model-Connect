@@ -182,7 +182,7 @@ class MagpiePipeline final : public IPipeline {
     void init_cross_attn_resources();
     void init_cfg_logit_buffers();
 
-    void apply_env_overrides();
+    void reset_rng_for_request(int32_t request_seed = -1);
     void ensure_cfg_resources();
     void run_cfg_encoder(const std::vector<int32_t>& text_ids);
     void log_decoder_profiling(const DecoderLoopState& state, int32_t ctx_frames,

@@ -9,6 +9,7 @@
 #include "runtime/models/magpie/magpie_codec_plan.h"
 #include "runtime/models/magpie/magpie_decode_policy.h"
 #include "runtime/models/magpie/magpie_decoder_plan.h"
+#include "runtime/models/magpie/magpie_generation_plan.h"
 #include "runtime/models/magpie/magpie_text_completion_policy.h"
 #include "runtime/models/magpie/tensor_names.h"
 
@@ -1777,7 +1778,7 @@ int32_t MagpiePipeline::generate_audio_streaming(const std::vector<int32_t>& tex
     if (!audio_callback)
         return 0;
 
-    apply_env_overrides();
+    reset_rng_for_request();
     ensure_cfg_resources();
     text_length_ = static_cast<int32_t>(text_ids.size());
 
@@ -1980,13 +1981,14 @@ void MagpiePipeline::log_pipeline_profiling(int32_t num_frames, int32_t num_samp
 // generate_audio() helpers
 // ---------------------------------------------------------------------------
 
-void MagpiePipeline::apply_env_overrides() {
+void MagpiePipeline::reset_rng_for_request(int32_t request_seed) {
     // All values now arrive pre-populated from the audio_magpie.* namespace
     // (magpie_plugin does the ctx.runtime_config reads at construction).
     // Formerly this method read TRTMC_MAGPIE_{GREEDY,CFG_SCALE,TEMPERATURE,
     // FINISHED_LIMIT,SEED} directly — those env vars are deleted.
-    if (config_.seed >= 0)
-        rng_.seed(static_cast<std::mt19937::result_type>(config_.seed));
+    const int64_t seed = resolve_magpie_seed(config_.seed, request_seed);
+    if (seed >= 0)
+        rng_.seed(static_cast<std::mt19937::result_type>(seed));
 }
 
 void MagpiePipeline::ensure_cfg_resources() {
@@ -2047,7 +2049,7 @@ AudioResult MagpiePipeline::generate_audio(const std::string& prompt, const Gene
     AudioResult result;
     result.sample_rate = config_.sample_rate;
 
-    apply_env_overrides();
+    reset_rng_for_request(cfg.seed);
     ensure_cfg_resources();
 
     text_length_ = static_cast<int32_t>(input_ids.size());

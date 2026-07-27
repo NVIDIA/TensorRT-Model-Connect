@@ -199,6 +199,14 @@ def _bark_generation_options(request: Mapping[str, Any]) -> dict[str, int]:
     return {"semantic_max_new_tokens": max_new_tokens}
 
 
+def _apply_magpie_generation_options(model: Any, request: Mapping[str, Any]) -> None:
+    max_new_tokens = request.get("max_new_tokens", 0)
+    if isinstance(max_new_tokens, bool) or not isinstance(max_new_tokens, int):
+        raise ValueError("Magpie request max_new_tokens must be an integer")
+    if max_new_tokens > 0:
+        model.inference_parameters.max_decoder_steps = max_new_tokens
+
+
 def _load_kwargs(arguments: argparse.Namespace, torch_module: Any) -> dict[str, Any]:
     values: dict[str, Any] = {
         "trust_remote_code": arguments.trust_remote_code,
@@ -411,6 +419,7 @@ def _load_tts(
             local_files_only=arguments.local_files_only,
         )
         model = MagpieTTSModel.restore_from(restore_path=model_archive).eval().to(device)
+        _apply_magpie_generation_options(model, request)
         seed = _request_seed(
             request,
             _runtime_config(arguments).get("audio_magpie.seed", 42),

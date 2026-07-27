@@ -19,6 +19,7 @@
 //                 profile parser accepts the scoped shape.
 // =============================================================================
 
+#include "runtime/registry/runtime_config_resolution.h"
 #include "test_helpers.h"
 #include "trtmc/config/cli_support.h"
 #include "trtmc/config/config_bundle.h"
@@ -316,7 +317,8 @@ void test_resolve_session_beats_platform() {
     LayerContribution platform;
     platform.layer = Layer::PlatformProfile;
     platform.values["triattention"]["kv_budget"] = std::any{std::int32_t{10240}};
-    auto bundle = trtmc::config::resolve_cli_config("", {"triattention.kv_budget=8192"}, {platform});
+    auto bundle =
+        trtmc::config::resolve_cli_config("", {"triattention.kv_budget=8192"}, {platform});
     check(bundle.get<std::int32_t>("triattention", "kv_budget") == 8192,
           "resolve: session beats platform");
     check(bundle.source_of("triattention", "kv_budget") == Layer::SessionRequest,
@@ -350,6 +352,19 @@ void test_write_effective_config_next_to_places_file(std::string tmp_dir) {
     check(fs::exists(written), "write_effective: file exists");
     check(fs::path(written).filename() == "bundle.effective_config.json",
           "write_effective: sibling filename");
+}
+
+void test_runtime_resolution_survives_unwritable_effective_config_sidecar() {
+    register_demo_schema();
+    auto resolved = trtmc::detail::resolve_runtime_config(
+        R"({"defaults":{"triattention":{"kv_budget":4096}}})", "/dev/null/bundle.trtfb", "",
+        {"triattention.kv_budget=8192"});
+
+    check(resolved.has_value(), "runtime resolution: unwritable sidecar retains config");
+    if (resolved) {
+        check(resolved->get<std::int32_t>("triattention", "kv_budget") == 8192,
+              "runtime resolution: session override remains active");
+    }
 }
 
 // ---- bundle defaults: block ------------------------------------------------
@@ -417,7 +432,7 @@ void test_resolve_pipeline_config_merges_bundle_and_session(std::string tmp_dir)
     std::ofstream(profile) << R"({"triattention": {"dump_scores_path": "/tmp/x"}})";
 
     auto res = trtmc::config::resolve_pipeline_config(header, profile.string(),
-                                                     {"triattention.kv_budget=8192"});
+                                                      {"triattention.kv_budget=8192"});
 
     // bundle_default + session contributions both land
     check(res.contributions.size() == 2, "resolve: two contributions");
@@ -503,6 +518,7 @@ int main() {
     test_resolve_session_beats_platform();
 
     test_bundle_to_effective_json_contains_source();
+    test_runtime_resolution_survives_unwritable_effective_config_sidecar();
 
     test_extract_bundle_defaults_finds_block();
     test_extract_bundle_defaults_absent_block();

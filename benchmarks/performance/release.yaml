@@ -413,6 +413,8 @@ entries:
     model: magpie-tts-357m
     workload:
       testcase: magpie-tts-357m
+      request:
+        max_new_tokens: 256
     baseline:
       runner: task-reference
       adapter: nemo-tts
