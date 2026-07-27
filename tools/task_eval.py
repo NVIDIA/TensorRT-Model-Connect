@@ -6916,14 +6916,20 @@ def _vision_response(
             masks_path = _persist_numpy_output(
                 masks, artifact_dir / case.name / f"{source}_masks.npy"
             )
-        if not masks_path or not Path(masks_path).is_file():
+        num_masks = int(data.get("num_masks", len(masks) if masks is not None else 0))
+        stderr = str(metadata.get("stderr", "") or "")
+        empty_prediction = num_masks == 0 and (
+            masks is not None or "produced no masks" in stderr.lower()
+        )
+        if (not masks_path or not Path(masks_path).is_file()) and not empty_prediction:
             raise RuntimeError(f"{source} prompted segmentation produced no masks")
         scores = data.get("mask_scores") or data.get("iou_scores") or data.get("scores") or []
         response.update(
             {
                 "masks_path": masks_path,
                 "mask_scores": [float(value) for value in scores],
-                "num_masks": int(data.get("num_masks", 0)),
+                "num_masks": num_masks,
+                "empty_prediction": empty_prediction,
                 "point_x": prompt_row.get("point_x"),
                 "point_y": prompt_row.get("point_y"),
                 "text_prompt": str(prompt_row.get("text_prompt", "")),
@@ -7021,7 +7027,7 @@ def run_vision_trtfb(args: argparse.Namespace) -> None:
                 prompt_row=prompt_row,
                 artifact_dir=artifacts_dir,
             )
-            if response["returncode"] != 0:
+            if response["returncode"] != 0 and not response.get("empty_prediction"):
                 raise RuntimeError(
                     f"TRT vision run failed for {case.name}: "
                     f"returncode={response['returncode']}"
@@ -9375,6 +9381,20 @@ def _selected_prompt_mask(masks: Any, scores: list[Any], prompt_mode: str) -> An
     return masks[min(index, masks.shape[0] - 1)]
 
 
+def _selected_prompt_prediction_mask(
+    row: dict[str, Any], prompt_mode: str, target_shape: tuple[int, ...]
+) -> Any:
+    import numpy as np
+
+    if bool(row.get("empty_prediction")) or int(row.get("num_masks", -1)) == 0:
+        return np.zeros(target_shape, dtype=bool)
+    return _selected_prompt_mask(
+        _mask_stack(str(row["masks_path"])),
+        list(row.get("mask_scores", [])),
+        prompt_mode,
+    )
+
+
 def _binary_mask_iou(left: Any, right: Any) -> float:
     import numpy as np
 
@@ -9410,17 +9430,17 @@ def compare_prompted_segmentation_prediction_sets(
         if hf_row is None or trtfb_row is None:
             cases.append({"sample_id": sample_id, "passed": False, "error": "missing prediction"})
             continue
-        hf_mask = _selected_prompt_mask(
-            _mask_stack(str(hf_row["masks_path"])),
-            list(hf_row.get("mask_scores", [])),
-            prompt_mode,
-        )
-        trtfb_mask = _selected_prompt_mask(
-            _mask_stack(str(trtfb_row["masks_path"])),
-            list(trtfb_row.get("mask_scores", [])),
-            prompt_mode,
-        )
         ground_truth = _load_segmentation_array(str(request[ground_truth_mask_field])) > 0
+        hf_mask = _selected_prompt_prediction_mask(
+            hf_row,
+            prompt_mode,
+            ground_truth.shape,
+        )
+        trtfb_mask = _selected_prompt_prediction_mask(
+            trtfb_row,
+            prompt_mode,
+            ground_truth.shape,
+        )
         backend_iou = _binary_mask_iou(hf_mask, trtfb_mask)
         hf_gt_iou = _binary_mask_iou(ground_truth, hf_mask)
         trtfb_gt_iou = _binary_mask_iou(ground_truth, trtfb_mask)
@@ -9433,6 +9453,8 @@ def compare_prompted_segmentation_prediction_sets(
                 "hf_ground_truth_iou": hf_gt_iou,
                 "trtfb_ground_truth_iou": trtfb_gt_iou,
                 "ground_truth_iou_drop_from_hf": hf_gt_iou - trtfb_gt_iou,
+                "hf_empty_prediction": bool(hf_row.get("empty_prediction")),
+                "trtfb_empty_prediction": bool(trtfb_row.get("empty_prediction")),
                 "hf_segmented_image_path": str(hf_row.get("segmented_image_path", "")),
                 "trtfb_segmented_image_path": str(
                     trtfb_row.get("segmented_image_path", "")
