@@ -41,6 +41,10 @@ struct BarkFinePlan {
     int32_t last_predicted_codebook{8};
 };
 
+inline int64_t resolve_bark_seed(int64_t session_seed, int32_t request_seed) {
+    return request_seed >= 0 ? static_cast<int64_t>(request_seed) : session_seed;
+}
+
 inline bool bark_fine_uses_sampling(const BarkConfig& cfg) {
     return !cfg.greedy && std::abs(cfg.fine_temperature - 1.0F) > 1e-6F;
 }

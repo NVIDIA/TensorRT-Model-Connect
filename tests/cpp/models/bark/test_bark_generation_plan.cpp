@@ -125,6 +125,15 @@ void test_fine_sampling_policy_matches_hf() {
     check(!trtmc::bark_fine_uses_sampling(cfg), "bark global greedy disables fine sampling");
 }
 
+void test_request_seed_overrides_session_seed() {
+    check(trtmc::resolve_bark_seed(42, 0) == 0,
+          "bark request seed overrides configured session seed");
+    check(trtmc::resolve_bark_seed(42, -1) == 42,
+          "bark configured session seed remains the fallback");
+    check(trtmc::resolve_bark_seed(-1, -1) == -1,
+          "bark remains nondeterministic when neither seed is configured");
+}
+
 void test_fine_input_embeddings_use_hf_padding_code() {
     constexpr int32_t n_frames = 1;
     constexpr int32_t actual_frames = 1;
@@ -178,6 +187,7 @@ int main() {
     test_codec_plan_prefers_fine_codes_when_available();
     test_fine_plan_and_code_initialization();
     test_fine_sampling_policy_matches_hf();
+    test_request_seed_overrides_session_seed();
     test_fine_input_embeddings_use_hf_padding_code();
     test_codec_input_builder_transposes_codebooks();
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
 from pathlib import Path
 import subprocess
@@ -758,11 +759,54 @@ def test_multimodal_and_speech_cases_preserve_required_runtime_inputs(tmp_path: 
         ManifestCatalog().resolve("magpie-tts-357m"),
         tmp_path / "magpie.trtfb",
     )
+    assert magpie.request["seed"] == 42
     assert magpie.runtime["config"] == {
         "audio_magpie.cfg_scale": 2.5,
         "audio_magpie.temperature": 0.6,
         "audio_magpie.seed": 42,
     }
+
+    bark = resolve_case(
+        ManifestCatalog().resolve("bark-small"),
+        tmp_path / "bark.trtfb",
+    )
+    assert bark.request["seed"] == 0
+    assert bark.sources["request.seed"] == "model testcase"
+
+    qwen3_omni = resolve_case(
+        ManifestCatalog().resolve("qwen3-omni-30b-a3b-instruct"),
+        tmp_path / "qwen3-omni.trtfb",
+    )
+    assert qwen3_omni.request["seed"] == 42
+    assert qwen3_omni.sources["request.seed"] == "model testcase"
+
+
+def test_seeded_ready_profiles_preserve_seed_in_public_request(tmp_path: Path) -> None:
+    def declares_seed(value: object) -> bool:
+        if not isinstance(value, Mapping):
+            return False
+        return any(
+            name in {"seed", "seeds"} or declares_seed(item)
+            for name, item in value.items()
+        )
+
+    missing: list[str] = []
+    for entry in ManifestCatalog().entries():
+        if entry.status != "ready" or entry.model is None:
+            continue
+        testcase = entry.model.testcases[0]
+        seed_contract = {
+            name: testcase[name]
+            for name in ("seed", "seeds", "inputs", "determinism", "runtime_config")
+            if name in testcase
+        }
+        if not declares_seed(seed_contract):
+            continue
+        case = resolve_case(entry.model, tmp_path / f"{entry.name}.trtfb")
+        if not {"seed", "seeds"} & set(case.request):
+            missing.append(entry.name)
+
+    assert missing == []
 
 
 def test_text_generation_preserves_sampling_contract(tmp_path: Path) -> None:

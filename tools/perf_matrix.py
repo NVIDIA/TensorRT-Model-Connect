@@ -545,6 +545,7 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
         raise PerfMatrixError(f"case {case['id']} baseline experts implementation is invalid")
     output_contract = baseline.get("output_contract", "exact-token-ids")
     if output_contract not in {
+        "audio-duration",
         "audio-shape",
         "exact-token-ids",
         "exact-text",
@@ -556,6 +557,17 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
         "token-agreement",
     }:
         raise PerfMatrixError(f"case {case['id']} baseline output contract is invalid")
+    if output_contract == "audio-duration":
+        limit = baseline.get("max_audio_duration_relative_difference")
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, (int, float))
+            or not 0.0 <= float(limit) <= 1.0
+        ):
+            raise PerfMatrixError(
+                f"case {case['id']} audio-duration contract has an invalid "
+                "relative-difference limit"
+            )
     if output_contract == "token-agreement":
         for name in ("min_positional_token_agreement", "max_normalized_edit_distance"):
             value = baseline.get(name)
@@ -1565,6 +1577,28 @@ def _output_contract(
         )
         matched = None not in left_shape and left_shape == right_shape
         return matched, "audio output shape differs" if not matched else ""
+    if contract == "audio-duration":
+        left_samples = left.get("num_samples", left.get("audio_samples"))
+        right_samples = right.get("num_samples", right.get("audio_samples"))
+        left_rate = left.get("sample_rate")
+        right_rate = right.get("sample_rate")
+        values = (left_samples, right_samples, left_rate, right_rate)
+        if any(
+            isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0
+            for value in values
+        ):
+            return False, "audio duration metadata is incomplete"
+        if left_rate != right_rate:
+            return False, "audio sample rate differs"
+        relative_difference = abs(float(left_samples) - float(right_samples)) / float(
+            right_samples
+        )
+        limit = float(case["baseline"]["max_audio_duration_relative_difference"])
+        matched = relative_difference <= limit
+        return (
+            matched,
+            "audio duration differs by more than the configured contract" if not matched else "",
+        )
     if contract == "media-shape":
         names = ("height", "width", "channels")
         media_type = right.get("media_type")

@@ -308,6 +308,19 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert by_id["magpie_tts.generate_audio"]["baseline"]["adapter_options"] == {
         "speaker_encoder_revision": "e9124b5364a2c3e9b4f78da429a33cbca8f8c22b"
     }
+    assert by_id["bark.generate_audio"]["baseline"]["output_contract"] == "audio-duration"
+    assert (
+        by_id["bark.generate_audio"]["baseline"][
+            "max_audio_duration_relative_difference"
+        ]
+        == 0.02
+    )
+    for case_id in (
+        "magpie_tts.generate_audio",
+        "personaplex.speak",
+        "qwen3_omni.generate_audio",
+    ):
+        assert by_id[case_id]["baseline"]["output_contract"] == "audio-shape"
     assert by_id["personaplex.speak"]["baseline"]["adapter_options"] == {
         "reference_commit": "3428dfd95309a7f3c84fd93259ded0f810d1ff91"
     }
@@ -719,6 +732,65 @@ def test_audio_contract_rejects_different_generated_sample_counts() -> None:
 
     reference["output_summary"]["audio_samples"] = 58_965
     assert perf_matrix._output_contract(case, candidate, reference) == (True, "")
+
+
+def test_audio_duration_contract_allows_only_tightly_comparable_workloads() -> None:
+    case = {
+        "operation": "generate_audio",
+        "baseline": {
+            "output_contract": "audio-duration",
+            "max_audio_duration_relative_difference": 0.02,
+        },
+    }
+    candidate = {
+        "output_summary": {
+            "num_samples": 85_440,
+            "sample_rate": 24_000,
+        }
+    }
+    reference = {
+        "output_summary": {
+            "audio_samples": 86_400,
+            "sample_rate": 24_000,
+        }
+    }
+
+    assert perf_matrix._output_contract(case, candidate, reference) == (True, "")
+
+    candidate["output_summary"]["num_samples"] = 327_680
+    assert perf_matrix._output_contract(case, candidate, reference) == (
+        False,
+        "audio duration differs by more than the configured contract",
+    )
+
+    candidate["output_summary"]["num_samples"] = 85_440
+    candidate["output_summary"]["sample_rate"] = 22_050
+    assert perf_matrix._output_contract(case, candidate, reference) == (
+        False,
+        "audio sample rate differs",
+    )
+
+
+def test_audio_duration_contract_requires_an_explicit_bounded_limit() -> None:
+    case = next(
+        value
+        for value in perf_matrix._cases(perf_matrix._read_yaml(SUITE))
+        if value["id"] == "bark.generate_audio"
+    )
+
+    for invalid in (None, True, -0.01, 1.01):
+        drifted = {
+            **case,
+            "baseline": {
+                **case["baseline"],
+                "max_audio_duration_relative_difference": invalid,
+            },
+        }
+        with pytest.raises(
+            perf_matrix.PerfMatrixError,
+            match="audio-duration contract has an invalid relative-difference limit",
+        ):
+            perf_matrix._validate_baseline(drifted)
 
 
 def test_media_contract_compares_materialized_frame_geometry() -> None:
@@ -1320,6 +1392,16 @@ def test_source_revision_can_be_injected_without_git(monkeypatch) -> None:
     monkeypatch.setenv("TRTMC_PERF_SOURCE_REVISION", "tested-commit")
 
     assert perf_matrix._git_commit() == "tested-commit"
+
+
+def test_task_reference_request_seed_is_explicit_and_strict() -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+
+    assert runner["_request_seed"]({"seed": 0}) == 0
+    assert runner["_request_seed"]({}, 42) == 42
+    for invalid in (True, 0.5, "42"):
+        with pytest.raises(ValueError, match="request seed must be an integer"):
+            runner["_request_seed"]({"seed": invalid})
 
 
 def test_task_reference_runner_measures_loaded_public_operation(

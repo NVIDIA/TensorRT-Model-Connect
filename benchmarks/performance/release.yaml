@@ -41,7 +41,9 @@ entries:
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
-      output_contract: audio-shape
+      output_contract: audio-duration
+      # Fixed-seed backends may stop at adjacent AR steps; keep workloads within 2%.
+      max_audio_duration_relative_difference: 0.02
   - id: bart.generate
     family: bart
     operation: generate

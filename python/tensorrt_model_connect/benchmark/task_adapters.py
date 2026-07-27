@@ -388,6 +388,7 @@ def _generate_audio_request(testcase: Mapping[str, Any], _model_root: Path) -> C
     runtime_config = testcase.get("runtime_config", {})
     if not isinstance(runtime_config, Mapping):
         raise BenchmarkError("generate_audio runtime_config must be an object")
+    config = _flatten_runtime_config(runtime_config)
     request = {
         "batch_size": 1,
         "prompt": _prompt(testcase, "generate_audio"),
@@ -398,7 +399,10 @@ def _generate_audio_request(testcase: Mapping[str, Any], _model_root: Path) -> C
         "prompt": _MODEL_TESTCASE,
         "max_new_tokens": _MODEL_TESTCASE if "max_new_tokens" in testcase else _TASK_DEFAULT,
     }
-    config = _flatten_runtime_config(runtime_config)
+    seed = _generate_audio_seed(testcase, config)
+    if seed is not None:
+        request["seed"] = seed
+        sources["seed"] = _MODEL_TESTCASE
     runtime = {"config": config} if config else {}
     runtime_sources = {"config": _MODEL_TESTCASE} if config else {}
     return _resolution(
@@ -408,6 +412,46 @@ def _generate_audio_request(testcase: Mapping[str, Any], _model_root: Path) -> C
         runtime=runtime,
         runtime_sources=runtime_sources,
     )
+
+
+def _generate_audio_seed(
+    testcase: Mapping[str, Any], runtime_config: Mapping[str, Any]
+) -> int | None:
+    inputs = testcase.get("inputs", {})
+    if not isinstance(inputs, Mapping):
+        raise BenchmarkError("generate_audio testcase inputs must be an object")
+    determinism = testcase.get("determinism", {})
+    if not isinstance(determinism, Mapping):
+        raise BenchmarkError("generate_audio testcase determinism must be an object")
+
+    declared: Any = None
+    found = False
+    for values in (inputs, testcase, determinism):
+        if "seed" in values:
+            declared = values["seed"]
+            found = True
+            break
+
+    if not found:
+        runtime_seeds = [
+            value for name, value in runtime_config.items() if name.endswith(".seed")
+        ]
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) for value in runtime_seeds
+        ):
+            raise BenchmarkError("generate_audio seed must be an integer")
+        distinct_runtime_seeds = set(runtime_seeds)
+        if len(distinct_runtime_seeds) > 1:
+            raise BenchmarkError("generate_audio runtime config has conflicting seed values")
+        if runtime_seeds:
+            declared = runtime_seeds[0]
+            found = True
+
+    if not found:
+        return None
+    if isinstance(declared, bool) or not isinstance(declared, int):
+        raise BenchmarkError("generate_audio seed must be an integer")
+    return declared
 
 
 def _flatten_runtime_config(value: Mapping[str, Any]) -> dict[str, Any]:

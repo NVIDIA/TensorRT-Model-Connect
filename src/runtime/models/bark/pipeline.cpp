@@ -92,8 +92,8 @@ void maybe_dump_tokens(const std::string& dump_path, const char* suffix,
     }
 }
 
-// Seed the sampler RNG from audio_bark.seed. A value of -1 (default)
-// means "leave the RNG at its constructed state." Replaces TRTMC_BARK_SEED.
+// Seed the sampler RNG from the request, falling back to audio_bark.seed.
+// A value of -1 (default) means "leave the RNG at its constructed state."
 void maybe_seed_bark_rng(std::mt19937& rng, std::int64_t seed) {
     if (seed < 0)
         return;
@@ -186,10 +186,9 @@ AudioResult BarkPipeline::generate_audio(const std::string& prompt, const Genera
 
     int32_t max_tokens = cfg.max_new_tokens > 0 ? cfg.max_new_tokens : 768;
 
-    // config_.greedy and config_.seed arrive pre-populated from the
-    // audio_bark.* namespace (see bark_plugin.cpp). No env-var reads
-    // anywhere in this file.
-    maybe_seed_bark_rng(rng_, config_.seed);
+    // A public request seed takes precedence over the session-level
+    // audio_bark.seed fallback populated by bark_plugin.cpp.
+    maybe_seed_bark_rng(rng_, resolve_bark_seed(config_.seed, cfg.seed));
 
     std::cerr << "[trtmc] Bark: starting pipeline with " << input_ids.size()
               << " text tokens, max_semantic=" << max_tokens << (config_.greedy ? " (greedy)" : "")
