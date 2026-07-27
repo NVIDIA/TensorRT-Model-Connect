@@ -36,7 +36,6 @@ from tensorrt_model_connect.python_profiles import (  # noqa: E402
     profile_env_var,
     resolve_profile_python,
 )
-from tests.e2e_harness.manifest_loader import load_all_model_manifests  # noqa: E402
 from tools import task_eval, trtmc_disagreements  # noqa: E402
 
 
@@ -47,6 +46,10 @@ DEFAULT_OUTPUT = REPO_ROOT / "artifacts" / "trtmc-validate"
 DEFAULT_ENGINE_DIR = DEFAULT_OUTPUT / "engines"
 DEFAULT_REFERENCE_CACHE = DEFAULT_OUTPUT / "references"
 COMMON_REFERENCE_PROFILE = "reference_common"
+NOT_COMPARED_DIRECTORY = "not-compared"
+LEGACY_E2E_REASON = (
+    "E2E execution does not compare aligned reference and TRTMC outputs."
+)
 
 
 class ValidationError(RuntimeError):
@@ -56,7 +59,26 @@ class ValidationError(RuntimeError):
 @dataclass(frozen=True)
 class Binding:
     model: str
-    workload: str
+    workload: str | None
+    not_compared_reason: str = ""
+
+    @property
+    def runnable(self) -> bool:
+        return self.workload is not None
+
+
+def _required_workload(binding: Binding) -> str:
+    if binding.workload is None:
+        raise ValidationError(
+            f"model {binding.model} has no reference-consistency workload"
+        )
+    return binding.workload
+
+
+def _case_directory(output: Path, binding: Binding) -> Path:
+    return output / binding.model / (
+        binding.workload if binding.workload is not None else NOT_COMPARED_DIRECTORY
+    )
 
 
 @dataclass(frozen=True)
@@ -100,6 +122,17 @@ SANA_WM_SOURCE = ReferenceSource(
 def _validate_model_spec(path: Path, name: Any, spec: Any) -> None:
     if not isinstance(name, str) or not isinstance(spec, dict):
         raise ValidationError(f"{path}: invalid model binding {name!r}")
+    not_compared_reason = spec.get("not_compared_reason")
+    if not_compared_reason is not None:
+        if not isinstance(not_compared_reason, str) or not not_compared_reason.strip():
+            raise ValidationError(
+                f"{path}: {name}.not_compared_reason must be a non-empty string"
+            )
+        if "default" in spec or "workloads" in spec:
+            raise ValidationError(
+                f"{path}: {name} cannot declare workloads while marked not compared"
+            )
+        return
     workloads = spec.get("workloads")
     default = spec.get("default")
     valid_workloads = (
@@ -109,6 +142,11 @@ def _validate_model_spec(path: Path, name: Any, spec: Any) -> None:
     )
     if not valid_workloads:
         raise ValidationError(f"{path}: {name}.workloads must contain names")
+    if "e2e" in workloads:
+        raise ValidationError(
+            f"{path}: {name}.workloads cannot use e2e; reference consistency "
+            "requires aligned reference and TRTMC outputs"
+        )
     if default not in workloads:
         raise ValidationError(f"{path}: {name}.default must be one of {name}.workloads")
 
@@ -171,12 +209,12 @@ def audit_catalog(
             details.append(f"non-ready or unknown models: {', '.join(stale)}")
         raise ValidationError("; ".join(details))
 
-    known_workloads = set(suite_names) | {"e2e"}
+    known_workloads = set(suite_names)
     unknown = sorted(
         {
             workload
             for spec in models.values()
-            for workload in spec["workloads"]
+            for workload in spec.get("workloads", [])
             if workload not in known_workloads
         }
     )
@@ -186,8 +224,7 @@ def audit_catalog(
     declared_sampled = {
         workload
         for spec in models.values()
-        for workload in spec["workloads"]
-        if workload != "e2e"
+        for workload in spec.get("workloads", [])
     }
     configured_sampled = set(catalog["sample_limits"])
     missing_limits = sorted(declared_sampled - configured_sampled)
@@ -209,9 +246,7 @@ def audit_workload_compatibility(
 ) -> None:
     incompatible = []
     for model_name, spec in catalog["models"].items():
-        for workload in spec["workloads"]:
-            if workload == "e2e":
-                continue
+        for workload in spec.get("workloads", []):
             matched, reason = task_eval.suite_match_reason(
                 suites[workload],
                 task_models[model_name],
@@ -231,6 +266,18 @@ def resolve_binding(
     if model not in models:
         raise ValidationError(f"unknown or unsupported model: {model}")
     spec = models[model]
+    not_compared_reason = str(spec.get("not_compared_reason", "") or "")
+    if not_compared_reason:
+        if workload:
+            raise ValidationError(
+                f"model {model} has no reference-consistency workloads: "
+                f"{not_compared_reason}"
+            )
+        return Binding(
+            model=model,
+            workload=None,
+            not_compared_reason=not_compared_reason,
+        )
     selected = workload or spec["default"]
     if selected not in spec["workloads"]:
         available = ", ".join(spec["workloads"])
@@ -245,21 +292,18 @@ def resolve_sample_limit(
     binding: Binding,
     explicit_limit: int | None,
 ) -> int:
-    if explicit_limit is not None:
-        if explicit_limit < 0:
-            raise ValidationError("--limit must be zero or greater")
-        return explicit_limit
-    if binding.workload == "e2e":
+    if explicit_limit is not None and explicit_limit < 0:
+        raise ValidationError("--limit must be zero or greater")
+    if not binding.runnable:
         return 0
+    if explicit_limit is not None:
+        return explicit_limit
+    assert binding.workload is not None
     return int(catalog["sample_limits"][binding.workload])
 
 
 def _task_eval_models(models_root: Path) -> dict[str, dict[str, Any]]:
     return {str(model["name"]): model for model in task_eval.load_manifest_records(models_root)}
-
-
-def _e2e_models(models_root: Path) -> dict[str, Any]:
-    return {model.name: model for model in load_all_model_manifests(models_root)}
 
 
 def _declared_profile(
@@ -285,33 +329,23 @@ def _binding_profiles(
     binding: Binding,
     *,
     task_models: Mapping[str, dict[str, Any]],
-    e2e_models: Mapping[str, Any],
 ) -> tuple[str, ...]:
-    if binding.workload != "e2e":
-        model = task_models[binding.model]
-        profile = _declared_profile(
-            family=str(model.get("family", "") or ""),
-            runtime_strategy=str(model.get("runtime_strategy", "") or ""),
-            reference_backend=str(model.get("reference_backend", "") or ""),
-            execution_profiles=model.get("execution_profiles"),
+    if not binding.runnable:
+        raise ValidationError(
+            f"model {binding.model} has no reference-consistency workload"
         )
-        return (
-            (COMMON_REFERENCE_PROFILE,)
-            if profile == COMMON_REFERENCE_PROFILE
-            else (COMMON_REFERENCE_PROFILE, profile)
-        )
-
-    profiles = [COMMON_REFERENCE_PROFILE]
-    for case in e2e_models[binding.model].testcases:
-        profile = _declared_profile(
-            family=case.family,
-            runtime_strategy=case.runtime_strategy,
-            reference_backend=case.reference_backend,
-            execution_profiles=case.execution_profiles,
-        )
-        if profile not in profiles:
-            profiles.append(profile)
-    return tuple(profiles)
+    model = task_models[binding.model]
+    profile = _declared_profile(
+        family=str(model.get("family", "") or ""),
+        runtime_strategy=str(model.get("runtime_strategy", "") or ""),
+        reference_backend=str(model.get("reference_backend", "") or ""),
+        execution_profiles=model.get("execution_profiles"),
+    )
+    return (
+        (COMMON_REFERENCE_PROFILE,)
+        if profile == COMMON_REFERENCE_PROFILE
+        else (COMMON_REFERENCE_PROFILE, profile)
+    )
 
 
 def ensure_environments(
@@ -467,11 +501,12 @@ def _comparison_command(
     reference_sources: ReferenceSourceSelection | None = None,
 ) -> list[str]:
     work_root = case_dir / "validation"
+    workload = _required_workload(binding)
     command = [
         reference_python,
         str(REPO_ROOT / "tools" / "trtmc_compare.py"),
         "--suite",
-        binding.workload,
+        workload,
         "--dataset",
         str(dataset),
         "--model",
@@ -516,39 +551,6 @@ def _comparison_command(
                 str(reference_sources.elf_reference_repo),
             ]
         )
-    return command
-
-
-def _e2e_command(
-    binding: Binding,
-    *,
-    case_dir: Path,
-    arguments: argparse.Namespace,
-    reference_python: str,
-) -> list[str]:
-    command = [
-        reference_python,
-        "-m",
-        "pytest",
-        "tests/test_e2e.py",
-        "-q",
-        "--e2e-model",
-        binding.model,
-        "--e2e-artifacts-dir",
-        str(case_dir / "e2e"),
-        "--engine-dir",
-        str(arguments.engine_dir),
-        "--trtmc-binary",
-        str(arguments.trtmc_binary),
-        "--hf-python",
-        reference_python,
-    ]
-    if arguments.platform:
-        command.extend(["--e2e-platform", arguments.platform])
-    if arguments.force_build:
-        command.append("--rebuild-engines")
-    if arguments.model_plugin_dir:
-        command.extend(["--model-plugin-dir", str(arguments.model_plugin_dir)])
     return command
 
 
@@ -793,52 +795,6 @@ def _append_unique(commands: dict[str, list[str]], kind: str, command: str) -> N
         commands[kind].append(command)
 
 
-def _e2e_command_kind(command: Sequence[Any]) -> str:
-    executable = Path(str(command[0])).name
-    is_reference_python = "python" in executable and "-c" in command
-    return "hf" if is_reference_python else "trtmc"
-
-
-def _collect_e2e_result_commands(
-    commands: dict[str, list[str]],
-    result: Mapping[str, Any],
-) -> None:
-    for entry in result.get("commands", []):
-        command = entry.get("command", []) if isinstance(entry, dict) else []
-        if not isinstance(command, list) or not command:
-            continue
-        _append_unique(
-            commands,
-            _e2e_command_kind(command),
-            shlex.join(str(token) for token in command),
-        )
-    repro = result.get("repro_commands", {})
-    if isinstance(repro, dict):
-        _append_unique(
-            commands,
-            "trtmc",
-            str(repro.get("trt_inference", "") or ""),
-        )
-
-
-def _commands_from_e2e_results(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    commands = {"hf": [], "trtmc": []}
-    for result in results:
-        _collect_e2e_result_commands(commands, result)
-    counts = {kind: len(values) for kind, values in commands.items()}
-    commands = {
-        kind: values[:MAX_REPRO_COMMANDS_PER_BACKEND]
-        for kind, values in commands.items()
-    }
-    return {
-        **commands,
-        "command_count": counts,
-        "commands_shown": {kind: len(values) for kind, values in commands.items()},
-        "command_logs": {"hf": [], "trtmc": []},
-        "representative": {"sample_id": "", "reason": "first_input"},
-    }
-
-
 _PRIMARY_COMPARISON_METRICS = (
     "sample_agreement_rate",
     "prediction_agreement_rate",
@@ -903,13 +859,6 @@ def _raw_comparison(result: Mapping[str, Any]) -> dict[str, Any]:
     raw_result = result.get("raw_result")
     if isinstance(raw_result, dict) and raw_result:
         return dict(raw_result)
-    raw_results = result.get("raw_results")
-    if isinstance(raw_results, list) and raw_results:
-        passed = all(
-            isinstance(item, dict) and item.get("status") in {"pass", "passed"}
-            for item in raw_results
-        )
-        return {"mode": "e2e", "status": "passed" if passed else "failed"}
     status = str(result.get("status", "") or "")
     return {"status": status} if status else {}
 
@@ -1068,6 +1017,25 @@ def _add_dataset_reproduction(
 
 def _normalize_result(result: Mapping[str, Any]) -> dict[str, Any]:
     normalized = dict(result)
+    if normalized.get("executor") == "e2e" or isinstance(
+        normalized.get("raw_results"),
+        list,
+    ):
+        normalized.update(
+            {
+                "workload": None,
+                "execution": {"status": "not_run", "exit_code": None},
+                "comparison": {
+                    "status": "not_run",
+                    "mode": "",
+                    "primary_metric": None,
+                    "metrics": {},
+                    "failures": [],
+                },
+                "validation": {"status": "not_compared"},
+                "not_compared_reason": LEGACY_E2E_REASON,
+            }
+        )
     raw_result = _raw_comparison(normalized)
     execution = normalized.get("execution")
     if not isinstance(execution, dict):
@@ -1092,6 +1060,42 @@ def _normalize_result(result: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _not_compared_result(binding: Binding) -> dict[str, Any]:
+    return _normalize_result(
+        {
+            "schema_version": "trtmc.validation-result/v2",
+            "model": binding.model,
+            "workload": None,
+            "executor": "not_compared",
+            "execution": {"status": "not_run", "exit_code": None},
+            "comparison": {
+                "status": "not_run",
+                "mode": "",
+                "primary_metric": None,
+                "metrics": {},
+                "failures": [],
+            },
+            "validation": {"status": "not_compared"},
+            "not_compared_reason": binding.not_compared_reason,
+            "reference_environment": [],
+            "reproduce": {},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+
+def _write_not_compared_case(binding: Binding, output: Path) -> tuple[dict[str, Any], Path]:
+    case_dir = _case_directory(output, binding)
+    case_dir.mkdir(parents=True, exist_ok=True)
+    result = _not_compared_result(binding)
+    comparison = case_dir / "comparison.json"
+    comparison.write_text(
+        json.dumps(result, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return result, comparison
+
+
 def _comparison_result(
     binding: Binding,
     *,
@@ -1101,7 +1105,8 @@ def _comparison_result(
     dataset_command: str,
     sample_limit: int = 0,
 ) -> dict[str, Any]:
-    summary_path = case_dir / "validation" / binding.workload / "eval_summary.json"
+    workload = _required_workload(binding)
+    summary_path = case_dir / "validation" / workload / "eval_summary.json"
     raw_result: dict[str, Any] = {}
     if summary_path.is_file():
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -1123,7 +1128,7 @@ def _comparison_result(
     status = str(raw_result.get("status", "") or "")
     if status not in {"passed", "failed", "skipped"}:
         status = "passed" if returncode == 0 else "failed"
-    work_dir = case_dir / "validation" / binding.workload / binding.model
+    work_dir = case_dir / "validation" / workload / binding.model
     disagreements = trtmc_disagreements.build_disagreement_artifact(
         work_dir=work_dir,
         case_dir=case_dir,
@@ -1151,58 +1156,19 @@ def _comparison_result(
     })
 
 
-def _e2e_result(
-    binding: Binding,
-    *,
-    case_dir: Path,
-    returncode: int,
-    reference_environment: EnvironmentSelection,
-    dataset_command: str,
-) -> dict[str, Any]:
-    result_paths = sorted((case_dir / "e2e").glob("*/result.json"))
-    raw_results = [json.loads(path.read_text(encoding="utf-8")) for path in result_paths]
-    status = (
-        "passed"
-        if returncode == 0
-        and raw_results
-        and all(result.get("status") == "pass" for result in raw_results)
-        else "failed"
-    )
-    return _normalize_result({
-        "schema_version": "trtmc.validation-result/v2",
-        "model": binding.model,
-        "workload": binding.workload,
-        "executor": "e2e",
-        "status": status,
-        "returncode": returncode,
-        "reference_environment": [
-            {"name": name, "python": path} for name, path in reference_environment.names_and_paths
-        ],
-        "reproduce": _add_dataset_reproduction(
-            _commands_from_e2e_results(raw_results),
-            dataset_command,
-        ),
-        "raw_result_paths": [str(path) for path in result_paths],
-        "raw_results": raw_results,
-        "execution_log": str(case_dir / "execution.log"),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
-
-
 def run_binding(
     binding: Binding,
     *,
     arguments: argparse.Namespace,
     task_models: Mapping[str, dict[str, Any]],
-    e2e_models: Mapping[str, Any],
     suites: Mapping[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    case_dir = Path(arguments.output) / binding.model / binding.workload
+    workload = _required_workload(binding)
+    case_dir = _case_directory(Path(arguments.output), binding)
     case_dir.mkdir(parents=True, exist_ok=True)
     profiles = _binding_profiles(
         binding,
         task_models=task_models,
-        e2e_models=e2e_models,
     )
     environment = ensure_environments(profiles, str(arguments.hf_python))
     reference_sources = ensure_reference_sources(
@@ -1214,45 +1180,29 @@ def run_binding(
     process_env.update(reference_sources.environment)
     dataset_command = shlex.join([sys.executable, *sys.argv])
 
-    if binding.workload == "e2e":
-        command = _e2e_command(
-            binding,
-            case_dir=case_dir,
-            arguments=arguments,
-            reference_python=environment.base_python,
-        )
-        returncode = _run_subprocess(command, case_dir / "execution.log", process_env)
-        result = _e2e_result(
-            binding,
-            case_dir=case_dir,
-            returncode=returncode,
-            reference_environment=environment,
-            dataset_command=dataset_command,
-        )
-    else:
-        suite = suites[binding.workload]
-        dataset = (
-            Path(arguments.dataset)
-            if arguments.dataset
-            else _dataset_path(suite, arguments.dataset_root)
-        )
-        command = _comparison_command(
-            binding,
-            case_dir=case_dir,
-            dataset=dataset,
-            arguments=arguments,
-            reference_python=environment.base_python,
-            reference_sources=reference_sources,
-        )
-        returncode = _run_subprocess(command, case_dir / "execution.log", process_env)
-        result = _comparison_result(
-            binding,
-            case_dir=case_dir,
-            returncode=returncode,
-            reference_environment=environment,
-            dataset_command=dataset_command,
-            sample_limit=int(arguments.limit or 0),
-        )
+    suite = suites[workload]
+    dataset = (
+        Path(arguments.dataset)
+        if arguments.dataset
+        else _dataset_path(suite, arguments.dataset_root)
+    )
+    command = _comparison_command(
+        binding,
+        case_dir=case_dir,
+        dataset=dataset,
+        arguments=arguments,
+        reference_python=environment.base_python,
+        reference_sources=reference_sources,
+    )
+    returncode = _run_subprocess(command, case_dir / "execution.log", process_env)
+    result = _comparison_result(
+        binding,
+        case_dir=case_dir,
+        returncode=returncode,
+        reference_environment=environment,
+        dataset_command=dataset_command,
+        sample_limit=int(arguments.limit or 0),
+    )
 
     comparison = case_dir / "comparison.json"
     comparison.write_text(
@@ -1581,6 +1531,13 @@ def _render_reproduction(
     case_dir: Path,
     artifact_href: str,
 ) -> str:
+    not_compared_reason = str(result.get("not_compared_reason", "") or "")
+    if not_compared_reason:
+        return (
+            '<span class="unavailable">'
+            f"{html.escape(not_compared_reason)}"
+            "</span>"
+        )
     reference_commands = _result_commands(result, "hf")
     trtmc_commands = _result_commands(result, "trtmc")
     dataset_command, sample_limit, _ = _dataset_reproduction(result)
@@ -1631,10 +1588,15 @@ def _signal(status: str, labels: Mapping[str, str]) -> str:
 def _render_execution(result: Mapping[str, Any]) -> str:
     execution = result.get("execution", {})
     status = str(execution.get("status", "error")) if isinstance(execution, dict) else "error"
-    return _signal(status, {"completed": "Completed", "error": "Error"})
+    return _signal(
+        status,
+        {"completed": "Completed", "error": "Error", "not_run": "Not run"},
+    )
 
 
 def _render_reference(result: Mapping[str, Any]) -> str:
+    if result.get("not_compared_reason"):
+        return _signal("not_run", {"not_run": "Not configured"})
     status = _reference_result_status(result)
     display_status = {
         "reused": "cached",
@@ -1671,7 +1633,13 @@ def _render_comparison(result: Mapping[str, Any]) -> str:
         },
     )
     mode = str(comparison.get("mode", "") or "")
-    detail = f'<div class="detail">{html.escape(mode)}</div>' if mode else ""
+    not_compared_reason = str(result.get("not_compared_reason", "") or "")
+    detail_text = mode or not_compared_reason
+    detail = (
+        f'<div class="detail">{html.escape(detail_text)}</div>'
+        if detail_text
+        else ""
+    )
     return signal + detail
 
 
@@ -1694,6 +1662,8 @@ def _format_metric_value(name: str, value: Any) -> str:
 
 
 def _render_metrics(result: Mapping[str, Any]) -> str:
+    if result.get("not_compared_reason"):
+        return '<span class="unavailable">Not compared</span>'
     comparison = result.get("comparison", {})
     metrics = comparison.get("metrics", {}) if isinstance(comparison, dict) else {}
     if not isinstance(metrics, dict) or not metrics:
@@ -1728,16 +1698,21 @@ def _render_validation(result: Mapping[str, Any]) -> str:
     )
     return _signal(
         status,
-        {"passed": "Pass", "failed": "Fail", "skipped": "Skipped"},
+        {
+            "passed": "Pass",
+            "failed": "Fail",
+            "skipped": "Skipped",
+            "not_compared": "Not compared",
+        },
     )
 
 
 def _render_samples(result: Mapping[str, Any]) -> str:
+    if result.get("not_compared_reason"):
+        return "—"
     _command, sample_limit, _ = _dataset_reproduction(result)
     if sample_limit:
         return str(sample_limit)
-    if result.get("workload") == "e2e":
-        return "E2E"
     return "Full"
 
 
@@ -1757,12 +1732,32 @@ def _normalize_result_files(
     return results
 
 
+def _deduplicate_results(
+    result_paths: Sequence[Path],
+    results: Sequence[dict[str, Any]],
+) -> tuple[list[Path], list[dict[str, Any]]]:
+    selected: dict[tuple[str, str], tuple[Path, dict[str, Any]]] = {}
+    for path, result in zip(result_paths, results, strict=True):
+        key = (
+            str(result.get("model", "")),
+            str(result.get("workload") or ""),
+        )
+        current = selected.get(key)
+        if current is None or path.parent.name == NOT_COMPARED_DIRECTORY:
+            selected[key] = (path, result)
+    ordered = sorted(selected.values(), key=lambda item: str(item[0]))
+    return (
+        [path for path, _result in ordered],
+        [result for _path, result in ordered],
+    )
+
+
 def _report_counts(
     results: Sequence[Mapping[str, Any]],
 ) -> tuple[dict[str, int], dict[str, int], int]:
     validation_counts = {
         name: sum(result["validation"]["status"] == name for result in results)
-        for name in ("passed", "failed", "skipped")
+        for name in ("passed", "failed", "skipped", "not_compared")
     }
     comparison_counts = {
         name: sum(result["comparison"]["status"] == name for result in results)
@@ -1810,7 +1805,7 @@ def _report_rows(
         rows.append(
             "<tr>"
             f"<td>{html.escape(str(result.get('model', '')))}</td>"
-            f"<td>{html.escape(str(result.get('workload', '')))}</td>"
+            f"<td>{html.escape(str(result.get('workload') or '—'))}</td>"
             f"<td>{_render_samples(result)}</td>"
             f"<td>{_render_execution(result)}</td>"
             f"<td>{_render_reference(result)}</td>"
@@ -1881,7 +1876,7 @@ pre {{ margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
 .signal-skipped .signal-light {{ background: #f9ab00; box-shadow: 0 0 0 3px #fef7e0; }}
 .signal-cached {{ color: #185abc; }}
 .signal-cached .signal-light {{ background: #1a73e8; box-shadow: 0 0 0 3px #e8f0fe; }}
-.signal-not_run {{ color: #5f6368; }}
+.signal-not_run, .signal-not_compared {{ color: #5f6368; }}
 .detail {{ color: #5f6368; font-size: 12px; margin-top: 4px; }}
 .metric {{ display: flex; justify-content: space-between; gap: 14px;
            font-variant-numeric: tabular-nums; font-size: 12px; }}
@@ -1898,6 +1893,7 @@ pre {{ margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
 <div class="summary">{report["summary"]["cases"]} cases ·
 {comparison_counts["agreement"]} agreements ·
 {comparison_counts["disagreement"]} disagreements ·
+{comparison_counts["not_run"]} not compared ·
 {execution_errors} execution errors ·
 {report["summary"]["selected_samples"]} samples{duration_summary}<br>
 {html.escape(provenance)}</div>
@@ -1912,6 +1908,7 @@ pre {{ margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
 def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
     result_paths = sorted(output.glob("*/*/comparison.json"))
     results = _normalize_result_files(result_paths)
+    result_paths, results = _deduplicate_results(result_paths, results)
     validation_counts, comparison_counts, execution_errors = _report_counts(results)
     traffic_light_counts = _traffic_light_counts(results)
     sample_limits = [_dataset_reproduction(result)[1] for result in results]
@@ -1920,11 +1917,18 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
         "schema_version": "trtmc.validation-report/v2",
         "generated_at": generated_at.isoformat(),
         "validation_status": (
-            "passed" if results and validation_counts["failed"] == 0 else "failed"
+            "failed"
+            if not results or validation_counts["failed"]
+            else "incomplete"
+            if validation_counts["not_compared"]
+            else "passed"
         ),
         "summary": {
             "cases": len(results),
-            "execution_completed": len(results) - execution_errors,
+            "execution_completed": sum(
+                result["execution"]["status"] == "completed"
+                for result in results
+            ),
             "execution_errors": execution_errors,
             "agreements": comparison_counts["agreement"],
             "disagreements": comparison_counts["disagreement"],
@@ -1963,6 +1967,12 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
 
 
 def _print_result(result: Mapping[str, Any], comparison: Path, report: Path) -> None:
+    not_compared_reason = str(result.get("not_compared_reason", "") or "")
+    if not_compared_reason:
+        print()
+        print(f"Compare result: {comparison}")
+        print(f"Report:         {report}")
+        return
     reproduce = result.get("reproduce", {})
     hf_commands = reproduce.get("hf", []) if isinstance(reproduce, dict) else []
     trtmc_commands = reproduce.get("trtmc", []) if isinstance(reproduce, dict) else []
@@ -2030,7 +2040,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backend-dir", type=Path)
     parser.add_argument("--model-plugin-dir", type=Path)
     parser.add_argument("--cuda-visible-devices", default="")
-    parser.add_argument("--platform", default="")
     parser.add_argument(
         "--limit",
         type=int,
@@ -2092,15 +2101,25 @@ def _print_bindings(
     print(
         json.dumps(
             [
-                {
-                    "model": binding.model,
-                    "workload": binding.workload,
-                    "sample_limit": resolve_sample_limit(
-                        catalog,
-                        binding,
-                        explicit_limit,
-                    ),
-                }
+                (
+                    {
+                        "model": binding.model,
+                        "workload": binding.workload,
+                        "sample_limit": resolve_sample_limit(
+                            catalog,
+                            binding,
+                            explicit_limit,
+                        ),
+                    }
+                    if binding.runnable
+                    else {
+                        "model": binding.model,
+                        "workload": None,
+                        "sample_limit": 0,
+                        "status": "not_compared",
+                        "reason": binding.not_compared_reason,
+                    }
+                )
                 for binding in bindings
             ],
             indent=2,
@@ -2118,11 +2137,12 @@ def _worker_command(
     binding: Binding,
     arguments: argparse.Namespace,
 ) -> list[str]:
+    workload = _required_workload(binding)
     command = [
         sys.executable,
         str(Path(__file__).resolve()),
         binding.model,
-        binding.workload,
+        workload,
         "--model-worker",
     ]
     for option, value in (
@@ -2142,7 +2162,6 @@ def _worker_command(
         ("--backend-dir", arguments.backend_dir),
         ("--model-plugin-dir", arguments.model_plugin_dir),
         ("--cuda-visible-devices", arguments.cuda_visible_devices),
-        ("--platform", arguments.platform),
     ):
         if value:
             command.extend([option, str(value)])
@@ -2212,7 +2231,7 @@ def _run_supervised_binding(
     arguments: argparse.Namespace,
     catalog: Mapping[str, Any],
 ) -> dict[str, Any]:
-    case_dir = arguments.output / binding.model / binding.workload
+    case_dir = _case_directory(arguments.output, binding)
     case_dir.mkdir(parents=True, exist_ok=True)
     comparison_path = case_dir / "comparison.json"
     comparison_path.unlink(missing_ok=True)
@@ -2267,13 +2286,24 @@ def _run_all_bindings(
     write_run_metadata(arguments.output)
     failed = False
     for binding in bindings:
+        if not binding.runnable:
+            print(
+                f"\nNot compared: {binding.model} / "
+                f"{binding.not_compared_reason}",
+                flush=True,
+            )
+            result, comparison = _write_not_compared_case(
+                binding,
+                arguments.output,
+            )
+            _, report_path, _ = write_report(arguments.output)
+            _print_result(result, comparison, report_path)
+            continue
         sample_limit = resolve_sample_limit(catalog, binding, arguments.limit)
         sample_note = (
             "full dataset"
-            if binding.workload != "e2e" and sample_limit == 0
+            if sample_limit == 0
             else f"{sample_limit} samples"
-            if binding.workload != "e2e"
-            else "e2e"
         )
         print(
             f"\nStarting worker: {binding.model} / {binding.workload} / {sample_note}",
@@ -2285,7 +2315,7 @@ def _run_all_bindings(
             catalog=catalog,
         )
         _, report_path, _ = write_report(arguments.output)
-        comparison = arguments.output / binding.model / binding.workload / "comparison.json"
+        comparison = _case_directory(arguments.output, binding) / "comparison.json"
         _print_result(result, comparison, report_path)
         model_failed = result["validation"]["status"] == "failed"
         failed = failed or model_failed
@@ -2306,12 +2336,27 @@ def _run_bindings(
     task_models: Mapping[str, dict[str, Any]],
     suites: Mapping[str, dict[str, Any]],
 ) -> int:
-    e2e_models = _e2e_models(arguments.models_dir)
     _prepare_run_directories(arguments)
     if not arguments.model_worker:
         write_run_metadata(arguments.output)
     failed = False
+    not_compared = False
     for binding in bindings:
+        if not binding.runnable:
+            print(
+                f"\nNot compared: {binding.model} / "
+                f"{binding.not_compared_reason}",
+                flush=True,
+            )
+            result, comparison = _write_not_compared_case(
+                binding,
+                arguments.output,
+            )
+            not_compared = True
+            if not arguments.model_worker:
+                _, report_path, _ = write_report(arguments.output)
+                _print_result(result, comparison, report_path)
+            continue
         binding_arguments = copy.copy(arguments)
         binding_arguments.limit = resolve_sample_limit(
             catalog,
@@ -2320,12 +2365,8 @@ def _run_bindings(
         )
         sample_note = (
             "full dataset"
-            if binding.workload != "e2e" and binding_arguments.limit == 0
-            else (
-                f"{binding_arguments.limit} samples"
-                if binding.workload != "e2e"
-                else "e2e"
-            )
+            if binding_arguments.limit == 0
+            else f"{binding_arguments.limit} samples"
         )
         print(
             f"\n{binding.model} / {binding.workload} / {sample_note}",
@@ -2335,28 +2376,30 @@ def _run_bindings(
             binding,
             arguments=binding_arguments,
             task_models=task_models,
-            e2e_models=e2e_models,
             suites=suites,
         )
         if not arguments.model_worker:
             _, report_path, _ = write_report(arguments.output)
-            comparison = arguments.output / binding.model / binding.workload / "comparison.json"
+            comparison = _case_directory(arguments.output, binding) / "comparison.json"
             _print_result(result, comparison, report_path)
         failed = failed or result["validation"]["status"] == "failed"
-    return 1 if failed else 0
+    if failed:
+        return 1
+    return 2 if not_compared and not arguments.all else 0
 
 
 def _main(arguments: argparse.Namespace) -> int:
     catalog, suites, ready, task_models = _load_validation_inputs(arguments)
     if arguments.list:
         for name, spec in catalog["models"].items():
+            not_compared_reason = str(spec.get("not_compared_reason", "") or "")
+            if not_compared_reason:
+                print(f"{name}: not compared ({not_compared_reason})")
+                continue
             workloads = []
             for workload in spec["workloads"]:
-                if workload == "e2e":
-                    workloads.append("e2e")
-                else:
-                    limit = catalog["sample_limits"][workload]
-                    workloads.append(f"{workload} ({limit} samples)")
+                limit = catalog["sample_limits"][workload]
+                workloads.append(f"{workload} ({limit} samples)")
             print(f"{name}: {', '.join(workloads)}")
         return 0
     bindings = _select_bindings(arguments, catalog, ready)

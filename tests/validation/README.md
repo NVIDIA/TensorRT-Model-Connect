@@ -47,11 +47,13 @@ python tools/trtmc_validate.py gpt2-125m mmlu_continuation_parity \
   --output validation-artifacts
 ```
 
-The case result is always written to
+For configured consistency workloads, the case result is always written to
 `<output>/<model>/<workload>/comparison.json`; `report.json` and `report.html`
 are written at the output root. Exit status `0` means reference consistency
 passed, `1` means the case ran but validation failed, and `2` means CLI or
-setup validation failed before the case could run.
+setup validation failed before the case could run. Requesting a model that is
+explicitly marked not compared also writes
+`<output>/<model>/not-compared/comparison.json` and returns `2`.
 
 Dataset-backed workloads use the task-specific sample limits declared in
 `model_workloads.yaml`. Fast encoder and classification workloads use larger
@@ -80,13 +82,24 @@ directories therefore do not retain another copy of the bundle.
 
 At completion the command prints the exact reference and TRTMC reproduction
 commands, the per-model `comparison.json`, and the aggregate `report.html`.
-Dataset-backed comparison runs through `tools/trtmc_compare.py`; task-eval
+Comparison runs through `tools/trtmc_compare.py`; task-eval
 commands are not part of the validation result or its reproduction contract.
-Every non-`e2e` model/workload binding must resolve to an independent reference
+Every model/workload binding must resolve to an independent reference
 runner selected by the prepared dataset kind. A catalog-wide test rejects new
-bindings that would fall back to `task_eval.py`. Models whose validation
-contract is still only `e2e` continue to use the E2E path and are not presented
-as migrated task-eval workloads.
+bindings that would fall back to `task_eval.py` or E2E execution.
+
+Every agreement or disagreement therefore means that both backends consumed
+the aligned prepared inputs and produced outputs that were evaluated by the
+declared comparator. A model without that complete contract stays in the
+catalog with `not_compared_reason`. `--all` records it as a white **Not
+compared** row without launching E2E, creating a reference environment, or
+building an engine. Such rows make the aggregate report status `incomplete`;
+they are not agreements, disagreements, execution errors, or attempted model
+failures.
+
+`--all --dry-run` keeps these models visible with `workload: null`,
+`status: not_compared`, and the reason. CI matrix generation can select only
+entries that contain a workload.
 
 The HTML artifact is named **TRTMC Reference Consistency Report** because it
 covers task accuracy as well as token, embedding, and numerical agreement.
@@ -121,6 +134,9 @@ The report keeps three statuses separate:
 - `comparison`: whether TRTMC agrees or disagrees with the reference;
 - `validation`: the final pass, fail, or skipped result.
 
+An unimplemented consistency contract uses `execution: not_run`,
+`comparison: not_run`, and `validation: not_compared`.
+
 The HTML report renders each status as an independent colored signal and shows
 the primary agreement metric next to it.
 
@@ -132,6 +148,13 @@ the primary agreement metric next to it.
 3. Add a workload sample limit if the workload is new.
 4. Select one workload as the model default.
 
-Use `e2e` only when the model cannot use a dataset-backed workload yet. A model
-may list multiple workloads; callers select one by passing it after the model
-name.
+A model may list multiple workloads; callers select one by passing it after the
+model name. If the aligned reference/TRTMC comparison is not implemented yet,
+declare only:
+
+```yaml
+model-name:
+  not_compared_reason: Aligned reference workload and output comparator are not implemented.
+```
+
+Do not use `e2e` as a validation workload.

@@ -36,6 +36,13 @@ def test_model_workload_catalog_covers_every_ready_model():
     )
 
     assert len(catalog["models"]) == len(ready_models) == 105
+    assert sum(
+        "not_compared_reason" in spec for spec in catalog["models"].values()
+    ) == 10
+    assert all(
+        "e2e" not in spec.get("workloads", [])
+        for spec in catalog["models"].values()
+    )
 
 
 def test_validation_ready_models_exclude_l0_only_profiles():
@@ -62,8 +69,7 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
     declared = {
         workload
         for spec in catalog["models"].values()
-        for workload in spec["workloads"]
-        if workload != "e2e"
+        for workload in spec.get("workloads", [])
     }
 
     assert configured == declared
@@ -80,8 +86,7 @@ def test_every_dataset_backed_validation_binding_has_native_reference_runner():
     bindings = [
         (model_name, workload)
         for model_name, spec in catalog["models"].items()
-        for workload in spec["workloads"]
-        if workload != "e2e"
+        for workload in spec.get("workloads", [])
     ]
     missing = []
     for model_name, workload in bindings:
@@ -115,6 +120,52 @@ def test_resolve_binding_defaults_and_rejects_undeclared_workload():
         trtmc_validate.resolve_binding(catalog, "model-a", "workload-c")
 
 
+def test_resolve_binding_keeps_unimplemented_model_visible_but_not_runnable():
+    catalog = {
+        "models": {
+            "model-a": {
+                "not_compared_reason": "Reference comparator is missing.",
+            }
+        }
+    }
+
+    binding = trtmc_validate.resolve_binding(catalog, "model-a")
+
+    assert binding == trtmc_validate.Binding(
+        "model-a",
+        None,
+        "Reference comparator is missing.",
+    )
+    assert not binding.runnable
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="has no reference-consistency workloads",
+    ):
+        trtmc_validate.resolve_binding(catalog, "model-a", "workload-a")
+
+
+def test_catalog_rejects_e2e_as_reference_consistency_workload(tmp_path):
+    catalog_path = tmp_path / "model_workloads.yaml"
+    catalog_path.write_text(
+        """
+version: 1
+sample_limits:
+  workload-a: 1
+models:
+  model-a:
+    default: e2e
+    workloads: [e2e]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="cannot use e2e",
+    ):
+        trtmc_validate.load_catalog(catalog_path)
+
+
 def test_resolve_sample_limit_uses_workload_policy_and_cli_override():
     catalog = {
         "sample_limits": {"workload-a": 50},
@@ -123,9 +174,8 @@ def test_resolve_sample_limit_uses_workload_policy_and_cli_override():
                 "default": "workload-a",
                 "workloads": ["workload-a"],
             },
-            "model-e2e": {
-                "default": "e2e",
-                "workloads": ["e2e"],
+            "model-not-compared": {
+                "not_compared_reason": "Reference comparator is missing.",
             },
         },
     }
@@ -157,7 +207,23 @@ def test_resolve_sample_limit_uses_workload_policy_and_cli_override():
     assert (
         trtmc_validate.resolve_sample_limit(
             catalog,
-            trtmc_validate.Binding("model-e2e", "e2e"),
+            trtmc_validate.Binding(
+                "model-not-compared",
+                None,
+                "Reference comparator is missing.",
+            ),
+            7,
+        )
+        == 0
+    )
+    assert (
+        trtmc_validate.resolve_sample_limit(
+            catalog,
+            trtmc_validate.Binding(
+                "model-not-compared",
+                None,
+                "Reference comparator is missing.",
+            ),
             None,
         )
         == 0
@@ -242,6 +308,67 @@ def test_all_supervisor_applies_model_failure_policy(
 
     assert returncode == 1
     assert attempted == expected_models
+
+
+def test_all_supervisor_records_not_compared_without_launching_worker(
+    tmp_path,
+    monkeypatch,
+):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--output",
+            str(tmp_path / "results"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    binding = trtmc_validate.Binding(
+        "model-a",
+        None,
+        "Reference comparator is missing.",
+    )
+
+    def unexpected_worker(*_args, **_kwargs):
+        raise AssertionError("not-compared models must not launch a worker")
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_run_supervised_binding",
+        unexpected_worker,
+    )
+    monkeypatch.setattr(trtmc_validate, "write_run_metadata", lambda output: output)
+    monkeypatch.setattr(
+        trtmc_validate,
+        "write_report",
+        lambda output: (
+            output / "report.json",
+            output / "report.html",
+            {},
+        ),
+    )
+    monkeypatch.setattr(trtmc_validate, "_print_result", lambda *args: None)
+
+    returncode = trtmc_validate._run_all_bindings(
+        [binding],
+        arguments=arguments,
+        catalog={"sample_limits": {}},
+    )
+
+    comparison = (
+        arguments.output
+        / "model-a"
+        / trtmc_validate.NOT_COMPARED_DIRECTORY
+        / "comparison.json"
+    )
+    result = json.loads(comparison.read_text(encoding="utf-8"))
+    assert returncode == 0
+    assert result["execution"]["status"] == "not_run"
+    assert result["comparison"]["status"] == "not_run"
+    assert result["validation"]["status"] == "not_compared"
+    assert result["not_compared_reason"] == "Reference comparator is missing."
 
 
 def test_supervised_binding_replaces_stale_result_with_worker_crash(tmp_path, monkeypatch):
@@ -358,9 +485,8 @@ def test_all_dry_run_emits_machine_readable_ci_cases(monkeypatch, capsys):
                 "default": "workload-a",
                 "workloads": ["workload-a"],
             },
-            "model-e2e": {
-                "default": "e2e",
-                "workloads": ["e2e"],
+            "model-not-compared": {
+                "not_compared_reason": "Reference comparator is missing.",
             },
         },
     }
@@ -370,7 +496,7 @@ def test_all_dry_run_emits_machine_readable_ci_cases(monkeypatch, capsys):
         lambda arguments: (
             catalog,
             {"workload-a": {}},
-            ("model-a", "model-e2e"),
+            ("model-a", "model-not-compared"),
             {},
         ),
     )
@@ -385,9 +511,11 @@ def test_all_dry_run_emits_machine_readable_ci_cases(monkeypatch, capsys):
             "sample_limit": 5,
         },
         {
-            "model": "model-e2e",
-            "workload": "e2e",
+            "model": "model-not-compared",
+            "workload": None,
             "sample_limit": 0,
+            "status": "not_compared",
+            "reason": "Reference comparator is missing.",
         },
     ]
 
@@ -421,7 +549,7 @@ def test_single_ci_case_writes_stable_result_and_exit_code(
     binding = trtmc_validate.Binding("model-a", "workload-a")
     catalog = {"sample_limits": {"workload-a": 5}}
 
-    def run_binding(binding, *, arguments, task_models, e2e_models, suites):
+    def run_binding(binding, *, arguments, task_models, suites):
         result = {
             "schema_version": "trtmc.validation-result/v2",
             "model": binding.model,
@@ -453,7 +581,6 @@ def test_single_ci_case_writes_stable_result_and_exit_code(
         )
         return result
 
-    monkeypatch.setattr(trtmc_validate, "_e2e_models", lambda models_dir: {})
     monkeypatch.setattr(trtmc_validate, "run_binding", run_binding)
 
     returncode = trtmc_validate._run_bindings(
@@ -509,7 +636,6 @@ def test_model_specific_reference_environment_keeps_common_validation_base() -> 
                 "reference_backend": "hf_transformers",
             }
         },
-        e2e_models={},
     )
 
     assert profiles == (
@@ -771,7 +897,7 @@ def test_traffic_light_counts_are_mutually_exclusive():
             result("passed", "agreement"),
             result("skipped", "not_run"),
             result("failed", "disagreement"),
-            result("failed", "not_run"),
+            result("not_compared", "not_run"),
         ]
     ) == {
         "green": 1,
@@ -779,6 +905,77 @@ def test_traffic_light_counts_are_mutually_exclusive():
         "red": 1,
         "white": 1,
     }
+
+
+def test_legacy_e2e_result_is_not_reported_as_reference_agreement(tmp_path):
+    case_dir = tmp_path / "model-a" / "e2e"
+    case_dir.mkdir(parents=True)
+    (case_dir / "comparison.json").write_text(
+        json.dumps(
+            {
+                "model": "model-a",
+                "workload": "e2e",
+                "executor": "e2e",
+                "status": "passed",
+                "returncode": 0,
+                "raw_results": [{"status": "pass"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, html_path, report = trtmc_validate.write_report(tmp_path)
+
+    result = report["results"][0]
+    assert report["validation_status"] == "incomplete"
+    assert report["summary"]["agreements"] == 0
+    assert report["summary"]["not_compared"] == 1
+    assert result["execution"]["status"] == "not_run"
+    assert result["comparison"]["status"] == "not_run"
+    assert result["validation"]["status"] == "not_compared"
+    assert result["not_compared_reason"] == trtmc_validate.LEGACY_E2E_REASON
+    document = html_path.read_text(encoding="utf-8")
+    assert "🟢 0 &nbsp; 🟡 0 &nbsp;" in document
+    assert "🔴 0 &nbsp; ⚪ 1" in document
+    assert "E2E execution does not compare aligned reference" in document
+
+
+def test_not_compared_result_replaces_legacy_e2e_row_without_deleting_evidence(
+    tmp_path,
+):
+    legacy_dir = tmp_path / "model-a" / "e2e"
+    legacy_dir.mkdir(parents=True)
+    legacy_comparison = legacy_dir / "comparison.json"
+    legacy_comparison.write_text(
+        json.dumps(
+            {
+                "model": "model-a",
+                "workload": "e2e",
+                "executor": "e2e",
+                "status": "passed",
+                "raw_results": [{"status": "pass"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    trtmc_validate._write_not_compared_case(
+        trtmc_validate.Binding(
+            "model-a",
+            None,
+            "Reference comparator is missing.",
+        ),
+        tmp_path,
+    )
+
+    _, _, report = trtmc_validate.write_report(tmp_path)
+
+    assert legacy_comparison.is_file()
+    assert report["summary"]["cases"] == 1
+    assert report["summary"]["not_compared"] == 1
+    assert (
+        report["results"][0]["not_compared_reason"]
+        == "Reference comparator is missing."
+    )
 
 
 def test_write_report_records_total_duration(tmp_path, monkeypatch):
@@ -1570,7 +1767,6 @@ def test_run_binding_wires_reference_source_command_and_environment(
                 "execution_profiles": {},
             }
         },
-        e2e_models={},
         suites={"elf-workload": {}},
     )
 
