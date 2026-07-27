@@ -12,8 +12,9 @@ frameworks run in separate Python processes and do not add dependencies to
 
 The suite contains one row for every release-relevant single-process model
 profile marked `ready` in the benchmark catalog. Profiles whose names contain an
-`l0` segment are shorter PR-smoke duplicates and are deliberately excluded. The
-suite currently has 105 model-profile comparisons across 76 families and 77
+`l0` segment are shorter PR-smoke duplicates and are deliberately excluded.
+Other temporary omissions must be named under `excluded_profiles` with a reason.
+The suite currently has 104 model-profile comparisons across 76 families and 77
 `(family, operation)` contracts because some families expose multiple profiles
 and `eagle_vlm` exposes both `embed` and `rerank`. Catalog profiles marked
 `distributed` require their own multi-process launch and are not silently
@@ -109,9 +110,19 @@ additional_profiles:
 The resolved row uses `qwen3-0.6b-fp8` as both its model profile and testcase,
 while retaining the reviewed Qwen timing, reference, and output contracts. A
 profile with different replay inputs or reference assets declares those
-overrides in the same block. The coverage check requires every non-L0 ready
-single-process catalog profile exactly once and rejects L0 entries in the suite
-as extras.
+overrides in the same block.
+
+A ready profile can be omitted only with an explicit reason:
+
+```yaml
+excluded_profiles:
+  - model: qwen3-moe-30b-a3b
+    reason: Excluded while its single-process TensorRT engine deserialization failure is unresolved.
+```
+
+The coverage check requires every non-L0 ready single-process catalog profile to
+appear exactly once or in `excluded_profiles`. It rejects L0 entries, unknown
+exclusions, and profiles that are both configured and excluded.
 
 Suite-level `defaults.measurement` avoids repeating warmup and iteration counts.
 The fully resolved workload and measurement values are recorded in `results.json`.

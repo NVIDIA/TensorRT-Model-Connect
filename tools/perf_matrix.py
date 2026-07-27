@@ -379,6 +379,34 @@ def _cases(suite: Mapping[str, Any]) -> list[dict[str, Any]]:
     return cases
 
 
+def _excluded_profiles(suite: Mapping[str, Any]) -> dict[str, str]:
+    configured = suite.get("excluded_profiles", [])
+    if not isinstance(configured, list):
+        raise PerfMatrixError("suite excluded_profiles must be a list")
+    exclusions: dict[str, str] = {}
+    for raw in configured:
+        if not isinstance(raw, Mapping):
+            raise PerfMatrixError("every excluded profile must be an object")
+        unsupported = sorted(set(raw) - {"model", "reason"})
+        if unsupported:
+            raise PerfMatrixError(
+                "excluded profile has unsupported fields: " + ", ".join(unsupported)
+            )
+        model = raw.get("model")
+        reason = raw.get("reason")
+        if not isinstance(model, str) or not model.strip():
+            raise PerfMatrixError("excluded profile model must be a non-empty string")
+        if not isinstance(reason, str) or not reason.strip():
+            raise PerfMatrixError(
+                f"excluded profile {model} reason must be a non-empty string"
+            )
+        model = model.strip()
+        if model in exclusions:
+            raise PerfMatrixError(f"duplicate excluded profile: {model}")
+        exclusions[model] = reason.strip()
+    return exclusions
+
+
 def _additional_profile_cases(
     base_cases: Sequence[Mapping[str, Any]],
     configured: Sequence[Any],
@@ -621,16 +649,27 @@ def _is_l0_profile(name: str) -> bool:
     return L0_PROFILE_PATTERN.search(name) is not None
 
 
-def _validate_coverage(cases: Sequence[Mapping[str, Any]]) -> None:
-    expected = {
+def _validate_coverage(
+    cases: Sequence[Mapping[str, Any]],
+    excluded_profiles: Iterable[str] = (),
+) -> None:
+    catalog_profiles = {
         entry.name: (entry.family, entry.operation)
         for entry in ManifestCatalog().entries()
         if entry.status == "ready" and not _is_l0_profile(entry.name)
     }
+    excluded = set(excluded_profiles)
+    invalid_exclusions = sorted(excluded - set(catalog_profiles))
+    expected = {
+        model: contract
+        for model, contract in catalog_profiles.items()
+        if model not in excluded
+    }
     actual_models = [str(case["model"]) for case in cases]
     actual = set(actual_models)
     missing = sorted(set(expected) - actual)
-    extra = sorted(actual - set(expected))
+    extra = sorted(actual - set(catalog_profiles))
+    excluded_in_cases = sorted(actual & excluded)
     duplicates = sorted(
         model for model, count in Counter(actual_models).items() if count > 1
     )
@@ -638,17 +677,31 @@ def _validate_coverage(cases: Sequence[Mapping[str, Any]]) -> None:
         (
             model,
             f"{case['family']}.{case['operation']}",
-            f"{expected[model][0]}.{expected[model][1]}",
+            f"{catalog_profiles[model][0]}.{catalog_profiles[model][1]}",
         )
         for case in cases
-        if (model := str(case["model"])) in expected
-        and (str(case["family"]), str(case["operation"])) != expected[model]
+        if (model := str(case["model"])) in catalog_profiles
+        and (str(case["family"]), str(case["operation"])) != catalog_profiles[model]
     )
-    if missing or extra or duplicates or mismatched:
-        details = _coverage_details(missing, extra, duplicates, mismatched)
+    if (
+        missing
+        or extra
+        or duplicates
+        or mismatched
+        or invalid_exclusions
+        or excluded_in_cases
+    ):
+        details = _coverage_details(
+            missing,
+            extra,
+            duplicates,
+            mismatched,
+            invalid_exclusions,
+            excluded_in_cases,
+        )
         raise PerfMatrixError(
             "suite profile coverage does not match the release-ready catalog "
-            "(L0 duplicates excluded): " + "; ".join(details)
+            "(configured and L0 exclusions applied): " + "; ".join(details)
         )
 
 
@@ -657,6 +710,8 @@ def _coverage_details(
     extra: Sequence[str],
     duplicates: Sequence[str],
     mismatched: Sequence[tuple[str, str, str]],
+    invalid_exclusions: Sequence[str],
+    excluded_in_cases: Sequence[str],
 ) -> list[str]:
     details = []
     if missing:
@@ -670,6 +725,10 @@ def _coverage_details(
             "family-operation="
             + ",".join(f"{model}:{actual}!={expected}" for model, actual, expected in mismatched)
         )
+    if invalid_exclusions:
+        details.append("invalid-exclusion=" + ",".join(invalid_exclusions))
+    if excluded_in_cases:
+        details.append("excluded-and-configured=" + ",".join(excluded_in_cases))
     return details
 
 
@@ -747,6 +806,7 @@ def _initial_results(
 ) -> dict[str, Any]:
     catalog_entries = ManifestCatalog().entries()
     catalog_counts = Counter(entry.status for entry in catalog_entries)
+    explicit_exclusions = _excluded_profiles(suite)
     excluded_l0_profiles = sum(
         entry.status == "ready" and _is_l0_profile(entry.name)
         for entry in catalog_entries
@@ -772,7 +832,16 @@ def _initial_results(
         "catalog_coverage": {
             "total_profiles": sum(catalog_counts.values()),
             "ready_profiles": catalog_counts["ready"],
-            "release_profiles": catalog_counts["ready"] - excluded_l0_profiles,
+            "release_profiles": (
+                catalog_counts["ready"]
+                - excluded_l0_profiles
+                - len(explicit_exclusions)
+            ),
+            "explicitly_excluded_profiles": len(explicit_exclusions),
+            "explicit_exclusions": [
+                {"model": model, "reason": reason}
+                for model, reason in explicit_exclusions.items()
+            ],
             "excluded_l0_profiles": excluded_l0_profiles,
             "distributed_profiles": catalog_counts["distributed"],
             "other_profiles": sum(
@@ -2278,8 +2347,15 @@ def _report_html(results: Mapping[str, Any]) -> str:
     ready_profiles = int(catalog.get("ready_profiles", len(rows)))
     release_profiles = int(catalog.get("release_profiles", len(rows)))
     excluded_l0_profiles = int(catalog.get("excluded_l0_profiles", 0))
+    explicitly_excluded_profiles = int(
+        catalog.get("explicitly_excluded_profiles", 0)
+    )
     distributed_profiles = int(catalog.get("distributed_profiles", 0))
     other_profiles = int(catalog.get("other_profiles", 0))
+    explicit_exclusion_label = (
+        f"{explicitly_excluded_profiles} explicitly excluded profile"
+        + ("s" if explicitly_excluded_profiles != 1 else "")
+    )
     bundle_preparation_summary = html.escape(_bundle_preparation_summary(rows))
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -2296,7 +2372,7 @@ th{{background:#e5e7eb}} tr:nth-child(even){{background:#f9fafb}} code{{font-siz
 </style></head><body>
 <h1>TRTMC performance matrix</h1>
 <p class="meta">Generated {generated}. {family_count} families across {len(rows)} model-profile comparisons.{repeated_note}</p>
-<p class="meta">Release matrix coverage: {release_profiles} single-process profiles. {excluded_l0_profiles} duplicate L0 profiles are excluded from the {ready_profiles} ready catalog profiles. {distributed_profiles} distributed profiles require a separate multi-process run and are outside this report. {other_profiles} other or unsupported profiles.</p>
+<p class="meta">Release matrix coverage: {release_profiles} single-process profiles. {explicit_exclusion_label} and {excluded_l0_profiles} duplicate L0 profiles are excluded from the {ready_profiles} ready catalog profiles. {distributed_profiles} distributed profiles require a separate multi-process run and are outside this report. {other_profiles} other or unsupported profiles.</p>
 <p class="meta">Timing contracts were validated before execution for {preflight_count} comparisons. A row is classified only when its recorded TRTMC and reference policies match that contract.</p>
 <p class="meta">Times are the p50 wall time from the recorded timed samples. Measured scope states the exact recorded boundary and the work included and excluded on each side.</p>
 <p class="meta">{bundle_preparation_summary}</p>
@@ -2482,7 +2558,7 @@ def _load_suite_request(
     suite_path = arguments.suite.resolve()
     suite = _read_yaml(suite_path)
     cases = _cases(suite)
-    _validate_coverage(cases)
+    _validate_coverage(cases, _excluded_profiles(suite))
     selected = _selected_cases(cases, arguments.entry)
     if not selected:
         raise PerfMatrixError("selection contains no entries")
@@ -2557,7 +2633,7 @@ def _resume(arguments: argparse.Namespace) -> int:
         raise PerfMatrixError("cannot resume because the repository revision changed")
     suite = _read_yaml(suite_path)
     cases = _cases(suite)
-    _validate_coverage(cases)
+    _validate_coverage(cases, _excluded_profiles(suite))
     selected_ids = results.get("selected_entry_ids")
     if not isinstance(selected_ids, list) or not all(
         isinstance(value, str) for value in selected_ids
