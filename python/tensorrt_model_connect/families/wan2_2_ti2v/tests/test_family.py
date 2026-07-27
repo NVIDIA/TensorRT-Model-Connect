@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +24,7 @@ from tensorrt_model_connect.families.wan2_2_ti2v.model_config import (
     select_generation_profile,
     validate_native_config,
 )
+from tensorrt_model_connect.families.wan2_2_ti2v import fp8_profile
 from tensorrt_model_connect.families.wan2_2_ti2v.plugin import (
     WAN22_EAGER_BUNDLE_SECTIONS,
     WAN22_LAZY_BUNDLE_SECTIONS,
@@ -72,6 +75,34 @@ def _write_checkpoint(root: Path) -> Path:
     return tokenizer
 
 
+_TEST_CHECKPOINT_PAYLOAD = b"wan22-test-checkpoint"
+
+
+def _packaged_snapshot(root: Path) -> Path:
+    snapshot = (
+        root
+        / "models--Wan-AI--Wan2.2-TI2V-5B"
+        / "snapshots"
+        / fp8_profile.PACKAGED_HF_REVISION
+    )
+    snapshot.mkdir(parents=True)
+    (snapshot / "test-checkpoint.bin").write_bytes(_TEST_CHECKPOINT_PAYLOAD)
+    return snapshot
+
+
+def _use_test_checkpoint_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        fp8_profile,
+        "PACKAGED_CHECKPOINT_FILES",
+        {
+            "test-checkpoint.bin": (
+                hashlib.sha256(_TEST_CHECKPOINT_PAYLOAD).hexdigest(),
+                len(_TEST_CHECKPOINT_PAYLOAD),
+            )
+        },
+    )
+
+
 def test_hf_snapshot_required_files_are_family_owned() -> None:
     manifest_path = Path(__file__).resolve().parents[1] / "MODEL.toml"
     with manifest_path.open("rb") as manifest_file:
@@ -93,6 +124,120 @@ def test_hf_snapshot_required_files_are_family_owned() -> None:
         "models_t5_umt5-xxl-enc-bf16.pth",
         "google/umt5-xxl/tokenizer.json",
     }
+
+
+def test_packaged_fp8_asset_is_complete_and_immutable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    payload = fp8_profile.PACKAGED_FP8_SCALE_PATH.read_bytes()
+    assert len(payload) == 14_001
+    assert hashlib.sha256(payload).hexdigest() == fp8_profile.PACKAGED_FP8_SCALE_SHA256
+
+    _use_test_checkpoint_identity(monkeypatch)
+    snapshot = _packaged_snapshot(tmp_path)
+    monkeypatch.setattr(
+        fp8_profile,
+        "_current_device_profile",
+        lambda: ((10, 3), False),
+    )
+    scales = Wan22TI2VPlugin().fp8_precomputed_scales(
+        str(snapshot),
+        _runtime_config(),
+    )
+    assert len(scales) == 120
+    assert set(scales) == {
+        name
+        for index in range(WAN22_TI2V_5B.num_layers)
+        for name in (
+            f"blocks.{index}.ffn.net.0.proj",
+            f"blocks.{index}.ffn.net.2",
+            f"blocks.{index}.attn2.to_q",
+            f"blocks.{index}.attn2.to_out.0",
+        )
+    }
+    assert all(
+        set(entry) == {"input_scale", "weight_scale"}
+        and all(math.isfinite(value) and value > 0 for value in entry.values())
+        for entry in scales.values()
+    )
+
+    monkeypatch.setattr(
+        fp8_profile,
+        "_current_device_profile",
+        lambda: ((11, 0), True),
+    )
+    assert (
+        Wan22TI2VPlugin().fp8_precomputed_scales(str(snapshot), _runtime_config())
+        == scales
+    )
+    local_checkpoint = tmp_path / "local-checkpoint"
+    local_checkpoint.mkdir()
+    (local_checkpoint / "test-checkpoint.bin").write_bytes(_TEST_CHECKPOINT_PAYLOAD)
+    assert (
+        Wan22TI2VPlugin().fp8_precomputed_scales(
+            str(local_checkpoint),
+            _runtime_config(),
+        )
+        == scales
+    )
+
+
+def test_packaged_fp8_request_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_test_checkpoint_identity(monkeypatch)
+    snapshot = _packaged_snapshot(tmp_path)
+    monkeypatch.setattr(
+        fp8_profile,
+        "_current_device_profile",
+        lambda: ((10, 3), False),
+    )
+
+    with pytest.raises(ValueError, match="exact checkpoint files"):
+        Wan22TI2VPlugin().fp8_precomputed_scales(str(tmp_path), _runtime_config())
+    with pytest.raises(ValueError, match="official"):
+        Wan22TI2VPlugin().fp8_precomputed_scales(
+            str(snapshot),
+            _runtime_config(
+                video_width=672,
+                video_height=384,
+                video_num_frames=5,
+                num_inference_steps=15,
+            ),
+        )
+
+    monkeypatch.setattr(
+        fp8_profile,
+        "_current_device_profile",
+        lambda: ((11, 0), False),
+    )
+    with pytest.raises(ValueError, match="portable BF16"):
+        Wan22TI2VPlugin().fp8_precomputed_scales(str(snapshot), _runtime_config())
+
+
+def test_packaged_fp8_checkpoint_corruption_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_test_checkpoint_identity(monkeypatch)
+    snapshot = _packaged_snapshot(tmp_path)
+    (snapshot / "test-checkpoint.bin").write_bytes(b"x" * len(_TEST_CHECKPOINT_PAYLOAD))
+    monkeypatch.setattr(
+        fp8_profile,
+        "_current_device_profile",
+        lambda: ((11, 0), True),
+    )
+    with pytest.raises(ValueError, match="content does not match"):
+        Wan22TI2VPlugin().fp8_precomputed_scales(str(snapshot), _runtime_config())
+
+
+def test_packaged_fp8_asset_corruption_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    corrupt = tmp_path / fp8_profile.PACKAGED_FP8_SCALE_FILENAME
+    corrupt.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(fp8_profile, "PACKAGED_FP8_SCALE_PATH", corrupt)
+    with pytest.raises(RuntimeError, match="SHA256"):
+        fp8_profile._load_scale_asset()
 
 
 def test_qualified_generation_profiles_are_exact() -> None:
@@ -228,6 +373,7 @@ def test_public_builder_routes_wan_to_component_bundle(
     monkeypatch.setattr(engine_builder.trt_compat, "resolved_summary", lambda: "TensorRT test")
     monkeypatch.setattr(engine_builder, "_get_trt_version", lambda: "11.2.0")
     monkeypatch.setattr(engine_builder, "_get_gpu_name", lambda: "NVIDIA GB300")
+    monkeypatch.setattr(engine_builder.build_bundle, "_fp8_scales", None, raising=False)
     captured = {}
     monkeypatch.setattr(
         engine_builder,
@@ -250,6 +396,43 @@ def test_public_builder_routes_wan_to_component_bundle(
         *WAN22_MODEL_OWNED_BUNDLE_SECTIONS,
         "config.json",
     ]
+
+    packaged_scales = {
+        name: {"input_scale": 0.125, "weight_scale": 0.25}
+        for index in range(WAN22_TI2V_5B.num_layers)
+        for name in (
+            f"blocks.{index}.ffn.net.0.proj",
+            f"blocks.{index}.ffn.net.2",
+            f"blocks.{index}.attn2.to_q",
+            f"blocks.{index}.attn2.to_out.0",
+        )
+    }
+    scale_calls = []
+    monkeypatch.setattr(
+        plugin,
+        "fp8_precomputed_scales",
+        lambda model_dir, config: (
+            scale_calls.append((model_dir, config)) or packaged_scales
+        ),
+    )
+    monkeypatch.setattr(engine_builder.build_bundle, "_fp8_scales", "auto")
+    engine_builder.build_bundle(
+        str(tmp_path),
+        output_path,
+    )
+
+    assert len(scale_calls) == 1
+    assert len(calls) == 2
+    assert calls[1][1]["fp8_scales"] is packaged_scales
+    assert captured["info"].quantization == "fp8"
+    config_payload = json.loads(
+        next(
+            section.data
+            for section in captured["sections"]
+            if section.name == "config.json"
+        )
+    )
+    assert config_payload["quantization"] == {"format": "fp8"}
 
 
 def test_component_builder_emits_four_native_plans(

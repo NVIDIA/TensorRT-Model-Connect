@@ -134,6 +134,14 @@ class WheelArchiveValidator:
                 if "/benchmark/_catalog/" in name
                 and name.endswith("/data/flux2-fp8-scales.json")
             ]
+            wan22_packaged_fp8_assets = [
+                name
+                for name in names
+                if name.endswith(
+                    "/families/wan2_2_ti2v/data/"
+                    "wan22-ti2v-5b-921dbaf3-fp8-scales.json"
+                )
+            ]
             benchmark_image_assets = [
                 name
                 for name in names
@@ -159,6 +167,10 @@ class WheelArchiveValidator:
             (bool(benchmark_manifests), "packaged benchmark manifests are missing"),
             (bool(benchmark_audio_assets), "packaged benchmark audio assets are missing"),
             (bool(benchmark_fp8_assets), "packaged benchmark FP8 scale assets are missing"),
+            (
+                len(wan22_packaged_fp8_assets) == 1,
+                "packaged Wan2.2 FP8 scale asset is missing",
+            ),
             (bool(benchmark_image_assets), "packaged benchmark image assets are missing"),
             (bool(package_cores), "packaged core DSO is missing"),
             (bool(script_cores), "core DSO beside native trtmc script is missing"),

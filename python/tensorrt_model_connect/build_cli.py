@@ -163,7 +163,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
     from .engine_builder import _build_native_impl as build
     from .quantization import canonicalize_quant_format
 
-    # FP8 quantization: --fp8-scales (pre-computed) or --fp8 (auto-calibrate)
+    # FP8 quantization: explicit scales or family-provided/live calibration.
     fp8_scales = None
     fp8_auto = getattr(args, 'fp8', False)
     if getattr(args, 'fp8_scales', None):
@@ -173,9 +173,9 @@ def _cmd_build(args: argparse.Namespace) -> int:
         print(f"[trtmc build] Loaded FP8 scales from {args.fp8_scales} "
               f"({len(fp8_scales)} layers)", file=sys.stderr)
     elif fp8_auto:
-        # Sentinel: engine_builder will call plugin.fp8_calibrate()
+        # Sentinel: engine_builder resolves packaged scales before calibration.
         fp8_scales = "auto"
-        print("[trtmc build] FP8 auto-calibration enabled", file=sys.stderr)
+        print("[trtmc build] FP8 scale resolution enabled", file=sys.stderr)
 
     save_fp8_scales = getattr(args, 'save_fp8_scales', None)
     quantize = canonicalize_quant_format(getattr(args, "quantize", None))
@@ -675,7 +675,7 @@ def main() -> None:
     build_p.add_argument("--verbose", action="store_true",
                          help="Verbose TRT builder output")
     build_p.add_argument("--fp8", action="store_true",
-                         help="Enable FP8 quantization (auto-calibrate via ModelOpt)")
+                         help="Enable FP8 with family-provided scales or auto-calibration")
     build_p.add_argument("--fp8-scales", default=None,
                          help="Path to pre-computed FP8 scales JSON (skips calibration)")
     build_p.add_argument("--save-fp8-scales", default=None,

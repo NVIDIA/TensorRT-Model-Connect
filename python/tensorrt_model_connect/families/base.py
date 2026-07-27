@@ -204,6 +204,18 @@ class FamilyPlugin(Protocol):
     # Optional: FP8 quantization support
     # ------------------------------------------------------------------
 
+    def fp8_precomputed_scales(
+        self, model_dir: str, config: ModelConfig,
+    ) -> dict[str, dict[str, float]] | None:
+        """Return family-provided precomputed FP8 scales when available.
+
+        This hook is consulted before live calibration for ``--fp8`` builds.
+        Plugins should validate the checkpoint contents, generation profile,
+        and target hardware before returning a packaged scale map. Return None
+        to fall through to ``fp8_calibrate()``.
+        """
+        return None
+
     def fp8_calibrate(
         self, model_dir: str, config: ModelConfig,
     ) -> dict[str, dict[str, float]] | None:

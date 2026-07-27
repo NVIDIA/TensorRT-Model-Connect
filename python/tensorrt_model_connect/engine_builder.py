@@ -1493,7 +1493,28 @@ def _build_diffusion_bundle(
     if "_transformer_config" in weights:
         config.raw["_transformer_config"] = weights["_transformer_config"]
 
-    # Auto-calibrate FP8 if requested
+    # Prefer a family-provided scale asset before running live calibration.
+    if fp8_scales == "auto":
+        precomputed_fn = getattr(plugin, "fp8_precomputed_scales", None)
+        if callable(precomputed_fn):
+            print(
+                f"[trtmc build] Resolving packaged FP8 scales for {plugin.name} ...",
+                file=sys.stderr,
+            )
+            precomputed_scales = precomputed_fn(str(model_dir_path), config)
+            if precomputed_scales is not None:
+                if not isinstance(precomputed_scales, dict) or not precomputed_scales:
+                    raise ValueError(
+                        f"Plugin {plugin.name}.fp8_precomputed_scales() must "
+                        "return a non-empty dictionary or None"
+                    )
+                fp8_scales = precomputed_scales
+                print(
+                    f"[trtmc build] Loaded {len(fp8_scales)} precomputed FP8 layer scales",
+                    file=sys.stderr,
+                )
+
+    # Auto-calibrate FP8 when the family has no matching packaged asset.
     if fp8_scales == "auto":
         calibrate_fn = getattr(plugin, 'fp8_calibrate', None)
         if calibrate_fn is None:
@@ -1678,6 +1699,7 @@ def _build_diffusion_bundle(
         created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         runtime_strategy=getattr(plugin, "runtime_strategy", "diffusion"),
         precision=precision,
+        quantization="fp8" if fp8_scales else "none",
         max_cache_length=max_cache_length,
         tokenizer_add_special_tokens=tokenizer_add_special_tokens,
         max_batch_size=mbs_envelope,

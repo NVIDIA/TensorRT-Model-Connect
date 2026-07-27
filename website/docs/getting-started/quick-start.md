@@ -135,6 +135,52 @@ minimal command does not repeat them. The runtime accepts `--num-steps 50
 other values are rejected rather than silently running an unqualified shape.
 CI additionally owns a fixed reduced L0 profile for fast smoke coverage.
 
+### Qualified Thor FP8 performance profile
+
+The accepted Thor performance build uses a packaged, immutable FP8 scale map,
+so customers do not download or generate a separate quantization JSON. Pin the
+qualified checkpoint revision and add `--fp8`:
+
+```bash
+$TRTMC build Wan-AI/Wan2.2-TI2V-5B \
+  --model-revision 921dbaf3f1674a56f47e83fb80a34bac8a8f203e \
+  --fp8 \
+  -o /tmp/wan22-ti2v-5b-fp8.trtfb
+
+TRTMC_WAN22_EASYCACHE=1 \
+TRTMC_WAN22_EASYCACHE_THRESHOLD=1.0 \
+TRTMC_WAN22_EASYCACHE_FIRST_EXACT_STEPS=7 \
+TRTMC_WAN22_EASYCACHE_LAST_EXACT_STEPS=2 \
+TRTMC_WAN22_EASYCACHE_MAX_CONSECUTIVE_REUSE=4 \
+TRTMC_WAN22_EASYCACHE_LATE_CFG=1 \
+TRTMC_PNG_WRITE_WORKERS=8 \
+$TRTMC generate-video /tmp/wan22-ti2v-5b-fp8.trtfb \
+  --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage" \
+  --output /tmp/wan22-fp8-frames \
+  --num-steps 50 \
+  --guidance-scale 5 \
+  --height 704 \
+  --width 1280 \
+  --seed 42
+```
+
+The JSON is a fixed offline PyTorch-collected map, not ModelOpt output or
+runtime auto-calibration. It covers the full 50-step conditional and
+unconditional trajectory for the prompt and seed above: activation scales are
+`amax * 1.10 / 448`, and weight scales are `maxabs / 448`. The exact checkpoint
+files and scale asset are SHA256-checked before the optimized build.
+
+The packaged scale asset is selected only for the pinned checkpoint, the
+official 1280x704/121-frame/50-step profile, and the GB300 calibration platform
+or integrated SM 11.0 Thor target. Omitting `--fp8` keeps the existing BF16
+build on other platforms. TensorRT plans remain target-specific and must be
+rebuilt on each machine; the scale JSON itself is checkpoint/profile data and
+does not make Wan2.2 Thor-only. The aggressive EasyCache settings above are
+additionally runtime-gated to the official profile on integrated SM 11.0 Thor.
+The accepted visual receipt is this prompt/seed on Thor with TensorRT
+11.2.0.113 and CUDA 13.4.46; other prompts and software versions are not claimed
+by that single run.
+
 ## What To Read Next
 
 - [Build and Run](build-and-run.md) covers common tasks for text, vision-language, audio, diffusion, segmentation, and time-series bundles.

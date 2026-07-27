@@ -82,6 +82,13 @@ class Wan22TI2VPlugin:
         del config, weights, _max_cache_length, precision, verbose, kwargs
         raise NotImplementedError("Wan2.2 TI2V uses build_components(), not build_engine()")
 
+    def fp8_precomputed_scales(self, model_dir: str, config) -> dict:
+        """Load the packaged scale profile after fail-closed qualification."""
+
+        from .fp8_profile import load_packaged_fp8_scales
+
+        return load_packaged_fp8_scales(model_dir, config)
+
     def build_components(
         self,
         model_dir: str,

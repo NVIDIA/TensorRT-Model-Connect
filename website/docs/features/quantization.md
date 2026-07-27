@@ -16,7 +16,7 @@ Supported `--quantize` values are:
 fp8, int8, int8_sq, int4, int4_awq, nvfp4, w4a8
 ```
 
-The builder also exposes legacy FP8-specific flags:
+The builder also exposes FP8-specific flags:
 
 ```bash
 --fp8
@@ -31,9 +31,12 @@ Family plugins can override:
 - `quant_exclude_patterns()`
 - `calibration_data()`
 - `quant_adapter()`
+- `fp8_precomputed_scales()`
 - `fp8_calibrate()`
 
-These hooks keep quantization policy close to the model architecture that needs it.
+For `--fp8`, a family-provided precomputed scale profile is preferred before
+live calibration. These hooks keep quantization policy and qualification close
+to the model architecture that needs it.
 
 ## Validation expectation
 

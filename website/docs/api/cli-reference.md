@@ -38,7 +38,7 @@ python -m tensorrt_model_connect build <hf-repo-or-local-dir> -o <output.trtfb>
 | `--quantize fp8|int8|int8_sq|int4|int4_awq|nvfp4|w4a8` | Quantization format. |
 | `--quant-scales PATH` | Load precomputed quantization scales. |
 | `--quant-calibration-samples N` | PTQ calibration sample count. |
-| `--fp8` | Enable legacy FP8 auto-calibration path. |
+| `--fp8` | Enable FP8 using family-provided scales when available, otherwise auto-calibrate. |
 | `--fp8-scales PATH` | Load precomputed FP8 scales. |
 | `--save-fp8-scales PATH` | Save calibrated FP8 scales. |
 | `--rtx` | Build for TensorRT-RTX backend. |

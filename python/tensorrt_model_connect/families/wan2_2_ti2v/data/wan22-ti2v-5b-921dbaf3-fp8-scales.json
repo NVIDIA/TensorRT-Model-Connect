@@ -1,0 +1,482 @@
+{
+  "blocks.0.ffn.net.0.proj": {
+    "input_scale": 0.014808872767857143,
+    "weight_scale": 0.000905532855540514
+  },
+  "blocks.0.ffn.net.2": {
+    "input_scale": 0.026088169642857147,
+    "weight_scale": 0.00048498915774481636
+  },
+  "blocks.1.ffn.net.0.proj": {
+    "input_scale": 0.02547433035714286,
+    "weight_scale": 0.0005013058627290386
+  },
+  "blocks.1.ffn.net.2": {
+    "input_scale": 0.02977120535714286,
+    "weight_scale": 0.0007491121733827251
+  },
+  "blocks.10.ffn.net.0.proj": {
+    "input_scale": 0.014425223214285715,
+    "weight_scale": 0.0005806685824479375
+  },
+  "blocks.10.ffn.net.2": {
+    "input_scale": 0.03621651785714286,
+    "weight_scale": 0.0006435511500707694
+  },
+  "blocks.11.ffn.net.0.proj": {
+    "input_scale": 0.014041573660714287,
+    "weight_scale": 0.0006864397520465511
+  },
+  "blocks.11.ffn.net.2": {
+    "input_scale": 0.045731026785714286,
+    "weight_scale": 0.0008375391896281924
+  },
+  "blocks.12.ffn.net.0.proj": {
+    "input_scale": 0.01381138392857143,
+    "weight_scale": 0.000556625725169267
+  },
+  "blocks.12.ffn.net.2": {
+    "input_scale": 0.03959263392857143,
+    "weight_scale": 0.0011219375633767673
+  },
+  "blocks.13.ffn.net.0.proj": {
+    "input_scale": 0.016420200892857142,
+    "weight_scale": 0.0006939338387123176
+  },
+  "blocks.13.ffn.net.2": {
+    "input_scale": 0.04880022321428572,
+    "weight_scale": 0.000553297544164317
+  },
+  "blocks.14.ffn.net.0.proj": {
+    "input_scale": 0.015576171875000001,
+    "weight_scale": 0.0007342960951583726
+  },
+  "blocks.14.ffn.net.2": {
+    "input_scale": 0.026548549107142858,
+    "weight_scale": 0.000749947370163032
+  },
+  "blocks.15.ffn.net.0.proj": {
+    "input_scale": 0.014501953125,
+    "weight_scale": 0.0008518152338053499
+  },
+  "blocks.15.ffn.net.2": {
+    "input_scale": 0.03606305803571429,
+    "weight_scale": 0.0006696188024112157
+  },
+  "blocks.16.ffn.net.0.proj": {
+    "input_scale": 0.015652901785714286,
+    "weight_scale": 0.0007603982064340796
+  },
+  "blocks.16.ffn.net.2": {
+    "input_scale": 0.021637834821428576,
+    "weight_scale": 0.0009853745411549295
+  },
+  "blocks.17.ffn.net.0.proj": {
+    "input_scale": 0.017724609375000002,
+    "weight_scale": 0.0007222492380865983
+  },
+  "blocks.17.ffn.net.2": {
+    "input_scale": 0.07059151785714286,
+    "weight_scale": 0.0009017693810164928
+  },
+  "blocks.18.ffn.net.0.proj": {
+    "input_scale": 0.016573660714285714,
+    "weight_scale": 0.0008616499336702484
+  },
+  "blocks.18.ffn.net.2": {
+    "input_scale": 0.021484375,
+    "weight_scale": 0.0005614100290196282
+  },
+  "blocks.19.ffn.net.0.proj": {
+    "input_scale": 0.01595982142857143,
+    "weight_scale": 0.0007552069478801318
+  },
+  "blocks.19.ffn.net.2": {
+    "input_scale": 0.028083147321428574,
+    "weight_scale": 0.0007474365245018687
+  },
+  "blocks.2.ffn.net.0.proj": {
+    "input_scale": 0.019335937500000004,
+    "weight_scale": 0.0006335658420409475
+  },
+  "blocks.2.ffn.net.2": {
+    "input_scale": 0.03514229910714286,
+    "weight_scale": 0.0008587621019354888
+  },
+  "blocks.20.ffn.net.0.proj": {
+    "input_scale": 0.011586216517857144,
+    "weight_scale": 0.000538648571819067
+  },
+  "blocks.20.ffn.net.2": {
+    "input_scale": 0.13995535714285715,
+    "weight_scale": 0.0009669398090669087
+  },
+  "blocks.21.ffn.net.0.proj": {
+    "input_scale": 0.011509486607142858,
+    "weight_scale": 0.0006026569088654858
+  },
+  "blocks.21.ffn.net.2": {
+    "input_scale": 0.05279017857142858,
+    "weight_scale": 0.0015829008604798997
+  },
+  "blocks.22.ffn.net.0.proj": {
+    "input_scale": 0.012276785714285714,
+    "weight_scale": 0.0007671515590378217
+  },
+  "blocks.22.ffn.net.2": {
+    "input_scale": 0.018491908482142858,
+    "weight_scale": 0.0017683031037449837
+  },
+  "blocks.23.ffn.net.0.proj": {
+    "input_scale": 0.011356026785714287,
+    "weight_scale": 0.0010059988791389124
+  },
+  "blocks.23.ffn.net.2": {
+    "input_scale": 0.03590959821428572,
+    "weight_scale": 0.0005599239042827062
+  },
+  "blocks.24.ffn.net.0.proj": {
+    "input_scale": 0.009974888392857142,
+    "weight_scale": 0.0009644627571105957
+  },
+  "blocks.24.ffn.net.2": {
+    "input_scale": 0.02839006696428572,
+    "weight_scale": 0.0006117802113294601
+  },
+  "blocks.25.ffn.net.0.proj": {
+    "input_scale": 0.011125837053571428,
+    "weight_scale": 0.0006089008945439543
+  },
+  "blocks.25.ffn.net.2": {
+    "input_scale": 0.018952287946428576,
+    "weight_scale": 0.00043816368893853256
+  },
+  "blocks.26.ffn.net.0.proj": {
+    "input_scale": 0.01166294642857143,
+    "weight_scale": 0.000890301274401801
+  },
+  "blocks.26.ffn.net.2": {
+    "input_scale": 0.04204799107142858,
+    "weight_scale": 0.0005452000602547612
+  },
+  "blocks.27.ffn.net.0.proj": {
+    "input_scale": 0.01273716517857143,
+    "weight_scale": 0.0007857695621039186
+  },
+  "blocks.27.ffn.net.2": {
+    "input_scale": 0.026088169642857147,
+    "weight_scale": 0.0004683848736541612
+  },
+  "blocks.28.ffn.net.0.proj": {
+    "input_scale": 0.014962332589285716,
+    "weight_scale": 0.0005134376032011849
+  },
+  "blocks.28.ffn.net.2": {
+    "input_scale": 0.03775111607142857,
+    "weight_scale": 0.0005817245026784283
+  },
+  "blocks.29.ffn.net.0.proj": {
+    "input_scale": 0.026855468750000003,
+    "weight_scale": 0.0010290478489228658
+  },
+  "blocks.29.ffn.net.2": {
+    "input_scale": 0.019796316964285715,
+    "weight_scale": 0.0008507317065128259
+  },
+  "blocks.3.ffn.net.0.proj": {
+    "input_scale": 0.01757114955357143,
+    "weight_scale": 0.0008110290925417628
+  },
+  "blocks.3.ffn.net.2": {
+    "input_scale": 0.04665178571428572,
+    "weight_scale": 0.0005105038373065847
+  },
+  "blocks.4.ffn.net.0.proj": {
+    "input_scale": 0.01595982142857143,
+    "weight_scale": 0.0007509609152163778
+  },
+  "blocks.4.ffn.net.2": {
+    "input_scale": 0.03989955357142857,
+    "weight_scale": 0.0004668039535837514
+  },
+  "blocks.5.ffn.net.0.proj": {
+    "input_scale": 0.01166294642857143,
+    "weight_scale": 0.0007536321479294981
+  },
+  "blocks.5.ffn.net.2": {
+    "input_scale": 0.03468191964285715,
+    "weight_scale": 0.0006897200032004289
+  },
+  "blocks.6.ffn.net.0.proj": {
+    "input_scale": 0.01396484375,
+    "weight_scale": 0.0006185496625091348
+  },
+  "blocks.6.ffn.net.2": {
+    "input_scale": 0.04204799107142858,
+    "weight_scale": 0.0005690549899424825
+  },
+  "blocks.7.ffn.net.0.proj": {
+    "input_scale": 0.013274274553571429,
+    "weight_scale": 0.0005742985356066908
+  },
+  "blocks.7.ffn.net.2": {
+    "input_scale": 0.05371093750000001,
+    "weight_scale": 0.0005371396962021079
+  },
+  "blocks.8.ffn.net.0.proj": {
+    "input_scale": 0.014425223214285715,
+    "weight_scale": 0.0006359715147742204
+  },
+  "blocks.8.ffn.net.2": {
+    "input_scale": 0.07028459821428572,
+    "weight_scale": 0.0005891206009047372
+  },
+  "blocks.9.ffn.net.0.proj": {
+    "input_scale": 0.014655412946428572,
+    "weight_scale": 0.0007201996631920338
+  },
+  "blocks.9.ffn.net.2": {
+    "input_scale": 0.03099888392857143,
+    "weight_scale": 0.0007091164588928223
+  },
+  "blocks.0.attn2.to_out.0": {
+    "input_scale": 0.0030116489955357146,
+    "weight_scale": 0.0014420489647558757
+  },
+  "blocks.0.attn2.to_q": {
+    "input_scale": 0.10189732142857144,
+    "weight_scale": 0.0006170465078737054
+  },
+  "blocks.1.attn2.to_out.0": {
+    "input_scale": 0.0023978097098214285,
+    "weight_scale": 0.0005232050150100674
+  },
+  "blocks.1.attn2.to_q": {
+    "input_scale": 0.09821428571428571,
+    "weight_scale": 0.0004240336628364665
+  },
+  "blocks.10.attn2.to_out.0": {
+    "input_scale": 0.005409458705357144,
+    "weight_scale": 0.0010769704489835671
+  },
+  "blocks.10.attn2.to_q": {
+    "input_scale": 0.06138392857142858,
+    "weight_scale": 0.00043865948516343323
+  },
+  "blocks.11.attn2.to_out.0": {
+    "input_scale": 0.005447823660714286,
+    "weight_scale": 0.0012347031650798662
+  },
+  "blocks.11.attn2.to_q": {
+    "input_scale": 0.06169084821428572,
+    "weight_scale": 0.00035632697732320854
+  },
+  "blocks.12.attn2.to_out.0": {
+    "input_scale": 0.0070207868303571435,
+    "weight_scale": 0.004064231046608516
+  },
+  "blocks.12.attn2.to_q": {
+    "input_scale": 0.07765066964285715,
+    "weight_scale": 0.0004304671726588692
+  },
+  "blocks.13.attn2.to_out.0": {
+    "input_scale": 0.005255998883928572,
+    "weight_scale": 0.003377301352364676
+  },
+  "blocks.13.attn2.to_q": {
+    "input_scale": 0.10987723214285715,
+    "weight_scale": 0.00039569680978144916
+  },
+  "blocks.14.attn2.to_out.0": {
+    "input_scale": 0.004143415178571429,
+    "weight_scale": 0.0014940911371793067
+  },
+  "blocks.14.attn2.to_q": {
+    "input_scale": 0.0666015625,
+    "weight_scale": 0.00036051523472581593
+  },
+  "blocks.15.attn2.to_out.0": {
+    "input_scale": 0.004642159598214286,
+    "weight_scale": 0.0034263309623513904
+  },
+  "blocks.15.attn2.to_q": {
+    "input_scale": 0.10680803571428572,
+    "weight_scale": 0.0003741495976490634
+  },
+  "blocks.16.attn2.to_out.0": {
+    "input_scale": 0.0045654296875,
+    "weight_scale": 0.0015051116102508136
+  },
+  "blocks.16.attn2.to_q": {
+    "input_scale": 0.07672991071428571,
+    "weight_scale": 0.00041502537871045727
+  },
+  "blocks.17.attn2.to_out.0": {
+    "input_scale": 0.0033185686383928573,
+    "weight_scale": 0.004064632313592094
+  },
+  "blocks.17.attn2.to_q": {
+    "input_scale": 0.11785714285714287,
+    "weight_scale": 0.00035572441161743233
+  },
+  "blocks.18.attn2.to_out.0": {
+    "input_scale": 0.003970772879464286,
+    "weight_scale": 0.002622304218155997
+  },
+  "blocks.18.attn2.to_q": {
+    "input_scale": 0.12215401785714286,
+    "weight_scale": 0.0003478117287158966
+  },
+  "blocks.19.attn2.to_out.0": {
+    "input_scale": 0.0032418387276785714,
+    "weight_scale": 0.002165785325425012
+  },
+  "blocks.19.attn2.to_q": {
+    "input_scale": 0.08839285714285715,
+    "weight_scale": 0.00030735697198127
+  },
+  "blocks.2.attn2.to_out.0": {
+    "input_scale": 0.004814801897321429,
+    "weight_scale": 0.00074632020135011
+  },
+  "blocks.2.attn2.to_q": {
+    "input_scale": 0.0908482142857143,
+    "weight_scale": 0.0003972911675061498
+  },
+  "blocks.20.attn2.to_out.0": {
+    "input_scale": 0.00281982421875,
+    "weight_scale": 0.0026612518621342523
+  },
+  "blocks.20.attn2.to_q": {
+    "input_scale": 0.11356026785714288,
+    "weight_scale": 0.0003318736396197762
+  },
+  "blocks.21.attn2.to_out.0": {
+    "input_scale": 0.0032610212053571434,
+    "weight_scale": 0.0027094350329467227
+  },
+  "blocks.21.attn2.to_q": {
+    "input_scale": 0.11417410714285715,
+    "weight_scale": 0.000313300739175507
+  },
+  "blocks.22.attn2.to_out.0": {
+    "input_scale": 0.002589634486607143,
+    "weight_scale": 0.0029862520417996813
+  },
+  "blocks.22.attn2.to_q": {
+    "input_scale": 0.12583705357142858,
+    "weight_scale": 0.00038650894670614174
+  },
+  "blocks.23.attn2.to_out.0": {
+    "input_scale": 0.0031267438616071432,
+    "weight_scale": 0.0038953380925314768
+  },
+  "blocks.23.attn2.to_q": {
+    "input_scale": 0.12583705357142858,
+    "weight_scale": 0.00035629178663449626
+  },
+  "blocks.24.attn2.to_out.0": {
+    "input_scale": 0.002858189174107143,
+    "weight_scale": 0.0033872260579041074
+  },
+  "blocks.24.attn2.to_q": {
+    "input_scale": 0.12890625000000003,
+    "weight_scale": 0.0003398429003677198
+  },
+  "blocks.25.attn2.to_out.0": {
+    "input_scale": 0.003433663504464286,
+    "weight_scale": 0.002470872497984341
+  },
+  "blocks.25.attn2.to_q": {
+    "input_scale": 0.12767857142857145,
+    "weight_scale": 0.0002861537504941225
+  },
+  "blocks.26.attn2.to_out.0": {
+    "input_scale": 0.003740583147321429,
+    "weight_scale": 0.0020183751891766277
+  },
+  "blocks.26.attn2.to_q": {
+    "input_scale": 0.12338169642857144,
+    "weight_scale": 0.000306043607581939
+  },
+  "blocks.27.attn2.to_out.0": {
+    "input_scale": 0.002762276785714286,
+    "weight_scale": 0.0022919225905622754
+  },
+  "blocks.27.attn2.to_q": {
+    "input_scale": 0.11417410714285715,
+    "weight_scale": 0.00031824120586471897
+  },
+  "blocks.28.attn2.to_out.0": {
+    "input_scale": 0.0045270647321428575,
+    "weight_scale": 0.0009442482675824847
+  },
+  "blocks.28.attn2.to_q": {
+    "input_scale": 0.11969866071428573,
+    "weight_scale": 0.00028893248444156986
+  },
+  "blocks.29.attn2.to_out.0": {
+    "input_scale": 0.004987444196428571,
+    "weight_scale": 0.0009351204415517193
+  },
+  "blocks.29.attn2.to_q": {
+    "input_scale": 0.10189732142857144,
+    "weight_scale": 0.00027856658146317514
+  },
+  "blocks.3.attn2.to_out.0": {
+    "input_scale": 0.003433663504464286,
+    "weight_scale": 0.0009840412198432855
+  },
+  "blocks.3.attn2.to_q": {
+    "input_scale": 0.08962053571428573,
+    "weight_scale": 0.0004091928380408457
+  },
+  "blocks.4.attn2.to_out.0": {
+    "input_scale": 0.004680524553571429,
+    "weight_scale": 0.002457295943583761
+  },
+  "blocks.4.attn2.to_q": {
+    "input_scale": 0.09821428571428571,
+    "weight_scale": 0.00035647472499736717
+  },
+  "blocks.5.attn2.to_out.0": {
+    "input_scale": 0.004469517299107143,
+    "weight_scale": 0.0009308561150516782
+  },
+  "blocks.5.attn2.to_q": {
+    "input_scale": 0.08716517857142858,
+    "weight_scale": 0.0003695639648607799
+  },
+  "blocks.6.attn2.to_out.0": {
+    "input_scale": 0.004949079241071429,
+    "weight_scale": 0.002448208097900663
+  },
+  "blocks.6.attn2.to_q": {
+    "input_scale": 0.09698660714285715,
+    "weight_scale": 0.0003641283671770777
+  },
+  "blocks.7.attn2.to_out.0": {
+    "input_scale": 0.004949079241071429,
+    "weight_scale": 0.0007512438377099377
+  },
+  "blocks.7.attn2.to_q": {
+    "input_scale": 0.07212611607142858,
+    "weight_scale": 0.00043967386175479205
+  },
+  "blocks.8.attn2.to_out.0": {
+    "input_scale": 0.005946568080357143,
+    "weight_scale": 0.0011146049946546555
+  },
+  "blocks.8.attn2.to_q": {
+    "input_scale": 0.06629464285714286,
+    "weight_scale": 0.00044996790321809906
+  },
+  "blocks.9.attn2.to_out.0": {
+    "input_scale": 0.005486188616071429,
+    "weight_scale": 0.0033992837582315716
+  },
+  "blocks.9.attn2.to_q": {
+    "input_scale": 0.09268973214285715,
+    "weight_scale": 0.00041607903715755256
+  }
+}
