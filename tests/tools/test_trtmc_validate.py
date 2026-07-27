@@ -1461,6 +1461,41 @@ def test_commands_from_logs_use_native_trtmc_jsonl(tmp_path: Path) -> None:
     ]
 
 
+def test_commands_from_logs_prefer_native_reference_jsonl(tmp_path: Path) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "prompts.jsonl").write_text(
+        json.dumps({"sample_id": "sample-1"}) + "\n",
+        encoding="utf-8",
+    )
+    (work_dir / "hf_run.log").write_text(
+        "$ python trtmc_reference.py run\n",
+        encoding="utf-8",
+    )
+    (work_dir / "hf_native_run.log").write_text(
+        "$ python plugin_reference.py\n",
+        encoding="utf-8",
+    )
+    (work_dir / "hf_native_commands.jsonl").write_text(
+        json.dumps(
+            {
+                "sample_id": "sample-1",
+                "command": ["python", "model_reference.py", "--prompt", "cat"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    reproduction = trtmc_validate._commands_from_logs(work_dir)
+
+    assert reproduction["hf"] == ["python model_reference.py --prompt cat"]
+    assert reproduction["command_count"]["hf"] == 1
+    assert reproduction["command_logs"]["hf"] == [
+        "hf_native_commands.jsonl"
+    ]
+
+
 def test_failed_sample_uses_recorded_trtmc_command_and_copies_media(tmp_path):
     case_dir = tmp_path / "model-a" / "workload-a"
     work_dir = case_dir / "validation" / "workload-a" / "model-a"

@@ -745,9 +745,12 @@ def _command_log_kind(
     path: Path,
     *,
     has_native_reference: bool,
+    has_native_reference_commands: bool,
     has_native_trtmc: bool,
 ) -> str | None:
     if has_native_reference and path.name == "hf_run.log":
+        return None
+    if has_native_reference_commands and path.name == "hf_native_run.log":
         return None
     if has_native_trtmc and path.name == "trtfb_run.log":
         return None
@@ -798,6 +801,9 @@ def _collect_command_logs(
         path.name in {"hf_native_run.log", "hf_native_commands.jsonl"}
         for path in log_paths
     )
+    has_native_reference_commands = any(
+        path.name == "hf_native_commands.jsonl" for path in log_paths
+    )
     has_native_trtmc = any(
         path.name == "trtfb_native_commands.jsonl" for path in log_paths
     )
@@ -805,6 +811,7 @@ def _collect_command_logs(
         kind = _command_log_kind(
             path,
             has_native_reference=has_native_reference,
+            has_native_reference_commands=has_native_reference_commands,
             has_native_trtmc=has_native_trtmc,
         )
         if kind is None:
