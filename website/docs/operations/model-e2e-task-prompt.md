@@ -57,10 +57,10 @@ You are working in tensorrt-model-connect. Add one model end-to-end so it is
   D) Single-model E2E validation (mandatory)
   Run:
   - python -m pytest tests/test_e2e.py::test_e2e[<MODEL_NAME>] -v \
-    --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+    --engine-dir ./engines \
     --trtmc-binary ./build/trtmc \
     --hf-python /opt/venv/bin/python \
-    --e2e-artifacts-dir /workspace/users/yifeif/tensorrt-model-connect/test-result
+    --e2e-artifacts-dir ./test-result
 
   Then inspect artifacts/result.json and verify output quality:
   - text: continuation makes sense
@@ -84,7 +84,7 @@ You are working in tensorrt-model-connect. Add one model end-to-end so it is
   - python -m pytest tests/builder/test_graph_ops.py tests/builder/
   test_graph_ops_extended.py tests/builder/test_graph_blocks.py -v -n auto
   - python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
-    --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+    --engine-dir ./engines \
     --trtmc-binary ./build/trtmc \
     --hf-python /opt/venv/bin/python \
     --rebuild-engines

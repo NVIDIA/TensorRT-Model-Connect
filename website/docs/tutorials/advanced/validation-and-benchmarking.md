@@ -20,7 +20,7 @@ flowchart TB
 
 ```bash
 pytest tests/test_e2e.py::test_e2e[qwen3-0.6b-fp16] -v \
-  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --engine-dir ./engines \
   --trtmc-binary ./build/trtmc
 ```
 

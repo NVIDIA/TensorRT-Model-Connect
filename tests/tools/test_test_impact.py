@@ -1448,7 +1448,7 @@ class TestNoImpact:
     def test_model_plugin_evidence_report(self, imap):
         """Generated model-plugin evidence JSON is report-only."""
         match = test_impact.classify_file(
-            "reports/model-plugin-encapsulation/e2e-parity-evidence-agent4.json",
+            "reports/model-plugin-encapsulation/e2e-parity-evidence.json",
             imap,
         )
         assert match.rule == "model_plugin_evidence_report"
@@ -1883,15 +1883,6 @@ class TestUnitTiers:
         match = test_impact.classify_file("tools/select_latest_attempt_artifact.py", imap)
 
         assert match.rule == "nightly_artifact_selector_tool"
-        assert match.models == []
-        assert match.unit_tiers == ["tools"]
-        assert match.rebuild_cpp is False
-
-    def test_nightly_issue_tracker_tool(self, imap):
-        """Nightly issue tracking runs its tooling contracts, not model E2E."""
-        match = test_impact.classify_file("tools/nightly_issue_tracker.py", imap)
-
-        assert match.rule == "nightly_issue_tracker_tool"
         assert match.models == []
         assert match.unit_tiers == ["tools"]
         assert match.rebuild_cpp is False
@@ -3574,22 +3565,6 @@ class TestCoverageMapIntegration:
         assert result.tools_tests == [
             "tests/tools/test_github_actions_ci.py",
             "tests/tools/test_select_latest_attempt_artifact.py",
-        ]
-        assert result.fallback_tiers == []
-
-    @pytest.mark.parametrize("coverage_map", [None, {}])
-    def test_nightly_issue_tracker_selects_focused_tools_tests(self, imap, coverage_map):
-        result = test_impact.analyze_impact(
-            ["tools/nightly_issue_tracker.py"],
-            imap,
-            coverage_map=coverage_map,
-        )
-
-        assert result.e2e_models == []
-        assert result.unit_tiers == ["tools"]
-        assert result.tools_tests == [
-            "tests/tools/test_github_actions_ci.py",
-            "tests/tools/test_nightly_issue_tracker.py",
         ]
         assert result.fallback_tiers == []
 

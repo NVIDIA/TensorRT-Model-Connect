@@ -13,9 +13,6 @@ import pytest
 from tools.ci import optimized_runtime_qualifications as qualifications
 
 
-_DIGEST_IMAGE = f"example.invalid/runtime:1@sha256:{'a' * 64}"
-
-
 def _write(path: Path, text: str = "") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -55,14 +52,13 @@ def _descriptor(
     _write(
         repository / relative,
         f"""
-schema_version = 2
+schema_version = 3
 kind = "producer"
 id = "{family}-{adapter}-{gpu}"
 runtime_id = "{runtime_id or adapter}"
 representative = {str(representative).lower()}
 entrypoint = "{entrypoint}"
-container_image = "{_DIGEST_IMAGE}"
-runner_labels = ["self-hosted", "{gpu}"]
+execution_binding = "{gpu}"
 profile_glob = "python/tensorrt_model_connect/families/{family}/{adapter}/profiles/**/*.toml"
 trigger_globs = [
   "python/tensorrt_model_connect/families/{family}/{adapter}/**",
@@ -324,8 +320,11 @@ def test_invalid_descriptor_and_duplicate_profile_basenames_fail(tmp_path: Path)
     descriptor = _descriptor(tmp_path, "family-a", "runtime-a")
     _profile(tmp_path, "family-a", "runtime-a", "a")
     text = (tmp_path / descriptor).read_text(encoding="utf-8")
-    (tmp_path / descriptor).write_text(text.replace("@sha256:", ":"), encoding="utf-8")
-    with pytest.raises(qualifications.QualificationError, match="pinned by sha256"):
+    (tmp_path / descriptor).write_text(
+        text.replace('execution_binding = "a100"', 'execution_binding = "INVALID VALUE"'),
+        encoding="utf-8",
+    )
+    with pytest.raises(qualifications.QualificationError, match="execution_binding is invalid"):
         _selection(tmp_path, descriptor)
 
     (tmp_path / descriptor).write_text(text, encoding="utf-8")

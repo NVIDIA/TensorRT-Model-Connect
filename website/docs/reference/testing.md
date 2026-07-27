@@ -9,7 +9,7 @@ pytest tests/builder -q
 pytest tests/tools -q
 ctest --test-dir build --output-on-failure
 pytest tests/e2e/models/<family> --e2e-model <manifest-name> -v \
-  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --engine-dir ./engines \
   --trtmc-binary ./build/trtmc \
   --model-plugin-dir ./build/models
 ```

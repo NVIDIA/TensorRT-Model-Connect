@@ -9,7 +9,7 @@ const [organizationName, repositoryName] = repository.split('/');
 const config = {
   title: 'TensorRT-Model-Connect',
   tagline: 'Build TensorRT bundles with Python. Run them from C++.',
-  url: process.env.SITE_URL || 'https://nvidia-dev.github.io',
+  url: process.env.SITE_URL || 'https://nvidia.github.io',
   baseUrl: process.env.BASE_URL || '/',
   organizationName,
   projectName: repositoryName,

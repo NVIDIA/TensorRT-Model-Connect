@@ -104,9 +104,13 @@ class CiContainer:
         if not self.config.hardened:
             options = shlex.split(self.env.get("TRTMC_CONTAINER_OPTIONS", ""))
             mounts = []
-            shared_users = Path("/workspace/users/yifeif")
-            if shared_users.is_dir():
-                mounts.extend(["-v", f"{shared_users}:{shared_users}"])
+            configured_mounts = self.env.get("TRTMC_CI_HOST_MOUNTS", "")
+            for raw_path in configured_mounts.split(os.pathsep):
+                if not raw_path:
+                    continue
+                host_path = Path(raw_path).resolve()
+                if host_path.is_dir():
+                    mounts.extend(["-v", f"{host_path}:{host_path}"])
             return options, mounts
 
         scratch_parent = Path(self.env.get("RUNNER_TEMP", "/tmp")).resolve()

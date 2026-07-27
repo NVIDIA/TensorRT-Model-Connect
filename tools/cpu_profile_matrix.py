@@ -11,8 +11,8 @@ runtime strategy.
 Usage:
     # Use pre-built bundles from engine-dir (recommended)
     python tools/cpu_profile_matrix.py \\
-      --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \\
-      --hf-cache /mnt/storage/tensorrt-model-connect/model-weights
+      --engine-dir /path/to/engines \\
+      --hf-cache /path/to/model-cache
 
     # Profile specific strategies only
     python tools/cpu_profile_matrix.py \\

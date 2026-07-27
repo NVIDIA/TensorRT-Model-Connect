@@ -734,7 +734,6 @@ SHARED_DEBUG_DIFFUSION_PIPELINE_TOOL = REPO_ROOT / "tools" / "debug_diffusion_pi
 SHARED_VALIDATE_T5_TOOL = REPO_ROOT / "tools" / "validate_t5.py"
 SHARED_VALIDATE_DIT_TOOL = REPO_ROOT / "tools" / "validate_dit.py"
 SHARED_GITHUB_CI_FILES = (
-    REPO_ROOT / ".github" / "workflows" / "nightly.yml",
     REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml",
     REPO_ROOT / "tools" / "ci" / "stage.py",
     REPO_ROOT / "tools" / "ci" / "container.py",

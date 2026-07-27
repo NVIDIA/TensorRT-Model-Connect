@@ -300,8 +300,8 @@ def build_z_image_dit_engine(
     # HF-correct caption embeddings drive fp16-block transients close to the
     # 65504 storage limit: the attention out-projection output peaks at 63k+
     # at 512px and the SwiGLU gated product feeding ff_w2 peaks at 63k+ at
-    # 1024px (the previous caption semantics already sat near 56k). On P2021,
-    # TensorRT GEMMs become non-finite at these magnitudes because internal
+    # 1024px (the previous caption semantics already sat near 56k). On affected
+    # TensorRT configurations, GEMMs become non-finite because internal
     # fp16 partial accumulations can overflow before the result is stored.
     # Both branches are sandwich-normed — an RMSNorm sits directly after the
     # projection — so pre-scaling one linear stage per branch (to_out for

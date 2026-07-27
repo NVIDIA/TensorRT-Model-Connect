@@ -1,760 +1,106 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 name: TensorRT-Model-Connect Premerge CI
 
 run-name: >-
-  PR #${{ github.event.pull_request.number }} · label ${{ github.event.label.name }}
+  PR #${{ github.event.pull_request.number || inputs.pr_number }} · private CI dispatch
 
 on:
-  pull_request:
+  pull_request_target:
     branches:
       - main
-    types:
-      - labeled
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Open pull request number to test
+        required: true
+        type: string
 
 permissions: {}
 
 concurrency:
   group: >-
-    trtmc-premerge-${{ github.event.pull_request.number }}-${{ github.event.label.name == 'run-ci' && 'authorized' || github.run_id }}
-  cancel-in-progress: ${{ github.event.label.name == 'run-ci' }}
+    trtmc-private-dispatch-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: false
 
 jobs:
-  legal:
-    # Authorized runs preserve the exact context required by main's ruleset.
-    # Other labels use a different context and therefore cannot satisfy it.
-    name: ${{ github.event.label.name == 'run-ci' && 'Legal compliance' || 'Ignored label / Legal compliance' }}
-    runs-on: ubuntu-latest
+  dispatch:
+    name: Private CI dispatch
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.label.name == 'run-ci'
+    runs-on: ubuntu-24.04
+    environment: ci-dispatch
     timeout-minutes: 10
     permissions:
       contents: read
       pull-requests: write
-    outputs:
-      authorized: ${{ steps.authorize.outputs.authorized }}
-      tested_sha: ${{ steps.snapshot.outputs.tested_sha }}
-      base_sha: ${{ steps.snapshot.outputs.base_sha }}
-      head_sha: ${{ steps.snapshot.outputs.head_sha }}
 
     steps:
-      - name: Route label, pin snapshot, and consume authorization
-        id: authorize
-        env:
-          TRIGGER_LABEL: ${{ github.event.label.name }}
-          TESTED_SHA: ${{ github.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          if [ "$TRIGGER_LABEL" != "run-ci" ]; then
-            echo "authorized=false" >> "$GITHUB_OUTPUT"
-            echo "Ignoring unrelated label \`$TRIGGER_LABEL\`; no premerge work was requested." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          if [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then
-            echo "::error::run-ci is restricted to branches in $GITHUB_REPOSITORY; fork pull requests cannot receive the write token needed to consume the label."
-            exit 1
-          fi
-
-          test -n "$TESTED_SHA"
-          test -n "$HEAD_SHA"
-
-          # Record the immutable event SHAs before consuming the one-shot label.
-          # The checked-out merge snapshot validates and publishes its own
-          # exact base and head parents below.
-          echo "tested_sha=$TESTED_SHA" >> "$GITHUB_OUTPUT"
-          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
-
-          gh api --silent \
-            --method DELETE \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/run-ci"
-
-          # Write authorization only after strict label deletion succeeds. A
-          # rerun without reapplying run-ci receives 404 above and is rejected.
-          echo "authorized=true" >> "$GITHUB_OUTPUT"
-          {
-            echo "### One-shot premerge authorization"
-            echo
-            echo "- Tested merge snapshot: \`$TESTED_SHA\`"
-            echo "- Event PR head SHA: \`$HEAD_SHA\`"
-            echo "- Consumed label: \`run-ci\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Check out pinned merge snapshot
-        if: ${{ steps.authorize.outputs.authorized == 'true' }}
-        uses: actions/checkout@v4
+      # pull_request_target is safe here only because every executable byte
+      # comes from the protected base revision. This workflow must never fetch
+      # or execute a pull-request head or merge ref.
+      - name: Check out the trusted bridge
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ steps.authorize.outputs.tested_sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Resolve pinned PR merge snapshot
-        id: snapshot
-        if: ${{ steps.authorize.outputs.authorized == 'true' }}
-        env:
-          CAPTURED_TESTED_SHA: ${{ steps.authorize.outputs.tested_sha }}
-          CAPTURED_HEAD_SHA: ${{ steps.authorize.outputs.head_sha }}
-        run: |
-          set -euo pipefail
-
-          tested_sha="$(git rev-parse "${CAPTURED_TESTED_SHA}^{commit}")"
-          read -r -a commits <<< "$(git rev-list --parents -n 1 "$tested_sha")"
-          if [ "${#commits[@]}" -ne 3 ] || [ "${commits[0]}" != "$tested_sha" ]; then
-            echo "::error::Expected the tested revision to be a two-parent GitHub PR merge snapshot"
-            exit 1
-          fi
-
-          base_sha="$(git rev-parse "${commits[1]}^{commit}")"
-          head_sha="$(git rev-parse "${commits[2]}^{commit}")"
-          captured_head_sha="$(git rev-parse "${CAPTURED_HEAD_SHA}^{commit}")"
-          if [ "$head_sha" != "$captured_head_sha" ]; then
-            echo "::error::Pinned merge snapshot head $head_sha does not match captured PR head $captured_head_sha"
-            exit 1
-          fi
-
-          echo "tested_sha=$tested_sha" >> "$GITHUB_OUTPUT"
-          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
-          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
-          {
-            echo "### Pinned PR merge snapshot"
-            echo
-            echo "- Tested merge snapshot: \`$tested_sha\`"
-            echo "- Exact base parent: \`$base_sha\`"
-            echo "- Exact PR head parent: \`$head_sha\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Set up Python
-        if: ${{ steps.authorize.outputs.authorized == 'true' }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Check canonical legal documents
-        if: ${{ steps.authorize.outputs.authorized == 'true' }}
-        run: |
-          python - <<'PY'
-          import hashlib
-          from pathlib import Path
-
-          expected = {
-              "LICENSE": "d07c0367e2861e7fe70fa1b679f879f4fa2f9138ade4457d44ecf8b2e135bb45",
-              "CONTRIBUTING.md": "efc27920357d41bd5fe87108dbf35089b5bed1c90a05cf23577c9e1b52c698eb",
-              "NOTICE": "fca31175673a934f79dace4b3cdb40eac41e781e06ffb3ecba99d86dee07484c",
-          }
-          for path, expected_digest in expected.items():
-              digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
-              if digest != expected_digest:
-                  raise SystemExit(
-                      f"{path}: expected SHA-256 {expected_digest}, found {digest}"
-                  )
-          PY
-
-      - name: Check all tracked source headers
-        if: ${{ steps.authorize.outputs.authorized == 'true' }}
-        run: python tools/legal_headers.py --check
-
-  impact:
-    name: 2 / Ownership and impact
-    needs: legal
-    if: ${{ needs.legal.outputs.authorized == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    outputs:
-      has_models: ${{ steps.impact.outputs.has_models }}
-      matrix: ${{ steps.impact.outputs.matrix }}
-      affected_models: ${{ steps.impact.outputs.affected_models }}
-      direct_models: ${{ steps.impact.outputs.direct_models }}
-      fallback_models: ${{ steps.impact.outputs.fallback_models }}
-      expected_count: ${{ steps.impact.outputs.expected_count }}
-      mode: ${{ steps.impact.outputs.mode }}
-      run_unit_tests: ${{ steps.impact.outputs.run_unit_tests }}
-      unit_scope: ${{ steps.impact.outputs.unit_scope }}
-
-    steps:
-      - name: Check out pinned merge snapshot
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.legal.outputs.tested_sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Validate ownership manifests
-        run: python3 tools/model_ci.py validate
-
-      - name: Select affected models
-        id: impact
-        env:
-          BASE_SHA: ${{ needs.legal.outputs.base_sha }}
-          TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
-        run: |
-          set -euo pipefail
-          python3 tools/model_ci.py impact \
-            --base "$BASE_SHA" \
-            --head "$TESTED_SHA" \
-            --platform-change-policy fallback \
-            --fallback-model deepseek_v2 \
-            --fallback-model patchtsmixer \
-            --fallback-model segformer \
-            --fallback-model whisper \
-            --fallback-model ltx_video \
-            --github-output "$GITHUB_OUTPUT"
-
-      - name: Summarize selection
-        env:
-          AFFECTED_MODELS: ${{ steps.impact.outputs.affected_models }}
-          DIRECT_MODELS: ${{ steps.impact.outputs.direct_models }}
-          FALLBACK_MODELS: ${{ steps.impact.outputs.fallback_models }}
-          MODE: ${{ steps.impact.outputs.mode }}
-          RUN_UNIT_TESTS: ${{ steps.impact.outputs.run_unit_tests }}
-          UNIT_SCOPE: ${{ steps.impact.outputs.unit_scope }}
-        run: |
-          {
-            echo "### Model impact"
-            echo
-            echo "- Mode: \`$MODE\`"
-            echo "- Models: \`$AFFECTED_MODELS\`"
-            echo "- Directly affected models: \`$DIRECT_MODELS\`"
-            echo "- Representative fallback models: \`$FALLBACK_MODELS\`"
-            echo "- Run source-only units: \`$RUN_UNIT_TESTS\`"
-            echo "- Unit scope: \`$UNIT_SCOPE\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  source-quality:
-    name: Source quality
-    needs: legal
-    if: ${{ needs.legal.outputs.authorized == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    env:
-      CI_BASE_REF: ${{ needs.legal.outputs.base_sha }}
-
-    steps:
-      - name: Check out pinned merge snapshot
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.legal.outputs.tested_sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install source quality tools
-        run: python -m pip install --disable-pip-version-check --quiet lizard ruff clang-format pytest
-
-      - name: Check source quality
-        run: python3 -m tools.ci pipeline source-quality
-
-  unit-tests:
-    name: 3 / Unit / C++ and Python
-    needs:
-      - legal
-      - impact
-    if: >-
-      ${{
-        needs.legal.outputs.authorized == 'true' &&
-        needs.impact.outputs.run_unit_tests == 'true'
-      }}
-    runs-on: ${{ fromJSON(vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
-    timeout-minutes: 180
-    permissions:
-      contents: read
-      packages: read
-    env:
-      CI_BASE_REF: ${{ needs.legal.outputs.base_sha }}
-      TRTMC_CI_IMAGE: ${{ vars.TRTMC_MANYLINUX_CI_IMAGE || 'trtmc-dev-gb300:manylinux_2_39' }}
-      TRTMC_CI_CONTAINER_NAME: trtmc-premerge-unit-${{ github.run_id }}-${{ github.run_attempt }}
-      TRTMC_CI_WORKSPACE: ${{ github.workspace }}/premerge-unit-checkout
-      TRTMC_CI_HARDENED: "true"
-      TRTMC_UNIT_BUILD_JOBS: ${{ vars.TRTMC_UNIT_BUILD_JOBS || '8' }}
-      TRTMC_UNIT_TEST_JOBS: ${{ vars.TRTMC_UNIT_TEST_JOBS || '8' }}
-      TRTMC_PREMERGE_UNIT_SCOPE: ${{ needs.impact.outputs.unit_scope }}
-      PYTHONHASHSEED: "0"
-
-    steps:
-      - name: Check out pinned merge snapshot
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.legal.outputs.tested_sha }}
-          path: premerge-unit-checkout
-          fetch-depth: 0
-          persist-credentials: false
-          clean: true
-          lfs: false
-
-      - name: Log in to GitHub Container Registry
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          docker_config="${RUNNER_TEMP}/trtmc-docker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-unit"
-          mkdir -p "$docker_config"
-          echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
-          printf '%s' "$GHCR_TOKEN" | DOCKER_CONFIG="$docker_config" docker login ghcr.io \
-            --username "$GITHUB_ACTOR" --password-stdin
-
-      - name: Ensure CI Docker image
-        id: ci_image
-        timeout-minutes: 90
-        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
-        run: python3 -m tools.ci image ensure
-
-      - name: Start clean unit-test container
-        timeout-minutes: 5
-        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
-        env:
-          TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
-        run: python3 -m tools.ci container start
-
-      - name: Run source-only unit tests
-        timeout-minutes: 60
-        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
-        run: python3 -m tools.ci stage premerge-unit
-
-      - name: Clean unit-test container
-        if: ${{ always() }}
-        run: |
-          docker rm -f "$TRTMC_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
-          unit_scratch="${RUNNER_TEMP}/trtmc-premerge-unit-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          rm -rf -- "$unit_scratch"
-          if [ -n "${DOCKER_CONFIG:-}" ]; then
-            rm -rf "$DOCKER_CONFIG"
-          fi
-
-  model-proof:
-    name: 4 / Model / ${{ matrix.model }} [${{ matrix.selection_kind }}]
-    needs:
-      - legal
-      - impact
-      - unit-tests
-    if: >-
-      ${{
-        always() &&
-        needs.legal.outputs.authorized == 'true' &&
-        needs.impact.outputs.has_models == 'true' &&
-        (
-          (needs.impact.outputs.run_unit_tests == 'true' &&
-           needs.unit-tests.result == 'success') ||
-          (needs.impact.outputs.run_unit_tests == 'false' &&
-           needs.unit-tests.result == 'skipped')
-        )
-      }}
-    strategy:
-      fail-fast: true
-      matrix: ${{ fromJSON(needs.impact.outputs.matrix) }}
-    permissions:
-      contents: read
-      packages: read
-    uses: ./.github/workflows/model-proof.yml
-    with:
-      model: ${{ matrix.model }}
-      revision: ${{ needs.legal.outputs.tested_sha }}
-      suite: premerge
-    secrets: inherit
-
-  no-model:
-    name: 4 / No model changes
-    needs:
-      - legal
-      - impact
-      - unit-tests
-    if: >-
-      ${{
-        always() &&
-        needs.legal.outputs.authorized == 'true' &&
-        needs.impact.outputs.has_models == 'false' &&
-        (
-          (needs.impact.outputs.run_unit_tests == 'true' &&
-           needs.unit-tests.result == 'success') ||
-          (needs.impact.outputs.run_unit_tests == 'false' &&
-           needs.unit-tests.result == 'skipped')
-        )
-      }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-
-    steps:
-      - name: Confirm no model proof is required
-        env:
-          IMPACT_MODE: ${{ needs.impact.outputs.mode }}
-        run: |
-          set -euo pipefail
-          case "$IMPACT_MODE" in
-            none) echo "No model-owned, platform, or unit inputs changed." ;;
-            unit) echo "Unit tests cover this change; no model proof is required." ;;
-            *) echo "Unexpected zero-model impact mode: $IMPACT_MODE" >&2; exit 1 ;;
-          esac >> "$GITHUB_STEP_SUMMARY"
-
-  report:
-    name: 5 / Combined HTML report
-    needs:
-      - legal
-      - impact
-      - unit-tests
-      - model-proof
-      - no-model
-    if: >-
-      ${{
-        always() &&
-        github.event.label.name == 'run-ci'
-      }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    permissions:
-      actions: read
-      contents: read
-
-    steps:
-      - name: Bootstrap combined HTML before checkout
-        env:
-          EXPECTED_MODELS: ${{ needs.impact.outputs.affected_models }}
-          REVISION: ${{ needs.legal.outputs.tested_sha || github.sha }}
-          SUITE: premerge
-          HAS_MODELS: ${{ needs.impact.outputs.has_models }}
-          LEGAL_RESULT: ${{ needs.legal.result }}
-          IMPACT_RESULT: ${{ needs.impact.result }}
-          UNIT_RESULT: ${{ needs.unit-tests.result }}
-          RUN_UNIT_TESTS: ${{ needs.impact.outputs.run_unit_tests }}
-          MODEL_RESULT: ${{ needs.model-proof.result }}
-          NO_MODEL_RESULT: ${{ needs.no-model.result }}
-          REPORT_OUTPUT_DIR: ${{ runner.temp }}/model-proof-report-${{ github.run_id }}-${{ github.run_attempt }}
-          PARTS_DIR: ${{ runner.temp }}/model-proof-parts-${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          set -euo pipefail
-          echo "REPORT_OUTPUT_DIR=$REPORT_OUTPUT_DIR" >> "$GITHUB_ENV"
-          echo "PARTS_DIR=$PARTS_DIR" >> "$GITHUB_ENV"
-          mkdir -p "$REPORT_OUTPUT_DIR" "$PARTS_DIR"
-          python3 - \
-            "$REPORT_OUTPUT_DIR" "$EXPECTED_MODELS" "$REVISION" "$SUITE" \
-            "$HAS_MODELS" "$LEGAL_RESULT" "$IMPACT_RESULT" \
-            "$RUN_UNIT_TESTS" "$UNIT_RESULT" \
-            "$MODEL_RESULT" "$NO_MODEL_RESULT" <<'PY'
-          import html
-          import json
-          import sys
-          from pathlib import Path
-
-          (
-              output_dir,
-              raw_models,
-              revision,
-              suite,
-              has_models,
-              legal_result,
-              impact_result,
-              run_unit_tests,
-              unit_result,
-              model_result,
-              no_model_result,
-          ) = sys.argv[1:]
-          root = Path(output_dir)
-          try:
-              models = json.loads(raw_models)
-          except json.JSONDecodeError:
-              models = []
-          if not isinstance(models, list):
-              models = []
-          models = [model for model in models if isinstance(model, str)]
-          upstream_results = {
-              "legal": legal_result,
-              "impact": impact_result,
-          }
-          if run_unit_tests == "true":
-              upstream_results["unit-tests"] = unit_result
-          if has_models == "true":
-              upstream_results["model-proof"] = model_result
-          elif has_models == "false":
-              upstream_results["no-model"] = no_model_result
-          else:
-              upstream_results["impact-selection"] = "invalid"
-          issues = ["Combined report generation has not completed."]
-          issues.extend(
-              f"Upstream job {name!r} finished with result {result!r}."
-              for name, result in upstream_results.items()
-              if result != "success"
-          )
-          status = {
-              "schema_version": 1,
-              "report_kind": "combined_model_proof",
-              "outcome": "failed",
-              "source_revision": revision,
-              "suite": suite,
-              "upstream_results": upstream_results,
-              "expected_models": models,
-              "discovered_models": [],
-              "expected_count": len(models),
-              "discovered_count": 0,
-              "result_count": 0,
-              "issue_count": len(issues),
-              "issues": issues,
-              "models": [],
-          }
-          (root / "model-proof-report-status.json").write_text(
-              json.dumps(status, indent=2) + "\n", encoding="utf-8"
-          )
-          model_text = ", ".join(models) if models else "No affected models"
-          issue_items = "".join(f"<li>{html.escape(issue)}</li>" for issue in issues)
-          document = f"""<!DOCTYPE html>
-          <html lang="en"><head><meta charset="utf-8" />
-          <meta name="viewport" content="width=device-width, initial-scale=1" />
-          <title>TensorRT-Model-Connect Premerge Report</title>
-          <style>body{{font-family:system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem}}.pending{{padding:1rem;background:#fff7ed;border:1px solid #fdba74;border-radius:.5rem}}code{{overflow-wrap:anywhere}}</style>
-          </head><body><h1>TensorRT-Model-Connect Premerge Report</h1>
-          <div class="pending"><strong>The combined report did not complete.</strong></div>
-          <p>Revision: <code>{html.escape(revision)}</code></p>
-          <p>Suite: <code>{html.escape(suite)}</code></p>
-          <p>Expected models: {html.escape(model_text)}</p>
-          <h2>Available diagnostics</h2><ul>{issue_items}</ul></body></html>"""
-          (root / "model-proof-report.html").write_text(document, encoding="utf-8")
-          PY
-
-      - name: Check out pinned merge snapshot for report tooling
-        id: checkout
-        if: ${{ always() }}
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.legal.outputs.tested_sha || github.sha }}
+          repository: NVIDIA/TensorRT-Model-Connect
+          ref: ${{ github.event.pull_request.base.sha || 'main' }}
+          path: .ci-bridge
           fetch-depth: 1
           persist-credentials: false
+          sparse-checkout: .github/scripts/private_ci_bridge.py
+          sparse-checkout-cone-mode: false
 
-      - name: Download isolated model proof artifacts
-        id: download
-        if: ${{ always() && needs.impact.outputs.has_models == 'true' }}
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          pattern: model-proof-*-${{ needs.legal.outputs.tested_sha || github.sha }}-*
-          path: ${{ runner.temp }}/model-proof-parts-${{ github.run_id }}-${{ github.run_attempt }}
-          merge-multiple: false
-
-      - name: Compose combined model proof report
-        id: compose
-        if: ${{ always() }}
+      - name: Resolve and revalidate the exact pull-request snapshot
         env:
-          EXPECTED_MODELS: ${{ needs.impact.outputs.affected_models }}
-          REVISION: ${{ needs.legal.outputs.tested_sha || github.sha }}
-          SUITE: premerge
-          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
-          DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
-          HAS_MODELS: ${{ needs.impact.outputs.has_models }}
-          LEGAL_RESULT: ${{ needs.legal.result }}
-          IMPACT_RESULT: ${{ needs.impact.result }}
-          UNIT_RESULT: ${{ needs.unit-tests.result }}
-          RUN_UNIT_TESTS: ${{ needs.impact.outputs.run_unit_tests }}
-          MODEL_RESULT: ${{ needs.model-proof.result }}
-          NO_MODEL_RESULT: ${{ needs.no-model.result }}
-        run: |
-          set -uo pipefail
-          compose_rc=1
-          if [ "$CHECKOUT_OUTCOME" != "success" ]; then
-            echo "::error::Report tooling checkout did not succeed: $CHECKOUT_OUTCOME"
-          else
-            if [ "$HAS_MODELS" = "true" ] && [ "$DOWNLOAD_OUTCOME" != "success" ]; then
-              echo "::error::Model proof artifact download did not succeed: $DOWNLOAD_OUTCOME"
-            fi
-            upstream_args=(
-              --upstream-result "legal=$LEGAL_RESULT"
-              --upstream-result "impact=$IMPACT_RESULT"
-            )
-            if [ "$RUN_UNIT_TESTS" = "true" ]; then
-              upstream_args+=(--upstream-result "unit-tests=$UNIT_RESULT")
-            fi
-            case "$HAS_MODELS" in
-              true) upstream_args+=(--upstream-result "model-proof=$MODEL_RESULT") ;;
-              false) upstream_args+=(--upstream-result "no-model=$NO_MODEL_RESULT") ;;
-              *) upstream_args+=(--upstream-result "impact-selection=invalid") ;;
-            esac
-            if python3 scripts/generate_model_proof_report.py \
-                --parts-dir "$PARTS_DIR" \
-                --expected-models "$EXPECTED_MODELS" \
-                --revision "$REVISION" \
-                --suite "$SUITE" \
-                --project-dir "$GITHUB_WORKSPACE" \
-                --output "$REPORT_OUTPUT_DIR/model-proof-report.html" \
-                --status-output "$REPORT_OUTPUT_DIR/model-proof-report-status.json" \
-                "${upstream_args[@]}"; then
-              compose_rc=0
-            else
-              compose_rc=$?
-            fi
-          fi
-          echo "exit_code=$compose_rc" >> "$GITHUB_OUTPUT"
-          exit 0
-
-      - name: Upload combined model proof HTML report
-        id: report_upload
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: model-proof-html-${{ needs.legal.outputs.tested_sha || github.sha }}-${{ github.run_attempt }}
-          if-no-files-found: error
-          retention-days: 7
-          path: |
-            ${{ runner.temp }}/model-proof-report-${{ github.run_id }}-${{ github.run_attempt }}/model-proof-report.html
-            ${{ runner.temp }}/model-proof-report-${{ github.run_id }}-${{ github.run_attempt }}/model-proof-report-status.json
-
-      - name: Enforce combined report certification
-        if: ${{ always() }}
-        env:
-          COMPOSE_EXIT_CODE: ${{ steps.compose.outputs.exit_code }}
-          REPORT_UPLOAD_OUTCOME: ${{ steps.report_upload.outcome }}
-          EXPECTED_MODELS: ${{ needs.impact.outputs.affected_models }}
-          REVISION: ${{ needs.legal.outputs.tested_sha || github.sha }}
-          SUITE: premerge
+          GITHUB_TOKEN: ${{ github.token }}
+          REQUESTED_PR_NUMBER: ${{ inputs.pr_number || '' }}
         run: |
           set -euo pipefail
-          test "$REPORT_UPLOAD_OUTCOME" = "success" || {
-            echo "::error::Combined HTML artifact upload result: $REPORT_UPLOAD_OUTCOME"
-            exit 1
-          }
-          test "${COMPOSE_EXIT_CODE:-1}" -eq 0 || {
-            echo "::error::Combined report certification exited ${COMPOSE_EXIT_CODE:-missing}"
-            exit 1
-          }
-          python3 - \
-            "$REPORT_OUTPUT_DIR/model-proof-report-status.json" \
-            "$EXPECTED_MODELS" "$REVISION" "$SUITE" <<'PY'
-          import json
-          import sys
-          from pathlib import Path
+          python3 .ci-bridge/.github/scripts/private_ci_bridge.py resolve \
+            --event "$GITHUB_EVENT_PATH" \
+            --pr-number "$REQUESTED_PR_NUMBER" \
+            --output "$RUNNER_TEMP/private-ci-request.json"
 
-          status_path, raw_expected, revision, suite = sys.argv[1:]
-          status = json.loads(Path(status_path).read_text(encoding="utf-8"))
-          expected = json.loads(raw_expected)
-          errors = []
-          required = {
-              "schema_version": 1,
-              "report_kind": "combined_model_proof",
-              "outcome": "passed",
-              "source_revision": revision,
-              "suite": suite,
-              "expected_models": expected,
-              "discovered_models": expected,
-              "expected_count": len(expected),
-              "discovered_count": len(expected),
-              "issue_count": 0,
-          }
-          for key, wanted in required.items():
-              if status.get(key) != wanted:
-                  errors.append(f"{key}: expected {wanted!r}, found {status.get(key)!r}")
-          if errors:
-              raise SystemExit("Combined report status is not certified:\n- " + "\n- ".join(errors))
-          PY
+      - name: Mint a source-check token
+        id: source-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ vars.TRTMC_CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TRTMC_CI_APP_PRIVATE_KEY }}
+          owner: NVIDIA
+          repositories: TensorRT-Model-Connect
+          permission-checks: write
 
-  required:
-    # Authorized runs preserve the exact context required by main's ruleset.
-    # Other labels use a distinct successful context and leave it unsatisfied.
-    name: ${{ github.event.label.name == 'run-ci' && 'Premerge CI' || 'Ignored label / Premerge CI' }}
-    needs:
-      - legal
-      - impact
-      - source-quality
-      - unit-tests
-      - model-proof
-      - no-model
-      - report
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
+      - name: Mint an internal-dispatch token
+        id: ci-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ vars.TRTMC_CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TRTMC_CI_APP_PRIVATE_KEY }}
+          # These target identities are environment secrets because the pinned
+          # action logs owner/repository while resolving an installation.
+          owner: ${{ secrets.TRTMC_PRIVATE_CI_OWNER }}
+          repositories: ${{ secrets.TRTMC_PRIVATE_CI_REPOSITORY }}
+          permission-actions: write
 
-    steps:
-      - name: Verify every required job
+      - name: Create the queued check and dispatch private CI
         env:
-          TRIGGER_LABEL: ${{ github.event.label.name }}
-          AUTHORIZED: ${{ needs.legal.outputs.authorized }}
-          TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
-          LEGAL_RESULT: ${{ needs.legal.result }}
-          IMPACT_RESULT: ${{ needs.impact.result }}
-          SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
-          UNIT_RESULT: ${{ needs.unit-tests.result }}
-          RUN_UNIT_TESTS: ${{ needs.impact.outputs.run_unit_tests }}
-          MODEL_RESULT: ${{ needs.model-proof.result }}
-          NO_MODEL_RESULT: ${{ needs.no-model.result }}
-          REPORT_RESULT: ${{ needs.report.result }}
-          HAS_MODELS: ${{ needs.impact.outputs.has_models }}
-          EXPECTED_COUNT: ${{ needs.impact.outputs.expected_count }}
+          CI_DISPATCH_TOKEN: ${{ steps.ci-token.outputs.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_CHECK_TOKEN: ${{ steps.source-token.outputs.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PRIVATE_CI_OWNER: ${{ secrets.TRTMC_PRIVATE_CI_OWNER }}
+          PRIVATE_CI_REPOSITORY: ${{ secrets.TRTMC_PRIVATE_CI_REPOSITORY }}
         run: |
           set -euo pipefail
-
-          if [ "$TRIGGER_LABEL" != "run-ci" ]; then
-            test "$AUTHORIZED" = "false"
-            echo "Ignored unrelated label \`$TRIGGER_LABEL\`; protected premerge contexts were not emitted." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+          arguments=()
+          if [ "$EVENT_NAME" = "pull_request_target" ]; then
+            arguments+=(--consume-label)
           fi
-
-          test "$LEGAL_RESULT" = "success" || {
-            echo "::error::Legal compliance and one-shot authorization result: $LEGAL_RESULT"
-            exit 1
-          }
-          test "$AUTHORIZED" = "true" || {
-            echo "::error::The run-ci label was not consumed successfully"
-            exit 1
-          }
-          test -n "$TESTED_SHA"
-          test "$IMPACT_RESULT" = "success" || {
-            echo "::error::Ownership and impact result: $IMPACT_RESULT"
-            exit 1
-          }
-          test "$SOURCE_QUALITY_RESULT" = "success" || {
-            echo "::error::Source quality result: $SOURCE_QUALITY_RESULT"
-            exit 1
-          }
-          case "$RUN_UNIT_TESTS" in
-            true)
-              test "$UNIT_RESULT" = "success" || {
-                echo "::error::Source-only unit test result: $UNIT_RESULT"
-                exit 1
-              }
-              ;;
-            false)
-              test "$UNIT_RESULT" = "skipped" || {
-                echo "::error::Unit tests ran unexpectedly: $UNIT_RESULT"
-                exit 1
-              }
-              ;;
-            *)
-              echo "::error::Invalid run_unit_tests output: $RUN_UNIT_TESTS"
-              exit 1
-              ;;
-          esac
-          test "$REPORT_RESULT" = "success" || {
-            echo "::error::Combined HTML report result: $REPORT_RESULT"
-            exit 1
-          }
-
-          case "$HAS_MODELS" in
-            true)
-              test "${EXPECTED_COUNT:-0}" -gt 0
-              test "$MODEL_RESULT" = "success" || {
-                echo "::error::One or more isolated model proofs did not pass: $MODEL_RESULT"
-                exit 1
-              }
-              test "$NO_MODEL_RESULT" = "skipped"
-              ;;
-            false)
-              test "${EXPECTED_COUNT:-0}" -eq 0
-              test "$MODEL_RESULT" = "skipped"
-              test "$NO_MODEL_RESULT" = "success" || {
-                echo "::error::No-model result: $NO_MODEL_RESULT"
-                exit 1
-              }
-              ;;
-            *)
-              echo "::error::Impact job did not emit a valid has_models output"
-              exit 1
-              ;;
-          esac
-
-          echo "All required premerge checks passed for \`$TESTED_SHA\`." >> "$GITHUB_STEP_SUMMARY"
+          python3 .ci-bridge/.github/scripts/private_ci_bridge.py dispatch \
+            --request "$RUNNER_TEMP/private-ci-request.json" \
+            "${arguments[@]}"

@@ -67,7 +67,7 @@ def test_a100_ci_entrypoint_builds_only_qwen_and_is_valid_bash() -> None:
     with A100_QUALIFICATION_DESCRIPTOR.open("rb") as descriptor_stream:
         descriptor = tomllib.load(descriptor_stream)
 
-    assert descriptor["runner_labels"] == ["trtmc-a100-80gb-pcie-proof"]
+    assert descriptor["execution_binding"] == "a100-sm80"
     assert (
         'TRTMC_CONAN_BUILD_TARGETS="trtmc trtmc_benchmark_worker '
         'trtmc_backend_trt trtmc_model_qwen"' in runner

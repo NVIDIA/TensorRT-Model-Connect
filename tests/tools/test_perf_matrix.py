@@ -21,7 +21,6 @@ from tools import perf_matrix
 REPOSITORY = Path(__file__).resolve().parents[2]
 SUITE = REPOSITORY / "benchmarks/performance/release.yaml"
 GB300_ENVIRONMENT = REPOSITORY / "benchmarks/performance/environments/gb300.yaml"
-PERFORMANCE_WORKFLOW = REPOSITORY / ".github/workflows/performance.yml"
 TASK_ADAPTERS = {
     "bark.generate_audio": "hf-transformers-tts",
     "canary.transcribe": "nemo-asr",
@@ -395,22 +394,6 @@ def test_checked_in_gb300_environment_is_ci_runnable() -> None:
     assert raw["storage"]["runtime_dirs"] == "${TRTMC_PERF_RUNTIME_DIRS}"
     assert raw["execution"]["minimum_gpu_free_fraction"] == 0.0
     assert raw["execution"]["timeout_seconds"] == 7200
-
-
-def test_performance_workflow_uses_the_matrix_cli_and_reference_checkouts() -> None:
-    workflow = PERFORMANCE_WORKFLOW.read_text(encoding="utf-8")
-
-    assert "python3 tools/perf_matrix.py run" in workflow
-    assert "benchmarks/performance/environments/gb300.yaml" in workflow
-    assert '--entry "${{ inputs.entry }}"' in workflow
-    assert "tools/perf_release.py" not in workflow
-    for name in (
-        "TRTMC_ELF_REFERENCE_REPO",
-        "TRTMC_LANCE_REFERENCE_REPO",
-        "TRTMC_SANA_WM_REFERENCE_REPO",
-        "PERSONAPLEX_OFFICIAL_REPO",
-    ):
-        assert f"{name}: ${{{{ vars.{name} }}}}" in workflow
 
 
 def test_compile_contract_cannot_silently_fall_back_to_eager() -> None:

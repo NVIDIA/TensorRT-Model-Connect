@@ -10,7 +10,7 @@ breaking down CPU-side overhead, and collecting GPU kernel traces.
 ```bash
 python tools/trtmc_profile.py \
   --model Qwen/Qwen3-0.6B \
-  --bundle /workspace/users/yifeif/tensorrt-model-connect/engines/qwen3-0.6b.trtfb \
+  --bundle ./engines/qwen3-0.6b.trtfb \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
   --output-dir /tmp/qwen_profile \
@@ -328,7 +328,7 @@ The report includes:
 
 ```bash
 MODEL="Qwen/Qwen3-0.6B"
-BUNDLE="/workspace/users/yifeif/tensorrt-model-connect/engines/qwen3-0.6b.trtfb"
+BUNDLE="./engines/qwen3-0.6b.trtfb"
 OUT="/tmp/profile_${MODEL//\//-}"
 
 # 1. 4-way benchmark (C++ + TRT Python + HF eager + HF compile) + per-layer timing

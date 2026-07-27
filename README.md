@@ -2,8 +2,8 @@
 
 ![TensorRT-Model-Connect overview](website/static/img/trtmc-landing.png)
 
-[Documentation site](https://sturdy-broccoli-y7zg5w9.pages.github.io/) |
-[Quick Start](https://sturdy-broccoli-y7zg5w9.pages.github.io/getting-started/quick-start) |
+[Documentation site](https://nvidia.github.io/TensorRT-Model-Connect/) |
+[Quick Start](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/quick-start) |
 [GitHub Actions](https://github.com/NVIDIA/TensorRT-Model-Connect/actions) |
 [Docs source](website/docs/intro.md)
 

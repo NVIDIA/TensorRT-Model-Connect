@@ -19,7 +19,6 @@ import time
 from pathlib import Path
 
 import pytest
-import yaml
 
 from tools.ci.context import CiContext
 from tools.ci.gpu_lease import GpuLease
@@ -34,7 +33,6 @@ RUNNER = REPO_ROOT / "tools" / "ci" / "model_proof.py"
 RUNNER_COMMAND = [sys.executable, "-m", "tools.ci", "model-proof"]
 MODEL_CI = REPO_ROOT / "tools" / "model_ci.py"
 IMAGE_ENSURE = REPO_ROOT / "tools" / "ci" / "docker_image.py"
-PROOF_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "model-proof.yml"
 FALLBACK_WRITER = REPO_ROOT / ".github" / "scripts" / "write-model-proof-fallback-report.py"
 PLUGIN_CMAKE = REPO_ROOT / "cmake" / "trtmc_pipeline_plugins.cmake"
 SANA_REFERENCE_REVISION = "59629fdf790850797cb657bad014fce432bd713d"
@@ -342,15 +340,6 @@ def _lock_is_busy(path: Path) -> bool:
             return True
         fcntl.flock(stream, fcntl.LOCK_UN)
     return False
-
-
-def _workflow_singleton_gate_program() -> str:
-    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
-    step = workflow.split("- name: Enforce isolated model certification", maxsplit=1)[1].split(
-        "- name: Clean model proof scratch space", maxsplit=1
-    )[0]
-    program = step.split("<<'PY'\n", maxsplit=1)[1].split("\n          PY", maxsplit=1)[0]
-    return textwrap.dedent(program)
 
 
 def _run_test_selection(
@@ -1225,34 +1214,12 @@ def test_runner_warms_the_exact_shared_selection_before_the_proof() -> None:
     assert "offline HF cache readiness check failed" in warm
 
 
-def test_runner_keeps_local_fallback_and_workflow_uses_runner_cache_paths() -> None:
+def test_runner_uses_local_fallback_and_isolated_cache_paths() -> None:
     runner = RUNNER.read_text(encoding="utf-8")
-    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
 
     assert 'self.context.env.get("HF_HOME", str(Path.home() / ".cache/huggingface"))' in runner
-    assert "TRTMC_HF_CACHE: ${{ vars.TRTMC_HF_HOME || " in workflow
-    assert "TRTMC_HF_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || " in workflow
-    assert "format('{0}/hub', vars.TRTMC_HF_HOME || " in workflow
-    assert (
-        "TRTMC_MODEL_REFERENCE_CACHE_ROOT: ${{ vars.TRTMC_MODEL_REFERENCE_CACHE_ROOT || "
-        in workflow
-    )
-    assert "TRTMC_HF_MODULES_CACHE:" not in workflow
     assert 'self.context.env.get("TRTMC_HF_HUB_CACHE"' in runner
     assert "TRTMC_HF_MODULES_CACHE" not in runner
-
-
-def test_hf_token_is_not_exposed_to_pull_request_model_proof_code() -> None:
-    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
-    job_environment = workflow.split("\n    steps:", maxsplit=1)[0]
-    proof_step = workflow.split("- name: Run isolated model proof", maxsplit=1)[1].split(
-        "- name: Finalize model proof fallback", maxsplit=1
-    )[0]
-
-    assert "HF_TOKEN:" not in job_environment
-    assert "HUGGING_FACE_HUB_TOKEN:" not in job_environment
-    assert "HF_TOKEN:" not in proof_step
-    assert "HUGGING_FACE_HUB_TOKEN:" not in proof_step
 
 
 def test_runner_removes_only_its_container_without_masking_exit_status() -> None:
@@ -1264,20 +1231,6 @@ def test_runner_removes_only_its_container_without_masking_exit_status() -> None
     assert "self.lease.release()" in cleanup
     assert "for number in (signal.SIGINT, signal.SIGTERM)" in text
     assert "raise SystemExit(130 if number == signal.SIGINT else 143)" in text
-
-
-def test_workflow_reconciles_exact_job_containers_after_a_cancelled_proof() -> None:
-    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
-    reconciliation = workflow.split("- name: Reconcile model proof containers", maxsplit=1)[
-        1
-    ].split("- name: Finalize model proof fallback", maxsplit=1)[0]
-
-    assert "if: ${{ always() && steps.checkout.outcome == 'success' }}" in reconciliation
-    assert "--cleanup-containers" in reconciliation
-    assert '--model "$MODEL"' in reconciliation
-    assert workflow.index("Reconcile model proof containers") < workflow.index(
-        "Finalize model proof fallback"
-    )
 
 
 def test_every_host_container_has_exact_workflow_job_identity_labels(tmp_path: Path) -> None:
@@ -1507,11 +1460,10 @@ def test_orphan_reclamation_rejects_a_failed_remove_when_full_id_remains(
     assert not any(" --inner " in f" {line} " for line in docker_lines)
 
 
-def test_model_proof_serializes_image_setup_and_uses_the_verified_image_id() -> None:
+def test_model_proof_image_setup_is_serialized_and_emits_a_verified_image_id() -> None:
     ensure = IMAGE_ENSURE.read_text(encoding="utf-8") + (
         REPO_ROOT / "tools/ci/process.py"
     ).read_text(encoding="utf-8")
-    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
 
     for contract in (
         "TRTMC_CI_IMAGE_LOCK_FILE",
@@ -1523,440 +1475,11 @@ def test_model_proof_serializes_image_setup_and_uses_the_verified_image_id() -> 
         "_verification_stamp",
     ):
         assert contract in ensure
-    assert "id: ci_image" in workflow
-    assert "timeout-minutes: 90" in workflow
-    assert "TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}" in workflow
-
-
-def test_model_proof_job_budget_reserves_singleton_finalization() -> None:
-    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
-    job_configuration = workflow.split("jobs:\n  prove:", maxsplit=1)[1].split(
-        "\n    steps:", maxsplit=1
-    )[0]
-    proof = workflow.split("- name: Run isolated model proof", maxsplit=1)[1].split(
-        "- name: Finalize model proof fallback", maxsplit=1
-    )[0]
-
-    assert "timeout-minutes: ${{ inputs.suite == 'nightly' && 540 || 300 }}" in job_configuration
-    assert "timeout-minutes: ${{ inputs.suite == 'nightly' && 360 || 150 }}" in proof
-    assert "inputs.suite == 'nightly' && '5400' || '3600'" in job_configuration
-    assert "inputs.suite == 'nightly' && '600' || '360'" in job_configuration
-    assert "inputs.expected_count" not in workflow
-
-    nightly_job_minutes = 540
-    disk_headroom_wait_minutes = 3600 // 60
-    image_minutes = 90
-    nightly_proof_minutes = 360
-    finalization_margin_minutes = 30
-    lease_minutes = 5400 // 60
-    sana_build_minutes = (
-        json.loads(
-            (REPO_ROOT / "tests/e2e/models/sana_wm/manifests/sana-wm-bidirectional.json").read_text(
-                encoding="utf-8"
-            )
-        )["build_timeout_s"]
-        // 60
-    )
-    e2e_and_report_margin_minutes = 150
-    assert nightly_proof_minutes >= (
-        lease_minutes + sana_build_minutes + e2e_and_report_margin_minutes
-    )
-    assert nightly_job_minutes >= (
-        disk_headroom_wait_minutes
-        + image_minutes
-        + nightly_proof_minutes
-        + finalization_margin_minutes
-    )
-    assert nightly_proof_minutes <= 360
-
-
-def test_model_proof_uses_a_dedicated_self_hosted_checkout() -> None:
-    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
-    checkout = workflow.split("- name: Check out exact source revision", maxsplit=1)[1].split(
-        "- name: Ensure CI Docker image", maxsplit=1
-    )[0]
-
-    assert "path: model-proof-source" in checkout
-    assert "clean: true" in checkout
-    assert "persist-credentials: false" in checkout
-    assert workflow.count("working-directory: ${{ github.workspace }}/model-proof-source") == 3
-
-
-def test_model_proof_bootstraps_html_without_a_checkout_dependency() -> None:
-    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
-    bootstrap = workflow.split("- name: Bootstrap model HTML before checkout", maxsplit=1)[1].split(
-        "- name: Check model proof disk headroom", maxsplit=1
-    )[0]
-    checkout_failure = workflow.split("- name: Finalize model proof fallback", maxsplit=1)[1].split(
-        "- name: Upload isolated model proof artifact", maxsplit=1
-    )[0]
-
-    assert workflow.index("Bootstrap model HTML before checkout") < workflow.index(
-        "Check out exact source revision"
-    )
-    assert "model-proof-report.html" in bootstrap
-    assert "model-proof-status.json" in bootstrap
-    assert "working-directory:" not in bootstrap
-    assert ".github/scripts/" not in bootstrap
-    assert "if: ${{ always() }}" in checkout_failure
-    assert "CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}" in checkout_failure
-    assert "model-proof-report.html" in checkout_failure
-    assert "working-directory:" not in checkout_failure
-    assert "write-model-proof-fallback-report.py" in checkout_failure
-
-
-def _write_certified_singleton_artifacts(
-    root: Path,
-    *,
-    model: str = "alpha",
-    revision: str = "a" * 40,
-) -> None:
-    root.mkdir(parents=True)
-    (root / "model-proof-status.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "model": model,
-                "source_revision": revision,
-                "suite": "premerge",
-                "outcome": "passed",
-            }
-        ),
-        encoding="utf-8",
-    )
-    (root / "proof.json").write_text(
-        json.dumps(
-            {
-                "model": model,
-                "source_revision": revision,
-                "passed": True,
-            }
-        ),
-        encoding="utf-8",
-    )
-    (root / "selection.json").write_text(json.dumps({"requested_model": model}), encoding="utf-8")
-    (root / "model-proof-report.html").write_text(
-        "<!doctype html><title>complete proof</title>", encoding="utf-8"
-    )
-
-
-def _run_workflow_singleton_gate(
-    root: Path,
-    *,
-    model: str = "alpha",
-    revision: str = "a" * 40,
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            _workflow_singleton_gate_program(),
-            str(root),
-            model,
-            revision,
-            "premerge",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-
-def test_workflow_singleton_gate_accepts_complete_certification(
-    tmp_path: Path,
-) -> None:
-    artifacts = tmp_path / "artifacts"
-    _write_certified_singleton_artifacts(artifacts)
-
-    result = _run_workflow_singleton_gate(artifacts)
-
-    assert result.returncode == 0, result.stdout + result.stderr
-
-
-@pytest.mark.parametrize(
-    ("filename", "field", "value", "message"),
-    [
-        ("model-proof-status.json", "outcome", "failed", "status is not"),
-        ("proof.json", "passed", False, "passed=true"),
-        ("selection.json", "requested_model", "beta", "requested model"),
-    ],
-)
-def test_workflow_singleton_gate_rejects_invalid_certification(
-    tmp_path: Path,
-    filename: str,
-    field: str,
-    value: object,
-    message: str,
-) -> None:
-    artifacts = tmp_path / "artifacts"
-    _write_certified_singleton_artifacts(artifacts)
-    path = artifacts / filename
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    payload[field] = value
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-    result = _run_workflow_singleton_gate(artifacts)
-
-    assert result.returncode == 1
-    assert message in result.stderr
-
-
-def test_model_proof_resolves_durable_workspace_after_runner_assignment() -> None:
-    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
-    job_configuration = workflow.split("\n    steps:", maxsplit=1)[0]
-    bootstrap = workflow.split("- name: Bootstrap model HTML before checkout", maxsplit=1)[1].split(
-        "- name: Check model proof disk headroom", maxsplit=1
-    )[0]
-    proof = workflow.split("- name: Run isolated model proof", maxsplit=1)[1].split(
-        "- name: Finalize model proof fallback", maxsplit=1
-    )[0]
-    finalize = workflow.split("- name: Finalize model proof fallback", maxsplit=1)[1].split(
-        "- name: Upload isolated model proof artifact", maxsplit=1
-    )[0]
-
-    assert "MODEL_PROOF_OUTPUT_DIR:" not in job_configuration
-    assert (
-        "MODEL_PROOF_OUTPUT_DIR: ${{ github.workspace }}/model-proof-output-"
-        "${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.model }}"
-    ) in bootstrap
-    assert "${{ runner.temp }}/model-proof-" not in workflow
-    assert 'echo "MODEL_PROOF_OUTPUT_DIR=$MODEL_PROOF_OUTPUT_DIR" >> "$GITHUB_ENV"' in bootstrap
-    assert "${{ env.MODEL_PROOF_OUTPUT_DIR }}" not in proof
-    assert '--output-dir "$MODEL_PROOF_OUTPUT_DIR"' in proof
-    assert 'printf \'%s\\n\' "$proof_rc" > "$MODEL_PROOF_OUTPUT_DIR/proof-exit-code.txt"' in proof
-    assert "GITHUB_OUTPUT" not in proof
-    assert "steps.proof.outputs.exit_code" not in finalize
-    assert "proof_exit_code=1" in finalize
-    assert "proof-exit-code.txt" in finalize
-    assert '--exit-code "$proof_exit_code"' in finalize
-
-
-def test_model_proof_checks_disk_headroom_before_checkout() -> None:
-    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
-    disk_check = workflow.split("- name: Check model proof disk headroom", maxsplit=1)[1].split(
-        "- name: Check out exact source revision", maxsplit=1
-    )[0]
-
-    assert workflow.index("Check model proof disk headroom") < workflow.index(
-        "Check out exact source revision"
-    )
-    assert "TRTMC_MODEL_PROOF_MIN_FREE_GIB:" in workflow
-    assert "TRTMC_MODEL_PROOF_DISK_HEADROOM_TIMEOUT_SECONDS:" in workflow
-    assert "inputs.suite == 'nightly' && '3600' || '60'" in workflow
-    assert "TRTMC_MODEL_PROOF_DISK_HEADROOM_POLL_SECONDS:" in workflow
-    assert "vars.TRTMC_MODEL_PROOF_DISK_HEADROOM_POLL_SECONDS || '10'" in workflow
-    assert "TRTMC_MODEL_PROOF_STALE_MINUTES:" in workflow
-    assert '-mmin "+$TRTMC_MODEL_PROOF_STALE_MINUTES"' in disk_check
-    assert "-name work -o -name projection" in disk_check
-    assert "-exec rm -rf -- {} +" in disk_check
-    assert 'proof_capacity="$((${#gpu_ids[@]} * TRTMC_MODEL_PROOF_SLOTS_PER_GPU))"' in disk_check
-    assert 'required_gib="$((TRTMC_MODEL_PROOF_MIN_FREE_GIB * proof_capacity))"' in disk_check
-    assert 'required_kib="$((required_gib * 1024 * 1024))"' in disk_check
-    assert 'df -Pk "$GITHUB_WORKSPACE"' in disk_check
-    assert '[ "$available_kib" -ge "$required_kib" ]' in disk_check
-    assert 'sleep "$sleep_seconds"' in disk_check
-    assert 'waited_seconds="$((waited_seconds + sleep_seconds))"' in disk_check
-    assert "Insufficient model-proof disk headroom" in disk_check
-
-
-def _model_proof_disk_headroom_script() -> str:
-    workflow = yaml.safe_load(PROOF_WORKFLOW.read_text(encoding="utf-8"))
-    steps = workflow["jobs"]["prove"]["steps"]
-    return next(
-        step["run"] for step in steps if step.get("name") == "Check model proof disk headroom"
-    )
-
-
-def _run_model_proof_disk_headroom_check(
-    tmp_path: Path,
-    *,
-    available_kib: list[int | str],
-    timeout_seconds: str = "20",
-    poll_seconds: str = "10",
-) -> tuple[subprocess.CompletedProcess[str], list[str], int]:
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    df_state = tmp_path / "df-state"
-    sleep_log = tmp_path / "sleep-log"
-
-    fake_df = fake_bin / "df"
-    fake_df.write_text(
-        textwrap.dedent(
-            """\
-            #!/usr/bin/env bash
-            set -euo pipefail
-            call=0
-            if [ -f "$FAKE_DF_STATE" ]; then
-              read -r call < "$FAKE_DF_STATE"
-            fi
-            IFS=, read -r -a values <<< "$FAKE_DF_AVAILABLE_KIB"
-            index="$call"
-            if [ "$index" -ge "${#values[@]}" ]; then
-              index="$((${#values[@]} - 1))"
-            fi
-            available="${values[$index]}"
-            printf '%s\n' "$((call + 1))" > "$FAKE_DF_STATE"
-            printf '%s\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on'
-            printf '/dev/fake 999999999 0 %s 0%% %s\n' "$available" "$GITHUB_WORKSPACE"
-            """
-        ),
-        encoding="utf-8",
-    )
-    fake_df.chmod(0o755)
-
-    fake_sleep = fake_bin / "sleep"
-    fake_sleep.write_text(
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        'printf \'%s\\n\' "${1:?}" >> "$FAKE_SLEEP_LOG"\n',
-        encoding="utf-8",
-    )
-    fake_sleep.chmod(0o755)
-
-    env = os.environ.copy()
-    env.update(
-        {
-            "PATH": f"{fake_bin}:{env['PATH']}",
-            "GITHUB_WORKSPACE": str(tmp_path),
-            "TRTMC_MODEL_PROOF_MIN_FREE_GIB": "40",
-            "TRTMC_MODEL_PROOF_STALE_MINUTES": "600",
-            "TRTMC_MODEL_PROOF_GPU_IDS": "0,1,2,3",
-            "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "4",
-            "TRTMC_MODEL_PROOF_DISK_HEADROOM_TIMEOUT_SECONDS": timeout_seconds,
-            "TRTMC_MODEL_PROOF_DISK_HEADROOM_POLL_SECONDS": poll_seconds,
-            "FAKE_DF_AVAILABLE_KIB": ",".join(str(value) for value in available_kib),
-            "FAKE_DF_STATE": str(df_state),
-            "FAKE_SLEEP_LOG": str(sleep_log),
-        }
-    )
-    result = subprocess.run(
-        ["bash"],
-        input=_model_proof_disk_headroom_script(),
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    sleeps = sleep_log.read_text(encoding="utf-8").splitlines() if sleep_log.exists() else []
-    df_calls = int(df_state.read_text(encoding="utf-8")) if df_state.exists() else 0
-    return result, sleeps, df_calls
-
-
-def test_model_proof_disk_headroom_waits_for_transient_capacity(tmp_path: Path) -> None:
-    required_kib = 40 * 16 * 1024 * 1024
-
-    result, sleeps, df_calls = _run_model_proof_disk_headroom_check(
-        tmp_path,
-        available_kib=[required_kib - 1, required_kib - 1, required_kib],
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert sleeps == ["10", "10"]
-    assert df_calls == 3
-    assert "ready after 20s" in result.stdout
-    assert "640 GiB available; 640 GiB required for 16 GPU proof slots" in result.stdout
-
-
-def test_model_proof_disk_headroom_timeout_remains_fail_closed(tmp_path: Path) -> None:
-    required_kib = 40 * 16 * 1024 * 1024
-
-    result, sleeps, df_calls = _run_model_proof_disk_headroom_check(
-        tmp_path,
-        available_kib=[required_kib - 1],
-        timeout_seconds="15",
-    )
-
-    assert result.returncode == 1
-    assert sleeps == ["10", "5"]
-    assert df_calls == 3
-    assert "after waiting 15s" in result.stderr
-    assert "639 GiB available; 640 GiB required for 16 GPU proof slots" in result.stderr
-
-
-def test_model_proof_disk_headroom_zero_timeout_fails_without_sleep(tmp_path: Path) -> None:
-    required_kib = 40 * 16 * 1024 * 1024
-
-    result, sleeps, df_calls = _run_model_proof_disk_headroom_check(
-        tmp_path,
-        available_kib=[required_kib - 1],
-        timeout_seconds="0",
-    )
-
-    assert result.returncode == 1
-    assert sleeps == []
-    assert df_calls == 1
-    assert "after waiting 0s" in result.stderr
-
-
-@pytest.mark.parametrize(
-    ("timeout_seconds", "poll_seconds", "message"),
-    [
-        ("-1", "10", "must be an integer from 0 to 3600"),
-        ("3601", "10", "must be an integer from 0 to 3600"),
-        ("18446744073709551615", "10", "must be an integer from 0 to 3600"),
-        ("invalid", "10", "must be an integer from 0 to 3600"),
-        ("20", "0", "must be an integer from 1 to 60"),
-        ("20", "61", "must be an integer from 1 to 60"),
-        ("20", "18446744073709551615", "must be an integer from 1 to 60"),
-        ("20", "invalid", "must be an integer from 1 to 60"),
-    ],
-)
-def test_model_proof_disk_headroom_rejects_invalid_wait_configuration(
-    tmp_path: Path,
-    timeout_seconds: str,
-    poll_seconds: str,
-    message: str,
-) -> None:
-    result, sleeps, df_calls = _run_model_proof_disk_headroom_check(
-        tmp_path,
-        available_kib=[40 * 16 * 1024 * 1024],
-        timeout_seconds=timeout_seconds,
-        poll_seconds=poll_seconds,
-    )
-
-    assert result.returncode == 1
-    assert message in result.stderr
-    assert sleeps == []
-    assert df_calls == 0
-
-
-def test_model_proof_disk_headroom_rejects_malformed_df_output(tmp_path: Path) -> None:
-    result, sleeps, df_calls = _run_model_proof_disk_headroom_check(
-        tmp_path,
-        available_kib=["not-a-number"],
-    )
-
-    assert result.returncode == 1
-    assert "Unable to determine model-proof disk headroom from df" in result.stderr
-    assert sleeps == []
-    assert df_calls == 1
-
-
-def test_model_proof_uploads_before_singleton_gate_and_cleanup() -> None:
-    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
-    gate = workflow.split("- name: Enforce isolated model certification", maxsplit=1)[1].split(
-        "- name: Clean model proof scratch space", maxsplit=1
-    )[0]
-    cleanup = workflow.split("- name: Clean model proof scratch space", maxsplit=1)[1]
-
-    assert workflow.index("Upload isolated model proof artifact") < workflow.index(
-        "Enforce isolated model certification"
-    )
-    assert workflow.index("Enforce isolated model certification") < workflow.index(
-        "Clean model proof scratch space"
-    )
-    assert "if: ${{ always() }}" in gate
-    assert "id: artifact_upload" in workflow
-    assert '"$GITHUB_WORKSPACE"/model-proof-output-*' in cleanup
-    assert "-name work -o -name projection" in cleanup
-    assert 'ARTIFACT_UPLOAD_OUTCOME" = "success"' in cleanup
-    assert 'rm -rf -- "$MODEL_PROOF_OUTPUT_DIR"' in cleanup
 
 
 def test_model_proof_always_generates_a_strict_self_contained_html_report() -> None:
     runner = RUNNER.read_text(encoding="utf-8")
     inner = (REPO_ROOT / "tools/ci/model_proof_inner.py").read_text(encoding="utf-8")
-    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
 
     for contract in (
         "report_rc = self._finalize_report(validation_rc)",
@@ -1980,31 +1503,6 @@ def test_model_proof_always_generates_a_strict_self_contained_html_report() -> N
     assert 'raise CiError(f"model proof did not emit {name}")' in runner
     assert 'self.payload["validation_exit_code"] = returncode' in inner
     assert 'self.payload["report_exit_code"] = report_rc' in inner
-    assert "Upload isolated model proof artifact" in workflow
-    assert "Bootstrap model HTML before checkout" in workflow
-    assert "Finalize model proof fallback" in workflow
-    assert "ci-image.log" in workflow
-    assert "model-proof-report.html" in workflow
-    assert "model-proof-index.html" not in workflow
-    assert "if-no-files-found: error" in workflow
-
-
-def test_model_proof_fallback_step_has_valid_shell_heredocs() -> None:
-    workflow = yaml.safe_load(PROOF_WORKFLOW.read_text(encoding="utf-8"))
-    steps = workflow["jobs"]["prove"]["steps"]
-    script = next(
-        step["run"] for step in steps if step.get("name") == "Finalize model proof fallback"
-    )
-
-    result = subprocess.run(
-        ["bash", "-n"],
-        input=script,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
 
 
 def test_model_proof_enforces_one_full_bundle_build_per_selected_model() -> None:
@@ -4858,7 +4356,6 @@ def test_gpu_mapping_exists_only_on_the_hermetic_proof_container() -> None:
     text = RUNNER.read_text(encoding="utf-8")
     allocator = (REPO_ROOT / "tools/ci/gpu_lease.py").read_text(encoding="utf-8")
     inner = (REPO_ROOT / "tools/ci/model_proof_inner.py").read_text(encoding="utf-8")
-    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
     host = text.split("def _run_host(self)", maxsplit=1)[1]
     warm = text.split("def _prepare_hf_cache(", maxsplit=1)[1].split(
         "def _validated_cache_evidence", maxsplit=1
@@ -4888,11 +4385,3 @@ def test_gpu_mapping_exists_only_on_the_hermetic_proof_container() -> None:
     assert '"resource_class": self.resource_class' in allocator
     assert '"gpu_resource_class": self.resource_class' in allocator
     assert '"gpu_lease_evidence": "gpu-lease.json"' in inner
-    assert "vars.TRTMC_MODEL_PROOF_GPU_IDS" not in workflow
-    assert "\n      TRTMC_MODEL_PROOF_GPU_IDS:" not in workflow
-    assert "TRTMC_MODEL_PROOF_SLOTS_PER_GPU" in workflow
-    assert (
-        "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS: "
-        "${{ vars.TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS || "
-        "(inputs.suite == 'nightly' && '5400' || '3600') }}" in workflow
-    )

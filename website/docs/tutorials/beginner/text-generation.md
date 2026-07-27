@@ -228,7 +228,7 @@ You understand this stage when you can explain why two successful runs can produ
 
 ```bash
 /opt/venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b-fp16] -v \
-  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --engine-dir ./engines \
   --trtmc-binary ./build/trtmc \
   --rebuild-engines
 ```

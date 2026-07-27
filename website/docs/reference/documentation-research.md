@@ -12,7 +12,6 @@ The site structure follows patterns from current public documentation:
 | [Google documentation best practices](https://google.github.io/styleguide/docguide/best_practices.html) | Keep docs fresh with code, prefer simple direct language, and put the simplest use case first. |
 | [Universal Design for Learning](https://www.cast.org/resources/about-universal-design-for-learning/) | Present concepts in multiple forms: motivation, visual representation, and hands-on proof points. |
 | [ysyx course handouts](https://ysyx.oscc.cc/docs/en/2407/f/1.html) | Teach through staged handouts with information-box categories, required tasks, reflective questions, learning logs, and independent problem-solving habits. |
-| Local TensorRT documentation repo (`/workspace/users/yifeif/workspaces/documentation`) | Use restrained NVIDIA technical-doc styling: dense side navigation, right-page table of contents, neutral cards, admonitions, tabbed examples, dropdowns, and reference-heavy tables. |
 | [TensorRT-LLM](https://nvidia.github.io/TensorRT-LLM/) | Separate getting started, model support, CLI reference, API reference, features, and developer guide sections. |
 | [NVIDIA TensorRT getting started](https://developer.nvidia.com/tensorrt-getting-started) | Route learners by beginner, intermediate, and expert levels across videos, notebooks, samples, and guides. |
 | [Kubernetes](https://kubernetes.io/docs/tasks/) | Task pages focus on one outcome and provide a short sequence of steps. |

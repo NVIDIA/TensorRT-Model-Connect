@@ -38,7 +38,8 @@ from pathlib import Path
 # Configuration
 # ---------------------------------------------------------------------------
 
-WORKSPACE_ROOT = "/workspace/users/yifeif/workspaces"
+WORKSPACE_ROOT = os.environ.get(
+    "TRTMC_WORKSPACE_ROOT", str(Path.home() / "trtmc-workspaces"))
 DEFAULT_AGENTS = ["agent-1", "agent-2", "agent-3", "agent-4"]
 DEFAULT_AGENT_BIN = "codex"
 DEFAULT_AGENT_ARGS = [
@@ -137,7 +138,7 @@ WORKER_PROMPT = textwrap.dedent("""\
 
     ## Step 5: Commit, push, and open a PR
     ```
-    cd /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect
+    cd "$(git rev-parse --show-toplevel)"
     git fetch github main
     git switch -C autopilot/{family_name} github/main
     git add python/tensorrt_model_connect/families/{family_name}.py
@@ -154,7 +155,7 @@ WORKER_PROMPT = textwrap.dedent("""\
     At the end, write a JSON status file to the WORKSPACE (not container /tmp):
     ```
     echo '{{"family": "{family_name}", "status": "PASS", "branch": "autopilot/{family_name}"}}' \\
-        > /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/.autopilot_status.json
+        > .autopilot_status.json
     ```
     If all retries failed, write status "FAIL" with the last error message instead.
     Write this file on the HOST filesystem, not via docker exec.

@@ -529,7 +529,7 @@ def test_default_suites_include_one_dpg_bench_diffusion_image_suite() -> None:
     assert suite["ci"] == {
         "eligible": False,
         "lane": "local_only",
-        "notes": "P2021-only until the DPG-Bench scorecard is visually calibrated.\n",
+        "notes": "Local-only until the DPG-Bench scorecard is visually calibrated.\n",
     }
 
 

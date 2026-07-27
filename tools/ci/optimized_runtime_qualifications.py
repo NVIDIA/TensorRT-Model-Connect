@@ -28,7 +28,6 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 
 DESCRIPTOR_GLOB = "tests/e2e/models/*/*/QUALIFICATION.*.toml"
 _ID = re.compile(r"[a-z0-9][a-z0-9._-]*")
-_IMAGE = re.compile(r"\S+@sha256:[0-9a-f]{64}")
 _PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.toml")
 _MAX_MATRIX_ENTRIES = 256
 
@@ -43,8 +42,7 @@ class ProducerQualification:
     id: str
     runtime_id: str
     entrypoint: str
-    container_image: str
-    runner_labels: tuple[str, ...]
+    execution_binding: str
     representative: bool
     profile_glob: str
     trigger_globs: tuple[str, ...]
@@ -142,16 +140,14 @@ def _common_fields(repository: Path, relative: str, data: dict[str, object]) -> 
         raise QualificationError(f"{relative}: entrypoint does not exist: {entrypoint}")
     if not entrypoint_path.stat().st_mode & 0o111:
         raise QualificationError(f"{relative}: entrypoint must be executable")
-    image = data["container_image"]
-    if not isinstance(image, str) or _IMAGE.fullmatch(image) is None:
-        raise QualificationError(f"{relative}: container_image must be pinned by sha256 digest")
     return {
         "path": relative,
         "id": identifier,
         "runtime_id": runtime_id,
         "entrypoint": entrypoint,
-        "container_image": image,
-        "runner_labels": _string_list(data["runner_labels"], f"{relative}: runner_labels"),
+        "execution_binding": _identifier(
+            data["execution_binding"], relative, "execution_binding"
+        ),
     }
 
 
@@ -168,17 +164,16 @@ def _load_descriptor(repository: Path, path: Path) -> ProducerQualification:
         "runtime_id",
         "representative",
         "entrypoint",
-        "container_image",
-        "runner_labels",
+        "execution_binding",
         "profile_glob",
         "trigger_globs",
         "representative_trigger_globs",
         "profile_target",
     }
     kind = data.get("kind")
-    if data.get("schema_version") != 2 or kind != "producer":
+    if data.get("schema_version") != 3 or kind != "producer":
         raise QualificationError(
-            f"{relative} must use producer qualification schema version 2"
+            f"{relative} must use producer qualification schema version 3"
         )
     if set(data) != producer_fields:
         raise QualificationError(f"{relative}: fields do not match {kind} schema")
@@ -392,8 +387,7 @@ def select_qualifications(
                 "runtime_id": descriptor.runtime_id,
                 "descriptor": descriptor.path,
                 "entrypoint": descriptor.entrypoint,
-                "container_image": descriptor.container_image,
-                "runner_labels": list(descriptor.runner_labels),
+                "execution_binding": descriptor.execution_binding,
                 "profile_files": profile_files,
             }
         )

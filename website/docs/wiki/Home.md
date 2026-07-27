@@ -134,6 +134,6 @@ matching manifest under `tests/e2e/models/`, and validate with
 
 # Run E2E validation (single model)
 pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
-  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --engine-dir ./engines \
   --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python
 ```

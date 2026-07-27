@@ -1,12 +1,14 @@
 # CI orchestration tutorial
 
-This directory contains the Python control plane for TensorRT Model Connect CI.
-Its job is to make the workflow readable: GitHub Actions chooses **when** a job
-runs, while these classes define **what** that job does.
+This directory contains the source-visible test implementation for TensorRT
+Model Connect CI. The public GitHub Actions workflow only authorizes and
+dispatches an exact pull-request snapshot; it does not execute pull-request
+code. A private controller owns the job graph and invokes these classes against
+that snapshot. Public checks receive only normalized test outcomes.
 
 The shortest useful reading order is:
 
-1. `.github/workflows/trtmc-ci.yml` — the pre-merge job graph.
+1. `.github/workflows/trtmc-ci.yml` — the trusted public dispatch bridge.
 2. `tools/ci/__main__.py` — the public command-line interface.
 3. `tools/ci/pipeline.py` — the named non-model stages and their ordered steps.
 4. `tools/ci/model_proof.py` and `model_proof_inner.py` — one isolated model proof.
@@ -15,9 +17,11 @@ The shortest useful reading order is:
 
 ```mermaid
 flowchart LR
-    A[Add run-ci label] --> B[Legal compliance]
-    B --> C[Ownership and impact]
-    B --> D[Source quality]
+    A[Add run-ci label] --> P[Public snapshot dispatch]
+    P --> B[Private controller authorization]
+    B --> L[Legal compliance]
+    L --> C[Ownership and impact]
+    L --> D[Source quality]
     C --> E[C++ and Python units]
     E --> F1[Model A proof]
     E --> F2[Model B proof]
@@ -29,9 +33,9 @@ flowchart LR
     G --> H
 ```
 
-Each model box is a separate matrix job. Jobs share the machine's four GPUs
-through file-backed leases, but each proof sees only its selected model source,
-private cache view, build directory, and artifacts.
+Each model box is a separate matrix job. Jobs use controller-selected GPU
+resources through file-backed leases, but each proof sees only its selected
+model source, private cache view, build directory, and artifacts.
 
 ## Try the interface
 
@@ -53,11 +57,12 @@ that enters the run-owned container and invokes `pipeline` there.
 
 ### 1. Pin and authorize the PR
 
-Adding the `run-ci` label starts `.github/workflows/trtmc-ci.yml`. The Legal job
-captures one merge commit SHA, removes the one-shot label, checks out that exact
-snapshot, requires it to have exactly two parents, and verifies that its second
-parent is the captured PR head. Its first parent is therefore the exact base for
-all diff-based checks. Every later job uses those snapshot-derived SHAs; the
+Adding the `run-ci` label starts `.github/workflows/trtmc-ci.yml`. The bridge
+executes no pull-request code. It reads the live pull request, verifies the
+current head, base, and two-parent merge snapshot, removes the one-shot label,
+creates a queued check on that exact merge SHA, and dispatches the immutable
+tuple to the private controller. The controller reauthorizes the same tuple
+before any test runs. Every later job uses those snapshot-derived SHAs; the
 label event's potentially stale `pull_request.base.sha` is never used.
 
 Commits pushed after the label was consumed do not alter the active run. Add the
@@ -158,12 +163,13 @@ per-model artifacts and generates one report. Certification checks require:
 - a passing proof for every model;
 - no missing report sections or evidence.
 
-The report is an Actions artifact. GitHub Pages remains reserved for project
-documentation.
+Raw reports remain internal. The public check contains only the tested source
+revision, links to source-owned tests, and normalized outcomes. GitHub Pages
+remains reserved for project documentation.
 
 ## What nightly adds
 
-`.github/workflows/nightly.yml` uses the same image, container, pipeline, model
+The private nightly controller uses the same image, container, pipeline, model
 proof, scheduling, and reporting classes. It broadens selection to the full
 model inventory and adds package, coverage, full-E2E, semantic media assessment,
 and eligible task-evaluation work.
@@ -507,18 +513,19 @@ the producing class remains the source of truth for optional evidence fields.
   and selects hardware proofs from an exact source diff.
 - **Inputs:** A repository plus base/head Git revisions, explicit changed paths,
   or `--all` for manual dispatch. Each producer declares profile selection,
-  triggers, a model-owned entrypoint, a digest-pinned image, and runner labels.
+  triggers, a model-owned entrypoint, and an opaque execution-binding ID.
 - **Outputs:** One deterministic `producers` GitHub matrix. Entries contain the
   selected profile basenames. Profile-only changes select that exact qualified
   profile, family changes select that family's complete target suite, and shared
   changes select one producer representative per optimized runtime.
-- **Boundary:** It contains no model or optimized-runtime identities and never
-  builds or executes a bundle. The standalone manual/reusable workflow invokes
-  each selected model-owned entrypoint, uploads its qualification artifacts,
-  and performs entrypoint-owned cleanup. Ordinary premerge CI does not call the
-  hardware workflow while no managed target-hardware runner pool exists;
-  integration behavior is covered there by source-only unit and contract tests.
-  Artifact format and qualification logic remain model-owned.
+- **Boundary:** It contains no private runner labels, image locations, model
+  credentials, or optimized-runtime identities and never builds or executes a
+  bundle. The private CI control plane resolves each opaque binding to its
+  reviewed runner and digest-pinned image, then invokes the selected
+  model-owned entrypoint. Ordinary premerge CI does not call the hardware
+  workflow while no managed target-hardware runner pool exists; integration
+  behavior is covered there by source-only unit and contract tests. Artifact
+  format and qualification logic remain model-owned.
 
 ### `model_reference_cache.py`
 

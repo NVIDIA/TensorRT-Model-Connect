@@ -46,16 +46,12 @@ class E2EParallelConfig:
         parser.add_argument(
             "--engine-dir",
             type=Path,
-            default=Path(
-                env.get("ENGINE_DIR", "/workspace/users/yifeif/tensorrt-model-connect/engines")
-            ),
+            default=Path(env.get("ENGINE_DIR", "engines")),
         )
         parser.add_argument(
             "--result-dir",
             type=Path,
-            default=Path(
-                env.get("RESULT_DIR", "/workspace/users/yifeif/tensorrt-model-connect/test-result")
-            ),
+            default=Path(env.get("RESULT_DIR", "test-result")),
         )
         parser.add_argument(
             "--trtmc-binary", type=Path, default=Path(env.get("TRTMC_BINARY", "./build/trtmc"))
