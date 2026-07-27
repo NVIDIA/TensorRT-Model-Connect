@@ -103,83 +103,65 @@ If generation fails, classify the failure before changing code:
 | Runtime says no plugin registered | The binary was built without the plugin for the bundle's `runtime_strategy`. |
 | Output differs between runs | Sampling is enabled. Use `--greedy` or a fixed `--seed` for smoke tests. |
 
-## Wan2.2 720p Video In Two Commands
+## Jetson Thor: Wan2.2 720p In Two Commands
 
-Install the `wan` build extra once (for a source checkout, use
-`pip install -e '.[wan]' -C py-only=true`). It supplies PyTorch only for
-reading the official T5/VAE checkpoint files during bundle creation; the
-generated bundle runs through the native C++/TensorRT runtime.
+Use TensorRT 11.2.0.113 and an aarch64 Model Connect wheel built from
+`main@00acabb1` or later. Install both wheels once; the `wan` extra is needed
+only while the bundle is built:
 
 ```bash
-$TRTMC build Wan-AI/Wan2.2-TI2V-5B -o /tmp/wan22-ti2v-5b.trtfb
-
-$TRTMC generate-video /tmp/wan22-ti2v-5b.trtfb \
-  --prompt "Two anthropomorphic cats boxing on a spotlighted stage" \
-  --output /tmp/wan22-frames \
-  --seed 42
+python3.12 -m venv ~/.venvs/trtmc
+. ~/.venvs/trtmc/bin/activate
+python -m pip install \
+  ./tensorrt-11.2.0.113-cp312-none-linux_aarch64.whl \
+  './tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl[wan]'
 ```
 
-No checkpoint path, plugin path, backend directory, or build-method selector
-is required. The first command downloads the checkpoint through the standard
-Hugging Face cache and selects the family-owned BF16 default.
-
-The builder creates TensorRT-native plans for UMT5, DiT, and both VAE stages.
-The `.trtfb` contains those plans, the tokenizer, and its config. The installed
-WAN model DSO adds no direct cuDNN, cuBLASLt, NVRTC, or separately managed
-companion-plugin dependency.
-
-The customer profile is 1280x704, 121 frames, 50 steps, CFG 5, flow shift 5,
-24 FPS, and a 512-token text encoder. Those values come from the bundle, so the
-minimal command does not repeat them. The runtime accepts `--num-steps 50
---height 704 --width 1280` when an explicit command is useful for a comparison;
-other values are rejected rather than silently running an unqualified shape.
-CI additionally owns a fixed reduced L0 profile for fast smoke coverage.
-
-### Qualified Thor FP8 performance profile
-
-The accepted Thor performance build uses a packaged, immutable FP8 scale map,
-so customers do not download or generate a separate quantization JSON. Pin the
-qualified checkpoint revision and add `--fp8`:
+Then run these two native Model Connect commands:
 
 ```bash
-$TRTMC build Wan-AI/Wan2.2-TI2V-5B \
+trtmc build Wan-AI/Wan2.2-TI2V-5B \
   --model-revision 921dbaf3f1674a56f47e83fb80a34bac8a8f203e \
   --fp8 \
-  -o /tmp/wan22-ti2v-5b-fp8.trtfb
+  -o wan22-thor.trtfb
 
-TRTMC_WAN22_EASYCACHE=1 \
-TRTMC_WAN22_EASYCACHE_THRESHOLD=1.0 \
-TRTMC_WAN22_EASYCACHE_FIRST_EXACT_STEPS=7 \
-TRTMC_WAN22_EASYCACHE_LAST_EXACT_STEPS=2 \
-TRTMC_WAN22_EASYCACHE_MAX_CONSECUTIVE_REUSE=4 \
-TRTMC_WAN22_EASYCACHE_LATE_CFG=1 \
-TRTMC_PNG_WRITE_WORKERS=8 \
-$TRTMC generate-video /tmp/wan22-ti2v-5b-fp8.trtfb \
-  --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage" \
-  --output /tmp/wan22-fp8-frames \
-  --num-steps 50 \
-  --guidance-scale 5 \
-  --height 704 \
-  --width 1280 \
-  --seed 42
+env TRTMC_WAN22_EASYCACHE=1 \
+    TRTMC_WAN22_EASYCACHE_THRESHOLD=1.0 \
+    TRTMC_WAN22_EASYCACHE_MAX_CONSECUTIVE_REUSE=4 \
+    TRTMC_WAN22_EASYCACHE_LATE_CFG=1 \
+  trtmc generate-video wan22-thor.trtfb \
+    --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage" \
+    --output wan22-frames \
+    --seed 42
 ```
 
-The JSON is a fixed offline PyTorch-collected map, not ModelOpt output or
-runtime auto-calibration. It covers the full 50-step conditional and
-unconditional trajectory for the prompt and seed above: activation scales are
-`amax * 1.10 / 448`, and weight scales are `maxabs / 448`. The exact checkpoint
-files and scale asset are SHA256-checked before the optimized build.
+The first command downloads the pinned checkpoint from Hugging Face, verifies
+its contents, loads the packaged FP8 scales, and builds the target-specific
+TensorRT bundle. No local checkpoint path, quantization JSON, plugin path, or
+backend selector is needed.
 
-The packaged scale asset is selected only for the pinned checkpoint, the
-official 1280x704/121-frame/50-step profile, and the GB300 calibration platform
-or integrated SM 11.0 Thor target. Omitting `--fp8` keeps the existing BF16
-build on other platforms. TensorRT plans remain target-specific and must be
-rebuilt on each machine; the scale JSON itself is checkpoint/profile data and
-does not make Wan2.2 Thor-only. The aggressive EasyCache settings above are
-additionally runtime-gated to the official profile on integrated SM 11.0 Thor.
-The accepted visual receipt is this prompt/seed on Thor with TensorRT
-11.2.0.113 and CUDA 13.4.46; other prompts and software versions are not claimed
-by that single run.
+The official bundle profile already supplies 1280x704, 121 frames, 50 steps,
+CFG 5, flow shift 5, and 24 FPS. The runtime defaults supply the 7/2 exact-step
+windows, and PNG output automatically selects up to eight writer threads.
+Success ends with:
+
+```text
+Generated image: 1280x704 (121 frames)
+```
+
+The command writes `wan22-frames/frame_0000.png` through
+`wan22-frames/frame_0120.png`. PyTorch is used only to read the checkpoint
+during the build; generation runs through the native C++/TensorRT runtime.
+
+The approximately 205-second, 121-frame qualification point used an integrated
+SM 11.0 Jetson AGX Thor with TensorRT 11.2.0.113 and CUDA toolkit 13.4.46. It is
+a receipt for the prompt and seed above, not a latency guarantee across BSPs,
+clocks, temperatures, or prompts.
+
+TensorRT plans must be built on the target Thor. Wan2.2 itself is not
+Thor-only: the packaged FP8 profile also supports GB300 SM 10.3, while other
+supported GPUs can omit `--fp8` and the four EasyCache environment variables
+to use the portable BF16 path.
 
 ## What To Read Next
 

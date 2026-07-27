@@ -33,7 +33,7 @@ Python builder dependencies including TensorRT, and the TensorRT backend DSO.
 CUDA driver/runtime libraries still come from the host system.
 
 To build and run native Wan2.2 TI2V-5B at 720p, follow the
-[two-command Wan2.2 Quick Start](website/docs/getting-started/quick-start.md).
+[two-command Jetson Thor guide](website/docs/getting-started/quick-start.md#jetson-thor-wan22-720p-in-two-commands).
 
 For source development, open Codex or another repo-aware coding agent and ask:
 
