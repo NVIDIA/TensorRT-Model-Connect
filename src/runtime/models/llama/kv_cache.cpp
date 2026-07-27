@@ -25,6 +25,52 @@ int32_t round_up_rows(int32_t value, int32_t bucket, int32_t maximum) {
     return std::min(rounded, maximum);
 }
 
+void validate_native_scalar_input(TrtModule& module, const std::string& name) {
+    if (module.tensor_dtype(name) != DType::kInt32 ||
+        module.tensor_shape(name) != std::vector<int64_t>{1}) {
+        throw std::runtime_error("Llama native KV input '" + name + "' must be int32 [1]");
+    }
+}
+
+bool valid_native_cache_shape(const std::vector<int64_t>& shape, int32_t max_length,
+                              int32_t kv_dim) {
+    if (shape.size() != 4)
+        return false;
+    if (shape[0] != 1 || shape[2] != static_cast<int64_t>(max_length))
+        return false;
+    if (shape[1] <= 0 || shape[3] <= 0)
+        return false;
+    return shape[1] * shape[3] == kv_dim;
+}
+
+void validate_native_cache_pair(TrtModule& module, const std::string& cache_name,
+                                const std::string& present_name, int32_t max_length, int32_t kv_dim,
+                                DType cache_dtype) {
+    if (!module.has_input(cache_name) || !module.has_output(present_name)) {
+        throw std::runtime_error("Llama native KV engine is missing cache/present pair '" +
+                                 cache_name + "'/'" + present_name + "'");
+    }
+    const auto cache_shape = module.tensor_shape(cache_name);
+    const auto present_shape = module.tensor_shape(present_name);
+    if (!valid_native_cache_shape(cache_shape, max_length, kv_dim) ||
+        present_shape != cache_shape) {
+        throw std::runtime_error("Llama native KV cache/present tensors must share static "
+                                 "[1,Hkv,max_length,D] shape");
+    }
+    if (module.tensor_dtype(cache_name) != cache_dtype ||
+        module.tensor_dtype(present_name) != cache_dtype) {
+        throw std::runtime_error("Llama native KV cache dtype does not match model precision");
+    }
+}
+
+bool all_tensors_ok(const std::vector<DeviceTensor>& tensors) {
+    for (const auto& tensor : tensors) {
+        if (!tensor.ok())
+            return false;
+    }
+    return true;
+}
+
 } // namespace
 
 LlamaKvCache::LlamaKvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim,
@@ -90,41 +136,15 @@ bool LlamaKvCache::configure_binding_mode(TrtModule& module) {
 }
 
 void LlamaKvCache::validate_native_kv_contract(TrtModule& module) const {
-    const auto validate_scalar = [&](const std::string& name) {
-        if (module.tensor_dtype(name) != DType::kInt32 ||
-            module.tensor_shape(name) != std::vector<int64_t>{1}) {
-            throw std::runtime_error("Llama native KV input '" + name + "' must be int32 [1]");
-        }
-    };
-    validate_scalar(names_.cache_write_indices);
-    validate_scalar(names_.key_value_lengths);
+    validate_native_scalar_input(module, names_.cache_write_indices);
+    validate_native_scalar_input(module, names_.key_value_lengths);
 
     for (int32_t i = 0; i < num_layers_; ++i) {
         const auto li = static_cast<std::size_t>(i);
-        const auto validate_cache = [&](const std::string& cache_name,
-                                        const std::string& present_name) {
-            if (!module.has_input(cache_name) || !module.has_output(present_name)) {
-                throw std::runtime_error("Llama native KV engine is missing cache/present pair '" +
-                                         cache_name + "'/'" + present_name + "'");
-            }
-            const auto cache_shape = module.tensor_shape(cache_name);
-            const auto present_shape = module.tensor_shape(present_name);
-            const bool valid_shape = cache_shape.size() == 4 && cache_shape[0] == 1 &&
-                                     cache_shape[2] == static_cast<int64_t>(max_length_) &&
-                                     cache_shape[1] > 0 && cache_shape[3] > 0 &&
-                                     cache_shape[1] * cache_shape[3] == kv_dim_;
-            if (!valid_shape || present_shape != cache_shape) {
-                throw std::runtime_error("Llama native KV cache/present tensors must share static "
-                                         "[1,Hkv,max_length,D] shape");
-            }
-            if (module.tensor_dtype(cache_name) != cache_dtype_ ||
-                module.tensor_dtype(present_name) != cache_dtype_) {
-                throw std::runtime_error(
-                    "Llama native KV cache dtype does not match model precision");
-            }
-        };
-        validate_cache(names_.cache_k[li], names_.present_k[li]);
-        validate_cache(names_.cache_v[li], names_.present_v[li]);
+        validate_native_cache_pair(module, names_.cache_k[li], names_.present_k[li], max_length_,
+                                   kv_dim_, cache_dtype_);
+        validate_native_cache_pair(module, names_.cache_v[li], names_.present_v[li], max_length_,
+                                   kv_dim_, cache_dtype_);
     }
 }
 
@@ -503,26 +523,13 @@ std::size_t LlamaKvCache::device_memory_bytes() const {
 }
 
 bool LlamaKvCache::ok() const {
-    if (cache_k_.size() != static_cast<std::size_t>(num_layers_) ||
-        cache_v_.size() != static_cast<std::size_t>(num_layers_))
+    const auto expected_layers = static_cast<std::size_t>(num_layers_);
+    if (cache_k_.size() != expected_layers)
         return false;
-    for (const auto& t : cache_k_) {
-        if (!t.ok())
-            return false;
-    }
-    for (const auto& t : cache_v_) {
-        if (!t.ok())
-            return false;
-    }
-    for (const auto& t : present_k_) {
-        if (!t.ok())
-            return false;
-    }
-    for (const auto& t : present_v_) {
-        if (!t.ok())
-            return false;
-    }
-    return true;
+    if (cache_v_.size() != expected_layers)
+        return false;
+    return all_tensors_ok(cache_k_) && all_tensors_ok(cache_v_) && all_tensors_ok(present_k_) &&
+           all_tensors_ok(present_v_);
 }
 
 } // namespace trtmc

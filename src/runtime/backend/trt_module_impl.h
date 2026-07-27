@@ -118,9 +118,21 @@ class TrtModuleImpl final : public ITrtModule {
                                 int32_t num_profiles);
     void allocate_single_input(nvinfer1::ICudaEngine* engine, const std::string& name,
                                int32_t num_profiles);
+    void initialize_input_storage(const std::string& name, BufferEntry& entry);
     void allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io);
+    void allocate_single_output(nvinfer1::ICudaEngine* engine, const std::string& name);
+    bool initialize_alias_output(const std::string& name, BufferEntry& entry);
+    void initialize_output_storage(const std::string& name, BufferEntry& entry);
+    bool allocate_owned_device_buffer(BufferEntry& entry);
     void set_dynamic_input_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io,
                                   nvinfer1::OptProfileSelector selector);
+    bool alias_group_is_complete(const std::string& input_name) const;
+    void prepare_buffer_rebind(BufferEntry& entry, void* ptr, bool retain_owned_memory);
+    bool bind_alias_outputs(const std::vector<std::string>& output_names, void* ptr,
+                            bool is_external);
+    void update_alias_groups_ready(void* ptr);
+    void rebind_single_buffer(const std::string& name, BufferEntry& entry, void* ptr);
+    void copy_device_input(const std::string& name, const DeviceTensor* tensor);
     void update_dynamic_shape(const std::string& name, BufferEntry& entry,
                               const std::vector<int64_t>& new_shape);
     void execute_enqueue();

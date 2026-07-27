@@ -65,7 +65,7 @@ def _optimized_cli_public_options(args: argparse.Namespace) -> dict:
     if public_options.get("precision") is None:
         public_options["precision"] = "fp32"
     # Keep the existing optimized-runtime request contract unchanged. Native
-    # Qwen/Llama builders interpret an omitted capacity from the model config,
+    # builders may derive an omitted capacity from model-owned configuration,
     # while legacy capsules still own their established 256-token profile.
     if public_options.get("max_cache_length") is None:
         public_options["max_cache_length"] = 256

@@ -336,23 +336,7 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const s
     entry.is_dynamic = is_dynamic;
     entry.shape = is_dynamic ? dims_to_shape(init_dims) : shape;
 
-    const auto external = initial_external_bindings_.find(name);
-    if (external != initial_external_bindings_.end()) {
-        entry.d_ptr = external->second;
-        entry.is_external = true;
-    } else if (alias_outputs_by_input_.count(name) != 0) {
-        // Alias state is allocated lazily on first execution. A model runtime
-        // can bind its persistent state before then, avoiding a transient
-        // full-capacity allocation while split engines are being loaded.
-    } else if (nbytes > 0) {
-        auto err = cudaMalloc(&entry.d_ptr, nbytes);
-        if (err != cudaSuccess)
-            entry.d_ptr = nullptr;
-        else {
-            entry.owns_device_memory = true;
-            cudaMemsetAsync(entry.d_ptr, 0, nbytes, stream_);
-        }
-    }
+    initialize_input_storage(name, entry);
 
     if (entry.d_ptr)
         bind_tensor_address(name, entry);
@@ -361,6 +345,34 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const s
         ctx_->setInputShape(name.c_str(), init_dims);
 
     buffers_[name] = std::move(entry);
+}
+
+bool TrtModuleImpl::allocate_owned_device_buffer(BufferEntry& entry) {
+    if (entry.nbytes == 0)
+        return false;
+    if (cudaMalloc(&entry.d_ptr, entry.nbytes) != cudaSuccess) {
+        entry.d_ptr = nullptr;
+        return false;
+    }
+    entry.owns_device_memory = true;
+    cudaMemsetAsync(entry.d_ptr, 0, entry.nbytes, stream_);
+    return true;
+}
+
+void TrtModuleImpl::initialize_input_storage(const std::string& name, BufferEntry& entry) {
+    const auto external = initial_external_bindings_.find(name);
+    if (external != initial_external_bindings_.end()) {
+        entry.d_ptr = external->second;
+        entry.is_external = true;
+        return;
+    }
+    if (alias_outputs_by_input_.count(name) != 0) {
+        // Alias state is allocated lazily on first execution. A model runtime
+        // can bind its persistent state before then, avoiding a transient
+        // full-capacity allocation while split engines are being loaded.
+        return;
+    }
+    allocate_owned_device_buffer(entry);
 }
 
 void TrtModuleImpl::allocate_input_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io,
@@ -376,6 +388,72 @@ void TrtModuleImpl::allocate_input_buffers(nvinfer1::ICudaEngine* engine, int32_
     }
 }
 
+bool TrtModuleImpl::initialize_alias_output(const std::string& name, BufferEntry& entry) {
+    const auto alias = alias_input_by_output_.find(name);
+    if (alias == alias_input_by_output_.end())
+        return false;
+
+    const auto& aliased_input_name = alias->second;
+    const auto input = buffers_.find(aliased_input_name);
+    if (input == buffers_.end()) {
+        throw std::runtime_error("Aliased output '" + name + "' refers to unavailable input '" +
+                                 aliased_input_name + "'");
+    }
+    const auto external = initial_external_bindings_.find(name);
+    if (external != initial_external_bindings_.end() && external->second != input->second.d_ptr) {
+        throw std::invalid_argument("Aliased output '" + name +
+                                    "' must use the same address as input '" + aliased_input_name +
+                                    "'");
+    }
+
+    // TensorRT's KV cache update contract requires input/output in-place
+    // aliasing. This entry is a non-owning view of the input allocation, so
+    // free_buffers() releases the allocation exactly once through the input.
+    entry.d_ptr = input->second.d_ptr;
+    entry.is_external = input->second.is_external;
+    return true;
+}
+
+void TrtModuleImpl::initialize_output_storage(const std::string& name, BufferEntry& entry) {
+    const auto external = initial_external_bindings_.find(name);
+    if (external != initial_external_bindings_.end()) {
+        entry.d_ptr = external->second;
+        entry.is_external = true;
+        return;
+    }
+    allocate_owned_device_buffer(entry);
+}
+
+void TrtModuleImpl::allocate_single_output(nvinfer1::ICudaEngine* engine, const std::string& name) {
+    const auto dtype = from_trt_dtype(engine->getTensorDataType(name.c_str()));
+
+    // For dynamic engines, query the context for inferred output shape based
+    // on max input shapes. Static engines can use the engine shape directly.
+    const nvinfer1::Dims out_dims = has_dynamic_shapes_ ? ctx_->getTensorShape(name.c_str())
+                                                        : engine->getTensorShape(name.c_str());
+    std::vector<int64_t> shape;
+    const std::size_t nbytes = compute_alloc_bytes(out_dims, dtype, shape);
+
+    BufferEntry entry;
+    entry.shape = std::move(shape);
+    entry.dtype = dtype;
+    entry.nbytes = nbytes;
+    entry.is_input = false;
+
+    const bool is_engine_alias = initialize_alias_output(name, entry);
+    if (!is_engine_alias)
+        initialize_output_storage(name, entry);
+    if (entry.d_ptr)
+        bind_tensor_address(name, entry);
+
+    // Aliased state can be several GiB. Keep host staging lazy for that case;
+    // forward() allocates it only when the backend owns the state and the
+    // caller explicitly requests a host result.
+    if (!is_engine_alias)
+        allocate_host_output_staging(host_output_staging_, name, nbytes, entry.is_external);
+    buffers_[name] = std::move(entry);
+}
+
 void TrtModuleImpl::allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io) {
     for (int32_t i = 0; i < num_io; ++i) {
         const char* raw_name = engine->getIOTensorName(i);
@@ -384,73 +462,7 @@ void TrtModuleImpl::allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32
         const std::string name(raw_name);
         if (engine->getTensorIOMode(name.c_str()) == nvinfer1::TensorIOMode::kINPUT)
             continue;
-
-        auto dtype = from_trt_dtype(engine->getTensorDataType(name.c_str()));
-
-        // For dynamic engines, query the context for inferred output shape
-        // (based on the max input shapes set by the caller).
-        // For static engines, use the engine shape directly.
-        nvinfer1::Dims out_dims = has_dynamic_shapes_ ? ctx_->getTensorShape(name.c_str())
-                                                      : engine->getTensorShape(name.c_str());
-
-        std::vector<int64_t> shape;
-        std::size_t nbytes = compute_alloc_bytes(out_dims, dtype, shape);
-
-        BufferEntry entry;
-        entry.shape = shape;
-        entry.dtype = dtype;
-        entry.nbytes = nbytes;
-        entry.is_input = false;
-
-        const auto external = initial_external_bindings_.find(name);
-        const auto alias = alias_input_by_output_.find(name);
-        const bool is_engine_alias = alias != alias_input_by_output_.end();
-        if (is_engine_alias) {
-            const auto& aliased_input_name = alias->second;
-            const auto input = buffers_.find(aliased_input_name);
-            if (input == buffers_.end()) {
-                throw std::runtime_error("Aliased output '" + name +
-                                         "' refers to unavailable input '" + aliased_input_name +
-                                         "'");
-            }
-            if (external != initial_external_bindings_.end() &&
-                external->second != input->second.d_ptr) {
-                throw std::invalid_argument("Aliased output '" + name +
-                                            "' must use the same address as input '" +
-                                            aliased_input_name + "'");
-            }
-            // TensorRT's KV cache update contract requires input/output
-            // in-place aliasing. This entry is a non-owning view of the input
-            // allocation, so free_buffers() releases the allocation exactly
-            // once through the input entry.
-            entry.d_ptr = input->second.d_ptr;
-            entry.is_external = input->second.is_external;
-        }
-        if (!is_engine_alias) {
-            if (external != initial_external_bindings_.end()) {
-                entry.d_ptr = external->second;
-                entry.is_external = true;
-            } else if (nbytes > 0) {
-                auto err = cudaMalloc(&entry.d_ptr, nbytes);
-                if (err != cudaSuccess)
-                    entry.d_ptr = nullptr;
-                else {
-                    entry.owns_device_memory = true;
-                    cudaMemsetAsync(entry.d_ptr, 0, nbytes, stream_);
-                }
-            }
-        }
-
-        if (entry.d_ptr)
-            bind_tensor_address(name, entry);
-
-        // Aliased state can be several GiB. Keep host staging lazy for that
-        // case; forward() allocates it only when the backend owns the state
-        // and the caller explicitly requests a host result.
-        if (!is_engine_alias)
-            allocate_host_output_staging(host_output_staging_, name, nbytes, entry.is_external);
-
-        buffers_[name] = std::move(entry);
+        allocate_single_output(engine, name);
     }
 }
 
@@ -488,46 +500,66 @@ std::string TrtModuleImpl::canonical_alias_input(const std::string& name) const 
     return {};
 }
 
-bool TrtModuleImpl::bind_alias_group(const std::string& input_name, void* ptr, bool external) {
+bool TrtModuleImpl::alias_group_is_complete(const std::string& input_name) const {
     const auto input = buffers_.find(input_name);
     const auto outputs = alias_outputs_by_input_.find(input_name);
     if (input == buffers_.end() || outputs == alias_outputs_by_input_.end())
         return false;
+    return std::all_of(
+        outputs->second.begin(), outputs->second.end(),
+        [&](const std::string& output_name) { return buffers_.count(output_name) != 0; });
+}
 
-    for (const auto& output_name : outputs->second)
-        if (buffers_.count(output_name) == 0)
-            return false;
-
-    const bool address_changed = input->second.d_ptr != ptr;
-    const bool retain_owned_memory =
-        input->second.owns_device_memory && input->second.d_ptr == ptr && ptr != nullptr;
-    if (address_changed && use_cuda_graph_ && cuda_graph_)
+void TrtModuleImpl::prepare_buffer_rebind(BufferEntry& entry, void* ptr, bool retain_owned_memory) {
+    if (entry.d_ptr != ptr && use_cuda_graph_ && cuda_graph_)
         cuda_graph_->reset();
-    if (input->second.d_ptr && input->second.owns_device_memory && !retain_owned_memory)
-        cudaFree(input->second.d_ptr);
+    if (entry.d_ptr && entry.owns_device_memory && !retain_owned_memory)
+        cudaFree(entry.d_ptr);
+}
 
-    const bool is_external = external && !retain_owned_memory;
-    input->second.d_ptr = ptr;
-    input->second.is_external = is_external;
-    input->second.owns_device_memory = retain_owned_memory;
-    if (ptr == nullptr)
-        alias_groups_ready_ = false;
-
-    bool bound = ptr == nullptr || bind_tensor_address(input_name, input->second);
-    for (const auto& output_name : outputs->second) {
+bool TrtModuleImpl::bind_alias_outputs(const std::vector<std::string>& output_names, void* ptr,
+                                       bool is_external) {
+    bool bound = true;
+    for (const auto& output_name : output_names) {
         auto& output = buffers_.at(output_name);
         output.d_ptr = ptr;
         output.is_external = is_external;
         output.owns_device_memory = false;
         bound = (ptr == nullptr || bind_tensor_address(output_name, output)) && bound;
     }
-    if (bound && ptr != nullptr) {
-        alias_groups_ready_ = std::all_of(
-            alias_outputs_by_input_.begin(), alias_outputs_by_input_.end(), [&](const auto& group) {
-                const auto buffer = buffers_.find(group.first);
-                return buffer != buffers_.end() && buffer->second.d_ptr != nullptr;
-            });
+    return bound;
+}
+
+void TrtModuleImpl::update_alias_groups_ready(void* ptr) {
+    if (ptr == nullptr) {
+        alias_groups_ready_ = false;
+        return;
     }
+    alias_groups_ready_ = std::all_of(
+        alias_outputs_by_input_.begin(), alias_outputs_by_input_.end(), [&](const auto& group) {
+            const auto buffer = buffers_.find(group.first);
+            return buffer != buffers_.end() && buffer->second.d_ptr != nullptr;
+        });
+}
+
+bool TrtModuleImpl::bind_alias_group(const std::string& input_name, void* ptr, bool external) {
+    if (!alias_group_is_complete(input_name))
+        return false;
+
+    auto& input = buffers_.at(input_name);
+    const auto& output_names = alias_outputs_by_input_.at(input_name);
+    const bool retain_owned_memory =
+        input.owns_device_memory && input.d_ptr == ptr && ptr != nullptr;
+    prepare_buffer_rebind(input, ptr, retain_owned_memory);
+
+    const bool is_external = external && !retain_owned_memory;
+    input.d_ptr = ptr;
+    input.is_external = is_external;
+    input.owns_device_memory = retain_owned_memory;
+
+    bool bound = ptr == nullptr || bind_tensor_address(input_name, input);
+    bound = bind_alias_outputs(output_names, ptr, is_external) && bound;
+    update_alias_groups_ready(bound ? ptr : nullptr);
     return bound;
 }
 
@@ -550,8 +582,13 @@ bool TrtModuleImpl::ensure_alias_group_buffer(const std::string& input_name) {
         return false;
     cudaMemsetAsync(ptr, 0, input->second.nbytes, stream_);
     const bool bound = bind_alias_group(input_name, ptr, false);
+    if (!bound) {
+        bind_alias_group(input_name, nullptr, false);
+        cudaFree(ptr);
+        return false;
+    }
     buffers_.at(input_name).owns_device_memory = true;
-    return bound;
+    return true;
 }
 
 void TrtModuleImpl::free_buffers() {
@@ -744,32 +781,36 @@ void TrtModuleImpl::sync() {
 
 // --- Forward device async (GPU → GPU, no sync) ---
 
+void TrtModuleImpl::copy_device_input(const std::string& name, const DeviceTensor* tensor) {
+    if (tensor == nullptr)
+        return;
+    auto input = buffers_.find(name);
+    if (input == buffers_.end() || !input->second.is_input)
+        return;
+
+    auto& entry = input->second;
+    if (entry.d_ptr == nullptr) {
+        const auto alias_input = canonical_alias_input(name);
+        if (!alias_input.empty())
+            ensure_alias_group_buffer(alias_input);
+    }
+    if (entry.d_ptr == nullptr)
+        return;
+
+    update_dynamic_shape(name, entry, tensor->shape());
+    if (tensor->data() == entry.d_ptr)
+        return;
+    const auto copy_bytes = std::min(tensor->nbytes(), entry.nbytes);
+    if (copy_bytes == 0)
+        return;
+    cudaMemcpyAsync(entry.d_ptr, tensor->data(), copy_bytes, cudaMemcpyDeviceToDevice, stream_);
+}
+
 void TrtModuleImpl::forward_device_async(const DeviceTensorMap& inputs) {
     runtime_measurement::record_model_call_start();
-    // D2D copy input DeviceTensors into our buffers
-    for (const auto& [name, dt_ptr] : inputs) {
-        auto it = buffers_.find(name);
-        if (it == buffers_.end() || !dt_ptr)
-            continue;
-        auto& entry = it->second;
-        if (entry.is_input && !entry.d_ptr) {
-            const auto alias_input = canonical_alias_input(name);
-            if (!alias_input.empty())
-                ensure_alias_group_buffer(alias_input);
-        }
-        if (!entry.is_input || !entry.d_ptr)
-            continue;
-
-        update_dynamic_shape(name, entry, dt_ptr->shape());
-
-        if (dt_ptr->data() != entry.d_ptr) {
-            auto copy_bytes = std::min(dt_ptr->nbytes(), entry.nbytes);
-            if (copy_bytes > 0) {
-                cudaMemcpyAsync(entry.d_ptr, dt_ptr->data(), copy_bytes, cudaMemcpyDeviceToDevice,
-                                stream_);
-            }
-        }
-    }
+    // D2D copy input DeviceTensors into our buffers.
+    for (const auto& [name, tensor] : inputs)
+        copy_device_input(name, tensor);
 
     // Execute (no sync — caller will sync or run more kernels on same stream)
     execute_enqueue();
@@ -898,6 +939,17 @@ void* TrtModuleImpl::device_ptr(const std::string& name) const {
     return it->second.d_ptr;
 }
 
+void TrtModuleImpl::rebind_single_buffer(const std::string& name, BufferEntry& entry, void* ptr) {
+    const bool retain_owned_memory =
+        entry.owns_device_memory && entry.d_ptr == ptr && ptr != nullptr;
+    prepare_buffer_rebind(entry, ptr, retain_owned_memory);
+    entry.d_ptr = ptr;
+    entry.is_external = !retain_owned_memory;
+    entry.owns_device_memory = retain_owned_memory;
+    if (ptr != nullptr)
+        bind_tensor_address(name, entry);
+}
+
 void TrtModuleImpl::bind_external(const std::string& name, void* external_device_ptr) {
     auto it = buffers_.find(name);
     if (it == buffers_.end())
@@ -909,28 +961,10 @@ void TrtModuleImpl::bind_external(const std::string& name, void* external_device
         return;
     }
 
-    auto& entry = it->second;
-
-    if (entry.d_ptr != external_device_ptr && use_cuda_graph_ && cuda_graph_)
-        cuda_graph_->reset();
-
     // Binding the module's existing allocation is a no-op with respect to
     // ownership. This avoids freeing the address and immediately rebinding a
     // dangling pointer.
-    const bool retain_owned_memory = entry.owns_device_memory &&
-                                     entry.d_ptr == external_device_ptr &&
-                                     external_device_ptr != nullptr;
-    if (entry.d_ptr && entry.owns_device_memory && !retain_owned_memory) {
-        cudaFree(entry.d_ptr);
-    }
-
-    entry.d_ptr = external_device_ptr;
-    entry.is_external = !retain_owned_memory;
-    entry.owns_device_memory = retain_owned_memory;
-
-    // Update execution context binding
-    if (ctx_ && external_device_ptr)
-        bind_tensor_address(name, entry);
+    rebind_single_buffer(name, it->second, external_device_ptr);
 }
 
 } // namespace trtmc

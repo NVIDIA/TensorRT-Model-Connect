@@ -163,7 +163,7 @@ class TestMainParser:
         monkeypatch.setattr(
             sys,
             "argv",
-            ["trtmc", "build", "Qwen/Qwen3-0.6B"],
+            ["trtmc", "build", "example-org/GenericDecoder-0.6B"],
         )
 
         with pytest.raises(SystemExit) as exc_info:
@@ -177,7 +177,10 @@ class TestMainParser:
 def test_default_bundle_path_uses_model_name():
     from tensorrt_model_connect.build_cli import _default_bundle_path
 
-    assert _default_bundle_path("Qwen/Qwen3-0.6B") == "Qwen3-0.6B.trtfb"
+    assert (
+        _default_bundle_path("example-org/GenericDecoder-0.6B")
+        == "GenericDecoder-0.6B.trtfb"
+    )
     assert _default_bundle_path("/models/My Model/") == "My-Model.trtfb"
 
 
@@ -204,7 +207,7 @@ def test_cmd_build_derives_output_and_keeps_native_capacity_unset(monkeypatch):
 
     monkeypatch.setattr(engine_builder, "_build_native_impl", _fake_native_build)
     args = argparse.Namespace(
-        model="Qwen/Qwen3-0.6B",
+        model="example-org/GenericDecoder-0.6B",
         output=None,
         max_cache_length=None,
         precision=None,
@@ -218,7 +221,7 @@ def test_cmd_build_derives_output_and_keeps_native_capacity_unset(monkeypatch):
     )
 
     assert cli._cmd_build(args) == 0
-    assert captured["output_path"] == "Qwen3-0.6B.trtfb"
+    assert captured["output_path"] == "GenericDecoder-0.6B.trtfb"
     assert captured["max_cache_length"] is None
     assert optimized_call["explicit_public_options"] == frozenset()
 

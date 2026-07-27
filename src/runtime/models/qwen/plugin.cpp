@@ -210,6 +210,62 @@ std::string format_bytes(std::uint64_t bytes) {
     return oss.str();
 }
 
+bool engine_uses_native_kv_updates(const TrtModule& module, const QwenKvCacheNames& kv_names) {
+    const bool has_write_indices = module.has_input(kv_names.cache_write_indices);
+    const bool has_kv_lengths = module.has_input(kv_names.key_value_lengths);
+    if (has_write_indices != has_kv_lengths) {
+        throw std::runtime_error("Qwen native KV engine must expose both cache_write_indices and "
+                                 "key_value_lengths");
+    }
+    return has_write_indices;
+}
+
+void reject_native_kv_size_override(const PipelineContext& ctx) {
+    if (ctx.kv_cache_size_bytes != 0) {
+        throw std::invalid_argument(
+            "Qwen native TensorRT KV cache allocates the model's complete fixed "
+            "capacity; kv_cache_size_bytes is not supported");
+    }
+}
+
+void apply_runtime_kv_size_override(const PipelineContext& ctx, const TrtModule& module,
+                                    const QwenKvCacheNames& kv_names,
+                                    const QwenTriAttentionConfig& tri_cfg, int32_t bundle_max_rows,
+                                    KvCacheRuntimeSizing& sizing) {
+    if (!cache_input_supports_runtime_rows(module, kv_names.cache_k.front())) {
+        throw std::runtime_error(
+            "This bundle was not built with runtime-resizable KV cache support. "
+            "Rebuild with trtmc build --dynamic-kv-cache to use --kv-cache-size.");
+    }
+
+    const std::uint64_t requested_rows = ctx.kv_cache_size_bytes / sizing.row_bytes;
+    if (requested_rows == 0) {
+        throw std::runtime_error("--kv-cache-size is smaller than one KV row (" +
+                                 format_bytes(sizing.row_bytes) + ")");
+    }
+
+    std::uint64_t runtime_rows = requested_rows;
+    if (runtime_rows > static_cast<std::uint64_t>(bundle_max_rows)) {
+        runtime_rows = static_cast<std::uint64_t>(bundle_max_rows);
+        sizing.clamped_to_bundle_max = true;
+    }
+    if (runtime_rows > static_cast<std::uint64_t>(std::numeric_limits<int32_t>::max())) {
+        throw std::runtime_error("Resolved KV cache rows exceed int32 runtime limits");
+    }
+
+    sizing.runtime_rows = static_cast<int32_t>(runtime_rows);
+    sizing.cache_bytes = runtime_rows * sizing.row_bytes;
+    sizing.override_applied = true;
+
+    if (tri_cfg.enabled && sizing.runtime_rows < tri_cfg.kv_budget) {
+        const auto minimum_bytes = static_cast<std::uint64_t>(tri_cfg.kv_budget) * sizing.row_bytes;
+        throw std::runtime_error(
+            "--kv-cache-size resolves to " + std::to_string(sizing.runtime_rows) +
+            " rows, but this TriAttention bundle needs at least " +
+            std::to_string(tri_cfg.kv_budget) + " rows (" + format_bytes(minimum_bytes) + ")");
+    }
+}
+
 KvCacheRuntimeSizing
 resolve_kv_cache_runtime_sizing(const PipelineContext& ctx, const TrtModule& module,
                                 const QwenKvCacheNames& kv_names, DType cache_dtype,
@@ -225,57 +281,15 @@ resolve_kv_cache_runtime_sizing(const PipelineContext& ctx, const TrtModule& mod
     sizing.runtime_rows = bundle_max_rows;
     sizing.cache_bytes = static_cast<std::uint64_t>(bundle_max_rows) * sizing.row_bytes;
 
-    const bool has_write_indices = module.has_input(kv_names.cache_write_indices);
-    const bool has_kv_lengths = module.has_input(kv_names.key_value_lengths);
-    if (has_write_indices != has_kv_lengths) {
-        throw std::runtime_error("Qwen native KV engine must expose both cache_write_indices and "
-                                 "key_value_lengths");
-    }
-    if (has_write_indices) {
-        if (ctx.kv_cache_size_bytes != 0) {
-            throw std::invalid_argument(
-                "Qwen native TensorRT KV cache allocates the model's complete fixed "
-                "capacity; kv_cache_size_bytes is not supported");
-        }
+    if (engine_uses_native_kv_updates(module, kv_names)) {
+        reject_native_kv_size_override(ctx);
         return sizing;
     }
 
     if (ctx.kv_cache_size_bytes == 0)
         return sizing;
 
-    if (!cache_input_supports_runtime_rows(module, kv_names.cache_k.front())) {
-        throw std::runtime_error(
-            "This bundle was not built with runtime-resizable KV cache support. "
-            "Rebuild with trtmc build --dynamic-kv-cache to use --kv-cache-size.");
-    }
-
-    const std::uint64_t requested_rows_u64 = ctx.kv_cache_size_bytes / sizing.row_bytes;
-    if (requested_rows_u64 == 0) {
-        throw std::runtime_error("--kv-cache-size is smaller than one KV row (" +
-                                 format_bytes(sizing.row_bytes) + ")");
-    }
-
-    std::uint64_t runtime_rows_u64 = requested_rows_u64;
-    if (runtime_rows_u64 > static_cast<std::uint64_t>(bundle_max_rows)) {
-        runtime_rows_u64 = static_cast<std::uint64_t>(bundle_max_rows);
-        sizing.clamped_to_bundle_max = true;
-    }
-    if (runtime_rows_u64 > static_cast<std::uint64_t>(std::numeric_limits<int32_t>::max())) {
-        throw std::runtime_error("Resolved KV cache rows exceed int32 runtime limits");
-    }
-
-    sizing.runtime_rows = static_cast<int32_t>(runtime_rows_u64);
-    sizing.cache_bytes = runtime_rows_u64 * sizing.row_bytes;
-    sizing.override_applied = true;
-
-    if (tri_cfg.enabled && sizing.runtime_rows < tri_cfg.kv_budget) {
-        const auto minimum_bytes = static_cast<std::uint64_t>(tri_cfg.kv_budget) * sizing.row_bytes;
-        throw std::runtime_error(
-            "--kv-cache-size resolves to " + std::to_string(sizing.runtime_rows) +
-            " rows, but this TriAttention bundle needs at least " +
-            std::to_string(tri_cfg.kv_budget) + " rows (" + format_bytes(minimum_bytes) + ")");
-    }
-
+    apply_runtime_kv_size_override(ctx, module, kv_names, tri_cfg, bundle_max_rows, sizing);
     return sizing;
 }
 

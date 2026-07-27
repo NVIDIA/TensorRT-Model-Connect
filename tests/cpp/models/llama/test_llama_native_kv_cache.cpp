@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "../native_kv_cache_contract_test.h"
+#include "../../native_kv_cache_contract_test.h"
 #include "runtime/models/llama/kv_cache.h"
 
 int main() {
