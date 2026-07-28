@@ -1819,7 +1819,9 @@ def test_continuation_suite_limits_prompts_to_model_context(
     assert config["prompt_truncation_side"] == "left"
 
 
-@pytest.mark.parametrize("model_name", ["granite-3.1-2b", "olmo2-1b"])
+@pytest.mark.parametrize(
+    "model_name", ["falcon-rw-1b", "granite-3.1-2b", "olmo2-1b"]
+)
 def test_continuation_suite_uses_aligned_fp32_comparison_for_sensitive_models(
     model_name: str,
 ) -> None:

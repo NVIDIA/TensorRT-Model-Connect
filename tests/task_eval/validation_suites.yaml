@@ -157,6 +157,10 @@ suites:
           # Reserve the suite's 64 generated tokens inside its 2048 limit.
           prompt_token_limit: 1984
           prompt_truncation_side: left
+        falcon-rw-1b:
+          # This checkpoint is numerically sensitive in FP16. Compare both
+          # sides in FP32 instead of measuring different FP16 kernel rounding.
+          comparison_precision: fp32
         granite-3.1-2b:
           # This checkpoint is numerically sensitive in FP16. Compare both
           # sides in FP32 instead of measuring different FP16 kernel rounding.
