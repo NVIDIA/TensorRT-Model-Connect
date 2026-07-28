@@ -93,6 +93,7 @@ def test_all_help_and_docs_name_validation_eligibility_boundaries():
     assert "97 use dataset-backed reference workloads" in website_text
     assert "8 are explicitly marked `not_compared_reason`" in website_text
     assert "explicit E2E fallback" not in website_text
+    assert "E2E bindings have no dataset slice" not in website_text
 
 
 def test_catalog_defines_sample_limit_for_every_dataset_workload():

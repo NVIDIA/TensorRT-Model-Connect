@@ -118,9 +118,9 @@ python3 tools/trtmc_validate.py gpt2-125m --limit 100
 python3 tools/trtmc_validate.py gpt2-125m --limit 0
 ```
 
-`--limit` applies only to dataset-backed workloads. E2E bindings have no
-dataset slice, always report `sample_limit: 0` in a dry-run plan, and do not
-forward this option to pytest.
+`--limit` applies only to runnable dataset-backed workloads. Not-compared
+entries have no dataset slice, report `sample_limit: 0` in a dry-run plan, and
+do not launch a worker.
 
 This workflow needs the model checkpoint, its reference environment and
 dataset, a compatible TRTMC bundle/runtime, and usually target GPU hardware.
