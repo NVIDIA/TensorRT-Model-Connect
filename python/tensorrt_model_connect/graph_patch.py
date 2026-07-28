@@ -11,11 +11,17 @@ The objects consumed here deliberately use a small duck-typed surface:
   and ``set_input`` when it is rewired;
 * a tensor may expose ``name``, ``dtype``, and ``shape``.
 
-This makes the graph-selection prototype unit-testable without importing
-TensorRT and keeps the eventual UI artifact independent of a TensorRT version.
+This makes graph selection unit-testable without importing TensorRT and keeps
+selection artifacts independent of a TensorRT version.
 The helper intentionally does not try to delete the selected layers.  It
 rewires every consumer outside the selected region, leaving the old region
 unreachable for the backend to prune.
+
+Replacement callbacks may add backend layers while producing their outputs.
+TensorRT does not expose a general rollback API, so callers must discard the
+entire network if a callback or later validation raises.  The helper delays
+consumer rewiring until every callback output has passed its ABI checks, but
+does not claim transactional rollback of layers created by callbacks.
 """
 
 from __future__ import annotations
@@ -413,15 +419,7 @@ class RegionArtifact:
 
 @dataclass(frozen=True)
 class GraphRegionSelection:
-    """Small region document downloaded by the interactive graph viewer.
-
-    The viewer stores node IDs plus boundary tensor contracts instead of a
-    second copy of the full graph.  Older programmatic callers may construct a
-    selection with tensor IDs alone; rich contracts are optional here, but are
-    preserved when a viewer document is parsed and serialized again.  At build
-    time the graph snapshot is reconstructed, its fingerprint is checked, and
-    the boundary is derived again.
-    """
+    """Exact structural region selection pinned to one graph fingerprint."""
 
     graph_fingerprint: str
     selected_node_ids: tuple[str, ...]
@@ -432,45 +430,71 @@ class GraphRegionSelection:
     instance: Mapping[str, Any] = field(default_factory=dict)
     schema_version: int = GRAPH_REGION_SELECTION_SCHEMA_VERSION
     kind: str = GRAPH_REGION_SELECTION_KIND
-    input_contracts: tuple[Mapping[str, Any], ...] = ()
-    output_contracts: tuple[Mapping[str, Any], ...] = ()
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "GraphRegionSelection":
+        unknown = set(value) - {
+            "schema_version",
+            "kind",
+            "graph",
+            "selection",
+            "boundary",
+            "instance",
+        }
+        if unknown:
+            raise GraphPatchError(
+                f"Unknown graph-region fields: {sorted(str(item) for item in unknown)}"
+            )
         graph = value.get("graph", {})
         selection = value.get("selection", {})
         boundary = value.get("boundary", {})
         if not all(isinstance(item, Mapping) for item in (graph, selection, boundary)):
             raise GraphPatchError("Region graph, selection, and boundary must be JSON objects")
+        for where, item, allowed in (
+            ("graph", graph, {"model", "stage", "fingerprint"}),
+            ("selection", selection, {"node_ids"}),
+            ("boundary", boundary, {"inputs", "outputs"}),
+        ):
+            extra = set(item) - allowed
+            if extra:
+                raise GraphPatchError(
+                    f"Unknown {where} fields: {sorted(str(key) for key in extra)}"
+                )
 
-        def parse_contracts(
+        def parse_tensor_refs(
             raw: Any,
             where: str,
-        ) -> tuple[tuple[str, ...], tuple[Mapping[str, Any], ...]]:
+        ) -> tuple[str, ...]:
             if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
                 raise GraphPatchError(f"{where} must be a JSON array")
             ordered: list[str] = []
-            contracts: list[Mapping[str, Any]] = []
             seen: set[str] = set()
-            for index, contract in enumerate(raw):
-                if not isinstance(contract, Mapping):
+            for index, reference in enumerate(raw):
+                if not isinstance(reference, Mapping):
                     raise GraphPatchError(f"{where}[{index}] must be a JSON object")
-                tensor_id = contract.get("tensor_id")
+                extra = set(reference) - {"tensor_id"}
+                if extra:
+                    raise GraphPatchError(
+                        f"Unknown {where}[{index}] fields: {sorted(str(key) for key in extra)}"
+                    )
+                tensor_id = reference.get("tensor_id")
                 if not isinstance(tensor_id, str) or not tensor_id:
                     raise GraphPatchError(f"{where}[{index}].tensor_id must be a non-empty string")
-                if tensor_id not in seen:
-                    seen.add(tensor_id)
-                    ordered.append(tensor_id)
-                    contracts.append(_json_value(contract))
-            return tuple(ordered), tuple(contracts)
+                if tensor_id in seen:
+                    raise GraphPatchError(f"{where} contains duplicate tensor ID {tensor_id}")
+                seen.add(tensor_id)
+                ordered.append(tensor_id)
+            return tuple(ordered)
 
         raw_node_ids = selection.get("node_ids", ())
         if not isinstance(raw_node_ids, Sequence) or isinstance(
             raw_node_ids, (str, bytes, bytearray)
         ):
             raise GraphPatchError("selection.node_ids must be a JSON array")
-        selected_node_ids = tuple(str(item) for item in raw_node_ids)
-        if not selected_node_ids or any(not item for item in selected_node_ids):
+        if any(not isinstance(item, str) or not item for item in raw_node_ids):
+            raise GraphPatchError("selection.node_ids must contain at least one non-empty node ID")
+        selected_node_ids = tuple(raw_node_ids)
+        if not selected_node_ids:
             raise GraphPatchError("selection.node_ids must contain at least one non-empty node ID")
         if len(selected_node_ids) != len(set(selected_node_ids)):
             raise GraphPatchError("selection.node_ids contains duplicate node IDs")
@@ -478,10 +502,7 @@ class GraphRegionSelection:
         fingerprint = graph.get("fingerprint")
         if not isinstance(fingerprint, str) or not fingerprint:
             raise GraphPatchError("graph.fingerprint must be a non-empty string")
-        schema_version = value.get(
-            "schema_version",
-            GRAPH_REGION_SELECTION_SCHEMA_VERSION,
-        )
+        schema_version = value.get("schema_version")
         if type(schema_version) is not int or (
             schema_version != GRAPH_REGION_SELECTION_SCHEMA_VERSION
         ):
@@ -490,7 +511,7 @@ class GraphRegionSelection:
                 f"{schema_version!r}; expected "
                 f"{GRAPH_REGION_SELECTION_SCHEMA_VERSION}"
             )
-        kind = value.get("kind", GRAPH_REGION_SELECTION_KIND)
+        kind = value.get("kind")
         if kind != GRAPH_REGION_SELECTION_KIND:
             raise GraphPatchError(
                 f"Unsupported graph-region kind {kind!r}; expected {GRAPH_REGION_SELECTION_KIND!r}"
@@ -498,11 +519,17 @@ class GraphRegionSelection:
         instance = value.get("instance", {})
         if not isinstance(instance, Mapping):
             raise GraphPatchError("instance must be a JSON object")
-        input_tensor_ids, input_contracts = parse_contracts(
+        model = graph.get("model", "")
+        stage = graph.get("stage", "")
+        if not isinstance(model, str):
+            raise GraphPatchError("graph.model must be a string")
+        if not isinstance(stage, str):
+            raise GraphPatchError("graph.stage must be a string")
+        input_tensor_ids = parse_tensor_refs(
             boundary.get("inputs", ()),
             "boundary.inputs",
         )
-        output_tensor_ids, output_contracts = parse_contracts(
+        output_tensor_ids = parse_tensor_refs(
             boundary.get("outputs", ()),
             "boundary.outputs",
         )
@@ -514,10 +541,8 @@ class GraphRegionSelection:
             selected_node_ids=selected_node_ids,
             input_tensor_ids=input_tensor_ids,
             output_tensor_ids=output_tensor_ids,
-            input_contracts=input_contracts,
-            output_contracts=output_contracts,
-            model=str(graph.get("model", "")),
-            stage=str(graph.get("stage", "")),
+            model=model,
+            stage=stage,
             instance=_json_value(instance),
         )
 
@@ -529,24 +554,6 @@ class GraphRegionSelection:
         return cls.from_dict(decoded)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the viewer interchange document.
-
-        Parsed rich boundary contracts round-trip unchanged.  Selections
-        created by legacy callers with tensor IDs alone retain the compact
-        tensor-ID representation.
-        """
-
-        inputs = (
-            [_json_value(contract) for contract in self.input_contracts]
-            if self.input_contracts
-            else [{"tensor_id": tensor_id} for tensor_id in self.input_tensor_ids]
-        )
-        outputs = (
-            [_json_value(contract) for contract in self.output_contracts]
-            if self.output_contracts
-            else [{"tensor_id": tensor_id} for tensor_id in self.output_tensor_ids]
-        )
-
         value: dict[str, Any] = {
             "schema_version": self.schema_version,
             "kind": self.kind,
@@ -559,8 +566,8 @@ class GraphRegionSelection:
                 "node_ids": list(self.selected_node_ids),
             },
             "boundary": {
-                "inputs": inputs,
-                "outputs": outputs,
+                "inputs": [{"tensor_id": tensor_id} for tensor_id in self.input_tensor_ids],
+                "outputs": [{"tensor_id": tensor_id} for tensor_id in self.output_tensor_ids],
             },
         }
         if self.instance:
@@ -579,12 +586,45 @@ class GraphRegionSelection:
     def validate(self, snapshot: GraphSnapshot) -> RegionBoundary:
         """Recompute and validate the selected cut against ``snapshot``."""
 
+        if type(self.schema_version) is not int or (
+            self.schema_version != GRAPH_REGION_SELECTION_SCHEMA_VERSION
+        ):
+            raise GraphPatchError(
+                "Unsupported graph-region schema_version "
+                f"{self.schema_version!r}; expected "
+                f"{GRAPH_REGION_SELECTION_SCHEMA_VERSION}"
+            )
+        if self.kind != GRAPH_REGION_SELECTION_KIND:
+            raise GraphPatchError(
+                f"Unsupported graph-region kind {self.kind!r}; "
+                f"expected {GRAPH_REGION_SELECTION_KIND!r}"
+            )
+        if not isinstance(self.graph_fingerprint, str) or not self.graph_fingerprint:
+            raise GraphPatchError("graph.fingerprint must be a non-empty string")
+        if not isinstance(self.instance, Mapping):
+            raise GraphPatchError("instance must be a mapping")
+        if not isinstance(self.model, str) or not isinstance(self.stage, str):
+            raise GraphPatchError("Region model and stage must be strings")
+        if not self.selected_node_ids or len(self.selected_node_ids) != len(
+            set(self.selected_node_ids)
+        ):
+            raise GraphPatchError("selection.node_ids must contain unique, non-empty node IDs")
+        if any(not item for item in self.selected_node_ids):
+            raise GraphPatchError("selection.node_ids must contain unique, non-empty node IDs")
+        if len(self.input_tensor_ids) != len(set(self.input_tensor_ids)):
+            raise GraphPatchError("Region input boundary contains duplicate tensor IDs")
+        if len(self.output_tensor_ids) != len(set(self.output_tensor_ids)):
+            raise GraphPatchError("Region output boundary contains duplicate tensor IDs")
+        if any(not item for item in self.input_tensor_ids):
+            raise GraphPatchError("Region input boundary contains an empty tensor ID")
+        if any(not item for item in self.output_tensor_ids):
+            raise GraphPatchError("Region output boundary contains an empty tensor ID")
         if snapshot.fingerprint != self.graph_fingerprint:
             raise GraphPatchError(
                 "Selected graph fingerprint no longer matches the build graph: "
                 f"expected {self.graph_fingerprint}, got {snapshot.fingerprint}"
             )
-        boundary = compute_region_boundary(snapshot, self.selected_node_ids)
+        boundary = validate_region(snapshot, self.selected_node_ids)
         if boundary.input_tensor_ids != self.input_tensor_ids:
             raise GraphPatchError(
                 "Selected region input boundary no longer matches the build graph: "
@@ -597,20 +637,19 @@ class GraphRegionSelection:
                 f"expected {self.output_tensor_ids}, got "
                 f"{boundary.output_tensor_ids}"
             )
-        _validate_selected_region(snapshot, boundary)
         return boundary
 
 
 @dataclass(frozen=True)
 class GraphRegionSelectionSet:
-    """A set of independent region instances from one inspected graph.
+    """A set of independent region instances from one graph snapshot.
 
     Repeated transformer blocks are represented as separate regions instead of
     one disconnected selection.  Every region is validated against the same
     immutable graph snapshot and invokes the replacement callback once.
 
     ``from_dict`` and ``from_json`` also accept the original single-region
-    document, preserving the existing viewer and YAML contract.
+    structural document.
     """
 
     graph_fingerprint: str
@@ -624,7 +663,7 @@ class GraphRegionSelectionSet:
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "GraphRegionSelectionSet":
         kind = value.get("kind")
-        if kind in (None, GRAPH_REGION_SELECTION_KIND) and "selection" in value:
+        if kind == GRAPH_REGION_SELECTION_KIND and "selection" in value:
             selection = GraphRegionSelection.from_dict(value)
             return cls(
                 graph_fingerprint=selection.graph_fingerprint,
@@ -632,16 +671,23 @@ class GraphRegionSelectionSet:
                 model=selection.model,
                 stage=selection.stage,
             )
+        unknown = set(value) - {
+            "schema_version",
+            "kind",
+            "graph",
+            "regions",
+        }
+        if unknown:
+            raise GraphPatchError(
+                f"Unknown graph-region-set fields: {sorted(str(item) for item in unknown)}"
+            )
         if kind != GRAPH_REGION_SELECTION_SET_KIND:
             raise GraphPatchError(
                 "Unsupported graph-region-set kind "
                 f"{kind!r}; expected {GRAPH_REGION_SELECTION_SET_KIND!r}"
             )
 
-        schema_version = value.get(
-            "schema_version",
-            GRAPH_REGION_SELECTION_SET_SCHEMA_VERSION,
-        )
+        schema_version = value.get("schema_version")
         if type(schema_version) is not int or (
             schema_version != GRAPH_REGION_SELECTION_SET_SCHEMA_VERSION
         ):
@@ -654,11 +700,20 @@ class GraphRegionSelectionSet:
         graph = value.get("graph", {})
         if not isinstance(graph, Mapping):
             raise GraphPatchError("Region-set graph must be a JSON object")
+        unknown_graph = set(graph) - {"model", "stage", "fingerprint", "build"}
+        if unknown_graph:
+            raise GraphPatchError(
+                f"Unknown graph fields: {sorted(str(item) for item in unknown_graph)}"
+            )
         fingerprint = graph.get("fingerprint")
         if not isinstance(fingerprint, str) or not fingerprint:
             raise GraphPatchError("graph.fingerprint must be a non-empty string")
-        model = str(graph.get("model", ""))
-        stage = str(graph.get("stage", ""))
+        model = graph.get("model", "")
+        stage = graph.get("stage", "")
+        if not isinstance(model, str):
+            raise GraphPatchError("graph.model must be a string")
+        if not isinstance(stage, str):
+            raise GraphPatchError("graph.stage must be a string")
         build = graph.get("build", {})
         if not isinstance(build, Mapping):
             raise GraphPatchError("graph.build must be a JSON object")
@@ -676,35 +731,28 @@ class GraphRegionSelectionSet:
         for index, raw_region in enumerate(raw_regions):
             if not isinstance(raw_region, Mapping):
                 raise GraphPatchError(f"regions[{index}] must be a JSON object")
-            region_value: Mapping[str, Any] = raw_region
-            nested = raw_region.get("region")
-            if nested is not None:
-                if not isinstance(nested, Mapping):
-                    raise GraphPatchError(f"regions[{index}].region must be a JSON object")
-                region_value = nested
-
-            if "graph" in region_value or "kind" in region_value:
-                region_document = dict(region_value)
-                if "instance" not in region_document and isinstance(
-                    raw_region.get("instance"), Mapping
-                ):
-                    region_document["instance"] = raw_region["instance"]
-            else:
-                region_document = {
-                    "schema_version": GRAPH_REGION_SELECTION_SCHEMA_VERSION,
-                    "kind": GRAPH_REGION_SELECTION_KIND,
-                    "graph": {
-                        "model": model,
-                        "stage": stage,
-                        "fingerprint": fingerprint,
-                    },
-                    "selection": region_value.get("selection", {}),
-                    "boundary": region_value.get("boundary", {}),
-                    "instance": region_value.get(
-                        "instance",
-                        raw_region.get("instance", {}),
-                    ),
-                }
+            unknown_region = set(raw_region) - {
+                "selection",
+                "boundary",
+                "instance",
+            }
+            if unknown_region:
+                raise GraphPatchError(
+                    f"Unknown regions[{index}] fields: "
+                    f"{sorted(str(item) for item in unknown_region)}"
+                )
+            region_document = {
+                "schema_version": GRAPH_REGION_SELECTION_SCHEMA_VERSION,
+                "kind": GRAPH_REGION_SELECTION_KIND,
+                "graph": {
+                    "model": model,
+                    "stage": stage,
+                    "fingerprint": fingerprint,
+                },
+                "selection": raw_region.get("selection", {}),
+                "boundary": raw_region.get("boundary", {}),
+                "instance": raw_region.get("instance", {}),
+            }
             selection = GraphRegionSelection.from_dict(region_document)
             if selection.graph_fingerprint != fingerprint:
                 raise GraphPatchError(
@@ -792,6 +840,8 @@ class GraphRegionSelectionSet:
             raise GraphPatchError("A graph region set requires a non-empty graph fingerprint")
         if not isinstance(self.build, Mapping):
             raise GraphPatchError("Graph region-set build metadata must be a mapping")
+        if not isinstance(self.model, str) or not isinstance(self.stage, str):
+            raise GraphPatchError("Graph region-set model and stage must be strings")
         if not self.selections:
             raise GraphPatchError("A graph region set must contain at least one region")
         owner: dict[str, int] = {}
@@ -942,6 +992,7 @@ def _validate_selected_region(
         "LOOP",
         "PLUGIN",
         "RECURRENCE",
+        "TRIP_LIMIT",
     )
     node_by_id = {node.id: node for node in snapshot.nodes}
     unsafe = [
@@ -954,6 +1005,17 @@ def _validate_selected_region(
             "The graph-patch prototype cannot replace stateful, control-flow, "
             f"collective, or existing plugin layers: {unsafe}"
         )
+
+
+def validate_region(
+    snapshot: GraphSnapshot,
+    selected_node_ids: Sequence[str],
+) -> RegionBoundary:
+    """Derive a boundary and enforce structural replacement safety."""
+
+    boundary = compute_region_boundary(snapshot, selected_node_ids)
+    _validate_selected_region(snapshot, boundary)
+    return boundary
 
 
 @dataclass(frozen=True)
@@ -1015,35 +1077,82 @@ class _TensorDraft:
 
 
 @dataclass(frozen=True)
-class _Capture:
+class CapturedGraph:
+    """One graph snapshot plus identity-safe live-handle lookup."""
+
     snapshot: GraphSnapshot
-    layers: Mapping[str, Any]
-    tensors: Mapping[str, Any]
+    _layers: Mapping[str, Any] = field(repr=False)
+    _tensors: Mapping[str, Any] = field(repr=False)
+    _node_ids_by_identity: Mapping[int, tuple[str, ...]] = field(repr=False)
+    _tensor_ids_by_identity: Mapping[int, str] = field(repr=False)
+    _node_ids_by_signature: Mapping[
+        tuple[
+            str,
+            str,
+            tuple[str | None, ...],
+            tuple[str | None, ...],
+        ],
+        tuple[str, ...],
+    ] = field(repr=False)
+
+    def node_id_for(self, layer: Any) -> str:
+        identity_candidates = self._node_ids_by_identity.get(id(layer), ())
+        if len(identity_candidates) == 1 and self._layers[identity_candidates[0]] is layer:
+            return identity_candidates[0]
+        # TensorRT can expose one C++ layer through a typed wrapper returned by
+        # add_*() and a distinct generic ILayer wrapper from get_layer().  Its
+        # ordered tensor handles are stable across those wrappers.
+        try:
+            signature = _layer_signature(layer, self.tensor_id_for)
+        except (
+            AttributeError,
+            GraphPatchError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            signature = None
+        candidates = () if signature is None else self._node_ids_by_signature.get(signature, ())
+        if len(candidates) != 1:
+            raise GraphPatchError("Layer handle does not belong to this captured graph")
+        return candidates[0]
+
+    def tensor_id_for(self, tensor: Any) -> str:
+        tensor_id = self._tensor_ids_by_identity.get(id(tensor))
+        if tensor_id is None or self._tensors[tensor_id] is not tensor:
+            raise GraphPatchError("Tensor handle does not belong to this captured graph")
+        return tensor_id
+
+    def _layer_for(self, node_id: str) -> Any:
+        return self._layers[node_id]
+
+    def _tensor_for(self, tensor_id: str) -> Any:
+        return self._tensors[tensor_id]
+
+    def _original_tensor_id(self, tensor: Any) -> str | None:
+        tensor_id = self._tensor_ids_by_identity.get(id(tensor))
+        if tensor_id is None or self._tensors[tensor_id] is not tensor:
+            return None
+        return tensor_id
 
 
 class _TensorRegistry:
     """Give repeated backend tensor handles deterministic snapshot IDs."""
 
     def __init__(self) -> None:
-        self._by_object: dict[Any, str] = {}
         self._by_identity: dict[int, str] = {}
+        # Strong references prevent object-id reuse during one capture.
         self._values: list[Any] = []
         self.drafts: list[_TensorDraft] = []
 
     def register(self, tensor: Any) -> str:
-        try:
-            known = self._by_object.get(tensor)
-        except (TypeError, ValueError):
-            known = self._by_identity.get(id(tensor))
+        known = self._by_identity.get(id(tensor))
         if known is not None:
             return known
 
         tensor_id = f"tensor:{len(self.drafts)}"
         self._values.append(tensor)
-        try:
-            self._by_object[tensor] = tensor_id
-        except (TypeError, ValueError):
-            self._by_identity[id(tensor)] = tensor_id
+        self._by_identity[id(tensor)] = tensor_id
         self.drafts.append(
             _TensorDraft(
                 id=tensor_id,
@@ -1076,6 +1185,39 @@ def _count(value: Any, attribute: str, *, required: bool = False) -> int:
         return int(raw)
     except (TypeError, ValueError) as exc:
         raise GraphPatchError(f"{attribute} must be an integer, got {raw!r}") from exc
+
+
+def _layer_signature(
+    layer: Any,
+    tensor_id_for: Callable[[Any], str],
+) -> tuple[
+    str,
+    str,
+    tuple[str | None, ...],
+    tuple[str | None, ...],
+]:
+    name = getattr(layer, "name", None)
+    raw_op = getattr(layer, "type", None)
+    if raw_op is None:
+        raw_op = getattr(layer, "op", type(layer).__name__)
+
+    def ids(method_name: str, count_name: str) -> tuple[str | None, ...]:
+        method = getattr(layer, method_name, None)
+        count = _count(layer, count_name, required=True)
+        if not callable(method):
+            raise GraphPatchError(f"Layer does not expose required {method_name}")
+        result: list[str | None] = []
+        for index in range(count):
+            tensor = method(index)
+            result.append(None if tensor is None else tensor_id_for(tensor))
+        return tuple(result)
+
+    return (
+        "" if name is None else str(name),
+        str(raw_op),
+        ids("get_input", "num_inputs"),
+        ids("get_output", "num_outputs"),
+    )
 
 
 def _object_name(value: Any, fallback: str) -> str:
@@ -1155,13 +1297,14 @@ def _node_provenance(
     return _json_value(raw)
 
 
-def _capture_network(
+def capture_network(
     network: Any,
     *,
-    name: str | None,
-    metadata: Mapping[str, Any] | None,
-    provenance: ProvenanceProvider | None,
-) -> _Capture:
+    name: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+    provenance: ProvenanceProvider | None = None,
+) -> CapturedGraph:
+    """Capture a graph and retain live object-to-ID bindings by identity."""
     layer_count = _count(network, "num_layers", required=True)
     layers = [network.get_layer(index) for index in range(layer_count)]
     registry = _TensorRegistry()
@@ -1256,10 +1399,45 @@ def _capture_network(
         metadata=_json_value(metadata or {}),
     )
     snapshot._validate_references()
-    return _Capture(
+    tensor_bindings = {draft.id: draft.value for draft in registry.drafts}
+    tensor_ids_by_identity = {
+        id(tensor): tensor_id for tensor_id, tensor in tensor_bindings.items()
+    }
+
+    def captured_tensor_id(tensor: Any) -> str:
+        tensor_id = tensor_ids_by_identity.get(id(tensor))
+        if tensor_id is None or tensor_bindings[tensor_id] is not tensor:
+            raise GraphPatchError("Layer signature references an uncaptured tensor")
+        return tensor_id
+
+    signature_owners: dict[
+        tuple[
+            str,
+            str,
+            tuple[str | None, ...],
+            tuple[str | None, ...],
+        ],
+        list[str],
+    ] = {}
+    for node_id, layer in layer_bindings.items():
+        signature = _layer_signature(layer, captured_tensor_id)
+        signature_owners.setdefault(signature, []).append(node_id)
+
+    identity_owners: dict[int, list[str]] = {}
+    for node_id, layer in layer_bindings.items():
+        identity_owners.setdefault(id(layer), []).append(node_id)
+
+    return CapturedGraph(
         snapshot=snapshot,
-        layers=layer_bindings,
-        tensors={draft.id: draft.value for draft in registry.drafts},
+        _layers=layer_bindings,
+        _tensors=tensor_bindings,
+        _node_ids_by_identity={
+            identity: tuple(node_ids) for identity, node_ids in identity_owners.items()
+        },
+        _tensor_ids_by_identity=tensor_ids_by_identity,
+        _node_ids_by_signature={
+            signature: tuple(node_ids) for signature, node_ids in signature_owners.items()
+        },
     )
 
 
@@ -1275,10 +1453,10 @@ def snapshot_network(
     ``provenance`` can be either a ``(layer, index) -> mapping`` callback or a
     mapping keyed by node ID, layer name, integer index, or string index.  This
     is the hook through which builder scopes/source locations can later be
-    attached to the graph viewer.
+    attached to diagnostic graph artifacts.
     """
 
-    return _capture_network(
+    return capture_network(
         network,
         name=name,
         metadata=metadata,
@@ -1349,9 +1527,9 @@ def create_region_artifact(
     *,
     metadata: Mapping[str, Any] | None = None,
 ) -> RegionArtifact:
-    """Create the portable contract a graph-selection UI would save."""
+    """Create a portable contract for a structurally safe region."""
 
-    boundary = compute_region_boundary(snapshot, selected_node_ids)
+    boundary = validate_region(snapshot, selected_node_ids)
     selected = set(boundary.selected_node_ids)
     nodes = tuple(node for node in snapshot.nodes if node.id in selected)
     relevant_tensor_ids = {
@@ -1385,13 +1563,17 @@ def rewire_region(
     """Replace a selected region by rewiring all of its external uses.
 
     The callback receives ``(network, boundary_inputs, region_artifact)`` and
-    returns one live backend tensor per ordered boundary output.  The helper
+    returns one newly created live backend tensor per ordered boundary output;
+    returning a tensor from the original graph is rejected.  The helper
     validates the snapshot against the live network before calling it, rewires
     all external consumer slots with ``set_input``, and updates marked network
     outputs through ``unmark_output``/``mark_output`` when needed.
+
+    If this function raises after invoking ``replacement``, discard ``network``;
+    callback-created layers cannot be rolled back generically.
     """
 
-    live = _capture_network(
+    live = capture_network(
         network,
         name=snapshot.name,
         metadata=snapshot.metadata,
@@ -1403,6 +1585,7 @@ def rewire_region(
             f"expected {snapshot.fingerprint}, got {live.snapshot.fingerprint}"
         )
 
+    validate_region(snapshot, selected_node_ids)
     artifact = create_region_artifact(snapshot, selected_node_ids)
     return _rewire_captured_regions(
         network,
@@ -1421,10 +1604,95 @@ class _RewirePlan:
     marked_output_ids: frozenset[str]
 
 
+def _try_set_tensor_name(tensor: Any, name: str) -> bool:
+    try:
+        tensor.name = name
+    except (AttributeError, TypeError, ValueError, RuntimeError):
+        return False
+    return getattr(tensor, "name", None) == name
+
+
+def _preserve_replaced_output_name(
+    snapshot: GraphSnapshot,
+    tensor_id: str,
+    old_output: Any,
+    new_output: Any,
+) -> None:
+    """Move a public output name off the old tensor before reusing it."""
+
+    old_name = getattr(old_output, "name", None)
+    if old_output is new_output or old_name is None:
+        return
+    if not hasattr(new_output, "name"):
+        raise GraphPatchError(
+            f"Replacement for network output {tensor_id} does not expose a writable name"
+        )
+
+    stem = f"__trtmc_replaced_{snapshot.fingerprint[:12]}_{tensor_id.replace(':', '_')}"
+    for suffix in range(100):
+        temporary_name = stem if suffix == 0 else f"{stem}_{suffix}"
+        if _try_set_tensor_name(old_output, temporary_name):
+            break
+    else:
+        raise GraphPatchError(f"Could not reserve the public name of network output {tensor_id}")
+
+    # Some bindings can return two Python wrappers for one backend tensor.
+    # In that case the temporary rename is visible through both wrappers.
+    if getattr(new_output, "name", None) == temporary_name:
+        if not _try_set_tensor_name(new_output, old_name):
+            raise GraphPatchError(
+                f"Could not restore the public name of network output {tensor_id}"
+            )
+        return
+
+    if _try_set_tensor_name(new_output, old_name):
+        return
+
+    restored = _try_set_tensor_name(old_output, old_name)
+    suffix = "" if restored else "; the original name could not be restored"
+    raise GraphPatchError(
+        f"Could not preserve the public name of network output {tensor_id}{suffix}"
+    )
+
+
+def _validate_replacement_output(
+    artifact: RegionArtifact,
+    output_index: int,
+    output: Any,
+    *,
+    region_index: int,
+) -> None:
+    contract_by_id = {tensor.id: tensor for tensor in artifact.tensors}
+    tensor_id = artifact.output_tensor_ids[output_index]
+    contract = contract_by_id[tensor_id]
+    actual = {
+        "dtype": _tensor_dtype(output),
+        "shape": _tensor_shape(output),
+        "location": _tensor_location(output),
+        "is_shape_tensor": _optional_tensor_bool(output, "is_shape_tensor"),
+    }
+    expected = {
+        "dtype": contract.dtype,
+        "shape": contract.shape,
+        "location": contract.location,
+        "is_shape_tensor": contract.is_shape_tensor,
+    }
+    mismatches = [
+        f"{field}: expected {wanted!r}, got {actual[field]!r}"
+        for field, wanted in expected.items()
+        if wanted is not None and actual[field] != wanted
+    ]
+    if mismatches:
+        raise GraphPatchError(
+            "Replacement output ABI mismatch for "
+            f"region {region_index} output {output_index} ({tensor_id}): " + "; ".join(mismatches)
+        )
+
+
 def _rewire_captured_regions(
     network: Any,
     snapshot: GraphSnapshot,
-    live: _Capture,
+    live: CapturedGraph,
     artifacts: Sequence[RegionArtifact],
     replacement: ReplacementCallback,
 ) -> RewireBatchResult:
@@ -1444,7 +1712,7 @@ def _rewire_captured_regions(
                 output_index = output_index_by_id.get(input_tensor_id)
                 if output_index is None:
                     continue
-                layer = live.layers[node.id]
+                layer = live._layer_for(node.id)
                 if not callable(getattr(layer, "set_input", None)):
                     raise GraphPatchError(f"External consumer {node.id} does not expose set_input")
                 external_slots.append((layer, input_index, output_index))
@@ -1462,7 +1730,7 @@ def _rewire_captured_regions(
             _RewirePlan(
                 artifact=artifact,
                 boundary_inputs=tuple(
-                    live.tensors[tensor_id] for tensor_id in artifact.input_tensor_ids
+                    live._tensor_for(tensor_id) for tensor_id in artifact.input_tensor_ids
                 ),
                 external_slots=tuple(external_slots),
                 marked_output_ids=marked_output_ids,
@@ -1496,36 +1764,77 @@ def _rewire_captured_regions(
             raise GraphPatchError(
                 f"Replacement outputs for region {region_index} cannot contain None"
             )
+        for output_index, output in enumerate(replacement_outputs):
+            existing_tensor_id = live._original_tensor_id(output)
+            if existing_tensor_id is not None:
+                raise GraphPatchError(
+                    "Replacement outputs must be newly created backend tensors; "
+                    f"region {region_index} output {output_index} aliases "
+                    f"original tensor {existing_tensor_id}"
+                )
+            _validate_replacement_output(
+                plan.artifact,
+                output_index,
+                output,
+                region_index=region_index,
+            )
         outputs_by_plan.append(replacement_outputs)
 
-    results: list[RewireResult] = []
+    replacement_output_owners: dict[int, tuple[int, int]] = {}
+    for region_index, replacement_outputs in enumerate(outputs_by_plan):
+        for output_index, replacement_output in enumerate(replacement_outputs):
+            previous = replacement_output_owners.get(id(replacement_output))
+            if previous is not None:
+                raise GraphPatchError(
+                    "One replacement tensor cannot satisfy two region outputs: "
+                    f"region {previous[0]} output {previous[1]} and "
+                    f"region {region_index} output {output_index}"
+                )
+            replacement_output_owners[id(replacement_output)] = (
+                region_index,
+                output_index,
+            )
+
+    replacement_by_output_id: dict[str, Any] = {}
+    for plan, replacement_outputs in zip(plans, outputs_by_plan):
+        for tensor_id, replacement_output in zip(
+            plan.artifact.output_tensor_ids,
+            replacement_outputs,
+        ):
+            if tensor_id in plan.marked_output_ids:
+                replacement_by_output_id[tensor_id] = replacement_output
+
+    for tensor_id, replacement_output in replacement_by_output_id.items():
+        _preserve_replaced_output_name(
+            snapshot,
+            tensor_id,
+            live._tensor_for(tensor_id),
+            replacement_output,
+        )
+
     for plan, replacement_outputs in zip(plans, outputs_by_plan):
         for layer, input_index, output_index in plan.external_slots:
             layer.set_input(input_index, replacement_outputs[output_index])
 
-        rewired_network_outputs = 0
-        replacement_by_id = dict(zip(plan.artifact.output_tensor_ids, replacement_outputs))
+    # TensorRT only exposes append-style mark_output(). Preserve binding order
+    # by rebuilding the complete output list whenever one selected region
+    # replaces a marked graph output.
+    if replacement_by_output_id:
         for tensor_id in snapshot.outputs:
-            if tensor_id not in plan.marked_output_ids:
-                continue
-            old_output = live.tensors[tensor_id]
-            new_output = replacement_by_id[tensor_id]
-            old_name = getattr(old_output, "name", None)
-            network.unmark_output(old_output)
-            if old_name is not None and hasattr(new_output, "name"):
-                try:
-                    new_output.name = old_name
-                except (AttributeError, TypeError):
-                    pass
+            network.unmark_output(live._tensor_for(tensor_id))
+        for tensor_id in snapshot.outputs:
+            old_output = live._tensor_for(tensor_id)
+            new_output = replacement_by_output_id.get(tensor_id, old_output)
             network.mark_output(new_output)
-            rewired_network_outputs += 1
 
+    results: list[RewireResult] = []
+    for plan, replacement_outputs in zip(plans, outputs_by_plan):
         results.append(
             RewireResult(
                 artifact=plan.artifact,
                 replacement_outputs=replacement_outputs,
                 rewired_consumer_inputs=len(plan.external_slots),
-                rewired_network_outputs=rewired_network_outputs,
+                rewired_network_outputs=len(plan.marked_output_ids),
             )
         )
     return RewireBatchResult(results=tuple(results))
@@ -1539,7 +1848,7 @@ def rewire_selection(
     *,
     provenance: ProvenanceProvider | None = None,
 ) -> RewireResult:
-    """Validate a viewer-downloaded selection and replace that exact region."""
+    """Validate and replace one selection with newly created output tensors."""
 
     selection.validate(snapshot)
     return rewire_selection_set(
@@ -1559,10 +1868,18 @@ def rewire_selection_set(
     *,
     provenance: ProvenanceProvider | None = None,
 ) -> RewireBatchResult:
-    """Replace every independent region against the same original snapshot."""
+    """Replace every independent region against the same original snapshot.
+
+    Each callback result must contain newly created, mutually distinct backend
+    tensors; aliases to the original graph or another region output are
+    rejected before consumer rewiring.
+
+    If this function raises after invoking ``replacement``, discard ``network``;
+    callback-created layers cannot be rolled back generically.
+    """
 
     selection_set.validate(snapshot)
-    live = _capture_network(
+    live = capture_network(
         network,
         name=snapshot.name,
         metadata=snapshot.metadata,

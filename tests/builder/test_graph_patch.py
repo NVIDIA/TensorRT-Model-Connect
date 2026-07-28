@@ -14,6 +14,7 @@ from tensorrt_model_connect.graph_patch import (
     GraphRegionSelectionSet,
     GraphSnapshot,
     RegionArtifact,
+    capture_network,
     coerce_region_selection_set,
     compute_region_boundary,
     create_region_artifact,
@@ -34,6 +35,31 @@ class FakeTensor:
         self.name = name
         self.shape = shape
         self.dtype = dtype
+
+
+class EqualFakeTensor(FakeTensor):
+    """Distinct backend handles that intentionally compare equal."""
+
+    def __hash__(self) -> int:
+        return 1
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, EqualFakeTensor)
+
+
+class ReadOnlyNameFakeTensor:
+    def __init__(self, name: str):
+        self._name = name
+        self.shape = (1, 8, 128)
+        self.dtype = "float16"
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @name.setter
+    def name(self, _value: str) -> None:
+        raise AttributeError("name is read-only")
 
 
 class FakeLayer:
@@ -200,6 +226,86 @@ def test_snapshot_json_round_trip_and_structural_fingerprint() -> None:
     assert moved_source_line.fingerprint == snapshot.fingerprint
 
 
+def test_snapshot_tracks_tensor_handles_by_identity_not_equality() -> None:
+    graph_input = EqualFakeTensor("input")
+    first_output = EqualFakeTensor("first")
+    second_output = EqualFakeTensor("second")
+    network = FakeNetwork(
+        [graph_input],
+        [
+            FakeLayer("first", "IDENTITY", [graph_input], [first_output]),
+            FakeLayer("second", "IDENTITY", [first_output], [second_output]),
+        ],
+        [second_output],
+    )
+
+    captured = capture_network(network)
+    snapshot = captured.snapshot
+
+    assert len(snapshot.tensors) == 3
+    assert snapshot.nodes[0].outputs == ("tensor:1",)
+    assert snapshot.nodes[1].inputs == ("tensor:1",)
+    assert snapshot.nodes[1].outputs == ("tensor:2",)
+    assert captured.node_id_for(network.layers[0]) == "node:0"
+    equivalent_wrapper = FakeLayer(
+        "first",
+        "IDENTITY",
+        [graph_input],
+        [first_output],
+    )
+    assert captured.node_id_for(equivalent_wrapper) == "node:0"
+    assert captured.tensor_id_for(first_output) == "tensor:1"
+    with pytest.raises(GraphPatchError, match="does not belong"):
+        captured.tensor_id_for(EqualFakeTensor("unknown"))
+
+
+def test_captured_graph_resolves_unique_no_output_layer_proxy() -> None:
+    graph_input = FakeTensor("input")
+    network = FakeNetwork(
+        [graph_input],
+        [FakeLayer("sink", "ASSERTION", [graph_input], [])],
+        [graph_input],
+    )
+
+    captured = capture_network(network)
+    equivalent_wrapper = FakeLayer("sink", "ASSERTION", [graph_input], [])
+
+    assert captured.node_id_for(equivalent_wrapper) == "node:0"
+
+
+def test_captured_graph_rejects_ambiguous_no_output_layer_proxy() -> None:
+    graph_input = FakeTensor("input")
+    network = FakeNetwork(
+        [graph_input],
+        [
+            FakeLayer("sink", "ASSERTION", [graph_input], []),
+            FakeLayer("sink", "ASSERTION", [graph_input], []),
+        ],
+        [graph_input],
+    )
+
+    captured = capture_network(network)
+    equivalent_wrapper = FakeLayer("sink", "ASSERTION", [graph_input], [])
+
+    with pytest.raises(GraphPatchError, match="does not belong"):
+        captured.node_id_for(equivalent_wrapper)
+
+
+def test_captured_graph_rejects_one_layer_handle_used_for_two_nodes() -> None:
+    graph_input = FakeTensor("input")
+    shared_layer = FakeLayer("sink", "ASSERTION", [graph_input], [])
+    network = FakeNetwork(
+        [graph_input],
+        [shared_layer, shared_layer],
+        [graph_input],
+    )
+
+    captured = capture_network(network)
+
+    with pytest.raises(GraphPatchError, match="does not belong"):
+        captured.node_id_for(shared_layer)
+
+
 def test_boundary_and_region_artifact_are_derived_from_selection() -> None:
     network, _ = _attention_network()
     snapshot = snapshot_network(network)
@@ -275,11 +381,107 @@ def test_rewire_region_updates_all_external_consumers_and_network_output() -> No
     assert result.rewired_network_outputs == 1
     assert result.replacement_outputs == (new_context,)
     assert network.output_calls == [
+        ("unmark", tensors["residual"]),
         ("unmark", tensors["context"]),
+        ("mark", tensors["residual"]),
         ("mark", new_context),
     ]
     assert new_context.name == "context"
-    assert set(network.outputs) == {tensors["residual"], new_context}
+    assert network.outputs == [tensors["residual"], new_context]
+
+
+def test_rewire_region_preserves_network_output_order() -> None:
+    network, tensors = _attention_network()
+    network.outputs = [tensors["context"], tensors["residual"]]
+    snapshot = snapshot_network(network)
+    new_context = FakeTensor("ffi_context")
+
+    rewire_region(
+        network,
+        snapshot,
+        ["node:2"],
+        lambda *_args: [new_context],
+    )
+
+    assert network.outputs == [new_context, tensors["residual"]]
+    assert new_context.name == "context"
+
+
+def test_rewire_region_fails_before_mutation_when_output_name_cannot_be_preserved() -> None:
+    network, tensors = _attention_network()
+    snapshot = snapshot_network(network)
+    replacement = ReadOnlyNameFakeTensor("ffi_context")
+
+    with pytest.raises(GraphPatchError, match="preserve the public name"):
+        rewire_region(
+            network,
+            snapshot,
+            ["node:2"],
+            lambda *_args: [replacement],
+        )
+
+    assert network.layers[3].inputs[0] is tensors["context"]
+    assert network.layers[4].inputs[0] is tensors["context"]
+    assert network.outputs == [tensors["residual"], tensors["context"]]
+    assert network.output_calls == []
+    assert tensors["context"].name == "context"
+
+
+@pytest.mark.parametrize(
+    ("field", "expected", "actual"),
+    [
+        ("dtype", "float32", "int8"),
+        ("shape", (1,), (99,)),
+        ("location", "DEVICE", "HOST"),
+        ("is_shape_tensor", False, True),
+    ],
+)
+def test_rewire_region_rejects_output_abi_mismatch_before_mutation(
+    field: str,
+    expected: object,
+    actual: object,
+) -> None:
+    network, tensors = _attention_network()
+    setattr(tensors["context"], field, expected)
+    snapshot = snapshot_network(network)
+    replacement = FakeTensor("ffi_context")
+    setattr(replacement, field, actual)
+
+    with pytest.raises(GraphPatchError, match=rf"ABI mismatch.*{field}"):
+        rewire_region(
+            network,
+            snapshot,
+            ["node:2"],
+            lambda *_args: [replacement],
+        )
+
+    assert network.layers[3].inputs[0] is tensors["context"]
+    assert network.layers[4].inputs[0] is tensors["context"]
+    assert network.outputs == [tensors["residual"], tensors["context"]]
+    assert network.output_calls == []
+
+
+@pytest.mark.parametrize("tensor_name", ["hidden", "residual", "context"])
+def test_rewire_region_rejects_original_tensor_as_replacement_output(
+    tensor_name: str,
+) -> None:
+    network, tensors = _attention_network()
+    snapshot = snapshot_network(network)
+    original_names = {name: tensor.name for name, tensor in tensors.items()}
+
+    with pytest.raises(GraphPatchError, match="newly created backend tensors"):
+        rewire_region(
+            network,
+            snapshot,
+            ["node:2"],
+            lambda *_args: [tensors[tensor_name]],
+        )
+
+    assert network.layers[3].inputs[0] is tensors["context"]
+    assert network.layers[4].inputs[0] is tensors["context"]
+    assert network.outputs == [tensors["residual"], tensors["context"]]
+    assert network.output_calls == []
+    assert {name: tensor.name for name, tensor in tensors.items()} == original_names
 
 
 def test_rewire_fails_closed_when_graph_drifted() -> None:
@@ -311,7 +513,7 @@ def test_invalid_selection_and_output_count_are_rejected() -> None:
         rewire_region(network, snapshot, ["node:2"], lambda *_args: [])
 
 
-def _viewer_selection(snapshot: GraphSnapshot) -> dict:
+def _selection_document(snapshot: GraphSnapshot) -> dict:
     return {
         "schema_version": 1,
         "kind": "tensorrt_model_connect.graph_region",
@@ -322,18 +524,14 @@ def _viewer_selection(snapshot: GraphSnapshot) -> dict:
         },
         "selection": {
             "node_ids": ["node:2"],
-            "semantic_paths": [],
         },
         "boundary": {
             "inputs": [
-                {"tensor_id": "tensor:1", "consumer": "node:2"},
-                {"tensor_id": "tensor:2", "consumer": "node:2"},
+                {"tensor_id": "tensor:1"},
+                {"tensor_id": "tensor:2"},
             ],
-            # The viewer has one edge per external consumer. Repeated tensor
-            # IDs are deliberately accepted and collapsed by the loader.
             "outputs": [
-                {"tensor_id": "tensor:3", "consumer": "node:3"},
-                {"tensor_id": "tensor:3", "consumer": "node:4"},
+                {"tensor_id": "tensor:3"},
             ],
         },
     }
@@ -429,10 +627,10 @@ def _selection_set_document(snapshot: GraphSnapshot) -> dict:
     }
 
 
-def test_viewer_selection_drives_exact_rewire() -> None:
+def test_structural_selection_document_drives_exact_rewire() -> None:
     network, tensors = _attention_network()
     snapshot = snapshot_network(network)
-    selection = GraphRegionSelection.from_dict(_viewer_selection(snapshot))
+    selection = GraphRegionSelection.from_dict(_selection_document(snapshot))
     replacement_output = FakeTensor("ffi_context")
 
     result = rewire_selection(
@@ -451,20 +649,15 @@ def test_viewer_selection_drives_exact_rewire() -> None:
     assert network.layers[4].inputs[0] is replacement_output
 
 
-def test_region_set_parses_legacy_single_region_and_round_trips() -> None:
+def test_region_set_parses_single_region_and_round_trips() -> None:
     network, _ = _attention_network()
     snapshot = snapshot_network(network)
-    legacy = GraphRegionSelection.from_dict(_viewer_selection(snapshot))
+    selection = GraphRegionSelection.from_dict(_selection_document(snapshot))
 
-    wrapped = GraphRegionSelectionSet.from_dict(_viewer_selection(snapshot))
-    assert wrapped == coerce_region_selection_set(legacy)
-    assert wrapped.selections == (legacy,)
-    assert legacy.input_contracts == (
-        {"consumer": "node:2", "tensor_id": "tensor:1"},
-        {"consumer": "node:2", "tensor_id": "tensor:2"},
-    )
-    assert legacy.output_contracts == ({"consumer": "node:3", "tensor_id": "tensor:3"},)
-    assert GraphRegionSelection.from_json(legacy.to_json()) == legacy
+    wrapped = GraphRegionSelectionSet.from_dict(_selection_document(snapshot))
+    assert wrapped == coerce_region_selection_set(selection)
+    assert wrapped.selections == (selection,)
+    assert GraphRegionSelection.from_json(selection.to_json()) == selection
 
     repeated_network, _ = _repeated_regions_network()
     repeated_snapshot = snapshot_network(repeated_network)
@@ -475,6 +668,54 @@ def test_region_set_parses_legacy_single_region_and_round_trips() -> None:
     assert len(restored.selections) == 2
     assert restored.selections[1].instance["layer_index"] == 1
     assert restored.build == {"precision": "fp16"}
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value["selection"].update({"semantic_paths": []}),
+        lambda value: value["boundary"]["outputs"][0].update({"consumer": "node:3"}),
+        lambda value: value["boundary"]["outputs"].append({"tensor_id": "tensor:3"}),
+    ],
+)
+def test_selection_document_rejects_unknown_or_duplicate_boundary_data(
+    mutation,
+) -> None:
+    network, _ = _attention_network()
+    snapshot = snapshot_network(network)
+    value = _selection_document(snapshot)
+    mutation(value)
+
+    with pytest.raises(GraphPatchError, match="Unknown|duplicate"):
+        GraphRegionSelection.from_dict(value)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["node_id", "model", "stage"],
+)
+def test_selection_document_rejects_non_string_fields(field: str) -> None:
+    network, _ = _attention_network()
+    snapshot = snapshot_network(network)
+    value = _selection_document(snapshot)
+    if field == "node_id":
+        value["selection"]["node_ids"] = [2]
+    else:
+        value["graph"][field] = {"not": "a string"}
+
+    with pytest.raises(GraphPatchError, match="string|node ID"):
+        GraphRegionSelection.from_dict(value)
+
+
+@pytest.mark.parametrize("field", ["kind", "schema_version"])
+def test_selection_document_requires_kind_and_schema_version(field: str) -> None:
+    network, _ = _attention_network()
+    snapshot = snapshot_network(network)
+    value = _selection_document(snapshot)
+    value.pop(field)
+
+    with pytest.raises(GraphPatchError, match="Unsupported"):
+        GraphRegionSelection.from_dict(value)
 
 
 def test_region_set_replaces_each_independent_instance_once() -> None:
@@ -556,15 +797,37 @@ def test_region_set_validates_all_outputs_before_rewiring() -> None:
     assert network.layers[3].inputs[0] is tensors["context_1"]
 
 
-def test_viewer_selection_fails_closed_on_fingerprint_or_boundary_drift() -> None:
+def test_region_set_rejects_one_tensor_for_two_region_outputs_before_rewiring() -> None:
+    network, tensors = _repeated_regions_network()
+    snapshot = snapshot_network(network)
+    selection_set = GraphRegionSelectionSet.from_dict(_selection_set_document(snapshot))
+    shared = FakeTensor("shared")
+    original_output_names = [tensor.name for tensor in network.outputs]
+
+    with pytest.raises(GraphPatchError, match="two region outputs"):
+        rewire_selection_set(
+            network,
+            snapshot,
+            selection_set,
+            lambda *_args: [shared],
+        )
+
+    assert network.layers[1].inputs[0] is tensors["context_0"]
+    assert network.layers[3].inputs[0] is tensors["context_1"]
+    assert network.outputs == [tensors["output"]]
+    assert [tensor.name for tensor in network.outputs] == original_output_names
+    assert shared.name == "shared"
+
+
+def test_selection_document_fails_closed_on_fingerprint_or_boundary_drift() -> None:
     network, _ = _attention_network()
     snapshot = snapshot_network(network)
-    value = _viewer_selection(snapshot)
+    value = _selection_document(snapshot)
     value["graph"]["fingerprint"] = "stale"
     with pytest.raises(GraphPatchError, match="fingerprint"):
         GraphRegionSelection.from_dict(value).validate(snapshot)
 
-    value = _viewer_selection(snapshot)
+    value = _selection_document(snapshot)
     value["boundary"]["outputs"] = [{"tensor_id": "tensor:4"}]
     with pytest.raises(GraphPatchError, match="output boundary"):
         GraphRegionSelection.from_dict(value).validate(snapshot)
@@ -595,11 +858,67 @@ def test_selection_rejects_disconnected_nonconvex_and_plugin_regions() -> None:
             nonconvex_snapshot,
             ["node:0", "node:2"],
         ).validate(nonconvex_snapshot)
+    called = False
+
+    def replacement(*_args):
+        nonlocal called
+        called = True
+        return [FakeTensor("replacement")]
+
+    with pytest.raises(GraphPatchError, match="convex region"):
+        rewire_region(
+            nonconvex,
+            nonconvex_snapshot,
+            ["node:0", "node:2"],
+            replacement,
+        )
+    assert called is False
 
     network.layers[2].type = "PLUGIN_V3"
     plugin_snapshot = snapshot_network(network)
     with pytest.raises(GraphPatchError, match="existing plugin"):
         _selection_for_nodes(plugin_snapshot, ["node:2"]).validate(plugin_snapshot)
+    with pytest.raises(GraphPatchError, match="existing plugin"):
+        rewire_region(
+            network,
+            plugin_snapshot,
+            ["node:2"],
+            replacement,
+        )
+    assert called is False
+
+
+@pytest.mark.parametrize(
+    "unsafe_op",
+    [
+        "CONDITIONAL_INPUT",
+        "ITERATOR",
+        "LOOP_OUTPUT",
+        "RECURRENCE",
+        "TRIP_LIMIT",
+    ],
+)
+def test_rewire_region_rejects_control_flow_layers(unsafe_op: str) -> None:
+    network, _ = _attention_network()
+    network.layers[2].type = unsafe_op
+    snapshot = snapshot_network(network)
+    called = False
+
+    def replacement(*_args):
+        nonlocal called
+        called = True
+        return [FakeTensor("replacement")]
+
+    with pytest.raises(GraphPatchError, match="control-flow"):
+        create_region_artifact(snapshot, ["node:2"])
+    with pytest.raises(GraphPatchError, match="control-flow"):
+        rewire_region(
+            network,
+            snapshot,
+            ["node:2"],
+            replacement,
+        )
+    assert called is False
 
 
 def test_graph_patch_module_has_no_tensorrt_import() -> None:
