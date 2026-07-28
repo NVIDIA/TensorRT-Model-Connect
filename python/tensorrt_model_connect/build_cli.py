@@ -202,7 +202,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
 
     try:
         build(
-            model_id_or_path=build_model_ref,
+            model_id_or_path=args.model,
             model_revision=getattr(args, "model_revision", None),
             output_path=args.output,
             max_cache_length=args.max_cache_length,

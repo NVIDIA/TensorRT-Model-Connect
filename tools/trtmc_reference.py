@@ -551,7 +551,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--predictions", default="hf_predictions.json")
     parser.add_argument("--raw-output", default="hf_raw.jsonl")
-    parser.add_argument("--dtype", choices=("auto", "float16", "bfloat16"), default="auto")
+    parser.add_argument(
+        "--dtype",
+        choices=("auto", "float16", "bfloat16", "float32"),
+        default="auto",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--device-map", default="")
     parser.add_argument("--attn-impl", default="")

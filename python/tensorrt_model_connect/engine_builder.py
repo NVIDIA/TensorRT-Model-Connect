@@ -10,6 +10,7 @@ import inspect
 import json
 import re
 import sys
+import tempfile
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -661,7 +662,12 @@ def _detect_tokenizer_add_special_tokens(model_dir: Path) -> bool:
     return False
 
 
-def _detect_tokenizer_special_frame(model_dir: Path) -> tuple[list[int], list[int]] | None:
+def _detect_tokenizer_special_frame(
+    model_dir: Path | str,
+    *,
+    revision: str | None = None,
+    local_files_only: bool = False,
+) -> tuple[list[int], list[int]] | None:
     """Return exact HF add-special prefix/suffix IDs when they are representable.
 
     Some tokenizers add BOS by default but not EOS. A single
@@ -672,7 +678,12 @@ def _detect_tokenizer_special_frame(model_dir: Path) -> tuple[list[int], list[in
     try:
         from transformers import AutoTokenizer
 
-        tok = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
+        tokenizer_kwargs = {"trust_remote_code": True}
+        if revision:
+            tokenizer_kwargs["revision"] = revision
+        if local_files_only:
+            tokenizer_kwargs["local_files_only"] = True
+        tok = AutoTokenizer.from_pretrained(str(model_dir), **tokenizer_kwargs)
         ids_default = list(tok.encode("hello"))
         ids_without = list(tok.encode("hello", add_special_tokens=False))
     except Exception:
@@ -742,16 +753,36 @@ def _ensure_tokenizer_json(model_dir: Path, *, plugin=None) -> None:
 
     slow_tokenizer_error: str | None = None
 
-    # --- Attempt 1: standard HF slow → fast conversion ---
+    # --- Attempt 1: standard HF conversion in an isolated directory ---
     try:
         from transformers import AutoTokenizer
+
         tok = AutoTokenizer.from_pretrained(str(model_dir), use_fast=False)
-        tok.save_pretrained(str(model_dir))
-        if tokenizer_path.exists():
-            print("[trtmc build] Generated tokenizer.json from slow tokenizer",
-                  file=sys.stderr)
-            return
-        slow_tokenizer_error = "slow tokenizer conversion did not create tokenizer.json"
+        with tempfile.TemporaryDirectory(prefix="trtmc-tokenizer-") as temporary_dir:
+            generated_path = Path(temporary_dir) / "tokenizer.json"
+            backend_tokenizer = getattr(tok, "backend_tokenizer", None)
+            if backend_tokenizer is None:
+                backend_tokenizer = getattr(tok, "_tokenizer", None)
+            if backend_tokenizer is not None and hasattr(backend_tokenizer, "save"):
+                backend_tokenizer.save(str(generated_path))
+            if not generated_path.exists():
+                tok.save_pretrained(temporary_dir)
+            if not generated_path.exists():
+                raise RuntimeError(
+                    "tokenizer conversion did not create tokenizer.json"
+                )
+            with tempfile.NamedTemporaryFile(
+                dir=model_dir,
+                prefix=".trtmc-tokenizer-",
+                suffix=".json",
+                delete=False,
+            ) as output:
+                temporary_path = Path(output.name)
+                output.write(generated_path.read_bytes())
+            temporary_path.replace(tokenizer_path)
+        print("[trtmc build] Generated tokenizer.json from source tokenizer",
+              file=sys.stderr)
+        return
     except Exception as e:
         slow_tokenizer_error = f"slow tokenizer conversion failed: {e}"
 
@@ -765,6 +796,28 @@ def _ensure_tokenizer_json(model_dir: Path, *, plugin=None) -> None:
 
     print("[trtmc build] Warning: could not generate tokenizer.json "
           "(C++ runtime may fail to create tokenizer)", file=sys.stderr)
+
+
+def _prepare_tokenizer_special_frame(
+    model_dir: Path,
+    *,
+    plugin=None,
+    source_model_id_or_path: str | None = None,
+    source_revision: str | None = None,
+) -> tuple[list[int], list[int]] | None:
+    """Generate tokenizer.json without changing the source tokenizer contract."""
+
+    source = source_model_id_or_path or str(model_dir)
+    source_is_remote = not Path(source).is_dir()
+    source_frame = _detect_tokenizer_special_frame(
+        source,
+        revision=source_revision,
+        local_files_only=source_is_remote,
+    )
+    _ensure_tokenizer_json(model_dir, plugin=plugin)
+    if source_frame is not None:
+        return source_frame
+    return _detect_tokenizer_special_frame(model_dir)
 
 
 @enforce_single_full_bundle_build
@@ -798,6 +851,8 @@ def build_bundle(
     diffusion_overrides: dict | None = None,
     build_timing_path: str | None = None,
     max_batch_size: int = 1,
+    tokenizer_source_model_id_or_path: str | None = None,
+    tokenizer_source_revision: str | None = None,
 ) -> None:
     """Full pipeline: load HF model → build TRT engine → write .trtfb bundle.
 
@@ -1214,15 +1269,22 @@ def build_bundle(
     requires_tokenizer = bool(getattr(plugin, "requires_tokenizer", True))
     if requires_tokenizer:
         tokenizer_json_t0 = time.monotonic()
-        _ensure_tokenizer_json(model_dir_path, plugin=plugin)
+        tokenizer_special_frame = _prepare_tokenizer_special_frame(
+            model_dir_path,
+            plugin=plugin,
+            source_model_id_or_path=tokenizer_source_model_id_or_path,
+            source_revision=tokenizer_source_revision,
+        )
         _add_build_timing(
             build_timing, "tokenizer_json_ensure_s",
             time.monotonic() - tokenizer_json_t0)
         _write_build_timing(build_timing)
+    else:
+        tokenizer_special_frame = _detect_tokenizer_special_frame(
+            model_dir_path)
 
     # 5b. Detect tokenizer special-tokens behavior from HF config
     tokenizer_t0 = time.monotonic()
-    tokenizer_special_frame = _detect_tokenizer_special_frame(model_dir_path)
     if tokenizer_special_frame is None:
         tokenizer_special_prefix_ids: list[int] = []
         tokenizer_special_suffix_ids: list[int] = []
@@ -1793,7 +1855,9 @@ def _build_native_impl(
                  parallel_config=parallel_config,
                  diffusion_overrides=diffusion_overrides,
                  build_timing_path=build_timing_path,
-                 max_batch_size=max_batch_size)
+                 max_batch_size=max_batch_size,
+                 tokenizer_source_model_id_or_path=model_id_or_path,
+                 tokenizer_source_revision=model_revision)
 
 
 def _optimized_request_value(value):

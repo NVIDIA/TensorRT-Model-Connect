@@ -540,6 +540,48 @@ def test_transformers_reference_metadata_is_direct_and_sample_selectable(
     assert "task_eval.py" not in " ".join(command)
 
 
+def test_transformers_text_reference_accepts_float32_dtype() -> None:
+    arguments = transformers_text.build_parser().parse_args(
+        [
+            "--model",
+            "org/model",
+            "--prompts",
+            "/tmp/prompts.jsonl",
+            "--answers",
+            "/tmp/answers.json",
+            "--manifest",
+            "/tmp/manifest.json",
+            "--predictions",
+            "/tmp/predictions.json",
+            "--raw-output",
+            "/tmp/raw.jsonl",
+            "--dtype",
+            "float32",
+        ]
+    )
+    torch_module = SimpleNamespace(float32=object())
+
+    assert transformers_text._model_dtype(torch_module, arguments.dtype) is (
+        torch_module.float32
+    )
+
+
+def test_reference_entrypoint_accepts_float32_dtype() -> None:
+    arguments = trtmc_reference.build_parser().parse_args(
+        [
+            "run",
+            "--model",
+            "org/model",
+            "--work-dir",
+            "/tmp/reference-work",
+            "--dtype",
+            "float32",
+        ]
+    )
+
+    assert arguments.dtype == "float32"
+
+
 def test_encoder_reference_metadata_is_direct_and_sample_selectable(
     tmp_path: Path,
 ) -> None:

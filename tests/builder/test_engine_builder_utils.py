@@ -141,6 +141,125 @@ class TestDetectTokenizerAddSpecialTokens:
 
         assert _detect_tokenizer_special_frame(tmp_path) == ([1], [])
 
+    def test_prepare_preserves_pre_conversion_special_frame(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        state = {"converted": False}
+
+        class SourceTokenizer:
+            def encode(self, _text, add_special_tokens=True):
+                return [10] if add_special_tokens else [10]
+
+            def save_pretrained(self, path):
+                state["converted"] = True
+                (Path(path) / "tokenizer.json").write_text(
+                    json.dumps({"model": {"type": "BPE"}}),
+                    encoding="utf-8",
+                )
+
+        class ConvertedTokenizer:
+            def encode(self, _text, add_special_tokens=True):
+                return [2, 10] if add_special_tokens else [10]
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(path, **_kwargs):
+                assert Path(path) == tmp_path
+                return ConvertedTokenizer() if state["converted"] else SourceTokenizer()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+        )
+
+        frame = engine_builder._prepare_tokenizer_special_frame(tmp_path)
+
+        assert frame == ([], [])
+        assert (tmp_path / "tokenizer.json").is_file()
+
+    def test_prepare_uses_remote_source_contract_for_polluted_snapshot(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        (tmp_path / "tokenizer.json").write_text(
+            json.dumps({"model": {"type": "BPE"}}),
+            encoding="utf-8",
+        )
+
+        class SourceTokenizer:
+            def encode(self, _text, add_special_tokens=True):
+                return [10] if add_special_tokens else [10]
+
+        class PollutedSnapshotTokenizer:
+            def encode(self, _text, add_special_tokens=True):
+                return [2, 10] if add_special_tokens else [10]
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(path, **kwargs):
+                if path == "facebook/opt-125m":
+                    assert kwargs["local_files_only"] is True
+                    return SourceTokenizer()
+                assert Path(path) == tmp_path
+                return PollutedSnapshotTokenizer()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+        )
+
+        frame = engine_builder._prepare_tokenizer_special_frame(
+            tmp_path,
+            source_model_id_or_path="facebook/opt-125m",
+        )
+
+        assert frame == ([], [])
+
+    def test_tokenizer_generation_does_not_rewrite_sibling_metadata(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        tokenizer_config = tmp_path / "tokenizer_config.json"
+        tokenizer_config.write_text('{"add_bos_token": false}', encoding="utf-8")
+
+        class BackendTokenizer:
+            def save(self, path):
+                Path(path).write_text(
+                    json.dumps({"model": {"type": "BPE"}}),
+                    encoding="utf-8",
+                )
+
+        class FakeTokenizer:
+            backend_tokenizer = BackendTokenizer()
+
+            def save_pretrained(self, _path):
+                raise AssertionError("save_pretrained would rewrite sibling metadata")
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(path, **_kwargs):
+                assert Path(path) == tmp_path
+                return FakeTokenizer()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+        )
+
+        _ensure_tokenizer_json(tmp_path)
+
+        assert tokenizer_config.read_text(encoding="utf-8") == (
+            '{"add_bos_token": false}'
+        )
+        assert (tmp_path / "tokenizer.json").is_file()
+
     def test_no_tokenizer_config(self, tmp_path):
         # No tokenizer_config.json and no transformers — should return False
         result = _detect_tokenizer_add_special_tokens(tmp_path)

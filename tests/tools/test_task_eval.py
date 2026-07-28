@@ -3530,6 +3530,11 @@ def test_eval_continuation_builds_for_prompt_and_generated_tokens(
     )
     monkeypatch.setattr(task_eval, "ensure_bundle", fake_ensure_bundle)
     monkeypatch.setattr(task_eval, "run_trtfb", fake_run_trtfb)
+    monkeypatch.setattr(
+        task_eval,
+        "validate_text_input_token_contract",
+        lambda **_kwargs: None,
+    )
     args = task_eval.build_arg_parser().parse_args(
         [
             "eval",
@@ -3625,6 +3630,184 @@ def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch)
     assert captured["cmd"][
         captured["cmd"].index("--reference-cache-identity") + 1
     ] == "org/model/reference-contract-v1"
+
+
+@pytest.mark.parametrize(
+    ("precision", "expected"),
+    [
+        ("fp16", "float16"),
+        ("bf16", "bfloat16"),
+        ("fp32", "float32"),
+    ],
+)
+def test_text_reference_auto_dtype_follows_engine_precision(
+    tmp_path: Path,
+    precision: str,
+    expected: str,
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps({"dataset_kind": "mmlu_five_shot_json"}),
+        encoding="utf-8",
+    )
+
+    dtype = task_eval.resolve_hf_reference_dtype(
+        argparse.Namespace(hf_dtype="auto"),
+        {"precision": precision},
+        work_dir,
+    )
+
+    assert dtype == expected
+
+
+def test_explicit_reference_dtype_overrides_engine_precision(tmp_path: Path) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps({"dataset_kind": "mmlu_five_shot_json"}),
+        encoding="utf-8",
+    )
+
+    dtype = task_eval.resolve_hf_reference_dtype(
+        argparse.Namespace(hf_dtype="bfloat16"),
+        {"precision": "fp16"},
+        work_dir,
+    )
+
+    assert dtype == "bfloat16"
+
+
+def test_non_transformers_reference_keeps_auto_dtype(tmp_path: Path) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps({"dataset_kind": "diffusion_prompt_json"}),
+        encoding="utf-8",
+    )
+
+    dtype = task_eval.resolve_hf_reference_dtype(
+        argparse.Namespace(hf_dtype="auto"),
+        {"precision": "fp16"},
+        work_dir,
+    )
+
+    assert dtype == "auto"
+
+
+def test_text_input_contract_reports_first_token_mismatch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "prompts.jsonl").write_text(
+        json.dumps({"sample_id": "mmlu_000007", "prompt": "Question"}) + "\n",
+        encoding="utf-8",
+    )
+
+    class HfTokenizer:
+        def __call__(self, text):
+            assert text == "Question"
+            return SimpleNamespace(input_ids=[10, 11, 12])
+
+    class BundleTokenizer:
+        def encode(self, text, *, add_special_tokens):
+            assert text == "Question"
+            assert add_special_tokens is False
+            return SimpleNamespace(ids=[10, 11, 12])
+
+    monkeypatch.setattr(
+        task_eval,
+        "_load_text_input_contract",
+        lambda **_kwargs: (
+            HfTokenizer(),
+            BundleTokenizer(),
+            {
+                "tokenizer_special_prefix_ids": [2],
+                "tokenizer_special_suffix_ids": [],
+            },
+        ),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"mmlu_000007.*first_difference=0.*HF=\[10, 11, 12\].*TRTMC=\[2, 10, 11, 12\]",
+    ):
+        task_eval.validate_text_input_token_contract(
+            model={"name": "opt-125m", "hf_id": "facebook/opt-125m"},
+            work_dir=work_dir,
+            bundle_path=tmp_path / "opt-125m.trtfb",
+            local_files_only=True,
+            trust_remote_code=False,
+        )
+
+    artifact = json.loads(
+        (work_dir / "input_token_contract.json").read_text(encoding="utf-8")
+    )
+    assert artifact["status"] == "mismatch"
+    assert artifact["samples"][0]["hf_token_count"] == 3
+    assert artifact["samples"][0]["trtmc_token_count"] == 4
+    assert artifact["samples"][0]["first_difference"] == 0
+
+
+def test_text_input_contract_records_aligned_token_digests(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "prompts.jsonl").write_text(
+        json.dumps({"sample_id": "sample-1", "prompt": "Question"}) + "\n",
+        encoding="utf-8",
+    )
+
+    class HfTokenizer:
+        def __call__(self, _text):
+            return SimpleNamespace(input_ids=[2, 10, 11])
+
+    class BundleTokenizer:
+        def encode(self, _text, *, add_special_tokens):
+            assert add_special_tokens is False
+            return SimpleNamespace(ids=[10, 11])
+
+    monkeypatch.setattr(
+        task_eval,
+        "_load_text_input_contract",
+        lambda **_kwargs: (
+            HfTokenizer(),
+            BundleTokenizer(),
+            {
+                "tokenizer_special_prefix_ids": [2],
+                "tokenizer_special_suffix_ids": [],
+            },
+        ),
+    )
+
+    task_eval.validate_text_input_token_contract(
+        model={"name": "decoder", "hf_id": "org/decoder"},
+        work_dir=work_dir,
+        bundle_path=tmp_path / "decoder.trtfb",
+        local_files_only=True,
+        trust_remote_code=False,
+    )
+
+    artifact = json.loads(
+        (work_dir / "input_token_contract.json").read_text(encoding="utf-8")
+    )
+    assert artifact["status"] == "aligned"
+    assert artifact["samples"] == [
+        {
+            "sample_id": "sample-1",
+            "hf_token_count": 3,
+            "trtmc_token_count": 3,
+            "hf_token_sha256": artifact["samples"][0]["hf_token_sha256"],
+            "trtmc_token_sha256": artifact["samples"][0]["trtmc_token_sha256"],
+        }
+    ]
+    assert artifact["samples"][0]["hf_token_sha256"] == (
+        artifact["samples"][0]["trtmc_token_sha256"]
+    )
 
 
 def test_run_hf_reference_subprocess_passes_asr_family_metadata(

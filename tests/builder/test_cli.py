@@ -339,6 +339,50 @@ class TestCmdBuildMocked:
         finally:
             eb._build_native_impl = original_build
 
+    def test_build_preserves_original_model_identity_after_profile_resolution(
+        self, monkeypatch, tmp_path
+    ):
+        """Tokenizer semantics must resolve from the user-provided model ID."""
+        import tensorrt_model_connect.build_cli as cli
+        import tensorrt_model_connect.engine_builder as eb
+
+        captured = {}
+
+        def mock_build(model_id_or_path, **kwargs):
+            captured["model_id_or_path"] = model_id_or_path
+
+        monkeypatch.setattr(eb, "_build_native_impl", mock_build)
+        monkeypatch.setattr(
+            cli,
+            "_resolve_build_model_metadata",
+            lambda *args, **kwargs: ("/cache/snapshots/model", "opt"),
+        )
+        monkeypatch.setattr(
+            cli,
+            "_maybe_reexec_build_in_profile",
+            lambda *args, **kwargs: None,
+        )
+        args = argparse.Namespace(
+            model="example-org/example-model",
+            output=str(tmp_path / "out.trtfb"),
+            max_cache_length=256,
+            precision="fp16",
+            method="trt",
+            quantize=None,
+            quant_scales=None,
+            quant_calibration_samples=512,
+            verbose=False,
+            _skip_profile_resolution=False,
+        )
+
+        with patch(
+            "tensorrt_model_connect.runtime_provider.orchestrator.try_build_optimized_runtime",
+            return_value=None,
+        ):
+            assert cli._cmd_build(args) == 0
+
+        assert captured["model_id_or_path"] == "example-org/example-model"
+
     def test_verbose_flag_propagated(self, tmp_path):
         """Verify verbose=True is forwarded to engine_builder.build()."""
         from tensorrt_model_connect.build_cli import _cmd_build
