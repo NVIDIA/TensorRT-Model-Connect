@@ -1819,6 +1819,22 @@ def test_continuation_suite_limits_prompts_to_model_context(
     assert config["prompt_truncation_side"] == "left"
 
 
+@pytest.mark.parametrize("model_name", ["granite-3.1-2b", "olmo2-1b"])
+def test_continuation_suite_uses_aligned_fp32_comparison_for_sensitive_models(
+    model_name: str,
+) -> None:
+    suite = task_eval.suite_by_id(
+        task_eval.load_suites(),
+        "mmlu_continuation_parity",
+    )
+    config = task_eval.effective_task_eval_config(
+        suite,
+        {"name": model_name, "family": "", "task_eval": {}},
+    )
+
+    assert config["comparison_precision"] == "fp32"
+
+
 def test_mmlu_suite_disables_hf_cache_for_internlm() -> None:
     suite = task_eval.suite_by_id(task_eval.load_suites(), "mmlu_five_shot_mcq")
     config = task_eval.effective_task_eval_config(
@@ -3349,6 +3365,38 @@ def test_ensure_bundle_replaces_existing_file_before_build(
     assert bundle.read_bytes() == b"new"
 
 
+def test_ensure_bundle_applies_selected_cuda_device_to_build(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle = tmp_path / "shared" / "model.trtfb"
+    captured: dict[str, str] = {}
+
+    class Result:
+        returncode = 0
+
+    def fake_run(command, **kwargs):
+        captured["cuda_visible_devices"] = kwargs["env"]["CUDA_VISIBLE_DEVICES"]
+        Path(command[command.index("-o") + 1]).write_bytes(b"bundle")
+        return Result()
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "parent-device")
+    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+
+    task_eval.ensure_bundle(
+        {
+            "name": "model",
+            "hf_id": "org/model",
+            "precision": "fp32",
+        },
+        bundle_path=bundle,
+        trtmc_binary="trtmc",
+        cuda_visible_devices="selected-device",
+    )
+
+    assert captured["cuda_visible_devices"] == "selected-device"
+
+
 def test_ensure_bundle_removes_partial_replacement_after_failed_build(
     tmp_path: Path,
     monkeypatch,
@@ -3458,6 +3506,51 @@ def test_ensure_bundle_replaces_incompatible_tensorrt_abi(
     assert [command[1] for command in commands] == ["inspect", "build"]
 
 
+def test_ensure_bundle_replaces_mismatched_precision(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle = tmp_path / "shared" / "model.trtfb"
+    bundle.parent.mkdir()
+    bundle.write_bytes(b"fp16")
+    commands: list[list[str]] = []
+
+    class Result:
+        returncode = 0
+        stdout = (
+            "TRT ABI:            11.2\n"
+            "Max cache length:   256\n"
+            "Precision:          fp16\n"
+        )
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        if command[1] == "inspect":
+            return Result()
+        output = Path(command[command.index("-o") + 1])
+        output.write_bytes(b"fp32")
+        return Result()
+
+    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+    monkeypatch.setattr(task_eval, "runtime_tensorrt_abi", lambda: "11.2")
+
+    _, built = task_eval.ensure_bundle(
+        {
+            "name": "model",
+            "hf_id": "org/model",
+            "precision": "fp32",
+        },
+        bundle_path=bundle,
+        trtmc_binary="trtmc",
+        max_cache_length=256,
+        replace_existing=True,
+    )
+
+    assert built is True
+    assert bundle.read_bytes() == b"fp32"
+    assert [command[1] for command in commands] == ["inspect", "build"]
+
+
 def test_suite_build_cache_minimum_overrides_manifest_cache() -> None:
     suite = {"build": {"min_max_cache_length": 1024}}
     model = {"max_cache_length": 256}
@@ -3519,12 +3612,16 @@ def test_eval_continuation_builds_for_prompt_and_generated_tokens(
     suite = task_eval.suite_by_id(
         task_eval.load_suites(), "mmlu_continuation_parity"
     )
+    suite["model_overrides"]["by_model"]["decoder-small"] = {
+        "comparison_precision": "fp32"
+    }
     model = {
         "name": "decoder-small",
         "hf_id": "example-org/decoder-small",
+        "hf_revision": "0123456789abcdef",
         "bundle": "decoder-small.trtfb",
         "max_cache_length": 256,
-        "precision": "fp32",
+        "precision": "fp16",
         "trust_remote_code": False,
         "build_args": {},
         "quantization": {},
@@ -3543,9 +3640,11 @@ def test_eval_continuation_builds_for_prompt_and_generated_tokens(
     ]
 
     def fake_run_hf(_args, _model, work_dir):
+        assert _model["precision"] == "fp32"
         task_eval.write_predictions(work_dir / "hf_predictions.json", responses)
 
     def fake_ensure_bundle(*_args, **kwargs):
+        assert _args[0]["precision"] == "fp32"
         assert kwargs["max_cache_length"] == 445
         bundle = kwargs["bundle_path"]
         bundle.parent.mkdir(parents=True, exist_ok=True)
@@ -3557,7 +3656,15 @@ def test_eval_continuation_builds_for_prompt_and_generated_tokens(
             Path(args.work_dir) / "trtfb_predictions.json", responses
         )
 
-    monkeypatch.setattr(task_eval, "max_prompt_token_length", lambda **_kwargs: 381)
+    def fake_max_prompt_token_length(**kwargs):
+        assert kwargs["model_revision"] == "0123456789abcdef"
+        return 381
+
+    monkeypatch.setattr(
+        task_eval,
+        "max_prompt_token_length",
+        fake_max_prompt_token_length,
+    )
     monkeypatch.setattr(
         task_eval, "run_hf_reference_subprocess", fake_run_hf
     )
@@ -3609,6 +3716,48 @@ def test_prompt_length_validation_rejects_over_cache(tmp_path: Path, monkeypatch
         assert "max_prompt_tokens=513" in str(exc)
     else:
         raise AssertionError("expected prompt length validation failure")
+
+
+def test_max_prompt_token_length_uses_pinned_model_revision(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prompts = tmp_path / "prompts.jsonl"
+    prompts.write_text(json.dumps({"prompt": "one two"}) + "\n", encoding="utf-8")
+    captured: dict[str, Any] = {}
+
+    class Tokenizer:
+        def __call__(self, text, *, add_special_tokens=False):
+            assert add_special_tokens is False
+            return argparse.Namespace(input_ids=text.split())
+
+    class AutoTokenizer:
+        @staticmethod
+        def from_pretrained(model_id, **kwargs):
+            captured["model_id"] = model_id
+            captured.update(kwargs)
+            return Tokenizer()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(AutoTokenizer=AutoTokenizer),
+    )
+
+    length = task_eval.max_prompt_token_length(
+        model_id="org/model",
+        model_revision="0123456789abcdef",
+        prompts_path=prompts,
+        local_files_only=True,
+    )
+
+    assert length == 2
+    assert captured == {
+        "model_id": "org/model",
+        "revision": "0123456789abcdef",
+        "local_files_only": True,
+        "trust_remote_code": False,
+    }
 
 
 def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch) -> None:
@@ -3739,6 +3888,53 @@ def test_explicit_reference_dtype_must_match_engine_precision(tmp_path: Path) ->
             argparse.Namespace(hf_dtype="bfloat16"),
             {"precision": "fp16"},
             work_dir,
+        )
+
+
+def test_comparison_precision_overrides_both_candidate_and_reference(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps({"dataset_kind": "mmlu_five_shot_json"}),
+        encoding="utf-8",
+    )
+    original = {
+        "name": "sensitive-model",
+        "precision": "fp16",
+        "quantization": {},
+    }
+
+    model = task_eval.apply_comparison_precision(
+        original,
+        {"comparison_precision": "fp32"},
+    )
+    contract = task_eval.resolve_reference_precision_contract(
+        argparse.Namespace(hf_dtype="auto"),
+        model,
+        work_dir,
+    )
+
+    assert original["precision"] == "fp16"
+    assert model["precision"] == "fp32"
+    assert contract["trtmc_base_precision"] == "fp32"
+    assert contract["reference_precision"] == "fp32"
+    assert contract["comparison"] == "aligned"
+
+
+def test_comparison_precision_rejects_quantized_models() -> None:
+    with pytest.raises(
+        ValueError,
+        match="FP8 quantization.*may only override unquantized base precision",
+    ):
+        task_eval.apply_comparison_precision(
+            {
+                "name": "quantized-model",
+                "precision": "fp16",
+                "quantization": {"format": "fp8"},
+            },
+            {"comparison_precision": "fp32"},
         )
 
 

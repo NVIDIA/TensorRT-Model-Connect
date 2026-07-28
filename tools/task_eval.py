@@ -2840,6 +2840,7 @@ def apply_work_prompt_token_limit(
     *,
     work_dir: Path,
     model_id: str,
+    model_revision: str = "",
     token_limit: int,
     truncation_side: str = "left",
     local_files_only: bool = False,
@@ -2850,11 +2851,13 @@ def apply_work_prompt_token_limit(
     except Exception as exc:  # pragma: no cover - runtime dependency
         raise RuntimeError("Prompt truncation requires transformers") from exc
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_id,
-        local_files_only=local_files_only,
-        trust_remote_code=trust_remote_code,
-    )
+    tokenizer_kwargs = {
+        "local_files_only": local_files_only,
+        "trust_remote_code": trust_remote_code,
+    }
+    if model_revision:
+        tokenizer_kwargs["revision"] = model_revision
+    tokenizer = AutoTokenizer.from_pretrained(model_id, **tokenizer_kwargs)
     prompts_path = work_dir / "prompts.jsonl"
     rows = load_jsonl(prompts_path)
     summary = truncate_prompt_rows(
@@ -2880,6 +2883,7 @@ def apply_work_prompt_token_limit(
 def max_prompt_token_length(
     *,
     model_id: str,
+    model_revision: str = "",
     prompts_path: Path,
     local_files_only: bool = False,
     trust_remote_code: bool = False,
@@ -2889,11 +2893,13 @@ def max_prompt_token_length(
     except Exception as exc:  # pragma: no cover - runtime dependency
         raise RuntimeError("Prompt length check requires transformers") from exc
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_id,
-        local_files_only=local_files_only,
-        trust_remote_code=trust_remote_code,
-    )
+    tokenizer_kwargs = {
+        "local_files_only": local_files_only,
+        "trust_remote_code": trust_remote_code,
+    }
+    if model_revision:
+        tokenizer_kwargs["revision"] = model_revision
+    tokenizer = AutoTokenizer.from_pretrained(model_id, **tokenizer_kwargs)
     max_len = 0
     for row in load_jsonl(prompts_path):
         documents = row.get("documents")
@@ -2920,6 +2926,7 @@ def validate_prompt_lengths_for_cache(
 ) -> int:
     max_prompt_len = max_prompt_token_length(
         model_id=str(model["hf_id"]),
+        model_revision=str(model.get("hf_revision", "") or ""),
         prompts_path=work_dir / "prompts.jsonl",
         local_files_only=local_files_only,
         trust_remote_code=trust_remote_code or bool(model.get("trust_remote_code", False)),
@@ -8550,6 +8557,7 @@ def _bundle_can_be_reused(
     inspection: Mapping[str, str],
     *,
     max_cache_length: int | None,
+    expected_precision: str,
     allow_unknown: bool,
 ) -> bool:
     if not inspection:
@@ -8560,6 +8568,19 @@ def _bundle_can_be_reused(
             if int(raw_cache) < max_cache_length:
                 return False
         except ValueError:
+            return False
+    raw_precision = inspection.get("Precision")
+    if expected_precision:
+        if raw_precision is None:
+            if not allow_unknown:
+                return False
+        elif (
+            _canonical_reference_precision(
+                raw_precision,
+                field="bundle precision",
+            )
+            != expected_precision
+        ):
             return False
     bundle_abi = inspection.get("TRT ABI", "")
     runtime_abi = runtime_tensorrt_abi()
@@ -8584,12 +8605,18 @@ def ensure_bundle(
     replace_existing: bool = False,
     extra_build_args: list[str] | None = None,
     log_path: Path | None = None,
+    cuda_visible_devices: str = "",
 ) -> tuple[Path, bool]:
+    expected_precision = _canonical_reference_precision(
+        model.get("precision", "fp32"),
+        field="TRTMC base precision",
+    )
     if bundle_path.is_file() and not force_build:
         inspection = bundle_inspection(bundle_path, trtmc_binary)
         if _bundle_can_be_reused(
             inspection,
             max_cache_length=max_cache_length,
+            expected_precision=expected_precision,
             allow_unknown=not replace_existing,
         ):
             return bundle_path, False
@@ -8607,10 +8634,21 @@ def ensure_bundle(
     )
     log_path = log_path or bundle_path.with_suffix(".build.log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    build_env = None
+    if cuda_visible_devices:
+        build_env = os.environ.copy()
+        build_env["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
     with log_path.open("w", encoding="utf-8") as log_f:
         log_f.write(f"$ {shlex.join(cmd)}\n")
         log_f.flush()
-        proc = subprocess.run(cmd, check=False, text=True, stdout=log_f, stderr=subprocess.STDOUT)
+        proc = subprocess.run(
+            cmd,
+            check=False,
+            text=True,
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
+            env=build_env,
+        )
     if proc.returncode != 0:
         _remove_bundle_before_or_after_replacement(
             bundle_path,
@@ -8742,6 +8780,30 @@ def _model_quantization_format(model: Mapping[str, Any]) -> str:
     if model.get("fp8_scales"):
         return "fp8"
     return ""
+
+
+def apply_comparison_precision(
+    model: Mapping[str, Any],
+    task_eval_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Apply one validation base precision to both TRTMC and its reference."""
+
+    configured = task_eval_config.get("comparison_precision")
+    updated = copy.deepcopy(dict(model))
+    if configured in (None, ""):
+        return updated
+    quantization = _model_quantization_format(updated)
+    if quantization:
+        model_name = str(updated.get("name", "") or "quantized model")
+        raise ValueError(
+            f"{model_name} uses {quantization.upper()} quantization; "
+            "comparison_precision may only override unquantized base precision"
+        )
+    updated["precision"] = _canonical_reference_precision(
+        configured,
+        field="task_eval.comparison_precision",
+    )
+    return updated
 
 
 def _configured_reference_precision(
@@ -10006,6 +10068,7 @@ def eval_one_model(
         model.get("reference_backend", "hf_transformers") or "hf_transformers"
     )
     task_eval_config = effective_task_eval_config(suite, model)
+    model = apply_comparison_precision(model, task_eval_config)
     suite_reference = suite.get("reference", {})
     if isinstance(suite_reference, dict) and suite_reference:
         task_eval_config["reference"] = suite_reference
@@ -10046,6 +10109,7 @@ def eval_one_model(
         prompt_normalization = apply_work_prompt_token_limit(
             work_dir=work_dir,
             model_id=str(model["hf_id"]),
+            model_revision=str(model.get("hf_revision", "") or ""),
             token_limit=prompt_token_limit,
             truncation_side=str(task_eval_config.get("prompt_truncation_side", "left")),
             local_files_only=args.local_files_only,
@@ -10087,6 +10151,7 @@ def eval_one_model(
         prompt_rows_path = work_dir / "prompts.jsonl"
         max_prompt_len = max_prompt_token_length(
             model_id=str(model["hf_id"]),
+            model_revision=str(model.get("hf_revision", "") or ""),
             prompts_path=prompt_rows_path,
             local_files_only=args.local_files_only,
             trust_remote_code=args.trust_remote_code or bool(model.get("trust_remote_code", False)),
@@ -10128,6 +10193,7 @@ def eval_one_model(
         ),
         extra_build_args=args.extra_build_arg,
         log_path=work_dir / "build.log",
+        cuda_visible_devices=args.cuda_visible_devices,
     )
 
     if (
@@ -10809,12 +10875,15 @@ def _model_tokenizer(model: dict[str, Any], args: argparse.Namespace) -> Any:
     try:
         from transformers import AutoTokenizer
 
-        tok = AutoTokenizer.from_pretrained(
-            str(model["hf_id"]),
-            trust_remote_code=getattr(args, "trust_remote_code", False)
+        tokenizer_kwargs = {
+            "trust_remote_code": getattr(args, "trust_remote_code", False)
             or bool(model.get("trust_remote_code", False)),
-            local_files_only=getattr(args, "local_files_only", False),
-        )
+            "local_files_only": getattr(args, "local_files_only", False),
+        }
+        model_revision = str(model.get("hf_revision", "") or "")
+        if model_revision:
+            tokenizer_kwargs["revision"] = model_revision
+        tok = AutoTokenizer.from_pretrained(str(model["hf_id"]), **tokenizer_kwargs)
         return lambda s: tok(s, add_special_tokens=False).input_ids  # noqa: E731
     except Exception:
         return None

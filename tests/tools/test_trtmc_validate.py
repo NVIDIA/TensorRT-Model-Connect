@@ -1998,6 +1998,7 @@ def test_finalize_run_metadata_records_completion(monkeypatch, tmp_path):
 
 def test_comparison_command_uses_validation_entrypoint(tmp_path):
     arguments = argparse.Namespace(
+        models_dir=tmp_path / "models",
         engine_dir=tmp_path / "engines",
         reference_cache_dir=tmp_path / "references",
         trtmc_binary=tmp_path / "trtmc",
@@ -2034,6 +2035,9 @@ def test_comparison_command_uses_validation_entrypoint(tmp_path):
     )
     assert command[command.index("--model") + 1] == "model-a"
     assert command[command.index("--suite") + 1] == "workload-a"
+    assert command[command.index("--models-dir") + 1] == str(
+        tmp_path / "models"
+    )
     assert command[command.index("--hf-python") + 1] == "/profiles/python"
     assert command[command.index("--reference-cache-dir") + 1] == str(
         tmp_path / "references"

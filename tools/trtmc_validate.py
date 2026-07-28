@@ -552,6 +552,8 @@ def _comparison_command(
         str(dataset),
         "--model",
         binding.model,
+        "--models-dir",
+        str(arguments.models_dir),
         "--work-root",
         str(work_root),
         "--engine-dir",
