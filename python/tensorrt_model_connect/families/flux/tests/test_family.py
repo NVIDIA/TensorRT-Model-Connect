@@ -247,6 +247,7 @@ def test_build_components_with_clip_and_second_t5(
         str(model_dir),
         _cfg(image_height=80, image_width=96),
         weights,
+        precision="fp16",
         verbose=False,
     )
 
@@ -258,6 +259,7 @@ def test_build_components_with_clip_and_second_t5(
     # h_lat=10, w_lat=12, pack_size=2 -> num_img_tokens=30
     assert calls["build_flux_dit_engine"][1]["num_img_tokens"] == 30
     assert calls["load_flux_dit_weights"][1]["dim"] == 8
+    assert calls["build_flux_dit_engine"][1]["precision"] == "fp16"
     assert calls["serialize"][0][1] is True
 
 

@@ -19,6 +19,7 @@ construction happens. No engine is compiled.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 try:
@@ -202,3 +203,202 @@ def test_batched_path_attaches_profile_with_expected_shapes(monkeypatch):
     assert by_name["rotary_sin"] == (-1, total_seq, head_dim)
 
 
+def test_fp16_precision_casts_inputs_and_matmul_constants(monkeypatch):
+    """Intent: prevent FP16 manifests from silently rebuilding an FP32 DiT.
+
+    Preconditions: the FLUX.1 builder is configured for FP16.
+    Postconditions: FP32 runtime inputs are cast at the graph boundary and
+    matrix weights are materialized as FP16 TensorRT constants.
+    """
+    casts = []
+    matmuls = []
+
+    class _CastNetwork:
+        def add_cast(self, tensor, dtype):
+            casts.append((tensor.dtype, dtype))
+            return _RecordingLayer(_FakeTensor("cast", dtype, tensor.shape))
+
+    def record_matmul(network, inp, in_dim, out_dim, weight, *, dtype):
+        matmuls.append((network, inp, in_dim, out_dim, weight, dtype))
+        return inp
+
+    monkeypatch.setattr(
+        flux_dit_builder.graph_ops,
+        "add_matmul_rhs_constant",
+        record_matmul,
+    )
+
+    try:
+        flux_dit_builder._configure_compute_precision("fp16")
+        network = _CastNetwork()
+        fp32_input = _FakeTensor(
+            "hidden_states",
+            flux_dit_builder.trt.float32,
+            (4, 16),
+        )
+
+        fp16_input = flux_dit_builder._to_compute_dtype(network, fp32_input)
+        flux_dit_builder._matmul(
+            network,
+            fp16_input,
+            16,
+            32,
+            np.zeros((16, 32), dtype=np.float32),
+        )
+
+        assert casts == [
+            (flux_dit_builder.trt.float32, flux_dit_builder.trt.float16)
+        ]
+        assert fp16_input.dtype == flux_dit_builder.trt.float16
+        assert matmuls[0][-1] == np.float16
+    finally:
+        flux_dit_builder._configure_compute_precision("fp32")
+
+
+def test_fp16_adaln_keeps_modulation_in_fp32(monkeypatch):
+    """Intent: prevent FP16 AdaLN overflow from collapsing generated images.
+
+    Preconditions: normalized activations and modulation vectors originate in
+    FP16.
+    Postconditions: normalization, scale, shift, and both modulation ops use
+    FP32 before a single cast returns the block output to FP16.
+    """
+    casts = []
+    elementwise_dtypes = []
+
+    class _TypedNetwork:
+        def add_shuffle(self, tensor):
+            return _RecordingLayer(_FakeTensor("shuffle", tensor.dtype, tensor.shape))
+
+        def add_cast(self, tensor, dtype):
+            casts.append((tensor.dtype, dtype))
+            return _RecordingLayer(_FakeTensor("cast", dtype, tensor.shape))
+
+        def add_elementwise(self, left, right, _operation):
+            assert left.dtype == right.dtype
+            elementwise_dtypes.append(left.dtype)
+            return _RecordingLayer(_FakeTensor("elementwise", left.dtype, left.shape))
+
+    monkeypatch.setattr(
+        flux_dit_builder.graph_ops,
+        "add_layer_norm_native",
+        lambda _network, tensor, *_args, **_kwargs: _FakeTensor(
+            "normalized", tensor.dtype, tensor.shape
+        ),
+    )
+    monkeypatch.setattr(
+        flux_dit_builder.graph_ops,
+        "add_constant",
+        lambda _network, shape, _values, dtype=np.float32: _FakeTensor(
+            "constant",
+            (
+                flux_dit_builder.trt.float16
+                if dtype == np.float16
+                else flux_dit_builder.trt.float32
+            ),
+            shape,
+        ),
+    )
+
+    try:
+        flux_dit_builder._configure_compute_precision("fp16")
+        fp16 = flux_dit_builder.trt.float16
+        fp32 = flux_dit_builder.trt.float32
+        output = flux_dit_builder._adaln_modulate(
+            _TypedNetwork(),
+            _FakeTensor("x", fp16, (4, 16)),
+            _FakeTensor("scale", fp16, (16,)),
+            _FakeTensor("shift", fp16, (16,)),
+            16,
+            _FakeTensor("eps", fp32, (1, 1)),
+            4,
+        )
+
+        assert output.dtype == fp16
+        assert elementwise_dtypes == [fp32, fp32, fp32]
+        assert casts.count((fp16, fp32)) == 3
+        assert casts[-1] == (fp32, fp16)
+    finally:
+        flux_dit_builder._configure_compute_precision("fp32")
+
+
+def test_fp16_block_updates_accumulate_in_fp32_residual():
+    """Intent: prevent deep FLUX.1 residual streams from overflowing FP16.
+
+    Preconditions: a block emits an FP16 update for an FP32 residual.
+    Postconditions: the update is promoted and the residual sum remains FP32.
+    """
+    casts = []
+    sums = []
+
+    class _TypedNetwork:
+        def add_cast(self, tensor, dtype):
+            casts.append((tensor.dtype, dtype))
+            return _RecordingLayer(_FakeTensor("cast", dtype, tensor.shape))
+
+        def add_elementwise(self, left, right, operation):
+            assert left.dtype == right.dtype
+            sums.append((left.dtype, right.dtype, operation))
+            return _RecordingLayer(
+                _FakeTensor("residual_sum", left.dtype, left.shape))
+
+    try:
+        flux_dit_builder._configure_compute_precision("fp16")
+        fp16 = flux_dit_builder.trt.float16
+        fp32 = flux_dit_builder.trt.float32
+        output = flux_dit_builder._residual_add(
+            _TypedNetwork(),
+            _FakeTensor("residual", fp32, (4, 16)),
+            _FakeTensor("update", fp16, (4, 16)),
+        )
+
+        assert output.dtype == fp32
+        assert casts == [(fp16, fp32)]
+        assert sums == [
+            (fp32, fp32, flux_dit_builder.trt.ElementWiseOperation.SUM)
+        ]
+    finally:
+        flux_dit_builder._configure_compute_precision("fp32")
+
+
+def test_fp16_block_gate_runs_before_overflow_in_fp32():
+    """Intent: keep finite FP16 branch values finite while gating.
+
+    Preconditions: both a residual-branch projection and its gate are FP16.
+    Postconditions: both operands are promoted before their product is formed.
+    """
+    casts = []
+    products = []
+
+    class _TypedNetwork:
+        def add_shuffle(self, tensor):
+            return _RecordingLayer(_FakeTensor("gate_2d", tensor.dtype, (1, 16)))
+
+        def add_cast(self, tensor, dtype):
+            casts.append((tensor.dtype, dtype))
+            return _RecordingLayer(_FakeTensor("cast", dtype, tensor.shape))
+
+        def add_elementwise(self, left, right, operation):
+            assert left.dtype == right.dtype
+            products.append((left.dtype, right.dtype, operation))
+            return _RecordingLayer(
+                _FakeTensor("gated_update", left.dtype, left.shape))
+
+    try:
+        flux_dit_builder._configure_compute_precision("fp16")
+        fp16 = flux_dit_builder.trt.float16
+        fp32 = flux_dit_builder.trt.float32
+        output = flux_dit_builder._gate_1d(
+            _TypedNetwork(),
+            _FakeTensor("update", fp16, (4, 16)),
+            _FakeTensor("gate", fp16, (16,)),
+            4,
+        )
+
+        assert output.dtype == fp32
+        assert casts == [(fp16, fp32), (fp16, fp32)]
+        assert products == [
+            (fp32, fp32, flux_dit_builder.trt.ElementWiseOperation.PROD)
+        ]
+    finally:
+        flux_dit_builder._configure_compute_precision("fp32")

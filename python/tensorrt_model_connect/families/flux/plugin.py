@@ -453,6 +453,7 @@ class FluxPlugin:
                     num_single_layers=num_single_layers,
                     num_img_tokens=num_img_tokens,
                     text_seq_len=self._T5_MAX_SEQ_LEN,
+                    precision=precision,
                     verbose=verbose,
                     max_batch_size=dit_mbs,
                     opt_batch_size=dit_opt,

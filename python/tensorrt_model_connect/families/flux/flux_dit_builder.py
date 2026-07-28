@@ -38,6 +38,56 @@ if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
 
 
+_COMPUTE_TRT_DTYPE = trt.float32
+_COMPUTE_NP_DTYPE = np.float32
+
+
+def _configure_compute_precision(precision: str) -> None:
+    """Select the strongly typed storage/compute dtype for the DiT graph."""
+    global _COMPUTE_TRT_DTYPE, _COMPUTE_NP_DTYPE
+    if precision == "fp32":
+        _COMPUTE_TRT_DTYPE = trt.float32
+        _COMPUTE_NP_DTYPE = np.float32
+    elif precision == "fp16":
+        _COMPUTE_TRT_DTYPE = trt.float16
+        _COMPUTE_NP_DTYPE = np.float16
+    elif precision == "bf16":
+        import ml_dtypes
+        _COMPUTE_TRT_DTYPE = trt.bfloat16
+        _COMPUTE_NP_DTYPE = ml_dtypes.bfloat16
+    else:
+        raise ValueError(
+            "FLUX.1 DiT precision must be fp32, fp16, or bf16; "
+            f"got {precision!r}")
+
+
+def _to_compute_dtype(network, tensor):
+    if tensor.dtype == _COMPUTE_TRT_DTYPE:
+        return tensor
+    return network.add_cast(tensor, _COMPUTE_TRT_DTYPE).get_output(0)
+
+
+def _matmul(network, inp, in_dim, out_dim, weight):
+    return graph_ops.add_matmul_rhs_constant(
+        network, inp, in_dim, out_dim, weight, dtype=_COMPUTE_NP_DTYPE)
+
+
+def _bias_sum(network, inp, width, bias):
+    return graph_ops.add_bias_sum(
+        network, inp, width, bias, dtype=_COMPUTE_NP_DTYPE)
+
+
+def _residual_add(network, residual, update):
+    """Accumulate FP16 block updates into an FP32 residual stream."""
+    if _COMPUTE_TRT_DTYPE == trt.float16:
+        if residual.dtype != trt.float32:
+            residual = network.add_cast(residual, trt.float32).get_output(0)
+        if update.dtype != trt.float32:
+            update = network.add_cast(update, trt.float32).get_output(0)
+    return network.add_elementwise(
+        residual, update, trt.ElementWiseOperation.SUM).get_output(0)
+
+
 def build_flux_dit_engine(
     weights: "WeightDict",
     *,
@@ -51,6 +101,7 @@ def build_flux_dit_engine(
     eps: float = 1e-6,
     max_batch_size: int = 1,
     opt_batch_size: int | None = None,
+    precision: str = "fp32",
     verbose: bool = False,
 ) -> bytes:
     """Build FLUX.1 DiT denoiser TRT engine plan.
@@ -63,6 +114,7 @@ def build_flux_dit_engine(
     """
     if max_batch_size < 1:
         raise ValueError(f"max_batch_size must be >= 1 (got {max_batch_size})")
+    _configure_compute_precision(precision)
     if max_batch_size > 1:
         return _build_flux_dit_engine_batched(
             weights,
@@ -76,6 +128,7 @@ def build_flux_dit_engine(
             eps=eps,
             max_batch_size=max_batch_size,
             opt_batch_size=opt_batch_size,
+            precision=precision,
             verbose=verbose,
         )
 
@@ -102,18 +155,30 @@ def build_flux_dit_engine(
     rotary_sin = network.add_input(
         "rotary_sin", trt.float32, (total_seq, head_dim))
 
+    print(
+        f"[flux-dit] Network: strongly_typed=True, precision={precision}",
+        file=sys.stderr,
+    )
+
     # Constants
     eps_np = np.array([eps], dtype=np.float32)
     eps_t = graph_ops.add_constant(network, (1, 1), eps_np)
+
+    if _COMPUTE_TRT_DTYPE == trt.float16:
+        hidden = hidden_inp
+        encoder_hidden = encoder_inp
+    else:
+        hidden = _to_compute_dtype(network, hidden_inp)
+        encoder_hidden = _to_compute_dtype(network, encoder_inp)
+    temb = _to_compute_dtype(network, temb_inp)
+    rotary_cos = _to_compute_dtype(network, rotary_cos)
+    rotary_sin = _to_compute_dtype(network, rotary_sin)
 
     # Split RoPE for text and image
     txt_cos = network.add_slice(rotary_cos, (0, 0), (text_seq_len, head_dim), (1, 1)).get_output(0)
     txt_sin = network.add_slice(rotary_sin, (0, 0), (text_seq_len, head_dim), (1, 1)).get_output(0)
     img_cos = network.add_slice(rotary_cos, (text_seq_len, 0), (num_img_tokens, head_dim), (1, 1)).get_output(0)
     img_sin = network.add_slice(rotary_sin, (text_seq_len, 0), (num_img_tokens, head_dim), (1, 1)).get_output(0)
-
-    hidden = hidden_inp
-    encoder_hidden = encoder_inp
 
     # ===================== Joint Transformer Blocks =====================
     for layer_idx in range(num_layers):
@@ -124,16 +189,18 @@ def build_flux_dit_engine(
         norm1_w = weights[f"{p}.norm1.linear.weight"]  # [dim, 6*dim]
         norm1_b = weights[f"{p}.norm1.linear.bias"]    # [6*dim]
 
-        temb_silu = network.add_activation(temb_inp, trt.ActivationType.SIGMOID)
+        temb_silu = network.add_activation(temb, trt.ActivationType.SIGMOID)
         temb_silu_out = network.add_elementwise(
-            temb_inp, temb_silu.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
+            temb, temb_silu.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
 
         norm1_proj = _matmul_bias_1d(network, temb_silu_out, dim, 6 * dim, norm1_w, norm1_b)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = _chunk_6(
             network, norm1_proj, dim)
 
         # AdaLN: LayerNorm(x) * (1 + scale) + shift
-        normed_hidden = _adaln_modulate(network, hidden, scale_msa, shift_msa, dim, eps_t, num_img_tokens)
+        normed_hidden = _adaln_modulate(
+            network, hidden, scale_msa, shift_msa, dim, eps_t,
+            num_img_tokens, eps)
 
         # --- AdaLN-Zero for text (norm1_context) ---
         ctx_norm1_w = weights[f"{p}.norm1_context.linear.weight"]
@@ -144,7 +211,8 @@ def build_flux_dit_engine(
             network, ctx_norm1_proj, dim)
 
         normed_encoder = _adaln_modulate(
-            network, encoder_hidden, c_scale_msa, c_shift_msa, dim, eps_t, text_seq_len)
+            network, encoder_hidden, c_scale_msa, c_shift_msa, dim, eps_t,
+            text_seq_len, eps)
 
         # --- Joint Attention ---
         # Image QKV
@@ -194,34 +262,30 @@ def build_flux_dit_engine(
         # Image output projection + gate + residual
         img_attn_proj = _linear(network, img_attn, dim, dim, weights, f"{p}.attn.to_out.0")
         img_attn_gated = _gate_1d(network, img_attn_proj, gate_msa, num_img_tokens)
-        hidden = network.add_elementwise(
-            hidden, img_attn_gated,
-            trt.ElementWiseOperation.SUM).get_output(0)
+        hidden = _residual_add(network, hidden, img_attn_gated)
 
         # Text output projection + gate + residual
         txt_attn_proj = _linear(network, txt_attn, dim, dim, weights, f"{p}.attn.to_add_out")
         txt_attn_gated = _gate_1d(network, txt_attn_proj, c_gate_msa, text_seq_len)
-        encoder_hidden = network.add_elementwise(
-            encoder_hidden, txt_attn_gated,
-            trt.ElementWiseOperation.SUM).get_output(0)
+        encoder_hidden = _residual_add(
+            network, encoder_hidden, txt_attn_gated)
 
         # --- Image FFN ---
         normed_ff = _layernorm_modulate(
-            network, hidden, scale_mlp, shift_mlp, dim, eps_t, num_img_tokens)
+            network, hidden, scale_mlp, shift_mlp, dim, eps_t,
+            num_img_tokens, eps)
         ff_out = _gelu_ffn(network, normed_ff, dim, weights, f"{p}.ff")
         ff_gated = _gate_1d(network, ff_out, gate_mlp, num_img_tokens)
-        hidden = network.add_elementwise(
-            hidden, ff_gated,
-            trt.ElementWiseOperation.SUM).get_output(0)
+        hidden = _residual_add(network, hidden, ff_gated)
 
         # --- Text FFN ---
         normed_ctx_ff = _layernorm_modulate(
-            network, encoder_hidden, c_scale_mlp, c_shift_mlp, dim, eps_t, text_seq_len)
+            network, encoder_hidden, c_scale_mlp, c_shift_mlp, dim, eps_t,
+            text_seq_len, eps)
         ctx_ff_out = _gelu_ffn(network, normed_ctx_ff, dim, weights, f"{p}.ff_context")
         ctx_ff_gated = _gate_1d(network, ctx_ff_out, c_gate_mlp, text_seq_len)
-        encoder_hidden = network.add_elementwise(
-            encoder_hidden, ctx_ff_gated,
-            trt.ElementWiseOperation.SUM).get_output(0)
+        encoder_hidden = _residual_add(
+            network, encoder_hidden, ctx_ff_gated)
 
     # ===================== Single Transformer Blocks =====================
     for layer_idx in range(num_single_layers):
@@ -236,24 +300,26 @@ def build_flux_dit_engine(
         norm_w = weights[f"{p}.norm.linear.weight"]
         norm_b = weights[f"{p}.norm.linear.bias"]
 
-        temb_silu2 = network.add_activation(temb_inp, trt.ActivationType.SIGMOID)
+        temb_silu2 = network.add_activation(temb, trt.ActivationType.SIGMOID)
         temb_silu2_out = network.add_elementwise(
-            temb_inp, temb_silu2.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
+            temb, temb_silu2.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
 
         norm_proj = _matmul_bias_1d(network, temb_silu2_out, dim, 3 * dim, norm_w, norm_b)
         shift_msa_s, scale_msa_s, gate_msa_s = _chunk_3(network, norm_proj, dim)
 
         normed_cat = _adaln_modulate(
-            network, residual, scale_msa_s, shift_msa_s, dim, eps_t, total_seq)
+            network, residual, scale_msa_s, shift_msa_s, dim, eps_t,
+            total_seq, eps)
 
         # Parallel MLP: proj_mlp -> GELU_tanh
-        mlp_hidden = graph_ops.add_matmul_rhs_constant(
+        mlp_hidden = _matmul(
             network, normed_cat, dim, ffn_dim,
             weights[f"{p}.proj_mlp.weight"])
         mlp_b = weights.get(f"{p}.proj_mlp.bias")
         if mlp_b is not None:
-            mlp_hidden = graph_ops.add_bias_sum(network, mlp_hidden, ffn_dim, mlp_b)
-        mlp_hidden = graph_ops.add_gelu_tanh(network, mlp_hidden)
+            mlp_hidden = _bias_sum(network, mlp_hidden, ffn_dim, mlp_b)
+        mlp_hidden = graph_ops.add_gelu_tanh(
+            network, mlp_hidden, dtype=_COMPUTE_NP_DTYPE)
 
         # Self-attention on full sequence (text + image)
         q_s = _linear(network, normed_cat, dim, dim, weights, f"{p}.attn.to_q")
@@ -278,17 +344,15 @@ def build_flux_dit_engine(
 
         proj_out_w = weights[f"{p}.proj_out.weight"]
         in_features = dim + ffn_dim
-        combined = graph_ops.add_matmul_rhs_constant(
+        combined = _matmul(
             network, cat_attn_mlp.get_output(0), in_features, dim, proj_out_w)
         proj_out_b = weights.get(f"{p}.proj_out.bias")
         if proj_out_b is not None:
-            combined = graph_ops.add_bias_sum(network, combined, dim, proj_out_b)
+            combined = _bias_sum(network, combined, dim, proj_out_b)
 
         # Gate + residual
         gated_s = _gate_1d(network, combined, gate_msa_s, total_seq)
-        cat_hidden_out = network.add_elementwise(
-            residual, gated_s,
-            trt.ElementWiseOperation.SUM).get_output(0)
+        cat_hidden_out = _residual_add(network, residual, gated_s)
 
         # Split back
         encoder_hidden = network.add_slice(
@@ -301,25 +365,26 @@ def build_flux_dit_engine(
     final_norm_w = weights["norm_out.linear.weight"]
     final_norm_b = weights["norm_out.linear.bias"]
 
-    temb_silu_f = network.add_activation(temb_inp, trt.ActivationType.SIGMOID)
+    temb_silu_f = network.add_activation(temb, trt.ActivationType.SIGMOID)
     temb_silu_f_out = network.add_elementwise(
-        temb_inp, temb_silu_f.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
+        temb, temb_silu_f.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
 
     final_proj = _matmul_bias_1d(network, temb_silu_f_out, dim, 2 * dim, final_norm_w, final_norm_b)
     final_scale = network.add_slice(final_proj, (0,), (dim,), (1,)).get_output(0)
     final_shift = network.add_slice(final_proj, (dim,), (dim,), (1,)).get_output(0)
 
     output = _adaln_modulate(
-        network, hidden, final_scale, final_shift, dim, eps_t, num_img_tokens)
+        network, hidden, final_scale, final_shift, dim, eps_t,
+        num_img_tokens, eps)
 
     # proj_out: [num_img_tokens, dim] -> [num_img_tokens, out_channels]
     proj_out_w = weights["proj_out.weight"]
     out_channels = proj_out_w.shape[1]
-    output = graph_ops.add_matmul_rhs_constant(
+    output = _matmul(
         network, output, dim, out_channels, proj_out_w)
     proj_out_b = weights.get("proj_out.bias")
     if proj_out_b is not None:
-        output = graph_ops.add_bias_sum(network, output, out_channels, proj_out_b)
+        output = _bias_sum(network, output, out_channels, proj_out_b)
 
     cast_output = network.add_cast(output, trt.float32)
     output_final = cast_output.get_output(0)
@@ -344,9 +409,8 @@ def _matmul_bias_1d(network, inp, in_dim, out_dim, weight, bias):
     """Matmul + bias for 1D input: [in_dim] -> [out_dim]."""
     inp_2d = network.add_shuffle(inp)
     inp_2d.reshape_dims = (1, in_dim)
-    out = graph_ops.add_matmul_rhs_constant(
-        network, inp_2d.get_output(0), in_dim, out_dim, weight)
-    out = graph_ops.add_bias_sum(network, out, out_dim, bias)
+    out = _matmul(network, inp_2d.get_output(0), in_dim, out_dim, weight)
+    out = _bias_sum(network, out, out_dim, bias)
     flat = network.add_shuffle(out)
     flat.reshape_dims = (out_dim,)
     return flat.get_output(0)
@@ -370,10 +434,31 @@ def _chunk_3(network, tensor, dim):
     return chunks
 
 
-def _adaln_modulate(network, x, scale, shift, dim, eps_t, seq_len):
+def _adaln_modulate(
+    network, x, scale, shift, dim, eps_t, seq_len, eps=1e-6,
+):
     """AdaLN: LayerNorm(x) * (1 + scale) + shift.
-    x: [seq_len, dim], scale/shift: [dim] (1D from chunk)."""
-    normed = graph_ops.add_layer_norm_no_affine(network, x, dim, eps_t)
+    x: [seq_len, dim], scale/shift: [dim] (1D from chunk).
+
+    FP16 needs both the normalization and the following modulation in FP32.
+    Casting the normalized tensor back before applying scale/shift can overflow
+    over 57 FLUX.1 blocks and collapse the decoded image.
+    """
+    fp16_modulation = _COMPUTE_TRT_DTYPE == trt.float16
+    if fp16_modulation:
+        normed = graph_ops.add_layer_norm_native(
+            network,
+            x,
+            dim,
+            np.ones((dim,), dtype=np.float32),
+            np.zeros((dim,), dtype=np.float32),
+            eps,
+            dtype=np.float16,
+        )
+        normed = network.add_cast(normed, trt.float32).get_output(0)
+    else:
+        normed = graph_ops.add_layer_norm_no_affine(
+            network, x, dim, eps_t, dtype=_COMPUTE_NP_DTYPE)
 
     # Reshape scale/shift from [dim] to [1, dim] for broadcast with [seq_len, dim]
     scale_2d = network.add_shuffle(scale)
@@ -381,29 +466,51 @@ def _adaln_modulate(network, x, scale, shift, dim, eps_t, seq_len):
     shift_2d = network.add_shuffle(shift)
     shift_2d.reshape_dims = (1, dim)
 
-    one_const = graph_ops.add_constant(network, (1, 1), np.array([1.0], dtype=np.float32))
+    scale_value = scale_2d.get_output(0)
+    shift_value = shift_2d.get_output(0)
+    if fp16_modulation:
+        scale_value = network.add_cast(
+            scale_value, trt.float32).get_output(0)
+        shift_value = network.add_cast(
+            shift_value, trt.float32).get_output(0)
+        one_const = graph_ops.add_constant(
+            network, (1, 1), np.array([1.0], dtype=np.float32))
+    else:
+        one_const = graph_ops.add_constant(
+            network,
+            (1, 1),
+            np.array([1.0], dtype=np.float32),
+            dtype=_COMPUTE_NP_DTYPE,
+        )
     scale_plus_1 = network.add_elementwise(
-        one_const, scale_2d.get_output(0), trt.ElementWiseOperation.SUM).get_output(0)
+        one_const, scale_value, trt.ElementWiseOperation.SUM).get_output(0)
 
     scaled = network.add_elementwise(
         normed, scale_plus_1, trt.ElementWiseOperation.PROD)
     shifted = network.add_elementwise(
-        scaled.get_output(0), shift_2d.get_output(0), trt.ElementWiseOperation.SUM)
-    return shifted.get_output(0)
+        scaled.get_output(0), shift_value, trt.ElementWiseOperation.SUM)
+    result = shifted.get_output(0)
+    if fp16_modulation:
+        result = network.add_cast(
+            result, _COMPUTE_TRT_DTYPE).get_output(0)
+    return result
 
 
-def _layernorm_modulate(network, x, scale, shift, dim, eps_t, seq_len):
+def _layernorm_modulate(
+    network, x, scale, shift, dim, eps_t, seq_len, eps=1e-6,
+):
     """LayerNorm(x) * (1 + scale) + shift."""
-    return _adaln_modulate(network, x, scale, shift, dim, eps_t, seq_len)
+    return _adaln_modulate(
+        network, x, scale, shift, dim, eps_t, seq_len, eps)
 
 
 def _linear(network, inp, in_dim, out_dim, weights, prefix):
     """Linear projection with optional bias."""
-    out = graph_ops.add_matmul_rhs_constant(
+    out = _matmul(
         network, inp, in_dim, out_dim, weights[f"{prefix}.weight"])
     b = weights.get(f"{prefix}.bias")
     if b is not None:
-        out = graph_ops.add_bias_sum(network, out, out_dim, b)
+        out = _bias_sum(network, out, out_dim, b)
     return out
 
 
@@ -415,7 +522,7 @@ def _rms_norm_per_head_seq(network, x, num_heads, head_dim, weight, eps_t, seq_l
     """
     return graph_ops.add_rms_norm_per_head(
         network, x, num_heads, head_dim, weight, eps_t,
-        sequence_length=seq_len)
+        dtype=_COMPUTE_NP_DTYPE, sequence_length=seq_len)
 
 
 def _apply_native_rope_from_full_cache(
@@ -441,8 +548,13 @@ def _gate_1d(network, x, gate, seq_len):
     # Reshape gate from [dim] to [1, dim] for TRT broadcast
     gate_2d = network.add_shuffle(gate)
     gate_2d.reshape_dims = (1, -1)
+    gate_value = gate_2d.get_output(0)
+    if _COMPUTE_TRT_DTYPE == trt.float16:
+        x = network.add_cast(x, trt.float32).get_output(0)
+        gate_value = network.add_cast(
+            gate_value, trt.float32).get_output(0)
     return network.add_elementwise(
-        x, gate_2d.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
+        x, gate_value, trt.ElementWiseOperation.PROD).get_output(0)
 
 
 def _gelu_ffn(network, inp, dim, weights, prefix):
@@ -450,18 +562,19 @@ def _gelu_ffn(network, inp, dim, weights, prefix):
     fc1_w = weights[f"{prefix}.net.0.proj.weight"]
     ffn_dim = fc1_w.shape[1]
 
-    fc1 = graph_ops.add_matmul_rhs_constant(network, inp, dim, ffn_dim, fc1_w)
+    fc1 = _matmul(network, inp, dim, ffn_dim, fc1_w)
     fc1_b = weights.get(f"{prefix}.net.0.proj.bias")
     if fc1_b is not None:
-        fc1 = graph_ops.add_bias_sum(network, fc1, ffn_dim, fc1_b)
+        fc1 = _bias_sum(network, fc1, ffn_dim, fc1_b)
 
-    act = graph_ops.add_gelu_tanh(network, fc1)
+    act = graph_ops.add_gelu_tanh(
+        network, fc1, dtype=_COMPUTE_NP_DTYPE)
 
     fc2_w = weights[f"{prefix}.net.2.weight"]
-    fc2 = graph_ops.add_matmul_rhs_constant(network, act, ffn_dim, dim, fc2_w)
+    fc2 = _matmul(network, act, ffn_dim, dim, fc2_w)
     fc2_b = weights.get(f"{prefix}.net.2.bias")
     if fc2_b is not None:
-        fc2 = graph_ops.add_bias_sum(network, fc2, dim, fc2_b)
+        fc2 = _bias_sum(network, fc2, dim, fc2_b)
     return fc2
 
 
@@ -597,6 +710,10 @@ def _apply_rope_batched_from_full_cache(network, x, cos_t, sin_t, num_heads: int
 
 def _layer_norm_last_dim_no_affine_batched(network, x, eps_t):
     """LayerNorm without affine over final dim for ``[B, S, D]``."""
+    output_dtype = x.dtype
+    if output_dtype != trt.float32:
+        x = network.add_cast(x, trt.float32).get_output(0)
+        eps_t = network.add_cast(eps_t, trt.float32).get_output(0)
     mean = network.add_reduce(x, trt.ReduceOperation.AVG, 1 << 2, keep_dims=True)
     centered = network.add_elementwise(
         x, mean.get_output(0), trt.ElementWiseOperation.SUB).get_output(0)
@@ -607,14 +724,17 @@ def _layer_norm_last_dim_no_affine_batched(network, x, eps_t):
                                       trt.ElementWiseOperation.SUM)
     std = network.add_unary(var_eps.get_output(0), trt.UnaryOperation.SQRT)
     inv_std = network.add_unary(std.get_output(0), trt.UnaryOperation.RECIP)
-    return network.add_elementwise(
+    result = network.add_elementwise(
         centered, inv_std.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
+    if result.dtype != output_dtype and output_dtype != trt.float16:
+        result = network.add_cast(result, output_dtype).get_output(0)
+    return result
 
 
 def _matmul_bias_batched(network, inp, in_dim, out_dim, weight, bias):
     """Matmul + bias for ``[B, in_dim]`` -> ``[B, out_dim]``."""
-    out = graph_ops.add_matmul_rhs_constant(network, inp, in_dim, out_dim, weight)
-    return graph_ops.add_bias_sum(network, out, out_dim, bias)
+    out = _matmul(network, inp, in_dim, out_dim, weight)
+    return _bias_sum(network, out, out_dim, bias)
 
 
 def _chunk_batched(network, tensor, chunks: int, dim: int):
@@ -631,16 +751,35 @@ def _adaln_modulate_batched(network, x, scale, shift, dim, eps_t):
     shift_3d = network.add_shuffle(shift)
     shift_3d.reshape_dims = (-1, 1, dim)
 
-    one_const = graph_ops.add_constant(network, (1, 1, 1),
-                                       np.array([1.0], dtype=np.float32))
+    fp16_modulation = _COMPUTE_TRT_DTYPE == trt.float16
+    scale_value = scale_3d.get_output(0)
+    shift_value = shift_3d.get_output(0)
+    if fp16_modulation:
+        scale_value = network.add_cast(
+            scale_value, trt.float32).get_output(0)
+        shift_value = network.add_cast(
+            shift_value, trt.float32).get_output(0)
+        one_const = graph_ops.add_constant(
+            network, (1, 1, 1), np.array([1.0], dtype=np.float32))
+    else:
+        one_const = graph_ops.add_constant(
+            network,
+            (1, 1, 1),
+            np.array([1.0], dtype=np.float32),
+            dtype=_COMPUTE_NP_DTYPE,
+        )
     scale_plus_1 = network.add_elementwise(
-        one_const, scale_3d.get_output(0),
+        one_const, scale_value,
         trt.ElementWiseOperation.SUM).get_output(0)
 
     scaled = network.add_elementwise(normed, scale_plus_1, trt.ElementWiseOperation.PROD)
     shifted = network.add_elementwise(
-        scaled.get_output(0), shift_3d.get_output(0), trt.ElementWiseOperation.SUM)
-    return shifted.get_output(0)
+        scaled.get_output(0), shift_value, trt.ElementWiseOperation.SUM)
+    result = shifted.get_output(0)
+    if fp16_modulation:
+        result = network.add_cast(
+            result, _COMPUTE_TRT_DTYPE).get_output(0)
+    return result
 
 
 def _layernorm_modulate_batched(network, x, scale, shift, dim, eps_t):
@@ -652,8 +791,13 @@ def _gate_batched(network, x, gate, dim: int):
     """Gate ``[B, S, D]`` with per-sample gate ``[B, D]``."""
     gate_3d = network.add_shuffle(gate)
     gate_3d.reshape_dims = (-1, 1, dim)
+    gate_value = gate_3d.get_output(0)
+    if _COMPUTE_TRT_DTYPE == trt.float16:
+        x = network.add_cast(x, trt.float32).get_output(0)
+        gate_value = network.add_cast(
+            gate_value, trt.float32).get_output(0)
     return network.add_elementwise(
-        x, gate_3d.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
+        x, gate_value, trt.ElementWiseOperation.PROD).get_output(0)
 
 
 def _build_flux_dit_engine_batched(
@@ -669,6 +813,7 @@ def _build_flux_dit_engine_batched(
     eps: float,
     max_batch_size: int,
     opt_batch_size: int | None,
+    precision: str,
     verbose: bool,
 ) -> bytes:
     """Build a dynamic-leading-batch FLUX.1 DiT TRT engine."""
@@ -689,6 +834,12 @@ def _build_flux_dit_engine_batched(
 
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+
+    print(
+        f"[flux-dit] Network: strongly_typed=True, precision={precision}, "
+        f"dynamic_batch=True",
+        file=sys.stderr,
+    )
 
     hidden_inp = network.add_input(
         "hidden_states", trt.float32, (-1, num_img_tokens, dim))
@@ -723,6 +874,16 @@ def _build_flux_dit_engine_batched(
     eps_t = graph_ops.add_constant(
         network, (1, 1, 1), np.array([eps], dtype=np.float32))
 
+    if _COMPUTE_TRT_DTYPE == trt.float16:
+        hidden = hidden_inp
+        encoder_hidden = encoder_inp
+    else:
+        hidden = _to_compute_dtype(network, hidden_inp)
+        encoder_hidden = _to_compute_dtype(network, encoder_inp)
+    temb = _to_compute_dtype(network, temb_inp)
+    rotary_cos = _to_compute_dtype(network, rotary_cos)
+    rotary_sin = _to_compute_dtype(network, rotary_sin)
+
     txt_cos = _slice_batched_sequence(network, rotary_cos, 0, text_seq_len, head_dim)
     txt_sin = _slice_batched_sequence(network, rotary_sin, 0, text_seq_len, head_dim)
     img_cos = _slice_batched_sequence(network, rotary_cos, text_seq_len,
@@ -730,17 +891,14 @@ def _build_flux_dit_engine_batched(
     img_sin = _slice_batched_sequence(network, rotary_sin, text_seq_len,
                                       num_img_tokens, head_dim)
 
-    hidden = hidden_inp
-    encoder_hidden = encoder_inp
-
     for layer_idx in range(num_layers):
         p = f"transformer_blocks.{layer_idx}"
 
         norm1_w = weights[f"{p}.norm1.linear.weight"]
         norm1_b = weights[f"{p}.norm1.linear.bias"]
-        temb_silu = network.add_activation(temb_inp, trt.ActivationType.SIGMOID)
+        temb_silu = network.add_activation(temb, trt.ActivationType.SIGMOID)
         temb_silu_out = network.add_elementwise(
-            temb_inp, temb_silu.get_output(0),
+            temb, temb_silu.get_output(0),
             trt.ElementWiseOperation.PROD).get_output(0)
 
         norm1_proj = _matmul_bias_batched(
@@ -770,18 +928,22 @@ def _build_flux_dit_engine_batched(
         q_img = graph_ops.add_rms_norm_per_head_batched(
             network, q_img, num_heads, head_dim,
             weights[f"{p}.attn.norm_q.weight"], eps_t,
+            dtype=_COMPUTE_NP_DTYPE,
             sequence_length=num_img_tokens)
         k_img = graph_ops.add_rms_norm_per_head_batched(
             network, k_img, num_heads, head_dim,
             weights[f"{p}.attn.norm_k.weight"], eps_t,
+            dtype=_COMPUTE_NP_DTYPE,
             sequence_length=num_img_tokens)
         q_txt = graph_ops.add_rms_norm_per_head_batched(
             network, q_txt, num_heads, head_dim,
             weights[f"{p}.attn.norm_added_q.weight"], eps_t,
+            dtype=_COMPUTE_NP_DTYPE,
             sequence_length=text_seq_len)
         k_txt = graph_ops.add_rms_norm_per_head_batched(
             network, k_txt, num_heads, head_dim,
             weights[f"{p}.attn.norm_added_k.weight"], eps_t,
+            dtype=_COMPUTE_NP_DTYPE,
             sequence_length=text_seq_len)
 
         q_img = _apply_rope_batched_from_full_cache(
@@ -810,28 +972,26 @@ def _build_flux_dit_engine_batched(
 
         img_attn_proj = _linear(network, img_attn, dim, dim, weights, f"{p}.attn.to_out.0")
         img_attn_gated = _gate_batched(network, img_attn_proj, gate_msa, dim)
-        hidden = network.add_elementwise(
-            hidden, img_attn_gated, trt.ElementWiseOperation.SUM).get_output(0)
+        hidden = _residual_add(network, hidden, img_attn_gated)
 
         txt_attn_proj = _linear(network, txt_attn, dim, dim, weights,
                                 f"{p}.attn.to_add_out")
         txt_attn_gated = _gate_batched(network, txt_attn_proj, c_gate_msa, dim)
-        encoder_hidden = network.add_elementwise(
-            encoder_hidden, txt_attn_gated, trt.ElementWiseOperation.SUM).get_output(0)
+        encoder_hidden = _residual_add(
+            network, encoder_hidden, txt_attn_gated)
 
         normed_ff = _layernorm_modulate_batched(
             network, hidden, scale_mlp, shift_mlp, dim, eps_t)
         ff_out = _gelu_ffn(network, normed_ff, dim, weights, f"{p}.ff")
         ff_gated = _gate_batched(network, ff_out, gate_mlp, dim)
-        hidden = network.add_elementwise(
-            hidden, ff_gated, trt.ElementWiseOperation.SUM).get_output(0)
+        hidden = _residual_add(network, hidden, ff_gated)
 
         normed_ctx_ff = _layernorm_modulate_batched(
             network, encoder_hidden, c_scale_mlp, c_shift_mlp, dim, eps_t)
         ctx_ff_out = _gelu_ffn(network, normed_ctx_ff, dim, weights, f"{p}.ff_context")
         ctx_ff_gated = _gate_batched(network, ctx_ff_out, c_gate_mlp, dim)
-        encoder_hidden = network.add_elementwise(
-            encoder_hidden, ctx_ff_gated, trt.ElementWiseOperation.SUM).get_output(0)
+        encoder_hidden = _residual_add(
+            network, encoder_hidden, ctx_ff_gated)
 
     for layer_idx in range(num_single_layers):
         p = f"single_transformer_blocks.{layer_idx}"
@@ -842,9 +1002,9 @@ def _build_flux_dit_engine_batched(
 
         norm_w = weights[f"{p}.norm.linear.weight"]
         norm_b = weights[f"{p}.norm.linear.bias"]
-        temb_silu2 = network.add_activation(temb_inp, trt.ActivationType.SIGMOID)
+        temb_silu2 = network.add_activation(temb, trt.ActivationType.SIGMOID)
         temb_silu2_out = network.add_elementwise(
-            temb_inp, temb_silu2.get_output(0),
+            temb, temb_silu2.get_output(0),
             trt.ElementWiseOperation.PROD).get_output(0)
 
         norm_proj = _matmul_bias_batched(
@@ -853,12 +1013,13 @@ def _build_flux_dit_engine_batched(
         normed_cat = _adaln_modulate_batched(
             network, residual, scale_msa_s, shift_msa_s, dim, eps_t)
 
-        mlp_hidden = graph_ops.add_matmul_rhs_constant(
+        mlp_hidden = _matmul(
             network, normed_cat, dim, ffn_dim, weights[f"{p}.proj_mlp.weight"])
         mlp_b = weights.get(f"{p}.proj_mlp.bias")
         if mlp_b is not None:
-            mlp_hidden = graph_ops.add_bias_sum(network, mlp_hidden, ffn_dim, mlp_b)
-        mlp_hidden = graph_ops.add_gelu_tanh(network, mlp_hidden)
+            mlp_hidden = _bias_sum(network, mlp_hidden, ffn_dim, mlp_b)
+        mlp_hidden = graph_ops.add_gelu_tanh(
+            network, mlp_hidden, dtype=_COMPUTE_NP_DTYPE)
 
         q_s = _linear(network, normed_cat, dim, dim, weights, f"{p}.attn.to_q")
         k_s = _linear(network, normed_cat, dim, dim, weights, f"{p}.attn.to_k")
@@ -867,10 +1028,12 @@ def _build_flux_dit_engine_batched(
         q_s = graph_ops.add_rms_norm_per_head_batched(
             network, q_s, num_heads, head_dim,
             weights[f"{p}.attn.norm_q.weight"], eps_t,
+            dtype=_COMPUTE_NP_DTYPE,
             sequence_length=total_seq)
         k_s = graph_ops.add_rms_norm_per_head_batched(
             network, k_s, num_heads, head_dim,
             weights[f"{p}.attn.norm_k.weight"], eps_t,
+            dtype=_COMPUTE_NP_DTYPE,
             sequence_length=total_seq)
 
         q_s = _apply_rope_batched_from_full_cache(
@@ -885,15 +1048,14 @@ def _build_flux_dit_engine_batched(
 
         proj_out_w = weights[f"{p}.proj_out.weight"]
         in_features = dim + ffn_dim
-        combined = graph_ops.add_matmul_rhs_constant(
+        combined = _matmul(
             network, cat_attn_mlp.get_output(0), in_features, dim, proj_out_w)
         proj_out_b = weights.get(f"{p}.proj_out.bias")
         if proj_out_b is not None:
-            combined = graph_ops.add_bias_sum(network, combined, dim, proj_out_b)
+            combined = _bias_sum(network, combined, dim, proj_out_b)
 
         gated_s = _gate_batched(network, combined, gate_msa_s, dim)
-        cat_hidden_out = network.add_elementwise(
-            residual, gated_s, trt.ElementWiseOperation.SUM).get_output(0)
+        cat_hidden_out = _residual_add(network, residual, gated_s)
 
         encoder_hidden = _slice_batched_sequence(
             network, cat_hidden_out, 0, text_seq_len, dim)
@@ -903,9 +1065,9 @@ def _build_flux_dit_engine_batched(
     final_norm_w = weights["norm_out.linear.weight"]
     final_norm_b = weights["norm_out.linear.bias"]
 
-    temb_silu_f = network.add_activation(temb_inp, trt.ActivationType.SIGMOID)
+    temb_silu_f = network.add_activation(temb, trt.ActivationType.SIGMOID)
     temb_silu_f_out = network.add_elementwise(
-        temb_inp, temb_silu_f.get_output(0),
+        temb, temb_silu_f.get_output(0),
         trt.ElementWiseOperation.PROD).get_output(0)
 
     final_proj = _matmul_bias_batched(
@@ -918,11 +1080,11 @@ def _build_flux_dit_engine_batched(
 
     proj_out_w = weights["proj_out.weight"]
     out_channels = proj_out_w.shape[1]
-    output = graph_ops.add_matmul_rhs_constant(
+    output = _matmul(
         network, output, dim, out_channels, proj_out_w)
     proj_out_b = weights.get("proj_out.bias")
     if proj_out_b is not None:
-        output = graph_ops.add_bias_sum(network, output, out_channels, proj_out_b)
+        output = _bias_sum(network, output, out_channels, proj_out_b)
 
     cast_output = network.add_cast(output, trt.float32)
     output_final = cast_output.get_output(0)
