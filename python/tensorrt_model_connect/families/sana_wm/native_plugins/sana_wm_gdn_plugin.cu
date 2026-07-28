@@ -104,6 +104,50 @@ bool report_cublas_error(cublasStatus_t status, const char* op, const char* mode
     return true;
 }
 
+struct ThreadCublasHandles {
+    int32_t device{-1};
+    cublasHandle_t handle{nullptr};
+
+    ~ThreadCublasHandles() { reset(); }
+
+    void reset() {
+        if (handle == nullptr)
+            return;
+        int32_t current_device = -1;
+        const bool restore_device =
+            cudaGetDevice(&current_device) == cudaSuccess && current_device != device;
+        if (restore_device)
+            cudaSetDevice(device);
+        cublasDestroy(handle);
+        if (restore_device)
+            cudaSetDevice(current_device);
+        handle = nullptr;
+        device = -1;
+    }
+};
+
+bool get_thread_cublas_handle(cublasHandle_t& handle, cudaStream_t stream, const char* mode,
+                              SanaWmGdnShape shape) {
+    int32_t current_device = -1;
+    if (report_cuda_launch_error(cudaGetDevice(&current_device), "cudaGetDevice", mode, false,
+                                 shape)) {
+        return false;
+    }
+
+    thread_local ThreadCublasHandles handles;
+    if (handles.handle != nullptr && handles.device != current_device)
+        handles.reset();
+    if (handles.handle == nullptr) {
+        if (report_cublas_error(cublasCreate(&handles.handle), "create", mode, shape))
+            return false;
+        handles.device = current_device;
+    }
+    if (report_cublas_error(cublasSetStream(handles.handle, stream), "set_stream", mode, shape))
+        return false;
+    handle = handles.handle;
+    return true;
+}
+
 void clear_stale_cuda_error(const char* mode, bool reverse, SanaWmGdnShape shape) {
     const cudaError_t prior = cudaGetLastError();
     if (prior == cudaSuccess)
@@ -136,6 +180,7 @@ bool use_main_combined_cublas() {
 }
 
 constexpr int32_t kRawRmsThreads = 128;
+constexpr int32_t kRawBzThreadsPerOutput = 8;
 
 SanaWmGdnShape parse_shape(const nvinfer1::Dims& dims) {
     SanaWmGdnShape shape;
@@ -569,113 +614,162 @@ __global__ void cam_prep_inv_rms_kernel(float* q_inv, float* k_inv, const void* 
     }
 }
 
+struct CamPrepValues {
+    float q;
+    float k;
+    float v;
+    float k_pre_sq;
+};
+
 template <bool kRawBf16>
-__global__ void cam_prep_kernel(float* q_out, float* k_out, float* v_out, float* inflation_sq,
-                                const void* q_raw, const void* k_raw, const void* v_raw,
-                                const float* q_inv, const float* k_inv, const float* q_norm_weight,
-                                const float* k_norm_weight, const float* proj_q,
-                                const float* proj_kv, const float* rope_cos, const float* rope_sin,
-                                SanaWmCamPrepShape shape, float k_scale) {
+__device__ __forceinline__ CamPrepValues cam_prep_values(
+    const void* q_raw, const void* k_raw, const void* v_raw, const float* q_inv, const float* k_inv,
+    const float* q_norm_weight, const float* k_norm_weight, const float* proj_q,
+    const float* proj_kv, const float* rope_cos, const float* rope_sin, SanaWmCamPrepShape shape,
+    float k_scale, int32_t b, int32_t n, int32_t h, int32_t d) {
+    const int32_t half = shape.head_dim / 2;
+    const int32_t rope_pairs = half / 2;
+    CamPrepValues values{0.0F, 0.0F, 0.0F, 0.0F};
+    const int32_t bn = b * shape.tokens + n;
+    const float q_inv_value = q_inv[bn];
+    const float k_inv_value = k_inv[bn];
+    const int32_t norm_base = h * shape.head_dim;
+
+    if (d < half) {
+        const int32_t group = d / 4;
+        const int32_t row = d - group * 4;
+        const int32_t base_d = group * 4;
+        float q_acc = 0.0F;
+        float k_acc = 0.0F;
+        float v_terms[4];
+#pragma unroll
+        for (int32_t col = 0; col < 4; ++col) {
+            const int32_t src_d = base_d + col;
+            const int64_t raw_offset = cam_prep_raw_offset(shape, b, n, h, src_d);
+            float q_src = cam_prep_load_raw<kRawBf16>(q_raw, raw_offset) * q_inv_value *
+                          q_norm_weight[norm_base + src_d];
+            q_src = q_src > 0.0F ? q_src : 0.0F;
+            float k_src = cam_prep_load_raw<kRawBf16>(k_raw, raw_offset) * k_inv_value *
+                          k_norm_weight[norm_base + src_d];
+            k_src = (k_src > 0.0F ? k_src : 0.0F) * k_scale;
+            const float v_src = cam_prep_load_raw<kRawBf16>(v_raw, raw_offset);
+            const float q_m = proj_q[cam_prep_matrix_offset(shape, b, n, row, col)];
+            const float kv_m = proj_kv[cam_prep_matrix_offset(shape, b, n, row, col)];
+            q_acc += q_src * q_m;
+            k_acc += k_src * kv_m;
+            v_terms[col] = __fmul_rn(v_src, kv_m);
+            if (col == row) {
+                values.k_pre_sq = k_src * k_src;
+            }
+        }
+        values.q = q_acc;
+        values.k = k_acc;
+        values.v = __fadd_rn(__fadd_rn(v_terms[0], v_terms[2]), __fadd_rn(v_terms[1], v_terms[3]));
+    } else {
+        const int32_t rope_d = d - half;
+        const int32_t pair = rope_d / 2;
+        const int32_t even_d = half + pair * 2;
+        const int32_t odd_d = even_d + 1;
+        const int64_t even_offset = cam_prep_raw_offset(shape, b, n, h, even_d);
+        const int64_t odd_offset = cam_prep_raw_offset(shape, b, n, h, odd_d);
+        float q_even = cam_prep_load_raw<kRawBf16>(q_raw, even_offset) * q_inv_value *
+                       q_norm_weight[norm_base + even_d];
+        q_even = q_even > 0.0F ? q_even : 0.0F;
+        float q_odd = cam_prep_load_raw<kRawBf16>(q_raw, odd_offset) * q_inv_value *
+                      q_norm_weight[norm_base + odd_d];
+        q_odd = q_odd > 0.0F ? q_odd : 0.0F;
+        float k_even = cam_prep_load_raw<kRawBf16>(k_raw, even_offset) * k_inv_value *
+                       k_norm_weight[norm_base + even_d];
+        k_even = (k_even > 0.0F ? k_even : 0.0F) * k_scale;
+        float k_odd = cam_prep_load_raw<kRawBf16>(k_raw, odd_offset) * k_inv_value *
+                      k_norm_weight[norm_base + odd_d];
+        k_odd = (k_odd > 0.0F ? k_odd : 0.0F) * k_scale;
+        const float v_even = cam_prep_load_raw<kRawBf16>(v_raw, even_offset);
+        const float v_odd = cam_prep_load_raw<kRawBf16>(v_raw, odd_offset);
+        const float c = rope_cos[static_cast<int64_t>(n) * rope_pairs + pair];
+        const float s = rope_sin[static_cast<int64_t>(n) * rope_pairs + pair];
+        if ((rope_d & 1) == 0) {
+            values.q = q_even * c - q_odd * s;
+            values.k = k_even * c - k_odd * s;
+            values.v = v_even * c - v_odd * s;
+            values.k_pre_sq = k_even * k_even;
+        } else {
+            values.q = q_even * s + q_odd * c;
+            values.k = k_even * s + k_odd * c;
+            values.v = v_even * s + v_odd * c;
+            values.k_pre_sq = k_odd * k_odd;
+        }
+    }
+    return values;
+}
+
+template <bool kRawBf16>
+__global__ void cam_prep_output_tiled_kernel(
+    float* q_out, float* k_out, float* v_out, const void* q_raw, const void* k_raw,
+    const void* v_raw, const float* q_inv, const float* k_inv, const float* q_norm_weight,
+    const float* k_norm_weight, const float* proj_q, const float* proj_kv, const float* rope_cos,
+    const float* rope_sin, SanaWmCamPrepShape shape, float k_scale) {
+    __shared__ float q_tile[32][33];
+    __shared__ float k_tile[32][33];
+    __shared__ float v_tile[32][33];
+    const int32_t bh = static_cast<int32_t>(blockIdx.z);
+    const int32_t b = bh / shape.heads;
+    const int32_t h = bh - b * shape.heads;
+    const int32_t input_d = static_cast<int32_t>(blockIdx.y) * 32 + threadIdx.x;
+    const int32_t input_n_base = static_cast<int32_t>(blockIdx.x) * 32 + threadIdx.y;
+
+#pragma unroll
+    for (int32_t offset = 0; offset < 32; offset += 8) {
+        const int32_t input_n = input_n_base + offset;
+        if (input_n < shape.tokens && input_d < shape.head_dim) {
+            const auto values = cam_prep_values<kRawBf16>(
+                q_raw, k_raw, v_raw, q_inv, k_inv, q_norm_weight, k_norm_weight, proj_q, proj_kv,
+                rope_cos, rope_sin, shape, k_scale, b, input_n, h, input_d);
+            q_tile[threadIdx.y + offset][threadIdx.x] = values.q;
+            k_tile[threadIdx.y + offset][threadIdx.x] = values.k;
+            v_tile[threadIdx.y + offset][threadIdx.x] = values.v;
+        }
+    }
+    __syncthreads();
+
+    const int32_t output_n = static_cast<int32_t>(blockIdx.x) * 32 + threadIdx.x;
+    const int32_t output_d_base = static_cast<int32_t>(blockIdx.y) * 32 + threadIdx.y;
+#pragma unroll
+    for (int32_t offset = 0; offset < 32; offset += 8) {
+        const int32_t output_d = output_d_base + offset;
+        if (output_n < shape.tokens && output_d < shape.head_dim) {
+            const int64_t out_offset = cam_prep_bhdn_offset(shape, b, h, output_d, output_n);
+            q_out[out_offset] = q_tile[threadIdx.x][threadIdx.y + offset];
+            k_out[out_offset] = k_tile[threadIdx.x][threadIdx.y + offset];
+            v_out[out_offset] = v_tile[threadIdx.x][threadIdx.y + offset];
+        }
+    }
+}
+
+template <bool kRawBf16>
+__global__ void cam_prep_inflation_kernel(float* inflation_sq, const void* q_raw, const void* k_raw,
+                                          const void* v_raw, const float* q_inv, const float* k_inv,
+                                          const float* q_norm_weight, const float* k_norm_weight,
+                                          const float* proj_q, const float* proj_kv,
+                                          const float* rope_cos, const float* rope_sin,
+                                          SanaWmCamPrepShape shape, float k_scale) {
     __shared__ float k_pre_sums[256];
     __shared__ float k_post_sums[256];
-
     const int32_t pid = static_cast<int32_t>(blockIdx.x);
     const int32_t h = pid % shape.heads;
     const int32_t bn = pid / shape.heads;
     const int32_t b = bn / shape.tokens;
     const int32_t n = bn - b * shape.tokens;
     const int32_t d = threadIdx.x;
-    const int32_t half = shape.head_dim / 2;
-    const int32_t rope_pairs = half / 2;
-
-    float q_value = 0.0F;
-    float k_value = 0.0F;
-    float v_value = 0.0F;
-    float k_pre_sq = 0.0F;
-    float k_post_sq = 0.0F;
-
-    const float q_inv_value = q_inv[bn];
-    const float k_inv_value = k_inv[bn];
-    const int32_t norm_base = h * shape.head_dim;
-
+    CamPrepValues values{0.0F, 0.0F, 0.0F, 0.0F};
     if (d < shape.head_dim) {
-        if (d < half) {
-            const int32_t group = d / 4;
-            const int32_t row = d - group * 4;
-            const int32_t base_d = group * 4;
-            float q_acc = 0.0F;
-            float k_acc = 0.0F;
-            float v_terms[4];
-#pragma unroll
-            for (int32_t col = 0; col < 4; ++col) {
-                const int32_t src_d = base_d + col;
-                const int64_t raw_offset = cam_prep_raw_offset(shape, b, n, h, src_d);
-                float q_src = cam_prep_load_raw<kRawBf16>(q_raw, raw_offset) * q_inv_value *
-                              q_norm_weight[norm_base + src_d];
-                q_src = q_src > 0.0F ? q_src : 0.0F;
-                float k_src = cam_prep_load_raw<kRawBf16>(k_raw, raw_offset) * k_inv_value *
-                              k_norm_weight[norm_base + src_d];
-                k_src = (k_src > 0.0F ? k_src : 0.0F) * k_scale;
-                const float v_src = cam_prep_load_raw<kRawBf16>(v_raw, raw_offset);
-                const float q_m = proj_q[cam_prep_matrix_offset(shape, b, n, row, col)];
-                const float kv_m = proj_kv[cam_prep_matrix_offset(shape, b, n, row, col)];
-                q_acc += q_src * q_m;
-                k_acc += k_src * kv_m;
-                v_terms[col] = __fmul_rn(v_src, kv_m);
-                if (col == row) {
-                    k_pre_sq = k_src * k_src;
-                }
-            }
-            q_value = q_acc;
-            k_value = k_acc;
-            v_value =
-                __fadd_rn(__fadd_rn(v_terms[0], v_terms[2]), __fadd_rn(v_terms[1], v_terms[3]));
-        } else {
-            const int32_t rope_d = d - half;
-            const int32_t pair = rope_d / 2;
-            const int32_t even_d = half + pair * 2;
-            const int32_t odd_d = even_d + 1;
-            const int64_t even_offset = cam_prep_raw_offset(shape, b, n, h, even_d);
-            const int64_t odd_offset = cam_prep_raw_offset(shape, b, n, h, odd_d);
-            float q_even = cam_prep_load_raw<kRawBf16>(q_raw, even_offset) * q_inv_value *
-                           q_norm_weight[norm_base + even_d];
-            q_even = q_even > 0.0F ? q_even : 0.0F;
-            float q_odd = cam_prep_load_raw<kRawBf16>(q_raw, odd_offset) * q_inv_value *
-                          q_norm_weight[norm_base + odd_d];
-            q_odd = q_odd > 0.0F ? q_odd : 0.0F;
-            float k_even = cam_prep_load_raw<kRawBf16>(k_raw, even_offset) * k_inv_value *
-                           k_norm_weight[norm_base + even_d];
-            k_even = (k_even > 0.0F ? k_even : 0.0F) * k_scale;
-            float k_odd = cam_prep_load_raw<kRawBf16>(k_raw, odd_offset) * k_inv_value *
-                          k_norm_weight[norm_base + odd_d];
-            k_odd = (k_odd > 0.0F ? k_odd : 0.0F) * k_scale;
-            const float v_even = cam_prep_load_raw<kRawBf16>(v_raw, even_offset);
-            const float v_odd = cam_prep_load_raw<kRawBf16>(v_raw, odd_offset);
-            const float c = rope_cos[static_cast<int64_t>(n) * rope_pairs + pair];
-            const float s = rope_sin[static_cast<int64_t>(n) * rope_pairs + pair];
-            if ((rope_d & 1) == 0) {
-                q_value = q_even * c - q_odd * s;
-                k_value = k_even * c - k_odd * s;
-                v_value = v_even * c - v_odd * s;
-                k_pre_sq = k_even * k_even;
-            } else {
-                q_value = q_even * s + q_odd * c;
-                k_value = k_even * s + k_odd * c;
-                v_value = v_even * s + v_odd * c;
-                k_pre_sq = k_odd * k_odd;
-            }
-        }
-        const int64_t out_offset = cam_prep_bhdn_offset(shape, b, h, d, n);
-        q_out[out_offset] = q_value;
-        k_out[out_offset] = k_value;
-        v_out[out_offset] = v_value;
-        k_post_sq = k_value * k_value;
+        values = cam_prep_values<kRawBf16>(q_raw, k_raw, v_raw, q_inv, k_inv, q_norm_weight,
+                                           k_norm_weight, proj_q, proj_kv, rope_cos, rope_sin,
+                                           shape, k_scale, b, n, h, d);
     }
-
-    k_pre_sums[d] = d < shape.head_dim ? k_pre_sq : 0.0F;
-    k_post_sums[d] = d < shape.head_dim ? k_post_sq : 0.0F;
+    k_pre_sums[d] = values.k_pre_sq;
+    k_post_sums[d] = values.k * values.k;
     __syncthreads();
-
     for (int32_t stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (d < stride) {
             k_pre_sums[d] += k_pre_sums[d + stride];
@@ -1420,7 +1514,10 @@ __global__ void raw_phase_a_bz_kernel(float* b_z, const float* k_raw, const floa
                                       const float* k_norm_weight, const float* beta,
                                       SanaWmGdnShape shape, int32_t t, float k_scale) {
     const int64_t total = static_cast<int64_t>(shape.batch) * shape.heads * shape.head_dim;
-    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int32_t outputs_per_block = blockDim.x / kRawBzThreadsPerOutput;
+    const int32_t output_in_block = threadIdx.x / kRawBzThreadsPerOutput;
+    const int32_t residue = threadIdx.x % kRawBzThreadsPerOutput;
+    const int64_t idx = static_cast<int64_t>(blockIdx.x) * outputs_per_block + output_in_block;
     if (idx >= total)
         return;
     const int32_t d = static_cast<int32_t>(idx % shape.head_dim);
@@ -1428,40 +1525,151 @@ __global__ void raw_phase_a_bz_kernel(float* b_z, const float* k_raw, const floa
     const int32_t b = static_cast<int32_t>(idx / (shape.head_dim * shape.heads));
     float accum = 0.0F;
     for (int32_t chunk = 0; chunk < shape.spatial; chunk += 64) {
-        float partial[8];
-#pragma unroll
-        for (int32_t residue = 0; residue < 8; ++residue) {
-            const int32_t first_s = chunk + residue;
-            float value = 0.0F;
-            if (first_s < shape.spatial) {
-                const float beta_s = beta[bht1s_offset(shape, b, h, t, first_s)];
-                const float k_value = raw_normed_relu(k_raw, k_inv, k_norm_weight, shape, b, t,
-                                                      first_s, h, d, k_scale);
-                value = __fmul_rn(beta_s, k_value);
-            }
-#pragma unroll
-            for (int32_t offset = 8; offset < 64; offset += 8) {
-                const int32_t s = first_s + offset;
-                float term = 0.0F;
-                if (s < shape.spatial) {
-                    const float beta_s = beta[bht1s_offset(shape, b, h, t, s)];
-                    const float k_value =
-                        raw_normed_relu(k_raw, k_inv, k_norm_weight, shape, b, t, s, h, d, k_scale);
-                    term = __fmul_rn(beta_s, k_value);
-                }
-                value = __fadd_rn(value, term);
-            }
-            partial[residue] = value;
+        const int32_t first_s = chunk + residue;
+        float value = 0.0F;
+        if (first_s < shape.spatial) {
+            const float beta_s = beta[bht1s_offset(shape, b, h, t, first_s)];
+            const float k_value =
+                raw_normed_relu(k_raw, k_inv, k_norm_weight, shape, b, t, first_s, h, d, k_scale);
+            value = __fmul_rn(beta_s, k_value);
         }
-        const float pair_0 = __fadd_rn(partial[0], partial[1]);
-        const float pair_1 = __fadd_rn(partial[2], partial[3]);
-        const float pair_2 = __fadd_rn(partial[4], partial[5]);
-        const float pair_3 = __fadd_rn(partial[6], partial[7]);
-        const float half_0 = __fadd_rn(pair_0, pair_2);
-        const float half_1 = __fadd_rn(pair_1, pair_3);
-        accum = __fadd_rn(accum, __fadd_rn(half_0, half_1));
+#pragma unroll
+        for (int32_t offset = 8; offset < 64; offset += 8) {
+            const int32_t s = first_s + offset;
+            float term = 0.0F;
+            if (s < shape.spatial) {
+                const float beta_s = beta[bht1s_offset(shape, b, h, t, s)];
+                const float k_value =
+                    raw_normed_relu(k_raw, k_inv, k_norm_weight, shape, b, t, s, h, d, k_scale);
+                term = __fmul_rn(beta_s, k_value);
+            }
+            value = __fadd_rn(value, term);
+        }
+        const uint32_t mask = __activemask();
+        const float adjacent = __shfl_down_sync(mask, value, 1, kRawBzThreadsPerOutput);
+        const float pair = (residue & 1) == 0 ? __fadd_rn(value, adjacent) : value;
+        const float pair_2 = __shfl_sync(mask, pair, 4, kRawBzThreadsPerOutput);
+        const float pair_3 = __shfl_sync(mask, pair, 6, kRawBzThreadsPerOutput);
+        const float half = residue == 0 ? __fadd_rn(pair, pair_2)
+                                        : (residue == 2 ? __fadd_rn(pair, pair_3) : pair);
+        const float half_1 = __shfl_sync(mask, half, 2, kRawBzThreadsPerOutput);
+        if (residue == 0)
+            accum = __fadd_rn(accum, __fadd_rn(half, half_1));
     }
-    b_z[frame_vector_offset(shape, b, h, t, d)] = accum;
+    if (residue == 0)
+        b_z[frame_vector_offset(shape, b, h, t, d)] = accum;
+}
+
+__global__ void sana_wm_short_conv_kernel(uint16_t* output, const uint16_t* input,
+                                          const uint16_t* weight, const uint16_t* bias,
+                                          int32_t batch, int32_t frames, int32_t spatial,
+                                          int32_t channels, int32_t kernel_size) {
+    const int64_t total =
+        static_cast<int64_t>(batch) * frames * spatial * static_cast<int64_t>(channels);
+    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= total)
+        return;
+
+    const int32_t channel = static_cast<int32_t>(idx % channels);
+    int64_t token_index = idx / channels;
+    const int32_t spatial_index = static_cast<int32_t>(token_index % spatial);
+    token_index /= spatial;
+    const int32_t frame = static_cast<int32_t>(token_index % frames);
+    const int32_t batch_index = static_cast<int32_t>(token_index / frames);
+    const int32_t radius = kernel_size - 1;
+
+    float forward = 0.0F;
+    float backward = 0.0F;
+    for (int32_t tap = 0; tap < kernel_size; ++tap) {
+        const float weight_value = bf16_bits_to_float(weight[channel * kernel_size + tap]);
+        const int32_t forward_frame = frame - radius + tap;
+        if (forward_frame >= 0) {
+            const int64_t input_offset =
+                ((static_cast<int64_t>(batch_index) * frames + forward_frame) * spatial +
+                 spatial_index) *
+                    channels +
+                channel;
+            forward = __fmaf_rn(bf16_bits_to_float(input[input_offset]), weight_value, forward);
+        }
+        const int32_t backward_frame = frame + radius - tap;
+        if (backward_frame < frames) {
+            const int64_t input_offset =
+                ((static_cast<int64_t>(batch_index) * frames + backward_frame) * spatial +
+                 spatial_index) *
+                    channels +
+                channel;
+            backward = __fmaf_rn(bf16_bits_to_float(input[input_offset]), weight_value, backward);
+        }
+    }
+    if (bias != nullptr) {
+        const float bias_value = bf16_bits_to_float(bias[channel]);
+        forward = __fadd_rn(forward, bias_value);
+        backward = __fadd_rn(backward, bias_value);
+    }
+
+    const float forward_bf16 = bf16_bits_to_float(bf16_bits(forward));
+    const float backward_bf16 = bf16_bits_to_float(bf16_bits(backward));
+    const float combined_bf16 =
+        bf16_bits_to_float(bf16_bits(__fadd_rn(forward_bf16, backward_bf16)));
+    const float center_weight = bf16_bits_to_float(weight[channel * kernel_size + kernel_size - 1]);
+    const float center_product =
+        bf16_bits_to_float(bf16_bits(__fmul_rn(bf16_bits_to_float(input[idx]), center_weight)));
+    output[idx] = bf16_bits(__fsub_rn(combined_bf16, center_product));
+}
+
+__device__ __forceinline__ float sana_wm_silu_bf16(float value) {
+    return bf16_bits_to_float(bf16_bits(value / (1.0F + expf(-value))));
+}
+
+__device__ __forceinline__ float sana_wm_add_bias_bf16(float value, const uint16_t* bias,
+                                                       int32_t channel) {
+    if (bias == nullptr)
+        return value;
+    return bf16_bits_to_float(bf16_bits(__fadd_rn(value, bf16_bits_to_float(bias[channel]))));
+}
+
+__global__ void sana_wm_bias_silu_kernel(uint16_t* values, const uint16_t* bias, int64_t total,
+                                         int32_t channels) {
+    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= total)
+        return;
+
+    const int32_t channel = static_cast<int32_t>(idx % channels);
+    const float value = sana_wm_add_bias_bf16(bf16_bits_to_float(values[idx]), bias, channel);
+    values[idx] = bf16_bits(sana_wm_silu_bf16(value));
+}
+
+__global__ void sana_wm_gated_silu_kernel(uint16_t* output, const uint16_t* input,
+                                          const uint16_t* bias, int64_t total, int32_t hidden) {
+    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= total)
+        return;
+
+    const int32_t channel = static_cast<int32_t>(idx % hidden);
+    const int64_t row = idx / hidden;
+    const int64_t input_offset = row * (2 * hidden) + channel;
+    const float value =
+        sana_wm_add_bias_bf16(bf16_bits_to_float(input[input_offset]), bias, channel);
+    const float gate = sana_wm_silu_bf16(sana_wm_add_bias_bf16(
+        bf16_bits_to_float(input[input_offset + hidden]), bias, hidden + channel));
+    output[idx] = bf16_bits(__fmul_rn(value, gate));
+}
+
+__global__ void sana_wm_t2i_modulate_kernel(uint16_t* output, const uint16_t* input,
+                                            const uint16_t* shift, const uint16_t* scale,
+                                            int64_t total, int32_t tokens, int32_t hidden) {
+    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= total)
+        return;
+
+    const int32_t channel = static_cast<int32_t>(idx % hidden);
+    const int64_t batch_frame = idx / (static_cast<int64_t>(tokens) * hidden);
+    const int64_t modulation_offset = batch_frame * hidden + channel;
+    const float scale_plus_one = bf16_bits_to_float(
+        bf16_bits(__fadd_rn(bf16_bits_to_float(scale[modulation_offset]), 1.0F)));
+    const float product =
+        bf16_bits_to_float(bf16_bits(__fmul_rn(bf16_bits_to_float(input[idx]), scale_plus_one)));
+    output[idx] = bf16_bits(__fadd_rn(product, bf16_bits_to_float(shift[modulation_offset])));
 }
 
 __global__ void prepare_phase_a_bf16_kernel(uint16_t* k_values, uint16_t* k_rot_values,
@@ -1714,6 +1922,35 @@ __global__ void phase_c_raw_cublas_output_kernel(float* out, const float* num,
     out[raw_output_offset(shape, b, t, s, h, d)] = num_bf16 / (den_bf16 + eps);
 }
 
+__global__ void phase_c_raw_cublas_output_vectorized_kernel(float* out, const float* num,
+                                                            const uint16_t* den_values,
+                                                            SanaWmGdnShape shape,
+                                                            int32_t padded_dim, int32_t t,
+                                                            float eps) {
+    const int32_t vectors_per_token = shape.head_dim / 4;
+    const int64_t total =
+        static_cast<int64_t>(shape.batch) * shape.heads * shape.spatial * vectors_per_token;
+    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= total)
+        return;
+    const int32_t vector_d = static_cast<int32_t>(idx % vectors_per_token);
+    const int32_t d = vector_d * 4;
+    const int32_t s = static_cast<int32_t>((idx / vectors_per_token) % shape.spatial);
+    const int32_t h =
+        static_cast<int32_t>((idx / (vectors_per_token * shape.spatial)) % shape.heads);
+    const int32_t b = static_cast<int32_t>(
+        idx / (static_cast<int64_t>(vectors_per_token) * shape.spatial * shape.heads));
+    const int64_t num_offset = frame_scratch_offset(shape, padded_dim, b, h, s, d);
+    const float4 raw = *reinterpret_cast<const float4*>(num + num_offset);
+    const float den_bf16 = bf16_bits_to_float(
+        den_values[(static_cast<int64_t>(b) * shape.heads + h) * shape.spatial + s]);
+    const float divisor = den_bf16 + eps;
+    const float4 result{round_bf16(raw.x) / divisor, round_bf16(raw.y) / divisor,
+                        round_bf16(raw.z) / divisor, round_bf16(raw.w) / divisor};
+    const int64_t out_offset = raw_output_offset(shape, b, t, s, h, d);
+    *reinterpret_cast<float4*>(out + out_offset) = result;
+}
+
 __global__ void copy_raw_phase_c_num_debug_kernel(float* out, const float* num,
                                                   SanaWmGdnShape shape, int32_t padded_dim,
                                                   int32_t t) {
@@ -1797,21 +2034,35 @@ __global__ void phase_c_den_bf16_kernel(uint16_t* den_values, const float* hist_
 __global__ void copy_phase_c_num_debug_kernel(float* out, const float* num, SanaWmGdnShape shape,
                                               int32_t padded_dim, int32_t t,
                                               bool camera_corrections) {
-    const int64_t total =
-        static_cast<int64_t>(shape.batch) * shape.heads * shape.spatial * shape.head_dim;
-    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (idx >= total)
-        return;
-    const int32_t d = static_cast<int32_t>(idx % shape.head_dim);
-    const int32_t s = static_cast<int32_t>((idx / shape.head_dim) % shape.spatial);
-    const int32_t h = static_cast<int32_t>((idx / (shape.head_dim * shape.spatial)) % shape.heads);
-    const int32_t b = static_cast<int32_t>(
-        idx / (static_cast<int64_t>(shape.head_dim) * shape.spatial * shape.heads));
-    const float raw = num[frame_scratch_offset(shape, padded_dim, b, h, s, d)];
-    const uint16_t bits =
-        camera_corrections ? camera_phase_c_num_bf16_bits(raw, h, t, s, d) : bf16_bits(raw);
-    const float value = bf16_bits_to_float(bits);
-    out[out_bhdn_offset(shape, b, h, d, t, s, false)] = value;
+    __shared__ uint16_t tile[32][33];
+    const int32_t bh = static_cast<int32_t>(blockIdx.z);
+    const int32_t b = bh / shape.heads;
+    const int32_t h = bh - b * shape.heads;
+    const int32_t input_d = static_cast<int32_t>(blockIdx.x) * 32 + threadIdx.x;
+    const int32_t input_s_base = static_cast<int32_t>(blockIdx.y) * 32 + threadIdx.y;
+
+#pragma unroll
+    for (int32_t offset = 0; offset < 32; offset += 8) {
+        const int32_t input_s = input_s_base + offset;
+        if (input_s < shape.spatial && input_d < shape.head_dim) {
+            const float raw = num[frame_scratch_offset(shape, padded_dim, b, h, input_s, input_d)];
+            tile[threadIdx.y + offset][threadIdx.x] =
+                camera_corrections ? camera_phase_c_num_bf16_bits(raw, h, t, input_s, input_d)
+                                   : bf16_bits(raw);
+        }
+    }
+    __syncthreads();
+
+    const int32_t output_s = static_cast<int32_t>(blockIdx.y) * 32 + threadIdx.x;
+    const int32_t output_d_base = static_cast<int32_t>(blockIdx.x) * 32 + threadIdx.y;
+#pragma unroll
+    for (int32_t offset = 0; offset < 32; offset += 8) {
+        const int32_t output_d = output_d_base + offset;
+        if (output_s < shape.spatial && output_d < shape.head_dim) {
+            const float value = bf16_bits_to_float(tile[threadIdx.x][threadIdx.y + offset]);
+            out[out_bhdn_offset(shape, b, h, output_d, t, output_s, false)] = value;
+        }
+    }
 }
 
 __global__ void copy_phase_c_den_debug_kernel(float* out, const uint16_t* den_values,
@@ -1994,9 +2245,8 @@ int32_t launch_camera_combined_cublas(SanaWmGdnShape shape, const void* const* i
         static_cast<int64_t>(shape.batch) * shape.heads * shape.spatial * shape.head_dim;
 
     cublasHandle_t handle = nullptr;
-    if (report_cublas_error(cublasCreate(&handle), "create", "camera_combined_cublas", shape))
+    if (!get_thread_cublas_handle(handle, stream, "camera_combined_cublas", shape))
         return 1;
-    cublasSetStream(handle, stream);
 
     const long long scratch_stride =
         static_cast<long long>(shape.spatial) * static_cast<long long>(padded_dim);
@@ -2012,7 +2262,6 @@ int32_t launch_camera_combined_cublas(SanaWmGdnShape shape, const void* const* i
                                                              k, beta, shape, padded_dim, t);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "prepare_phase_a_bf16",
                                      "camera_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         if (!cublas_bf16_gemm_strided_batched(
@@ -2025,7 +2274,6 @@ int32_t launch_camera_combined_cublas(SanaWmGdnShape shape, const void* const* i
                 beta_v_values, padded_dim, scratch_stride, k_rot_values, padded_dim, scratch_stride,
                 gemm_b, padded_dim, matrix_stride, static_cast<int32_t>(bh), "phase_a_a",
                 "camera_combined_cublas", shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         finalize_raw_phase_a_bf16_kernel<<<
@@ -2033,7 +2281,6 @@ int32_t launch_camera_combined_cublas(SanaWmGdnShape shape, const void* const* i
             stream>>>(i_p_kv, a_t, i_p_z_unused, gemm_a, gemm_b, gemm_a, shape, padded_dim, t);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "finalize_phase_a_bf16",
                                      "camera_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
     }
@@ -2048,7 +2295,6 @@ int32_t launch_camera_combined_cublas(SanaWmGdnShape shape, const void* const* i
                                                               padded_dim);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "state_to_bf16_fwd",
                                      "camera_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         const auto* i_p_frame = i_p_kv + static_cast<std::size_t>(t) * matrix_stride;
@@ -2057,7 +2303,6 @@ int32_t launch_camera_combined_cublas(SanaWmGdnShape shape, const void* const* i
                 padded_dim, matrix_stride, i_p_frame, padded_dim, frame_matrix_stride, gemm_a,
                 padded_dim, matrix_stride, static_cast<int32_t>(bh), "phase_b_fwd",
                 "camera_combined_cublas", shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         update_padded_state_kernel<<<static_cast<uint32_t>((matrix_elems_per_frame + kThreads - 1) /
@@ -2066,7 +2311,6 @@ int32_t launch_camera_combined_cublas(SanaWmGdnShape shape, const void* const* i
                                                             shape, padded_dim, t, t, false);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_b_kv_fwd_update",
                                      "camera_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         float* tmp = state_kv;
@@ -2085,7 +2329,6 @@ int32_t launch_camera_combined_cublas(SanaWmGdnShape shape, const void* const* i
                                                               padded_dim);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "state_to_bf16_rev",
                                      "camera_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         const auto* i_p_frame = i_p_kv + static_cast<std::size_t>(f_src) * matrix_stride;
@@ -2094,7 +2337,6 @@ int32_t launch_camera_combined_cublas(SanaWmGdnShape shape, const void* const* i
                 padded_dim, matrix_stride, i_p_frame, padded_dim, frame_matrix_stride, gemm_a,
                 padded_dim, matrix_stride, static_cast<int32_t>(bh), "phase_b_rev",
                 "camera_combined_cublas", shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         update_padded_state_kernel<<<static_cast<uint32_t>((matrix_elems_per_frame + kThreads - 1) /
@@ -2103,7 +2345,6 @@ int32_t launch_camera_combined_cublas(SanaWmGdnShape shape, const void* const* i
                                                             shape, padded_dim, f_src, f_dst, true);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_b_kv_rev_update",
                                      "camera_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         float* tmp = state_kv;
@@ -2111,6 +2352,9 @@ int32_t launch_camera_combined_cublas(SanaWmGdnShape shape, const void* const* i
         next_kv = tmp;
     }
 
+    dim3 phase_c_copy_threads(32, 8);
+    dim3 phase_c_copy_blocks((shape.head_dim + 31) / 32, (shape.spatial + 31) / 32,
+                             shape.batch * shape.heads);
     for (int32_t t = 0; t < shape.frames; ++t) {
         prepare_phase_c_qrot_bf16_kernel<<<static_cast<uint32_t>((scratch_elems + kThreads - 1) /
                                                                  kThreads),
@@ -2118,7 +2362,6 @@ int32_t launch_camera_combined_cublas(SanaWmGdnShape shape, const void* const* i
                                                                   t);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "prepare_phase_c_q",
                                      "camera_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         convert_history_frame_to_bf16_kernel<<<
@@ -2126,7 +2369,6 @@ int32_t launch_camera_combined_cublas(SanaWmGdnShape shape, const void* const* i
             stream>>>(state_kv_bf16, hist_kv, shape, padded_dim, t);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "hist_to_bf16_phase_c",
                                      "camera_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         if (!cublas_bf16_gemm_strided_batched(
@@ -2134,21 +2376,15 @@ int32_t launch_camera_combined_cublas(SanaWmGdnShape shape, const void* const* i
                 state_kv_bf16, padded_dim, matrix_stride, q_values, padded_dim, scratch_stride,
                 phase_c_num, padded_dim, scratch_stride, static_cast<int32_t>(bh), "phase_c_num",
                 "camera_combined_cublas", shape)) {
-            cublasDestroy(handle);
             return 1;
         }
-        copy_phase_c_num_debug_kernel<<<static_cast<uint32_t>(
-                                            (output_elems_per_frame + kThreads - 1) / kThreads),
-                                        kThreads, 0, stream>>>(out, phase_c_num, shape, padded_dim,
-                                                               t, true);
+        copy_phase_c_num_debug_kernel<<<phase_c_copy_blocks, phase_c_copy_threads, 0, stream>>>(
+            out, phase_c_num, shape, padded_dim, t, true);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_c_num_copy",
                                      "camera_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
     }
-
-    cublasDestroy(handle);
     return 0;
 }
 
@@ -2207,9 +2443,8 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
     const int64_t output_elems = output_elems_per_frame * shape.frames;
 
     cublasHandle_t handle = nullptr;
-    if (report_cublas_error(cublasCreate(&handle), "create", "main_combined_cublas", shape))
+    if (!get_thread_cublas_handle(handle, stream, "main_combined_cublas", shape))
         return 1;
-    cublasSetStream(handle, stream);
 
     const long long scratch_stride =
         static_cast<long long>(shape.spatial) * static_cast<long long>(padded_dim);
@@ -2225,7 +2460,6 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
                                                              k_rot, beta, shape, padded_dim, t);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "prepare_phase_a_bf16",
                                      "main_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         if (!cublas_bf16_gemm_strided_batched(
@@ -2233,7 +2467,6 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
                 beta_k_rot_values, padded_dim, scratch_stride, k_rot_values, padded_dim,
                 scratch_stride, gemm_a, padded_dim, matrix_stride, static_cast<int32_t>(bh),
                 "phase_a_pkv", "main_combined_cublas", shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         if (!cublas_bf16_gemm_strided_batched(
@@ -2241,7 +2474,6 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
                 beta_v_values, padded_dim, scratch_stride, k_rot_values, padded_dim, scratch_stride,
                 gemm_b, padded_dim, matrix_stride, static_cast<int32_t>(bh), "phase_a_a",
                 "main_combined_cublas", shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         if (!cublas_bf16_gemm_strided_batched(
@@ -2249,7 +2481,6 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
                 beta_k_values, padded_dim, scratch_stride, k_values, padded_dim, scratch_stride,
                 gemm_c, padded_dim, matrix_stride, static_cast<int32_t>(bh), "phase_a_pz",
                 "main_combined_cublas", shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         finalize_raw_phase_a_bf16_kernel<<<
@@ -2257,7 +2488,6 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
             stream>>>(i_p_kv, a_t, i_p_z, gemm_a, gemm_b, gemm_c, shape, padded_dim, t);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "finalize_phase_a_bf16",
                                      "main_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         phase_a_bz_kernel<<<static_cast<uint32_t>((vector_elems_per_frame + kThreads - 1) /
@@ -2265,7 +2495,6 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
                             kThreads, 0, stream>>>(b_z, k, beta, shape, t);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_a_bz", "main_combined_cublas",
                                      false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
     }
@@ -2283,7 +2512,6 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
                                              shape, stream)) {
         const bool failed = report_cuda_launch_error(cudaPeekAtLastError(), "debug_output",
                                                      "main_combined_cublas", false, shape);
-        cublasDestroy(handle);
         return failed ? 1 : 0;
     }
 
@@ -2300,7 +2528,6 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
                                                               padded_dim);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "state_to_bf16_fwd",
                                      "main_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         const auto* i_p_frame = i_p_kv + static_cast<std::size_t>(t) * matrix_stride;
@@ -2309,7 +2536,6 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
                 padded_dim, matrix_stride, i_p_frame, padded_dim, frame_matrix_stride, gemm_a,
                 padded_dim, matrix_stride, static_cast<int32_t>(bh), "phase_b_fwd",
                 "main_combined_cublas", shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         update_padded_state_kernel<<<static_cast<uint32_t>((matrix_elems_per_frame + kThreads - 1) /
@@ -2318,14 +2544,12 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
                                                             shape, padded_dim, t, t, false);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_b_kv_fwd_update",
                                      "main_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         phase_b_z_bf16_kernel<<<static_cast<uint32_t>(vector_elems_per_frame), 32, 0, stream>>>(
             next_z, state_z, hist_z, i_p_z, b_z, decay, shape, padded_dim, t, t, false);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_b_z_fwd", "main_combined_cublas",
                                      false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         float* tmp_kv = state_kv;
@@ -2350,7 +2574,6 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
                                                               padded_dim);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "state_to_bf16_rev",
                                      "main_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         const auto* i_p_frame = i_p_kv + static_cast<std::size_t>(f_src) * matrix_stride;
@@ -2359,7 +2582,6 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
                 padded_dim, matrix_stride, i_p_frame, padded_dim, frame_matrix_stride, gemm_a,
                 padded_dim, matrix_stride, static_cast<int32_t>(bh), "phase_b_rev",
                 "main_combined_cublas", shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         update_padded_state_kernel<<<static_cast<uint32_t>((matrix_elems_per_frame + kThreads - 1) /
@@ -2368,14 +2590,12 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
                                                             shape, padded_dim, f_src, f_dst, true);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_b_kv_rev_update",
                                      "main_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         phase_b_z_bf16_kernel<<<static_cast<uint32_t>(vector_elems_per_frame), 32, 0, stream>>>(
             next_z, state_z, hist_z, i_p_z, b_z, decay, shape, padded_dim, f_src, f_dst, true);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_b_z_rev", "main_combined_cublas",
                                      false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         float* tmp_kv = state_kv;
@@ -2393,7 +2613,6 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
                                              shape, stream)) {
         const bool failed = report_cuda_launch_error(cudaPeekAtLastError(), "debug_output",
                                                      "main_combined_cublas", false, shape);
-        cublasDestroy(handle);
         return failed ? 1 : 0;
     }
 
@@ -2406,7 +2625,6 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
                                                                   padded_dim, t);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "prepare_phase_c_qrot",
                                      "main_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         convert_history_frame_to_bf16_kernel<<<
@@ -2414,7 +2632,6 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
             stream>>>(state_kv_bf16, hist_kv, shape, padded_dim, t);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "hist_to_bf16_phase_c",
                                      "main_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         if (!cublas_bf16_gemm_strided_batched(
@@ -2422,7 +2639,6 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
                 state_kv_bf16, padded_dim, matrix_stride, q_rot_values, padded_dim, scratch_stride,
                 phase_c_num, padded_dim, scratch_stride, static_cast<int32_t>(bh), "phase_c_num",
                 "main_combined_cublas", shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         if (debug_phase_c_num) {
@@ -2432,7 +2648,6 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
                                                                    padded_dim, t, false);
             if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_c_num_debug",
                                          "main_combined_cublas", false, shape)) {
-                cublasDestroy(handle);
                 return 1;
             }
             continue;
@@ -2443,7 +2658,6 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
             phase_c_den, hist_z, q, shape, t);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_c_den", "main_combined_cublas",
                                      false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         if (debug_phase_c_den) {
@@ -2452,7 +2666,6 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
                                             kThreads, 0, stream>>>(out, phase_c_den, shape, t);
             if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_c_den_debug",
                                          "main_combined_cublas", false, shape)) {
-                cublasDestroy(handle);
                 return 1;
             }
             continue;
@@ -2463,12 +2676,9 @@ int32_t launch_main_combined_cublas(SanaWmGdnShape shape, const void* const* inp
                                                               padded_dim, t, eps);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_c_output",
                                      "main_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
     }
-
-    cublasDestroy(handle);
     return 0;
 }
 
@@ -2669,9 +2879,8 @@ int32_t launch_main_raw_combined_cublas(SanaWmGdnShape shape, const void* const*
     }
 
     cublasHandle_t handle = nullptr;
-    if (report_cublas_error(cublasCreate(&handle), "create", "main_raw_combined_cublas", shape))
+    if (!get_thread_cublas_handle(handle, stream, "main_raw_combined_cublas", shape))
         return 1;
-    cublasSetStream(handle, stream);
 
     const long long scratch_stride =
         static_cast<long long>(shape.spatial) * static_cast<long long>(padded_dim);
@@ -2687,7 +2896,6 @@ int32_t launch_main_raw_combined_cublas(SanaWmGdnShape shape, const void* const*
             k_inv, k_norm_weight, rope_cos, rope_sin, beta, shape, padded_dim, t, k_scale);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "prepare_phase_a_bf16",
                                      "main_raw_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         if (!cublas_bf16_gemm_strided_batched(
@@ -2705,7 +2913,6 @@ int32_t launch_main_raw_combined_cublas(SanaWmGdnShape shape, const void* const*
                 beta_k_values, padded_dim, scratch_stride, k_values, padded_dim, scratch_stride,
                 gemm_c, padded_dim, matrix_stride, static_cast<int32_t>(bh), "phase_a_pz",
                 "main_raw_combined_cublas", shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         finalize_raw_phase_a_bf16_kernel<<<
@@ -2713,16 +2920,14 @@ int32_t launch_main_raw_combined_cublas(SanaWmGdnShape shape, const void* const*
             stream>>>(i_p_kv, a_t, i_p_z, gemm_a, gemm_b, gemm_c, shape, padded_dim, t);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "finalize_phase_a_bf16",
                                      "main_raw_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
-        raw_phase_a_bz_kernel<<<static_cast<uint32_t>((vector_elems_per_frame + kThreads - 1) /
-                                                      kThreads),
-                                kThreads, 0, stream>>>(b_z, k_raw, k_inv, k_norm_weight, beta,
-                                                       shape, t, k_scale);
+        raw_phase_a_bz_kernel<<<
+            static_cast<uint32_t>((vector_elems_per_frame * kRawBzThreadsPerOutput + kThreads - 1) /
+                                  kThreads),
+            kThreads, 0, stream>>>(b_z, k_raw, k_inv, k_norm_weight, beta, shape, t, k_scale);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_a_bz",
                                      "main_raw_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
     }
@@ -2741,7 +2946,6 @@ int32_t launch_main_raw_combined_cublas(SanaWmGdnShape shape, const void* const*
                                              shape, stream)) {
         const bool failed = report_cuda_launch_error(cudaPeekAtLastError(), "debug_output",
                                                      "main_raw_combined_cublas", false, shape);
-        cublasDestroy(handle);
         return failed ? 1 : 0;
     }
 
@@ -2758,7 +2962,6 @@ int32_t launch_main_raw_combined_cublas(SanaWmGdnShape shape, const void* const*
                                                               padded_dim);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "state_to_bf16_fwd",
                                      "main_raw_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         const auto* i_p_frame = i_p_kv + static_cast<std::size_t>(t) * matrix_stride;
@@ -2767,7 +2970,6 @@ int32_t launch_main_raw_combined_cublas(SanaWmGdnShape shape, const void* const*
                 padded_dim, matrix_stride, i_p_frame, padded_dim, frame_matrix_stride, gemm_a,
                 padded_dim, matrix_stride, static_cast<int32_t>(bh), "phase_b_fwd",
                 "main_raw_combined_cublas", shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         update_padded_state_kernel<<<static_cast<uint32_t>((matrix_elems_per_frame + kThreads - 1) /
@@ -2776,14 +2978,12 @@ int32_t launch_main_raw_combined_cublas(SanaWmGdnShape shape, const void* const*
                                                             shape, padded_dim, t, t, false);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_b_kv_fwd_update",
                                      "main_raw_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         phase_b_z_bf16_kernel<<<static_cast<uint32_t>(vector_elems_per_frame), 32, 0, stream>>>(
             next_z, state_z, hist_z, i_p_z, b_z, decay, shape, padded_dim, t, t, false);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_b_z_fwd",
                                      "main_raw_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         float* tmp_kv = state_kv;
@@ -2808,7 +3008,6 @@ int32_t launch_main_raw_combined_cublas(SanaWmGdnShape shape, const void* const*
                                                               padded_dim);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "state_to_bf16_rev",
                                      "main_raw_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         const auto* i_p_frame = i_p_kv + static_cast<std::size_t>(f_src) * matrix_stride;
@@ -2817,7 +3016,6 @@ int32_t launch_main_raw_combined_cublas(SanaWmGdnShape shape, const void* const*
                 padded_dim, matrix_stride, i_p_frame, padded_dim, frame_matrix_stride, gemm_a,
                 padded_dim, matrix_stride, static_cast<int32_t>(bh), "phase_b_rev",
                 "main_raw_combined_cublas", shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         update_padded_state_kernel<<<static_cast<uint32_t>((matrix_elems_per_frame + kThreads - 1) /
@@ -2826,14 +3024,12 @@ int32_t launch_main_raw_combined_cublas(SanaWmGdnShape shape, const void* const*
                                                             shape, padded_dim, f_src, f_dst, true);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_b_kv_rev_update",
                                      "main_raw_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         phase_b_z_bf16_kernel<<<static_cast<uint32_t>(vector_elems_per_frame), 32, 0, stream>>>(
             next_z, state_z, hist_z, i_p_z, b_z, decay, shape, padded_dim, f_src, f_dst, true);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_b_z_rev",
                                      "main_raw_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         float* tmp_kv = state_kv;
@@ -2852,7 +3048,6 @@ int32_t launch_main_raw_combined_cublas(SanaWmGdnShape shape, const void* const*
                                              shape, stream)) {
         const bool failed = report_cuda_launch_error(cudaPeekAtLastError(), "debug_output",
                                                      "main_raw_combined_cublas", false, shape);
-        cublasDestroy(handle);
         return failed ? 1 : 0;
     }
 
@@ -2866,10 +3061,8 @@ int32_t launch_main_raw_combined_cublas(SanaWmGdnShape shape, const void* const*
             padded_dim, eps);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_c_scalar_output",
                                      "main_raw_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
-        cublasDestroy(handle);
         return 0;
     }
     for (int32_t t = 0; t < shape.frames; ++t) {
@@ -2879,7 +3072,6 @@ int32_t launch_main_raw_combined_cublas(SanaWmGdnShape shape, const void* const*
             q_rot_values, q_raw, q_inv, q_norm_weight, rope_cos, rope_sin, shape, padded_dim, t);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "prepare_phase_c_qrot",
                                      "main_raw_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         convert_history_frame_to_bf16_kernel<<<
@@ -2887,7 +3079,6 @@ int32_t launch_main_raw_combined_cublas(SanaWmGdnShape shape, const void* const*
             stream>>>(state_kv_bf16, hist_kv, shape, padded_dim, t);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "hist_to_bf16_phase_c",
                                      "main_raw_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         if (!cublas_bf16_gemm_strided_batched(
@@ -2895,14 +3086,12 @@ int32_t launch_main_raw_combined_cublas(SanaWmGdnShape shape, const void* const*
                 state_kv_bf16, padded_dim, matrix_stride, q_rot_values, padded_dim, scratch_stride,
                 phase_c_num, padded_dim, scratch_stride, static_cast<int32_t>(bh), "phase_c_num",
                 "main_raw_combined_cublas", shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         phase_c_raw_den_bf16_kernel<<<static_cast<uint32_t>(bh * shape.spatial), 32, 0, stream>>>(
             phase_c_den, hist_z, q_raw, q_inv, q_norm_weight, shape, t);
         if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_c_den",
                                      "main_raw_combined_cublas", false, shape)) {
-            cublasDestroy(handle);
             return 1;
         }
         if (debug_phase_c_num) {
@@ -2911,7 +3100,6 @@ int32_t launch_main_raw_combined_cublas(SanaWmGdnShape shape, const void* const*
                 0, stream>>>(out, phase_c_num, shape, padded_dim, t);
             if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_c_num_debug",
                                          "main_raw_combined_cublas", false, shape)) {
-                cublasDestroy(handle);
                 return 1;
             }
         } else if (debug_phase_c_den) {
@@ -2920,22 +3108,26 @@ int32_t launch_main_raw_combined_cublas(SanaWmGdnShape shape, const void* const*
                 0, stream>>>(out, phase_c_den, shape, t);
             if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_c_den_debug",
                                          "main_raw_combined_cublas", false, shape)) {
-                cublasDestroy(handle);
                 return 1;
             }
         } else {
-            phase_c_raw_cublas_output_kernel<<<
-                static_cast<uint32_t>((output_elems_per_frame + kThreads - 1) / kThreads), kThreads,
-                0, stream>>>(out, phase_c_num, phase_c_den, shape, padded_dim, t, eps);
+            if (shape.head_dim % 4 == 0) {
+                const int64_t output_vectors = output_elems_per_frame / 4;
+                phase_c_raw_cublas_output_vectorized_kernel<<<
+                    static_cast<uint32_t>((output_vectors + kThreads - 1) / kThreads), kThreads, 0,
+                    stream>>>(out, phase_c_num, phase_c_den, shape, padded_dim, t, eps);
+            } else {
+                phase_c_raw_cublas_output_kernel<<<
+                    static_cast<uint32_t>((output_elems_per_frame + kThreads - 1) / kThreads),
+                    kThreads, 0, stream>>>(out, phase_c_num, phase_c_den, shape, padded_dim, t,
+                                           eps);
+            }
             if (report_cuda_launch_error(cudaPeekAtLastError(), "phase_c_output",
                                          "main_raw_combined_cublas", false, shape)) {
-                cublasDestroy(handle);
                 return 1;
             }
         }
     }
-
-    cublasDestroy(handle);
     return 0;
 }
 
@@ -3115,6 +3307,67 @@ int32_t launch_main_raw_combined(SanaWmGdnShape shape, const void* const* inputs
 }
 
 } // namespace
+
+int32_t launch_sana_wm_short_conv(void* output, const void* input, const void* weight,
+                                  const void* bias, int32_t batch, int32_t frames, int32_t spatial,
+                                  int32_t channels, int32_t kernel_size,
+                                  cudaStream_t stream) noexcept {
+    if (output == nullptr || input == nullptr || weight == nullptr || batch <= 0 || frames <= 0 ||
+        spatial <= 0 || channels <= 0 || kernel_size <= 0) {
+        return 1;
+    }
+    constexpr int32_t kThreads = 256;
+    const int64_t total =
+        static_cast<int64_t>(batch) * frames * spatial * static_cast<int64_t>(channels);
+    sana_wm_short_conv_kernel<<<static_cast<uint32_t>((total + kThreads - 1) / kThreads), kThreads,
+                                0, stream>>>(
+        static_cast<uint16_t*>(output), static_cast<const uint16_t*>(input),
+        static_cast<const uint16_t*>(weight), static_cast<const uint16_t*>(bias), batch, frames,
+        spatial, channels, kernel_size);
+    return cudaPeekAtLastError() == cudaSuccess ? 0 : 1;
+}
+
+int32_t launch_sana_wm_bias_silu(void* values, const void* bias, int32_t rows, int32_t spatial,
+                                 int32_t channels, cudaStream_t stream) noexcept {
+    if (values == nullptr || rows <= 0 || spatial <= 0 || channels <= 0)
+        return 1;
+    constexpr int32_t kThreads = 256;
+    const int64_t total = static_cast<int64_t>(rows) * spatial * channels;
+    sana_wm_bias_silu_kernel<<<static_cast<uint32_t>((total + kThreads - 1) / kThreads), kThreads,
+                               0, stream>>>(static_cast<uint16_t*>(values),
+                                            static_cast<const uint16_t*>(bias), total, channels);
+    return cudaPeekAtLastError() == cudaSuccess ? 0 : 1;
+}
+
+int32_t launch_sana_wm_gated_silu(void* output, const void* input, const void* bias, int32_t rows,
+                                  int32_t spatial, int32_t hidden, cudaStream_t stream) noexcept {
+    if (output == nullptr || input == nullptr || rows <= 0 || spatial <= 0 || hidden <= 0)
+        return 1;
+    constexpr int32_t kThreads = 256;
+    const int64_t total = static_cast<int64_t>(rows) * spatial * hidden;
+    sana_wm_gated_silu_kernel<<<static_cast<uint32_t>((total + kThreads - 1) / kThreads), kThreads,
+                                0, stream>>>(static_cast<uint16_t*>(output),
+                                             static_cast<const uint16_t*>(input),
+                                             static_cast<const uint16_t*>(bias), total, hidden);
+    return cudaPeekAtLastError() == cudaSuccess ? 0 : 1;
+}
+
+int32_t launch_sana_wm_t2i_modulate(void* output, const void* input, const void* shift,
+                                    const void* scale, int32_t batch, int32_t frames,
+                                    int32_t tokens, int32_t hidden, cudaStream_t stream) noexcept {
+    if (output == nullptr || input == nullptr || shift == nullptr || scale == nullptr ||
+        batch <= 0 || frames <= 0 || tokens <= 0 || hidden <= 0) {
+        return 1;
+    }
+    constexpr int32_t kThreads = 256;
+    const int64_t total = static_cast<int64_t>(batch) * frames * tokens * hidden;
+    sana_wm_t2i_modulate_kernel<<<static_cast<uint32_t>((total + kThreads - 1) / kThreads),
+                                  kThreads, 0, stream>>>(
+        static_cast<uint16_t*>(output), static_cast<const uint16_t*>(input),
+        static_cast<const uint16_t*>(shift), static_cast<const uint16_t*>(scale), total, tokens,
+        hidden);
+    return cudaPeekAtLastError() == cudaSuccess ? 0 : 1;
+}
 
 SanaWmUcpePlugin::SanaWmUcpePlugin(int32_t frames, int32_t spatial, int32_t heads, int32_t head_dim,
                                    bool inverse, bool tree_reduce, bool downscale, bool double_rope,
@@ -3434,18 +3687,39 @@ int32_t SanaWmCamPrepPlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDesc
         return 1;
     }
     const int32_t prep_blocks = shape.batch * shape.tokens * shape.heads;
+    dim3 output_threads(32, 8);
+    dim3 output_blocks((shape.tokens + 31) / 32, (shape.head_dim + 31) / 32,
+                       shape.batch * shape.heads);
     const float k_scale = 1.0F / std::sqrt(static_cast<float>(shape.head_dim)) *
                           (1.0F / std::sqrt(static_cast<float>(spatial_)));
     if (raw_type == nvinfer1::DataType::kBF16) {
-        cam_prep_kernel<true><<<prep_blocks, prep_threads, 0, stream>>>(
-            q_out, k_out, v_out, inflation_sq, inputs[0], inputs[1], inputs[2], q_inv, k_inv,
+        cam_prep_output_tiled_kernel<true><<<output_blocks, output_threads, 0, stream>>>(
+            q_out, k_out, v_out, inputs[0], inputs[1], inputs[2], q_inv, k_inv,
+            static_cast<const float*>(inputs[7]), static_cast<const float*>(inputs[8]),
+            static_cast<const float*>(inputs[3]), static_cast<const float*>(inputs[4]),
+            static_cast<const float*>(inputs[5]), static_cast<const float*>(inputs[6]), shape,
+            k_scale);
+        if (cudaPeekAtLastError() != cudaSuccess) {
+            return 1;
+        }
+        cam_prep_inflation_kernel<true><<<prep_blocks, prep_threads, 0, stream>>>(
+            inflation_sq, inputs[0], inputs[1], inputs[2], q_inv, k_inv,
             static_cast<const float*>(inputs[7]), static_cast<const float*>(inputs[8]),
             static_cast<const float*>(inputs[3]), static_cast<const float*>(inputs[4]),
             static_cast<const float*>(inputs[5]), static_cast<const float*>(inputs[6]), shape,
             k_scale);
     } else {
-        cam_prep_kernel<false><<<prep_blocks, prep_threads, 0, stream>>>(
-            q_out, k_out, v_out, inflation_sq, inputs[0], inputs[1], inputs[2], q_inv, k_inv,
+        cam_prep_output_tiled_kernel<false><<<output_blocks, output_threads, 0, stream>>>(
+            q_out, k_out, v_out, inputs[0], inputs[1], inputs[2], q_inv, k_inv,
+            static_cast<const float*>(inputs[7]), static_cast<const float*>(inputs[8]),
+            static_cast<const float*>(inputs[3]), static_cast<const float*>(inputs[4]),
+            static_cast<const float*>(inputs[5]), static_cast<const float*>(inputs[6]), shape,
+            k_scale);
+        if (cudaPeekAtLastError() != cudaSuccess) {
+            return 1;
+        }
+        cam_prep_inflation_kernel<false><<<prep_blocks, prep_threads, 0, stream>>>(
+            inflation_sq, inputs[0], inputs[1], inputs[2], q_inv, k_inv,
             static_cast<const float*>(inputs[7]), static_cast<const float*>(inputs[8]),
             static_cast<const float*>(inputs[3]), static_cast<const float*>(inputs[4]),
             static_cast<const float*>(inputs[5]), static_cast<const float*>(inputs[6]), shape,

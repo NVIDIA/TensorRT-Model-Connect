@@ -14,7 +14,6 @@
 #include <ATen/ops/amin.h>
 #include <ATen/ops/cat.h>
 #include <ATen/ops/constant_pad_nd.h>
-#include <ATen/ops/conv1d.h>
 #include <ATen/ops/conv2d.h>
 #include <ATen/ops/conv3d.h>
 #include <ATen/ops/cos.h>
@@ -154,11 +153,6 @@ bool report_timestep_error(const char* op, const char* detail) {
     return true;
 }
 
-bool report_t2i_error(const char* op, const char* detail) {
-    std::fprintf(stderr, "[trtmc.sana_wm_t2i_modulate] %s failed: %s\n", op, detail);
-    return true;
-}
-
 bool report_frame_gate_error(const char* op, const char* detail) {
     std::fprintf(stderr, "[trtmc.sana_wm_frame_gate] %s failed: %s\n", op, detail);
     return true;
@@ -196,11 +190,6 @@ bool report_frame_mean_error(const char* op, const char* detail) {
 
 bool report_layer_norm_error(const char* op, const char* detail) {
     std::fprintf(stderr, "[trtmc.sana_wm_layer_norm] %s failed: %s\n", op, detail);
-    return true;
-}
-
-bool report_short_conv_error(const char* op, const char* detail) {
-    std::fprintf(stderr, "[trtmc.sana_wm_short_conv] %s failed: %s\n", op, detail);
     return true;
 }
 
@@ -470,8 +459,6 @@ int32_t SanaWmTorchConv2dPlugin::enqueue(nvinfer1::PluginTensorDesc const* input
         auto output_view = at::from_blob(
             outputs[0], {shape.batch, out_channels_, shape.height, shape.width}, options);
         output_view.copy_(output);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& e) {
         report_torch_conv_error("aten conv2d", e.what());
@@ -760,8 +747,6 @@ int32_t SanaWmTorchConv3dPlugin::enqueue(nvinfer1::PluginTensorDesc const* input
         auto output_view = at::from_blob(
             outputs[0], {shape.batch, out_channels_, output_t_, output_h_, output_w_}, options);
         output_view.copy_(output);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& e) {
         report_torch_conv3d_error("aten conv3d", e.what());
@@ -880,8 +865,6 @@ int32_t SanaWmVaeRmsSiluPlugin::enqueue(nvinfer1::PluginTensorDesc const* inputD
         auto output = at::silu(at::div(input, rms));
         auto output_view = at::from_blob(outputs[0], dimensions, options);
         output_view.copy_(output);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& e) {
         report_vae_rms_silu_error("aten rms norm + silu", e.what());
@@ -1044,8 +1027,6 @@ int32_t SanaWmVaeDenormalizePlugin::enqueue(nvinfer1::PluginTensorDesc const* in
         auto result = input * std / scaling_factor_ + mean;
         auto output = at::from_blob(outputs[0], dimensions, options);
         output.copy_(result);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& error) {
         report_vae_rms_silu_error("aten VAE denormalize", error.what());
@@ -1212,8 +1193,6 @@ int32_t SanaWmVaeLayerNormPlugin::enqueue(nvinfer1::PluginTensorDesc const* inpu
                           .movedim(-1, 1);
         auto output = at::from_blob(outputs[0], dimensions, options);
         output.copy_(result);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& error) {
         report_layer_norm_error("aten VAE channel layer_norm", error.what());
@@ -1494,32 +1473,30 @@ int32_t SanaWmGlumbconvTempPlugin::enqueue(nvinfer1::PluginTensorDesc const* inp
         auto t_weight =
             at::from_blob(t_weight_device_, {channels_, channels_, t_kernel_, 1}, options);
 
-        std::optional<at::Tensor> inverted_bias;
-        if (inverted_bias_device_ != nullptr)
-            inverted_bias = at::from_blob(inverted_bias_device_, {expanded}, options);
-        std::optional<at::Tensor> depth_bias;
-        if (depth_bias_device_ != nullptr)
-            depth_bias = at::from_blob(depth_bias_device_, {expanded}, options);
-
         const std::array<int64_t, 2> stride{1, 1};
         const std::array<int64_t, 2> dilation{1, 1};
         const std::array<int64_t, 2> pad_none{0, 0};
         const std::array<int64_t, 2> pad_depth{1, 1};
         const std::array<int64_t, 2> pad_temporal{t_kernel_ / 2, 0};
+        const int32_t rows = batch_ * frames_;
+        const int32_t spatial = height_ * width_;
 
         auto x =
             input.reshape({batch_ * frames_, height_, width_, channels_}).permute({0, 3, 1, 2});
-        auto inverted =
-            at::conv2d(x, inverted_weight, inverted_bias, stride, pad_none, dilation, 1);
-        inverted = at::silu(inverted);
-        auto depth =
-            at::conv2d(inverted, depth_weight, depth_bias, stride, pad_depth, dilation, expanded);
-        auto chunks = depth.chunk(2, 1);
-        if (chunks.size() != 2)
+        auto inverted = at::conv2d(x, inverted_weight, std::nullopt, stride, pad_none, dilation, 1);
+        if (launch_sana_wm_bias_silu(inverted.data_ptr(), inverted_bias_device_, rows, spatial,
+                                     expanded, stream) != 0) {
             return 1;
-        auto gated = chunks[0] * at::silu(chunks[1]);
+        }
+        auto depth =
+            at::conv2d(inverted, depth_weight, std::nullopt, stride, pad_depth, dilation, expanded);
+        auto gated =
+            at::empty({rows, hidden_, height_, width_}, options, at::MemoryFormat::ChannelsLast);
+        if (launch_sana_wm_gated_silu(gated.data_ptr(), depth.data_ptr(), depth_bias_device_, rows,
+                                      spatial, hidden_, stream) != 0) {
+            return 1;
+        }
         auto point = at::conv2d(gated, point_weight, std::nullopt, stride, pad_none, dilation, 1);
-        const int32_t spatial = height_ * width_;
         auto point_bcts = point.view({batch_, frames_, channels_, spatial}).permute({0, 2, 1, 3});
         auto temporal =
             at::conv2d(point_bcts, t_weight, std::nullopt, stride, pad_temporal, dilation, 1);
@@ -1527,8 +1504,6 @@ int32_t SanaWmGlumbconvTempPlugin::enqueue(nvinfer1::PluginTensorDesc const* inp
             (point_bcts + temporal).permute({0, 2, 3, 1}).reshape({batch_, token_count, channels_});
         auto output_view = at::from_blob(outputs[0], {batch_, token_count, channels_}, options);
         output_view.copy_(out);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& e) {
         report_glumbconvtemp_error("aten glumbconvtemp", e.what());
@@ -1819,8 +1794,6 @@ int32_t SanaWmTimestepEmbedPlugin::enqueue(nvinfer1::PluginTensorDesc const* inp
         auto output_t0 =
             at::from_blob(outputs[1], {batch, 1, frames, 6 * hidden_size_}, bf16_options);
         output_t0.copy_(t0.reshape({batch, 1, frames, 6 * hidden_size_}));
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& e) {
         report_timestep_error("aten timestep embed", e.what());
@@ -1909,50 +1882,24 @@ int32_t SanaWmT2IModulatePlugin::enqueue(nvinfer1::PluginTensorDesc const* input
                                          nvinfer1::PluginTensorDesc const*,
                                          void const* const* inputs, void* const* outputs, void*,
                                          cudaStream_t stream) noexcept {
-    try {
-        const auto x_dims = inputDesc[0].dims;
-        const auto shift_dims = inputDesc[1].dims;
-        const auto scale_dims = inputDesc[2].dims;
-        if (x_dims.nbDims != 4 || shift_dims.nbDims != 4 || scale_dims.nbDims != 4)
-            return 1;
-        const int32_t batch = x_dims.d[0];
-        const int32_t frames = x_dims.d[1];
-        const int32_t tokens = x_dims.d[2];
-        const int32_t hidden = x_dims.d[3];
-        if (batch <= 0 || frames <= 0 || tokens <= 0 || hidden <= 0)
-            return 1;
-        if (shift_dims.d[0] != batch || shift_dims.d[1] != frames || shift_dims.d[2] != 1 ||
-            shift_dims.d[3] != hidden || scale_dims.d[0] != batch || scale_dims.d[1] != frames ||
-            scale_dims.d[2] != 1 || scale_dims.d[3] != hidden) {
-            return 1;
-        }
-
-        int device_index = 0;
-        if (cudaGetDevice(&device_index) != cudaSuccess)
-            return 1;
-        const auto torch_stream = c10::cuda::getStreamFromExternal(stream, device_index);
-        c10::cuda::CUDAStreamGuard guard(torch_stream);
-        const auto options =
-            at::TensorOptions().dtype(at::kBFloat16).device(at::kCUDA, device_index);
-        auto x =
-            at::from_blob(const_cast<void*>(inputs[0]), {batch, frames, tokens, hidden}, options);
-        auto shift =
-            at::from_blob(const_cast<void*>(inputs[1]), {batch, frames, 1, hidden}, options);
-        auto scale =
-            at::from_blob(const_cast<void*>(inputs[2]), {batch, frames, 1, hidden}, options);
-        auto result = x * (scale + 1) + shift;
-        auto output = at::from_blob(outputs[0], {batch, frames, tokens, hidden}, options);
-        output.copy_(result);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
-        return 0;
-    } catch (const c10::Error& e) {
-        report_t2i_error("aten t2i_modulate", e.what());
+    const auto x_dims = inputDesc[0].dims;
+    const auto shift_dims = inputDesc[1].dims;
+    const auto scale_dims = inputDesc[2].dims;
+    if (x_dims.nbDims != 4 || shift_dims.nbDims != 4 || scale_dims.nbDims != 4)
         return 1;
-    } catch (const std::exception& e) {
-        report_t2i_error("aten t2i_modulate", e.what());
+    const int32_t batch = x_dims.d[0];
+    const int32_t frames = x_dims.d[1];
+    const int32_t tokens = x_dims.d[2];
+    const int32_t hidden = x_dims.d[3];
+    if (batch <= 0 || frames <= 0 || tokens <= 0 || hidden <= 0)
+        return 1;
+    if (shift_dims.d[0] != batch || shift_dims.d[1] != frames || shift_dims.d[2] != 1 ||
+        shift_dims.d[3] != hidden || scale_dims.d[0] != batch || scale_dims.d[1] != frames ||
+        scale_dims.d[2] != 1 || scale_dims.d[3] != hidden) {
         return 1;
     }
+    return launch_sana_wm_t2i_modulate(outputs[0], inputs[0], inputs[1], inputs[2], batch, frames,
+                                       tokens, hidden, stream);
 }
 
 SanaWmCaptionEmbedPlugin::SanaWmCaptionEmbedPlugin(int32_t hidden_size)
@@ -2090,8 +2037,6 @@ int32_t SanaWmCaptionEmbedPlugin::enqueue(nvinfer1::PluginTensorDesc const* inpu
 
         auto output = at::from_blob(outputs[0], {batch, groups, length, hidden_size_}, options);
         output.copy_(result);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& e) {
         report_caption_embed_error("aten caption embed", e.what());
@@ -2275,8 +2220,6 @@ int32_t SanaWmCrossAttentionPlugin::enqueue(nvinfer1::PluginTensorDesc const* in
 
         auto output = at::from_blob(outputs[0], {batch, token_count, hidden}, bf16_options);
         output.copy_(result);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& e) {
         report_cross_attention_error("aten cross attention", e.what());
@@ -2553,29 +2496,18 @@ int32_t SanaWmSoftmaxAttentionPlugin::enqueue(nvinfer1::PluginTensorDesc const* 
                 return at::cat({geometric, rope}, -1);
             };
 
-            auto q_bhdn = rms_norm(q_raw, q_weight)
+            auto q_bhnd = rms_norm(q_raw, q_weight)
                               .reshape({batch, tokens, heads_, head_dim_})
-                              .permute({0, 2, 3, 1})
-                              .contiguous();
-            auto k_bhdn = rms_norm(k_raw, k_weight)
+                              .permute({0, 2, 1, 3});
+            auto k_bhnd = rms_norm(k_raw, k_weight)
                               .reshape({batch, tokens, heads_, head_dim_})
-                              .permute({0, 2, 3, 1})
-                              .contiguous();
-            auto v_bhdn = v_raw.reshape({batch, tokens, heads_, head_dim_})
-                              .permute({0, 2, 3, 1})
-                              .contiguous();
-            auto q_trans =
-                apply_camera(q_bhdn.transpose(-1, -2), p_t, false).transpose(-1, -2).contiguous();
-            auto kv_bhdn = at::cat({k_bhdn, v_bhdn}, 1);
-            auto kv_trans = apply_camera(kv_bhdn.transpose(-1, -2), p_inv, false)
-                                .transpose(-1, -2)
-                                .contiguous();
-            auto k_trans = kv_trans.slice(1, 0, heads_);
-            auto v_trans = kv_trans.slice(1, heads_, 2 * heads_);
-
-            auto q = q_trans.transpose(-1, -2);
-            auto k = k_trans.transpose(-1, -2);
-            auto v = v_trans.transpose(-1, -2);
+                              .permute({0, 2, 1, 3});
+            auto v_bhnd = v_raw.reshape({batch, tokens, heads_, head_dim_}).permute({0, 2, 1, 3});
+            auto q = apply_camera(q_bhnd, p_t, false);
+            auto kv_bhnd = at::cat({k_bhnd, v_bhnd}, 1);
+            auto kv_trans = apply_camera(kv_bhnd, p_inv, false);
+            auto k = kv_trans.slice(1, 0, heads_);
+            auto v = kv_trans.slice(1, heads_, 2 * heads_);
             const int32_t padded_dim = head_dim_ == 32 || head_dim_ == 64 || head_dim_ == 128 ||
                                                head_dim_ == 256 || head_dim_ >= 256
                                            ? head_dim_
@@ -2589,16 +2521,15 @@ int32_t SanaWmSoftmaxAttentionPlugin::enqueue(nvinfer1::PluginTensorDesc const* 
             auto out = at::scaled_dot_product_attention(q, k, v, std::nullopt, 0.0, false);
             if (padded_dim != head_dim_)
                 out = out.slice(-1, 0, head_dim_);
-            out = out.transpose(-1, -2);
-            auto out_trans =
-                apply_camera(out.transpose(-1, -2), p, true).transpose(-1, -2).contiguous();
-            result = out_trans.reshape({batch, channels, tokens}).permute({0, 2, 1});
+            auto out_trans = apply_camera(out, p, true);
+            auto output =
+                at::from_blob(outputs[0], {batch, tokens, heads_, head_dim_}, bf16_options);
+            output.copy_(out_trans.permute({0, 2, 1, 3}));
+            return 0;
         }
 
         auto output = at::from_blob(outputs[0], {batch, tokens, channels}, bf16_options);
         output.copy_(result);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& e) {
         report_softmax_attention_error("aten softmax attention", e.what());
@@ -2891,8 +2822,6 @@ int32_t SanaWmTorchCamPrepPlugin::enqueue(nvinfer1::PluginTensorDesc const* inpu
         at::from_blob(outputs[1], qkv_shape, float_options).copy_(k_out.to(at::kFloat));
         at::from_blob(outputs[2], qkv_shape, float_options).copy_(v_out.to(at::kFloat));
         at::from_blob(outputs[3], {batch, heads_, tokens}, float_options).copy_(inflation);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& e) {
         report_torch_cam_prep_error("aten camera prep", e.what());
@@ -3034,8 +2963,6 @@ int32_t SanaWmCameraBetaDiscountPlugin::enqueue(nvinfer1::PluginTensorDesc const
         auto discounted = beta.to(at::kFloat) / frame_inflation.unsqueeze(-1);
         at::from_blob(outputs[0], {batch, heads_, frames_, spatial_}, float_options)
             .copy_(discounted);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& e) {
         report_camera_beta_discount_error("aten beta discount", e.what());
@@ -3152,8 +3079,6 @@ int32_t SanaWmFrameGatePlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDe
         auto result = (tokens * gate).reshape({batch, token_count, hidden});
         auto output = at::from_blob(outputs[0], {batch, token_count, hidden}, options);
         output.copy_(result);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& e) {
         report_frame_gate_error("aten frame gate", e.what());
@@ -3280,8 +3205,6 @@ int32_t SanaWmFrameMeanPlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDe
         auto result = x.mean(2);
         auto output = at::from_blob(outputs[0], {batch, frames_, hidden}, options);
         output.copy_(result);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& e) {
         report_frame_mean_error("aten mean", e.what());
@@ -3402,8 +3325,6 @@ int32_t SanaWmLayerNormPlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDe
         auto result = at::layer_norm(x, {hidden}, {}, {}, static_cast<double>(eps_), true);
         auto output = at::from_blob(outputs[0], shape, options);
         output.copy_(result);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         (void)count;
         return 0;
     } catch (const c10::Error& e) {
@@ -3579,65 +3500,20 @@ bool SanaWmShortConvPlugin::ensureDeviceCache(cudaStream_t stream, int32_t devic
 int32_t SanaWmShortConvPlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDesc,
                                        nvinfer1::PluginTensorDesc const*, void const* const* inputs,
                                        void* const* outputs, void*, cudaStream_t stream) noexcept {
-    try {
-        const auto dims = inputDesc[0].dims;
-        const int32_t expected_weight = channels_ * kernel_size_;
-        if (dims.nbDims != 3 || dims.d[0] <= 0 || dims.d[1] != frames_ * spatial_ ||
-            dims.d[2] != channels_ || frames_ <= 0 || spatial_ <= 0 || channels_ <= 0 ||
-            kernel_size_ <= 0 || static_cast<int32_t>(weight_.size()) != expected_weight) {
-            return 1;
-        }
-        const int32_t batch = dims.d[0];
-        int device_index = 0;
-        if (cudaGetDevice(&device_index) != cudaSuccess)
-            return 1;
-        if (!ensureDeviceCache(stream, device_index))
-            return 1;
-        const auto torch_stream = c10::cuda::getStreamFromExternal(stream, device_index);
-        c10::cuda::CUDAStreamGuard guard(torch_stream);
-        const auto options =
-            at::TensorOptions().dtype(at::kBFloat16).device(at::kCUDA, device_index);
-        auto x = at::from_blob(const_cast<void*>(inputs[0]), {batch, frames_ * spatial_, channels_},
-                               options);
-        auto temporal = x.reshape({batch, frames_, spatial_, channels_})
-                            .permute({0, 2, 1, 3})
-                            .contiguous()
-                            .reshape({batch * spatial_, frames_, channels_});
-        auto weight = at::from_blob(weight_device_, {channels_, 1, kernel_size_}, options);
-        std::optional<at::Tensor> bias;
-        if (bias_device_ != nullptr)
-            bias = at::from_blob(bias_device_, {channels_}, options);
-        const std::array<int64_t, 1> stride{1};
-        const std::array<int64_t, 1> padding{0};
-        const std::array<int64_t, 1> dilation{1};
-
-        auto causal = [&](const at::Tensor& btc) {
-            auto bct = btc.transpose(1, 2).contiguous();
-            auto padded = at::constant_pad_nd(bct, {kernel_size_ - 1, 0}, 0);
-            auto y = at::conv1d(padded, weight, bias, stride, padding, dilation, channels_);
-            return y.transpose(1, 2).contiguous();
-        };
-
-        auto y_fwd = causal(temporal);
-        auto y_bwd = causal(temporal.flip({1})).flip({1});
-        auto center = weight.select(2, kernel_size_ - 1).reshape({1, 1, channels_});
-        auto combined = y_fwd + y_bwd - temporal * center;
-        auto restored = combined.reshape({batch, spatial_, frames_, channels_})
-                            .permute({0, 2, 1, 3})
-                            .contiguous()
-                            .reshape({batch, frames_ * spatial_, channels_});
-        auto output = at::from_blob(outputs[0], {batch, frames_ * spatial_, channels_}, options);
-        output.copy_(restored);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
-        return 0;
-    } catch (const c10::Error& e) {
-        report_short_conv_error("aten short conv", e.what());
-        return 1;
-    } catch (const std::exception& e) {
-        report_short_conv_error("aten short conv", e.what());
+    const auto dims = inputDesc[0].dims;
+    const int32_t expected_weight = channels_ * kernel_size_;
+    if (dims.nbDims != 3 || dims.d[0] <= 0 || dims.d[1] != frames_ * spatial_ ||
+        dims.d[2] != channels_ || frames_ <= 0 || spatial_ <= 0 || channels_ <= 0 ||
+        kernel_size_ <= 0 || static_cast<int32_t>(weight_.size()) != expected_weight) {
         return 1;
     }
+    int32_t device_index = 0;
+    if (cudaGetDevice(&device_index) != cudaSuccess)
+        return 1;
+    if (!ensureDeviceCache(stream, device_index))
+        return 1;
+    return launch_sana_wm_short_conv(outputs[0], inputs[0], weight_device_, bias_device_, dims.d[0],
+                                     frames_, spatial_, channels_, kernel_size_, stream);
 }
 
 SanaWmGateProjPlugin::SanaWmGateProjPlugin(int32_t input_dim, int32_t output_dim,
@@ -3892,8 +3768,6 @@ int32_t SanaWmGateProjPlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDes
         const auto output_options = activation_ == 2 ? options.dtype(at::kFloat) : options;
         auto output = at::from_blob(outputs[0], output_shape, output_options);
         output.copy_(result);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& e) {
         report_gate_proj_error("aten linear", e.what());
@@ -4059,8 +3933,6 @@ int32_t SanaWmDecayPlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDesc,
         auto result = at::exp(-(a * at::softplus(gate_dt, 1.0, 20.0)));
         auto output = at::from_blob(outputs[0], {batch, frames, heads_}, options);
         output.copy_(result);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& e) {
         report_decay_error("aten decay", e.what());
@@ -4191,8 +4063,6 @@ int32_t SanaWmGemmaRmsNormPlugin::enqueue(nvinfer1::PluginTensorDesc const* inpu
         auto result = (normalized * weight).to(at::kBFloat16);
         auto output = at::from_blob(outputs[0], shape, bf16_options);
         output.copy_(result);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& e) {
         report_gemma_rms_norm_error("aten rms norm", e.what());
@@ -4306,8 +4176,6 @@ int32_t SanaWmGemmaGatedGeluPlugin::enqueue(nvinfer1::PluginTensorDesc const* in
         auto result = at::gelu(gate, "tanh") * up;
         auto output = at::from_blob(outputs[0], shape, options);
         output.copy_(result);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& e) {
         report_gemma_gated_gelu_error("aten gated gelu", e.what());
@@ -4466,8 +4334,6 @@ int32_t SanaWmGemmaRopePlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDe
             result = at::cat({result, q.slice(-1, rotary_dim_, head_dim_)}, -1);
         auto output = at::from_blob(outputs[0], {rows, heads_, head_dim_}, options);
         output.copy_(result);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& e) {
         report_gemma_rope_error("aten rope", e.what());
@@ -4656,8 +4522,6 @@ int32_t SanaWmGemmaAttentionPlugin::enqueue(nvinfer1::PluginTensorDesc const* in
         auto result = context.transpose(1, 2).reshape({query_rows, heads_ * head_dim_});
         auto output = at::from_blob(outputs[0], {query_rows, heads_ * head_dim_}, options);
         output.copy_(result);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& e) {
         report_gemma_attention_error("aten scaled_dot_product_attention", e.what());
@@ -4812,8 +4676,6 @@ int32_t SanaWmLtxTextNormalizePlugin::enqueue(nvinfer1::PluginTensorDesc const* 
 
         auto output = at::from_blob(outputs[0], {batch, seq_len, packed_dim}, bf16_options);
         output.copy_(normalized);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& error) {
         std::fprintf(stderr, "[trtmc.sana_wm_ltx_text_normalize] %s\n", error.what());
@@ -4982,8 +4844,6 @@ int32_t SanaWmLtxRegisterPlugin::enqueue(nvinfer1::PluginTensorDesc const* input
         auto result = flipped * padded + (1 - flipped) * registers;
         auto output = at::from_blob(outputs[0], {1, seq_len, hidden_dim_}, bf16_options);
         output.copy_(result);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& error) {
         std::fprintf(stderr, "[trtmc.sana_wm_ltx_register] %s\n", error.what());
@@ -5263,8 +5123,6 @@ int32_t SanaWmLtxConnectorBlockPlugin::enqueue(nvinfer1::PluginTensorDesc const*
 
         auto output = at::from_blob(outputs[0], {1, seq_len, hidden_dim_}, bf16_options);
         output.copy_(result);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& error) {
         std::fprintf(stderr, "[trtmc.sana_wm_ltx_connector_block] %s\n", error.what());
@@ -5366,8 +5224,6 @@ int32_t SanaWmLtxRmsNormPlugin::enqueue(nvinfer1::PluginTensorDesc const* inputD
         auto result = at::rms_norm(input, normalized_shape, std::nullopt, eps_);
         auto output = at::from_blob(outputs[0], shape, options);
         output.copy_(result);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& error) {
         std::fprintf(stderr, "[trtmc.sana_wm_ltx_rms_norm] %s\n", error.what());
@@ -5485,8 +5341,6 @@ int32_t SanaWmLtxTimestepFrequencyPlugin::enqueue(nvinfer1::PluginTensorDesc con
         auto result = at::cat({at::cos(args), at::sin(args)}, -1).to(at::kBFloat16);
         auto output = at::from_blob(outputs[0], {rows, frequency_dim_}, bf16_options);
         output.copy_(result);
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& error) {
         std::fprintf(stderr, "[trtmc.sana_wm_ltx_timestep_frequency] %s\n", error.what());
@@ -5801,8 +5655,6 @@ int32_t SanaWmLtxVideoBlockPlugin::enqueue(nvinfer1::PluginTensorDesc const* inp
             for (int32_t i = 0; i < static_cast<int32_t>(debug_values.size()); ++i)
                 write(i + 1, debug_values[static_cast<size_t>(i)]);
         }
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& error) {
         std::fprintf(stderr, "[trtmc.sana_wm_ltx_video_block] %s\n", error.what());
@@ -5993,8 +5845,6 @@ int32_t SanaWmLtxVideoOutputPlugin::enqueue(nvinfer1::PluginTensorDesc const* in
             (latent.to(at::kFloat) - velocity.to(at::kFloat) * raw_timestep).to(at::kBFloat16);
         auto output = at::from_blob(outputs[0], {tokens, output_dim_}, bf16_options);
         output.copy_(denoised.reshape({tokens, output_dim_}));
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            return 1;
         return 0;
     } catch (const c10::Error& error) {
         std::fprintf(stderr, "[trtmc.sana_wm_ltx_video_output] %s\n", error.what());

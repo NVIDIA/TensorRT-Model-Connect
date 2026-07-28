@@ -183,6 +183,18 @@ class SanaWmCamPrepPlugin : public nvinfer1::IPluginV2DynamicExt {
 };
 
 #if TRTMC_HAS_LIBTORCH_CONV
+int32_t launch_sana_wm_short_conv(void* output, const void* input, const void* weight,
+                                  const void* bias, int32_t batch, int32_t frames, int32_t spatial,
+                                  int32_t channels, int32_t kernel_size,
+                                  cudaStream_t stream) noexcept;
+int32_t launch_sana_wm_bias_silu(void* values, const void* bias, int32_t rows, int32_t spatial,
+                                 int32_t channels, cudaStream_t stream) noexcept;
+int32_t launch_sana_wm_gated_silu(void* output, const void* input, const void* bias, int32_t rows,
+                                  int32_t spatial, int32_t hidden, cudaStream_t stream) noexcept;
+int32_t launch_sana_wm_t2i_modulate(void* output, const void* input, const void* shift,
+                                    const void* scale, int32_t batch, int32_t frames,
+                                    int32_t tokens, int32_t hidden, cudaStream_t stream) noexcept;
+
 class SanaWmTorchConv2dPlugin : public nvinfer1::IPluginV2DynamicExt {
   public:
     SanaWmTorchConv2dPlugin() = default;
