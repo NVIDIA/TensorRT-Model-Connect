@@ -8,6 +8,9 @@ Tensor names and shapes must stay compatible with the C++ bundle runtime.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
+
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
@@ -447,6 +450,7 @@ def make_rope_table_half_dim(
     cosine: bool,
     partial_rotary_factor: float = 1.0,
     interleaved: bool = False,
+    rope_scaling: Mapping[str, Any] | None = None,
 ) -> np.ndarray:
     """Build a RoPE cos/sin table of shape [max_cache_length, rotary_ndims // 2].
 
@@ -463,6 +467,7 @@ def make_rope_table_half_dim(
         partial_rotary_factor: Fraction of head dims that rotate (default 1.0).
         interleaved:      If True, adjacent-pair frequencies (CodeGen/GPT-J).
                           If False, half-split frequencies (LLaMA/Qwen).
+        rope_scaling:     Optional Hugging Face RoPE scaling configuration.
 
     Returns:
         Float32 array [max_cache_length, rotary_ndims // 2].
@@ -474,17 +479,71 @@ def make_rope_table_half_dim(
     if max_cache_length <= 0 or rope_theta <= 0.0:
         return np.full((max(max_cache_length, 1), max(half, 1)),
                        default, dtype=np.float32)
-    table = np.full((max_cache_length, half), default, dtype=np.float32)
-    for pos in range(max_cache_length):
-        for d in range(half):
-            # For both interleaved and rotate-half the frequency index is d
-            # (the distinction only affects which input pair is rotated; the
-            # freq assignment per half-dim is the same).
-            exponent = (2.0 * d) / rotary_ndims
-            inv_freq = rope_theta ** (-exponent)
-            angle = pos * inv_freq
-            table[pos, d] = np.cos(angle) if cosine else np.sin(angle)
-    return table
+    if not rope_scaling:
+        table = np.full(
+            (max_cache_length, half),
+            default,
+            dtype=np.float32,
+        )
+        for pos in range(max_cache_length):
+            for dimension in range(half):
+                exponent = (2.0 * dimension) / rotary_ndims
+                inverse_frequency = rope_theta ** (-exponent)
+                angle = pos * inverse_frequency
+                table[pos, dimension] = (
+                    np.cos(angle) if cosine else np.sin(angle)
+                )
+        return table
+
+    exponents = np.arange(0, rotary_ndims, 2, dtype=np.float64) / rotary_ndims
+    inverse_frequencies = np.power(float(rope_theta), -exponents)
+    rope_type = str(
+        rope_scaling.get("rope_type")
+        or rope_scaling.get("type")
+        or ""
+    ).lower()
+    if rope_type != "llama3":
+        raise NotImplementedError(
+            f"Unsupported Llama RoPE scaling type: {rope_type or '<missing>'}"
+        )
+    factor = float(rope_scaling["factor"])
+    low_freq_factor = float(rope_scaling["low_freq_factor"])
+    high_freq_factor = float(rope_scaling["high_freq_factor"])
+    original_context = float(
+        rope_scaling["original_max_position_embeddings"]
+    )
+    if (
+        factor <= 0.0
+        or low_freq_factor <= 0.0
+        or high_freq_factor <= low_freq_factor
+        or original_context <= 0.0
+    ):
+        raise ValueError(f"Invalid Llama 3 RoPE scaling: {dict(rope_scaling)}")
+
+    wavelengths = 2.0 * np.pi / inverse_frequencies
+    low_freq_wavelength = original_context / low_freq_factor
+    high_freq_wavelength = original_context / high_freq_factor
+    scaled = np.where(
+        wavelengths > low_freq_wavelength,
+        inverse_frequencies / factor,
+        inverse_frequencies,
+    )
+    smooth = (
+        original_context / wavelengths - low_freq_factor
+    ) / (high_freq_factor - low_freq_factor)
+    interpolated = (1.0 - smooth) * scaled / factor + smooth * scaled
+    medium = (
+        (wavelengths >= high_freq_wavelength)
+        & (wavelengths <= low_freq_wavelength)
+    )
+    inverse_frequencies = np.where(medium, interpolated, scaled)
+
+    angles = np.outer(
+        np.arange(max_cache_length, dtype=np.float64),
+        inverse_frequencies,
+    )
+    values = np.cos(angles) if cosine else np.sin(angles)
+    return values.astype(np.float32)
 
 
 def reshape_rows_to_heads_4d(
