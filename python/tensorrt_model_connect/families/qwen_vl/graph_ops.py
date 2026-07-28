@@ -600,6 +600,149 @@ def add_windowed_self_attention_with_rope(
     return out
 
 
+def _runtime_rope_cache_3d(
+    network: trt.INetworkDefinition,
+    cache: trt.ITensor,
+    half_head_dim: int,
+    target_dtype: trt.DataType,
+) -> trt.ITensor:
+    """Normalize a runtime [N, D/2] vision RoPE cache to [1, N, D/2]."""
+    if cache.dtype != target_dtype:
+        cache = network.add_cast(cache, target_dtype).get_output(0)
+    shaped = network.add_shuffle(cache)
+    shaped.reshape_dims = (1, -1, half_head_dim)
+    return shaped.get_output(0)
+
+
+def add_dynamic_self_attention_with_rope(
+    network: trt.INetworkDefinition,
+    hidden: trt.ITensor,
+    w_q: np.ndarray,
+    w_k: np.ndarray,
+    w_v: np.ndarray,
+    w_o: np.ndarray,
+    hidden_size: int,
+    num_heads: int,
+    cos_half: trt.ITensor,
+    sin_half: trt.ITensor,
+    q_bias: np.ndarray | None = None,
+    k_bias: np.ndarray | None = None,
+    v_bias: np.ndarray | None = None,
+    o_bias: np.ndarray | None = None,
+    dtype: np.dtype = np.float32,
+) -> trt.ITensor:
+    """Full vision attention for a runtime-variable number of patch rows."""
+    head_dim = hidden_size // num_heads
+    q = add_matmul_rhs_constant(
+        network, hidden, hidden_size, hidden_size, w_q, dtype=dtype)
+    k = add_matmul_rhs_constant(
+        network, hidden, hidden_size, hidden_size, w_k, dtype=dtype)
+    v = add_matmul_rhs_constant(
+        network, hidden, hidden_size, hidden_size, w_v, dtype=dtype)
+    if q_bias is not None:
+        q = add_bias_sum(network, q, hidden_size, q_bias, dtype=dtype)
+    if k_bias is not None:
+        k = add_bias_sum(network, k, hidden_size, k_bias, dtype=dtype)
+    if v_bias is not None:
+        v = add_bias_sum(network, v, hidden_size, v_bias, dtype=dtype)
+
+    cos_3d = _runtime_rope_cache_3d(
+        network, cos_half, head_dim // 2, q.dtype)
+    sin_3d = _runtime_rope_cache_3d(
+        network, sin_half, head_dim // 2, q.dtype)
+    q = add_apply_rope_native_sequence(
+        network, q, num_heads, head_dim, cos_3d, sin_3d,
+        rotary_embedding_dim=head_dim, sequence_length=None)
+    k = add_apply_rope_native_sequence(
+        network, k, num_heads, head_dim, cos_3d, sin_3d,
+        rotary_embedding_dim=head_dim, sequence_length=None)
+    context = add_attention_from_rows(
+        network, q, k, v, num_heads=num_heads, head_dim=head_dim,
+        q_seq=None, kv_seq=None)
+    out = add_matmul_rhs_constant(
+        network, context, hidden_size, hidden_size, w_o, dtype=dtype)
+    if o_bias is not None:
+        out = add_bias_sum(network, out, hidden_size, o_bias, dtype=dtype)
+    return out
+
+
+def add_dynamic_windowed_self_attention_with_rope(
+    network: trt.INetworkDefinition,
+    hidden: trt.ITensor,
+    w_q: np.ndarray,
+    w_k: np.ndarray,
+    w_v: np.ndarray,
+    w_o: np.ndarray,
+    hidden_size: int,
+    num_heads: int,
+    cos_half: trt.ITensor,
+    sin_half: trt.ITensor,
+    padded_window_indices: trt.ITensor,
+    compact_window_indices: trt.ITensor,
+    window_mask: trt.ITensor,
+    window_patch_size: int,
+    q_bias: np.ndarray | None = None,
+    k_bias: np.ndarray | None = None,
+    v_bias: np.ndarray | None = None,
+    o_bias: np.ndarray | None = None,
+    dtype: np.dtype = np.float32,
+) -> trt.ITensor:
+    """Windowed vision attention for runtime-variable smart-resize grids."""
+    if window_patch_size <= 0:
+        raise ValueError("window_patch_size must be positive")
+    head_dim = hidden_size // num_heads
+    q = add_matmul_rhs_constant(
+        network, hidden, hidden_size, hidden_size, w_q, dtype=dtype)
+    k = add_matmul_rhs_constant(
+        network, hidden, hidden_size, hidden_size, w_k, dtype=dtype)
+    v = add_matmul_rhs_constant(
+        network, hidden, hidden_size, hidden_size, w_v, dtype=dtype)
+    if q_bias is not None:
+        q = add_bias_sum(network, q, hidden_size, q_bias, dtype=dtype)
+    if k_bias is not None:
+        k = add_bias_sum(network, k, hidden_size, k_bias, dtype=dtype)
+    if v_bias is not None:
+        v = add_bias_sum(network, v, hidden_size, v_bias, dtype=dtype)
+
+    cos_3d = _runtime_rope_cache_3d(
+        network, cos_half, head_dim // 2, q.dtype)
+    sin_3d = _runtime_rope_cache_3d(
+        network, sin_half, head_dim // 2, q.dtype)
+    q = add_apply_rope_native_sequence(
+        network, q, num_heads, head_dim, cos_3d, sin_3d,
+        rotary_embedding_dim=head_dim, sequence_length=None)
+    k = add_apply_rope_native_sequence(
+        network, k, num_heads, head_dim, cos_3d, sin_3d,
+        rotary_embedding_dim=head_dim, sequence_length=None)
+
+    windowed_qkv = []
+    for tensor in (q, k, v):
+        padded = network.add_gather(
+            tensor, padded_window_indices, 0).get_output(0)
+        shaped = network.add_shuffle(padded)
+        shaped.reshape_dims = (-1, window_patch_size, num_heads, head_dim)
+        shaped.second_transpose = trt.Permutation([0, 2, 1, 3])
+        windowed_qkv.append(shaped.get_output(0))
+
+    if window_mask.dtype != windowed_qkv[0].dtype:
+        window_mask = network.add_cast(
+            window_mask, windowed_qkv[0].dtype).get_output(0)
+    context = add_attention_core(
+        network, *windowed_qkv, mask=window_mask,
+        scale=1.0 / np.sqrt(max(head_dim, 1)))
+    flattened = network.add_shuffle(context)
+    flattened.first_transpose = trt.Permutation([0, 2, 1, 3])
+    flattened.reshape_dims = (-1, hidden_size)
+    compact = network.add_gather(
+        flattened.get_output(0), compact_window_indices, 0).get_output(0)
+
+    out = add_matmul_rhs_constant(
+        network, compact, hidden_size, hidden_size, w_o, dtype=dtype)
+    if o_bias is not None:
+        out = add_bias_sum(network, out, hidden_size, o_bias, dtype=dtype)
+    return out
+
+
 def add_patch_embed_3d(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,

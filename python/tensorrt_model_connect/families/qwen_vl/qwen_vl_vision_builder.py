@@ -169,6 +169,10 @@ def build_qwen_vl_vision_engine(
     fixed_image_size: int = 448,
     fixed_image_height: int | None = None,
     fixed_image_width: int | None = None,
+    dynamic_image_resolution: bool = False,
+    min_image_pixels: int = 3136,
+    opt_image_pixels: int = 200704,
+    max_image_pixels: int = 12845056,
     precision: str = "fp32",
     verbose: bool = False,
 ) -> bytes:
@@ -183,6 +187,10 @@ def build_qwen_vl_vision_engine(
         fixed_image_size: Square image height/width fallback.
         fixed_image_height: Optional rectangular image height.
         fixed_image_width: Optional rectangular image width.
+        dynamic_image_resolution: Accept runtime Qwen smart-resize patch grids.
+        min_image_pixels: Minimum dynamic optimization-profile image area.
+        opt_image_pixels: Preferred dynamic optimization-profile image area.
+        max_image_pixels: Maximum dynamic optimization-profile image area.
         verbose: Print detailed logs.
 
     Returns:
@@ -215,7 +223,8 @@ def build_qwen_vl_vision_engine(
     if fixed_h % patch_size or fixed_w % patch_size:
         raise ValueError("fixed image dimensions must be divisible by patch_size")
 
-    # Compute grid dimensions for fixed image size
+    # Compute grid dimensions for the fixed path. The dynamic path uses these
+    # only for diagnostics and profile defaults.
     grid_h = fixed_h // patch_size
     grid_w = fixed_w // patch_size
     num_patches = grid_h * grid_w
@@ -230,15 +239,37 @@ def build_qwen_vl_vision_engine(
         # Fallback: try to infer from config
         text_hidden_size = vision_config.get("text_hidden_size", embed_dim)
 
+    patch_pixels = patch_size * patch_size
+    merge_unit = merge_size * merge_size
+    if dynamic_image_resolution:
+        profile_pixels = (
+            int(min_image_pixels), int(opt_image_pixels), int(max_image_pixels))
+        if any(value <= 0 for value in profile_pixels):
+            raise ValueError("dynamic Qwen-VL image pixel limits must be positive")
+        if not profile_pixels[0] <= profile_pixels[1] <= profile_pixels[2]:
+            raise ValueError(
+                "dynamic Qwen-VL image pixel limits must satisfy min <= opt <= max")
+        profile_patches = tuple(
+            max(merge_unit, (value // patch_pixels // merge_unit) * merge_unit)
+            for value in profile_pixels
+        )
+    else:
+        profile_patches = (num_patches, num_patches, num_patches)
+
     if verbose:
-        print(f"[trtmc build] Vision: image={fixed_h}x{fixed_w}, "
-              f"grid={grid_h}x{grid_w}, patches={num_patches}, "
+        resolution = (
+            f"dynamic-patches={profile_patches}"
+            if dynamic_image_resolution else
+            f"image={fixed_h}x{fixed_w}, grid={grid_h}x{grid_w}"
+        )
+        print(f"[trtmc build] Vision: {resolution}, patches={num_patches}, "
               f"merged={num_merged}, embed={embed_dim}, "
               f"text_hidden={text_hidden_size}", file=sys.stderr)
 
+    workspace_bytes = 8 << 30 if dynamic_image_resolution else 2 << 30
     builder_context = create_builder_context(
         verbose=verbose,
-        workspace_bytes=2 << 30,
+        workspace_bytes=workspace_bytes,
     )
     builder = builder_context.builder
     network = builder_context.network
@@ -249,13 +280,17 @@ def build_qwen_vl_vision_engine(
         dtype=work_np_dtype)
 
     # ---------------------------------------------------------------
-    # Input: pixel_values [T*C, H, W]
-    # For temporal_patch_size=2, T*C = 2*3 = 6
+    # Fixed profiles consume [T*C, H, W]. Dynamic profiles consume the exact
+    # Hugging Face patchified representation [N, T*C*P*P].
     # ---------------------------------------------------------------
     input_channels = temporal_patch_size * in_channels
-    pixel_values = network.add_input(
-        "pixel_values", trt.float32,
-        (input_channels, fixed_h, fixed_w))
+    patch_vector_size = input_channels * patch_size * patch_size
+    pixel_shape = (
+        (-1, patch_vector_size)
+        if dynamic_image_resolution
+        else (input_channels, fixed_h, fixed_w)
+    )
+    pixel_values = network.add_input("pixel_values", trt.float32, pixel_shape)
     if work_trt_dtype != trt.float32:
         pixel_values = network.add_cast(
             pixel_values, work_trt_dtype).get_output(0)
@@ -270,28 +305,54 @@ def build_qwen_vl_vision_engine(
     if patch_embed_w is None:
         raise RuntimeError("Missing visual.patch_embed.proj.weight")
 
-    hidden = graph_ops.add_patch_embed_3d(
-        network, pixel_values,
-        patch_embed_w.astype(work_np_dtype),
-        patch_embed_b.astype(work_np_dtype) if patch_embed_b is not None else None,
-        in_channels=in_channels,
-        embed_dim=embed_dim,
-        temporal_patch_size=temporal_patch_size,
-        patch_size=patch_size,
-        dtype=work_np_dtype)
+    if dynamic_image_resolution:
+        patch_matrix = patch_embed_w.reshape(embed_dim, patch_vector_size).T
+        hidden = graph_ops.add_matmul_rhs_constant(
+            network, pixel_values, patch_vector_size, embed_dim,
+            patch_matrix.astype(work_np_dtype), dtype=work_np_dtype)
+        if patch_embed_b is not None:
+            hidden = graph_ops.add_bias_sum(
+                network, hidden, embed_dim,
+                patch_embed_b.astype(work_np_dtype), dtype=work_np_dtype)
+    else:
+        hidden = graph_ops.add_patch_embed_3d(
+            network, pixel_values,
+            patch_embed_w.astype(work_np_dtype),
+            patch_embed_b.astype(work_np_dtype) if patch_embed_b is not None else None,
+            in_channels=in_channels,
+            embed_dim=embed_dim,
+            temporal_patch_size=temporal_patch_size,
+            patch_size=patch_size,
+            dtype=work_np_dtype)
 
     # ---------------------------------------------------------------
     # Stage 2: Precompute RoPE tables + window index
     # ---------------------------------------------------------------
     window_size = int(vision_config.get("window_size", 112))
-    merge_unit = merge_size * merge_size
-
-    cos_table, sin_table, window_index, reverse_indices, window_patch_counts = \
-        _compute_vision_rope_tables(
-            grid_h, grid_w, embed_dim, num_heads,
-            merge_size=merge_size, window_size=window_size,
-            patch_size=patch_size, rope_theta=rope_theta,
-            return_window_patch_counts=True)
+    head_dim = embed_dim // num_heads
+    if dynamic_image_resolution:
+        cos_half = network.add_input(
+            "vision_cos_half", trt.float32, (-1, head_dim // 2))
+        sin_half = network.add_input(
+            "vision_sin_half", trt.float32, (-1, head_dim // 2))
+        window_index_tensor = network.add_input(
+            "vision_window_indices", trt.int32, (-1,))
+        padded_window_indices = network.add_input(
+            "vision_padded_window_indices", trt.int32, (-1,))
+        compact_window_indices = network.add_input(
+            "vision_compact_window_indices", trt.int32, (-1,))
+        reverse_indices_tensor = network.add_input(
+            "vision_reverse_indices", trt.int32, (-1,))
+        window_mask = None
+        cos_table = sin_table = window_index = reverse_indices = None
+        window_patch_counts = np.empty((0,), dtype=np.int32)
+    else:
+        cos_table, sin_table, window_index, reverse_indices, window_patch_counts = \
+            _compute_vision_rope_tables(
+                grid_h, grid_w, embed_dim, num_heads,
+                merge_size=merge_size, window_size=window_size,
+                patch_size=patch_size, rope_theta=rope_theta,
+                return_window_patch_counts=True)
 
     # Windowed vs full attention config
     vit_merger_window_size = window_size // merge_size // patch_size
@@ -302,6 +363,10 @@ def build_qwen_vl_vision_engine(
     # Number of real, non-empty windows. Edge windows can be partial when the
     # processor's smart-resized image is not window-aligned.
     num_windows = int(len(window_patch_counts))
+    if dynamic_image_resolution:
+        window_mask = network.add_input(
+            "vision_window_mask", trt.float32,
+            (-1, 1, 1, patches_per_window))
 
     fullatt_block_indexes = set(
         vision_config.get("fullatt_block_indexes", [7, 15, 23, 31]))
@@ -311,9 +376,10 @@ def build_qwen_vl_vision_engine(
               f"rope_dim={embed_dim // num_heads // 2}, "
               f"window_size={window_size}, "
               f"vit_merger_window_size={vit_merger_window_size}, "
-              f"num_windows={num_windows}, "
+              f"num_windows={'dynamic' if dynamic_image_resolution else num_windows}, "
               f"patches_per_window={patches_per_window}, "
-              f"actual_window_patch_counts={window_patch_counts.tolist()}, "
+              f"actual_window_patch_counts="
+              f"{'runtime' if dynamic_image_resolution else window_patch_counts.tolist()}, "
               f"fullatt_blocks={sorted(fullatt_block_indexes)}",
               file=sys.stderr)
 
@@ -322,17 +388,28 @@ def build_qwen_vl_vision_engine(
     # hidden: [num_patches, embed_dim] -> reorder groups of merge_unit
     # ---------------------------------------------------------------
     reshp_win = network.add_shuffle(hidden)
-    reshp_win.reshape_dims = (num_merged, merge_unit, embed_dim)
+    reshp_win.reshape_dims = (
+        (-1, merge_unit, embed_dim)
+        if dynamic_image_resolution
+        else (num_merged, merge_unit, embed_dim)
+    )
 
-    win_idx_weights = trt.Weights(np.ascontiguousarray(window_index))
-    win_idx_layer = network.add_constant((num_merged,), win_idx_weights)
-    win_idx_cast = network.add_cast(win_idx_layer.get_output(0), trt.int32)
+    if dynamic_image_resolution:
+        win_idx_cast = window_index_tensor
+    else:
+        win_idx_weights = trt.Weights(np.ascontiguousarray(window_index))
+        win_idx_layer = network.add_constant((num_merged,), win_idx_weights)
+        win_idx_cast = network.add_cast(
+            win_idx_layer.get_output(0), trt.int32).get_output(0)
 
     gathered_win = network.add_gather(
-        reshp_win.get_output(0), win_idx_cast.get_output(0), 0)
+        reshp_win.get_output(0), win_idx_cast, 0)
 
     reshp_back = network.add_shuffle(gathered_win.get_output(0))
-    reshp_back.reshape_dims = (num_patches, embed_dim)
+    reshp_back.reshape_dims = (
+        (-1, embed_dim)
+        if dynamic_image_resolution else (num_patches, embed_dim)
+    )
     hidden = reshp_back.get_output(0)
 
     # ---------------------------------------------------------------
@@ -385,16 +462,13 @@ def build_qwen_vl_vision_engine(
         use_full_attn = (layer_idx in fullatt_block_indexes)
         w_o_np = (w_o.astype(work_np_dtype).T.copy() if w_o is not None
                   else np.zeros((embed_dim, embed_dim), dtype=work_np_dtype))
-        attn_kwargs = dict(
+        common_attn_kwargs = dict(
             w_q=w_q.astype(work_np_dtype),
             w_k=w_k.astype(work_np_dtype),
             w_v=w_v.astype(work_np_dtype),
             w_o=w_o_np,
             hidden_size=embed_dim,
             num_heads=num_heads,
-            seq_length=num_patches,
-            cos_table=cos_table,
-            sin_table=sin_table,
             q_bias=q_bias.astype(work_np_dtype) if q_bias is not None else None,
             k_bias=k_bias.astype(work_np_dtype) if k_bias is not None else None,
             v_bias=v_bias.astype(work_np_dtype) if v_bias is not None else None,
@@ -402,16 +476,33 @@ def build_qwen_vl_vision_engine(
             dtype=work_np_dtype,
         )
 
-        if use_full_attn:
+        if dynamic_image_resolution and use_full_attn:
+            attn_out = graph_ops.add_dynamic_self_attention_with_rope(
+                network, normed, cos_half=cos_half, sin_half=sin_half,
+                **common_attn_kwargs)
+        elif dynamic_image_resolution:
+            attn_out = graph_ops.add_dynamic_windowed_self_attention_with_rope(
+                network, normed, cos_half=cos_half, sin_half=sin_half,
+                padded_window_indices=padded_window_indices,
+                compact_window_indices=compact_window_indices,
+                window_mask=window_mask,
+                window_patch_size=patches_per_window,
+                **common_attn_kwargs)
+        elif use_full_attn:
             attn_out = graph_ops.add_self_attention_block_with_rope(
-                network, normed, **attn_kwargs)
+                network, normed, seq_length=num_patches,
+                cos_table=cos_table, sin_table=sin_table,
+                **common_attn_kwargs)
         else:
             attn_out = graph_ops.add_windowed_self_attention_with_rope(
                 network,
                 normed,
+                seq_length=num_patches,
+                cos_table=cos_table,
+                sin_table=sin_table,
                 num_windows=num_windows,
                 window_patch_counts=window_patch_counts,
-                **attn_kwargs,
+                **common_attn_kwargs,
             )
 
         # Residual
@@ -526,7 +617,10 @@ def build_qwen_vl_vision_engine(
 
     # 2. Group every merge_unit consecutive patches (matches HF's view(-1, hidden_size))
     reshape_merge = network.add_shuffle(normed_patches)
-    reshape_merge.reshape_dims = (num_merged, merged_dim)
+    reshape_merge.reshape_dims = (
+        (-1, merged_dim)
+        if dynamic_image_resolution else (num_merged, merged_dim)
+    )
     merged_features = reshape_merge.get_output(0)
 
     # 3. MLP: [num_merged, merged_dim] -> [num_merged, text_hidden_size]
@@ -553,12 +647,16 @@ def build_qwen_vl_vision_engine(
                                           dtype=work_np_dtype)
 
     # 4. Reverse window reorder: restore original spatial order
-    rev_idx_weights = trt.Weights(np.ascontiguousarray(reverse_indices))
-    rev_idx_layer = network.add_constant((num_merged,), rev_idx_weights)
-    rev_idx_cast = network.add_cast(rev_idx_layer.get_output(0), trt.int32)
+    if dynamic_image_resolution:
+        rev_idx_cast = reverse_indices_tensor
+    else:
+        rev_idx_weights = trt.Weights(np.ascontiguousarray(reverse_indices))
+        rev_idx_layer = network.add_constant((num_merged,), rev_idx_weights)
+        rev_idx_cast = network.add_cast(
+            rev_idx_layer.get_output(0), trt.int32).get_output(0)
 
     reversed_out = network.add_gather(
-        fc2_out, rev_idx_cast.get_output(0), 0)
+        fc2_out, rev_idx_cast, 0)
 
     # ---------------------------------------------------------------
     # Output: image_features [num_merged, text_hidden_size]
@@ -573,10 +671,60 @@ def build_qwen_vl_vision_engine(
     # ---------------------------------------------------------------
     # Build
     # ---------------------------------------------------------------
+    if dynamic_image_resolution:
+        min_patches, opt_patches, max_patches = profile_patches
+
+        def padded_rows(rows: int) -> int:
+            return max(
+                patches_per_window,
+                ((rows + patches_per_window - 1) // patches_per_window)
+                * patches_per_window,
+            )
+
+        min_padded = padded_rows(min_patches)
+        opt_padded = padded_rows(opt_patches)
+        # Edge windows can require more padding than a flat row-count
+        # estimate, so reserve up to twice the maximum patch rows.
+        max_padded = padded_rows(max_patches * 2)
+        min_merged = min_patches // merge_unit
+        opt_merged = opt_patches // merge_unit
+        max_merged = max_patches // merge_unit
+        profile = builder.create_optimization_profile()
+        profile.set_shape(
+            "pixel_values",
+            (min_patches, patch_vector_size),
+            (opt_patches, patch_vector_size),
+            (max_patches, patch_vector_size),
+        )
+        for name in ("vision_cos_half", "vision_sin_half"):
+            profile.set_shape(
+                name,
+                (min_patches, head_dim // 2),
+                (opt_patches, head_dim // 2),
+                (max_patches, head_dim // 2),
+            )
+        for name in ("vision_window_indices", "vision_reverse_indices"):
+            profile.set_shape(
+                name, (min_merged,), (opt_merged,), (max_merged,))
+        profile.set_shape(
+            "vision_padded_window_indices",
+            (min_padded,), (opt_padded,), (max_padded,))
+        profile.set_shape(
+            "vision_compact_window_indices",
+            (min_patches,), (opt_patches,), (max_patches,))
+        profile.set_shape(
+            "vision_window_mask",
+            (min_padded // patches_per_window, 1, 1, patches_per_window),
+            (opt_padded // patches_per_window, 1, 1, patches_per_window),
+            (max_padded // patches_per_window, 1, 1, patches_per_window),
+        )
+        trt_config.add_optimization_profile(profile)
+
     if verbose:
         print(f"[trtmc build] Building Qwen VL vision TRT engine "
               f"({num_layers} layers, embed={embed_dim}, "
-              f"patches={num_patches}, merged={num_merged}, "
+              f"patches={'dynamic' if dynamic_image_resolution else num_patches}, "
+              f"merged={'dynamic' if dynamic_image_resolution else num_merged}, "
               f"text_hidden={text_hidden_size}) ...", file=sys.stderr)
 
     plan = builder.build_serialized_network(network, trt_config)

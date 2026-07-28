@@ -447,6 +447,12 @@ Tensor make_pixel_values_tensor(const QwenVlPreprocessedImage& preprocessed,
             break;
         }
     }
+    if (pixel_t.shape.size() == 2 && preprocessed.image_grid_hws.size() >= 2 &&
+        preprocessed.channels > 0) {
+        const int64_t patches =
+            static_cast<int64_t>(preprocessed.image_grid_hws[0]) * preprocessed.image_grid_hws[1];
+        pixel_t.shape = {patches, preprocessed.channels};
+    }
     if (pixel_t.shape.empty())
         pixel_t.shape = {static_cast<int64_t>(preprocessed.pixel_values.size())};
     pixel_t.dtype = DType::kFloat32;
@@ -463,6 +469,38 @@ void add_image_grid_input(TensorMap& inputs, const QwenVlPreprocessedImage& prep
     grid_t.shape = {static_cast<int64_t>(preprocessed.image_grid_hws.size() / 2), 2};
     grid_t.dtype = DType::kInt32;
     inputs["image_grid_hws"] = grid_t;
+}
+
+void add_dynamic_vision_metadata(TensorMap& inputs, const QwenVlPreprocessedImage& preprocessed,
+                                 const TrtModule& encoder) {
+    const auto add_float = [&](const char* name, const std::vector<float>& values,
+                               std::vector<int64_t> shape) {
+        if (encoder.has_input(name)) {
+            inputs[name] =
+                Tensor{const_cast<float*>(values.data()), std::move(shape), DType::kFloat32};
+        }
+    };
+    const auto add_int = [&](const char* name, const std::vector<int32_t>& values) {
+        if (encoder.has_input(name)) {
+            inputs[name] = Tensor{const_cast<int32_t*>(values.data()),
+                                  {static_cast<int64_t>(values.size())},
+                                  DType::kInt32};
+        }
+    };
+    const int64_t patches =
+        preprocessed.image_grid_hws.size() >= 2
+            ? static_cast<int64_t>(preprocessed.image_grid_hws[0]) * preprocessed.image_grid_hws[1]
+            : 0;
+    add_float("vision_cos_half", preprocessed.vision_cos_half,
+              {patches, preprocessed.vision_rope_half_dim});
+    add_float("vision_sin_half", preprocessed.vision_sin_half,
+              {patches, preprocessed.vision_rope_half_dim});
+    add_int("vision_window_indices", preprocessed.vision_window_indices);
+    add_int("vision_padded_window_indices", preprocessed.vision_padded_window_indices);
+    add_int("vision_compact_window_indices", preprocessed.vision_compact_window_indices);
+    add_int("vision_reverse_indices", preprocessed.vision_reverse_indices);
+    add_float("vision_window_mask", preprocessed.vision_window_mask,
+              {preprocessed.vision_window_count, 1, 1, preprocessed.vision_patches_per_window});
 }
 
 bool copy_float_output(const TensorMap& outputs, const std::string& name,
@@ -568,7 +606,7 @@ TextResult QwenVlPipeline::generate(const std::string& prompt, const float* imag
     int32_t nf = static_cast<int32_t>(features.size() / static_cast<std::size_t>(dim));
 
     // Format prompt, tokenize, generate with vision features
-    auto input_ids = tokenizer_->encode(qwen_vl_format_prompt(prompt, vl_preprocess_));
+    auto input_ids = tokenizer_->encode(qwen_vl_format_prompt(prompt, vl_preprocess_, nf));
     auto [max_new, eos] = resolve_gen_limits(cfg);
     auto sp_vl = qwen_vl_sampling_params_from_config(cfg, eos);
     auto out =
@@ -808,6 +846,7 @@ bool QwenVlPipeline::run_vision_encoder(const QwenVlPreprocessedImage& preproces
     TensorMap inputs;
     inputs["pixel_values"] = make_pixel_values_tensor(preprocessed, *vision_encoder_);
     add_image_grid_input(inputs, preprocessed, *vision_encoder_);
+    add_dynamic_vision_metadata(inputs, preprocessed, *vision_encoder_);
 
     auto outputs = vision_encoder_->forward(inputs);
 

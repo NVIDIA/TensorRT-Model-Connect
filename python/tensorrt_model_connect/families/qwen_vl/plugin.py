@@ -17,7 +17,9 @@ Detection: ``deepstack_visual_indexes`` in vision_config means Qwen3-VL.
 
 from __future__ import annotations
 
+import json
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -84,6 +86,45 @@ def _fixed_image_dimensions(config: ModelConfig) -> tuple[int, int]:
         raise ValueError(
             "Rectangular vision profiles currently support Qwen2.5-VL only")
     return height, width
+
+
+def _vision_build_options(config: ModelConfig) -> dict:
+    family_options = config.raw.get("_family_build_options", {})
+    vision_options = (
+        family_options.get("qwen_vl_vision", {})
+        if isinstance(family_options, dict) else {}
+    )
+    if not isinstance(vision_options, dict):
+        raise ValueError("qwen_vl_vision build options must be an object")
+    return vision_options
+
+
+def _dynamic_vision_profile(
+    model_dir: str, config: ModelConfig,
+) -> tuple[bool, int, int, int]:
+    """Resolve dynamic smart-resize limits from build and processor configs."""
+    options = _vision_build_options(config)
+    enabled = bool(options.get("dynamic_resolution", False))
+    processor_config: dict = {}
+    processor_path = Path(model_dir) / "preprocessor_config.json"
+    if processor_path.exists():
+        with processor_path.open(encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if isinstance(loaded, dict):
+            processor_config = loaded
+
+    min_pixels = int(options.get("min_pixels", 0))
+    max_pixels = int(options.get("max_pixels", 0))
+    if min_pixels <= 0:
+        min_pixels = int(processor_config.get("min_pixels", 3136))
+    if max_pixels <= 0:
+        max_pixels = int(processor_config.get("max_pixels", 12845056))
+    opt_pixels = int(options.get("opt_pixels", 200704))
+    if not min_pixels <= opt_pixels <= max_pixels:
+        raise ValueError(
+            "qwen_vl_vision pixel limits must satisfy min_pixels <= "
+            "opt_pixels <= max_pixels")
+    return enabled, min_pixels, opt_pixels, max_pixels
 
 
 class QwenVLPlugin:
@@ -179,8 +220,19 @@ class QwenVLPlugin:
             "fp32" if precision == "fp16" and _VISION_COMPONENT in selected_fp32
             else precision)
         fixed_h, fixed_w = _fixed_image_dimensions(config)
+        dynamic_resolution, min_pixels, opt_pixels, max_pixels = (
+            _dynamic_vision_profile(model_dir, config))
+        config.raw["_qwen_vl_dynamic_vision_profile"] = {
+            "enabled": dynamic_resolution,
+            "min_pixels": min_pixels,
+            "opt_pixels": opt_pixels,
+            "max_pixels": max_pixels,
+        }
 
         if _is_qwen3_vl(config):
+            if dynamic_resolution:
+                raise NotImplementedError(
+                    "Dynamic image resolution currently supports Qwen2.5-VL only")
             from .qwen_vl_vision_builder import build_qwen3_vl_vision_engine
             return build_qwen3_vl_vision_engine(
                 vision_config, vision_weights,
@@ -195,6 +247,10 @@ class QwenVLPlugin:
                 fixed_image_size=_DEFAULT_FIXED_IMAGE_SIZE,
                 fixed_image_height=fixed_h,
                 fixed_image_width=fixed_w,
+                dynamic_image_resolution=dynamic_resolution,
+                min_image_pixels=min_pixels,
+                opt_image_pixels=opt_pixels,
+                max_image_pixels=max_pixels,
                 precision=vision_precision,
                 verbose=verbose)
 
@@ -211,21 +267,34 @@ class QwenVLPlugin:
         grid_w = fixed_w // patch_size
         num_patches = grid_h * grid_w
         num_merged = num_patches // (merge_size * merge_size)
-
-        # Rectangular buckets preserve the source aspect ratio before applying
-        # Qwen's required merge-group pixel ordering. Square profiles retain
-        # the established direct-resize behavior for compatibility.
-        preproc = (
-            "aspect_preserve_merge_group_chw"
-            if fixed_h != fixed_w else "merge_group_chw"
+        profile = config.raw.get("_qwen_vl_dynamic_vision_profile", {})
+        dynamic_resolution = bool(
+            profile.get(
+                "enabled",
+                _vision_build_options(config).get("dynamic_resolution", False),
+            )
         )
+
+        if dynamic_resolution:
+            if _is_qwen3_vl(config):
+                raise NotImplementedError(
+                    "Dynamic image resolution currently supports Qwen2.5-VL only")
+            preproc = "qwen_smart_resize_patchify"
+        else:
+            # Rectangular buckets preserve the source aspect ratio before
+            # applying Qwen's required merge-group pixel ordering.
+            preproc = (
+                "aspect_preserve_merge_group_chw"
+                if fixed_h != fixed_w else "merge_group_chw"
+            )
 
         vl_cfg = {
             "image_token_id": 151655,
             "fixed_image_size": _DEFAULT_FIXED_IMAGE_SIZE,
             "fixed_image_height": fixed_h,
             "fixed_image_width": fixed_w,
-            "num_image_pad_tokens": num_merged,
+            "num_image_pad_tokens": 0 if dynamic_resolution else num_merged,
+            "dynamic_image_resolution": dynamic_resolution,
             "vision_output_dim": config.hidden_size,
             "preprocessor_type": preproc,
             "vl_prompt_template": (
@@ -237,6 +306,26 @@ class QwenVLPlugin:
             ),
             "image_token_str": "<|image_pad|>",
         }
+
+        if dynamic_resolution:
+            options = _vision_build_options(config)
+            vl_cfg.update({
+                "min_pixels": int(
+                    profile.get("min_pixels", options.get("min_pixels") or 3136)),
+                "max_pixels": int(
+                    profile.get("max_pixels", options.get("max_pixels") or 12845056)),
+                "vision_embed_dim": int(
+                    vision_config.get(
+                        "embed_dim", vision_config.get("hidden_size", 1280))),
+                "vision_num_heads": int(
+                    vision_config.get(
+                        "num_heads",
+                        vision_config.get("num_attention_heads", 16))),
+                "vision_window_size": int(
+                    vision_config.get("window_size", 112)),
+                "vision_rope_theta": float(
+                    vision_config.get("rope_theta", 10000.0)),
+            })
 
         if _is_qwen3_vl(config):
             ds_indexes = vision_config.get("deepstack_visual_indexes", [])

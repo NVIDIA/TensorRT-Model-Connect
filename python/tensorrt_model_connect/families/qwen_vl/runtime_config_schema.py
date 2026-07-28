@@ -55,6 +55,33 @@ VISION_SCHEMA = Schema(
             allowed_layers=_BUILD,
             validator=lambda value: isinstance(value, int) and value > 0,
         ),
+        ConfigField(
+            name="dynamic_resolution",
+            type_tag="bool",
+            default=False,
+            allowed_layers=_BUILD,
+        ),
+        ConfigField(
+            name="min_pixels",
+            type_tag="int32",
+            default=0,
+            allowed_layers=_BUILD,
+            validator=lambda value: isinstance(value, int) and value >= 0,
+        ),
+        ConfigField(
+            name="opt_pixels",
+            type_tag="int32",
+            default=200704,
+            allowed_layers=_BUILD,
+            validator=lambda value: isinstance(value, int) and value > 0,
+        ),
+        ConfigField(
+            name="max_pixels",
+            type_tag="int32",
+            default=0,
+            allowed_layers=_BUILD,
+            validator=lambda value: isinstance(value, int) and value >= 0,
+        ),
     ),
 )
 

@@ -11,9 +11,14 @@
 #include "utils/json_helpers.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <stdexcept>
 #include <string>
+#include <thread>
+#include <utility>
 
 namespace trtmc {
 
@@ -26,7 +31,8 @@ static stbir_filter resolve_stbir_filter(const std::string& interpolation) {
         return STBIR_FILTER_TRIANGLE;
     if (interpolation == "nearest")
         return STBIR_FILTER_POINT_SAMPLE;
-    // "bicubic" or anything else -> Catmull-Rom (matches PIL BICUBIC)
+    // "bicubic" or anything else -> Catmull-Rom. Qwen's native dynamic path
+    // uses the PyTorch-compatible antialiased implementation below instead.
     return STBIR_FILTER_CATMULLROM;
 }
 
@@ -42,12 +48,87 @@ struct LoadedImage {
     bool ok{false};
 };
 
+static int32_t preprocess_worker_count() {
+    static const int32_t workers = [] {
+        constexpr int32_t default_cap = 8;
+        int32_t requested = default_cap;
+        if (const char* value = std::getenv("TRTMC_QWEN_VL_PREPROCESS_THREADS")) {
+            char* end = nullptr;
+            const long parsed = std::strtol(value, &end, 10);
+            if (end != value && *end == '\0' && parsed > 0)
+                requested = static_cast<int32_t>(std::min(parsed, 64L));
+        }
+        const unsigned hardware = std::thread::hardware_concurrency();
+        return std::max<int32_t>(
+            1, std::min<int32_t>(requested, hardware == 0 ? default_cap : hardware));
+    }();
+    return workers;
+}
+
+template <typename Function>
+static void parallel_for_ranges(int32_t count, int32_t min_grain, Function&& function) {
+    if (count <= 0)
+        return;
+    const int32_t by_grain = (count + min_grain - 1) / min_grain;
+    const int32_t workers = std::min({count, by_grain, preprocess_worker_count()});
+    if (workers <= 1) {
+        function(0, count);
+        return;
+    }
+
+    std::vector<std::thread> threads;
+    threads.reserve(static_cast<std::size_t>(workers - 1));
+    for (int32_t worker = 0; worker < workers - 1; ++worker) {
+        const int32_t begin = count * worker / workers;
+        const int32_t end = count * (worker + 1) / workers;
+        threads.emplace_back([&, begin, end] { function(begin, end); });
+    }
+    function(count * (workers - 1) / workers, count);
+    for (auto& thread : threads)
+        thread.join();
+}
+
 static int target_height(const QwenVlPreprocessConfig& config) {
     return config.fixed_image_height > 0 ? config.fixed_image_height : config.fixed_image_size;
 }
 
 static int target_width(const QwenVlPreprocessConfig& config) {
     return config.fixed_image_width > 0 ? config.fixed_image_width : config.fixed_image_size;
+}
+
+std::array<int32_t, 2> qwen_vl_smart_resize(int32_t image_height, int32_t image_width,
+                                            int32_t factor, int32_t min_pixels,
+                                            int32_t max_pixels) {
+    if (image_height <= 0 || image_width <= 0 || factor <= 0 || min_pixels <= 0 ||
+        max_pixels < min_pixels) {
+        throw std::invalid_argument("invalid Qwen-VL smart-resize configuration");
+    }
+    const double long_side = static_cast<double>(std::max(image_height, image_width));
+    const double short_side = static_cast<double>(std::min(image_height, image_width));
+    if (long_side / short_side > 200.0)
+        throw std::invalid_argument("Qwen-VL image aspect ratio exceeds 200");
+
+    const auto aligned_round = [factor](double extent) {
+        return std::max(factor, static_cast<int32_t>(std::nearbyint(extent / factor)) * factor);
+    };
+    int32_t height = aligned_round(image_height);
+    int32_t width = aligned_round(image_width);
+    const int64_t aligned_pixels = static_cast<int64_t>(height) * width;
+    const double source_pixels = static_cast<double>(image_height) * image_width;
+    if (aligned_pixels > max_pixels) {
+        const double beta = std::sqrt(source_pixels / max_pixels);
+        height = std::max(factor,
+                          static_cast<int32_t>(std::floor(image_height / beta / factor)) * factor);
+        width = std::max(factor,
+                         static_cast<int32_t>(std::floor(image_width / beta / factor)) * factor);
+    } else if (aligned_pixels < min_pixels) {
+        const double beta = std::sqrt(static_cast<double>(min_pixels) / source_pixels);
+        height = std::max(factor,
+                          static_cast<int32_t>(std::ceil(image_height * beta / factor)) * factor);
+        width =
+            std::max(factor, static_cast<int32_t>(std::ceil(image_width * beta / factor)) * factor);
+    }
+    return {height, width};
 }
 
 // Resize raw uint8 RGB pixels to the fixed vision profile dimensions.
@@ -66,21 +147,210 @@ static std::vector<unsigned char> resize_raw(const unsigned char* raw, int width
     return resized;
 }
 
+// Qwen2-VL's fast Hugging Face processor resizes uint8 tensors with
+// torchvision bicubic interpolation and antialiasing enabled. In particular,
+// downsampling widens the cubic support; a plain Catmull-Rom resize does not.
+// The fixed-point coefficient conversion and per-axis uint8 rounding below
+// mirror PyTorch's CPU uint8 path so preprocessing does not drift before the
+// vision transformer.
+struct AntialiasWeights {
+    std::vector<int32_t> starts;
+    std::vector<int32_t> sizes;
+    std::vector<int16_t> values;
+    int32_t stride{0};
+    uint32_t precision{0};
+};
+
+static double keys_cubic(double x) {
+    constexpr double a = -0.5;
+    x = std::abs(x);
+    if (x < 1.0)
+        return ((a + 2.0) * x - (a + 3.0)) * x * x + 1.0;
+    if (x < 2.0)
+        return ((a * x - 5.0 * a) * x + 8.0 * a) * x - 4.0 * a;
+    return 0.0;
+}
+
+static AntialiasWeights make_bicubic_antialias_weights(int32_t input_size, int32_t output_size) {
+    constexpr int32_t interp_size = 4;
+    const double scale = static_cast<double>(input_size) / output_size;
+    const double support = scale >= 1.0 ? (interp_size * 0.5) * scale : interp_size * 0.5;
+    const int32_t kernel_size = static_cast<int32_t>(std::ceil(support)) * 2 + 1;
+
+    // PyTorch pads each int16 coefficient row to a 32-bit-aligned size in its
+    // optimized uint8 path. The padding does not participate in convolution.
+    int32_t coefficient_stride = kernel_size;
+    while (coefficient_stride % static_cast<int32_t>(sizeof(int32_t)) != 0)
+        ++coefficient_stride;
+
+    AntialiasWeights result;
+    result.starts.resize(static_cast<std::size_t>(output_size));
+    result.sizes.resize(static_cast<std::size_t>(output_size));
+    result.values.assign(static_cast<std::size_t>(output_size) * coefficient_stride, 0);
+    result.stride = coefficient_stride;
+
+    std::vector<double> floating(static_cast<std::size_t>(output_size) * kernel_size, 0.0);
+    double maximum_weight = 0.0;
+    for (int32_t output_index = 0; output_index < output_size; ++output_index) {
+        const double center = scale * (output_index + 0.5);
+        const double inverse_scale = scale >= 1.0 ? 1.0 / scale : 1.0;
+        const int32_t start = std::max(static_cast<int32_t>(center - support + 0.5), 0);
+        const int32_t size =
+            std::clamp(std::min(static_cast<int32_t>(center + support + 0.5), input_size) - start,
+                       0, kernel_size);
+        result.starts[static_cast<std::size_t>(output_index)] = start;
+        result.sizes[static_cast<std::size_t>(output_index)] = size;
+
+        double total = 0.0;
+        double* row = floating.data() + static_cast<std::size_t>(output_index) * kernel_size;
+        for (int32_t index = 0; index < size; ++index) {
+            row[index] = keys_cubic((index + start - center + 0.5) * inverse_scale);
+            total += row[index];
+        }
+        if (total != 0.0) {
+            for (int32_t index = 0; index < size; ++index) {
+                row[index] /= total;
+                maximum_weight = std::max(maximum_weight, row[index]);
+            }
+        }
+    }
+
+    // Select the greatest fixed-point precision whose largest coefficient fits
+    // in int16, exactly as PyTorch's uint8 antialias implementation does.
+    for (; result.precision < 22; ++result.precision) {
+        const int32_t next = static_cast<int32_t>(
+            0.5 + maximum_weight * static_cast<double>(uint32_t{1} << (result.precision + 1)));
+        if (next >= (1 << 15))
+            break;
+    }
+
+    const double multiplier = static_cast<double>(uint32_t{1} << result.precision);
+    for (int32_t output_index = 0; output_index < output_size; ++output_index) {
+        const double* source =
+            floating.data() + static_cast<std::size_t>(output_index) * kernel_size;
+        int16_t* destination =
+            result.values.data() + static_cast<std::size_t>(output_index) * coefficient_stride;
+        for (int32_t index = 0; index < kernel_size; ++index) {
+            const double value = source[index] * multiplier;
+            destination[index] =
+                static_cast<int16_t>(value < 0.0 ? static_cast<int32_t>(value - 0.5)
+                                                 : static_cast<int32_t>(value + 0.5));
+        }
+    }
+    return result;
+}
+
+static uint8_t fixed_point_pixel(const uint8_t* source, int32_t source_stride,
+                                 const int16_t* weights, int32_t count, uint32_t precision) {
+    int32_t value = int32_t{1} << (precision - 1);
+    for (int32_t index = 0; index < count; ++index)
+        value += static_cast<int32_t>(source[static_cast<std::size_t>(index) * source_stride]) *
+                 weights[index];
+    return static_cast<uint8_t>(std::clamp(value >> precision, 0, 255));
+}
+
+std::vector<unsigned char> qwen_vl_resize_bicubic_antialias_u8(const unsigned char* raw,
+                                                               int32_t width, int32_t height,
+                                                               int32_t target_width,
+                                                               int32_t target_height) {
+    if (raw == nullptr || width <= 0 || height <= 0 || target_width <= 0 || target_height <= 0)
+        return {};
+    if (width == target_width && height == target_height) {
+        return {raw, raw + static_cast<std::size_t>(width) * height * 3};
+    }
+
+    std::vector<unsigned char> horizontal;
+    const unsigned char* vertical_source = raw;
+    if (width != target_width) {
+        const auto weights = make_bicubic_antialias_weights(width, target_width);
+        horizontal.resize(static_cast<std::size_t>(height) * target_width * 3);
+        parallel_for_ranges(height, 16, [&](int32_t begin_y, int32_t end_y) {
+            for (int32_t y = begin_y; y < end_y; ++y) {
+                for (int32_t x = 0; x < target_width; ++x) {
+                    const int32_t start = weights.starts[static_cast<std::size_t>(x)];
+                    const int32_t count = weights.sizes[static_cast<std::size_t>(x)];
+                    const int16_t* coefficients =
+                        weights.values.data() + static_cast<std::size_t>(x) * weights.stride;
+                    for (int32_t channel = 0; channel < 3; ++channel) {
+                        const auto source_offset =
+                            (static_cast<std::size_t>(y) * width + start) * 3 + channel;
+                        const auto destination_offset =
+                            (static_cast<std::size_t>(y) * target_width + x) * 3 + channel;
+                        horizontal[destination_offset] = fixed_point_pixel(
+                            raw + source_offset, 3, coefficients, count, weights.precision);
+                    }
+                }
+            }
+        });
+        vertical_source = horizontal.data();
+    }
+
+    if (height == target_height)
+        return horizontal;
+
+    const auto weights = make_bicubic_antialias_weights(height, target_height);
+    std::vector<unsigned char> resized(static_cast<std::size_t>(target_height) * target_width * 3);
+    const int32_t row_stride = target_width * 3;
+    parallel_for_ranges(target_height, 16, [&](int32_t begin_y, int32_t end_y) {
+        for (int32_t y = begin_y; y < end_y; ++y) {
+            const int32_t start = weights.starts[static_cast<std::size_t>(y)];
+            const int32_t count = weights.sizes[static_cast<std::size_t>(y)];
+            const int16_t* coefficients =
+                weights.values.data() + static_cast<std::size_t>(y) * weights.stride;
+            for (int32_t x = 0; x < target_width; ++x) {
+                for (int32_t channel = 0; channel < 3; ++channel) {
+                    const auto source_offset =
+                        (static_cast<std::size_t>(start) * target_width + x) * 3 + channel;
+                    const auto destination_offset =
+                        (static_cast<std::size_t>(y) * target_width + x) * 3 + channel;
+                    resized[destination_offset] =
+                        fixed_point_pixel(vertical_source + source_offset, row_stride, coefficients,
+                                          count, weights.precision);
+                }
+            }
+        }
+    });
+    return resized;
+}
+
 // Convert resized uint8 HWC buffer to float32 CHW, normalizing per channel.
 static bool normalize_to_chw(const std::vector<unsigned char>& resized, int target_width,
                              int target_height, const QwenVlPreprocessConfig& config,
                              std::vector<float>& out_chw) {
-    ImageNormalizationParams params;
-    params.width = target_width;
-    params.height = target_height;
-    params.channels = config.in_channels;
-    params.image_mean[0] = config.image_mean[0];
-    params.image_mean[1] = config.image_mean[1];
-    params.image_mean[2] = config.image_mean[2];
-    params.image_std[0] = config.image_std[0];
-    params.image_std[1] = config.image_std[1];
-    params.image_std[2] = config.image_std[2];
-    return normalize_hwc_u8_to_chw(resized, params, out_chw);
+    if (target_width <= 0 || target_height <= 0 || config.in_channels <= 0 ||
+        config.in_channels > 3) {
+        return false;
+    }
+    const std::size_t pixel_count = static_cast<std::size_t>(target_width) * target_height;
+    const std::size_t required_size = pixel_count * config.in_channels;
+    if (resized.size() < required_size)
+        return false;
+
+    out_chw.resize(required_size);
+    parallel_for_ranges(
+        config.in_channels * target_height, 16, [&](int32_t begin_row, int32_t end_row) {
+            for (int32_t row = begin_row; row < end_row; ++row) {
+                const int32_t channel = row / target_height;
+                const int32_t y = row % target_height;
+                const float mean = config.image_mean[channel];
+                const float standard_deviation = config.image_std[channel];
+                const float inverse_standard_deviation =
+                    standard_deviation > 1.0e-8F ? 1.0F / standard_deviation : 1.0F;
+                const std::size_t source_row =
+                    static_cast<std::size_t>(y) * target_width * config.in_channels + channel;
+                const std::size_t destination_row =
+                    static_cast<std::size_t>(channel) * pixel_count +
+                    static_cast<std::size_t>(y) * target_width;
+                for (int32_t x = 0; x < target_width; ++x) {
+                    const float pixel =
+                        static_cast<float>(resized[source_row + static_cast<std::size_t>(x) *
+                                                                    config.in_channels]) /
+                        255.0F;
+                    out_chw[destination_row + x] = (pixel - mean) * inverse_standard_deviation;
+                }
+            }
+        });
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,6 +384,40 @@ static LoadedImage load_resize_normalize(const runtime::adapters::io::DecodedIma
     }
     loaded.target_height = dst_h;
     loaded.target_width = dst_w;
+    loaded.channels = config.in_channels;
+    loaded.ok = true;
+    return loaded;
+}
+
+static LoadedImage load_smart_resize_normalize(const runtime::adapters::io::DecodedImage& image,
+                                               const QwenVlPreprocessConfig& config) {
+    LoadedImage loaded;
+    if (image.empty()) {
+        std::cerr << "[trtmc] Failed to preprocess smart-resized image: decoded image missing"
+                  << std::endl;
+        return loaded;
+    }
+    std::array<int32_t, 2> target{};
+    try {
+        target =
+            qwen_vl_smart_resize(image.height, image.width, config.patch_size * config.merge_size,
+                                 config.min_pixels, config.max_pixels);
+    } catch (const std::invalid_argument& error) {
+        std::cerr << "[trtmc] Failed to smart-resize Qwen-VL image: " << error.what() << std::endl;
+        return loaded;
+    }
+    auto resized = config.interpolation == "bicubic"
+                       ? qwen_vl_resize_bicubic_antialias_u8(image.pixels.data(), image.width,
+                                                             image.height, target[1], target[0])
+                       : resize_raw(image.pixels.data(), image.width, image.height, target[1],
+                                    target[0], resolve_stbir_filter(config.interpolation));
+    if (resized.empty() ||
+        !normalize_to_chw(resized, target[1], target[0], config, loaded.img_chw)) {
+        std::cerr << "[trtmc] Failed to resize or normalize Qwen-VL image" << std::endl;
+        return loaded;
+    }
+    loaded.target_height = target[0];
+    loaded.target_width = target[1];
     loaded.channels = config.in_channels;
     loaded.ok = true;
     return loaded;
@@ -381,6 +685,205 @@ static QwenVlPreprocessedImage preprocess_patchify_chw(const LoadedImage& loaded
     return result;
 }
 
+static std::vector<int32_t> build_dynamic_window_order(int32_t grid_h, int32_t grid_w,
+                                                       const QwenVlPreprocessConfig& config,
+                                                       QwenVlPreprocessedImage& result) {
+    const int32_t merged_h = grid_h / config.merge_size;
+    const int32_t merged_w = grid_w / config.merge_size;
+    const int32_t window_groups = config.vision_window_size / config.merge_size / config.patch_size;
+    const int32_t windows_h = (merged_h + window_groups - 1) / window_groups;
+    const int32_t windows_w = (merged_w + window_groups - 1) / window_groups;
+    const int32_t num_groups = merged_h * merged_w;
+    result.vision_window_indices.reserve(static_cast<std::size_t>(num_groups));
+    result.vision_reverse_indices.resize(static_cast<std::size_t>(num_groups));
+    std::vector<int32_t> group_counts;
+    group_counts.reserve(static_cast<std::size_t>(windows_h * windows_w));
+    for (int32_t window_h = 0; window_h < windows_h; ++window_h) {
+        for (int32_t window_w = 0; window_w < windows_w; ++window_w) {
+            int32_t count = 0;
+            for (int32_t local_h = 0; local_h < window_groups; ++local_h) {
+                for (int32_t local_w = 0; local_w < window_groups; ++local_w) {
+                    const int32_t row = window_h * window_groups + local_h;
+                    const int32_t col = window_w * window_groups + local_w;
+                    if (row >= merged_h || col >= merged_w)
+                        continue;
+                    const int32_t group = row * merged_w + col;
+                    result.vision_reverse_indices[static_cast<std::size_t>(group)] =
+                        static_cast<int32_t>(result.vision_window_indices.size());
+                    result.vision_window_indices.push_back(group);
+                    ++count;
+                }
+            }
+            if (count > 0)
+                group_counts.push_back(count);
+        }
+    }
+    return group_counts;
+}
+
+static void build_dynamic_vision_rope(int32_t merged_w, const QwenVlPreprocessConfig& config,
+                                      QwenVlPreprocessedImage& result) {
+    const int32_t head_dim = config.vision_embed_dim / config.vision_num_heads;
+    const int32_t half_head_dim = head_dim / 2;
+    const int32_t axis_frequencies = half_head_dim / 2;
+    const int32_t merge = config.merge_size;
+    const std::size_t patch_count =
+        result.vision_window_indices.size() * static_cast<std::size_t>(merge * merge);
+    result.vision_rope_half_dim = half_head_dim;
+    result.vision_cos_half.reserve(patch_count * static_cast<std::size_t>(half_head_dim));
+    result.vision_sin_half.reserve(patch_count * static_cast<std::size_t>(half_head_dim));
+
+    // RoPE values depend only on the spatial position and frequency. A large
+    // document can contain tens of thousands of patches but only a few
+    // hundred distinct row/column positions. Compute each position/frequency
+    // pair once instead of repeating pow/cos/sin for every patch.
+    int32_t max_group_h = -1;
+    int32_t max_group_w = -1;
+    for (const int32_t group : result.vision_window_indices) {
+        max_group_h = std::max(max_group_h, group / merged_w);
+        max_group_w = std::max(max_group_w, group % merged_w);
+    }
+    const int32_t position_count_h = (max_group_h + 1) * merge;
+    const int32_t position_count_w = (max_group_w + 1) * merge;
+
+    const auto build_axis_cache = [&](int32_t position_count) {
+        std::pair<std::vector<float>, std::vector<float>> cache;
+        cache.first.resize(static_cast<std::size_t>(position_count) * axis_frequencies);
+        cache.second.resize(static_cast<std::size_t>(position_count) * axis_frequencies);
+        for (int32_t position = 0; position < position_count; ++position) {
+            for (int32_t frequency = 0; frequency < axis_frequencies; ++frequency) {
+                const double exponent = static_cast<double>(2 * frequency) / half_head_dim;
+                const double angle = position / std::pow(config.vision_rope_theta, exponent);
+                const std::size_t offset =
+                    static_cast<std::size_t>(position) * axis_frequencies + frequency;
+                cache.first[offset] = static_cast<float>(std::cos(angle));
+                cache.second[offset] = static_cast<float>(std::sin(angle));
+            }
+        }
+        return cache;
+    };
+    const auto height_cache = build_axis_cache(position_count_h);
+    const auto width_cache = build_axis_cache(position_count_w);
+
+    for (const int32_t group : result.vision_window_indices) {
+        const int32_t group_h = group / merged_w;
+        const int32_t group_w = group % merged_w;
+        for (int32_t merge_h = 0; merge_h < merge; ++merge_h) {
+            for (int32_t merge_w = 0; merge_w < merge; ++merge_w) {
+                const int32_t position_h = group_h * merge + merge_h;
+                const int32_t position_w = group_w * merge + merge_w;
+                for (const auto& [position, cache] :
+                     {std::pair{position_h, &height_cache}, std::pair{position_w, &width_cache}}) {
+                    const std::size_t begin = static_cast<std::size_t>(position) * axis_frequencies;
+                    result.vision_cos_half.insert(result.vision_cos_half.end(),
+                                                  cache->first.begin() + begin,
+                                                  cache->first.begin() + begin + axis_frequencies);
+                    result.vision_sin_half.insert(result.vision_sin_half.end(),
+                                                  cache->second.begin() + begin,
+                                                  cache->second.begin() + begin + axis_frequencies);
+                }
+            }
+        }
+    }
+}
+
+static void build_dynamic_window_padding(const std::vector<int32_t>& group_counts,
+                                         const QwenVlPreprocessConfig& config,
+                                         QwenVlPreprocessedImage& result) {
+    const int32_t merge_unit = config.merge_size * config.merge_size;
+    const int32_t window_groups = config.vision_window_size / config.merge_size / config.patch_size;
+    const int32_t patches_per_window = window_groups * window_groups * merge_unit;
+    result.vision_window_count = static_cast<int32_t>(group_counts.size());
+    result.vision_patches_per_window = patches_per_window;
+    int32_t compact_offset = 0;
+    for (const int32_t groups : group_counts) {
+        const int32_t real_patches = groups * merge_unit;
+        const int32_t padded_offset =
+            static_cast<int32_t>(result.vision_padded_window_indices.size());
+        for (int32_t patch = 0; patch < patches_per_window; ++patch) {
+            const bool real = patch < real_patches;
+            result.vision_padded_window_indices.push_back(compact_offset + (real ? patch : 0));
+            result.vision_window_mask.push_back(real ? 0.0F : -1.0e9F);
+            if (real)
+                result.vision_compact_window_indices.push_back(padded_offset + patch);
+        }
+        compact_offset += real_patches;
+    }
+}
+
+static QwenVlPreprocessedImage
+preprocess_qwen_smart_resize_patchify(const LoadedImage& loaded,
+                                      const QwenVlPreprocessConfig& config) {
+    QwenVlPreprocessedImage result;
+    const int32_t patch = config.patch_size;
+    const int32_t merge = config.merge_size;
+    const int32_t grid_h = loaded.target_height / patch;
+    const int32_t grid_w = loaded.target_width / patch;
+    if (patch <= 0 || merge <= 0 || grid_h % merge || grid_w % merge ||
+        config.temporal_patch_size <= 0 || config.vision_num_heads <= 0 ||
+        config.vision_embed_dim % config.vision_num_heads) {
+        std::cerr << "[trtmc] Invalid dynamic Qwen-VL patch configuration" << std::endl;
+        return result;
+    }
+
+    const int32_t patch_vector = loaded.channels * config.temporal_patch_size * patch * patch;
+    const int32_t num_patches = grid_h * grid_w;
+    result.pixel_values.resize(static_cast<std::size_t>(num_patches) * patch_vector);
+    const int32_t group_rows = grid_h / merge;
+    const int32_t group_columns = grid_w / merge;
+    parallel_for_ranges(group_rows, 2, [&](int32_t begin_group_h, int32_t end_group_h) {
+        for (int32_t group_h = begin_group_h; group_h < end_group_h; ++group_h) {
+            for (int32_t group_w = 0; group_w < group_columns; ++group_w) {
+                for (int32_t merge_h = 0; merge_h < merge; ++merge_h) {
+                    for (int32_t merge_w = 0; merge_w < merge; ++merge_w) {
+                        const std::size_t patch_index =
+                            ((static_cast<std::size_t>(group_h) * group_columns + group_w) * merge +
+                             merge_h) *
+                                merge +
+                            merge_w;
+                        float* patch_destination =
+                            result.pixel_values.data() + patch_index * patch_vector;
+                        for (int32_t channel = 0; channel < loaded.channels; ++channel) {
+                            for (int32_t temporal = 0; temporal < config.temporal_patch_size;
+                                 ++temporal) {
+                                for (int32_t patch_h = 0; patch_h < patch; ++patch_h) {
+                                    const int32_t source_h =
+                                        (group_h * merge + merge_h) * patch + patch_h;
+                                    const int32_t source_w = (group_w * merge + merge_w) * patch;
+                                    const std::size_t source =
+                                        (static_cast<std::size_t>(channel) * loaded.target_height +
+                                         source_h) *
+                                            loaded.target_width +
+                                        source_w;
+                                    const std::size_t destination =
+                                        ((static_cast<std::size_t>(channel) *
+                                              config.temporal_patch_size +
+                                          temporal) *
+                                             patch +
+                                         patch_h) *
+                                        patch;
+                                    std::copy_n(loaded.img_chw.data() + source, patch,
+                                                patch_destination + destination);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    result.image_grid_hws = {grid_h, grid_w};
+    result.channels = patch_vector;
+    result.height = loaded.target_height;
+    result.width = loaded.target_width;
+    const auto group_counts = build_dynamic_window_order(grid_h, grid_w, config, result);
+    build_dynamic_vision_rope(grid_w / merge, config, result);
+    build_dynamic_window_padding(group_counts, config, result);
+    result.ok = true;
+    return result;
+}
+
 // ---------------------------------------------------------------------------
 // Dispatcher
 // ---------------------------------------------------------------------------
@@ -398,6 +901,8 @@ struct PreprocessDispatch {
 };
 
 static PreprocessDispatch resolve_preprocess_dispatch(const std::string& preprocessor_type) {
+    if (preprocessor_type == "qwen_smart_resize_patchify")
+        return {load_smart_resize_normalize, preprocess_qwen_smart_resize_patchify, false};
     if (preprocessor_type == "aspect_preserve_merge_group_chw")
         return {load_aspect_preserve_resize_normalize, preprocess_merge_group_chw, false};
     if (preprocessor_type == "center_crop_chw")
@@ -467,12 +972,13 @@ QwenVlPreprocessedImage qwen_vl_load_and_preprocess_image(const std::string& ima
 }
 
 std::string qwen_vl_format_prompt(const std::string& user_prompt,
-                                  const QwenVlPreprocessConfig& config) {
+                                  const QwenVlPreprocessConfig& config, int32_t image_pad_tokens) {
     // Build image_pads string: repeat image_token_str num_image_pad_tokens times
     std::string image_pads;
-    image_pads.reserve(static_cast<std::size_t>(config.num_image_pad_tokens) *
-                       config.image_token_str.size());
-    for (int32_t i = 0; i < config.num_image_pad_tokens; ++i) {
+    const int32_t pad_count =
+        image_pad_tokens >= 0 ? image_pad_tokens : config.num_image_pad_tokens;
+    image_pads.reserve(static_cast<std::size_t>(pad_count) * config.image_token_str.size());
+    for (int32_t i = 0; i < pad_count; ++i) {
         image_pads += config.image_token_str;
     }
 
@@ -567,6 +1073,16 @@ static void parse_base_vl_config(const std::string& config_text, QwenVlPreproces
         extract_json_int(config_text, "temporal_patch_size", cfg.temporal_patch_size);
     cfg.num_image_pad_tokens = extract_json_int(config_text, "num_image_pad_tokens", 256);
     cfg.vision_output_dim = extract_json_int(config_text, "vision_output_dim", 0);
+    cfg.dynamic_image_resolution =
+        extract_json_bool(config_text, "dynamic_image_resolution", false);
+    cfg.vision_embed_dim = extract_json_int(config_text, "vision_embed_dim", cfg.vision_embed_dim);
+    cfg.vision_num_heads = extract_json_int(config_text, "vision_num_heads", cfg.vision_num_heads);
+    cfg.vision_window_size =
+        extract_json_int(config_text, "vision_window_size", cfg.vision_window_size);
+    cfg.vision_rope_theta =
+        extract_json_float(config_text, "vision_rope_theta", cfg.vision_rope_theta);
+    cfg.min_pixels = extract_json_int(config_text, "min_pixels", cfg.min_pixels);
+    cfg.max_pixels = extract_json_int(config_text, "max_pixels", cfg.max_pixels);
     cfg.vl_prompt_template = extract_json_string(config_text, "vl_prompt_template", "");
     cfg.image_token_str = extract_json_string(config_text, "image_token_str", "");
     cfg.interpolation = extract_json_string(config_text, "interpolation", "bicubic");
@@ -598,6 +1114,8 @@ static void apply_preprocessor_config_overrides(const std::string& config_text,
     cfg.patch_size = extract_json_int(preprocessor_config_text, "patch_size", 14);
     cfg.merge_size = extract_json_int(preprocessor_config_text, "merge_size", 2);
     cfg.temporal_patch_size = extract_json_int(preprocessor_config_text, "temporal_patch_size", 2);
+    cfg.min_pixels = extract_json_int(preprocessor_config_text, "min_pixels", cfg.min_pixels);
+    cfg.max_pixels = extract_json_int(preprocessor_config_text, "max_pixels", cfg.max_pixels);
 
     auto mean_vals = extract_json_float_array(preprocessor_config_text, "image_mean", 3);
     assign_image_norm_triplet(mean_vals, cfg.image_mean);

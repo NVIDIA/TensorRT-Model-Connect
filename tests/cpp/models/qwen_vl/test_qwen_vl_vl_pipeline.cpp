@@ -1060,7 +1060,14 @@ static void test_vl_pool_isolates_concurrent_lora_selection() {
     cudaStreamDestroy(stream_b);
 }
 
+static void test_qwen_vl_smart_resize() {
+    const auto resized = trtmc::qwen_vl_smart_resize(1000, 2000, 28, 3136, 200704);
+    check(resized[0] == 308 && resized[1] == 616,
+          "smart_resize: preserves aspect ratio within the pixel limit");
+}
+
 int main() {
+    test_qwen_vl_smart_resize();
     test_vl_text_only();
     test_vl_text_only_max_tokens();
     test_vl_validates_decoder();

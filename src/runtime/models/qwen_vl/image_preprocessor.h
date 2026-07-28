@@ -28,6 +28,13 @@ struct QwenVlPreprocessConfig {
     int32_t num_image_pad_tokens{256};
     int32_t image_token_id{-1};
     int32_t vision_output_dim{0};
+    bool dynamic_image_resolution{false};
+    int32_t min_pixels{3136};
+    int32_t max_pixels{12845056};
+    int32_t vision_embed_dim{1280};
+    int32_t vision_num_heads{16};
+    int32_t vision_window_size{112};
+    float vision_rope_theta{10000.0F};
     std::string vl_prompt_template;
     std::string image_token_str;
     // Preprocessing strategy: "merge_group_chw", "simple_chw",
@@ -41,7 +48,17 @@ struct QwenVlPreprocessConfig {
 struct QwenVlPreprocessedImage {
     std::vector<float> pixel_values;     // Layout depends on preprocessor_type
     std::vector<int32_t> image_grid_hws; // [height, width] patch grid for patchified inputs
-    int32_t channels{0};                 // C*T for merge_group_chw, C for simple_chw
+    std::vector<float> vision_cos_half;
+    std::vector<float> vision_sin_half;
+    std::vector<int32_t> vision_window_indices;
+    std::vector<int32_t> vision_padded_window_indices;
+    std::vector<int32_t> vision_compact_window_indices;
+    std::vector<int32_t> vision_reverse_indices;
+    std::vector<float> vision_window_mask;
+    int32_t vision_window_count{0};
+    int32_t vision_patches_per_window{0};
+    int32_t vision_rope_half_dim{0};
+    int32_t channels{0}; // C*T for merge_group_chw, C for simple_chw
     int32_t height{0};
     int32_t width{0};
     bool ok{false};
@@ -51,6 +68,18 @@ struct QwenVlMropePositions {
     std::vector<std::array<int32_t, 3>> token_positions;
     int32_t next_position{0};
 };
+
+// Mirror Hugging Face Qwen2-VL smart_resize. Returned dimensions are aligned
+// to patch_size * merge_size and constrained by min/max pixel area.
+std::array<int32_t, 2> qwen_vl_smart_resize(int32_t image_height, int32_t image_width,
+                                            int32_t factor, int32_t min_pixels, int32_t max_pixels);
+
+// Resize HWC uint8 RGB pixels with the bicubic-antialias contract used by the
+// Hugging Face fast Qwen2-VL image processor.
+std::vector<unsigned char> qwen_vl_resize_bicubic_antialias_u8(const unsigned char* pixels,
+                                                               int32_t width, int32_t height,
+                                                               int32_t target_width,
+                                                               int32_t target_height);
 
 // Build Hugging Face-compatible Qwen2.5-VL temporal/height/width positions
 // for a single image. grid_height/grid_width are post-merge token dimensions.
@@ -83,7 +112,8 @@ QwenVlPreprocessedImage qwen_vl_load_and_preprocess_image(const std::string& ima
 // Format a VL prompt with image pad tokens from the template.
 // Replaces {image_pads} and {prompt} in vl_prompt_template.
 std::string qwen_vl_format_prompt(const std::string& user_prompt,
-                                  const QwenVlPreprocessConfig& config);
+                                  const QwenVlPreprocessConfig& config,
+                                  int32_t image_pad_tokens = -1);
 
 // Parse QwenVlPreprocessConfig from config.json text.
 QwenVlPreprocessConfig qwen_vl_parse_preprocess_config(const std::string& config_text,
