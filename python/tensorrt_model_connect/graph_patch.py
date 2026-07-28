@@ -46,6 +46,7 @@ GRAPH_REGION_SET_KIND = GRAPH_REGION_SELECTION_SET_KIND
 ProvenanceProvider = (
     Mapping[Any, Mapping[str, Any]] | Callable[[Any, int], Mapping[str, Any] | None]
 )
+LayerIdentityProvider = Callable[[Any, int], Mapping[str, Any] | None]
 ReplacementCallback = Callable[
     [Any, tuple[Any, ...], "RegionArtifact"],
     Sequence[Any],
@@ -66,13 +67,18 @@ def _json_value(value: Any) -> Any:
             raise GraphPatchError("Graph metadata cannot contain NaN or infinity")
         return value
     if isinstance(value, Mapping):
+        non_string_keys = [key for key in value if not isinstance(key, str)]
+        if non_string_keys:
+            raise GraphPatchError("Graph metadata object keys must be strings")
         return {
-            str(key): _json_value(item)
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            key: _json_value(item) for key, item in sorted(value.items(), key=lambda pair: pair[0])
         }
     if isinstance(value, (list, tuple)):
         return [_json_value(item) for item in value]
-    return str(value)
+    raise GraphPatchError(
+        "Graph metadata values must use JSON scalars, arrays, or objects; "
+        f"got {type(value).__name__}"
+    )
 
 
 def _fingerprint(payload: Mapping[str, Any]) -> str:
@@ -91,6 +97,46 @@ def _validate_fingerprint(expected: Any, actual: str, artifact: str) -> None:
         raise GraphPatchError(
             f"{artifact} fingerprint mismatch: expected {expected}, computed {actual}"
         )
+
+
+@dataclass(frozen=True)
+class LayerIdentityContract:
+    """Versioned model-owned meaning of per-layer identity attributes.
+
+    ``provider_id`` identifies the model/family-owned provider implementation.
+    Its owner must increment ``schema_version`` whenever the meaning or coverage
+    of the returned attributes changes.
+    """
+
+    provider_id: str
+    schema_version: int
+
+    def validate(self) -> None:
+        if not isinstance(self.provider_id, str) or not self.provider_id:
+            raise GraphPatchError("Layer identity provider_id must be a non-empty string")
+        if type(self.schema_version) is not int or self.schema_version < 1:
+            raise GraphPatchError("Layer identity schema_version must be a positive integer")
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "provider_id": self.provider_id,
+            "schema_version": self.schema_version,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "LayerIdentityContract":
+        unknown = set(value) - {"provider_id", "schema_version"}
+        if unknown:
+            raise GraphPatchError(
+                f"Unknown layer identity contract fields: {sorted(str(item) for item in unknown)}"
+            )
+        contract = cls(
+            provider_id=value.get("provider_id"),
+            schema_version=value.get("schema_version"),
+        )
+        contract.validate()
+        return contract
 
 
 @dataclass(frozen=True)
@@ -143,6 +189,8 @@ class Node:
     op: str
     inputs: tuple[str | None, ...] = ()
     outputs: tuple[str | None, ...] = ()
+    identity_attributes: Mapping[str, Any] = field(default_factory=dict)
+    identity_complete: bool = False
     provenance: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -152,12 +200,30 @@ class Node:
             "op": self.op,
             "inputs": list(self.inputs),
             "outputs": list(self.outputs),
+            "identity": {
+                "attributes": _json_value(self.identity_attributes),
+                "complete": self.identity_complete,
+            },
             "provenance": _json_value(self.provenance),
         }
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "Node":
+        raw_identity = value.get("identity", {})
         raw_provenance = value.get("provenance", {})
+        if not isinstance(raw_identity, Mapping):
+            raise GraphPatchError("Node identity must be a JSON object")
+        unknown_identity = set(raw_identity) - {"attributes", "complete"}
+        if unknown_identity:
+            raise GraphPatchError(
+                f"Unknown node identity fields: {sorted(str(item) for item in unknown_identity)}"
+            )
+        raw_identity_attributes = raw_identity.get("attributes", {})
+        if not isinstance(raw_identity_attributes, Mapping):
+            raise GraphPatchError("Node identity attributes must be a JSON object")
+        identity_complete = raw_identity.get("complete", False)
+        if type(identity_complete) is not bool:
+            raise GraphPatchError("Node identity complete must be a boolean")
         if not isinstance(raw_provenance, Mapping):
             raise GraphPatchError("Node provenance must be a JSON object")
         return cls(
@@ -166,6 +232,8 @@ class Node:
             op=str(value.get("op", "")),
             inputs=tuple(None if item is None else str(item) for item in value.get("inputs", ())),
             outputs=tuple(None if item is None else str(item) for item in value.get("outputs", ())),
+            identity_attributes=_json_value(raw_identity_attributes),
+            identity_complete=identity_complete,
             provenance=_json_value(raw_provenance),
         )
 
@@ -180,7 +248,22 @@ class GraphSnapshot:
     inputs: tuple[str, ...] = ()
     outputs: tuple[str, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    identity_contract: LayerIdentityContract | None = None
     schema_version: int = GRAPH_SNAPSHOT_SCHEMA_VERSION
+
+    @property
+    def identity_complete(self) -> bool:
+        return self.identity_contract is not None and all(
+            node.identity_complete for node in self.nodes
+        )
+
+    def _identity_dict(self) -> dict[str, Any]:
+        return {
+            "contract": (
+                None if self.identity_contract is None else self.identity_contract.to_dict()
+            ),
+            "complete": self.identity_complete,
+        }
 
     def _payload_dict(self) -> dict[str, Any]:
         return {
@@ -191,6 +274,7 @@ class GraphSnapshot:
             "inputs": list(self.inputs),
             "outputs": list(self.outputs),
             "metadata": _json_value(self.metadata),
+            "identity": self._identity_dict(),
         }
 
     def _fingerprint_payload_dict(self) -> dict[str, Any]:
@@ -213,6 +297,10 @@ class GraphSnapshot:
                     "op": node.op,
                     "inputs": list(node.inputs),
                     "outputs": list(node.outputs),
+                    "identity": {
+                        "attributes": _json_value(node.identity_attributes),
+                        "complete": node.identity_complete,
+                    },
                 }
                 for node in self.nodes
             ],
@@ -220,6 +308,7 @@ class GraphSnapshot:
             "inputs": list(self.inputs),
             "outputs": list(self.outputs),
             "metadata": _json_value(self.metadata),
+            "identity": self._identity_dict(),
         }
 
     @property
@@ -243,8 +332,22 @@ class GraphSnapshot:
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "GraphSnapshot":
         raw_metadata = value.get("metadata", {})
+        raw_identity = value.get("identity", {})
         if not isinstance(raw_metadata, Mapping):
             raise GraphPatchError("Graph metadata must be a JSON object")
+        if not isinstance(raw_identity, Mapping):
+            raise GraphPatchError("Graph identity must be a JSON object")
+        unknown_identity = set(raw_identity) - {"contract", "complete"}
+        if unknown_identity:
+            raise GraphPatchError(
+                f"Unknown graph identity fields: {sorted(str(item) for item in unknown_identity)}"
+            )
+        raw_contract = raw_identity.get("contract")
+        if raw_contract is not None and not isinstance(raw_contract, Mapping):
+            raise GraphPatchError("Graph identity contract must be a JSON object or null")
+        identity_complete = raw_identity.get("complete", False)
+        if type(identity_complete) is not bool:
+            raise GraphPatchError("Graph identity complete must be a boolean")
         snapshot = cls(
             schema_version=int(value.get("schema_version", GRAPH_SNAPSHOT_SCHEMA_VERSION)),
             name=str(value.get("name", "")),
@@ -253,12 +356,20 @@ class GraphSnapshot:
             inputs=tuple(str(item) for item in value.get("inputs", ())),
             outputs=tuple(str(item) for item in value.get("outputs", ())),
             metadata=_json_value(raw_metadata),
+            identity_contract=(
+                None if raw_contract is None else LayerIdentityContract.from_dict(raw_contract)
+            ),
         )
         if snapshot.schema_version != GRAPH_SNAPSHOT_SCHEMA_VERSION:
             raise GraphPatchError(
                 "Unsupported graph snapshot schema_version "
                 f"{snapshot.schema_version}; expected "
                 f"{GRAPH_SNAPSHOT_SCHEMA_VERSION}"
+            )
+        snapshot._validate_identity()
+        if identity_complete != snapshot.identity_complete:
+            raise GraphPatchError(
+                "Graph identity completeness does not match its node identity records"
             )
         _validate_fingerprint(
             value.get("fingerprint"),
@@ -311,6 +422,20 @@ class GraphSnapshot:
                 "Graph inputs/outputs reference unknown tensors: "
                 f"{sorted(unknown_inputs | unknown_outputs)}"
             )
+
+    def _validate_identity(self) -> None:
+        if self.identity_contract is not None:
+            self.identity_contract.validate()
+        elif any(node.identity_complete for node in self.nodes):
+            raise GraphPatchError(
+                "Complete node identity records require a layer identity contract"
+            )
+        for node in self.nodes:
+            if type(node.identity_complete) is not bool:
+                raise GraphPatchError(f"Node {node.id} identity completeness must be a boolean")
+            if not isinstance(node.identity_attributes, Mapping):
+                raise GraphPatchError(f"Node {node.id} identity attributes must be a mapping")
+            _json_value(node.identity_attributes)
 
 
 @dataclass(frozen=True)
@@ -1297,14 +1422,54 @@ def _node_provenance(
     return _json_value(raw)
 
 
+def _node_identity(
+    provider: LayerIdentityProvider | None,
+    layer: Any,
+    index: int,
+    node_id: str,
+) -> tuple[Mapping[str, Any], bool]:
+    if provider is None:
+        return {}, False
+    raw = provider(layer, index)
+    if raw is None:
+        return {}, False
+    if not isinstance(raw, Mapping):
+        raise GraphPatchError(
+            f"Layer identity for {node_id} must be a mapping or None, got {type(raw).__name__}"
+        )
+    return _json_value(raw), True
+
+
 def capture_network(
     network: Any,
     *,
     name: str | None = None,
     metadata: Mapping[str, Any] | None = None,
     provenance: ProvenanceProvider | None = None,
+    identity_provider: LayerIdentityProvider | None = None,
+    identity_contract: LayerIdentityContract | None = None,
 ) -> CapturedGraph:
-    """Capture a graph and retain live object-to-ID bindings by identity."""
+    """Capture a graph and retain live object-to-ID bindings by identity.
+
+    The model builder owns ``identity_provider``.  For every layer it must
+    return a deterministic JSON object covering every layer-specific setting
+    that can change execution semantics.  TensorRT's generic layer wrapper may
+    hide subtype attributes, so providers may need to record those settings
+    when the model creates the layer.  Returning ``None`` marks that layer's
+    identity incomplete: the snapshot remains inspectable but cannot be used
+    for rewiring.
+    """
+    if (identity_provider is None) != (identity_contract is None):
+        raise GraphPatchError(
+            "Layer identity provider and contract must either both be present or both be absent"
+        )
+    if identity_provider is not None and not callable(identity_provider):
+        raise GraphPatchError("Layer identity provider must be callable")
+    if identity_contract is not None:
+        if not isinstance(identity_contract, LayerIdentityContract):
+            raise GraphPatchError("Layer identity contract has the wrong type")
+        identity_contract.validate()
+
     layer_count = _count(network, "num_layers", required=True)
     layers = [network.get_layer(index) for index in range(layer_count)]
     registry = _TensorRegistry()
@@ -1354,6 +1519,12 @@ def capture_network(
         raw_op = getattr(layer, "type", None)
         if raw_op is None:
             raw_op = getattr(layer, "op", type(layer).__name__)
+        identity_attributes, identity_complete = _node_identity(
+            identity_provider,
+            layer,
+            index,
+            node_id,
+        )
         nodes.append(
             Node(
                 id=node_id,
@@ -1361,6 +1532,8 @@ def capture_network(
                 op=str(raw_op),
                 inputs=tuple(input_ids),
                 outputs=layer_output_ids[index],
+                identity_attributes=identity_attributes,
+                identity_complete=identity_complete,
                 provenance=_node_provenance(
                     provenance,
                     layer,
@@ -1397,8 +1570,10 @@ def capture_network(
         inputs=tuple(graph_inputs),
         outputs=tuple(graph_outputs),
         metadata=_json_value(metadata or {}),
+        identity_contract=identity_contract,
     )
     snapshot._validate_references()
+    snapshot._validate_identity()
     tensor_bindings = {draft.id: draft.value for draft in registry.drafts}
     tensor_ids_by_identity = {
         id(tensor): tensor_id for tensor_id, tensor in tensor_bindings.items()
@@ -1447,6 +1622,8 @@ def snapshot_network(
     name: str | None = None,
     metadata: Mapping[str, Any] | None = None,
     provenance: ProvenanceProvider | None = None,
+    identity_provider: LayerIdentityProvider | None = None,
+    identity_contract: LayerIdentityContract | None = None,
 ) -> GraphSnapshot:
     """Snapshot an ``INetworkDefinition``-like object without importing TRT.
 
@@ -1454,6 +1631,11 @@ def snapshot_network(
     mapping keyed by node ID, layer name, integer index, or string index.  This
     is the hook through which builder scopes/source locations can later be
     attached to diagnostic graph artifacts.
+
+    ``identity_provider`` and ``identity_contract`` are an all-or-nothing,
+    model-owned pair.  See :func:`capture_network` for their completeness
+    contract.  Omitting them intentionally produces a structural-only snapshot
+    suitable for inspection and selection, but not rewiring.
     """
 
     return capture_network(
@@ -1461,6 +1643,8 @@ def snapshot_network(
         name=name,
         metadata=metadata,
         provenance=provenance,
+        identity_provider=identity_provider,
+        identity_contract=identity_contract,
     ).snapshot
 
 
@@ -1552,12 +1736,68 @@ def create_region_artifact(
     )
 
 
+def _capture_live_for_rewire(
+    network: Any,
+    snapshot: GraphSnapshot,
+    *,
+    current_name: str,
+    current_metadata: Mapping[str, Any],
+    identity_provider: LayerIdentityProvider,
+    identity_contract: LayerIdentityContract,
+    provenance: ProvenanceProvider | None,
+) -> CapturedGraph:
+    """Recapture independently supplied current identity before any callback."""
+
+    snapshot._validate_identity()
+    if not snapshot.identity_complete:
+        raise GraphPatchError(
+            "Graph rewiring requires a complete model-owned layer identity provider; "
+            "the selected snapshot is structural-only or incomplete"
+        )
+    if not isinstance(current_name, str):
+        raise GraphPatchError("Current graph name must be a string")
+    if not isinstance(current_metadata, Mapping):
+        raise GraphPatchError("Current graph metadata must be a mapping")
+    if not isinstance(identity_contract, LayerIdentityContract):
+        raise GraphPatchError("Current layer identity contract has the wrong type")
+    identity_contract.validate()
+    if identity_contract != snapshot.identity_contract:
+        raise GraphPatchError(
+            "Current layer identity contract does not match the selected graph snapshot"
+        )
+    if not callable(identity_provider):
+        raise GraphPatchError("Current layer identity provider must be callable")
+
+    live = capture_network(
+        network,
+        name=current_name,
+        metadata=current_metadata,
+        provenance=provenance,
+        identity_provider=identity_provider,
+        identity_contract=identity_contract,
+    )
+    if not live.snapshot.identity_complete:
+        raise GraphPatchError(
+            "Current layer identity provider did not completely describe every live layer"
+        )
+    if live.snapshot.fingerprint != snapshot.fingerprint:
+        raise GraphPatchError(
+            "Live graph no longer matches the selected graph snapshot: "
+            f"expected {snapshot.fingerprint}, got {live.snapshot.fingerprint}"
+        )
+    return live
+
+
 def rewire_region(
     network: Any,
     snapshot: GraphSnapshot,
     selected_node_ids: Sequence[str],
     replacement: ReplacementCallback,
     *,
+    current_name: str,
+    current_metadata: Mapping[str, Any],
+    identity_provider: LayerIdentityProvider,
+    identity_contract: LayerIdentityContract,
     provenance: ProvenanceProvider | None = None,
 ) -> RewireResult:
     """Replace a selected region by rewiring all of its external uses.
@@ -1569,21 +1809,24 @@ def rewire_region(
     all external consumer slots with ``set_input``, and updates marked network
     outputs through ``unmark_output``/``mark_output`` when needed.
 
+    ``current_name``, ``current_metadata``, and the identity provider/contract
+    must describe the current build independently.  They are never replayed
+    from ``snapshot``.  A structural-only or incompletely identified snapshot
+    is rejected before ``replacement`` is called.
+
     If this function raises after invoking ``replacement``, discard ``network``;
     callback-created layers cannot be rolled back generically.
     """
 
-    live = capture_network(
+    live = _capture_live_for_rewire(
         network,
-        name=snapshot.name,
-        metadata=snapshot.metadata,
+        snapshot,
+        current_name=current_name,
+        current_metadata=current_metadata,
+        identity_provider=identity_provider,
+        identity_contract=identity_contract,
         provenance=provenance,
     )
-    if live.snapshot.fingerprint != snapshot.fingerprint:
-        raise GraphPatchError(
-            "Live graph no longer matches the selected graph snapshot: "
-            f"expected {snapshot.fingerprint}, got {live.snapshot.fingerprint}"
-        )
 
     validate_region(snapshot, selected_node_ids)
     artifact = create_region_artifact(snapshot, selected_node_ids)
@@ -1846,9 +2089,17 @@ def rewire_selection(
     selection: GraphRegionSelection,
     replacement: ReplacementCallback,
     *,
+    current_name: str,
+    current_metadata: Mapping[str, Any],
+    identity_provider: LayerIdentityProvider,
+    identity_contract: LayerIdentityContract,
     provenance: ProvenanceProvider | None = None,
 ) -> RewireResult:
-    """Validate and replace one selection with newly created output tensors."""
+    """Validate and replace one fully identified selection.
+
+    Current graph identity is recaptured from the explicit ``current_*`` and
+    identity arguments before ``replacement`` can run.
+    """
 
     selection.validate(snapshot)
     return rewire_selection_set(
@@ -1856,6 +2107,10 @@ def rewire_selection(
         snapshot,
         coerce_region_selection_set(selection),
         replacement,
+        current_name=current_name,
+        current_metadata=current_metadata,
+        identity_provider=identity_provider,
+        identity_contract=identity_contract,
         provenance=provenance,
     ).results[0]
 
@@ -1866,6 +2121,10 @@ def rewire_selection_set(
     selection_set: GraphRegionSelectionSet,
     replacement: ReplacementCallback,
     *,
+    current_name: str,
+    current_metadata: Mapping[str, Any],
+    identity_provider: LayerIdentityProvider,
+    identity_contract: LayerIdentityContract,
     provenance: ProvenanceProvider | None = None,
 ) -> RewireBatchResult:
     """Replace every independent region against the same original snapshot.
@@ -1874,23 +2133,24 @@ def rewire_selection_set(
     tensors; aliases to the original graph or another region output are
     rejected before consumer rewiring.
 
+    Current graph identity is recaptured from the explicit ``current_*`` and
+    identity arguments.  A structural-only or incompletely identified snapshot
+    is rejected before ``replacement`` is called.
+
     If this function raises after invoking ``replacement``, discard ``network``;
     callback-created layers cannot be rolled back generically.
     """
 
     selection_set.validate(snapshot)
-    live = capture_network(
+    live = _capture_live_for_rewire(
         network,
-        name=snapshot.name,
-        metadata=snapshot.metadata,
+        snapshot,
+        current_name=current_name,
+        current_metadata=current_metadata,
+        identity_provider=identity_provider,
+        identity_contract=identity_contract,
         provenance=provenance,
     )
-    if live.snapshot.fingerprint != snapshot.fingerprint:
-        raise GraphPatchError(
-            "Live graph no longer matches the selected graph snapshot: "
-            f"expected {snapshot.fingerprint}, got "
-            f"{live.snapshot.fingerprint}"
-        )
     artifacts = tuple(
         create_region_artifact(
             snapshot,
