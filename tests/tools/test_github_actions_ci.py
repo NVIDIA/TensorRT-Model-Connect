@@ -52,6 +52,45 @@ def test_public_repository_contains_only_public_workflow_orchestration() -> None
     assert not [name for name in private_workflows if (workflows / name).exists()]
 
 
+def test_premerge_workflow_only_dispatches_an_exact_trusted_snapshot() -> None:
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml"
+    ).read_text(encoding="utf-8")
+    authorize = workflow.split("\n  authorize:", maxsplit=1)[1].split(
+        "\n  dispatch:", maxsplit=1
+    )[0]
+
+    assert "pull_request_target:" in workflow
+    assert "types: [labeled]" in workflow
+    assert "github.event.label.name == 'run-ci'" in workflow
+    assert "workflow_dispatch:" in workflow
+    assert "github.repository == 'NVIDIA/TensorRT-Model-Connect'" in workflow
+    assert "github.ref == 'refs/heads/main'" in workflow
+    assert "collaborators/$ACTOR/permission" in workflow
+    assert "write|admin)" in workflow
+    assert "Only actors with write, maintain, or admin access" in workflow
+    assert "name: Authorize trusted trigger" in workflow
+    assert "needs: authorize" in workflow
+    assert "environment:" not in authorize
+    assert "secrets." not in authorize
+    assert 'pull="$(gh api --method GET' in workflow
+    assert "pr_number=$PR_NUMBER" in workflow
+    assert "base_sha=$base_sha" in workflow
+    assert "head_sha=$head_sha" in workflow
+    assert "merge_sha=$merge_sha" in workflow
+    assert workflow.count("actions/create-github-app-token@") == 1
+    assert "permission-actions: write" in workflow
+    assert "permission-checks:" not in workflow
+    assert "actions/checkout@" not in workflow
+    assert "private_ci_bridge.py" not in workflow
+    assert "self-hosted" not in workflow
+    assert "secrets: inherit" not in workflow
+    assert "actions/workflows/premerge.yml/dispatches" in workflow
+    assert 'ref: "main"' in workflow
+    for name in ("pr_number", "base_sha", "head_sha", "merge_sha"):
+        assert f"{name}: ${name}" in workflow
+
+
 def test_ci_runtime_uses_class_based_entrypoints_without_legacy_scripts() -> None:
     legacy_scripts = (
         ".github/scripts/ensure-ci-docker-image.sh",
