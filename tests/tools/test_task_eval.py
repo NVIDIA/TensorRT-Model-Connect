@@ -2362,6 +2362,38 @@ def test_continuation_parity_requires_token_ids_when_requested() -> None:
         raise AssertionError("expected missing token-id validation failure")
 
 
+def test_continuation_suite_accepts_one_divergent_sample_in_ten() -> None:
+    hf = {
+        "responses": [
+            {
+                "sample_id": f"sample-{index}",
+                "output_text": "same",
+                "generated_token_ids": [1, 2],
+            }
+            for index in range(10)
+        ]
+    }
+    trtfb = json.loads(json.dumps(hf))
+    trtfb["responses"][-1]["output_text"] = "different"
+    trtfb["responses"][-1]["generated_token_ids"] = [9, 9]
+    summary = task_eval.compare_continuation_sets(
+        hf, trtfb, require_token_ids=True
+    )
+    result = {
+        "exact_match_rate": summary["exact_match_rate"],
+        "token_prefix_agreement": summary["token_prefix_agreement"],
+    }
+    suite = task_eval.suite_by_id(
+        task_eval.load_suites(), "mmlu_continuation_parity"
+    )
+
+    task_eval.apply_metric_gates(result, suite["gates"])
+
+    assert result["exact_match_rate"] == 0.9
+    assert result["token_prefix_agreement"] == 0.9
+    assert result["status"] == "passed"
+
+
 def test_validation_suites_keep_continuation_and_drop_trace_cloze() -> None:
     suites = task_eval.load_suites()
     ids = {suite["id"] for suite in suites}
@@ -2372,6 +2404,7 @@ def test_validation_suites_keep_continuation_and_drop_trace_cloze() -> None:
     assert continuation["dataset"]["kind"] == "mmlu_five_shot_json"
     assert continuation["scoring"]["scorer"] == "continuation"
     assert continuation["user_contract"] == "continuation_parity"
+    assert continuation["gates"] == {"min_exact_match_rate": 0.9}
 
 
 def test_compare_continuation_cli_writes_json_summary(tmp_path: Path) -> None:
