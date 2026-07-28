@@ -44,6 +44,7 @@ Tensor contract (matches the C++ runtime KvCache naming):
 from __future__ import annotations
 
 import sys
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -172,6 +173,8 @@ def build_dual_profile_tp_decoder_engine(
     interleaved_rope: bool = False,
     parallel_residual: bool = False,
     scale_attn_weights: bool = True,
+    attention_layer_types: Sequence[str] | None = None,
+    local_attention_window: int = 0,
     verbose: bool = False,
     dynamic_kv_profile_rows: list[int] | None = None,
     parallel_config=None,
@@ -423,12 +426,35 @@ def build_dual_profile_tp_decoder_engine(
             num_heads, target_dtype=work_trt_dtype)
     else:
         mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask_work)
+    local_mask_4d = None
+    if (
+        attention_layer_types
+        and "local" in attention_layer_types
+        and local_attention_window > 0
+    ):
+        local_mask_2d = graph_ops.add_local_attention_mask_2d(
+            network,
+            attention_mask_work,
+            position_id,
+            max_cache_length=max_cache_length,
+            window_size=local_attention_window,
+        )
+        local_mask_4d = graph_ops.add_2d_mask_to_4d(network, local_mask_2d)
 
     present_k_outs: list[trt.ITensor] = []
     present_v_outs: list[trt.ITensor] = []
 
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"
+        layer_mask_4d = (
+            local_mask_4d
+            if (
+                local_mask_4d is not None
+                and layer_idx < len(attention_layer_types or ())
+                and attention_layer_types[layer_idx] == "local"
+            )
+            else mask_4d
+        )
 
         # Pre-attention norm.
         normed = _norm_multi(
@@ -501,7 +527,7 @@ def build_dual_profile_tp_decoder_engine(
             network, q, all_k_cat.get_output(0), all_v_cat.get_output(0),
             num_heads=num_heads, head_dim=head_dim,
             num_kv_heads=num_kv_heads,
-            q_seq=None, kv_seq=None, causal=False, mask=mask_4d,
+            q_seq=None, kv_seq=None, causal=False, mask=layer_mask_4d,
             scale=attn_scale, tag=f"{prefix}.attn")
 
         attn_out = matmul(context, attention_size, hidden,

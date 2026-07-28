@@ -523,6 +523,77 @@ def add_2d_mask_to_4d(
     return mask_4d.get_output(0)
 
 
+def add_local_attention_mask_2d(
+    network: trt.INetworkDefinition,
+    attention_mask: trt.ITensor,
+    position_id: trt.ITensor,
+    *,
+    max_cache_length: int,
+    window_size: int,
+) -> trt.ITensor:
+    """Add GPT-Neo's local-window restriction to a runtime causal mask."""
+
+    if window_size <= 0:
+        raise ValueError("window_size must be positive")
+    cache_positions = add_constant(
+        network,
+        (max_cache_length,),
+        np.arange(max_cache_length, dtype=np.int32),
+        dtype=np.int32,
+    )
+    key_positions = network.add_concatenation([cache_positions, position_id])
+    key_positions.axis = 0
+    key_2d = network.add_shuffle(key_positions.get_output(0))
+    key_2d.reshape_dims = (1, -1)
+
+    query_2d = network.add_shuffle(position_id)
+    query_2d.reshape_dims = (-1, 1)
+    window_span = add_constant(
+        network,
+        (1, 1),
+        np.array([[window_size - 1]], dtype=np.int32),
+        dtype=np.int32,
+    )
+    oldest_visible = network.add_elementwise(
+        query_2d.get_output(0),
+        window_span,
+        trt.ElementWiseOperation.SUB,
+    ).get_output(0)
+    out_of_window = network.add_elementwise(
+        key_2d.get_output(0),
+        oldest_visible,
+        trt.ElementWiseOperation.LESS,
+    ).get_output(0)
+
+    penalty = add_constant(
+        network,
+        (1, 1),
+        np.array([[-1e9]], dtype=np.float32),
+        dtype=np.float32,
+    )
+    zero = add_constant(
+        network,
+        (1, 1),
+        np.array([[0.0]], dtype=np.float32),
+        dtype=np.float32,
+    )
+    local_penalty = network.add_select(
+        out_of_window,
+        penalty,
+        zero,
+    ).get_output(0)
+    if local_penalty.dtype != attention_mask.dtype:
+        local_penalty = network.add_cast(
+            local_penalty,
+            attention_mask.dtype,
+        ).get_output(0)
+    return network.add_elementwise(
+        attention_mask,
+        local_penalty,
+        trt.ElementWiseOperation.SUM,
+    ).get_output(0)
+
+
 def add_alibi_mask_4d(
     network: trt.INetworkDefinition,
     mask_2d: trt.ITensor,

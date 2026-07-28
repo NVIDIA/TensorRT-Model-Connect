@@ -19,6 +19,7 @@ Tensor names MUST match what the C++ runtime expects:
 from __future__ import annotations
 
 import sys
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -65,6 +66,8 @@ def build_standard_decoder_engine(
     interleaved_rope: bool = False,
     parallel_residual: bool = False,
     scale_attn_weights: bool = True,
+    attention_layer_types: Sequence[str] | None = None,
+    local_attention_window: int = 0,
     embed_input: bool = False,
     verbose: bool = False,
     debug_layer_outputs: bool = False,
@@ -147,6 +150,8 @@ def build_standard_decoder_engine(
             interleaved_rope=interleaved_rope,
             parallel_residual=parallel_residual,
             scale_attn_weights=scale_attn_weights,
+            attention_layer_types=attention_layer_types,
+            local_attention_window=local_attention_window,
             verbose=verbose,
             profile_mode=("prefill" if decoder_engine_role == "prefill" else "dual_profile"),
         )
@@ -272,6 +277,19 @@ def build_standard_decoder_engine(
     if work_trt_dtype != trt.float32:
         mask_cast = network.add_cast(attention_mask, work_trt_dtype)
         attention_mask = mask_cast.get_output(0)
+    local_attention_mask = None
+    if (
+        attention_layer_types
+        and "local" in attention_layer_types
+        and local_attention_window > 0
+    ):
+        local_attention_mask = graph_ops.add_local_attention_mask_2d(
+            network,
+            attention_mask,
+            position_id,
+            max_cache_length=max_cache_length,
+            window_size=local_attention_window,
+        )
 
     def _cast_work_dtype(tensor: trt.ITensor) -> trt.ITensor:
         if tensor.dtype == work_trt_dtype:
@@ -410,13 +428,22 @@ def build_standard_decoder_engine(
 
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"
+        layer_attention_mask = (
+            local_attention_mask
+            if (
+                local_attention_mask is not None
+                and layer_idx < len(attention_layer_types or ())
+                and attention_layer_types[layer_idx] == "local"
+            )
+            else attention_mask
+        )
 
         result = _add_decoder_layer(
             network=network,
             hidden=hidden_state,
             cache_k=cache_k_inputs[layer_idx],
             cache_v=cache_v_inputs[layer_idx],
-            attention_mask=attention_mask,
+            attention_mask=layer_attention_mask,
             position_id=position_id,
             attention_scale=attn_scale,
             eps_tensor=eps_tensor,

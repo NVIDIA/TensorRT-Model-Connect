@@ -10,7 +10,7 @@ GPT-Neo (EleutherAI) uses:
   - Separate Q/K/V Linear projections (NOT fused, NOT Conv1D)
   - Output projection with bias
   - Tied word embeddings (wte == lm_head)
-  - Local/global attention alternation (ignored — our causal mask handles it)
+  - Alternating local/global attention from the Hugging Face config
 """
 
 from __future__ import annotations
@@ -30,6 +30,10 @@ from .checkpoint_mapper import (
 from ...parallel_config import normalize_parallel_config
 from .standard_decoder_builder import build_standard_decoder_engine
 from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
+from .attention_contract import (
+    resolve_attention_layer_types,
+    resolve_local_attention_window,
+)
 
 
 class GPTNeoPlugin:
@@ -154,6 +158,14 @@ class GPTNeoPlugin:
         parallel_config=None,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
+        attention_layer_types = resolve_attention_layer_types(
+            config.raw,
+            num_layers=config.num_hidden_layers,
+        )
+        local_attention_window = resolve_local_attention_window(
+            config.raw,
+            attention_layer_types,
+        )
         if parallel.enabled:
             return build_dual_profile_tp_decoder_engine(
                 config, weights, max_cache_length,
@@ -163,6 +175,8 @@ class GPTNeoPlugin:
                 position_type="learned",
                 activation="gelu_new",
                 scale_attn_weights=False,
+                attention_layer_types=attention_layer_types,
+                local_attention_window=local_attention_window,
                 verbose=verbose,
                 parallel_config=parallel)
         return build_standard_decoder_engine(
@@ -173,6 +187,8 @@ class GPTNeoPlugin:
             position_type="learned",
             activation="gelu_new",
             scale_attn_weights=False,
+            attention_layer_types=attention_layer_types,
+            local_attention_window=local_attention_window,
             verbose=verbose,
             debug_layer_outputs=debug_layer_outputs)
 
