@@ -4399,6 +4399,7 @@ _FIFTH_IDENTITY_CASES = [
         "I13_mutated_functools_decorator",
         """
         import functools
+        import shutil
         def dead():
             p = AP(); p.add_argument('--dead', required=True); p.parse_args()
         def replacement():
@@ -4991,6 +4992,7 @@ _SEVENTH_IDENTITY_CASES = [
         "D02_setattr_module_decorator",
         """
         import functools
+        import shutil
         def dead():
             p = AP(); p.add_argument('--dead', required=True); p.parse_args()
         def replacement():
@@ -5078,6 +5080,7 @@ _SEVENTH_IDENTITY_CASES = [
         "D07_module_alias_direct_mutation",
         """
         import functools as ft
+        import shutil
         def dead():
             p = AP(); p.add_argument('--dead', required=True); p.parse_args()
         def replacement():
@@ -5599,6 +5602,7 @@ _EIGHTH_ARGPARSE_CASES = [
         "D01_module_dict_subscript_mutation",
         """
         import functools
+        import shutil
         def dead():
             p = AP()
             p.add_argument('--dead', required=True)
@@ -5621,6 +5625,7 @@ _EIGHTH_ARGPARSE_CASES = [
         "D02_vars_subscript_mutation",
         """
         import functools
+        import shutil
         def dead():
             p = AP()
             p.add_argument('--dead', required=True)
@@ -5643,6 +5648,7 @@ _EIGHTH_ARGPARSE_CASES = [
         "D03_namespace_update_mutation",
         """
         import functools
+        import shutil
         def dead():
             p = AP()
             p.add_argument('--dead', required=True)
