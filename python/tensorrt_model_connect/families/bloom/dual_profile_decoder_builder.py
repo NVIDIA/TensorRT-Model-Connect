@@ -346,6 +346,7 @@ def build_dual_profile_decoder_engine(
         work_np_dtype, work_trt_dtype = np.float16, trt.bfloat16
     else:
         work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        trt_config.clear_flag(trt.BuilderFlag.TF32)
 
     # ---- Inputs (dynamic Sq) ---------------------------------------------
     token_id = network.add_input("token_id", trt.int32, (-1,))

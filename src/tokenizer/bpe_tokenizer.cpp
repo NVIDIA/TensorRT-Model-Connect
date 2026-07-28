@@ -254,7 +254,9 @@ inline bool is_prefix(char32_t cp, Variant v) {
 
 // BLOOM word char: not whitespace and not BLOOM punctuation
 inline bool is_bloom_word_char(char32_t cp) {
-    return !is_whitespace(cp) && !is_bloom_punct(cp);
+    // The serialized regex is `[^(\s|[.,!?…。，、।۔،])]`. Parentheses and
+    // the pipe are literal members of that negated character class.
+    return !is_whitespace(cp) && !is_bloom_punct(cp) && cp != '(' && cp != ')' && cp != '|';
 }
 
 // ── Scanning helpers (advance pointer past matching chars) ──
@@ -528,32 +530,30 @@ std::vector<std::string> pre_tokenize(const std::string& text, Variant variant,
     return result;
 }
 
-// ── BLOOM pre-tokenize helpers ──
-
-// Handle optional leading space + word chars for BLOOM
-inline bool try_bloom_space_word(char32_t cp, const char*& p, const char* end, const char* start,
-                                 std::vector<std::string>& result) {
-    if (cp != ' ')
-        return false;
-    if (p >= end) {
-        result.emplace_back(start, p);
-        return true;
+// Return the end of a BLOOM Split-regex match beginning at `start`.
+// The regex is " ?[^(\s|[.,!?...])]+": an optional ASCII space followed by
+// one or more non-whitespace, non-punctuation characters.
+const char* bloom_match_end(const char* start, const char* end) {
+    const char* p = start;
+    char32_t cp = read_utf8(p, end);
+    if (cp == ' ') {
+        if (p >= end)
+            return nullptr;
+        cp = read_utf8(p, end);
+        if (!is_bloom_word_char(cp))
+            return nullptr;
+    } else if (!is_bloom_word_char(cp)) {
+        return nullptr;
     }
-    const char* after_space = p;
-    char32_t next_cp = read_utf8(p, end);
-    if (is_bloom_word_char(next_cp)) {
-        scan_bloom_words(p, end);
-        result.emplace_back(start, p);
-        return true;
-    }
-    // Space followed by whitespace or punctuation — back up
-    p = after_space;
-    return false;
+    scan_bloom_words(p, end);
+    return p;
 }
 
-// BLOOM pre-tokenizer: " ?[^(\s|[.,!?...])]+".
-// Simpler than GPT-2: optional space + non-whitespace-non-punct chars.
-// Punctuation chars become individual tokens.
+// BLOOM uses Split(..., behavior="Isolated", invert=false) followed by
+// ByteLevel(use_regex=false). Regex matches are isolated, while every
+// contiguous unmatched span remains a single pre-token. In particular,
+// punctuation and adjacent newlines must stay together so BPE can merge
+// strings such as ".\n\n".
 std::vector<std::string> bloom_pre_tokenize(const std::string& text) {
     std::vector<std::string> result;
     if (text.empty())
@@ -564,33 +564,16 @@ std::vector<std::string> bloom_pre_tokenize(const std::string& text) {
 
     while (p < end) {
         const char* start = p;
-        char32_t cp = read_utf8(p, end);
-
-        if (try_bloom_space_word(cp, p, end, start, result))
-            continue;
-
-        if (is_whitespace(cp)) {
-            emit_whitespace_leave_last(p, end, start, result);
+        if (const char* match_end = bloom_match_end(start, end)) {
+            result.emplace_back(start, match_end);
+            p = match_end;
             continue;
         }
 
-        if (is_bloom_punct(cp)) {
-            // Keep consecutive non-word chars together (Split "Isolated" behavior:
-            // unmatched text stays as one segment for BPE to merge)
-            while (p < end) {
-                const char* next_start = p;
-                char32_t next_cp = read_utf8(p, end);
-                if (!is_bloom_punct(next_cp) || is_whitespace(next_cp)) {
-                    p = next_start;
-                    break;
-                }
-            }
-            result.emplace_back(start, p);
-            continue;
-        }
-
-        // Word chars (no leading space)
-        scan_bloom_words(p, end);
+        // Preserve one contiguous unmatched span until the next regex match.
+        read_utf8(p, end);
+        while (p < end && bloom_match_end(p, end) == nullptr)
+            read_utf8(p, end);
         result.emplace_back(start, p);
     }
 

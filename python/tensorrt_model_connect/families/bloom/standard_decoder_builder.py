@@ -197,6 +197,7 @@ def build_standard_decoder_engine(
     else:
         work_np_dtype = np.float32
         work_trt_dtype = trt.float32
+        trt_config.clear_flag(trt.BuilderFlag.TF32)
 
     if dynamic_kv_cache and position_type == "alibi":
         raise ValueError("dynamic_kv_cache is not supported for ALiBi decoder builds")

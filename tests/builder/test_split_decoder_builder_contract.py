@@ -21,6 +21,12 @@ REMOVED_SHARED_BUILDER_MODULES = (
     BUILDERS_DIR / "utils.py",
 )
 
+BLOOM_FP32_BUILDERS = (
+    FAMILIES_DIR / "bloom" / "standard_decoder_builder.py",
+    FAMILIES_DIR / "bloom" / "dual_profile_decoder_builder.py",
+    FAMILIES_DIR / "bloom" / "dual_profile_decoder_tp_builder.py",
+)
+
 
 def _family_files(name: str) -> list[Path]:
     return sorted(FAMILIES_DIR.glob(f"*/{name}"))
@@ -103,3 +109,15 @@ def test_family_code_does_not_import_shared_builder_package() -> None:
             violations.append(str(path.relative_to(ROOT)))
 
     assert not violations
+
+
+def test_bloom_fp32_builders_disable_tf32() -> None:
+    """BLOOM FP32 must not silently use lower-precision TF32 matmuls."""
+    missing = [
+        str(path.relative_to(ROOT))
+        for path in BLOOM_FP32_BUILDERS
+        if "trt_config.clear_flag(trt.BuilderFlag.TF32)"
+        not in path.read_text(encoding="utf-8")
+    ]
+
+    assert not missing

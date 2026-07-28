@@ -732,12 +732,15 @@ int main() {
               "\u0120": 7, "!": 8, ".": 9, ",": 10,
               "he": 11, "ll": 12, "lo": 13, "hell": 19, "hel": 20,
               "\u0120w": 14, "or": 15, "ld": 16, "orld": 21,
-              "hello": 17, "\u0120world": 18
+              "hello": 17, "\u0120world": 18,
+              "\u010a": 22, "\u010a\u010a": 23, ".\u010a\u010a": 24,
+              "|": 25, "|.": 26
             },
             "merges": [
               "h e", "l l", "l o", "he ll", "hel lo",
               "\u0120 w", "o r", "l d", "or ld",
-              "\u0120w orld", "hello \u0120world"
+              "\u0120w orld", "hello \u0120world",
+              "\u010a \u010a", ". \u010a\u010a", "| ."
             ]
           },
           "pre_tokenizer": {
@@ -786,6 +789,19 @@ int main() {
             check(ids.size() == 5, "word_separator_punct_split_dot_size");
             check(ids[0] == 19 && ids[1] == 3, "word_separator_punct_split_dot_hello");
             check(ids[2] == 9, "word_separator_punct_split_dot_period");
+        }
+
+        // Split(Isolated) preserves the unmatched ".\n\n" span, allowing
+        // BLOOM's BPE merge across punctuation and adjacent newlines.
+        {
+            auto ids = tok->encode(".\n\nworld");
+            check(ids.size() == 3 && ids[0] == 24 && ids[1] == 4 && ids[2] == 21,
+                  "word_separator_preserves_unmatched_punctuation_newlines");
+        }
+        {
+            auto ids = tok->encode("|.world");
+            check(ids.size() == 3 && ids[0] == 26 && ids[1] == 4 && ids[2] == 21,
+                  "word_separator_preserves_unmatched_regex_literals");
         }
 
         // Round-trip: "hell" + "o" → byte_decode → "hello"
