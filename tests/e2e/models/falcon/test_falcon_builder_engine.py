@@ -144,10 +144,10 @@ class TestFalconEngine(FamilyPluginTestMixin):
         """Validate Falcon-RW ALiBi is scaled like HF Falcon attention logits.
 
         Intention:
-            HF Falcon adds ALiBi to raw QK attention scores and then scales the
-            combined logits by 1/sqrt(head_dim). TRT native attention scales QK
-            before applying the additive mask, so the Falcon plugin must
-            pre-scale ALiBi slopes to keep the same logit contract.
+            HF Falcon's default SDPA path rounds ALiBi in BF16, casts it to
+            the model dtype, and then scales the additive mask by
+            1/sqrt(head_dim). The Falcon plugin forwards that scale without
+            pre-scaling the slopes before their BF16 rounding boundary.
 
         Setup:
             Monkeypatch the shared decoder builder, build a tiny ALiBi Falcon

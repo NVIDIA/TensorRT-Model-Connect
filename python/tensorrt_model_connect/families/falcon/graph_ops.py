@@ -297,7 +297,10 @@ def add_activation(
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Dispatch activation by name: 'silu', 'gelu_new', 'gelu', 'relu', 'relu2'/'squared_relu'."""
-    if activation_type in ("gelu_new", "gelu"):
+    if activation_type == "gelu":
+        return network.add_activation(
+            inp, trt.ActivationType.GELU_ERF).get_output(0)
+    elif activation_type == "gelu_new":
         return add_gelu_new(network, inp, dtype=dtype)
     elif activation_type == "relu":
         act = network.add_activation(inp, trt.ActivationType.RELU)
@@ -531,12 +534,13 @@ def add_alibi_mask_4d(
     cache_position_indices: trt.ITensor,
     num_heads: int,
     target_dtype: trt.DataType | None = None,
+    bias_scale: float = 1.0,
 ) -> trt.ITensor:
     """Build a per-head ALiBi additive mask for native IAttention.
 
     Args:
         mask_2d: [Sq, K] additive mask.
-        position_id: [Sq] query positions.
+        position_id: [Sq] current key positions.
         alibi_slopes_tensor: [H, 1, 1] per-head slopes.
         cache_position_indices: [cache_rows] key positions for cached rows.
         target_dtype: Optional dtype for the returned mask. Defaults to
@@ -544,8 +548,39 @@ def add_alibi_mask_4d(
 
     Returns:
         [1, H, Sq, K] additive mask containing both ``mask_2d`` and
-        ``slope[h] * (key_pos[k] - query_pos[q])``.
+        Falcon's BF16-rounded ``slope[h] * key_pos[k]`` bias.
     """
+    alibi_bias_t = add_alibi_bias_4d(
+        network,
+        mask_2d,
+        position_id,
+        alibi_slopes_tensor,
+        cache_position_indices,
+        num_heads,
+        target_dtype=target_dtype,
+        bias_scale=bias_scale,
+    )
+    mask_4d = add_2d_mask_to_4d(network, mask_2d)
+    out_dtype = target_dtype or mask_4d.dtype
+    if mask_4d.dtype != out_dtype:
+        mask_4d = network.add_cast(mask_4d, out_dtype).get_output(0)
+
+    combined = network.add_elementwise(
+        mask_4d, alibi_bias_t, trt.ElementWiseOperation.SUM)
+    return combined.get_output(0)
+
+
+def add_alibi_bias_4d(
+    network: trt.INetworkDefinition,
+    shape_source_2d: trt.ITensor,
+    position_id: trt.ITensor,
+    alibi_slopes_tensor: trt.ITensor,
+    cache_position_indices: trt.ITensor,
+    num_heads: int,
+    target_dtype: trt.DataType | None = None,
+    bias_scale: float = 1.0,
+) -> trt.ITensor:
+    """Build Falcon's BF16-rounded ALiBi bias without the padding mask."""
     pos_float = network.add_cast(position_id, trt.float32).get_output(0)
     cache_positions = cache_position_indices
     if cache_positions.dtype != trt.float32:
@@ -554,54 +589,44 @@ def add_alibi_mask_4d(
     key_pos = network.add_concatenation([cache_positions, pos_float])
     key_pos.axis = 0
 
-    mask_shape = network.add_shape(mask_2d).get_output(0)
+    mask_shape = network.add_shape(shape_source_2d).get_output(0)
     one_const = add_constant(
         network, (1,), np.array([1], dtype=np.int64), dtype=np.int64)
-    sq_size = network.add_slice(mask_shape, start=(0,), shape=(1,), stride=(1,))
     k_size = network.add_slice(mask_shape, start=(1,), shape=(1,), stride=(1,))
-    sq_size_t = sq_size.get_output(0)
     k_size_t = k_size.get_output(0)
-
-    key_pos_shape = network.add_concatenation([one_const, k_size_t])
-    key_pos_shape.axis = 0
-    key_pos_2d = network.add_shuffle(key_pos.get_output(0))
-    key_pos_2d.set_input(1, key_pos_shape.get_output(0))
-
-    query_pos_shape = network.add_concatenation([sq_size_t, one_const])
-    query_pos_shape.axis = 0
-    query_pos_2d = network.add_shuffle(pos_float)
-    query_pos_2d.set_input(1, query_pos_shape.get_output(0))
-
-    rel_pos = network.add_elementwise(
-        key_pos_2d.get_output(0), query_pos_2d.get_output(0),
-        trt.ElementWiseOperation.SUB)
 
     one_const2 = add_constant(
         network, (1,), np.array([1], dtype=np.int64), dtype=np.int64)
-    rel_shape = network.add_concatenation([one_const, one_const2, sq_size_t, k_size_t])
-    rel_shape.axis = 0
-    rel_4d = network.add_shuffle(rel_pos.get_output(0))
-    rel_4d.set_input(1, rel_shape.get_output(0))
+    one_const3 = add_constant(
+        network, (1,), np.array([1], dtype=np.int64), dtype=np.int64)
+    key_pos_shape = network.add_concatenation(
+        [one_const, one_const2, one_const3, k_size_t])
+    key_pos_shape.axis = 0
+    key_pos_4d = network.add_shuffle(key_pos.get_output(0))
+    key_pos_4d.set_input(1, key_pos_shape.get_output(0))
+    key_pos_bf16 = network.add_cast(
+        key_pos_4d.get_output(0), trt.bfloat16).get_output(0)
 
     slopes = alibi_slopes_tensor
-    if slopes.dtype != trt.float32:
-        slopes = network.add_cast(slopes, trt.float32).get_output(0)
     slopes_4d = network.add_shuffle(slopes)
     slopes_4d.reshape_dims = (1, num_heads, 1, 1)
+    slopes_bf16 = network.add_cast(
+        slopes_4d.get_output(0), trt.bfloat16).get_output(0)
 
     alibi_bias = network.add_elementwise(
-        slopes_4d.get_output(0), rel_4d.get_output(0),
+        slopes_bf16, key_pos_bf16,
         trt.ElementWiseOperation.PROD)
     alibi_bias_t = alibi_bias.get_output(0)
 
-    mask_4d = add_2d_mask_to_4d(network, mask_2d)
-    out_dtype = target_dtype or mask_4d.dtype
+    out_dtype = target_dtype or shape_source_2d.dtype
     if alibi_bias_t.dtype != out_dtype:
         alibi_bias_t = network.add_cast(alibi_bias_t, out_dtype).get_output(0)
-
-    combined = network.add_elementwise(
-        mask_4d, alibi_bias_t, trt.ElementWiseOperation.SUM)
-    return combined.get_output(0)
+    if bias_scale != 1.0:
+        scale = _scalar_constant_for_trt_dtype(
+            network, (1, 1, 1, 1), bias_scale, out_dtype)
+        alibi_bias_t = network.add_elementwise(
+            alibi_bias_t, scale, trt.ElementWiseOperation.PROD).get_output(0)
+    return alibi_bias_t
 
 
 def add_apply_rope_native(

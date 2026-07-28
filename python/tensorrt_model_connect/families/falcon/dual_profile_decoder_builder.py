@@ -441,10 +441,9 @@ def build_dual_profile_decoder_engine(
     alibi_slopes_tensor: trt.ITensor | None = None
     alibi_cache_positions_fp32: trt.ITensor | None = None
     if position_type == "alibi":
-        alibi_slopes_np = graph_ops.compute_alibi_slopes(num_heads) * float(alibi_bias_scale)
-        # Slopes live as fp32 so the (key_pos - q_pos) math stays in fp32;
-        # add_alibi_mask_4d casts the final bias to work_trt_dtype before adding
-        # to the additive mask.
+        alibi_slopes_np = graph_ops.compute_alibi_slopes(num_heads)
+        # HF rounds both slopes and positions to BF16 before multiplying, then
+        # promotes the resulting ALiBi tensor to FP32 with the QK logits.
         alibi_slopes_tensor = graph_ops.add_constant(
             network, (num_heads, 1, 1),
             alibi_slopes_np.reshape(num_heads, 1, 1), dtype=np.float32)
@@ -502,7 +501,8 @@ def build_dual_profile_decoder_engine(
         mask_4d = graph_ops.add_alibi_mask_4d(
             network, attention_mask_work, position_id,
             alibi_slopes_tensor, alibi_cache_positions_fp32,
-            num_heads, target_dtype=work_trt_dtype)
+            num_heads, target_dtype=work_trt_dtype,
+            bias_scale=float(alibi_bias_scale))
     else:
         mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask_work)
 
