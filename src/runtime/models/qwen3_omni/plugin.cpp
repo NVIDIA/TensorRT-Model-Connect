@@ -58,6 +58,7 @@ class Qwen3OmniPlugin final : public IPipelinePlugin {
         omni_cfg.thinker_vocab_size = ctx.config.vocab_size;
         omni_cfg.thinker_num_layers = ctx.config.num_layers;
         omni_cfg.thinker_num_heads = ctx.config.num_heads;
+        omni_cfg.thinker_eos_token_id = extract_json_int(json, "im_end_token_id", 151645);
         omni_cfg.num_experts = extract_json_int(json, "num_local_experts", 8);
         omni_cfg.num_experts_per_tok = extract_json_int(json, "num_experts_per_tok", 2);
         omni_cfg.talker_hidden_size = extract_json_int(json, "omni_talker_hidden_size", 0);

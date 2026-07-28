@@ -21,6 +21,7 @@ from tensorrt_model_connect.families.qwen3_omni.audio_runtime import (
     _chatml,
     _read_request,
     _serve_worker,
+    _thinker_forward_input_ids,
 )
 from tensorrt_model_connect.config import ModelConfig
 from tensorrt_model_connect.families.qwen3_omni.plugin import (
@@ -80,6 +81,13 @@ def test_talker_chatml_contains_model_roles_and_exact_text() -> None:
     assert "<|im_start|>system\n" in rendered
     assert "<|im_start|>user\nquestion<|im_end|>" in rendered
     assert "<|im_start|>assistant\nanswer<|im_end|>" in rendered
+    assert rendered.endswith("answer<|im_end|>")
+
+
+def test_talker_does_not_forward_selected_thinker_eos() -> None:
+    sequence_ids = np.array([[10, 11, 151645]])
+
+    assert _thinker_forward_input_ids(sequence_ids).tolist() == [[10, 11]]
 
 
 def test_persistent_talker_worker_initializes_once_for_multiple_requests() -> None:

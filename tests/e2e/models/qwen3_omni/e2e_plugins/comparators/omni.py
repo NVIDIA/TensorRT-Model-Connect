@@ -372,6 +372,18 @@ class OmniComparator:
                 note="Code2Wav synthetic fallback must never certify",
             )
 
+            ref_thinker_text = str((ref.data or {}).get("decoded_text", "") or "")
+            if ref_thinker_text:
+                trt_thinker_text = str((trt.data or {}).get("thinker_text", "") or "")
+                thinker_text_matches = trt_thinker_text == ref_thinker_text
+                metrics["thinker_text_exact"] = MetricResult(
+                    value=1.0 if thinker_text_matches else 0.0,
+                    threshold=1.0,
+                    operator="==",
+                    passed=thinker_text_matches,
+                    note="must exactly match the pinned official-HF Thinker response",
+                )
+
             if wav_evidence:
                 channels = int(wav_evidence.get("channels", 0))
                 encoding = str(wav_evidence.get("encoding", ""))
@@ -421,6 +433,13 @@ class OmniComparator:
                             operator=">=",
                             passed=duration_ratio >= duration_ratio_min,
                             note=f"TRT samples={num_samples}, HF samples={ref_num_samples}",
+                        ),
+                        "audio_num_samples_exact": MetricResult(
+                            value=float(num_samples),
+                            threshold=float(ref_num_samples),
+                            operator="==",
+                            passed=ref_num_samples > 0 and num_samples == ref_num_samples,
+                            note="must exactly match the pinned official-HF audio shape",
                         ),
                         "audio_rms": MetricResult(
                             value=rms,

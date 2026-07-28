@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_RUNTIME_TIMEOUT_S = 600
 _MAX_RUNTIME_TIMEOUT_S = 3600
 _SIMPLE_WAVEFORM_FALLBACK = "no Code2Wav engine, generating simple waveform"
+_THINKER_TEXT_PREFIX = "[trtmc] Omni Thinker text: "
 
 
 def _runtime_timeout_s(case: E2ECase) -> int:
@@ -136,6 +137,9 @@ class OmniMultimodalRunner:
             )
 
         data = _parse_stage_output(result.stdout.strip(), stage_name)
+        thinker_text = _parse_thinker_text(result.stderr or "")
+        if thinker_text:
+            data["thinker_text"] = thinker_text
 
         return StageOutput(
             stage_name=stage_name,
@@ -381,6 +385,15 @@ def _parse_stage_output(stdout: str, stage_name: str) -> dict[str, Any]:
             continue
 
     return {"raw_output": stdout}
+
+
+def _parse_thinker_text(stderr: str) -> str:
+    """Extract the final Thinker response reported by the C++ runtime."""
+    for line in reversed(stderr.splitlines()):
+        line = line.strip()
+        if line.startswith(_THINKER_TEXT_PREFIX):
+            return line[len(_THINKER_TEXT_PREFIX) :].strip()
+    return ""
 
 
 # Primary plugin for auto-discovery

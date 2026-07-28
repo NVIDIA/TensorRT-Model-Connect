@@ -20,7 +20,7 @@ def test_qwen3_omni_runtime_feeds_generated_text_to_official_talker() -> None:
     assert "tokenizer_->decode(text_tokens)" in source
     assert "talker_runtime_->run(prompt, assistant_text)" in source
     assert "format_omni_chat_prompt(prompt)" in source
-    assert "token == config_->thinker_eos_token_id" in source
+    assert "omni_thinker_should_stop(token, config_->thinker_eos_token_id)" in source
     assert 'outputs.find("hidden_state")' not in source
 
 

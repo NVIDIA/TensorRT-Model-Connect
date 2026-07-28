@@ -132,7 +132,7 @@ void test_omni_pipeline_construction() {
 }
 
 void test_omni_generate_audio() {
-    const std::vector<float> thinker_logits = {1.0F, 0.1F, 0.1F, 0.1F};
+    const std::vector<float> thinker_logits = {0.1F, 0.1F, 0.1F, 1.0F};
     auto thinker_engine = trtmc::test::build_mock_step_engine(9, 4, thinker_logits);
     if (!thinker_engine) {
         std::cerr << "WARNING: Could not build thinker engine for omni_generate, skipping\n";
@@ -147,6 +147,7 @@ void test_omni_generate_audio() {
     auto thinker_cache = std::make_unique<trtmc::Qwen3OmniKvCache>(0, 8, 0, stream);
 
     trtmc::OmniConfig cfg;
+    cfg.thinker_eos_token_id = 3;
     trtmc::OmniPipeline pipeline(std::move(thinker), std::move(thinker_cache), nullptr, cfg, stream,
                                  std::make_shared<OmniFixedTokenizer>(), "test-omni-gen");
 

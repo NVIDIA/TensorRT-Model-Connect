@@ -15,6 +15,7 @@
 // =============================================================================
 
 #include "runtime/models/qwen3_omni/omni_audio_plan.h"
+#include "runtime/models/qwen3_omni/omni_thinker_plan.h"
 
 #include <cstdint>
 #include <iostream>
@@ -99,6 +100,13 @@ void test_code2wav_output_uses_official_stride_and_causal_delay() {
           "omni code2wav output rejects zero frames");
 }
 
+void test_thinker_stops_only_on_configured_eos() {
+    check(!trtmc::omni_thinker_should_stop(0, 151645),
+          "omni thinker preserves token zero as ordinary text");
+    check(trtmc::omni_thinker_should_stop(151645, 151645),
+          "omni thinker stops on configured im_end token");
+}
+
 } // namespace
 
 int main() {
@@ -107,6 +115,7 @@ int main() {
     test_codec_plan_derives_official_frame_shape();
     test_code2wav_input_builder_transposes_frame_major_tokens();
     test_code2wav_output_uses_official_stride_and_causal_delay();
+    test_thinker_stops_only_on_configured_eos();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " omni audio plan test(s) failed\n";

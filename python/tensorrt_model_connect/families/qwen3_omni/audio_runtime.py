@@ -17,7 +17,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass
-from typing import BinaryIO, Callable, Protocol
+from typing import Any, BinaryIO, Callable, Protocol
 
 import numpy as np
 
@@ -74,8 +74,13 @@ def _chatml(request: TalkerRequest) -> str:
     return (
         f"<|im_start|>system\n{_SYSTEM_PROMPT}<|im_end|>\n"
         f"<|im_start|>user\n{request.prompt}<|im_end|>\n"
-        f"<|im_start|>assistant\n{request.assistant_text}<|im_end|>\n"
+        f"<|im_start|>assistant\n{request.assistant_text}<|im_end|>"
     )
+
+
+def _thinker_forward_input_ids(sequence_ids: Any) -> Any:
+    """Exclude the selected EOS, which Transformers does not forward."""
+    return sequence_ids[..., :-1]
 
 
 class _OfficialTalker:
@@ -148,7 +153,9 @@ class _OfficialTalker:
             input_ids = self._tokenizer(
                 _chatml(request), add_special_tokens=False, return_tensors="pt"
             ).input_ids
-            thinker_embed = self._thinker_embedding(input_ids).to(self._device)
+            thinker_embed = self._thinker_embedding(
+                _thinker_forward_input_ids(input_ids)
+            ).to(self._device)
             thinker_hidden = torch.zeros_like(thinker_embed)
             input_ids = input_ids.to(self._device)
 

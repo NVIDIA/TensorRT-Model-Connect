@@ -7,6 +7,7 @@
 
 #include "runtime/models/qwen3_omni/argmax_kernel.h"
 #include "runtime/models/qwen3_omni/omni_audio_plan.h"
+#include "runtime/models/qwen3_omni/omni_thinker_plan.h"
 #include "runtime/models/qwen3_omni/talker_runtime.h"
 #include "trtmc/tokenizer.h"
 
@@ -238,7 +239,7 @@ std::vector<int32_t> OmniPipeline::run_thinker(const std::vector<int32_t>& input
 
     for (int32_t step = 0; step < max_tokens; ++step) {
         const int32_t token = next_token;
-        if (token == 0 || token == config_->thinker_eos_token_id)
+        if (omni_thinker_should_stop(token, config_->thinker_eos_token_id))
             break;
         output_ids.push_back(token);
         if (step + 1 < max_tokens)

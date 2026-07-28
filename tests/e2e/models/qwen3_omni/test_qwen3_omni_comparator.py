@@ -18,13 +18,13 @@ from tests.e2e_harness.contracts import (
 )
 
 
-def _invariant_ref(stage_name: str) -> StageOutput:
+def _invariant_ref(stage_name: str, *, num_samples: int = 37_845) -> StageOutput:
     return StageOutput(
         stage_name=stage_name,
         data={
             "_invariant_only": True,
             "sample_rate": 24_000,
-            "num_samples": 37_845,
+            "num_samples": num_samples,
         },
         metadata={"source": "invariant_only"},
     )
@@ -76,7 +76,7 @@ def _threshold() -> ThresholdProfile:
 def test_omni_invariant_talker_requires_meaningful_audio(tmp_path) -> None:
     audio = tmp_path / "talker.wav"
     _write_wav(audio, num_samples=24_000)
-    reference = _invariant_ref("talker_decode")
+    reference = _invariant_ref("talker_decode", num_samples=24_000)
     reference.data["wav_path"] = str(audio)
 
     result = OmniComparator().compare(
@@ -101,7 +101,7 @@ def test_omni_invariant_talker_accepts_product_float32_wav(tmp_path) -> None:
     reference_audio = tmp_path / "reference.wav"
     _write_float32_wav(audio, num_samples=24_000)
     _write_wav(reference_audio, num_samples=24_000)
-    reference = _invariant_ref("talker_decode")
+    reference = _invariant_ref("talker_decode", num_samples=24_000)
     reference.data["wav_path"] = str(reference_audio)
 
     result = OmniComparator().compare(
@@ -114,6 +114,57 @@ def test_omni_invariant_talker_accepts_product_float32_wav(tmp_path) -> None:
     assert result.status == StageStatus.PASSED.value
     assert result.metrics["audio_wav_valid"].passed is True
     assert result.metrics["audio_encoding_supported"].passed is True
+
+
+def test_omni_talker_requires_exact_thinker_text_and_audio_shape(tmp_path) -> None:
+    audio = tmp_path / "talker.wav"
+    short_audio = tmp_path / "short.wav"
+    _write_float32_wav(audio, num_samples=37_845)
+    _write_float32_wav(short_audio, num_samples=35_925)
+    reference = _invariant_ref("talker_decode")
+    reference.data.update(
+        {
+            "decoded_text": "Hello from Qwen-Omni!",
+            "wav_path": str(audio),
+        }
+    )
+
+    matching = OmniComparator().compare(
+        StageOutput(
+            stage_name="talker_decode",
+            data={"thinker_text": "Hello from Qwen-Omni!"},
+            metadata={"audio_output_path": str(audio)},
+        ),
+        reference,
+        _threshold(),
+        StageSpec(name="talker_decode"),
+    )
+    wrong_text = OmniComparator().compare(
+        StageOutput(
+            stage_name="talker_decode",
+            data={"thinker_text": "Hello from Qwen-Omni"},
+            metadata={"audio_output_path": str(audio)},
+        ),
+        reference,
+        _threshold(),
+        StageSpec(name="talker_decode"),
+    )
+    wrong_shape = OmniComparator().compare(
+        StageOutput(
+            stage_name="talker_decode",
+            data={"thinker_text": "Hello from Qwen-Omni!"},
+            metadata={"audio_output_path": str(short_audio)},
+        ),
+        reference,
+        _threshold(),
+        StageSpec(name="talker_decode"),
+    )
+
+    assert matching.status == StageStatus.PASSED.value
+    assert matching.metrics["thinker_text_exact"].passed is True
+    assert matching.metrics["audio_num_samples_exact"].passed is True
+    assert wrong_text.metrics["thinker_text_exact"].passed is False
+    assert wrong_shape.metrics["audio_num_samples_exact"].passed is False
 
 
 def test_omni_waveform_oracle_fails_closed_without_reference_audio(tmp_path) -> None:
@@ -221,7 +272,7 @@ def test_omni_invariant_talker_compares_pinned_reference_waveform(tmp_path) -> N
         )
         wav_file.writeframes(b"".join(struct.pack("<h", sample) for sample in samples))
 
-    reference_output = _invariant_ref("talker_decode")
+    reference_output = _invariant_ref("talker_decode", num_samples=24_000)
     reference_output.data["wav_path"] = str(reference)
     matching_result = OmniComparator().compare(
         StageOutput(stage_name="talker_decode", metadata={"audio_output_path": str(matching)}),

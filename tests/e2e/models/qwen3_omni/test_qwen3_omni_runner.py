@@ -117,6 +117,25 @@ def test_omni_runner_uses_model_owned_runtime_budget(monkeypatch, tmp_path) -> N
     assert captured["timeout"] == 900
 
 
+def test_talker_runner_captures_thinker_text(monkeypatch, tmp_path) -> None:
+    case = _make_case(inputs={"prompt": "hello", "max_new_tokens": 16})
+    ctx = _make_ctx(case, tmp_path)
+
+    def _fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout="Generated 37845 audio samples\n",
+            stderr="[trtmc] Omni Thinker text: Hello from Qwen-Omni!\n",
+        )
+
+    monkeypatch.setattr(omni.subprocess, "run", _fake_run)
+
+    out = omni.OmniMultimodalRunner().run_stage(case, StageSpec(name="talker_decode"), ctx)
+
+    assert out.data["thinker_text"] == "Hello from Qwen-Omni!"
+
+
 def test_omni_timeout_preserves_partial_stderr(monkeypatch, tmp_path) -> None:
     case = _make_case(
         inputs={
