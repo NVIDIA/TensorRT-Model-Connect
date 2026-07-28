@@ -62,6 +62,15 @@ class WanPlugin final : public IPipelinePlugin {
         auto parts = load_diffusion_parts(ctx.backend, ctx.bundle, ctx.config_json, opts,
                                           denoiser_section_name, denoiser_options);
 
+        if (ctx.cuda_graphs) {
+            parts.denoiser.module->enable_cuda_graph();
+            parts.vae.module->enable_cuda_graph();
+            if (parts.vae_first_frame.module)
+                parts.vae_first_frame.module->enable_cuda_graph();
+            for (auto& text_encoder : parts.text_encoders)
+                text_encoder.module->enable_cuda_graph();
+        }
+
         // Extract first text encoder
         std::unique_ptr<TrtModule> te_module;
         if (!parts.text_encoders.empty())

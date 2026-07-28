@@ -21,6 +21,8 @@
 
 namespace trtmc {
 
+class WanGpuMatmul;
+
 class WanPipeline final : public IPipeline {
   public:
     WanPipeline(std::unique_ptr<TrtModule> text_encoder, std::unique_ptr<TrtModule> denoiser,
@@ -49,6 +51,8 @@ class WanPipeline final : public IPipeline {
     void compute_timestep_embedding(float timestep, std::vector<float>& temb_6d,
                                     std::vector<float>& time_embed) const;
     void project_text(const std::vector<float>& in, int32_t seq_len, std::vector<float>& out) const;
+    void matmul_bias(const float* lhs, const float* rhs, const float* bias, float* output,
+                     int32_t rows, int32_t inner, int32_t columns) const;
     void patchify(const std::vector<float>& latents, int32_t c, int32_t t, int32_t h, int32_t w,
                   std::vector<float>& patches) const;
     void unpatchify(const std::vector<float>& patches, int32_t c, int32_t t, int32_t h, int32_t w,
@@ -90,6 +94,7 @@ class WanPipeline final : public IPipeline {
     WanPreprocessorWeights weights_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
+    std::unique_ptr<WanGpuMatmul> gpu_matmul_;
 
     std::vector<DeviceTensor> vae_cache_in_;
     std::vector<DeviceTensor> vae_cache_out_;

@@ -15,6 +15,7 @@
 // =============================================================================
 
 #include "runtime/models/wan/wan_denoising_step_seam.h"
+#include "runtime/models/wan/wan_matmul_policy.h"
 
 #include <cstdint>
 #include <iostream>
@@ -148,11 +149,23 @@ void test_wan_step_runner_handles_zero_steps_and_success() {
           "wan seam applies scheduler updates on success");
 }
 
+void test_wan_large_preprocessing_matmuls_use_gpu() {
+    check(trtmc::wan_should_use_gpu_matmul(7800, 64, 1536),
+          "wan routes the release patch projection to GPU");
+    check(trtmc::wan_should_use_gpu_matmul(226, 4096, 1536), "wan routes text projection to GPU");
+    check(trtmc::wan_should_use_gpu_matmul(1, 1536, 9216),
+          "wan routes large timestep projection to GPU");
+    check(!trtmc::wan_should_use_gpu_matmul(1, 256, 1536),
+          "wan keeps small timestep projection on CPU");
+    check(!trtmc::wan_should_use_gpu_matmul(0, 64, 1536), "wan rejects invalid matrix dimensions");
+}
+
 } // namespace
 
 int main() {
     test_wan_step_runner_updates_latents_and_handles_failure();
     test_wan_step_runner_handles_zero_steps_and_success();
+    test_wan_large_preprocessing_matmuls_use_gpu();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " Wan denoising seam test(s) failed\n";

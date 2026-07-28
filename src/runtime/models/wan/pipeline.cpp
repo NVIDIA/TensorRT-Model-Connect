@@ -5,14 +5,16 @@
 
 // WanPipeline — TrtModule-based Wan2.1 diffusion pipeline.
 // Ports WanDiffusionBackend to use TrtModule::forward() for all GPU work.
-// All CPU math (timestep embedding, RoPE, patchify, unpatchify, text projection)
-// is kept identical. Raw TRT calls replaced with TrtModule::forward(TensorMap).
+// Large preprocessing projections use cuBLAS with the exact CPU implementation
+// retained as a fallback. Raw TRT calls use TrtModule::forward(TensorMap).
 
 #include "runtime/models/wan/pipeline.h"
 
+#include "runtime/models/wan/gpu_matmul.h"
 #include "runtime/models/wan/wan_denoising_step_seam.h"
 #include "runtime/models/wan/wan_generation_conditioning.h"
 #include "runtime/models/wan/wan_generation_plan.h"
+#include "runtime/models/wan/wan_matmul_policy.h"
 
 #include <algorithm>
 #include <cmath>
@@ -562,9 +564,18 @@ WanPipeline::WanPipeline(std::unique_ptr<TrtModule> text_encoder,
       denoiser_(std::move(denoiser)), vae_(std::move(vae)),
       vae_first_frame_(std::move(vae_first_frame)), config_(std::move(config)),
       weights_(std::move(weights)), tokenizer_(std::move(tokenizer)),
-      model_id_(std::move(model_id_str)) {}
+      model_id_(std::move(model_id_str)), gpu_matmul_(std::make_unique<WanGpuMatmul>()) {}
 
 WanPipeline::~WanPipeline() = default;
+
+void WanPipeline::matmul_bias(const float* lhs, const float* rhs, const float* bias, float* output,
+                              int32_t rows, int32_t inner, int32_t columns) const {
+    if (wan_should_use_gpu_matmul(rows, inner, columns) && gpu_matmul_ != nullptr &&
+        gpu_matmul_->run(lhs, rhs, bias, output, rows, inner, columns)) {
+        return;
+    }
+    cpu_matmul_bias(lhs, rhs, bias, output, rows, inner, columns);
+}
 
 // ---------------------------------------------------------------------------
 // T5 encoder via TrtModule::forward()
@@ -681,7 +692,7 @@ bool WanPipeline::run_denoiser(const std::vector<float>& hidden, const std::vect
 }
 
 // ---------------------------------------------------------------------------
-// Timestep embedding (CPU math — identical to old backend)
+// Timestep embedding
 // ---------------------------------------------------------------------------
 
 void WanPipeline::compute_timestep_embedding(float timestep, std::vector<float>& temb_6d,
@@ -700,24 +711,24 @@ void WanPipeline::compute_timestep_embedding(float timestep, std::vector<float>&
     }
 
     std::vector<float> hidden_1(static_cast<std::size_t>(dim));
-    cpu_matmul_bias(sinusoidal.data(), weights_.time_emb_0_weight.data(),
-                    weights_.time_emb_0_bias.data(), hidden_1.data(), 1, freq_dim, dim);
+    matmul_bias(sinusoidal.data(), weights_.time_emb_0_weight.data(),
+                weights_.time_emb_0_bias.data(), hidden_1.data(), 1, freq_dim, dim);
     cpu_silu_inplace(hidden_1.data(), static_cast<std::size_t>(dim));
 
     time_embed.resize(static_cast<std::size_t>(dim));
-    cpu_matmul_bias(hidden_1.data(), weights_.time_emb_2_weight.data(),
-                    weights_.time_emb_2_bias.data(), time_embed.data(), 1, dim, dim);
+    matmul_bias(hidden_1.data(), weights_.time_emb_2_weight.data(), weights_.time_emb_2_bias.data(),
+                time_embed.data(), 1, dim, dim);
 
     std::vector<float> silu_te(time_embed.begin(), time_embed.end());
     cpu_silu_inplace(silu_te.data(), static_cast<std::size_t>(dim));
 
     temb_6d.resize(static_cast<std::size_t>(6 * dim));
-    cpu_matmul_bias(silu_te.data(), weights_.time_proj_weight.data(),
-                    weights_.time_proj_bias.data(), temb_6d.data(), 1, dim, 6 * dim);
+    matmul_bias(silu_te.data(), weights_.time_proj_weight.data(), weights_.time_proj_bias.data(),
+                temb_6d.data(), 1, dim, 6 * dim);
 }
 
 // ---------------------------------------------------------------------------
-// Text projection (CPU math — identical to old backend)
+// Text projection
 // ---------------------------------------------------------------------------
 
 void WanPipeline::project_text(const std::vector<float>& in, int32_t seq_len,
@@ -726,15 +737,15 @@ void WanPipeline::project_text(const std::vector<float>& in, int32_t seq_len,
     const int32_t dim = config_.dit_dim;
 
     out.resize(static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(dim));
-    cpu_matmul_bias(in.data(), weights_.text_proj_weight.data(), weights_.text_proj_bias.data(),
-                    out.data(), seq_len, te_dim, dim);
+    matmul_bias(in.data(), weights_.text_proj_weight.data(), weights_.text_proj_bias.data(),
+                out.data(), seq_len, te_dim, dim);
 
     if (!weights_.text_proj_2_weight.empty()) {
         cpu_gelu_tanh_inplace(out.data(),
                               static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(dim));
         std::vector<float> tmp(out.size());
-        cpu_matmul_bias(out.data(), weights_.text_proj_2_weight.data(),
-                        weights_.text_proj_2_bias.data(), tmp.data(), seq_len, dim, dim);
+        matmul_bias(out.data(), weights_.text_proj_2_weight.data(),
+                    weights_.text_proj_2_bias.data(), tmp.data(), seq_len, dim, dim);
         out = std::move(tmp);
     }
 }
@@ -1292,9 +1303,9 @@ ImageResult WanPipeline::generate_image(const std::string& prompt, const Generat
     };
     const auto embed_hidden = [this, &layout](const std::vector<float>& patches,
                                               std::vector<float>& hidden) {
-        cpu_matmul_bias(patches.data(), weights_.patch_embed_weight.data(),
-                        weights_.patch_embed_bias.data(), hidden.data(), layout.num_patches,
-                        layout.patch_dim, layout.dim);
+        matmul_bias(patches.data(), weights_.patch_embed_weight.data(),
+                    weights_.patch_embed_bias.data(), hidden.data(), layout.num_patches,
+                    layout.patch_dim, layout.dim);
     };
     const auto unpatchify_fn = [this, &layout](const std::vector<float>& patches,
                                                std::vector<float>& out) {
