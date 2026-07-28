@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import errno
 import fcntl
+import functools
 import hashlib
 import html
 import json
@@ -3165,6 +3166,43 @@ def _task_eval_models(models_root: Path) -> dict[str, dict[str, Any]]:
     return {str(model["name"]): model for model in task_eval.load_manifest_records(models_root)}
 
 
+def _authoritative_gates_by_binding(
+    catalog: Mapping[str, Any],
+    *,
+    suites: Mapping[str, dict[str, Any]],
+    task_models: Mapping[str, dict[str, Any]],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    gates_by_binding: dict[tuple[str, str], dict[str, Any]] = {}
+    for model_name, specification in catalog["models"].items():
+        for workload in specification.get("workloads", []):
+            resolved = task_eval.resolve_suite_for_model(
+                suites[workload],
+                task_models[model_name],
+            )
+            gates_by_binding[(model_name, workload)] = (
+                _validated_gate_configuration(
+                    resolved.get("gates", {}),
+                    field=f"resolved gates for {model_name}/{workload}",
+                )
+            )
+    return gates_by_binding
+
+
+@functools.lru_cache(maxsize=1)
+def _default_authoritative_gates_by_binding(
+) -> dict[tuple[str, str], dict[str, Any]]:
+    catalog = load_catalog()
+    suites = {
+        str(suite["id"]): suite
+        for suite in task_eval.load_suites()
+    }
+    return _authoritative_gates_by_binding(
+        catalog,
+        suites=suites,
+        task_models=_task_eval_models(DEFAULT_MODELS),
+    )
+
+
 def _declared_profile(
     *,
     family: str,
@@ -4052,11 +4090,19 @@ _REQUIRED_PASS_METRICS_BY_MODE = {
         "correctness_agreement_rate",
     ),
 }
-_GENERIC_GATED_MODES = {
-    "asr_transcript",
-    "mcq",
-    "ocrbench_v2",
-    "tts_intelligibility",
+_PASSED_COMPLETE_COUNT_FIELD_BY_MODE = {
+    "asr_transcript": "total_count",
+    "diffusion_image_clip_parity": "total_count",
+    "diffusion_text_parity": "sample_count",
+    "encoder_embedding_parity": "sample_count",
+    "image_classification_parity": "sample_count",
+    "mcq": "total_count",
+    "ocrbench_v2": "total_count",
+    "prompted_segmentation_parity": "sample_count",
+    "reranking_parity": "sample_count",
+    "semantic_segmentation_parity": "sample_count",
+    "time_series_parity": "sample_count",
+    "tts_intelligibility": "total_count",
 }
 _GATE_METRIC_ALIASES = {
     "backend_mask_iou": "mean_backend_mask_iou",
@@ -4069,6 +4115,7 @@ _COMPARISON_METRICS = (
     "count",
     "exact_count",
     "passed_count",
+    "sample_count",
     "valid_count",
     "skipped_count",
     "total_count",
@@ -4106,6 +4153,7 @@ _COUNT_COMPARISON_METRICS = {
     "count",
     "exact_count",
     "passed_count",
+    "sample_count",
     "valid_count",
     "skipped_count",
     "total_count",
@@ -4709,8 +4757,100 @@ def _normalize_validation_result(
     )
 
 
+def _validated_gate_configuration(
+    value: Any,
+    *,
+    field: str,
+) -> dict[str, int | float]:
+    if not isinstance(value, Mapping):
+        raise ValidationError(
+            f"validation result {field} must be an object"
+        )
+    gates: dict[str, int | float] = {}
+    for gate, required in value.items():
+        if not isinstance(gate, str) or not gate:
+            raise ValidationError(
+                f"validation result {field} names must be non-empty strings"
+            )
+        finite = False
+        if (
+            isinstance(required, (int, float))
+            and not isinstance(required, bool)
+        ):
+            try:
+                finite = math.isfinite(required)
+            except OverflowError:
+                finite = False
+        if not finite:
+            raise ValidationError(
+                f"validation result {field}.{gate} must be a finite number"
+            )
+        gates[gate] = required
+    return gates
+
+
+def _validate_passed_complete_count_evidence(
+    raw_result: Mapping[str, Any],
+    *,
+    mode: str,
+) -> None:
+    count_field = _PASSED_COMPLETE_COUNT_FIELD_BY_MODE.get(mode)
+    if count_field is None:
+        return
+    evidence_label = (
+        "diffusion"
+        if mode == "diffusion_image_clip_parity"
+        else mode
+    )
+    valid_count = raw_result.get("valid_count")
+    complete_count = raw_result.get(count_field)
+    if (
+        type(valid_count) is not int
+        or valid_count <= 0
+        or type(complete_count) is not int
+        or complete_count <= 0
+    ):
+        raise ValidationError(
+            f"passed {evidence_label} comparison must include positive integer "
+            f"valid_count and {count_field} evidence"
+        )
+    if valid_count != complete_count:
+        raise ValidationError(
+            f"passed {evidence_label} comparison requires valid_count to equal "
+            f"{count_field}"
+        )
+    skipped_count = raw_result.get("skipped_count")
+    if count_field == "total_count" and type(skipped_count) is not int:
+        raise ValidationError(
+            f"passed {evidence_label} comparison must include integer "
+            "skipped_count evidence"
+        )
+    if "skipped_count" in raw_result and (
+        type(skipped_count) is not int or skipped_count != 0
+    ):
+        raise ValidationError(
+            f"passed {evidence_label} comparison requires zero skipped samples"
+        )
+    alternate_count_field = (
+        "sample_count"
+        if count_field == "total_count"
+        else "total_count"
+    )
+    if (
+        alternate_count_field in raw_result
+        and raw_result[alternate_count_field] != complete_count
+    ):
+        raise ValidationError(
+            f"passed {evidence_label} comparison has conflicting "
+            f"{count_field} and "
+            f"{alternate_count_field} evidence"
+        )
+
+
 def _validate_raw_metric_relationships(
     raw_result: Mapping[str, Any],
+    *,
+    expected_gates: Mapping[str, Any] | None = None,
 ) -> None:
     raw_status = str(raw_result.get("status", "") or "")
     passed = raw_status in {"pass", "passed"}
@@ -4745,27 +4885,11 @@ def _validate_raw_metric_relationships(
                 "metric evidence: "
                 + ", ".join(missing)
             )
-    if passed and mode in _GENERIC_GATED_MODES:
-        counts = ("valid_count", "skipped_count", "total_count")
-        missing_counts = [
-            name
-            for name in counts
-            if type(raw_result.get(name)) is not int
-        ]
-        if missing_counts:
-            raise ValidationError(
-                f"passed {mode} comparison is missing raw count evidence: "
-                + ", ".join(missing_counts)
-            )
-        if (
-            raw_result["valid_count"] <= 0
-            or raw_result["skipped_count"] != 0
-            or raw_result["valid_count"] != raw_result["total_count"]
-        ):
-            raise ValidationError(
-                f"passed {mode} comparison requires a non-empty valid set, "
-                "zero skipped samples, and valid_count equal to total_count"
-            )
+    if passed:
+        _validate_passed_complete_count_evidence(
+            raw_result,
+            mode=mode,
+        )
     supported_mode = mode in _PRIMARY_METRIC_BY_MODE
     if passed and supported_mode and mode != "continuation":
         gates = raw_result.get("gates")
@@ -4778,27 +4902,52 @@ def _validate_raw_metric_relationships(
         gates = raw_result.get("gates", {})
         if gates is None:
             gates = {}
-    if passed and supported_mode and gates:
-        if not isinstance(gates, Mapping):
-            raise ValidationError(
-                "validation result raw_result.gates must be an object"
+    if passed and supported_mode:
+        actual_gates = _validated_gate_configuration(
+            gates,
+            field="raw_result.gates",
+        )
+        if expected_gates is not None:
+            authoritative_gates = _validated_gate_configuration(
+                expected_gates,
+                field="expected_gates",
             )
+            if actual_gates != authoritative_gates:
+                unknown = sorted(
+                    set(actual_gates) - set(authoritative_gates)
+                )
+                missing = sorted(
+                    set(authoritative_gates) - set(actual_gates)
+                )
+                changed = sorted(
+                    gate
+                    for gate in set(actual_gates).intersection(
+                        authoritative_gates
+                    )
+                    if actual_gates[gate] != authoritative_gates[gate]
+                )
+                details = []
+                if unknown:
+                    details.append(
+                        "unknown gates: " + ", ".join(unknown)
+                    )
+                if missing:
+                    details.append(
+                        "missing gates: " + ", ".join(missing)
+                    )
+                if changed:
+                    details.append(
+                        "changed thresholds: " + ", ".join(changed)
+                    )
+                raise ValidationError(
+                    f"passed {mode} raw_result.gates must exactly match "
+                    "the authoritative workload configuration"
+                    + (": " + "; ".join(details) if details else "")
+                )
+    if passed and supported_mode and gates:
+        assert isinstance(gates, Mapping)
         violations: list[str] = []
         for gate, required in gates.items():
-            if not isinstance(gate, str) or not gate:
-                raise ValidationError(
-                    "validation result raw_result.gates names must be "
-                    "non-empty strings"
-                )
-            if (
-                not isinstance(required, (int, float))
-                or isinstance(required, bool)
-                or not math.isfinite(required)
-            ):
-                raise ValidationError(
-                    "validation result raw_result.gates."
-                    f"{gate} must be a finite number"
-                )
             if gate.startswith("min_"):
                 metric = gate[len("min_") :]
                 operator = "min"
@@ -4957,7 +5106,11 @@ def _validate_raw_metric_relationships(
             )
 
 
-def _normalize_result(result: Mapping[str, Any]) -> dict[str, Any]:
+def _normalize_result(
+    result: Mapping[str, Any],
+    *,
+    expected_gates: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     normalized = dict(result)
     if "status" in normalized and not isinstance(
         normalized["status"],
@@ -5386,7 +5539,10 @@ def _normalize_result(result: Mapping[str, Any]) -> dict[str, Any]:
                     f"{delta_name} conflicts with {reference_name} and "
                     f"{candidate_name}"
                 )
-    _validate_raw_metric_relationships(raw_result)
+    _validate_raw_metric_relationships(
+        raw_result,
+        expected_gates=expected_gates,
+    )
     execution = _normalize_execution_result(
         normalized.get("execution"),
         fallback=_execution_details(normalized, raw_result),
@@ -5687,6 +5843,7 @@ def _comparison_result(
     reference_environment: EnvironmentSelection,
     dataset_command: str,
     sample_limit: int = 0,
+    expected_gates: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     workload = _required_workload(binding)
     summary_path = _comparison_summary_path(binding, case_dir)
@@ -5812,7 +5969,10 @@ def _comparison_result(
             "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     try:
-        return _normalize_result(result_payload)
+        return _normalize_result(
+            result_payload,
+            expected_gates=expected_gates,
+        )
     except ValidationError as exc:
         if raw_result.get("error_type") == "ComparisonProcessError":
             raise
@@ -5821,7 +5981,10 @@ def _comparison_result(
             "comparison wrote malformed model evidence for "
             f"{binding.model!r}: {exc}"
         )
-        return _normalize_result(result_payload)
+        return _normalize_result(
+            result_payload,
+            expected_gates=expected_gates,
+        )
 
 
 def _comparison_summary_path(binding: Binding, case_dir: Path) -> Path:
@@ -5857,6 +6020,15 @@ def run_binding(
     dataset_command = shlex.join([sys.executable, *sys.argv])
 
     suite = suites[workload]
+    resolved_suite = task_eval.resolve_suite_for_model(
+        suite,
+        task_models[binding.model],
+    )
+    expected_gates = resolved_suite.get("gates", {})
+    if not isinstance(expected_gates, Mapping):
+        raise ValidationError(
+            f"resolved gates for {binding.model}/{workload} must be an object"
+        )
     dataset = (
         Path(arguments.dataset)
         if arguments.dataset
@@ -5884,6 +6056,7 @@ def run_binding(
         reference_environment=environment,
         dataset_command=dataset_command,
         sample_limit=int(arguments.limit or 0),
+        expected_gates=expected_gates,
     )
 
     comparison = case_dir / "comparison.json"
@@ -7117,6 +7290,10 @@ def _validate_result_identity(
 def _normalize_result_files(
     output: Path,
     result_paths: Sequence[Path],
+    *,
+    expected_gates_by_binding: (
+        Mapping[tuple[str, str], Mapping[str, Any]] | None
+    ) = None,
 ) -> tuple[
     list[dict[str, Any]],
     dict[Path, _CaseArtifactStage],
@@ -7149,7 +7326,47 @@ def _normalize_result_files(
             )
         _validate_disagreement_metadata(loaded, path=path)
         _validate_result_identity(loaded, path=path)
-        result = _normalize_result(loaded)
+        expected_gates = None
+        if loaded.get("workload") is not None:
+            key = (loaded.get("model"), loaded.get("workload"))
+            gate_context = expected_gates_by_binding
+            explicit_context = gate_context is not None
+            if gate_context is None:
+                gate_context = (
+                    _default_authoritative_gates_by_binding()
+                )
+            if key in gate_context:
+                expected_gates = gate_context[key]
+            elif explicit_context:
+                raise ValidationError(
+                    "validation report has no authoritative gate "
+                    f"configuration for {key[0]}/{key[1]}: {path}"
+                )
+            else:
+                raw_result = loaded.get("raw_result")
+                raw_mode = (
+                    raw_result.get("mode")
+                    if isinstance(raw_result, Mapping)
+                    else None
+                )
+                raw_status = (
+                    raw_result.get("status")
+                    if isinstance(raw_result, Mapping)
+                    else None
+                )
+                if (
+                    raw_status in {"pass", "passed"}
+                    and raw_mode in _PRIMARY_METRIC_BY_MODE
+                ):
+                    raise ValidationError(
+                        "validation report has no authoritative gate "
+                        f"configuration for passed {key[0]}/{key[1]}: "
+                        f"{path}"
+                    )
+        result = _normalize_result(
+            loaded,
+            expected_gates=expected_gates,
+        )
         _validate_report_json_depth(
             result,
             path=path,
@@ -7593,11 +7810,20 @@ def write_report(
     output: Path,
     *,
     result_paths: Sequence[Path] | None = None,
+    expected_gates_by_binding: (
+        Mapping[tuple[str, str], Mapping[str, Any]] | None
+    ) = None,
 ) -> tuple[Path, Path, dict[str, Any]]:
     with _validation_output_publication_lock(output):
+        report_kwargs: dict[str, Any] = {}
+        if expected_gates_by_binding is not None:
+            report_kwargs["expected_gates_by_binding"] = (
+                expected_gates_by_binding
+            )
         return _write_report_locked(
             output,
             result_paths=result_paths,
+            **report_kwargs,
         )
 
 
@@ -7605,6 +7831,9 @@ def _write_report_locked(
     output: Path,
     *,
     result_paths: Sequence[Path] | None = None,
+    expected_gates_by_binding: (
+        Mapping[tuple[str, str], Mapping[str, Any]] | None
+    ) = None,
 ) -> tuple[Path, Path, dict[str, Any]]:
     selected_paths = (
         _discover_report_result_paths(output)
@@ -7633,6 +7862,7 @@ def _write_report_locked(
     all_results, stages = _normalize_result_files(
         output,
         selected_paths,
+        expected_gates_by_binding=expected_gates_by_binding,
     )
     all_paths = selected_paths
     transaction_entries: list[tuple[str, Any]] = []
@@ -7904,8 +8134,10 @@ def _positive_int(value: str) -> int:
 
 def _nonnegative_float(value: str) -> float:
     parsed = float(value)
-    if parsed < 0:
-        raise argparse.ArgumentTypeError("must be nonnegative")
+    if not math.isfinite(parsed) or parsed < 0:
+        raise argparse.ArgumentTypeError(
+            "must be a finite nonnegative number"
+        )
     return parsed
 
 
@@ -8157,6 +8389,7 @@ def _run_supervised_binding(
     arguments: argparse.Namespace,
     catalog: Mapping[str, Any],
     attempt: int = 1,
+    expected_gates: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     case_dir = _prepare_case_directory(arguments.output, binding)
     comparison_path = case_dir / "comparison.json"
@@ -8222,7 +8455,10 @@ def _run_supervised_binding(
                 "runnable worker raw_result must include an explicit "
                 "comparison status"
             )
-        result = _normalize_result(loaded)
+        result = _normalize_result(
+            loaded,
+            expected_gates=expected_gates,
+        )
         if result.get("model") != binding.model or result.get("workload") != binding.workload:
             raise ValidationError("worker wrote comparison.json for a different binding")
         execution_completed = (
@@ -8353,16 +8589,21 @@ def _run_supervised_binding_with_retries(
     *,
     arguments: argparse.Namespace,
     catalog: Mapping[str, Any],
+    expected_gates: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     case_dir = _case_directory(arguments.output, binding)
     attempts = []
     result: dict[str, Any] = {}
     for attempt in range(1, arguments.model_attempts + 1):
+        worker_kwargs: dict[str, Any] = {}
+        if expected_gates is not None:
+            worker_kwargs["expected_gates"] = expected_gates
         result = _run_supervised_binding(
             binding,
             arguments=arguments,
             catalog=catalog,
             attempt=attempt,
+            **worker_kwargs,
         )
         execution = result.get("execution", {})
         execution_error = (
@@ -8410,14 +8651,26 @@ def _run_all_bindings(
     *,
     arguments: argparse.Namespace,
     catalog: Mapping[str, Any],
+    expected_gates_by_binding: (
+        Mapping[tuple[str, str], Mapping[str, Any]] | None
+    ) = None,
 ) -> int:
     _prepare_run_directories(arguments)
     write_run_metadata(arguments.output)
     failed = False
     not_compared = False
     current_result_paths: list[Path] = []
+    report_kwargs: dict[str, Any] = {}
+    if expected_gates_by_binding is not None:
+        report_kwargs["expected_gates_by_binding"] = (
+            expected_gates_by_binding
+        )
     try:
-        write_report(arguments.output, result_paths=[])
+        write_report(
+            arguments.output,
+            result_paths=[],
+            **report_kwargs,
+        )
         for binding in bindings:
             if not binding.runnable:
                 print(
@@ -8434,6 +8687,7 @@ def _run_all_bindings(
                 _, report_path, _ = write_report(
                     arguments.output,
                     result_paths=current_result_paths,
+                    **report_kwargs,
                 )
                 _print_result(result, comparison, report_path)
                 continue
@@ -8452,10 +8706,22 @@ def _run_all_bindings(
                 f"{binding.workload} / {sample_note}",
                 flush=True,
             )
+            worker_kwargs: dict[str, Any] = {}
+            if expected_gates_by_binding is not None:
+                key = (binding.model, _required_workload(binding))
+                if key not in expected_gates_by_binding:
+                    raise ValidationError(
+                        "no authoritative gate configuration for "
+                        f"{key[0]}/{key[1]}"
+                    )
+                worker_kwargs["expected_gates"] = (
+                    expected_gates_by_binding[key]
+                )
             result = _run_supervised_binding_with_retries(
                 binding,
                 arguments=arguments,
                 catalog=catalog,
+                **worker_kwargs,
             )
             comparison = (
                 _case_directory(arguments.output, binding)
@@ -8465,6 +8731,7 @@ def _run_all_bindings(
             _, report_path, _ = write_report(
                 arguments.output,
                 result_paths=current_result_paths,
+                **report_kwargs,
             )
             _print_result(result, comparison, report_path)
             model_failed = result["validation"]["status"] == "failed"
@@ -8484,6 +8751,7 @@ def _run_all_bindings(
             write_report(
                 arguments.output,
                 result_paths=current_result_paths,
+                **report_kwargs,
             )
         except BaseException as reporting_exc:
             note = (
@@ -8499,6 +8767,7 @@ def _run_all_bindings(
     write_report(
         arguments.output,
         result_paths=current_result_paths,
+        **report_kwargs,
     )
     if failed:
         return 1
@@ -8512,12 +8781,20 @@ def _run_bindings(
     catalog: Mapping[str, Any],
     task_models: Mapping[str, dict[str, Any]],
     suites: Mapping[str, dict[str, Any]],
+    expected_gates_by_binding: (
+        Mapping[tuple[str, str], Mapping[str, Any]] | None
+    ) = None,
 ) -> int:
     _prepare_run_directories(arguments)
     if not arguments.model_worker:
         write_run_metadata(arguments.output)
     failed = False
     not_compared = False
+    report_kwargs: dict[str, Any] = {}
+    if expected_gates_by_binding is not None:
+        report_kwargs["expected_gates_by_binding"] = (
+            expected_gates_by_binding
+        )
     for binding in bindings:
         if not binding.runnable:
             print(
@@ -8531,7 +8808,10 @@ def _run_bindings(
             )
             not_compared = True
             if not arguments.model_worker:
-                _, report_path, _ = write_report(arguments.output)
+                _, report_path, _ = write_report(
+                    arguments.output,
+                    **report_kwargs,
+                )
                 _print_result(result, comparison, report_path)
             continue
         binding_arguments = copy.copy(arguments)
@@ -8556,7 +8836,10 @@ def _run_bindings(
             suites=suites,
         )
         if not arguments.model_worker:
-            _, report_path, _ = write_report(arguments.output)
+            _, report_path, _ = write_report(
+                arguments.output,
+                **report_kwargs,
+            )
             comparison = _case_directory(arguments.output, binding) / "comparison.json"
             _print_result(result, comparison, report_path)
         failed = failed or result["validation"]["status"] == "failed"
@@ -8587,11 +8870,17 @@ def _main(arguments: argparse.Namespace) -> int:
             explicit_limit=arguments.limit,
         )
         return 0
+    expected_gates_by_binding = _authoritative_gates_by_binding(
+        catalog,
+        suites=suites,
+        task_models=task_models,
+    )
     if not arguments.model_worker:
         return _run_all_bindings(
             bindings,
             arguments=arguments,
             catalog=catalog,
+            expected_gates_by_binding=expected_gates_by_binding,
         )
     return _run_bindings(
         bindings,
@@ -8599,6 +8888,7 @@ def _main(arguments: argparse.Namespace) -> int:
         catalog=catalog,
         task_models=task_models,
         suites=suites,
+        expected_gates_by_binding=expected_gates_by_binding,
     )
 
 

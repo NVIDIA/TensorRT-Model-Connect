@@ -49,7 +49,39 @@ def _raw_evidence(
             }
         )
     evidence.update(extra)
+    mode = evidence.get("mode")
+    if (
+        status in {"pass", "passed"}
+        and isinstance(mode, str)
+        and trtmc_validate._PASSED_COMPLETE_COUNT_FIELD_BY_MODE.get(
+            mode
+        )
+        == "sample_count"
+    ):
+        evidence.setdefault("sample_count", evidence.get("valid_count"))
+        if "total_count" not in extra:
+            evidence.pop("total_count", None)
+        if "skipped_count" not in extra:
+            evidence.pop("skipped_count", None)
     return evidence
+
+
+def _test_gate_context(result_paths) -> dict:
+    context = {}
+    for path in result_paths:
+        result = json.loads(path.read_text(encoding="utf-8"))
+        workload = result.get("workload")
+        if workload is None:
+            continue
+        raw_result = result.get("raw_result", {})
+        gates = (
+            raw_result.get("gates", {})
+            if isinstance(raw_result, dict)
+            else {}
+        )
+        assert isinstance(gates, dict)
+        context[(result["model"], workload)] = dict(gates)
+    return context
 
 
 def _assert_output_lock_held(output: Path) -> None:
@@ -137,6 +169,76 @@ def test_model_workload_catalog_covers_every_validation_eligible_model():
         )
     }
     assert len(qwen_identities) == 1
+
+
+def test_authoritative_gates_use_resolved_cli_suite_and_model_context():
+    catalog = {
+        "models": {
+            "model-a": {
+                "workloads": ["suite-a"],
+            }
+        }
+    }
+    suites = {
+        "suite-a": {
+            "id": "suite-a",
+            "gates": {
+                "min_agreement": 0.5,
+                "max_error": 0.4,
+            },
+            "family_profiles": {
+                "family-a": {
+                    "gates": {
+                        "min_agreement": 0.75,
+                    }
+                }
+            },
+            "model_profiles": {
+                "model-a": {
+                    "gates": {
+                        "max_error": 0.1,
+                    }
+                }
+            },
+        }
+    }
+    task_models = {
+        "model-a": {
+            "name": "model-a",
+            "family": "family-a",
+        }
+    }
+
+    assert trtmc_validate._authoritative_gates_by_binding(
+        catalog,
+        suites=suites,
+        task_models=task_models,
+    ) == {
+        ("model-a", "suite-a"): {
+            "min_agreement": 0.75,
+            "max_error": 0.1,
+        }
+    }
+
+
+def test_complete_count_policy_covers_every_supported_noncontinuation_mode():
+    assert set(
+        trtmc_validate._PASSED_COMPLETE_COUNT_FIELD_BY_MODE
+    ) == (
+        set(trtmc_validate._PRIMARY_METRIC_BY_MODE)
+        - {"continuation"}
+    )
+
+
+def test_gate_configuration_rejects_unrepresentably_large_integer():
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="must be a finite number",
+    ):
+        trtmc_validate._validated_gate_configuration(
+            {"min_score": 10**10_000},
+            field="expected_gates",
+        )
 
 
 def test_validation_eligible_models_apply_all_selection_boundaries():
@@ -414,6 +516,24 @@ def test_all_defaults_to_continue_and_accepts_stop_policy():
     assert default.model_retry_delay_seconds == 5.0
 
 
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_model_retry_delay_rejects_nonfinite_values(value):
+    parser = trtmc_validate.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            ["--all", "--model-retry-delay-seconds", value]
+        )
+
+
+def test_model_retry_delay_accepts_finite_zero():
+    arguments = trtmc_validate.build_parser().parse_args(
+        ["--all", "--model-retry-delay-seconds", "0"]
+    )
+
+    assert arguments.model_retry_delay_seconds == 0.0
+
+
 @pytest.mark.parametrize(
     ("policy", "expected_models"),
     [
@@ -492,6 +612,96 @@ def test_all_supervisor_applies_model_failure_policy(
 
     assert returncode == 1
     assert attempted == expected_models
+
+
+def test_all_supervisor_propagates_authoritative_gates_to_worker_and_report(
+    tmp_path,
+    monkeypatch,
+):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--output",
+            str(tmp_path / "results"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "workload-a")
+    expected_gates = {"min_score": 0.75}
+    gates_by_binding = {
+        ("model-a", "workload-a"): expected_gates,
+    }
+    worker_contexts = []
+    report_contexts = []
+
+    def run_worker(
+        selected,
+        *,
+        arguments,
+        catalog,
+        expected_gates,
+    ):
+        del arguments, catalog
+        worker_contexts.append((selected, expected_gates))
+        return {
+            "model": selected.model,
+            "workload": selected.workload,
+            "validation": {"status": "passed"},
+        }
+
+    def write_report(_output, **kwargs):
+        report_contexts.append(
+            kwargs.get("expected_gates_by_binding")
+        )
+        return (
+            tmp_path / "report.json",
+            tmp_path / "report.html",
+            {},
+        )
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_run_supervised_binding_with_retries",
+        run_worker,
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "write_report",
+        write_report,
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "write_run_metadata",
+        lambda output: output,
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "finalize_run_metadata",
+        lambda output: output,
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_print_result",
+        lambda *_args: None,
+    )
+
+    returncode = trtmc_validate._run_all_bindings(
+        [binding],
+        arguments=arguments,
+        catalog={"sample_limits": {"workload-a": 1}},
+        expected_gates_by_binding=gates_by_binding,
+    )
+
+    assert returncode == 0
+    assert worker_contexts == [(binding, expected_gates)]
+    assert report_contexts
+    assert all(
+        context is gates_by_binding
+        for context in report_contexts
+    )
 
 
 def test_all_supervisor_records_unexpected_run_failure(
@@ -1319,6 +1529,13 @@ def test_single_ci_case_writes_stable_result_and_exit_code(
         catalog=catalog,
         task_models={},
         suites={"workload-a": {}},
+        expected_gates_by_binding={
+            ("model-a", "workload-a"): _raw_evidence(
+                "model-a",
+                "workload-a",
+                "passed",
+            )["gates"],
+        },
     )
 
     case_dir = arguments.output / "model-a" / "workload-a"
@@ -1574,7 +1791,12 @@ def test_write_report_links_each_comparison(tmp_path):
         encoding="utf-8",
     )
 
-    json_path, html_path, report = trtmc_validate.write_report(tmp_path)
+    json_path, html_path, report = trtmc_validate.write_report(
+        tmp_path,
+        expected_gates_by_binding=_test_gate_context(
+            [comparison]
+        ),
+    )
 
     assert report["summary"] == {
         "cases": 1,
@@ -1905,6 +2127,9 @@ def test_report_lock_covers_all_successful_publication_phases(
     trtmc_validate.write_report(
         tmp_path,
         result_paths=[comparison],
+        expected_gates_by_binding=_test_gate_context(
+            [comparison]
+        ),
     )
 
     assert phases == {
@@ -1971,6 +2196,9 @@ def test_report_lock_covers_rollback_and_releases_after_failure(
         trtmc_validate.write_report(
             tmp_path,
             result_paths=[comparison],
+            expected_gates_by_binding=_test_gate_context(
+                [comparison]
+            ),
         )
 
     assert injected
@@ -2009,8 +2237,19 @@ def test_all_report_only_contains_results_created_by_current_run(
     )
     binding = trtmc_validate.Binding("current-model", "current-workload")
 
-    def run_worker(selected, *, arguments, catalog):
+    def run_worker(
+        selected,
+        *,
+        arguments,
+        catalog,
+        expected_gates,
+    ):
         del catalog
+        assert expected_gates == _raw_evidence(
+            selected.model,
+            selected.workload,
+            "passed",
+        )["gates"]
         result = {
             "model": selected.model,
             "workload": selected.workload,
@@ -2044,6 +2283,13 @@ def test_all_report_only_contains_results_created_by_current_run(
         [binding],
         arguments=arguments,
         catalog={"sample_limits": {"current-workload": 2}},
+        expected_gates_by_binding={
+            ("current-model", "current-workload"): _raw_evidence(
+                "current-model",
+                "current-workload",
+                "passed",
+            )["gates"],
+        },
     )
 
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
@@ -2400,7 +2646,8 @@ def test_report_does_not_refresh_disagreement_artifact_from_raw_work_dir(
     case_dir.mkdir(parents=True)
     work_dir = tmp_path / "work"
     work_dir.mkdir()
-    (case_dir / "comparison.json").write_text(
+    comparison = case_dir / "comparison.json"
+    comparison.write_text(
         json.dumps(
                 {
                     "model": "model-a",
@@ -2421,7 +2668,12 @@ def test_report_does_not_refresh_disagreement_artifact_from_raw_work_dir(
     external.write_text("DO-NOT-TRUNCATE\n", encoding="utf-8")
     (case_dir / "disagreements.jsonl").symlink_to(external)
 
-    _, _, report = trtmc_validate.write_report(tmp_path)
+    _, _, report = trtmc_validate.write_report(
+        tmp_path,
+        expected_gates_by_binding=_test_gate_context(
+            [comparison]
+        ),
+    )
 
     assert report["validation_status"] == "passed"
     assert external.read_text(encoding="utf-8") == "DO-NOT-TRUNCATE\n"
@@ -4052,7 +4304,8 @@ def test_write_report_recovers_json_logged_runner_command(tmp_path):
         + "\n",
         encoding="utf-8",
     )
-    (case_dir / "comparison.json").write_text(
+    comparison = case_dir / "comparison.json"
+    comparison.write_text(
         json.dumps(
             {
                 "model": "model-a",
@@ -4071,7 +4324,12 @@ def test_write_report_recovers_json_logged_runner_command(tmp_path):
         encoding="utf-8",
     )
 
-    _, html_path, report = trtmc_validate.write_report(tmp_path)
+    _, html_path, report = trtmc_validate.write_report(
+        tmp_path,
+        expected_gates_by_binding=_test_gate_context(
+            [comparison]
+        ),
+    )
 
     assert report["results"][0]["reproduce"]["trtmc"] == [
         "trtmc build",
@@ -6453,6 +6711,271 @@ def test_passed_result_accepts_satisfied_specialized_gates(extra):
     assert result["validation"]["status"] == "passed"
 
 
+@pytest.mark.parametrize(
+    ("counterexample", "message"),
+    [
+        (
+            "missing-complete-count",
+            "valid_count and sample_count evidence",
+        ),
+        ("explicit-skipped-sample", "zero skipped samples"),
+        ("weakened-threshold", "changed thresholds"),
+        ("unknown-gate", "unknown gates"),
+    ],
+)
+def test_passed_raw_evidence_rejects_incomplete_counts_or_untrusted_gates(
+    counterexample,
+    message,
+):
+    authoritative_gates = {
+        "min_vector_cosine": 0.99,
+        "min_vector_pass_rate": 1.0,
+        "max_pair_cosine_abs_delta": 0.02,
+    }
+    raw_result = _raw_evidence(
+        "model-a",
+        "workload-a",
+        "passed",
+        mode="encoder_embedding_parity",
+        vector_pass_rate=1.0,
+        min_vector_cosine=1.0,
+        max_pair_cosine_abs_delta=0.0,
+        gates=dict(authoritative_gates),
+    )
+    if counterexample == "missing-complete-count":
+        raw_result.pop("sample_count")
+    elif counterexample == "explicit-skipped-sample":
+        raw_result["skipped_count"] = 1
+    elif counterexample == "weakened-threshold":
+        raw_result["gates"]["min_vector_pass_rate"] = 0.5
+    else:
+        raw_result["gates"]["min_untrusted_score"] = 0.0
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match=message,
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": 0,
+                "raw_result": raw_result,
+            },
+            expected_gates=authoritative_gates,
+        )
+
+
+def test_report_rejects_passed_supported_mode_without_gate_context(
+    tmp_path,
+    monkeypatch,
+):
+    model = "model-a"
+    workload = "workload-a"
+    case_dir = tmp_path / model / workload
+    case_dir.mkdir(parents=True)
+    comparison = case_dir / "comparison.json"
+    comparison.write_text(
+        json.dumps(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": model,
+                "workload": workload,
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    model,
+                    workload,
+                    "passed",
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_default_authoritative_gates_by_binding",
+        lambda: {},
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="no authoritative gate configuration",
+    ):
+        trtmc_validate.write_report(
+            tmp_path,
+            result_paths=[comparison],
+        )
+
+
+def test_report_rejects_threshold_gated_continuation_without_gate_context(
+    tmp_path,
+    monkeypatch,
+):
+    model = "model-a"
+    workload = "workload-a"
+    case_dir = tmp_path / model / workload
+    case_dir.mkdir(parents=True)
+    comparison = case_dir / "comparison.json"
+    comparison.write_text(
+        json.dumps(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": model,
+                "workload": workload,
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    model,
+                    workload,
+                    "passed",
+                    mode="continuation",
+                    evaluation_policy="threshold_gated",
+                    count=1,
+                    exact_count=1,
+                    divergent_count=0,
+                    exact_match_rate=1.0,
+                    divergence_rate=0.0,
+                    token_prefix_agreement=1.0,
+                    gates={
+                        "min_token_prefix_agreement": 0.98,
+                    },
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_default_authoritative_gates_by_binding",
+        lambda: {},
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="no authoritative gate configuration",
+    ):
+        trtmc_validate.write_report(
+            tmp_path,
+            result_paths=[comparison],
+        )
+
+
+def test_report_rechecks_raw_gates_against_authoritative_binding(
+    tmp_path,
+    monkeypatch,
+):
+    model = "model-a"
+    workload = "workload-a"
+    case_dir = tmp_path / model / workload
+    case_dir.mkdir(parents=True)
+    expected_gates = {
+        "max_accuracy_drop_from_hf": 0.0,
+        "min_prediction_agreement": 1.0,
+    }
+    raw_result = _raw_evidence(
+        model,
+        workload,
+        "passed",
+        gates={
+            **expected_gates,
+            "min_untrusted_score": 0.0,
+        },
+    )
+    comparison = case_dir / "comparison.json"
+    comparison.write_text(
+        json.dumps(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": model,
+                "workload": workload,
+                "returncode": 0,
+                "raw_result": raw_result,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_default_authoritative_gates_by_binding",
+        lambda: {(model, workload): expected_gates},
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="unknown gates",
+    ):
+        trtmc_validate.write_report(
+            tmp_path,
+            result_paths=[comparison],
+        )
+
+
+def test_real_time_series_producer_count_reaches_validation(
+    tmp_path,
+):
+    gates = {
+        "max_relative_l2": 0.01,
+        "max_absolute_error": 0.1,
+        "min_sample_agreement_rate": 1.0,
+    }
+    predictions = {
+        "responses": [
+            {
+                "sample_id": "one",
+                "output_values": [1.0, 2.0],
+                "output_shape": [2],
+            }
+        ]
+    }
+    producer_summary = task_eval.compare_time_series_prediction_sets(
+        predictions,
+        predictions,
+        gates=gates,
+    )
+    assert producer_summary["status"] == "passed"
+    assert producer_summary["sample_count"] == 1
+
+    validation_dir = tmp_path / "validation" / "workload-a"
+    validation_dir.mkdir(parents=True)
+    raw_result = {
+        "model": "model-a",
+        "suite": "workload-a",
+        "mode": "time_series_parity",
+        "status": producer_summary["status"],
+        "sample_count": producer_summary["sample_count"],
+        "valid_count": producer_summary["valid_count"],
+        "passed_count": producer_summary["passed_count"],
+        "sample_agreement_rate": producer_summary[
+            "sample_agreement_rate"
+        ],
+        "mean_relative_l2": producer_summary["mean_relative_l2"],
+        "max_relative_l2": producer_summary["max_relative_l2"],
+        "max_absolute_error": producer_summary["max_absolute_error"],
+        "gates": producer_summary["gates"],
+    }
+    (validation_dir / "eval_summary.json").write_text(
+        json.dumps({"results": [raw_result]}),
+        encoding="utf-8",
+    )
+
+    result = trtmc_validate._comparison_result(
+        trtmc_validate.Binding("model-a", "workload-a"),
+        case_dir=tmp_path,
+        returncode=0,
+        reference_environment=trtmc_validate.EnvironmentSelection(
+            base_python="/profiles/python",
+            names_and_paths=(),
+            overrides={},
+        ),
+        dataset_command="python tools/trtmc_validate.py model-a",
+        expected_gates=gates,
+    )
+
+    assert result["validation"]["status"] == "passed"
+    assert result["raw_result"]["sample_count"] == 1
+    assert result["raw_result"]["valid_count"] == 1
+
+
 def test_real_mcq_producer_status_reaches_canonical_report(tmp_path):
     answers = {
         "requests": [
@@ -6507,7 +7030,12 @@ def test_real_mcq_producer_status_reaches_canonical_report(tmp_path):
             encoding="utf-8",
         )
 
-        _, _, report = trtmc_validate.write_report(output)
+        _, _, report = trtmc_validate.write_report(
+            output,
+            expected_gates_by_binding={
+                (model, workload): gates,
+            },
+        )
 
         assert report["results"][0]["validation"]["status"] == expected_status
 
@@ -8443,6 +8971,9 @@ def test_report_aggregates_running_and_failed_run_status(
     _, _, report = trtmc_validate.write_report(
         tmp_path,
         result_paths=[comparison],
+        expected_gates_by_binding=_test_gate_context(
+            [comparison]
+        ),
     )
 
     assert report["validation_status"] == expected_report_status
@@ -8575,6 +9106,9 @@ def test_report_refresh_preserves_command_count_and_representative(
     _, _, report = trtmc_validate.write_report(
         tmp_path,
         result_paths=[comparison],
+        expected_gates_by_binding=_test_gate_context(
+            [comparison]
+        ),
     )
 
     reproduce = report["results"][0]["reproduce"]
@@ -8717,6 +9251,9 @@ def test_write_report_handles_40_staged_cases_with_nofile_limit_64(
         _, _, report = trtmc_validate.write_report(
             tmp_path,
             result_paths=result_paths,
+            expected_gates_by_binding=_test_gate_context(
+                result_paths
+            ),
         )
         descriptors_after = len(tuple(proc_fds.iterdir()))
     finally:

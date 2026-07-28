@@ -251,10 +251,10 @@ runner = PromptedSegmentationRunner()
     ) == {"sam3_prompted_segmentation": {"segment-prompted"}}
 
 
-def _extract_conditional_runner_commands(
+def _extract_runner_commands_for_binding(
     tmp_path: Path,
     *,
-    condition: str,
+    binding_source: str,
     runner_class: str,
 ) -> dict[str, set[str]]:
     mod = _import_checker()
@@ -288,9 +288,7 @@ class SecondRunner:
     def run_stage(self, binary, bundle):
         return [binary, "generate-audio", bundle]
 
-runner = FirstRunner()
-if {condition}:
-    runner = SecondRunner()
+{binding_source}
         """,
         encoding="utf-8",
     )
@@ -303,6 +301,23 @@ if {condition}:
         },
         models_dir,
         {"generate-audio", "run"},
+    )
+
+
+def _extract_conditional_runner_commands(
+    tmp_path: Path,
+    *,
+    condition: str,
+    runner_class: str,
+) -> dict[str, set[str]]:
+    return _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source=f"""
+runner = FirstRunner()
+if {condition}:
+    runner = SecondRunner()
+""",
+        runner_class=runner_class,
     )
 
 
@@ -334,6 +349,132 @@ def test_runtime_command_discovery_fails_closed_for_unknown_runner_rebinding(
         condition="select_second",
         runner_class="FirstRunner",
     ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_selects_true_if_expression_branch(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="runner = SecondRunner() if True else FirstRunner()",
+        runner_class="SecondRunner",
+    ) == {"conditional_runtime": {"generate-audio"}}
+
+
+def test_runtime_command_discovery_selects_false_if_expression_branch(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="runner = SecondRunner() if False else FirstRunner()",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
+
+
+def test_runtime_command_discovery_fails_closed_for_unknown_if_expression(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source=(
+            "runner = SecondRunner() if select_second else FirstRunner()"
+        ),
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_fails_closed_for_try_rebinding(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+runner = FirstRunner()
+try:
+    runner = SecondRunner()
+except RuntimeError:
+    runner = FirstRunner()
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_fails_closed_for_loop_rebinding(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+runner = FirstRunner()
+for _candidate in candidates:
+    runner = SecondRunner()
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_later_assignment_clears_ambiguity(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+runner = FirstRunner()
+try:
+    runner = SecondRunner()
+except RuntimeError:
+    runner = FirstRunner()
+for _candidate in candidates:
+    runner = FirstRunner()
+runner = SecondRunner()
+""",
+        runner_class="SecondRunner",
+    ) == {"conditional_runtime": {"generate-audio"}}
+
+
+def test_runtime_command_discovery_ignores_nested_scope_assignments(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+runner = FirstRunner()
+
+def configure_runner():
+    runner = SecondRunner()
+    return runner
+
+class RunnerHolder:
+    runner = SecondRunner()
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
+
+
+def test_runtime_command_discovery_fails_closed_for_comprehension_walrus(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+runner = FirstRunner()
+[runner := SecondRunner() for _candidate in candidates]
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_ignores_comprehension_target_binding(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+runner = FirstRunner()
+[FirstRunner() for runner in candidates]
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
 
 
 def test_runtime_command_discovery_does_not_borrow_sibling_runner_commands(

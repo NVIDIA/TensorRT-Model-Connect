@@ -486,6 +486,139 @@ def _same_entrypoint_binding(
     )
 
 
+def _entrypoint_binding_from_expression(
+    expression: ast.expr,
+) -> _EntrypointBinding:
+    """Resolve a direct assignment expression when its branch is knowable."""
+    if not isinstance(expression, ast.IfExp):
+        return _EntrypointBinding(expression=expression)
+
+    if isinstance(expression.test, ast.Constant) and isinstance(
+        expression.test.value,
+        bool,
+    ):
+        selected = expression.body if expression.test.value else expression.orelse
+        return _entrypoint_binding_from_expression(selected)
+
+    body_binding = _entrypoint_binding_from_expression(expression.body)
+    else_binding = _entrypoint_binding_from_expression(expression.orelse)
+    if _same_entrypoint_binding(body_binding, else_binding):
+        return body_binding
+    return _EntrypointBinding(ambiguous=True)
+
+
+class _SameScopeRebindingVisitor(ast.NodeVisitor):
+    """Find bindings without descending into nested Python scopes."""
+
+    def __init__(self, assignment_name: str) -> None:
+        self.assignment_name = assignment_name
+        self.rebinds = False
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if node.id == self.assignment_name and isinstance(
+            node.ctx,
+            (ast.Store, ast.Del),
+        ):
+            self.rebinds = True
+
+    def _visit_definition_expressions(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> None:
+        if node.name == self.assignment_name:
+            self.rebinds = True
+        for expression in (
+            *node.decorator_list,
+            *node.args.defaults,
+            *(default for default in node.args.kw_defaults if default is not None),
+        ):
+            self.visit(expression)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_definition_expressions(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_definition_expressions(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        if node.name == self.assignment_name:
+            self.rebinds = True
+        for expression in (
+            *node.decorator_list,
+            *node.bases,
+            *(keyword.value for keyword in node.keywords),
+        ):
+            self.visit(expression)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        # The lambda body does not execute when the module creates the lambda.
+        return
+
+    def _visit_comprehension_expressions(
+        self,
+        generators: list[ast.comprehension],
+        expressions: Iterable[ast.expr],
+    ) -> None:
+        for generator in generators:
+            # Comprehension targets are local in Python 3. The iterable is
+            # evaluated outside that local scope, while assignment expressions
+            # in filters or results bind the containing scope. Inspect those
+            # expressions without treating the local target as a rebind.
+            self.visit(generator.iter)
+            for condition in generator.ifs:
+                self.visit(condition)
+        for expression in expressions:
+            self.visit(expression)
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension_expressions(node.generators, [node.elt])
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension_expressions(node.generators, [node.elt])
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension_expressions(
+            node.generators,
+            [node.key, node.value],
+        )
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_comprehension_expressions(node.generators, [node.elt])
+
+    def visit_alias(self, node: ast.alias) -> None:
+        bound_name = node.asname or node.name.split(".", 1)[0]
+        if bound_name == self.assignment_name:
+            self.rebinds = True
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name == self.assignment_name:
+            self.rebinds = True
+        self.generic_visit(node)
+
+    def visit_MatchAs(self, node: ast.MatchAs) -> None:
+        if node.name == self.assignment_name:
+            self.rebinds = True
+        self.generic_visit(node)
+
+    def visit_MatchStar(self, node: ast.MatchStar) -> None:
+        if node.name == self.assignment_name:
+            self.rebinds = True
+
+    def visit_MatchMapping(self, node: ast.MatchMapping) -> None:
+        if node.rest == self.assignment_name:
+            self.rebinds = True
+        self.generic_visit(node)
+
+
+def _may_rebind_entrypoint(
+    node: ast.AST,
+    assignment_name: str,
+) -> bool:
+    visitor = _SameScopeRebindingVisitor(assignment_name)
+    visitor.visit(node)
+    return visitor.rebinds
+
+
 def _entrypoint_binding_after(
     statements: list[ast.stmt],
     *,
@@ -497,11 +630,19 @@ def _entrypoint_binding_after(
     for statement in statements:
         assignment_value = _direct_assignment_value(statement, assignment_name)
         if assignment_value is not None:
-            binding = _EntrypointBinding(expression=assignment_value)
-            continue
-        if not isinstance(statement, ast.If):
+            binding = _entrypoint_binding_from_expression(assignment_value)
             continue
 
+        if not isinstance(statement, ast.If):
+            if _may_rebind_entrypoint(statement, assignment_name):
+                binding = _EntrypointBinding(ambiguous=True)
+            continue
+
+        branch_initial = (
+            _EntrypointBinding(ambiguous=True)
+            if _may_rebind_entrypoint(statement.test, assignment_name)
+            else binding
+        )
         if isinstance(statement.test, ast.Constant) and isinstance(
             statement.test.value,
             bool,
@@ -510,19 +651,19 @@ def _entrypoint_binding_after(
             binding = _entrypoint_binding_after(
                 selected_branch,
                 assignment_name=assignment_name,
-                initial=binding,
+                initial=branch_initial,
             )
             continue
 
         body_binding = _entrypoint_binding_after(
             statement.body,
             assignment_name=assignment_name,
-            initial=binding,
+            initial=branch_initial,
         )
         else_binding = _entrypoint_binding_after(
             statement.orelse,
             assignment_name=assignment_name,
-            initial=binding,
+            initial=branch_initial,
         )
         if _same_entrypoint_binding(body_binding, else_binding):
             binding = body_binding

@@ -230,6 +230,7 @@ class ProgramSpec:
     command_required: bool = False
     nested: dict[str, ProgramSpec] = field(default_factory=dict)
     allow_extras: bool = False
+    uncertain_reason: str | None = None
 
 
 def is_vendored_fixture_document(path: Path) -> bool:
@@ -708,17 +709,121 @@ def _is_static_env_operand(token: str) -> bool:
     )
 
 
-def _strip_shell_wrappers(tokens: list[str]) -> list[str]:
-    """Drop statically understood assignments and ``env`` wrappers.
+def _strip_command_wrapper(tokens: Sequence[str]) -> list[str] | None:
+    """Return the executable following a statically understood ``command``."""
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            return list(tokens[index + 1 :])
+        if token == "-p":
+            index += 1
+            continue
+        if token in {"-v", "-V"}:
+            return []
+        if token.startswith("-") and not token.startswith("--"):
+            options = token[1:]
+            if options and set(options) <= {"p"}:
+                index += 1
+                continue
+            if options and set(options) <= {"p", "v", "V"}:
+                return []
+            return None
+        if token.startswith("-"):
+            return None
+        return list(tokens[index:])
+    return []
 
-    Unknown or dynamic ``env`` options return no command so callers skip the
-    invocation instead of treating an option operand as an executable.
+
+_TIME_FLAG_OPTIONS = {
+    "-a",
+    "--append",
+    "-p",
+    "--portability",
+    "-q",
+    "--quiet",
+    "-v",
+    "--verbose",
+}
+_TIME_VALUE_OPTIONS = {
+    "-f",
+    "--format",
+    "-o",
+    "--output",
+}
+
+
+def _strip_time_wrapper(tokens: Sequence[str]) -> list[str] | None:
+    """Return the executable following statically understood shell/GNU ``time``."""
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            return list(tokens[index + 1 :])
+        if token in {"--help", "--version", "-V"}:
+            return []
+        if token in _TIME_FLAG_OPTIONS:
+            index += 1
+            continue
+        option, separator, value = token.partition("=")
+        if option in _TIME_VALUE_OPTIONS and separator:
+            if not value:
+                return None
+            index += 1
+            continue
+        if token in _TIME_VALUE_OPTIONS:
+            if index + 1 >= len(tokens):
+                return None
+            index += 2
+            continue
+        if token.startswith(("-f", "-o")) and len(token) > 2:
+            index += 1
+            continue
+        if token.startswith("-") and not token.startswith("--"):
+            options = token[1:]
+            if options and set(options) <= {"a", "p", "q", "v"}:
+                index += 1
+                continue
+            return None
+        if token.startswith("-"):
+            return None
+        return list(tokens[index:])
+    return []
+
+
+def _strip_shell_wrappers(
+    tokens: list[str],
+    *,
+    uncertainty: list[str] | None = None,
+) -> list[str]:
+    """Drop understood assignments plus ``env``, ``command``, and ``time``.
+
+    Unknown or dynamic wrapper options return no command so callers fail closed
+    instead of treating an option operand as an executable.
     """
     remaining = list(tokens)
     while True:
         while remaining and _ENV_ASSIGNMENT_RE.match(remaining[0]):
             remaining.pop(0)
-        if not remaining or remaining[0] not in {"env", "/usr/bin/env"}:
+        if not remaining:
+            return remaining
+        if remaining[0] in {"command", "/usr/bin/command"}:
+            stripped = _strip_command_wrapper(remaining)
+            if stripped is None:
+                if uncertainty is not None:
+                    uncertainty.append("unsupported `command` wrapper options")
+                return []
+            remaining = stripped
+            continue
+        if remaining[0] in {"time", "/bin/time", "/usr/bin/time"}:
+            stripped = _strip_time_wrapper(remaining)
+            if stripped is None:
+                if uncertainty is not None:
+                    uncertainty.append("unsupported `time` wrapper options")
+                return []
+            remaining = stripped
+            continue
+        if remaining[0] not in {"env", "/usr/bin/env"}:
             return remaining
 
         index = 1
@@ -1230,6 +1335,21 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
         tree = ast.parse(script_path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError):
         return None
+    argparse_evidence = any(
+        (
+            isinstance(node, ast.Import)
+            and any(alias.name == "argparse" for alias in node.names)
+        )
+        or (isinstance(node, ast.ImportFrom) and node.module == "argparse")
+        or (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "argparse"
+            and node.func.attr == "ArgumentParser"
+        )
+        for node in ast.walk(tree)
+    )
 
     scope_by_node: dict[int, tuple[tuple[str, str, int], ...]] = {}
     function_scopes: dict[
@@ -1239,6 +1359,10 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
     function_parameters: dict[
         tuple[tuple[str, str, int], ...],
         tuple[str, ...],
+    ] = {}
+    class_scopes: dict[
+        tuple[tuple[tuple[str, str, int], ...], str],
+        tuple[tuple[str, str, int], ...],
     ] = {}
 
     def normalize_reference(reference: str) -> str:
@@ -1271,6 +1395,7 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
         scope_by_node[id(node)] = scope
         if isinstance(node, ast.ClassDef):
             nested_scope = (*scope, ("class", node.name, node.lineno))
+            class_scopes[binding_key(node.name, scope)] = nested_scope
             for expression in [
                 *node.decorator_list,
                 *node.bases,
@@ -1332,6 +1457,32 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
         if (assigned := _assigned_call(node)) is not None
         for variable, call in (assigned,)
     ]
+    instance_binding_candidates: dict[
+        tuple[tuple[tuple[str, str, int], ...], str],
+        set[tuple[tuple[str, str, int], ...] | None],
+    ] = {}
+    for node in assignment_nodes:
+        variable = _assigned_name(node)
+        if variable is None:
+            continue
+        scope = scope_by_node[id(node)]
+        class_scope_value: tuple[tuple[str, str, int], ...] | None = None
+        value = node.value
+        if isinstance(value, ast.Call):
+            class_reference = _expression_reference(value.func)
+            if class_reference is not None:
+                resolved_class = resolve_reference(class_scopes, class_reference, scope)
+                if isinstance(resolved_class, tuple):
+                    class_scope_value = resolved_class
+        instance_binding_candidates.setdefault(
+            binding_key(variable, scope),
+            set(),
+        ).add(class_scope_value)
+    instance_class_scopes = {
+        variable: next(iter(candidates))
+        for variable, candidates in instance_binding_candidates.items()
+        if len(candidates) == 1 and None not in candidates
+    }
     calls = sorted(
         (node for node in ast.walk(tree) if isinstance(node, ast.Call)),
         key=lambda node: (node.lineno, node.col_offset),
@@ -1363,10 +1514,34 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
         scope: tuple[tuple[str, str, int], ...],
     ) -> tuple[tuple[str, str, int], ...] | None:
         reference = _expression_reference(expression)
-        if reference is None:
+        if reference is not None:
+            resolved = resolve_reference(function_scopes, reference, scope)
+            if isinstance(resolved, tuple):
+                return resolved
+        if not isinstance(expression, ast.Attribute):
             return None
-        resolved = resolve_reference(function_scopes, reference, scope)
-        return resolved if isinstance(resolved, tuple) else None
+
+        owner_scope: tuple[tuple[str, str, int], ...] | None = None
+        if isinstance(expression.value, ast.Call):
+            class_reference = _expression_reference(expression.value.func)
+            if class_reference is not None:
+                resolved_class = resolve_reference(class_scopes, class_reference, scope)
+                if isinstance(resolved_class, tuple):
+                    owner_scope = resolved_class
+        else:
+            owner_reference = _expression_reference(expression.value)
+            if owner_reference is not None:
+                resolved_instance = resolve_reference(
+                    instance_class_scopes,
+                    owner_reference,
+                    scope,
+                )
+                if isinstance(resolved_instance, tuple):
+                    owner_scope = resolved_instance
+        if owner_scope is None:
+            return None
+        resolved_method = function_scopes.get((owner_scope, expression.attr))
+        return resolved_method if isinstance(resolved_method, tuple) else None
 
     function_return_paths: dict[
         tuple[tuple[str, str, int], ...],
@@ -1820,6 +1995,7 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
             bool,
         ]
     ] = []
+    unresolved_parse_scopes: list[tuple[tuple[str, str, int], ...]] = []
     parse_method_names = {
         "parse_args": False,
         "parse_intermixed_args": False,
@@ -1843,6 +2019,8 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
                     parse_method_names[call.func.attr],
                 )
             )
+        else:
+            unresolved_parse_scopes.append(scope_by_node[id(call)])
 
     reachable_scopes = {
         (),
@@ -1863,6 +2041,20 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
                 reachable_scopes.add(function_scope)
                 reachability_changed = True
 
+    def uncertain_contract(reason: str) -> ProgramSpec:
+        return ProgramSpec(
+            root=CommandSpec.empty(),
+            commands={},
+            uncertain_reason=reason,
+        )
+
+    if (
+        argparse_evidence
+        and root_ids
+        and any(scope in reachable_scopes for scope in unresolved_parse_scopes)
+    ):
+        return uncertain_contract("a reachable parse call has an unresolved parser identity")
+
     selected_calls = [item for item in parse_calls if item[0] in reachable_scopes]
     if parse_calls and not selected_calls:
         return None
@@ -1872,11 +2064,32 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
     selected_roots = set(parse_modes)
     if not selected_roots:
         inherited_roots = {parent[0] for inherited in parent_paths.values() for parent in inherited}
-        selected_roots = root_ids - inherited_roots
-        if len(selected_roots) != 1:
+        candidate_roots = root_ids - inherited_roots
+        if len(candidate_roots) == 1:
+            selected_roots = candidate_roots
+        else:
+
+            def root_scope(
+                root: tuple[object, ...],
+            ) -> tuple[tuple[str, str, int], ...] | None:
+                variable = root[1] if root and root[0] == "synthetic" else root[0]
+                if (
+                    isinstance(variable, tuple)
+                    and len(variable) == 2
+                    and isinstance(variable[0], tuple)
+                ):
+                    return variable[0]
+                return None
+
+            selected_roots = {
+                root for root in candidate_roots if root_scope(root) in reachable_scopes
+            }
+        if not selected_roots:
             return None
-    if len(selected_roots) != 1:
-        return None
+    if len(selected_roots) > 1:
+        if not argparse_evidence:
+            return None
+        return uncertain_contract("multiple reachable parser roots were discovered")
     selected_root = next(iter(selected_roots))
     modes = parse_modes.get(selected_root, {False})
     allow_extras = modes == {True}
@@ -2435,6 +2648,21 @@ def check_trtmc_contract(block: ShellBlock, repo_root: Path) -> list[Finding]:
             )
             continue
 
+        if (
+            command == "build"
+            and python_cli is not None
+            and python_cli.uncertain_reason is not None
+        ):
+            findings.extend(
+                _check_argparse_invocation(
+                    block,
+                    offset,
+                    invocation[2:],
+                    "trtmc build",
+                    python_cli,
+                )
+            )
+            continue
         if command == "build" and python_cli is not None:
             spec = _merge_command_specs(
                 python_cli.root,
@@ -2473,6 +2701,17 @@ def check_python_module_contract(
         module = tokens[2]
         if module == "tensorrt_model_connect":
             if tensorrt_program is None or len(tokens) < 4:
+                continue
+            if tensorrt_program.uncertain_reason is not None:
+                findings.extend(
+                    _check_argparse_invocation(
+                        block,
+                        offset,
+                        tokens[3:],
+                        "python -m tensorrt_model_connect",
+                        tensorrt_program,
+                    )
+                )
                 continue
             command = tokens[3]
             if command.startswith("-") or "DOC_PLACEHOLDER" in command:
@@ -2671,6 +2910,16 @@ def _check_argparse_invocation(
     contract: ProgramSpec,
 ) -> list[Finding]:
     """Validate an argparse script, including a selected subcommand."""
+    if contract.uncertain_reason is not None:
+        return [
+            Finding(
+                block.path,
+                _source_line(block, offset),
+                f"cannot statically validate argparse contract for `{local}`: "
+                f"{contract.uncertain_reason}",
+            )
+        ]
+
     command: str | None = None
     command_index: int | None = None
     if contract.commands:
@@ -2875,6 +3124,23 @@ def check_ctest_contract(block: ShellBlock) -> list[Finding]:
     return findings
 
 
+def check_shell_wrapper_contract(block: ShellBlock) -> list[Finding]:
+    """Reject wrapper options whose executable boundary is not statically known."""
+    findings: list[Finding] = []
+    for offset, raw_tokens in _block_commands(block):
+        uncertainty: list[str] = []
+        _strip_shell_wrappers(raw_tokens, uncertainty=uncertainty)
+        findings.extend(
+            Finding(
+                block.path,
+                _source_line(block, offset),
+                f"cannot statically resolve shell wrapper: {reason}",
+            )
+            for reason in uncertainty
+        )
+    return findings
+
+
 def check_command_block(
     block: ShellBlock,
     repo_root: Path,
@@ -2890,6 +3156,7 @@ def check_command_block(
         syntax_finding = check_shell_syntax(candidate)
         if syntax_finding:
             findings.append(syntax_finding)
+        findings.extend(check_shell_wrapper_contract(candidate))
         findings.extend(check_local_inputs(candidate, repo_root))
         findings.extend(check_positional_inputs(candidate, repo_root))
         findings.extend(check_trtmc_contract(candidate, repo_root))

@@ -26,6 +26,8 @@ from __future__ import annotations
 from pathlib import Path
 import shlex
 
+import pytest
+
 from tools import check_doc_commands as cdc
 
 
@@ -356,6 +358,62 @@ def test_static_env_wrappers_preserve_valid_nested_commands() -> None:
         "unknown option for `tools/trtmc_validate.py`: "
         "--definitely-invalid"
     ]
+
+
+def test_command_and_time_wrappers_reuse_nested_cli_contracts() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    bodies = (
+        "command python3 tools/trtmc_validate.py --definitely-invalid\n",
+        "command -p -- python3 tools/trtmc_validate.py --definitely-invalid\n",
+        "time python3 tools/trtmc_validate.py --definitely-invalid\n",
+        "time -p command -- python3 tools/trtmc_validate.py --definitely-invalid\n",
+        (
+            "/usr/bin/time --verbose --output=/tmp/trtmc-time.txt "
+            "python3 tools/trtmc_validate.py --definitely-invalid\n"
+        ),
+        ("{ time -p command python3 tools/trtmc_validate.py --definitely-invalid; }\n"),
+    )
+
+    for body in bodies:
+        block = cdc.ShellBlock(
+            path=Path("README.md"),
+            line=10,
+            language="bash",
+            body=body,
+        )
+        assert [finding.message for finding in cdc.check_command_block(block, repo_root)] == [
+            "unknown option for `tools/trtmc_validate.py`: --definitely-invalid"
+        ]
+
+
+def test_uncertain_command_and_time_wrapper_options_fail_closed() -> None:
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        3,
+        "bash",
+        "command --implementation-specific python3 tools/trtmc_validate.py\n"
+        "time --implementation-specific python3 tools/trtmc_validate.py\n",
+    )
+    query = cdc.ShellBlock(
+        Path("README.md"),
+        8,
+        "bash",
+        "command -v python3\n",
+    )
+
+    assert [
+        (finding.line, finding.message) for finding in cdc.check_shell_wrapper_contract(block)
+    ] == [
+        (
+            4,
+            "cannot statically resolve shell wrapper: unsupported `command` wrapper options",
+        ),
+        (
+            5,
+            "cannot statically resolve shell wrapper: unsupported `time` wrapper options",
+        ),
+    ]
+    assert cdc.check_shell_wrapper_contract(query) == []
 
 
 def test_literal_shell_c_payload_syntax_and_local_inputs_are_checked(
@@ -1386,6 +1444,154 @@ def test_argparse_ignores_uncalled_class_main_and_follows_module_main_call_graph
         "unknown option for `tools/scoped_class.py`: --dead",
         "missing required option for `tools/scoped_class.py`: --live",
     ]
+
+
+@pytest.mark.parametrize(
+    "entrypoint",
+    [
+        "if __name__ == '__main__':\n    App().main()\n",
+        "def run():\n"
+        "    app = App()\n"
+        "    return app.main()\n"
+        "if __name__ == '__main__':\n"
+        "    run()\n",
+    ],
+)
+def test_argparse_follows_statically_bound_class_method_entrypoints(
+    tmp_path: Path,
+    entrypoint: str,
+) -> None:
+    script = tmp_path / "tools" / "class_entrypoint.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "class Unused:\n"
+        "    def main(self):\n"
+        "        parser = argparse.ArgumentParser()\n"
+        '        parser.add_argument("--dead", required=True)\n'
+        "        return parser.parse_args()\n"
+        "class App:\n"
+        "    def main(self):\n"
+        "        parser = argparse.ArgumentParser()\n"
+        '        parser.add_argument("--live", required=True)\n'
+        "        return parser.parse_args()\n"
+        f"{entrypoint}",
+        encoding="utf-8",
+    )
+    valid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/class_entrypoint.py --live yes\n",
+    )
+    invalid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "{ time -p command python3 tools/class_entrypoint.py --dead yes; }\n",
+    )
+
+    assert cdc.check_command_block(valid, tmp_path) == []
+    assert [finding.message for finding in cdc.check_command_block(invalid, tmp_path)] == [
+        "unknown option for `tools/class_entrypoint.py`: --dead",
+        "missing required option for `tools/class_entrypoint.py`: --live",
+    ]
+
+
+def test_multiple_reachable_argparse_roots_report_conservative_finding(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "multiple_roots.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "def main():\n"
+        "    first = argparse.ArgumentParser()\n"
+        '    first.add_argument("--first")\n'
+        "    first.parse_args()\n"
+        "    second = argparse.ArgumentParser()\n"
+        '    second.add_argument("--second")\n'
+        "    second.parse_args()\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/multiple_roots.py --first yes\n",
+    )
+
+    assert [finding.message for finding in cdc.check_command_block(block, tmp_path)] == [
+        "cannot statically validate argparse contract for "
+        "`tools/multiple_roots.py`: multiple reachable parser roots were discovered"
+    ]
+
+
+def test_unresolved_reachable_argparse_identity_reports_conservative_finding(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "selected_root.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "def select_parser(use_first):\n"
+        "    first = argparse.ArgumentParser()\n"
+        '    first.add_argument("--first")\n'
+        "    second = argparse.ArgumentParser()\n"
+        '    second.add_argument("--second")\n'
+        "    return first if use_first else second\n"
+        "def main():\n"
+        "    return select_parser(True).parse_args()\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/selected_root.py --first yes\n",
+    )
+
+    assert [finding.message for finding in cdc.check_command_block(block, tmp_path)] == [
+        "cannot statically validate argparse contract for "
+        "`tools/selected_root.py`: "
+        "a reachable parse call has an unresolved parser identity"
+    ]
+
+
+def test_no_argparse_script_is_not_reported_as_an_ambiguous_contract(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "custom_parser.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "class ArgumentParser:\n"
+        "    def add_argument(self, *_args, **_kwargs):\n"
+        "        return None\n"
+        "    def parse_args(self):\n"
+        "        return None\n"
+        "def main():\n"
+        "    first = ArgumentParser()\n"
+        '    first.add_argument("--first")\n'
+        "    first.parse_args()\n"
+        "    second = ArgumentParser()\n"
+        '    second.add_argument("--second")\n'
+        "    second.parse_args()\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/custom_parser.py --implementation-specific\n",
+    )
+
+    assert cdc.check_command_block(block, tmp_path) == []
 
 
 def test_argparse_helper_arguments_attach_to_the_called_parser(

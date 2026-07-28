@@ -414,8 +414,38 @@ def infer_user_contract(raw: dict[str, Any], reference_family: str) -> str:
     return str(raw.get("user_contract", "") or "")
 
 
+def _boolean_field(
+    values: Mapping[str, Any],
+    field: str,
+    *,
+    context: str,
+    default: bool = False,
+) -> bool:
+    value = values.get(field, default)
+    if type(value) is not bool:
+        raise ValueError(f"{context} {field} must be a boolean")
+    return value
+
+
+def _effective_model_trust_remote_code(
+    model: Mapping[str, Any],
+    *,
+    explicit: bool = False,
+) -> bool:
+    if type(explicit) is not bool:
+        raise ValueError("explicit trust_remote_code must be a boolean")
+    declared = _boolean_field(
+        model,
+        "trust_remote_code",
+        context=f"Model {model.get('name', '<unknown>')!r}",
+    )
+    return explicit or declared
+
+
 def manifest_record(path: Path) -> dict[str, Any]:
     raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"Model manifest {path} must contain a JSON object")
     model_name = str(raw.get("name", path.stem))
     testcases = raw.pop("testcases", [])
     if isinstance(testcases, list) and testcases:
@@ -429,6 +459,31 @@ def manifest_record(path: Path) -> dict[str, Any]:
         )
         if isinstance(canonical, dict):
             raw = {**raw, **canonical, "name": model_name}
+    distributed = raw.get("distributed_runtime", {})
+    if not isinstance(distributed, dict):
+        raise ValueError(
+            f"Model manifest {path} distributed_runtime must be an object"
+        )
+    distributed_enabled = _boolean_field(
+        distributed,
+        "enabled",
+        context=f"Model manifest {path} distributed_runtime",
+    )
+    core = _boolean_field(
+        raw,
+        "core",
+        context=f"Model manifest {path}",
+    )
+    gated = _boolean_field(
+        raw,
+        "gated",
+        context=f"Model manifest {path}",
+    )
+    trust_remote_code = _boolean_field(
+        raw,
+        "trust_remote_code",
+        context=f"Model manifest {path}",
+    )
     build_args = raw.get("build_args", {})
     task_eval_config = raw.get("task_eval", {})
     if not isinstance(task_eval_config, dict):
@@ -458,8 +513,7 @@ def manifest_record(path: Path) -> dict[str, Any]:
         task_eval_config.get("user_contract")
         or infer_user_contract(raw, reference_family)
     )
-    distributed = raw.get("distributed_runtime", {})
-    requires_multi_device = bool(distributed.get("enabled")) or (
+    requires_multi_device = distributed_enabled or (
         str(raw.get("ci_tier", "")) == "multi_device"
     )
     return {
@@ -478,12 +532,12 @@ def manifest_record(path: Path) -> dict[str, Any]:
         else {},
         "user_contract": user_contract,
         "ci_tier": raw.get("ci_tier", "default"),
-        "core": bool(raw.get("core", False)),
+        "core": core,
         "skip": raw.get("skip", ""),
         "requires_multi_device": requires_multi_device,
         "l0_replacement": raw.get("l0_replacement", ""),
-        "gated": bool(raw.get("gated", False)),
-        "trust_remote_code": bool(raw.get("trust_remote_code", False)),
+        "gated": gated,
+        "trust_remote_code": trust_remote_code,
         "max_cache_length": raw.get(
             "max_cache_length",
             build_args.get("max_cache_length", 256) if isinstance(build_args, dict) else 256,
@@ -2922,7 +2976,10 @@ def validate_prompt_lengths_for_cache(
         model_id=str(model["hf_id"]),
         prompts_path=work_dir / "prompts.jsonl",
         local_files_only=local_files_only,
-        trust_remote_code=trust_remote_code or bool(model.get("trust_remote_code", False)),
+        trust_remote_code=_effective_model_trust_remote_code(
+            model,
+            explicit=trust_remote_code,
+        ),
     )
     if max_prompt_len > max_cache_length:
         raise RuntimeError(
@@ -8624,7 +8681,7 @@ def build_bundle_command(
             calibration_samples = quantization.get("calibration_samples")
             if calibration_samples is not None:
                 cmd.extend(["--quant-calibration-samples", str(calibration_samples)])
-    if model.get("trust_remote_code"):
+    if _effective_model_trust_remote_code(model):
         cmd.append("--trust-remote-code")
     for key, flag in (
         ("image_height", "--image-height"),
@@ -8856,7 +8913,10 @@ def _namespace_for_run_hf(
         device=args.hf_device,
         device_map=args.hf_device_map,
         attn_impl=args.hf_attn_impl,
-        trust_remote_code=args.trust_remote_code or bool(model.get("trust_remote_code", False)),
+        trust_remote_code=_effective_model_trust_remote_code(
+            model,
+            explicit=args.trust_remote_code,
+        ),
         local_files_only=args.local_files_only,
         do_sample=args.do_sample,
         apply_chat_template=args.apply_chat_template,
@@ -10226,8 +10286,9 @@ def eval_one_model(
             token_limit=prompt_token_limit,
             truncation_side=str(task_eval_config.get("prompt_truncation_side", "left")),
             local_files_only=args.local_files_only,
-            trust_remote_code=(
-                args.trust_remote_code or bool(model.get("trust_remote_code", False))
+            trust_remote_code=_effective_model_trust_remote_code(
+                model,
+                explicit=args.trust_remote_code,
             ),
         )
 
@@ -10266,7 +10327,10 @@ def eval_one_model(
             model_id=str(model["hf_id"]),
             prompts_path=prompt_rows_path,
             local_files_only=args.local_files_only,
-            trust_remote_code=args.trust_remote_code or bool(model.get("trust_remote_code", False)),
+            trust_remote_code=_effective_model_trust_remote_code(
+                model,
+                explicit=args.trust_remote_code,
+            ),
         )
     generation = generation_defaults(work_dir)
     generation_headroom = generation_cache_headroom(
@@ -10378,6 +10442,7 @@ def eval_one_model(
             **base_result,
             "mode": scorer,
             "status": summary["status"],
+            "sample_count": summary["sample_count"],
             "valid_count": summary["valid_count"],
             "passed_count": summary["passed_count"],
             "sample_agreement_rate": summary["sample_agreement_rate"],
@@ -10412,6 +10477,7 @@ def eval_one_model(
             **base_result,
             "mode": scorer,
             "status": summary["status"],
+            "sample_count": summary["sample_count"],
             "valid_count": summary["valid_count"],
             "hf_top1_accuracy": summary["hf_top1_accuracy"],
             "trtfb_top1_accuracy": summary["trtfb_top1_accuracy"],
@@ -10441,6 +10507,7 @@ def eval_one_model(
             **base_result,
             "mode": scorer,
             "status": summary["status"],
+            "sample_count": summary["sample_count"],
             "valid_count": summary["valid_count"],
             "hf_mean_iou": summary["hf_mean_iou"],
             "trtfb_mean_iou": summary["trtfb_mean_iou"],
@@ -10472,6 +10539,7 @@ def eval_one_model(
             **base_result,
             "mode": scorer,
             "status": summary["status"],
+            "sample_count": summary["sample_count"],
             "valid_count": summary["valid_count"],
             "prompt_mode": summary["prompt_mode"],
             "mean_backend_mask_iou": summary["mean_backend_mask_iou"],
@@ -10505,6 +10573,7 @@ def eval_one_model(
             **base_result,
             "mode": scorer,
             "status": summary["status"],
+            "sample_count": summary["sample_count"],
             "valid_count": summary["valid_count"],
             "passed_count": summary["passed_count"],
             "sample_pass_rate": summary["sample_pass_rate"],
@@ -10542,6 +10611,7 @@ def eval_one_model(
             **base_result,
             "mode": scorer,
             "status": summary["status"],
+            "sample_count": len(summary["samples"]),
             "valid_count": summary["valid_count"],
             "pair_count": summary["pair_count"],
             "vector_pass_rate": summary["vector_pass_rate"],
@@ -10590,6 +10660,7 @@ def eval_one_model(
         result = {
             **base_result,
             "mode": scorer,
+            "sample_count": len(summary["samples"]),
             "valid_count": summary["valid_count"],
             "token_agreement_rate": summary["token_agreement_rate"],
             "shared_sampling_inputs_match_rate": summary["shared_sampling_inputs_match_rate"],
@@ -10977,13 +11048,16 @@ def cmd_compare_continuation(args: argparse.Namespace) -> int:
 
 def _model_tokenizer(model: dict[str, Any], args: argparse.Namespace) -> Any:
     """Return a tokenize(str)->list[int] using the model tokenizer, or None."""
+    trust_remote_code = _effective_model_trust_remote_code(
+        model,
+        explicit=getattr(args, "trust_remote_code", False),
+    )
     try:
         from transformers import AutoTokenizer
 
         tok = AutoTokenizer.from_pretrained(
             str(model["hf_id"]),
-            trust_remote_code=getattr(args, "trust_remote_code", False)
-            or bool(model.get("trust_remote_code", False)),
+            trust_remote_code=trust_remote_code,
             local_files_only=getattr(args, "local_files_only", False),
         )
         return lambda s: tok(s, add_special_tokens=False).input_ids  # noqa: E731

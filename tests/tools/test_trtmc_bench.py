@@ -30,6 +30,7 @@ from tensorrt_model_connect.benchmark.operations import registered_operations
 from tensorrt_model_connect.benchmark.task_adapters import registered_task_adapters
 from tensorrt_model_connect.benchmark.types import BenchmarkError
 from tensorrt_model_connect.benchmark.worker import worker_backend_abi, worker_metadata
+from tools import task_eval
 
 
 pytestmark = pytest.mark.unit
@@ -204,6 +205,65 @@ def test_bundle_plan_rejects_non_boolean_trust_remote_code_defensively(
         match="trust_remote_code for distilgpt2 must be a boolean",
     ):
         BundleBuilder(tmp_path / "cache")._plan(invalid_model, ())
+
+
+@pytest.mark.parametrize("invalid_value", ["false", 0, 1, None, [], {}])
+def test_task_eval_manifest_rejects_non_boolean_trust_remote_code(
+    tmp_path: Path,
+    invalid_value: object,
+) -> None:
+    source = REPOSITORY_ROOT / "tests/e2e/models/gpt2/manifests/distilgpt2.json"
+    raw = json.loads(source.read_text(encoding="utf-8"))
+    raw["trust_remote_code"] = invalid_value
+    manifest = tmp_path / "gpt2/manifests/distilgpt2.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match=r"Model manifest .* trust_remote_code must be a boolean",
+    ):
+        task_eval.manifest_record(manifest)
+
+
+@pytest.mark.parametrize(
+    ("declared", "flag_present"),
+    [(False, False), (True, True)],
+)
+def test_task_eval_build_command_preserves_boolean_trust_remote_code(
+    tmp_path: Path,
+    declared: bool,
+    flag_present: bool,
+) -> None:
+    command = task_eval.build_bundle_command(
+        {
+            "name": "example",
+            "hf_id": "example/model",
+            "trust_remote_code": declared,
+        },
+        trtmc_binary="trtmc",
+        bundle_path=tmp_path / "example.trtfb",
+    )
+
+    assert ("--trust-remote-code" in command) is flag_present
+
+
+def test_task_eval_build_command_rejects_non_boolean_trust_remote_code(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="Model 'example' trust_remote_code must be a boolean",
+    ):
+        task_eval.build_bundle_command(
+            {
+                "name": "example",
+                "hf_id": "example/model",
+                "trust_remote_code": "false",
+            },
+            trtmc_binary="trtmc",
+            bundle_path=tmp_path / "example.trtfb",
+        )
 
 
 def test_operation_registry_declares_supported_task_semantics() -> None:
