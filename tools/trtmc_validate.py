@@ -4076,7 +4076,6 @@ _COMPARISON_METRICS = (
     "token_id_prefix_agreement",
     "normalized_transcript_exact_agreement_rate",
     "correctness_agreement_rate",
-    "initial_latents_match_rate",
     "divergence_rate",
     "divergent_count",
     "hf_accuracy",
