@@ -299,11 +299,12 @@ The exact Edge-LLM release/commit, TensorRT, CUDA, compiler, and target identify
 the dependency build cache. A native-only MC request neither fetches nor builds
 Edge-LLM.
 
-The x86 release cohort is TensorRT 11.1.0.106 with CUDA 13.4; the existing
-aarch64 release remains on TensorRT 11.2.0.113. The wheel metadata selects the
-TensorRT package by architecture. Model Connect, the Qwen adapter, and Edge-LLM
-must use the same process-wide TensorRT/CUDA ABI. The bundle therefore does not
-carry a second `libnvinfer` or `libcudart`.
+The Edge-LLM x86 release cohort uses TensorRT 11.1.0.106 with CUDA 13.4, as
+specified by its model-owned dependency lock. Model Connect's aarch64 release
+cohort uses the official TensorRT 11.1.0.106 SDK with CUDA 13.3. Wheel metadata
+selects the TensorRT package for the current architecture. Model Connect, the
+Qwen adapter, and Edge-LLM must use the same process-wide TensorRT/CUDA ABI.
+The bundle therefore does not carry a second `libnvinfer` or `libcudart`.
 
 The x86 build and qualification image provides Python 3.12 with its `venv`
 module, CMake 3.20 or newer, Ninja, GCC 13, the CUDA 13.4 toolkit, and the

@@ -22,7 +22,6 @@ on:
 
 permissions:
   contents: read
-  packages: read
 
 jobs:
   prove:
@@ -204,17 +203,6 @@ jobs:
           clean: true
           lfs: false
 
-      - name: Log in to GitHub Container Registry
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          docker_config="${RUNNER_TEMP}/trtmc-docker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p "$docker_config"
-          echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
-          printf '%s' "$GHCR_TOKEN" | DOCKER_CONFIG="$docker_config" docker login ghcr.io \
-            --username "$GITHUB_ACTOR" --password-stdin
-
       - name: Ensure CI Docker image
         id: ci_image
         timeout-minutes: 90
@@ -267,9 +255,6 @@ jobs:
           PROOF_OUTCOME: ${{ steps.proof.outcome }}
         run: |
           set -euo pipefail
-          if [ -n "${DOCKER_CONFIG:-}" ]; then
-            rm -rf "$DOCKER_CONFIG"
-          fi
           artifacts="$MODEL_PROOF_OUTPUT_DIR/artifacts"
           mkdir -p "$artifacts"
           if [ -f "$MODEL_PROOF_OUTPUT_DIR/ci-image.log" ]; then

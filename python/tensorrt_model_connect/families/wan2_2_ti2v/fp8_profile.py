@@ -8,9 +8,10 @@ unconditional denoising trajectory at 1280x704/121 frames, CFG 5, flow shift
 5, and seed 42. Activation amax uses a 10 percent margin before E4M3
 normalization; weight scales use per-tensor max-absolute E4M3 normalization.
 This fixed map was collected with PyTorch on GB300; it was not produced by
-ModelOpt or runtime calibration. The accepted visual receipt is the Jetson Thor
-cat-prompt/seed-42 run with TensorRT 11.2.0.113 and CUDA 13.4.46. Other prompts
-and software versions are outside that single-trajectory receipt.
+ModelOpt or runtime calibration. Consumption with the official TensorRT
+11.1.0.106 release requires a fresh full-resolution Jetson Thor visual
+qualification. A visual receipt collected with a different TensorRT build does
+not qualify this official-release path.
 
 The data is checkpoint/profile calibration, not a serialized TensorRT plan.
 Each target still builds its own TensorRT engines.
@@ -38,7 +39,7 @@ PACKAGED_FP8_SCALE_PATH = Path(__file__).with_name("data") / PACKAGED_FP8_SCALE_
 # Exact platforms on which Model Connect may consume this packaged map.
 PACKAGED_FP8_TARGETS = {
     ((10, 3), False): "GB300 calibration host",
-    ((11, 0), True): "Jetson Thor visual-validation target",
+    ((11, 0), True): "Jetson Thor visual-requalification target",
 }
 
 # Content identities at the pinned Hugging Face revision. Hashing is a one-time

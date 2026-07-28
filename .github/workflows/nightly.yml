@@ -206,7 +206,6 @@ jobs:
     timeout-minutes: 180
     permissions:
       contents: read
-      packages: read
     env:
       CI_BASE_REF: ${{ needs.legal.outputs.tested_sha || github.sha }}
       TRTMC_CI_CONTAINER_NAME: trtmc-nightly-unit-${{ github.run_id }}-${{ github.run_attempt }}
@@ -226,17 +225,6 @@ jobs:
           persist-credentials: false
           clean: true
           lfs: false
-
-      - name: Log in to GitHub Container Registry
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          docker_config="${RUNNER_TEMP}/trtmc-docker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-nightly-unit"
-          mkdir -p "$docker_config"
-          echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
-          printf '%s' "$GHCR_TOKEN" | DOCKER_CONFIG="$docker_config" docker login ghcr.io \
-            --username "$GITHUB_ACTOR" --password-stdin
 
       - name: Ensure CI Docker image
         id: ci_image
@@ -262,9 +250,6 @@ jobs:
           docker rm -f "$TRTMC_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
           unit_scratch="${RUNNER_TEMP}/trtmc-premerge-unit-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           rm -rf -- "$unit_scratch"
-          if [ -n "${DOCKER_CONFIG:-}" ]; then
-            rm -rf "$DOCKER_CONFIG"
-          fi
 
   cache-warm:
     name: 3 / Model caches / ${{ matrix.node_label }}
@@ -282,7 +267,6 @@ jobs:
     timeout-minutes: 270
     permissions:
       contents: read
-      packages: read
     env:
       TRTMC_CI_CONTAINER_NAME: trtmc-nightly-cache-${{ github.run_id }}-${{ github.run_attempt }}
       TRTMC_CI_WORKSPACE: ${{ github.workspace }}/nightly-cache-${{ github.run_id }}-${{ github.run_attempt }}
@@ -305,17 +289,6 @@ jobs:
           persist-credentials: false
           clean: true
           lfs: false
-
-      - name: Log in to GitHub Container Registry
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          docker_config="${RUNNER_TEMP}/trtmc-docker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-nightly-cache"
-          mkdir -p "$docker_config"
-          echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
-          printf '%s' "$GHCR_TOKEN" | DOCKER_CONFIG="$docker_config" docker login ghcr.io \
-            --username "$GITHUB_ACTOR" --password-stdin
 
       - name: Ensure CI Docker image
         id: ci_image
@@ -354,9 +327,6 @@ jobs:
         if: ${{ always() }}
         run: |
           docker rm -f "$TRTMC_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
-          if [ -n "${DOCKER_CONFIG:-}" ]; then
-            rm -rf "$DOCKER_CONFIG"
-          fi
 
   package:
     name: 3 / Coverage and wheel package
@@ -368,7 +338,6 @@ jobs:
     timeout-minutes: 330
     permissions:
       contents: read
-      packages: read
     env:
       TRTMC_CI_CONTAINER_NAME: trtmc-nightly-package-${{ github.run_id }}-${{ github.run_attempt }}
       TRTMC_CI_WORKSPACE: ${{ github.workspace }}/nightly-package-${{ github.run_id }}-${{ github.run_attempt }}
@@ -393,17 +362,6 @@ jobs:
           persist-credentials: false
           clean: true
           lfs: false
-
-      - name: Log in to GitHub Container Registry
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          docker_config="${RUNNER_TEMP}/trtmc-docker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-nightly-package"
-          mkdir -p "$docker_config"
-          echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
-          printf '%s' "$GHCR_TOKEN" | DOCKER_CONFIG="$docker_config" docker login ghcr.io \
-            --username "$GITHUB_ACTOR" --password-stdin
 
       - name: Ensure CI Docker image
         id: ci_image
@@ -458,9 +416,6 @@ jobs:
         if: ${{ always() }}
         run: |
           docker rm -f "$TRTMC_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
-          if [ -n "${DOCKER_CONFIG:-}" ]; then
-            rm -rf "$DOCKER_CONFIG"
-          fi
 
   model-proof:
     name: 4 / Model / ${{ matrix.model }}
@@ -483,7 +438,6 @@ jobs:
       matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}
     permissions:
       contents: read
-      packages: read
     uses: ./.github/workflows/model-proof.yml
     with:
       model: ${{ matrix.model }}
@@ -506,7 +460,6 @@ jobs:
     permissions:
       actions: read
       contents: read
-      packages: read
     env:
       TRTMC_CI_CONTAINER_NAME: trtmc-nightly-vlm-${{ github.run_id }}-${{ github.run_attempt }}
       TRTMC_CI_WORKSPACE: ${{ github.workspace }}/nightly-vlm-${{ github.run_id }}-${{ github.run_attempt }}
@@ -589,17 +542,6 @@ jobs:
             exit 1
           }
           echo "Diffusion frame pairs: $pair_count"
-
-      - name: Log in to GitHub Container Registry
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          docker_config="${RUNNER_TEMP}/trtmc-docker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-nightly-vlm"
-          mkdir -p "$docker_config"
-          echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
-          printf '%s' "$GHCR_TOKEN" | DOCKER_CONFIG="$docker_config" docker login ghcr.io \
-            --username "$GITHUB_ACTOR" --password-stdin
 
       - name: Ensure CI Docker image
         id: ci_image
@@ -758,9 +700,6 @@ jobs:
         if: ${{ always() }}
         run: |
           docker rm -f "$TRTMC_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
-          if [ -n "${DOCKER_CONFIG:-}" ]; then
-            rm -rf "$DOCKER_CONFIG"
-          fi
 
   report:
     name: 6 / Combined HTML report

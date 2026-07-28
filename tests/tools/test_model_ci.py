@@ -410,6 +410,8 @@ def test_impact_selects_only_model_a(tmp_path: Path) -> None:
         "python/tensorrt_model_connect/families/model_a/graph_blocks.py",
         "python/tensorrt_model_connect/families/model_a/model/model.py",
         "python/tensorrt_model_connect/families/model_a/debug_runner.py",
+        "python/tensorrt_model_connect/families/model_a/Dockerfile.thor",
+        "python/tensorrt_model_connect/families/model_a/Dockerfile.thor.dockerignore",
         "tests/e2e/models/model_a/model.l0.json",
         "src/runtime/models/model_a/model_a.cpp",
     ),

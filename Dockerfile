@@ -1,12 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-ARG TENSORRT_SDK_IMAGE=ghcr.io/nvidia/tensorrt-model-connect/tensorrt-sdk:11.2.0.113@sha256:18c12935c4e7f507d8719d44509cb5623b17f298ee951d844bd9e558a8309929
-FROM ${TENSORRT_SDK_IMAGE} AS tensorrt_sdk
+ARG TENSORRT_IMAGE=nvcr.io/nvidia/tensorrt:26.07-py3@sha256:f794a79e8b996d16dbc2e5884e19d8e2269a51c960106c9b49b0061a6926c541
+FROM ${TENSORRT_IMAGE} AS ci-base
 
-FROM nvidia/cuda:13.3.0-devel-ubuntu24.04 AS ci-base
-
-ARG TENSORRT_VERSION=11.2.0.113
+ARG TENSORRT_VERSION=11.1.0.106
 ARG PYTORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu130
 ARG TORCH_VERSION=2.12.0+cu130
 ARG TORCHVISION_VERSION=0.27.0+cu130
@@ -33,28 +31,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     lcov \
     && rm -rf /var/lib/apt/lists/*
 
-# TensorRT 11.2 nightlies are mirrored to an access-controlled,
-# repository-linked GHCR image by a maintainer. CI pulls this stage with its
-# scoped GITHUB_TOKEN, so NVIDIA Artifactory credentials never enter GitHub
-# Actions. Install the SDK assets into the same locations used by the previous
-# TensorRT packages.
-COPY --from=tensorrt_sdk /opt/tensorrt/include/ /usr/include/aarch64-linux-gnu/
-COPY --from=tensorrt_sdk /opt/tensorrt/python/tensorrt-${TENSORRT_VERSION}-cp312-none-linux_aarch64.whl /opt/tensorrt/python/
-RUN \
-    test -f "/opt/tensorrt/python/tensorrt-${TENSORRT_VERSION}-cp312-none-linux_aarch64.whl" && \
-    grep -q "#define TRT_BUILD_ENTERPRISE 113" /usr/include/aarch64-linux-gnu/NvInferVersion.h
+# The pinned NVIDIA NGC image is the official TensorRT 11.1 ARM64 development
+# release. Validate the Python binding, C++ headers, runtime library, and Thor
+# (SM110) builder resource before adding any project dependencies.
+RUN python3.12 -c \
+      "import tensorrt; assert tensorrt.__version__ == '${TENSORRT_VERSION}', tensorrt.__version__" && \
+    grep -q "#define TRT_MAJOR_ENTERPRISE 11" \
+      /usr/include/aarch64-linux-gnu/NvInferVersion.h && \
+    grep -q "#define TRT_MINOR_ENTERPRISE 1" \
+      /usr/include/aarch64-linux-gnu/NvInferVersion.h && \
+    grep -q "#define TRT_PATCH_ENTERPRISE 0" \
+      /usr/include/aarch64-linux-gnu/NvInferVersion.h && \
+    grep -q "#define TRT_BUILD_ENTERPRISE 106" \
+      /usr/include/aarch64-linux-gnu/NvInferVersion.h && \
+    test -f /usr/lib/aarch64-linux-gnu/libnvinfer.so.11 && \
+    test -f /usr/lib/aarch64-linux-gnu/libnvinfer_builder_resource_sm110.so.11.1.0
 
 # ── Python venv with all deps ───────────────────────────────────────────────
 ENV VIRTUAL_ENV=/opt/venv
-RUN python3.12 -m venv $VIRTUAL_ENV
+RUN python3.12 -m venv --system-site-packages $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-# Install the runtime libraries and Python bindings from the same SDK as the
-# headers. CMake derives the backend ABI alias from NvInferVersion.h.
-COPY --from=tensorrt_sdk /opt/tensorrt/lib/ /opt/venv/lib/python3.12/site-packages/tensorrt_libs/
+# The venv inherits the official TensorRT binding from the NGC image. CMake
+# derives the backend ABI alias from the matching NvInferVersion.h.
 RUN pip install -U pip && \
-    pip install --no-cache-dir \
-      "/opt/tensorrt/python/tensorrt-${TENSORRT_VERSION}-cp312-none-linux_aarch64.whl"
+    python3.12 -c \
+      "import tensorrt; assert tensorrt.__version__ == '${TENSORRT_VERSION}', tensorrt.__version__"
 
 # CUDA Python bindings (needed by debug_runner.py / diff tools). Match the
 # CUDA 13.0 Python stack pulled by PyTorch.
@@ -140,16 +142,9 @@ RUN pip install --force-reinstall \
     python3 -c "import torch; assert torch.__version__ == '${TORCH_VERSION}', torch.__version__" && \
     python3 -c "import importlib.metadata as m; assert m.version('nvidia-modelopt') == '${MODELOPT_VERSION}', m.version('nvidia-modelopt')"
 
-# Create libnvinfer.so symlink when the SDK only ships the versioned library.
-RUN TRT_LIB=$(python3 -c \
-      "import importlib.util; s=importlib.util.find_spec('tensorrt_libs'); print(s.submodule_search_locations[0])") && \
-    [ ! -f "$TRT_LIB/libnvinfer.so" ] && ln -sf libnvinfer.so.11 "$TRT_LIB/libnvinfer.so" || true && \
-    echo "$TRT_LIB" > /etc/ld.so.conf.d/tensorrt.conf && \
-    ldconfig
-
 # ── Environment ─────────────────────────────────────────────────────────────
 # Pre-compute paths so cmake / runtime find TRT without manual exports
-ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs
+ENV TRT_LIB_DIR=/usr/lib/aarch64-linux-gnu
 ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu
 ENV LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64"
 

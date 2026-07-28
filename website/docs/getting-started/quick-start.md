@@ -105,15 +105,14 @@ If generation fails, classify the failure before changing code:
 
 ## Jetson Thor: Wan2.2 720p In Two Commands
 
-Use TensorRT 11.2.0.113 and an aarch64 Model Connect wheel built from
-`main@00acabb1` or later. Install both wheels once; the `wan` extra is needed
-only while the bundle is built:
+Use a Model Connect wheel built against the official TensorRT 11.1.0.106
+release for CUDA 13.3. Its pinned public TensorRT dependency is installed
+automatically; the `wan` extra is needed only while the bundle is built:
 
 ```bash
 python3.12 -m venv ~/.venvs/trtmc
 . ~/.venvs/trtmc/bin/activate
 python -m pip install \
-  ./tensorrt-11.2.0.113-cp312-none-linux_aarch64.whl \
   './tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl[wan]'
 ```
 
@@ -140,6 +139,10 @@ its contents, loads the packaged FP8 scales, and builds the target-specific
 TensorRT bundle. No local checkpoint path, quantization JSON, plugin path, or
 backend selector is needed.
 
+For a board that does not already have Docker, Model Connect, or a checkpoint
+cache, follow [Wan2.2 On A Fresh Jetson Thor](wan2-2-thor-from-scratch.md).
+That customer image consumes only the official TensorRT 11.1.0.106 NGC image.
+
 The official bundle profile already supplies 1280x704, 121 frames, 50 steps,
 CFG 5, flow shift 5, and 24 FPS. The runtime defaults supply the 7/2 exact-step
 windows, and PNG output automatically selects up to eight writer threads.
@@ -153,10 +156,10 @@ The command writes `wan22-frames/frame_0000.png` through
 `wan22-frames/frame_0120.png`. PyTorch is used only to read the checkpoint
 during the build; generation runs through the native C++/TensorRT runtime.
 
-The approximately 205-second, 121-frame qualification point used an integrated
-SM 11.0 Jetson AGX Thor with TensorRT 11.2.0.113 and CUDA toolkit 13.4.46. It is
-a receipt for the prompt and seed above, not a latency guarantee across BSPs,
-clocks, temperatures, or prompts.
+The official TensorRT 11.1.0.106 path requires a fresh full 121-frame visual
+and performance qualification on Jetson AGX Thor. Measurements and visual
+receipts collected with earlier internal SDK builds do not qualify this
+official-release path and must not be used as its latency or quality claim.
 
 TensorRT plans must be built on the target Thor. Wan2.2 itself is not
 Thor-only: the packaged FP8 profile also supports GB300 SM 10.3, while other

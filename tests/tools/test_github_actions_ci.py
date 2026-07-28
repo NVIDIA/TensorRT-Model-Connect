@@ -163,43 +163,35 @@ def test_workflows_define_shared_hf_cache_env() -> None:
     assert '"HF_MODULES_CACHE": "/work/hf-modules"' in runner
 
 
-def test_workflows_pull_tensorrt_sdk_from_ghcr_without_artifactory_secrets() -> None:
+def test_workflows_use_the_official_tensorrt_release_without_private_registry_auth() -> None:
     dockerfile = (REPO_ROOT / "Dockerfile").read_text()
-    assert "ghcr.io/nvidia/tensorrt-model-connect/tensorrt-sdk:11.2.0.113@sha256:" in dockerfile
-    assert "ENV TRT_ROOT=" not in dockerfile
-    assert "ENV PIP_FIND_LINKS=" not in dockerfile
-    assert "ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs" in dockerfile
-    assert "ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu" in dockerfile
+    assert (
+        "ARG TENSORRT_IMAGE=nvcr.io/nvidia/tensorrt:26.07-py3"
+        "@sha256:f794a79e8b996d16dbc2e5884e19d8e2269a51c960106c9b49b0061a6926c541"
+    ) in dockerfile
+    assert "FROM ${TENSORRT_IMAGE} AS ci-base" in dockerfile
+    assert "ARG TENSORRT_VERSION=11.1.0.106" in dockerfile
+    assert "#define TRT_MAJOR_ENTERPRISE 11" in dockerfile
+    assert "#define TRT_MINOR_ENTERPRISE 1" in dockerfile
+    assert "#define TRT_PATCH_ENTERPRISE 0" in dockerfile
+    assert "#define TRT_BUILD_ENTERPRISE 106" in dockerfile
 
-    package = _ci_source("package.py")
-    assert package.count("_install_tensorrt_sdk") >= 2
-
-    for workflow in ("nightly.yml", "model-proof.yml"):
+    for workflow in ("trtmc-ci.yml", "nightly.yml", "model-proof.yml"):
         text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text()
-        assert "packages: read" in text
-        assert "GHCR_TOKEN: ${{ github.token }}" in text
-        assert "DOCKER_CONFIG=$docker_config" in text
+        assert "packages: read" not in text
+        assert "GHCR_TOKEN" not in text
+        assert "docker login ghcr.io" not in text
         assert "TRTMC_ARTIFACTORY_USERNAME" not in text
         assert "TRTMC_ARTIFACTORY_PASSWORD" not in text
 
-    premerge = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
-    assert "uses: ./.github/workflows/model-proof.yml" in premerge
-    assert "packages: read" in premerge
-    assert "TRTMC_ARTIFACTORY_USERNAME" not in premerge
-    assert "TRTMC_ARTIFACTORY_PASSWORD" not in premerge
-
-
-def test_tensorrt_sdk_publisher_is_temporary_and_self_contained() -> None:
+    assert "ghcr.io" not in dockerfile
+    assert "TENSORRT_SDK_IMAGE" not in dockerfile
+    assert "/opt/tensorrt/python" not in dockerfile
+    assert not (REPO_ROOT / "Dockerfile.tensorrt-sdk").exists()
     scripts = REPO_ROOT / "scripts"
     assert not (scripts / "load_artifactory_credentials.sh").exists()
     assert not (scripts / "fetch_tensorrt_sdk.sh").exists()
-
-    publisher = (scripts / "publish_tensorrt_sdk.sh").read_text()
-    assert "TEMPORARY:" in publisher
-    assert "when TensorRT 11.2" in publisher
-    assert "is publicly released" in publisher
-    assert "load_artifactory_credentials()" in publisher
-    assert "stage_tensorrt_sdk()" in publisher
+    assert not (scripts / "publish_tensorrt_sdk.sh").exists()
 
 
 def test_github_stage_wrapper_mounts_and_exports_hf_cache_env() -> None:

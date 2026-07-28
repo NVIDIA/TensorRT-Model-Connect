@@ -8,14 +8,6 @@
   "precision": "fp16",
   "reference_precision": "fp32",
   "e2e_parallel_resource": "exclusive_gpu",
-  "build_env": {
-    "TRTMC_BARK_TIMING_CACHE_MODE": "verified",
-    "TRTMC_BARK_TIMING_CACHE_PATH": {
-      "path": "data/timing_cache/bark-small-gb300-trt11.2-cuda13.3-fp16.cache",
-      "relative_to": "model"
-    },
-    "TRTMC_BARK_TIMING_CACHE_SHA256": "fd5877cddb8c989017f18ee1084c6d2f4f2c69e89027e21803931f4e26ba14bc"
-  },
   "max_cache_length": 1024,
   "trust_remote_code": false,
   "testcases": [

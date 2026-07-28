@@ -21,15 +21,14 @@ libraries, TensorRT headers and libraries, `patchelf`, and `auditwheel`.
 
 ## 1. Simple pip install
 
-Install the TensorRT 11.2 Python wheel from the TensorRT 11.2.0.113 SDK, then
-install the published TensorRT-Model-Connect wheel that matches your Python
-version:
+Install the published TensorRT-Model-Connect wheel that matches your Python
+version. Pip resolves its pinned TensorRT dependency from NVIDIA's official
+TensorRT 11.1.0.106 Python distribution:
 
 ```bash
 python3.12 -m venv .venv-trtmc
 . .venv-trtmc/bin/activate
 
-pip install ./tensorrt-11.2.0.113-cp312-none-linux_aarch64.whl
 pip install ./tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl
 
 trtmc version
@@ -45,14 +44,13 @@ pip install './tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.wh
 PyTorch reads the official checkpoint during `trtmc build`; it is not used by
 the native C++ video-generation runtime.
 
-Use the TensorRT `cp310` and TensorRT-Model-Connect `py310` wheels with Python
-3.10. Use the `cp312` and `py312` wheels with Python 3.12. The
-TensorRT-Model-Connect wheel installs:
+Use the TensorRT-Model-Connect `py310` wheel with Python 3.10 and the `py312`
+wheel with Python 3.12. The TensorRT-Model-Connect wheel installs:
 
 - the Python builder package,
 - the native `trtmc` executable,
 - packaged TensorRT backend DSOs,
-- the pinned `tensorrt==11.2.0.113` Python dependency.
+- the pinned official `tensorrt==11.1.0.106` Python dependency.
 
 Quick smoke test:
 
@@ -104,8 +102,6 @@ environment. Install the built wheel in a fresh environment:
 ```bash
 python3.12 -m venv /tmp/trtmc-wheel-smoke
 /tmp/trtmc-wheel-smoke/bin/python -m pip install --upgrade pip
-/tmp/trtmc-wheel-smoke/bin/python -m pip install \
-  /opt/tensorrt/python/tensorrt-11.2.0.113-cp312-none-linux_aarch64.whl
 /tmp/trtmc-wheel-smoke/bin/python -m pip install \
   dist/tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl
 /tmp/trtmc-wheel-smoke/bin/trtmc version

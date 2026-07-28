@@ -640,7 +640,9 @@ def test_manifest_profile_and_dependency_pins_are_exact_and_capsule_owned() -> N
         f"tensorrt=={dependency_spec.tensorrt_version_text}; platform_machine == 'x86_64'"
         in project_dependencies
     )
-    assert "tensorrt==11.2.0.113; platform_machine == 'aarch64'" in project_dependencies
+    assert (
+        "tensorrt==11.1.0.106; platform_machine == 'aarch64'" in project_dependencies
+    )
     exporter_python = dependency["exporter_python"]
     exporter_spec = dependency_spec.exporter_python
     assert exporter_spec.implementation == exporter_python["implementation"]
