@@ -68,6 +68,144 @@ _DIFFUSION_SAMPLE_INPUT_FIELDS = frozenset(
         "translation_speed",
     }
 )
+_GENERATION_BOOLEAN_FIELDS = frozenset(
+    {
+        "apply_chat_template",
+        "do_sample",
+        "enable_thinking",
+        "use_shared_initial_latents",
+    }
+)
+_TASK_EVAL_BOOLEAN_FIELDS = frozenset(
+    {
+        "build_generation_headroom",
+        "hf_use_cache",
+        "require_valid_prediction",
+    }
+)
+_COMPLETE_COUNT_FIELD_BY_MODE = {
+    "asr_transcript": "total_count",
+    "continuation": "count",
+    "diffusion_image_clip_parity": "total_count",
+    "diffusion_text_parity": "sample_count",
+    "encoder_embedding_parity": "sample_count",
+    "image_classification_parity": "sample_count",
+    "mcq": "total_count",
+    "ocrbench_v2": "total_count",
+    "prompted_segmentation_parity": "sample_count",
+    "reranking_parity": "sample_count",
+    "semantic_segmentation_parity": "sample_count",
+    "time_series_parity": "sample_count",
+    "tts_intelligibility": "total_count",
+}
+_PASSED_COUNT_RATE_FIELD_BY_MODE = {
+    "diffusion_image_clip_parity": "overall_pass_rate",
+    "encoder_embedding_parity": "vector_pass_rate",
+    "reranking_parity": "sample_pass_rate",
+    "time_series_parity": "sample_agreement_rate",
+}
+
+
+def _boolean_field(
+    values: Mapping[str, Any],
+    field: str,
+    *,
+    context: str,
+    default: bool = False,
+) -> bool:
+    value = values.get(field, default)
+    if type(value) is not bool:
+        raise ValueError(f"{context} {field} must be a boolean")
+    return value
+
+
+def _validate_boolean_fields(
+    values: Mapping[str, Any],
+    fields: Sequence[str],
+    *,
+    context: str,
+) -> None:
+    for field in fields:
+        if field in values:
+            _boolean_field(values, field, context=context)
+
+
+def _validate_generation_boolean_config(
+    generation: Any,
+    *,
+    context: str,
+) -> None:
+    if not isinstance(generation, Mapping):
+        raise ValueError(f"{context} must be a mapping")
+    _validate_boolean_fields(
+        generation,
+        _GENERATION_BOOLEAN_FIELDS,
+        context=context,
+    )
+    if "streaming" in generation:
+        streaming = generation["streaming"]
+        if not isinstance(streaming, Mapping):
+            raise ValueError(f"{context} streaming must be a mapping")
+        _validate_boolean_fields(
+            streaming,
+            ("enabled",),
+            context=f"{context} streaming",
+        )
+
+
+def _validate_task_eval_boolean_config(
+    config: Any,
+    *,
+    context: str,
+) -> None:
+    if not isinstance(config, Mapping):
+        raise ValueError(f"{context} must be a mapping")
+    _validate_boolean_fields(
+        config,
+        _TASK_EVAL_BOOLEAN_FIELDS,
+        context=context,
+    )
+    if "generation" in config:
+        _validate_generation_boolean_config(
+            config["generation"],
+            context=f"{context} generation",
+        )
+
+
+def _validate_suite_boolean_config(
+    suite: Mapping[str, Any],
+    *,
+    context: str,
+) -> None:
+    if "generation" in suite:
+        _validate_generation_boolean_config(
+            suite["generation"],
+            context=f"{context} generation",
+        )
+    for profile_group in ("family_profiles", "model_profiles"):
+        profiles = suite.get(profile_group, {})
+        if not isinstance(profiles, Mapping):
+            raise ValueError(f"{context} {profile_group} must be a mapping")
+        for owner, profile in profiles.items():
+            if not isinstance(profile, Mapping):
+                raise ValueError(f"{context} {profile_group}.{owner} must be a mapping")
+            if "generation" in profile:
+                _validate_generation_boolean_config(
+                    profile["generation"],
+                    context=(f"{context} {profile_group}.{owner} generation"),
+                )
+    overrides = suite.get("model_overrides", {})
+    if not isinstance(overrides, Mapping):
+        raise ValueError(f"{context} model_overrides must be a mapping")
+    for override_group in ("by_family", "by_model"):
+        entries = overrides.get(override_group, {})
+        if not isinstance(entries, Mapping):
+            raise ValueError(f"{context} model_overrides.{override_group} must be a mapping")
+        for owner, config in entries.items():
+            _validate_task_eval_boolean_config(
+                config,
+                context=(f"{context} model_overrides.{override_group}.{owner}"),
+            )
 
 
 def _sha256_file(path: Path) -> str:
@@ -107,6 +245,10 @@ def load_suites(path: Path = DEFAULT_SUITES) -> list[dict[str, Any]]:
         if suite_id in seen:
             raise ValueError(f"{path}: duplicate suite id {suite_id!r}")
         seen.add(suite_id)
+        _validate_suite_boolean_config(
+            suite,
+            context=f"{path}: suite {suite_id!r}",
+        )
     return suites
 
 
@@ -124,15 +266,18 @@ def validate_ci_suite(suite: dict[str, Any], lane: str) -> dict[str, Any]:
         raise ValueError(f"Task-eval suite {suite['id']!r} is not CI-eligible")
     if str(ci.get("lane", "")) != lane:
         raise ValueError(
-            f"Task-eval suite {suite['id']!r} belongs to lane "
-            f"{ci.get('lane')!r}, not {lane!r}"
+            f"Task-eval suite {suite['id']!r} belongs to lane {ci.get('lane')!r}, not {lane!r}"
         )
     if int(ci.get("limit", 0) or 0) <= 0:
         raise ValueError(f"Task-eval suite {suite['id']!r} must define a positive CI limit")
     if not isinstance(ci.get("sample_seed"), int):
         raise ValueError(f"Task-eval suite {suite['id']!r} must define an integer CI sample seed")
     models = suite.get("default_model_names", [])
-    if not isinstance(models, list) or not models or not all(isinstance(item, str) for item in models):
+    if (
+        not isinstance(models, list)
+        or not models
+        or not all(isinstance(item, str) for item in models)
+    ):
         raise ValueError(f"Task-eval suite {suite['id']!r} has no default CI models")
     return ci
 
@@ -189,15 +334,89 @@ def ensure_ci_dataset(
 
 
 def validate_eval_summary(
-    summary: dict[str, Any], expected_models: list[str]
+    summary: dict[str, Any],
+    expected_models: list[str],
+    expected_limit: int | None = None,
 ) -> tuple[bool, list[dict[str, Any]]]:
     raw_results = summary.get("results", [])
     if not isinstance(raw_results, list):
         return False, []
     results = [result for result in raw_results if isinstance(result, dict)]
     actual_models = [str(result.get("model", "")) for result in results]
-    complete = len(results) == len(expected_models) and sorted(actual_models) == sorted(expected_models)
-    return complete and all(result.get("status") == "passed" for result in results), results
+    complete = len(results) == len(expected_models) and sorted(actual_models) == sorted(
+        expected_models
+    )
+    counts_complete = all(
+        _passed_result_has_complete_counts(
+            result,
+            expected_limit=expected_limit,
+        )
+        for result in results
+        if result.get("status") == "passed"
+    )
+    return (
+        complete
+        and counts_complete
+        and all(result.get("status") == "passed" for result in results),
+        results,
+    )
+
+
+def _passed_result_has_complete_counts(
+    result: Mapping[str, Any],
+    *,
+    expected_limit: int | None,
+) -> bool:
+    complete_count = result.get("complete_count")
+    valid_count = result.get("valid_count")
+    prepared_count = result.get("prepared_input_count")
+    requested_limit = result.get(
+        "requested_sample_limit",
+        expected_limit,
+    )
+    if (
+        type(complete_count) is not int
+        or complete_count <= 0
+        or type(valid_count) is not int
+        or type(prepared_count) is not int
+        or prepared_count <= 0
+        or complete_count != prepared_count
+    ):
+        return False
+    skipped_count = result.get("skipped_count")
+    excluded_count = result.get("excluded_count")
+    if (
+        type(skipped_count) is not int
+        or type(excluded_count) is not int
+        or skipped_count < 0
+        or excluded_count < 0
+        or skipped_count != 0
+        or excluded_count != 0
+        or valid_count + skipped_count + excluded_count != complete_count
+    ):
+        return False
+    rate_field = _PASSED_COUNT_RATE_FIELD_BY_MODE.get(str(result.get("mode", "") or ""))
+    if rate_field is not None:
+        passed_count = result.get("passed_count")
+        rate = result.get(rate_field)
+        if (
+            type(passed_count) is not int
+            or not 0 <= passed_count <= valid_count
+            or not isinstance(rate, (int, float))
+            or isinstance(rate, bool)
+            or not math.isclose(
+                float(rate),
+                passed_count / valid_count if valid_count else 0.0,
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
+        ):
+            return False
+    if type(requested_limit) is not int or requested_limit < 0:
+        return False
+    if expected_limit is not None and requested_limit != expected_limit:
+        return False
+    return requested_limit == 0 or complete_count == requested_limit
 
 
 def _public_ci_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -209,6 +428,11 @@ def _public_ci_result(result: dict[str, Any]) -> dict[str, Any]:
         "mode",
         "valid_count",
         "passed_count",
+        "complete_count",
+        "prepared_input_count",
+        "requested_sample_limit",
+        "skipped_count",
+        "excluded_count",
         "sample_agreement_rate",
         "prediction_agreement_rate",
         "mean_relative_l2",
@@ -267,7 +491,15 @@ def write_public_ci_artifacts(
     artifact_dir: Path,
 ) -> None:
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    passed, _ = validate_eval_summary({"results": results}, expected_models)
+    ci = suite.get("ci", {})
+    expected_limit = (
+        ci.get("limit") if isinstance(ci, Mapping) and type(ci.get("limit")) is int else None
+    )
+    passed, _ = validate_eval_summary(
+        {"results": results},
+        expected_models,
+        expected_limit=expected_limit,
+    )
     payload = {
         "suite": suite["id"],
         "ci": suite["ci"],
@@ -385,9 +617,7 @@ def _deep_merge_mappings(*values: Any) -> dict[str, Any]:
     return merged
 
 
-def effective_task_eval_config(
-    suite: dict[str, Any], model: dict[str, Any]
-) -> dict[str, Any]:
+def effective_task_eval_config(suite: dict[str, Any], model: dict[str, Any]) -> dict[str, Any]:
     """Resolve suite family/model overrides, then manifest-specific settings."""
     overrides = suite.get("model_overrides", {})
     if not isinstance(overrides, dict):
@@ -399,11 +629,16 @@ def effective_task_eval_config(
             f"Suite {suite.get('id', '<unknown>')} model_overrides.by_family/by_model "
             "must be mappings"
         )
-    return _deep_merge_mappings(
+    resolved = _deep_merge_mappings(
         by_family.get(str(model.get("family", "")), {}),
         by_model.get(str(model.get("name", "")), {}),
         model.get("task_eval", {}),
     )
+    _validate_task_eval_boolean_config(
+        resolved,
+        context=(f"Task-eval configuration for {model.get('name', '<unknown>')!r}"),
+    )
+    return resolved
 
 
 def infer_reference_family(raw: dict[str, Any]) -> str:
@@ -412,19 +647,6 @@ def infer_reference_family(raw: dict[str, Any]) -> str:
 
 def infer_user_contract(raw: dict[str, Any], reference_family: str) -> str:
     return str(raw.get("user_contract", "") or "")
-
-
-def _boolean_field(
-    values: Mapping[str, Any],
-    field: str,
-    *,
-    context: str,
-    default: bool = False,
-) -> bool:
-    value = values.get(field, default)
-    if type(value) is not bool:
-        raise ValueError(f"{context} {field} must be a boolean")
-    return value
 
 
 def _effective_model_trust_remote_code(
@@ -461,9 +683,7 @@ def manifest_record(path: Path) -> dict[str, Any]:
             raw = {**raw, **canonical, "name": model_name}
     distributed = raw.get("distributed_runtime", {})
     if not isinstance(distributed, dict):
-        raise ValueError(
-            f"Model manifest {path} distributed_runtime must be an object"
-        )
+        raise ValueError(f"Model manifest {path} distributed_runtime must be an object")
     distributed_enabled = _boolean_field(
         distributed,
         "enabled",
@@ -487,20 +707,20 @@ def manifest_record(path: Path) -> dict[str, Any]:
     build_args = raw.get("build_args", {})
     task_eval_config = raw.get("task_eval", {})
     if not isinstance(task_eval_config, dict):
-        task_eval_config = {}
+        raise ValueError(f"Model manifest {path} task_eval must be an object")
+    _validate_task_eval_boolean_config(
+        task_eval_config,
+        context=f"Model manifest {path} task_eval",
+    )
     runtime_strategy = str(raw.get("runtime_strategy") or "")
     task_strategy = str(raw.get("task_strategy") or runtime_strategy)
     # A model's E2E testcase may exercise a different contract from its
     # dataset-backed validation workload (for example seeded top-p sampling
     # versus deterministic MMLU). Keep the E2E fields intact and let the
     # task-eval section declare validation-specific reference semantics.
-    reference_family = str(
-        task_eval_config.get("reference_family") or infer_reference_family(raw)
-    )
+    reference_family = str(task_eval_config.get("reference_family") or infer_reference_family(raw))
     reference_backend = str(
-        task_eval_config.get("reference_backend")
-        or raw.get("reference_backend", "")
-        or ""
+        task_eval_config.get("reference_backend") or raw.get("reference_backend", "") or ""
     )
     if not reference_backend:
         try:
@@ -510,12 +730,9 @@ def manifest_record(path: Path) -> dict[str, Any]:
         except Exception:
             reference_backend = "hf_transformers"
     user_contract = str(
-        task_eval_config.get("user_contract")
-        or infer_user_contract(raw, reference_family)
+        task_eval_config.get("user_contract") or infer_user_contract(raw, reference_family)
     )
-    requires_multi_device = distributed_enabled or (
-        str(raw.get("ci_tier", "")) == "multi_device"
-    )
+    requires_multi_device = distributed_enabled or (str(raw.get("ci_tier", "")) == "multi_device")
     return {
         "name": model_name,
         "manifest": str(path.relative_to(REPO_ROOT) if path.is_relative_to(REPO_ROOT) else path),
@@ -633,10 +850,9 @@ def suite_match_reason(suite: dict[str, Any], model: dict[str, Any]) -> tuple[bo
     return True, "selected"
 
 
-def resolve_suite_for_model(
-    suite: dict[str, Any], model: dict[str, Any]
-) -> dict[str, Any]:
+def resolve_suite_for_model(suite: dict[str, Any], model: dict[str, Any]) -> dict[str, Any]:
     """Resolve manifest generation settings and per-model gates for one suite run."""
+    suite_id = str(suite.get("id", "<unknown>"))
     resolved = copy.deepcopy(suite)
     generation = dict(resolved.get("generation", {}))
     for key in (
@@ -665,9 +881,7 @@ def resolve_suite_for_model(
         raise ValueError(f"Suite {suite['id']} model_profiles must be a mapping")
     profile = profiles.get(str(model.get("name", "")), {})
     if not isinstance(profile, dict):
-        raise ValueError(
-            f"Suite {suite['id']} profile for {model.get('name')} must be a mapping"
-        )
+        raise ValueError(f"Suite {suite['id']} profile for {model.get('name')} must be a mapping")
     for owner, source in ((model.get("family"), family_profile), (model.get("name"), profile)):
         profile_generation = source.get("generation", {})
         if not isinstance(profile_generation, dict):
@@ -675,15 +889,17 @@ def resolve_suite_for_model(
                 f"Suite {suite['id']} generation profile for {owner} must be a mapping"
             )
         generation.update(profile_generation)
+    _validate_generation_boolean_config(
+        generation,
+        context=(f"Resolved suite {suite_id} generation for {model.get('name', '<unknown>')}"),
+    )
     resolved["generation"] = generation
 
     gates = dict(resolved.get("gates", {}))
     for owner, source in ((model.get("family"), family_profile), (model.get("name"), profile)):
         profile_gates = source.get("gates", {})
         if not isinstance(profile_gates, dict):
-            raise ValueError(
-                f"Suite {suite['id']} gate profile for {owner} must be a mapping"
-            )
+            raise ValueError(f"Suite {suite['id']} gate profile for {owner} must be a mapping")
         gates.update(profile_gates)
     resolved["gates"] = gates
     return resolved
@@ -788,8 +1004,7 @@ def render_mmlu_prompt(prompt: str, task_eval_config: dict[str, Any] | None) -> 
     if renderer != "gpt_oss_harmony_mcq":
         raise ValueError(f"Unsupported MMLU prompt renderer {renderer!r}")
     system_prompt = str(
-        config.get("system_prompt", GPT_OSS_MMLU_SYSTEM_PROMPT)
-        or GPT_OSS_MMLU_SYSTEM_PROMPT
+        config.get("system_prompt", GPT_OSS_MMLU_SYSTEM_PROMPT) or GPT_OSS_MMLU_SYSTEM_PROMPT
     )
     return (
         f"<|start|>system<|message|>{system_prompt}<|end|>"
@@ -850,9 +1065,7 @@ def prepare_mmlu_dataset(
     for dataset_index, request in indexed:
         prepared_request = dict(request)
         prepared_request["sample_id"] = str(
-            request.get("id")
-            or request.get("sample_id")
-            or f"{sample_prefix}_{dataset_index:06d}"
+            request.get("id") or request.get("sample_id") or f"{sample_prefix}_{dataset_index:06d}"
         )
         requests.append(prepared_request)
     answers = _copy_dataset_header(data, requests)
@@ -1109,9 +1322,7 @@ def prepare_diffusion_prompt_dataset(
         required = {"Prompt", "Category", "Challenge", "Note"}
         missing = required.difference(reader.fieldnames or [])
         if missing:
-            raise ValueError(
-                f"{dataset_path}: missing PartiPrompts columns {sorted(missing)}"
-            )
+            raise ValueError(f"{dataset_path}: missing PartiPrompts columns {sorted(missing)}")
         indexed = []
         for dataset_index, row in enumerate(reader):
             prompt = str(row.get("Prompt", "")).strip()
@@ -1148,9 +1359,7 @@ def prepare_diffusion_prompt_dataset(
         "dataset": "PartiPrompts",
         "requests": [request for _dataset_index, request in indexed],
     }
-    answers_path.write_text(
-        json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    answers_path.write_text(json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8")
     with prompts_path.open("w", encoding="utf-8") as prompts_file:
         for eval_index, (dataset_index, request) in enumerate(indexed):
             prompt_row = {
@@ -1247,9 +1456,7 @@ def prepare_diffusion_prompt_json_dataset(
     manifest_path = work_dir / "manifest.json"
     selected = [request for _source_position, request in indexed]
     answers = _copy_dataset_header(data, selected)
-    answers_path.write_text(
-        json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    answers_path.write_text(json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8")
     with prompts_path.open("w", encoding="utf-8") as prompts_file:
         for eval_index, (_source_position, request) in enumerate(indexed):
             prompt_row = dict(request)
@@ -1621,9 +1828,7 @@ def _write_indexed_json_task_dataset(
     manifest_path = work_dir / "manifest.json"
     answers = _copy_dataset_header(data, prepared_requests)
     answers["scoring"] = suite.get("scoring", {})
-    answers_path.write_text(
-        json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    answers_path.write_text(json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8")
     with prompts_path.open("w", encoding="utf-8") as prompts_file:
         for row in prompt_rows:
             prompts_file.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -1672,9 +1877,7 @@ def prepare_image_classification_dataset(
         try:
             label = int(request["label"])
         except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(
-                f"{dataset_path}: request {dataset_index} has invalid label"
-            ) from exc
+            raise ValueError(f"{dataset_path}: request {dataset_index} has invalid label") from exc
         image_path = resolve_dataset_asset_path(dataset_path, image_ref)
         sample_id = str(request.get("id", f"imagenette_{dataset_index:06d}"))
         row = {
@@ -1728,9 +1931,7 @@ def prepare_semantic_segmentation_dataset(
         image_ref = str(request.get("image", "") or "")
         mask_ref = str(request.get("mask", "") or "")
         if not image_ref or not mask_ref:
-            raise ValueError(
-                f"{dataset_path}: request {dataset_index} requires image and mask"
-            )
+            raise ValueError(f"{dataset_path}: request {dataset_index} requires image and mask")
         image_path = resolve_dataset_asset_path(dataset_path, image_ref)
         mask_path = resolve_dataset_asset_path(dataset_path, mask_ref)
         sample_id = str(request.get("id", f"ade20k_{dataset_index:06d}"))
@@ -1784,9 +1985,7 @@ def prepare_prompted_segmentation_dataset(
         required = ("image", "instance_mask", "category_mask", "text_prompt")
         missing = [field for field in required if not request.get(field)]
         if missing:
-            raise ValueError(
-                f"{dataset_path}: request {dataset_index} is missing {missing}"
-            )
+            raise ValueError(f"{dataset_path}: request {dataset_index} is missing {missing}")
         try:
             point_x = float(request["point_x"])
             point_y = float(request["point_y"])
@@ -1795,16 +1994,10 @@ def prepare_prompted_segmentation_dataset(
                 f"{dataset_path}: request {dataset_index} has invalid point prompt"
             ) from exc
         if not (0.0 <= point_x <= 1.0 and 0.0 <= point_y <= 1.0):
-            raise ValueError(
-                f"{dataset_path}: request {dataset_index} point must be normalized"
-            )
+            raise ValueError(f"{dataset_path}: request {dataset_index} point must be normalized")
         image_path = resolve_dataset_asset_path(dataset_path, str(request["image"]))
-        instance_mask = resolve_dataset_asset_path(
-            dataset_path, str(request["instance_mask"])
-        )
-        category_mask = resolve_dataset_asset_path(
-            dataset_path, str(request["category_mask"])
-        )
+        instance_mask = resolve_dataset_asset_path(dataset_path, str(request["instance_mask"]))
+        category_mask = resolve_dataset_asset_path(dataset_path, str(request["category_mask"]))
         sample_id = str(request.get("id", f"coco_prompt_{dataset_index:06d}"))
         row = {
             "sample_id": sample_id,
@@ -1867,9 +2060,7 @@ def prepare_reranking_dataset(
             )
         documents = [str(document) for document in documents]
         if any(not document for document in documents):
-            raise ValueError(
-                f"{dataset_path}: request {dataset_index} contains an empty document"
-            )
+            raise ValueError(f"{dataset_path}: request {dataset_index} contains an empty document")
         relevant = request.get("relevant_document_indices", [])
         if not isinstance(relevant, list):
             raise ValueError(
@@ -2224,9 +2415,7 @@ def prepare_asr_chat_dataset(
                 "audio": str(output_audio),
             }
             language = str(
-                request.get("language")
-                or suite.get("generation", {}).get("language", "")
-                or ""
+                request.get("language") or suite.get("generation", {}).get("language", "") or ""
             )
             if language:
                 sample["language"] = language
@@ -2428,9 +2617,7 @@ def prepare_sts_pair_dataset(
         try:
             score = float(row["score"])
         except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(
-                f"{dataset_path}: STS row {dataset_index} has invalid score"
-            ) from exc
+            raise ValueError(f"{dataset_path}: STS row {dataset_index} has invalid score") from exc
         indexed.append((dataset_index, {**row, "score": score}))
     if sample_seed is not None:
         random.Random(sample_seed).shuffle(indexed)
@@ -2473,9 +2660,7 @@ def prepare_sts_pair_dataset(
         "scoring": suite.get("scoring", {}),
         "requests": requests,
     }
-    answers_path.write_text(
-        json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    answers_path.write_text(json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8")
     manifest = {
         "suite": suite["id"],
         "dataset": str(dataset_path),
@@ -2563,9 +2748,7 @@ def prepare_time_series_csv_dataset(
     )
     test_end = int(time_series.get("test_end", dataset_config.get("test_end", len(rows))))
     if not context_length <= test_target_start < test_end <= len(rows):
-        raise ValueError(
-            "time_series test_target_start/test_end do not define a valid test window"
-        )
+        raise ValueError("time_series test_target_start/test_end do not define a valid test window")
     first_start = test_target_start - context_length
     last_start = test_end - context_length - prediction_length
     if last_start < first_start:
@@ -2864,9 +3047,7 @@ def truncate_prompt_rows(
         truncated = before > token_limit
         if truncated:
             token_ids = (
-                token_ids[-token_limit:]
-                if truncation_side == "left"
-                else token_ids[:token_limit]
+                token_ids[-token_limit:] if truncation_side == "left" else token_ids[:token_limit]
             )
             row["prompt"] = tokenizer.decode(
                 token_ids,
@@ -2953,9 +3134,7 @@ def max_prompt_token_length(
         documents = row.get("documents")
         if isinstance(documents, list) and documents:
             query = str(row.get("query", row.get("prompt", "")))
-            prompts = [
-                f"question:{query}   passage:{document}" for document in documents
-            ]
+            prompts = [f"question:{query}   passage:{document}" for document in documents]
         else:
             prompts = [str(row.get("prompt", ""))]
         for prompt in prompts:
@@ -3155,8 +3334,10 @@ def _append_native_trtmc_command(
 
 
 def _command_tokens(value: Any) -> list[str]:
-    if isinstance(value, (list, tuple)) and value and all(
-        isinstance(token, (str, int, float, Path)) for token in value
+    if (
+        isinstance(value, (list, tuple))
+        and value
+        and all(isinstance(token, (str, int, float, Path)) for token in value)
     ):
         return [str(token) for token in value]
     if isinstance(value, str):
@@ -3259,9 +3440,18 @@ def run_vlm_trtfb(args: argparse.Namespace) -> None:
                 cmd.extend(["--config", args.config])
             for token in args.set or []:
                 cmd.extend(["--set", token])
-            if args.chat_template or bool(defaults.get("apply_chat_template", False)):
+            if args.chat_template or _boolean_field(
+                defaults,
+                "apply_chat_template",
+                context="Task-eval generation",
+            ):
                 cmd.append("--chat-template")
-            if not bool(defaults.get("enable_thinking", True)):
+            if not _boolean_field(
+                defaults,
+                "enable_thinking",
+                context="Task-eval generation",
+                default=True,
+            ):
                 cmd.append("--no-thinking")
 
             _append_native_trtmc_command(
@@ -3389,15 +3579,19 @@ def run_asr_trtfb(args: argparse.Namespace) -> None:
     write_predictions(predictions, rows)
 
 
-def _asr_runtime_flags(
-    prompt_row: dict[str, Any], defaults: dict[str, Any]
-) -> list[str]:
+def _asr_runtime_flags(prompt_row: dict[str, Any], defaults: dict[str, Any]) -> list[str]:
     flags: list[str] = []
     language = str(prompt_row.get("language") or defaults.get("language", "") or "")
     if language:
         flags.extend(["--language", language])
     streaming = defaults.get("streaming", {})
-    if not isinstance(streaming, dict) or not streaming.get("enabled"):
+    if not isinstance(streaming, dict):
+        raise ValueError("Task-eval generation streaming must be a mapping")
+    if not _boolean_field(
+        streaming,
+        "enabled",
+        context="Task-eval generation streaming",
+    ):
         return flags
     flags.append("--stream")
     if streaming.get("chunk_ms") is not None:
@@ -4858,10 +5052,7 @@ def _first_token_divergence(reference: list[int], actual: list[int]) -> int:
 def _diffusion_text_shared_sampling_inputs(row: dict[str, Any]) -> dict[str, str]:
     explicit = row.get("shared_sampling_inputs", {})
     if isinstance(explicit, dict) and explicit:
-        return {
-            str(key): str(Path(str(value)).resolve())
-            for key, value in explicit.items()
-        }
+        return {str(key): str(Path(str(value)).resolve()) for key, value in explicit.items()}
     shared_dir = str(row.get("shared_inputs_dir", "") or "")
     if not shared_dir:
         return {}
@@ -5175,23 +5366,17 @@ def build_reference_comparison_result(
         "mode": scorer,
         "hf_accuracy": hf_accuracy,
         "trtfb_accuracy": trtfb_accuracy,
-        "accuracy_delta_trtfb_minus_hf": summary[
-            "accuracy_delta_trtfb_minus_hf"
-        ],
+        "accuracy_delta_trtfb_minus_hf": summary["accuracy_delta_trtfb_minus_hf"],
         "accuracy_drop_from_hf": accuracy_drop,
         "prediction_agreement_rate": summary["prediction_agreement_rate"],
-        "correctness_agreement_rate": summary[
-            "correctness_agreement_rate"
-        ],
+        "correctness_agreement_rate": summary["correctness_agreement_rate"],
         "valid_count": valid_count,
         "skipped_count": skipped_count,
+        "excluded_count": 0,
         "total_count": int(summary["total_count"]),
-        "hf_valid_prediction_rate": summary["hf"].get(
-            "valid_prediction_rate"
-        ),
-        "trtfb_valid_prediction_rate": summary["trtfb"].get(
-            "valid_prediction_rate"
-        ),
+        "complete_count": int(summary["total_count"]),
+        "hf_valid_prediction_rate": summary["hf"].get("valid_prediction_rate"),
+        "trtfb_valid_prediction_rate": summary["trtfb"].get("valid_prediction_rate"),
         "gates": dict(gates),
     }
     if scorer == "asr_transcript":
@@ -5211,8 +5396,95 @@ def require_explicit_result_status(result: dict[str, Any]) -> None:
     status = result.get("status")
     if status not in {"passed", "failed"}:
         raise RuntimeError(
-            "task-eval producer must return an explicit passed/failed status; "
-            f"got {status!r}"
+            f"task-eval producer must return an explicit passed/failed status; got {status!r}"
+        )
+
+
+def apply_complete_count_contract(
+    result: dict[str, Any],
+    *,
+    requested_sample_limit: int,
+    prepared_input_count: int,
+) -> None:
+    """Attach and enforce the complete comparison count contract."""
+    if type(requested_sample_limit) is not int or requested_sample_limit < 0:
+        raise RuntimeError("requested_sample_limit must be a non-negative integer")
+    if type(prepared_input_count) is not int or prepared_input_count < 0:
+        raise RuntimeError("prepared_input_count must be a non-negative integer")
+    mode = str(result.get("mode", "") or "")
+    count_field = _COMPLETE_COUNT_FIELD_BY_MODE.get(mode)
+    complete_count = (
+        result.get(count_field) if count_field is not None else result.get("complete_count")
+    )
+    if complete_count is None:
+        for candidate in ("total_count", "sample_count", "count"):
+            if candidate in result:
+                complete_count = result[candidate]
+                break
+    skipped_count = result.get("skipped_count", 0)
+    excluded_count = result.get("excluded_count", 0)
+    valid_count = result.get("valid_count")
+    if complete_count is None and type(valid_count) is int:
+        if type(skipped_count) is int and type(excluded_count) is int:
+            complete_count = valid_count + skipped_count + excluded_count
+    for field, value in (
+        ("complete_count", complete_count),
+        ("valid_count", valid_count),
+        ("skipped_count", skipped_count),
+        ("excluded_count", excluded_count),
+    ):
+        if type(value) is not int or value < 0:
+            raise RuntimeError(
+                f"task-eval producer {mode or '<unknown>'} must return "
+                f"a non-negative integer {field}"
+            )
+    result.update(
+        {
+            "requested_sample_limit": requested_sample_limit,
+            "prepared_input_count": prepared_input_count,
+            "complete_count": complete_count,
+            "valid_count": valid_count,
+            "skipped_count": skipped_count,
+            "excluded_count": excluded_count,
+        }
+    )
+    rate_field = _PASSED_COUNT_RATE_FIELD_BY_MODE.get(mode)
+    if rate_field is not None:
+        passed_count = result.get("passed_count")
+        rate = result.get(rate_field)
+        if (
+            type(passed_count) is not int
+            or not 0 <= passed_count <= valid_count
+            or not isinstance(rate, (int, float))
+            or isinstance(rate, bool)
+            or not math.isclose(
+                float(rate),
+                passed_count / valid_count if valid_count else 0.0,
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
+        ):
+            raise RuntimeError(
+                f"task-eval producer {mode} must return consistent passed_count and {rate_field}"
+            )
+    if result.get("status") != "passed":
+        return
+    if (
+        complete_count <= 0
+        or complete_count != prepared_input_count
+        or valid_count + skipped_count + excluded_count != complete_count
+        or skipped_count != 0
+        or excluded_count != 0
+        or (requested_sample_limit > 0 and complete_count != requested_sample_limit)
+    ):
+        raise RuntimeError(
+            f"passed task-eval producer {mode or '<unknown>'} has "
+            "incomplete sample evidence: "
+            f"requested={requested_sample_limit}, "
+            f"prepared={prepared_input_count}, "
+            f"complete={complete_count}, valid={valid_count}, "
+            f"skipped={skipped_count}, "
+            f"excluded={excluded_count}"
         )
 
 
@@ -5231,9 +5503,7 @@ def continuation_task_quality_diagnostics(
         "trtfb": trtfb_quality,
         "hf_corpus_bleu": hf_quality["corpus_bleu"],
         "trtfb_corpus_bleu": trtfb_quality["corpus_bleu"],
-        "corpus_bleu_abs_delta": abs(
-            hf_quality["corpus_bleu"] - trtfb_quality["corpus_bleu"]
-        ),
+        "corpus_bleu_abs_delta": abs(hf_quality["corpus_bleu"] - trtfb_quality["corpus_bleu"]),
     }
 
 
@@ -5401,9 +5671,7 @@ def compare_prediction_sets(
         )
         prediction_score = float(agreement_match)
         if scorer == "asr_transcript":
-            transcript_similarity = max(
-                0.0, 1.0 - _normalized_edit_distance(hf_pred, trt_pred)
-            )
+            transcript_similarity = max(0.0, 1.0 - _normalized_edit_distance(hf_pred, trt_pred))
             prediction_score = transcript_similarity
             asr_parity_samples.append(
                 {
@@ -5457,17 +5725,13 @@ def compare_prediction_sets(
         ),
         "prediction_agreement_rate": (agreement_score / total) if total else 0.0,
         "agreement_count": correctness_agreement,
-        "correctness_agreement_rate": (
-            correctness_agreement / total if total else 0.0
-        ),
+        "correctness_agreement_rate": (correctness_agreement / total if total else 0.0),
         "total_count": total,
         "buckets": dict(buckets),
         "disagreements": disagreements,
     }
     if scorer == "asr_transcript":
-        exact_count = sum(
-            bool(sample["transcript_exact"]) for sample in asr_parity_samples
-        )
+        exact_count = sum(bool(sample["transcript_exact"]) for sample in asr_parity_samples)
         summary["normalized_transcript_exact_agreement_rate"] = (
             exact_count / total if total else 0.0
         )
@@ -5479,15 +5743,11 @@ def _load_diffusion_task_eval_comparator(work_dir: Path) -> Any:
     case, _reference, _runner = _load_diffusion_task_eval_plugins(work_dir)
     comparator = get_comparator(case.task_strategy)
     if comparator is None:
-        raise RuntimeError(
-            f"No comparator plugin {case.task_strategy!r} for {case.family}"
-        )
+        raise RuntimeError(f"No comparator plugin {case.task_strategy!r} for {case.family}")
     return comparator
 
 
-def _compute_task_eval_clip_metrics(
-    trt_frames_dir: str, hf_frames_dir: str, prompt: str
-) -> Any:
+def _compute_task_eval_clip_metrics(trt_frames_dir: str, hf_frames_dir: str, prompt: str) -> Any:
     from tests.e2e.models.flux.e2e_plugins.comparators.clip_metrics import (
         compute_clip_metrics,
     )
@@ -5575,7 +5835,8 @@ def write_diffusion_visual_review(
         "</style></head><body><h1>Diffusion HF/TRTMC visual review</h1>"
         "<p>Parity metrics answer whether both implementations agree. The DPG checklist is for "
         "manual prompt-adherence review and must not be inferred from CLIPScore alone.</p>"
-        + "".join(cards) + "</body></html>\n",
+        + "".join(cards)
+        + "</body></html>\n",
         encoding="utf-8",
     )
     return report_path
@@ -5633,9 +5894,7 @@ def compare_diffusion_image_predictions(
         expected_prompt = str(request.get("prompt", ""))
         hf_prompt = str(hf_row.get("prompt", ""))
         trt_prompt = str(trt_row.get("prompt", ""))
-        if expected_prompt and (
-            hf_prompt != expected_prompt or trt_prompt != expected_prompt
-        ):
+        if expected_prompt and (hf_prompt != expected_prompt or trt_prompt != expected_prompt):
             raise ValueError(
                 f"Diffusion prompt mismatch at index {index}: "
                 f"expected={expected_prompt!r} hf={hf_prompt!r} trtfb={trt_prompt!r}"
@@ -5681,19 +5940,25 @@ def compare_diffusion_image_predictions(
         )
         if invalid:
             skipped_count += 1
-            samples.append({
-                "index": index,
-                "sample_id": expected_id,
-                "category": request.get("category", ""),
-                "challenge": request.get("challenge", ""),
-                "prompt": request.get("prompt", ""),
-                "questions": request.get("questions", []),
-                "hf_image": str(_first_generated_image(str(hf_row.get("frames_dir", ""))) or ""),
-                "trtfb_image": str(_first_generated_image(str(trt_row.get("frames_dir", ""))) or ""),
-                "status": StageStatus.ERROR.value,
-                "metrics": {},
-                "shared_inputs": shared_inputs,
-            })
+            samples.append(
+                {
+                    "index": index,
+                    "sample_id": expected_id,
+                    "category": request.get("category", ""),
+                    "challenge": request.get("challenge", ""),
+                    "prompt": request.get("prompt", ""),
+                    "questions": request.get("questions", []),
+                    "hf_image": str(
+                        _first_generated_image(str(hf_row.get("frames_dir", ""))) or ""
+                    ),
+                    "trtfb_image": str(
+                        _first_generated_image(str(trt_row.get("frames_dir", ""))) or ""
+                    ),
+                    "status": StageStatus.ERROR.value,
+                    "metrics": {},
+                    "shared_inputs": shared_inputs,
+                }
+            )
             continue
 
         trt_output = StageOutput(
@@ -5750,8 +6015,7 @@ def compare_diffusion_image_predictions(
                         threshold=-max_drop if max_drop is not None else None,
                         operator=">=" if max_drop is not None else "info",
                         passed=(
-                            max_drop is None
-                            or float(clip.prompt_clipscore_delta) >= -max_drop
+                            max_drop is None or float(clip.prompt_clipscore_delta) >= -max_drop
                         ),
                         note=(
                             f"trt={clip.trt_prompt_clipscore:.2f}, "
@@ -5763,10 +6027,7 @@ def compare_diffusion_image_predictions(
                         value=float(clip.hf_prompt_clipscore),
                         threshold=hf_floor,
                         operator=">=" if hf_floor is not None else "info",
-                        passed=(
-                            hf_floor is None
-                            or float(clip.hf_prompt_clipscore) >= hf_floor
-                        ),
+                        passed=(hf_floor is None or float(clip.hf_prompt_clipscore) >= hf_floor),
                     ),
                     "trt_prompt_clipscore": MetricResult(
                         value=float(clip.trt_prompt_clipscore),
@@ -5820,21 +6081,25 @@ def compare_diffusion_image_predictions(
             f"{'PASS' if result.status == StageStatus.PASSED.value else 'FAIL'}: "
             f"{gated_passed}/{len(gated_metrics)} gated metrics passed"
         )
-        samples.append({
-            "index": index,
-            "sample_id": expected_id,
-            "category": request.get("category", ""),
-            "challenge": request.get("challenge", ""),
-            "prompt": request.get("prompt", ""),
-            "questions": request.get("questions", []),
-            "hf_image": str(_first_generated_image(str(hf_output.data["frames_dir"])) or ""),
-            "trtfb_image": str(_first_generated_image(str(trt_output.data["frames_dir"])) or ""),
-            "initial_latents_sha256": hf_latent_hash,
-            "shared_inputs": shared_inputs,
-            "status": result.status,
-            "metrics": sample_metrics,
-            "message": result.message,
-        })
+        samples.append(
+            {
+                "index": index,
+                "sample_id": expected_id,
+                "category": request.get("category", ""),
+                "challenge": request.get("challenge", ""),
+                "prompt": request.get("prompt", ""),
+                "questions": request.get("questions", []),
+                "hf_image": str(_first_generated_image(str(hf_output.data["frames_dir"])) or ""),
+                "trtfb_image": str(
+                    _first_generated_image(str(trt_output.data["frames_dir"])) or ""
+                ),
+                "initial_latents_sha256": hf_latent_hash,
+                "shared_inputs": shared_inputs,
+                "status": result.status,
+                "metrics": sample_metrics,
+                "message": result.message,
+            }
+        )
 
     metrics = {}
     for metric_name, values in sorted(metric_values.items()):
@@ -5856,9 +6121,7 @@ def compare_diffusion_image_predictions(
         "skipped_count": skipped_count,
         "total_count": len(requests),
         "initial_latents_match_rate": (
-            matching_initial_latents_count / len(requests)
-            if requests
-            else 0.0
+            matching_initial_latents_count / len(requests) if requests else 0.0
         ),
         "metrics": metrics,
         "samples": samples,
@@ -5891,15 +6154,16 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
             [
                 f"- normalized_transcript_exact_agreement_rate: "
                 f"{summary['normalized_transcript_exact_agreement_rate']:.4f}",
-                f"- correctness_agreement_rate: "
-                f"{summary['correctness_agreement_rate']:.4f}",
+                f"- correctness_agreement_rate: {summary['correctness_agreement_rate']:.4f}",
             ]
         )
-    lines.extend([
-        "",
-        "| Bucket | Count |",
-        "|---|---:|",
-    ])
+    lines.extend(
+        [
+            "",
+            "| Bucket | Count |",
+            "|---|---:|",
+        ]
+    )
     for key in ("both_correct", "hf_correct_trtfb_wrong", "hf_wrong_trtfb_correct", "both_wrong"):
         lines.append(f"| {key} | {summary['buckets'].get(key, 0)} |")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -5907,7 +6171,12 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
 
 def generation_defaults(work_dir: Path) -> dict[str, Any]:
     manifest = work_manifest(work_dir)
-    return manifest.get("generation", {})
+    generation = manifest.get("generation", {})
+    _validate_generation_boolean_config(
+        generation,
+        context=f"Task-eval work manifest {work_dir} generation",
+    )
+    return dict(generation)
 
 
 def work_manifest(work_dir: Path) -> dict[str, Any]:
@@ -5920,10 +6189,18 @@ def work_manifest(work_dir: Path) -> dict[str, Any]:
 def hf_generation_overrides(work_dir: Path) -> dict[str, Any]:
     task_eval_config = work_manifest(work_dir).get("task_eval", {})
     if not isinstance(task_eval_config, dict):
-        return {}
+        raise ValueError(f"Task-eval work manifest {work_dir} task_eval must be a mapping")
+    _validate_task_eval_boolean_config(
+        task_eval_config,
+        context=f"Task-eval work manifest {work_dir} task_eval",
+    )
     overrides: dict[str, Any] = {}
     if "hf_use_cache" in task_eval_config:
-        overrides["use_cache"] = bool(task_eval_config["hf_use_cache"])
+        overrides["use_cache"] = _boolean_field(
+            task_eval_config,
+            "hf_use_cache",
+            context=f"Task-eval work manifest {work_dir} task_eval",
+        )
     return overrides
 
 
@@ -6414,7 +6691,11 @@ def run_vlm_hf_reference(args: argparse.Namespace) -> None:
     top_k = args.top_k if args.top_k is not None else int(defaults.get("top_k", 1))
     top_p = args.top_p if args.top_p is not None else float(defaults.get("top_p", 1.0))
     seed = args.seed if args.seed is not None else int(defaults.get("seed", -1))
-    do_sample = args.do_sample or bool(defaults.get("do_sample", False))
+    do_sample = args.do_sample or _boolean_field(
+        defaults,
+        "do_sample",
+        context="Task-eval generation",
+    )
 
     logging.set_verbosity_error()
     processor = AutoProcessor.from_pretrained(
@@ -6680,9 +6961,7 @@ def _run_nemo_asr_hf_reference(args: argparse.Namespace) -> None:
         return
 
     map_location = str(getattr(args, "device", "") or "cpu")
-    model = nemo_asr.models.ASRModel.from_pretrained(
-        args.model, map_location=map_location
-    )
+    model = nemo_asr.models.ASRModel.from_pretrained(args.model, map_location=map_location)
     try:
         if map_location and map_location != "cpu" and hasattr(model, "to"):
             model = model.to(map_location)
@@ -6734,9 +7013,7 @@ def _run_nemotron35_transformers_reference(
         import torch
         from transformers import AutoModel, AutoProcessor
     except Exception as exc:  # pragma: no cover - runtime dependency
-        raise RuntimeError(
-            "Nemotron 3.5 ASR reference requires transformers>=5.13"
-        ) from exc
+        raise RuntimeError("Nemotron 3.5 ASR reference requires transformers>=5.13") from exc
 
     device = torch.device(str(getattr(args, "device", "") or "cpu"))
     common_kwargs = {
@@ -6767,9 +7044,7 @@ def _run_nemotron35_transformers_reference(
             mono_path = canary_audio_dir / _safe_sample_filename(sample_id, ".wav")
             _write_wav_pcm16(mono_path, audio, target_sr)
             language = str(
-                prompt_row.get("language")
-                or defaults.get("language", "en-US")
-                or "en-US"
+                prompt_row.get("language") or defaults.get("language", "en-US") or "en-US"
             )
             inputs = processor(
                 audio,
@@ -6786,9 +7061,7 @@ def _run_nemotron35_transformers_reference(
             token_ids = [int(token_id) for token_id in sequences[0].detach().cpu().tolist()]
             row = {
                 "sample_id": sample_id,
-                "output_text": processor.batch_decode(
-                    sequences, skip_special_tokens=True
-                )[0],
+                "output_text": processor.batch_decode(sequences, skip_special_tokens=True)[0],
                 "generated_tokens": len(token_ids),
                 "generated_token_ids": token_ids,
                 "wall_ms": wall_ms,
@@ -6886,9 +7159,7 @@ def _load_vision_task_eval_plugins(work_dir: Path) -> tuple[Any, Any, Any]:
     reference = get_reference(case.reference_backend)
     runner = get_runner(case.task_strategy)
     if reference is None:
-        raise RuntimeError(
-            f"No reference plugin {case.reference_backend!r} for {case.family}"
-        )
+        raise RuntimeError(f"No reference plugin {case.reference_backend!r} for {case.family}")
     if runner is None:
         raise RuntimeError(f"No runner plugin {case.task_strategy!r} for {case.family}")
     return case, reference, runner
@@ -7143,9 +7414,7 @@ def _vision_response(
                     f"{raw_class_map_path}"
                 )
             response["raw_class_map_path"] = raw_class_map_path
-        response["visualization_path"] = str(
-            data.get("viz_path") or data.get("output_path") or ""
-        )
+        response["visualization_path"] = str(data.get("viz_path") or data.get("output_path") or "")
         return response
     if dataset_kind == "prompted_segmentation_json":
         masks_path = str(data.get("masks_path", "") or "")
@@ -7202,9 +7471,7 @@ def run_vision_hf_reference(args: argparse.Namespace) -> None:
                 hf_python=sys.executable,
                 reference_python=sys.executable,
             )
-            output = reference.run_stage(
-                case, _vision_full_inference_stage(case), context
-            )
+            output = reference.run_stage(case, _vision_full_inference_stage(case), context)
             response = _vision_response(
                 case=case,
                 source="hf",
@@ -7253,9 +7520,7 @@ def run_vision_trtfb(args: argparse.Namespace) -> None:
                 engine_dir=str(bundle_path.parent),
                 model_plugin_dir=str(getattr(args, "model_plugin_dir", "") or ""),
             )
-            output = runner.run_stage(
-                case, _vision_full_inference_stage(case), context
-            )
+            output = runner.run_stage(case, _vision_full_inference_stage(case), context)
             _record_output_native_command(work_dir, case.name, output)
             response = _vision_response(
                 case=case,
@@ -7267,8 +7532,7 @@ def run_vision_trtfb(args: argparse.Namespace) -> None:
             )
             if response["returncode"] != 0 and not response.get("empty_prediction"):
                 raise RuntimeError(
-                    f"TRT vision run failed for {case.name}: "
-                    f"returncode={response['returncode']}"
+                    f"TRT vision run failed for {case.name}: returncode={response['returncode']}"
                 )
             responses.append(response)
             raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
@@ -7297,21 +7561,15 @@ def _load_reranking_task_eval_plugins(work_dir: Path) -> tuple[Any, Any, Any, An
     runner = get_runner(case.task_strategy)
     comparator = get_comparator(case.task_strategy)
     if reference is None:
-        raise RuntimeError(
-            f"No reference plugin {case.reference_backend!r} for {case.family}"
-        )
+        raise RuntimeError(f"No reference plugin {case.reference_backend!r} for {case.family}")
     if runner is None:
         raise RuntimeError(f"No runner plugin {case.task_strategy!r} for {case.family}")
     if comparator is None:
-        raise RuntimeError(
-            f"No comparator plugin {case.task_strategy!r} for {case.family}"
-        )
+        raise RuntimeError(f"No comparator plugin {case.task_strategy!r} for {case.family}")
     return case, reference, runner, comparator
 
 
-def _reranking_case_for_request(
-    template: Any, prompt_row: dict[str, Any], index: int
-) -> Any:
+def _reranking_case_for_request(template: Any, prompt_row: dict[str, Any], index: int) -> Any:
     case = copy.deepcopy(template)
     case.name = str(prompt_row.get("sample_id", f"reranking_{index:06d}"))
     case.inputs["prompt"] = str(prompt_row["query"])
@@ -7351,8 +7609,7 @@ def _reranking_response(
 def _write_reranking_run_metadata(log_file: Any, sample_id: str, output: Any) -> None:
     metadata = output.metadata if isinstance(output.metadata, dict) else {}
     log_file.write(
-        json.dumps({"sample_id": sample_id, "metadata": metadata}, ensure_ascii=False)
-        + "\n"
+        json.dumps({"sample_id": sample_id, "metadata": metadata}, ensure_ascii=False) + "\n"
     )
     log_file.flush()
 
@@ -7361,9 +7618,7 @@ def run_reranking_hf_reference(args: argparse.Namespace) -> None:
     from tests.e2e_harness.contracts import RunContext
 
     work_dir = Path(args.work_dir)
-    template, reference, _runner, _comparator = _load_reranking_task_eval_plugins(
-        work_dir
-    )
+    template, reference, _runner, _comparator = _load_reranking_task_eval_plugins(work_dir)
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
     artifacts_dir = work_dir / "hf_artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -7383,9 +7638,7 @@ def run_reranking_hf_reference(args: argparse.Namespace) -> None:
                 hf_python=sys.executable,
                 reference_python=sys.executable,
             )
-            output = reference.run_stage(
-                case, _reranking_full_inference_stage(case), context
-            )
+            output = reference.run_stage(case, _reranking_full_inference_stage(case), context)
             response = _reranking_response(
                 case=case, source="hf", output=output, prompt_row=prompt_row
             )
@@ -7404,9 +7657,7 @@ def run_reranking_trtfb(args: argparse.Namespace) -> None:
     from tests.e2e_harness.contracts import RunContext
 
     work_dir = Path(args.work_dir)
-    template, _reference, runner, _comparator = _load_reranking_task_eval_plugins(
-        work_dir
-    )
+    template, _reference, runner, _comparator = _load_reranking_task_eval_plugins(work_dir)
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
     artifacts_dir = work_dir / "trtfb_artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -7432,9 +7683,7 @@ def run_reranking_trtfb(args: argparse.Namespace) -> None:
                 engine_dir=str(bundle_path.parent),
                 model_plugin_dir=str(getattr(args, "model_plugin_dir", "") or ""),
             )
-            output = runner.run_stage(
-                case, _reranking_full_inference_stage(case), context
-            )
+            output = runner.run_stage(case, _reranking_full_inference_stage(case), context)
             _record_output_native_command(work_dir, case.name, output)
             response = _reranking_response(
                 case=case, source="trtfb", output=output, prompt_row=prompt_row
@@ -7469,15 +7718,11 @@ def _load_diffusion_task_eval_plugins(work_dir: Path) -> tuple[Any, Any, Any]:
     runner = get_runner(case.task_strategy)
     comparator = get_comparator(case.task_strategy)
     if reference is None:
-        raise RuntimeError(
-            f"No reference plugin {case.reference_backend!r} for {case.family}"
-        )
+        raise RuntimeError(f"No reference plugin {case.reference_backend!r} for {case.family}")
     if runner is None:
         raise RuntimeError(f"No runner plugin {case.task_strategy!r} for {case.family}")
     if comparator is None:
-        raise RuntimeError(
-            f"No comparator plugin {case.task_strategy!r} for {case.family}"
-        )
+        raise RuntimeError(f"No comparator plugin {case.task_strategy!r} for {case.family}")
     return case, reference, runner
 
 
@@ -7530,9 +7775,7 @@ def _diffusion_response(
     if case is not None:
         response["seed"] = int(case.inputs.get("seed", case.determinism.get("seed", 42)))
         response["action"] = str(case.inputs.get("action", ""))
-        image_value = str(
-            case.inputs.get("image") or case.inputs.get("image_path") or ""
-        )
+        image_value = str(case.inputs.get("image") or case.inputs.get("image_path") or "")
         response["condition_image"] = image_value
         image_path = Path(image_value) if image_value else None
         if image_path is not None and image_path.is_file():
@@ -7561,9 +7804,7 @@ def run_diffusion_hf_reference(args: argparse.Namespace) -> None:
                 hf_python=sys.executable,
                 reference_python=sys.executable,
             )
-            output = reference.run_stage(
-                case, _diffusion_end_to_end_stage(case), context
-            )
+            output = reference.run_stage(case, _diffusion_end_to_end_stage(case), context)
             response = _diffusion_response(case.name, "hf", output, case=case)
             response["prompt"] = str(prompt_row["prompt"])
             if response["returncode"] != 0 or response["num_frames"] < 1:
@@ -7726,7 +7967,9 @@ def run_encoder_embedding_hf_reference(args: argparse.Namespace) -> None:
         import transformers
         from transformers import logging
     except Exception as exc:  # pragma: no cover - runtime dependency
-        raise RuntimeError("encoder/embedding HF reference requires torch and transformers") from exc
+        raise RuntimeError(
+            "encoder/embedding HF reference requires torch and transformers"
+        ) from exc
 
     work_dir = Path(args.work_dir)
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
@@ -7877,9 +8120,21 @@ def run_hf_reference(args: argparse.Namespace) -> None:
     top_k = args.top_k if args.top_k is not None else int(defaults.get("top_k", 1))
     top_p = args.top_p if args.top_p is not None else float(defaults.get("top_p", 1.0))
     seed = args.seed if args.seed is not None else int(defaults.get("seed", -1))
-    do_sample = args.do_sample or bool(defaults.get("do_sample", False))
-    apply_chat_template = args.apply_chat_template or bool(
-        defaults.get("apply_chat_template", answers.get("apply_chat_template", False))
+    do_sample = args.do_sample or _boolean_field(
+        defaults,
+        "do_sample",
+        context="Task-eval generation",
+    )
+    answers_apply_chat_template = _boolean_field(
+        answers,
+        "apply_chat_template",
+        context="Task-eval answers",
+    )
+    apply_chat_template = args.apply_chat_template or _boolean_field(
+        defaults,
+        "apply_chat_template",
+        context="Task-eval generation",
+        default=answers_apply_chat_template,
     )
     generation_overrides = hf_generation_overrides(work_dir)
 
@@ -8019,19 +8274,11 @@ def run_diffusion_trtfb(args: argparse.Namespace) -> None:
                 engine_dir=str(bundle_path.parent),
                 model_plugin_dir=str(getattr(args, "model_plugin_dir", "") or ""),
             )
-            output = runner.run_stage(
-                case, _diffusion_end_to_end_stage(case), context
-            )
+            output = runner.run_stage(case, _diffusion_end_to_end_stage(case), context)
             _record_output_native_command(work_dir, case.name, output)
-            command = (
-                output.metadata.get("command")
-                if isinstance(output.metadata, dict)
-                else None
-            )
+            command = output.metadata.get("command") if isinstance(output.metadata, dict) else None
             if isinstance(command, list) and command:
-                log_file.write(
-                    f"$ {shlex.join(str(token) for token in command)}\n"
-                )
+                log_file.write(f"$ {shlex.join(str(token) for token in command)}\n")
             elif isinstance(command, str) and command:
                 log_file.write(f"$ {command}\n")
             log_file.flush()
@@ -8560,9 +8807,18 @@ def run_trtfb(args: argparse.Namespace) -> None:
         cmd.extend(["--config", args.config])
     for token in args.set or []:
         cmd.extend(["--set", token])
-    if args.chat_template or bool(defaults.get("apply_chat_template", False)):
+    if args.chat_template or _boolean_field(
+        defaults,
+        "apply_chat_template",
+        context="Task-eval generation",
+    ):
         cmd.append("--chat-template")
-    if not bool(defaults.get("enable_thinking", True)):
+    if not _boolean_field(
+        defaults,
+        "enable_thinking",
+        context="Task-eval generation",
+        default=True,
+    ):
         cmd.append("--no-thinking")
 
     _write_dataset_benchmark_reproduction(work_dir, cmd)
@@ -8618,9 +8874,7 @@ def _model_asset_path(model: dict[str, Any], value: str) -> Path:
         if not manifest.is_absolute():
             manifest = REPO_ROOT / manifest
         model_dir = (
-            manifest.parent.parent
-            if manifest.parent.name == "manifests"
-            else manifest.parent
+            manifest.parent.parent if manifest.parent.name == "manifests" else manifest.parent
         )
         if asset.parts[:3] == ("tests", "e2e", "data"):
             candidate = model_dir / "data" / asset.name
@@ -8650,12 +8904,14 @@ def build_bundle_command(
     hf_revision = str(model.get("hf_revision", "") or "")
     if hf_revision:
         cmd.extend(["--model-revision", hf_revision])
-    cmd.extend([
-        "-o",
-        str(bundle_path),
-        "--max-cache-length",
-        str(cache_length),
-    ])
+    cmd.extend(
+        [
+            "-o",
+            str(bundle_path),
+            "--max-cache-length",
+            str(cache_length),
+        ]
+    )
     build_args = model.get("build_args", {})
     method = _manifest_build_method(build_args)
     if method:
@@ -8668,8 +8924,7 @@ def build_bundle_command(
         cmd.extend(["--precision", precision])
     fp32_layers = model.get("fp32_layers") or []
     if fp32_layers:
-        cmd.extend(
-            ["--fp32-layers", ",".join(str(layer) for layer in fp32_layers)])
+        cmd.extend(["--fp32-layers", ",".join(str(layer) for layer in fp32_layers)])
     quantization = model.get("quantization", {})
     if isinstance(quantization, dict):
         quant_format = quantization.get("format")
@@ -8725,15 +8980,15 @@ def generation_cache_headroom(
     generation: dict[str, Any],
     max_new_tokens: int | None,
 ) -> int:
-    reserve_headroom = scorer == "continuation" or bool(
-        task_eval_config.get("build_generation_headroom", False)
+    reserve_headroom = scorer == "continuation" or _boolean_field(
+        task_eval_config,
+        "build_generation_headroom",
+        context="Task-eval configuration",
     )
     if not reserve_headroom:
         return 0
     return int(
-        max_new_tokens
-        if max_new_tokens is not None
-        else generation.get("max_new_tokens", 0)
+        max_new_tokens if max_new_tokens is not None else generation.get("max_new_tokens", 0)
     )
 
 
@@ -8983,9 +9238,7 @@ def _configured_reference_precision(
 ) -> str:
     task_config = model.get("task_eval", {})
     configured = (
-        task_config.get("reference_precision")
-        if isinstance(task_config, Mapping)
-        else None
+        task_config.get("reference_precision") if isinstance(task_config, Mapping) else None
     )
     manifest_path = work_dir / "manifest.json"
     if manifest_path.is_file():
@@ -9031,8 +9284,7 @@ def resolve_reference_precision_contract(
         )
     if requested and configured and requested != configured:
         raise ValueError(
-            f"--hf-dtype {requested} conflicts with "
-            f"task_eval.reference_precision {configured}"
+            f"--hf-dtype {requested} conflicts with task_eval.reference_precision {configured}"
         )
 
     reference_precision = requested or configured
@@ -9131,9 +9383,7 @@ def _read_bundle_section(bundle_path: Path, section_name: str) -> bytes:
             raise ValueError(f"{bundle_path} has a truncated header size")
         header_size = struct.unpack("<Q", raw_header_size)[0]
         if header_size > max_header_size:
-            raise ValueError(
-                f"{bundle_path} header exceeds {max_header_size} bytes"
-            )
+            raise ValueError(f"{bundle_path} header exceeds {max_header_size} bytes")
         raw_header = bundle.read(header_size)
         if len(raw_header) != header_size:
             raise ValueError(f"{bundle_path} has a truncated JSON header")
@@ -9146,9 +9396,7 @@ def _read_bundle_section(bundle_path: Path, section_name: str) -> bytes:
         size = int(section.get("size", -1))
         data_start = 16 + header_size
         if offset < 0 or size < 0 or data_start + offset + size > bundle_path.stat().st_size:
-            raise ValueError(
-                f"{bundle_path} has an invalid {section_name!r} section range"
-            )
+            raise ValueError(f"{bundle_path} has an invalid {section_name!r} section range")
         bundle.seek(data_start + offset)
         data = bundle.read(size)
         if len(data) != size:
@@ -9180,9 +9428,7 @@ def _load_text_input_contract(
     bundle_tokenizer = Tokenizer.from_str(
         _read_bundle_section(bundle_path, "tokenizer.json").decode("utf-8")
     )
-    bundle_config = json.loads(
-        _read_bundle_section(bundle_path, "config.json").decode("utf-8")
-    )
+    bundle_config = json.loads(_read_bundle_section(bundle_path, "config.json").decode("utf-8"))
     if not isinstance(bundle_config, dict):
         raise ValueError(f"{bundle_path} config.json must contain an object")
     return hf_tokenizer, bundle_tokenizer, bundle_config
@@ -9225,17 +9471,9 @@ def validate_text_input_token_contract(
         "tokenizer_special_prefix_ids" in bundle_config
         or "tokenizer_special_suffix_ids" in bundle_config
     )
-    prefix = [
-        int(token_id)
-        for token_id in bundle_config.get("tokenizer_special_prefix_ids", [])
-    ]
-    suffix = [
-        int(token_id)
-        for token_id in bundle_config.get("tokenizer_special_suffix_ids", [])
-    ]
-    bundle_add_special_tokens = bool(
-        bundle_config.get("tokenizer_add_special_tokens", False)
-    )
+    prefix = [int(token_id) for token_id in bundle_config.get("tokenizer_special_prefix_ids", [])]
+    suffix = [int(token_id) for token_id in bundle_config.get("tokenizer_special_suffix_ids", [])]
+    bundle_add_special_tokens = bool(bundle_config.get("tokenizer_add_special_tokens", False))
 
     samples: list[dict[str, Any]] = []
     first_mismatch: dict[str, Any] | None = None
@@ -9332,18 +9570,12 @@ def run_hf_reference_subprocess(
     ]
     if hf_args.model_revision:
         cmd.extend(["--model-revision", str(hf_args.model_revision)])
-    reference_cache_dir = str(
-        getattr(args, "reference_cache_dir", "") or ""
-    )
+    reference_cache_dir = str(getattr(args, "reference_cache_dir", "") or "")
     if reference_cache_dir:
         cmd.extend(["--cache-dir", reference_cache_dir])
-    reference_cache_identity = str(
-        getattr(args, "reference_cache_identity", "") or ""
-    )
+    reference_cache_identity = str(getattr(args, "reference_cache_identity", "") or "")
     if reference_cache_identity:
-        cmd.extend(
-            ["--reference-cache-identity", reference_cache_identity]
-        )
+        cmd.extend(["--reference-cache-identity", reference_cache_identity])
     if hf_args.device_map:
         cmd.extend(["--device-map", str(hf_args.device_map)])
     if hf_args.attn_impl:
@@ -9425,9 +9657,7 @@ def _pearson_correlation(left: list[float], right: list[float]) -> float | None:
     )
     if denominator <= 0.0:
         return None
-    return sum(
-        a * b for a, b in zip(left_centered, right_centered, strict=True)
-    ) / denominator
+    return sum(a * b for a, b in zip(left_centered, right_centered, strict=True)) / denominator
 
 
 def _spearman_correlation(left: list[float], right: list[float]) -> float | None:
@@ -9543,13 +9773,9 @@ def compare_encoder_embedding_prediction_sets(
         "pair_count": len(pair_rows),
         "vector_passed_count": vector_passed,
         "vector_pass_rate": vector_pass_rate,
-        "mean_vector_cosine": sum(vector_cosines) / len(vector_cosines)
-        if vector_cosines
-        else 0.0,
+        "mean_vector_cosine": sum(vector_cosines) / len(vector_cosines) if vector_cosines else 0.0,
         "min_vector_cosine": min(vector_cosines, default=0.0),
-        "mean_pair_cosine_abs_delta": sum(pair_deltas) / len(pair_deltas)
-        if pair_deltas
-        else None,
+        "mean_pair_cosine_abs_delta": sum(pair_deltas) / len(pair_deltas) if pair_deltas else None,
         "max_pair_cosine_abs_delta": max_pair_delta,
         "hf_sts_spearman": _spearman_correlation(gold_scores, hf_similarities),
         "trtfb_sts_spearman": _spearman_correlation(gold_scores, trtfb_similarities),
@@ -9687,8 +9913,7 @@ def write_time_series_summary_markdown(summary: dict[str, Any], path: Path) -> N
         "",
         f"- status: {summary['status']}",
         f"- sample_agreement_rate: {summary['sample_agreement_rate']:.4f}",
-        "- max_relative_l2: "
-        f"{_format_optional_float(summary['max_relative_l2'], precision=6)}",
+        f"- max_relative_l2: {_format_optional_float(summary['max_relative_l2'], precision=6)}",
         "- max_absolute_error: "
         f"{_format_optional_float(summary['max_absolute_error'], precision=6)}",
     ]
@@ -9834,13 +10059,9 @@ def compare_semantic_segmentation_prediction_sets(
 ) -> dict[str, Any]:
     import numpy as np
 
-    hf_by_id = {
-        str(row["sample_id"]): row
-        for row in _task_eval_response_rows(hf_data, "HF")
-    }
+    hf_by_id = {str(row["sample_id"]): row for row in _task_eval_response_rows(hf_data, "HF")}
     trtfb_by_id = {
-        str(row["sample_id"]): row
-        for row in _task_eval_response_rows(trtfb_data, "TRTMC")
+        str(row["sample_id"]): row for row in _task_eval_response_rows(trtfb_data, "TRTMC")
     }
     requests = answers.get("requests", [])
     hf_ground = np.zeros((num_classes, num_classes), dtype=np.int64)
@@ -9860,9 +10081,7 @@ def compare_semantic_segmentation_prediction_sets(
                 or hf_by_id[sample_id]["class_map_path"]
             )
         )
-        trtfb_map = _load_segmentation_array(
-            str(trtfb_by_id[sample_id]["class_map_path"])
-        )
+        trtfb_map = _load_segmentation_array(str(trtfb_by_id[sample_id]["class_map_path"]))
         hf_conf = _segmentation_confusion(
             ground_truth,
             hf_map,
@@ -9986,13 +10205,9 @@ def compare_prompted_segmentation_prediction_sets(
     prompt_mode: str,
     ground_truth_mask_field: str,
 ) -> dict[str, Any]:
-    hf_by_id = {
-        str(row["sample_id"]): row
-        for row in _task_eval_response_rows(hf_data, "HF")
-    }
+    hf_by_id = {str(row["sample_id"]): row for row in _task_eval_response_rows(hf_data, "HF")}
     trtfb_by_id = {
-        str(row["sample_id"]): row
-        for row in _task_eval_response_rows(trtfb_data, "TRTMC")
+        str(row["sample_id"]): row for row in _task_eval_response_rows(trtfb_data, "TRTMC")
     }
     cases: list[dict[str, Any]] = []
     for request in answers.get("requests", []):
@@ -10028,9 +10243,7 @@ def compare_prompted_segmentation_prediction_sets(
                 "hf_empty_prediction": bool(hf_row.get("empty_prediction")),
                 "trtfb_empty_prediction": bool(trtfb_row.get("empty_prediction")),
                 "hf_segmented_image_path": str(hf_row.get("segmented_image_path", "")),
-                "trtfb_segmented_image_path": str(
-                    trtfb_row.get("segmented_image_path", "")
-                ),
+                "trtfb_segmented_image_path": str(trtfb_row.get("segmented_image_path", "")),
             }
         )
     valid = [case for case in cases if "error" not in case]
@@ -10080,25 +10293,17 @@ def compare_reranking_prediction_sets(
         ThresholdProfile,
     )
 
-    hf_by_id = {
-        str(row["sample_id"]): row
-        for row in _task_eval_response_rows(hf_data, "HF")
-    }
+    hf_by_id = {str(row["sample_id"]): row for row in _task_eval_response_rows(hf_data, "HF")}
     trtfb_by_id = {
-        str(row["sample_id"]): row
-        for row in _task_eval_response_rows(trtfb_data, "TRTMC")
+        str(row["sample_id"]): row for row in _task_eval_response_rows(trtfb_data, "TRTMC")
     }
     metric_thresholds = {
-        "pairwise_ordering_agreement": float(
-            gates.get("pairwise_ordering_agreement", 0.9)
-        ),
+        "pairwise_ordering_agreement": float(gates.get("pairwise_ordering_agreement", 0.9)),
         "kendall_tau": float(gates.get("kendall_tau", 0.8)),
         "spearman_rho": float(gates.get("spearman_rho", 0.8)),
         "score_correlation": float(gates.get("score_correlation", 0.9)),
     }
-    threshold = ThresholdProfile(
-        task_strategy="reranking", metrics=metric_thresholds
-    )
+    threshold = ThresholdProfile(task_strategy="reranking", metrics=metric_thresholds)
     stage = StageSpec(name="full_inference", required=True)
     cases: list[dict[str, Any]] = []
     for request in answers.get("requests", []):
@@ -10106,16 +10311,12 @@ def compare_reranking_prediction_sets(
         hf_row = hf_by_id.get(sample_id)
         trtfb_row = trtfb_by_id.get(sample_id)
         if hf_row is None or trtfb_row is None:
-            cases.append(
-                {"sample_id": sample_id, "passed": False, "error": "missing prediction"}
-            )
+            cases.append({"sample_id": sample_id, "passed": False, "error": "missing prediction"})
             continue
         hf_scores = hf_row.get("scores")
         trtfb_scores = trtfb_row.get("scores")
         if not isinstance(hf_scores, list) or not isinstance(trtfb_scores, list):
-            cases.append(
-                {"sample_id": sample_id, "passed": False, "error": "missing scores"}
-            )
+            cases.append({"sample_id": sample_id, "passed": False, "error": "missing scores"})
             continue
         if not hf_scores or len(hf_scores) != len(trtfb_scores):
             cases.append(
@@ -10123,8 +10324,7 @@ def compare_reranking_prediction_sets(
                     "sample_id": sample_id,
                     "passed": False,
                     "error": (
-                        f"score count mismatch: HF={len(hf_scores)}, "
-                        f"TRTMC={len(trtfb_scores)}"
+                        f"score count mismatch: HF={len(hf_scores)}, TRTMC={len(trtfb_scores)}"
                     ),
                 }
             )
@@ -10145,13 +10345,9 @@ def compare_reranking_prediction_sets(
             }
             for name, metric in comparison.metrics.items()
         }
-        relevant_indices = {
-            int(index) for index in request.get("relevant_document_indices", [])
-        }
+        relevant_indices = {int(index) for index in request.get("relevant_document_indices", [])}
         hf_top_index = max(range(len(hf_scores)), key=lambda index: hf_scores[index])
-        trtfb_top_index = max(
-            range(len(trtfb_scores)), key=lambda index: trtfb_scores[index]
-        )
+        trtfb_top_index = max(range(len(trtfb_scores)), key=lambda index: trtfb_scores[index])
         cases.append(
             {
                 "sample_id": sample_id,
@@ -10180,17 +10376,11 @@ def compare_reranking_prediction_sets(
             "min": min(values) if values else 0.0,
         }
     gold_cases = [case for case in valid if case["relevant_document_indices"]]
-    hf_top1_accuracy = _mean(
-        [1.0 if case["hf_top1_correct"] else 0.0 for case in gold_cases]
-    )
-    trtfb_top1_accuracy = _mean(
-        [1.0 if case["trtfb_top1_correct"] else 0.0 for case in gold_cases]
-    )
+    hf_top1_accuracy = _mean([1.0 if case["hf_top1_correct"] else 0.0 for case in gold_cases])
+    trtfb_top1_accuracy = _mean([1.0 if case["trtfb_top1_correct"] else 0.0 for case in gold_cases])
     status = (
         "passed"
-        if valid
-        and len(valid) == len(cases)
-        and sample_pass_rate >= min_sample_pass_rate
+        if valid and len(valid) == len(cases) and sample_pass_rate >= min_sample_pass_rate
         else "failed"
     )
     return {
@@ -10267,15 +10457,26 @@ def eval_one_model(
         task_eval_config=task_eval_config,
     )
     precision_contract = (
-        None
-        if no_hf_reference
-        else resolve_reference_precision_contract(args, model, work_dir)
+        None if no_hf_reference else resolve_reference_precision_contract(args, model, work_dir)
     )
+    prepared_manifest = work_manifest(work_dir)
+    prepared_input_count = prepared_manifest.get("request_count")
+    if type(prepared_input_count) is not int or prepared_input_count < 0:
+        raise RuntimeError(
+            "task-eval dataset preparation must record a non-negative integer request_count"
+        )
 
     prompt_token_limit = int(task_eval_config.get("prompt_token_limit", 0) or 0)
     prompt_normalization: dict[str, Any] | None = None
     if prompt_token_limit:
-        if bool(suite.get("generation", {}).get("apply_chat_template", False)):
+        suite_generation = suite.get("generation", {})
+        if not isinstance(suite_generation, Mapping):
+            raise ValueError(f"Suite {suite['id']} generation must be a mapping")
+        if _boolean_field(
+            suite_generation,
+            "apply_chat_template",
+            context=f"Suite {suite['id']} generation",
+        ):
             raise ValueError(
                 "prompt_token_limit requires apply_chat_template=false so HF and TRTFB "
                 "consume the same normalized prompt"
@@ -10364,9 +10565,7 @@ def eval_one_model(
         trtmc_binary=args.trtmc_binary,
         max_cache_length=max_cache_length,
         force_build=args.force_build,
-        replace_existing=bool(
-            getattr(args, "replace_bundle_on_build", False)
-        ),
+        replace_existing=bool(getattr(args, "replace_bundle_on_build", False)),
         extra_build_args=args.extra_build_arg,
         log_path=work_dir / "build.log",
     )
@@ -10383,8 +10582,7 @@ def eval_one_model(
             bundle_path=bundle_path,
             local_files_only=args.local_files_only,
             trust_remote_code=(
-                args.trust_remote_code
-                or bool(model.get("trust_remote_code", False))
+                args.trust_remote_code or bool(model.get("trust_remote_code", False))
             ),
         )
 
@@ -10413,6 +10611,8 @@ def eval_one_model(
         "bundle_built": built,
         "model_plugin_dir": str(getattr(args, "model_plugin_dir", "") or ""),
         "gates": dict(suite.get("gates", {})),
+        "requested_sample_limit": int(args.limit),
+        "prepared_input_count": prepared_input_count,
     }
     if precision_contract is not None:
         base_result["reference_dtype"] = precision_contract["reference_dtype"]
@@ -10452,12 +10652,8 @@ def eval_one_model(
             "max_absolute_error": summary["max_absolute_error"],
         }
     elif scorer == "image_classification_parity":
-        hf_data = json.loads(
-            (work_dir / "hf_predictions.json").read_text(encoding="utf-8")
-        )
-        trtfb_data = json.loads(
-            (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
-        )
+        hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
+        trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
         summary = compare_image_classification_prediction_sets(
             hf_data,
             trtfb_data,
@@ -10485,12 +10681,8 @@ def eval_one_model(
             "top1_agreement": summary["top1_agreement"],
         }
     elif scorer == "semantic_segmentation_parity":
-        hf_data = json.loads(
-            (work_dir / "hf_predictions.json").read_text(encoding="utf-8")
-        )
-        trtfb_data = json.loads(
-            (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
-        )
+        hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
+        trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
         dataset_config = suite.get("dataset", {})
         summary = compare_semantic_segmentation_prediction_sets(
             hf_data,
@@ -10516,12 +10708,8 @@ def eval_one_model(
             "backend_pixel_agreement": summary["backend_pixel_agreement"],
         }
     elif scorer == "prompted_segmentation_parity":
-        hf_data = json.loads(
-            (work_dir / "hf_predictions.json").read_text(encoding="utf-8")
-        )
-        trtfb_data = json.loads(
-            (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
-        )
+        hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
+        trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
         summary = compare_prompted_segmentation_prediction_sets(
             hf_data,
             trtfb_data,
@@ -10545,20 +10733,12 @@ def eval_one_model(
             "mean_backend_mask_iou": summary["mean_backend_mask_iou"],
             "hf_mean_ground_truth_iou": summary["hf_mean_ground_truth_iou"],
             "trtfb_mean_ground_truth_iou": summary["trtfb_mean_ground_truth_iou"],
-            "ground_truth_iou_drop_from_hf": summary[
-                "ground_truth_iou_drop_from_hf"
-            ],
+            "ground_truth_iou_drop_from_hf": summary["ground_truth_iou_drop_from_hf"],
         }
     elif scorer == "reranking_parity":
-        hf_data = json.loads(
-            (work_dir / "hf_predictions.json").read_text(encoding="utf-8")
-        )
-        trtfb_data = json.loads(
-            (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
-        )
-        _template, _reference, _runner, comparator = (
-            _load_reranking_task_eval_plugins(work_dir)
-        )
+        hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
+        trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
+        _template, _reference, _runner, comparator = _load_reranking_task_eval_plugins(work_dir)
         summary = compare_reranking_prediction_sets(
             hf_data,
             trtfb_data,
@@ -10579,19 +10759,17 @@ def eval_one_model(
             "sample_pass_rate": summary["sample_pass_rate"],
             "hf_top1_accuracy": summary["hf_top1_accuracy"],
             "trtfb_top1_accuracy": summary["trtfb_top1_accuracy"],
-            "mean_pairwise_ordering_agreement": summary["metrics"][
-                "pairwise_ordering_agreement"
-            ]["mean"],
-            "min_pairwise_ordering_agreement": summary["metrics"][
-                "pairwise_ordering_agreement"
-            ]["min"],
+            "mean_pairwise_ordering_agreement": summary["metrics"]["pairwise_ordering_agreement"][
+                "mean"
+            ],
+            "min_pairwise_ordering_agreement": summary["metrics"]["pairwise_ordering_agreement"][
+                "min"
+            ],
             "metrics": summary["metrics"],
         }
     elif scorer == "encoder_embedding_parity":
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
-        trtfb_data = json.loads(
-            (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
-        )
+        trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
         summary = compare_encoder_embedding_prediction_sets(
             hf_data,
             trtfb_data,
@@ -10613,6 +10791,7 @@ def eval_one_model(
             "status": summary["status"],
             "sample_count": len(summary["samples"]),
             "valid_count": summary["valid_count"],
+            "passed_count": summary["vector_passed_count"],
             "pair_count": summary["pair_count"],
             "vector_pass_rate": summary["vector_pass_rate"],
             "mean_vector_cosine": summary["mean_vector_cosine"],
@@ -10748,9 +10927,7 @@ def eval_one_model(
             "mean_first_divergence": summary["mean_first_divergence"],
             "divergent_count": summary["divergent_count"],
             "divergence_rate": summary["divergence_rate"],
-            "mean_divergent_first_divergence": summary[
-                "mean_divergent_first_divergence"
-            ],
+            "mean_divergent_first_divergence": summary["mean_divergent_first_divergence"],
             "mean_divergent_prefix_ratio": summary["mean_divergent_prefix_ratio"],
             "min_divergent_prefix_ratio": summary["min_divergent_prefix_ratio"],
             "mean_divergent_severity": summary["mean_divergent_severity"],
@@ -10805,9 +10982,7 @@ def eval_one_model(
             "valid_count": summary["valid_count"],
             "skipped_count": summary["skipped_count"],
             "total_count": summary["total_count"],
-            "initial_latents_match_rate": summary[
-                "initial_latents_match_rate"
-            ],
+            "initial_latents_match_rate": summary["initial_latents_match_rate"],
             "metrics": summary["metrics"],
             "status": (
                 "passed"
@@ -10826,8 +11001,10 @@ def eval_one_model(
             json.loads(answers_path.read_text(encoding="utf-8")),
             scorer=scorer,
             answer_parser=str(task_eval_config.get("answer_parser", "") or ""),
-            require_valid_prediction=bool(
-                task_eval_config.get("require_valid_prediction", False)
+            require_valid_prediction=_boolean_field(
+                task_eval_config,
+                "require_valid_prediction",
+                context="Task-eval configuration",
             ),
         )
         (work_dir / "summary.json").write_text(
@@ -10841,6 +11018,11 @@ def eval_one_model(
             gates=dict(suite.get("gates", {})),
         )
     require_explicit_result_status(result)
+    apply_complete_count_contract(
+        result,
+        requested_sample_limit=int(args.limit),
+        prepared_input_count=prepared_input_count,
+    )
     (work_dir / "eval_result.json").write_text(
         json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False),
         encoding="utf-8",
@@ -10936,9 +11118,7 @@ def compare_continuation_sets(
         divergence = _first_divergence(hf_tokens, trt_tokens)
         reference_len = max(1, len(hf_tokens), len(trt_tokens))
         normalized_divergence = 1.0 if is_exact else divergence / reference_len
-        divergence_severity = (
-            0.0 if is_exact else (reference_len - divergence) / reference_len
-        )
+        divergence_severity = 0.0 if is_exact else (reference_len - divergence) / reference_len
         total_matched += min(divergence, reference_len)
         total_reference += reference_len
         div_positions.append(divergence)
@@ -10995,9 +11175,7 @@ def compare_continuation_sets(
         "mean_divergent_severity": (
             sum(divergent_severities) / divergent_count if divergent_count else 0.0
         ),
-        "max_divergent_severity": (
-            max(divergent_severities) if divergent_severities else 0.0
-        ),
+        "max_divergent_severity": (max(divergent_severities) if divergent_severities else 0.0),
         "count": count,
         "exact_count": exact,
         "text_exact_count": text_exact,
@@ -11891,9 +12069,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
     suite = suite_by_id(suites, args.suite)
     ci_lane = str(getattr(args, "ci_lane", ""))
     expected_models = (
-        configure_ci_eval(args, suite)
-        if ci_lane
-        else list(suite.get("default_model_names", []))
+        configure_ci_eval(args, suite) if ci_lane else list(suite.get("default_model_names", []))
     )
     dataset_kind = suite.get("dataset", {}).get("kind", "")
     if dataset_kind not in {
@@ -12029,7 +12205,11 @@ def cmd_eval(args: argparse.Namespace) -> int:
             artifact_dir=Path(artifact_dir),
         )
     if ci_lane:
-        passed, _ = validate_eval_summary(out, expected_models)
+        passed, _ = validate_eval_summary(
+            out,
+            expected_models,
+            expected_limit=int(args.limit),
+        )
         return 0 if passed else 1
     return 0
 

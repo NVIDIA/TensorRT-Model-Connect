@@ -11,7 +11,7 @@ import ast
 import json
 import re
 import sys
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -456,6 +456,559 @@ class _EntrypointBinding:
     ambiguous: bool = False
 
 
+@dataclass(frozen=True)
+class _EntrypointClassResolution:
+    classes: frozenset[_SymbolRef] = frozenset()
+    is_collection: bool = False
+    ambiguous: bool = False
+
+
+@dataclass(frozen=True)
+class _StaticAssignmentState:
+    expression: ast.expr | None = None
+    ambiguous: bool = False
+
+
+_UNKNOWN_CONSTANT = object()
+
+
+def _safe_constant_value(
+    expression: ast.expr,
+    *,
+    constant_resolver: Callable[[ast.Name], Any] | None = None,
+) -> Any:
+    """Evaluate side-effect-free literal expressions without executing code."""
+    if isinstance(expression, ast.Constant):
+        return expression.value
+
+    if isinstance(expression, ast.Name) and constant_resolver is not None:
+        return constant_resolver(expression)
+
+    if isinstance(expression, (ast.List, ast.Set, ast.Tuple)):
+        values: list[Any] = []
+        for element in expression.elts:
+            value = _safe_constant_value(
+                element,
+                constant_resolver=constant_resolver,
+            )
+            if value is _UNKNOWN_CONSTANT:
+                return _UNKNOWN_CONSTANT
+            values.append(value)
+        if isinstance(expression, ast.List):
+            return values
+        if isinstance(expression, ast.Tuple):
+            return tuple(values)
+        try:
+            return set(values)
+        except TypeError:
+            return _UNKNOWN_CONSTANT
+
+    if isinstance(expression, ast.Dict):
+        keys: list[Any] = []
+        values: list[Any] = []
+        for key_expression, value_expression in zip(
+            expression.keys,
+            expression.values,
+            strict=True,
+        ):
+            if key_expression is None:
+                return _UNKNOWN_CONSTANT
+            key = _safe_constant_value(
+                key_expression,
+                constant_resolver=constant_resolver,
+            )
+            value = _safe_constant_value(
+                value_expression,
+                constant_resolver=constant_resolver,
+            )
+            if key is _UNKNOWN_CONSTANT or value is _UNKNOWN_CONSTANT:
+                return _UNKNOWN_CONSTANT
+            keys.append(key)
+            values.append(value)
+        try:
+            return dict(zip(keys, values, strict=True))
+        except TypeError:
+            return _UNKNOWN_CONSTANT
+
+    if isinstance(expression, ast.Compare):
+        left_expression = expression.left
+        left = _safe_constant_value(
+            left_expression,
+            constant_resolver=constant_resolver,
+        )
+        if left is _UNKNOWN_CONSTANT:
+            return _UNKNOWN_CONSTANT
+        for operator, comparator_expression in zip(
+            expression.ops,
+            expression.comparators,
+            strict=True,
+        ):
+            right = _safe_constant_value(
+                comparator_expression,
+                constant_resolver=constant_resolver,
+            )
+            if right is _UNKNOWN_CONSTANT:
+                return _UNKNOWN_CONSTANT
+            try:
+                if isinstance(operator, ast.Eq):
+                    matches = left == right
+                elif isinstance(operator, ast.NotEq):
+                    matches = left != right
+                elif isinstance(operator, ast.Lt):
+                    matches = left < right
+                elif isinstance(operator, ast.LtE):
+                    matches = left <= right
+                elif isinstance(operator, ast.Gt):
+                    matches = left > right
+                elif isinstance(operator, ast.GtE):
+                    matches = left >= right
+                elif isinstance(operator, ast.In):
+                    matches = left in right
+                elif isinstance(operator, ast.NotIn):
+                    matches = left not in right
+                elif isinstance(operator, (ast.Is, ast.IsNot)):
+                    if not (
+                        isinstance(left_expression, ast.Constant)
+                        and isinstance(comparator_expression, ast.Constant)
+                        and any(
+                            left_expression.value is singleton
+                            for singleton in (None, True, False, Ellipsis)
+                        )
+                        and any(
+                            comparator_expression.value is singleton
+                            for singleton in (None, True, False, Ellipsis)
+                        )
+                    ):
+                        return _UNKNOWN_CONSTANT
+                    matches = left is right
+                    if isinstance(operator, ast.IsNot):
+                        matches = not matches
+                else:
+                    return _UNKNOWN_CONSTANT
+            except (TypeError, ValueError):
+                return _UNKNOWN_CONSTANT
+            if not matches:
+                return False
+            left = right
+            left_expression = comparator_expression
+        return True
+
+    if isinstance(expression, ast.IfExp):
+        test_value = _safe_constant_value(
+            expression.test,
+            constant_resolver=constant_resolver,
+        )
+        if test_value is _UNKNOWN_CONSTANT:
+            return _UNKNOWN_CONSTANT
+        selected = expression.body if bool(test_value) else expression.orelse
+        return _safe_constant_value(
+            selected,
+            constant_resolver=constant_resolver,
+        )
+
+    if isinstance(expression, ast.UnaryOp):
+        operand = _safe_constant_value(
+            expression.operand,
+            constant_resolver=constant_resolver,
+        )
+        if operand is _UNKNOWN_CONSTANT:
+            return _UNKNOWN_CONSTANT
+        if isinstance(expression.op, ast.Not):
+            return not bool(operand)
+        if isinstance(operand, (complex, float, int)):
+            if isinstance(expression.op, ast.UAdd):
+                return +operand
+            if isinstance(expression.op, ast.USub):
+                return -operand
+            if isinstance(expression.op, ast.Invert) and isinstance(operand, int):
+                return ~operand
+
+    if isinstance(expression, ast.BoolOp):
+        values = iter(expression.values)
+        first = _safe_constant_value(
+            next(values),
+            constant_resolver=constant_resolver,
+        )
+        if first is _UNKNOWN_CONSTANT:
+            return _UNKNOWN_CONSTANT
+        result = first
+        for value_expression in values:
+            if isinstance(expression.op, ast.And) and not bool(result):
+                return result
+            if isinstance(expression.op, ast.Or) and bool(result):
+                return result
+            result = _safe_constant_value(
+                value_expression,
+                constant_resolver=constant_resolver,
+            )
+            if result is _UNKNOWN_CONSTANT:
+                return _UNKNOWN_CONSTANT
+        return result
+
+    if isinstance(expression, ast.Subscript) and not isinstance(expression.slice, ast.Slice):
+        container = _safe_constant_value(
+            expression.value,
+            constant_resolver=constant_resolver,
+        )
+        index = _safe_constant_value(
+            expression.slice,
+            constant_resolver=constant_resolver,
+        )
+        if (
+            isinstance(container, (list, tuple))
+            and isinstance(index, int)
+            and index >= -len(container)
+            and index < len(container)
+        ):
+            return container[index]
+
+    return _UNKNOWN_CONSTANT
+
+
+def _safe_truth_value(
+    expression: ast.expr,
+    *,
+    constant_resolver: Callable[[ast.Name], Any] | None = None,
+) -> bool | None:
+    value = _safe_constant_value(
+        expression,
+        constant_resolver=constant_resolver,
+    )
+    return None if value is _UNKNOWN_CONSTANT else bool(value)
+
+
+def _compare_operation_is_provably_side_effect_free(
+    left: ast.expr,
+    operator: ast.cmpop,
+    right: ast.expr,
+    *,
+    constant_resolver: Callable[[ast.Name], Any] | None = None,
+) -> bool:
+    """Whether one comparison cannot dispatch to plugin-defined Python code."""
+    if isinstance(operator, (ast.Is, ast.IsNot)):
+        return True
+    return all(
+        _safe_constant_value(
+            operand,
+            constant_resolver=constant_resolver,
+        )
+        is not _UNKNOWN_CONSTANT
+        for operand in (left, right)
+    )
+
+
+def _truth_test_is_provably_side_effect_free(
+    expression: ast.expr,
+    *,
+    constant_resolver: Callable[[ast.Name], Any] | None = None,
+) -> bool:
+    """Whether ``bool(expression)`` cannot invoke plugin-defined Python code."""
+    if (
+        _safe_constant_value(
+            expression,
+            constant_resolver=constant_resolver,
+        )
+        is not _UNKNOWN_CONSTANT
+    ):
+        return True
+    if isinstance(expression, ast.Compare):
+        left = expression.left
+        for operator, comparator in zip(
+            expression.ops,
+            expression.comparators,
+            strict=True,
+        ):
+            if not _compare_operation_is_provably_side_effect_free(
+                left,
+                operator,
+                comparator,
+                constant_resolver=constant_resolver,
+            ):
+                return False
+            left = comparator
+        return True
+    if isinstance(expression, ast.UnaryOp) and isinstance(expression.op, ast.Not):
+        return _truth_test_is_provably_side_effect_free(
+            expression.operand,
+            constant_resolver=constant_resolver,
+        )
+    return False
+
+
+def _expression_evaluation_is_provably_side_effect_free(
+    expression: ast.expr,
+    *,
+    constant_resolver: Callable[[ast.Name], Any] | None = None,
+) -> bool:
+    """Whether evaluating an expression cannot execute plugin-defined code."""
+    if isinstance(expression, (ast.Constant, ast.Name)):
+        return True
+
+    if isinstance(expression, ast.NamedExpr):
+        return isinstance(
+            expression.target, ast.Name
+        ) and _expression_evaluation_is_provably_side_effect_free(
+            expression.value,
+            constant_resolver=constant_resolver,
+        )
+
+    if isinstance(expression, ast.Lambda):
+        return all(
+            _expression_evaluation_is_provably_side_effect_free(
+                default,
+                constant_resolver=constant_resolver,
+            )
+            for default in (
+                *expression.args.defaults,
+                *(value for value in expression.args.kw_defaults if value is not None),
+            )
+        )
+
+    if isinstance(expression, (ast.List, ast.Tuple)):
+        for element in expression.elts:
+            if isinstance(element, ast.Starred):
+                value = _safe_constant_value(
+                    element.value,
+                    constant_resolver=constant_resolver,
+                )
+                if not isinstance(value, (list, tuple)):
+                    return False
+                continue
+            if not _expression_evaluation_is_provably_side_effect_free(
+                element,
+                constant_resolver=constant_resolver,
+            ):
+                return False
+        return True
+
+    if isinstance(expression, (ast.Set, ast.Dict)):
+        return (
+            _safe_constant_value(
+                expression,
+                constant_resolver=constant_resolver,
+            )
+            is not _UNKNOWN_CONSTANT
+        )
+
+    if isinstance(expression, ast.BoolOp):
+        for index, value_expression in enumerate(expression.values):
+            if not _expression_evaluation_is_provably_side_effect_free(
+                value_expression,
+                constant_resolver=constant_resolver,
+            ):
+                return False
+            if index == len(expression.values) - 1:
+                return True
+            if not _truth_test_is_provably_side_effect_free(
+                value_expression,
+                constant_resolver=constant_resolver,
+            ):
+                return False
+            value = _safe_truth_value(
+                value_expression,
+                constant_resolver=constant_resolver,
+            )
+            if value is not None and (
+                (isinstance(expression.op, ast.And) and not value)
+                or (isinstance(expression.op, ast.Or) and value)
+            ):
+                return True
+        return True
+
+    if isinstance(expression, ast.IfExp):
+        if not _expression_evaluation_is_provably_side_effect_free(
+            expression.test,
+            constant_resolver=constant_resolver,
+        ) or not _truth_test_is_provably_side_effect_free(
+            expression.test,
+            constant_resolver=constant_resolver,
+        ):
+            return False
+        test_value = _safe_truth_value(
+            expression.test,
+            constant_resolver=constant_resolver,
+        )
+        branches = (
+            (expression.body, expression.orelse)
+            if test_value is None
+            else (expression.body if test_value else expression.orelse,)
+        )
+        return all(
+            _expression_evaluation_is_provably_side_effect_free(
+                branch,
+                constant_resolver=constant_resolver,
+            )
+            for branch in branches
+        )
+
+    if isinstance(expression, ast.Compare):
+        if not _expression_evaluation_is_provably_side_effect_free(
+            expression.left,
+            constant_resolver=constant_resolver,
+        ):
+            return False
+        left = expression.left
+        for operator, comparator in zip(
+            expression.ops,
+            expression.comparators,
+            strict=True,
+        ):
+            if not _expression_evaluation_is_provably_side_effect_free(
+                comparator,
+                constant_resolver=constant_resolver,
+            ) or not _compare_operation_is_provably_side_effect_free(
+                left,
+                operator,
+                comparator,
+                constant_resolver=constant_resolver,
+            ):
+                return False
+            comparison = ast.Compare(
+                left=left,
+                ops=[operator],
+                comparators=[comparator],
+            )
+            if (
+                _safe_truth_value(
+                    comparison,
+                    constant_resolver=constant_resolver,
+                )
+                is False
+            ):
+                return True
+            left = comparator
+        return True
+
+    if isinstance(expression, ast.UnaryOp):
+        if not _expression_evaluation_is_provably_side_effect_free(
+            expression.operand,
+            constant_resolver=constant_resolver,
+        ):
+            return False
+        if isinstance(expression.op, ast.Not):
+            return _truth_test_is_provably_side_effect_free(
+                expression.operand,
+                constant_resolver=constant_resolver,
+            )
+        return (
+            _safe_constant_value(
+                expression,
+                constant_resolver=constant_resolver,
+            )
+            is not _UNKNOWN_CONSTANT
+        )
+
+    if isinstance(expression, ast.BinOp):
+        return (
+            _safe_constant_value(
+                expression,
+                constant_resolver=constant_resolver,
+            )
+            is not _UNKNOWN_CONSTANT
+        )
+
+    if isinstance(expression, ast.Slice):
+        return all(
+            value is None
+            or _expression_evaluation_is_provably_side_effect_free(
+                value,
+                constant_resolver=constant_resolver,
+            )
+            for value in (expression.lower, expression.upper, expression.step)
+        )
+
+    # Calls, attributes, subscriptions, comprehensions, awaiting/yielding, and
+    # formatted values can dispatch to plugin-defined Python protocols.
+    return False
+
+
+def _plain_local_class_constructor_is_provably_side_effect_free(
+    expression: ast.expr,
+    *,
+    known_classes: dict[str, ast.ClassDef] | None,
+) -> bool:
+    """Recognize a zero-argument local class construction with no callbacks."""
+    if (
+        known_classes is None
+        or not isinstance(expression, ast.Call)
+        or expression.args
+        or expression.keywords
+        or not isinstance(expression.func, ast.Name)
+    ):
+        return False
+    class_node = known_classes.get(expression.func.id)
+    if class_node is None or class_node.decorator_list or class_node.bases or class_node.keywords:
+        return False
+    for body_statement in class_node.body:
+        if isinstance(body_statement, ast.Pass):
+            continue
+        if (
+            isinstance(body_statement, ast.Expr)
+            and isinstance(body_statement.value, ast.Constant)
+            and isinstance(body_statement.value.value, str)
+        ):
+            continue
+        if (
+            isinstance(body_statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and body_statement.name not in {"__init__", "__new__"}
+            and not body_statement.decorator_list
+            and not body_statement.args.defaults
+            and not any(value is not None for value in body_statement.args.kw_defaults)
+        ):
+            continue
+        return False
+    return True
+
+
+def _plain_class_definition_is_provably_side_effect_free(
+    statement: ast.ClassDef,
+    *,
+    known_classes: dict[str, ast.ClassDef] | None = None,
+) -> bool:
+    """Recognize the narrow class form whose module-time execution is inert."""
+    if statement.decorator_list or statement.bases or statement.keywords:
+        return False
+    for body_statement in statement.body:
+        if isinstance(body_statement, ast.Pass):
+            continue
+        if (
+            isinstance(body_statement, ast.Expr)
+            and isinstance(body_statement.value, ast.Constant)
+            and isinstance(body_statement.value.value, str)
+        ):
+            continue
+        if isinstance(body_statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if (
+                body_statement.decorator_list
+                or body_statement.args.defaults
+                or any(value is not None for value in body_statement.args.kw_defaults)
+            ):
+                return False
+            continue
+        if isinstance(body_statement, (ast.Assign, ast.AnnAssign)):
+            value = body_statement.value
+            targets = (
+                body_statement.targets
+                if isinstance(body_statement, ast.Assign)
+                else [body_statement.target]
+            )
+            if (
+                value is None
+                or not all(isinstance(target, ast.Name) for target in targets)
+                or not (
+                    _expression_evaluation_is_provably_side_effect_free(value)
+                    or _plain_local_class_constructor_is_provably_side_effect_free(
+                        value,
+                        known_classes=known_classes,
+                    )
+                )
+            ):
+                return False
+            continue
+        return False
+    return True
+
+
 def _direct_assignment_value(
     statement: ast.stmt,
     assignment_name: str,
@@ -488,30 +1041,41 @@ def _same_entrypoint_binding(
 
 def _entrypoint_binding_from_expression(
     expression: ast.expr,
+    *,
+    constant_resolver: Callable[[ast.Name], Any] | None = None,
 ) -> _EntrypointBinding:
     """Resolve a direct assignment expression when its branch is knowable."""
     if not isinstance(expression, ast.IfExp):
         return _EntrypointBinding(expression=expression)
 
-    if isinstance(expression.test, ast.Constant) and isinstance(
-        expression.test.value,
-        bool,
-    ):
-        selected = expression.body if expression.test.value else expression.orelse
-        return _entrypoint_binding_from_expression(selected)
+    test_value = _safe_truth_value(
+        expression.test,
+        constant_resolver=constant_resolver,
+    )
+    if test_value is not None:
+        selected = expression.body if test_value else expression.orelse
+        return _entrypoint_binding_from_expression(
+            selected,
+            constant_resolver=constant_resolver,
+        )
 
-    body_binding = _entrypoint_binding_from_expression(expression.body)
-    else_binding = _entrypoint_binding_from_expression(expression.orelse)
-    if _same_entrypoint_binding(body_binding, else_binding):
-        return body_binding
-    return _EntrypointBinding(ambiguous=True)
+    # Preserve the conditional expression. Its two branches may still resolve
+    # to the same concrete class, in which case the runtime choice is
+    # unambiguous even though the condition is not statically known.
+    return _EntrypointBinding(expression=expression)
 
 
 class _SameScopeRebindingVisitor(ast.NodeVisitor):
     """Find bindings without descending into nested Python scopes."""
 
-    def __init__(self, assignment_name: str) -> None:
+    def __init__(
+        self,
+        assignment_name: str,
+        *,
+        constant_resolver: Callable[[ast.Name], Any] | None = None,
+    ) -> None:
         self.assignment_name = assignment_name
+        self.constant_resolver = constant_resolver
         self.rebinds = False
 
     def visit_Name(self, node: ast.Name) -> None:
@@ -551,8 +1115,61 @@ class _SameScopeRebindingVisitor(ast.NodeVisitor):
             self.visit(expression)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
-        # The lambda body does not execute when the module creates the lambda.
-        return
+        # Defaults execute when the module creates the lambda. The body remains
+        # a nested scope and does not execute until the lambda is called.
+        for expression in (
+            *node.args.defaults,
+            *(default for default in node.args.kw_defaults if default is not None),
+        ):
+            self.visit(expression)
+
+    def visit_BoolOp(self, node: ast.BoolOp) -> None:
+        for expression in node.values:
+            self.visit(expression)
+            value = _safe_truth_value(
+                expression,
+                constant_resolver=self.constant_resolver,
+            )
+            if value is None:
+                continue
+            if isinstance(node.op, ast.And) and not value:
+                return
+            if isinstance(node.op, ast.Or) and value:
+                return
+
+    def visit_IfExp(self, node: ast.IfExp) -> None:
+        self.visit(node.test)
+        test_value = _safe_truth_value(
+            node.test,
+            constant_resolver=self.constant_resolver,
+        )
+        if test_value is None:
+            self.visit(node.body)
+            self.visit(node.orelse)
+            return
+        self.visit(node.body if test_value else node.orelse)
+
+    def visit_Compare(self, node: ast.Compare) -> None:
+        self.visit(node.left)
+        left = node.left
+        for operator, comparator in zip(
+            node.ops,
+            node.comparators,
+            strict=True,
+        ):
+            self.visit(comparator)
+            comparison = ast.Compare(
+                left=left,
+                ops=[operator],
+                comparators=[comparator],
+            )
+            value = _safe_truth_value(
+                comparison,
+                constant_resolver=self.constant_resolver,
+            )
+            if value is False:
+                return
+            left = comparator
 
     def _visit_comprehension_expressions(
         self,
@@ -613,10 +1230,567 @@ class _SameScopeRebindingVisitor(ast.NodeVisitor):
 def _may_rebind_entrypoint(
     node: ast.AST,
     assignment_name: str,
+    *,
+    constant_resolver: Callable[[ast.Name], Any] | None = None,
 ) -> bool:
-    visitor = _SameScopeRebindingVisitor(assignment_name)
+    visitor = _SameScopeRebindingVisitor(
+        assignment_name,
+        constant_resolver=constant_resolver,
+    )
     visitor.visit(node)
     return visitor.rebinds
+
+
+def _same_static_assignment_state(
+    left: _StaticAssignmentState,
+    right: _StaticAssignmentState,
+) -> bool:
+    if left.ambiguous or right.ambiguous:
+        return left.ambiguous and right.ambiguous
+    if left.expression is None or right.expression is None:
+        return left.expression is None and right.expression is None
+    return ast.dump(left.expression, include_attributes=False) == ast.dump(
+        right.expression,
+        include_attributes=False,
+    )
+
+
+def _merge_static_assignment_states(
+    left: _StaticAssignmentState,
+    right: _StaticAssignmentState,
+) -> _StaticAssignmentState:
+    if _same_static_assignment_state(left, right):
+        return left
+    return _StaticAssignmentState(ambiguous=True)
+
+
+def _assignment_state_after_expression(
+    expression: ast.expr,
+    *,
+    assignment_name: str,
+    initial: _StaticAssignmentState,
+    constant_resolver: Callable[[ast.Name], Any] | None,
+) -> _StaticAssignmentState:
+    """Apply same-scope effects, failing closed at unknown Python callbacks."""
+    if isinstance(expression, ast.NamedExpr):
+        state = _assignment_state_after_expression(
+            expression.value,
+            assignment_name=assignment_name,
+            initial=initial,
+            constant_resolver=constant_resolver,
+        )
+        if isinstance(expression.target, ast.Name) and expression.target.id == assignment_name:
+            return _StaticAssignmentState(expression=expression.value)
+        if _may_rebind_entrypoint(
+            expression.target,
+            assignment_name,
+            constant_resolver=constant_resolver,
+        ):
+            return _StaticAssignmentState(ambiguous=True)
+        return state
+
+    if isinstance(expression, ast.Lambda):
+        state = initial
+        for default in (
+            *expression.args.defaults,
+            *(value for value in expression.args.kw_defaults if value is not None),
+        ):
+            state = _assignment_state_after_expression(
+                default,
+                assignment_name=assignment_name,
+                initial=state,
+                constant_resolver=constant_resolver,
+            )
+        return state
+
+    if isinstance(expression, ast.BoolOp):
+
+        def visit_from(
+            index: int,
+            state: _StaticAssignmentState,
+        ) -> _StaticAssignmentState:
+            value_expression = expression.values[index]
+            state = _assignment_state_after_expression(
+                value_expression,
+                assignment_name=assignment_name,
+                initial=state,
+                constant_resolver=constant_resolver,
+            )
+            if index == len(expression.values) - 1:
+                return state
+
+            if not _truth_test_is_provably_side_effect_free(
+                value_expression,
+                constant_resolver=constant_resolver,
+            ):
+                return _StaticAssignmentState(ambiguous=True)
+            value = _safe_truth_value(
+                value_expression,
+                constant_resolver=constant_resolver,
+            )
+            if value is not None:
+                short_circuits = (isinstance(expression.op, ast.And) and not value) or (
+                    isinstance(expression.op, ast.Or) and value
+                )
+                return state if short_circuits else visit_from(index + 1, state)
+
+            continued = visit_from(index + 1, state)
+            return _merge_static_assignment_states(state, continued)
+
+        return visit_from(0, initial)
+
+    if isinstance(expression, ast.IfExp):
+        state = _assignment_state_after_expression(
+            expression.test,
+            assignment_name=assignment_name,
+            initial=initial,
+            constant_resolver=constant_resolver,
+        )
+        if not _truth_test_is_provably_side_effect_free(
+            expression.test,
+            constant_resolver=constant_resolver,
+        ):
+            return _StaticAssignmentState(ambiguous=True)
+        test_value = _safe_truth_value(
+            expression.test,
+            constant_resolver=constant_resolver,
+        )
+        if test_value is not None:
+            selected = expression.body if test_value else expression.orelse
+            return _assignment_state_after_expression(
+                selected,
+                assignment_name=assignment_name,
+                initial=state,
+                constant_resolver=constant_resolver,
+            )
+        body_state = _assignment_state_after_expression(
+            expression.body,
+            assignment_name=assignment_name,
+            initial=state,
+            constant_resolver=constant_resolver,
+        )
+        else_state = _assignment_state_after_expression(
+            expression.orelse,
+            assignment_name=assignment_name,
+            initial=state,
+            constant_resolver=constant_resolver,
+        )
+        return _merge_static_assignment_states(body_state, else_state)
+
+    if isinstance(expression, (ast.List, ast.Tuple, ast.Set)):
+        state = initial
+        for element in expression.elts:
+            value_expression = element.value if isinstance(element, ast.Starred) else element
+            state = _assignment_state_after_expression(
+                value_expression,
+                assignment_name=assignment_name,
+                initial=state,
+                constant_resolver=constant_resolver,
+            )
+            if isinstance(element, ast.Starred):
+                value = _safe_constant_value(
+                    element.value,
+                    constant_resolver=constant_resolver,
+                )
+                if not isinstance(value, (list, tuple)):
+                    return _StaticAssignmentState(ambiguous=True)
+            elif isinstance(expression, ast.Set) and (
+                _safe_constant_value(
+                    element,
+                    constant_resolver=constant_resolver,
+                )
+                is _UNKNOWN_CONSTANT
+            ):
+                return _StaticAssignmentState(ambiguous=True)
+        return state
+
+    if isinstance(expression, ast.Dict):
+        state = initial
+        for key, value in zip(expression.keys, expression.values, strict=True):
+            if key is None:
+                state = _assignment_state_after_expression(
+                    value,
+                    assignment_name=assignment_name,
+                    initial=state,
+                    constant_resolver=constant_resolver,
+                )
+                return _StaticAssignmentState(ambiguous=True)
+            state = _assignment_state_after_expression(
+                key,
+                assignment_name=assignment_name,
+                initial=state,
+                constant_resolver=constant_resolver,
+            )
+            state = _assignment_state_after_expression(
+                value,
+                assignment_name=assignment_name,
+                initial=state,
+                constant_resolver=constant_resolver,
+            )
+            if (
+                _safe_constant_value(
+                    key,
+                    constant_resolver=constant_resolver,
+                )
+                is _UNKNOWN_CONSTANT
+            ):
+                return _StaticAssignmentState(ambiguous=True)
+        return state
+
+    if isinstance(expression, ast.Call):
+        state = _assignment_state_after_expression(
+            expression.func,
+            assignment_name=assignment_name,
+            initial=initial,
+            constant_resolver=constant_resolver,
+        )
+        for argument in expression.args:
+            value_expression = argument.value if isinstance(argument, ast.Starred) else argument
+            state = _assignment_state_after_expression(
+                value_expression,
+                assignment_name=assignment_name,
+                initial=state,
+                constant_resolver=constant_resolver,
+            )
+            if isinstance(argument, ast.Starred):
+                return _StaticAssignmentState(ambiguous=True)
+        for keyword in expression.keywords:
+            state = _assignment_state_after_expression(
+                keyword.value,
+                assignment_name=assignment_name,
+                initial=state,
+                constant_resolver=constant_resolver,
+            )
+            if keyword.arg is None:
+                return _StaticAssignmentState(ambiguous=True)
+        # Invoking even a syntactically simple callable can mutate module globals.
+        return _StaticAssignmentState(ambiguous=True)
+
+    if isinstance(expression, ast.Compare):
+        state = _assignment_state_after_expression(
+            expression.left,
+            assignment_name=assignment_name,
+            initial=initial,
+            constant_resolver=constant_resolver,
+        )
+
+        def visit_comparators(
+            index: int,
+            left: ast.expr,
+            current: _StaticAssignmentState,
+        ) -> _StaticAssignmentState:
+            comparator = expression.comparators[index]
+            current = _assignment_state_after_expression(
+                comparator,
+                assignment_name=assignment_name,
+                initial=current,
+                constant_resolver=constant_resolver,
+            )
+            operator = expression.ops[index]
+            if not _compare_operation_is_provably_side_effect_free(
+                left,
+                operator,
+                comparator,
+                constant_resolver=constant_resolver,
+            ):
+                return _StaticAssignmentState(ambiguous=True)
+            if index == len(expression.comparators) - 1:
+                return current
+
+            comparison = ast.Compare(
+                left=left,
+                ops=[operator],
+                comparators=[comparator],
+            )
+            value = _safe_truth_value(
+                comparison,
+                constant_resolver=constant_resolver,
+            )
+            if value is False:
+                return current
+            continued = visit_comparators(index + 1, comparator, current)
+            if value is True:
+                return continued
+            return _merge_static_assignment_states(current, continued)
+
+        return visit_comparators(0, expression.left, state)
+
+    if isinstance(expression, ast.UnaryOp):
+        state = _assignment_state_after_expression(
+            expression.operand,
+            assignment_name=assignment_name,
+            initial=initial,
+            constant_resolver=constant_resolver,
+        )
+        if isinstance(expression.op, ast.Not):
+            is_safe = _truth_test_is_provably_side_effect_free(
+                expression.operand,
+                constant_resolver=constant_resolver,
+            )
+        else:
+            is_safe = (
+                _safe_constant_value(
+                    expression,
+                    constant_resolver=constant_resolver,
+                )
+                is not _UNKNOWN_CONSTANT
+            )
+        return state if is_safe else _StaticAssignmentState(ambiguous=True)
+
+    if isinstance(expression, ast.BinOp):
+        state = _assignment_state_after_expression(
+            expression.left,
+            assignment_name=assignment_name,
+            initial=initial,
+            constant_resolver=constant_resolver,
+        )
+        state = _assignment_state_after_expression(
+            expression.right,
+            assignment_name=assignment_name,
+            initial=state,
+            constant_resolver=constant_resolver,
+        )
+        if (
+            _safe_constant_value(
+                expression,
+                constant_resolver=constant_resolver,
+            )
+            is _UNKNOWN_CONSTANT
+        ):
+            return _StaticAssignmentState(ambiguous=True)
+        return state
+
+    if isinstance(expression, ast.Attribute):
+        _assignment_state_after_expression(
+            expression.value,
+            assignment_name=assignment_name,
+            initial=initial,
+            constant_resolver=constant_resolver,
+        )
+        return _StaticAssignmentState(ambiguous=True)
+
+    if isinstance(expression, ast.Subscript):
+        state = _assignment_state_after_expression(
+            expression.value,
+            assignment_name=assignment_name,
+            initial=initial,
+            constant_resolver=constant_resolver,
+        )
+        state = _assignment_state_after_expression(
+            expression.slice,
+            assignment_name=assignment_name,
+            initial=state,
+            constant_resolver=constant_resolver,
+        )
+        if (
+            _safe_constant_value(
+                expression,
+                constant_resolver=constant_resolver,
+            )
+            is _UNKNOWN_CONSTANT
+        ):
+            return _StaticAssignmentState(ambiguous=True)
+        return state
+
+    if _may_rebind_entrypoint(
+        expression,
+        assignment_name,
+        constant_resolver=constant_resolver,
+    ):
+        return _StaticAssignmentState(ambiguous=True)
+    if not _expression_evaluation_is_provably_side_effect_free(
+        expression,
+        constant_resolver=constant_resolver,
+    ):
+        return _StaticAssignmentState(ambiguous=True)
+    return initial
+
+
+def _single_static_assignment_expression(
+    contract: _ModuleContract,
+    assignment_name: str,
+    *,
+    before_lineno: int | None,
+    constant_resolver: Callable[[ast.Name], Any] | None = None,
+) -> tuple[ast.expr | None, bool]:
+    """Return the last deterministic binding that exists at a use site."""
+    state = _StaticAssignmentState()
+    for statement in contract.tree.body:
+        if before_lineno is not None and statement.lineno >= before_lineno:
+            break
+
+        direct_value = _direct_assignment_value(statement, assignment_name)
+        if direct_value is not None:
+            state = _assignment_state_after_expression(
+                direct_value,
+                assignment_name=assignment_name,
+                initial=state,
+                constant_resolver=constant_resolver,
+            )
+            targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+            target_count = sum(
+                1
+                for target in targets
+                for node in ast.walk(target)
+                if isinstance(node, ast.Name)
+                and node.id == assignment_name
+                and isinstance(node.ctx, (ast.Store, ast.Del))
+            )
+            if target_count == 1:
+                # Assignment targets bind after their value expression has
+                # finished evaluating, so this unconditional binding overrides
+                # any earlier uncertainty or assignment-expression effect.
+                state = _StaticAssignmentState(expression=direct_value)
+            elif target_count:
+                state = _StaticAssignmentState(ambiguous=True)
+            continue
+
+        if isinstance(statement, (ast.Assign, ast.AnnAssign, ast.Expr)):
+            value = statement.value
+            if value is not None and not (
+                isinstance(statement, (ast.Assign, ast.AnnAssign))
+                and _plain_local_class_constructor_is_provably_side_effect_free(
+                    value,
+                    known_classes=contract.classes,
+                )
+            ):
+                state = _assignment_state_after_expression(
+                    value,
+                    assignment_name=assignment_name,
+                    initial=state,
+                    constant_resolver=constant_resolver,
+                )
+            continue
+
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for expression in (
+                *statement.decorator_list,
+                *statement.args.defaults,
+                *(value for value in statement.args.kw_defaults if value is not None),
+            ):
+                state = _assignment_state_after_expression(
+                    expression,
+                    assignment_name=assignment_name,
+                    initial=state,
+                    constant_resolver=constant_resolver,
+                )
+            if statement.decorator_list:
+                # Applying an arbitrary decorator is an implicit call after the
+                # decorator expressions and defaults have been evaluated.
+                state = _StaticAssignmentState(ambiguous=True)
+            if statement.name == assignment_name:
+                state = _StaticAssignmentState(ambiguous=True)
+            continue
+
+        if isinstance(statement, ast.ClassDef):
+            for expression in (
+                *statement.decorator_list,
+                *statement.bases,
+                *(keyword.value for keyword in statement.keywords),
+            ):
+                state = _assignment_state_after_expression(
+                    expression,
+                    assignment_name=assignment_name,
+                    initial=state,
+                    constant_resolver=constant_resolver,
+                )
+            # Non-trivial class execution can invoke descriptors, metaclasses,
+            # __init_subclass__, decorators, and arbitrary class-body code.
+            if not _plain_class_definition_is_provably_side_effect_free(
+                statement,
+                known_classes=contract.classes,
+            ):
+                state = _StaticAssignmentState(ambiguous=True)
+            if statement.name == assignment_name:
+                state = _StaticAssignmentState(ambiguous=True)
+            continue
+
+        if _may_rebind_entrypoint(
+            statement,
+            assignment_name,
+            constant_resolver=constant_resolver,
+        ):
+            state = _StaticAssignmentState(ambiguous=True)
+        elif not isinstance(statement, ast.Pass):
+            # Dynamic compound statements are conservatively opaque. A later
+            # unconditional assignment still restores a precise state.
+            state = _StaticAssignmentState(ambiguous=True)
+
+    return state.expression, state.ambiguous
+
+
+def _safe_constant_value_with_assignments(
+    expression: ast.expr,
+    *,
+    current_module: str,
+    modules: dict[str, _ModuleContract],
+    seen_assignments: frozenset[_SymbolRef] = frozenset(),
+) -> tuple[Any, bool]:
+    """Resolve safe constants through one prior, unambiguous assignment."""
+    ambiguous_assignment = False
+
+    def resolve_name(name_expression: ast.Name) -> Any:
+        nonlocal ambiguous_assignment
+        reference = _resolve_reference(
+            name_expression,
+            current_module=current_module,
+            modules=modules,
+        )
+        if reference is None:
+            return _UNKNOWN_CONSTANT
+        assignment_ref = _resolve_definition(
+            reference,
+            modules=modules,
+            kind="assignments",
+        )
+        if assignment_ref is None:
+            return _UNKNOWN_CONSTANT
+        if assignment_ref in seen_assignments:
+            ambiguous_assignment = True
+            return _UNKNOWN_CONSTANT
+
+        assignment_contract = modules[assignment_ref.module]
+        before_lineno = name_expression.lineno if assignment_ref.module == current_module else None
+
+        def assignment_constant_resolver(nested_name: ast.Name) -> Any:
+            nonlocal ambiguous_assignment
+            nested_value, nested_ambiguity = _safe_constant_value_with_assignments(
+                nested_name,
+                current_module=assignment_ref.module,
+                modules=modules,
+                seen_assignments=seen_assignments | {assignment_ref},
+            )
+            if nested_ambiguity:
+                ambiguous_assignment = True
+            return nested_value
+
+        assigned_expression, assignment_is_ambiguous = _single_static_assignment_expression(
+            assignment_contract,
+            assignment_ref.name,
+            before_lineno=before_lineno,
+            constant_resolver=assignment_constant_resolver,
+        )
+        if assignment_is_ambiguous:
+            ambiguous_assignment = True
+            return _UNKNOWN_CONSTANT
+        if assigned_expression is None:
+            return _UNKNOWN_CONSTANT
+
+        value, nested_ambiguity = _safe_constant_value_with_assignments(
+            assigned_expression,
+            current_module=assignment_ref.module,
+            modules=modules,
+            seen_assignments=seen_assignments | {assignment_ref},
+        )
+        if nested_ambiguity:
+            ambiguous_assignment = True
+        return value
+
+    value = _safe_constant_value(
+        expression,
+        constant_resolver=resolve_name,
+    )
+    return value, ambiguous_assignment
 
 
 def _entrypoint_binding_after(
@@ -624,34 +1798,122 @@ def _entrypoint_binding_after(
     *,
     assignment_name: str,
     initial: _EntrypointBinding,
+    constant_resolver: Callable[[ast.Name], Any] | None = None,
+    known_classes: dict[str, ast.ClassDef] | None = None,
 ) -> _EntrypointBinding:
     """Resolve a module-level entrypoint binding along statically known paths."""
+
+    def transfer_expression(
+        expression: ast.expr,
+        current: _EntrypointBinding,
+    ) -> _EntrypointBinding:
+        state = _assignment_state_after_expression(
+            expression,
+            assignment_name=assignment_name,
+            initial=_StaticAssignmentState(
+                expression=current.expression,
+                ambiguous=current.ambiguous,
+            ),
+            constant_resolver=constant_resolver,
+        )
+        return _EntrypointBinding(
+            expression=state.expression,
+            ambiguous=state.ambiguous,
+        )
+
     binding = initial
     for statement in statements:
         assignment_value = _direct_assignment_value(statement, assignment_name)
         if assignment_value is not None:
-            binding = _entrypoint_binding_from_expression(assignment_value)
+            binding = _entrypoint_binding_from_expression(
+                assignment_value,
+                constant_resolver=constant_resolver,
+            )
             continue
 
         if not isinstance(statement, ast.If):
-            if _may_rebind_entrypoint(statement, assignment_name):
+            if isinstance(statement, (ast.Assign, ast.AnnAssign, ast.Expr)):
+                value = statement.value
+                if value is not None and not (
+                    isinstance(statement, (ast.Assign, ast.AnnAssign))
+                    and _plain_local_class_constructor_is_provably_side_effect_free(
+                        value,
+                        known_classes=known_classes,
+                    )
+                ):
+                    binding = transfer_expression(value, binding)
+                targets = (
+                    statement.targets
+                    if isinstance(statement, ast.Assign)
+                    else [statement.target]
+                    if isinstance(statement, ast.AnnAssign)
+                    else []
+                )
+                if any(
+                    _may_rebind_entrypoint(
+                        target,
+                        assignment_name,
+                        constant_resolver=constant_resolver,
+                    )
+                    for target in targets
+                ):
+                    binding = _EntrypointBinding(ambiguous=True)
+                continue
+
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for expression in (
+                    *statement.decorator_list,
+                    *statement.args.defaults,
+                    *(value for value in statement.args.kw_defaults if value is not None),
+                ):
+                    binding = transfer_expression(expression, binding)
+                if statement.decorator_list or statement.name == assignment_name:
+                    binding = _EntrypointBinding(ambiguous=True)
+                continue
+
+            if isinstance(statement, ast.ClassDef):
+                for expression in (
+                    *statement.decorator_list,
+                    *statement.bases,
+                    *(keyword.value for keyword in statement.keywords),
+                ):
+                    binding = transfer_expression(expression, binding)
+                if not _plain_class_definition_is_provably_side_effect_free(
+                    statement,
+                    known_classes=known_classes,
+                ):
+                    binding = _EntrypointBinding(ambiguous=True)
+                continue
+
+            if not isinstance(statement, ast.Pass) or _may_rebind_entrypoint(
+                statement,
+                assignment_name,
+                constant_resolver=constant_resolver,
+            ):
                 binding = _EntrypointBinding(ambiguous=True)
             continue
 
-        branch_initial = (
-            _EntrypointBinding(ambiguous=True)
-            if _may_rebind_entrypoint(statement.test, assignment_name)
-            else binding
+        branch_initial = transfer_expression(
+            statement.test,
+            binding,
         )
-        if isinstance(statement.test, ast.Constant) and isinstance(
-            statement.test.value,
-            bool,
+        if not _truth_test_is_provably_side_effect_free(
+            statement.test,
+            constant_resolver=constant_resolver,
         ):
-            selected_branch = statement.body if statement.test.value else statement.orelse
+            branch_initial = _EntrypointBinding(ambiguous=True)
+        test_value = _safe_truth_value(
+            statement.test,
+            constant_resolver=constant_resolver,
+        )
+        if test_value is not None:
+            selected_branch = statement.body if test_value else statement.orelse
             binding = _entrypoint_binding_after(
                 selected_branch,
                 assignment_name=assignment_name,
                 initial=branch_initial,
+                constant_resolver=constant_resolver,
+                known_classes=known_classes,
             )
             continue
 
@@ -659,11 +1921,15 @@ def _entrypoint_binding_after(
             statement.body,
             assignment_name=assignment_name,
             initial=branch_initial,
+            constant_resolver=constant_resolver,
+            known_classes=known_classes,
         )
         else_binding = _entrypoint_binding_after(
             statement.orelse,
             assignment_name=assignment_name,
             initial=branch_initial,
+            constant_resolver=constant_resolver,
+            known_classes=known_classes,
         )
         if _same_entrypoint_binding(body_binding, else_binding):
             binding = body_binding
@@ -673,13 +1939,27 @@ def _entrypoint_binding_after(
 
 
 def _module_entrypoint_expression(
-    contract: _ModuleContract,
+    modules: dict[str, _ModuleContract],
+    *,
+    entrypoint_module: str,
     assignment_name: str,
 ) -> ast.expr | None:
+    contract = modules[entrypoint_module]
+
+    def constant_resolver(expression: ast.Name) -> Any:
+        value, _ = _safe_constant_value_with_assignments(
+            expression,
+            current_module=entrypoint_module,
+            modules=modules,
+        )
+        return value
+
     binding = _entrypoint_binding_after(
         contract.tree.body,
         assignment_name=assignment_name,
         initial=_EntrypointBinding(),
+        constant_resolver=constant_resolver,
+        known_classes=contract.classes,
     )
     if binding.ambiguous:
         return None
@@ -697,64 +1977,610 @@ def _active_entrypoint_class_refs(
     if entrypoint_contract is None:
         return set()
     entrypoint_expression = _module_entrypoint_expression(
-        entrypoint_contract,
-        assignment_name,
+        modules,
+        entrypoint_module=entrypoint_module,
+        assignment_name=assignment_name,
     )
     if entrypoint_expression is None:
         return set()
 
-    active_classes: set[_SymbolRef] = set()
-    visited_assignments: set[_SymbolRef] = set()
+    def assignment_expression(
+        expression: ast.expr,
+        current_module: str,
+        seen_assignments: frozenset[_SymbolRef],
+    ) -> tuple[
+        tuple[ast.expr, str, frozenset[_SymbolRef]] | None,
+        bool,
+    ]:
+        reference = _resolve_reference(
+            expression,
+            current_module=current_module,
+            modules=modules,
+        )
+        if reference is None:
+            return None, False
+        assignment_ref = _resolve_definition(
+            reference,
+            modules=modules,
+            kind="assignments",
+        )
+        if assignment_ref is None:
+            return None, False
+        if assignment_ref in seen_assignments:
+            return None, True
 
-    def visit_expression(expression: ast.expr, current_module: str) -> None:
-        if isinstance(expression, ast.Call):
-            reference = _resolve_reference(
-                expression.func,
-                current_module=current_module,
-                modules=modules,
+        assignment_contract = modules[assignment_ref.module]
+        before_lineno = expression.lineno if assignment_ref.module == current_module else None
+        assigned_expression, assignment_is_ambiguous = _single_static_assignment_expression(
+            assignment_contract,
+            assignment_ref.name,
+            before_lineno=before_lineno,
+        )
+        if assignment_is_ambiguous:
+            return None, True
+        if assigned_expression is None:
+            return None, False
+        return (
+            (
+                assigned_expression,
+                assignment_ref.module,
+                seen_assignments | {assignment_ref},
+            ),
+            False,
+        )
+
+    def trusted_environment_lookup(
+        expression: ast.expr,
+        current_module: str,
+    ) -> bool:
+        if not isinstance(expression, ast.Call):
+            return False
+        if (
+            len(expression.args) != 1
+            or expression.keywords
+            or not isinstance(expression.args[0], ast.Constant)
+            or not isinstance(expression.args[0].value, str)
+        ):
+            return False
+
+        function = expression.func
+        contract = modules[current_module]
+        if (
+            isinstance(function, ast.Attribute)
+            and function.attr == "getenv"
+            and isinstance(function.value, ast.Name)
+        ):
+            return contract.imported_modules.get(function.value.id) == "os"
+        return (
+            isinstance(function, ast.Attribute)
+            and function.attr == "get"
+            and isinstance(function.value, ast.Attribute)
+            and function.value.attr == "environ"
+            and isinstance(function.value.value, ast.Name)
+            and contract.imported_modules.get(function.value.value.id) == "os"
+        )
+
+    def safe_primitive_expression(
+        expression: ast.expr,
+        current_module: str,
+        seen_assignments: frozenset[_SymbolRef],
+    ) -> bool:
+        if isinstance(expression, ast.Constant):
+            return isinstance(
+                expression.value,
+                (bool, bytes, complex, float, int, str, type(None)),
             )
-            if reference is not None:
-                class_ref = _resolve_definition(
-                    reference,
-                    modules=modules,
-                    kind="classes",
+        if trusted_environment_lookup(expression, current_module):
+            return True
+        if isinstance(expression, (ast.List, ast.Set, ast.Tuple)):
+            return all(
+                not isinstance(element, ast.Starred)
+                and safe_primitive_expression(
+                    element,
+                    current_module,
+                    seen_assignments,
                 )
-                if class_ref is not None:
-                    active_classes.add(class_ref)
-            for argument in (*expression.args, *expression.keywords):
-                value = argument.value if isinstance(argument, ast.keyword) else argument
-                visit_expression(value, current_module)
-            return
-
-        if isinstance(expression, ast.Name):
-            reference = _resolve_reference(
+                for element in expression.elts
+            )
+        if isinstance(expression, ast.Dict):
+            return all(
+                key is not None
+                and safe_primitive_expression(
+                    key,
+                    current_module,
+                    seen_assignments,
+                )
+                and safe_primitive_expression(
+                    value,
+                    current_module,
+                    seen_assignments,
+                )
+                for key, value in zip(
+                    expression.keys,
+                    expression.values,
+                    strict=True,
+                )
+            )
+        if isinstance(expression, ast.UnaryOp) and isinstance(
+            expression.op,
+            (ast.Invert, ast.UAdd, ast.USub),
+        ):
+            return safe_primitive_expression(
+                expression.operand,
+                current_module,
+                seen_assignments,
+            )
+        if result_is_builtin_bool(
+            expression,
+            current_module,
+            seen_assignments,
+        ):
+            return evaluation_is_side_effect_free(
                 expression,
+                current_module,
+                seen_assignments,
+            )
+
+        assignment, assignment_is_ambiguous = assignment_expression(
+            expression,
+            current_module,
+            seen_assignments,
+        )
+        if assignment_is_ambiguous or assignment is None:
+            return False
+        return safe_primitive_expression(*assignment)
+
+    def result_is_builtin_bool(
+        expression: ast.expr,
+        current_module: str,
+        seen_assignments: frozenset[_SymbolRef],
+    ) -> bool:
+        """Whether the value itself is provably an exact built-in bool."""
+        if isinstance(expression, ast.Constant):
+            return isinstance(expression.value, bool)
+        if isinstance(expression, ast.UnaryOp) and isinstance(expression.op, ast.Not):
+            return True
+        if isinstance(expression, ast.Compare):
+            return all(
+                safe_primitive_expression(
+                    value,
+                    current_module,
+                    seen_assignments,
+                )
+                for value in (expression.left, *expression.comparators)
+            )
+        if isinstance(expression, ast.BoolOp):
+            return all(
+                result_is_builtin_bool(value, current_module, seen_assignments)
+                for value in expression.values
+            )
+        if isinstance(expression, ast.IfExp):
+            return result_is_builtin_bool(
+                expression.body,
+                current_module,
+                seen_assignments,
+            ) and result_is_builtin_bool(
+                expression.orelse,
+                current_module,
+                seen_assignments,
+            )
+        assignment, assignment_is_ambiguous = assignment_expression(
+            expression,
+            current_module,
+            seen_assignments,
+        )
+        if assignment_is_ambiguous or assignment is None:
+            return False
+        return result_is_builtin_bool(*assignment)
+
+    def evaluation_is_side_effect_free(
+        expression: ast.expr,
+        current_module: str,
+        seen_assignments: frozenset[_SymbolRef],
+    ) -> bool:
+        """Whether evaluating the value can avoid plugin-defined Python code."""
+        if isinstance(expression, ast.Constant):
+            return True
+        if trusted_environment_lookup(expression, current_module):
+            return True
+        if isinstance(expression, (ast.List, ast.Set, ast.Tuple)):
+            return all(
+                not isinstance(element, ast.Starred)
+                and evaluation_is_side_effect_free(
+                    element,
+                    current_module,
+                    seen_assignments,
+                )
+                for element in expression.elts
+            )
+        if isinstance(expression, ast.Dict):
+            return all(
+                key is not None
+                and evaluation_is_side_effect_free(
+                    key,
+                    current_module,
+                    seen_assignments,
+                )
+                and evaluation_is_side_effect_free(
+                    value,
+                    current_module,
+                    seen_assignments,
+                )
+                for key, value in zip(
+                    expression.keys,
+                    expression.values,
+                    strict=True,
+                )
+            )
+        if isinstance(expression, ast.Compare):
+            return all(
+                safe_primitive_expression(
+                    value,
+                    current_module,
+                    seen_assignments,
+                )
+                for value in (expression.left, *expression.comparators)
+            )
+        if isinstance(expression, ast.UnaryOp):
+            return safe_primitive_expression(
+                expression.operand,
+                current_module,
+                seen_assignments,
+            )
+        if isinstance(expression, ast.BoolOp):
+            return all(
+                safe_primitive_expression(
+                    value,
+                    current_module,
+                    seen_assignments,
+                )
+                for value in expression.values
+            )
+        if isinstance(expression, ast.IfExp):
+            return all(
+                safe_primitive_expression(
+                    value,
+                    current_module,
+                    seen_assignments,
+                )
+                for value in (
+                    expression.test,
+                    expression.body,
+                    expression.orelse,
+                )
+            )
+
+        assignment, assignment_is_ambiguous = assignment_expression(
+            expression,
+            current_module,
+            seen_assignments,
+        )
+        if assignment_is_ambiguous or assignment is None:
+            return False
+        return evaluation_is_side_effect_free(*assignment)
+
+    def stable_unknown_truth_test(
+        expression: ast.expr,
+        current_module: str,
+        seen_assignments: frozenset[_SymbolRef],
+    ) -> bool:
+        """Allow unknown choices only when truth-testing cannot run user code."""
+        if not isinstance(expression, ast.Name):
+            return False
+        assignment, assignment_is_ambiguous = assignment_expression(
+            expression,
+            current_module,
+            seen_assignments,
+        )
+        if assignment_is_ambiguous or assignment is None:
+            return False
+        return result_is_builtin_bool(
+            *assignment,
+        ) and evaluation_is_side_effect_free(*assignment)
+
+    def sequence_elements(
+        expression: ast.expr,
+        current_module: str,
+        seen_assignments: frozenset[_SymbolRef],
+    ) -> list[tuple[ast.expr, str, frozenset[_SymbolRef]]] | None:
+        if isinstance(expression, (ast.List, ast.Tuple)):
+            elements: list[tuple[ast.expr, str, frozenset[_SymbolRef]]] = []
+            for element in expression.elts:
+                if isinstance(element, ast.Starred):
+                    expanded = sequence_elements(
+                        element.value,
+                        current_module,
+                        seen_assignments,
+                    )
+                    if expanded is None:
+                        return None
+                    elements.extend(expanded)
+                else:
+                    elements.append(
+                        (element, current_module, seen_assignments),
+                    )
+            return elements
+
+        if isinstance(expression, ast.IfExp):
+            test_value, assignment_is_ambiguous = _safe_constant_value_with_assignments(
+                expression.test,
                 current_module=current_module,
                 modules=modules,
+                seen_assignments=seen_assignments,
             )
-            if reference is None or reference in visited_assignments:
-                return
-            assignment_ref = _resolve_definition(
+            if assignment_is_ambiguous or test_value is _UNKNOWN_CONSTANT:
+                return None
+            selected = expression.body if bool(test_value) else expression.orelse
+            return sequence_elements(selected, current_module, seen_assignments)
+
+        assignment, assignment_is_ambiguous = assignment_expression(
+            expression,
+            current_module,
+            seen_assignments,
+        )
+        if assignment_is_ambiguous or assignment is None:
+            return None
+        return sequence_elements(*assignment)
+
+    def constant_index_value(
+        expression: ast.expr,
+        current_module: str,
+        seen_assignments: frozenset[_SymbolRef],
+    ) -> tuple[Any, bool]:
+        return _safe_constant_value_with_assignments(
+            expression,
+            current_module=current_module,
+            modules=modules,
+            seen_assignments=seen_assignments,
+        )
+
+    def resolve_expression(
+        expression: ast.expr,
+        current_module: str,
+        seen_assignments: frozenset[_SymbolRef],
+    ) -> _EntrypointClassResolution:
+        if isinstance(expression, ast.Call):
+            assignment, assignment_is_ambiguous = assignment_expression(
+                expression.func,
+                current_module,
+                seen_assignments,
+            )
+            if assignment_is_ambiguous:
+                return _EntrypointClassResolution(ambiguous=True)
+            if assignment is not None:
+                factory_expression, factory_module, factory_seen = assignment
+                return resolve_factory(
+                    factory_expression,
+                    factory_module,
+                    factory_seen,
+                )
+            return resolve_factory(
+                expression.func,
+                current_module,
+                seen_assignments,
+            )
+
+        if isinstance(expression, (ast.List, ast.Tuple)):
+            elements = sequence_elements(
+                expression,
+                current_module,
+                seen_assignments,
+            )
+            if elements is None:
+                return _EntrypointClassResolution(ambiguous=True)
+            active_classes: set[_SymbolRef] = set()
+            for element, element_module, element_seen in elements:
+                resolution = resolve_expression(
+                    element,
+                    element_module,
+                    element_seen,
+                )
+                if resolution.ambiguous or resolution.is_collection or len(resolution.classes) != 1:
+                    return _EntrypointClassResolution(ambiguous=True)
+                active_classes.update(resolution.classes)
+            return _EntrypointClassResolution(
+                classes=frozenset(active_classes),
+                is_collection=True,
+            )
+
+        if isinstance(expression, ast.IfExp):
+            test_value, assignment_is_ambiguous = _safe_constant_value_with_assignments(
+                expression.test,
+                current_module=current_module,
+                modules=modules,
+                seen_assignments=seen_assignments,
+            )
+            if assignment_is_ambiguous:
+                return _EntrypointClassResolution(ambiguous=True)
+            if test_value is not _UNKNOWN_CONSTANT:
+                selected = expression.body if bool(test_value) else expression.orelse
+                return resolve_expression(selected, current_module, seen_assignments)
+
+            if not stable_unknown_truth_test(
+                expression.test,
+                current_module,
+                seen_assignments,
+            ):
+                return _EntrypointClassResolution(ambiguous=True)
+            body_resolution = resolve_expression(
+                expression.body,
+                current_module,
+                seen_assignments,
+            )
+            else_resolution = resolve_expression(
+                expression.orelse,
+                current_module,
+                seen_assignments,
+            )
+            if (
+                body_resolution.ambiguous
+                or else_resolution.ambiguous
+                or body_resolution != else_resolution
+            ):
+                return _EntrypointClassResolution(ambiguous=True)
+            return body_resolution
+
+        if isinstance(expression, ast.Subscript):
+            if isinstance(expression.slice, ast.Slice):
+                return _EntrypointClassResolution(ambiguous=True)
+            elements = sequence_elements(
+                expression.value,
+                current_module,
+                seen_assignments,
+            )
+            if elements is None:
+                return _EntrypointClassResolution(ambiguous=True)
+            index, assignment_is_ambiguous = constant_index_value(
+                expression.slice,
+                current_module,
+                seen_assignments,
+            )
+            if assignment_is_ambiguous:
+                return _EntrypointClassResolution(ambiguous=True)
+            if index is not _UNKNOWN_CONSTANT:
+                if not isinstance(index, int) or not (-len(elements) <= index < len(elements)):
+                    return _EntrypointClassResolution(ambiguous=True)
+                return resolve_expression(*elements[index])
+
+            if not isinstance(expression.slice, ast.Name) or not elements:
+                return _EntrypointClassResolution(ambiguous=True)
+            candidate_class: _SymbolRef | None = None
+            for element, element_module, element_seen in elements:
+                resolution = resolve_expression(
+                    element,
+                    element_module,
+                    element_seen,
+                )
+                if resolution.ambiguous or resolution.is_collection or len(resolution.classes) != 1:
+                    return _EntrypointClassResolution(ambiguous=True)
+                (current_class,) = resolution.classes
+                if candidate_class is None:
+                    candidate_class = current_class
+                elif current_class != candidate_class:
+                    return _EntrypointClassResolution(ambiguous=True)
+            return _EntrypointClassResolution(
+                classes=frozenset({candidate_class}),
+            )
+
+        assignment, assignment_is_ambiguous = assignment_expression(
+            expression,
+            current_module,
+            seen_assignments,
+        )
+        if assignment_is_ambiguous:
+            return _EntrypointClassResolution(ambiguous=True)
+        if assignment is not None:
+            return resolve_expression(*assignment)
+        return _EntrypointClassResolution(ambiguous=True)
+
+    def resolve_factory(
+        expression: ast.expr,
+        current_module: str,
+        seen_assignments: frozenset[_SymbolRef],
+    ) -> _EntrypointClassResolution:
+        if isinstance(expression, ast.IfExp):
+            test_value, assignment_is_ambiguous = _safe_constant_value_with_assignments(
+                expression.test,
+                current_module=current_module,
+                modules=modules,
+                seen_assignments=seen_assignments,
+            )
+            if assignment_is_ambiguous:
+                return _EntrypointClassResolution(ambiguous=True)
+            if test_value is not _UNKNOWN_CONSTANT:
+                selected = expression.body if bool(test_value) else expression.orelse
+                return resolve_factory(selected, current_module, seen_assignments)
+            if not stable_unknown_truth_test(
+                expression.test,
+                current_module,
+                seen_assignments,
+            ):
+                return _EntrypointClassResolution(ambiguous=True)
+            body_resolution = resolve_factory(
+                expression.body,
+                current_module,
+                seen_assignments,
+            )
+            else_resolution = resolve_factory(
+                expression.orelse,
+                current_module,
+                seen_assignments,
+            )
+            if (
+                body_resolution.ambiguous
+                or else_resolution.ambiguous
+                or body_resolution != else_resolution
+            ):
+                return _EntrypointClassResolution(ambiguous=True)
+            return body_resolution
+
+        if isinstance(expression, ast.Subscript):
+            if isinstance(expression.slice, ast.Slice):
+                return _EntrypointClassResolution(ambiguous=True)
+            elements = sequence_elements(
+                expression.value,
+                current_module,
+                seen_assignments,
+            )
+            if elements is None:
+                return _EntrypointClassResolution(ambiguous=True)
+            index, assignment_is_ambiguous = constant_index_value(
+                expression.slice,
+                current_module,
+                seen_assignments,
+            )
+            if assignment_is_ambiguous:
+                return _EntrypointClassResolution(ambiguous=True)
+            if index is not _UNKNOWN_CONSTANT:
+                if not isinstance(index, int) or not (-len(elements) <= index < len(elements)):
+                    return _EntrypointClassResolution(ambiguous=True)
+                return resolve_factory(*elements[index])
+            if not isinstance(expression.slice, ast.Name) or not elements:
+                return _EntrypointClassResolution(ambiguous=True)
+            candidate: _EntrypointClassResolution | None = None
+            for element in elements:
+                resolution = resolve_factory(*element)
+                if resolution.ambiguous:
+                    return _EntrypointClassResolution(ambiguous=True)
+                if candidate is None:
+                    candidate = resolution
+                elif resolution != candidate:
+                    return _EntrypointClassResolution(ambiguous=True)
+            return candidate or _EntrypointClassResolution(ambiguous=True)
+
+        assignment, assignment_is_ambiguous = assignment_expression(
+            expression,
+            current_module,
+            seen_assignments,
+        )
+        if assignment_is_ambiguous:
+            return _EntrypointClassResolution(ambiguous=True)
+        if assignment is not None:
+            return resolve_factory(*assignment)
+
+        reference = _resolve_reference(
+            expression,
+            current_module=current_module,
+            modules=modules,
+        )
+        if reference is not None:
+            class_ref = _resolve_definition(
                 reference,
                 modules=modules,
-                kind="assignments",
+                kind="classes",
             )
-            if assignment_ref is None:
-                return
-            visited_assignments.add(assignment_ref)
-            assignment_contract = modules[assignment_ref.module]
-            visit_expression(
-                assignment_contract.assignments[assignment_ref.name],
-                assignment_ref.module,
-            )
-            return
+            if class_ref is not None:
+                return _EntrypointClassResolution(
+                    classes=frozenset({class_ref}),
+                )
+        return _EntrypointClassResolution(ambiguous=True)
 
-        for child in ast.iter_child_nodes(expression):
-            if isinstance(child, ast.expr):
-                visit_expression(child, current_module)
-
-    visit_expression(entrypoint_expression, entrypoint_module)
-    return active_classes
+    resolution = resolve_expression(
+        entrypoint_expression,
+        entrypoint_module,
+        frozenset(),
+    )
+    return set() if resolution.ambiguous else set(resolution.classes)
 
 
 def _active_runner_class_refs(

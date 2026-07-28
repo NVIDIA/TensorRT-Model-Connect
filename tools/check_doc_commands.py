@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import argparse
 import ast
+import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import textwrap
@@ -150,6 +152,7 @@ class ShellBlock:
     line: int
     language: str
     body: str
+    cwd: Path = Path(".")
 
 
 @dataclass(frozen=True)
@@ -172,6 +175,26 @@ class _MarkdownContainer:
 class _ShellCommand:
     tokens: tuple[str, ...]
     input_redirections: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _WrapperResolution:
+    tokens: tuple[str, ...]
+    cwd: Path
+    uncertainty: tuple[str, ...] = ()
+    cwd_hops: tuple[Path, ...] = ()
+
+
+@dataclass(frozen=True)
+class _NestedShellPayload:
+    body: str
+    cwd: Path
+
+
+@dataclass(frozen=True)
+class _InputCandidate:
+    token: str
+    allow_plain: bool = False
 
 
 @dataclass(frozen=True)
@@ -704,9 +727,106 @@ def _block_commands(block: ShellBlock) -> Iterable[tuple[int, list[str]]]:
 def _is_static_env_operand(token: str) -> bool:
     """Return whether an ``env`` option operand is statically knowable."""
     return bool(token) and not any(
-        marker in token
-        for marker in ("$", "`", "\x00", "DOC_PLACEHOLDER")
+        marker in token for marker in ("$", "`", "\x00", "DOC_PLACEHOLDER")
     )
+
+
+def _split_gnu_env_string(value: str) -> list[str] | None:
+    """Parse the static GNU ``env -S`` subset used by documentation.
+
+    GNU ``env`` does not use shell word splitting here. In particular, ``\\_``
+    is an argument separator outside quotes and a literal space inside double
+    quotes. Unsupported escapes and malformed quoting fail closed.
+    """
+    arguments: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    token_started = False
+    index = 0
+    whitespace = " \t\n\r\v\f"
+    escapes = {
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "v": "\v",
+        "#": "#",
+        "$": "$",
+        '"': '"',
+        "'": "'",
+        "\\": "\\",
+    }
+
+    def finish_argument() -> None:
+        nonlocal token_started
+        if token_started:
+            arguments.append("".join(current))
+            current.clear()
+            token_started = False
+
+    while index < len(value):
+        character = value[index]
+        if quote is None and character in whitespace:
+            finish_argument()
+            index += 1
+            continue
+        if quote is None and character == "#" and not token_started:
+            break
+        if character in {"'", '"'}:
+            if quote is None:
+                quote = character
+                token_started = True
+                index += 1
+                continue
+            if quote == character:
+                quote = None
+                index += 1
+                continue
+            current.append(character)
+            token_started = True
+            index += 1
+            continue
+        if character != "\\":
+            current.append(character)
+            token_started = True
+            index += 1
+            continue
+        if index + 1 >= len(value):
+            return None
+
+        escaped = value[index + 1]
+        if quote == "'":
+            if escaped in {"'", "\\"}:
+                current.append(escaped)
+            else:
+                current.extend(("\\", escaped))
+            token_started = True
+            index += 2
+            continue
+        if escaped == "c":
+            if quote == '"':
+                return None
+            finish_argument()
+            return arguments
+        if escaped == "_":
+            if quote == '"':
+                current.append(" ")
+                token_started = True
+            else:
+                finish_argument()
+            index += 2
+            continue
+        replacement = escapes.get(escaped)
+        if replacement is None:
+            return None
+        current.append(replacement)
+        token_started = True
+        index += 2
+
+    if quote is not None:
+        return None
+    finish_argument()
+    return arguments
 
 
 def _strip_command_wrapper(tokens: Sequence[str]) -> list[str] | None:
@@ -791,47 +911,201 @@ def _strip_time_wrapper(tokens: Sequence[str]) -> list[str] | None:
     return []
 
 
-def _strip_shell_wrappers(
-    tokens: list[str],
-    *,
-    uncertainty: list[str] | None = None,
-) -> list[str]:
-    """Drop understood assignments plus ``env``, ``command``, and ``time``.
+_TIMEOUT_DURATION_RE = re.compile(
+    r"\+?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|"
+    r"(?i:inf(?:inity)?))(?:s|m|h|d)?\Z",
+)
+_TIMEOUT_FLAG_OPTIONS = {
+    "--foreground",
+    "--preserve-status",
+    "-v",
+    "--verbose",
+}
+_TIMEOUT_VALUE_OPTIONS = {
+    "-k",
+    "--kill-after",
+    "-s",
+    "--signal",
+}
 
-    Unknown or dynamic wrapper options return no command so callers fail closed
-    instead of treating an option operand as an executable.
-    """
+
+def _is_timeout_signal(value: str) -> bool:
+    """Return whether GNU ``timeout`` accepts a static signal value."""
+    if re.fullmatch(r"[0-9]+", value) is not None:
+        number = int(value)
+        return number == 0 or number in {int(candidate) for candidate in signal.valid_signals()}
+
+    normalized = value.upper().removeprefix("SIG")
+    realtime = re.fullmatch(r"(RTMIN|RTMAX)([+-])([0-9]+)", normalized)
+    if realtime is not None:
+        base = signal.SIGRTMIN if realtime.group(1) == "RTMIN" else signal.SIGRTMAX
+        offset = int(realtime.group(3))
+        number = base + offset if realtime.group(2) == "+" else base - offset
+        return signal.SIGRTMIN <= number <= signal.SIGRTMAX
+    candidate = getattr(signal, f"SIG{normalized}", None)
+    return isinstance(candidate, int) and not normalized.startswith("_")
+
+
+def _strip_timeout_wrapper(tokens: Sequence[str]) -> list[str] | None:
+    """Return the command after a statically understood GNU ``timeout``."""
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            index += 1
+            break
+        if token in {"--help", "--version"}:
+            return []
+        if token in _TIMEOUT_FLAG_OPTIONS:
+            index += 1
+            continue
+        option, separator, value = token.partition("=")
+        if option in {"--kill-after", "--signal"} and separator:
+            if not _is_static_env_operand(value):
+                return None
+            if option == "--kill-after" and _TIMEOUT_DURATION_RE.fullmatch(value) is None:
+                return None
+            if option == "--signal" and not _is_timeout_signal(value):
+                return None
+            index += 1
+            continue
+        if token in _TIMEOUT_VALUE_OPTIONS:
+            if index + 1 >= len(tokens):
+                return None
+            value = tokens[index + 1]
+            if not _is_static_env_operand(value):
+                return None
+            if token in {"-k", "--kill-after"} and _TIMEOUT_DURATION_RE.fullmatch(value) is None:
+                return None
+            if token in {"-s", "--signal"} and not _is_timeout_signal(value):
+                return None
+            index += 2
+            continue
+        if token.startswith("-") and not token.startswith("--"):
+            options = token[1:]
+            cursor = 0
+            consumed_next = False
+            while cursor < len(options):
+                short_option = options[cursor]
+                if short_option == "v":
+                    cursor += 1
+                    continue
+                if short_option not in {"k", "s"}:
+                    return None
+                value = options[cursor + 1 :]
+                if not value:
+                    if index + 1 >= len(tokens):
+                        return None
+                    value = tokens[index + 1]
+                    consumed_next = True
+                if not _is_static_env_operand(value):
+                    return None
+                if short_option == "k" and _TIMEOUT_DURATION_RE.fullmatch(value) is None:
+                    return None
+                if short_option == "s" and not _is_timeout_signal(value):
+                    return None
+                cursor = len(options)
+            index += 2 if consumed_next else 1
+            continue
+        if token.startswith("-"):
+            return None
+        break
+
+    if index >= len(tokens):
+        return None
+    duration = tokens[index]
+    if _TIMEOUT_DURATION_RE.fullmatch(duration) is None:
+        return None
+    index += 1
+    if index >= len(tokens):
+        return None
+    return list(tokens[index:])
+
+
+def _updated_static_cwd(cwd: Path, operand: str) -> Path:
+    """Apply one statically known ``env --chdir`` operand lexically."""
+    target = Path(operand)
+    if target.is_absolute():
+        return target
+    return Path(os.path.normpath(str(cwd / target)))
+
+
+def _wrapper_uncertainty(
+    cwd: Path,
+    reason: str,
+    *,
+    cwd_hops: Sequence[Path] = (),
+) -> _WrapperResolution:
+    return _WrapperResolution(
+        (),
+        cwd,
+        uncertainty=(reason,),
+        cwd_hops=tuple(cwd_hops),
+    )
+
+
+def _resolve_shell_wrappers(
+    tokens: Sequence[str],
+    *,
+    cwd: Path = Path("."),
+    max_split_depth: int = 8,
+) -> _WrapperResolution:
+    """Resolve supported shell wrappers without losing their static cwd."""
     remaining = list(tokens)
+    split_depth = 0
+    cwd_hops: list[Path] = []
     while True:
         while remaining and _ENV_ASSIGNMENT_RE.match(remaining[0]):
             remaining.pop(0)
         if not remaining:
-            return remaining
+            return _WrapperResolution((), cwd, cwd_hops=tuple(cwd_hops))
         if remaining[0] in {"command", "/usr/bin/command"}:
             stripped = _strip_command_wrapper(remaining)
             if stripped is None:
-                if uncertainty is not None:
-                    uncertainty.append("unsupported `command` wrapper options")
-                return []
+                return _wrapper_uncertainty(
+                    cwd,
+                    "unsupported `command` wrapper options",
+                    cwd_hops=cwd_hops,
+                )
             remaining = stripped
             continue
         if remaining[0] in {"time", "/bin/time", "/usr/bin/time"}:
             stripped = _strip_time_wrapper(remaining)
             if stripped is None:
-                if uncertainty is not None:
-                    uncertainty.append("unsupported `time` wrapper options")
-                return []
+                return _wrapper_uncertainty(
+                    cwd,
+                    "unsupported `time` wrapper options",
+                    cwd_hops=cwd_hops,
+                )
+            remaining = stripped
+            continue
+        if Path(remaining[0]).name == "timeout":
+            stripped = _strip_timeout_wrapper(remaining)
+            if stripped is None:
+                return _wrapper_uncertainty(
+                    cwd,
+                    "unsupported `timeout` wrapper options or command boundary",
+                    cwd_hops=cwd_hops,
+                )
             remaining = stripped
             continue
         if remaining[0] not in {"env", "/usr/bin/env"}:
-            return remaining
+            return _WrapperResolution(
+                tuple(remaining),
+                cwd,
+                cwd_hops=tuple(cwd_hops),
+            )
 
+        env_entry_cwd = cwd
+        chdir_operand: str | None = None
         index = 1
         while index < len(remaining):
             token = remaining[index]
             if token == "--":
                 index += 1
                 break
+            if token in {"--help", "--version"}:
+                return _WrapperResolution((), cwd, cwd_hops=tuple(cwd_hops))
             if token in {"-i", "--ignore-environment", "-"}:
                 index += 1
                 continue
@@ -840,42 +1114,125 @@ def _strip_shell_wrappers(
                     index + 1 >= len(remaining)
                     or _ENV_NAME_RE.fullmatch(remaining[index + 1]) is None
                 ):
-                    return []
+                    return _wrapper_uncertainty(
+                        cwd,
+                        "unsupported or dynamic `env` wrapper options",
+                        cwd_hops=cwd_hops,
+                    )
                 index += 2
                 continue
             if token.startswith("-u") and token != "-u":
                 if _ENV_NAME_RE.fullmatch(token[2:]) is None:
-                    return []
+                    return _wrapper_uncertainty(
+                        cwd,
+                        "unsupported or dynamic `env` wrapper options",
+                        cwd_hops=cwd_hops,
+                    )
                 index += 1
                 continue
             if token.startswith("--unset="):
                 if _ENV_NAME_RE.fullmatch(token.partition("=")[2]) is None:
-                    return []
+                    return _wrapper_uncertainty(
+                        cwd,
+                        "unsupported or dynamic `env` wrapper options",
+                        cwd_hops=cwd_hops,
+                    )
                 index += 1
                 continue
             if token in {"-C", "--chdir"}:
-                if (
-                    index + 1 >= len(remaining)
-                    or not _is_static_env_operand(remaining[index + 1])
-                ):
-                    return []
+                if index + 1 >= len(remaining) or not _is_static_env_operand(remaining[index + 1]):
+                    return _wrapper_uncertainty(
+                        cwd,
+                        "unsupported or dynamic `env` wrapper options",
+                        cwd_hops=cwd_hops,
+                    )
+                chdir_operand = remaining[index + 1]
                 index += 2
                 continue
             if token.startswith("-C") and token != "-C":
-                if not _is_static_env_operand(token[2:]):
-                    return []
+                operand = token[2:]
+                if not _is_static_env_operand(operand):
+                    return _wrapper_uncertainty(
+                        cwd,
+                        "unsupported or dynamic `env` wrapper options",
+                        cwd_hops=cwd_hops,
+                    )
+                chdir_operand = operand
                 index += 1
                 continue
             if token.startswith("--chdir="):
-                if not _is_static_env_operand(token.partition("=")[2]):
-                    return []
+                operand = token.partition("=")[2]
+                if not _is_static_env_operand(operand):
+                    return _wrapper_uncertainty(
+                        cwd,
+                        "unsupported or dynamic `env` wrapper options",
+                        cwd_hops=cwd_hops,
+                    )
+                chdir_operand = operand
                 index += 1
                 continue
+
+            split_value: str | None = None
+            split_end = index + 1
+            if token in {"-S", "--split-string"}:
+                if index + 1 < len(remaining):
+                    split_value = remaining[index + 1]
+                    split_end = index + 2
+            elif token.startswith("-S") and token != "-S":
+                split_value = token[2:]
+            elif token.startswith("--split-string="):
+                split_value = token.partition("=")[2]
+            if split_value is not None:
+                if split_depth >= max_split_depth or not _is_static_env_operand(split_value):
+                    return _wrapper_uncertainty(
+                        cwd,
+                        "unsupported or dynamic `env` wrapper options",
+                        cwd_hops=cwd_hops,
+                    )
+                split_tokens = _split_gnu_env_string(split_value)
+                if split_tokens is None:
+                    return _wrapper_uncertainty(
+                        cwd,
+                        "unsupported or dynamic `env` wrapper options",
+                        cwd_hops=cwd_hops,
+                    )
+                remaining[index:split_end] = split_tokens
+                split_depth += 1
+                continue
+            if token in {"-S", "--split-string"}:
+                return _wrapper_uncertainty(
+                    cwd,
+                    "unsupported or dynamic `env` wrapper options",
+                    cwd_hops=cwd_hops,
+                )
             if token.startswith("-"):
-                return []
+                return _wrapper_uncertainty(
+                    cwd,
+                    "unsupported or dynamic `env` wrapper options",
+                    cwd_hops=cwd_hops,
+                )
             break
 
+        if chdir_operand is not None:
+            cwd = _updated_static_cwd(env_entry_cwd, chdir_operand)
+            cwd_hops.append(cwd)
         remaining = remaining[index:]
+
+
+def _strip_shell_wrappers(
+    tokens: list[str],
+    *,
+    uncertainty: list[str] | None = None,
+    cwd: Path = Path("."),
+    cwd_out: list[Path] | None = None,
+) -> list[str]:
+    """Compatibility wrapper returning only the resolved command tokens."""
+    resolution = _resolve_shell_wrappers(tokens, cwd=cwd)
+    if uncertainty is not None:
+        uncertainty.extend(resolution.uncertainty)
+    if cwd_out is not None:
+        cwd_out.append(resolution.cwd)
+    return list(resolution.tokens)
 
 
 def _is_inline_command(body: str) -> bool:
@@ -892,7 +1249,28 @@ def _is_inline_command(body: str) -> bool:
     tokens = list(commands[0].tokens)
     if tokens and tokens[0] == "$":
         tokens.pop(0)
-    tokens = _strip_shell_wrappers(tokens)
+    original = list(tokens)
+    resolution = _resolve_shell_wrappers(tokens)
+    tokens = list(resolution.tokens)
+    if resolution.uncertainty:
+        while original and _ENV_ASSIGNMENT_RE.match(original[0]):
+            original.pop(0)
+        return bool(
+            original
+            and (
+                original[0]
+                in {
+                    "command",
+                    "/usr/bin/command",
+                    "time",
+                    "/bin/time",
+                    "/usr/bin/time",
+                    "env",
+                    "/usr/bin/env",
+                }
+                or Path(original[0]).name == "timeout"
+            )
+        )
     if not tokens:
         return False
     command = tokens[0]
@@ -967,20 +1345,28 @@ def _docker_exec_command(tokens: Sequence[str]) -> list[str] | None:
     return list(tokens[index + 1 :]) if index + 1 < len(tokens) else None
 
 
-def _nested_shell_payload(tokens: Sequence[str]) -> str | None:
+def _nested_shell_payload(
+    tokens: Sequence[str],
+    *,
+    cwd: Path,
+) -> _NestedShellPayload | None:
     """Extract a statically knowable shell payload from supported wrappers."""
-    remaining = _strip_shell_wrappers(list(tokens))
+    resolution = _resolve_shell_wrappers(tokens, cwd=cwd)
+    remaining = list(resolution.tokens)
     if not remaining:
         return None
 
     payload = _shell_c_payload(remaining)
+    payload_cwd = resolution.cwd
     if payload is None and Path(remaining[0]).name == "docker":
         docker_command = _docker_exec_command(remaining)
-        payload = (
-            _shell_c_payload(_strip_shell_wrappers(docker_command))
-            if docker_command is not None
-            else None
-        )
+        if docker_command is not None:
+            docker_resolution = _resolve_shell_wrappers(
+                docker_command,
+                cwd=resolution.cwd,
+            )
+            payload = _shell_c_payload(docker_resolution.tokens)
+            payload_cwd = docker_resolution.cwd
 
     if (
         payload is None
@@ -991,7 +1377,7 @@ def _nested_shell_payload(tokens: Sequence[str]) -> str | None:
         or "DOC_PLACEHOLDER" in payload
     ):
         return None
-    return payload
+    return _NestedShellPayload(payload, payload_cwd)
 
 
 def shell_validation_blocks(
@@ -1017,10 +1403,13 @@ def shell_validation_blocks(
         if depth >= max_nested_depth:
             return
         for offset, command in _block_shell_commands(current):
-            payload = _nested_shell_payload(command.tokens)
+            payload = _nested_shell_payload(
+                command.tokens,
+                cwd=current.cwd,
+            )
             if payload is None:
                 continue
-            body = payload + ("" if payload.endswith("\n") else "\n")
+            body = payload.body + ("" if payload.body.endswith("\n") else "\n")
             signature = normalize_shell(body).strip()
             if not signature or signature in ancestors:
                 continue
@@ -1029,6 +1418,7 @@ def shell_validation_blocks(
                 line=_source_line(current, offset),
                 language=_NESTED_SHELL_LANGUAGE,
                 body=body,
+                cwd=payload.cwd,
             )
             yield from visit(
                 nested,
@@ -1040,16 +1430,15 @@ def shell_validation_blocks(
     yield from visit(block, 0, frozenset({root_signature}))
 
 
-def _clean_local_path(token: str) -> str | None:
+def _normalized_path_token(token: str) -> str | None:
     token = token.strip("'\"")
-    if token.startswith("./"):
-        token = token[2:]
     token = token.split("::", 1)[0]
     token = token.rstrip(".,;:)")
     if (
         not token
         or token == "."
         or token.startswith("/")
+        or any(character.isspace() for character in token)
         or "$" in token
         or "*" in token
         or "?" in token
@@ -1059,12 +1448,82 @@ def _clean_local_path(token: str) -> str | None:
         or "DOC_PLACEHOLDER" in token
     ):
         return None
-    if token.startswith(_LOCAL_PREFIXES):
-        return token
+    return token
+
+
+def _candidate_repo_path_token(
+    token: str,
+    *,
+    allow_plain: bool = False,
+) -> str | None:
+    """Return a static relative path token that this checker owns."""
+    normalized = _normalized_path_token(token)
+    if normalized is None:
+        return None
+    classification = normalized.removeprefix("./")
+    looks_local = classification.startswith(_LOCAL_PREFIXES)
+    if allow_plain:
+        path = Path(normalized)
+        looks_local = looks_local or "/" in normalized or bool(path.suffix)
+    if looks_local:
+        return normalized
     return None
 
 
-def _candidate_input_paths(tokens: list[str]) -> list[str]:
+def _resolved_repo_local_path(
+    repo_root: Path,
+    cwd: Path,
+    token: str,
+    *,
+    allow_plain: bool = False,
+) -> str | None:
+    """Resolve a relative input against a static cwd, bounded to the repo."""
+    normalized = _candidate_repo_path_token(
+        token,
+        allow_plain=allow_plain,
+    )
+    if normalized is None:
+        return None
+
+    root = repo_root.resolve()
+    base = _resolved_command_cwd(repo_root, cwd)
+    resolved = (base / normalized).resolve()
+    try:
+        return resolved.relative_to(root).as_posix()
+    except ValueError:
+        return None
+
+
+def _resolved_command_cwd(repo_root: Path, cwd: Path) -> Path:
+    """Return the absolute static cwd used to resolve command operands."""
+    root = repo_root.resolve()
+    return cwd.resolve() if cwd.is_absolute() else (root / cwd).resolve()
+
+
+def _external_candidate_path(
+    repo_root: Path,
+    cwd: Path,
+    token: str,
+    *,
+    allow_plain: bool,
+) -> Path | None:
+    """Return a static candidate's path when it resolves outside the repo."""
+    normalized = _candidate_repo_path_token(
+        token,
+        allow_plain=allow_plain,
+    )
+    if normalized is None:
+        return None
+    root = repo_root.resolve()
+    resolved = (_resolved_command_cwd(repo_root, cwd) / normalized).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return resolved
+    return None
+
+
+def _candidate_input_paths(tokens: list[str]) -> list[_InputCandidate]:
     """Return repo-local inputs whose existence is required by the command."""
     tokens = _strip_shell_wrappers(tokens)
     if not tokens:
@@ -1072,56 +1531,127 @@ def _candidate_input_paths(tokens: list[str]) -> list[str]:
 
     command = tokens[0]
     command_name = Path(command).name
-    candidates: list[str] = []
+    candidates: list[_InputCandidate] = []
 
-    if command.startswith("./"):
-        candidates.append(command)
+    if command.startswith(("./", "../")):
+        candidates.append(_InputCandidate(command, allow_plain=True))
 
-    if command_name in {"python", "python3", "bash", "sh"}:
+    if command_name in {"bash", "sh"}:
         for token in tokens[1:]:
             if token.startswith("-"):
                 continue
-            local = _clean_local_path(token)
-            if local:
-                candidates.append(local)
+            candidates.append(_InputCandidate(token, allow_plain=True))
+            break
+    if command_name in {"python", "python3"}:
+        index = 1
+        while index < len(tokens):
+            token = tokens[index]
+            if token in {"-c", "-m"}:
+                break
+            if token == "--":
+                if index + 1 < len(tokens):
+                    candidates.append(_InputCandidate(tokens[index + 1], allow_plain=True))
+                break
+            if token in {"-W", "-X", "--check-hash-based-pycs"}:
+                index += 2
+                continue
+            if token.startswith("-"):
+                index += 1
+                continue
+            candidates.append(_InputCandidate(token, allow_plain=True))
             break
 
     if command_name == "find" and len(tokens) > 1:
-        candidates.append(tokens[1])
+        candidates.append(_InputCandidate(tokens[1], allow_plain=True))
 
     if command_name == "cat":
-        candidates.extend(tokens[1:])
+        candidates.extend(_InputCandidate(token, allow_plain=True) for token in tokens[1:])
 
     if command_name == "rg":
         # Search roots are repo inputs. Quoted patterns and option values do
         # not start with a known repository prefix and are ignored.
-        candidates.extend(tokens[1:])
+        candidates.extend(_InputCandidate(token) for token in tokens[1:])
 
     is_pytest = command_name in {"pytest", "py.test"}
     if command_name in {"python", "python3"}:
         is_pytest = len(tokens) > 2 and tokens[1:3] == ["-m", "pytest"]
     if is_pytest:
-        candidates.extend(tokens[1:])
+        candidates.extend(_InputCandidate(token, allow_plain=True) for token in tokens[1:])
 
-    results: list[str] = []
+    results: list[_InputCandidate] = []
     for candidate in candidates:
-        local = _clean_local_path(candidate)
-        if local and local not in results:
-            results.append(local)
+        if candidate not in results:
+            results.append(candidate)
     return results
 
 
 def check_local_inputs(block: ShellBlock, repo_root: Path) -> list[Finding]:
     """Check commands whose repo-local inputs must already exist."""
     findings: list[Finding] = []
+    resolved_root = repo_root.resolve()
     for offset, command in _block_shell_commands(block):
+        resolution = _resolve_shell_wrappers(
+            command.tokens,
+            cwd=block.cwd,
+        )
+        invalid_cwd = False
+        if not resolution.uncertainty:
+            for cwd_hop in resolution.cwd_hops:
+                command_cwd = _resolved_command_cwd(repo_root, cwd_hop)
+                try:
+                    displayed_cwd = command_cwd.relative_to(resolved_root).as_posix()
+                except ValueError:
+                    displayed_cwd = command_cwd.as_posix()
+                if command_cwd.exists() and command_cwd.is_dir():
+                    continue
+                problem = "does not exist" if not command_cwd.exists() else "is not a directory"
+                findings.append(
+                    Finding(
+                        block.path,
+                        _source_line(block, offset),
+                        f"command working directory {problem}: {displayed_cwd}",
+                    )
+                )
+                invalid_cwd = True
+                break
+        if invalid_cwd:
+            continue
         candidates = [
-            *_candidate_input_paths(list(command.tokens)),
-            *command.input_redirections,
+            *(
+                (candidate, resolution.cwd)
+                for candidate in _candidate_input_paths(list(resolution.tokens))
+            ),
+            *(
+                (_InputCandidate(token, allow_plain=True), block.cwd)
+                for token in command.input_redirections
+            ),
         ]
-        for candidate in candidates:
-            local = _clean_local_path(candidate)
+        for candidate, candidate_cwd in candidates:
+            allow_plain = candidate.allow_plain and (
+                _resolved_command_cwd(repo_root, candidate_cwd) != repo_root.resolve()
+            )
+            local = _resolved_repo_local_path(
+                repo_root,
+                candidate_cwd,
+                candidate.token,
+                allow_plain=allow_plain,
+            )
             if local is None:
+                external = _external_candidate_path(
+                    repo_root,
+                    candidate_cwd,
+                    candidate.token,
+                    allow_plain=allow_plain,
+                )
+                if external is not None:
+                    findings.append(
+                        Finding(
+                            block.path,
+                            _source_line(block, offset),
+                            "command input resolves outside repository "
+                            f"and cannot be validated: {external}",
+                        )
+                    )
                 continue
             if not (repo_root / local).exists():
                 findings.append(
@@ -1170,10 +1700,58 @@ def _literal_value(
         if isinstance(node, ast.Set):
             return frozenset(values)
         return values
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        operand = _literal_value(node.operand, binding)
+        if operand is not _UNRESOLVED:
+            return not bool(operand)
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
         operand = _literal_value(node.operand, binding)
         if isinstance(operand, (int, float, complex)):
             return -operand if isinstance(node.op, ast.USub) else operand
+    if isinstance(node, ast.BoolOp):
+        values = [_literal_value(value, binding) for value in node.values]
+        if any(value is _UNRESOLVED for value in values):
+            return _UNRESOLVED
+        return (
+            all(bool(value) for value in values)
+            if isinstance(node.op, ast.And)
+            else any(bool(value) for value in values)
+        )
+    if isinstance(node, ast.Compare):
+        left = _literal_value(node.left, binding)
+        comparators = [_literal_value(comparator, binding) for comparator in node.comparators]
+        if left is _UNRESOLVED or any(value is _UNRESOLVED for value in comparators):
+            return _UNRESOLVED
+        values = [left, *comparators]
+        results: list[bool] = []
+        for operator, lhs, rhs in zip(node.ops, values, values[1:]):
+            try:
+                if isinstance(operator, ast.Eq):
+                    result = lhs == rhs
+                elif isinstance(operator, ast.NotEq):
+                    result = lhs != rhs
+                elif isinstance(operator, ast.Is):
+                    result = lhs is rhs
+                elif isinstance(operator, ast.IsNot):
+                    result = lhs is not rhs
+                elif isinstance(operator, ast.In):
+                    result = lhs in rhs
+                elif isinstance(operator, ast.NotIn):
+                    result = lhs not in rhs
+                elif isinstance(operator, ast.Lt):
+                    result = lhs < rhs
+                elif isinstance(operator, ast.LtE):
+                    result = lhs <= rhs
+                elif isinstance(operator, ast.Gt):
+                    result = lhs > rhs
+                elif isinstance(operator, ast.GtE):
+                    result = lhs >= rhs
+                else:
+                    return _UNRESOLVED
+            except (TypeError, ValueError):
+                return _UNRESOLVED
+            results.append(bool(result))
+        return all(results)
     return _UNRESOLVED
 
 
@@ -1286,13 +1864,10 @@ def _assigned_call(node: ast.AST) -> tuple[str, ast.Call] | None:
     return name, value
 
 
-def _is_call_named(call: ast.Call, name: str) -> bool:
-    if isinstance(call.func, ast.Name):
-        return call.func.id == name
-    return isinstance(call.func, ast.Attribute) and call.func.attr == name
-
-
-def _literal_loop_bindings(node: ast.For) -> list[dict[str, object]]:
+def _literal_loop_bindings(
+    node: ast.For,
+    binding: dict[str, object] | None = None,
+) -> list[dict[str, object]] | None:
     """Expand a finite loop whose targets and iterable are literal values."""
     if isinstance(node.target, ast.Name):
         target_names = (node.target.id,)
@@ -1301,23 +1876,25 @@ def _literal_loop_bindings(node: ast.For) -> list[dict[str, object]]:
     ):
         target_names = tuple(element.id for element in node.target.elts)
     else:
-        return []
+        return None
     if not isinstance(node.iter, (ast.Tuple, ast.List)):
-        return []
+        return None
 
     bindings: list[dict[str, object]] = []
     for item in node.iter.elts:
         if len(target_names) == 1:
-            raw_values = (_literal_value(item),)
+            raw_values = (_literal_value(item, binding),)
         elif isinstance(item, (ast.Tuple, ast.List)):
-            raw_values = tuple(_literal_value(value) for value in item.elts)
+            raw_values = tuple(_literal_value(value, binding) for value in item.elts)
         else:
-            return []
+            return None
         if len(raw_values) != len(target_names) or any(
             value is _UNRESOLVED for value in raw_values
         ):
-            return []
-        bindings.append(dict(zip(target_names, raw_values)))
+            return None
+        expanded = dict(binding or {})
+        expanded.update(zip(target_names, raw_values))
+        bindings.append(expanded)
     return bindings
 
 
@@ -1335,21 +1912,25 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
         tree = ast.parse(script_path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError):
         return None
-    argparse_evidence = any(
-        (
-            isinstance(node, ast.Import)
-            and any(alias.name == "argparse" for alias in node.names)
-        )
-        or (isinstance(node, ast.ImportFrom) and node.module == "argparse")
-        or (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "argparse"
-            and node.func.attr == "ArgumentParser"
-        )
-        for node in ast.walk(tree)
-    )
+    argparse_module_imports: list[tuple[ast.AST, str]] = []
+    argparse_constructor_imports: list[tuple[ast.AST, str]] = []
+    context_factory_function_scopes: set[tuple[tuple[str, str, int], ...]] = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            argparse_module_imports.extend(
+                (node, alias.asname or alias.name)
+                for alias in node.names
+                if alias.name == "argparse"
+            )
+        elif isinstance(node, ast.ImportFrom) and node.module == "argparse":
+            argparse_constructor_imports.extend(
+                (node, alias.asname or alias.name)
+                for alias in node.names
+                if alias.name == "ArgumentParser"
+            )
+
+    argparse_evidence = bool(argparse_module_imports or argparse_constructor_imports)
 
     scope_by_node: dict[int, tuple[tuple[str, str, int], ...]] = {}
     function_scopes: dict[
@@ -1359,10 +1940,6 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
     function_parameters: dict[
         tuple[tuple[str, str, int], ...],
         tuple[str, ...],
-    ] = {}
-    class_scopes: dict[
-        tuple[tuple[tuple[str, str, int], ...], str],
-        tuple[tuple[str, str, int], ...],
     ] = {}
 
     def normalize_reference(reference: str) -> str:
@@ -1395,7 +1972,6 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
         scope_by_node[id(node)] = scope
         if isinstance(node, ast.ClassDef):
             nested_scope = (*scope, ("class", node.name, node.lineno))
-            class_scopes[binding_key(node.name, scope)] = nested_scope
             for expression in [
                 *node.decorator_list,
                 *node.bases,
@@ -1447,6 +2023,1432 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
     assignment_nodes = [
         node for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.AnnAssign))
     ]
+    parent_by_node: dict[int, ast.AST] = {
+        id(child): parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)
+    }
+
+    def is_conditional_binding(node: ast.AST) -> bool:
+        """Return whether a binding may not execute before a later use."""
+        current = node
+        while (parent := parent_by_node.get(id(current))) is not None:
+            if isinstance(
+                parent,
+                (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+            ):
+                return False
+            if isinstance(
+                parent,
+                (
+                    ast.If,
+                    ast.For,
+                    ast.AsyncFor,
+                    ast.While,
+                    ast.Try,
+                    ast.TryStar,
+                    ast.With,
+                    ast.AsyncWith,
+                    ast.Match,
+                    ast.IfExp,
+                    ast.BoolOp,
+                ),
+            ):
+                return True
+            current = parent
+        return False
+
+    def direct_statement_block(
+        parent: ast.AST,
+        child: ast.AST,
+    ) -> tuple[list[ast.stmt], int] | None:
+        if not isinstance(child, ast.stmt):
+            return None
+        for _field, value in ast.iter_fields(parent):
+            if isinstance(value, list) and child in value:
+                statements = [statement for statement in value if isinstance(statement, ast.stmt)]
+                if len(statements) == len(value):
+                    return statements, statements.index(child)
+        return None
+
+    def statement_abrupt_state(
+        statement: ast.stmt,
+        binding: dict[str, object],
+    ) -> bool | None:
+        if isinstance(
+            statement,
+            (ast.Raise, ast.Return, ast.Break, ast.Continue),
+        ):
+            return True
+        if isinstance(statement, ast.If):
+            condition = _literal_value(statement.test, binding)
+            if condition is _UNRESOLVED:
+                body = block_abrupt_state(statement.body, binding)
+                orelse = block_abrupt_state(statement.orelse, binding)
+                if body is True and orelse is True:
+                    return True
+                if body is False and orelse is False:
+                    return False
+                return None
+            selected = statement.body if bool(condition) else statement.orelse
+            return block_abrupt_state(selected, binding)
+        if isinstance(statement, (ast.Try, ast.TryStar)):
+            final_state = block_abrupt_state(
+                statement.finalbody,
+                binding,
+            )
+            if final_state is not False:
+                return final_state
+        return False
+
+    def block_abrupt_state(
+        statements: list[ast.stmt],
+        binding: dict[str, object],
+    ) -> bool | None:
+        uncertain = False
+        for statement in statements:
+            state = statement_abrupt_state(statement, binding)
+            if state is True:
+                return True
+            if state is None:
+                uncertain = True
+        return None if uncertain else False
+
+    def statement_may_raise(statement: ast.stmt) -> bool:
+        if isinstance(statement, ast.Pass):
+            return False
+        if isinstance(statement, ast.Raise):
+            return True
+        if isinstance(statement, (ast.Break, ast.Continue, ast.Return)):
+            return False
+        return any(
+            isinstance(descendant, (ast.Call, ast.Await, ast.Yield, ast.YieldFrom))
+            for descendant in ast.walk(statement)
+        )
+
+    def pattern_match_state(
+        pattern: ast.pattern,
+        value: object,
+        binding: dict[str, object],
+    ) -> bool | None:
+        if isinstance(pattern, ast.MatchValue):
+            expected = _literal_value(pattern.value, binding)
+            return None if expected is _UNRESOLVED else value == expected
+        if isinstance(pattern, ast.MatchSingleton):
+            return value is pattern.value
+        if isinstance(pattern, ast.MatchAs):
+            if pattern.pattern is None:
+                return True
+            return pattern_match_state(pattern.pattern, value, binding)
+        if isinstance(pattern, ast.MatchOr):
+            states = [
+                pattern_match_state(candidate, value, binding) for candidate in pattern.patterns
+            ]
+            if any(state is True for state in states):
+                return True
+            return None if any(state is None for state in states) else False
+        if isinstance(pattern, ast.MatchSequence) and isinstance(
+            value,
+            (list, tuple),
+        ):
+            if len(pattern.patterns) != len(value):
+                return False
+            states = [
+                pattern_match_state(candidate, item, binding)
+                for candidate, item in zip(pattern.patterns, value)
+            ]
+            if any(state is False for state in states):
+                return False
+            return None if any(state is None for state in states) else True
+        return None
+
+    def selected_match_case(
+        node: ast.Match,
+        binding: dict[str, object],
+    ) -> int | object | None:
+        subject = _literal_value(node.subject, binding)
+        if subject is _UNRESOLVED:
+            return _UNRESOLVED
+        for index, case in enumerate(node.cases):
+            matched = pattern_match_state(case.pattern, subject, binding)
+            if matched is None:
+                return _UNRESOLVED
+            if not matched:
+                continue
+            if case.guard is not None:
+                guard = _literal_value(case.guard, binding)
+                if guard is _UNRESOLVED:
+                    return _UNRESOLVED
+                if not bool(guard):
+                    continue
+            return index
+        return None
+
+    def declaration_contexts(
+        node: ast.AST,
+    ) -> tuple[list[dict[str, object]], bool]:
+        """Return literal execution contexts and whether reachability is unknown."""
+        ancestry: list[tuple[ast.AST, ast.AST]] = []
+        current = node
+        while (parent := parent_by_node.get(id(current))) is not None:
+            ancestry.append((parent, current))
+            if isinstance(
+                parent,
+                (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+            ):
+                break
+            current = parent
+
+        contexts: list[dict[str, object]] = [{}]
+        uncertain = False
+        for parent, child in reversed(ancestry):
+            direct_block = direct_statement_block(parent, child)
+            if direct_block is not None:
+                statements, child_index = direct_block
+                reachable: list[dict[str, object]] = []
+                for binding in contexts:
+                    state = block_abrupt_state(
+                        statements[:child_index],
+                        binding,
+                    )
+                    if state is True:
+                        continue
+                    if state is None:
+                        uncertain = True
+                    reachable.append(binding)
+                contexts = reachable
+                if not contexts:
+                    continue
+
+            if isinstance(parent, ast.For):
+                if child in parent.body:
+                    expanded: list[dict[str, object]] = []
+                    for binding in contexts:
+                        loop_bindings = _literal_loop_bindings(parent, binding)
+                        if loop_bindings is None:
+                            uncertain = True
+                            expanded.append(binding)
+                        else:
+                            expanded.extend(loop_bindings)
+                    contexts = expanded
+                elif child in parent.orelse:
+                    break_states = [
+                        statement_abrupt_state(statement, binding)
+                        for binding in contexts
+                        for statement in parent.body
+                        if isinstance(statement, ast.Break)
+                    ]
+                    if any(state is True for state in break_states):
+                        contexts = []
+                    elif any(state is None for state in break_states):
+                        uncertain = True
+                continue
+
+            if isinstance(parent, (ast.If, ast.IfExp)):
+                body = parent.body
+                orelse = parent.orelse
+                in_body = child is body or (isinstance(body, list) and child in body)
+                in_orelse = child is orelse or (isinstance(orelse, list) and child in orelse)
+                if not (in_body or in_orelse):
+                    continue
+                reachable = []
+                for binding in contexts:
+                    condition = _literal_value(parent.test, binding)
+                    if condition is _UNRESOLVED:
+                        uncertain = True
+                        reachable.append(binding)
+                    elif bool(condition) == in_body:
+                        reachable.append(binding)
+                contexts = reachable
+                continue
+
+            if isinstance(parent, ast.While):
+                in_body = child in parent.body
+                in_orelse = child in parent.orelse
+                if not (in_body or in_orelse):
+                    continue
+                reachable = []
+                for binding in contexts:
+                    condition = _literal_value(parent.test, binding)
+                    if condition is _UNRESOLVED:
+                        uncertain = True
+                        reachable.append(binding)
+                    elif in_body and bool(condition):
+                        reachable.append(binding)
+                    elif in_orelse and not bool(condition):
+                        reachable.append(binding)
+                contexts = reachable
+                continue
+
+            if isinstance(parent, (ast.Try, ast.TryStar)):
+                if child in parent.body:
+                    prior = parent.body[: parent.body.index(child)]
+                    if any(statement_may_raise(statement) for statement in prior):
+                        uncertain = True
+                elif child in parent.handlers:
+                    if not any(statement_may_raise(statement) for statement in parent.body):
+                        contexts = []
+                    else:
+                        uncertain = True
+                elif child in parent.orelse:
+                    if any(statement_may_raise(statement) for statement in parent.body):
+                        uncertain = True
+                continue
+
+            if isinstance(parent, ast.Match) and child in parent.cases:
+                case_index = parent.cases.index(child)
+                reachable = []
+                for binding in contexts:
+                    selected = selected_match_case(parent, binding)
+                    if selected is _UNRESOLVED:
+                        uncertain = True
+                        reachable.append(binding)
+                    elif selected == case_index:
+                        reachable.append(binding)
+                contexts = reachable
+
+        return contexts, uncertain
+
+    def has_enclosing_loop(node: ast.AST) -> bool:
+        current = node
+        while (parent := parent_by_node.get(id(current))) is not None:
+            if isinstance(
+                parent,
+                (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+            ):
+                return False
+            if isinstance(parent, (ast.For, ast.AsyncFor)):
+                return True
+            current = parent
+        return False
+
+    def nearest_enclosing_for(node: ast.AST) -> ast.For | None:
+        current = node
+        while (parent := parent_by_node.get(id(current))) is not None:
+            if isinstance(
+                parent,
+                (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+            ):
+                return None
+            if isinstance(parent, ast.For):
+                return parent
+            current = parent
+        return None
+
+    uncertain_parser_declaration_scopes: set[tuple[tuple[str, str, int], ...]] = set()
+
+    def reachable_declaration_contexts(
+        node: ast.AST,
+    ) -> list[dict[str, object]]:
+        contexts, uncertain = declaration_contexts(node)
+        if uncertain:
+            uncertain_parser_declaration_scopes.add(scope_by_node[id(node)])
+        return contexts
+
+    argparse_module_identity = object()
+    argparse_constructor_identity = object()
+    other_identity = object()
+    binding_events: dict[
+        tuple[tuple[tuple[str, str, int], ...], str],
+        list[tuple[int, int, object]],
+    ] = {}
+
+    def binding_position(node: ast.AST) -> tuple[int, int]:
+        return (
+            node.end_lineno if node.end_lineno is not None else node.lineno,
+            (node.end_col_offset if node.end_col_offset is not None else node.col_offset),
+        )
+
+    def record_binding(
+        name: str,
+        scope: tuple[tuple[str, str, int], ...],
+        node: ast.AST,
+        value: object,
+    ) -> None:
+        if not name.isidentifier():
+            return
+        line, column = binding_position(node)
+        binding_events.setdefault((scope, name), []).append((line, column, value))
+
+    for node in ast.walk(tree):
+        scope = scope_by_node[id(node)]
+        binding_contexts, conditional = declaration_contexts(node)
+        if not binding_contexts:
+            continue
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.asname or alias.name.partition(".")[0]
+                identity = (
+                    argparse_module_identity
+                    if alias.name == "argparse" and not conditional
+                    else other_identity
+                )
+                record_binding(name, scope, node, identity)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                name = alias.asname or alias.name
+                identity = (
+                    argparse_constructor_identity
+                    if (
+                        node.module == "argparse"
+                        and alias.name == "ArgumentParser"
+                        and not conditional
+                    )
+                    else other_identity
+                )
+                record_binding(name, scope, node, identity)
+        elif isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            record_binding(node.name, scope, node, other_identity)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                function_scope = (
+                    *scope,
+                    ("function", node.name, node.lineno),
+                )
+                parameters = [
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                    *node.args.kwonlyargs,
+                ]
+                if node.args.vararg is not None:
+                    parameters.append(node.args.vararg)
+                if node.args.kwarg is not None:
+                    parameters.append(node.args.kwarg)
+                for parameter in parameters:
+                    binding_events.setdefault(
+                        (function_scope, parameter.arg),
+                        [],
+                    ).append((-1, -1, other_identity))
+
+    def assignment_targets(node: ast.Assign | ast.AnnAssign) -> list[ast.Name]:
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        return [target for target in targets if isinstance(target, ast.Name)]
+
+    for node in assignment_nodes:
+        binding_contexts, conditional = declaration_contexts(node)
+        if not binding_contexts:
+            continue
+        value: object = other_identity if conditional or node.value is None else node.value
+        for target in assignment_targets(node):
+            record_binding(
+                target.id,
+                scope_by_node[id(node)],
+                node,
+                value,
+            )
+
+    for node in (
+        candidate
+        for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.NamedExpr) and isinstance(candidate.target, ast.Name)
+    ):
+        binding_contexts, conditional = declaration_contexts(node)
+        if not binding_contexts:
+            continue
+        record_binding(
+            node.target.id,
+            scope_by_node[id(node)],
+            node,
+            (other_identity if conditional else node.value),
+        )
+
+    class_identity = object()
+    function_identity = object()
+    instance_identity = object()
+    parameter_identity = object()
+    ambiguous_identity = object()
+    identity_events: dict[
+        tuple[tuple[tuple[str, str, int], ...], str],
+        list[tuple[int, int, object]],
+    ] = {}
+    opaque_identity_barriers: dict[
+        tuple[tuple[str, str, int], ...],
+        list[tuple[int, int]],
+    ] = {}
+    function_opaque_default_parameters: dict[
+        tuple[tuple[str, str, int], ...],
+        dict[str, ast.AST],
+    ] = {}
+    definition_identity_scopes: dict[
+        tuple[
+            tuple[tuple[str, str, int], ...],
+            str,
+            tuple[int, int],
+        ],
+        tuple[tuple[str, str, int], ...],
+    ] = {}
+    opaque_identity_event_keys: set[
+        tuple[
+            tuple[tuple[str, str, int], ...],
+            str,
+            tuple[int, int],
+        ]
+    ] = set()
+
+    def record_identity_binding(
+        name: str,
+        scope: tuple[tuple[str, str, int], ...],
+        node: ast.AST,
+        value: object,
+    ) -> None:
+        if not name.isidentifier():
+            return
+        line, column = binding_position(node)
+        identity_events.setdefault((scope, name), []).append((line, column, value))
+
+    def record_opaque_identity_barrier(
+        scope: tuple[tuple[str, str, int], ...],
+        node: ast.AST,
+    ) -> None:
+        opaque_identity_barriers.setdefault(scope, []).append((node.lineno, node.col_offset))
+
+    decorator_binding_events: dict[
+        tuple[tuple[tuple[str, str, int], ...], str],
+        list[tuple[int, int, str | None]],
+    ] = {}
+    decorator_attribute_mutations: dict[
+        tuple[tuple[tuple[str, str, int], ...], str],
+        list[tuple[int, int]],
+    ] = {}
+
+    def record_decorator_binding(
+        scope: tuple[tuple[str, str, int], ...],
+        name: str,
+        node: ast.AST,
+        provenance: str | None,
+    ) -> None:
+        decorator_binding_events.setdefault((scope, name), []).append(
+            (*binding_position(node), provenance)
+        )
+
+    def decorator_visible_scopes(
+        scope: tuple[tuple[str, str, int], ...],
+    ) -> Iterable[tuple[tuple[str, str, int], ...]]:
+        for length in range(len(scope), -1, -1):
+            candidate = scope[:length]
+            if candidate and candidate[-1][0] == "class" and candidate != scope:
+                continue
+            yield candidate
+
+    def decorator_namespace_owner(expression: ast.AST) -> str | None:
+        if isinstance(expression, ast.Attribute) and expression.attr == "__dict__":
+            return _expression_reference(expression.value)
+        if (
+            isinstance(expression, ast.Call)
+            and isinstance(expression.func, ast.Name)
+            and expression.func.id == "vars"
+            and len(expression.args) == 1
+            and not expression.keywords
+        ):
+            return _expression_reference(expression.args[0])
+        return None
+
+    def record_decorator_mutation(
+        scope: tuple[tuple[str, str, int], ...],
+        owner: str,
+        attribute: object,
+        node: ast.AST,
+    ) -> None:
+        suffix = attribute if isinstance(attribute, str) else "*"
+        decorator_attribute_mutations.setdefault(
+            (scope, f"{owner}.{suffix}"),
+            [],
+        ).append(binding_position(node))
+
+    decorator_function_definitions: dict[
+        tuple[tuple[tuple[str, str, int], ...], str],
+        list[
+            tuple[
+                tuple[int, int],
+                tuple[tuple[str, str, int], ...],
+            ]
+        ],
+    ] = {}
+    decorator_global_writes: dict[
+        tuple[tuple[str, str, int], ...],
+        set[str],
+    ] = {}
+    for candidate in ast.walk(tree):
+        if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            scope = scope_by_node[id(candidate)]
+            nested_scope = (
+                *scope,
+                ("function", candidate.name, candidate.lineno),
+            )
+            decorator_function_definitions.setdefault(
+                (scope, candidate.name),
+                [],
+            ).append((binding_position(candidate), nested_scope))
+        elif isinstance(candidate, ast.Global):
+            decorator_global_writes.setdefault(
+                scope_by_node[id(candidate)],
+                set(),
+            ).update(candidate.names)
+
+    for candidate in ast.walk(tree):
+        scope = scope_by_node[id(candidate)]
+        contexts, uncertain = declaration_contexts(candidate)
+        if not contexts:
+            continue
+        if isinstance(candidate, ast.Import):
+            for alias in candidate.names:
+                record_decorator_binding(
+                    scope,
+                    alias.asname or alias.name.partition(".")[0],
+                    candidate,
+                    None if uncertain else alias.name,
+                )
+        elif isinstance(candidate, ast.ImportFrom):
+            for alias in candidate.names:
+                if alias.name != "*":
+                    record_decorator_binding(
+                        scope,
+                        alias.asname or alias.name,
+                        candidate,
+                        (
+                            f"{candidate.module}.{alias.name}"
+                            if candidate.module and not uncertain
+                            else None
+                        ),
+                    )
+        elif isinstance(
+            candidate,
+            (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+        ):
+            record_decorator_binding(
+                scope,
+                candidate.name,
+                candidate,
+                None,
+            )
+        elif isinstance(candidate, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = candidate.targets if isinstance(candidate, ast.Assign) else [candidate.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    record_decorator_binding(
+                        scope,
+                        target.id,
+                        candidate,
+                        None,
+                    )
+                elif (
+                    isinstance(target, ast.Subscript)
+                    and (owner := decorator_namespace_owner(target.value)) is not None
+                ):
+                    record_decorator_mutation(
+                        scope,
+                        owner,
+                        _literal_value(target.slice),
+                        candidate,
+                    )
+                elif (reference := _expression_reference(target)) is not None:
+                    decorator_attribute_mutations.setdefault(
+                        (scope, reference),
+                        [],
+                    ).append(binding_position(candidate))
+        elif isinstance(candidate, ast.Delete):
+            for target in candidate.targets:
+                if isinstance(target, ast.Name):
+                    record_decorator_binding(
+                        scope,
+                        target.id,
+                        candidate,
+                        None,
+                    )
+                elif (reference := _expression_reference(target)) is not None:
+                    decorator_attribute_mutations.setdefault(
+                        (scope, reference),
+                        [],
+                    ).append(binding_position(candidate))
+        elif (
+            isinstance(candidate, ast.Call)
+            and isinstance(candidate.func, ast.Name)
+            and candidate.func.id == "setattr"
+            and len(candidate.args) >= 2
+            and isinstance((owner := _expression_reference(candidate.args[0])), str)
+        ):
+            record_decorator_mutation(
+                scope,
+                owner,
+                _literal_value(candidate.args[1]),
+                candidate,
+            )
+        elif (
+            isinstance(candidate, ast.Call)
+            and isinstance(candidate.func, ast.Attribute)
+            and candidate.func.attr == "update"
+            and (owner := decorator_namespace_owner(candidate.func.value)) is not None
+        ):
+            recorded = False
+            if candidate.args and isinstance(candidate.args[0], ast.Dict):
+                for key in candidate.args[0].keys:
+                    record_decorator_mutation(
+                        scope,
+                        owner,
+                        _literal_value(key),
+                        candidate,
+                    )
+                    recorded = True
+            for keyword in candidate.keywords:
+                record_decorator_mutation(
+                    scope,
+                    owner,
+                    keyword.arg,
+                    candidate,
+                )
+                recorded = True
+            if not recorded or len(candidate.args) > 1:
+                record_decorator_mutation(
+                    scope,
+                    owner,
+                    _UNRESOLVED,
+                    candidate,
+                )
+
+    for call in (
+        candidate
+        for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.Call) and isinstance(candidate.func, ast.Name)
+    ):
+        contexts, _uncertain = declaration_contexts(call)
+        if not contexts:
+            continue
+        call_scope = scope_by_node[id(call)]
+        before = (call.lineno, call.col_offset)
+        function_scope: tuple[tuple[str, str, int], ...] | None = None
+        for candidate_scope in decorator_visible_scopes(call_scope):
+            definitions = [
+                event
+                for event in decorator_function_definitions.get(
+                    (candidate_scope, call.func.id),
+                    (),
+                )
+                if event[0] < before
+            ]
+            if definitions:
+                function_scope = definitions[-1][1]
+                break
+        if function_scope is None:
+            continue
+        for name in decorator_global_writes.get(function_scope, ()):
+            record_decorator_binding(
+                (),
+                name,
+                call,
+                None,
+            )
+
+    for events in decorator_binding_events.values():
+        events.sort(key=lambda event: event[:2])
+    for events in decorator_attribute_mutations.values():
+        events.sort()
+
+    def decorator_name_provenance(
+        name: str,
+        scope: tuple[tuple[str, str, int], ...],
+        before: tuple[int, int],
+    ) -> str | None:
+        for candidate_scope in decorator_visible_scopes(scope):
+            prior = [
+                event
+                for event in decorator_binding_events.get(
+                    (candidate_scope, name),
+                    (),
+                )
+                if event[:2] < before
+            ]
+            if prior:
+                return prior[-1][2]
+        if name in {"classmethod", "property", "staticmethod"}:
+            return f"builtins.{name}"
+        return None
+
+    invalidated_decorator_provenance = object()
+
+    def decorator_resolved_provenance(
+        expression: ast.AST,
+        scope: tuple[tuple[str, str, int], ...],
+    ) -> object:
+        target = expression.func if isinstance(expression, ast.Call) else expression
+        reference = _expression_reference(target)
+        if reference is None:
+            return None
+        before = (expression.lineno, expression.col_offset)
+        if "." not in reference:
+            provenance = decorator_name_provenance(
+                reference,
+                scope,
+                before,
+            )
+        else:
+            base, attribute = reference.split(".", 1)
+            base_provenance = decorator_name_provenance(
+                base,
+                scope,
+                before,
+            )
+            if base_provenance is None:
+                return None
+            for candidate_scope in decorator_visible_scopes(scope):
+                mutations = decorator_attribute_mutations.get(
+                    (candidate_scope, reference),
+                    (),
+                )
+                if any(position < before for position in mutations):
+                    return invalidated_decorator_provenance
+            provenance = f"{base_provenance}.{attribute}"
+        if provenance is None or "." not in provenance:
+            return None
+        provenance_base, provenance_attribute = provenance.split(".", 1)
+        for candidate_scope in decorator_visible_scopes(scope):
+            references = {provenance}
+            for (
+                event_scope,
+                name,
+            ), events in decorator_binding_events.items():
+                if event_scope != candidate_scope:
+                    continue
+                prior = [event for event in events if event[:2] < before]
+                if prior and prior[-1][2] == provenance_base:
+                    references.add(f"{name}.{provenance_attribute}")
+            if any(
+                any(
+                    position < before
+                    for mutation_reference in (
+                        candidate_reference,
+                        f"{candidate_reference.split('.', 1)[0]}.*",
+                    )
+                    for position in decorator_attribute_mutations.get(
+                        (candidate_scope, mutation_reference),
+                        (),
+                    )
+                )
+                for candidate_reference in references
+            ):
+                return invalidated_decorator_provenance
+        return provenance
+
+    def decorator_preserves_identity_graph(
+        expression: ast.AST,
+        scope: tuple[tuple[str, str, int], ...],
+    ) -> bool:
+        return decorator_resolved_provenance(expression, scope) in {
+            "builtins.classmethod",
+            "builtins.property",
+            "builtins.staticmethod",
+            "contextlib.contextmanager",
+            "dataclasses.dataclass",
+            "functools.cache",
+            "functools.cached_property",
+            "functools.lru_cache",
+        }
+
+    for node in ast.walk(tree):
+        scope = scope_by_node[id(node)]
+        binding_contexts, conditional = declaration_contexts(node)
+        if not binding_contexts:
+            continue
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                record_identity_binding(
+                    alias.asname or alias.name.partition(".")[0],
+                    scope,
+                    node,
+                    other_identity,
+                )
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name != "*":
+                    record_identity_binding(
+                        alias.asname or alias.name,
+                        scope,
+                        node,
+                        other_identity,
+                    )
+        elif isinstance(node, ast.ClassDef):
+            nested_scope = (*scope, ("class", node.name, node.lineno))
+            definition_identity_scopes[(scope, node.name, binding_position(node))] = nested_scope
+            opaque_decorators = [
+                decorator
+                for decorator in node.decorator_list
+                if not decorator_preserves_identity_graph(decorator, scope)
+            ]
+            if opaque_decorators:
+                record_opaque_identity_barrier(scope, node)
+            record_identity_binding(
+                node.name,
+                scope,
+                node,
+                (
+                    ambiguous_identity
+                    if conditional or opaque_decorators
+                    else (class_identity, nested_scope)
+                ),
+            )
+            if opaque_decorators:
+                opaque_identity_event_keys.add((scope, node.name, binding_position(node)))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            nested_scope = (*scope, ("function", node.name, node.lineno))
+            definition_identity_scopes[(scope, node.name, binding_position(node))] = nested_scope
+            if any(
+                decorator_resolved_provenance(decorator, scope) == "contextlib.contextmanager"
+                for decorator in node.decorator_list
+            ):
+                context_factory_function_scopes.add(nested_scope)
+            opaque_decorators = [
+                decorator
+                for decorator in node.decorator_list
+                if not decorator_preserves_identity_graph(decorator, scope)
+            ]
+            defaults = [
+                *node.args.defaults,
+                *(default for default in node.args.kw_defaults if default is not None),
+            ]
+            opaque_defaults = [
+                default for default in defaults if _literal_value(default) is _UNRESOLVED
+            ]
+            if opaque_decorators:
+                record_opaque_identity_barrier(scope, node)
+            if opaque_defaults:
+                positional = [
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                ]
+                opaque_by_name = {
+                    argument.arg: default
+                    for argument, default in zip(
+                        positional[-len(node.args.defaults) :],
+                        node.args.defaults,
+                    )
+                    if _literal_value(default) is _UNRESOLVED
+                }
+                opaque_by_name.update(
+                    {
+                        argument.arg: default
+                        for argument, default in zip(
+                            node.args.kwonlyargs,
+                            node.args.kw_defaults,
+                        )
+                        if (default is not None and _literal_value(default) is _UNRESOLVED)
+                    }
+                )
+                function_opaque_default_parameters[nested_scope] = opaque_by_name
+            record_identity_binding(
+                node.name,
+                scope,
+                node,
+                (
+                    ambiguous_identity
+                    if conditional or opaque_decorators
+                    else (function_identity, nested_scope)
+                ),
+            )
+            if opaque_decorators:
+                opaque_identity_event_keys.add((scope, node.name, binding_position(node)))
+            parameters = [
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            ]
+            if node.args.vararg is not None:
+                parameters.append(node.args.vararg)
+            if node.args.kwarg is not None:
+                parameters.append(node.args.kwarg)
+            for parameter in parameters:
+                identity_events.setdefault(
+                    (nested_scope, parameter.arg),
+                    [],
+                ).append(
+                    (
+                        -1,
+                        -1,
+                        (
+                            parameter_identity,
+                            nested_scope,
+                            parameter.arg,
+                        ),
+                    )
+                )
+
+    for node in assignment_nodes:
+        binding_contexts, conditional = declaration_contexts(node)
+        if not binding_contexts:
+            continue
+        value = ambiguous_identity if conditional or node.value is None else node.value
+        for target in assignment_targets(node):
+            record_identity_binding(
+                target.id,
+                scope_by_node[id(node)],
+                node,
+                value,
+            )
+
+    for node in (
+        candidate
+        for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.NamedExpr) and isinstance(candidate.target, ast.Name)
+    ):
+        binding_contexts, conditional = declaration_contexts(node)
+        if not binding_contexts:
+            continue
+        record_identity_binding(
+            node.target.id,
+            scope_by_node[id(node)],
+            node,
+            (ambiguous_identity if conditional else node.value),
+        )
+
+    def deleted_names(target: ast.AST) -> Iterable[str]:
+        if isinstance(target, ast.Name):
+            yield target.id
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                yield from deleted_names(element)
+
+    for node in (candidate for candidate in ast.walk(tree) if isinstance(candidate, ast.Delete)):
+        scope = scope_by_node[id(node)]
+        if scope:
+            continue
+        names = [name for target in node.targets for name in deleted_names(target)]
+        if names:
+            for name in names:
+                record_identity_binding(
+                    name,
+                    scope,
+                    node,
+                    ambiguous_identity,
+                )
+                opaque_identity_event_keys.add((scope, name, binding_position(node)))
+                record_binding(
+                    name,
+                    scope,
+                    node,
+                    ambiguous_identity,
+                )
+        else:
+            record_opaque_identity_barrier(scope, node)
+
+    for events in binding_events.values():
+        events.sort(key=lambda event: event[:2])
+    for events in identity_events.values():
+        events.sort(key=lambda event: event[:2])
+    for barriers in opaque_identity_barriers.values():
+        barriers.sort()
+
+    global_names_by_scope: dict[
+        tuple[tuple[str, str, int], ...],
+        set[str],
+    ] = {}
+    nonlocal_names_by_scope: dict[
+        tuple[tuple[str, str, int], ...],
+        set[str],
+    ] = {}
+    written_names_by_scope: dict[
+        tuple[tuple[str, str, int], ...],
+        set[str],
+    ] = {}
+    for node in ast.walk(tree):
+        scope = scope_by_node[id(node)]
+        if isinstance(node, ast.Global):
+            global_names_by_scope.setdefault(scope, set()).update(node.names)
+        elif isinstance(node, ast.Nonlocal):
+            nonlocal_names_by_scope.setdefault(scope, set()).update(node.names)
+        elif isinstance(node, ast.Name) and isinstance(
+            node.ctx,
+            (ast.Store, ast.Del),
+        ):
+            written_names_by_scope.setdefault(scope, set()).add(node.id)
+
+    function_external_effects: dict[
+        tuple[tuple[str, str, int], ...],
+        tuple[frozenset[str], frozenset[str]],
+    ] = {}
+    for scope in global_names_by_scope.keys() | nonlocal_names_by_scope.keys():
+        written = written_names_by_scope.get(scope, set())
+        global_writes = frozenset(global_names_by_scope.get(scope, set()) & written)
+        nonlocal_writes = frozenset(nonlocal_names_by_scope.get(scope, set()) & written)
+        if global_writes or nonlocal_writes:
+            function_external_effects[scope] = (
+                global_writes,
+                nonlocal_writes,
+            )
+
+    def visible_scopes(
+        scope: tuple[tuple[str, str, int], ...],
+    ) -> Iterable[tuple[tuple[str, str, int], ...]]:
+        for length in range(len(scope), -1, -1):
+            candidate = scope[:length]
+            # A method does not close over its class namespace.
+            if candidate and candidate[-1][0] == "class" and candidate != scope:
+                continue
+            yield candidate
+
+    def tagged_identity(value: object, tag: object) -> bool:
+        return isinstance(value, tuple) and bool(value) and value[0] is tag
+
+    def direct_named_identity(
+        name: str,
+        scope: tuple[tuple[str, str, int], ...],
+        before: tuple[int, int],
+        root_before: tuple[int, int] | None,
+    ) -> object:
+        for candidate_scope in visible_scopes(scope):
+            candidate_before = (
+                root_before if candidate_scope == () and root_before is not None else before
+            )
+            prior = [
+                event
+                for event in identity_events.get(
+                    (candidate_scope, name),
+                    (),
+                )
+                if event[:2] < candidate_before
+            ]
+            if prior:
+                value = prior[-1][2]
+                return (
+                    value
+                    if (
+                        tagged_identity(value, class_identity)
+                        or tagged_identity(value, function_identity)
+                    )
+                    else other_identity
+                )
+            if (
+                candidate_scope
+                and candidate_scope[-1][0] == "function"
+                and (candidate_scope, name) in identity_events
+            ):
+                return other_identity
+        return other_identity
+
+    def resolve_identity_name(
+        name: str,
+        scope: tuple[tuple[str, str, int], ...],
+        before: tuple[int, int],
+        root_before: tuple[int, int] | None = None,
+        seen: frozenset[
+            tuple[
+                tuple[tuple[str, str, int], ...],
+                str,
+                tuple[int, int],
+            ]
+        ] = frozenset(),
+    ) -> object:
+        for candidate_scope in visible_scopes(scope):
+            events = identity_events.get((candidate_scope, name), ())
+            candidate_before = (
+                root_before if candidate_scope == () and root_before is not None else before
+            )
+            prior = [event for event in events if event[:2] < candidate_before]
+            prior_barriers = [
+                position
+                for position in opaque_identity_barriers.get(
+                    candidate_scope,
+                    (),
+                )
+                if position < candidate_before
+            ]
+            if prior_barriers and (not prior or prior_barriers[-1] > prior[-1][:2]):
+                return ambiguous_identity
+            if prior:
+                line, column, value = prior[-1]
+                event_key = (candidate_scope, name, (line, column))
+                if event_key in seen:
+                    return ambiguous_identity
+                if value is other_identity or value is ambiguous_identity:
+                    return value
+                if any(
+                    tagged_identity(value, tag)
+                    for tag in (
+                        class_identity,
+                        function_identity,
+                        instance_identity,
+                        parameter_identity,
+                    )
+                ):
+                    return value
+                if isinstance(value, ast.AST):
+                    if isinstance(value, ast.Name):
+                        direct = direct_named_identity(
+                            value.id,
+                            candidate_scope,
+                            (line, column),
+                            ((line, column) if candidate_scope == () else root_before),
+                        )
+                        if direct is not other_identity:
+                            return direct
+                    return resolve_identity_expression(
+                        value,
+                        candidate_scope,
+                        (line, column),
+                        ((line, column) if candidate_scope == () else root_before),
+                        seen | {event_key},
+                    )
+                return other_identity
+            if events and candidate_scope and candidate_scope[-1][0] == "function":
+                return other_identity
+        return other_identity
+
+    def resolve_identity_expression(
+        expression: ast.AST,
+        scope: tuple[tuple[str, str, int], ...],
+        before: tuple[int, int] | None = None,
+        root_before: tuple[int, int] | None = None,
+        seen: frozenset[
+            tuple[
+                tuple[tuple[str, str, int], ...],
+                str,
+                tuple[int, int],
+            ]
+        ] = frozenset(),
+    ) -> object:
+        if before is None:
+            before = (expression.lineno, expression.col_offset)
+        if isinstance(expression, ast.Name):
+            return resolve_identity_name(
+                expression.id,
+                scope,
+                before,
+                root_before,
+                seen,
+            )
+        if isinstance(expression, ast.NamedExpr):
+            return resolve_identity_expression(
+                expression.value,
+                scope,
+                before,
+                root_before,
+                seen,
+            )
+        if isinstance(expression, ast.IfExp):
+            condition = _literal_value(expression.test)
+            if condition is not _UNRESOLVED:
+                selected = expression.body if bool(condition) else expression.orelse
+                return resolve_identity_expression(
+                    selected,
+                    scope,
+                    before,
+                    root_before,
+                    seen,
+                )
+            body = resolve_identity_expression(
+                expression.body,
+                scope,
+                before,
+                root_before,
+                seen,
+            )
+            other = resolve_identity_expression(
+                expression.orelse,
+                scope,
+                before,
+                root_before,
+                seen,
+            )
+            return body if body == other else ambiguous_identity
+        if isinstance(expression, ast.Attribute):
+            owner_scope: tuple[tuple[str, str, int], ...] | None = None
+            if isinstance(expression.value, ast.Name) and expression.value.id in {"self", "cls"}:
+                lexical_class = class_scope(scope)
+                if lexical_class and lexical_class[-1][0] == "class":
+                    owner_scope = lexical_class
+            if owner_scope is None:
+                owner = resolve_identity_expression(
+                    expression.value,
+                    scope,
+                    before,
+                    root_before,
+                    seen,
+                )
+                if tagged_identity(owner, class_identity) or tagged_identity(
+                    owner,
+                    instance_identity,
+                ):
+                    owner_scope = owner[1]
+                elif owner is ambiguous_identity:
+                    return ambiguous_identity
+            if owner_scope is not None:
+                method_scope = function_scopes.get((owner_scope, expression.attr))
+                if isinstance(method_scope, tuple):
+                    return function_identity, method_scope
+            return other_identity
+        if isinstance(expression, ast.Call):
+            if (
+                isinstance(expression.func, ast.Name)
+                and expression.func.id == "super"
+                and not any(
+                    event[:2] < (expression.lineno, expression.col_offset)
+                    for candidate_scope in visible_scopes(scope)
+                    for event in identity_events.get(
+                        (candidate_scope, "super"),
+                        (),
+                    )
+                )
+            ):
+                # ``super`` is interpreted by the dedicated runtime-MRO
+                # traversal below; it is not an opaque user factory result.
+                return other_identity
+            constructor = resolve_identity_expression(
+                expression.func,
+                scope,
+                (expression.lineno, expression.col_offset),
+                root_before,
+                seen,
+            )
+            if tagged_identity(constructor, class_identity):
+                return (
+                    instance_identity,
+                    constructor[1],
+                    (
+                        scope,
+                        expression.lineno,
+                        expression.col_offset,
+                    ),
+                )
+            if constructor is ambiguous_identity:
+                return ambiguous_identity
+            return ambiguous_identity
+        return other_identity
+
+    class_base_scopes: dict[
+        tuple[tuple[str, str, int], ...],
+        tuple[tuple[tuple[str, str, int], ...], ...],
+    ] = {}
+    uncertain_class_bases: set[tuple[tuple[str, str, int], ...]] = set()
+    for node in (candidate for candidate in ast.walk(tree) if isinstance(candidate, ast.ClassDef)):
+        scope = scope_by_node[id(node)]
+        resolved_class = (*scope, ("class", node.name, node.lineno))
+        bases: list[tuple[tuple[str, str, int], ...]] = []
+        for base in node.bases:
+            if _expression_reference(base) == "object":
+                continue
+            resolved_base = resolve_identity_expression(
+                base,
+                scope,
+                (node.lineno, node.col_offset),
+            )
+            if tagged_identity(resolved_base, class_identity):
+                bases.append(resolved_base[1])
+            elif resolved_base is ambiguous_identity:
+                uncertain_class_bases.add(resolved_class)
+        class_base_scopes[resolved_class] = tuple(bases)
+
+    def resolve_argparse_name(
+        name: str,
+        scope: tuple[tuple[str, str, int], ...],
+        before: tuple[int, int],
+        seen: frozenset[
+            tuple[
+                tuple[tuple[str, str, int], ...],
+                str,
+                tuple[int, int],
+            ]
+        ],
+    ) -> object:
+        for candidate_scope in visible_scopes(scope):
+            key = (candidate_scope, name)
+            events = binding_events.get(key, ())
+            prior = [event for event in events if event[:2] < before]
+            if prior:
+                line, column, value = prior[-1]
+                event_key = (candidate_scope, name, (line, column))
+                if event_key in seen:
+                    return other_identity
+                if value is ambiguous_identity:
+                    return ambiguous_identity
+                if value in {
+                    argparse_module_identity,
+                    argparse_constructor_identity,
+                    other_identity,
+                }:
+                    return value
+                if isinstance(value, ast.AST):
+                    return resolve_argparse_expression(
+                        value,
+                        candidate_scope,
+                        (line, column),
+                        seen | {event_key},
+                    )
+                return other_identity
+            # Function-local bindings shadow outer scopes for the whole body,
+            # including uses textually before the binding.
+            if events and candidate_scope and candidate_scope[-1][0] == "function":
+                return other_identity
+        return other_identity
+
+    def resolve_argparse_expression(
+        expression: ast.AST,
+        scope: tuple[tuple[str, str, int], ...],
+        before: tuple[int, int],
+        seen: frozenset[
+            tuple[
+                tuple[tuple[str, str, int], ...],
+                str,
+                tuple[int, int],
+            ]
+        ] = frozenset(),
+    ) -> object:
+        if isinstance(expression, ast.Name):
+            return resolve_argparse_name(
+                expression.id,
+                scope,
+                before,
+                seen,
+            )
+        if isinstance(expression, ast.NamedExpr):
+            return resolve_argparse_expression(
+                expression.value,
+                scope,
+                before,
+                seen,
+            )
+        if isinstance(expression, ast.IfExp):
+            condition = _literal_value(expression.test)
+            if condition is not _UNRESOLVED:
+                selected = expression.body if bool(condition) else expression.orelse
+                return resolve_argparse_expression(
+                    selected,
+                    scope,
+                    before,
+                    seen,
+                )
+            body = resolve_argparse_expression(
+                expression.body,
+                scope,
+                before,
+                seen,
+            )
+            other = resolve_argparse_expression(
+                expression.orelse,
+                scope,
+                before,
+                seen,
+            )
+            return body if body is other else ambiguous_identity
+        if (
+            isinstance(expression, ast.Attribute)
+            and expression.attr == "ArgumentParser"
+            and resolve_argparse_expression(
+                expression.value,
+                scope,
+                before,
+                seen,
+            )
+            is argparse_module_identity
+        ):
+            return argparse_constructor_identity
+        return other_identity
+
+    def is_argparse_constructor(call: ast.Call) -> bool:
+        return (
+            resolve_argparse_expression(
+                call.func,
+                scope_by_node[id(call)],
+                (call.lineno, call.col_offset),
+            )
+            is argparse_constructor_identity
+        )
+
     assignments = [
         (
             binding_key(variable, scope_by_node[id(node)]),
@@ -1457,49 +3459,82 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
         if (assigned := _assigned_call(node)) is not None
         for variable, call in (assigned,)
     ]
-    instance_binding_candidates: dict[
-        tuple[tuple[tuple[str, str, int], ...], str],
-        set[tuple[tuple[str, str, int], ...] | None],
-    ] = {}
-    for node in assignment_nodes:
-        variable = _assigned_name(node)
-        if variable is None:
-            continue
-        scope = scope_by_node[id(node)]
-        class_scope_value: tuple[tuple[str, str, int], ...] | None = None
-        value = node.value
-        if isinstance(value, ast.Call):
-            class_reference = _expression_reference(value.func)
-            if class_reference is not None:
-                resolved_class = resolve_reference(class_scopes, class_reference, scope)
-                if isinstance(resolved_class, tuple):
-                    class_scope_value = resolved_class
-        instance_binding_candidates.setdefault(
-            binding_key(variable, scope),
-            set(),
-        ).add(class_scope_value)
-    instance_class_scopes = {
-        variable: next(iter(candidates))
-        for variable, candidates in instance_binding_candidates.items()
-        if len(candidates) == 1 and None not in candidates
-    }
     calls = sorted(
         (node for node in ast.walk(tree) if isinstance(node, ast.Call)),
         key=lambda node: (node.lineno, node.col_offset),
     )
+    assigned_variable_by_call = {id(call): variable for variable, call, _node in assignments}
+    assigned_node_by_call = {id(call): node for _variable, call, node in assignments}
 
     # A parser path is ``(root parser identity, command-name tuple)``.
     parser_paths: dict[
         tuple[tuple[tuple[str, str, int], ...], str],
         tuple[tuple[object, ...], tuple[str, ...]],
     ] = {}
+    parser_event_paths: dict[
+        tuple[
+            tuple[tuple[tuple[str, str, int], ...], str],
+            int,
+            int,
+        ],
+        tuple[tuple[object, ...], tuple[str, ...]],
+    ] = {}
+    parser_path_positions: dict[
+        tuple[tuple[tuple[str, str, int], ...], str],
+        tuple[int, int],
+    ] = {}
+
+    def parser_event_key(
+        variable: tuple[tuple[tuple[str, str, int], ...], str],
+        node: ast.AST,
+    ) -> tuple[
+        tuple[tuple[tuple[str, str, int], ...], str],
+        int,
+        int,
+    ]:
+        line, column = binding_position(node)
+        return variable, line, column
+
+    def record_parser_binding(
+        variable: tuple[tuple[tuple[str, str, int], ...], str],
+        node: ast.AST,
+        path: tuple[tuple[object, ...], tuple[str, ...]],
+    ) -> bool:
+        position = binding_position(node)
+        changed = False
+        if position >= parser_path_positions.get(variable, (-1, -1)):
+            changed = parser_paths.get(variable) != path
+            parser_paths[variable] = path
+            parser_path_positions[variable] = position
+        event_key = parser_event_key(variable, node)
+        changed = changed or parser_event_paths.get(event_key) != path
+        parser_event_paths[event_key] = path
+        return changed
+
+    constructor_paths: dict[
+        int,
+        tuple[tuple[object, ...], tuple[str, ...]],
+    ] = {}
     root_ids: set[tuple[object, ...]] = set()
-    for variable, call, _node in assignments:
-        if not _is_call_named(call, "ArgumentParser"):
+    for call in calls:
+        if not is_argparse_constructor(call) or not reachable_declaration_contexts(call):
             continue
+        variable = assigned_variable_by_call.get(id(call))
+        if variable is None:
+            variable = (
+                scope_by_node[id(call)],
+                f"$direct@{call.lineno}:{call.col_offset}",
+            )
         root_id = (variable, call.lineno, call.col_offset)
         root_ids.add(root_id)
-        parser_paths[variable] = (root_id, ())
+        path = (root_id, ())
+        constructor_paths[id(call)] = path
+        if id(call) in assigned_variable_by_call:
+            record_parser_binding(
+                variable,
+                assigned_node_by_call[id(call)],
+                path,
+            )
 
     returns_by_scope: dict[
         tuple[tuple[str, str, int], ...],
@@ -1512,56 +3547,188 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
     def resolve_function(
         expression: ast.AST,
         scope: tuple[tuple[str, str, int], ...],
+        root_before: tuple[int, int] | None = None,
     ) -> tuple[tuple[str, str, int], ...] | None:
-        reference = _expression_reference(expression)
-        if reference is not None:
-            resolved = resolve_reference(function_scopes, reference, scope)
-            if isinstance(resolved, tuple):
-                return resolved
-        if not isinstance(expression, ast.Attribute):
-            return None
-
-        owner_scope: tuple[tuple[str, str, int], ...] | None = None
-        if isinstance(expression.value, ast.Call):
-            class_reference = _expression_reference(expression.value.func)
-            if class_reference is not None:
-                resolved_class = resolve_reference(class_scopes, class_reference, scope)
-                if isinstance(resolved_class, tuple):
-                    owner_scope = resolved_class
-        else:
-            owner_reference = _expression_reference(expression.value)
-            if owner_reference is not None:
-                resolved_instance = resolve_reference(
-                    instance_class_scopes,
-                    owner_reference,
-                    scope,
-                )
-                if isinstance(resolved_instance, tuple):
-                    owner_scope = resolved_instance
-        if owner_scope is None:
-            return None
-        resolved_method = function_scopes.get((owner_scope, expression.attr))
-        return resolved_method if isinstance(resolved_method, tuple) else None
+        resolved = resolve_identity_expression(
+            expression,
+            scope,
+            root_before=root_before,
+        )
+        return resolved[1] if tagged_identity(resolved, function_identity) else None
 
     function_return_paths: dict[
         tuple[tuple[str, str, int], ...],
         tuple[tuple[object, ...], tuple[str, ...]],
     ] = {}
 
+    def ordered_name_binding(
+        name: str,
+        scope: tuple[tuple[str, str, int], ...],
+        before: tuple[int, int],
+    ) -> (
+        tuple[
+            tuple[tuple[str, str, int], ...],
+            tuple[int, int, object] | None,
+        ]
+        | None
+    ):
+        for candidate_scope in visible_scopes(scope):
+            events = binding_events.get((candidate_scope, name), ())
+            prior = [event for event in events if event[:2] < before]
+            if prior:
+                return candidate_scope, prior[-1]
+            if events and candidate_scope and candidate_scope[-1][0] == "function":
+                return candidate_scope, None
+        return None
+
+    def ordered_parser_name(
+        name: str,
+        scope: tuple[tuple[str, str, int], ...],
+        before: tuple[int, int],
+    ) -> tuple[
+        bool,
+        tuple[tuple[object, ...], tuple[str, ...]] | None,
+    ]:
+        binding = ordered_name_binding(name, scope, before)
+        if binding is None:
+            return False, None
+        candidate_scope, event = binding
+        if event is None:
+            return True, None
+        line, column, _value = event
+        return (
+            True,
+            parser_event_paths.get(((candidate_scope, name), line, column)),
+        )
+
     def resolve_parser_expression(
         expression: ast.AST,
         scope: tuple[tuple[str, str, int], ...],
     ) -> tuple[tuple[object, ...], tuple[str, ...]] | None:
+        if isinstance(expression, ast.Name):
+            _bound, ordered = ordered_parser_name(
+                expression.id,
+                scope,
+                (expression.lineno, expression.col_offset),
+            )
+            return ordered
         reference = _expression_reference(expression)
         if reference is not None:
             resolved = resolve_reference(parser_paths, reference, scope)
             if isinstance(resolved, tuple):
                 return resolved
+        if isinstance(expression, ast.NamedExpr):
+            return resolve_parser_expression(expression.value, scope)
+        if isinstance(expression, ast.IfExp):
+            condition = _literal_value(expression.test)
+            if condition is not _UNRESOLVED:
+                selected = expression.body if bool(condition) else expression.orelse
+                return resolve_parser_expression(selected, scope)
+            body = resolve_parser_expression(expression.body, scope)
+            other = resolve_parser_expression(expression.orelse, scope)
+            return body if body is not None and body == other else None
         if isinstance(expression, ast.Call):
+            constructor = constructor_paths.get(id(expression))
+            if constructor is not None:
+                return constructor
             function_scope = resolve_function(expression.func, scope)
             if function_scope is not None:
                 return function_return_paths.get(function_scope)
         return None
+
+    def definitely_non_parser_expression(
+        expression: ast.AST,
+        scope: tuple[tuple[str, str, int], ...],
+    ) -> bool:
+        if not isinstance(expression, ast.Name):
+            return False
+        binding = ordered_name_binding(
+            expression.id,
+            scope,
+            (expression.lineno, expression.col_offset),
+        )
+        if binding is None:
+            return False
+
+        def could_be_parser(
+            value: ast.AST,
+            value_scope: tuple[tuple[str, str, int], ...],
+            seen: frozenset[
+                tuple[
+                    tuple[tuple[str, str, int], ...],
+                    str,
+                    tuple[int, int],
+                ]
+            ] = frozenset(),
+        ) -> bool:
+            if resolve_parser_expression(value, value_scope) is not None:
+                return True
+            if isinstance(value, ast.NamedExpr):
+                return could_be_parser(value.value, value_scope, seen)
+            if isinstance(value, ast.IfExp):
+                return could_be_parser(
+                    value.body,
+                    value_scope,
+                    seen,
+                ) or could_be_parser(
+                    value.orelse,
+                    value_scope,
+                    seen,
+                )
+            if isinstance(value, ast.Name):
+                nested = ordered_name_binding(
+                    value.id,
+                    value_scope,
+                    (value.lineno, value.col_offset),
+                )
+                if nested is None or nested[1] is None:
+                    return False
+                nested_scope, (line, column, nested_value) = nested
+                event_key = (nested_scope, value.id, (line, column))
+                if event_key in seen:
+                    return True
+                return isinstance(nested_value, ast.AST) and could_be_parser(
+                    nested_value,
+                    nested_scope,
+                    seen | {event_key},
+                )
+            if isinstance(value, ast.Call):
+                resolved_class = resolve_identity_expression(
+                    value.func,
+                    value_scope,
+                )
+                return not tagged_identity(
+                    resolved_class,
+                    class_identity,
+                )
+            return False
+
+        binding_scope, event = binding
+        if event is None:
+            return False
+        line, column, value = event
+        if (line, column) == (-1, -1):
+            return False
+        if value is ambiguous_identity:
+            return False
+        if parser_event_paths.get(((binding_scope, expression.id), line, column)) is not None:
+            return False
+        return not (
+            isinstance(value, ast.AST)
+            and could_be_parser(
+                value,
+                binding_scope,
+                frozenset(
+                    {
+                        (
+                            binding_scope,
+                            expression.id,
+                            (line, column),
+                        )
+                    }
+                ),
+            )
+        )
 
     subparser_paths: dict[
         tuple[tuple[tuple[str, str, int], ...], str],
@@ -1580,6 +3747,7 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
             isinstance(call.func, ast.Attribute)
             and call.func.attr == "add_parser"
             and (owner := _expression_reference(call.func.value)) is not None
+            and reachable_declaration_contexts(call)
         ):
             continue
         owner_key = binding_key(owner, scope_by_node[id(call)])
@@ -1603,32 +3771,70 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
                 if function_return_paths.get(function_scope) != path:
                     function_return_paths[function_scope] = path
                     changed = True
+        for node in assignment_nodes:
+            variable_name = _assigned_name(node)
+            if variable_name is None:
+                continue
+            if not declaration_contexts(node)[0]:
+                continue
+            scope = scope_by_node[id(node)]
+            path = resolve_parser_expression(node.value, scope)
+            variable = binding_key(variable_name, scope)
+            if path is not None:
+                changed = record_parser_binding(variable, node, path) or changed
+        for expression in (node for node in ast.walk(tree) if isinstance(node, ast.NamedExpr)):
+            target = _expression_reference(expression.target)
+            if target is None:
+                continue
+            if not declaration_contexts(expression)[0]:
+                continue
+            scope = scope_by_node[id(expression)]
+            path = resolve_parser_expression(expression.value, scope)
+            variable = binding_key(target, scope)
+            if path is not None:
+                changed = (
+                    record_parser_binding(
+                        variable,
+                        expression,
+                        path,
+                    )
+                    or changed
+                )
         for variable, call, node in assignments:
+            if not declaration_contexts(node)[0]:
+                continue
             scope = scope_by_node[id(node)]
             if not isinstance(call.func, ast.Attribute):
                 function_scope = resolve_function(call.func, scope)
                 if function_scope is not None and function_scope in function_return_paths:
                     path = function_return_paths[function_scope]
-                    if parser_paths.get(variable) != path:
-                        parser_paths[variable] = path
-                        changed = True
+                    changed = record_parser_binding(variable, node, path) or changed
                 continue
             owner = _expression_reference(call.func.value)
             if owner is None:
                 continue
             if call.func.attr == "add_subparsers":
-                path = resolve_reference(parser_paths, owner, scope)
+                path = resolve_parser_expression(call.func.value, scope)
                 if isinstance(path, tuple) and subparser_paths.get(variable) != path:
                     subparser_paths[variable] = path
                     changed = True
             elif call.func.attr == "add_parser" and call.args:
+                if has_enclosing_loop(call):
+                    continue
                 parent = resolve_reference(subparser_paths, owner, scope)
-                name = _literal_value(call.args[0])
-                if isinstance(parent, tuple) and isinstance(name, str):
+                contexts = reachable_declaration_contexts(call)
+                names = {
+                    name
+                    for binding in contexts
+                    if isinstance(
+                        (name := _literal_value(call.args[0], binding)),
+                        str,
+                    )
+                }
+                if isinstance(parent, tuple) and len(names) == 1:
+                    name = next(iter(names))
                     path = (parent[0], (*parent[1], name))
-                    if parser_paths.get(variable) != path:
-                        parser_paths[variable] = path
-                        changed = True
+                    changed = record_parser_binding(variable, node, path) or changed
 
     command_paths: set[tuple[tuple[object, ...], tuple[str, ...]]] = set()
     command_aliases: dict[
@@ -1675,22 +3881,29 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
             and (owner := _expression_reference(call.func.value)) is not None
         ):
             continue
+        if has_enclosing_loop(call):
+            continue
+        contexts = reachable_declaration_contexts(call)
+        if not contexts:
+            continue
         parent = resolve_reference(
             subparser_paths,
             owner,
             scope_by_node[id(call)],
         )
-        name = _literal_value(call.args[0])
-        if isinstance(parent, tuple) and isinstance(name, str):
+        for binding in contexts:
+            name = _literal_value(call.args[0], binding)
+            if not (isinstance(parent, tuple) and isinstance(name, str)):
+                continue
             path = (parent[0], (*parent[1], name))
             command_paths.add(path)
-            record_command_aliases(path, call)
+            record_command_aliases(path, call, binding)
             inherited = resolved_parent_paths(call, scope_by_node[id(call)])
             if inherited:
                 parent_paths[path] = inherited
 
     for variable, call, node in assignments:
-        if not _is_call_named(call, "ArgumentParser"):
+        if not is_argparse_constructor(call):
             continue
         path = parser_paths.get(variable)
         if path is None:
@@ -1712,9 +3925,6 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
         ],
     ] = {}
     for loop in (node for node in ast.walk(tree) if isinstance(node, ast.For)):
-        bindings = _literal_loop_bindings(loop)
-        if not bindings:
-            continue
         generated: dict[
             tuple[tuple[tuple[str, str, int], ...], str],
             list[
@@ -1724,11 +3934,9 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
                 ]
             ],
         ] = {}
-        for statement in loop.body:
-            assigned = _assigned_call(statement)
-            if assigned is None:
+        for call in calls:
+            if nearest_enclosing_for(call) is not loop:
                 continue
-            variable_name, call = assigned
             if not (
                 isinstance(call.func, ast.Attribute)
                 and call.func.attr == "add_parser"
@@ -1736,29 +3944,33 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
                 and (owner := _expression_reference(call.func.value)) is not None
             ):
                 continue
+            contexts = reachable_declaration_contexts(call)
+            if not contexts:
+                continue
             parent = resolve_reference(
                 subparser_paths,
                 owner,
-                scope_by_node[id(statement)],
+                scope_by_node[id(call)],
             )
             if not isinstance(parent, tuple):
                 continue
-            variable = binding_key(variable_name, scope_by_node[id(statement)])
-            for binding in bindings:
+            variable = assigned_variable_by_call.get(id(call))
+            for binding in contexts:
                 name = _bound_loop_value(call.args[0], binding)
                 if not isinstance(name, str):
                     continue
                 path = (parent[0], (*parent[1], name))
-                generated.setdefault(variable, []).append((binding, path))
+                if variable is not None:
+                    generated.setdefault(variable, []).append((binding, path))
                 command_paths.add(path)
                 record_command_aliases(path, call, binding)
                 inherited = resolved_parent_paths(
                     call,
-                    scope_by_node[id(statement)],
+                    scope_by_node[id(call)],
                 )
                 if inherited:
                     parent_paths[path] = inherited
-            if generated.get(variable):
+            if variable is not None and generated.get(variable):
                 parser_paths[variable] = generated[variable][-1][1]
         loop_generated[id(loop)] = generated
 
@@ -1793,9 +4005,6 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
                 )
             unresolved_groups = True
 
-    if not root_ids:
-        return None
-
     loop_arguments: dict[
         int,
         list[
@@ -1806,32 +4015,33 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
         ],
     ] = {}
     for loop in (node for node in ast.walk(tree) if isinstance(node, ast.For)):
-        bindings = _literal_loop_bindings(loop)
-        if not bindings:
-            continue
         generated = loop_generated.get(id(loop), {})
-        for statement in loop.body:
-            for node in ast.walk(statement):
-                if not (
-                    isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "add_argument"
-                    and (owner := _expression_reference(node.func.value)) is not None
-                ):
-                    continue
-                owner_key = binding_key(owner, scope_by_node[id(node)])
-                if owner_key in generated:
-                    loop_arguments[id(node)] = [
-                        (path, binding) for binding, path in generated[owner_key]
-                    ]
-                    continue
-                path = resolve_reference(
-                    argument_containers,
-                    owner,
-                    scope_by_node[id(node)],
-                )
-                if isinstance(path, tuple):
-                    loop_arguments[id(node)] = [(path, binding) for binding in bindings]
+        for node in calls:
+            if nearest_enclosing_for(node) is not loop:
+                continue
+            if not (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add_argument"
+                and (owner := _expression_reference(node.func.value)) is not None
+            ):
+                continue
+            contexts = reachable_declaration_contexts(node)
+            if not contexts:
+                loop_arguments[id(node)] = []
+                continue
+            owner_key = binding_key(owner, scope_by_node[id(node)])
+            if owner_key in generated:
+                loop_arguments[id(node)] = [
+                    (path, binding) for binding, path in generated[owner_key] if binding in contexts
+                ]
+                continue
+            path = resolve_reference(
+                argument_containers,
+                owner,
+                scope_by_node[id(node)],
+            )
+            if isinstance(path, tuple):
+                loop_arguments[id(node)] = [(path, binding) for binding in contexts]
 
     helper_argument_paths: dict[
         int,
@@ -1895,8 +4105,16 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
     for node in calls:
         if not (isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument"):
             continue
+        contexts = reachable_declaration_contexts(node)
+        if not contexts:
+            continue
+        scope = scope_by_node[id(node)]
         owner = _expression_reference(node.func.value)
-        if owner is None:
+        receiver_path = resolve_parser_expression(
+            node.func.value,
+            scope,
+        )
+        if owner is None and receiver_path is None:
             continue
         declarations: list[
             tuple[
@@ -1908,15 +4126,26 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
             declarations = list(loop_arguments[id(node)])
         elif id(node) in helper_argument_paths:
             declarations = [
-                (path, None) for path in sorted(helper_argument_paths[id(node)], key=repr)
+                (path, binding)
+                for path in sorted(
+                    helper_argument_paths[id(node)],
+                    key=repr,
+                )
+                for binding in contexts
             ]
         else:
-            path = resolve_reference(
-                argument_containers,
-                owner,
-                scope_by_node[id(node)],
+            path = (
+                resolve_reference(
+                    argument_containers,
+                    owner,
+                    scope,
+                )
+                if owner is not None
+                else receiver_path
             )
-            declarations = [(path, None)] if isinstance(path, tuple) else []
+            declarations = (
+                [(path, binding) for binding in contexts] if isinstance(path, tuple) else []
+            )
         for path, binding in declarations:
             argument = _argument_spec(node, binding)
             if argument is None:
@@ -1925,9 +4154,10 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
             if isinstance(argument, OptionSpec):
                 for alias in argument.aliases:
                     target.options[alias] = argument
-                group = binding_key(owner, scope_by_node[id(node)])
-                if group in mutually_exclusive_options:
-                    mutually_exclusive_options[group].append(argument)
+                if owner is not None:
+                    group = binding_key(owner, scope)
+                    if group in mutually_exclusive_options:
+                        mutually_exclusive_options[group].append(argument)
             else:
                 target.positionals.append(argument)
 
@@ -1962,7 +4192,10 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
             and (owner := _expression_reference(call.func.value)) is not None
         ):
             continue
-        path = resolve_reference(parser_paths, owner, scope_by_node[id(call)])
+        path = resolve_parser_expression(
+            call.func.value,
+            scope_by_node[id(call)],
+        )
         required = _literal_value(_call_keyword(call, "required"))
         if isinstance(path, tuple) and isinstance(required, bool):
             required_events.append((call.lineno, call.col_offset, path, required))
@@ -1996,6 +4229,7 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
         ]
     ] = []
     unresolved_parse_scopes: list[tuple[tuple[str, str, int], ...]] = []
+    non_parser_parse_scopes: list[tuple[tuple[str, str, int], ...]] = []
     parse_method_names = {
         "parse_args": False,
         "parse_intermixed_args": False,
@@ -2019,27 +4253,1143 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
                     parse_method_names[call.func.attr],
                 )
             )
+        elif definitely_non_parser_expression(
+            call.func.value,
+            scope_by_node[id(call)],
+        ):
+            non_parser_parse_scopes.append(scope_by_node[id(call)])
         else:
             unresolved_parse_scopes.append(scope_by_node[id(call)])
 
-    reachable_scopes = {
-        (),
-        *(
-            scope
-            for scope in function_scopes.values()
-            if (len(scope) == 1 and scope[-1][0] == "function" and scope[-1][1] == "main")
-        ),
+    main_scopes = {
+        scope
+        for scope in function_scopes.values()
+        if (len(scope) == 1 and scope[-1][0] == "function" and scope[-1][1] == "main")
     }
+    reachable_scopes = {(), *main_scopes}
+    reachable_execution_points: dict[
+        tuple[tuple[str, str, int], ...],
+        set[tuple[int, int]],
+    ] = {scope: {(sys.maxsize, sys.maxsize)} for scope in main_scopes}
+    class_mros: dict[
+        tuple[tuple[str, str, int], ...],
+        tuple[tuple[tuple[str, str, int], ...], ...] | None,
+    ] = {}
+
+    def class_mro(
+        resolved_class: tuple[tuple[str, str, int], ...],
+        active: frozenset[tuple[tuple[str, str, int], ...]] = frozenset(),
+    ) -> tuple[tuple[tuple[str, str, int], ...], ...] | None:
+        if resolved_class in class_mros:
+            return class_mros[resolved_class]
+        if resolved_class in active or resolved_class in uncertain_class_bases:
+            return None
+        bases = class_base_scopes.get(resolved_class, ())
+        base_mros = [class_mro(base, active | {resolved_class}) for base in bases]
+        if any(mro is None for mro in base_mros):
+            class_mros[resolved_class] = None
+            return None
+        sequences = [list(mro) for mro in base_mros if mro is not None]
+        sequences.append(list(bases))
+        merged: list[tuple[tuple[str, str, int], ...]] = []
+        while any(sequences):
+            sequences = [sequence for sequence in sequences if sequence]
+            candidate = next(
+                (
+                    sequence[0]
+                    for sequence in sequences
+                    if not any(sequence[0] in other[1:] for other in sequences)
+                ),
+                None,
+            )
+            if candidate is None:
+                class_mros[resolved_class] = None
+                return None
+            merged.append(candidate)
+            for sequence in sequences:
+                if sequence and sequence[0] == candidate:
+                    sequence.pop(0)
+        result = (resolved_class, *merged)
+        class_mros[resolved_class] = result
+        return result
+
+    constructor_contexts: set[
+        tuple[
+            tuple[tuple[str, str, int], ...],
+            tuple[tuple[tuple[str, str, int], ...], ...],
+            int,
+            tuple[int, int],
+        ]
+    ] = set()
+
+    def next_constructor_context(
+        mro: tuple[tuple[tuple[str, str, int], ...], ...],
+        method_name: str,
+        start: int,
+        root_before: tuple[int, int],
+    ) -> (
+        tuple[
+            tuple[tuple[str, str, int], ...],
+            tuple[tuple[tuple[str, str, int], ...], ...],
+            int,
+            tuple[int, int],
+        ]
+        | None
+    ):
+        for index in range(start, len(mro)):
+            method_scope = function_scopes.get((mro[index], method_name))
+            if isinstance(method_scope, tuple):
+                return method_scope, mro, index, root_before
+        return None
+
+    def explicit_super_constructor_contexts(
+        call: ast.Call,
+        call_scope: tuple[tuple[str, str, int], ...],
+    ) -> set[
+        tuple[
+            tuple[tuple[str, str, int], ...],
+            tuple[tuple[tuple[str, str, int], ...], ...],
+            int,
+            tuple[int, int],
+        ]
+    ]:
+        if (
+            not isinstance(call.func, ast.Attribute)
+            or call.func.attr not in {"__new__", "__init__"}
+            or not isinstance(call.func.value, ast.Call)
+        ):
+            return set()
+        super_call = call.func.value
+        if (
+            not isinstance(super_call.func, ast.Name)
+            or super_call.func.id != "super"
+            or super_call.keywords
+        ):
+            return set()
+        contexts: set[
+            tuple[
+                tuple[tuple[str, str, int], ...],
+                tuple[tuple[tuple[str, str, int], ...], ...],
+                int,
+                tuple[int, int],
+            ]
+        ] = set()
+        for function_scope, mro, _owner_index, root_before in constructor_contexts:
+            if function_scope != call_scope:
+                continue
+            if not super_call.args:
+                start_class = class_scope(call_scope)
+            elif len(super_call.args) == 2:
+                resolved_start = resolve_identity_expression(
+                    super_call.args[0],
+                    call_scope,
+                    root_before=root_before,
+                )
+                start_class = (
+                    resolved_start[1] if tagged_identity(resolved_start, class_identity) else None
+                )
+                parameters = function_parameters.get(call_scope, ())
+                receiver = resolve_identity_expression(
+                    super_call.args[1],
+                    call_scope,
+                    root_before=root_before,
+                )
+                if (
+                    not isinstance(start_class, tuple)
+                    or not parameters
+                    or receiver
+                    != (
+                        parameter_identity,
+                        call_scope,
+                        parameters[0],
+                    )
+                ):
+                    continue
+            else:
+                continue
+            if not isinstance(start_class, tuple) or start_class not in mro:
+                continue
+            next_context = next_constructor_context(
+                mro,
+                call.func.attr,
+                mro.index(start_class) + 1,
+                root_before,
+            )
+            if next_context is not None:
+                contexts.add(next_context)
+        return contexts
+
+    applied_external_effects: set[
+        tuple[
+            tuple[tuple[str, str, int], ...],
+            int,
+            tuple[int, int],
+        ]
+    ] = set()
+
+    def outer_nonlocal_scope(
+        function_scope: tuple[tuple[str, str, int], ...],
+        name: str,
+    ) -> tuple[tuple[str, str, int], ...] | None:
+        for length in range(len(function_scope) - 1, 0, -1):
+            candidate = function_scope[:length]
+            if candidate[-1][0] == "function" and (
+                (candidate, name) in identity_events or (candidate, name) in binding_events
+            ):
+                return candidate
+        return None
+
+    def effect_position(
+        target_scope: tuple[tuple[str, str, int], ...],
+        call: ast.Call,
+        call_scope: tuple[tuple[str, str, int], ...],
+        root_before: tuple[int, int],
+    ) -> tuple[int, int]:
+        if target_scope == () and call_scope != ():
+            line, column = root_before
+            return line, column - 1
+        return call.lineno, call.col_offset
+
+    def record_external_effect(
+        target_scope: tuple[tuple[str, str, int], ...],
+        name: str,
+        position: tuple[int, int],
+    ) -> None:
+        line, column = position
+        identity_events.setdefault((target_scope, name), []).append(
+            (line, column, ambiguous_identity)
+        )
+        opaque_identity_event_keys.add((target_scope, name, position))
+        identity_events[(target_scope, name)].sort(key=lambda event: event[:2])
+        binding_events.setdefault((target_scope, name), []).append(
+            (line, column, ambiguous_identity)
+        )
+        binding_events[(target_scope, name)].sort(key=lambda event: event[:2])
+
+    def apply_external_effects(
+        function_scope: tuple[tuple[str, str, int], ...],
+        call: ast.Call,
+        call_scope: tuple[tuple[str, str, int], ...],
+        root_before: tuple[int, int],
+    ) -> None:
+        effect_key = (function_scope, id(call), root_before)
+        if effect_key in applied_external_effects:
+            return
+        applied_external_effects.add(effect_key)
+        global_writes, nonlocal_writes = function_external_effects.get(
+            function_scope,
+            (frozenset(), frozenset()),
+        )
+        for name in global_writes:
+            target_scope: tuple[tuple[str, str, int], ...] = ()
+            record_external_effect(
+                target_scope,
+                name,
+                effect_position(
+                    target_scope,
+                    call,
+                    call_scope,
+                    root_before,
+                ),
+            )
+        for name in nonlocal_writes:
+            target_scope = outer_nonlocal_scope(function_scope, name)
+            if target_scope is None:
+                continue
+            record_external_effect(
+                target_scope,
+                name,
+                effect_position(
+                    target_scope,
+                    call,
+                    call_scope,
+                    root_before,
+                ),
+            )
+
+    parse_scopes = {scope for scope, _root_id, _allow_extras in parse_calls}
+
+    def identity_scope_has_parse_call(
+        identity_scope: tuple[tuple[str, str, int], ...],
+    ) -> bool:
+        if identity_scope and identity_scope[-1][0] == "function":
+            return identity_scope in parse_scopes
+        return any(scope[: len(identity_scope)] == identity_scope for scope in parse_scopes)
+
+    parse_method_names = {
+        scope[-1][1]
+        for scope in parse_scopes
+        if (scope and scope[-1][0] == "function" and any(part[0] == "class" for part in scope[:-1]))
+    }
+    parser_identity_method_names = {
+        "add_argument",
+        "add_argument_group",
+        "add_mutually_exclusive_group",
+        "add_parser",
+        "add_subparsers",
+        "parse_args",
+        "parse_intermixed_args",
+        "parse_known_args",
+        "parse_known_intermixed_args",
+    }
+
+    def expression_mentions_parse_identity(
+        expression: ast.AST,
+        scope: tuple[tuple[str, str, int], ...],
+        root_before: tuple[int, int],
+    ) -> bool:
+        for candidate in ast.walk(expression):
+            if not isinstance(candidate, ast.Name):
+                continue
+            identity = resolve_identity_expression(
+                candidate,
+                scope,
+                (candidate.lineno, candidate.col_offset),
+                root_before,
+            )
+            if (
+                tagged_identity(identity, class_identity)
+                or tagged_identity(identity, function_identity)
+                or tagged_identity(identity, instance_identity)
+            ) and identity_scope_has_parse_call(identity[1]):
+                return True
+        return False
+
+    def name_can_dispatch_to_parse_scope(
+        name: str,
+        scope: tuple[tuple[str, str, int], ...],
+        before: tuple[int, int],
+        root_before: tuple[int, int],
+    ) -> bool:
+        for candidate_scope in visible_scopes(scope):
+            candidate_before = root_before if candidate_scope == () else before
+            events = [
+                event
+                for event in identity_events.get(
+                    (candidate_scope, name),
+                    (),
+                )
+                if event[:2] < candidate_before
+            ]
+            for line, column, value in reversed(events):
+                definition_scope = definition_identity_scopes.get(
+                    (
+                        candidate_scope,
+                        name,
+                        (line, column),
+                    )
+                )
+                if definition_scope is not None and identity_scope_has_parse_call(definition_scope):
+                    return True
+                if (
+                    tagged_identity(value, class_identity)
+                    or tagged_identity(value, function_identity)
+                    or tagged_identity(value, instance_identity)
+                ):
+                    if identity_scope_has_parse_call(value[1]):
+                        return True
+                    continue
+                if value in {
+                    argparse_constructor_identity,
+                    argparse_module_identity,
+                }:
+                    return True
+                if isinstance(value, ast.AST):
+                    resolved = resolve_identity_expression(
+                        value,
+                        candidate_scope,
+                        (line, column),
+                        ((line, column) if candidate_scope == () else root_before),
+                    )
+                    if (
+                        tagged_identity(resolved, class_identity)
+                        or tagged_identity(resolved, function_identity)
+                        or tagged_identity(resolved, instance_identity)
+                    ) and identity_scope_has_parse_call(resolved[1]):
+                        return True
+                    if resolved is ambiguous_identity and expression_mentions_parse_identity(
+                        value,
+                        candidate_scope,
+                        ((line, column) if candidate_scope == () else root_before),
+                    ):
+                        return True
+            if events and candidate_scope and candidate_scope[-1][0] == "function":
+                return False
+        return False
+
+    def name_has_opaque_identity_effect(
+        name: str,
+        scope: tuple[tuple[str, str, int], ...],
+        before: tuple[int, int],
+        root_before: tuple[int, int],
+    ) -> bool:
+        for candidate_scope in visible_scopes(scope):
+            candidate_before = root_before if candidate_scope == () else before
+            barriers = [
+                position
+                for position in opaque_identity_barriers.get(
+                    candidate_scope,
+                    (),
+                )
+                if position < candidate_before
+            ]
+            latest_barrier = barriers[-1] if barriers else None
+            events = [
+                event
+                for event in identity_events.get(
+                    (candidate_scope, name),
+                    (),
+                )
+                if event[:2] < candidate_before
+            ]
+            for line, column, value in reversed(events):
+                key = (
+                    candidate_scope,
+                    name,
+                    (line, column),
+                )
+                if key in opaque_identity_event_keys:
+                    return True
+                if value is ambiguous_identity:
+                    continue
+                if latest_barrier is not None and latest_barrier > (line, column):
+                    return True
+                return False
+            if latest_barrier is not None:
+                return True
+            if events and candidate_scope and candidate_scope[-1][0] == "function":
+                return False
+        return False
+
+    def ambiguous_call_affects_identity_graph(
+        call: ast.Call,
+        call_scope: tuple[tuple[str, str, int], ...],
+        root_before: tuple[int, int],
+    ) -> bool:
+        if isinstance(call.func, ast.Name):
+            return name_can_dispatch_to_parse_scope(
+                call.func.id,
+                call_scope,
+                (call.lineno, call.col_offset),
+                root_before,
+            )
+        if not isinstance(call.func, ast.Attribute):
+            return False
+        if call.func.attr in parse_method_names:
+            if expression_mentions_parse_identity(
+                call.func.value,
+                call_scope,
+                root_before,
+            ):
+                return True
+            if isinstance(call.func.value, ast.Name):
+                return name_can_dispatch_to_parse_scope(
+                    call.func.value.id,
+                    call_scope,
+                    (call.lineno, call.col_offset),
+                    root_before,
+                )
+            return False
+        return (
+            call.func.attr in parser_identity_method_names
+            and isinstance(call.func.value, ast.Name)
+            and name_has_opaque_identity_effect(
+                call.func.value.id,
+                call_scope,
+                (call.lineno, call.col_offset),
+                root_before,
+            )
+        )
+
+    def invocation_uses_identity_default(
+        function_scope: tuple[tuple[str, str, int], ...],
+        call: ast.Call,
+        *,
+        implicit_receiver: bool = False,
+    ) -> bool:
+        defaults = function_opaque_default_parameters.get(function_scope)
+        if not defaults:
+            return False
+        parameters = function_parameters.get(function_scope, ())
+        positional_offset = (
+            1
+            if (
+                implicit_receiver
+                or (
+                    len(function_scope) >= 2
+                    and function_scope[-2][0] == "class"
+                    and isinstance(call.func, ast.Attribute)
+                )
+            )
+            else 0
+        )
+        provided = {keyword.arg for keyword in call.keywords if keyword.arg is not None}
+        provided.update(parameters[: len(call.args) + positional_offset])
+        definition_scope = function_scope[:-1]
+        for name, default in defaults.items():
+            if name in provided:
+                continue
+            identity = resolve_identity_expression(
+                default,
+                definition_scope,
+                (default.lineno, default.col_offset),
+            )
+            if (
+                tagged_identity(identity, class_identity)
+                or tagged_identity(identity, function_identity)
+                or tagged_identity(identity, instance_identity)
+            ) and identity_scope_has_parse_call(identity[1]):
+                return True
+            if identity is ambiguous_identity and expression_mentions_parse_identity(
+                default,
+                definition_scope,
+                (default.lineno, default.col_offset),
+            ):
+                return True
+        return False
+
+    def parameter_dispatch_reaches_parse(
+        parameter: object,
+        root_before: tuple[int, int],
+    ) -> bool:
+        if not tagged_identity(parameter, parameter_identity):
+            return False
+        function_scope = parameter[1]
+        parameter_name = parameter[2]
+        parameters = function_parameters.get(function_scope, ())
+        if parameter_name not in parameters:
+            return False
+        parameter_index = parameters.index(parameter_name)
+        for invocation in calls:
+            invocation_scope = scope_by_node[id(invocation)]
+            if (
+                resolve_function(
+                    invocation.func,
+                    invocation_scope,
+                    root_before,
+                )
+                != function_scope
+            ):
+                continue
+            argument: ast.AST | None = None
+            if parameter_index < len(invocation.args):
+                argument = invocation.args[parameter_index]
+            else:
+                argument = next(
+                    (
+                        keyword.value
+                        for keyword in invocation.keywords
+                        if keyword.arg == parameter_name
+                    ),
+                    None,
+                )
+            if argument is None:
+                argument = function_opaque_default_parameters.get(
+                    function_scope,
+                    {},
+                ).get(parameter_name)
+            if argument is None:
+                continue
+            identity = resolve_identity_expression(
+                argument,
+                invocation_scope,
+                (argument.lineno, argument.col_offset),
+                root_before,
+            )
+            if (
+                tagged_identity(identity, class_identity)
+                or tagged_identity(identity, function_identity)
+                or tagged_identity(identity, instance_identity)
+            ) and identity_scope_has_parse_call(identity[1]):
+                return True
+            if identity is ambiguous_identity and expression_mentions_parse_identity(
+                argument,
+                invocation_scope,
+                root_before,
+            ):
+                return True
+        return False
+
+    applied_unknown_call_effects: set[tuple[int, tuple[int, int]]] = set()
+
+    def expanded_argument_nodes(
+        expression: ast.AST,
+        scope: tuple[tuple[str, str, int], ...],
+        before: tuple[int, int],
+        root_before: tuple[int, int],
+        seen: frozenset[
+            tuple[
+                tuple[tuple[str, str, int], ...],
+                str,
+                tuple[int, int],
+            ]
+        ] = frozenset(),
+    ) -> Iterable[ast.AST]:
+        yield expression
+        for child in ast.iter_child_nodes(expression):
+            yield from expanded_argument_nodes(
+                child,
+                scope,
+                before,
+                root_before,
+                seen,
+            )
+        if not isinstance(expression, ast.Name):
+            return
+        for candidate_scope in visible_scopes(scope):
+            candidate_before = root_before if candidate_scope == () else before
+            prior = [
+                event
+                for event in identity_events.get(
+                    (candidate_scope, expression.id),
+                    (),
+                )
+                if event[:2] < candidate_before
+            ]
+            barriers = [
+                position
+                for position in opaque_identity_barriers.get(
+                    candidate_scope,
+                    (),
+                )
+                if position < candidate_before
+            ]
+            if not prior or (barriers and barriers[-1] > prior[-1][:2]):
+                return
+            line, column, value = prior[-1]
+            event_key = (
+                candidate_scope,
+                expression.id,
+                (line, column),
+            )
+            if event_key in seen or not isinstance(value, ast.AST):
+                return
+            yield from expanded_argument_nodes(
+                value,
+                candidate_scope,
+                (line, column),
+                ((line, column) if candidate_scope == () else root_before),
+                seen | {event_key},
+            )
+            return
+
+    def binding_scope_for_name(
+        name: str,
+        scope: tuple[tuple[str, str, int], ...],
+        before: tuple[int, int],
+        root_before: tuple[int, int],
+    ) -> tuple[tuple[str, str, int], ...] | None:
+        for candidate_scope in visible_scopes(scope):
+            candidate_before = root_before if candidate_scope == () else before
+            if any(
+                event[:2] < candidate_before
+                for event in identity_events.get(
+                    (candidate_scope, name),
+                    (),
+                )
+            ):
+                return candidate_scope
+        return None
+
+    def apply_unknown_call_effects(
+        call: ast.Call,
+        call_scope: tuple[tuple[str, str, int], ...],
+        root_before: tuple[int, int],
+    ) -> bool:
+        effect_key = (id(call), root_before)
+        if effect_key in applied_unknown_call_effects:
+            return False
+        applied_unknown_call_effects.add(effect_key)
+        if (
+            isinstance(call.func, ast.Name)
+            and call.func.id == "super"
+            and not any(
+                event[:2] < (call.lineno, call.col_offset)
+                for candidate_scope in visible_scopes(call_scope)
+                for event in identity_events.get(
+                    (candidate_scope, "super"),
+                    (),
+                )
+            )
+        ):
+            return False
+        expressions = [
+            *call.args,
+            *(keyword.value for keyword in call.keywords),
+        ]
+        parser_instances: set[object] = set()
+        for expression in expressions:
+            for argument in expanded_argument_nodes(
+                expression,
+                call_scope,
+                (call.lineno, call.col_offset),
+                root_before,
+            ):
+                if (
+                    isinstance(argument, ast.Call)
+                    and isinstance(argument.func, ast.Name)
+                    and argument.func.id in {"globals", "locals"}
+                    and not argument.args
+                    and not argument.keywords
+                ):
+                    target_scope = () if argument.func.id == "globals" else call_scope
+                    position = effect_position(
+                        target_scope,
+                        call,
+                        call_scope,
+                        root_before,
+                    )
+                    opaque_identity_barriers.setdefault(
+                        target_scope,
+                        [],
+                    ).append(position)
+                    opaque_identity_barriers[target_scope].sort()
+                    continue
+                if not isinstance(argument, ast.Name):
+                    continue
+                identity = resolve_identity_expression(
+                    argument,
+                    call_scope,
+                    (argument.lineno, argument.col_offset),
+                    root_before,
+                )
+                if tagged_identity(
+                    identity,
+                    instance_identity,
+                ) and identity_scope_has_parse_call(identity[1]):
+                    parser_instances.add(identity)
+
+        affected_symbols: set[tuple[tuple[tuple[str, str, int], ...], str]] = set()
+        before = (call.lineno, call.col_offset)
+        for candidate_scope in visible_scopes(call_scope):
+            for event_scope, name in identity_events:
+                if event_scope != candidate_scope:
+                    continue
+                identity = resolve_identity_name(
+                    name,
+                    call_scope,
+                    before,
+                    root_before,
+                )
+                if identity in parser_instances:
+                    affected_symbols.add((candidate_scope, name))
+        for target_scope, name in affected_symbols:
+            record_external_effect(
+                target_scope,
+                name,
+                effect_position(
+                    target_scope,
+                    call,
+                    call_scope,
+                    root_before,
+                ),
+            )
+
+        return bool(parser_instances and not affected_symbols)
+
+    function_instance_mutations: dict[
+        tuple[tuple[str, str, int], ...],
+        list[ast.Name],
+    ] = {}
+
+    def mutated_object_name(target: ast.AST) -> ast.Name | None:
+        current = target
+        while isinstance(current, (ast.Attribute, ast.Subscript)):
+            current = current.value
+        return current if isinstance(current, ast.Name) else None
+
+    for mutation in ast.walk(tree):
+        targets: list[ast.AST] = []
+        if isinstance(mutation, ast.Assign):
+            targets.extend(mutation.targets)
+        elif isinstance(mutation, (ast.AnnAssign, ast.AugAssign)):
+            targets.append(mutation.target)
+        elif isinstance(mutation, ast.Delete):
+            targets.extend(mutation.targets)
+        if not targets:
+            continue
+        mutation_scope = scope_by_node[id(mutation)]
+        if not (mutation_scope and mutation_scope[-1][0] == "function"):
+            continue
+        for target in targets:
+            name = mutated_object_name(target)
+            if name is not None and name is not target:
+                function_instance_mutations.setdefault(
+                    mutation_scope,
+                    [],
+                ).append(name)
+
+    applied_context_instance_effects: set[
+        tuple[
+            tuple[tuple[str, str, int], ...],
+            int,
+            tuple[int, int],
+        ]
+    ] = set()
+
+    def apply_context_instance_effects(
+        function_scope: tuple[tuple[str, str, int], ...],
+        context_call: ast.AST,
+        call_scope: tuple[tuple[str, str, int], ...],
+        root_before: tuple[int, int],
+    ) -> None:
+        effect_key = (function_scope, id(context_call), root_before)
+        if effect_key in applied_context_instance_effects:
+            return
+        applied_context_instance_effects.add(effect_key)
+        parser_instances: set[object] = set()
+        for name in function_instance_mutations.get(
+            function_scope,
+            (),
+        ):
+            identity = resolve_identity_expression(
+                name,
+                function_scope,
+                (name.lineno, name.col_offset),
+                root_before,
+            )
+            if tagged_identity(
+                identity,
+                instance_identity,
+            ) and identity_scope_has_parse_call(identity[1]):
+                parser_instances.add(identity)
+        if not parser_instances:
+            return
+        before = (context_call.lineno, context_call.col_offset)
+        affected_symbols: set[tuple[tuple[tuple[str, str, int], ...], str]] = set()
+        for candidate_scope in visible_scopes(function_scope):
+            for event_scope, name in identity_events:
+                if event_scope != candidate_scope:
+                    continue
+                identity = resolve_identity_name(
+                    name,
+                    function_scope,
+                    before,
+                    root_before,
+                )
+                if identity in parser_instances:
+                    affected_symbols.add((candidate_scope, name))
+        for target_scope, name in affected_symbols:
+            record_external_effect(
+                target_scope,
+                name,
+                effect_position(
+                    target_scope,
+                    context_call,
+                    call_scope,
+                    root_before,
+                ),
+            )
+
+    def expression_mentions_user_identity(
+        expression: ast.AST,
+        scope: tuple[tuple[str, str, int], ...],
+        root_before: tuple[int, int],
+    ) -> bool:
+        return any(
+            isinstance(candidate, ast.Name)
+            and any(
+                tagged_identity(
+                    resolve_identity_expression(
+                        candidate,
+                        scope,
+                        (candidate.lineno, candidate.col_offset),
+                        root_before,
+                    ),
+                    tag,
+                )
+                for tag in (
+                    class_identity,
+                    function_identity,
+                    instance_identity,
+                )
+            )
+            for candidate in expanded_argument_nodes(
+                expression,
+                scope,
+                (expression.lineno, expression.col_offset),
+                root_before,
+            )
+        )
+
+    with_nodes = [
+        candidate
+        for candidate in ast.walk(tree)
+        if isinstance(candidate, (ast.With, ast.AsyncWith))
+    ]
+
+    identity_graph_complete = True
     reachability_changed = True
     while reachability_changed:
         reachability_changed = False
+        for with_node in with_nodes:
+            with_scope = scope_by_node[id(with_node)]
+            if with_scope not in reachable_scopes or not declaration_contexts(with_node)[0]:
+                continue
+            execution_points = (
+                {(with_node.lineno, with_node.col_offset)}
+                if with_scope == ()
+                else reachable_execution_points.get(with_scope, set())
+            )
+            method_names = (
+                ("__aenter__", "__aexit__")
+                if isinstance(with_node, ast.AsyncWith)
+                else ("__enter__", "__exit__")
+            )
+            for root_before in execution_points:
+                for item in with_node.items:
+                    context_expression = item.context_expr
+                    context_identity = resolve_identity_expression(
+                        context_expression,
+                        with_scope,
+                        root_before=root_before,
+                    )
+                    if not tagged_identity(
+                        context_identity,
+                        instance_identity,
+                    ):
+                        context_factory_scope = None
+                        if isinstance(context_expression, ast.Call):
+                            callable_identity = resolve_identity_expression(
+                                context_expression.func,
+                                with_scope,
+                                root_before=root_before,
+                            )
+                            if (
+                                tagged_identity(
+                                    callable_identity,
+                                    function_identity,
+                                )
+                                and callable_identity[1] in context_factory_function_scopes
+                            ):
+                                context_factory_scope = callable_identity[1]
+                        if context_factory_scope is not None:
+                            apply_external_effects(
+                                context_factory_scope,
+                                context_expression,
+                                with_scope,
+                                root_before,
+                            )
+                            apply_context_instance_effects(
+                                context_factory_scope,
+                                context_expression,
+                                with_scope,
+                                root_before,
+                            )
+                            if context_factory_scope not in reachable_scopes:
+                                reachable_scopes.add(context_factory_scope)
+                                reachability_changed = True
+                            points = reachable_execution_points.setdefault(
+                                context_factory_scope,
+                                set(),
+                            )
+                            if root_before not in points:
+                                points.add(root_before)
+                                reachability_changed = True
+                            continue
+                        if isinstance(context_expression, ast.Call):
+                            context_callable_provenance = decorator_resolved_provenance(
+                                context_expression.func,
+                                with_scope,
+                            )
+                            if context_callable_provenance is invalidated_decorator_provenance:
+                                identity_graph_complete = False
+                                continue
+                            if isinstance(context_callable_provenance, str):
+                                continue
+                        if (
+                            context_identity is ambiguous_identity
+                            and expression_mentions_user_identity(
+                                context_expression,
+                                with_scope,
+                                root_before,
+                            )
+                        ):
+                            identity_graph_complete = False
+                        continue
+                    mro = class_mro(context_identity[1])
+                    if mro is None:
+                        identity_graph_complete = False
+                        continue
+                    for method_name in method_names:
+                        method_scope = next(
+                            (
+                                scope
+                                for owner in mro
+                                if (scope := function_scopes.get((owner, method_name))) is not None
+                            ),
+                            None,
+                        )
+                        if method_scope is None:
+                            identity_graph_complete = False
+                            continue
+                        apply_external_effects(
+                            method_scope,
+                            context_expression,
+                            with_scope,
+                            root_before,
+                        )
+                        apply_context_instance_effects(
+                            method_scope,
+                            context_expression,
+                            with_scope,
+                            root_before,
+                        )
+                        if method_scope not in reachable_scopes:
+                            reachable_scopes.add(method_scope)
+                            reachability_changed = True
+                        points = reachable_execution_points.setdefault(
+                            method_scope,
+                            set(),
+                        )
+                        if root_before not in points:
+                            points.add(root_before)
+                            reachability_changed = True
         for call in calls:
             if scope_by_node[id(call)] not in reachable_scopes:
                 continue
-            function_scope = resolve_function(call.func, scope_by_node[id(call)])
-            if function_scope is not None and function_scope not in reachable_scopes:
-                reachable_scopes.add(function_scope)
-                reachability_changed = True
+            call_scope = scope_by_node[id(call)]
+            for constructor_context in explicit_super_constructor_contexts(
+                call,
+                call_scope,
+            ):
+                if constructor_context not in constructor_contexts:
+                    constructor_contexts.add(constructor_context)
+                    reachability_changed = True
+                constructor_scope, _mro, _index, root_before = constructor_context
+                apply_external_effects(
+                    constructor_scope,
+                    call,
+                    call_scope,
+                    root_before,
+                )
+                if invocation_uses_identity_default(
+                    constructor_scope,
+                    call,
+                    implicit_receiver=True,
+                ):
+                    identity_graph_complete = False
+                if constructor_scope not in reachable_scopes:
+                    reachable_scopes.add(constructor_scope)
+                    reachability_changed = True
+                points = reachable_execution_points.setdefault(
+                    constructor_scope,
+                    set(),
+                )
+                if root_before not in points:
+                    points.add(root_before)
+                    reachability_changed = True
+
+            execution_points = (
+                {(call.lineno, call.col_offset)}
+                if call_scope == ()
+                else reachable_execution_points.get(call_scope, set())
+            )
+            for root_before in execution_points:
+                callable_identity = resolve_identity_expression(
+                    call.func,
+                    call_scope,
+                    root_before=root_before,
+                )
+                if (
+                    callable_identity is ambiguous_identity
+                    and ambiguous_call_affects_identity_graph(
+                        call,
+                        call_scope,
+                        root_before,
+                    )
+                ):
+                    identity_graph_complete = False
+                if parameter_dispatch_reaches_parse(
+                    callable_identity,
+                    root_before,
+                ):
+                    identity_graph_complete = False
+                function_scope = resolve_function(
+                    call.func,
+                    call_scope,
+                    root_before,
+                )
+                if function_scope is not None:
+                    apply_external_effects(
+                        function_scope,
+                        call,
+                        call_scope,
+                        root_before,
+                    )
+                    if invocation_uses_identity_default(
+                        function_scope,
+                        call,
+                    ):
+                        identity_graph_complete = False
+                    if function_scope not in reachable_scopes:
+                        reachable_scopes.add(function_scope)
+                        reachability_changed = True
+                    points = reachable_execution_points.setdefault(
+                        function_scope,
+                        set(),
+                    )
+                    if root_before not in points:
+                        points.add(root_before)
+                        reachability_changed = True
+                elif callable_identity is other_identity:
+                    if apply_unknown_call_effects(
+                        call,
+                        call_scope,
+                        root_before,
+                    ):
+                        identity_graph_complete = False
+                resolved_class = (
+                    callable_identity[1]
+                    if tagged_identity(callable_identity, class_identity)
+                    else None
+                )
+                if not isinstance(resolved_class, tuple):
+                    continue
+                mro = class_mro(resolved_class)
+                if mro is None:
+                    identity_graph_complete = False
+                    continue
+                for method_name in ("__new__", "__init__"):
+                    constructor_context = next_constructor_context(
+                        mro,
+                        method_name,
+                        0,
+                        root_before,
+                    )
+                    if constructor_context is None:
+                        continue
+                    if constructor_context not in constructor_contexts:
+                        constructor_contexts.add(constructor_context)
+                        reachability_changed = True
+                    (
+                        constructor_scope,
+                        _context_mro,
+                        _index,
+                        context_root,
+                    ) = constructor_context
+                    apply_external_effects(
+                        constructor_scope,
+                        call,
+                        call_scope,
+                        context_root,
+                    )
+                    if invocation_uses_identity_default(
+                        constructor_scope,
+                        call,
+                        implicit_receiver=True,
+                    ):
+                        identity_graph_complete = False
+                    if constructor_scope not in reachable_scopes:
+                        reachable_scopes.add(constructor_scope)
+                        reachability_changed = True
+                    points = reachable_execution_points.setdefault(
+                        constructor_scope,
+                        set(),
+                    )
+                    if context_root not in points:
+                        points.add(context_root)
+                        reachability_changed = True
 
     def uncertain_contract(reason: str) -> ProgramSpec:
         return ProgramSpec(
@@ -2051,12 +5401,28 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
     if (
         argparse_evidence
         and root_ids
+        and any(scope in reachable_scopes for scope in uncertain_parser_declaration_scopes)
+    ):
+        return uncertain_contract(
+            "a reachable argparse declaration has dynamic control-flow reachability"
+        )
+
+    if argparse_evidence and root_ids and not identity_graph_complete:
+        return uncertain_contract(
+            "a reachable call has an unresolved class, function, or instance identity"
+        )
+
+    if (
+        argparse_evidence
+        and root_ids
         and any(scope in reachable_scopes for scope in unresolved_parse_scopes)
     ):
         return uncertain_contract("a reachable parse call has an unresolved parser identity")
 
     selected_calls = [item for item in parse_calls if item[0] in reachable_scopes]
     if parse_calls and not selected_calls:
+        return None
+    if not selected_calls and any(scope in reachable_scopes for scope in non_parser_parse_scopes):
         return None
     for _scope, root_id, allow_extras in selected_calls:
         parse_modes.setdefault(root_id, set()).add(allow_extras)
@@ -2691,7 +6057,11 @@ def check_python_module_contract(
     tensorrt_program = _python_cli_contract(repo_root)
     findings: list[Finding] = []
     for offset, raw_tokens in _block_commands(block):
-        tokens = _strip_shell_wrappers(raw_tokens)
+        resolution = _resolve_shell_wrappers(
+            raw_tokens,
+            cwd=block.cwd,
+        )
+        tokens = list(resolution.tokens)
         if len(tokens) < 3:
             continue
         if Path(tokens[0]).name not in {"python", "python3"}:
@@ -2741,7 +6111,8 @@ def check_python_module_contract(
             )
             continue
 
-        module_path = _local_python_module_path(repo_root, module)
+        module_root = resolution.cwd if resolution.cwd.is_absolute() else repo_root / resolution.cwd
+        module_path = _local_python_module_path(module_root, module)
         if module_path is None:
             continue
         program = _argparse_program_contract(module_path)
@@ -2780,7 +6151,11 @@ def check_positional_inputs(block: ShellBlock, repo_root: Path) -> list[Finding]
     python_cli = _python_cli_contract(repo_root)
     findings: list[Finding] = []
     for offset, raw_tokens in _block_commands(block):
-        tokens = _strip_shell_wrappers(raw_tokens)
+        resolution = _resolve_shell_wrappers(
+            raw_tokens,
+            cwd=block.cwd,
+        )
+        tokens = list(resolution.tokens)
         spec: CommandSpec | None = None
         argument_tokens: list[str] = []
 
@@ -2808,7 +6183,13 @@ def check_positional_inputs(block: ShellBlock, repo_root: Path) -> list[Finding]
             spec,
         )
         for value in positionals:
-            local = _clean_local_path(value)
+            allow_plain = _resolved_command_cwd(repo_root, resolution.cwd) != repo_root.resolve()
+            local = _resolved_repo_local_path(
+                repo_root,
+                resolution.cwd,
+                value,
+                allow_plain=allow_plain,
+            )
             if local and not (repo_root / local).exists():
                 findings.append(
                     Finding(
@@ -2817,6 +6198,23 @@ def check_positional_inputs(block: ShellBlock, repo_root: Path) -> list[Finding]
                         f"positional command input does not exist: {local}",
                     )
                 )
+            elif local is None:
+                external = _external_candidate_path(
+                    repo_root,
+                    resolution.cwd,
+                    value,
+                    allow_plain=allow_plain,
+                )
+                if external is not None:
+                    findings.append(
+                        Finding(
+                            block.path,
+                            _source_line(block, offset),
+                            "positional command input resolves outside "
+                            "repository and cannot be validated: "
+                            f"{external}",
+                        )
+                    )
     return findings
 
 
@@ -3050,10 +6448,19 @@ def check_python_script_contract(
     """Validate flags for directly invoked, local argparse scripts."""
     findings: list[Finding] = []
     for offset, raw_tokens in _block_commands(block):
-        tokens = _strip_shell_wrappers(raw_tokens)
+        resolution = _resolve_shell_wrappers(
+            raw_tokens,
+            cwd=block.cwd,
+        )
+        tokens = list(resolution.tokens)
         if len(tokens) < 2 or Path(tokens[0]).name not in {"python", "python3"}:
             continue
-        local = _clean_local_path(tokens[1])
+        local = _resolved_repo_local_path(
+            repo_root,
+            resolution.cwd,
+            tokens[1],
+            allow_plain=True,
+        )
         if not local or not local.endswith(".py"):
             continue
         contract = _argparse_program_contract(repo_root / local)
@@ -3078,10 +6485,19 @@ def check_direct_script_contract(
     """Validate flags for executable repo-local Python wrappers."""
     findings: list[Finding] = []
     for offset, raw_tokens in _block_commands(block):
-        tokens = _strip_shell_wrappers(raw_tokens)
-        if not tokens or not tokens[0].startswith("./"):
+        resolution = _resolve_shell_wrappers(
+            raw_tokens,
+            cwd=block.cwd,
+        )
+        tokens = list(resolution.tokens)
+        if not tokens or not tokens[0].startswith(("./", "../")):
             continue
-        local = _clean_local_path(tokens[0])
+        local = _resolved_repo_local_path(
+            repo_root,
+            resolution.cwd,
+            tokens[0],
+            allow_plain=True,
+        )
         if not local:
             continue
         contract = _argparse_program_contract(repo_root / local)
@@ -3128,15 +6544,17 @@ def check_shell_wrapper_contract(block: ShellBlock) -> list[Finding]:
     """Reject wrapper options whose executable boundary is not statically known."""
     findings: list[Finding] = []
     for offset, raw_tokens in _block_commands(block):
-        uncertainty: list[str] = []
-        _strip_shell_wrappers(raw_tokens, uncertainty=uncertainty)
+        resolution = _resolve_shell_wrappers(
+            raw_tokens,
+            cwd=block.cwd,
+        )
         findings.extend(
             Finding(
                 block.path,
                 _source_line(block, offset),
                 f"cannot statically resolve shell wrapper: {reason}",
             )
-            for reason in uncertainty
+            for reason in resolution.uncertainty
         )
     return findings
 

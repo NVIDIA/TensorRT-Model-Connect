@@ -25,6 +25,10 @@ from __future__ import annotations
 
 from pathlib import Path
 import shlex
+import signal
+import subprocess
+import sys
+import textwrap
 
 import pytest
 
@@ -238,20 +242,11 @@ def test_literal_env_wrapped_shell_payloads_reuse_cli_contracts() -> None:
     bodies = (
         f"env -i bash -c {shlex.quote(payload)}\n",
         f"env - sh -c {shlex.quote(payload)}\n",
-        (
-            "/usr/bin/env --ignore-environment MODE=test sh -c "
-            f"{shlex.quote(payload)}\n"
-        ),
+        (f"/usr/bin/env --ignore-environment MODE=test sh -c {shlex.quote(payload)}\n"),
         f"env -u HOME bash -c {shlex.quote(payload)}\n",
         f"env --unset=HOME sh -c {shlex.quote(payload)}\n",
-        (
-            "MODE=test env -i /usr/bin/env --unset HOME -- bash -c "
-            f"{shlex.quote(payload)}\n"
-        ),
-        (
-            "docker exec trtmc-dev /usr/bin/env --unset HOME bash -c "
-            f"{shlex.quote(payload)}\n"
-        ),
+        (f"MODE=test env -i /usr/bin/env --unset HOME -- bash -c {shlex.quote(payload)}\n"),
+        (f"docker exec trtmc-dev /usr/bin/env --unset HOME bash -c {shlex.quote(payload)}\n"),
     )
 
     for body in bodies:
@@ -261,20 +256,14 @@ def test_literal_env_wrapped_shell_payloads_reuse_cli_contracts() -> None:
             language="bash",
             body=body,
         )
-        assert [
-            finding.message
-            for finding in cdc.check_command_block(block, repo_root)
-        ] == [
-            "unknown option for `tools/trtmc_validate.py`: "
-            "--definitely-invalid"
+        assert [finding.message for finding in cdc.check_command_block(block, repo_root)] == [
+            "unknown option for `tools/trtmc_validate.py`: --definitely-invalid"
         ]
 
 
-def test_dynamic_env_wrappers_are_skipped_safely() -> None:
+def test_dynamic_and_unknown_env_wrappers_fail_closed() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    payload = shlex.quote(
-        "python3 tools/trtmc_validate.py --definitely-invalid"
-    )
+    payload = shlex.quote("python3 tools/trtmc_validate.py --definitely-invalid")
     block = cdc.ShellBlock(
         path=Path("README.md"),
         line=10,
@@ -283,31 +272,39 @@ def test_dynamic_env_wrappers_are_skipped_safely() -> None:
             f'env -S "$ENV_ARGS" bash -c {payload}\n'
             f'env --unset "$ENV_NAME" bash -c {payload}\n'
             f'env --chdir "$WORKDIR" bash -c {payload}\n'
+            f"env --implementation-specific bash -c {payload}\n"
         ),
     )
 
-    assert cdc.check_command_block(block, repo_root) == []
+    assert [finding.message for finding in cdc.check_command_block(block, repo_root)] == [
+        "cannot statically resolve shell wrapper: unsupported or dynamic `env` wrapper options",
+        "cannot statically resolve shell wrapper: unsupported or dynamic `env` wrapper options",
+        "cannot statically resolve shell wrapper: unsupported or dynamic `env` wrapper options",
+        "cannot statically resolve shell wrapper: unsupported or dynamic `env` wrapper options",
+    ]
     assert list(cdc.shell_validation_blocks(block)) == [block]
+
+    inline = cdc.extract_inline_commands(
+        Path("README.md"),
+        'Run `env --split-string="$ENV_ARGS"` after setup.',
+    )
+    assert len(inline) == 1
+    assert [finding.message for finding in cdc.check_command_block(inline[0], repo_root)] == [
+        "cannot statically resolve shell wrapper: unsupported or dynamic `env` wrapper options"
+    ]
 
 
 def test_static_env_chdir_wrappers_reuse_nested_cli_contracts() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    payload = shlex.quote(
-        "python3 tools/trtmc_validate.py --definitely-invalid"
-    )
+    payload = shlex.quote("python3 tools/trtmc_validate.py --definitely-invalid")
+    root = shlex.quote(str(repo_root))
     bodies = (
-        f"env --chdir /tmp bash -c {payload}\n",
-        f"env --chdir='/tmp/work tree' sh -c {payload}\n",
-        f"env -C /tmp bash -c {payload}\n",
-        f"env -C/tmp sh -c {payload}\n",
-        (
-            "docker exec trtmc-dev env --chdir /tmp bash -c "
-            f"{payload}\n"
-        ),
-        (
-            "docker exec trtmc-dev /usr/bin/env -C/tmp sh -c "
-            f"{payload}\n"
-        ),
+        f"env --chdir {root} bash -c {payload}\n",
+        f"env --chdir={root} sh -c {payload}\n",
+        f"env -C {root} bash -c {payload}\n",
+        f"env -C{root} sh -c {payload}\n",
+        (f"docker exec trtmc-dev env --chdir {root} bash -c {payload}\n"),
+        (f"docker exec trtmc-dev /usr/bin/env -C{root} sh -c {payload}\n"),
     )
 
     for body in bodies:
@@ -317,17 +314,358 @@ def test_static_env_chdir_wrappers_reuse_nested_cli_contracts() -> None:
             language="bash",
             body=body,
         )
-        assert [
-            finding.message
-            for finding in cdc.check_command_block(block, repo_root)
-        ] == [
-            "unknown option for `tools/trtmc_validate.py`: "
-            "--definitely-invalid"
+        assert [finding.message for finding in cdc.check_command_block(block, repo_root)] == [
+            "unknown option for `tools/trtmc_validate.py`: --definitely-invalid"
         ]
 
 
-def test_static_env_wrappers_preserve_valid_nested_commands() -> None:
+def test_env_chdir_propagates_static_cwd_to_relative_scripts_and_inputs(
+    tmp_path: Path,
+) -> None:
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    (tools_dir / "cwd_cli.py").write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        'parser.add_argument("--known")\n'
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+    (tools_dir / "present.json").write_text("{}\n", encoding="utf-8")
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        10,
+        "bash",
+        "env -C tools python3 cwd_cli.py --removed\n"
+        "env --chdir=tools cat present.json missing.json\n"
+        "env -C tools bash -c 'python3 cwd_cli.py --nested-removed'\n",
+    )
+
+    assert [
+        (finding.line, finding.message) for finding in cdc.check_command_block(block, tmp_path)
+    ] == [
+        (12, "command input does not exist: tools/missing.json"),
+        (11, "unknown option for `tools/cwd_cli.py`: --removed"),
+        (13, "unknown option for `tools/cwd_cli.py`: --nested-removed"),
+    ]
+
+
+def test_static_env_chdir_outside_repo_fails_closed() -> None:
     repo_root = Path(__file__).resolve().parents[2]
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        10,
+        "bash",
+        "env --chdir /tmp python3 relative.py --invalid\n",
+    )
+
+    assert [
+        (finding.line, finding.message) for finding in cdc.check_command_block(block, repo_root)
+    ] == [
+        (
+            11,
+            "command input resolves outside repository and cannot be validated: /tmp/relative.py",
+        )
+    ]
+
+
+def test_literal_env_split_string_is_recursively_resolved() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    bodies = (
+        ("env -S 'python3 tools/trtmc_validate.py --definitely-invalid'\n"),
+        ("env --split-string='env -S \"python3 tools/trtmc_validate.py --definitely-invalid\"'\n"),
+        ("env -S '-C . python3 tools/trtmc_validate.py --definitely-invalid'\n"),
+    )
+
+    for body in bodies:
+        block = cdc.ShellBlock(Path("README.md"), 1, "bash", body)
+        assert [finding.message for finding in cdc.check_command_block(block, repo_root)] == [
+            "unknown option for `tools/trtmc_validate.py`: --definitely-invalid"
+        ]
+
+
+def test_gnu_env_split_string_escape_boundary_and_unknown_escape(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "cli.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "from argparse import ArgumentParser\n"
+        "parser = ArgumentParser()\n"
+        'parser.add_argument("--live", required=True)\n'
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+    escaped_boundary = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        r"env -S 'python3\_tools/cli.py --dead yes'" "\n",
+    )
+    unknown_escape = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        r"env -S 'python3\q tools/cli.py --live yes'" "\n",
+    )
+
+    assert [finding.message for finding in cdc.check_command_block(escaped_boundary, tmp_path)] == [
+        "unknown option for `tools/cli.py`: --dead",
+        "missing required option for `tools/cli.py`: --live",
+    ]
+    assert [finding.message for finding in cdc.check_command_block(unknown_escape, tmp_path)] == [
+        "cannot statically resolve shell wrapper: unsupported or dynamic `env` wrapper options"
+    ]
+
+
+def test_env_chdir_missing_repo_directory_fails_closed(
+    tmp_path: Path,
+) -> None:
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        4,
+        "bash",
+        "env -C missing true\n",
+    )
+
+    assert [
+        (finding.line, finding.message) for finding in cdc.check_command_block(block, tmp_path)
+    ] == [
+        (5, "command working directory does not exist: missing"),
+    ]
+
+
+def test_env_chdir_missing_or_non_directory_external_hops_fail_closed(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    missing = tmp_path / "missing-cwd"
+    not_directory = tmp_path / "cwd-file"
+    not_directory.write_text("not a directory\n", encoding="utf-8")
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        4,
+        "bash",
+        f"env -C {shlex.quote(str(missing))} true\n"
+        f"env --chdir={shlex.quote(str(not_directory))} true\n",
+    )
+
+    assert [
+        (finding.line, finding.message) for finding in cdc.check_command_block(block, repo_root)
+    ] == [
+        (
+            5,
+            f"command working directory does not exist: {missing}",
+        ),
+        (
+            6,
+            f"command working directory is not a directory: {not_directory}",
+        ),
+    ]
+
+
+def test_env_chdir_rejects_invalid_outer_hop_before_valid_final_cwd(
+    tmp_path: Path,
+) -> None:
+    resolution = cdc._resolve_shell_wrappers(["env", "-C", "missing", "env", "-C", "..", "true"])
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        4,
+        "bash",
+        "env -C missing env -C .. true\n",
+    )
+
+    assert resolution.cwd == Path(".")
+    assert resolution.cwd_hops == (Path("missing"), Path("."))
+    assert [
+        (finding.line, finding.message) for finding in cdc.check_command_block(block, tmp_path)
+    ] == [
+        (5, "command working directory does not exist: missing"),
+    ]
+
+
+def test_env_chdir_valid_external_directory_keeps_input_policy(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    external_cwd = tmp_path / "external-cwd"
+    external_cwd.mkdir()
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        4,
+        "bash",
+        f"env -C {shlex.quote(str(external_cwd))} python3 relative.py\n",
+    )
+
+    assert [
+        (finding.line, finding.message) for finding in cdc.check_command_block(block, repo_root)
+    ] == [
+        (
+            5,
+            "command input resolves outside repository and cannot be "
+            f"validated: {external_cwd}/relative.py",
+        ),
+    ]
+
+
+def test_python_module_under_static_cwd_is_not_treated_as_a_script_path(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "tools" / "pkg"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "__main__.py").write_text("", encoding="utf-8")
+    (package / "cli.py").write_text("", encoding="utf-8")
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        4,
+        "bash",
+        "timeout 5 env -C tools python3 -m pkg.cli\nenv --chdir=tools python3 -m pkg\n",
+    )
+
+    assert cdc.check_local_inputs(block, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "tokens",
+    [
+        ["env", "-C", "missing", "-C", ".", "pwd"],
+        ["env", "--chdir", "missing", "--chdir", ".", "pwd"],
+        ["env", "-Cmissing", "--chdir=.", "pwd"],
+        ["env", "-S", "-C missing -C . pwd"],
+    ],
+)
+def test_same_env_layer_uses_only_final_chdir_like_gnu_env(
+    tmp_path: Path,
+    tokens: list[str],
+) -> None:
+    completed = subprocess.run(
+        tokens,
+        cwd=tmp_path,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    resolution = cdc._resolve_shell_wrappers(tokens)
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        4,
+        "bash",
+        f"{shlex.join(tokens)}\n",
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert Path(completed.stdout.strip()) == tmp_path
+    assert resolution.cwd == Path(".")
+    assert resolution.cwd_hops == (Path("."),)
+    assert cdc.check_local_inputs(block, tmp_path) == []
+
+
+def test_env_chdir_layers_match_gnu_for_override_and_nested_env(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "x" / "y").mkdir(parents=True)
+    (tmp_path / "y").mkdir()
+    same_layer = ["env", "-C", "x", "-C", "y", "pwd"]
+    nested = ["env", "-C", "x", "env", "-C", "y", "pwd"]
+    split_nested = ["env", "-S", "-C x env -C y pwd"]
+
+    for tokens, expected, expected_hops in [
+        (same_layer, tmp_path / "y", (Path("y"),)),
+        (
+            nested,
+            tmp_path / "x" / "y",
+            (Path("x"), Path("x/y")),
+        ),
+        (
+            split_nested,
+            tmp_path / "x" / "y",
+            (Path("x"), Path("x/y")),
+        ),
+    ]:
+        completed = subprocess.run(
+            tokens,
+            cwd=tmp_path,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        resolution = cdc._resolve_shell_wrappers(tokens)
+        block = cdc.ShellBlock(
+            Path("README.md"),
+            4,
+            "bash",
+            f"{shlex.join(tokens)}\n",
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        assert Path(completed.stdout.strip()) == expected
+        assert resolution.cwd_hops == expected_hops
+        assert cdc.check_local_inputs(block, tmp_path) == []
+
+
+def test_env_chdir_final_hop_and_external_override_match_gnu(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    missing = tmp_path / "missing"
+    invalid = ["env", "-C", ".", "-C", str(missing), "pwd"]
+    overridden = [
+        "env",
+        "-C",
+        str(missing),
+        "-C",
+        str(external),
+        "pwd",
+    ]
+
+    invalid_run = subprocess.run(
+        invalid,
+        cwd=repo_root,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    overridden_run = subprocess.run(
+        overridden,
+        cwd=repo_root,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    invalid_block = cdc.ShellBlock(
+        Path("README.md"),
+        4,
+        "bash",
+        f"{shlex.join(invalid)}\n",
+    )
+    overridden_block = cdc.ShellBlock(
+        Path("README.md"),
+        4,
+        "bash",
+        f"{shlex.join(overridden)}\n",
+    )
+
+    assert invalid_run.returncode != 0
+    assert [finding.message for finding in cdc.check_local_inputs(invalid_block, repo_root)] == [
+        f"command working directory does not exist: {missing}",
+    ]
+    assert overridden_run.returncode == 0, overridden_run.stderr
+    assert Path(overridden_run.stdout.strip()) == external
+    assert cdc.check_local_inputs(overridden_block, repo_root) == []
+
+
+def test_static_env_wrappers_preserve_valid_nested_commands(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    external_cwd = tmp_path / "work tree"
+    external_cwd.mkdir()
     block = cdc.ShellBlock(
         path=Path("README.md"),
         line=10,
@@ -345,18 +683,16 @@ def test_static_env_wrappers_preserve_valid_nested_commands() -> None:
     inline = cdc.extract_inline_commands(
         Path("README.md"),
         (
-            "Run `EMPTY= LABEL='two words' env -i env --chdir '/tmp/work tree' "
+            "Run `EMPTY= LABEL='two words' env -i env --chdir "
+            f"{shlex.quote(str(external_cwd))} "
             "--unset HOME -- bash -c "
             "'python3 tools/trtmc_validate.py --definitely-invalid'`."
         ),
     )
     assert len(inline) == 1
-    assert [
-        finding.message
-        for finding in cdc.check_command_block(inline[0], repo_root)
-    ] == [
-        "unknown option for `tools/trtmc_validate.py`: "
-        "--definitely-invalid"
+    assert [finding.message for finding in cdc.check_command_block(inline[0], repo_root)] == [
+        "command input resolves outside repository and cannot be validated: "
+        f"{external_cwd}/tools/trtmc_validate.py"
     ]
 
 
@@ -414,6 +750,178 @@ def test_uncertain_command_and_time_wrapper_options_fail_closed() -> None:
         ),
     ]
     assert cdc.check_shell_wrapper_contract(query) == []
+
+
+def test_timeout_wrapper_resolves_common_options_and_command_boundary() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    bodies = (
+        "timeout 30s python3 tools/trtmc_validate.py --definitely-invalid\n",
+        "timeout 1e3s python3 tools/trtmc_validate.py --definitely-invalid\n",
+        "timeout +1s python3 tools/trtmc_validate.py --definitely-invalid\n",
+        "timeout inf python3 tools/trtmc_validate.py --definitely-invalid\n",
+        (
+            "/usr/bin/timeout --foreground --preserve-status "
+            "--signal=TERM --kill-after=5s 2m "
+            "python3 tools/trtmc_validate.py --definitely-invalid\n"
+        ),
+        (
+            "timeout -v -s TERM -k 1s -- 10 "
+            "command python3 tools/trtmc_validate.py --definitely-invalid\n"
+        ),
+    )
+
+    for body in bodies:
+        block = cdc.ShellBlock(Path("README.md"), 1, "bash", body)
+        assert [finding.message for finding in cdc.check_command_block(block, repo_root)] == [
+            "unknown option for `tools/trtmc_validate.py`: --definitely-invalid"
+        ]
+
+
+def test_unknown_timeout_shapes_fail_closed() -> None:
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        3,
+        "bash",
+        "timeout --implementation-specific 5 python3 tools/check.py\n"
+        "timeout -p 5 python3 tools/check.py\n"
+        "timeout soon python3 tools/check.py\n"
+        "timeout NaN python3 tools/check.py\n"
+        "timeout 5\n",
+    )
+
+    assert [
+        (finding.line, finding.message) for finding in cdc.check_shell_wrapper_contract(block)
+    ] == [
+        (
+            4,
+            "cannot statically resolve shell wrapper: "
+            "unsupported `timeout` wrapper options or command boundary",
+        ),
+        (
+            5,
+            "cannot statically resolve shell wrapper: "
+            "unsupported `timeout` wrapper options or command boundary",
+        ),
+        (
+            6,
+            "cannot statically resolve shell wrapper: "
+            "unsupported `timeout` wrapper options or command boundary",
+        ),
+        (
+            7,
+            "cannot statically resolve shell wrapper: "
+            "unsupported `timeout` wrapper options or command boundary",
+        ),
+        (
+            8,
+            "cannot statically resolve shell wrapper: "
+            "unsupported `timeout` wrapper options or command boundary",
+        ),
+    ]
+
+
+def test_timeout_signal_values_are_validated_without_execution() -> None:
+    valid = cdc.ShellBlock(
+        Path("README.md"),
+        3,
+        "bash",
+        "timeout --signal=TERM 1 true\n"
+        "timeout --signal SIGTERM 1 true\n"
+        "timeout -s15 1 true\n"
+        "timeout -s 0 1 true\n"
+        "timeout --signal=RTMIN+1 1 true\n",
+    )
+    invalid = cdc.ShellBlock(
+        Path("README.md"),
+        8,
+        "bash",
+        "timeout --signal=NOT_A_REAL_SIGNAL 1 true\ntimeout -s999999 1 true\n",
+    )
+
+    assert cdc.check_shell_wrapper_contract(valid) == []
+    assert [
+        (finding.line, finding.message) for finding in cdc.check_shell_wrapper_contract(invalid)
+    ] == [
+        (
+            9,
+            "cannot statically resolve shell wrapper: "
+            "unsupported `timeout` wrapper options or command boundary",
+        ),
+        (
+            10,
+            "cannot statically resolve shell wrapper: "
+            "unsupported `timeout` wrapper options or command boundary",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "0",
+        "32",
+        "33",
+        "64",
+        "TERM",
+        "SIGTERM",
+        "RTMIN+1",
+        "NOT_A_REAL_SIGNAL",
+        "١٥",
+    ],
+)
+def test_timeout_signal_acceptance_matches_gnu_timeout(
+    value: str,
+) -> None:
+    completed = subprocess.run(
+        ["timeout", f"--signal={value}", "1", "true"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        3,
+        "bash",
+        f"timeout --signal={value} 1 true\n",
+    )
+    checker_accepts = cdc.check_shell_wrapper_contract(block) == []
+
+    assert checker_accepts == (completed.returncode != 125), completed.stderr
+    if value.isascii() and value.isdecimal():
+        number = int(value)
+        assert checker_accepts == (
+            number == 0 or number in {int(candidate) for candidate in signal.valid_signals()}
+        )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["-s=TERM"],
+        ["-vsTERM"],
+        ["-vk.01s"],
+    ],
+)
+def test_timeout_short_option_clusters_match_gnu_timeout(
+    options: list[str],
+) -> None:
+    tokens = ["timeout", *options, "1", "true"]
+    completed = subprocess.run(
+        tokens,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        3,
+        "bash",
+        f"{shlex.join(tokens)}\n",
+    )
+
+    assert (cdc.check_shell_wrapper_contract(block) == []) == (completed.returncode != 125), (
+        completed.stderr
+    )
 
 
 def test_literal_shell_c_payload_syntax_and_local_inputs_are_checked(
@@ -505,7 +1013,10 @@ def test_nested_shell_c_recursion_rejects_an_ancestor_cycle(monkeypatch) -> None
     monkeypatch.setattr(
         cdc,
         "_nested_shell_payload",
-        lambda _tokens: block.body,
+        lambda _tokens, *, cwd=Path("."): cdc._NestedShellPayload(
+            block.body,
+            cwd,
+        ),
     )
 
     assert list(cdc.shell_validation_blocks(block)) == [block]
@@ -1498,6 +2009,1454 @@ def test_argparse_follows_statically_bound_class_method_entrypoints(
     ]
 
 
+def test_argparse_import_alias_and_named_expression_select_root(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "named_root.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "from argparse import ArgumentParser as AP\n"
+        "parser = (selected := AP())\n"
+        'selected.add_argument("--live", required=True)\n'
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+    valid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/named_root.py --live yes\n",
+    )
+    invalid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/named_root.py --dead yes\n",
+    )
+
+    assert cdc.check_python_script_contract(valid, tmp_path) == []
+    assert [finding.message for finding in cdc.check_python_script_contract(invalid, tmp_path)] == [
+        "unknown option for `tools/named_root.py`: --dead",
+        "missing required option for `tools/named_root.py`: --live",
+    ]
+
+
+def test_argparse_constructor_alias_chain_selects_root(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "alias_chain.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "from argparse import ArgumentParser as AP\n"
+        "Parser = AP\n"
+        "parser = Parser()\n"
+        'parser.add_argument("--live", required=True)\n'
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+    valid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/alias_chain.py --live yes\n",
+    )
+    invalid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/alias_chain.py --dead yes\n",
+    )
+
+    assert cdc.check_python_script_contract(valid, tmp_path) == []
+    assert [finding.message for finding in cdc.check_python_script_contract(invalid, tmp_path)] == [
+        "unknown option for `tools/alias_chain.py`: --dead",
+        "missing required option for `tools/alias_chain.py`: --live",
+    ]
+
+
+def test_argparse_module_attribute_constructor_alias_selects_root(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "module_alias.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse as ap\n"
+        "module = ap\n"
+        "Parser = module.ArgumentParser\n"
+        "parser = Parser()\n"
+        'parser.add_argument("--live", required=True)\n'
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+    invalid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/module_alias.py --dead yes\n",
+    )
+
+    assert [finding.message for finding in cdc.check_python_script_contract(invalid, tmp_path)] == [
+        "unknown option for `tools/module_alias.py`: --dead",
+        "missing required option for `tools/module_alias.py`: --live",
+    ]
+
+
+def test_argparse_constructor_alias_rebinding_is_ordered(
+    tmp_path: Path,
+) -> None:
+    tools = tmp_path / "tools"
+    tools.mkdir(parents=True)
+    custom_parser = (
+        "class CustomParser:\n"
+        "    def add_argument(self, *_args, **_kwargs):\n"
+        "        return None\n"
+        "    def parse_args(self):\n"
+        "        return None\n"
+    )
+    before_rebind = tools / "before_rebind.py"
+    before_rebind.write_text(
+        "from argparse import ArgumentParser as AP\n"
+        f"{custom_parser}"
+        "Parser = AP\n"
+        "parser = Parser()\n"
+        'parser.add_argument("--live", required=True)\n'
+        "Parser = CustomParser\n"
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+    after_rebind = tools / "after_rebind.py"
+    after_rebind.write_text(
+        "from argparse import ArgumentParser as AP\n"
+        f"{custom_parser}"
+        "Parser = AP\n"
+        "Parser = CustomParser\n"
+        "parser = Parser()\n"
+        'parser.add_argument("--custom")\n'
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+    before_block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/before_rebind.py --dead yes\n",
+    )
+    after_block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/after_rebind.py --anything\n",
+    )
+
+    assert [
+        finding.message for finding in cdc.check_python_script_contract(before_block, tmp_path)
+    ] == [
+        "unknown option for `tools/before_rebind.py`: --dead",
+        "missing required option for `tools/before_rebind.py`: --live",
+    ]
+    assert cdc.check_python_script_contract(after_block, tmp_path) == []
+
+
+def test_argparse_constructor_parameter_shadows_outer_alias(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "scoped_alias.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "from argparse import ArgumentParser as Parser\n"
+        "class CustomParser:\n"
+        "    def add_argument(self, *_args, **_kwargs):\n"
+        "        return None\n"
+        "    def parse_args(self):\n"
+        "        return None\n"
+        "def run(Parser):\n"
+        "    parser = Parser()\n"
+        '    parser.add_argument("--custom")\n'
+        "    parser.parse_args()\n"
+        "run(CustomParser)\n",
+        encoding="utf-8",
+    )
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/scoped_alias.py --anything\n",
+    )
+
+    assert cdc.check_python_script_contract(block, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("expression", "expects_argparse"),
+    [
+        ("AP if True else CustomParser", True),
+        ("CustomParser if False else AP", True),
+        ("AP if False else CustomParser", False),
+        ("AP if condition else AP", True),
+        ("AP if condition else CustomParser", False),
+    ],
+)
+def test_argparse_constructor_alias_static_conditional_expressions(
+    tmp_path: Path,
+    expression: str,
+    expects_argparse: bool,
+) -> None:
+    script = tmp_path / "tools" / "conditional_alias.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "from argparse import ArgumentParser as AP\n"
+        "class CustomParser:\n"
+        "    def add_argument(self, *_args, **_kwargs):\n"
+        "        return None\n"
+        "    def parse_args(self):\n"
+        "        return None\n"
+        "condition = bool()\n"
+        f"Parser = {expression}\n"
+        "parser = Parser()\n"
+        'parser.add_argument("--live", required=True)\n'
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/conditional_alias.py --dead yes\n",
+    )
+
+    messages = [finding.message for finding in cdc.check_python_script_contract(block, tmp_path)]
+    if expects_argparse:
+        assert messages == [
+            "unknown option for `tools/conditional_alias.py`: --dead",
+            "missing required option for `tools/conditional_alias.py`: --live",
+        ]
+    else:
+        assert messages == []
+
+
+def test_argparse_constructor_named_expression_alias_side_effect(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "named_constructor_alias.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "from argparse import ArgumentParser as AP\n"
+        "Parser = (Alias := AP)\n"
+        "parser = Alias()\n"
+        'parser.add_argument("--live", required=True)\n'
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/named_constructor_alias.py --dead yes\n",
+    )
+
+    assert [finding.message for finding in cdc.check_python_script_contract(block, tmp_path)] == [
+        "unknown option for `tools/named_constructor_alias.py`: --dead",
+        "missing required option for `tools/named_constructor_alias.py`: --live",
+    ]
+
+
+def test_argparse_parser_instance_rebinding_and_parameter_shadowing(
+    tmp_path: Path,
+) -> None:
+    tools = tmp_path / "tools"
+    tools.mkdir(parents=True)
+    custom_parser = (
+        "class CustomParser:\n"
+        "    def add_argument(self, *_args, **_kwargs):\n"
+        "        return None\n"
+        "    def parse_args(self):\n"
+        "        return None\n"
+    )
+    rebound = tools / "rebound_instance.py"
+    rebound.write_text(
+        "from argparse import ArgumentParser as AP\n"
+        f"{custom_parser}"
+        "parser = AP()\n"
+        'parser.add_argument("--dead", required=True)\n'
+        "parser = CustomParser()\n"
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+    shadowed = tools / "shadowed_instance.py"
+    shadowed.write_text(
+        "from argparse import ArgumentParser as AP\n"
+        f"{custom_parser}"
+        "parser = AP()\n"
+        'parser.add_argument("--dead", required=True)\n'
+        "def run(parser):\n"
+        "    parser.parse_args()\n"
+        "run(CustomParser())\n",
+        encoding="utf-8",
+    )
+
+    rebound_block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/rebound_instance.py --anything\n",
+    )
+    shadowed_block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/shadowed_instance.py --anything\n",
+    )
+
+    assert cdc.check_python_script_contract(rebound_block, tmp_path) == []
+    assert [
+        finding.message
+        for finding in cdc.check_python_script_contract(
+            shadowed_block,
+            tmp_path,
+        )
+    ] == [
+        "cannot statically validate argparse contract for "
+        "`tools/shadowed_instance.py`: "
+        "a reachable parse call has an unresolved parser identity"
+    ]
+
+
+def test_argparse_named_expression_receiver_attaches_arguments(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "named_receiver.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "from argparse import ArgumentParser as AP\n"
+        "(parser := AP()).add_argument('--live', required=True)\n"
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+    valid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/named_receiver.py --live yes\n",
+    )
+    invalid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/named_receiver.py --dead yes\n",
+    )
+
+    assert cdc.check_python_script_contract(valid, tmp_path) == []
+    assert [finding.message for finding in cdc.check_python_script_contract(invalid, tmp_path)] == [
+        "unknown option for `tools/named_receiver.py`: --dead",
+        "missing required option for `tools/named_receiver.py`: --live",
+    ]
+
+
+def test_argparse_if_expression_preserves_or_rejects_root_identity(
+    tmp_path: Path,
+) -> None:
+    same = tmp_path / "tools" / "same_root.py"
+    same.parent.mkdir(parents=True)
+    same.write_text(
+        "from argparse import ArgumentParser as AP\n"
+        "parser = AP()\n"
+        'parser.add_argument("--live", required=True)\n'
+        "selected = parser if object() else parser\n"
+        "selected.parse_args()\n",
+        encoding="utf-8",
+    )
+    ambiguous = tmp_path / "tools" / "ambiguous_root.py"
+    ambiguous.write_text(
+        "from argparse import ArgumentParser as AP\n"
+        "first = AP()\n"
+        'first.add_argument("--first")\n'
+        "second = AP()\n"
+        'second.add_argument("--second")\n'
+        "selected = first if object() else second\n"
+        "selected.parse_args()\n",
+        encoding="utf-8",
+    )
+    valid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/same_root.py --live yes\n",
+    )
+    uncertain = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/ambiguous_root.py --first yes\n",
+    )
+
+    assert cdc.check_python_script_contract(valid, tmp_path) == []
+    assert [
+        finding.message for finding in cdc.check_python_script_contract(uncertain, tmp_path)
+    ] == [
+        "cannot statically validate argparse contract for "
+        "`tools/ambiguous_root.py`: "
+        "a reachable parse call has an unresolved parser identity"
+    ]
+
+
+@pytest.mark.parametrize("method", ["__new__", "__init__"])
+def test_argparse_reaches_parser_in_called_class_constructor(
+    tmp_path: Path,
+    method: str,
+) -> None:
+    script = tmp_path / "tools" / f"constructor_{method.strip('_')}.py"
+    script.parent.mkdir(parents=True)
+    receiver = "cls" if method == "__new__" else "self"
+    tail = "        return object.__new__(cls)\n" if method == "__new__" else ""
+    script.write_text(
+        "from argparse import ArgumentParser as AP\n"
+        "class App:\n"
+        f"    def {method}({receiver}):\n"
+        "        parser = AP()\n"
+        '        parser.add_argument("--live", required=True)\n'
+        "        parser.parse_args()\n"
+        f"{tail}"
+        "def main():\n"
+        "    return App()\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    invalid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        f"python3 tools/{script.name} --dead yes\n",
+    )
+
+    assert [finding.message for finding in cdc.check_python_script_contract(invalid, tmp_path)] == [
+        f"unknown option for `tools/{script.name}`: --dead",
+        f"missing required option for `tools/{script.name}`: --live",
+    ]
+
+
+def test_argparse_reaches_inherited_class_constructor(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "inherited_constructor.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "from argparse import ArgumentParser as AP\n"
+        "class Base:\n"
+        "    def __init__(self):\n"
+        "        parser = AP()\n"
+        '        parser.add_argument("--live", required=True)\n'
+        "        parser.parse_args()\n"
+        "class App(Base):\n"
+        "    pass\n"
+        "def main():\n"
+        "    return App()\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    invalid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/inherited_constructor.py --dead yes\n",
+    )
+
+    assert [finding.message for finding in cdc.check_python_script_contract(invalid, tmp_path)] == [
+        "unknown option for `tools/inherited_constructor.py`: --dead",
+        "missing required option for `tools/inherited_constructor.py`: --live",
+    ]
+
+
+def test_argparse_local_constructor_reaches_base_only_with_explicit_super(
+    tmp_path: Path,
+) -> None:
+    tools = tmp_path / "tools"
+    tools.mkdir(parents=True)
+    base = (
+        "from argparse import ArgumentParser\n"
+        "class Base:\n"
+        "    def __init__(self):\n"
+        "        parser = ArgumentParser()\n"
+        '        parser.add_argument("--live", required=True)\n'
+        "        parser.parse_args()\n"
+    )
+    with_super = tools / "with_super.py"
+    with_super.write_text(
+        f"{base}"
+        "class App(Base):\n"
+        "    def __init__(self):\n"
+        "        super().__init__()\n"
+        "def main():\n"
+        "    return App()\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    without_super = tools / "without_super.py"
+    without_super.write_text(
+        f"{base}"
+        "class App(Base):\n"
+        "    def __init__(self):\n"
+        "        self.ready = True\n"
+        "def main():\n"
+        "    return App()\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    with_super_block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/with_super.py --dead yes\n",
+    )
+    without_super_block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/without_super.py --dead yes\n",
+    )
+
+    assert [
+        finding.message
+        for finding in cdc.check_python_script_contract(
+            with_super_block,
+            tmp_path,
+        )
+    ] == [
+        "unknown option for `tools/with_super.py`: --dead",
+        "missing required option for `tools/with_super.py`: --live",
+    ]
+    assert (
+        cdc.check_python_script_contract(
+            without_super_block,
+            tmp_path,
+        )
+        == []
+    )
+
+
+def test_argparse_constructor_lookup_follows_python_mro(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "mro_constructor.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "from argparse import ArgumentParser\n"
+        "class First:\n"
+        "    def __init__(self):\n"
+        "        parser = ArgumentParser()\n"
+        '        parser.add_argument("--live", required=True)\n'
+        "        parser.parse_args()\n"
+        "class DeadSecond:\n"
+        "    def __init__(self):\n"
+        "        parser = ArgumentParser()\n"
+        '        parser.add_argument("--dead", required=True)\n'
+        "        parser.parse_args()\n"
+        "class App(First, DeadSecond):\n"
+        "    pass\n"
+        "App()\n",
+        encoding="utf-8",
+    )
+    valid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/mro_constructor.py --live yes\n",
+    )
+
+    assert cdc.check_python_script_contract(valid, tmp_path) == []
+
+
+@pytest.mark.parametrize("cooperative", [False, True])
+def test_argparse_constructor_super_uses_runtime_mro_context(
+    tmp_path: Path,
+    cooperative: bool,
+) -> None:
+    script = tmp_path / "tools" / f"cooperative_{cooperative}.py"
+    script.parent.mkdir(parents=True)
+    super_call = "        super().__init__()\n" if cooperative else ""
+    script.write_text(
+        "from argparse import ArgumentParser\n"
+        "class First:\n"
+        "    def __init__(self):\n"
+        "        self.ready = True\n"
+        f"{super_call}"
+        "class Second:\n"
+        "    def __init__(self):\n"
+        "        parser = ArgumentParser()\n"
+        '        parser.add_argument("--live", required=True)\n'
+        "        parser.parse_args()\n"
+        "class App(First, Second):\n"
+        "    pass\n"
+        "App()\n",
+        encoding="utf-8",
+    )
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        f"python3 tools/{script.name} --dead yes\n",
+    )
+
+    messages = [finding.message for finding in cdc.check_python_script_contract(block, tmp_path)]
+    if cooperative:
+        assert messages == [
+            f"unknown option for `tools/{script.name}`: --dead",
+            f"missing required option for `tools/{script.name}`: --live",
+        ]
+    else:
+        assert messages == []
+
+
+@pytest.mark.parametrize(
+    ("super_call", "reaches_base"),
+    [
+        ("super(App, self).__init__()", True),
+        ("super(Base, self).__init__()", False),
+        ("super(App, object()).__init__()", False),
+    ],
+)
+def test_argparse_two_argument_super_binding(
+    tmp_path: Path,
+    super_call: str,
+    reaches_base: bool,
+) -> None:
+    script = tmp_path / "tools" / "two_arg_super.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "from argparse import ArgumentParser\n"
+        "class Base:\n"
+        "    def __init__(self):\n"
+        "        parser = ArgumentParser()\n"
+        '        parser.add_argument("--live", required=True)\n'
+        "        parser.parse_args()\n"
+        "class App(Base):\n"
+        "    def __init__(self):\n"
+        f"        {super_call}\n"
+        "App()\n",
+        encoding="utf-8",
+    )
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/two_arg_super.py --dead yes\n",
+    )
+
+    messages = [finding.message for finding in cdc.check_python_script_contract(block, tmp_path)]
+    if reaches_base:
+        assert messages == [
+            "unknown option for `tools/two_arg_super.py`: --dead",
+            "missing required option for `tools/two_arg_super.py`: --live",
+        ]
+    else:
+        assert messages == []
+
+
+@pytest.mark.parametrize(
+    ("case_id", "source"),
+    [
+        (
+            "A04",
+            "class Base:\n"
+            "    def __init__(self):\n"
+            "        parser = AP()\n"
+            "        parser.add_argument('--live', required=True)\n"
+            "        parser.parse_args()\n"
+            "FrozenBase = Base\n"
+            "class App(FrozenBase):\n"
+            "    pass\n"
+            "class Base:\n"
+            "    def __init__(self):\n"
+            "        parser = AP()\n"
+            "        parser.add_argument('--dead', required=True)\n"
+            "        parser.parse_args()\n"
+            "App()\n",
+        ),
+        (
+            "A05",
+            "class App:\n"
+            "    def __init__(self):\n"
+            "        parser = AP()\n"
+            "        parser.add_argument('--live', required=True)\n"
+            "        parser.parse_args()\n"
+            "App()\n"
+            "class App:\n"
+            "    def __init__(self):\n"
+            "        parser = AP()\n"
+            "        parser.add_argument('--dead', required=True)\n"
+            "        parser.parse_args()\n",
+        ),
+        (
+            "A06",
+            "class App:\n"
+            "    def __init__(self):\n"
+            "        parser = AP()\n"
+            "        parser.add_argument('--live', required=True)\n"
+            "        parser.parse_args()\n"
+            "Alias = App\n"
+            "class App:\n"
+            "    def __init__(self):\n"
+            "        parser = AP()\n"
+            "        parser.add_argument('--dead', required=True)\n"
+            "        parser.parse_args()\n"
+            "Alias()\n",
+        ),
+        (
+            "A07",
+            "def run():\n"
+            "    parser = AP()\n"
+            "    parser.add_argument('--live', required=True)\n"
+            "    parser.parse_args()\n"
+            "run()\n"
+            "def run():\n"
+            "    parser = AP()\n"
+            "    parser.add_argument('--dead', required=True)\n"
+            "    parser.parse_args()\n",
+        ),
+        (
+            "A08",
+            "def run():\n"
+            "    parser = AP()\n"
+            "    parser.add_argument('--live', required=True)\n"
+            "    parser.parse_args()\n"
+            "Alias = run\n"
+            "def run():\n"
+            "    parser = AP()\n"
+            "    parser.add_argument('--dead', required=True)\n"
+            "    parser.parse_args()\n"
+            "Alias()\n",
+        ),
+        (
+            "A09",
+            "class First:\n"
+            "    def run(self):\n"
+            "        parser = AP()\n"
+            "        parser.add_argument('--dead', required=True)\n"
+            "        parser.parse_args()\n"
+            "class Second:\n"
+            "    def run(self):\n"
+            "        parser = AP()\n"
+            "        parser.add_argument('--live', required=True)\n"
+            "        parser.parse_args()\n"
+            "app = First()\n"
+            "app = Second()\n"
+            "app.run()\n",
+        ),
+        (
+            "A10",
+            "class First:\n"
+            "    def run(self):\n"
+            "        parser = AP()\n"
+            "        parser.add_argument('--live', required=True)\n"
+            "        parser.parse_args()\n"
+            "class Second:\n"
+            "    def run(self):\n"
+            "        parser = AP()\n"
+            "        parser.add_argument('--dead', required=True)\n"
+            "        parser.parse_args()\n"
+            "app = First()\n"
+            "alias = app\n"
+            "app = Second()\n"
+            "alias.run()\n",
+        ),
+        (
+            "A11",
+            "class App:\n"
+            "    def run(self):\n"
+            "        parser = AP()\n"
+            "        parser.add_argument('--dead', required=True)\n"
+            "        parser.parse_args()\n"
+            "def main():\n"
+            "    class App:\n"
+            "        def run(self):\n"
+            "            parser = AP()\n"
+            "            parser.add_argument('--live', required=True)\n"
+            "            parser.parse_args()\n"
+            "    App().run()\n"
+            "main()\n",
+        ),
+        (
+            "A12",
+            "class Base:\n"
+            "    def __init__(self):\n"
+            "        parser = AP()\n"
+            "        parser.add_argument('--live', required=True)\n"
+            "        parser.parse_args()\n"
+            "class App(Base):\n"
+            "    def __init__(self):\n"
+            "        ThisClass = App\n"
+            "        super(ThisClass, self).__init__()\n"
+            "App()\n",
+        ),
+        (
+            "A13",
+            "class Base:\n"
+            "    def __init__(self):\n"
+            "        parser = AP()\n"
+            "        parser.add_argument('--live', required=True)\n"
+            "        parser.parse_args()\n"
+            "class App(Base):\n"
+            "    def __init__(self):\n"
+            "        receiver = self\n"
+            "        super(App, receiver).__init__()\n"
+            "App()\n",
+        ),
+    ],
+    ids=lambda value: value if isinstance(value, str) and value.startswith("A") else None,
+)
+def test_argparse_reachability_identity_matches_python_execution(
+    tmp_path: Path,
+    case_id: str,
+    source: str,
+) -> None:
+    script = tmp_path / "tools" / f"identity_{case_id}.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        f"from argparse import ArgumentParser as AP\n{source}",
+        encoding="utf-8",
+    )
+    valid_run = subprocess.run(
+        [sys.executable, str(script), "--live", "yes"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    invalid_run = subprocess.run(
+        [sys.executable, str(script), "--dead", "yes"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    valid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        f"python3 tools/{script.name} --live yes\n",
+    )
+    invalid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        f"python3 tools/{script.name} --dead yes\n",
+    )
+
+    assert valid_run.returncode == 0, valid_run.stderr
+    assert invalid_run.returncode != 0
+    assert cdc.check_python_script_contract(valid, tmp_path) == []
+    assert [finding.message for finding in cdc.check_python_script_contract(invalid, tmp_path)] == [
+        f"unknown option for `tools/{script.name}`: --dead",
+        f"missing required option for `tools/{script.name}`: --live",
+    ]
+
+
+def test_argparse_dynamic_reachability_identity_fails_closed(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "dynamic_identity.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "from argparse import ArgumentParser as AP\n"
+        "class First:\n"
+        "    def run(self):\n"
+        "        parser = AP()\n"
+        "        parser.add_argument('--first')\n"
+        "        parser.parse_args()\n"
+        "class Second:\n"
+        "    def run(self):\n"
+        "        parser = AP()\n"
+        "        parser.add_argument('--second')\n"
+        "        parser.parse_args()\n"
+        "Target = First if object() else Second\n"
+        "Target().run()\n",
+        encoding="utf-8",
+    )
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/dynamic_identity.py --first yes\n",
+    )
+
+    assert [finding.message for finding in cdc.check_python_script_contract(block, tmp_path)] == [
+        "cannot statically validate argparse contract for "
+        "`tools/dynamic_identity.py`: "
+        "a reachable call has an unresolved class, function, or instance identity"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("case_id", "source", "runtime_flag", "statically_exact"),
+    [
+        (
+            "V01_class_alias_chain",
+            """
+            class Live:
+                def run(self):
+                    p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            class Dead:
+                def run(self):
+                    p = AP(); p.add_argument("--dead", required=True); p.parse_args()
+            A = Live
+            B = A
+            A = Dead
+            B().run()
+            """,
+            "live",
+            True,
+        ),
+        (
+            "V02_function_alias_chain",
+            """
+            def target():
+                p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            A = target
+            B = A
+            def target():
+                p = AP(); p.add_argument("--dead", required=True); p.parse_args()
+            B()
+            """,
+            "live",
+            True,
+        ),
+        (
+            "V03_instance_alias_chain",
+            """
+            class Live:
+                def run(self):
+                    p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            class Dead:
+                def run(self):
+                    p = AP(); p.add_argument("--dead", required=True); p.parse_args()
+            app = Live()
+            A = app
+            B = A
+            app = Dead()
+            B.run()
+            """,
+            "live",
+            True,
+        ),
+        (
+            "V04_base_alias_chain_freeze",
+            """
+            class Base:
+                def __init__(self):
+                    p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            B1 = Base
+            B2 = B1
+            class App(B2):
+                pass
+            class Base:
+                def __init__(self):
+                    p = AP(); p.add_argument("--dead", required=True); p.parse_args()
+            App()
+            """,
+            "live",
+            True,
+        ),
+        (
+            "V05_local_shadow_alias_chain",
+            """
+            class App:
+                def run(self):
+                    p = AP(); p.add_argument("--dead", required=True); p.parse_args()
+            def main():
+                class App:
+                    def run(self):
+                        p = AP(); p.add_argument("--live", required=True); p.parse_args()
+                A = App
+                B = A
+                B().run()
+            main()
+            """,
+            "live",
+            True,
+        ),
+        (
+            "V06_super_alias_chains",
+            """
+            class Base:
+                def __init__(self):
+                    p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            class App(Base):
+                def __init__(self):
+                    C1 = App
+                    C2 = C1
+                    r1 = self
+                    r2 = r1
+                    super(C2, r2).__init__()
+            App()
+            """,
+            "live",
+            True,
+        ),
+        (
+            "V07_deleted_class_alias",
+            """
+            class Live:
+                def __init__(self):
+                    p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            Alias = Live
+            del Alias
+            Alias()
+            """,
+            "none",
+            False,
+        ),
+        (
+            "V08_deleted_function_alias",
+            """
+            def live():
+                p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            Alias = live
+            del Alias
+            Alias()
+            """,
+            "none",
+            False,
+        ),
+        (
+            "V09_deleted_instance_alias",
+            """
+            class Live:
+                def run(self):
+                    p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            alias = Live()
+            del alias
+            alias.run()
+            """,
+            "none",
+            False,
+        ),
+        (
+            "V10_global_instance_rebind",
+            """
+            class Live:
+                def run(self):
+                    p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            class Dead:
+                def run(self):
+                    p = AP(); p.add_argument("--dead", required=True); p.parse_args()
+            target = Live()
+            def switch():
+                global target
+                target = Dead()
+            switch()
+            target.run()
+            """,
+            "dead",
+            False,
+        ),
+        (
+            "V11_global_function_rebind",
+            """
+            def live():
+                p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            def dead():
+                p = AP(); p.add_argument("--dead", required=True); p.parse_args()
+            target = live
+            def switch():
+                global target
+                target = dead
+            switch()
+            target()
+            """,
+            "dead",
+            False,
+        ),
+        (
+            "V12_global_class_rebind",
+            """
+            class Live:
+                def run(self):
+                    p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            class Dead:
+                def run(self):
+                    p = AP(); p.add_argument("--dead", required=True); p.parse_args()
+            Target = Live
+            def switch():
+                global Target
+                Target = Dead
+            switch()
+            Target().run()
+            """,
+            "dead",
+            False,
+        ),
+        (
+            "V13_nonlocal_instance_rebind",
+            """
+            def outer():
+                class Live:
+                    def run(self):
+                        p = AP(); p.add_argument("--live", required=True); p.parse_args()
+                class Dead:
+                    def run(self):
+                        p = AP(); p.add_argument("--dead", required=True); p.parse_args()
+                target = Live()
+                def switch():
+                    nonlocal target
+                    target = Dead()
+                switch()
+                target.run()
+            outer()
+            """,
+            "dead",
+            False,
+        ),
+        (
+            "V14_nonlocal_function_rebind",
+            """
+            def outer():
+                def live():
+                    p = AP(); p.add_argument("--live", required=True); p.parse_args()
+                def dead():
+                    p = AP(); p.add_argument("--dead", required=True); p.parse_args()
+                target = live
+                def switch():
+                    nonlocal target
+                    target = dead
+                switch()
+                target()
+            outer()
+            """,
+            "dead",
+            False,
+        ),
+        (
+            "V15_class_decorator_replacement",
+            """
+            class Dead:
+                def run(self):
+                    p = AP(); p.add_argument("--dead", required=True); p.parse_args()
+            def replace(_):
+                return Dead
+            @replace
+            class Target:
+                def run(self):
+                    p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            Target().run()
+            """,
+            "dead",
+            False,
+        ),
+        (
+            "V16_function_decorator_replacement",
+            """
+            def dead():
+                p = AP(); p.add_argument("--dead", required=True); p.parse_args()
+            def replace(_):
+                return dead
+            @replace
+            def target():
+                p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            target()
+            """,
+            "dead",
+            False,
+        ),
+        (
+            "V17_decorator_global_side_effect",
+            """
+            class Live:
+                def run(self):
+                    p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            class Dead:
+                def run(self):
+                    p = AP(); p.add_argument("--dead", required=True); p.parse_args()
+            target = Live()
+            def mutate(value):
+                global target
+                target = Dead()
+                return value
+            @mutate
+            def marker():
+                pass
+            target.run()
+            """,
+            "dead",
+            False,
+        ),
+        (
+            "V18_default_global_side_effect",
+            """
+            class Live:
+                def run(self):
+                    p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            class Dead:
+                def run(self):
+                    p = AP(); p.add_argument("--dead", required=True); p.parse_args()
+            target = Live()
+            def switch():
+                global target
+                target = Dead()
+            def marker(value=switch()):
+                pass
+            target.run()
+            """,
+            "dead",
+            False,
+        ),
+        (
+            "V19_default_function_freeze",
+            """
+            def live():
+                p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            def invoke(fn=live):
+                fn()
+            def live():
+                p = AP(); p.add_argument("--dead", required=True); p.parse_args()
+            invoke()
+            """,
+            "live",
+            False,
+        ),
+        (
+            "V20_default_class_freeze",
+            """
+            class Live:
+                def run(self):
+                    p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            def invoke(cls=Live):
+                cls().run()
+            class Live:
+                def run(self):
+                    p = AP(); p.add_argument("--dead", required=True); p.parse_args()
+            invoke()
+            """,
+            "live",
+            False,
+        ),
+        (
+            "V21_chained_decorators_replace",
+            """
+            def dead():
+                p = AP(); p.add_argument("--dead", required=True); p.parse_args()
+            def identity(value):
+                return value
+            def replace(value):
+                return dead
+            @identity
+            @replace
+            def target():
+                p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            target()
+            """,
+            "dead",
+            False,
+        ),
+        (
+            "V22_delete_then_except_rebind",
+            """
+            class Live:
+                def run(self):
+                    p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            class Dead:
+                def run(self):
+                    p = AP(); p.add_argument("--dead", required=True); p.parse_args()
+            Target = Live
+            del Target
+            try:
+                Target
+            except NameError:
+                Target = Dead
+            Target().run()
+            """,
+            "dead",
+            False,
+        ),
+        (
+            "V23_identity_class_decorator",
+            """
+            def identity(value):
+                return value
+            @identity
+            class Target:
+                def run(self):
+                    p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            Target().run()
+            """,
+            "live",
+            False,
+        ),
+        (
+            "V24_default_direct_parser_call",
+            """
+            def live():
+                p = AP(); p.add_argument("--live", required=True); p.parse_args()
+            def marker(value=live()):
+                pass
+            """,
+            "live",
+            False,
+        ),
+    ],
+    ids=lambda value: value if isinstance(value, str) and value.startswith("V") else None,
+)
+def test_argparse_adjacent_identity_graph_matches_python(
+    tmp_path: Path,
+    case_id: str,
+    source: str,
+    runtime_flag: str,
+    statically_exact: bool,
+) -> None:
+    script = tmp_path / "tools" / f"{case_id}.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "from argparse import ArgumentParser as AP\n" + textwrap.dedent(source),
+        encoding="utf-8",
+    )
+    outcomes: dict[str, tuple[int, list[str]]] = {}
+    for flag_name in ("live", "dead"):
+        flag = f"--{flag_name}"
+        completed = subprocess.run(
+            [sys.executable, str(script), flag, "yes"],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        command = cdc.ShellBlock(
+            Path("README.md"),
+            1,
+            "bash",
+            f"python3 tools/{script.name} {flag} yes\n",
+        )
+        findings = [
+            finding.message
+            for finding in cdc.check_python_script_contract(
+                command,
+                tmp_path,
+            )
+        ]
+        outcomes[flag_name] = completed.returncode, findings
+        if completed.returncode != 0:
+            assert findings, f"{case_id} false pass for {flag}: {completed.stderr}"
+
+    if runtime_flag == "none":
+        assert outcomes["live"][0] != 0
+        assert outcomes["dead"][0] != 0
+    else:
+        rejected = "dead" if runtime_flag == "live" else "live"
+        assert outcomes[runtime_flag][0] == 0
+        assert outcomes[rejected][0] != 0
+        if statically_exact:
+            assert outcomes[runtime_flag][1] == []
+            assert outcomes[rejected][1]
+
+
+def test_argparse_opaque_effect_is_recovered_by_static_rebind(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "recovered_identity.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "from argparse import ArgumentParser as AP\n"
+        "class Live:\n"
+        "    def run(self):\n"
+        "        p = AP(); p.add_argument('--live', required=True); p.parse_args()\n"
+        "class Dead:\n"
+        "    def run(self):\n"
+        "        p = AP(); p.add_argument('--dead', required=True); p.parse_args()\n"
+        "target = Live()\n"
+        "def switch():\n"
+        "    global target\n"
+        "    target = Live()\n"
+        "switch()\n"
+        "target = Dead()\n"
+        "target.run()\n",
+        encoding="utf-8",
+    )
+    valid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/recovered_identity.py --dead yes\n",
+    )
+    invalid = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/recovered_identity.py --live yes\n",
+    )
+
+    assert cdc.check_python_script_contract(valid, tmp_path) == []
+    assert cdc.check_python_script_contract(invalid, tmp_path)
+
+
+def test_direct_argparse_constructor_parse_is_not_silently_skipped(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "direct_parse.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\nargparse.ArgumentParser().parse_args()\n",
+        encoding="utf-8",
+    )
+    block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/direct_parse.py --implementation-specific\n",
+    )
+
+    assert [finding.message for finding in cdc.check_python_script_contract(block, tmp_path)] == [
+        "unknown option for `tools/direct_parse.py`: --implementation-specific"
+    ]
+
+
+def test_uncalled_argparse_class_and_custom_parser_remain_ignored(
+    tmp_path: Path,
+) -> None:
+    uncalled = tmp_path / "tools" / "uncalled_constructor.py"
+    uncalled.parent.mkdir(parents=True)
+    uncalled.write_text(
+        "import argparse\n"
+        "class Unused:\n"
+        "    def __init__(self):\n"
+        "        parser = argparse.ArgumentParser()\n"
+        '        parser.add_argument("--dead", required=True)\n'
+        "        parser.parse_args()\n"
+        "def main():\n"
+        "    return 0\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    custom = tmp_path / "tools" / "custom_single_root.py"
+    custom.write_text(
+        "class ArgumentParser:\n"
+        "    def add_argument(self, *_args, **_kwargs):\n"
+        "        return None\n"
+        "    def parse_args(self):\n"
+        "        return None\n"
+        "def main():\n"
+        "    parser = ArgumentParser()\n"
+        '    parser.add_argument("--custom")\n'
+        "    parser.parse_args()\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    uncalled_block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/uncalled_constructor.py --dead yes\n",
+    )
+    custom_block = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/custom_single_root.py --implementation-specific\n",
+    )
+
+    assert cdc.check_python_script_contract(uncalled_block, tmp_path) == []
+    assert cdc.check_python_script_contract(custom_block, tmp_path) == []
+
+
 def test_multiple_reachable_argparse_roots_report_conservative_finding(
     tmp_path: Path,
 ) -> None:
@@ -2242,3 +4201,1669 @@ def test_diagram_policy_and_beginner_block_count_are_self_consistent() -> None:
     assert "Core diagrams have static SVG versions" not in research
     assert "these eight blocks" in building_blocks
     assert "those seven blocks" not in building_blocks
+
+
+_FIFTH_IDENTITY_CASES = [
+    (
+        "I01_factory_returns_function",
+        """
+        def live():
+            p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        def dead():
+            p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        def choose(first, second):
+            return second
+        target = choose(live, dead)
+        target()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "I02_factory_returns_class",
+        """
+        class Live:
+            def run(self):
+                p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        class Dead:
+            def run(self):
+                p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        def choose(first, second):
+            return second
+        Target = choose(Live, Dead)
+        Target().run()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "I03_factory_returns_instance",
+        """
+        class Live:
+            def run(self):
+                p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        class Dead:
+            def run(self):
+                p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        def choose(first, second):
+            return second
+        target = choose(Live(), Dead())
+        target.run()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "I04_imported_factory",
+        """
+        from factory_helper import choose
+        def live():
+            p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        def dead():
+            p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        target = choose(live, dead)
+        target()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "I05_default_factory",
+        """
+        def live():
+            p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        def dead():
+            p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        def choose(first, second):
+            return second
+        def invoke(fn=choose(live, dead)):
+            fn()
+        invoke()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "I06_method_factory",
+        """
+        def live():
+            p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        def dead():
+            p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        class Chooser:
+            def choose(self, first, second):
+                return second
+        target = Chooser().choose(live, dead)
+        target()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "I07_factory_then_direct_recovery",
+        """
+        def live():
+            p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        def dead():
+            p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        def choose(first, second):
+            return second
+        target = choose(live, dead)
+        target = live
+        target()
+        """,
+        "live",
+        True,
+    ),
+    (
+        "I08_unrelated_factory_result",
+        """
+        class Live:
+            def run(self):
+                p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        def choose(first, second):
+            return second
+        unrelated = choose(1, 2)
+        Live().run()
+        """,
+        "live",
+        True,
+    ),
+    (
+        "I09_imported_globals_mutation",
+        """
+        from factory_helper import switch
+        class Live:
+            def run(self):
+                p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        class Dead:
+            def run(self):
+                p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        target = Live()
+        switch(globals())
+        target.run()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "I10_imported_instance_mutation",
+        """
+        from factory_helper import mutate
+        class Live:
+            def run(self):
+                p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        class Dead:
+            def run(self):
+                p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        target = Live()
+        mutate(target, Dead)
+        target.run()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "I11_shadowed_property_decorator",
+        """
+        def dead():
+            p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        def property(value):
+            return dead
+        @property
+        def target():
+            p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        target()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "I12_shadowed_cache_decorator",
+        """
+        class Dead:
+            def run(self):
+                p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        def cache(value):
+            return Dead
+        @cache
+        class Target:
+            def run(self):
+                p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        Target().run()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "I13_mutated_functools_decorator",
+        """
+        import functools
+        def dead():
+            p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        def replacement():
+            return lambda value: dead
+        functools.lru_cache = replacement
+        @functools.lru_cache()
+        def target():
+            p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        target()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "I14_opaque_decorator_new_symbol_recovery",
+        """
+        def replace(value):
+            return object()
+        @replace
+        class Target:
+            pass
+        class Dead:
+            def run(self):
+                p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        Target = Dead
+        Target().run()
+        """,
+        "dead",
+        True,
+    ),
+    (
+        "I15_opaque_decorator_existing_symbol_recovery",
+        """
+        class Dead:
+            def run(self):
+                p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        def replace(value):
+            return object()
+        @replace
+        class Target:
+            pass
+        Target = Dead
+        Target().run()
+        """,
+        "dead",
+        True,
+    ),
+    (
+        "I16_global_alias_recovery",
+        """
+        class Live:
+            def run(self):
+                p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        class Dead:
+            def run(self):
+                p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        target = Live()
+        def switch():
+            global target
+            target = Live()
+        switch()
+        fresh = Dead()
+        target = fresh
+        target.run()
+        """,
+        "dead",
+        True,
+    ),
+    (
+        "I17_nonlocal_direct_recovery",
+        """
+        def outer():
+            class Live:
+                def run(self):
+                    p = AP(); p.add_argument('--live', required=True); p.parse_args()
+            class Dead:
+                def run(self):
+                    p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+            target = Live()
+            def switch():
+                nonlocal target
+                target = Live()
+            switch()
+            target = Dead()
+            target.run()
+        outer()
+        """,
+        "dead",
+        True,
+    ),
+    (
+        "I18_delete_direct_recovery",
+        """
+        class Live:
+            def run(self):
+                p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        class Dead:
+            def run(self):
+                p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        target = Live()
+        del target
+        target = Dead()
+        target.run()
+        """,
+        "dead",
+        True,
+    ),
+    (
+        "I19_unrelated_global_write",
+        """
+        class Live:
+            def run(self):
+                p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        other = 0
+        def switch():
+            global other
+            other = 1
+        switch()
+        Live().run()
+        """,
+        "live",
+        True,
+    ),
+    (
+        "I20_unrelated_nonlocal_write",
+        """
+        def outer():
+            class Live:
+                def run(self):
+                    p = AP(); p.add_argument('--live', required=True); p.parse_args()
+            other = 0
+            def switch():
+                nonlocal other
+                other = 1
+            switch()
+            Live().run()
+        outer()
+        """,
+        "live",
+        True,
+    ),
+    (
+        "I21_same_line_global_recovery",
+        """
+        class Live:
+            def run(self):
+                p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        class Dead:
+            def run(self):
+                p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        target = Live()
+        def switch():
+            global target
+            target = Live()
+        switch(); target = Dead(); target.run()
+        """,
+        "dead",
+        True,
+    ),
+    (
+        "I22_real_lru_cache",
+        """
+        from functools import lru_cache
+        @lru_cache()
+        def target():
+            p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        target()
+        """,
+        "live",
+        True,
+    ),
+    (
+        "I23_real_classmethod",
+        """
+        class Target:
+            @classmethod
+            def run(cls):
+                p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        Target.run()
+        """,
+        "live",
+        True,
+    ),
+    (
+        "I24_supplied_default_function",
+        """
+        def live():
+            p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        def dead():
+            p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        def invoke(fn=live):
+            fn()
+        invoke(dead)
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "I25_supplied_function_parameter",
+        """
+        def live():
+            p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        def dead():
+            p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        def invoke(fn):
+            fn()
+        invoke(dead)
+        """,
+        "dead",
+        False,
+    ),
+]
+
+
+def _write_fifth_factory_helper(tmp_path: Path) -> None:
+    helper = tmp_path / "tools" / "factory_helper.py"
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.write_text(
+        "def choose(first, second):\n"
+        "    return second\n"
+        "def switch(namespace):\n"
+        "    namespace['target'] = namespace['Dead']()\n"
+        "def mutate(instance, replacement):\n"
+        "    instance.__class__ = replacement\n",
+        encoding="utf-8",
+    )
+
+
+def _fifth_contract_outcome(
+    tmp_path: Path,
+    script: Path,
+    argv: list[str],
+) -> tuple[int, list[str]]:
+    completed = subprocess.run(
+        [sys.executable, str(script), *argv],
+        cwd=tmp_path,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    command = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        f"python3 tools/{script.name} {' '.join(argv)}\n",
+    )
+    findings = [finding.message for finding in cdc.check_python_script_contract(command, tmp_path)]
+    return completed.returncode, findings
+
+
+@pytest.mark.parametrize(
+    ("case_id", "source", "runtime_flag", "statically_exact"),
+    _FIFTH_IDENTITY_CASES,
+    ids=[case[0] for case in _FIFTH_IDENTITY_CASES],
+)
+def test_argparse_fifth_identity_graph_matches_python(
+    tmp_path: Path,
+    case_id: str,
+    source: str,
+    runtime_flag: str,
+    statically_exact: bool,
+) -> None:
+    _write_fifth_factory_helper(tmp_path)
+    script = tmp_path / "tools" / f"{case_id}.py"
+    script.write_text(
+        "from argparse import ArgumentParser as AP\n" + textwrap.dedent(source),
+        encoding="utf-8",
+    )
+
+    outcomes: dict[str, tuple[int, list[str]]] = {}
+    for flag_name in ("live", "dead"):
+        outcomes[flag_name] = _fifth_contract_outcome(
+            tmp_path,
+            script,
+            [f"--{flag_name}", "yes"],
+        )
+        returncode, findings = outcomes[flag_name]
+        if returncode != 0:
+            assert findings, f"{case_id} false pass for --{flag_name}"
+
+    rejected = "dead" if runtime_flag == "live" else "live"
+    assert outcomes[runtime_flag][0] == 0
+    assert outcomes[rejected][0] != 0
+    if statically_exact:
+        assert outcomes[runtime_flag][1] == []
+        assert outcomes[rejected][1]
+
+
+_FIFTH_SUBCOMMAND_CASES = [
+    (
+        "S01_literal_loop",
+        """
+        p = AP()
+        sub = p.add_subparsers(required=True)
+        for name in ('run', 'check'):
+            cmd = sub.add_parser(name)
+            cmd.add_argument('--mode', choices=('fast', 'safe'), required=True)
+        p.parse_args()
+        """,
+        ["run", "--mode", "fast"],
+        ["removed", "--mode", "fast"],
+        True,
+    ),
+    (
+        "S02_if_false_subcommand",
+        """
+        p = AP()
+        sub = p.add_subparsers(required=True)
+        if False:
+            sub.add_parser('dead')
+        sub.add_parser('live')
+        p.parse_args()
+        """,
+        ["live"],
+        ["dead"],
+        False,
+    ),
+    (
+        "S03_if_true_subcommand",
+        """
+        p = AP()
+        sub = p.add_subparsers(required=True)
+        if True:
+            sub.add_parser('live')
+        p.parse_args()
+        """,
+        ["live"],
+        ["dead"],
+        True,
+    ),
+    (
+        "S04_empty_literal_loop",
+        """
+        p = AP()
+        sub = p.add_subparsers(required=True)
+        for name in ():
+            sub.add_parser(name)
+        p.parse_args()
+        """,
+        ["--help"],
+        ["ghost"],
+        False,
+    ),
+    (
+        "S05_loop_with_static_filter",
+        """
+        p = AP()
+        sub = p.add_subparsers(required=True)
+        for name in ('live', 'dead'):
+            if name == 'live':
+                sub.add_parser(name)
+        p.parse_args()
+        """,
+        ["live"],
+        ["dead"],
+        True,
+    ),
+    (
+        "S06_two_literal_loops",
+        """
+        p = AP()
+        sub = p.add_subparsers(required=True)
+        for name in ('one',):
+            sub.add_parser(name)
+        for name in ('two',):
+            sub.add_parser(name)
+        p.parse_args()
+        """,
+        ["two"],
+        ["three"],
+        True,
+    ),
+    (
+        "S07_if_false_option",
+        """
+        p = AP()
+        if False:
+            p.add_argument('--dead', required=True)
+        p.add_argument('--live', required=True)
+        p.parse_args()
+        """,
+        ["--live", "yes"],
+        ["--dead", "yes", "--live", "yes"],
+        False,
+    ),
+    (
+        "S08_if_true_required_option",
+        """
+        p = AP()
+        if True:
+            p.add_argument('--live', required=True)
+        p.parse_args()
+        """,
+        ["--live", "yes"],
+        ["--dead", "yes"],
+        True,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("case_id", "source", "accepted", "rejected", "statically_exact"),
+    _FIFTH_SUBCOMMAND_CASES,
+    ids=[case[0] for case in _FIFTH_SUBCOMMAND_CASES],
+)
+def test_argparse_fifth_subcommand_contract_matches_python(
+    tmp_path: Path,
+    case_id: str,
+    source: str,
+    accepted: list[str],
+    rejected: list[str],
+    statically_exact: bool,
+) -> None:
+    script = tmp_path / "tools" / f"{case_id}.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "from argparse import ArgumentParser as AP\n" + textwrap.dedent(source),
+        encoding="utf-8",
+    )
+
+    good = _fifth_contract_outcome(tmp_path, script, accepted)
+    bad = _fifth_contract_outcome(tmp_path, script, rejected)
+    assert good[0] == 0
+    assert bad[0] != 0
+    assert bad[1], f"{case_id} false pass for {' '.join(rejected)}"
+    if statically_exact:
+        assert good[1] == []
+        assert bad[1]
+
+    if case_id == "S08_if_true_required_option":
+        dynamic = tmp_path / "tools" / "dynamic_declaration.py"
+        dynamic.write_text(
+            "from argparse import ArgumentParser as AP\n"
+            "import os\n"
+            "p = AP()\n"
+            "sub = p.add_subparsers(required=True)\n"
+            "enabled = bool(os.environ.get('ENABLE_MAYBE'))\n"
+            "if enabled:\n"
+            "    sub.add_parser('maybe')\n"
+            "sub.add_parser('live')\n"
+            "p.parse_args()\n",
+            encoding="utf-8",
+        )
+        dynamic_findings = _fifth_contract_outcome(
+            tmp_path,
+            dynamic,
+            ["live"],
+        )[1]
+        assert any(
+            "a reachable argparse declaration has dynamic control-flow reachability" in finding
+            for finding in dynamic_findings
+        )
+
+
+_SEVENTH_BASE_CLASSES = """
+        class Live:
+            def run(self):
+                p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        class Dead:
+            def run(self):
+                p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+"""
+
+
+_SEVENTH_IDENTITY_CASES = [
+    (
+        "U01_keyword_instance_mutation",
+        _SEVENTH_BASE_CLASSES
+        + """
+        from mutation_helper import mutate
+        target = Live()
+        mutate(instance=target, replacement=Dead)
+        target.run()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "U02_starred_instance_mutation",
+        _SEVENTH_BASE_CLASSES
+        + """
+        from mutation_helper import mutate
+        target = Live()
+        mutate(*(target, Dead))
+        target.run()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "U03_alias_instance_mutation",
+        _SEVENTH_BASE_CLASSES
+        + """
+        from mutation_helper import mutate
+        target = Live()
+        alias = target
+        mutate(alias, Dead)
+        target.run()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "U04_container_instance_mutation",
+        _SEVENTH_BASE_CLASSES
+        + """
+        from mutation_helper import mutate_box
+        target = Live()
+        mutate_box([target], Dead)
+        target.run()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "U05_lambda_factory",
+        """
+        def live():
+            p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        def dead():
+            p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        choose = lambda first, second: second
+        target = choose(live, dead)
+        target()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "U06_partial_callable",
+        """
+        from functools import partial
+        def live():
+            p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        def dead(prefix=''):
+            p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        target = partial(dead)
+        target()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "U07_static_false_rebind",
+        _SEVENTH_BASE_CLASSES
+        + """
+        target = Live()
+        if False:
+            target = Dead()
+        target.run()
+        """,
+        "live",
+        True,
+    ),
+    (
+        "U08_static_true_factory_recovery",
+        _SEVENTH_BASE_CLASSES
+        + """
+        def choose(first, second):
+            return second
+        target = choose(Live(), Dead())
+        if True:
+            target = Live()
+        target.run()
+        """,
+        "live",
+        True,
+    ),
+    (
+        "D01_global_decorator_rebind",
+        """
+        from functools import lru_cache as memo
+        def dead():
+            p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        def replacement():
+            return lambda value: dead
+        def switch():
+            global memo
+            memo = replacement
+        switch()
+        @memo()
+        def target():
+            p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        target()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "D02_setattr_module_decorator",
+        """
+        import functools
+        def dead():
+            p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        def replacement():
+            return lambda value: dead
+        setattr(functools, 'lru_cache', replacement)
+        @functools.lru_cache()
+        def target():
+            p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        target()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "D03_mutated_builtin_property",
+        """
+        import builtins
+        def dead():
+            p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        def replacement(value):
+            return dead
+        builtins.property = replacement
+        @property
+        def target():
+            p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        target()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "D04_unreachable_import_provenance",
+        """
+        def dead():
+            p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        class Fake:
+            @staticmethod
+            def lru_cache():
+                return lambda value: dead
+        functools = Fake
+        if False:
+            import functools
+        @functools.lru_cache()
+        def target():
+            p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        target()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "D05_deleted_decorator_fallback",
+        """
+        from functools import lru_cache as memo
+        def dead():
+            p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        def replacement():
+            return lambda value: dead
+        del memo
+        try:
+            memo
+        except NameError:
+            memo = replacement
+        @memo()
+        def target():
+            p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        target()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "D06_real_import_alias",
+        """
+        from functools import lru_cache as memo
+        @memo()
+        def target():
+            p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        target()
+        """,
+        "live",
+        True,
+    ),
+    (
+        "D07_module_alias_direct_mutation",
+        """
+        import functools as ft
+        def dead():
+            p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        def replacement():
+            return lambda value: dead
+        ft.lru_cache = replacement
+        @ft.lru_cache()
+        def target():
+            p = AP(); p.add_argument('--live', required=True); p.parse_args()
+        target()
+        """,
+        "dead",
+        False,
+    ),
+    (
+        "D08_decorated_symbol_class_recovery",
+        """
+        def replacement(value):
+            return object()
+        @replacement
+        class Target:
+            pass
+        class Target:
+            def run(self):
+                p = AP(); p.add_argument('--dead', required=True); p.parse_args()
+        Target().run()
+        """,
+        "dead",
+        True,
+    ),
+]
+
+
+def _write_seventh_mutation_helper(tmp_path: Path) -> None:
+    helper = tmp_path / "tools" / "mutation_helper.py"
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.write_text(
+        "def mutate(instance, replacement):\n"
+        "    instance.__class__ = replacement\n"
+        "def mutate_box(box, replacement):\n"
+        "    box[0].__class__ = replacement\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    ("case_id", "source", "runtime_flag", "statically_exact"),
+    _SEVENTH_IDENTITY_CASES,
+    ids=[case[0] for case in _SEVENTH_IDENTITY_CASES],
+)
+def test_argparse_seventh_identity_and_decorator_graph_matches_python(
+    tmp_path: Path,
+    case_id: str,
+    source: str,
+    runtime_flag: str,
+    statically_exact: bool,
+) -> None:
+    _write_seventh_mutation_helper(tmp_path)
+    script = tmp_path / "tools" / f"{case_id}.py"
+    script.write_text(
+        "from argparse import ArgumentParser as AP\n" + textwrap.dedent(source),
+        encoding="utf-8",
+    )
+
+    outcomes = {
+        flag_name: _fifth_contract_outcome(
+            tmp_path,
+            script,
+            [f"--{flag_name}", "yes"],
+        )
+        for flag_name in ("live", "dead")
+    }
+    rejected = "dead" if runtime_flag == "live" else "live"
+    assert outcomes[runtime_flag][0] == 0
+    assert outcomes[rejected][0] != 0
+    assert outcomes[rejected][1], f"{case_id} false pass for --{rejected}"
+    if statically_exact:
+        assert outcomes[runtime_flag][1] == []
+        assert outcomes[rejected][1]
+
+
+_SEVENTH_CONTROL_CASES = [
+    (
+        "C01_raise_before_option",
+        """
+        p = AP()
+        try:
+            raise RuntimeError()
+            p.add_argument('--dead', required=True)
+        except RuntimeError:
+            pass
+        p.add_argument('--live', required=True)
+        p.parse_args()
+        """,
+        ["--live", "yes"],
+        ["--dead", "yes", "--live", "yes"],
+        True,
+    ),
+    (
+        "C02_unreached_except_option",
+        """
+        p = AP()
+        try:
+            pass
+        except Exception:
+            p.add_argument('--dead', required=True)
+        p.add_argument('--live', required=True)
+        p.parse_args()
+        """,
+        ["--live", "yes"],
+        ["--dead", "yes", "--live", "yes"],
+        True,
+    ),
+    (
+        "C03_static_match_branch",
+        """
+        p = AP()
+        match 1:
+            case 0:
+                p.add_argument('--dead', required=True)
+            case 1:
+                p.add_argument('--live', required=True)
+        p.parse_args()
+        """,
+        ["--live", "yes"],
+        ["--dead", "yes", "--live", "yes"],
+        True,
+    ),
+    (
+        "C04_while_break_else_subcommand",
+        """
+        p = AP()
+        sub = p.add_subparsers(required=True)
+        while True:
+            break
+        else:
+            sub.add_parser('dead')
+        sub.add_parser('live')
+        p.parse_args()
+        """,
+        ["live"],
+        ["dead"],
+        True,
+    ),
+    (
+        "C05_continue_before_subcommand",
+        """
+        p = AP()
+        sub = p.add_subparsers(required=True)
+        for name in ('dead',):
+            continue
+            sub.add_parser(name)
+        sub.add_parser('live')
+        p.parse_args()
+        """,
+        ["live"],
+        ["dead"],
+        True,
+    ),
+    (
+        "C06_dynamic_if_fails_closed",
+        """
+        import os
+        p = AP()
+        if os.getenv('ENABLE_DEAD'):
+            p.add_argument('--dead')
+        p.add_argument('--live', required=True)
+        p.parse_args()
+        """,
+        ["--live", "yes"],
+        ["--dead", "yes", "--live", "yes"],
+        False,
+    ),
+    (
+        "C07_dynamic_loop_fails_closed",
+        """
+        import os
+        p = AP()
+        sub = p.add_subparsers(required=True)
+        for name in os.getenv('EXTRA_COMMANDS', '').split():
+            sub.add_parser(name)
+        sub.add_parser('live')
+        p.parse_args()
+        """,
+        ["live"],
+        ["dead"],
+        False,
+    ),
+    (
+        "C08_literal_loop_membership_filter",
+        """
+        p = AP()
+        sub = p.add_subparsers(required=True)
+        for name in ('one', 'two', 'skip'):
+            if name in ('one', 'two'):
+                sub.add_parser(name)
+        p.parse_args()
+        """,
+        ["two"],
+        ["skip"],
+        True,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("case_id", "source", "accepted", "rejected", "statically_exact"),
+    _SEVENTH_CONTROL_CASES,
+    ids=[case[0] for case in _SEVENTH_CONTROL_CASES],
+)
+def test_argparse_seventh_control_flow_matches_python(
+    tmp_path: Path,
+    case_id: str,
+    source: str,
+    accepted: list[str],
+    rejected: list[str],
+    statically_exact: bool,
+) -> None:
+    script = tmp_path / "tools" / f"{case_id}.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "from argparse import ArgumentParser as AP\n" + textwrap.dedent(source),
+        encoding="utf-8",
+    )
+
+    good = _fifth_contract_outcome(tmp_path, script, accepted)
+    bad = _fifth_contract_outcome(tmp_path, script, rejected)
+    assert good[0] == 0
+    assert bad[0] != 0
+    assert bad[1], f"{case_id} false pass for {' '.join(rejected)}"
+    if statically_exact:
+        assert good[1] == []
+        assert bad[1]
+
+
+_EIGHTH_BASE_CLASSES = """
+        class Live:
+            def run(self):
+                p = AP()
+                p.add_argument('--live', required=True)
+                p.parse_args()
+
+        class Dead:
+            def run(self):
+                p = AP()
+                p.add_argument('--dead', required=True)
+                p.parse_args()
+"""
+
+
+_EIGHTH_ARGPARSE_CASES = [
+    (
+        "T01_return_runs_finally_parser",
+        """
+        def run():
+            try:
+                return
+            finally:
+                p = AP()
+                p.add_argument('--live', required=True)
+                p.parse_args()
+        run()
+        """,
+        ["--live", "yes"],
+        ["--dead", "yes"],
+        True,
+    ),
+    (
+        "T02_return_skips_try_tail",
+        """
+        def run():
+            try:
+                return
+                p = AP()
+                p.add_argument('--dead', required=True)
+                p.parse_args()
+            finally:
+                pass
+        run()
+        """,
+        ["--live", "yes"],
+        None,
+        True,
+    ),
+    (
+        "T03_finally_return_skips_following_parser",
+        """
+        def run():
+            try:
+                pass
+            finally:
+                return
+            p = AP()
+            p.add_argument('--dead', required=True)
+            p.parse_args()
+        run()
+        """,
+        ["--live", "yes"],
+        None,
+        True,
+    ),
+    (
+        "T04_raise_runs_finally_before_handler",
+        """
+        def run():
+            try:
+                try:
+                    raise RuntimeError('boom')
+                finally:
+                    p = AP()
+                    p.add_argument('--live', required=True)
+                    p.parse_args()
+            except RuntimeError:
+                pass
+        run()
+        """,
+        ["--live", "yes"],
+        ["--dead", "yes"],
+        False,
+    ),
+    (
+        "M01_false_guard_falls_through",
+        """
+        p = AP()
+        match 1:
+            case 1 if False:
+                p.add_argument('--dead', required=True)
+            case 1:
+                p.add_argument('--live', required=True)
+        p.parse_args()
+        """,
+        ["--live", "yes"],
+        ["--dead", "yes", "--live", "yes"],
+        True,
+    ),
+    (
+        "M02_dynamic_guard_fails_closed",
+        """
+        import os
+        p = AP()
+        match 1:
+            case 1 if os.getenv('ENABLE_DEAD'):
+                p.add_argument('--dead', required=True)
+            case _:
+                p.add_argument('--live', required=True)
+        p.parse_args()
+        """,
+        ["--live", "yes"],
+        ["--dead", "yes", "--live", "yes"],
+        False,
+    ),
+    (
+        "M03_true_guard_stops_fallthrough",
+        """
+        p = AP()
+        match 1:
+            case 1 if True:
+                p.add_argument('--live', required=True)
+            case _:
+                p.add_argument('--dead', required=True)
+        p.parse_args()
+        """,
+        ["--live", "yes"],
+        ["--dead", "yes", "--live", "yes"],
+        True,
+    ),
+    (
+        "W01_false_while_runs_else",
+        """
+        p = AP()
+        while False:
+            p.add_argument('--dead', required=True)
+        else:
+            p.add_argument('--live', required=True)
+        p.parse_args()
+        """,
+        ["--live", "yes"],
+        ["--dead", "yes", "--live", "yes"],
+        True,
+    ),
+    (
+        "W02_stateful_while_runs_else",
+        """
+        p = AP()
+        remaining = 1
+        while remaining:
+            remaining -= 1
+        else:
+            p.add_argument('--live', required=True)
+        p.parse_args()
+        """,
+        ["--live", "yes"],
+        ["--dead", "yes", "--live", "yes"],
+        False,
+    ),
+    (
+        "W03_callable_false_while_runs_else",
+        """
+        def keep_going():
+            return False
+        p = AP()
+        while keep_going():
+            p.add_argument('--dead', required=True)
+        else:
+            p.add_argument('--live', required=True)
+        p.parse_args()
+        """,
+        ["--live", "yes"],
+        ["--dead", "yes", "--live", "yes"],
+        False,
+    ),
+    (
+        "C01_enter_rebinds_global_target",
+        _EIGHTH_BASE_CLASSES
+        + """
+        target = Live()
+        class Swap:
+            def __enter__(self):
+                global target
+                target = Dead()
+            def __exit__(self, exc_type, exc, tb):
+                return False
+        with Swap():
+            pass
+        target.run()
+        """,
+        ["--dead", "yes"],
+        ["--live", "yes"],
+        False,
+    ),
+    (
+        "C02_exit_rebinds_global_target",
+        _EIGHTH_BASE_CLASSES
+        + """
+        target = Live()
+        class Swap:
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc, tb):
+                global target
+                target = Dead()
+                return False
+        with Swap():
+            pass
+        target.run()
+        """,
+        ["--dead", "yes"],
+        ["--live", "yes"],
+        False,
+    ),
+    (
+        "C03_enter_mutates_alias_identity",
+        _EIGHTH_BASE_CLASSES
+        + """
+        target = Live()
+        alias = target
+        class Swap:
+            def __enter__(self):
+                alias.__class__ = Dead
+            def __exit__(self, exc_type, exc, tb):
+                return False
+        with Swap():
+            pass
+        target.run()
+        """,
+        ["--dead", "yes"],
+        ["--live", "yes"],
+        False,
+    ),
+    (
+        "K01_direct_nested_kwargs",
+        _EIGHTH_BASE_CLASSES
+        + """
+        from mutation_helper import mutate_kwargs
+        target = Live()
+        mutate_kwargs(**{
+            'payload': {'layers': [target]},
+            'replacement': Dead,
+        })
+        target.run()
+        """,
+        ["--dead", "yes"],
+        ["--live", "yes"],
+        False,
+    ),
+    (
+        "K02_bound_nested_kwargs",
+        _EIGHTH_BASE_CLASSES
+        + """
+        from mutation_helper import mutate_kwargs
+        target = Live()
+        payload = {
+            'payload': {'layers': [target]},
+            'replacement': Dead,
+        }
+        mutate_kwargs(**payload)
+        target.run()
+        """,
+        ["--dead", "yes"],
+        ["--live", "yes"],
+        False,
+    ),
+    (
+        "K03_call_built_nested_kwargs",
+        _EIGHTH_BASE_CLASSES
+        + """
+        from mutation_helper import mutate_kwargs
+        target = Live()
+        mutate_kwargs(**dict(
+            payload={'layers': [target]},
+            replacement=Dead,
+        ))
+        target.run()
+        """,
+        ["--dead", "yes"],
+        ["--live", "yes"],
+        False,
+    ),
+    (
+        "D01_module_dict_subscript_mutation",
+        """
+        import functools
+        def dead():
+            p = AP()
+            p.add_argument('--dead', required=True)
+            p.parse_args()
+        def replacement():
+            return lambda value: dead
+        functools.__dict__['lru_cache'] = replacement
+        @functools.lru_cache()
+        def target():
+            p = AP()
+            p.add_argument('--live', required=True)
+            p.parse_args()
+        target()
+        """,
+        ["--dead", "yes"],
+        ["--live", "yes"],
+        False,
+    ),
+    (
+        "D02_vars_subscript_mutation",
+        """
+        import functools
+        def dead():
+            p = AP()
+            p.add_argument('--dead', required=True)
+            p.parse_args()
+        def replacement():
+            return lambda value: dead
+        vars(functools)['lru_cache'] = replacement
+        @functools.lru_cache()
+        def target():
+            p = AP()
+            p.add_argument('--live', required=True)
+            p.parse_args()
+        target()
+        """,
+        ["--dead", "yes"],
+        ["--live", "yes"],
+        False,
+    ),
+    (
+        "D03_namespace_update_mutation",
+        """
+        import functools
+        def dead():
+            p = AP()
+            p.add_argument('--dead', required=True)
+            p.parse_args()
+        def replacement():
+            return lambda value: dead
+        functools.__dict__.update({'lru_cache': replacement})
+        @functools.lru_cache()
+        def target():
+            p = AP()
+            p.add_argument('--live', required=True)
+            p.parse_args()
+        target()
+        """,
+        ["--dead", "yes"],
+        ["--live", "yes"],
+        False,
+    ),
+    (
+        "D04_builtin_descriptor_dict_mutation",
+        """
+        import builtins
+        def dead():
+            p = AP()
+            p.add_argument('--dead', required=True)
+            p.parse_args()
+        def replacement(value):
+            return dead
+        vars(builtins)['property'] = replacement
+        @property
+        def target():
+            p = AP()
+            p.add_argument('--live', required=True)
+            p.parse_args()
+        target()
+        """,
+        ["--dead", "yes"],
+        ["--live", "yes"],
+        False,
+    ),
+]
+
+
+def _write_eighth_mutation_helper(tmp_path: Path) -> None:
+    helper = tmp_path / "tools" / "mutation_helper.py"
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.write_text(
+        "def mutate_kwargs(**kwargs):\n"
+        "    target = kwargs['payload']['layers'][0]\n"
+        "    target.__class__ = kwargs['replacement']\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    ("case_id", "source", "accepted", "rejected", "statically_exact"),
+    _EIGHTH_ARGPARSE_CASES,
+    ids=[case[0] for case in _EIGHTH_ARGPARSE_CASES],
+)
+def test_argparse_eighth_control_and_identity_graph_matches_python(
+    tmp_path: Path,
+    case_id: str,
+    source: str,
+    accepted: list[str],
+    rejected: list[str] | None,
+    statically_exact: bool,
+) -> None:
+    _write_eighth_mutation_helper(tmp_path)
+    script = tmp_path / "tools" / f"{case_id}.py"
+    script.write_text(
+        "from argparse import ArgumentParser as AP\n" + textwrap.dedent(source),
+        encoding="utf-8",
+    )
+
+    good = _fifth_contract_outcome(tmp_path, script, accepted)
+    assert good[0] == 0
+    if rejected is None:
+        alternate = _fifth_contract_outcome(
+            tmp_path,
+            script,
+            ["--dead", "yes"],
+        )
+        assert alternate[0] == 0
+        if statically_exact:
+            assert good[1] == []
+            assert alternate[1] == []
+        return
+
+    bad = _fifth_contract_outcome(tmp_path, script, rejected)
+    assert bad[0] != 0
+    assert bad[1], f"{case_id} false pass for {' '.join(rejected)}"
+    if statically_exact:
+        assert good[1] == []
+        assert bad[1]
+
+
+_CONTEXTMANAGER_SCANDIR_CASES = [
+    (
+        "G01_contextmanager_rebind_before_yield",
+        _EIGHTH_BASE_CLASSES
+        + """
+        from contextlib import contextmanager
+        parser = Live()
+        @contextmanager
+        def swap():
+            global parser
+            parser = Dead()
+            yield
+        with swap():
+            pass
+        parser.run()
+        """,
+        ["--dead", "yes"],
+        ["--live", "yes"],
+        False,
+    ),
+    (
+        "G02_contextmanager_rebind_after_yield",
+        _EIGHTH_BASE_CLASSES
+        + """
+        from contextlib import contextmanager
+        parser = Live()
+        @contextmanager
+        def swap():
+            global parser
+            yield
+            parser = Dead()
+        with swap():
+            pass
+        parser.run()
+        """,
+        ["--dead", "yes"],
+        ["--live", "yes"],
+        False,
+    ),
+    (
+        "S01_unmodified_os_scandir",
+        """
+        import os
+        with os.scandir('.') as entries:
+            list(entries)
+        p = AP()
+        p.add_argument('--live', required=True)
+        p.parse_args()
+        """,
+        ["--live", "yes"],
+        ["--dead", "yes", "--live", "yes"],
+        True,
+    ),
+    (
+        "S02_directly_rewritten_os_scandir",
+        _EIGHTH_BASE_CLASSES
+        + """
+        import os
+        from contextlib import contextmanager
+        parser = Live()
+        @contextmanager
+        def replacement(path):
+            global parser
+            parser = Dead()
+            yield ()
+        os.scandir = replacement
+        with os.scandir('.') as entries:
+            pass
+        parser.run()
+        """,
+        ["--dead", "yes"],
+        ["--live", "yes"],
+        False,
+    ),
+    (
+        "S03_indirectly_rewritten_os_scandir",
+        _EIGHTH_BASE_CLASSES
+        + """
+        import os
+        from contextlib import contextmanager
+        parser = Live()
+        @contextmanager
+        def replacement(path):
+            global parser
+            parser = Dead()
+            yield ()
+        setattr(os, 'scandir', replacement)
+        with os.scandir('.') as entries:
+            pass
+        parser.run()
+        """,
+        ["--dead", "yes"],
+        ["--live", "yes"],
+        False,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("case_id", "source", "accepted", "rejected", "statically_exact"),
+    _CONTEXTMANAGER_SCANDIR_CASES,
+    ids=[case[0] for case in _CONTEXTMANAGER_SCANDIR_CASES],
+)
+def test_argparse_contextmanager_and_external_context_provenance(
+    tmp_path: Path,
+    case_id: str,
+    source: str,
+    accepted: list[str],
+    rejected: list[str],
+    statically_exact: bool,
+) -> None:
+    script = tmp_path / "tools" / f"{case_id}.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "from argparse import ArgumentParser as AP\n" + textwrap.dedent(source),
+        encoding="utf-8",
+    )
+
+    good = _fifth_contract_outcome(tmp_path, script, accepted)
+    bad = _fifth_contract_outcome(tmp_path, script, rejected)
+    assert good[0] == 0
+    assert bad[0] != 0
+    if statically_exact:
+        assert good[1] == []
+        assert bad[1]
+    else:
+        assert good[1], f"{case_id} did not fail closed for {' '.join(accepted)}"
+        assert bad[1], f"{case_id} did not fail closed for {' '.join(rejected)}"

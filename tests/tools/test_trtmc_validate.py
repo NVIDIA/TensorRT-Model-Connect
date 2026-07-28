@@ -12,6 +12,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -41,7 +42,9 @@ def _raw_evidence(
                 "accuracy_drop_from_hf": 0.0,
                 "valid_count": 1,
                 "skipped_count": 0,
+                "excluded_count": 0,
                 "total_count": 1,
+                "complete_count": 1,
                 "gates": {
                     "max_accuracy_drop_from_hf": 0.0,
                     "min_prediction_agreement": 1.0,
@@ -53,16 +56,25 @@ def _raw_evidence(
     if (
         status in {"pass", "passed"}
         and isinstance(mode, str)
-        and trtmc_validate._PASSED_COMPLETE_COUNT_FIELD_BY_MODE.get(
-            mode
-        )
-        == "sample_count"
+        and trtmc_validate._PASSED_COMPLETE_COUNT_FIELD_BY_MODE.get(mode) == "sample_count"
     ):
         evidence.setdefault("sample_count", evidence.get("valid_count"))
         if "total_count" not in extra:
             evidence.pop("total_count", None)
-        if "skipped_count" not in extra:
-            evidence.pop("skipped_count", None)
+        evidence.setdefault("excluded_count", 0)
+    rate_field = trtmc_validate._PASSED_COUNT_RATE_FIELD_BY_MODE.get(str(mode or ""))
+    if status in {"pass", "passed"} and rate_field is not None:
+        rate = evidence.get(rate_field, 1.0)
+        valid_count = evidence.get("valid_count")
+        if (
+            isinstance(rate, (int, float))
+            and not isinstance(rate, bool)
+            and type(valid_count) is int
+        ):
+            evidence.setdefault(
+                "passed_count",
+                round(float(rate) * valid_count),
+            )
     return evidence
 
 
@@ -74,14 +86,35 @@ def _test_gate_context(result_paths) -> dict:
         if workload is None:
             continue
         raw_result = result.get("raw_result", {})
-        gates = (
-            raw_result.get("gates", {})
-            if isinstance(raw_result, dict)
-            else {}
-        )
+        gates = raw_result.get("gates", {}) if isinstance(raw_result, dict) else {}
         assert isinstance(gates, dict)
         context[(result["model"], workload)] = dict(gates)
     return context
+
+
+def _write_test_run(
+    output: Path,
+    *,
+    run_id: str = "test-run",
+    status: str = "completed",
+) -> None:
+    run = {
+        "schema_version": "trtmc.validation-run/v1",
+        "run_id": run_id,
+        "started_at": "2026-07-27T01:00:00+00:00",
+        "finished_at": None,
+        "duration_seconds": None,
+        "status": status,
+    }
+    if status != "running":
+        run["finished_at"] = "2026-07-27T01:00:01+00:00"
+        run["duration_seconds"] = 1.0
+    if status == "failed":
+        run["error"] = "test run failed"
+    (output / "run.json").write_text(
+        json.dumps(run),
+        encoding="utf-8",
+    )
 
 
 def _assert_output_lock_held(output: Path) -> None:
@@ -90,8 +123,7 @@ def _assert_output_lock_held(output: Path) -> None:
         with pytest.raises(BlockingIOError):
             trtmc_validate.fcntl.flock(
                 descriptor,
-                trtmc_validate.fcntl.LOCK_EX
-                | trtmc_validate.fcntl.LOCK_NB,
+                trtmc_validate.fcntl.LOCK_EX | trtmc_validate.fcntl.LOCK_NB,
             )
     finally:
         os.close(descriptor)
@@ -102,8 +134,7 @@ def _assert_output_lock_available(output: Path) -> None:
     try:
         trtmc_validate.fcntl.flock(
             descriptor,
-            trtmc_validate.fcntl.LOCK_EX
-            | trtmc_validate.fcntl.LOCK_NB,
+            trtmc_validate.fcntl.LOCK_EX | trtmc_validate.fcntl.LOCK_NB,
         )
         trtmc_validate.fcntl.flock(
             descriptor,
@@ -149,13 +180,8 @@ def test_model_workload_catalog_covers_every_validation_eligible_model():
     )
 
     assert len(catalog["models"]) == len(eligible_models) == 105
-    assert sum(
-        "not_compared_reason" in spec for spec in catalog["models"].values()
-    ) == 14
-    assert all(
-        "e2e" not in spec.get("workloads", [])
-        for spec in catalog["models"].values()
-    )
+    assert sum("not_compared_reason" in spec for spec in catalog["models"].values()) == 14
+    assert all("e2e" not in spec.get("workloads", []) for spec in catalog["models"].values())
     assert (
         catalog["models"]["flux-2-dev"]["reference_cache_identity"]
         == catalog["models"]["flux-2-dev-fp8"]["reference_cache_identity"]
@@ -221,12 +247,9 @@ def test_authoritative_gates_use_resolved_cli_suite_and_model_context():
     }
 
 
-def test_complete_count_policy_covers_every_supported_noncontinuation_mode():
-    assert set(
-        trtmc_validate._PASSED_COMPLETE_COUNT_FIELD_BY_MODE
-    ) == (
-        set(trtmc_validate._PRIMARY_METRIC_BY_MODE)
-        - {"continuation"}
+def test_complete_count_policy_covers_every_supported_mode():
+    assert set(trtmc_validate._PASSED_COMPLETE_COUNT_FIELD_BY_MODE) == set(
+        trtmc_validate._PRIMARY_METRIC_BY_MODE
     )
 
 
@@ -269,14 +292,9 @@ def test_all_help_and_docs_name_validation_eligibility_boundaries():
         assert "`ci_tier: l0_only`" in text
         assert "readiness alone does not select a model" in text
     website_text = " ".join(
-        (repo_root / "website/docs/reference/testing.md")
-        .read_text(encoding="utf-8")
-        .split()
+        (repo_root / "website/docs/reference/testing.md").read_text(encoding="utf-8").split()
     )
-    assert (
-        "91 use dataset-backed, threshold-gated reference workloads"
-        in website_text
-    )
+    assert "91 use dataset-backed, threshold-gated reference workloads" in website_text
     assert "14 are explicitly marked `not_compared_reason`" in website_text
     assert "explicit E2E fallback" not in website_text
     assert "E2E bindings have no dataset slice" not in website_text
@@ -286,9 +304,7 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
     catalog = trtmc_validate.load_catalog()
     configured = set(catalog["sample_limits"])
     declared = {
-        workload
-        for spec in catalog["models"].values()
-        for workload in spec.get("workloads", [])
+        workload for spec in catalog["models"].values() for workload in spec.get("workloads", [])
     }
 
     assert configured == declared
@@ -521,9 +537,7 @@ def test_model_retry_delay_rejects_nonfinite_values(value):
     parser = trtmc_validate.build_parser()
 
     with pytest.raises(SystemExit):
-        parser.parse_args(
-            ["--all", "--model-retry-delay-seconds", value]
-        )
+        parser.parse_args(["--all", "--model-retry-delay-seconds", value])
 
 
 def test_model_retry_delay_accepts_finite_zero():
@@ -587,11 +601,10 @@ def test_all_supervisor_applies_model_failure_policy(
         "_run_supervised_binding_with_retries",
         run_worker,
     )
-    monkeypatch.setattr(trtmc_validate, "write_run_metadata", lambda output: output)
     monkeypatch.setattr(
         trtmc_validate,
         "finalize_run_metadata",
-        lambda output: output,
+        lambda output, **_kwargs: output,
     )
     monkeypatch.setattr(
         trtmc_validate,
@@ -653,9 +666,7 @@ def test_all_supervisor_propagates_authoritative_gates_to_worker_and_report(
         }
 
     def write_report(_output, **kwargs):
-        report_contexts.append(
-            kwargs.get("expected_gates_by_binding")
-        )
+        report_contexts.append(kwargs.get("expected_gates_by_binding"))
         return (
             tmp_path / "report.json",
             tmp_path / "report.html",
@@ -674,13 +685,8 @@ def test_all_supervisor_propagates_authoritative_gates_to_worker_and_report(
     )
     monkeypatch.setattr(
         trtmc_validate,
-        "write_run_metadata",
-        lambda output: output,
-    )
-    monkeypatch.setattr(
-        trtmc_validate,
         "finalize_run_metadata",
-        lambda output: output,
+        lambda output, **_kwargs: output,
     )
     monkeypatch.setattr(
         trtmc_validate,
@@ -698,10 +704,7 @@ def test_all_supervisor_propagates_authoritative_gates_to_worker_and_report(
     assert returncode == 0
     assert worker_contexts == [(binding, expected_gates)]
     assert report_contexts
-    assert all(
-        context is gates_by_binding
-        for context in report_contexts
-    )
+    assert all(context is gates_by_binding for context in report_contexts)
 
 
 def test_all_supervisor_records_unexpected_run_failure(
@@ -742,20 +745,14 @@ def test_all_supervisor_records_unexpected_run_failure(
             catalog={"sample_limits": {"workload-a": 1}},
         )
 
-    run = json.loads(
-        (arguments.output / "run.json").read_text(encoding="utf-8")
-    )
-    report = json.loads(
-        (arguments.output / "report.json").read_text(encoding="utf-8")
-    )
+    run = json.loads((arguments.output / "run.json").read_text(encoding="utf-8"))
+    report = json.loads((arguments.output / "report.json").read_text(encoding="utf-8"))
     assert run["status"] == "failed"
     assert run["finished_at"]
     assert "UNIQUE-EARLY-ERROR" in run["error"]
     assert report["run"]["error"] == run["error"]
     assert report["summary"]["cases"] == 0
-    assert "UNIQUE-EARLY-ERROR" in (
-        arguments.output / "report.html"
-    ).read_text(encoding="utf-8")
+    assert "UNIQUE-EARLY-ERROR" in (arguments.output / "report.html").read_text(encoding="utf-8")
 
 
 def test_supervisor_retries_execution_error_but_not_disagreement(
@@ -818,7 +815,7 @@ def test_supervisor_retries_execution_error_but_not_disagreement(
 
     def disagree(binding, *, arguments, catalog, attempt):
         attempts.append(attempt)
-        return {
+        result = {
             "model": binding.model,
             "workload": binding.workload,
             "execution": {"status": "completed", "exit_code": 1},
@@ -826,6 +823,15 @@ def test_supervisor_retries_execution_error_but_not_disagreement(
             "raw_result": {"status": "failed"},
             "worker_log": str(tmp_path / "worker-disagreement.log"),
         }
+        case_dir = trtmc_validate._case_directory(
+            arguments.output,
+            binding,
+        )
+        (case_dir / "comparison.json").write_text(
+            json.dumps(result),
+            encoding="utf-8",
+        )
+        return result
 
     monkeypatch.setattr(trtmc_validate, "_run_supervised_binding", disagree)
 
@@ -838,6 +844,88 @@ def test_supervisor_retries_execution_error_but_not_disagreement(
     assert attempts == [1]
     assert disagreement["execution"]["status"] == "completed"
     assert disagreement["execution"]["attempt_count"] == 1
+
+
+def test_retry_final_publication_preserves_newer_same_run_result(
+    tmp_path,
+    monkeypatch,
+):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--output",
+            str(tmp_path / "results"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "workload-a")
+    case_dir = trtmc_validate._case_directory(
+        arguments.output,
+        binding,
+    )
+    comparison = case_dir / "comparison.json"
+    result = {
+        "model": binding.model,
+        "workload": binding.workload,
+        "execution": {"status": "completed", "exit_code": 0},
+        "validation": {"status": "passed"},
+        "raw_result": {"status": "passed"},
+    }
+
+    def publish_attempt(*_args, **_kwargs):
+        case_dir.mkdir(parents=True, exist_ok=True)
+        comparison.write_text(json.dumps(result), encoding="utf-8")
+        return json.loads(json.dumps(result))
+
+    newer = {
+        "model": binding.model,
+        "workload": binding.workload,
+        "execution": {"status": "completed", "exit_code": 1},
+        "validation": {"status": "failed"},
+        "raw_result": {"status": "failed", "marker": "newer"},
+    }
+    replacement = case_dir / "replacement.json"
+    real_attempt_record = trtmc_validate._attempt_record
+    replaced = False
+
+    def replace_after_receipt(result, *, attempt, archived):
+        nonlocal replaced
+        record = real_attempt_record(
+            result,
+            attempt=attempt,
+            archived=archived,
+        )
+        replacement.write_text(json.dumps(newer), encoding="utf-8")
+        os.replace(replacement, comparison)
+        replaced = True
+        return record
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_run_supervised_binding",
+        publish_attempt,
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_attempt_record",
+        replace_after_receipt,
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="target changed before publication",
+    ):
+        trtmc_validate._run_supervised_binding_with_retries(
+            binding,
+            arguments=arguments,
+            catalog={"sample_limits": {"workload-a": 5}},
+        )
+
+    assert replaced
+    assert json.loads(comparison.read_text(encoding="utf-8")) == newer
 
 
 def test_all_supervisor_records_not_compared_without_launching_worker(
@@ -869,11 +957,10 @@ def test_all_supervisor_records_not_compared_without_launching_worker(
         "_run_supervised_binding_with_retries",
         unexpected_worker,
     )
-    monkeypatch.setattr(trtmc_validate, "write_run_metadata", lambda output: output)
     monkeypatch.setattr(
         trtmc_validate,
         "finalize_run_metadata",
-        lambda output: output,
+        lambda output, **_kwargs: output,
     )
     monkeypatch.setattr(
         trtmc_validate,
@@ -893,10 +980,7 @@ def test_all_supervisor_records_not_compared_without_launching_worker(
     )
 
     comparison = (
-        arguments.output
-        / "model-a"
-        / trtmc_validate.NOT_COMPARED_DIRECTORY
-        / "comparison.json"
+        arguments.output / "model-a" / trtmc_validate.NOT_COMPARED_DIRECTORY / "comparison.json"
     )
     result = json.loads(comparison.read_text(encoding="utf-8"))
     assert returncode == 0
@@ -934,6 +1018,12 @@ def test_supervised_binding_replaces_stale_result_with_worker_crash(tmp_path, mo
         ),
         encoding="utf-8",
     )
+    _write_test_run(
+        arguments.output,
+        run_id="current-run",
+        status="running",
+    )
+    arguments._validation_run_id = "current-run"
 
     def crash(command, log_path, env):
         log_path.write_text("worker crashed before comparison\n", encoding="utf-8")
@@ -952,12 +1042,46 @@ def test_supervised_binding_replaces_stale_result_with_worker_crash(tmp_path, mo
     assert result["validation"]["status"] == "failed"
     assert result["raw_result"]["error_type"] == "WorkerProcessError"
     assert result["reproduce"]["dataset"]["sample_limit"] == 5
-    assert "--model-worker" in result["reproduce"]["dataset"]["command"]
-    assert "--local-files-only" in result["reproduce"]["dataset"]["command"]
+    public_command = result["reproduce"]["dataset"]["command"]
+    assert "--model-worker" not in public_command
+    assert "--worker-run-id" not in public_command
+    assert "current-run" not in public_command
+    assert "--local-files-only" in public_command
     assert json.loads(comparison.read_text(encoding="utf-8")) == result
 
 
-def test_supervised_binding_rejects_stale_result_swapped_after_read(
+def test_public_worker_command_removes_all_private_run_id_forms():
+    command = [
+        "python",
+        "tools/trtmc_validate.py",
+        "model-a",
+        "workload-a",
+        "--model-worker",
+        "--worker-run-id=equals-secret",
+        "--worker-run-id",
+        "separate-secret",
+        "--worker-run-id",
+        "--local-files-only",
+        "--worker-run-id",
+        "--worker-run-id=repeated-secret",
+        "--limit",
+        "3",
+        "--worker-run-id=",
+        "--worker-run-id",
+    ]
+
+    assert trtmc_validate._public_worker_command(command) == [
+        "python",
+        "tools/trtmc_validate.py",
+        "model-a",
+        "workload-a",
+        "--local-files-only",
+        "--limit",
+        "3",
+    ]
+
+
+def test_supervised_binding_preserves_result_swapped_after_read(
     tmp_path,
     monkeypatch,
 ):
@@ -1011,17 +1135,18 @@ def test_supervised_binding_rejects_stale_result_swapped_after_read(
         swap_after_read,
     )
 
-    result = trtmc_validate._run_supervised_binding(
-        binding,
-        arguments=arguments,
-        catalog={"sample_limits": {"workload-a": 5}},
-    )
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="target changed before publication",
+    ):
+        trtmc_validate._run_supervised_binding(
+            binding,
+            arguments=arguments,
+            catalog={"sample_limits": {"workload-a": 5}},
+        )
 
     assert swapped
-    assert result["execution"] == {"status": "error", "exit_code": 0}
-    assert result["validation"]["status"] == "failed"
-    assert result["raw_result"]["error_type"] == "WorkerProcessError"
-    assert "changed after it was read" in result["raw_result"]["error"]
+    assert json.loads(comparison.read_text(encoding="utf-8")) == stale
 
 
 def test_supervised_binding_accepts_fresh_worker_result(tmp_path, monkeypatch):
@@ -1052,6 +1177,9 @@ def test_supervised_binding_accepts_fresh_worker_result(tmp_path, monkeypatch):
                         binding.model,
                         binding.workload,
                         "passed",
+                        valid_count=5,
+                        total_count=5,
+                        complete_count=5,
                     ),
                     "reproduce": {
                         "dataset": {
@@ -1081,6 +1209,144 @@ def test_supervised_binding_accepts_fresh_worker_result(tmp_path, monkeypatch):
     assert "--model-worker" not in result["reproduce"]["dataset"]["command"]
 
 
+def test_model_worker_run_id_is_immutable_if_run_metadata_is_replaced(
+    tmp_path,
+):
+    output = tmp_path / "results"
+    output.mkdir()
+    parent_arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--output",
+            str(output),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "workload-a")
+    _write_test_run(output, run_id="parent-run", status="running")
+    command = trtmc_validate._worker_command(
+        binding,
+        parent_arguments,
+        run_id="parent-run",
+    )
+    worker_arguments = trtmc_validate.build_parser().parse_args(command[2:])
+
+    assert worker_arguments.worker_run_id == "parent-run"
+    assert trtmc_validate._validated_result_run_id(worker_arguments) == "parent-run"
+
+    _write_test_run(output, run_id="replacement-run", status="running")
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="validation run changed",
+    ):
+        trtmc_validate._validated_result_run_id(worker_arguments)
+    replacement_metadata = (output / "run.json").read_text(encoding="utf-8")
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="validation run changed",
+    ):
+        trtmc_validate.finalize_run_metadata(
+            output,
+            expected_run_id="parent-run",
+        )
+    assert (output / "run.json").read_text(encoding="utf-8") == replacement_metadata
+
+
+def test_comparison_publication_preserves_same_run_target_replacement(
+    tmp_path,
+):
+    output = tmp_path / "results"
+    comparison = output / "model-a" / "workload-a" / "comparison.json"
+    comparison.parent.mkdir(parents=True)
+    _write_test_run(output, run_id="run-a", status="running")
+    comparison.write_text(
+        json.dumps({"run_id": "run-a", "marker": "old"}),
+        encoding="utf-8",
+    )
+    expected_target = trtmc_validate._regular_artifact_version(
+        comparison,
+    )
+    replacement = comparison.parent / "replacement.json"
+    replacement.write_text(
+        json.dumps({"run_id": "run-a", "marker": "newer"}),
+        encoding="utf-8",
+    )
+    os.replace(replacement, comparison)
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="target changed before publication",
+    ):
+        trtmc_validate._publish_validation_result(
+            output,
+            comparison,
+            {"run_id": "run-a", "marker": "stale-writer"},
+            expected_run_id="run-a",
+            expected_target=expected_target,
+        )
+
+    assert json.loads(comparison.read_text(encoding="utf-8")) == {
+        "run_id": "run-a",
+        "marker": "newer",
+    }
+
+
+def test_comparison_publication_rolls_back_after_run_replacement(
+    tmp_path,
+    monkeypatch,
+):
+    output = tmp_path / "results"
+    comparison = output / "model-a" / "workload-a" / "comparison.json"
+    comparison.parent.mkdir(parents=True)
+    _write_test_run(output, run_id="run-a", status="running")
+    original_result = {"run_id": "run-a", "marker": "original"}
+    comparison.write_text(json.dumps(original_result), encoding="utf-8")
+    expected_target = trtmc_validate._regular_artifact_version(
+        comparison,
+    )
+    replacement_run = output / "replacement-run.json"
+    replacement_metadata = json.loads((output / "run.json").read_text(encoding="utf-8"))
+    replacement_metadata["run_id"] = "run-b"
+    replacement_run.write_text(
+        json.dumps(replacement_metadata),
+        encoding="utf-8",
+    )
+    real_commit = trtmc_validate._commit_file_update
+    replaced = False
+
+    def replace_run_after_comparison_commit(update):
+        nonlocal replaced
+        real_commit(update)
+        if update.path == comparison and not replaced:
+            os.replace(replacement_run, output / "run.json")
+            replaced = True
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_commit_file_update",
+        replace_run_after_comparison_commit,
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="validation run changed",
+    ):
+        trtmc_validate._publish_validation_result(
+            output,
+            comparison,
+            {"run_id": "run-a", "marker": "stale-writer"},
+            expected_run_id="run-a",
+            expected_target=expected_target,
+        )
+
+    assert replaced
+    assert json.loads(comparison.read_text(encoding="utf-8")) == (original_result)
+    assert json.loads((output / "run.json").read_text(encoding="utf-8"))["run_id"] == "run-b"
+
+
 def test_supervised_binding_rejects_passing_result_from_crashed_worker(
     tmp_path,
     monkeypatch,
@@ -1097,12 +1363,7 @@ def test_supervised_binding_rejects_passing_result_from_crashed_worker(
         ]
     )
     binding = trtmc_validate.Binding("model-a", "workload-a")
-    comparison = (
-        arguments.output
-        / binding.model
-        / binding.workload
-        / "comparison.json"
-    )
+    comparison = arguments.output / binding.model / binding.workload / "comparison.json"
 
     def crash_after_pass(_command, _log_path, _env):
         comparison.write_text(
@@ -1157,12 +1418,7 @@ def test_supervised_binding_accepts_worker_disagreement_exit_code(
         ]
     )
     binding = trtmc_validate.Binding("model-a", "workload-a")
-    comparison = (
-        arguments.output
-        / binding.model
-        / binding.workload
-        / "comparison.json"
-    )
+    comparison = arguments.output / binding.model / binding.workload / "comparison.json"
 
     def disagree(_command, _log_path, _env):
         comparison.write_text(
@@ -1216,12 +1472,7 @@ def test_supervised_binding_rejects_not_compared_runnable_result(
         ]
     )
     binding = trtmc_validate.Binding("model-a", "workload-a")
-    comparison = (
-        arguments.output
-        / binding.model
-        / binding.workload
-        / "comparison.json"
-    )
+    comparison = arguments.output / binding.model / binding.workload / "comparison.json"
 
     def not_compared(_command, _log_path, _env):
         comparison.write_text(
@@ -1365,12 +1616,7 @@ def test_supervised_binding_rejects_unverifiable_worker_evidence(
         ]
     )
     binding = trtmc_validate.Binding("model-a", "workload-a")
-    comparison = (
-        arguments.output
-        / binding.model
-        / binding.workload
-        / "comparison.json"
-    )
+    comparison = arguments.output / binding.model / binding.workload / "comparison.json"
 
     def write_unverifiable_result(_command, _log_path, _env):
         comparison.write_text(json.dumps(payload), encoding="utf-8")
@@ -1472,6 +1718,9 @@ def test_single_ci_case_writes_stable_result_and_exit_code(
                 binding.model,
                 binding.workload,
                 "passed",
+                valid_count=5,
+                total_count=5,
+                complete_count=5,
             )
             if validation_status == "passed"
             else {
@@ -1495,16 +1744,14 @@ def test_single_ci_case_writes_stable_result_and_exit_code(
         result = trtmc_validate._normalize_result(
             {
                 "schema_version": "trtmc.validation-result/v2",
+                "run_id": trtmc_validate._current_run_id(arguments.output),
                 "model": binding.model,
                 "workload": binding.workload,
                 "returncode": 0,
                 "raw_result": raw_result,
                 "reproduce": {
                     "dataset": {
-                        "command": (
-                            "python tools/trtmc_validate.py "
-                            "model-a workload-a"
-                        ),
+                        "command": ("python tools/trtmc_validate.py model-a workload-a"),
                         "sample_limit": arguments.limit,
                         "prepared_input_count": arguments.limit,
                     },
@@ -1764,17 +2011,21 @@ def test_write_report_links_each_comparison(tmp_path):
     comparison = case_dir / "comparison.json"
     comparison.write_text(
         json.dumps(
-                {
-                    "model": "model-a",
-                    "workload": "workload-a",
-                    "status": "passed",
-                    "returncode": 0,
-                    "raw_result": _raw_evidence(
-                        "model-a",
-                        "workload-a",
-                        "passed",
-                    ),
-                    "reference_environment": [
+            {
+                "run_id": "test-run",
+                "model": "model-a",
+                "workload": "workload-a",
+                "status": "passed",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                    valid_count=500,
+                    total_count=500,
+                    complete_count=500,
+                ),
+                "reference_environment": [
                     {"name": "reference_common", "python": "/profiles/python"}
                 ],
                 "reproduce": {
@@ -1783,19 +2034,18 @@ def test_write_report_links_each_comparison(tmp_path):
                     "dataset": {
                         "command": "python tools/trtmc_validate.py model-a",
                         "sample_limit": 500,
-                        "prepared_input_count": 1000,
+                        "prepared_input_count": 500,
                     },
                 },
             }
         ),
         encoding="utf-8",
     )
+    _write_test_run(tmp_path)
 
     json_path, html_path, report = trtmc_validate.write_report(
         tmp_path,
-        expected_gates_by_binding=_test_gate_context(
-            [comparison]
-        ),
+        expected_gates_by_binding=_test_gate_context([comparison]),
     )
 
     assert report["summary"] == {
@@ -1808,7 +2058,12 @@ def test_write_report_links_each_comparison(tmp_path):
         "validation_passed": 1,
         "validation_failed": 0,
         "validation_skipped": 0,
+        "requested_samples": 500,
+        "prepared_samples": 500,
+        "actual_samples": 500,
+        "full_dataset_cases": 0,
         "selected_samples": 500,
+        "duration_seconds": 1.0,
     }
     assert report["validation_status"] == "passed"
     assert report["results"][0]["execution"]["status"] == "completed"
@@ -1828,12 +2083,176 @@ def test_write_report_links_each_comparison(tmp_path):
     assert "Dataset · Reference 1/1 · TRTMC 1/1" in document
     assert "Dataset slice (500 samples)" in document
     assert "<th>Samples</th>" in document
-    assert "<td>500</td>" in document
+    assert "<td>500<div" in document
+    assert "requested 500 · prepared 500" in document
     assert report["summary"]["selected_samples"] == 500
-    assert "prepared inputs" not in document
     assert "$ python tools/trtmc_validate.py model-a" in document
     assert "$ python hf.py" in document
     assert "$ trtmc run" in document
+
+
+def test_passed_result_rejects_partial_requested_sample_evidence():
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="prepared_input_count to equal complete_count",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "status": "passed",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                    complete_count=1,
+                    total_count=1,
+                    valid_count=1,
+                ),
+                "reproduce": {
+                    "dataset": {
+                        "command": "python validate.py",
+                        "sample_limit": 10,
+                        "prepared_input_count": 10,
+                    }
+                },
+            },
+            expected_gates={
+                "max_accuracy_drop_from_hf": 0.0,
+                "min_prediction_agreement": 1.0,
+            },
+        )
+
+
+def test_passed_result_accepts_complete_full_dataset_limit_zero():
+    result = trtmc_validate._normalize_result(
+        {
+            "model": "model-a",
+            "workload": "workload-a",
+            "status": "passed",
+            "returncode": 0,
+            "raw_result": _raw_evidence(
+                "model-a",
+                "workload-a",
+                "passed",
+                complete_count=3,
+                total_count=3,
+                valid_count=3,
+            ),
+            "reproduce": {
+                "dataset": {
+                    "command": "python validate.py",
+                    "sample_limit": 0,
+                    "prepared_input_count": 3,
+                }
+            },
+        },
+        expected_gates={
+            "max_accuracy_drop_from_hf": 0.0,
+            "min_prediction_agreement": 1.0,
+        },
+    )
+
+    assert result["validation"]["status"] == "passed"
+    assert result["raw_result"]["complete_count"] == 3
+
+
+def test_standalone_report_without_run_metadata_cannot_pass(tmp_path):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    case_dir.mkdir(parents=True)
+    comparison = case_dir / "comparison.json"
+    comparison.write_text(
+        json.dumps(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "status": "passed",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                ),
+                "reproduce": {
+                    "dataset": {
+                        "command": "python validate.py",
+                        "sample_limit": 1,
+                        "prepared_input_count": 1,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, _, report = trtmc_validate.write_report(
+        tmp_path,
+        expected_gates_by_binding=_test_gate_context([comparison]),
+    )
+
+    assert report["validation_status"] == "incomplete"
+    assert report["summary"]["requested_samples"] == 1
+    assert report["summary"]["prepared_samples"] == 1
+    assert report["summary"]["actual_samples"] == 1
+
+
+def test_report_rejects_comparison_from_different_run(tmp_path):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    case_dir.mkdir(parents=True)
+    comparison = case_dir / "comparison.json"
+    comparison.write_text(
+        json.dumps(
+            {
+                "run_id": "historical-run",
+                "model": "model-a",
+                "workload": "workload-a",
+                "status": "failed",
+                "returncode": 1,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "failed",
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_test_run(tmp_path, run_id="current-run")
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="different run",
+    ):
+        trtmc_validate.write_report(
+            tmp_path,
+            result_paths=[comparison],
+        )
+
+
+@pytest.mark.parametrize(
+    ("run_status", "report_status"),
+    [
+        ("running", "incomplete"),
+        ("completed", "failed"),
+        ("failed", "failed"),
+    ],
+)
+def test_canonical_empty_report_statuses(
+    tmp_path,
+    run_status,
+    report_status,
+):
+    _write_test_run(tmp_path, status=run_status)
+
+    _, _, report = trtmc_validate.write_report(
+        tmp_path,
+        result_paths=[],
+    )
+
+    assert report["validation_status"] == report_status
+    assert report["summary"]["cases"] == 0
+    assert report["summary"]["actual_samples"] == 0
 
 
 def test_write_report_holds_output_lock_for_entire_publication(
@@ -1872,10 +2291,13 @@ def test_write_report_holds_output_lock_for_entire_publication(
         publish_while_locked,
     )
 
-    assert trtmc_validate.write_report(
-        tmp_path,
-        result_paths=[],
-    ) == expected
+    assert (
+        trtmc_validate.write_report(
+            tmp_path,
+            result_paths=[],
+        )
+        == expected
+    )
     assert not locked
     assert operations == [
         trtmc_validate.fcntl.LOCK_EX,
@@ -1933,7 +2355,7 @@ def test_write_report_creates_missing_output_root(
     assert html_path == output / "report.html"
     assert json.loads(json_path.read_text(encoding="utf-8")) == report
     assert html_path.is_file()
-    assert report["validation_status"] == "failed"
+    assert report["validation_status"] == "incomplete"
 
 
 def test_output_publication_lock_preserves_body_error_when_unlock_fails(
@@ -1959,16 +2381,12 @@ def test_output_publication_lock_preserves_body_error_when_unlock_fails(
         with trtmc_validate._validation_output_publication_lock(output):
             raise RuntimeError("business failure")
 
-    assert any(
-        "injected unlock failure" in note
-        for note in getattr(raised.value, "__notes__", [])
-    )
+    assert any("injected unlock failure" in note for note in getattr(raised.value, "__notes__", []))
     descriptor = os.open(output, os.O_RDONLY | os.O_DIRECTORY)
     try:
         real_flock(
             descriptor,
-            trtmc_validate.fcntl.LOCK_EX
-            | trtmc_validate.fcntl.LOCK_NB,
+            trtmc_validate.fcntl.LOCK_EX | trtmc_validate.fcntl.LOCK_NB,
         )
         real_flock(descriptor, trtmc_validate.fcntl.LOCK_UN)
     finally:
@@ -1989,9 +2407,7 @@ def test_output_publication_lock_serializes_independent_processes(
         "os.close(descriptor)\n"
     )
     process = None
-    with trtmc_validate._validation_output_publication_lock(
-        tmp_path
-    ):
+    with trtmc_validate._validation_output_publication_lock(tmp_path):
         process = subprocess.Popen(
             [
                 sys.executable,
@@ -2014,6 +2430,371 @@ def test_output_publication_lock_serializes_independent_processes(
     assert marker.read_text(encoding="utf-8") == "entered"
 
 
+def test_new_run_waits_for_report_then_invalidates_stale_green_report(
+    tmp_path,
+    monkeypatch,
+):
+    output = tmp_path / "output"
+    case_dir = output / "model-a" / "workload-a"
+    case_dir.mkdir(parents=True)
+    comparison = case_dir / "comparison.json"
+    comparison.write_text(
+        json.dumps(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "run_id": "old-run",
+                "model": "model-a",
+                "workload": "workload-a",
+                "status": "passed",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                ),
+                "reproduce": {
+                    "dataset": {
+                        "command": "python validate.py",
+                        "sample_limit": 1,
+                        "prepared_input_count": 1,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_test_run(output, run_id="old-run", status="completed")
+    expected_gates = _test_gate_context([comparison])
+    _, _, initial_report = trtmc_validate.write_report(
+        output,
+        result_paths=[comparison],
+        expected_gates_by_binding=expected_gates,
+    )
+    assert initial_report["validation_status"] == "passed"
+
+    report_entered = threading.Event()
+    release_report = threading.Event()
+    writer_started = threading.Event()
+    writer_finished = threading.Event()
+    errors: list[BaseException] = []
+    real_normalize = trtmc_validate._normalize_result_files
+
+    def pause_after_normalization(*args, **kwargs):
+        normalized = real_normalize(*args, **kwargs)
+        _assert_output_lock_held(output)
+        report_entered.set()
+        assert release_report.wait(timeout=5)
+        return normalized
+
+    def publish_report():
+        try:
+            trtmc_validate.write_report(
+                output,
+                result_paths=[comparison],
+                expected_gates_by_binding=expected_gates,
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    def start_new_run():
+        writer_started.set()
+        try:
+            trtmc_validate.write_run_metadata(output)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            writer_finished.set()
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_normalize_result_files",
+        pause_after_normalization,
+    )
+    report_thread = threading.Thread(target=publish_report)
+    writer_thread = threading.Thread(target=start_new_run)
+    report_thread.start()
+    try:
+        assert report_entered.wait(timeout=5)
+        writer_thread.start()
+        assert writer_started.wait(timeout=5)
+        assert not writer_finished.wait(timeout=0.2)
+        assert (
+            json.loads((output / "report.json").read_text(encoding="utf-8"))["validation_status"]
+            == "passed"
+        )
+    finally:
+        release_report.set()
+        report_thread.join(timeout=5)
+        if writer_thread.ident is not None:
+            writer_thread.join(timeout=5)
+
+    assert not report_thread.is_alive()
+    assert not writer_thread.is_alive()
+    assert not errors
+    current_run = json.loads((output / "run.json").read_text(encoding="utf-8"))
+    assert current_run["run_id"] != "old-run"
+    assert current_run["status"] == "running"
+    assert not (output / "report.json").exists()
+    assert not (output / "report.html").exists()
+
+
+def test_finalize_run_then_concurrent_new_run_preserves_new_metadata(
+    tmp_path,
+    monkeypatch,
+):
+    output = tmp_path / "output"
+    output.mkdir()
+    _write_test_run(output, run_id="old-run", status="running")
+    monkeypatch.setenv(
+        "TRTMC_VALIDATION_SOURCE_REVISION",
+        "replacement-revision",
+    )
+
+    finalizer_entered = threading.Event()
+    release_finalizer = threading.Event()
+    writer_started = threading.Event()
+    writer_finished = threading.Event()
+    errors: list[BaseException] = []
+    real_elapsed = trtmc_validate._elapsed_seconds
+
+    def pause_after_expected_run_check(started_at, finished_at):
+        _assert_output_lock_held(output)
+        finalizer_entered.set()
+        assert release_finalizer.wait(timeout=5)
+        return real_elapsed(started_at, finished_at)
+
+    def finalize_old_run():
+        try:
+            trtmc_validate.finalize_run_metadata(
+                output,
+                expected_run_id="old-run",
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    def start_new_run():
+        writer_started.set()
+        try:
+            trtmc_validate.write_run_metadata(output)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            writer_finished.set()
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_elapsed_seconds",
+        pause_after_expected_run_check,
+    )
+    finalizer_thread = threading.Thread(target=finalize_old_run)
+    writer_thread = threading.Thread(target=start_new_run)
+    finalizer_thread.start()
+    try:
+        assert finalizer_entered.wait(timeout=5)
+        writer_thread.start()
+        assert writer_started.wait(timeout=5)
+        assert not writer_finished.wait(timeout=0.2)
+    finally:
+        release_finalizer.set()
+        finalizer_thread.join(timeout=5)
+        if writer_thread.ident is not None:
+            writer_thread.join(timeout=5)
+
+    assert not finalizer_thread.is_alive()
+    assert not writer_thread.is_alive()
+    assert not errors
+    current_run = json.loads((output / "run.json").read_text(encoding="utf-8"))
+    assert current_run["run_id"] != "old-run"
+    assert current_run["status"] == "running"
+    assert current_run["source_revision"] == "replacement-revision"
+
+
+def test_finalize_run_metadata_preserves_atomic_replacement_after_read(
+    tmp_path,
+    monkeypatch,
+):
+    output = tmp_path / "output"
+    output.mkdir()
+    _write_test_run(output, run_id="run-a", status="running")
+    replacement_path = output / "replacement-run.json"
+    replacement = json.loads((output / "run.json").read_text(encoding="utf-8"))
+    replacement["run_id"] = "run-b"
+    replacement_path.write_text(
+        json.dumps(replacement),
+        encoding="utf-8",
+    )
+    real_payload = trtmc_validate._json_artifact_payload
+    replaced = False
+
+    def replace_after_read(path, value, **kwargs):
+        nonlocal replaced
+        payload = real_payload(path, value, **kwargs)
+        if path == output / "run.json" and not replaced:
+            os.replace(replacement_path, path)
+            replaced = True
+        return payload
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_json_artifact_payload",
+        replace_after_read,
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="target changed before publication",
+    ):
+        trtmc_validate.finalize_run_metadata(
+            output,
+            expected_run_id="run-a",
+        )
+
+    assert replaced
+    assert json.loads((output / "run.json").read_text(encoding="utf-8")) == replacement
+
+
+def test_finalize_run_metadata_preserves_replacement_after_commit(
+    tmp_path,
+    monkeypatch,
+):
+    output = tmp_path / "output"
+    output.mkdir()
+    _write_test_run(output, run_id="run-a", status="running")
+    replacement_path = output / "replacement-run.json"
+    replacement = json.loads((output / "run.json").read_text(encoding="utf-8"))
+    replacement["run_id"] = "run-b"
+    replacement_path.write_text(
+        json.dumps(replacement),
+        encoding="utf-8",
+    )
+    real_commit = trtmc_validate._commit_file_update
+    replaced = False
+
+    def replace_after_commit(update):
+        nonlocal replaced
+        real_commit(update)
+        if update.path == output / "run.json" and not replaced:
+            os.replace(replacement_path, update.path)
+            replaced = True
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_commit_file_update",
+        replace_after_commit,
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="rollback was incomplete",
+    ):
+        trtmc_validate.finalize_run_metadata(
+            output,
+            expected_run_id="run-a",
+        )
+
+    assert replaced
+    assert json.loads((output / "run.json").read_text(encoding="utf-8")) == replacement
+
+
+def test_report_rechecks_run_id_immediately_before_commit(
+    tmp_path,
+    monkeypatch,
+):
+    _write_test_run(tmp_path, run_id="old-run", status="completed")
+    real_open_anchors = trtmc_validate._open_report_transaction_anchors
+    replaced = False
+
+    def replace_run_after_preflight(entries):
+        nonlocal replaced
+        anchors = real_open_anchors(entries)
+        _write_test_run(
+            tmp_path,
+            run_id="replacement-run",
+            status="running",
+        )
+        replaced = True
+        return anchors
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_open_report_transaction_anchors",
+        replace_run_after_preflight,
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="run changed while the report was being prepared",
+    ):
+        trtmc_validate.write_report(
+            tmp_path,
+            result_paths=[],
+        )
+
+    assert replaced
+    assert not (tmp_path / "report.json").exists()
+    assert not (tmp_path / "report.html").exists()
+    assert (
+        json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))["run_id"]
+        == "replacement-run"
+    )
+
+
+def test_report_rolls_back_if_same_run_metadata_changes_after_commit(
+    tmp_path,
+    monkeypatch,
+):
+    _write_test_run(tmp_path, run_id="same-run", status="running")
+    report_json = tmp_path / "report.json"
+    report_html = tmp_path / "report.html"
+    report_json.write_text(
+        json.dumps({"marker": "old-report"}),
+        encoding="utf-8",
+    )
+    report_html.write_text("OLD REPORT", encoding="utf-8")
+    replacement_path = tmp_path / "replacement-run.json"
+    replacement = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
+    replacement.update(
+        {
+            "status": "completed",
+            "finished_at": "2026-07-27T01:00:01+00:00",
+            "duration_seconds": 1.0,
+        }
+    )
+    replacement_path.write_text(
+        json.dumps(replacement),
+        encoding="utf-8",
+    )
+    real_commit = trtmc_validate._commit_file_update
+    replaced = False
+
+    def replace_run_after_report_commit(update):
+        nonlocal replaced
+        real_commit(update)
+        if update.path == report_html and not replaced:
+            os.replace(replacement_path, tmp_path / "run.json")
+            replaced = True
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_commit_file_update",
+        replace_run_after_report_commit,
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="run changed while the report was being prepared",
+    ):
+        trtmc_validate.write_report(
+            tmp_path,
+            result_paths=[],
+        )
+
+    assert replaced
+    assert json.loads(report_json.read_text(encoding="utf-8")) == {"marker": "old-report"}
+    assert report_html.read_text(encoding="utf-8") == "OLD REPORT"
+    assert json.loads((tmp_path / "run.json").read_text(encoding="utf-8")) == replacement
+
+
 def test_output_publication_lock_rejects_replaced_visible_root(
     tmp_path,
     monkeypatch,
@@ -2027,10 +2808,7 @@ def test_output_publication_lock_rejects_replaced_visible_root(
     def replace_after_lock(descriptor, operation):
         nonlocal replaced
         real_flock(descriptor, operation)
-        if (
-            operation == trtmc_validate.fcntl.LOCK_EX
-            and not replaced
-        ):
+        if operation == trtmc_validate.fcntl.LOCK_EX and not replaced:
             output.rename(moved)
             output.mkdir()
             replaced = True
@@ -2127,9 +2905,7 @@ def test_report_lock_covers_all_successful_publication_phases(
     trtmc_validate.write_report(
         tmp_path,
         result_paths=[comparison],
-        expected_gates_by_binding=_test_gate_context(
-            [comparison]
-        ),
+        expected_gates_by_binding=_test_gate_context([comparison]),
     )
 
     assert phases == {
@@ -2196,9 +2972,7 @@ def test_report_lock_covers_rollback_and_releases_after_failure(
         trtmc_validate.write_report(
             tmp_path,
             result_paths=[comparison],
-            expected_gates_by_binding=_test_gate_context(
-                [comparison]
-            ),
+            expected_gates_by_binding=_test_gate_context([comparison]),
         )
 
     assert injected
@@ -2245,12 +3019,16 @@ def test_all_report_only_contains_results_created_by_current_run(
         expected_gates,
     ):
         del catalog
-        assert expected_gates == _raw_evidence(
-            selected.model,
-            selected.workload,
-            "passed",
-        )["gates"]
+        assert (
+            expected_gates
+            == _raw_evidence(
+                selected.model,
+                selected.workload,
+                "passed",
+            )["gates"]
+        )
         result = {
+            "run_id": trtmc_validate._current_run_id(arguments.output),
             "model": selected.model,
             "workload": selected.workload,
             "status": "passed",
@@ -2259,8 +3037,17 @@ def test_all_report_only_contains_results_created_by_current_run(
                 selected.model,
                 selected.workload,
                 "passed",
+                valid_count=2,
+                total_count=2,
+                complete_count=2,
             ),
-            "reproduce": {},
+            "reproduce": {
+                "dataset": {
+                    "command": "python validate.py",
+                    "sample_limit": 2,
+                    "prepared_input_count": 2,
+                }
+            },
         }
         case_dir = trtmc_validate._prepare_case_directory(
             arguments.output,
@@ -2296,9 +3083,7 @@ def test_all_report_only_contains_results_created_by_current_run(
     assert returncode == 0
     assert report["validation_status"] == "passed"
     assert report["summary"]["cases"] == 1
-    assert [result["model"] for result in report["results"]] == [
-        "current-model"
-    ]
+    assert [result["model"] for result in report["results"]] == ["current-model"]
     assert stale_comparison.is_file()
 
 
@@ -2384,9 +3169,7 @@ def test_report_read_rejects_swapped_workload_directory(
         trtmc_validate._read_report_result(output, internal)
 
     assert swapped
-    assert json.loads(
-        (original_case_dir / "comparison.json").read_text()
-    )["model"] == "model-a"
+    assert json.loads((original_case_dir / "comparison.json").read_text())["model"] == "model-a"
     assert json.loads((outside / "comparison.json").read_text())["model"] == "outside"
 
 
@@ -2649,18 +3432,18 @@ def test_report_does_not_refresh_disagreement_artifact_from_raw_work_dir(
     comparison = case_dir / "comparison.json"
     comparison.write_text(
         json.dumps(
-                {
-                    "model": "model-a",
-                    "workload": "workload-a",
-                    "status": "passed",
-                    "returncode": 0,
-                    "raw_result": _raw_evidence(
-                        "model-a",
-                        "workload-a",
-                        "passed",
-                        work_dir=str(work_dir),
-                    ),
-                }
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "status": "passed",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                    work_dir=str(work_dir),
+                ),
+            }
         ),
         encoding="utf-8",
     )
@@ -2670,12 +3453,10 @@ def test_report_does_not_refresh_disagreement_artifact_from_raw_work_dir(
 
     _, _, report = trtmc_validate.write_report(
         tmp_path,
-        expected_gates_by_binding=_test_gate_context(
-            [comparison]
-        ),
+        expected_gates_by_binding=_test_gate_context([comparison]),
     )
 
-    assert report["validation_status"] == "passed"
+    assert report["validation_status"] == "incomplete"
     assert external.read_text(encoding="utf-8") == "DO-NOT-TRUNCATE\n"
 
 
@@ -2684,8 +3465,7 @@ def test_report_rejects_disagreement_artifact_path_outside_case(tmp_path):
     case_dir.mkdir(parents=True)
     external = tmp_path / "outside.jsonl"
     external.write_text(
-        json.dumps({"sample_id": "secret", "input": "LOCAL-SECRET-MARKER"})
-        + "\n",
+        json.dumps({"sample_id": "secret", "input": "LOCAL-SECRET-MARKER"}) + "\n",
         encoding="utf-8",
     )
     (case_dir / "comparison.json").write_text(
@@ -2773,12 +3553,8 @@ def test_report_does_not_render_unsafe_case_media(
     case_dir = tmp_path / "model-a" / "workload-a"
     case_dir.mkdir(parents=True)
     sample_id = "sample-1"
-    sample_directory = (
-        trtmc_disagreements._sample_directory_name(sample_id)
-    )
-    relative_media = (
-        Path("repro") / sample_directory / "media" / "01-secret.png"
-    )
+    sample_directory = trtmc_disagreements._sample_directory_name(sample_id)
+    relative_media = Path("repro") / sample_directory / "media" / "01-secret.png"
     media_path = case_dir / relative_media
     media_path.parent.mkdir(parents=True)
     external = tmp_path / "secret.png"
@@ -2807,17 +3583,17 @@ def test_report_does_not_render_unsafe_case_media(
     )
     (case_dir / "comparison.json").write_text(
         json.dumps(
-                {
-                    "model": "model-a",
-                    "workload": "workload-a",
-                    "status": "failed",
-                    "returncode": 1,
-                    "raw_result": _raw_evidence(
-                        "model-a",
-                        "workload-a",
-                        "failed",
-                    ),
-                    "disagreements": {
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "status": "failed",
+                "returncode": 1,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "failed",
+                ),
+                "disagreements": {
                     "count": 1,
                     "path": "disagreements.jsonl",
                 },
@@ -2876,17 +3652,17 @@ def test_report_does_not_render_noncanonical_media_url(
     )
     (case_dir / "comparison.json").write_text(
         json.dumps(
-                {
-                    "model": "model-a",
-                    "workload": "workload-a",
-                    "status": "failed",
-                    "returncode": 1,
-                    "raw_result": _raw_evidence(
-                        "model-a",
-                        "workload-a",
-                        "failed",
-                    ),
-                    "disagreements": {
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "status": "failed",
+                "returncode": 1,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "failed",
+                ),
+                "disagreements": {
                     "count": 1,
                     "path": "disagreements.jsonl",
                 },
@@ -2897,9 +3673,7 @@ def test_report_does_not_render_noncanonical_media_url(
 
     _, html_path, _ = trtmc_validate.write_report(tmp_path)
 
-    assert relative_media.as_posix() not in html_path.read_text(
-        encoding="utf-8"
-    )
+    assert relative_media.as_posix() not in html_path.read_text(encoding="utf-8")
 
 
 def test_report_rejects_symlinked_work_dir_inside_case(tmp_path):
@@ -3282,10 +4056,7 @@ def test_write_report_rejects_nonstandard_json_constants(tmp_path):
     case_dir = tmp_path / "model-a" / "workload-a"
     case_dir.mkdir(parents=True)
     (case_dir / "comparison.json").write_text(
-        (
-            '{"model":"model-a","workload":"workload-a",'
-            '"status":"passed","metric":NaN}'
-        ),
+        ('{"model":"model-a","workload":"workload-a","status":"passed","metric":NaN}'),
         encoding="utf-8",
     )
 
@@ -3311,10 +4082,7 @@ def test_write_report_rejects_invalid_json_scalars(
     case_dir = tmp_path / "model-a" / "workload-a"
     case_dir.mkdir(parents=True)
     (case_dir / "comparison.json").write_text(
-        (
-            '{"model":"model-a","workload":"workload-a",'
-            f'"status":"passed",{extra_field}}}'
-        ),
+        (f'{{"model":"model-a","workload":"workload-a","status":"passed",{extra_field}}}'),
         encoding="utf-8",
     )
 
@@ -3473,10 +4241,7 @@ def test_run_metadata_depth_is_preflighted_before_result_rewrite(
     case_dir = tmp_path / "model-a" / "workload-a"
     case_dir.mkdir(parents=True)
     comparison = case_dir / "comparison.json"
-    original = (
-        '{"model":"model-a","workload":"workload-a",'
-        '"status":"passed"}'
-    )
+    original = '{"model":"model-a","workload":"workload-a","status":"passed"}'
     comparison.write_text(original, encoding="utf-8")
     nested = 0
     for _ in range(255):
@@ -3499,9 +4264,7 @@ def test_report_rejects_result_too_deep_for_report_envelope(tmp_path):
     case_dir = tmp_path / "model-a" / "workload-a"
     case_dir.mkdir(parents=True)
     nested = 0
-    for _ in range(
-        trtmc_validate.MAX_VALIDATION_RESULT_JSON_DEPTH + 1
-    ):
+    for _ in range(trtmc_validate.MAX_VALIDATION_RESULT_JSON_DEPTH + 1):
         nested = [nested]
     comparison = case_dir / "comparison.json"
     comparison.write_text(
@@ -3960,17 +4723,11 @@ def test_report_preflights_all_result_identities_before_rewrite(tmp_path):
     first_dir.mkdir(parents=True)
     second_dir.mkdir(parents=True)
     first = first_dir / "comparison.json"
-    first_text = (
-        '{"model":"model-a","workload":"workload-a",'
-        '"status":"passed"}'
-    )
+    first_text = '{"model":"model-a","workload":"workload-a","status":"passed"}'
     first.write_text(first_text, encoding="utf-8")
     second = second_dir / "comparison.json"
     second.write_text(
-        (
-            '{"model":"WRONG","workload":"workload-b",'
-            '"status":"passed"}'
-        ),
+        ('{"model":"WRONG","workload":"workload-b","status":"passed"}'),
         encoding="utf-8",
     )
 
@@ -4040,7 +4797,9 @@ def test_write_report_surfaces_quantized_reference_precision_contract(
                     "prediction_agreement_rate": 1.0,
                     "accuracy_drop_from_hf": 0.0,
                     "valid_count": 1,
+                    "complete_count": 1,
                     "skipped_count": 0,
+                    "excluded_count": 0,
                     "total_count": 1,
                     "gates": {
                         "min_prediction_agreement_rate": 0.98,
@@ -4059,7 +4818,15 @@ def test_write_report_surfaces_quantized_reference_precision_contract(
         encoding="utf-8",
     )
 
-    _, html_path, report = trtmc_validate.write_report(tmp_path)
+    _, html_path, report = trtmc_validate.write_report(
+        tmp_path,
+        expected_gates_by_binding={
+            ("quantized-model", "mmlu_five_shot_mcq"): {
+                "min_prediction_agreement_rate": 0.98,
+                "max_accuracy_drop_from_hf": 0.01,
+            }
+        },
+    )
 
     assert report["results"][0]["precision_contract"] == {
         "trtmc_base_precision": "bf16",
@@ -4128,9 +4895,7 @@ def test_diffusion_report_flattens_nested_reference_metrics():
     }
     assert comparison["metrics"]["trt_hf_image_clip_cosine"] == 0.91
     assert comparison["metrics"]["psnr"] == 12.5
-    assert "No metrics" not in trtmc_validate._render_metrics(
-        {"comparison": comparison}
-    )
+    assert "No metrics" not in trtmc_validate._render_metrics({"comparison": comparison})
 
 
 def test_legacy_e2e_result_is_not_reported_as_reference_agreement(tmp_path):
@@ -4198,10 +4963,56 @@ def test_not_compared_result_replaces_legacy_e2e_row_without_deleting_evidence(
     assert legacy_comparison.is_file()
     assert report["summary"]["cases"] == 1
     assert report["summary"]["not_compared"] == 1
-    assert (
-        report["results"][0]["not_compared_reason"]
-        == "Reference comparator is missing."
+    assert report["results"][0]["not_compared_reason"] == "Reference comparator is missing."
+
+
+def test_not_compared_publication_preserves_newer_same_run_result(
+    tmp_path,
+    monkeypatch,
+):
+    binding = trtmc_validate.Binding(
+        "model-a",
+        None,
+        "Reference comparator is missing.",
     )
+    case_dir = trtmc_validate._prepare_case_directory(tmp_path, binding)
+    comparison = case_dir / "comparison.json"
+    _write_test_run(tmp_path, run_id="run-a", status="running")
+    comparison.write_text(
+        json.dumps({"run_id": "run-a", "marker": "old"}),
+        encoding="utf-8",
+    )
+    replacement = case_dir / "replacement.json"
+    newer = {"run_id": "run-a", "marker": "newer"}
+    replacement.write_text(json.dumps(newer), encoding="utf-8")
+    real_result = trtmc_validate._not_compared_result
+    replaced = False
+
+    def replace_after_target_capture(selected, *, run_id=""):
+        nonlocal replaced
+        result = real_result(selected, run_id=run_id)
+        os.replace(replacement, comparison)
+        replaced = True
+        return result
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_not_compared_result",
+        replace_after_target_capture,
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="target changed before publication",
+    ):
+        trtmc_validate._write_not_compared_case(
+            binding,
+            tmp_path,
+            run_id="run-a",
+        )
+
+    assert replaced
+    assert json.loads(comparison.read_text(encoding="utf-8")) == newer
 
 
 def test_write_report_records_total_duration(tmp_path, monkeypatch):
@@ -4326,9 +5137,7 @@ def test_write_report_recovers_json_logged_runner_command(tmp_path):
 
     _, html_path, report = trtmc_validate.write_report(
         tmp_path,
-        expected_gates_by_binding=_test_gate_context(
-            [comparison]
-        ),
+        expected_gates_by_binding=_test_gate_context([comparison]),
     )
 
     assert report["results"][0]["reproduce"]["trtmc"] == [
@@ -4580,10 +5389,7 @@ def test_commands_from_logs_use_native_trtmc_jsonl(tmp_path: Path) -> None:
     work_dir = tmp_path / "work"
     work_dir.mkdir()
     (work_dir / "prompts.jsonl").write_text(
-        "\n".join(
-            json.dumps({"sample_id": sample_id})
-            for sample_id in ("sample-1", "sample-2")
-        )
+        "\n".join(json.dumps({"sample_id": sample_id}) for sample_id in ("sample-1", "sample-2"))
         + "\n",
         encoding="utf-8",
     )
@@ -4608,13 +5414,9 @@ def test_commands_from_logs_use_native_trtmc_jsonl(tmp_path: Path) -> None:
 
     reproduction = trtmc_validate._commands_from_logs(work_dir)
 
-    assert reproduction["trtmc"] == [
-        "trtmc segment-prompted model.trtfb --prompt cat"
-    ]
+    assert reproduction["trtmc"] == ["trtmc segment-prompted model.trtfb --prompt cat"]
     assert reproduction["command_count"]["trtmc"] == 2
-    assert reproduction["command_logs"]["trtmc"] == [
-        "trtfb_native_commands.jsonl"
-    ]
+    assert reproduction["command_logs"]["trtmc"] == ["trtfb_native_commands.jsonl"]
 
 
 def test_commands_from_logs_prefer_native_reference_jsonl(tmp_path: Path) -> None:
@@ -4647,9 +5449,7 @@ def test_commands_from_logs_prefer_native_reference_jsonl(tmp_path: Path) -> Non
 
     assert reproduction["hf"] == ["python model_reference.py --prompt cat"]
     assert reproduction["command_count"]["hf"] == 1
-    assert reproduction["command_logs"]["hf"] == [
-        "hf_native_commands.jsonl"
-    ]
+    assert reproduction["command_logs"]["hf"] == ["hf_native_commands.jsonl"]
 
 
 @pytest.mark.parametrize(
@@ -4716,9 +5516,7 @@ def test_native_command_jsonl_requires_utf8(tmp_path):
     work_dir = tmp_path / "work"
     work_dir.mkdir()
     (work_dir / "trtfb_native_commands.jsonl").write_bytes(
-        b'{"sample_id":"sample","command":["trtmc","'
-        + b"\xff"
-        + b'"]}\n'
+        b'{"sample_id":"sample","command":["trtmc","' + b"\xff" + b'"]}\n'
     )
 
     with pytest.raises(
@@ -5057,15 +5855,8 @@ def test_report_validates_disagreement_rows_beyond_inline_preview(
     artifact = case_dir / "disagreements.jsonl"
     artifact.write_text(
         "".join(
-            json.dumps(
-                _canonical_disagreement_record(
-                    f"sample-{index}"
-                )
-            )
-            + "\n"
-            for index in range(
-                trtmc_disagreements.INLINE_DISAGREEMENT_LIMIT
-            )
+            json.dumps(_canonical_disagreement_record(f"sample-{index}")) + "\n"
+            for index in range(trtmc_disagreements.INLINE_DISAGREEMENT_LIMIT)
         )
         + "NOT-JSON\n",
         encoding="utf-8",
@@ -5083,9 +5874,7 @@ def test_report_validates_disagreement_rows_beyond_inline_preview(
                     "failed",
                 ),
                 "disagreements": {
-                    "count": (
-                        trtmc_disagreements.INLINE_DISAGREEMENT_LIMIT + 1
-                    ),
+                    "count": (trtmc_disagreements.INLINE_DISAGREEMENT_LIMIT + 1),
                     "path": "disagreements.jsonl",
                 },
             }
@@ -5245,12 +6034,8 @@ def test_report_render_failure_does_not_partially_publish_outputs(tmp_path):
     with pytest.raises(trtmc_validate.ValidationError):
         trtmc_validate.write_report(tmp_path)
 
-    assert (tmp_path / "report.json").read_text(
-        encoding="utf-8"
-    ) == "OLD-JSON"
-    assert (tmp_path / "report.html").read_text(
-        encoding="utf-8"
-    ) == "OLD-HTML"
+    assert (tmp_path / "report.json").read_text(encoding="utf-8") == "OLD-JSON"
+    assert (tmp_path / "report.html").read_text(encoding="utf-8") == "OLD-HTML"
 
 
 def test_disagreement_reproduction_paths_are_unique_for_colliding_sample_ids(
@@ -5278,14 +6063,7 @@ def test_disagreement_reproduction_paths_are_unique_for_colliding_sample_ids(
         encoding="utf-8",
     )
     (work_dir / "summary.json").write_text(
-        json.dumps(
-            {
-                "disagreements": [
-                    {"sample_id": prompt["sample_id"]}
-                    for prompt in prompts
-                ]
-            }
-        ),
+        json.dumps({"disagreements": [{"sample_id": prompt["sample_id"]} for prompt in prompts]}),
         encoding="utf-8",
     )
     (work_dir / "trtfb_repro.json").write_text(
@@ -5323,27 +6101,13 @@ def test_disagreement_reproduction_paths_are_unique_for_colliding_sample_ids(
     _, _, report = trtmc_validate.write_report(tmp_path)
 
     artifact = case_dir / report["results"][0]["disagreements"]["path"]
-    records = [
-        json.loads(line)
-        for line in artifact.read_text(encoding="utf-8").splitlines()
-    ]
-    paths = [
-        case_dir / record["artifacts"]["trtmc_input"]
-        for record in records
-    ]
-    media_paths = [
-        case_dir / record["artifacts"]["media"][0]["path"]
-        for record in records
-    ]
+    records = [json.loads(line) for line in artifact.read_text(encoding="utf-8").splitlines()]
+    paths = [case_dir / record["artifacts"]["trtmc_input"] for record in records]
+    media_paths = [case_dir / record["artifacts"]["media"][0]["path"] for record in records]
     assert len(set(paths)) == len(sample_ids)
     assert len(set(media_paths)) == len(sample_ids)
-    for index, (input_path, media_path) in enumerate(
-        zip(paths, media_paths, strict=True)
-    ):
-        assert (
-            json.loads(input_path.read_text(encoding="utf-8"))["prompt"]
-            == f"PROMPT-{index}"
-        )
+    for index, (input_path, media_path) in enumerate(zip(paths, media_paths, strict=True)):
+        assert json.loads(input_path.read_text(encoding="utf-8"))["prompt"] == f"PROMPT-{index}"
         assert media_path.read_bytes() == image_paths[index].read_bytes()
         assert len(input_path.parent.name.encode()) < 255
 
@@ -5353,9 +6117,7 @@ def test_disagreement_media_is_capped_per_sample(tmp_path):
     work_dir = case_dir / "validation" / "workload-a" / "model-a"
     work_dir.mkdir(parents=True)
     images = []
-    for index in range(
-        trtmc_disagreements.MAX_MEDIA_FILES_PER_SAMPLE + 4
-    ):
+    for index in range(trtmc_disagreements.MAX_MEDIA_FILES_PER_SAMPLE + 4):
         image = work_dir / f"input-{index:02d}.png"
         image.write_bytes(f"IMAGE-{index}".encode())
         images.append(str(image))
@@ -5380,14 +6142,9 @@ def test_disagreement_media_is_capped_per_sample(tmp_path):
     )
 
     record = json.loads(
-        (case_dir / "disagreements.jsonl")
-        .read_text(encoding="utf-8")
-        .splitlines()[0]
+        (case_dir / "disagreements.jsonl").read_text(encoding="utf-8").splitlines()[0]
     )
-    assert (
-        len(record["artifacts"]["media"])
-        == trtmc_disagreements.MAX_MEDIA_FILES_PER_SAMPLE
-    )
+    assert len(record["artifacts"]["media"]) == trtmc_disagreements.MAX_MEDIA_FILES_PER_SAMPLE
 
 
 def test_frame_scan_consumes_only_the_configured_entry_budget(
@@ -5423,10 +6180,7 @@ def test_frame_scan_consumes_only_the_configured_entry_budget(
         def __next__(self):
             nonlocal consumed
             consumed += 1
-            if (
-                consumed
-                > trtmc_disagreements.MAX_MEDIA_SCAN_ENTRIES * 2
-            ):
+            if consumed > trtmc_disagreements.MAX_MEDIA_SCAN_ENTRIES * 2:
                 raise StopIteration
             return FakeEntry(consumed)
 
@@ -5534,6 +6288,56 @@ def test_run_metadata_records_source_and_exact_command(monkeypatch, tmp_path):
     assert metadata["duration_seconds"] is None
 
 
+def test_write_run_metadata_rolls_back_stale_report_invalidation(
+    monkeypatch,
+    tmp_path,
+):
+    old_run = {
+        "schema_version": "trtmc.validation-run/v1",
+        "run_id": "old-run",
+        "started_at": "2026-07-27T01:00:00+00:00",
+        "finished_at": "2026-07-27T01:00:01+00:00",
+        "duration_seconds": 1.0,
+        "status": "completed",
+    }
+    old_report = {"validation_status": "passed"}
+    (tmp_path / "run.json").write_text(
+        json.dumps(old_run),
+        encoding="utf-8",
+    )
+    (tmp_path / "report.json").write_text(
+        json.dumps(old_report),
+        encoding="utf-8",
+    )
+    (tmp_path / "report.html").write_text(
+        "OLD GREEN REPORT",
+        encoding="utf-8",
+    )
+    real_commit = trtmc_validate._commit_file_update
+
+    def fail_run_commit(update):
+        if update.path.name == "run.json":
+            raise OSError("injected run metadata commit failure")
+        return real_commit(update)
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_commit_file_update",
+        fail_run_commit,
+    )
+
+    with pytest.raises(
+        OSError,
+        match="injected run metadata commit failure",
+    ):
+        trtmc_validate.write_run_metadata(tmp_path)
+
+    assert json.loads((tmp_path / "run.json").read_text(encoding="utf-8")) == old_run
+    assert json.loads((tmp_path / "report.json").read_text(encoding="utf-8")) == old_report
+    assert (tmp_path / "report.html").read_text(encoding="utf-8") == "OLD GREEN REPORT"
+    assert not tuple(tmp_path.glob(".*.stale.*"))
+
+
 def test_finalize_run_metadata_records_completion(monkeypatch, tmp_path):
     started_at = datetime(2026, 7, 25, 1, 2, 3, tzinfo=timezone.utc)
     finished_at = datetime(2026, 7, 25, 4, 4, 6, 500000, tzinfo=timezone.utc)
@@ -5587,12 +6391,11 @@ def test_comparison_command_uses_validation_entrypoint(tmp_path):
     assert command[command.index("--model") + 1] == "model-a"
     assert command[command.index("--suite") + 1] == "workload-a"
     assert command[command.index("--hf-python") + 1] == "/profiles/python"
-    assert command[command.index("--reference-cache-dir") + 1] == str(
-        tmp_path / "references"
+    assert command[command.index("--reference-cache-dir") + 1] == str(tmp_path / "references")
+    assert (
+        command[command.index("--reference-cache-identity") + 1]
+        == "org/model/reference-contract-v1"
     )
-    assert command[
-        command.index("--reference-cache-identity") + 1
-    ] == "org/model/reference-contract-v1"
     assert "--replace-bundle-on-build" in command
     assert "--force-hf" in command
     assert "--require-prebuilt-bundles" in command
@@ -5658,13 +6461,7 @@ def test_run_binding_wires_reference_source_command_and_environment(
     )
     summary.parent.mkdir(parents=True)
     summary.write_text(
-        json.dumps(
-            {
-                "results": [
-                    {"model": "elf-b", "status": "passed"}
-                ]
-            }
-        ),
+        json.dumps({"results": [{"model": "elf-b", "status": "passed"}]}),
         encoding="utf-8",
     )
     captured: dict[str, object] = {}
@@ -5687,9 +6484,7 @@ def test_run_binding_wires_reference_source_command_and_environment(
     def run(command, _log_path, environment):
         captured["command"] = command
         captured["environment"] = environment
-        captured["summary_before_run"] = json.loads(
-            summary.read_text(encoding="utf-8")
-        )
+        captured["summary_before_run"] = json.loads(summary.read_text(encoding="utf-8"))
         return 0
 
     monkeypatch.setattr(trtmc_validate, "_run_subprocess", run)
@@ -5720,6 +6515,87 @@ def test_run_binding_wires_reference_source_command_and_environment(
     assert command[command.index("--elf-reference-repo") + 1] == str(selection.elf_reference_repo)
     assert captured["environment"]["EXTERNAL_REFERENCE_SENTINEL"] == "present"
     assert captured["summary_before_run"] == {"results": []}
+
+
+def test_run_binding_preserves_newer_same_run_result(
+    tmp_path,
+    monkeypatch,
+):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "elf-b",
+            "elf-workload",
+            "--output",
+            str(tmp_path / "results"),
+            "--dataset",
+            str(tmp_path / "dataset.json"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    binding = trtmc_validate.Binding("elf-b", "elf-workload")
+    comparison = arguments.output / binding.model / binding.workload / "comparison.json"
+    comparison.parent.mkdir(parents=True)
+    comparison.write_text(
+        json.dumps({"marker": "old"}),
+        encoding="utf-8",
+    )
+    replacement = comparison.parent / "replacement.json"
+    newer = {"marker": "newer"}
+    replacement.write_text(json.dumps(newer), encoding="utf-8")
+    monkeypatch.setattr(
+        trtmc_validate,
+        "ensure_environments",
+        lambda _profiles, _base: trtmc_validate.EnvironmentSelection(
+            base_python="/profiles/python",
+            names_and_paths=(),
+            overrides={},
+        ),
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "ensure_reference_sources",
+        lambda _family, _cache: trtmc_validate.ReferenceSourceSelection(environment={}),
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_run_subprocess",
+        lambda *_args, **_kwargs: 0,
+    )
+
+    def replace_after_target_capture(selected, **_kwargs):
+        os.replace(replacement, comparison)
+        return {
+            "model": selected.model,
+            "workload": selected.workload,
+            "marker": "stale-writer",
+        }
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_comparison_result",
+        replace_after_target_capture,
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="target changed before publication",
+    ):
+        trtmc_validate.run_binding(
+            binding,
+            arguments=arguments,
+            task_models={
+                "elf-b": {
+                    "family": "elf_flow",
+                    "runtime_strategy": "elf_flow",
+                    "reference_backend": "torch_reference",
+                    "execution_profiles": {},
+                }
+            },
+            suites={"elf-workload": {}},
+        )
+
+    assert json.loads(comparison.read_text(encoding="utf-8")) == newer
 
 
 def test_compare_entrypoint_forwards_to_validation_backend(monkeypatch):
@@ -5802,9 +6678,7 @@ def test_result_statuses_separate_execution_from_agreement(
             "model": "model-a",
             "workload": "workload-a",
             "status": raw_result["status"],
-            "returncode": (
-                0 if raw_result["status"] == "passed" else 1
-            ),
+            "returncode": (0 if raw_result["status"] == "passed" else 1),
             "raw_result": raw_result,
         }
     )
@@ -5860,12 +6734,7 @@ def test_comparison_result_requires_one_exact_model_result(
     tmp_path,
     results,
 ):
-    summary = (
-        tmp_path
-        / "validation"
-        / "workload-a"
-        / "eval_summary.json"
-    )
+    summary = tmp_path / "validation" / "workload-a" / "eval_summary.json"
     summary.parent.mkdir(parents=True)
     summary.write_text(
         json.dumps({"results": results}),
@@ -5895,12 +6764,7 @@ def test_comparison_result_rejects_success_from_crashed_process(
     tmp_path,
     reported_status,
 ):
-    summary = (
-        tmp_path
-        / "validation"
-        / "workload-a"
-        / "eval_summary.json"
-    )
+    summary = tmp_path / "validation" / "workload-a" / "eval_summary.json"
     summary.parent.mkdir(parents=True)
     summary.write_text(
         json.dumps(
@@ -5936,12 +6800,7 @@ def test_comparison_result_rejects_success_from_crashed_process(
 
 
 def test_comparison_result_rejects_skipped_requested_comparison(tmp_path):
-    summary = (
-        tmp_path
-        / "validation"
-        / "workload-a"
-        / "eval_summary.json"
-    )
+    summary = tmp_path / "validation" / "workload-a" / "eval_summary.json"
     summary.parent.mkdir(parents=True)
     summary.write_text(
         json.dumps(
@@ -6041,10 +6900,7 @@ def test_empty_task_eval_boundaries_publish_standard_failed_reports(
         "failed",
         "failed",
     ]
-    assert all(
-        result["execution"]["status"] == "completed"
-        for result in report["results"]
-    )
+    assert all(result["execution"]["status"] == "completed" for result in report["results"])
 
 
 @pytest.mark.parametrize(
@@ -6711,14 +7567,48 @@ def test_passed_result_accepts_satisfied_specialized_gates(extra):
     assert result["validation"]["status"] == "passed"
 
 
+def test_passed_time_series_rejects_contradictory_passed_count_and_rate():
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="passed_count and sample_agreement_rate",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                    mode="time_series_parity",
+                    valid_count=1,
+                    sample_count=1,
+                    complete_count=1,
+                    passed_count=0,
+                    sample_agreement_rate=1.0,
+                    mean_relative_l2=0.0,
+                    max_relative_l2=0.0,
+                    max_absolute_error=0.0,
+                    gates={
+                        "min_sample_agreement_rate": 1.0,
+                        "max_relative_l2": 0.01,
+                        "max_absolute_error": 0.1,
+                    },
+                ),
+            }
+        )
+
+
 @pytest.mark.parametrize(
     ("counterexample", "message"),
     [
         (
             "missing-complete-count",
-            "valid_count and sample_count evidence",
+            "valid_count, complete_count, and sample_count evidence",
         ),
-        ("explicit-skipped-sample", "zero skipped samples"),
+        ("explicit-skipped-sample", "zero skipped and excluded samples"),
         ("weakened-threshold", "changed thresholds"),
         ("unknown-gate", "unknown gates"),
     ],
@@ -6937,6 +7827,12 @@ def test_real_time_series_producer_count_reaches_validation(
 
     validation_dir = tmp_path / "validation" / "workload-a"
     validation_dir.mkdir(parents=True)
+    work_dir = validation_dir / "model-a"
+    work_dir.mkdir()
+    (work_dir / "prompts.jsonl").write_text(
+        '{"sample_id":"one"}\n',
+        encoding="utf-8",
+    )
     raw_result = {
         "model": "model-a",
         "suite": "workload-a",
@@ -6945,9 +7841,10 @@ def test_real_time_series_producer_count_reaches_validation(
         "sample_count": producer_summary["sample_count"],
         "valid_count": producer_summary["valid_count"],
         "passed_count": producer_summary["passed_count"],
-        "sample_agreement_rate": producer_summary[
-            "sample_agreement_rate"
-        ],
+        "complete_count": producer_summary["sample_count"],
+        "skipped_count": 0,
+        "excluded_count": 0,
+        "sample_agreement_rate": producer_summary["sample_agreement_rate"],
         "mean_relative_l2": producer_summary["mean_relative_l2"],
         "max_relative_l2": producer_summary["max_relative_l2"],
         "max_absolute_error": producer_summary["max_absolute_error"],
@@ -7021,9 +7918,7 @@ def test_real_mcq_producer_status_reaches_canonical_report(tmp_path):
                     "schema_version": "trtmc.validation-result/v2",
                     "model": model,
                     "workload": workload,
-                    "returncode": (
-                        0 if raw_result["status"] == "passed" else 1
-                    ),
+                    "returncode": (0 if raw_result["status"] == "passed" else 1),
                     "raw_result": raw_result,
                 }
             ),
@@ -7330,21 +8225,10 @@ def test_write_report_rejects_raw_binding_mismatch(
 
 
 def test_comparison_result_rejects_invalid_summary_status(tmp_path):
-    summary = (
-        tmp_path
-        / "validation"
-        / "workload-a"
-        / "eval_summary.json"
-    )
+    summary = tmp_path / "validation" / "workload-a" / "eval_summary.json"
     summary.parent.mkdir(parents=True)
     summary.write_text(
-        json.dumps(
-            {
-                "results": [
-                    {"model": "model-a", "status": "unknown"}
-                ]
-            }
-        ),
+        json.dumps({"results": [{"model": "model-a", "status": "unknown"}]}),
         encoding="utf-8",
     )
 
@@ -7396,12 +8280,7 @@ def test_comparison_result_classifies_malformed_output_as_process_error(
     tmp_path,
     payload,
 ):
-    summary = (
-        tmp_path
-        / "validation"
-        / "workload-a"
-        / "eval_summary.json"
-    )
+    summary = tmp_path / "validation" / "workload-a" / "eval_summary.json"
     summary.parent.mkdir(parents=True)
     summary.write_text(payload, encoding="utf-8")
 
@@ -7423,9 +8302,7 @@ def test_comparison_result_classifies_malformed_output_as_process_error(
     }
     assert result["comparison"]["status"] == "not_run"
     assert result["validation"]["status"] == "failed"
-    assert result["raw_result"]["error_type"] == (
-        "ComparisonProcessError"
-    )
+    assert result["raw_result"]["error_type"] == ("ComparisonProcessError")
 
 
 def test_write_report_rolls_back_all_outputs_after_commit_failure(
@@ -7504,12 +8381,8 @@ def test_write_report_rolls_back_all_outputs_after_commit_failure(
     assert report_json.read_bytes() == b"OLD-REPORT-JSON"
     assert report_html.read_bytes() == b"OLD-REPORT-HTML"
     for case_dir, expected in original_case_artifacts.items():
-        assert (
-            case_dir / "comparison.json"
-        ).read_bytes() == expected["comparison"]
-        assert (
-            case_dir / "disagreements.jsonl"
-        ).read_bytes() == expected["disagreements"]
+        assert (case_dir / "comparison.json").read_bytes() == expected["comparison"]
+        assert (case_dir / "disagreements.jsonl").read_bytes() == expected["disagreements"]
         assert (case_dir / "repro" / "old.txt").read_bytes() == expected["repro"]
         assert not any(
             child.name.startswith(
@@ -7562,11 +8435,7 @@ def test_write_report_isolates_cleanup_errors_and_closes_all_anchors(
 
     def fail_first_cleanup_digest(directory_fd, name, *, maximum_bytes):
         nonlocal injected
-        if (
-            cleanup_phase
-            and not injected
-            and ".previous." in name
-        ):
+        if cleanup_phase and not injected and ".previous." in name:
             injected = True
             raise OSError("injected cleanup digest failure")
         return real_digest(
@@ -7663,9 +8532,7 @@ def test_file_transaction_rejects_original_swap_before_backup(
     assert target.read_bytes() == b"CONCURRENT"
     assert original_away.read_bytes() == b"ORIGINAL"
     assert not any(
-        child.name.startswith(
-            (".report.json.previous.", ".report.json.rollback.")
-        )
+        child.name.startswith((".report.json.previous.", ".report.json.rollback."))
         for child in tmp_path.iterdir()
     )
 
@@ -7715,9 +8582,7 @@ def test_directory_transaction_rejects_original_swap_before_backup(
     assert (repro / "concurrent.txt").read_bytes() == b"CONCURRENT"
     assert (original_away / "original.txt").read_bytes() == b"ORIGINAL"
     assert not any(
-        child.name.startswith(
-            (".repro-previous.", ".repro-next.", ".repro-rollback.")
-        )
+        child.name.startswith((".repro-previous.", ".repro-next.", ".repro-rollback."))
         for child in case_dir.iterdir()
     )
 
@@ -7751,9 +8616,7 @@ def test_file_transaction_reconciles_backup_rename_success_then_error(
         if (
             not injected
             and source_name == target.name
-            and destination_name.startswith(
-                ".report.json.previous."
-            )
+            and destination_name.startswith(".report.json.previous.")
         ):
             injected = True
             raise OSError("injected after successful backup rename")
@@ -7774,9 +8637,7 @@ def test_file_transaction_reconciles_backup_rename_success_then_error(
 
     assert injected
     assert target.read_bytes() == b"ORIGINAL"
-    assert [path.name for path in tmp_path.iterdir()] == [
-        "report.json"
-    ]
+    assert [path.name for path in tmp_path.iterdir()] == ["report.json"]
 
 
 def test_directory_transaction_reconciles_backup_rename_success_then_error(
@@ -7864,11 +8725,7 @@ def test_directory_prepare_recovers_stage_after_rename_success_then_error(
             destination_fd,
             destination_name,
         )
-        if (
-            not injected
-            and source_name == "repro"
-            and destination_name.startswith(".repro-next.")
-        ):
+        if not injected and source_name == "repro" and destination_name.startswith(".repro-next."):
             injected = True
             raise OSError("injected after successful prepare rename")
 
@@ -7887,10 +8744,7 @@ def test_directory_prepare_recovers_stage_after_rename_success_then_error(
     assert injected
     assert (stage.path / "repro" / "new.txt").read_bytes() == b"TRANSACTION"
     assert (repro / "original.txt").read_bytes() == b"ORIGINAL"
-    assert not any(
-        child.name.startswith(".repro-next.")
-        for child in case_dir.iterdir()
-    )
+    assert not any(child.name.startswith(".repro-next.") for child in case_dir.iterdir())
     trtmc_validate._cleanup_case_artifact_stage(stage)
     assert [path.name for path in case_dir.iterdir()] == ["repro"]
 
@@ -7912,11 +8766,7 @@ def test_directory_prepare_recovers_stage_after_fingerprint_failure(
 
     def fail_next_fingerprint(directory_fd, name):
         nonlocal injected
-        if (
-            not injected
-            and directory_fd == stage.case_fd
-            and name.startswith(".repro-next.")
-        ):
+        if not injected and directory_fd == stage.case_fd and name.startswith(".repro-next."):
             injected = True
             raise OSError("injected post-move fingerprint failure")
         return real_fingerprint(directory_fd, name)
@@ -7936,10 +8786,7 @@ def test_directory_prepare_recovers_stage_after_fingerprint_failure(
     assert injected
     assert (stage.path / "repro" / "new.txt").read_bytes() == b"TRANSACTION"
     assert (repro / "original.txt").read_bytes() == b"ORIGINAL"
-    assert not any(
-        child.name.startswith(".repro-next.")
-        for child in case_dir.iterdir()
-    )
+    assert not any(child.name.startswith(".repro-next.") for child in case_dir.iterdir())
     trtmc_validate._cleanup_case_artifact_stage(stage)
     assert [path.name for path in case_dir.iterdir()] == ["repro"]
 
@@ -7964,11 +8811,7 @@ def test_file_transaction_rejects_staged_content_mutation_during_install(
         destination_name,
     ):
         nonlocal injected
-        if (
-            not injected
-            and source_name == update.next_name
-            and destination_name == target.name
-        ):
+        if not injected and source_name == update.next_name and destination_name == target.name:
             descriptor = os.open(
                 source_name,
                 os.O_WRONLY,
@@ -8016,11 +8859,7 @@ def test_file_transaction_rejects_staged_content_mutation_during_install(
 
     assert injected
     assert target.read_bytes() == b"ORIGINAL"
-    recovery = [
-        path
-        for path in tmp_path.iterdir()
-        if ".rollback." in path.name
-    ]
+    recovery = [path for path in tmp_path.iterdir() if ".rollback." in path.name]
     assert len(recovery) == 1
     assert recovery[0].read_bytes() == b"MALICIOUS!!"
 
@@ -8048,11 +8887,7 @@ def test_directory_transaction_rejects_staged_mutation_during_install(
         destination_name,
     ):
         nonlocal injected
-        if (
-            not injected
-            and source_name == update.next_name
-            and destination_name == "repro"
-        ):
+        if not injected and source_name == update.next_name and destination_name == "repro":
             directory_fd = os.open(
                 source_name,
                 os.O_RDONLY | os.O_DIRECTORY,
@@ -8100,11 +8935,7 @@ def test_directory_transaction_rejects_staged_mutation_during_install(
 
     assert injected
     assert (repro / "original.txt").read_bytes() == b"ORIGINAL"
-    recovery = [
-        path
-        for path in case_dir.iterdir()
-        if path.name.startswith(".repro-rollback.")
-    ]
+    recovery = [path for path in case_dir.iterdir() if path.name.startswith(".repro-rollback.")]
     assert len(recovery) == 1
     assert (recovery[0] / "attacker.txt").read_bytes() == b"MALICIOUS"
 
@@ -8130,11 +8961,7 @@ def test_file_rollback_preserves_in_place_concurrent_modification(
         destination_name,
     ):
         nonlocal injected
-        if (
-            not injected
-            and source_name == target.name
-            and ".rollback." in destination_name
-        ):
+        if not injected and source_name == target.name and ".rollback." in destination_name:
             descriptor = os.open(
                 source_name,
                 os.O_WRONLY | os.O_TRUNC,
@@ -8168,11 +8995,7 @@ def test_file_rollback_preserves_in_place_concurrent_modification(
 
     assert injected
     assert target.read_bytes() == b"ORIGINAL"
-    recovery = [
-        path
-        for path in tmp_path.iterdir()
-        if ".rollback." in path.name
-    ]
+    recovery = [path for path in tmp_path.iterdir() if ".rollback." in path.name]
     assert len(recovery) == 1
     assert recovery[0].read_bytes() == b"CONCURRENT-MODIFICATION"
 
@@ -8248,11 +9071,7 @@ def test_directory_rollback_preserves_in_place_concurrent_modification(
 
     assert injected
     assert (repro / "original.txt").read_bytes() == b"ORIGINAL"
-    recovery = [
-        path
-        for path in case_dir.iterdir()
-        if path.name.startswith(".repro-rollback.")
-    ]
+    recovery = [path for path in case_dir.iterdir() if path.name.startswith(".repro-rollback.")]
     assert len(recovery) == 1
     assert (recovery[0] / "concurrent.txt").read_bytes() == b"CONCURRENT"
 
@@ -8317,11 +9136,7 @@ def test_file_finalize_quarantines_and_preserves_racing_replacement(
     assert cleanup_errors
     assert target.read_bytes() == b"TRANSACTION"
     assert preserved.read_bytes() == b"ORIGINAL"
-    quarantined = [
-        path
-        for path in tmp_path.iterdir()
-        if ".cleanup." in path.name
-    ]
+    quarantined = [path for path in tmp_path.iterdir() if ".cleanup." in path.name]
     assert len(quarantined) == 1
     assert quarantined[0].read_bytes() == b"CONCURRENT"
 
@@ -8384,24 +9199,16 @@ def test_directory_finalize_quarantines_and_preserves_racing_replacement(
         replace_then_rename,
     )
 
-    cleanup_errors = (
-        trtmc_validate._finalize_case_directory_update(update)
-    )
+    cleanup_errors = trtmc_validate._finalize_case_directory_update(update)
     trtmc_validate._cleanup_case_artifact_stage(stage)
 
     assert injected
     assert cleanup_errors
     assert (repro / "new.txt").read_bytes() == b"TRANSACTION"
     assert (preserved / "original.txt").read_bytes() == b"ORIGINAL"
-    quarantined = [
-        path
-        for path in case_dir.iterdir()
-        if path.name.startswith(".repro-cleanup.")
-    ]
+    quarantined = [path for path in case_dir.iterdir() if path.name.startswith(".repro-cleanup.")]
     assert len(quarantined) == 1
-    assert (
-        quarantined[0] / "concurrent.txt"
-    ).read_bytes() == b"CONCURRENT"
+    assert (quarantined[0] / "concurrent.txt").read_bytes() == b"CONCURRENT"
 
 
 def test_file_transaction_never_overwrites_concurrent_install_target(
@@ -8424,11 +9231,7 @@ def test_file_transaction_never_overwrites_concurrent_install_target(
         destination_name,
     ):
         nonlocal injected
-        if (
-            source_name == update.next_name
-            and destination_name == target.name
-            and not injected
-        ):
+        if source_name == update.next_name and destination_name == target.name and not injected:
             target.write_bytes(b"CONCURRENT")
             injected = True
         original_rename(
@@ -8484,11 +9287,7 @@ def test_directory_transaction_never_overwrites_concurrent_install_target(
         destination_name,
     ):
         nonlocal injected
-        if (
-            source_name == update.next_name
-            and destination_name == "repro"
-            and not injected
-        ):
+        if source_name == update.next_name and destination_name == "repro" and not injected:
             repro.mkdir()
             (repro / "concurrent.txt").write_bytes(b"CONCURRENT")
             injected = True
@@ -8585,9 +9384,7 @@ def test_directory_transaction_rejects_target_swap_after_install(
     (staged_repro / "new.txt").write_bytes(b"TRANSACTION")
     update = trtmc_validate._prepare_case_directory_update(stage)
     transaction_away = case_dir / "transaction-away"
-    original_verify = (
-        trtmc_validate._verify_committed_case_directory_update
-    )
+    original_verify = trtmc_validate._verify_committed_case_directory_update
     swapped = False
 
     def swap_then_verify(candidate):
@@ -8661,15 +9458,10 @@ def test_report_transaction_rejects_parent_swap_after_final_precheck(
 
     assert swapped
     assert (output / "sentinel").read_bytes() == b"REPLACEMENT"
-    assert sorted(child.name for child in output.iterdir()) == [
-        "sentinel"
-    ]
+    assert sorted(child.name for child in output.iterdir()) == ["sentinel"]
     assert (moved_output / "report.json").read_bytes() == b"OLD-JSON"
     assert (moved_output / "report.html").read_bytes() == b"OLD-HTML"
-    assert not any(
-        child.name.startswith(".report")
-        for child in moved_output.iterdir()
-    )
+    assert not any(child.name.startswith(".report") for child in moved_output.iterdir())
 
 
 def test_report_final_visibility_sweep_preserves_concurrent_target(
@@ -8683,9 +9475,7 @@ def test_report_final_visibility_sweep_preserves_concurrent_target(
     report_json.write_bytes(b"OLD-JSON")
     report_html.write_bytes(b"OLD-HTML")
     transaction_json = output / "transaction-report.json"
-    original_verify = (
-        trtmc_validate._verify_report_transaction_visibility
-    )
+    original_verify = trtmc_validate._verify_report_transaction_visibility
     swapped = False
 
     def swap_then_verify(entries):
@@ -8723,9 +9513,7 @@ def test_transaction_cleanup_handles_1100_levels_without_recursion(
 ):
     depth = 1100
     removed = []
-    directory_metadata = os.stat_result(
-        (stat.S_IFDIR | 0o700, 1, 1, 1, 0, 0, 0, 0, 0, 0)
-    )
+    directory_metadata = os.stat_result((stat.S_IFDIR | 0o700, 1, 1, 1, 0, 0, 0, 0, 0, 0))
 
     class Entry:
         name = "d"
@@ -8876,9 +9664,7 @@ def test_not_compared_result_has_canonical_shape():
     )
 
     assert result["workload"] is None
-    assert result["not_compared_reason"] == (
-        "No aligned reference comparator."
-    )
+    assert result["not_compared_reason"] == ("No aligned reference comparator.")
     assert result["execution"] == {
         "status": "not_run",
         "exit_code": None,
@@ -8971,9 +9757,7 @@ def test_report_aggregates_running_and_failed_run_status(
     _, _, report = trtmc_validate.write_report(
         tmp_path,
         result_paths=[comparison],
-        expected_gates_by_binding=_test_gate_context(
-            [comparison]
-        ),
+        expected_gates_by_binding=_test_gate_context([comparison]),
     )
 
     assert report["validation_status"] == expected_report_status
@@ -9106,9 +9890,7 @@ def test_report_refresh_preserves_command_count_and_representative(
     _, _, report = trtmc_validate.write_report(
         tmp_path,
         result_paths=[comparison],
-        expected_gates_by_binding=_test_gate_context(
-            [comparison]
-        ),
+        expected_gates_by_binding=_test_gate_context([comparison]),
     )
 
     reproduce = report["results"][0]["reproduce"]
@@ -9231,12 +10013,8 @@ def test_write_report_handles_40_staged_cases_with_nofile_limit_64(
     original_limits = resource.getrlimit(resource.RLIMIT_NOFILE)
     original_soft, hard = original_limits
     target = 64
-    if (
-        original_soft != resource.RLIM_INFINITY
-        and original_soft < target
-    ) or (
-        hard != resource.RLIM_INFINITY
-        and hard < target
+    if (original_soft != resource.RLIM_INFINITY and original_soft < target) or (
+        hard != resource.RLIM_INFINITY and hard < target
     ):
         pytest.skip("RLIMIT_NOFILE cannot be set to 64")
     descriptors_before = len(tuple(proc_fds.iterdir()))
@@ -9251,16 +10029,14 @@ def test_write_report_handles_40_staged_cases_with_nofile_limit_64(
         _, _, report = trtmc_validate.write_report(
             tmp_path,
             result_paths=result_paths,
-            expected_gates_by_binding=_test_gate_context(
-                result_paths
-            ),
+            expected_gates_by_binding=_test_gate_context(result_paths),
         )
         descriptors_after = len(tuple(proc_fds.iterdir()))
     finally:
         resource.setrlimit(resource.RLIMIT_NOFILE, original_limits)
 
     assert report["summary"]["cases"] == 40
-    assert report["validation_status"] == "passed"
+    assert report["validation_status"] == "incomplete"
     assert descriptors_after == descriptors_before
 
 
@@ -9344,13 +10120,7 @@ def test_report_enforces_aggregate_disagreement_media_budget(
             encoding="utf-8",
         )
         (work_dir / "summary.json").write_text(
-            json.dumps(
-                {
-                    "disagreements": [
-                        {"sample_id": "sample-1"}
-                    ]
-                }
-            ),
+            json.dumps({"disagreements": [{"sample_id": "sample-1"}]}),
             encoding="utf-8",
         )
         comparison = case_dir / "comparison.json"

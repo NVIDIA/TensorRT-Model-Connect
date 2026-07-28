@@ -13,7 +13,11 @@ from __future__ import annotations
 
 import importlib
 import json
+import runpy
+import sys
 from pathlib import Path
+
+import pytest
 
 
 def _import_checker():
@@ -256,6 +260,7 @@ def _extract_runner_commands_for_binding(
     *,
     binding_source: str,
     runner_class: str,
+    extra_module_sources: dict[str, str] | None = None,
 ) -> dict[str, set[str]]:
     mod = _import_checker()
     models_dir = tmp_path / "tests" / "e2e" / "models"
@@ -274,6 +279,10 @@ def _extract_runner_commands_for_binding(
     )
     plugin_dir = owner_dir / "e2e_plugins"
     plugin_dir.mkdir()
+    for relative_path, source in (extra_module_sources or {}).items():
+        module_path = plugin_dir / relative_path
+        module_path.parent.mkdir(parents=True, exist_ok=True)
+        module_path.write_text(source, encoding="utf-8")
     (plugin_dir / "runner.py").write_text(
         f"""
 import os
@@ -319,6 +328,433 @@ if {condition}:
 """,
         runner_class=runner_class,
     )
+
+
+def _execute_runner_binding(
+    tmp_path: Path,
+    *,
+    binding_source: str,
+) -> str:
+    """Execute the synthetic binding with Python and return its runner type."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    module_path = tmp_path / "runner_runtime.py"
+    module_path.write_text(
+        f"""
+import os
+
+select_second = os.environ.get("SELECT_SECOND") == "1"
+
+class FirstRunner:
+    pass
+
+class SecondRunner:
+    pass
+
+{binding_source}
+""",
+        encoding="utf-8",
+    )
+    namespace = runpy.run_path(str(module_path))
+    return type(namespace["runner"]).__name__
+
+
+def test_runtime_command_discovery_fails_closed_for_import_time_alias_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    package_name = "runtime_import_alias_case"
+    runtime_root = tmp_path / "python"
+    package_dir = runtime_root / package_name
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    mutator_source = """
+import sys
+
+runner_module = sys.modules[f"{__package__}.runner"]
+runner_module.A = runner_module.SecondRunner
+"""
+    (package_dir / "mutator.py").write_text(mutator_source, encoding="utf-8")
+    (package_dir / "runner.py").write_text(
+        """
+class FirstRunner:
+    pass
+
+class SecondRunner:
+    pass
+
+A = FirstRunner
+from . import mutator
+runner = A()
+""",
+        encoding="utf-8",
+    )
+
+    monkeypatch.syspath_prepend(str(runtime_root))
+    try:
+        runtime_module = importlib.import_module(f"{package_name}.runner")
+        assert type(runtime_module.runner).__name__ == "SecondRunner"
+    finally:
+        for module_name in tuple(sys.modules):
+            if module_name == package_name or module_name.startswith(f"{package_name}."):
+                sys.modules.pop(module_name, None)
+
+    binding_source = """
+A = FirstRunner
+from . import mutator
+runner = A()
+"""
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "checker-first",
+        binding_source=binding_source,
+        runner_class="FirstRunner",
+        extra_module_sources={"mutator.py": mutator_source},
+    ) == {"conditional_runtime": set()}
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "checker-second",
+        binding_source=binding_source,
+        runner_class="SecondRunner",
+        extra_module_sources={"mutator.py": mutator_source},
+    ) == {"conditional_runtime": set()}
+
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "checker-rebound",
+        binding_source="""
+A = FirstRunner
+from . import mutator
+A = FirstRunner
+runner = A()
+""",
+        runner_class="FirstRunner",
+        extra_module_sources={"mutator.py": mutator_source},
+    ) == {"conditional_runtime": {"run"}}
+
+
+_RUNTIME_BINDING_DIFFERENTIAL_CASES = [
+    (
+        "old_eq_ifexp",
+        """A = B = FirstRunner
+class Selector:
+    def __eq__(self, other):
+        global A
+        A = SecondRunner
+        return True
+flag = Selector() == 1
+runner = A() if flag else B()
+""",
+        "closed",
+    ),
+    (
+        "old_not_ifexp",
+        """A = B = FirstRunner
+class Selector:
+    def __bool__(self):
+        global A
+        A = SecondRunner
+        return True
+flag = not Selector()
+runner = B() if flag else A()
+""",
+        "closed",
+    ),
+    (
+        "old_chain_false",
+        "runner = FirstRunner()\n"
+        "factory = lambda value=(2 < 1 < (runner := SecondRunner())): value\n",
+        "exact",
+    ),
+    (
+        "eq_magic_direct_alias",
+        """A = FirstRunner
+class Selector:
+    def __eq__(self, other):
+        global A
+        A = SecondRunner
+        return True
+flag = Selector() == 1
+runner = A()
+""",
+        "closed",
+    ),
+    (
+        "order_magic_direct_alias",
+        """A = FirstRunner
+class Selector:
+    def __lt__(self, other):
+        global A
+        A = SecondRunner
+        return True
+flag = Selector() < 1
+runner = A()
+""",
+        "closed",
+    ),
+    (
+        "reflected_order_magic_direct_alias",
+        """A = FirstRunner
+class Selector:
+    def __gt__(self, other):
+        global A
+        A = SecondRunner
+        return True
+flag = 1 < Selector()
+runner = A()
+""",
+        "closed",
+    ),
+    (
+        "contains_magic_direct_alias",
+        """A = FirstRunner
+class Container:
+    def __contains__(self, item):
+        global A
+        A = SecondRunner
+        return True
+flag = 1 in Container()
+runner = A()
+""",
+        "closed",
+    ),
+    (
+        "item_eq_membership_direct_alias",
+        """A = FirstRunner
+class Item:
+    def __eq__(self, other):
+        global A
+        A = SecondRunner
+        return True
+flag = Item() in [1]
+runner = A()
+""",
+        "closed",
+    ),
+    (
+        "not_bool_magic_direct_alias",
+        """A = FirstRunner
+class Selector:
+    def __bool__(self):
+        global A
+        A = SecondRunner
+        return False
+flag = not Selector()
+runner = A()
+""",
+        "closed",
+    ),
+    (
+        "identity_constructor_side_effect",
+        """A = FirstRunner
+class Selector:
+    def __init__(self):
+        global A
+        A = SecondRunner
+obj = Selector()
+flag = obj is obj
+runner = A()
+""",
+        "closed",
+    ),
+    (
+        "safe_identity_true",
+        "flag = None is None\nrunner = SecondRunner() if flag else FirstRunner()\n",
+        "exact",
+    ),
+    (
+        "safe_identity_false",
+        "flag = None is not None\nrunner = SecondRunner() if flag else FirstRunner()\n",
+        "exact",
+    ),
+    (
+        "safe_eq_tuple",
+        "flag = (1, 2) == (1, 2)\nrunner = SecondRunner() if flag else FirstRunner()\n",
+        "exact",
+    ),
+    (
+        "safe_order_int",
+        "flag = 1 < 2\nrunner = SecondRunner() if flag else FirstRunner()\n",
+        "exact",
+    ),
+    (
+        "safe_membership_list",
+        "flag = 2 in [1, 2]\nrunner = SecondRunner() if flag else FirstRunner()\n",
+        "exact",
+    ),
+    (
+        "safe_not_literal",
+        "flag = not []\nrunner = SecondRunner() if flag else FirstRunner()\n",
+        "exact",
+    ),
+    (
+        "safe_truthy_literal",
+        "runner = SecondRunner() if [0] else FirstRunner()\n",
+        "exact",
+    ),
+    (
+        "safe_chain_true",
+        "flag = 1 < 2 < 3\nrunner = SecondRunner() if flag else FirstRunner()\n",
+        "exact",
+    ),
+    (
+        "safe_chain_false",
+        "flag = 2 < 1 < 3\nrunner = SecondRunner() if flag else FirstRunner()\n",
+        "exact",
+    ),
+    (
+        "and_false_walrus",
+        "runner = FirstRunner()\nflag = False and (runner := SecondRunner())\n",
+        "exact",
+    ),
+    (
+        "or_true_walrus",
+        "runner = FirstRunner()\nflag = True or (runner := SecondRunner())\n",
+        "exact",
+    ),
+    (
+        "and_true_walrus",
+        "runner = FirstRunner()\nflag = True and (runner := SecondRunner())\n",
+        "exact",
+    ),
+    (
+        "chain_true_walrus",
+        "runner = FirstRunner()\nflag = 1 < 2 < ((runner := SecondRunner()) and 3)\n",
+        "closed",
+    ),
+    (
+        "lambda_default_false",
+        "runner = FirstRunner()\n"
+        "factory = lambda value=(False and (runner := SecondRunner())): value\n",
+        "exact",
+    ),
+    (
+        "lambda_default_alias_true",
+        "Alias = FirstRunner\n"
+        "factory = lambda value=(True and (Alias := SecondRunner)): value\n"
+        "runner = Alias()\n",
+        "exact",
+    ),
+    (
+        "lambda_body_ignored",
+        "runner = FirstRunner()\nfactory = lambda: (runner := SecondRunner())\n",
+        "exact",
+    ),
+    (
+        "starred_safe_sequence",
+        "choices = [FirstRunner, SecondRunner]\nrunner = [*choices][1]()\n",
+        "exact",
+    ),
+    (
+        "starred_iter_magic_direct_alias",
+        """A = FirstRunner
+class Values:
+    def __iter__(self):
+        global A
+        A = SecondRunner
+        return iter([1])
+values = Values()
+expanded = [*values]
+runner = A()
+""",
+        "closed",
+    ),
+    (
+        "unknown_ifexp_same_alias",
+        "A = B = FirstRunner\nrunner = A() if select_second else B()\n",
+        "exact",
+    ),
+    (
+        "unknown_ifexp_different",
+        "runner = SecondRunner() if select_second else FirstRunner()\n",
+        "closed",
+    ),
+    (
+        "selector_binding_time",
+        "selected = 0\nrunner = (FirstRunner(), SecondRunner())[selected]\nselected = 1\n",
+        "exact",
+    ),
+    (
+        "alias_rebind_before",
+        "Alias = FirstRunner\nAlias = SecondRunner\nrunner = Alias()\n",
+        "exact",
+    ),
+    (
+        "alias_rebind_after",
+        "Alias = FirstRunner\nrunner = Alias()\nAlias = SecondRunner\n",
+        "exact",
+    ),
+    (
+        "nested_rebind_ignored",
+        "runner = FirstRunner()\ndef later():\n    global runner\n    runner = SecondRunner()\n",
+        "exact",
+    ),
+    (
+        "try_rebind",
+        "runner = FirstRunner()\ntry:\n    runner = SecondRunner()\nexcept Exception:\n    pass\n",
+        "closed",
+    ),
+    (
+        "loop_rebind",
+        "runner = FirstRunner()\nfor _ in [1]:\n    runner = SecondRunner()\n",
+        "closed",
+    ),
+    (
+        "decorator_magic_direct_alias",
+        """A = FirstRunner
+def decorate(cls):
+    global A
+    A = SecondRunner
+    return cls
+@decorate
+class Marked:
+    pass
+runner = A()
+""",
+        "closed",
+    ),
+    (
+        "function_default_magic_direct_alias",
+        """A = FirstRunner
+class Selector:
+    def __eq__(self, other):
+        global A
+        A = SecondRunner
+        return True
+def factory(value=(Selector() == 1)):
+    return value
+runner = A()
+""",
+        "closed",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("case_name", "binding_source", "policy"),
+    _RUNTIME_BINDING_DIFFERENTIAL_CASES,
+    ids=[case[0] for case in _RUNTIME_BINDING_DIFFERENTIAL_CASES],
+)
+def test_runtime_command_discovery_matches_real_python_alias_effects(
+    tmp_path: Path,
+    case_name: str,
+    binding_source: str,
+    policy: str,
+):
+    actual = _execute_runner_binding(
+        tmp_path / case_name / "python",
+        binding_source=binding_source,
+    )
+    active = [
+        runner_class
+        for runner_class in ("FirstRunner", "SecondRunner")
+        if _extract_runner_commands_for_binding(
+            tmp_path / case_name / f"checker-{runner_class}",
+            binding_source=binding_source,
+            runner_class=runner_class,
+        )["conditional_runtime"]
+    ]
+    if policy == "closed":
+        assert active == []
+    else:
+        assert policy == "exact"
+        assert active == [actual]
 
 
 def test_runtime_command_discovery_uses_true_branch_runner_rebinding(
@@ -376,9 +812,603 @@ def test_runtime_command_discovery_fails_closed_for_unknown_if_expression(
 ):
     assert _extract_runner_commands_for_binding(
         tmp_path,
-        binding_source=(
-            "runner = SecondRunner() if select_second else FirstRunner()"
-        ),
+        binding_source=("runner = SecondRunner() if select_second else FirstRunner()"),
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_accepts_unknown_if_expression_same_runner(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source=("runner = FirstRunner() if select_second else FirstRunner()"),
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
+
+
+def test_runtime_command_discovery_accepts_unknown_if_expression_same_alias(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+A = B = FirstRunner
+runner = A() if select_second else B()
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
+
+
+def test_runtime_command_discovery_resolves_safe_constant_if_expression(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="runner = SecondRunner() if [0] else FirstRunner()",
+        runner_class="SecondRunner",
+    ) == {"conditional_runtime": {"generate-audio"}}
+
+
+def test_runtime_command_discovery_rejects_shadowed_set_call_condition(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+def set():
+    return [1]
+
+runner = SecondRunner() if set() else FirstRunner()
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_rejects_if_expression_condition_walrus(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+A = B = FirstRunner
+runner = A() if (A := SecondRunner) else B()
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_rejects_if_expression_name_truthiness(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+A = B = FirstRunner
+
+class Selector:
+    def __bool__(self):
+        global A
+        A = SecondRunner
+        return True
+
+selector = Selector()
+runner = A() if selector else B()
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_rejects_if_expression_starred_condition(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+A = B = FirstRunner
+
+class Values:
+    def __iter__(self):
+        global A
+        A = SecondRunner
+        return iter([1])
+
+values = Values()
+runner = A() if [*values] else B()
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_rejects_compare_magic_method_alias_side_effect(
+    tmp_path: Path,
+):
+    binding_source = """
+A = B = FirstRunner
+
+class Selector:
+    def __eq__(self, other):
+        global A
+        A = SecondRunner
+        return True
+
+select_second = Selector() == 1
+runner = A() if select_second else B()
+"""
+    assert (
+        _execute_runner_binding(
+            tmp_path / "python",
+            binding_source=binding_source,
+        )
+        == "SecondRunner"
+    )
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "checker",
+        binding_source=binding_source,
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_rejects_not_magic_method_alias_side_effect(
+    tmp_path: Path,
+):
+    binding_source = """
+A = B = FirstRunner
+
+class Selector:
+    def __bool__(self):
+        global A
+        A = SecondRunner
+        return False
+
+select_second = not Selector()
+runner = A() if select_second else B()
+"""
+    assert (
+        _execute_runner_binding(
+            tmp_path / "python",
+            binding_source=binding_source,
+        )
+        == "SecondRunner"
+    )
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "checker",
+        binding_source=binding_source,
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_fails_closed_for_lambda_default_walrus(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+runner = FirstRunner()
+factory = lambda value=(runner := SecondRunner()): value
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_honors_lambda_default_short_circuit(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+runner = FirstRunner()
+factory = lambda value=(False and (runner := SecondRunner())): value
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
+
+
+def test_runtime_command_discovery_honors_assigned_lambda_short_circuit(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+flag = False
+runner = FirstRunner()
+factory = lambda value=(flag and (runner := SecondRunner())): value
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
+
+
+def test_runtime_command_discovery_honors_comparison_lambda_short_circuit(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+runner = FirstRunner()
+factory = lambda value=((1 == 2) and (runner := SecondRunner())): value
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
+
+
+def test_runtime_command_discovery_honors_false_chained_comparison_short_circuit(
+    tmp_path: Path,
+):
+    binding_source = """
+runner = FirstRunner()
+comparison = 2 < 1 < (runner := SecondRunner())
+"""
+    assert (
+        _execute_runner_binding(
+            tmp_path / "python",
+            binding_source=binding_source,
+        )
+        == "FirstRunner"
+    )
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "checker",
+        binding_source=binding_source,
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
+
+
+def test_runtime_command_discovery_checks_true_chained_comparison_rebinding(
+    tmp_path: Path,
+):
+    binding_source = """
+runner = FirstRunner()
+comparison = 1 < 2 < ((runner := SecondRunner()) and 3)
+"""
+    assert (
+        _execute_runner_binding(
+            tmp_path / "python",
+            binding_source=binding_source,
+        )
+        == "SecondRunner"
+    )
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "checker",
+        binding_source=binding_source,
+        runner_class="SecondRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_applies_true_lambda_default_alias_rebinding(
+    tmp_path: Path,
+):
+    binding_source = """
+Alias = FirstRunner
+factory = lambda value=((1 == 1) and (Alias := SecondRunner)): value
+runner = Alias()
+"""
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "first",
+        binding_source=binding_source,
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "second",
+        binding_source=binding_source,
+        runner_class="SecondRunner",
+    ) == {"conditional_runtime": {"generate-audio"}}
+
+
+def test_runtime_command_discovery_skips_false_lambda_default_alias_rebinding(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+Alias = FirstRunner
+factory = lambda value=((1 == 2) and (Alias := SecondRunner)): value
+runner = Alias()
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
+
+
+def test_runtime_command_discovery_selects_lambda_default_if_expression(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+runner = FirstRunner()
+factory = lambda value=((runner := SecondRunner()) if False else None): value
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
+
+
+def test_runtime_command_discovery_conservatively_checks_unknown_lambda_default(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+runner = FirstRunner()
+factory = lambda value=((runner := SecondRunner()) if select_second else None): value
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_checks_lambda_keyword_default_walrus(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+runner = FirstRunner()
+factory = lambda *, value=(runner := SecondRunner()): value
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_ignores_lambda_body_walrus(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+runner = FirstRunner()
+factory = lambda: (runner := SecondRunner())
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
+
+
+def test_runtime_command_discovery_selects_only_constant_subscript_runner(
+    tmp_path: Path,
+):
+    binding_source = "runner = (FirstRunner(), SecondRunner())[0]"
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "selected",
+        binding_source=binding_source,
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "unselected",
+        binding_source=binding_source,
+        runner_class="SecondRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_resolves_negative_constant_subscript(
+    tmp_path: Path,
+):
+    binding_source = "runner = [FirstRunner(), SecondRunner()][-1]"
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "selected",
+        binding_source=binding_source,
+        runner_class="SecondRunner",
+    ) == {"conditional_runtime": {"generate-audio"}}
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "unselected",
+        binding_source=binding_source,
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_resolves_safe_constant_subscript_selector(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source=("runner = (FirstRunner(), SecondRunner())[0 if not False else 1]"),
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
+
+
+def test_runtime_command_discovery_resolves_assigned_constant_subscript_selector(
+    tmp_path: Path,
+):
+    binding_source = """
+selected = 0
+runner = (FirstRunner(), SecondRunner())[selected]
+"""
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "selected",
+        binding_source=binding_source,
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "unselected",
+        binding_source=binding_source,
+        runner_class="SecondRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_uses_selector_value_at_runner_binding_time(
+    tmp_path: Path,
+):
+    binding_source = """
+selected = 0
+runner = (FirstRunner(), SecondRunner())[selected]
+selected = 1
+"""
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "first",
+        binding_source=binding_source,
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "second",
+        binding_source=binding_source,
+        runner_class="SecondRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_uses_latest_selector_before_runner_binding(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+selected = 1
+selected = 0
+runner = (FirstRunner(), SecondRunner())[selected]
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
+
+
+def test_runtime_command_discovery_uses_class_alias_at_instantiation_time(
+    tmp_path: Path,
+):
+    binding_source = """
+Alias = FirstRunner
+runner = Alias()
+Alias = SecondRunner
+"""
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "first",
+        binding_source=binding_source,
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "second",
+        binding_source=binding_source,
+        runner_class="SecondRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_uses_latest_class_alias_before_instantiation(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+Alias = SecondRunner
+Alias = FirstRunner
+runner = Alias()
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
+
+
+def test_runtime_command_discovery_fails_closed_for_out_of_range_subscript(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="runner = (FirstRunner(),)[1]",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_expands_starred_sequence_subscript(
+    tmp_path: Path,
+):
+    binding_source = "runner = (*[FirstRunner(), SecondRunner()], FirstRunner())[1]"
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "first",
+        binding_source=binding_source,
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "second",
+        binding_source=binding_source,
+        runner_class="SecondRunner",
+    ) == {"conditional_runtime": {"generate-audio"}}
+
+
+def test_runtime_command_discovery_expands_starred_sequence_negative_subscript(
+    tmp_path: Path,
+):
+    binding_source = """
+choices = [FirstRunner(), SecondRunner()]
+runner = (*choices,)[-1]
+"""
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "first",
+        binding_source=binding_source,
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "second",
+        binding_source=binding_source,
+        runner_class="SecondRunner",
+    ) == {"conditional_runtime": {"generate-audio"}}
+
+
+def test_runtime_command_discovery_fails_closed_for_starred_sequence_cycle(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+first_choices = second_choices
+second_choices = first_choices
+runner = (*second_choices,)[0]
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_accepts_dynamic_same_class_candidates(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source=("runner = (FirstRunner(), FirstRunner())[select_second]"),
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
+
+
+def test_runtime_command_discovery_rejects_dynamic_mixed_class_candidates(
+    tmp_path: Path,
+):
+    binding_source = "runner = (FirstRunner(), SecondRunner())[select_second]"
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "first",
+        binding_source=binding_source,
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+    assert _extract_runner_commands_for_binding(
+        tmp_path / "second",
+        binding_source=binding_source,
+        runner_class="SecondRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_rejects_dynamic_unknown_candidate(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+def build_runner():
+    return FirstRunner()
+
+runner = (FirstRunner(), build_runner())[select_second]
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_rejects_side_effecting_subscript_selector(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="""
+def choose_runner():
+    return 0
+
+runner = (FirstRunner(), FirstRunner())[choose_runner()]
+""",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+
+
+def test_runtime_command_discovery_rejects_runner_slice(
+    tmp_path: Path,
+):
+    assert _extract_runner_commands_for_binding(
+        tmp_path,
+        binding_source="runner = (FirstRunner(), FirstRunner())[:]",
         runner_class="FirstRunner",
     ) == {"conditional_runtime": set()}
 
@@ -464,7 +1494,7 @@ runner = FirstRunner()
     ) == {"conditional_runtime": set()}
 
 
-def test_runtime_command_discovery_ignores_comprehension_target_binding(
+def test_runtime_command_discovery_fails_closed_for_comprehension_callbacks(
     tmp_path: Path,
 ):
     assert _extract_runner_commands_for_binding(
@@ -474,7 +1504,7 @@ runner = FirstRunner()
 [FirstRunner() for runner in candidates]
 """,
         runner_class="FirstRunner",
-    ) == {"conditional_runtime": {"run"}}
+    ) == {"conditional_runtime": set()}
 
 
 def test_runtime_command_discovery_does_not_borrow_sibling_runner_commands(

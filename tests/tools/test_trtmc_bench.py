@@ -266,6 +266,99 @@ def test_task_eval_build_command_rejects_non_boolean_trust_remote_code(
         )
 
 
+@pytest.mark.parametrize("invalid_value", ["false", 0, 1])
+@pytest.mark.parametrize(
+    ("section", "field"),
+    [
+        ("task_eval", "hf_use_cache"),
+        ("task_eval", "require_valid_prediction"),
+        ("task_eval", "build_generation_headroom"),
+        ("generation", "do_sample"),
+        ("generation", "apply_chat_template"),
+        ("generation", "enable_thinking"),
+    ],
+)
+def test_task_eval_rejects_non_boolean_nested_configuration(
+    tmp_path: Path,
+    section: str,
+    field: str,
+    invalid_value: object,
+) -> None:
+    config = (
+        {field: invalid_value} if section == "task_eval" else {"generation": {field: invalid_value}}
+    )
+    with pytest.raises(ValueError, match=rf"{field} must be a boolean"):
+        task_eval.effective_task_eval_config(
+            {"id": "suite"},
+            {"name": "model", "task_eval": config},
+        )
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "task_eval": (config if section == "task_eval" else {}),
+                "generation": ({field: invalid_value} if section == "generation" else {}),
+            }
+        ),
+        encoding="utf-8",
+    )
+    if section == "task_eval":
+        with pytest.raises(
+            ValueError,
+            match=rf"{field} must be a boolean",
+        ):
+            task_eval.hf_generation_overrides(tmp_path)
+    else:
+        with pytest.raises(
+            ValueError,
+            match=rf"{field} must be a boolean",
+        ):
+            task_eval.generation_defaults(tmp_path)
+
+
+def test_task_eval_ci_rejects_passed_summary_with_skipped_sample() -> None:
+    passed, _ = task_eval.validate_eval_summary(
+        {
+            "results": [
+                {
+                    "model": "model-a",
+                    "mode": "mcq",
+                    "status": "passed",
+                    "requested_sample_limit": 2,
+                    "prepared_input_count": 2,
+                    "complete_count": 2,
+                    "valid_count": 1,
+                    "skipped_count": 1,
+                    "excluded_count": 0,
+                }
+            ]
+        },
+        ["model-a"],
+        expected_limit=2,
+    )
+
+    assert passed is False
+
+
+def test_task_eval_complete_count_contract_rejects_partial_prepared_input() -> None:
+    result = {
+        "mode": "mcq",
+        "status": "passed",
+        "total_count": 1,
+        "valid_count": 1,
+        "skipped_count": 0,
+        "excluded_count": 0,
+    }
+
+    with pytest.raises(RuntimeError, match="incomplete sample evidence"):
+        task_eval.apply_complete_count_contract(
+            result,
+            requested_sample_limit=10,
+            prepared_input_count=10,
+        )
+
+
 def test_operation_registry_declares_supported_task_semantics() -> None:
     operations = {operation.name: operation for operation in registered_operations()}
     adapters = {adapter.task_strategy: adapter for adapter in registered_task_adapters()}
@@ -628,10 +721,7 @@ def test_auto_build_reuses_model_defaults_and_largest_diffusion_shape(tmp_path: 
 
 
 def test_pinned_hf_revision_is_auditable_and_forwarded_to_builder(tmp_path: Path) -> None:
-    manifest = (
-        REPOSITORY_ROOT
-        / "tests/e2e/models/magpie_tts/manifests/magpie-tts-357m.json"
-    )
+    manifest = REPOSITORY_ROOT / "tests/e2e/models/magpie_tts/manifests/magpie-tts-357m.json"
     model = ManifestCatalog._load(manifest)
     plan = BundleBuilder(tmp_path / "cache")._plan(model, ())
 
@@ -680,18 +770,12 @@ def test_auto_build_requires_and_passes_manifest_fp8_scales(
         manifest = family / "manifests/flux-2-dev-fp8.json"
         manifest.parent.mkdir(parents=True)
         manifest.write_bytes(
-            (
-                REPOSITORY_ROOT
-                / "tests/e2e/models/flux/manifests/flux-2-dev-fp8.json"
-            ).read_bytes()
+            (REPOSITORY_ROOT / "tests/e2e/models/flux/manifests/flux-2-dev-fp8.json").read_bytes()
         )
         scales = family / "data/flux2-fp8-scales.json"
         scales.parent.mkdir()
         scales.write_bytes(
-            (
-                REPOSITORY_ROOT
-                / "tests/e2e/models/flux/data/flux2-fp8-scales.json"
-            ).read_bytes()
+            (REPOSITORY_ROOT / "tests/e2e/models/flux/data/flux2-fp8-scales.json").read_bytes()
         )
         monkeypatch.delenv("TRTMC_BENCH_MANIFEST_ROOT", raising=False)
         monkeypatch.setattr(benchmark_catalog, "__file__", str(package / "catalog.py"))
@@ -881,10 +965,7 @@ def test_seeded_ready_profiles_preserve_seed_in_public_request(tmp_path: Path) -
     def declares_seed(value: object) -> bool:
         if not isinstance(value, Mapping):
             return False
-        return any(
-            name in {"seed", "seeds"} or declares_seed(item)
-            for name, item in value.items()
-        )
+        return any(name in {"seed", "seeds"} or declares_seed(item) for name, item in value.items())
 
     missing: list[str] = []
     for entry in ManifestCatalog().entries():
