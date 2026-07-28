@@ -59,6 +59,38 @@ def test_validate_family_uses_model_owned_e2e_entrypoint() -> None:
     assert "export TRTMC_MODEL_PLUGIN_STRICT=1" in text
 
 
+def test_public_cli_and_cpp_docs_match_implemented_contracts() -> None:
+    """Public examples, layouts, and route-specific flags must stay exact."""
+    pipeline = (REPO_ROOT / "include" / "trtmc" / "pipeline.h").read_text(
+        encoding="utf-8"
+    )
+    cli_help = (REPO_ROOT / "src" / "cli" / "args.cpp").read_text(
+        encoding="utf-8"
+    )
+    cli_reference = (
+        REPO_ROOT / "website" / "docs" / "api" / "cli-reference.md"
+    ).read_text(encoding="utf-8")
+    config_loader = (
+        REPO_ROOT / "src" / "runtime" / "config" / "cli_support.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert "{.max_new_tokens" not in pipeline
+    assert "trtmc::GenerateConfig config;" in pipeline
+    assert "Frame-major interleaved HWC: [T, H, W, C]" in pipeline
+    assert "num_frames * height * width * channels" in pipeline
+
+    assert "Native TRT-RTX JIT cache file or optimized-runtime " in cli_help
+    assert "cache directory" in cli_help
+    assert "--config FILE.json" in cli_help
+    assert "--set NS.FIELD=VALUE" in cli_help
+    assert "On native TensorRT-RTX bundles, `--runtime-cache`" in cli_reference
+    assert "For Python builds, `--config` accepts" in cli_reference
+    assert "The C++ load/run `--config` surface" in cli_reference
+
+    assert "convert the profile to JSON" in config_loader
+    assert "tensorrt_model_connect/cli.py" not in config_loader
+
+
 def test_validate_family_forwards_trust_remote_code_to_bundle_build() -> None:
     """Remote-code models must receive the flag before any downstream checks."""
     text = (REPO_ROOT / "scripts" / "validate_family.sh").read_text(encoding="utf-8")
@@ -218,6 +250,149 @@ exit 0
     assert "SKIP  diff_logits (non-decoder: unit_non_decoder)" in result.stdout
     assert "FAIL  E2E pytest (no manifest -- create one)" in result.stdout
     assert "1 passed, 1 failed" in result.stdout
+
+
+def test_validate_family_isolated_plugin_ignores_stale_fixed_symlink(
+    tmp_path: Path,
+) -> None:
+    """A prior fixed-path symlink must not redirect the isolated plugin copy."""
+    project_dir = tmp_path / "repo"
+    scripts_dir = project_dir / "scripts"
+    manifest_dir = project_dir / "tests" / "e2e" / "models" / "unit" / "manifests"
+    runtime_dir = project_dir / "src" / "runtime" / "models" / "unit"
+    scripts_dir.mkdir(parents=True)
+    manifest_dir.mkdir(parents=True)
+    runtime_dir.mkdir(parents=True)
+    script = scripts_dir / "validate_family.sh"
+    script.write_text(
+        (REPO_ROOT / "scripts" / "validate_family.sh").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (manifest_dir.parent / "MODEL.toml").write_text(
+        'id = "unit"\ntest_manifests = ["manifests/unit-model.json"]\n',
+        encoding="utf-8",
+    )
+    (manifest_dir / "unit-model.json").write_text(
+        json.dumps(
+            {
+                "name": "unit-model",
+                "hf_id": "org/unit-model",
+                "bundle": "unit-model.trtfb",
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime_library = "libtrtmc_model_unit.so"
+    (runtime_dir / "MODEL.toml").write_text(
+        "\n".join(
+            [
+                'id = "unit"',
+                'runtime_strategies = ["unit_non_decoder"]',
+                f'runtime_library = "{runtime_library}"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    binary_dir = tmp_path / "bin"
+    binary_dir.mkdir()
+    fake_binary = binary_dir / "trtmc"
+    fake_binary.write_text(
+        """#!/usr/bin/env bash
+if [[ "$1" == "build" ]]; then
+    output=""
+    previous=""
+    for argument in "$@"; do
+        if [[ "$previous" == "-o" ]]; then
+            output="$argument"
+        fi
+        previous="$argument"
+    done
+    mkdir -p "$(dirname "$output")"
+    printf '%s' "current-bundle" > "$output"
+    exit 0
+fi
+if [[ "$1" == "inspect" ]]; then
+    echo "Runtime strategy: unit_non_decoder"
+    exit 0
+fi
+exit 1
+""",
+        encoding="utf-8",
+    )
+    fake_binary.chmod(0o755)
+    plugin_source = binary_dir / "models" / "unit" / runtime_library
+    plugin_source.parent.mkdir(parents=True)
+    plugin_source.write_bytes(b"CURRENT-PLUGIN")
+
+    plugin_path_log = tmp_path / "plugin-path.txt"
+    python_wrapper = tmp_path / "python-wrapper"
+    python_wrapper.write_text(
+        f"""#!/usr/bin/env bash
+if [[ "$1" == "-m" && "$2" == "pytest" ]]; then
+    plugin_dir=""
+    previous=""
+    for argument in "$@"; do
+        if [[ "$previous" == "--model-plugin-dir" ]]; then
+            plugin_dir="$argument"
+        fi
+        previous="$argument"
+    done
+    [[ -n "$plugin_dir" ]] || exit 90
+    [[ -f "$plugin_dir/{runtime_library}" ]] || exit 91
+    [[ ! -L "$plugin_dir/{runtime_library}" ]] || exit 92
+    [[ "$(cat "$plugin_dir/{runtime_library}")" == "CURRENT-PLUGIN" ]] || exit 93
+    printf '%s' "$plugin_dir" > "$PLUGIN_PATH_LOG"
+    exit 0
+fi
+exec "$REAL_PYTHON" "$@"
+""",
+        encoding="utf-8",
+    )
+    python_wrapper.chmod(0o755)
+
+    bundle_dir = tmp_path / "bundles"
+    bundle_dir.mkdir()
+    stale_fixed_dir = bundle_dir / "only-org_unit-model"
+    stale_fixed_dir.mkdir()
+    external = tmp_path / "external-plugin.so"
+    external.write_bytes(b"DO-NOT-OVERWRITE")
+    stale_destination = stale_fixed_dir / runtime_library
+    stale_destination.symlink_to(external)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "org/unit-model",
+            "--binary",
+            str(fake_binary),
+            "--bundle-dir",
+            str(bundle_dir),
+            "--isolate-model-plugin",
+        ],
+        cwd=project_dir,
+        env={
+            **os.environ,
+            "HF_PYTHON": str(python_wrapper),
+            "REAL_PYTHON": sys.executable,
+            "PLUGIN_PATH_LOG": str(plugin_path_log),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PASS  isolate model plugin (unit_non_decoder)" in result.stdout
+    assert stale_destination.is_symlink()
+    assert external.read_bytes() == b"DO-NOT-OVERWRITE"
+    isolated_path = Path(plugin_path_log.read_text(encoding="utf-8"))
+    assert isolated_path.name.startswith(".validate-family-plugin.")
+    assert not isolated_path.exists()
+    assert not list(bundle_dir.glob(".validate-family-plugin.*"))
 
 
 def test_validate_family_e2e_consumes_only_the_current_bundle(

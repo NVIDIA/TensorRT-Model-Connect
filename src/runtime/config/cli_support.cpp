@@ -515,8 +515,7 @@ LayeredFileValues load_layered_file(const std::string& path) {
     if (ext_low == ".yaml" || ext_low == ".yml") {
         throw std::invalid_argument(
             "--config " + path +
-            ": YAML is not supported by the C++ loader; convert to JSON or "
-            "load via a wrapper (tensorrt_model_connect/cli.py accepts YAML).");
+            ": YAML is not supported by the C++ loader; convert the profile to JSON.");
     }
     throw std::invalid_argument("--config " + path + ": unsupported extension '" + ext +
                                 "' (expected .json)");

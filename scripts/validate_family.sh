@@ -72,7 +72,9 @@ copy_isolated_model_plugin() {
     "$HF_PYTHON" - "$PROJECT_DIR" "$runtime_strategy" "$binary_path" "$out_dir" <<'PY'
 from __future__ import annotations
 
+import os
 import shutil
+import stat
 import sys
 from pathlib import Path
 
@@ -102,13 +104,60 @@ if len(matches) > 1:
     raise SystemExit(f"Multiple runtime model plugins own runtime_strategy={strategy!r}: {owners}")
 
 model_id, library = matches[0]
+if Path(library).name != library:
+    raise SystemExit(f"Runtime model plugin library must be a basename: {library!r}")
 src = binary.parent / "models" / model_id / library
-if not src.is_file():
-    raise SystemExit(f"Runtime model plugin library not found: {src}")
+required_flags = ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW")
+missing_flags = [name for name in required_flags if not hasattr(os, name)]
+if missing_flags:
+    raise SystemExit(
+        "Secure model plugin isolation requires " + ", ".join(missing_flags)
+    )
 
-out_dir.mkdir(parents=True, exist_ok=True)
-dst = out_dir / library
-shutil.copy2(src, dst)
+source_fd = None
+directory_fd = None
+destination_fd = None
+try:
+    source_fd = os.open(src, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    source_metadata = os.fstat(source_fd)
+    if not stat.S_ISREG(source_metadata.st_mode):
+        raise SystemExit(f"Runtime model plugin library is not a regular file: {src}")
+
+    directory_fd = os.open(
+        out_dir,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+    )
+    destination_fd = os.open(
+        library,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+        stat.S_IMODE(source_metadata.st_mode),
+        dir_fd=directory_fd,
+    )
+    with os.fdopen(source_fd, "rb") as source_file:
+        source_fd = None
+        with os.fdopen(destination_fd, "wb") as destination_file:
+            destination_fd = None
+            shutil.copyfileobj(source_file, destination_file)
+            destination_file.flush()
+            os.fsync(destination_file.fileno())
+            os.fchmod(
+                destination_file.fileno(),
+                stat.S_IMODE(source_metadata.st_mode),
+            )
+except OSError as exc:
+    if directory_fd is not None:
+        try:
+            os.unlink(library, dir_fd=directory_fd)
+        except OSError:
+            pass
+    raise SystemExit(f"Unable to copy isolated runtime model plugin: {exc}") from exc
+finally:
+    for descriptor in (destination_fd, source_fd, directory_fd):
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 print(out_dir)
 PY
 }
@@ -242,6 +291,7 @@ STEPS=()
 BUILD_STAGE_DIR=""
 CANDIDATE_BUNDLE_PATH=""
 BUNDLE_INSPECTION=""
+ISOLATED_PLUGIN_DIR=""
 
 run_step() {
     local name="$1"
@@ -258,6 +308,11 @@ run_step() {
 }
 
 cleanup_build_stage() {
+    if [[ -n "$ISOLATED_PLUGIN_DIR" \
+        && -d "$ISOLATED_PLUGIN_DIR" \
+        && ! -L "$ISOLATED_PLUGIN_DIR" ]]; then
+        rm -rf -- "$ISOLATED_PLUGIN_DIR"
+    fi
     if [[ -z "$BUILD_STAGE_DIR" ]] || [[ ! -d "$BUILD_STAGE_DIR" ]]; then
         return
     fi
@@ -330,10 +385,17 @@ if [[ "$ISOLATE_MODEL_PLUGIN" == "true" ]]; then
         STEPS+=("FAIL  isolate model plugin (no binary)")
         FAIL=$((FAIL + 1))
     else
-        ONLY_DIR="${BUNDLE_DIR}/only-${SAFE_NAME}"
+        ISOLATED_PLUGIN_DIR="$(
+            mktemp -d "${BUNDLE_DIR%/}/.validate-family-plugin.XXXXXX"
+        )"
         echo ""
         echo "==== isolate model plugin ===="
-        if MODEL_PLUGIN_DIR="$(copy_isolated_model_plugin "$RUNTIME_STRATEGY" "$BINARY" "$ONLY_DIR")"; then
+        if MODEL_PLUGIN_DIR="$(
+            copy_isolated_model_plugin \
+                "$RUNTIME_STRATEGY" \
+                "$BINARY" \
+                "$ISOLATED_PLUGIN_DIR"
+        )"; then
             echo "Using isolated model plugin dir: $MODEL_PLUGIN_DIR"
             export TRTMC_MODEL_PLUGIN_DIR="$MODEL_PLUGIN_DIR"
             export TRTMC_MODEL_PLUGIN_STRICT=1

@@ -16,10 +16,10 @@
 // configuration declare a schema with REGISTER_CONFIG_SCHEMA and their
 // values flow in through these two flags.
 //
-// JSON is the canonical wire format on the C++ side: the container does
-// not ship with yaml-cpp. Profile files on disk can be YAML (loaded and
-// converted by any orchestration layer, e.g. the Python benchmark) but
-// what reaches this module is JSON text.
+// JSON is the canonical wire format on the C++ side: load_layered_file()
+// accepts .json profiles only because the container does not ship with
+// yaml-cpp. An orchestration layer may parse YAML and convert it before
+// invoking the C++ config APIs, but C++ CLI --config does not do that.
 
 #include "trtmc/config/config_bundle.h"
 #include "trtmc/config/schema_registry.h"

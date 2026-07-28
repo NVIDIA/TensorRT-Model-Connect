@@ -48,7 +48,7 @@ python -m tensorrt_model_connect build <hf-repo-or-local-dir> -o <output.trtfb>
 | `--fp8-scales PATH` | Load precomputed FP8 scales. |
 | `--save-fp8-scales PATH` | Save calibrated FP8 scales. |
 | `--rtx` | Build for TensorRT-RTX backend. |
-| `--config FILE` | Load schema-driven config profile. |
+| `--config FILE` | Load a schema-driven JSON or YAML profile. YAML requires PyYAML. |
 | `--set NS.FIELD=VALUE` | Override a config field; repeatable. |
 | `--build-timing-json PATH` | Write structured build timing. |
 | `--verbose` | Enable verbose TensorRT builder output. |
@@ -137,6 +137,16 @@ Depending on the command, shared load/run options include `--hf-python`,
 `--set`. `trtmc --help` prints one combined synopsis for all commands; it is
 not separate per-command help. Read the relevant command section in that
 combined output and this reference for the accepted options.
+
+These shared options have route-specific contracts:
+
+- On native TensorRT-RTX bundles, `--runtime-cache` names a JIT kernel cache
+  file. On an optimized-runtime bundle, it names the root directory where the
+  host materializes the integrity-bound artifact cache.
+- For Python builds, `--config` accepts `.json`, `.yaml`, and `.yml` profiles;
+  YAML requires PyYAML. The C++ load/run `--config` surface accepts `.json`
+  only and rejects YAML with a conversion error. The current Qwen
+  optimized-runtime route rejects runtime `--config` and `--set` altogether.
 
 Text-generation options include `--max-new-tokens`, `--greedy`, `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--seed`, `--chat-template`, and `--no-thinking`.
 

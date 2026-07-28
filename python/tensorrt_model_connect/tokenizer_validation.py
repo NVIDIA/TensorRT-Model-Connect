@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import signal
 import stat
 import sys
 import threading
@@ -32,6 +33,7 @@ _TOKENIZER_REPAIR_LOCKS: dict[tuple[int, int], threading.RLock] = {}
 _TOKENIZER_REPAIR_LOCK_DEPTH = threading.local()
 _TOKENIZER_REPAIR_FDS: set[int] = set()
 _TOKENIZER_REPAIR_FORK_GUARD = threading.RLock()
+_TOKENIZER_REPAIR_OS_OPEN = os.open
 
 
 def _tokenizer_repair_atfork_hook(phase: str) -> None:
@@ -124,16 +126,98 @@ def _open_registered_repair_descriptor(
     dir_fd: int | None = None,
 ) -> int:
     """Open and register an FD atomically with respect to process fork."""
+    entry_pid = os.getpid()
     with _TOKENIZER_REPAIR_FORK_GUARD:
-        if mode is None:
-            descriptor = os.open(path, flags)
-        else:
-            descriptor = os.open(path, flags, mode, dir_fd=dir_fd)
-        _tokenizer_repair_fd_lifecycle_hook(
-            "opened-before-register",
-            descriptor,
-        )
-        _TOKENIZER_REPAIR_FDS.add(descriptor)
+        if os.getpid() != entry_pid:
+            raise RuntimeError(
+                "process forked while entering tokenizer repair descriptor setup"
+            )
+        opening_pid = entry_pid
+        previous_signal_mask = None
+        descriptor: int | None = None
+        descriptor_identity: os.stat_result | None = None
+        operation_error: BaseException | None = None
+        try:
+            if hasattr(signal, "pthread_sigmask"):
+                blocked_signals = set(signal.valid_signals())
+                blocked_signals.discard(signal.SIGKILL)
+                blocked_signals.discard(signal.SIGSTOP)
+                previous_signal_mask = signal.pthread_sigmask(
+                    signal.SIG_BLOCK,
+                    blocked_signals,
+                )
+            if mode is None:
+                descriptor = _TOKENIZER_REPAIR_OS_OPEN(path, flags)
+            else:
+                descriptor = _TOKENIZER_REPAIR_OS_OPEN(
+                    path,
+                    flags,
+                    mode,
+                    dir_fd=dir_fd,
+                )
+            if os.getpid() != opening_pid:
+                raise RuntimeError(
+                    "process forked while opening a tokenizer repair descriptor"
+                )
+            descriptor_identity = os.fstat(descriptor)
+            _TOKENIZER_REPAIR_FDS.add(descriptor)
+        except BaseException as exc:
+            operation_error = exc
+        try:
+            if previous_signal_mask is not None:
+                signal.pthread_sigmask(
+                    signal.SIG_SETMASK,
+                    previous_signal_mask,
+                )
+        except BaseException as exc:
+            if operation_error is None:
+                operation_error = exc
+
+        if operation_error is not None:
+            if descriptor is not None and os.getpid() == opening_pid:
+                try:
+                    current_identity = os.fstat(descriptor)
+                except OSError:
+                    pass
+                else:
+                    if descriptor_identity is None or (
+                        current_identity.st_dev == descriptor_identity.st_dev
+                        and current_identity.st_ino == descriptor_identity.st_ino
+                        and stat.S_IFMT(current_identity.st_mode)
+                        == stat.S_IFMT(descriptor_identity.st_mode)
+                    ):
+                        try:
+                            os.close(descriptor)
+                        except OSError:
+                            pass
+                _TOKENIZER_REPAIR_FDS.discard(descriptor)
+            raise operation_error
+
+        if os.getpid() != opening_pid:
+            # The at-fork child callback closed every registered repair FD.
+            # Never close this numeric value here because child code may have
+            # reused it before returning from a signal handler.
+            raise RuntimeError(
+                "process forked while restoring tokenizer repair signals"
+            )
+        assert descriptor is not None
+        try:
+            _tokenizer_repair_fd_lifecycle_hook(
+                "registered-before-return",
+                descriptor,
+            )
+        except BaseException:
+            if os.getpid() == opening_pid:
+                _close_registered_repair_descriptor(descriptor)
+            raise
+        if os.getpid() != opening_pid:
+            # The child at-fork callback already closed the registered repair
+            # descriptor. Do not touch its numeric value: child code in the
+            # lifecycle hook may already have reused that FD for unrelated
+            # work.
+            raise RuntimeError(
+                "process forked while registering a tokenizer repair descriptor"
+            )
         return descriptor
 
 
@@ -187,7 +271,17 @@ def tokenizer_repair_lock(model_dir: str | Path) -> Iterator[None]:
         with _TOKENIZER_REPAIR_LOCKS_GUARD:
             nested_lock = _TOKENIZER_REPAIR_LOCKS[nested_key]
         nested_lock.acquire()
+        if os.getpid() != acquisition_pid:
+            raise RuntimeError(
+                "process forked while acquiring nested tokenizer repair "
+                "ownership"
+            )
         depths[nested_key] += 1
+        if os.getpid() != acquisition_pid:
+            raise RuntimeError(
+                "process forked before entering nested tokenizer repair "
+                "ownership"
+            )
         try:
             yield
         finally:
@@ -230,6 +324,11 @@ def tokenizer_repair_lock(model_dir: str | Path) -> Iterator[None]:
         try:
             local_lock.acquire()
             acquired_local = True
+            if os.getpid() != acquisition_pid:
+                raise RuntimeError(
+                    "process forked while acquiring process-local tokenizer "
+                    "repair ownership"
+                )
         except Exception as exc:
             raise RuntimeError(
                 "cannot acquire process-local tokenizer.json repair "
@@ -288,6 +387,11 @@ def tokenizer_repair_lock(model_dir: str | Path) -> Iterator[None]:
                     "with exactly one link"
                 )
             _acquire_repair_flock(sentinel_descriptor)
+            if os.getpid() != acquisition_pid:
+                raise RuntimeError(
+                    "process forked while acquiring cross-process tokenizer "
+                    "repair ownership"
+                )
             flock_acquired = True
             visible_metadata = os.stat(
                 _TOKENIZER_REPAIR_LOCK_NAME,
@@ -324,6 +428,10 @@ def tokenizer_repair_lock(model_dir: str | Path) -> Iterator[None]:
 
         depths[lock_key] = 1
         held_paths[canonical_directory] = lock_key
+        if os.getpid() != acquisition_pid:
+            raise RuntimeError(
+                "process forked before entering tokenizer repair ownership"
+            )
         try:
             yield
         finally:

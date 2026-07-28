@@ -10,7 +10,9 @@
 //
 // Usage:
 //   auto pipe = trtmc::load("model.trtfb");
-//   auto result = pipe->generate("Hello", {.max_new_tokens = 20});
+//   trtmc::GenerateConfig config;
+//   config.max_new_tokens = 20;
+//   auto result = pipe->generate("Hello", config);
 //   std::cout << result.text << std::endl;
 
 #include <cstddef>
@@ -90,7 +92,9 @@ struct TranscriptionRequest {
 };
 
 struct ImageResult {
-    std::vector<float> pixels; // [C, H, W] float32 in [0,1]
+    // Frame-major interleaved HWC: [T, H, W, C] float32 in [0, 1].
+    // The length is num_frames * height * width * channels.
+    std::vector<float> pixels;
     int32_t height{0};
     int32_t width{0};
     int32_t channels{3};

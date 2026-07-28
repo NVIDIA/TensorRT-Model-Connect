@@ -296,6 +296,18 @@ std::string make_temp_json(const std::string& body) {
     return p;
 }
 
+void test_yaml_loader_error_is_actionable() {
+    namespace fs = std::filesystem;
+    fs::path path = fs::temp_directory_path() / "test_config_cli_support_profile.yaml";
+    {
+        std::ofstream out(path);
+        out << "triattention:\n  kv_budget: 4096\n";
+    }
+    expect_throws([&] { trtmc::config::load_layered_file(path.string()); },
+                  "convert the profile to JSON", "yaml_loader_error_is_actionable");
+    fs::remove(path);
+}
+
 void test_resolve_builds_bundle_from_file_and_set() {
     register_demo_schema();
     const std::string path =
@@ -582,6 +594,7 @@ int main() {
     test_unknown_field_raises();
     test_coercion_error_surfaces_field();
 
+    test_yaml_loader_error_is_actionable();
     test_resolve_builds_bundle_from_file_and_set();
     test_resolve_session_beats_platform();
 

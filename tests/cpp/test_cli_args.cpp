@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -58,6 +59,17 @@ void test_help_aliases_show_help() {
     check(parse({"trtmc", "help"}).show_help, "help shows help");
     check(parse({"trtmc", "--help"}).show_help, "--help shows help");
     check(parse({"trtmc", "-h"}).show_help, "-h shows help");
+}
+
+void test_usage_lists_runtime_config_flags() {
+    std::ostringstream captured;
+    auto* previous = std::cerr.rdbuf(captured.rdbuf());
+    trtmc::cli::print_usage();
+    std::cerr.rdbuf(previous);
+    const std::string usage = captured.str();
+    check_message_contains(usage, "--config FILE.json", "usage lists runtime config file");
+    check_message_contains(usage, "--set NS.FIELD=VALUE", "usage lists runtime config override");
+    check_message_contains(usage, "route support varies", "usage qualifies route support");
 }
 
 void test_version_aliases() {
@@ -384,6 +396,7 @@ void test_initial_latents_are_run_input_source() {
 int main() {
     test_no_args_show_help();
     test_help_aliases_show_help();
+    test_usage_lists_runtime_config_flags();
     test_version_aliases();
     test_build_forwards_args_verbatim();
     test_run_parses_common_flags();

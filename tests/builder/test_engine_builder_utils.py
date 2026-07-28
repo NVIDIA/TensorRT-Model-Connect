@@ -17,6 +17,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import signal
 import stat
 import subprocess
 import sys
@@ -2897,7 +2898,7 @@ class TestEnsureTokenizerJson:
         assert not returned_while_owner_was_active
         assert json.loads(tokenizer_path.read_text())["model"]["type"] == "BPE"
 
-    def test_fork_guard_covers_open_before_fd_registration(
+    def test_fork_guard_covers_registered_fd_before_return(
         self,
         tmp_path,
         monkeypatch,
@@ -2905,7 +2906,7 @@ class TestEnsureTokenizerJson:
         _assert_fork_cannot_inherit_repair_fd_at_window(
             monkeypatch,
             tmp_path,
-            "opened-before-register",
+            "registered-before-return",
         )
 
     def test_fork_guard_covers_cleanup_before_unlock_and_close(
@@ -2999,6 +3000,636 @@ class TestEnsureTokenizerJson:
             payload = os.read(read_fd, 256)
             assert os.waitstatus_to_exitcode(wait_status) == 0
             assert payload == b"reused-fd-open-and-fresh-lock-ok"
+        finally:
+            if not child_process:
+                os.close(read_fd)
+                os.close(write_fd)
+
+    def test_same_thread_fork_during_fd_registration_rejects_child_and_preserves_reused_fd(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        if not hasattr(os, "fork"):
+            pytest.skip("requires os.fork")
+
+        read_fd, write_fd = os.pipe()
+        child_process = False
+        child_pid = None
+        lifecycle_calls = 0
+        reused_descriptor = None
+        unrelated_path = tmp_path / "same-thread-fork-unrelated-fd"
+
+        def lifecycle_hook(phase, descriptor):
+            nonlocal child_process
+            nonlocal child_pid
+            nonlocal lifecycle_calls
+            nonlocal reused_descriptor
+            if phase != "registered-before-return":
+                return
+            lifecycle_calls += 1
+            if lifecycle_calls != 2:
+                return
+            forked_pid = os.fork()
+            if forked_pid == 0:
+                child_process = True
+                child_pid = 0
+                replacement_descriptor = os.open(
+                    unrelated_path,
+                    os.O_RDWR | os.O_CREAT,
+                    0o600,
+                )
+                if replacement_descriptor != descriptor:
+                    os.dup2(replacement_descriptor, descriptor)
+                    os.close(replacement_descriptor)
+                reused_descriptor = descriptor
+            else:
+                child_pid = forked_pid
+
+        monkeypatch.setattr(
+            tokenizer_validation,
+            "_tokenizer_repair_fd_lifecycle_hook",
+            lifecycle_hook,
+        )
+
+        try:
+            try:
+                with tokenizer_validation.tokenizer_repair_lock(tmp_path):
+                    if child_process:
+                        os.write(write_fd, b"child-entered-critical-section")
+                        os._exit(2)
+            except RuntimeError as exc:
+                if not child_process:
+                    raise
+                try:
+                    assert "process forked while registering" in str(exc)
+                    assert reused_descriptor is not None
+                    reused_metadata = os.fstat(reused_descriptor)
+                    expected_metadata = unrelated_path.stat()
+                    assert reused_metadata.st_dev == expected_metadata.st_dev
+                    assert reused_metadata.st_ino == expected_metadata.st_ino
+                    os.write(write_fd, b"child-rejected-reused-fd-open")
+                    os._exit(0)
+                except BaseException as child_exc:
+                    os.write(
+                        write_fd,
+                        f"child-check:{type(child_exc).__name__}:{child_exc}".encode(),
+                    )
+                    os._exit(3)
+
+            if child_process:
+                os.write(write_fd, b"child-returned-without-error")
+                os._exit(4)
+
+            assert child_pid is not None
+            _, wait_status = os.waitpid(child_pid, 0)
+            payload = os.read(read_fd, 256)
+            assert os.waitstatus_to_exitcode(wait_status) == 0
+            assert payload == b"child-rejected-reused-fd-open"
+        finally:
+            if not child_process:
+                os.close(read_fd)
+                os.close(write_fd)
+
+    def test_open_wrapper_fork_rejects_child_without_closing_reused_fd(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        if not hasattr(os, "fork"):
+            pytest.skip("requires os.fork")
+
+        sentinel = tmp_path / "open-wrapper-sentinel"
+        unrelated = tmp_path / "open-wrapper-unrelated"
+        read_fd, write_fd = os.pipe()
+        original_open = tokenizer_validation._TOKENIZER_REPAIR_OS_OPEN
+        child_process = False
+        child_pid = None
+        reused_descriptor = None
+
+        def fork_inside_open(path, flags, mode=0o777, *, dir_fd=None):
+            nonlocal child_process
+            nonlocal child_pid
+            nonlocal reused_descriptor
+            descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+            forked_pid = os.fork()
+            if forked_pid == 0:
+                child_process = True
+                child_pid = 0
+                os.close(descriptor)
+                replacement = original_open(
+                    unrelated,
+                    os.O_RDWR | os.O_CREAT | os.O_TRUNC,
+                    0o600,
+                )
+                if replacement != descriptor:
+                    os.dup2(replacement, descriptor)
+                    os.close(replacement)
+                reused_descriptor = descriptor
+            else:
+                child_pid = forked_pid
+            return descriptor
+
+        monkeypatch.setattr(
+            tokenizer_validation,
+            "_TOKENIZER_REPAIR_OS_OPEN",
+            fork_inside_open,
+        )
+        parent_descriptor = None
+        try:
+            try:
+                parent_descriptor = (
+                    tokenizer_validation._open_registered_repair_descriptor(
+                        sentinel,
+                        os.O_RDWR | os.O_CREAT,
+                        mode=0o600,
+                    )
+                )
+            except RuntimeError as exc:
+                if not child_process:
+                    raise
+                try:
+                    assert "process forked while opening" in str(exc)
+                    assert reused_descriptor is not None
+                    reused_metadata = os.fstat(reused_descriptor)
+                    expected_metadata = unrelated.stat()
+                    assert reused_metadata.st_dev == expected_metadata.st_dev
+                    assert reused_metadata.st_ino == expected_metadata.st_ino
+                    assert not tokenizer_validation._TOKENIZER_REPAIR_FDS
+                    os.write(write_fd, b"child-rejected-reused-fd-open")
+                    os._exit(0)
+                except BaseException as child_exc:
+                    os.write(
+                        write_fd,
+                        f"child-check:{type(child_exc).__name__}:{child_exc}".encode(),
+                    )
+                    os._exit(2)
+
+            if child_process:
+                os.write(write_fd, b"child-returned-without-error")
+                os._exit(3)
+
+            assert parent_descriptor is not None
+            tokenizer_validation._close_registered_repair_descriptor(
+                parent_descriptor
+            )
+            parent_descriptor = None
+            assert child_pid is not None
+            _, wait_status = os.waitpid(child_pid, 0)
+            payload = os.read(read_fd, 512)
+            assert os.waitstatus_to_exitcode(wait_status) == 0
+            assert payload == b"child-rejected-reused-fd-open"
+            assert not tokenizer_validation._TOKENIZER_REPAIR_FDS
+        finally:
+            if not child_process:
+                if parent_descriptor is not None:
+                    tokenizer_validation._close_registered_repair_descriptor(
+                        parent_descriptor
+                    )
+                os.close(read_fd)
+                os.close(write_fd)
+
+    def test_local_lock_fork_rejects_child_before_using_reused_directory_fd(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        if not hasattr(os, "fork"):
+            pytest.skip("requires os.fork")
+
+        model_dir = tmp_path / "model"
+        unrelated_dir = tmp_path / "unrelated"
+        model_dir.mkdir()
+        unrelated_dir.mkdir()
+        metadata = model_dir.stat()
+        lock_key = (metadata.st_dev, metadata.st_ino)
+        read_fd, write_fd = os.pipe()
+        child_process = False
+        child_pid = None
+        child_payload = b""
+        reused_descriptor = None
+
+        class ForkingLocalLock:
+            def acquire(self):
+                nonlocal child_process
+                nonlocal child_pid
+                nonlocal child_payload
+                nonlocal reused_descriptor
+                registered = tuple(
+                    tokenizer_validation._TOKENIZER_REPAIR_FDS
+                )
+                assert len(registered) == 1
+                directory_descriptor = registered[0]
+                forked_pid = os.fork()
+                if forked_pid == 0:
+                    child_process = True
+                    child_pid = 0
+                    replacement = os.open(
+                        unrelated_dir,
+                        os.O_RDONLY | os.O_DIRECTORY,
+                    )
+                    if replacement != directory_descriptor:
+                        os.dup2(replacement, directory_descriptor)
+                        os.close(replacement)
+                    reused_descriptor = directory_descriptor
+                else:
+                    child_pid = forked_pid
+                    child_payload = os.read(read_fd, 512)
+                return True
+
+            def release(self):
+                return None
+
+        monkeypatch.setitem(
+            tokenizer_validation._TOKENIZER_REPAIR_LOCKS,
+            lock_key,
+            ForkingLocalLock(),
+        )
+        try:
+            try:
+                with tokenizer_validation.tokenizer_repair_lock(model_dir):
+                    if child_process:
+                        os.write(write_fd, b"child-entered-critical-section")
+                        os._exit(2)
+            except RuntimeError as exc:
+                if not child_process:
+                    raise
+                try:
+                    assert "process forked while acquiring process-local" in str(
+                        exc
+                    )
+                    assert reused_descriptor is not None
+                    reused = os.fstat(reused_descriptor)
+                    expected = unrelated_dir.stat()
+                    assert reused.st_dev == expected.st_dev
+                    assert reused.st_ino == expected.st_ino
+                    assert not tokenizer_validation._TOKENIZER_REPAIR_FDS
+                    assert not (
+                        unrelated_dir
+                        / tokenizer_validation._TOKENIZER_REPAIR_LOCK_NAME
+                    ).exists()
+                    os.write(write_fd, b"child-rejected-reused-directory")
+                    os._exit(0)
+                except BaseException as child_exc:
+                    os.write(
+                        write_fd,
+                        f"child-check:{type(child_exc).__name__}:{child_exc}".encode(),
+                    )
+                    os._exit(3)
+
+            if child_process:
+                os.write(write_fd, b"child-returned-without-error")
+                os._exit(4)
+
+            assert child_pid is not None
+            _, wait_status = os.waitpid(child_pid, 0)
+            assert os.waitstatus_to_exitcode(wait_status) == 0
+            assert child_payload == b"child-rejected-reused-directory"
+            assert (
+                model_dir
+                / tokenizer_validation._TOKENIZER_REPAIR_LOCK_NAME
+            ).is_file()
+        finally:
+            if not child_process:
+                os.close(read_fd)
+                os.close(write_fd)
+
+    def test_flock_fork_rejects_child_before_using_reused_descriptors(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        if not hasattr(os, "fork"):
+            pytest.skip("requires os.fork")
+
+        model_dir = tmp_path / "model"
+        model_dir.mkdir()
+        unrelated = tmp_path / "unrelated"
+        read_fd, write_fd = os.pipe()
+        child_process = False
+        child_pid = None
+        child_payload = b""
+        reused_directory_descriptor = None
+        reused_sentinel_descriptor = None
+        original_acquire = tokenizer_validation._acquire_repair_flock
+
+        def fork_during_flock(descriptor):
+            nonlocal child_process
+            nonlocal child_pid
+            nonlocal child_payload
+            nonlocal reused_directory_descriptor
+            nonlocal reused_sentinel_descriptor
+            descriptors = tuple(
+                tokenizer_validation._TOKENIZER_REPAIR_FDS
+            )
+            directory_descriptor = next(
+                value
+                for value in descriptors
+                if stat.S_ISDIR(os.fstat(value).st_mode)
+            )
+            sentinel_descriptor = next(
+                value
+                for value in descriptors
+                if value != directory_descriptor
+            )
+            assert descriptor == sentinel_descriptor
+            forked_pid = os.fork()
+            if forked_pid == 0:
+                child_process = True
+                child_pid = 0
+                replacement_directory = os.open(
+                    model_dir,
+                    os.O_RDONLY | os.O_DIRECTORY,
+                )
+                if replacement_directory != directory_descriptor:
+                    os.dup2(
+                        replacement_directory,
+                        directory_descriptor,
+                    )
+                    os.close(replacement_directory)
+                replacement_file = os.open(
+                    unrelated,
+                    os.O_RDWR | os.O_CREAT,
+                    0o600,
+                )
+                if replacement_file != sentinel_descriptor:
+                    os.dup2(replacement_file, sentinel_descriptor)
+                    os.close(replacement_file)
+                reused_directory_descriptor = directory_descriptor
+                reused_sentinel_descriptor = sentinel_descriptor
+                return
+            child_pid = forked_pid
+            child_payload = os.read(read_fd, 512)
+            original_acquire(descriptor)
+
+        monkeypatch.setattr(
+            tokenizer_validation,
+            "_acquire_repair_flock",
+            fork_during_flock,
+        )
+        try:
+            try:
+                with tokenizer_validation.tokenizer_repair_lock(model_dir):
+                    if child_process:
+                        os.write(write_fd, b"child-entered-critical-section")
+                        os._exit(2)
+            except RuntimeError as exc:
+                if not child_process:
+                    raise
+                try:
+                    assert "process forked while acquiring cross-process" in str(
+                        exc
+                    )
+                    assert reused_directory_descriptor is not None
+                    assert reused_sentinel_descriptor is not None
+                    directory_metadata = os.fstat(
+                        reused_directory_descriptor
+                    )
+                    expected_directory = model_dir.stat()
+                    assert (
+                        directory_metadata.st_dev
+                        == expected_directory.st_dev
+                    )
+                    assert (
+                        directory_metadata.st_ino
+                        == expected_directory.st_ino
+                    )
+                    sentinel_metadata = os.fstat(
+                        reused_sentinel_descriptor
+                    )
+                    expected_file = unrelated.stat()
+                    assert sentinel_metadata.st_dev == expected_file.st_dev
+                    assert sentinel_metadata.st_ino == expected_file.st_ino
+                    assert not tokenizer_validation._TOKENIZER_REPAIR_FDS
+                    os.write(write_fd, b"child-rejected-reused-descriptors")
+                    os._exit(0)
+                except BaseException as child_exc:
+                    os.write(
+                        write_fd,
+                        f"child-check:{type(child_exc).__name__}:{child_exc}".encode(),
+                    )
+                    os._exit(3)
+
+            if child_process:
+                os.write(write_fd, b"child-returned-without-error")
+                os._exit(4)
+
+            assert child_pid is not None
+            _, wait_status = os.waitpid(child_pid, 0)
+            assert os.waitstatus_to_exitcode(wait_status) == 0
+            assert child_payload == b"child-rejected-reused-descriptors"
+        finally:
+            if not child_process:
+                os.close(read_fd)
+                os.close(write_fd)
+
+    def test_fork_after_final_ownership_check_rejects_child_before_yield(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        if not hasattr(os, "fork"):
+            pytest.skip("requires os.fork")
+
+        model_dir = tmp_path / "model"
+        model_dir.mkdir()
+        read_fd, write_fd = os.pipe()
+        child_process = False
+        child_pid = None
+        original_stat = tokenizer_validation.os.stat
+        forked_once = False
+
+        def fork_after_final_stat(path, *args, **kwargs):
+            nonlocal child_process
+            nonlocal child_pid
+            nonlocal forked_once
+            metadata = original_stat(path, *args, **kwargs)
+            if (
+                not forked_once
+                and Path(path) == model_dir
+                and kwargs.get("follow_symlinks") is True
+            ):
+                forked_once = True
+                forked_pid = os.fork()
+                if forked_pid == 0:
+                    child_process = True
+                    child_pid = 0
+                else:
+                    child_pid = forked_pid
+            return metadata
+
+        monkeypatch.setattr(
+            tokenizer_validation.os,
+            "stat",
+            fork_after_final_stat,
+        )
+        try:
+            try:
+                with tokenizer_validation.tokenizer_repair_lock(model_dir):
+                    if child_process:
+                        os.write(write_fd, b"child-entered-critical-section")
+                        os._exit(2)
+            except RuntimeError as exc:
+                if not child_process:
+                    raise
+                assert "process forked before entering" in str(exc)
+                assert not tokenizer_validation._TOKENIZER_REPAIR_FDS
+                os.write(write_fd, b"child-rejected-before-yield")
+                os._exit(0)
+
+            if child_process:
+                os.write(write_fd, b"child-returned-without-error")
+                os._exit(3)
+
+            assert child_pid is not None
+            _, wait_status = os.waitpid(child_pid, 0)
+            payload = os.read(read_fd, 512)
+            assert os.waitstatus_to_exitcode(wait_status) == 0
+            assert payload == b"child-rejected-before-yield"
+        finally:
+            if not child_process:
+                os.close(read_fd)
+                os.close(write_fd)
+
+    def test_pending_signal_exception_closes_registered_descriptor(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        if not hasattr(signal, "pthread_sigmask") or not hasattr(signal, "SIGUSR1"):
+            pytest.skip("requires pthread_sigmask and SIGUSR1")
+
+        sentinel = tmp_path / "pending-signal-sentinel"
+        original_open = tokenizer_validation._TOKENIZER_REPAIR_OS_OPEN
+        original_handler = signal.getsignal(signal.SIGUSR1)
+        original_mask = signal.pthread_sigmask(
+            signal.SIG_UNBLOCK,
+            {signal.SIGUSR1},
+        )
+        opened_descriptor = None
+
+        def raising_handler(signum, frame):
+            del signum, frame
+            raise RuntimeError("pending tokenizer signal handler exploded")
+
+        def signal_inside_open(path, flags, mode=0o777, *, dir_fd=None):
+            nonlocal opened_descriptor
+            opened_descriptor = original_open(
+                path,
+                flags,
+                mode,
+                dir_fd=dir_fd,
+            )
+            os.kill(os.getpid(), signal.SIGUSR1)
+            return opened_descriptor
+
+        signal.signal(signal.SIGUSR1, raising_handler)
+        monkeypatch.setattr(
+            tokenizer_validation,
+            "_TOKENIZER_REPAIR_OS_OPEN",
+            signal_inside_open,
+        )
+        try:
+            with pytest.raises(
+                RuntimeError,
+                match="pending tokenizer signal handler exploded",
+            ):
+                tokenizer_validation._open_registered_repair_descriptor(
+                    sentinel,
+                    os.O_RDWR | os.O_CREAT,
+                    mode=0o600,
+                )
+            assert opened_descriptor is not None
+            with pytest.raises(OSError) as closed:
+                os.fstat(opened_descriptor)
+            assert closed.value.errno == errno.EBADF
+            assert not tokenizer_validation._TOKENIZER_REPAIR_FDS
+            current_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+            assert signal.SIGUSR1 not in current_mask
+        finally:
+            signal.signal(signal.SIGUSR1, original_handler)
+            signal.pthread_sigmask(signal.SIG_SETMASK, original_mask)
+
+    def test_fork_while_entering_descriptor_guard_rejects_child_without_retaining_flock(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        if not hasattr(os, "fork"):
+            pytest.skip("requires os.fork")
+
+        read_fd, write_fd = os.pipe()
+        child_process = False
+        child_pid = None
+        child_payload = b""
+
+        class ForkingGuard:
+            def __init__(self):
+                self._lock = threading.RLock()
+                self._entry_count = 0
+                self._forked = False
+
+            def acquire(self, *args, **kwargs):
+                return self._lock.acquire(*args, **kwargs)
+
+            def release(self):
+                return self._lock.release()
+
+            def __enter__(self):
+                nonlocal child_process
+                nonlocal child_pid
+                nonlocal child_payload
+                self._lock.acquire()
+                self._entry_count += 1
+                if self._entry_count == 2 and not self._forked:
+                    self._forked = True
+                    forked_pid = os.fork()
+                    if forked_pid == 0:
+                        child_process = True
+                        child_pid = 0
+                    else:
+                        child_pid = forked_pid
+                        child_payload = os.read(read_fd, 1024)
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                del exc_type, exc_value, traceback
+                self._lock.release()
+
+        monkeypatch.setattr(
+            tokenizer_validation,
+            "_TOKENIZER_REPAIR_FORK_GUARD",
+            ForkingGuard(),
+        )
+        started = time.monotonic()
+        try:
+            try:
+                with tokenizer_validation.tokenizer_repair_lock(tmp_path):
+                    if child_process:
+                        os.write(write_fd, b"child-entered-critical-section")
+                        time.sleep(1.2)
+                        os._exit(4)
+                    parent_enter_delay = time.monotonic() - started
+            except RuntimeError as exc:
+                if not child_process:
+                    raise
+                os.write(
+                    write_fd,
+                    f"child-rejected:{type(exc).__name__}:{exc}".encode(),
+                )
+                time.sleep(1.2)
+                os._exit(0)
+
+            if child_process:
+                os.write(write_fd, b"child-returned-without-error")
+                os._exit(5)
+
+            assert child_pid is not None
+            _, wait_status = os.waitpid(child_pid, 0)
+            assert child_payload.startswith(b"child-rejected:RuntimeError:")
+            assert b"process forked while entering" in child_payload
+            assert parent_enter_delay < 0.5
+            assert os.waitstatus_to_exitcode(wait_status) == 0
         finally:
             if not child_process:
                 os.close(read_fd)
