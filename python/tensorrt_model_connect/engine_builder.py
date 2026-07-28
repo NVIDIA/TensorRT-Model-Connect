@@ -41,6 +41,8 @@ from .hf_snapshot import GENERIC_HF_ALLOW_PATTERNS, hf_snapshot_allow_patterns
 from .bundle_writer import BundleInfo, BundleSection, write_bundle
 from .tokenizer_validation import (
     native_tokenizer_json_error as _native_tokenizer_json_error,
+    tokenizer_repair_lock as _tokenizer_repair_lock,
+    tokenizer_repair_lock_present as _tokenizer_repair_lock_present,
 )
 from . import trt_compat
 from .triattention_export import (
@@ -61,6 +63,19 @@ except ImportError:
         from cuda import cudart  # type: ignore[no-redef]
     except ImportError:  # pragma: no cover - depends on build environment
         cudart = None  # type: ignore[assignment]
+
+_BUNDLE_ASSET_FILENAMES = (
+    "config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "chat_template.jinja",
+    "vocab.json",
+    "merges.txt",
+    "special_tokens_map.json",
+    "tokenizer.model",
+    "preprocessor_config.json",
+    "processor_config.json",
+)
 
 
 def _setup_trt_import(rtx: bool) -> None:
@@ -961,6 +976,36 @@ def _generate_standard_tokenizer_json_transactionally(
     *,
     trust_remote_code: bool,
 ) -> str | None:
+    """Generate tokenizer.json while owning and rechecking its canonical path."""
+    if (
+        _tokenizer_path_is_present(tokenizer_path)
+        and _native_tokenizer_json_error(tokenizer_path) is None
+        and not _wordpiece_tokenizer_needs_rebuild(model_dir)
+        and not _tokenizer_repair_lock_present(model_dir)
+    ):
+        return None
+    with _tokenizer_repair_lock(model_dir):
+        if (
+            _tokenizer_path_is_present(tokenizer_path)
+            and _native_tokenizer_json_error(tokenizer_path) is None
+            and not _wordpiece_tokenizer_needs_rebuild(model_dir)
+        ):
+            # A transaction that committed while this caller waited owns the
+            # canonical result. Do not regenerate, quarantine, or roll it back.
+            return None
+        return _generate_standard_tokenizer_json_under_lock(
+            model_dir,
+            tokenizer_path,
+            trust_remote_code=trust_remote_code,
+        )
+
+
+def _generate_standard_tokenizer_json_under_lock(
+    model_dir: Path,
+    tokenizer_path: Path,
+    *,
+    trust_remote_code: bool,
+) -> str | None:
     """Generate and install tokenizer.json without clobbering the original."""
     had_original = _tokenizer_path_is_present(tokenizer_path)
     installed = False
@@ -1080,6 +1125,29 @@ def _ensure_tokenizer_json(
     failure to the C++ runtime.
     """
     _validate_trust_remote_code(trust_remote_code)
+    tokenizer_path = model_dir / "tokenizer.json"
+    if (
+        _tokenizer_path_is_present(tokenizer_path)
+        and _native_tokenizer_json_error(tokenizer_path) is None
+        and not _wordpiece_tokenizer_needs_rebuild(model_dir)
+        and not _tokenizer_repair_lock_present(model_dir)
+    ):
+        return
+    with _tokenizer_repair_lock(model_dir):
+        _ensure_tokenizer_json_under_lock(
+            model_dir,
+            plugin=plugin,
+            trust_remote_code=trust_remote_code,
+        )
+
+
+def _ensure_tokenizer_json_under_lock(
+    model_dir: Path,
+    *,
+    plugin=None,
+    trust_remote_code: bool = False,
+) -> None:
+    """Validate and, if needed, repair while the model directory is owned."""
     tokenizer_path = model_dir / "tokenizer.json"
     tokenizer_present = _tokenizer_path_is_present(tokenizer_path)
     existing_error = (
@@ -1929,10 +1997,7 @@ def build_bundle(
     # non-HF config adapter, synthesize config.json for the C++ runtime from
     # the parsed ModelConfig.
     embedded_config_json = False
-    for filename in ("config.json", "tokenizer.json", "tokenizer_config.json",
-                     "chat_template.jinja", "vocab.json", "merges.txt",
-                     "special_tokens_map.json", "tokenizer.model",
-                     "preprocessor_config.json", "processor_config.json"):
+    for filename in _BUNDLE_ASSET_FILENAMES:
         file_path = model_dir_path / filename
         if file_path.exists():
             data = file_path.read_bytes()

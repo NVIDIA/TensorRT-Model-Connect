@@ -266,6 +266,18 @@ the native tokenizer validator. A false return, exception, missing file,
 unsafe file type, or incompatible content causes the outer transaction to
 remove the candidate and restore the original.
 
+The coordinator holds the shared, reentrant repair lock across standard
+conversion, the family hook, validation, commit, and rollback. The persistent
+`.trtmc-tokenizer-repair.lock` sentinel is created before the first canonical
+tokenizer mutation and is intentionally retained, but is not bundled. A hook
+must not delete or replace it. Family helpers that can also be called directly
+must use the same repair-lock helper and revalidate `tokenizer.json` after
+acquiring it; a transient valid-looking candidate is not a committed result
+until the owning hook returns and the outer transaction validates it. A forked
+child discards inherited repair ownership, so it must acquire fresh ownership
+before modifying tokenizer state rather than relying on an inherited lexical
+context.
+
 Successful repair creates or replaces `tokenizer.json` in the resolved model
 directory, so local checkpoint directories must be writable. When an original
 existed, a failed-candidate cleanup or restore failure identifies the concrete

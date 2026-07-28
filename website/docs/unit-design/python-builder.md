@@ -65,6 +65,20 @@ coordinator calls the optional family `ensure_tokenizer_json` hook, passing
 `previous_error` and `trust_remote_code` only when the hook accepts those
 keywords.
 
+The whole mutation lifecycle is owned by a process-reentrant and cross-process
+advisory lock keyed to the resolved model directory. Before mutating canonical
+tokenizer state, the coordinator safely opens or creates the persistent
+regular-file sentinel `.trtmc-tokenizer-repair.lock`. It never unlinks that
+sentinel, so cooperating waiters continue to lock the same inode across process
+exits; the sentinel is excluded from bundle assets. Waiters revalidate under
+the lock and reuse a compatible result committed by an earlier transaction.
+The same-thread standard and family fallbacks re-enter the existing ownership
+without taking a second OS lock. A forked child closes inherited repair
+descriptors and discards inherited ownership; before modifying tokenizer
+state, it must acquire fresh ownership instead of relying on the inherited
+lexical context. A compatible directory with no sentinel can return through
+the read-only fast path.
+
 Before either attempt, an existing `tokenizer.json` is atomically moved to
 `original-tokenizer.json` in a unique hidden `tokenizer-recovery-*` directory,
 so the family hook sees no rejected file to short-circuit on. If that initial

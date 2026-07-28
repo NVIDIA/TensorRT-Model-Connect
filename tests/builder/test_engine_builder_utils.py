@@ -14,17 +14,25 @@ Postconditions: HF directories are correctly identified, tokenizer special-token
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
+import subprocess
 import sys
+import threading
+import time
 import types
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 import tensorrt_model_connect.engine_builder as engine_builder
+import tensorrt_model_connect.families.internlm.tokenizer_json as internlm_tokenizer_json
+import tensorrt_model_connect.tokenizer_conversion as tokenizer_conversion
+import tensorrt_model_connect.tokenizer_validation as tokenizer_validation
 
 try:
     from tensorrt_model_connect.engine_builder import (
@@ -59,6 +67,104 @@ def _native_tokenizer_payload(
         model = {"type": "Unigram", "vocab": [["<unk>", -1.0]]}
     model.update(model_fields or {})
     return {"model": model, **document_fields}
+
+
+def _tokenizer_transaction_artifacts(model_dir):
+    return [
+        path
+        for path in model_dir.glob(".trtmc-*")
+        if path.name != tokenizer_validation._TOKENIZER_REPAIR_LOCK_NAME
+    ]
+
+
+def _assert_safe_tokenizer_repair_sentinel(model_dir):
+    sentinel = model_dir / tokenizer_validation._TOKENIZER_REPAIR_LOCK_NAME
+    metadata = sentinel.lstat()
+    assert stat.S_ISREG(metadata.st_mode)
+    assert metadata.st_nlink == 1
+    assert stat.S_IMODE(metadata.st_mode) & 0o600 == 0o600
+    assert stat.S_IMODE(metadata.st_mode) & 0o077 == 0
+
+
+def _assert_fork_cannot_inherit_repair_fd_at_window(
+    monkeypatch,
+    model_dir,
+    lifecycle_phase,
+):
+    if not hasattr(os, "fork"):
+        pytest.skip("requires os.fork")
+
+    window_entered = threading.Event()
+    fork_before_callback = threading.Event()
+    fork_finished = threading.Event()
+    read_fd, write_fd = os.pipe()
+    state = {}
+    errors = []
+
+    def lifecycle_hook(phase, descriptor):
+        if phase == lifecycle_phase and not window_entered.is_set():
+            state["descriptor"] = descriptor
+            window_entered.set()
+            assert fork_before_callback.wait(timeout=5)
+
+    def atfork_hook(phase):
+        if phase == "before":
+            fork_before_callback.set()
+
+    monkeypatch.setattr(
+        tokenizer_validation,
+        "_tokenizer_repair_fd_lifecycle_hook",
+        lifecycle_hook,
+    )
+    monkeypatch.setattr(
+        tokenizer_validation,
+        "_tokenizer_repair_atfork_hook",
+        atfork_hook,
+    )
+
+    def fork_worker():
+        try:
+            assert window_entered.wait(timeout=5)
+            child_pid = os.fork()
+            if child_pid == 0:
+                try:
+                    try:
+                        os.fstat(state["descriptor"])
+                    except OSError as exc:
+                        payload = (
+                            b"closed"
+                            if exc.errno == errno.EBADF
+                            else f"errno:{exc.errno}".encode()
+                        )
+                    else:
+                        payload = b"open"
+                    os.write(write_fd, payload)
+                finally:
+                    os._exit(0)
+            _, wait_status = os.waitpid(child_pid, 0)
+            state["wait_status"] = wait_status
+        except Exception as exc:  # pragma: no cover - assertion reports it
+            errors.append(exc)
+        finally:
+            fork_finished.set()
+
+    worker = threading.Thread(target=fork_worker, daemon=True)
+    worker.start()
+    try:
+        with tokenizer_validation.tokenizer_repair_lock(model_dir):
+            if lifecycle_phase == "opened-before-register":
+                assert fork_finished.wait(timeout=5)
+        assert fork_finished.wait(timeout=5)
+        payload = os.read(read_fd, 32)
+    finally:
+        worker.join(timeout=5)
+        os.close(read_fd)
+        os.close(write_fd)
+
+    assert not worker.is_alive()
+    assert not errors
+    assert os.waitstatus_to_exitcode(state["wait_status"]) == 0
+    assert payload == b"closed"
 
 
 class TestIsHfModelDir:
@@ -1383,7 +1489,7 @@ class TestEnsureTokenizerJson:
 
         tokenizer = json.loads((tmp_path / "tokenizer.json").read_text())
         assert tokenizer["model"]["vocab"]["hello"] == 5
-        assert not list(tmp_path.glob(".trtmc-*"))
+        assert not _tokenizer_transaction_artifacts(tmp_path)
 
     def test_missing_fast_tokenizer_delegates_to_family_plugin(
         self,
@@ -1502,7 +1608,7 @@ class TestEnsureTokenizerJson:
         assert not tokenizer_path.is_symlink()
         assert json.loads(tokenizer_path.read_text())["model"]["type"] == "Unigram"
         assert not (tmp_path / "real-tokenizer.json").exists()
-        assert not list(tmp_path.glob(".trtmc-*"))
+        assert not _tokenizer_transaction_artifacts(tmp_path)
 
     def test_empty_generated_file_is_rejected_and_original_is_restored(
         self,
@@ -1535,7 +1641,7 @@ class TestEnsureTokenizerJson:
 
         assert tokenizer_path.read_bytes() == original
         assert not tokenizer_path.is_symlink()
-        assert not list(tmp_path.glob(".trtmc-*"))
+        assert not _tokenizer_transaction_artifacts(tmp_path)
 
     def test_deep_existing_json_reaches_normal_repair_failure_and_rollback(
         self,
@@ -1558,7 +1664,7 @@ class TestEnsureTokenizerJson:
             _ensure_tokenizer_json(tmp_path)
 
         assert tokenizer_path.read_bytes() == original
-        assert not list(tmp_path.glob(".trtmc-*"))
+        assert not _tokenizer_transaction_artifacts(tmp_path)
 
     def test_standard_cleanup_failure_preserves_original_at_recovery_path(
         self,
@@ -1847,7 +1953,7 @@ class TestEnsureTokenizerJson:
             _ensure_tokenizer_json(tmp_path)
 
         assert tokenizer_path.read_bytes() == original
-        assert not list(tmp_path.glob(".trtmc-*"))
+        assert not _tokenizer_transaction_artifacts(tmp_path)
 
     def test_family_hook_cannot_approve_incompatible_tokenizer(
         self,
@@ -1926,7 +2032,7 @@ class TestEnsureTokenizerJson:
         assert tokenizer_path.read_bytes() == original
         assert not tokenizer_path.is_symlink()
         assert json.loads(source_path.read_text()) == source_payload
-        assert not list(tmp_path.glob(".trtmc-*"))
+        assert not _tokenizer_transaction_artifacts(tmp_path)
 
     @pytest.mark.parametrize(
         "failure_mode",
@@ -1977,7 +2083,7 @@ class TestEnsureTokenizerJson:
             _ensure_tokenizer_json(tmp_path, plugin=FailingPlugin())
 
         assert tokenizer_path.read_bytes() == original
-        assert not list(tmp_path.glob(".trtmc-*"))
+        assert not _tokenizer_transaction_artifacts(tmp_path)
 
     def test_failed_repair_restores_dangling_tokenizer_symlink(
         self,
@@ -2014,7 +2120,7 @@ class TestEnsureTokenizerJson:
         assert tokenizer_path.readlink() == Path(
             "missing-original-tokenizer.json"
         )
-        assert not list(tmp_path.glob(".trtmc-*"))
+        assert not _tokenizer_transaction_artifacts(tmp_path)
 
     def test_rejected_file_does_not_shortcut_t5_unigram_fallback(
         self,
@@ -2123,7 +2229,826 @@ class TestEnsureTokenizerJson:
         assert calls["sentencepiece_path"] == sentencepiece_path
         assert calls["vocab"] == [("<unk>", -1.0), ("\u2581hello", -2.0)]
         assert calls["unk_id"] == 0
-        assert not list(tmp_path.glob(".trtmc-*"))
+        assert not _tokenizer_transaction_artifacts(tmp_path)
+
+    def test_standard_concurrent_missing_failure_cannot_remove_later_commit(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        first_loader_entered = threading.Event()
+        release_first_loader = threading.Event()
+        call_count = 0
+        call_count_lock = threading.Lock()
+
+        class ValidTokenizer:
+            @staticmethod
+            def save_pretrained(path):
+                (Path(path) / "tokenizer.json").write_text(
+                    json.dumps(_native_tokenizer_payload("BPE")),
+                    encoding="utf-8",
+                )
+
+        class SequencedAutoTokenizer:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                nonlocal call_count
+                with call_count_lock:
+                    call_index = call_count
+                    call_count += 1
+                if call_index == 0:
+                    first_loader_entered.set()
+                    assert release_first_loader.wait(timeout=5)
+                    raise RuntimeError("deterministic first repair failure")
+                return ValidTokenizer()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=SequencedAutoTokenizer),
+        )
+        outcomes = {}
+
+        def repair(name):
+            outcomes[name] = (
+                engine_builder._generate_standard_tokenizer_json_transactionally(
+                    tmp_path,
+                    tokenizer_path,
+                    trust_remote_code=False,
+                )
+            )
+
+        first = threading.Thread(target=repair, args=("first",), daemon=True)
+        second = threading.Thread(target=repair, args=("second",), daemon=True)
+        first.start()
+        assert first_loader_entered.wait(timeout=5)
+        second.start()
+        release_first_loader.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+
+        assert not first.is_alive()
+        assert not second.is_alive()
+        assert "deterministic first repair failure" in outcomes["first"]
+        assert outcomes["second"] is None
+        assert call_count == 2
+        assert json.loads(tokenizer_path.read_text())["model"]["type"] == "BPE"
+        assert not _tokenizer_transaction_artifacts(tmp_path)
+        _assert_safe_tokenizer_repair_sentinel(tmp_path)
+
+    def test_standard_concurrent_incompatible_waiter_reuses_commit(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        tokenizer_path.write_text(
+            '{"malformed":"shared incompatible original"}',
+            encoding="utf-8",
+        )
+        loader_entered = threading.Event()
+        release_loader = threading.Event()
+        call_count = 0
+
+        class ValidTokenizer:
+            @staticmethod
+            def save_pretrained(path):
+                (Path(path) / "tokenizer.json").write_text(
+                    json.dumps(_native_tokenizer_payload("BPE")),
+                    encoding="utf-8",
+                )
+
+        class BlockingAutoTokenizer:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                loader_entered.set()
+                assert release_loader.wait(timeout=5)
+                return ValidTokenizer()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=BlockingAutoTokenizer),
+        )
+        outcomes = {}
+
+        def repair(name):
+            outcomes[name] = (
+                engine_builder._generate_standard_tokenizer_json_transactionally(
+                    tmp_path,
+                    tokenizer_path,
+                    trust_remote_code=False,
+                )
+            )
+
+        owner = threading.Thread(target=repair, args=("owner",), daemon=True)
+        waiter = threading.Thread(target=repair, args=("waiter",), daemon=True)
+        owner.start()
+        assert loader_entered.wait(timeout=5)
+        waiter.start()
+        release_loader.set()
+        owner.join(timeout=5)
+        waiter.join(timeout=5)
+
+        assert not owner.is_alive()
+        assert not waiter.is_alive()
+        assert outcomes == {"owner": None, "waiter": None}
+        assert call_count == 1
+        assert json.loads(tokenizer_path.read_text())["model"]["type"] == "BPE"
+        assert not _tokenizer_transaction_artifacts(tmp_path)
+        _assert_safe_tokenizer_repair_sentinel(tmp_path)
+
+    def test_concurrent_unigram_direct_waiter_revalidates_commit(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        converter_entered = threading.Event()
+        release_converter = threading.Event()
+        call_count = 0
+
+        def blocking_conversion(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            converter_entered.set()
+            assert release_converter.wait(timeout=5)
+            tokenizer_path.write_text(
+                json.dumps(_native_tokenizer_payload("Unigram")),
+                encoding="utf-8",
+            )
+            return True
+
+        monkeypatch.setattr(
+            tokenizer_conversion,
+            "_ensure_unigram_tokenizer_json_under_lock",
+            blocking_conversion,
+        )
+        outcomes = {}
+
+        def repair(name):
+            outcomes[name] = (
+                tokenizer_conversion.ensure_unigram_tokenizer_json(
+                    tmp_path,
+                    sentencepiece_candidates=("spiece.model",),
+                )
+            )
+
+        owner = threading.Thread(target=repair, args=("owner",), daemon=True)
+        waiter = threading.Thread(target=repair, args=("waiter",), daemon=True)
+        owner.start()
+        assert converter_entered.wait(timeout=5)
+        waiter.start()
+        release_converter.set()
+        owner.join(timeout=5)
+        waiter.join(timeout=5)
+
+        assert not owner.is_alive()
+        assert not waiter.is_alive()
+        assert outcomes == {"owner": True, "waiter": True}
+        assert call_count == 1
+        assert json.loads(tokenizer_path.read_text())["model"]["type"] == "Unigram"
+        assert not _tokenizer_transaction_artifacts(tmp_path)
+        _assert_safe_tokenizer_repair_sentinel(tmp_path)
+
+    def test_outer_concurrent_waiter_revalidates_committed_tokenizer(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        generator_entered = threading.Event()
+        release_generator = threading.Event()
+        call_count = 0
+
+        def blocking_standard(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            generator_entered.set()
+            assert release_generator.wait(timeout=5)
+            tokenizer_path.write_text(
+                json.dumps(_native_tokenizer_payload("BPE")),
+                encoding="utf-8",
+            )
+            return None
+
+        monkeypatch.setattr(
+            engine_builder,
+            "_generate_standard_tokenizer_json_transactionally",
+            blocking_standard,
+        )
+        errors = []
+
+        def repair():
+            try:
+                _ensure_tokenizer_json(tmp_path)
+            except Exception as exc:  # pragma: no cover - assertion reports it
+                errors.append(exc)
+
+        owner = threading.Thread(target=repair, daemon=True)
+        waiter = threading.Thread(target=repair, daemon=True)
+        owner.start()
+        assert generator_entered.wait(timeout=5)
+        waiter.start()
+        release_generator.set()
+        owner.join(timeout=5)
+        waiter.join(timeout=5)
+
+        assert not owner.is_alive()
+        assert not waiter.is_alive()
+        assert not errors
+        assert call_count == 1
+        assert json.loads(tokenizer_path.read_text())["model"]["type"] == "BPE"
+        assert not _tokenizer_transaction_artifacts(tmp_path)
+        _assert_safe_tokenizer_repair_sentinel(tmp_path)
+
+    def test_tokenizer_repair_lock_failure_precedes_all_modification(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        def fail_flock(descriptor):
+            raise OSError("deterministic flock failure")
+
+        monkeypatch.setattr(
+            tokenizer_validation,
+            "_acquire_repair_flock",
+            fail_flock,
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="cross-process tokenizer.json repair ownership",
+        ):
+            _ensure_tokenizer_json(tmp_path)
+
+        assert not (tmp_path / "tokenizer.json").exists()
+        assert [path.name for path in tmp_path.iterdir()] == [
+            tokenizer_validation._TOKENIZER_REPAIR_LOCK_NAME
+        ]
+        _assert_safe_tokenizer_repair_sentinel(tmp_path)
+
+    def test_unlock_failure_does_not_reverse_committed_repair(
+        self,
+        tmp_path,
+        monkeypatch,
+        capsys,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+
+        class ValidTokenizer:
+            @staticmethod
+            def save_pretrained(path):
+                (Path(path) / "tokenizer.json").write_text(
+                    json.dumps(_native_tokenizer_payload("BPE")),
+                    encoding="utf-8",
+                )
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                return ValidTokenizer()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+        )
+        monkeypatch.setattr(
+            tokenizer_validation,
+            "_release_repair_flock",
+            lambda descriptor: (_ for _ in ()).throw(
+                OSError("deterministic unlock failure")
+            ),
+        )
+
+        assert (
+            engine_builder._generate_standard_tokenizer_json_transactionally(
+                tmp_path,
+                tokenizer_path,
+                trust_remote_code=False,
+            )
+            is None
+        )
+
+        assert json.loads(tokenizer_path.read_text())["model"]["type"] == "BPE"
+        assert "explicit lock release failed" in capsys.readouterr().err
+        _assert_safe_tokenizer_repair_sentinel(tmp_path)
+
+    @pytest.mark.parametrize(
+        "sentinel_kind",
+        ("symlink", "fifo", "directory", "hardlink"),
+    )
+    def test_unsafe_tokenizer_repair_sentinel_fails_before_canonical_change(
+        self,
+        tmp_path,
+        sentinel_kind,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        original = b'{"malformed":"must remain canonical"}'
+        tokenizer_path.write_bytes(original)
+        sentinel_path = (
+            tmp_path / tokenizer_validation._TOKENIZER_REPAIR_LOCK_NAME
+        )
+        if sentinel_kind == "symlink":
+            target = tmp_path / "sentinel-target"
+            target.write_text("target", encoding="utf-8")
+            sentinel_path.symlink_to(target.name)
+        elif sentinel_kind == "fifo":
+            os.mkfifo(sentinel_path)
+        elif sentinel_kind == "directory":
+            sentinel_path.mkdir()
+        else:
+            target = tmp_path / "sentinel-hardlink-target"
+            target.write_text("target", encoding="utf-8")
+            os.link(target, sentinel_path)
+
+        with pytest.raises(
+            RuntimeError,
+            match="cross-process tokenizer.json repair ownership",
+        ):
+            _ensure_tokenizer_json(tmp_path)
+
+        assert tokenizer_path.read_bytes() == original
+        assert not _tokenizer_transaction_artifacts(tmp_path)
+
+    def test_valid_read_only_snapshot_uses_lock_free_fast_path(
+        self,
+        tmp_path,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        tokenizer_path.write_text(
+            json.dumps(_native_tokenizer_payload("BPE")),
+            encoding="utf-8",
+        )
+        original_mode = stat.S_IMODE(tmp_path.stat().st_mode)
+        tmp_path.chmod(0o555)
+        try:
+            _ensure_tokenizer_json(tmp_path)
+            assert (
+                engine_builder._generate_standard_tokenizer_json_transactionally(
+                    tmp_path,
+                    tokenizer_path,
+                    trust_remote_code=False,
+                )
+                is None
+            )
+        finally:
+            tmp_path.chmod(original_mode)
+
+        assert not (
+            tmp_path / tokenizer_validation._TOKENIZER_REPAIR_LOCK_NAME
+        ).exists()
+
+    def test_tokenizer_repair_sentinel_is_not_a_bundle_asset(self):
+        assert (
+            tokenizer_validation._TOKENIZER_REPAIR_LOCK_NAME
+            not in engine_builder._BUNDLE_ASSET_FILENAMES
+        )
+
+    @pytest.mark.parametrize(
+        "fast_path",
+        ("outer", "standard", "internlm", "unigram"),
+    )
+    def test_all_fast_paths_check_sentinel_after_canonical_validation(
+        self,
+        tmp_path,
+        monkeypatch,
+        fast_path,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        tokenizer_path.write_text(
+            json.dumps(_native_tokenizer_payload("BPE")),
+            encoding="utf-8",
+        )
+        events = []
+
+        if fast_path in {"outer", "standard"}:
+            monkeypatch.setattr(
+                engine_builder,
+                "_native_tokenizer_json_error",
+                lambda path: events.append("canonical") or None,
+            )
+            monkeypatch.setattr(
+                engine_builder,
+                "_wordpiece_tokenizer_needs_rebuild",
+                lambda path: events.append("wordpiece") or False,
+            )
+            monkeypatch.setattr(
+                engine_builder,
+                "_tokenizer_repair_lock_present",
+                lambda path: events.append("sentinel") or False,
+            )
+            if fast_path == "outer":
+                _ensure_tokenizer_json(tmp_path)
+            else:
+                assert (
+                    engine_builder._generate_standard_tokenizer_json_transactionally(
+                        tmp_path,
+                        tokenizer_path,
+                        trust_remote_code=False,
+                    )
+                    is None
+                )
+            assert events == ["canonical", "wordpiece", "sentinel"]
+            return
+
+        if fast_path == "internlm":
+            monkeypatch.setattr(
+                internlm_tokenizer_json,
+                "native_tokenizer_json_error",
+                lambda path: events.append("canonical") or None,
+            )
+            monkeypatch.setattr(
+                internlm_tokenizer_json,
+                "tokenizer_repair_lock_present",
+                lambda path: events.append("sentinel") or False,
+            )
+            assert internlm_tokenizer_json.ensure_tokenizer_json(tmp_path)
+        else:
+            monkeypatch.setattr(
+                tokenizer_conversion,
+                "native_tokenizer_json_error",
+                lambda path: events.append("canonical") or None,
+            )
+            monkeypatch.setattr(
+                tokenizer_conversion,
+                "tokenizer_repair_lock_present",
+                lambda path: events.append("sentinel") or False,
+            )
+            assert tokenizer_conversion.ensure_unigram_tokenizer_json(
+                tmp_path,
+                sentencepiece_candidates=(),
+            )
+        assert events == ["canonical", "sentinel"]
+
+    def test_waiter_does_not_trust_uncommitted_valid_family_candidate(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        first_candidate_written = threading.Event()
+        release_first_hook = threading.Event()
+        waiter_started = threading.Event()
+        waiter_returned = threading.Event()
+        hook_call_count = 0
+        hook_call_lock = threading.Lock()
+
+        monkeypatch.setattr(
+            engine_builder,
+            "_generate_standard_tokenizer_json_transactionally",
+            lambda *args, **kwargs: "conversion unavailable",
+        )
+
+        class SequencedPlugin:
+            @staticmethod
+            def ensure_tokenizer_json(model_dir, **kwargs):
+                nonlocal hook_call_count
+                with hook_call_lock:
+                    call_index = hook_call_count
+                    hook_call_count += 1
+                tokenizer_path.write_text(
+                    json.dumps(_native_tokenizer_payload("BPE")),
+                    encoding="utf-8",
+                )
+                if call_index == 0:
+                    first_candidate_written.set()
+                    assert release_first_hook.wait(timeout=5)
+                    raise RuntimeError("first family hook fails after write")
+                return True
+
+        outcomes = {}
+
+        def owner_repair():
+            try:
+                _ensure_tokenizer_json(tmp_path, plugin=SequencedPlugin())
+            except Exception as exc:
+                outcomes["owner"] = exc
+
+        def waiter_repair():
+            waiter_started.set()
+            try:
+                _ensure_tokenizer_json(tmp_path, plugin=SequencedPlugin())
+                outcomes["waiter"] = None
+            except Exception as exc:  # pragma: no cover - assertion reports it
+                outcomes["waiter"] = exc
+            finally:
+                waiter_returned.set()
+
+        owner = threading.Thread(target=owner_repair, daemon=True)
+        waiter = threading.Thread(target=waiter_repair, daemon=True)
+        owner.start()
+        assert first_candidate_written.wait(timeout=5)
+        waiter.start()
+        assert waiter_started.wait(timeout=5)
+        assert not waiter_returned.wait(timeout=0.1)
+        release_first_hook.set()
+        owner.join(timeout=5)
+        waiter.join(timeout=5)
+
+        assert not owner.is_alive()
+        assert not waiter.is_alive()
+        assert isinstance(outcomes["owner"], RuntimeError)
+        assert outcomes["waiter"] is None
+        assert hook_call_count == 2
+        assert json.loads(tokenizer_path.read_text())["model"]["type"] == "BPE"
+        assert not _tokenizer_transaction_artifacts(tmp_path)
+
+    def test_fast_path_validates_canonical_before_sentinel_absence(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        invalid_original = '{"malformed":"initial canonical"}'
+        tokenizer_path.write_text(invalid_original, encoding="utf-8")
+        owner_trigger = threading.Event()
+        transient_written = threading.Event()
+        allow_owner_rollback = threading.Event()
+        waiter_decided = threading.Event()
+        waiter_returned = threading.Event()
+        owner_errors = []
+        waiter_errors = []
+        waiter_name = "tokenizer-fast-path-ordering-waiter"
+        validation_observed = False
+        sentinel_absence_observed = False
+        waiter_attempted_lock = False
+
+        real_native_error = engine_builder._native_tokenizer_json_error
+        real_lock_present = engine_builder._tokenizer_repair_lock_present
+        real_repair_lock = engine_builder._tokenizer_repair_lock
+
+        def observed_native_error(path):
+            nonlocal validation_observed
+            if (
+                threading.current_thread().name == waiter_name
+                and not validation_observed
+            ):
+                captured_error = real_native_error(path)
+                validation_observed = True
+                owner_trigger.set()
+                assert transient_written.wait(timeout=5)
+                return captured_error
+            return real_native_error(path)
+
+        def observed_lock_present(path):
+            nonlocal sentinel_absence_observed
+            if (
+                threading.current_thread().name == waiter_name
+                and not sentinel_absence_observed
+            ):
+                captured_presence = real_lock_present(path)
+                sentinel_absence_observed = True
+                owner_trigger.set()
+                assert transient_written.wait(timeout=5)
+                return captured_presence
+            return real_lock_present(path)
+
+        @contextmanager
+        def observed_repair_lock(path):
+            nonlocal waiter_attempted_lock
+            if threading.current_thread().name == waiter_name:
+                waiter_attempted_lock = True
+                waiter_decided.set()
+            with real_repair_lock(path):
+                yield
+
+        def stable_standard_repair(*args, **kwargs):
+            tokenizer_path.write_text(
+                json.dumps(_native_tokenizer_payload("BPE")),
+                encoding="utf-8",
+            )
+            return None
+
+        monkeypatch.setattr(
+            engine_builder,
+            "_native_tokenizer_json_error",
+            observed_native_error,
+        )
+        monkeypatch.setattr(
+            engine_builder,
+            "_tokenizer_repair_lock_present",
+            observed_lock_present,
+        )
+        monkeypatch.setattr(
+            engine_builder,
+            "_tokenizer_repair_lock",
+            observed_repair_lock,
+        )
+        monkeypatch.setattr(
+            engine_builder,
+            "_generate_standard_tokenizer_json_transactionally",
+            stable_standard_repair,
+        )
+
+        def owner_transaction():
+            try:
+                assert owner_trigger.wait(timeout=5)
+                with tokenizer_validation.tokenizer_repair_lock(tmp_path):
+                    tokenizer_path.write_text(
+                        json.dumps(_native_tokenizer_payload("BPE")),
+                        encoding="utf-8",
+                    )
+                    transient_written.set()
+                    assert allow_owner_rollback.wait(timeout=5)
+                    tokenizer_path.write_text(
+                        invalid_original,
+                        encoding="utf-8",
+                    )
+            except Exception as exc:  # pragma: no cover - assertion reports it
+                owner_errors.append(exc)
+
+        def waiter_transaction():
+            try:
+                _ensure_tokenizer_json(tmp_path)
+            except Exception as exc:  # pragma: no cover - assertion reports it
+                waiter_errors.append(exc)
+            finally:
+                waiter_returned.set()
+                waiter_decided.set()
+
+        owner = threading.Thread(target=owner_transaction, daemon=True)
+        waiter = threading.Thread(
+            target=waiter_transaction,
+            name=waiter_name,
+            daemon=True,
+        )
+        owner.start()
+        waiter.start()
+        assert transient_written.wait(timeout=5)
+        assert waiter_decided.wait(timeout=5)
+        returned_while_owner_was_active = waiter_returned.is_set()
+        attempted_lock_while_owner_was_active = waiter_attempted_lock
+        allow_owner_rollback.set()
+        owner.join(timeout=5)
+        waiter.join(timeout=5)
+
+        assert not owner.is_alive()
+        assert not waiter.is_alive()
+        assert not owner_errors
+        assert not waiter_errors
+        assert validation_observed
+        assert not sentinel_absence_observed
+        assert attempted_lock_while_owner_was_active
+        assert not returned_while_owner_was_active
+        assert json.loads(tokenizer_path.read_text())["model"]["type"] == "BPE"
+
+    def test_fork_guard_covers_open_before_fd_registration(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _assert_fork_cannot_inherit_repair_fd_at_window(
+            monkeypatch,
+            tmp_path,
+            "opened-before-register",
+        )
+
+    def test_fork_guard_covers_cleanup_before_unlock_and_close(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _assert_fork_cannot_inherit_repair_fd_at_window(
+            monkeypatch,
+            tmp_path,
+            "before-unlock-close",
+        )
+
+    def test_fork_child_inherited_context_cannot_close_reused_fd(
+        self,
+        tmp_path,
+    ):
+        if not hasattr(os, "fork"):
+            pytest.skip("requires os.fork")
+
+        read_fd, write_fd = os.pipe()
+        child_pid = None
+        child_process = False
+        sentinel_descriptor = None
+        unrelated_path = tmp_path / "fork-child-unrelated-fd"
+        try:
+            try:
+                with tokenizer_validation.tokenizer_repair_lock(tmp_path):
+                    sentinel_metadata = (
+                        tmp_path
+                        / tokenizer_validation._TOKENIZER_REPAIR_LOCK_NAME
+                    ).lstat()
+                    for descriptor in tuple(
+                        tokenizer_validation._TOKENIZER_REPAIR_FDS
+                    ):
+                        metadata = os.fstat(descriptor)
+                        if (
+                            metadata.st_dev == sentinel_metadata.st_dev
+                            and metadata.st_ino == sentinel_metadata.st_ino
+                        ):
+                            sentinel_descriptor = descriptor
+                            break
+                    assert sentinel_descriptor is not None
+
+                    child_pid = os.fork()
+                    if child_pid == 0:
+                        child_process = True
+                        replacement_descriptor = os.open(
+                            unrelated_path,
+                            os.O_RDWR | os.O_CREAT,
+                            0o600,
+                        )
+                        if replacement_descriptor != sentinel_descriptor:
+                            os.dup2(
+                                replacement_descriptor,
+                                sentinel_descriptor,
+                            )
+                            os.close(replacement_descriptor)
+            except BaseException as exc:
+                if child_process:
+                    os.write(
+                        write_fd,
+                        f"inherited-exit:{type(exc).__name__}:{exc}".encode(),
+                    )
+                    os._exit(1)
+                raise
+
+            if child_process:
+                try:
+                    reused_metadata = os.fstat(sentinel_descriptor)
+                    expected_metadata = unrelated_path.stat()
+                    assert reused_metadata.st_dev == expected_metadata.st_dev
+                    assert reused_metadata.st_ino == expected_metadata.st_ino
+
+                    with tokenizer_validation.tokenizer_repair_lock(tmp_path):
+                        assert tokenizer_validation._TOKENIZER_REPAIR_FDS
+
+                    os.fstat(sentinel_descriptor)
+                    assert not tokenizer_validation._TOKENIZER_REPAIR_FDS
+                    os.write(write_fd, b"reused-fd-open-and-fresh-lock-ok")
+                    os._exit(0)
+                except BaseException as exc:
+                    os.write(
+                        write_fd,
+                        f"child-check:{type(exc).__name__}:{exc}".encode(),
+                    )
+                    os._exit(1)
+
+            assert child_pid is not None
+            _, wait_status = os.waitpid(child_pid, 0)
+            payload = os.read(read_fd, 256)
+            assert os.waitstatus_to_exitcode(wait_status) == 0
+            assert payload == b"reused-fd-open-and-fresh-lock-ok"
+        finally:
+            if not child_process:
+                os.close(read_fd)
+                os.close(write_fd)
+
+    def test_tokenizer_repair_lock_serializes_independent_process(
+        self,
+        tmp_path,
+    ):
+        ready_path = tmp_path / "child-ready"
+        acquired_path = tmp_path / "child-acquired"
+        script = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "from tensorrt_model_connect.tokenizer_validation import "
+            "tokenizer_repair_lock\n"
+            "model_dir, ready, acquired = map(Path, sys.argv[1:])\n"
+            "ready.write_text('ready', encoding='utf-8')\n"
+            "with tokenizer_repair_lock(model_dir):\n"
+            "    acquired.write_text('acquired', encoding='utf-8')\n"
+        )
+        repo_root = Path(__file__).resolve().parents[2]
+        child_env = dict(os.environ)
+        python_path = str(repo_root / "python")
+        if child_env.get("PYTHONPATH"):
+            python_path += os.pathsep + child_env["PYTHONPATH"]
+        child_env["PYTHONPATH"] = python_path
+        child = None
+        with tokenizer_validation.tokenizer_repair_lock(tmp_path):
+            child = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    script,
+                    str(tmp_path),
+                    str(ready_path),
+                    str(acquired_path),
+                ],
+                cwd=repo_root,
+                env=child_env,
+            )
+            deadline = time.monotonic() + 5
+            while not ready_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert ready_path.exists()
+            assert not acquired_path.exists()
+
+        assert child is not None
+        assert child.wait(timeout=5) == 0
+        assert acquired_path.read_text(encoding="utf-8") == "acquired"
 
     def test_invalid_existing_tokenizer_fails_closed_when_rebuild_is_unavailable(
         self,

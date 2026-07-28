@@ -63,6 +63,16 @@ remain immutable. For diffusion builds, the family-owned tokenizer-section
 hook selects directories and invokes the same repair callback before
 special-token detection and config reconciliation.
 
+Cooperative repairs of the same resolved directory are serialized across
+threads and processes. Before its first canonical-tokenizer mutation, repair
+creates the persistent regular-file sentinel
+`.trtmc-tokenizer-repair.lock`; waiters acquire that lock and revalidate
+`tokenizer.json` instead of acting on stale state. The sentinel is not bundled,
+and its presence alone does not mean a repair is still active. Do not delete or
+replace it. A compatible directory that has never needed repair uses a
+lock-free read-only fast path. If safe lock ownership cannot be acquired,
+repair stops before moving or replacing the canonical tokenizer.
+
 Before repair, an existing original is atomically moved to
 `original-tokenizer.json` in a hidden `tokenizer-recovery-*` directory. If
 that directory cannot be reserved or the move fails, the original remains

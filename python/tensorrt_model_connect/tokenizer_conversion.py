@@ -6,9 +6,18 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import sys
+import tempfile
 from pathlib import Path
 from typing import Iterable
+
+from .tokenizer_validation import (
+    native_tokenizer_json_error,
+    tokenizer_repair_lock,
+    tokenizer_repair_lock_present,
+)
 
 
 def _candidate_paths(model_dir: Path, candidates: Iterable[str]) -> list[Path]:
@@ -40,9 +49,36 @@ def ensure_unigram_tokenizer_json(
 ) -> bool:
     """Generate tokenizer.json from an explicitly selected SentencePiece file."""
     path = Path(model_dir)
-    if (path / "tokenizer.json").exists():
+    tokenizer_path = path / "tokenizer.json"
+    if (
+        (tokenizer_path.exists() or tokenizer_path.is_symlink())
+        and native_tokenizer_json_error(tokenizer_path) is None
+        and not tokenizer_repair_lock_present(path)
+    ):
         return True
+    with tokenizer_repair_lock(path):
+        if (
+            (tokenizer_path.exists() or tokenizer_path.is_symlink())
+            and native_tokenizer_json_error(tokenizer_path) is None
+        ):
+            return True
+        return _ensure_unigram_tokenizer_json_under_lock(
+            path,
+            tokenizer_path,
+            sentencepiece_candidates=sentencepiece_candidates,
+            vocab_json_name=vocab_json_name,
+            previous_error=previous_error,
+        )
 
+
+def _ensure_unigram_tokenizer_json_under_lock(
+    path: Path,
+    tokenizer_path: Path,
+    *,
+    sentencepiece_candidates: Iterable[str],
+    vocab_json_name: str | None,
+    previous_error: str | None,
+) -> bool:
     candidates = _candidate_paths(path, sentencepiece_candidates)
     if not candidates:
         return False
@@ -78,7 +114,28 @@ def ensure_unigram_tokenizer_json(
         ])
         tokenizer.pre_tokenizer = pre_tokenizers.Sequence([])
         tokenizer.decoder = decoders.Metaspace()
-        tokenizer.save(str(path / "tokenizer.json"))
+        with tempfile.TemporaryDirectory(
+            prefix=".trtmc-unigram-tokenizer-repair-",
+            dir=path,
+        ) as temporary_dir:
+            candidate_path = Path(temporary_dir) / "tokenizer.json"
+            tokenizer.save(str(candidate_path))
+            candidate_metadata = candidate_path.lstat()
+            if (
+                not stat.S_ISREG(candidate_metadata.st_mode)
+                or candidate_metadata.st_size == 0
+            ):
+                raise RuntimeError(
+                    "generated tokenizer.json must be a non-empty regular, "
+                    "non-symlink file"
+                )
+            candidate_error = native_tokenizer_json_error(candidate_path)
+            if candidate_error is not None:
+                raise RuntimeError(
+                    "generated tokenizer.json is not native-compatible: "
+                    f"{candidate_error}"
+                )
+            os.replace(candidate_path, tokenizer_path)
         print(
             f"[trtmc build] Generated tokenizer.json from {spm_path.name} "
             f"({len(vocab)} tokens)",

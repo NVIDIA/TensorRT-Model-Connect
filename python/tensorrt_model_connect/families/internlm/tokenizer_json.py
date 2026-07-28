@@ -12,7 +12,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-from ...tokenizer_validation import native_tokenizer_json_error
+from ...tokenizer_validation import (
+    native_tokenizer_json_error,
+    tokenizer_repair_lock,
+    tokenizer_repair_lock_present,
+)
 
 
 class _TokenizerRollbackError(RuntimeError):
@@ -147,6 +151,26 @@ def ensure_tokenizer_json(
         )
     del previous_error
     path = Path(model_dir)
+    tokenizer_path = path / "tokenizer.json"
+    if (
+        _path_is_present(tokenizer_path)
+        and native_tokenizer_json_error(tokenizer_path) is None
+        and not tokenizer_repair_lock_present(path)
+    ):
+        return True
+    with tokenizer_repair_lock(path):
+        return _ensure_tokenizer_json_under_lock(
+            path,
+            trust_remote_code=trust_remote_code,
+        )
+
+
+def _ensure_tokenizer_json_under_lock(
+    path: Path,
+    *,
+    trust_remote_code: bool,
+) -> bool:
+    """Revalidate and repair only while this process owns the directory."""
     tokenizer_path = path / "tokenizer.json"
     if (
         _path_is_present(tokenizer_path)

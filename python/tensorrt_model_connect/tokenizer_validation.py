@@ -10,13 +10,373 @@ import math
 import os
 import re
 import stat
+import sys
+import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 _FLOAT32_MAX = 3.4028234663852886e38
 _INT32_MIN = -(2**31)
 _INT32_MAX = 2**31 - 1
 _NATIVE_MODEL_TYPES = {"BPE", "WordPiece", "Unigram"}
+_TOKENIZER_REPAIR_LOCK_NAME = ".trtmc-tokenizer-repair.lock"
+
+# A directory inode is the shared ownership boundary for every tokenizer.json
+# repair path. The process-local lock serializes threads (and makes nested
+# outer -> family repairs reentrant). A persistent regular-file sentinel gives
+# flock a writable descriptor on NFS and is never unlinked, avoiding stale
+# lock-file inode races after crashes.
+_TOKENIZER_REPAIR_LOCKS_GUARD = threading.Lock()
+_TOKENIZER_REPAIR_LOCKS: dict[tuple[int, int], threading.RLock] = {}
+_TOKENIZER_REPAIR_LOCK_DEPTH = threading.local()
+_TOKENIZER_REPAIR_FDS: set[int] = set()
+_TOKENIZER_REPAIR_FORK_GUARD = threading.RLock()
+
+
+def _tokenizer_repair_atfork_hook(phase: str) -> None:
+    """Test seam for deterministic fork-window probes."""
+    del phase
+
+
+def _tokenizer_repair_fd_lifecycle_hook(
+    phase: str,
+    descriptor: int,
+) -> None:
+    """Test seam around FD registration and release critical sections."""
+    del phase, descriptor
+
+
+def _before_tokenizer_repair_fork() -> None:
+    _tokenizer_repair_atfork_hook("before")
+    _TOKENIZER_REPAIR_FORK_GUARD.acquire()
+
+
+def _after_tokenizer_repair_fork_in_parent() -> None:
+    try:
+        _tokenizer_repair_atfork_hook("parent")
+    finally:
+        _TOKENIZER_REPAIR_FORK_GUARD.release()
+
+
+def _after_tokenizer_repair_fork_in_child() -> None:
+    """Close inherited transaction FDs and reset thread locks in a child."""
+    global _TOKENIZER_REPAIR_LOCKS_GUARD
+    global _TOKENIZER_REPAIR_LOCKS
+    global _TOKENIZER_REPAIR_LOCK_DEPTH
+    global _TOKENIZER_REPAIR_FDS
+    global _TOKENIZER_REPAIR_FORK_GUARD
+
+    # Closing the child's copies does not release the parent's flock; it keeps
+    # the child from mistaking an inherited open-file-description lock for its
+    # own reentrant acquisition.
+    for descriptor in tuple(_TOKENIZER_REPAIR_FDS):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    _TOKENIZER_REPAIR_LOCKS_GUARD = threading.Lock()
+    _TOKENIZER_REPAIR_LOCKS = {}
+    _TOKENIZER_REPAIR_LOCK_DEPTH = threading.local()
+    _TOKENIZER_REPAIR_FDS = set()
+    _TOKENIZER_REPAIR_FORK_GUARD = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(
+        before=_before_tokenizer_repair_fork,
+        after_in_parent=_after_tokenizer_repair_fork_in_parent,
+        after_in_child=_after_tokenizer_repair_fork_in_child,
+    )
+
+
+def _acquire_repair_flock(descriptor: int) -> None:
+    import fcntl
+
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+
+
+def _release_repair_flock(descriptor: int) -> None:
+    import fcntl
+
+    fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+
+def tokenizer_repair_lock_present(model_dir: str | Path) -> bool:
+    """Return whether callers must synchronize before trusting canonical data."""
+    sentinel = Path(model_dir) / _TOKENIZER_REPAIR_LOCK_NAME
+    try:
+        sentinel.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # An inaccessible or otherwise abnormal sentinel must never enable the
+        # unlocked fast path.
+        return True
+    return True
+
+
+def _open_registered_repair_descriptor(
+    path: str | Path,
+    flags: int,
+    *,
+    mode: int | None = None,
+    dir_fd: int | None = None,
+) -> int:
+    """Open and register an FD atomically with respect to process fork."""
+    with _TOKENIZER_REPAIR_FORK_GUARD:
+        if mode is None:
+            descriptor = os.open(path, flags)
+        else:
+            descriptor = os.open(path, flags, mode, dir_fd=dir_fd)
+        _tokenizer_repair_fd_lifecycle_hook(
+            "opened-before-register",
+            descriptor,
+        )
+        _TOKENIZER_REPAIR_FDS.add(descriptor)
+        return descriptor
+
+
+def _close_registered_repair_descriptor(descriptor: int | None) -> None:
+    """Close before unregistering while process fork is excluded."""
+    if descriptor is None:
+        return
+    with _TOKENIZER_REPAIR_FORK_GUARD:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        finally:
+            _TOKENIZER_REPAIR_FDS.discard(descriptor)
+
+
+@contextmanager
+def tokenizer_repair_lock(model_dir: str | Path) -> Iterator[None]:
+    """Own tokenizer repair for one model directory across threads/processes.
+
+    The directory and sentinel descriptors remain open for the complete outer
+    transaction. Nested acquisition by the owning thread is process-local
+    only, avoiding a second open/flock that could deadlock while preserving the
+    outer cross-process lock. A forked child drops inherited ownership in the
+    at-fork callback; exiting an inherited lexical context in that child is a
+    no-op, and fresh child repair ownership must be acquired separately.
+    """
+    acquisition_pid = os.getpid()
+    directory = Path(model_dir)
+    try:
+        canonical_directory = str(directory.resolve(strict=True))
+    except Exception as exc:
+        raise RuntimeError(
+            "cannot acquire tokenizer.json repair ownership for "
+            f"'{directory}' before modifying it: {exc}"
+        ) from exc
+
+    depths = getattr(_TOKENIZER_REPAIR_LOCK_DEPTH, "depths", None)
+    held_paths = getattr(_TOKENIZER_REPAIR_LOCK_DEPTH, "held_paths", None)
+    if depths is None or held_paths is None:
+        depths = {}
+        held_paths = {}
+        _TOKENIZER_REPAIR_LOCK_DEPTH.depths = depths
+        _TOKENIZER_REPAIR_LOCK_DEPTH.held_paths = held_paths
+
+    # The normal outer -> standard -> family path reuses the already-open
+    # directory descriptor and flock. resolve() also makes symlink aliases hit
+    # this fast path.
+    nested_key = held_paths.get(canonical_directory)
+    if nested_key is not None:
+        with _TOKENIZER_REPAIR_LOCKS_GUARD:
+            nested_lock = _TOKENIZER_REPAIR_LOCKS[nested_key]
+        nested_lock.acquire()
+        depths[nested_key] += 1
+        try:
+            yield
+        finally:
+            if os.getpid() == acquisition_pid:
+                depths[nested_key] -= 1
+                nested_lock.release()
+        return
+
+    directory_descriptor: int | None = None
+    sentinel_descriptor: int | None = None
+    flock_acquired = False
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    try:
+        directory_descriptor = _open_registered_repair_descriptor(
+            directory,
+            flags,
+        )
+        metadata = os.fstat(directory_descriptor)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise NotADirectoryError(f"not a directory: '{directory}'")
+    except Exception as exc:
+        if os.getpid() == acquisition_pid:
+            _close_registered_repair_descriptor(directory_descriptor)
+        directory_descriptor = None
+        raise RuntimeError(
+            "cannot acquire tokenizer.json repair ownership for "
+            f"'{directory}' before modifying it: {exc}"
+        ) from exc
+
+    lock_key = (metadata.st_dev, metadata.st_ino)
+    with _TOKENIZER_REPAIR_LOCKS_GUARD:
+        local_lock = _TOKENIZER_REPAIR_LOCKS.setdefault(
+            lock_key,
+            threading.RLock(),
+        )
+
+    acquired_local = False
+    try:
+        try:
+            local_lock.acquire()
+            acquired_local = True
+        except Exception as exc:
+            raise RuntimeError(
+                "cannot acquire process-local tokenizer.json repair "
+                f"ownership for '{directory}': {exc}"
+            ) from exc
+
+        depth = depths.get(lock_key, 0)
+        if depth:
+            depths[lock_key] = depth + 1
+            held_paths[canonical_directory] = lock_key
+            _close_registered_repair_descriptor(directory_descriptor)
+            directory_descriptor = None
+            try:
+                yield
+            finally:
+                if os.getpid() == acquisition_pid:
+                    nested_depth = depths[lock_key] - 1
+                    if nested_depth:
+                        depths[lock_key] = nested_depth
+                    else:
+                        depths.pop(lock_key, None)
+                    if held_paths.get(canonical_directory) == lock_key:
+                        held_paths.pop(canonical_directory, None)
+            return
+
+        try:
+            required_flags = ("O_NOFOLLOW", "O_NONBLOCK")
+            missing_flags = [
+                name for name in required_flags if not hasattr(os, name)
+            ]
+            if missing_flags:
+                raise OSError(
+                    "secure tokenizer repair locking requires "
+                    + ", ".join(missing_flags)
+                )
+            sentinel_flags = (
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_CLOEXEC
+                | os.O_NOFOLLOW
+                | os.O_NONBLOCK
+            )
+            sentinel_descriptor = _open_registered_repair_descriptor(
+                _TOKENIZER_REPAIR_LOCK_NAME,
+                sentinel_flags,
+                mode=0o600,
+                dir_fd=directory_descriptor,
+            )
+            sentinel_metadata = os.fstat(sentinel_descriptor)
+            if (
+                not stat.S_ISREG(sentinel_metadata.st_mode)
+                or sentinel_metadata.st_nlink != 1
+            ):
+                raise OSError(
+                    "tokenizer repair sentinel must be a regular file "
+                    "with exactly one link"
+                )
+            _acquire_repair_flock(sentinel_descriptor)
+            flock_acquired = True
+            visible_metadata = os.stat(
+                _TOKENIZER_REPAIR_LOCK_NAME,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+            visible_directory_metadata = os.stat(
+                directory,
+                follow_symlinks=True,
+            )
+            if (
+                not stat.S_ISREG(visible_metadata.st_mode)
+                or visible_metadata.st_nlink != 1
+                or visible_metadata.st_dev != sentinel_metadata.st_dev
+                or visible_metadata.st_ino != sentinel_metadata.st_ino
+            ):
+                raise OSError(
+                    "tokenizer repair sentinel changed while acquiring its lock"
+                )
+            if (
+                not stat.S_ISDIR(visible_directory_metadata.st_mode)
+                or visible_directory_metadata.st_dev != metadata.st_dev
+                or visible_directory_metadata.st_ino != metadata.st_ino
+            ):
+                raise OSError(
+                    "model directory changed while acquiring tokenizer "
+                    "repair ownership"
+                )
+        except Exception as exc:
+            raise RuntimeError(
+                "cannot acquire cross-process tokenizer.json repair "
+                f"ownership for '{directory}' before modifying it: {exc}"
+            ) from exc
+
+        depths[lock_key] = 1
+        held_paths[canonical_directory] = lock_key
+        try:
+            yield
+        finally:
+            if os.getpid() == acquisition_pid:
+                depths.pop(lock_key, None)
+                if held_paths.get(canonical_directory) == lock_key:
+                    held_paths.pop(canonical_directory, None)
+    finally:
+        # Keep both descriptors registered until the flock is explicitly
+        # released and both closes have completed. The at-fork before callback
+        # holds the same guard, eliminating acquire/register and
+        # unregister/unlock inheritance windows.
+        if os.getpid() == acquisition_pid:
+            with _TOKENIZER_REPAIR_FORK_GUARD:
+                if sentinel_descriptor is not None:
+                    _tokenizer_repair_fd_lifecycle_hook(
+                        "before-unlock-close",
+                        sentinel_descriptor,
+                    )
+                    if flock_acquired:
+                        try:
+                            _release_repair_flock(sentinel_descriptor)
+                        except Exception as exc:
+                            # Closing the descriptor still releases flock. The
+                            # transaction has already committed or rolled back,
+                            # so do not turn success into a false failure.
+                            try:
+                                print(
+                                    "[trtmc build] tokenizer.json repair "
+                                    "completed, but explicit lock release "
+                                    "failed; descriptor close will release it "
+                                    f"for '{directory}': {exc}",
+                                    file=sys.stderr,
+                                )
+                            except Exception:
+                                pass
+                    try:
+                        os.close(sentinel_descriptor)
+                    except OSError:
+                        pass
+                    finally:
+                        _TOKENIZER_REPAIR_FDS.discard(sentinel_descriptor)
+                    sentinel_descriptor = None
+                if directory_descriptor is not None:
+                    try:
+                        os.close(directory_descriptor)
+                    except OSError:
+                        pass
+                    finally:
+                        _TOKENIZER_REPAIR_FDS.discard(directory_descriptor)
+                    directory_descriptor = None
+            if acquired_local:
+                local_lock.release()
 
 
 def _is_int32(value: object) -> bool:

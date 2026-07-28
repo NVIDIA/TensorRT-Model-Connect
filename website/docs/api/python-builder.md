@@ -93,6 +93,17 @@ before special-token metadata is detected and before the bundle is written.
 The resolved local directory therefore must be writable; a caller that needs
 an immutable source snapshot should build from a writable copy.
 
+Repairs targeting the same resolved directory share a process-reentrant,
+cross-process advisory lock. Repair creates the persistent regular-file
+sentinel `.trtmc-tokenizer-repair.lock` before any canonical mutation and never
+removes it; the file is lock metadata, is not included in the bundle, and does
+not by itself indicate an active repair. A waiting builder revalidates
+`tokenizer.json` after acquiring ownership, so it reuses another builder's
+committed result rather than regenerating or rolling it back. A compatible
+snapshot with no sentinel keeps the read-only fast path. Unsafe sentinel types
+or an unavailable lock fail closed before the canonical tokenizer is moved or
+replaced.
+
 Before either attempt, the transaction atomically quarantines an existing file
 at `original-tokenizer.json` in a unique hidden `tokenizer-recovery-*`
 directory. If that initial move fails, the canonical original remains

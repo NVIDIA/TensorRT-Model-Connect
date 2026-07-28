@@ -7,6 +7,7 @@ import json
 import os
 import stat
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -156,6 +157,112 @@ def test_ensure_tokenizer_json_shortcuts_only_native_compatible_existing_file(
     )
 
     assert ensure_tokenizer_json(tmp_path)
+
+
+def test_concurrent_direct_repair_waiter_reuses_committed_tokenizer(
+    monkeypatch,
+    tmp_path,
+):
+    loader_entered = threading.Event()
+    release_loader = threading.Event()
+    call_count = 0
+
+    class FakeTokenizer:
+        is_fast = True
+
+        @staticmethod
+        def save_pretrained(path):
+            _write_valid_bpe_tokenizer(Path(path))
+
+    class BlockingAutoTokenizer:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            loader_entered.set()
+            assert release_loader.wait(timeout=5)
+            return FakeTokenizer()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        types.SimpleNamespace(AutoTokenizer=BlockingAutoTokenizer),
+    )
+    outcomes = {}
+
+    def repair(name):
+        outcomes[name] = ensure_tokenizer_json(tmp_path)
+
+    owner = threading.Thread(target=repair, args=("owner",), daemon=True)
+    waiter = threading.Thread(target=repair, args=("waiter",), daemon=True)
+    owner.start()
+    assert loader_entered.wait(timeout=5)
+    waiter.start()
+    release_loader.set()
+    owner.join(timeout=5)
+    waiter.join(timeout=5)
+
+    assert not owner.is_alive()
+    assert not waiter.is_alive()
+    assert outcomes == {"owner": True, "waiter": True}
+    assert call_count == 1
+    assert json.loads(
+        (tmp_path / "tokenizer.json").read_text(encoding="utf-8")
+    )["model"]["type"] == "BPE"
+    assert not list(tmp_path.glob(".internlm-tokenizer-*"))
+
+
+def test_outer_to_internlm_hook_reentrant_lock_does_not_deadlock(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        "tensorrt_model_connect.engine_builder."
+        "_generate_standard_tokenizer_json_transactionally",
+        lambda *args, **kwargs: "conversion unavailable",
+    )
+
+    class FakeTokenizer:
+        is_fast = True
+
+        @staticmethod
+        def save_pretrained(path):
+            _write_valid_bpe_tokenizer(Path(path))
+
+    class FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            return FakeTokenizer()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+    )
+    outcome = {}
+
+    def repair():
+        try:
+            _ensure_tokenizer_json(
+                tmp_path,
+                plugin=types.SimpleNamespace(
+                    ensure_tokenizer_json=ensure_tokenizer_json,
+                ),
+            )
+            outcome["error"] = None
+        except Exception as exc:  # pragma: no cover - assertion reports it
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=repair, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert outcome == {"error": None}
+    assert json.loads(
+        (tmp_path / "tokenizer.json").read_text(encoding="utf-8")
+    )["model"]["type"] == "BPE"
+    assert not list(tmp_path.glob(".internlm-tokenizer-*"))
 
 
 def test_ensure_tokenizer_json_rejects_malformed_regenerated_file(
