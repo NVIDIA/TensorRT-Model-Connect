@@ -215,3 +215,23 @@ class TestBartBuildEngine:
             ("shuffle", self_attention_mask),
             ("shuffle", cross_attention_mask),
         ]
+
+    def test_bart_gelu_dispatch_matches_checkpoint_variants(self, monkeypatch):
+        graph_ops = importlib.import_module(
+            "tensorrt_model_connect.families.bart.graph_ops"
+        )
+        exact = object()
+        approximate = object()
+        monkeypatch.setattr(
+            graph_ops, "add_gelu_erf", lambda *_args, **_kwargs: exact
+        )
+        monkeypatch.setattr(
+            graph_ops, "add_gelu_new", lambda *_args, **_kwargs: approximate
+        )
+
+        assert graph_ops.add_activation(None, object(), "gelu") is exact
+        assert graph_ops.add_activation(None, object(), "gelu_new") is approximate
+        assert (
+            graph_ops.add_activation(None, object(), "gelu_pytorch_tanh")
+            is approximate
+        )

@@ -156,6 +156,7 @@ def _add_bart_tp_decoder_layer(
     max_cache_length: int,
     max_enc_seq: int,
     tp_size: int,
+    activation_function: str = "gelu",
 ):
     attention_window = max_cache_length + 1
 
@@ -259,7 +260,7 @@ def _add_bart_tp_decoder_layer(
         local_ffn_dim,
         weights[f"{prefix}.fc1_bias"],
     )
-    act = graph_ops.add_activation(network, fc1, "gelu_new")
+    act = graph_ops.add_activation(network, fc1, activation_function)
     fc2 = graph_ops.add_matmul_rhs_constant(
         network, act, local_ffn_dim, hidden_size, weights[f"{prefix}.w_fc2"])
     fc2 = _add_row_parallel_bias(
@@ -303,6 +304,7 @@ def build_bart_tp_decoder_engine(
     local_ffn_dim = dec_ffn // parallel.tp_size
     attention_window = max_cache_length + 1
     max_enc_seq = max_cache_length
+    activation_function = config.hidden_act or "gelu"
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -383,6 +385,7 @@ def build_bart_tp_decoder_engine(
             max_cache_length=max_cache_length,
             max_enc_seq=max_enc_seq,
             tp_size=parallel.tp_size,
+            activation_function=activation_function,
         )
         hidden_state = result["hidden"]
         present_k_outputs.append(result["present_k"])

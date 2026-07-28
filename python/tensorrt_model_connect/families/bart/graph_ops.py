@@ -140,6 +140,41 @@ def add_gelu_new(
     return result.get_output(0)
 
 
+def add_gelu_erf(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    dtype: np.dtype = np.float32,
+) -> trt.ITensor:
+    """GELU (exact, erf-based): 0.5*x*(1+erf(x/sqrt(2)))."""
+    target_dtype = inp.dtype
+    const_shape = (1,) * max(1, len(tuple(inp.shape)))
+
+    def _const(value):
+        constant = add_constant(
+            network,
+            const_shape,
+            np.array([value], dtype=np.float32),
+            dtype=dtype,
+        )
+        return _cast_back_to_trt_dtype(network, constant, target_dtype)
+
+    inv_sqrt2 = _const(1.0 / np.sqrt(2.0))
+    scaled = network.add_elementwise(
+        inp, inv_sqrt2, trt.ElementWiseOperation.PROD)
+    erf = network.add_unary(
+        scaled.get_output(0), trt.UnaryOperation.ERF)
+    one_plus_erf = network.add_elementwise(
+        _const(1.0), erf.get_output(0), trt.ElementWiseOperation.SUM)
+    half_x = network.add_elementwise(
+        _const(0.5), inp, trt.ElementWiseOperation.PROD)
+    result = network.add_elementwise(
+        half_x.get_output(0),
+        one_plus_erf.get_output(0),
+        trt.ElementWiseOperation.PROD,
+    )
+    return result.get_output(0)
+
+
 def add_activation(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
@@ -147,7 +182,9 @@ def add_activation(
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Dispatch activation by name: 'silu', 'gelu_new', 'gelu', 'relu', 'relu2'/'squared_relu'."""
-    if activation_type in ("gelu_new", "gelu"):
+    if activation_type == "gelu":
+        return add_gelu_erf(network, inp, dtype=dtype)
+    elif activation_type in ("gelu_new", "gelu_fast", "gelu_pytorch_tanh"):
         return add_gelu_new(network, inp, dtype=dtype)
     elif activation_type == "relu":
         act = network.add_activation(inp, trt.ActivationType.RELU)

@@ -49,6 +49,18 @@ def _require_trt_runtime() -> None:
     if cudart is None:
         raise ImportError("cuda-python is required for family debug_runner execution")
 
+
+def _decoder_cross_attention_mask_name(engine) -> str | None:
+    tensor_names = {
+        engine.get_tensor_name(index)
+        for index in range(engine.num_io_tensors)
+    }
+    for name in ("cross_attention_mask", "encoder_mask"):
+        if name in tensor_names:
+            return name
+    return None
+
+
 def load_vision_engine_from_bundle(bundle_path: str) -> tuple[bytes | None, dict]:
     """Load vision engine plan bytes from this family's .trtfb bundle."""
     import json
@@ -175,9 +187,8 @@ class Seq2SeqTrtRunner:
         # Auto-detect dimensions from decoder engine
         cache_shape = tuple(self.dec_engine.get_tensor_shape("cache_k_0"))
         self.attention_size = cache_shape[1]
-        self._decoder_has_encoder_mask = any(
-            self.dec_engine.get_tensor_name(i) == "encoder_mask"
-            for i in range(self.dec_engine.num_io_tensors)
+        self._decoder_cross_attention_mask_name = (
+            _decoder_cross_attention_mask_name(self.dec_engine)
         )
         if hidden_size is None:
             cross_shape = tuple(self.dec_engine.get_tensor_shape("cross_k_0"))
@@ -234,6 +245,24 @@ class Seq2SeqTrtRunner:
         self._h_logits = np.zeros(logits_shape, dtype=np.float32)
         err, self._d_logits = cudart.cudaMalloc(self._logits_numel * 4)
         _check_cuda(err)
+
+        self._debug_output_names = []
+        self._h_debug = {}
+        self._d_debug = {}
+        for index in range(self.dec_engine.num_io_tensors):
+            name = self.dec_engine.get_tensor_name(index)
+            if not name.startswith("debug_"):
+                continue
+            if self.dec_engine.get_tensor_mode(name) != trt.TensorIOMode.OUTPUT:
+                continue
+            shape = tuple(self.dec_engine.get_tensor_shape(name))
+            dtype = _trt_nptype_safe(self.dec_engine.get_tensor_dtype(name))
+            host = np.zeros(shape, dtype=dtype)
+            err, device = cudart.cudaMalloc(host.nbytes)
+            _check_cuda(err)
+            self._debug_output_names.append(name)
+            self._h_debug[name] = host
+            self._d_debug[name] = device
 
         # ----- Encoder device buffers -----
         enc_input_bytes = max_source_positions * 4  # int32 tokens
@@ -320,6 +349,8 @@ class Seq2SeqTrtRunner:
         self.dec_context.set_tensor_address("position_id", self._d_position_id)
         self.dec_context.set_tensor_address("attention_mask", self._d_mask)
         self.dec_context.set_tensor_address("logits", self._d_logits)
+        for name in self._debug_output_names:
+            self.dec_context.set_tensor_address(name, self._d_debug[name])
 
         for i in range(self.num_layers):
             self.dec_context.set_tensor_address(f"cache_k_{i}", self._d_cache_k[i])
@@ -328,8 +359,9 @@ class Seq2SeqTrtRunner:
             self.dec_context.set_tensor_address(f"present_v_{i}", self._d_present_v[i])
             self.dec_context.set_tensor_address(f"cross_k_{i}", self._d_cross_k[i])
             self.dec_context.set_tensor_address(f"cross_v_{i}", self._d_cross_v[i])
-        if self._decoder_has_encoder_mask:
-            self.dec_context.set_tensor_address("encoder_mask", self._d_enc_mask)
+        if self._decoder_cross_attention_mask_name is not None:
+            self.dec_context.set_tensor_address(
+                self._decoder_cross_attention_mask_name, self._d_enc_mask)
 
         self.dec_context.execute_async_v3(stream)
 
@@ -351,10 +383,19 @@ class Seq2SeqTrtRunner:
 
         cudart.cudaMemcpyAsync(self._h_logits.ctypes.data, self._d_logits,
             self._logits_numel * 4, D2H, stream)
+        for name in self._debug_output_names:
+            host = self._h_debug[name]
+            cudart.cudaMemcpyAsync(
+                host.ctypes.data, self._d_debug[name], host.nbytes, D2H, stream)
         cudart.cudaStreamSynchronize(stream)
         self.cache_length = min(self.cache_length + 1, self.max_cache_length)
 
-        return {"logits": self._h_logits.copy()}
+        outputs = {"logits": self._h_logits.copy()}
+        outputs.update({
+            name: self._h_debug[name].copy()
+            for name in self._debug_output_names
+        })
+        return outputs
 
     def reset(self):
         cache_bytes = self.max_cache_length * self.attention_size * self._cache_elem_bytes
@@ -393,6 +434,7 @@ class Seq2SeqTrtRunner:
         bufs.extend(self._d_present_v)
         bufs.extend(self._d_cross_k)
         bufs.extend(self._d_cross_v)
+        bufs.extend(self._d_debug.values())
         for d_ptr in bufs:
             cudart.cudaFree(d_ptr)
         if hasattr(self, "stream"):

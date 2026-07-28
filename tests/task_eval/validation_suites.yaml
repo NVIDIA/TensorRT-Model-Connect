@@ -142,6 +142,13 @@ suites:
           # the causal BART path's 1024-position table.
           prompt_token_limit: 958
           prompt_truncation_side: left
+          # Compare raw greedy logits with TRTMC. The checkpoint's generation
+          # defaults otherwise inject a 3-gram repetition ban and force BOS/EOS
+          # tokens that the native runtime does not apply.
+          hf_generation_overrides:
+            no_repeat_ngram_size: 0
+            forced_bos_token_id: null
+            forced_eos_token_id: null
         gpt2-125m:
           # Reserve the suite's 64 generated tokens inside GPT-2's 1024 limit.
           prompt_token_limit: 960

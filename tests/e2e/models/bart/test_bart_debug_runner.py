@@ -11,6 +11,39 @@ from unittest.mock import patch
 from tests.builder.debug_runner_test_support import make_bundle_bytes
 
 
+def test_bart_debug_runner_prefers_current_cross_attention_mask_name() -> None:
+    from tensorrt_model_connect.families.bart.debug_runner import (
+        _decoder_cross_attention_mask_name,
+    )
+
+    class FakeEngine:
+        names = ("token_id", "encoder_mask", "cross_attention_mask", "logits")
+        num_io_tensors = len(names)
+
+        def get_tensor_name(self, index):
+            return self.names[index]
+
+    assert (
+        _decoder_cross_attention_mask_name(FakeEngine())
+        == "cross_attention_mask"
+    )
+
+
+def test_bart_debug_runner_accepts_legacy_encoder_mask_name() -> None:
+    from tensorrt_model_connect.families.bart.debug_runner import (
+        _decoder_cross_attention_mask_name,
+    )
+
+    class FakeEngine:
+        names = ("token_id", "encoder_mask", "logits")
+        num_io_tensors = len(names)
+
+        def get_tensor_name(self, index):
+            return self.names[index]
+
+    assert _decoder_cross_attention_mask_name(FakeEngine()) == "encoder_mask"
+
+
 def test_bart_seq2seq_engine_section_and_communicator_forwarded(tmp_path) -> None:
     from tensorrt_model_connect.families.bart.debug_runner import (
         load_config_from_bundle,

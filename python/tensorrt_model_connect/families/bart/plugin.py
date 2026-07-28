@@ -197,6 +197,7 @@ class BartPlugin:
         head_dim = hidden // dec_heads
         attention_window = max_cache_length + 1
         max_enc_seq = max_cache_length
+        activation_function = config.hidden_act or "gelu"
         if precision == "fp16":
             work_np_dtype, work_trt_dtype = np.float16, trt.float16
         elif precision == "fp32":
@@ -295,7 +296,8 @@ class BartPlugin:
                 weights=weights, prefix=prefix,
                 hidden_size=hidden, num_heads=dec_heads, head_dim=head_dim,
                 ffn_dim=dec_ffn, max_cache_length=max_cache_length,
-                max_enc_seq=max_enc_seq, dtype=work_np_dtype)
+                max_enc_seq=max_enc_seq, activation_function=activation_function,
+                dtype=work_np_dtype)
             hidden_state = result["hidden"]
             present_k_outputs.append(result["present_k"])
             present_v_outputs.append(result["present_v"])
@@ -421,6 +423,7 @@ def _build_bart_encoder(
     if enc_mask.dtype != work_trt_dtype:
         enc_mask = network.add_cast(enc_mask, work_trt_dtype).get_output(0)
     head_dim = hidden // enc_heads
+    activation_function = config.hidden_act or "gelu"
 
     for li in range(enc_layers):
         pfx = f"enc_layer.{li}"
@@ -442,7 +445,7 @@ def _build_bart_encoder(
 
         fc1 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hs, hidden, enc_ffn, weights[f"{pfx}.w_fc1"], dtype=work_np_dtype), enc_ffn, weights[f"{pfx}.b_fc1"], dtype=work_np_dtype)
         act = graph_ops.add_activation(
-            network, fc1, "gelu_new", dtype=work_np_dtype)
+            network, fc1, activation_function, dtype=work_np_dtype)
         fc2 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, act, enc_ffn, hidden, weights[f"{pfx}.w_fc2"], dtype=work_np_dtype), hidden, weights[f"{pfx}.b_fc2"], dtype=work_np_dtype)
         hs = network.add_elementwise(hs, fc2, trt.ElementWiseOperation.SUM).get_output(0)
         hs = graph_ops.add_layer_norm_native(
@@ -467,7 +470,7 @@ def _build_bart_encoder(
 def _add_bart_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cross_v,
     attention_mask, cross_attention_mask, eps, weights, prefix,
     hidden_size, num_heads, head_dim, ffn_dim, max_cache_length, max_enc_seq,
-    dtype=np.float32):
+    activation_function="gelu", dtype=np.float32):
     attention_size = hidden_size
     attention_window = max_cache_length + 1
 
@@ -523,7 +526,8 @@ def _add_bart_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cross
 
     # MLP (no pre-norm, GELU)
     fc1 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, pca, hidden_size, ffn_dim, weights[f"{prefix}.w_fc1"], dtype=dtype), ffn_dim, weights[f"{prefix}.fc1_bias"], dtype=dtype)
-    act = graph_ops.add_activation(network, fc1, "gelu_new", dtype=dtype)
+    act = graph_ops.add_activation(
+        network, fc1, activation_function, dtype=dtype)
     fc2 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, act, ffn_dim, hidden_size, weights[f"{prefix}.w_fc2"], dtype=dtype), hidden_size, weights[f"{prefix}.fc2_bias"], dtype=dtype)
     # Residual + post-norm
     out = network.add_elementwise(pca, fc2, trt.ElementWiseOperation.SUM).get_output(0)

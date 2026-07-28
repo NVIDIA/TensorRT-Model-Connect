@@ -224,6 +224,10 @@ def _generation_settings(
         settings["generation_overrides"]["use_cache"] = bool(
             task_config["hf_use_cache"]
         )
+    hf_generation_overrides = task_config.get("hf_generation_overrides", {})
+    if not isinstance(hf_generation_overrides, dict):
+        raise ValueError("task_eval.hf_generation_overrides must be a mapping")
+    settings["generation_overrides"].update(hf_generation_overrides)
     return settings
 
 
