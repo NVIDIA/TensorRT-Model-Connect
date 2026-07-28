@@ -14,6 +14,7 @@
 #include "runtime/models/personaplex/speech_config.h"
 #include "runtime/models/personaplex/speech_delay_cache.h"
 #include "runtime/models/personaplex/speech_generation_policy.h"
+#include "runtime/models/personaplex/speech_performance.h"
 #include "runtime/models/personaplex/speech_runtime_plan.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/trt_module.h"
@@ -78,7 +79,8 @@ class SpeechPipeline final : public IPipeline {
     void speak_run_generation_loop(const SpeechGenerationSettings& settings,
                                    const SpeechOutputPlan& plan, DelayCacheState& delay_state,
                                    const std::vector<int32_t>& codec_tokens,
-                                   std::vector<int32_t>& output_codes, int32_t& frames_collected);
+                                   std::vector<int32_t>& output_codes, int32_t& frames_collected,
+                                   SpeechPerformanceTimings& timings);
     void speak_postprocess_waveform(std::vector<float>& waveform, int32_t generated_frames) const;
 
     std::unique_ptr<TrtModule> temporal_;

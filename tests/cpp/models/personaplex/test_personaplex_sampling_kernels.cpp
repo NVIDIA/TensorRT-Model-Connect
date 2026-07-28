@@ -87,6 +87,12 @@ void test_argmax_and_topk_sampling(cudaStream_t stream) {
           "unsupported top-k fails closed");
 }
 
+void test_optimized_launch_plans() {
+    const auto projection = trtmc::personaplex_depth_projection_launch_plan(1024);
+    check(projection.blocks == 1024, "one projection block per output row");
+    check(projection.threads == 256, "projection columns reduce in parallel");
+}
+
 void test_depth_embedding(cudaStream_t stream) {
     auto hidden = upload<float>({1.0F, 2.0F}, trtmc::DType::kFloat32, stream);
     auto projection = upload<float>({1.0F, 0.0F, 0.0F, 1.0F, 2.0F, 0.0F, 0.0F, 2.0F},
@@ -117,6 +123,45 @@ void test_depth_embedding(cudaStream_t stream) {
     check_close(run(1, 1, true), {42.0F, 45.0F}, "forced audio depth embedding");
 }
 
+void test_non_aligned_depth_embedding(cudaStream_t stream) {
+    constexpr int32_t depth_hidden = 263;
+    constexpr int32_t temporal_hidden = 259;
+    std::vector<float> hidden(static_cast<std::size_t>(temporal_hidden));
+    std::vector<float> projection(static_cast<std::size_t>(depth_hidden) * temporal_hidden);
+    std::vector<float> text_embedding(static_cast<std::size_t>(depth_hidden) * 2);
+    std::vector<float> expected(static_cast<std::size_t>(depth_hidden));
+    for (int32_t column = 0; column < temporal_hidden; ++column)
+        hidden[static_cast<std::size_t>(column)] = static_cast<float>((column % 13) - 6) * 0.125F;
+    for (int32_t row = 0; row < depth_hidden; ++row) {
+        text_embedding[static_cast<std::size_t>(depth_hidden + row)] =
+            static_cast<float>(row % 11) * 0.25F;
+        float projected = 0.0F;
+        for (int32_t column = 0; column < temporal_hidden; ++column) {
+            const auto offset = static_cast<std::size_t>(row) * temporal_hidden + column;
+            projection[offset] = static_cast<float>(((row + column) % 19) - 9) * 0.015625F;
+            projected += projection[offset] * hidden[static_cast<std::size_t>(column)];
+        }
+        expected[static_cast<std::size_t>(row)] =
+            projected + text_embedding[static_cast<std::size_t>(depth_hidden + row)];
+    }
+
+    auto device_hidden = upload(hidden, trtmc::DType::kFloat32, stream);
+    auto device_projection = upload(projection, trtmc::DType::kFloat32, stream);
+    auto device_text_embedding = upload(text_embedding, trtmc::DType::kFloat32, stream);
+    auto selected = upload<int32_t>({1}, trtmc::DType::kInt32, stream);
+    trtmc::DeviceTensor output({depth_hidden}, trtmc::DType::kFloat32, stream);
+    trtmc::personaplex_prepare_depth_embedding(
+        static_cast<float*>(output.data()), device_hidden.data(), trtmc::DType::kFloat32,
+        static_cast<const float*>(device_projection.data()), device_projection.numel(),
+        static_cast<const float*>(device_text_embedding.data()), device_text_embedding.numel(),
+        nullptr, 0, static_cast<const int32_t*>(selected.data()), 0, 0, false, 0, false,
+        depth_hidden, temporal_hidden, 2, 0, 0, stream);
+    check_cuda(cudaStreamSynchronize(stream), "synchronize non-aligned depth embedding");
+    std::vector<float> actual(static_cast<std::size_t>(depth_hidden));
+    check(output.copy_to_host(actual.data()), "download non-aligned depth embedding");
+    check_close(actual, expected, "non-aligned depth embedding");
+}
+
 } // namespace
 
 int main() {
@@ -128,8 +173,10 @@ int main() {
 
     cudaStream_t stream = nullptr;
     check_cuda(cudaStreamCreate(&stream), "create stream");
+    test_optimized_launch_plans();
     test_argmax_and_topk_sampling(stream);
     test_depth_embedding(stream);
+    test_non_aligned_depth_embedding(stream);
     check_cuda(cudaStreamDestroy(stream), "destroy stream");
     return g_failures == 0 ? 0 : 1;
 }

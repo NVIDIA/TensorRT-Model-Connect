@@ -304,7 +304,7 @@ def test_standard_decoder_uses_stable_fp32_tactics() -> None:
         module.build_standard_decoder_engine).nonlocals
 
     assert builder_context_options["disable_tf32"] is True
-    assert builder_context_options["builder_optimization_level"] == 0
+    assert builder_context_options["builder_optimization_level"] == 1
     assert builder_context_options["max_num_tactics"] == 1
 
 

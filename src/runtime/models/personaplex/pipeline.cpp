@@ -12,6 +12,7 @@
 #include "runtime/models/personaplex/speech_depth_plan.h"
 #include "runtime/models/personaplex/speech_generation_policy.h"
 #include "runtime/models/personaplex/speech_mimi_decode_plan.h"
+#include "runtime/models/personaplex/speech_performance.h"
 #include "runtime/models/personaplex/speech_runtime_plan.h"
 #include "runtime/models/personaplex/speech_temporal_embed_plan.h"
 #include "runtime/models/personaplex/speech_waveform_postprocess.h"
@@ -20,6 +21,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -666,6 +668,56 @@ void SpeechPipeline::run_text_prompt() {
 
 namespace {
 
+class CudaStageTimer {
+  public:
+    CudaStageTimer() {
+        auto error = cudaEventCreate(&start_);
+        if (error != cudaSuccess)
+            throw std::runtime_error(std::string("PersonaPlex timing event creation: ") +
+                                     cudaGetErrorString(error));
+        error = cudaEventCreate(&stop_);
+        if (error == cudaSuccess)
+            return;
+        cudaEventDestroy(start_);
+        start_ = nullptr;
+        throw std::runtime_error(std::string("PersonaPlex timing event creation: ") +
+                                 cudaGetErrorString(error));
+    }
+
+    ~CudaStageTimer() {
+        if (stop_)
+            cudaEventDestroy(stop_);
+        if (start_)
+            cudaEventDestroy(start_);
+    }
+
+    CudaStageTimer(const CudaStageTimer&) = delete;
+    CudaStageTimer& operator=(const CudaStageTimer&) = delete;
+
+    void start(cudaStream_t stream) { record(start_, stream); }
+    void stop(cudaStream_t stream) { record(stop_, stream); }
+
+    double elapsed_ms() const {
+        float elapsed = 0.0F;
+        const auto error = cudaEventElapsedTime(&elapsed, start_, stop_);
+        if (error != cudaSuccess)
+            throw std::runtime_error(std::string("PersonaPlex timing event query: ") +
+                                     cudaGetErrorString(error));
+        return static_cast<double>(elapsed);
+    }
+
+  private:
+    static void record(cudaEvent_t event, cudaStream_t stream) {
+        const auto error = cudaEventRecord(event, stream);
+        if (error != cudaSuccess)
+            throw std::runtime_error(std::string("PersonaPlex timing event record: ") +
+                                     cudaGetErrorString(error));
+    }
+
+    cudaEvent_t start_{nullptr};
+    cudaEvent_t stop_{nullptr};
+};
+
 void speech_log_depth_mode(const SpeechConfig& cfg) {
     if (speech_is_sampling_enabled(cfg)) {
         std::cerr << "[speech] Depth sampling: temperature=" << cfg.depth_temperature
@@ -766,7 +818,8 @@ void SpeechPipeline::speak_run_generation_loop(const SpeechGenerationSettings& s
                                                DelayCacheState& delay_state,
                                                const std::vector<int32_t>& codec_tokens,
                                                std::vector<int32_t>& output_codes,
-                                               int32_t& frames_collected) {
+                                               int32_t& frames_collected,
+                                               SpeechPerformanceTimings& timings) {
     const int32_t hidden = settings.hidden;
     SpeechDecodeStopState stop_state;
     speech_log_stop_configuration(config_, plan.extra_tail);
@@ -778,6 +831,8 @@ void SpeechPipeline::speak_run_generation_loop(const SpeechGenerationSettings& s
     std::vector<uint8_t> target_audio_provided(static_cast<std::size_t>(settings.num_cb));
     std::vector<int32_t> selected_frame_tokens;
     std::vector<int32_t> frame_codes(static_cast<std::size_t>(settings.num_cb));
+    CudaStageTimer temporal_timer;
+    CudaStageTimer depth_timer;
 
     frames_collected = 0;
     for (int32_t offset = 0; offset < plan.total_iters && frames_collected < plan.output_frames;
@@ -801,16 +856,22 @@ void SpeechPipeline::speak_run_generation_loop(const SpeechGenerationSettings& s
                                          moshi_input.data(), user_input.data(), text_input,
                                          summed_embed.data());
 
+        temporal_timer.start(stream_);
         const auto temporal_output = run_temporal_embed_step(summed_embed.data(), settings.hidden);
+        temporal_timer.stop(stream_);
         const auto text_target_idx = delay_cache_index(delay_state, 0, target_pos);
         const bool text_provided = delay_state.provided[text_target_idx] != 0;
         const int32_t forced_text_token = delay_state.cache[text_target_idx];
 
         build_target_audio_arrays(delay_state, target_pos, settings.num_cb, settings.audio_bos,
                                   target_audio_tokens, target_audio_provided);
+        depth_timer.start(stream_);
         run_depth(temporal_output, forced_text_token, text_provided, target_audio_tokens.data(),
                   target_audio_provided.data());
+        depth_timer.stop(stream_);
         download_selected_frame_tokens(selected_frame_tokens);
+        timings.temporal_ms += temporal_timer.elapsed_ms();
+        timings.depth_ms += depth_timer.elapsed_ms();
         const int32_t sampled_text_token = selected_frame_tokens[0];
         std::copy_n(selected_frame_tokens.begin() + 1, settings.num_cb, frame_codes.begin());
 
@@ -859,6 +920,9 @@ void SpeechPipeline::speak_postprocess_waveform(std::vector<float>& waveform,
 
 AudioResult SpeechPipeline::speak(const float* audio_in, int32_t num_samples,
                                   const GenerateConfig& cfg, int32_t input_sample_rate) {
+    using Clock = std::chrono::steady_clock;
+    const auto total_started = Clock::now();
+    SpeechPerformanceTimings timings;
     AudioResult result;
     result.sample_rate = config_.sample_rate;
 
@@ -885,7 +949,10 @@ AudioResult SpeechPipeline::speak(const float* audio_in, int32_t num_samples,
     speech_log_depth_mode(config_);
 
     // Stage 1: Encode input audio via Mimi
+    const auto encode_started = Clock::now();
     auto codec_tokens = run_mimi_encode(samples_ptr, samples_count);
+    timings.codec_ms +=
+        std::chrono::duration<double, std::milli>(Clock::now() - encode_started).count();
 
     const auto encoder_shape = resolve_encoder_shape_without_engine(
         config_, last_encode_codebooks_, last_encode_frames_, codec_tokens.size());
@@ -935,7 +1002,7 @@ AudioResult SpeechPipeline::speak(const float* audio_in, int32_t num_samples,
 
     int32_t frames_collected = 0;
     speak_run_generation_loop(settings, plan, delay_state, codec_tokens, output_codes,
-                              frames_collected);
+                              frames_collected, timings);
 
     const int32_t generated_frames = frames_collected;
     std::cerr << "[speech] Depth: generated " << generated_frames << " frames x " << num_cb
@@ -943,7 +1010,10 @@ AudioResult SpeechPipeline::speak(const float* audio_in, int32_t num_samples,
     speech_log_output_frames_debug(output_codes, generated_frames, mimi_cb);
 
     // Stage 4: Decode output tokens to audio via Mimi decoder
+    const auto decode_started = Clock::now();
     auto waveform = run_mimi_decode(output_codes, generated_frames);
+    timings.codec_ms +=
+        std::chrono::duration<double, std::milli>(Clock::now() - decode_started).count();
     speak_postprocess_waveform(waveform, generated_frames);
 
     result.samples = std::move(waveform);
@@ -951,6 +1021,12 @@ AudioResult SpeechPipeline::speak(const float* audio_in, int32_t num_samples,
     std::cerr << "[speech] Generated " << result.num_samples << " samples ("
               << static_cast<float>(result.num_samples) / result.sample_rate << "s @ "
               << result.sample_rate << " Hz)" << std::endl;
+    const double total_ms =
+        std::chrono::duration<double, std::milli>(Clock::now() - total_started).count();
+    std::cerr << "[trtmc.personaplex_timing] total_ms=" << total_ms
+              << " temporal_ms=" << timings.temporal_ms << " depth_ms=" << timings.depth_ms
+              << " codec_ms=" << timings.codec_ms << " host_ms=" << timings.host_ms(total_ms)
+              << " frames=" << generated_frames << std::endl;
     return result;
 }
 

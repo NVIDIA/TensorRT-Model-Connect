@@ -17,6 +17,7 @@ namespace {
 
 constexpr int32_t kArgmaxThreads = 256;
 constexpr int32_t kSampleThreads = 128;
+constexpr int32_t kProjectionThreads = 256;
 constexpr int32_t kMaxTopK = 4096;
 
 __device__ bool candidate_is_better(float lhs_value, int32_t lhs_index, float rhs_value,
@@ -202,23 +203,6 @@ __device__ float audio_seed(const float* embeddings, int64_t elements,
 }
 
 template <typename HiddenT>
-__device__ float projected_hidden(const HiddenT* temporal_hidden, const float* depth_projection,
-                                  int64_t projection_elements, int32_t codebook,
-                                  int32_t depth_hidden, int32_t temporal_hidden_dim, int32_t row) {
-    if (!depth_projection || !temporal_hidden || temporal_hidden_dim <= 0)
-        return 0.0F;
-    const int64_t matrix = static_cast<int64_t>(codebook) * depth_hidden * temporal_hidden_dim;
-    const int64_t row_offset = matrix + static_cast<int64_t>(row) * temporal_hidden_dim;
-    if (row_offset + temporal_hidden_dim > projection_elements)
-        return 0.0F;
-    float value = 0.0F;
-    for (int32_t column = 0; column < temporal_hidden_dim; ++column) {
-        value += depth_projection[row_offset + column] * load_hidden(temporal_hidden, column);
-    }
-    return value;
-}
-
-template <typename HiddenT>
 __global__ void prepare_depth_embedding_kernel(
     float* output, const HiddenT* temporal_hidden, const float* depth_projection,
     int64_t depth_projection_elements, const float* depth_text_embedding,
@@ -227,23 +211,51 @@ __global__ void prepare_depth_embedding_kernel(
     int32_t forced_text_token, bool text_token_is_forced, int32_t forced_previous_token,
     bool previous_token_is_forced, int32_t depth_hidden, int32_t temporal_hidden_dim,
     int32_t depth_text_vocab, int32_t audio_vocab_size, int32_t num_depformer_embeddings) {
-    const int32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    __shared__ float partial_sums[kProjectionThreads];
+    const int32_t row = blockIdx.x;
     if (row >= depth_hidden)
         return;
-    const float seed =
-        codebook == 0
-            ? text_seed(depth_text_embedding, depth_text_embedding_elements, selected_tokens,
-                        forced_text_token, text_token_is_forced, depth_text_vocab, depth_hidden,
-                        row)
-            : audio_seed(depth_audio_embeddings, depth_audio_embedding_elements, selected_tokens,
-                         codebook, forced_previous_token, previous_token_is_forced,
-                         audio_vocab_size, depth_hidden, num_depformer_embeddings, row);
-    output[row] =
-        seed + projected_hidden(temporal_hidden, depth_projection, depth_projection_elements,
-                                codebook, depth_hidden, temporal_hidden_dim, row);
+    const int64_t matrix = static_cast<int64_t>(codebook) * depth_hidden * temporal_hidden_dim;
+    const int64_t row_offset = matrix + static_cast<int64_t>(row) * temporal_hidden_dim;
+    const bool projection_is_valid = depth_projection && temporal_hidden &&
+                                     temporal_hidden_dim > 0 &&
+                                     row_offset + temporal_hidden_dim <= depth_projection_elements;
+    float projected = 0.0F;
+    if (projection_is_valid) {
+        for (int32_t column = threadIdx.x; column < temporal_hidden_dim;
+             column += kProjectionThreads) {
+            projected +=
+                depth_projection[row_offset + column] * load_hidden(temporal_hidden, column);
+        }
+    }
+    partial_sums[threadIdx.x] = projected;
+    __syncthreads();
+    for (int32_t stride = kProjectionThreads / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride)
+            partial_sums[threadIdx.x] += partial_sums[threadIdx.x + stride];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        const float seed = codebook == 0
+                               ? text_seed(depth_text_embedding, depth_text_embedding_elements,
+                                           selected_tokens, forced_text_token, text_token_is_forced,
+                                           depth_text_vocab, depth_hidden, row)
+                               : audio_seed(depth_audio_embeddings, depth_audio_embedding_elements,
+                                            selected_tokens, codebook, forced_previous_token,
+                                            previous_token_is_forced, audio_vocab_size,
+                                            depth_hidden, num_depformer_embeddings, row);
+        output[row] = seed + partial_sums[0];
+    }
 }
 
 } // namespace
+
+PersonaplexDepthProjectionLaunchPlan
+personaplex_depth_projection_launch_plan(int32_t depth_hidden) {
+    if (depth_hidden <= 0)
+        return {};
+    return {depth_hidden, kProjectionThreads};
+}
 
 bool personaplex_select_token(const float* logits, int32_t vocab_size, float temperature,
                               int32_t top_k, int32_t max_token_id, uint64_t* rng_state,
@@ -273,10 +285,9 @@ void personaplex_prepare_depth_embedding(
     int32_t audio_vocab_size, int32_t num_depformer_embeddings, cudaStream_t stream) {
     if (!output || !selected_tokens || depth_hidden <= 0)
         return;
-    constexpr int32_t threads = 256;
-    const int32_t blocks = (depth_hidden + threads - 1) / threads;
+    const auto launch = personaplex_depth_projection_launch_plan(depth_hidden);
 #define TRTMC_LAUNCH_DEPTH_EMBED(HIDDEN_TYPE)                                                      \
-    prepare_depth_embedding_kernel<<<blocks, threads, 0, stream>>>(                                \
+    prepare_depth_embedding_kernel<<<launch.blocks, launch.threads, 0, stream>>>(                  \
         output, static_cast<const HIDDEN_TYPE*>(temporal_hidden), depth_projection,                \
         depth_projection_elements, depth_text_embedding, depth_text_embedding_elements,            \
         depth_audio_embeddings, depth_audio_embedding_elements, selected_tokens, codebook,         \

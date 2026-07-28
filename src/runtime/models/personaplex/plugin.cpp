@@ -121,6 +121,16 @@ class PersonaPlexPlugin final : public IPipelinePlugin {
             extract_optional_module(ctx.backend, find_section(ctx.bundle, "mimi_decoder_plan"),
                                     "speech mimi_decoder", chained_opts);
 
+        if (ctx.cuda_graphs) {
+            temporal_loaded.module->enable_cuda_graph();
+            for (auto& depth_engine : depth_engines)
+                depth_engine->enable_cuda_graph();
+            if (mimi_encoder)
+                mimi_encoder->enable_cuda_graph();
+            if (mimi_decoder)
+                mimi_decoder->enable_cuda_graph();
+        }
+
         return std::make_unique<SpeechPipeline>(
             std::move(mimi_encoder), std::move(temporal_loaded.module), std::move(temporal_state),
             std::move(depth_engines), std::move(depth_state), std::move(mimi_decoder),

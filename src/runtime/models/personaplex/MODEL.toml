@@ -12,6 +12,7 @@ runtime_tests = [
   "test_personaplex_speech_generation_helpers|test_personaplex_speech_generation_helpers.cpp|_|_|_",
   "test_personaplex_speech_depth_plan|test_personaplex_speech_depth_plan.cpp|_|_|_",
   "test_personaplex_speech_runtime_plan|test_personaplex_speech_runtime_plan.cpp|_|_|_",
+  "test_personaplex_speech_performance|test_personaplex_speech_performance.cpp|_|_|_",
   "test_personaplex_speech_temporal_embed_plan|test_personaplex_speech_temporal_embed_plan.cpp|_|_|_",
   "test_personaplex_speech_mimi_decode_plan|test_personaplex_speech_mimi_decode_plan.cpp|_|_|_",
   "test_personaplex_decode_runtime|test_personaplex_decode_runtime.cpp|_|decode_runtime.cpp|_",

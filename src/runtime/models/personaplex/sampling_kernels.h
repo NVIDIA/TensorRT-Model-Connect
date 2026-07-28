@@ -12,6 +12,13 @@
 
 namespace trtmc {
 
+struct PersonaplexDepthProjectionLaunchPlan {
+    int32_t blocks{0};
+    int32_t threads{0};
+};
+
+PersonaplexDepthProjectionLaunchPlan personaplex_depth_projection_launch_plan(int32_t depth_hidden);
+
 bool personaplex_select_token(const float* logits, int32_t vocab_size, float temperature,
                               int32_t top_k, int32_t max_token_id, uint64_t* rng_state,
                               int32_t* token_id, cudaStream_t stream);
