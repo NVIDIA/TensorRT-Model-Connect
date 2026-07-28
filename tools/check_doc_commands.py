@@ -120,6 +120,7 @@ _LOCAL_PREFIXES = (
 _SHELL_SEPARATORS = {";", ";;", "&&", "||", "|", "&", "(", ")"}
 _SHELL_PREFIX_WORDS = {
     "!",
+    "{",
     "do",
     "elif",
     "if",
@@ -128,6 +129,7 @@ _SHELL_PREFIX_WORDS = {
     "while",
 }
 _SHELL_ONLY_WORDS = {
+    "}",
     "case",
     "done",
     "else",
@@ -1847,7 +1849,7 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
         *(
             scope
             for scope in function_scopes.values()
-            if scope and scope[-1][0] == "function" and scope[-1][1] == "main"
+            if (len(scope) == 1 and scope[-1][0] == "function" and scope[-1][1] == "main")
         ),
     }
     reachability_changed = True
@@ -1862,8 +1864,8 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
                 reachability_changed = True
 
     selected_calls = [item for item in parse_calls if item[0] in reachable_scopes]
-    if not selected_calls:
-        selected_calls = parse_calls
+    if parse_calls and not selected_calls:
+        return None
     for _scope, root_id, allow_extras in selected_calls:
         parse_modes.setdefault(root_id, set()).add(allow_extras)
 

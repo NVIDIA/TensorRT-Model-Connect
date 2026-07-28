@@ -29,17 +29,26 @@ python tools/trtmc_validate.py --all
 Eligibility excludes manifests that require multiple devices, are marked
 `skip`, or use `ci_tier: l0_only`; readiness alone does not select a model.
 
-The all-model command supervises one isolated worker process per model. By
-default it records a failed worker and continues with the remaining models.
-Stop after the first failed model when that is preferable:
+The command starts one isolated worker process per **attempt**. By default, a
+runnable binding permits at most two attempts with a five-second delay between
+them. It retries execution errors only; a completed comparison disagreement is
+not retried. `--model-attempts` changes the maximum, and
+`--model-retry-delay-seconds` changes the delay. An intermediate execution
+error is archived, and the final `comparison.json` records the attempt count
+and per-attempt evidence.
+
+After a binding reaches its terminal result, the all-model command records a
+failed binding and continues with the remaining models by default. Stop after
+the first terminally failed model when that is preferable:
 
 ```bash
 python tools/trtmc_validate.py --all --on-model-failure stop
 ```
 
-Both policies return a nonzero exit status when any attempted model fails.
-Process isolation also covers failures that happen before backend execution,
-such as reference-environment setup or uncaught model-specific Python errors.
+Both policies return a nonzero exit status when any attempted model ultimately
+fails. Process isolation and retry classification also cover failures that
+happen before backend execution, such as reference-environment setup or
+uncaught model-specific Python errors.
 
 The same CLI is the CI case entry point. Generate a machine-readable matrix,
 then run one exact model/workload binding in each CI node:

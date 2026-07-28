@@ -490,6 +490,31 @@ def test_every_command_in_shell_chain_is_checked(tmp_path: Path) -> None:
     ]
 
 
+def test_python_contract_inside_bash_brace_group_is_checked(tmp_path: Path) -> None:
+    script = tmp_path / "tools" / "cli.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        'parser.add_argument("--good", required=True)\n'
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+    block = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=7,
+        language="bash",
+        body="{ python3 tools/cli.py --bad value; }\n",
+    )
+
+    findings = cdc.check_python_script_contract(block, tmp_path)
+
+    assert [finding.message for finding in findings] == [
+        "unknown option for `tools/cli.py`: --bad",
+        "missing required option for `tools/cli.py`: --good",
+    ]
+
+
 def test_command_finding_uses_physical_line_across_blanks_comments_and_continuation(
     tmp_path: Path,
 ) -> None:
@@ -1316,6 +1341,50 @@ def test_argparse_selects_reachable_parse_root_without_dead_parser_pollution(
     assert [finding.message for finding in cdc.check_python_script_contract(dead, tmp_path)] == [
         "unknown option for `tools/scoped.py`: --dead",
         "missing required option for `tools/scoped.py`: --live",
+    ]
+
+
+def test_argparse_ignores_uncalled_class_main_and_follows_module_main_call_graph(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "tools" / "scoped_class.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "class Unused:\n"
+        "    def main(self):\n"
+        "        parser = argparse.ArgumentParser()\n"
+        '        parser.add_argument("--dead", required=True)\n'
+        "        return parser.parse_args()\n"
+        "def build_parser():\n"
+        "    parser = argparse.ArgumentParser()\n"
+        '    parser.add_argument("--live", required=True)\n'
+        "    return parser\n"
+        "def parse_cli():\n"
+        "    return build_parser().parse_args()\n"
+        "def main():\n"
+        "    return parse_cli()\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    live = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/scoped_class.py --live yes\n",
+    )
+    dead = cdc.ShellBlock(
+        Path("README.md"),
+        1,
+        "bash",
+        "python3 tools/scoped_class.py --dead yes\n",
+    )
+
+    assert cdc.check_python_script_contract(live, tmp_path) == []
+    assert [finding.message for finding in cdc.check_python_script_contract(dead, tmp_path)] == [
+        "unknown option for `tools/scoped_class.py`: --dead",
+        "missing required option for `tools/scoped_class.py`: --live",
     ]
 
 

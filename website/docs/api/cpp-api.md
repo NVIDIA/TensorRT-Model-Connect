@@ -90,6 +90,11 @@ contract.
 as `std::string`. `generate_image_batch()` returns
 `std::vector<ImageResult>`.
 
+`ImageResult::pixels` is frame-major, interleaved float32 data in
+`[T, H, W, C]` order with values in `[0, 1]`. Its length is
+`num_frames * height * width * channels`; a single image has
+`num_frames == 1`.
+
 ## GenerateConfig
 
 `GenerateConfig` controls decoding and generation:
@@ -174,6 +179,15 @@ The C-linkage surface currently exposes pipeline creation, error/version
 queries, batched image generation through `trtmc_generate_batch()`, and
 per-image cleanup through `trtmc_image_result_free()`. The caller owns the
 output array, and must free each successful result's pixel buffer.
+
+For `num_prompts > 0`, a non-null `out_results` must point to a writable array
+of at least `num_prompts` entries. Release any pixel buffers from an earlier
+call before reusing that array: `trtmc_generate_batch()` zero-initializes every
+entry before validating the remaining arguments. On success, release each
+returned buffer with `trtmc_image_result_free()`. On any nonzero return, every
+entry remains zero-initialized, `pixels` is null, and there is no allocation to
+release. `trtmc_image_result_free()` is a no-op for such a zero-initialized
+entry and sets a released `pixels` pointer back to null.
 
 There is no exported pipeline-destroy function. Creation returns an
 `IPipeline*`, and the public header uses C++ types such as `std::uint64_t` even

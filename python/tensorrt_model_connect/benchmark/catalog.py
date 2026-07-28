@@ -199,6 +199,8 @@ class ManifestCatalog:
         hf_revision = raw.get("hf_revision", "")
         if not isinstance(hf_revision, str):
             raise BenchmarkError(f"hf_revision in model manifest {path} must be a string")
+        if "trust_remote_code" in raw and not isinstance(raw["trust_remote_code"], bool):
+            raise BenchmarkError(f"trust_remote_code in model manifest {path} must be a boolean")
         task_strategy = str(raw["task_strategy"])
         model_defaults = _model_defaults(path, task_strategy)
         build_settings = {

@@ -450,6 +450,101 @@ def _resolve_definition(
     return _resolve_definition(imported, modules=modules, kind=kind, seen=seen)
 
 
+@dataclass(frozen=True)
+class _EntrypointBinding:
+    expression: ast.expr | None = None
+    ambiguous: bool = False
+
+
+def _direct_assignment_value(
+    statement: ast.stmt,
+    assignment_name: str,
+) -> ast.expr | None:
+    if isinstance(statement, ast.Assign):
+        targets = statement.targets
+    elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+        targets = [statement.target]
+    else:
+        return None
+
+    if any(isinstance(target, ast.Name) and target.id == assignment_name for target in targets):
+        return statement.value
+    return None
+
+
+def _same_entrypoint_binding(
+    left: _EntrypointBinding,
+    right: _EntrypointBinding,
+) -> bool:
+    if left.ambiguous or right.ambiguous:
+        return left.ambiguous and right.ambiguous
+    if left.expression is None or right.expression is None:
+        return left.expression is None and right.expression is None
+    return ast.dump(left.expression, include_attributes=False) == ast.dump(
+        right.expression,
+        include_attributes=False,
+    )
+
+
+def _entrypoint_binding_after(
+    statements: list[ast.stmt],
+    *,
+    assignment_name: str,
+    initial: _EntrypointBinding,
+) -> _EntrypointBinding:
+    """Resolve a module-level entrypoint binding along statically known paths."""
+    binding = initial
+    for statement in statements:
+        assignment_value = _direct_assignment_value(statement, assignment_name)
+        if assignment_value is not None:
+            binding = _EntrypointBinding(expression=assignment_value)
+            continue
+        if not isinstance(statement, ast.If):
+            continue
+
+        if isinstance(statement.test, ast.Constant) and isinstance(
+            statement.test.value,
+            bool,
+        ):
+            selected_branch = statement.body if statement.test.value else statement.orelse
+            binding = _entrypoint_binding_after(
+                selected_branch,
+                assignment_name=assignment_name,
+                initial=binding,
+            )
+            continue
+
+        body_binding = _entrypoint_binding_after(
+            statement.body,
+            assignment_name=assignment_name,
+            initial=binding,
+        )
+        else_binding = _entrypoint_binding_after(
+            statement.orelse,
+            assignment_name=assignment_name,
+            initial=binding,
+        )
+        if _same_entrypoint_binding(body_binding, else_binding):
+            binding = body_binding
+        else:
+            binding = _EntrypointBinding(ambiguous=True)
+    return binding
+
+
+def _module_entrypoint_expression(
+    contract: _ModuleContract,
+    assignment_name: str,
+) -> ast.expr | None:
+    binding = _entrypoint_binding_after(
+        contract.tree.body,
+        assignment_name=assignment_name,
+        initial=_EntrypointBinding(),
+    )
+    if binding.ambiguous:
+        return None
+    return binding.expression
+
+
 def _active_entrypoint_class_refs(
     modules: dict[str, _ModuleContract],
     *,
@@ -458,7 +553,13 @@ def _active_entrypoint_class_refs(
 ) -> set[_SymbolRef]:
     """Extract module-qualified classes instantiated by a plugin entrypoint."""
     entrypoint_contract = modules.get(entrypoint_module)
-    if entrypoint_contract is None or assignment_name not in entrypoint_contract.assignments:
+    if entrypoint_contract is None:
+        return set()
+    entrypoint_expression = _module_entrypoint_expression(
+        entrypoint_contract,
+        assignment_name,
+    )
+    if entrypoint_expression is None:
         return set()
 
     active_classes: set[_SymbolRef] = set()
@@ -511,10 +612,7 @@ def _active_entrypoint_class_refs(
             if isinstance(child, ast.expr):
                 visit_expression(child, current_module)
 
-    visit_expression(
-        entrypoint_contract.assignments[assignment_name],
-        entrypoint_module,
-    )
+    visit_expression(entrypoint_expression, entrypoint_module)
     return active_classes
 
 

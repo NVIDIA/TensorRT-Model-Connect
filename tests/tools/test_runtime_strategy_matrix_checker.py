@@ -251,6 +251,91 @@ runner = PromptedSegmentationRunner()
     ) == {"sam3_prompted_segmentation": {"segment-prompted"}}
 
 
+def _extract_conditional_runner_commands(
+    tmp_path: Path,
+    *,
+    condition: str,
+    runner_class: str,
+) -> dict[str, set[str]]:
+    mod = _import_checker()
+    models_dir = tmp_path / "tests" / "e2e" / "models"
+    owner_dir = models_dir / "conditional"
+    manifest_dir = owner_dir / "manifests"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "conditional.json").write_text(
+        """
+{
+  "family": "conditional",
+  "runtime_strategy": "conditional_runtime",
+  "task_strategy": "text_generation_causal"
+}
+        """,
+        encoding="utf-8",
+    )
+    plugin_dir = owner_dir / "e2e_plugins"
+    plugin_dir.mkdir()
+    (plugin_dir / "runner.py").write_text(
+        f"""
+import os
+
+select_second = os.environ.get("SELECT_SECOND") == "1"
+
+class FirstRunner:
+    def run_stage(self, binary, bundle):
+        return [binary, "run", bundle]
+
+class SecondRunner:
+    def run_stage(self, binary, bundle):
+        return [binary, "generate-audio", bundle]
+
+runner = FirstRunner()
+if {condition}:
+    runner = SecondRunner()
+        """,
+        encoding="utf-8",
+    )
+
+    return mod.extract_runtime_cli_commands_from_e2e_plugins(
+        {
+            "conditional_runtime": {
+                "runner_class": f"runner.{runner_class}",
+            }
+        },
+        models_dir,
+        {"generate-audio", "run"},
+    )
+
+
+def test_runtime_command_discovery_uses_true_branch_runner_rebinding(
+    tmp_path: Path,
+):
+    assert _extract_conditional_runner_commands(
+        tmp_path,
+        condition="True",
+        runner_class="SecondRunner",
+    ) == {"conditional_runtime": {"generate-audio"}}
+
+
+def test_runtime_command_discovery_ignores_false_branch_runner_rebinding(
+    tmp_path: Path,
+):
+    assert _extract_conditional_runner_commands(
+        tmp_path,
+        condition="False",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": {"run"}}
+
+
+def test_runtime_command_discovery_fails_closed_for_unknown_runner_rebinding(
+    tmp_path: Path,
+):
+    assert _extract_conditional_runner_commands(
+        tmp_path,
+        condition="select_second",
+        runner_class="FirstRunner",
+    ) == {"conditional_runtime": set()}
+
+
 def test_runtime_command_discovery_does_not_borrow_sibling_runner_commands(
     tmp_path: Path,
 ):

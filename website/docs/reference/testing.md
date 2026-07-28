@@ -8,8 +8,10 @@ title: Testing Reference
 every pull request, pushes to `main`, and manual runs. Its `Validate
 documentation` job uses Python 3.12 and Node 20 and runs all of these checks:
 
-1. Unit tests for the file-reference, command, runtime-strategy-matrix, and
-   selective-impact validators.
+1. Unit tests for the file-reference, command, runtime-strategy-matrix,
+   model-owned validation-script, selective-impact, and reference-consistency
+   and report validators, plus release-suite coverage for every non-L0-ready
+   model profile.
 2. `tools/test_impact.py --validate` to prove documentation and validator
    changes still select the intended focused checks.
 3. Strict tracked-document references and checked numeric claims.
@@ -96,10 +98,19 @@ E2E or the `tools/task_eval.py` CLI. Diagnostic-only task-eval suites remain
 available for investigation, but cannot publish a passed reference-consistency
 result.
 
-The all-model supervisor uses one isolated worker process per model and, by
-default, records a failed worker before continuing. Use
-`--all --on-model-failure stop` to stop after the first failed model. Both
-policies return nonzero when any attempted model fails.
+The supervisor starts one isolated worker process per **attempt**. By default,
+each runnable binding permits at most two attempts and waits five seconds
+before the second attempt. Only an execution error is retried; a completed
+comparison disagreement is final and is never retried. Configure those limits
+with `--model-attempts` and `--model-retry-delay-seconds`. Intermediate
+execution-error artifacts are archived, and `comparison.json` records the
+attempt count and per-attempt evidence.
+
+After a binding reaches its terminal result, the all-model failure policy
+applies. By default the supervisor records a failed binding and continues with
+the remaining models. Use `--all --on-model-failure stop` to stop after the
+first terminally failed model. Both policies return nonzero when any attempted
+model ultimately fails.
 
 Each case writes
 `<output>/<model>/<workload>/comparison.json`; the output root receives

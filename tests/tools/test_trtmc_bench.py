@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 import json
 from pathlib import Path
 import subprocess
@@ -168,6 +169,41 @@ def test_catalog_reuses_existing_model_manifests_for_different_tasks(tmp_path: P
     for model_name, expected in expectations.items():
         case = resolve_case(catalog.resolve(model_name), _bundle(tmp_path, model_name))
         assert (case.operation, case.measurement.warmup, case.measurement.iterations) == expected
+
+
+@pytest.mark.parametrize("invalid_value", ["false", 0, None, [], {}])
+def test_manifest_rejects_non_boolean_trust_remote_code(
+    tmp_path: Path,
+    invalid_value: object,
+) -> None:
+    source = REPOSITORY_ROOT / "tests/e2e/models/gpt2/manifests/distilgpt2.json"
+    raw = json.loads(source.read_text(encoding="utf-8"))
+    raw["trust_remote_code"] = invalid_value
+    manifest = tmp_path / "gpt2/manifests/distilgpt2.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(
+        BenchmarkError,
+        match=r"trust_remote_code in model manifest .* must be a boolean",
+    ):
+        ManifestCatalog._load(manifest)
+
+
+def test_bundle_plan_rejects_non_boolean_trust_remote_code_defensively(
+    tmp_path: Path,
+) -> None:
+    model = ManifestCatalog().resolve("distilgpt2")
+    invalid_model = replace(
+        model,
+        build_settings={**model.build_settings, "trust_remote_code": "false"},
+    )
+
+    with pytest.raises(
+        BenchmarkError,
+        match="trust_remote_code for distilgpt2 must be a boolean",
+    ):
+        BundleBuilder(tmp_path / "cache")._plan(invalid_model, ())
 
 
 def test_operation_registry_declares_supported_task_semantics() -> None:

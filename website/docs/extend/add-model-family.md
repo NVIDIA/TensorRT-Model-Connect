@@ -210,9 +210,10 @@ cmake --build build --target trtmc trtmc_model_example -j
 errors. CMake configure must reject missing sources, duplicate strategies, or
 invalid runtime manifest entries.
 
-## 6. Build, inspect, and isolate the smoke bundle
+## 6. Build a smoke bundle, then validate an exact staged candidate
 
-Set the concrete model reference once, then use the public CLI:
+Set the concrete model reference once. A direct public-CLI build is useful for
+inspection, but it is a separate smoke artifact:
 
 ```bash
 MODEL_REF=example-org/example-small
@@ -223,15 +224,36 @@ MODEL_REF=example-org/example-small
   --max-cache-length 256
 
 ./build/trtmc inspect /tmp/example-small.trtfb --list-engines
+```
+
+Run the family validator separately and give its candidate and E2E proof
+directories explicit locations:
+
+```bash
+VALIDATION_DIR=/tmp/trtmc-example-validation
+
 ./scripts/validate_family.sh "$MODEL_REF" \
   --binary ./build/trtmc \
-  --engine-dir /tmp/trtmc-example-engines \
+  --bundle-dir "$VALIDATION_DIR" \
+  --engine-dir "$VALIDATION_DIR/e2e" \
+  --e2e-model example-small-fp16 \
+  --max-cache-length 256 \
   --isolate-model-plugin
 ```
 
-Inspect the bundle before inference. Confirm that `family`,
+Inspect the direct smoke bundle before inference. Confirm that `family`,
 `runtime_strategy`, section layout, precision, and TensorRT metadata match the
-three descriptors. `--isolate-model-plugin` proves the requested strategy can
+three descriptors.
+
+`validate_family.sh` does not consume `/tmp/example-small.trtfb`. It builds a
+new candidate in a hidden staging directory under `--bundle-dir`, inspects and
+tests that exact candidate, and exposes it to the selected E2E node through a
+temporary engine directory without asking the harness to rebuild from the
+manifest's `hf_id`. A missing matching E2E manifest is a failure. The script
+publishes the candidate as
+`$VALIDATION_DIR/example-org_example-small.trtfb` only after every gate passes;
+on failure it leaves no newly published candidate at that destination.
+`--isolate-model-plugin` additionally proves that the requested strategy can
 be satisfied by the owning DSO rather than a stale installed plugin.
 
 Add `--trust-remote-code` only after reviewing and pinning the model repository
@@ -298,9 +320,11 @@ must invoke its supplied `ensure_tokenizer_json` callback for each required
 directory before returning sections. The builder then detects special tokens
 and reconciles bundle config from the repaired files.
 
-## 7. Run the declared E2E case
+## 7. Optionally rebuild and run the declared E2E case independently
 
-Use the manifest `name`, not the filename stem:
+The validator above has already run the declared E2E node against its exact
+staged candidate. For a separate manifest-driven rebuild, use the manifest
+`name`, not the filename stem:
 
 ```bash
 E2E_MODEL=example-small-fp16
@@ -317,5 +341,10 @@ PYTHONPATH=python:. pytest \
   --rebuild-engines
 ```
 
-The acceptance evidence is the exact-revision E2E result and its comparison
-artifacts, not the presence of the three descriptors alone.
+`--rebuild-engines` deliberately builds the manifest's configured checkpoint
+into `ENGINE_DIR`; it does **not** revalidate the staged candidate or the
+published bundle from `validate_family.sh`. Treat this as independent
+manifest-route evidence. For evidence about the exact `MODEL_REF` supplied to
+the validator, retain the validator's E2E result, comparison artifacts, and
+published validated bundle. In either flow, the evidence—not the presence of
+the three descriptors alone—is the acceptance signal.

@@ -356,12 +356,15 @@ def _build_options(model: ModelDescriptor, cases: Sequence[ResolvedCase]) -> dic
 
 def _base_build_options(model: ModelDescriptor, build_args: Mapping[str, Any]) -> dict[str, Any]:
     settings = model.build_settings
+    trust_remote_code = settings.get("trust_remote_code", False)
+    if not isinstance(trust_remote_code, bool):
+        raise BenchmarkError(f"trust_remote_code for {model.name} must be a boolean")
     options: dict[str, Any] = {
         "precision": model.precision,
         "max_cache_length": int(
             settings.get("max_cache_length", build_args.get("max_cache_length", 256))
         ),
-        "trust_remote_code": bool(settings.get("trust_remote_code", False)),
+        "trust_remote_code": trust_remote_code,
     }
     declared_max_batch = build_args.get("max_batch_size", settings.get("max_batch_size"))
     if declared_max_batch is not None:

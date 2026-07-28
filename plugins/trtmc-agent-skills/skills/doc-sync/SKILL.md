@@ -343,16 +343,20 @@ git diff --check
 Install `pytest` and `PyYAML` first if the validation environment does not
 provide them. Use Node 20 for the website commands to match CI.
 
-The validator tests protect the checkers themselves;
+The pytest bundle protects the file-reference and command checkers, the live
+runtime-strategy matrix, model-owned validation scripts, selective-test
+classification, canonical reference-consistency and report behavior, and
+release-suite coverage for every non-L0-ready model profile.
 `tools/test_impact.py --validate` protects selective-test ownership; the strict
 reference checker verifies tracked paths and numeric claims; the command
 checker validates documented shell syntax and known argument contracts; the
 matrix checker compares strategies with descriptors, source, tests, and runner
 commands; and the clean install plus production build validates the complete
-Docusaurus site. Use Node 20 to match CI. Run additional focused tests when a
-behavioral rewrite depends on another contract, and record any
-environment-dependent gate that could not run rather than calling the
-mandatory workflow nonexistent.
+Docusaurus site. `git diff --check` is an additional local patch-quality check,
+not a step in the GitHub workflow. Use Node 20 to match CI. Run additional
+focused tests when a behavioral rewrite depends on another contract, and
+record any environment-dependent gate that could not run rather than calling
+the mandatory workflow nonexistent.
 
 ## Summary Report
 
