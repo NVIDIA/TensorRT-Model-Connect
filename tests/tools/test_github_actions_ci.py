@@ -59,6 +59,10 @@ def test_premerge_workflow_only_dispatches_an_exact_trusted_snapshot() -> None:
     authorize = workflow.split("\n  authorize:", maxsplit=1)[1].split(
         "\n  dispatch:", maxsplit=1
     )[0]
+    dispatch = workflow.split("\n  dispatch:", maxsplit=1)[1]
+    dispatch_permissions = dispatch.split("    permissions:", maxsplit=1)[1].split(
+        "\n\n", maxsplit=1
+    )[0]
 
     assert "pull_request_target:" in workflow
     assert "types: [labeled]" in workflow
@@ -73,19 +77,50 @@ def test_premerge_workflow_only_dispatches_an_exact_trusted_snapshot() -> None:
     assert "needs: authorize" in workflow
     assert "environment:" not in authorize
     assert "secrets." not in authorize
+    assert "statuses: write" not in authorize
+    assert dispatch_permissions.strip() == "statuses: write"
     assert 'pull="$(gh api --method GET' in workflow
     assert "pr_number=$PR_NUMBER" in workflow
     assert "base_sha=$base_sha" in workflow
     assert "head_sha=$head_sha" in workflow
     assert "merge_sha=$merge_sha" in workflow
-    assert workflow.count("actions/create-github-app-token@") == 1
-    assert "permission-actions: write" in workflow
+    secret_references = set(re.findall(r"secrets\.([A-Z][A-Z0-9_]*)", workflow))
+    assert secret_references == {
+        "TRTMC_CI_DISPATCH_TOKEN",
+        "TRTMC_PRIVATE_CI_OWNER",
+        "TRTMC_PRIVATE_CI_REPOSITORY",
+    }
+    for secret in secret_references:
+        assert secret not in authorize
+        assert secret in dispatch
+    assert workflow.count("${{ secrets.TRTMC_CI_DISPATCH_TOKEN }}") == 1
+    assert "actions/create-github-app-token@" not in workflow
     assert "permission-checks:" not in workflow
     assert "actions/checkout@" not in workflow
     assert "private_ci_bridge.py" not in workflow
     assert "self-hosted" not in workflow
     assert "secrets: inherit" not in workflow
-    assert "actions/workflows/premerge.yml/dispatches" in workflow
+    assert (
+        "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/"
+        "actions/workflows/premerge.yml/dispatches"
+    ) in workflow
+    assert re.search(r'"/repos/[A-Za-z0-9]', workflow) is None
+    assert '[[ "$PRIVATE_CI_OWNER" =~ ^[A-Za-z0-9]' in workflow
+    assert '[[ "$PRIVATE_CI_REPOSITORY" =~ ^[A-Za-z0-9]' in workflow
+    assert "gh api --silent --method POST" in workflow
+    assert 'echo "$PRIVATE_CI_' not in dispatch
+    assert "GITHUB_STEP_SUMMARY" not in dispatch
+    assert "/repos/$GITHUB_REPOSITORY/statuses/$MERGE_SHA" in dispatch
+    assert "-f state=pending" in dispatch
+    assert "-f context=trtmc/premerge/required" in dispatch
+    assert '-f description="Premerge tests are running"' in dispatch
+    assert (
+        '-f target_url="https://github.com/$GITHUB_REPOSITORY/blob/$BASE_SHA/'
+        '.github/workflows/trtmc-ci.yml"'
+    ) in dispatch
+    assert dispatch.index("/statuses/$MERGE_SHA") < dispatch.index(
+        "actions/workflows/premerge.yml/dispatches"
+    )
     assert 'ref: "main"' in workflow
     for name in ("pr_number", "base_sha", "head_sha", "merge_sha"):
         assert f"{name}: ${name}" in workflow
