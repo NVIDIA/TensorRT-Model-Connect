@@ -3122,6 +3122,36 @@ class TestAggregation:
         ]
 
 
+class TestWan22ThorDeployment:
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "Dockerfile.wan22-thor",
+            "Dockerfile.wan22-thor.dockerignore",
+        ],
+    )
+    def test_deployment_assets_select_wan22(self, mock_repo, path):
+        """Thor image assets validate only the Wan2.2 model and deployment contracts."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        for name in ("wan22-ti2v-5b", "wan22-ti2v-5b-l0"):
+            _write_json(
+                models_dir / f"{name}.json",
+                {
+                    "name": name,
+                    "family": "wan2_2_ti2v",
+                    "runtime_strategy": "diffusion_wan2_2_ti2v",
+                    "task_strategy": "diffusion_media_generation",
+                },
+            )
+        impact_map = test_impact.build_impact_map(mock_repo)
+        match = test_impact.classify_file(path, impact_map)
+
+        assert match.rule == "wan22_thor_deployment"
+        assert match.models == ["wan22-ti2v-5b", "wan22-ti2v-5b-l0"]
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
+
 # ---------------------------------------------------------------------------
 # Validation test (uses real repo)
 # ---------------------------------------------------------------------------
