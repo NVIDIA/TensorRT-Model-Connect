@@ -93,6 +93,16 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
     assert catalog["sample_limits"]["gedit_bench_image_edit"] == 5
 
 
+def test_standard_validation_suites_have_report_task_types():
+    missing = [
+        suite["id"]
+        for suite in task_eval.load_suites()
+        if not trtmc_validate._suite_task_metadata(suite)[0]
+    ]
+
+    assert not missing
+
+
 def test_every_dataset_backed_validation_binding_has_native_reference_runner():
     catalog = trtmc_validate.load_catalog()
     suites = {suite["id"]: suite for suite in task_eval.load_suites()}
@@ -996,6 +1006,8 @@ def test_write_report_links_each_comparison(tmp_path):
             {
                 "model": "model-a",
                 "workload": "workload-a",
+                "task_type": "Text → Audio",
+                "user_contract": "tts_audio",
                 "status": "passed",
                 "reference_environment": [
                     {"name": "reference_common", "python": "/profiles/python"}
@@ -1043,6 +1055,9 @@ def test_write_report_links_each_comparison(tmp_path):
     assert "🟢 1 &nbsp; 🟡 0 &nbsp;" in document
     assert "🔴 0 &nbsp; ⚪ 0" in document
     assert "Vanilla reproduction" in document
+    assert "<th>Task type</th>" in document
+    assert "Text → Audio" in document
+    assert "tts_audio" in document
     assert "Dataset · Reference 1/1 · TRTMC 1/1" in document
     assert "Dataset slice (500 samples)" in document
     assert "<th>Samples</th>" in document
@@ -1093,6 +1108,37 @@ def test_write_report_surfaces_quantized_reference_precision_contract(
     document = html_path.read_text(encoding="utf-8")
     assert "TRTMC FP8 (BF16 base) vs HF BF16" in document
     assert "Quantized candidate vs unquantized reference" in document
+
+
+def test_report_infers_task_type_for_legacy_standard_result(tmp_path):
+    case_dir = tmp_path / "bark-large" / "seedtts_en_tts_intelligibility"
+    case_dir.mkdir(parents=True)
+    (case_dir / "comparison.json").write_text(
+        json.dumps(
+            {
+                "model": "bark-large",
+                "workload": "seedtts_en_tts_intelligibility",
+                "status": "passed",
+                "reproduce": {
+                    "dataset": {
+                        "command": "python tools/trtmc_validate.py bark-large",
+                        "sample_limit": 3,
+                        "prepared_input_count": 3,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, html_path, report = trtmc_validate.write_report(tmp_path)
+
+    result = report["results"][0]
+    assert result["task_type"] == "Text → Audio"
+    assert result["user_contract"] == "tts_audio"
+    document = html_path.read_text(encoding="utf-8")
+    assert "<strong>Text → Audio</strong>" in document
+    assert '<div class="detail">tts_audio</div>' in document
 
 
 def test_traffic_light_counts_are_mutually_exclusive():

@@ -10,6 +10,7 @@ import argparse
 import copy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import cache
 import html
 import json
 import os
@@ -52,6 +53,27 @@ NOT_COMPARED_DIRECTORY = "not-compared"
 LEGACY_E2E_REASON = (
     "E2E execution does not compare aligned reference and TRTMC outputs."
 )
+_TASK_TYPE_BY_USER_CONTRACT = {
+    "multiple_choice_qa": "Text → Choice",
+    "continuation_parity": "Text → Text",
+    "code_completion": "Text → Code",
+    "translation": "Text → Text",
+    "seq2seq_output": "Text → Text",
+    "vl_answer": "Image + Text → Text",
+    "ocr_text": "Image → Text",
+    "exact_transcript": "Audio → Text",
+    "tts_audio": "Text → Audio",
+    "diffusion_image": "Text → Image",
+    "diffusion_video": "Text → Video",
+    "image-to-image": "Image + Text → Image",
+    "image_classification": "Image → Class",
+    "segmentation_mask": "Image → Mask",
+    "prompted_mask": "Image + Prompt → Mask",
+    "time_series_prediction_parity": "Time Series → Time Series",
+    "encoder_embedding_parity": "Text → Embedding",
+    "ranking_order": "Query + Documents → Ranking",
+    "diffusion_text_generation": "Text → Text",
+}
 
 
 class ValidationError(RuntimeError):
@@ -186,6 +208,31 @@ def load_catalog(path: Path = DEFAULT_CATALOG) -> dict[str, Any]:
     for name, spec in models.items():
         _validate_model_spec(path, name, spec)
     return raw
+
+
+def _suite_task_metadata(suite: Mapping[str, Any]) -> tuple[str, str]:
+    user_contract = str(suite.get("user_contract", "") or "")
+    task_type = str(suite.get("task_type", "") or "")
+    if not task_type:
+        task_type = _TASK_TYPE_BY_USER_CONTRACT.get(user_contract, "")
+    return task_type, user_contract
+
+
+@cache
+def _default_suite_task_metadata() -> dict[str, tuple[str, str]]:
+    return {
+        str(suite["id"]): _suite_task_metadata(suite)
+        for suite in task_eval.load_suites(DEFAULT_SUITES)
+    }
+
+
+def _result_task_metadata(result: Mapping[str, Any]) -> tuple[str, str]:
+    task_type = str(result.get("task_type", "") or "")
+    user_contract = str(result.get("user_contract", "") or "")
+    if task_type:
+        return task_type, user_contract
+    workload = str(result.get("workload", "") or "")
+    return _default_suite_task_metadata().get(workload, ("", user_contract))
 
 
 def ready_model_names(models_root: Path = DEFAULT_MODELS) -> tuple[str, ...]:
@@ -1143,9 +1190,12 @@ def _normalize_result(result: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(precision_contract, dict):
         candidate = raw_result.get("precision_contract")
         precision_contract = dict(candidate) if isinstance(candidate, dict) else {}
+    task_type, user_contract = _result_task_metadata(normalized)
     normalized.update(
         {
             "schema_version": "trtmc.validation-result/v2",
+            "task_type": task_type,
+            "user_contract": user_contract,
             "execution": execution,
             "comparison": comparison,
             "validation": validation,
@@ -1205,6 +1255,8 @@ def _comparison_result(
     reference_environment: EnvironmentSelection,
     dataset_command: str,
     sample_limit: int = 0,
+    task_type: str = "",
+    user_contract: str = "",
 ) -> dict[str, Any]:
     workload = _required_workload(binding)
     summary_path = case_dir / "validation" / workload / "eval_summary.json"
@@ -1238,6 +1290,8 @@ def _comparison_result(
         "schema_version": "trtmc.validation-result/v2",
         "model": binding.model,
         "workload": binding.workload,
+        "task_type": task_type,
+        "user_contract": user_contract,
         "executor": "trtmc_compare",
         "status": status,
         "returncode": returncode,
@@ -1282,6 +1336,7 @@ def run_binding(
     dataset_command = shlex.join([sys.executable, *sys.argv])
 
     suite = suites[workload]
+    task_type, user_contract = _suite_task_metadata(suite)
     dataset = (
         Path(arguments.dataset)
         if arguments.dataset
@@ -1303,6 +1358,8 @@ def run_binding(
         reference_environment=environment,
         dataset_command=dataset_command,
         sample_limit=int(arguments.limit or 0),
+        task_type=task_type,
+        user_contract=user_contract,
     )
 
     comparison = case_dir / "comparison.json"
@@ -1947,6 +2004,7 @@ def _report_rows(
         rows.append(
             "<tr>"
             f"<td>{html.escape(str(result.get('model', '')))}</td>"
+            f"<td>{_render_task_type(result)}</td>"
             f"<td>{html.escape(str(result.get('workload') or '—'))}</td>"
             f"<td>{_render_samples(result)}</td>"
             f"<td>{_render_execution(result)}</td>"
@@ -1959,6 +2017,18 @@ def _report_rows(
             "</tr>"
         )
     return "".join(rows)
+
+
+def _render_task_type(result: Mapping[str, Any]) -> str:
+    task_type, user_contract = _result_task_metadata(result)
+    if not task_type:
+        return "—"
+    contract = (
+        f'<div class="detail">{html.escape(user_contract)}</div>'
+        if user_contract
+        else ""
+    )
+    return f"<strong>{html.escape(task_type)}</strong>{contract}"
 
 
 def _report_document(
@@ -2039,7 +2109,7 @@ pre {{ margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
 {execution_errors} execution errors ·
 {report["summary"]["selected_samples"]} samples{duration_summary}<br>
 {html.escape(provenance)}</div>
-<table><thead><tr><th>Model</th><th>Workload</th><th>Samples</th><th>Execution</th>
+<table><thead><tr><th>Model</th><th>Task type</th><th>Workload</th><th>Samples</th><th>Execution</th>
 <th>Reference</th><th>Comparison</th><th>Agreement metrics</th>
 <th>Validation</th><th>Vanilla reproduction</th><th>Result</th></tr></thead>
 <tbody>{rows}</tbody></table>
