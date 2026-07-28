@@ -7,6 +7,7 @@
 
 #include "runtime/backend/prebound_backend.h"
 #include "runtime/models/wan2_2_ti2v/options.h"
+#include "runtime/models/wan2_2_ti2v/runtime_config.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/tokenizer.h"
 
@@ -43,7 +44,8 @@ make_wan22_vae_cache_bindings(const std::vector<void*>& input_addresses,
 class Wan22TI2VPipeline final : public IPipeline {
   public:
     Wan22TI2VPipeline(Wan22ModuleLoader module_loader, std::unique_ptr<ITokenizer> tokenizer,
-                      Wan22TI2VOptions options, std::string model_id);
+                      Wan22TI2VOptions options, wan2_2_ti2v::RuntimeConfig runtime_config,
+                      std::string model_id);
     ~Wan22TI2VPipeline() override;
 
     bool supports_image_generation() const override { return true; }
@@ -72,6 +74,7 @@ class Wan22TI2VPipeline final : public IPipeline {
     Wan22ModuleLoader module_loader_;
     std::unique_ptr<ITokenizer> tokenizer_;
     Wan22TI2VOptions options_;
+    wan2_2_ti2v::RuntimeConfig runtime_config_;
     std::string model_id_;
     cudaStream_t stream_{nullptr};
     std::mutex generation_mutex_;

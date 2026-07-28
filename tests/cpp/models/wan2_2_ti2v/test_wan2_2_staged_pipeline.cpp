@@ -400,7 +400,7 @@ int main() {
     };
     {
         auto tokenizer = std::make_unique<FakeTokenizer>();
-        trtmc::Wan22TI2VPipeline pipeline(std::move(loader), std::move(tokenizer), {},
+        trtmc::Wan22TI2VPipeline pipeline(std::move(loader), std::move(tokenizer), {}, {},
                                           "wan22-test");
         if (module_loads != 0) {
             std::cerr << "FAIL: pipeline construction eagerly loaded a TensorRT plan\n";

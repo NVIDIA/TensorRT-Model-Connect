@@ -125,14 +125,14 @@ trtmc build Wan-AI/Wan2.2-TI2V-5B \
   --fp8 \
   -o wan22-thor.trtfb
 
-env TRTMC_WAN22_EASYCACHE=1 \
-    TRTMC_WAN22_EASYCACHE_THRESHOLD=1.0 \
-    TRTMC_WAN22_EASYCACHE_MAX_CONSECUTIVE_REUSE=4 \
-    TRTMC_WAN22_EASYCACHE_LATE_CFG=1 \
-  trtmc generate-video wan22-thor.trtfb \
-    --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage" \
-    --output wan22-frames \
-    --seed 42
+trtmc generate-video wan22-thor.trtfb \
+  --set wan2_2_ti2v.easycache_enabled=true \
+  --set wan2_2_ti2v.easycache_threshold=1.0 \
+  --set wan2_2_ti2v.easycache_max_consecutive_reuse=4 \
+  --set wan2_2_ti2v.late_cfg_enabled=true \
+  --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage" \
+  --output wan22-frames \
+  --seed 42
 ```
 
 The first command downloads the pinned checkpoint from Hugging Face, verifies
@@ -160,7 +160,7 @@ clocks, temperatures, or prompts.
 
 TensorRT plans must be built on the target Thor. Wan2.2 itself is not
 Thor-only: the packaged FP8 profile also supports GB300 SM 10.3, while other
-supported GPUs can omit `--fp8` and the four EasyCache environment variables
+supported GPUs can omit `--fp8` and the four EasyCache `--set` arguments
 to use the portable BF16 path.
 
 ## What To Read Next

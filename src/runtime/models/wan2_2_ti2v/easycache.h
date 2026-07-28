@@ -49,12 +49,11 @@ struct EasyCacheRuntimeProfile {
     int32_t compute_capability_minor{0};
 };
 
-EasyCacheConfig easycache_config_from_environment(int32_t total_steps);
 bool is_thor_performance_easycache_config(const EasyCacheConfig& easycache) noexcept;
 bool is_qualified_thor_performance_easycache_profile(
     const EasyCacheConfig& easycache, const EasyCacheRuntimeProfile& runtime) noexcept;
-bool late_cfg_enabled_from_environment(const EasyCacheConfig& easycache,
-                                       bool thor_performance_profile_qualified = false);
+bool validate_late_cfg_request(bool requested, const EasyCacheConfig& easycache,
+                               bool thor_performance_profile_qualified = false);
 
 class EasyCacheController {
   public:

@@ -7,77 +7,16 @@
 
 #include "runtime/models/wan2_2_ti2v/options.h"
 
-#include <algorithm>
-#include <array>
-#include <cctype>
-#include <cerrno>
 #include <cmath>
-#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <string>
-#include <string_view>
 
 namespace trtmc::wan2_2_ti2v {
 namespace {
 
-constexpr const char* kEnableEnvironment = "TRTMC_WAN22_EASYCACHE";
-constexpr const char* kThresholdEnvironment = "TRTMC_WAN22_EASYCACHE_THRESHOLD";
-constexpr const char* kFirstExactEnvironment = "TRTMC_WAN22_EASYCACHE_FIRST_EXACT_STEPS";
-constexpr const char* kLastExactEnvironment = "TRTMC_WAN22_EASYCACHE_LAST_EXACT_STEPS";
-constexpr const char* kMaxConsecutiveReuseEnvironment =
-    "TRTMC_WAN22_EASYCACHE_MAX_CONSECUTIVE_REUSE";
-constexpr const char* kLateCfgEnableEnvironment = "TRTMC_WAN22_EASYCACHE_LATE_CFG";
 constexpr double kMinimumNorm = 1.0e-8;
 constexpr double kMaximumTimestepExtrapolation = 2.0;
-
-std::string lowercase(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
-        return static_cast<char>(std::tolower(character));
-    });
-    return value;
-}
-
-bool parse_enabled(const char* name) {
-    const char* value = std::getenv(name);
-    if (value == nullptr || *value == '\0')
-        return false;
-    const auto normalized = lowercase(value);
-    constexpr std::array<std::string_view, 4> enabled = {"1", "true", "yes", "on"};
-    constexpr std::array<std::string_view, 4> disabled = {"0", "false", "no", "off"};
-    if (std::find(enabled.begin(), enabled.end(), normalized) != enabled.end())
-        return true;
-    if (std::find(disabled.begin(), disabled.end(), normalized) != disabled.end())
-        return false;
-    throw std::invalid_argument(std::string(name) +
-                                " must be one of 0/1, false/true, no/yes, or off/on");
-}
-
-double parse_positive_double(const char* name, double default_value) {
-    const char* value = std::getenv(name);
-    if (value == nullptr || *value == '\0')
-        return default_value;
-    char* end = nullptr;
-    errno = 0;
-    const double parsed = std::strtod(value, &end);
-    if (errno != 0 || end == value || *end != '\0' || !std::isfinite(parsed) || parsed <= 0.0)
-        throw std::invalid_argument(std::string(name) + " must be a finite positive number");
-    return parsed;
-}
-
-int32_t parse_nonnegative_int(const char* name, int32_t default_value) {
-    const char* value = std::getenv(name);
-    if (value == nullptr || *value == '\0')
-        return default_value;
-    char* end = nullptr;
-    errno = 0;
-    const long parsed = std::strtol(value, &end, 10);
-    if (errno != 0 || end == value || *end != '\0' || parsed < 0 ||
-        parsed > std::numeric_limits<int32_t>::max()) {
-        throw std::invalid_argument(std::string(name) + " must be a non-negative integer");
-    }
-    return static_cast<int32_t>(parsed);
-}
 
 bool exact_windows_are_valid(const EasyCacheConfig& config) noexcept {
     return config.first_exact_steps >= 0 && config.last_exact_steps >= 0 &&
@@ -110,23 +49,6 @@ bool is_qualified_conservative_late_cfg_profile(const EasyCacheConfig& config) n
 
 } // namespace
 
-EasyCacheConfig easycache_config_from_environment(int32_t total_steps) {
-    EasyCacheConfig config;
-    config.total_steps = total_steps;
-    config.enabled = parse_enabled(kEnableEnvironment);
-    if (!config.enabled)
-        return config;
-
-    config.threshold = parse_positive_double(kThresholdEnvironment, config.threshold);
-    config.first_exact_steps =
-        parse_nonnegative_int(kFirstExactEnvironment, config.first_exact_steps);
-    config.last_exact_steps = parse_nonnegative_int(kLastExactEnvironment, config.last_exact_steps);
-    config.max_consecutive_reuse =
-        parse_nonnegative_int(kMaxConsecutiveReuseEnvironment, config.max_consecutive_reuse);
-    validate_config(config);
-    return config;
-}
-
 bool is_thor_performance_easycache_config(const EasyCacheConfig& easycache) noexcept {
     return easycache.enabled && easycache.threshold == kThorPerformanceEasyCacheThreshold &&
            easycache.first_exact_steps == kThorPerformanceEasyCacheFirstExactSteps &&
@@ -145,15 +67,15 @@ bool is_qualified_thor_performance_easycache_profile(
            runtime.compute_capability_major == 11 && runtime.compute_capability_minor == 0;
 }
 
-bool late_cfg_enabled_from_environment(const EasyCacheConfig& easycache,
-                                       bool thor_performance_profile_qualified) {
-    if (!parse_enabled(kLateCfgEnableEnvironment))
+bool validate_late_cfg_request(bool requested, const EasyCacheConfig& easycache,
+                               bool thor_performance_profile_qualified) {
+    if (!requested)
         return false;
     if (!is_qualified_conservative_late_cfg_profile(easycache) &&
         !(thor_performance_profile_qualified && is_thor_performance_easycache_config(easycache))) {
         throw std::invalid_argument(
-            "TRTMC_WAN22_EASYCACHE_LATE_CFG requires either the conservative 50-step "
-            "EasyCache profile (threshold=0.08, first_exact_steps=7, last_exact_steps=2, "
+            "wan2_2_ti2v.late_cfg_enabled requires either the conservative 50-step EasyCache "
+            "profile (threshold=0.08, first_exact_steps=7, last_exact_steps=2, "
             "max_consecutive_reuse=4) or its runtime-qualified Thor performance profile");
     }
     return true;

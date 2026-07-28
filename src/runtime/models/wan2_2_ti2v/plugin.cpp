@@ -7,6 +7,7 @@
 #include "bundle/bundle_view.h"
 #include "runtime/backend/prebound_backend.h"
 #include "runtime/models/wan2_2_ti2v/pipeline.h"
+#include "runtime/models/wan2_2_ti2v/runtime_config.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "trtmc/runtime/trt_backend.h"
 #include "trtmc/tokenizer.h"
@@ -108,7 +109,8 @@ class Wan22TI2VPlugin final : public IPipelinePlugin {
         auto tokenizer = load_tokenizer(ctx.bundle);
         return std::make_unique<Wan22TI2VPipeline>(
             make_staged_module_loader(ctx, std::move(plan_sections)), std::move(tokenizer),
-            parse_wan22_options(ctx.config_json), ctx.bundle.info.model_id);
+            parse_wan22_options(ctx.config_json),
+            wan2_2_ti2v::resolve_runtime_config(ctx.runtime_config), ctx.bundle.info.model_id);
     }
 };
 

@@ -3,10 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "runtime/models/wan2_2_ti2v/config_schema.h"
 #include "runtime/models/wan2_2_ti2v/easycache.h"
+#include "runtime/models/wan2_2_ti2v/runtime_config.h"
+#include "trtmc/config/cli_support.h"
+#include "trtmc/config/schema_registry.h"
 
 #include <cmath>
-#include <cstdlib>
 #include <iostream>
 #include <optional>
 #include <stdexcept>
@@ -42,28 +45,6 @@ void check_throws(Callable&& callable, const char* label) {
     }
 }
 
-class ScopedEnvironment {
-  public:
-    explicit ScopedEnvironment(const char* name) : name_(name) {
-        if (const char* value = std::getenv(name))
-            original_ = value;
-    }
-
-    ~ScopedEnvironment() {
-        if (original_.has_value())
-            setenv(name_.c_str(), original_->c_str(), 1);
-        else
-            unsetenv(name_.c_str());
-    }
-
-    void set(const char* value) { setenv(name_.c_str(), value, 1); }
-    void unset() { unsetenv(name_.c_str()); }
-
-  private:
-    std::string name_;
-    std::optional<std::string> original_;
-};
-
 EasyCacheConfig qualified_config() {
     EasyCacheConfig config;
     config.enabled = true;
@@ -98,67 +79,77 @@ trtmc::wan2_2_ti2v::EasyCacheRuntimeProfile qualified_thor_runtime() {
     return runtime;
 }
 
-void test_defaults_are_inert() {
-    ScopedEnvironment easycache("TRTMC_WAN22_EASYCACHE");
-    ScopedEnvironment threshold("TRTMC_WAN22_EASYCACHE_THRESHOLD");
-    ScopedEnvironment late_cfg("TRTMC_WAN22_EASYCACHE_LATE_CFG");
-    easycache.unset();
-    threshold.set("not-parsed-while-disabled");
-    late_cfg.unset();
+void register_runtime_schema() {
+    auto& registry = trtmc::config::SchemaRegistry::instance();
+    registry.clear_for_testing();
+    registry.register_schema(trtmc::config::schemas::make_wan2_2_ti2v_schema());
+}
 
-    const auto config = trtmc::wan2_2_ti2v::easycache_config_from_environment(50);
-    check(!config.enabled, "EasyCache is disabled by default");
-    check(!trtmc::wan2_2_ti2v::late_cfg_enabled_from_environment(config),
+trtmc::wan2_2_ti2v::RuntimeConfig
+resolve_settings(const std::vector<std::string>& set_tokens = {}) {
+    const auto bundle = trtmc::config::resolve_cli_config("", set_tokens);
+    return trtmc::wan2_2_ti2v::resolve_runtime_config(&bundle);
+}
+
+void test_declarative_defaults_are_inert() {
+    register_runtime_schema();
+    const auto settings = resolve_settings();
+    check(!settings.easycache.enabled, "EasyCache is disabled by default");
+    check(close(settings.easycache.threshold, 0.02), "EasyCache threshold default is preserved");
+    check(settings.easycache.first_exact_steps == 7 && settings.easycache.last_exact_steps == 2 &&
+              settings.easycache.max_consecutive_reuse == 1,
+          "EasyCache integer defaults are preserved");
+    check(!trtmc::wan2_2_ti2v::validate_late_cfg_request(settings.late_cfg_enabled,
+                                                         settings.easycache),
           "late-CFG is disabled by default");
 }
 
-void test_qualified_profile_lock() {
-    ScopedEnvironment easycache("TRTMC_WAN22_EASYCACHE");
-    ScopedEnvironment threshold("TRTMC_WAN22_EASYCACHE_THRESHOLD");
-    ScopedEnvironment first("TRTMC_WAN22_EASYCACHE_FIRST_EXACT_STEPS");
-    ScopedEnvironment last("TRTMC_WAN22_EASYCACHE_LAST_EXACT_STEPS");
-    ScopedEnvironment maximum("TRTMC_WAN22_EASYCACHE_MAX_CONSECUTIVE_REUSE");
-    ScopedEnvironment late_cfg("TRTMC_WAN22_EASYCACHE_LATE_CFG");
-    easycache.set("true");
-    threshold.set("0.08");
-    first.set("7");
-    last.set("2");
-    maximum.set("4");
-    late_cfg.set("true");
-
-    const auto parsed = trtmc::wan2_2_ti2v::easycache_config_from_environment(50);
-    check(trtmc::wan2_2_ti2v::late_cfg_enabled_from_environment(parsed),
+void test_declarative_values_reach_runtime_api() {
+    register_runtime_schema();
+    const auto settings = resolve_settings({
+        "wan2_2_ti2v.easycache_enabled=true",
+        "wan2_2_ti2v.easycache_threshold=0.08",
+        "wan2_2_ti2v.easycache_first_exact_steps=7",
+        "wan2_2_ti2v.easycache_last_exact_steps=2",
+        "wan2_2_ti2v.easycache_max_consecutive_reuse=4",
+        "wan2_2_ti2v.late_cfg_enabled=true",
+    });
+    auto parsed = settings.easycache;
+    parsed.total_steps = 50;
+    check(settings.late_cfg_enabled, "late-CFG declarative value reaches the runtime API");
+    check(parsed.enabled && close(parsed.threshold, 0.08) && parsed.first_exact_steps == 7 &&
+              parsed.last_exact_steps == 2 && parsed.max_consecutive_reuse == 4,
+          "EasyCache declarative values reach the runtime API");
+    check(trtmc::wan2_2_ti2v::validate_late_cfg_request(settings.late_cfg_enabled, parsed),
           "late-CFG accepts the qualified EasyCache profile");
 
     auto invalid = qualified_config();
     invalid.enabled = false;
-    check_throws([&] { (void)trtmc::wan2_2_ti2v::late_cfg_enabled_from_environment(invalid); },
+    check_throws([&] { (void)trtmc::wan2_2_ti2v::validate_late_cfg_request(true, invalid); },
                  "late-CFG rejects disabled EasyCache");
     invalid = qualified_config();
     invalid.threshold = 0.05;
-    check_throws([&] { (void)trtmc::wan2_2_ti2v::late_cfg_enabled_from_environment(invalid); },
+    check_throws([&] { (void)trtmc::wan2_2_ti2v::validate_late_cfg_request(true, invalid); },
                  "late-CFG rejects an unqualified threshold");
     invalid = qualified_config();
     invalid.first_exact_steps = 8;
-    check_throws([&] { (void)trtmc::wan2_2_ti2v::late_cfg_enabled_from_environment(invalid); },
+    check_throws([&] { (void)trtmc::wan2_2_ti2v::validate_late_cfg_request(true, invalid); },
                  "late-CFG rejects an unqualified prefix");
     invalid = qualified_config();
     invalid.last_exact_steps = 1;
-    check_throws([&] { (void)trtmc::wan2_2_ti2v::late_cfg_enabled_from_environment(invalid); },
+    check_throws([&] { (void)trtmc::wan2_2_ti2v::validate_late_cfg_request(true, invalid); },
                  "late-CFG rejects an unqualified suffix");
     invalid = qualified_config();
     invalid.max_consecutive_reuse = 3;
-    check_throws([&] { (void)trtmc::wan2_2_ti2v::late_cfg_enabled_from_environment(invalid); },
+    check_throws([&] { (void)trtmc::wan2_2_ti2v::validate_late_cfg_request(true, invalid); },
                  "late-CFG rejects an unqualified reuse cap");
     invalid = qualified_config();
     invalid.total_steps = 49;
-    check_throws([&] { (void)trtmc::wan2_2_ti2v::late_cfg_enabled_from_environment(invalid); },
+    check_throws([&] { (void)trtmc::wan2_2_ti2v::validate_late_cfg_request(true, invalid); },
                  "late-CFG rejects an unqualified step count");
 }
 
 void test_thor_performance_profile_scope() {
-    ScopedEnvironment late_cfg("TRTMC_WAN22_EASYCACHE_LATE_CFG");
-    late_cfg.set("true");
     const auto config = thor_performance_config();
     const auto runtime = qualified_thor_runtime();
 
@@ -166,11 +157,10 @@ void test_thor_performance_profile_scope() {
           "Thor performance EasyCache config is exact");
     check(trtmc::wan2_2_ti2v::is_qualified_thor_performance_easycache_profile(config, runtime),
           "Thor performance profile accepts official integrated SM110");
-    check(trtmc::wan2_2_ti2v::late_cfg_enabled_from_environment(config, true),
+    check(trtmc::wan2_2_ti2v::validate_late_cfg_request(true, config, true),
           "late-CFG accepts runtime-qualified Thor performance profile");
-    check_throws(
-        [&] { (void)trtmc::wan2_2_ti2v::late_cfg_enabled_from_environment(config, false); },
-        "late-CFG rejects an unqualified Thor performance profile");
+    check_throws([&] { (void)trtmc::wan2_2_ti2v::validate_late_cfg_request(true, config, false); },
+                 "late-CFG rejects an unqualified Thor performance profile");
 
     auto invalid_runtime = runtime;
     invalid_runtime.video_height = 384;
@@ -217,6 +207,16 @@ void test_thor_performance_profile_scope() {
     invalid_config.total_steps = 49;
     check(!trtmc::wan2_2_ti2v::is_thor_performance_easycache_config(invalid_config),
           "Thor performance profile rejects non-qualified step count");
+}
+
+void test_schema_rejects_invalid_values() {
+    register_runtime_schema();
+    check_throws([] { (void)resolve_settings({"wan2_2_ti2v.easycache_threshold=0"}); },
+                 "schema rejects a non-positive threshold");
+    check_throws([] { (void)resolve_settings({"wan2_2_ti2v.easycache_first_exact_steps=-1"}); },
+                 "schema rejects a negative exact-step count");
+    check_throws([] { (void)resolve_settings({"wan2_2_ti2v.easycache_max_consecutive_reuse=0"}); },
+                 "schema rejects a zero reuse cap");
 }
 
 void test_easycache_exact_and_reuse_paths() {
@@ -382,9 +382,10 @@ void test_synthetic_unconditional_updates_easycache() {
 } // namespace
 
 int main() {
-    test_defaults_are_inert();
-    test_qualified_profile_lock();
+    test_declarative_defaults_are_inert();
+    test_declarative_values_reach_runtime_api();
     test_thor_performance_profile_scope();
+    test_schema_rejects_invalid_values();
     test_easycache_exact_and_reuse_paths();
     test_late_cfg_exact_windows_cadence_and_prediction();
     test_prediction_falls_back_to_actual();

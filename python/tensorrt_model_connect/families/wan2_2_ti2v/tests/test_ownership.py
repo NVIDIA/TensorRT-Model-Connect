@@ -13,6 +13,7 @@ import tomllib
 
 REPO_ROOT = Path(__file__).resolve().parents[5]
 PRODUCTION_ROOT = REPO_ROOT / "python/tensorrt_model_connect/families/wan2_2_ti2v"
+RUNTIME_ROOT = REPO_ROOT / "src/runtime/models/wan2_2_ti2v"
 FORBIDDEN_WAN21 = re.compile(
     r"families[./]wan_t2v(?![A-Za-z0-9_])"
     r"|runtime/models/wan(?![A-Za-z0-9_])"
@@ -71,3 +72,23 @@ def test_wan22_torch_is_build_extra_not_global_runtime_dependency() -> None:
 
     assert "torch>=2.0" not in pyproject["project"]["dependencies"]
     assert pyproject["project"]["optional-dependencies"]["wan"] == ["torch>=2.0"]
+
+
+def test_wan22_runtime_settings_are_declarative_and_model_owned() -> None:
+    checked_paths = [
+        *RUNTIME_ROOT.glob("*.cpp"),
+        *RUNTIME_ROOT.glob("*.h"),
+        REPO_ROOT / "website/docs/getting-started/quick-start.md",
+    ]
+    leftovers = [
+        str(path.relative_to(REPO_ROOT))
+        for path in checked_paths
+        if "TRTMC_" "WAN22_" in path.read_text(encoding="utf-8")
+    ]
+    assert not leftovers
+
+    manifest = (RUNTIME_ROOT / "MODEL.toml").read_text(encoding="utf-8")
+    assert (
+        'runtime_config_schemas = '
+        '["config_schema.cpp|register_wan2_2_ti2v_schema"]'
+    ) in manifest

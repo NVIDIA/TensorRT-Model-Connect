@@ -4,10 +4,11 @@
 id = "wan2_2_ti2v"
 runtime_library = "libtrtmc_model_wan2_2_ti2v.so"
 runtime_plugins = ["plugin.cpp|register_wan2_2_ti2v_plugin"]
+runtime_config_schemas = ["config_schema.cpp|register_wan2_2_ti2v_schema"]
 runtime_strategies = ["diffusion_wan2_2_ti2v"]
 runtime_tests = [
   "test_wan2_2_cuda_rng|test_wan2_2_cuda_rng.cpp|_|torch_cuda_normal.cu|REQUIRES_GPU",
-  "test_wan2_2_easycache|test_wan2_2_easycache.cpp|_|easycache.cpp|_",
+  "test_wan2_2_easycache|test_wan2_2_easycache.cpp|_|config_schema.cpp,easycache.cpp,runtime_config.cpp|_",
   "test_wan2_2_prompt_cleaner|test_wan2_2_prompt_cleaner.cpp|_|prompt_cleaner.cpp|_",
   "test_wan2_2_options|test_wan2_2_options.cpp|nlohmann_json::nlohmann_json|options.cpp|_",
   "test_wan2_2_staged_pipeline|test_wan2_2_staged_pipeline.cpp|trtmc_model_wan2_2_ti2v|_|REQUIRES_TRT,REQUIRES_GPU",

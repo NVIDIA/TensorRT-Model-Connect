@@ -392,9 +392,12 @@ make_wan22_vae_cache_bindings(const std::vector<void*>& input_addresses,
 
 Wan22TI2VPipeline::Wan22TI2VPipeline(Wan22ModuleLoader module_loader,
                                      std::unique_ptr<ITokenizer> tokenizer,
-                                     Wan22TI2VOptions options, std::string model_id)
+                                     Wan22TI2VOptions options,
+                                     wan2_2_ti2v::RuntimeConfig runtime_config,
+                                     std::string model_id)
     : module_loader_(std::move(module_loader)), tokenizer_(std::move(tokenizer)),
-      options_(std::move(options)), model_id_(std::move(model_id)) {
+      options_(std::move(options)), runtime_config_(std::move(runtime_config)),
+      model_id_(std::move(model_id)) {
     if (!module_loader_ || !tokenizer_)
         throw std::invalid_argument("Wan2.2 requires a tokenizer and staged TensorRT loader");
     const auto status = cudaStreamCreate(&stream_);
@@ -512,8 +515,8 @@ void Wan22TI2VPipeline::run_denoising(std::vector<float>& latents,
     auto denoiser = load_module("denoiser_plan");
     validate_denoiser_contract(*denoiser, shape);
 
-    const auto easycache_config =
-        wan2_2_ti2v::easycache_config_from_environment(request.num_inference_steps);
+    auto easycache_config = runtime_config_.easycache;
+    easycache_config.total_steps = request.num_inference_steps;
     bool thor_performance_profile_qualified = false;
     if (wan2_2_ti2v::is_thor_performance_easycache_config(easycache_config)) {
         const auto runtime_profile = current_easycache_runtime_profile(request);
@@ -536,8 +539,8 @@ void Wan22TI2VPipeline::run_denoising(std::vector<float>& latents,
     }
 
     std::unique_ptr<wan2_2_ti2v::LateCfgController> late_cfg;
-    if (wan2_2_ti2v::late_cfg_enabled_from_environment(easycache_config,
-                                                       thor_performance_profile_qualified)) {
+    if (wan2_2_ti2v::validate_late_cfg_request(runtime_config_.late_cfg_enabled, easycache_config,
+                                               thor_performance_profile_qualified)) {
         late_cfg = std::make_unique<wan2_2_ti2v::LateCfgController>();
         std::cerr << "[wan2.2-ti2v.late_cfg] enabled=1 refresh_interval=2"
                   << " first_exact_steps=20 last_exact_steps=2"
