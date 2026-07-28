@@ -401,12 +401,34 @@ def test_time_series_parity_requires_every_sample_to_pass() -> None:
     assert summary["cases"][1]["passed"] is False
 
 
+def test_time_series_empty_boundary_uses_standard_json_null_metrics() -> None:
+    summary = task_eval.compare_time_series_prediction_sets(
+        {"responses": []},
+        {"responses": []},
+        gates={
+            "max_relative_l2": 1e-3,
+            "max_absolute_error": 1e-3,
+            "min_sample_agreement_rate": 1.0,
+        },
+    )
+
+    assert summary["status"] == "failed"
+    assert summary["mean_relative_l2"] is None
+    assert summary["max_relative_l2"] is None
+    assert summary["max_absolute_error"] is None
+    json.dumps(summary, allow_nan=False)
+
+
 def test_default_suites_include_ocrbench_v2_unified() -> None:
     suites = task_eval.load_suites()
     suite = task_eval.suite_by_id(suites, "ocrbench_v2_unified")
 
     assert suite["dataset"]["kind"] == "vlm_unified_json"
     assert suite["scoring"]["scorer"] == "ocrbench_v2"
+    assert suite["gates"] == {
+        "max_accuracy_drop_from_hf": 0.0,
+        "min_correctness_agreement": 1.0,
+    }
     assert suite["selectors"]["runtime_strategies"] == ["deepseek_ocr_vision_language"]
     assert suite["selectors"]["families"] == ["deepseek_ocr"]
 
@@ -1165,6 +1187,23 @@ def test_compare_encoder_embedding_predictions_gates_vector_and_pair_parity() ->
     assert summary["vector_pass_rate"] == 1.0
     assert summary["min_vector_cosine"] > 0.99
     assert summary["max_pair_cosine_abs_delta"] < 0.01
+
+
+def test_encoder_empty_boundary_uses_standard_json_null_metrics() -> None:
+    summary = task_eval.compare_encoder_embedding_prediction_sets(
+        {"responses": []},
+        {"responses": []},
+        gates={
+            "min_vector_cosine": 0.99,
+            "min_vector_pass_rate": 1.0,
+            "max_pair_cosine_abs_delta": 0.01,
+        },
+    )
+
+    assert summary["status"] == "failed"
+    assert summary["mean_pair_cosine_abs_delta"] is None
+    assert summary["max_pair_cosine_abs_delta"] is None
+    json.dumps(summary, allow_nan=False)
 
 
 def test_encoder_reference_uses_dpr_context_classes() -> None:
@@ -6287,6 +6326,33 @@ def test_diffusion_text_task_metric_deltas(
     assert task_eval.diffusion_text_task_metric_deltas(task_metric, diagnostics) == expected
 
 
+def test_diffusion_text_unavailable_perplexity_delta_remains_renderable() -> None:
+    deltas = task_eval.diffusion_text_task_metric_deltas(
+        "unconditional_text_quality",
+        {
+            "hf_generation_ppl": None,
+            "trtfb_generation_ppl": None,
+            "hf_unigram_entropy": 0.0,
+            "trtfb_unigram_entropy": 0.0,
+        },
+    )
+    result = {
+        "mode": "diffusion_text_parity",
+        "generation_ppl_abs_delta": deltas["generation_ppl_abs_delta"],
+        "token_agreement_rate": 0.0,
+        "status": "failed",
+        "hf_reused": False,
+        "bundle_built": False,
+    }
+
+    assert deltas["generation_ppl_abs_delta"] is None
+    assert (
+        "task_metric_delta=unavailable"
+        in task_eval._format_result_line({"name": "model-a"}, result)
+    )
+    json.dumps(deltas, allow_nan=False)
+
+
 def test_metric_gates_fail_on_missing_or_out_of_range_metrics() -> None:
     result = {"corpus_bleu": 19.0, "non_empty_rate": 1.0}
 
@@ -6300,6 +6366,282 @@ def test_metric_gates_fail_on_missing_or_out_of_range_metrics() -> None:
         "min_corpus_bleu",
         "max_generation_ppl",
     ]
+
+
+def test_reference_comparison_producer_fails_mcq_disagreement() -> None:
+    answers = {
+        "requests": [
+            {
+                "answer": "A",
+                "subject": "subject",
+            }
+        ]
+    }
+    hf = {"responses": [{"sample_id": "one", "output_text": "A"}]}
+    trtfb = {"responses": [{"sample_id": "one", "output_text": "B"}]}
+    summary = task_eval.compare_prediction_sets(
+        hf,
+        trtfb,
+        answers,
+        scorer="mcq",
+    )
+
+    result = task_eval.build_reference_comparison_result(
+        base_result={"model": "model-a", "suite": "mmlu_five_shot_mcq"},
+        scorer="mcq",
+        summary=summary,
+        gates={
+            "max_accuracy_drop_from_hf": 0.01,
+            "min_prediction_agreement": 0.98,
+        },
+    )
+
+    assert result["status"] == "failed"
+    assert result["valid_count"] == 1
+    assert result["accuracy_drop_from_hf"] == 1.0
+    assert result["prediction_agreement_rate"] == 0.0
+    assert {failure["gate"] for failure in result["gate_failures"]} == {
+        "max_accuracy_drop_from_hf",
+        "min_prediction_agreement_rate",
+    }
+
+
+def test_reference_comparison_producer_passes_matching_mcq() -> None:
+    answers = {
+        "requests": [
+            {
+                "answer": "A",
+                "subject": "subject",
+            }
+        ]
+    }
+    predictions = {
+        "responses": [{"sample_id": "one", "output_text": "A"}]
+    }
+    summary = task_eval.compare_prediction_sets(
+        predictions,
+        predictions,
+        answers,
+        scorer="mcq",
+    )
+
+    result = task_eval.build_reference_comparison_result(
+        base_result={"model": "model-a", "suite": "mmlu_five_shot_mcq"},
+        scorer="mcq",
+        summary=summary,
+        gates={
+            "max_accuracy_drop_from_hf": 0.01,
+            "min_prediction_agreement": 0.98,
+        },
+    )
+
+    assert result["status"] == "passed"
+    assert result["gate_failures"] == []
+
+
+def test_reference_comparison_producer_fails_ocr_correctness_disagreement() -> None:
+    answers = {
+        "requests": [
+            {
+                "answer": "Facebook",
+                "subject": "APP agent en",
+                "ocrbench_type": "APP agent en",
+                "ocrbench_answers": ["Facebook"],
+            }
+        ]
+    }
+    hf = {
+        "responses": [
+            {"sample_id": "one", "output_text": "Facebook"},
+        ]
+    }
+    trtfb = {
+        "responses": [
+            {"sample_id": "one", "output_text": "Instagram"},
+        ]
+    }
+    summary = task_eval.compare_prediction_sets(
+        hf,
+        trtfb,
+        answers,
+        scorer="ocrbench_v2",
+    )
+    suite = task_eval.suite_by_id(
+        task_eval.load_suites(),
+        "ocrbench_v2_unified",
+    )
+
+    result = task_eval.build_reference_comparison_result(
+        base_result={"model": "deepseek-ocr", "suite": suite["id"]},
+        scorer="ocrbench_v2",
+        summary=summary,
+        gates=suite["gates"],
+    )
+
+    assert result["status"] == "failed"
+    assert result["correctness_agreement_rate"] == 0.0
+    assert {failure["gate"] for failure in result["gate_failures"]} == {
+        "max_accuracy_drop_from_hf",
+        "min_correctness_agreement_rate",
+    }
+
+
+def test_reference_comparison_producer_rejects_empty_evidence() -> None:
+    summary = task_eval.compare_prediction_sets(
+        {"responses": []},
+        {"responses": []},
+        {"requests": []},
+        scorer="mcq",
+    )
+
+    result = task_eval.build_reference_comparison_result(
+        base_result={"model": "model-a", "suite": "mmlu_five_shot_mcq"},
+        scorer="mcq",
+        summary=summary,
+        gates={},
+    )
+
+    assert result["status"] == "failed"
+    assert result["error_type"] == "BenchmarkGateError"
+    assert result["gate_failures"] == [
+        {
+            "gate": "non_empty_comparison",
+            "metric": "valid_count",
+            "actual": 0,
+            "required": 1,
+            "reason": "comparison produced no usable samples",
+        }
+    ]
+
+
+def test_reference_comparison_producer_rejects_skipped_samples() -> None:
+    answers = {
+        "requests": [
+            {"answer": "A", "subject": "subject"},
+            {"answer": "B", "subject": "subject"},
+        ]
+    }
+    predictions = {
+        "responses": [
+            {
+                "sample_id": "skipped",
+                "output_text": task_eval.ERROR_OUTPUT_TEXT,
+            },
+            {"sample_id": "valid", "output_text": "B"},
+        ]
+    }
+    summary = task_eval.compare_prediction_sets(
+        predictions,
+        predictions,
+        answers,
+        scorer="mcq",
+    )
+
+    result = task_eval.build_reference_comparison_result(
+        base_result={"model": "model-a", "suite": "mmlu_five_shot_mcq"},
+        scorer="mcq",
+        summary=summary,
+        gates={
+            "max_accuracy_drop_from_hf": 0.01,
+            "min_prediction_agreement": 0.98,
+        },
+    )
+
+    assert result["status"] == "failed"
+    assert result["valid_count"] == 1
+    assert result["skipped_count"] == 1
+    assert result["gate_failures"][-1]["gate"] == "no_skipped_samples"
+
+
+def test_reference_comparison_producer_gates_tts_health_regression(
+    tmp_path: Path,
+) -> None:
+    reference_wav = tmp_path / "reference.wav"
+    healthy_wav = tmp_path / "healthy.wav"
+    _write_pcm_wav(reference_wav)
+    _write_pcm_wav(healthy_wav)
+    answers = {
+        "scoring": {
+            "max_wer": 0.25,
+            "max_ned": 0.20,
+            "min_rms": 0.001,
+            "min_duration_ratio": 0.5,
+            "max_duration_ratio": 2.0,
+        },
+        "requests": [
+            {
+                "answer": "The test sentence.",
+                "reference": "The test sentence.",
+                "reference_wav": str(reference_wav),
+            }
+        ],
+    }
+    hf = {
+        "responses": [
+            {
+                "sample_id": "one",
+                "output_text": "The test sentence.",
+                "wav_path": str(healthy_wav),
+            }
+        ]
+    }
+    broken_trtfb = {
+        "responses": [
+            {
+                "sample_id": "one",
+                "output_text": "wrong words",
+                "wav_path": str(tmp_path / "missing.wav"),
+                "error": "audio generation failed",
+            }
+        ]
+    }
+    gates = {
+        "max_pass_rate_drop_from_hf": 0.05,
+        "min_correctness_agreement": 0.95,
+    }
+
+    bad_result = task_eval.build_reference_comparison_result(
+        base_result={
+            "model": "model-a",
+            "suite": "seedtts_en_tts_intelligibility",
+        },
+        scorer="tts_intelligibility",
+        summary=task_eval.compare_prediction_sets(
+            hf,
+            broken_trtfb,
+            answers,
+            scorer="tts_intelligibility",
+        ),
+        gates=gates,
+    )
+    good_result = task_eval.build_reference_comparison_result(
+        base_result={
+            "model": "model-a",
+            "suite": "seedtts_en_tts_intelligibility",
+        },
+        scorer="tts_intelligibility",
+        summary=task_eval.compare_prediction_sets(
+            hf,
+            hf,
+            answers,
+            scorer="tts_intelligibility",
+        ),
+        gates=gates,
+    )
+
+    assert bad_result["status"] == "failed"
+    assert {
+        failure["gate"] for failure in bad_result["gate_failures"]
+    } == {
+        "max_pass_rate_drop_from_hf",
+        "min_correctness_agreement_rate",
+    }
+    assert good_result["status"] == "passed"
+
+
+def test_result_status_must_be_explicit() -> None:
+    with pytest.raises(RuntimeError, match="explicit passed/failed status"):
+        task_eval.require_explicit_result_status({})
 
 
 def _ci_suite(*, digest: str = "a" * 64) -> dict:

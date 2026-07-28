@@ -4330,9 +4330,26 @@ def score_ocrbench_v2_predictions(
         is_error_output = output_text == ERROR_OUTPUT_TEXT
         if is_error_output:
             skipped += 1
-            sample_score, metric, warning = 0.0, "runtime_error", ""
-        else:
-            sample_score, metric, warning = _ocrbench_score_sample(output_text, request)
+            samples.append(
+                {
+                    "index": idx,
+                    "sample_id": response.get("sample_id", f"sample_{idx}"),
+                    "subject": subject,
+                    "type": task_type,
+                    "answer": str(request.get("answer", "")),
+                    "answer_aliases": request_answer_values(request)[1:],
+                    "prediction": output_text,
+                    "skipped": True,
+                    "score": 0.0,
+                    "correct": False,
+                    "metric": "runtime_error",
+                }
+            )
+            continue
+        sample_score, metric, warning = _ocrbench_score_sample(
+            output_text,
+            request,
+        )
         sample_score = _clip_score(sample_score)
         score_sum += sample_score
         perfect += int(sample_score >= 1.0)
@@ -4390,7 +4407,7 @@ def score_ocrbench_v2_predictions(
             "overall_accuracy": _mean(group_averages),
         }
 
-    valid_count = len(requests)
+    valid_count = len(requests) - skipped
     return {
         "overall_accuracy": _mean(all_capability_averages)
         if all_capability_averages
@@ -4856,8 +4873,8 @@ def compare_diffusion_text_prediction_sets(
 
 def diffusion_text_task_metric_deltas(
     task_metric: str,
-    diagnostics: dict[str, float],
-) -> dict[str, float]:
+    diagnostics: dict[str, float | None],
+) -> dict[str, float | None]:
     """Return absolute HF/TRTMC deltas for the task-level ELF metrics."""
     metric_pairs: dict[str, tuple[tuple[str, str, str], ...]] = {
         "sacrebleu": (("hf_corpus_bleu", "trtfb_corpus_bleu", "corpus_bleu_abs_delta"),),
@@ -4874,10 +4891,16 @@ def diffusion_text_task_metric_deltas(
     pairs = metric_pairs.get(task_metric)
     if pairs is None:
         raise ValueError(f"Unsupported diffusion-text task metric {task_metric!r}")
-    return {
-        output_key: abs(float(diagnostics[hf_key]) - float(diagnostics[trtfb_key]))
-        for hf_key, trtfb_key, output_key in pairs
-    }
+    deltas: dict[str, float | None] = {}
+    for hf_key, trtfb_key, output_key in pairs:
+        hf_value = diagnostics[hf_key]
+        trtfb_value = diagnostics[trtfb_key]
+        deltas[output_key] = (
+            None
+            if hf_value is None or trtfb_value is None
+            else abs(float(hf_value) - float(trtfb_value))
+        )
+    return deltas
 
 
 def compute_gpt2_generation_metrics(
@@ -4886,7 +4909,7 @@ def compute_gpt2_generation_metrics(
     model_id: str,
     device: str = "cuda",
     local_files_only: bool = False,
-) -> dict[str, float]:
+) -> dict[str, float | None]:
     try:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -4937,10 +4960,14 @@ def compute_gpt2_generation_metrics(
     del model
     if resolved_device.startswith("cuda"):
         torch.cuda.empty_cache()
-    if total_tokens == 0:
-        generation_ppl = math.inf
-    else:
-        generation_ppl = math.exp(total_nll / total_tokens)
+    generation_ppl: float | None = None
+    if total_tokens:
+        try:
+            candidate = math.exp(total_nll / total_tokens)
+        except OverflowError:
+            candidate = None
+        if candidate is not None and math.isfinite(candidate):
+            generation_ppl = candidate
     return {
         "generation_ppl": generation_ppl,
         "unigram_entropy": _mean(sample_entropies),
@@ -4991,6 +5018,145 @@ def apply_metric_gates(result: dict[str, Any], gates: dict[str, Any]) -> dict[st
             for failure in failures
         )
     return result
+
+
+def apply_comparison_gates(
+    result: dict[str, Any],
+    gates: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply suite gates whose public names omit the result ``_rate`` suffix."""
+    aliases = {
+        "correctness_agreement": "correctness_agreement_rate",
+        "prediction_agreement": "prediction_agreement_rate",
+    }
+    normalized: dict[str, Any] = {}
+    for gate, required in gates.items():
+        if gate.startswith("min_"):
+            prefix = "min_"
+        elif gate.startswith("max_"):
+            prefix = "max_"
+        else:
+            normalized[gate] = required
+            continue
+        metric = gate[len(prefix) :]
+        normalized[prefix + aliases.get(metric, metric)] = required
+    return apply_metric_gates(result, normalized)
+
+
+def require_nonempty_comparison(
+    result: dict[str, Any],
+    count_field: str,
+) -> dict[str, Any]:
+    """Fail a comparison that produced no usable samples."""
+    count = result.get(count_field)
+    if type(count) is int and count > 0:
+        return result
+    failure = {
+        "gate": "non_empty_comparison",
+        "metric": count_field,
+        "actual": count,
+        "required": 1,
+        "reason": "comparison produced no usable samples",
+    }
+    failures = result.get("gate_failures")
+    failures = list(failures) if isinstance(failures, list) else []
+    failures.append(failure)
+    result["gate_failures"] = failures
+    result["status"] = "failed"
+    result["error_type"] = "BenchmarkGateError"
+    message = f"comparison produced no usable samples ({count_field}={count!r})"
+    existing = str(result.get("error", "") or "")
+    result["error"] = f"{existing}; {message}" if existing else message
+    return result
+
+
+def require_no_skipped_comparison(result: dict[str, Any]) -> dict[str, Any]:
+    """Fail a comparison whenever either backend skipped a requested sample."""
+    skipped = result.get("skipped_count")
+    if skipped == 0:
+        return result
+    failure = {
+        "gate": "no_skipped_samples",
+        "metric": "skipped_count",
+        "actual": skipped,
+        "required": 0,
+        "reason": "comparison skipped one or more requested samples",
+    }
+    failures = result.get("gate_failures")
+    failures = list(failures) if isinstance(failures, list) else []
+    failures.append(failure)
+    result["gate_failures"] = failures
+    result["status"] = "failed"
+    result["error_type"] = "BenchmarkGateError"
+    message = f"comparison skipped requested samples (skipped_count={skipped!r})"
+    existing = str(result.get("error", "") or "")
+    result["error"] = f"{existing}; {message}" if existing else message
+    return result
+
+
+def build_reference_comparison_result(
+    *,
+    base_result: dict[str, Any],
+    scorer: str,
+    summary: dict[str, Any],
+    gates: dict[str, Any],
+) -> dict[str, Any]:
+    """Build and gate the common HF/TRTMC task-quality comparison result."""
+    hf_accuracy = float(summary["hf"]["overall_accuracy"])
+    trtfb_accuracy = float(summary["trtfb"]["overall_accuracy"])
+    valid_count = min(
+        int(summary["hf"].get("valid_count", 0) or 0),
+        int(summary["trtfb"].get("valid_count", 0) or 0),
+    )
+    skipped_count = max(
+        int(summary["hf"].get("skipped_count", 0) or 0),
+        int(summary["trtfb"].get("skipped_count", 0) or 0),
+    )
+    accuracy_drop = hf_accuracy - trtfb_accuracy
+    result = {
+        **base_result,
+        "mode": scorer,
+        "hf_accuracy": hf_accuracy,
+        "trtfb_accuracy": trtfb_accuracy,
+        "accuracy_delta_trtfb_minus_hf": summary[
+            "accuracy_delta_trtfb_minus_hf"
+        ],
+        "accuracy_drop_from_hf": accuracy_drop,
+        "prediction_agreement_rate": summary["prediction_agreement_rate"],
+        "correctness_agreement_rate": summary[
+            "correctness_agreement_rate"
+        ],
+        "valid_count": valid_count,
+        "skipped_count": skipped_count,
+        "total_count": int(summary["total_count"]),
+        "hf_valid_prediction_rate": summary["hf"].get(
+            "valid_prediction_rate"
+        ),
+        "trtfb_valid_prediction_rate": summary["trtfb"].get(
+            "valid_prediction_rate"
+        ),
+        "gates": dict(gates),
+    }
+    if scorer == "asr_transcript":
+        result["normalized_transcript_exact_agreement_rate"] = summary[
+            "normalized_transcript_exact_agreement_rate"
+        ]
+    elif scorer == "tts_intelligibility":
+        result["pass_rate_drop_from_hf"] = accuracy_drop
+    apply_comparison_gates(result, gates)
+    require_nonempty_comparison(result, "valid_count")
+    require_no_skipped_comparison(result)
+    return result
+
+
+def require_explicit_result_status(result: dict[str, Any]) -> None:
+    """Reject producer branches that omit their pass/fail decision."""
+    status = result.get("status")
+    if status not in {"passed", "failed"}:
+        raise RuntimeError(
+            "task-eval producer must return an explicit passed/failed status; "
+            f"got {status!r}"
+        )
 
 
 def continuation_task_quality_diagnostics(
@@ -5394,6 +5560,7 @@ def compare_diffusion_image_predictions(
     samples: list[dict[str, Any]] = []
     passed_count = 0
     skipped_count = 0
+    matching_initial_latents_count = 0
 
     for index, (hf_row, trt_row, request) in enumerate(
         zip(hf_rows, trt_rows, requests, strict=True)
@@ -5448,6 +5615,7 @@ def compare_diffusion_image_predictions(
                     f"Diffusion initial latent mismatch at index {index}: "
                     f"hf={hf_latent_hash!r} trtfb={trt_latent_hash!r}"
                 )
+            matching_initial_latents_count += 1
         invalid = (
             int(hf_row.get("returncode", 1)) != 0
             or int(trt_row.get("returncode", 1)) != 0
@@ -5630,6 +5798,11 @@ def compare_diffusion_image_predictions(
         "valid_count": valid_count,
         "skipped_count": skipped_count,
         "total_count": len(requests),
+        "initial_latents_match_rate": (
+            matching_initial_latents_count / len(requests)
+            if requests
+            else 0.0
+        ),
         "metrics": metrics,
         "samples": samples,
         "visual_review": str(visual_review),
@@ -9294,12 +9467,13 @@ def compare_encoder_embedding_prediction_sets(
 
     vector_passed = sum(value >= min_vector_cosine_gate for value in vector_cosines)
     vector_pass_rate = vector_passed / len(vector_cosines) if vector_cosines else 0.0
-    max_pair_delta = max(pair_deltas, default=float("inf"))
+    max_pair_delta = max(pair_deltas) if pair_deltas else None
     status = (
         "passed"
         if vector_cosines
         and pair_deltas
         and vector_pass_rate >= min_vector_pass_rate_gate
+        and max_pair_delta is not None
         and max_pair_delta <= max_pair_delta_gate
         else "failed"
     )
@@ -9315,7 +9489,7 @@ def compare_encoder_embedding_prediction_sets(
         "min_vector_cosine": min(vector_cosines, default=0.0),
         "mean_pair_cosine_abs_delta": sum(pair_deltas) / len(pair_deltas)
         if pair_deltas
-        else float("inf"),
+        else None,
         "max_pair_cosine_abs_delta": max_pair_delta,
         "hf_sts_spearman": _spearman_correlation(gold_scores, hf_similarities),
         "trtfb_sts_spearman": _spearman_correlation(gold_scores, trtfb_similarities),
@@ -9428,15 +9602,15 @@ def compare_time_series_prediction_sets(
         "mean_relative_l2": (
             sum(float(case["relative_l2"]) for case in valid_cases) / len(valid_cases)
             if valid_cases
-            else float("inf")
+            else None
         ),
         "max_relative_l2": max(
             (float(case["relative_l2"]) for case in valid_cases),
-            default=float("inf"),
+            default=None,
         ),
         "max_absolute_error": max(
             (float(case["max_absolute_error"]) for case in valid_cases),
-            default=float("inf"),
+            default=None,
         ),
         "gates": {
             "max_relative_l2": max_relative_l2,
@@ -9453,8 +9627,10 @@ def write_time_series_summary_markdown(summary: dict[str, Any], path: Path) -> N
         "",
         f"- status: {summary['status']}",
         f"- sample_agreement_rate: {summary['sample_agreement_rate']:.4f}",
-        f"- max_relative_l2: {summary['max_relative_l2']:.6e}",
-        f"- max_absolute_error: {summary['max_absolute_error']:.6e}",
+        "- max_relative_l2: "
+        f"{_format_optional_float(summary['max_relative_l2'], precision=6)}",
+        "- max_absolute_error: "
+        f"{_format_optional_float(summary['max_absolute_error'], precision=6)}",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -9979,7 +10155,8 @@ def write_encoder_embedding_summary_markdown(summary: dict[str, Any], path: Path
         f"- vector_pass_rate: {summary['vector_pass_rate']:.4f}",
         f"- mean_vector_cosine: {summary['mean_vector_cosine']:.6f}",
         f"- min_vector_cosine: {summary['min_vector_cosine']:.6f}",
-        f"- max_pair_cosine_abs_delta: {summary['max_pair_cosine_abs_delta']:.6f}",
+        "- max_pair_cosine_abs_delta: "
+        f"{_format_optional_float(summary['max_pair_cosine_abs_delta'], precision=6)}",
         f"- hf_sts_spearman: {_format_optional_float(summary.get('hf_sts_spearman'))}",
         f"- trtfb_sts_spearman: {_format_optional_float(summary.get('trtfb_sts_spearman'))}",
     ]
@@ -10171,6 +10348,7 @@ def eval_one_model(
         "hf_cache_key": str(hf_cache.get("key", "") or ""),
         "bundle_built": built,
         "model_plugin_dir": str(getattr(args, "model_plugin_dir", "") or ""),
+        "gates": dict(suite.get("gates", {})),
     }
     if precision_contract is not None:
         base_result["reference_dtype"] = precision_contract["reference_dtype"]
@@ -10187,7 +10365,13 @@ def eval_one_model(
             gates=suite.get("gates", {}),
         )
         (work_dir / "summary.json").write_text(
-            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+            json.dumps(
+                summary,
+                indent=2,
+                ensure_ascii=False,
+                allow_nan=False,
+            ),
+            encoding="utf-8",
         )
         write_time_series_summary_markdown(summary, work_dir / "summary.md")
         result = {
@@ -10216,7 +10400,13 @@ def eval_one_model(
             gates=suite.get("gates", {}),
         )
         (work_dir / "summary.json").write_text(
-            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+            json.dumps(
+                summary,
+                indent=2,
+                ensure_ascii=False,
+                allow_nan=False,
+            ),
+            encoding="utf-8",
         )
         result = {
             **base_result,
@@ -10326,6 +10516,7 @@ def eval_one_model(
             "min_pairwise_ordering_agreement": summary["metrics"][
                 "pairwise_ordering_agreement"
             ]["min"],
+            "metrics": summary["metrics"],
         }
     elif scorer == "encoder_embedding_parity":
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
@@ -10338,7 +10529,13 @@ def eval_one_model(
             gates=suite.get("gates", {}),
         )
         (work_dir / "summary.json").write_text(
-            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+            json.dumps(
+                summary,
+                indent=2,
+                ensure_ascii=False,
+                allow_nan=False,
+            ),
+            encoding="utf-8",
         )
         write_encoder_embedding_summary_markdown(summary, work_dir / "summary.md")
         result = {
@@ -10399,6 +10596,7 @@ def eval_one_model(
             **diagnostics,
         }
         apply_metric_gates(result, suite.get("gates", {}))
+        require_nonempty_comparison(result, "valid_count")
     elif scorer in {"sacrebleu", "rouge", "unconditional_text_quality"} and no_hf_reference:
         trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
         answers_data = json.loads(answers_path.read_text(encoding="utf-8"))
@@ -10472,6 +10670,8 @@ def eval_one_model(
                 "threshold_gated" if suite.get("gates", {}) else "diagnostic_only"
             ),
             "comparison_granularity": summary.get("comparison_granularity", ""),
+            "count": summary["count"],
+            "exact_count": summary["exact_count"],
             "exact_match_rate": summary["exact_match_rate"],
             "token_prefix_agreement": summary["token_prefix_agreement"],
             "mean_first_divergence": summary["mean_first_divergence"],
@@ -10511,6 +10711,7 @@ def eval_one_model(
                 json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
             )
         apply_metric_gates(result, suite.get("gates", {}))
+        require_nonempty_comparison(result, "count")
     elif scorer == "diffusion_image_clip_parity":
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
         trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
@@ -10532,6 +10733,10 @@ def eval_one_model(
             "passed_count": summary["passed_count"],
             "valid_count": summary["valid_count"],
             "skipped_count": summary["skipped_count"],
+            "total_count": summary["total_count"],
+            "initial_latents_match_rate": summary[
+                "initial_latents_match_rate"
+            ],
             "metrics": summary["metrics"],
             "status": (
                 "passed"
@@ -10558,49 +10763,15 @@ def eval_one_model(
             json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
         )
         write_summary_markdown(summary, work_dir / "summary.md")
-        result = {
-            **base_result,
-            "mode": scorer,
-            "hf_accuracy": summary["hf"]["overall_accuracy"],
-            "trtfb_accuracy": summary["trtfb"]["overall_accuracy"],
-            "accuracy_delta_trtfb_minus_hf": summary["accuracy_delta_trtfb_minus_hf"],
-            "prediction_agreement_rate": summary["prediction_agreement_rate"],
-            "hf_valid_prediction_rate": summary["hf"].get("valid_prediction_rate"),
-            "trtfb_valid_prediction_rate": summary["trtfb"].get("valid_prediction_rate"),
-        }
-        if scorer == "asr_transcript":
-            gates = suite.get("gates", {})
-            max_accuracy_drop = float(
-                gates.get("max_accuracy_drop_from_hf", 0.05)
-            )
-            min_agreement = float(gates.get("min_prediction_agreement", 0.90))
-            accuracy_drop = (
-                summary["hf"]["overall_accuracy"]
-                - summary["trtfb"]["overall_accuracy"]
-            )
-            result.update(
-                {
-                    "status": (
-                        "passed"
-                        if accuracy_drop <= max_accuracy_drop
-                        and summary["prediction_agreement_rate"] >= min_agreement
-                        else "failed"
-                    ),
-                    "accuracy_drop_from_hf": accuracy_drop,
-                    "normalized_transcript_exact_agreement_rate": summary[
-                        "normalized_transcript_exact_agreement_rate"
-                    ],
-                    "correctness_agreement_rate": summary[
-                        "correctness_agreement_rate"
-                    ],
-                    "gates": {
-                        "max_accuracy_drop_from_hf": max_accuracy_drop,
-                        "min_prediction_agreement": min_agreement,
-                    },
-                }
-            )
+        result = build_reference_comparison_result(
+            base_result=base_result,
+            scorer=scorer,
+            summary=summary,
+            gates=dict(suite.get("gates", {})),
+        )
+    require_explicit_result_status(result)
     (work_dir / "eval_result.json").write_text(
-        json.dumps(result, indent=2, ensure_ascii=False),
+        json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False),
         encoding="utf-8",
     )
     return result
@@ -10944,15 +11115,18 @@ def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
     if result.get("mode") == "time_series_parity":
         return (
             f"model={model['name']} agreement={result['sample_agreement_rate']:.4f} "
-            f"max_rel_l2={result['max_relative_l2']:.6e} "
-            f"max_abs_error={result['max_absolute_error']:.6e} "
+            "max_rel_l2="
+            f"{_format_optional_float(result['max_relative_l2'], precision=6)} "
+            "max_abs_error="
+            f"{_format_optional_float(result['max_absolute_error'], precision=6)} "
             f"status={result.get('status', '')} {common}"
         )
     if result.get("mode") == "encoder_embedding_parity":
         return (
             f"model={model['name']} vector_pass_rate={result['vector_pass_rate']:.4f} "
             f"min_vector_cosine={result['min_vector_cosine']:.6f} "
-            f"max_pair_delta={result['max_pair_cosine_abs_delta']:.6f} "
+            "max_pair_delta="
+            f"{_format_optional_float(result['max_pair_cosine_abs_delta'], precision=6)} "
             f"status={result.get('status', '')} {common}"
         )
     if result.get("mode") == "continuation":
@@ -10980,10 +11154,16 @@ def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
             "rouge1_abs_delta",
             "generation_ppl_abs_delta",
         )
-        delta = next(
-            (f"{name}={float(result[name]):.4f}" for name in delta_fields if name in result),
-            "task_metric_delta=unavailable",
-        )
+        delta = "task_metric_delta=unavailable"
+        for name in delta_fields:
+            value = result.get(name)
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+            ):
+                delta = f"{name}={float(value):.4f}"
+                break
         return (
             f"model={model['name']} {delta} "
             f"token_agreement={result['token_agreement_rate']:.4f} "
@@ -11598,8 +11778,16 @@ def cmd_eval_worker(args: argparse.Namespace) -> int:
     result_path = Path(request["result_path"])
     try:
         result = eval_one_model(suite=suite, model=model, args=worker_args)
-        result.setdefault("status", "passed")
-        result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        require_explicit_result_status(result)
+        result_path.write_text(
+            json.dumps(
+                result,
+                indent=2,
+                ensure_ascii=False,
+                allow_nan=False,
+            ),
+            encoding="utf-8",
+        )
         return 0
     except Exception as exc:
         traceback.print_exc()
@@ -11717,7 +11905,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
                     f"error_type={type(exc).__name__} error={exc}"
                 )
                 continue
-        result.setdefault("status", "passed")
+        require_explicit_result_status(result)
         results.append(result)
         print(f"[task_eval] {_format_result_line(model, result)}")
         if result.get("gpu_cleanup_confirmed") is False:
@@ -11747,7 +11935,15 @@ def cmd_eval(args: argparse.Namespace) -> int:
     }
     summary_path = Path(args.work_root) / suite["id"] / "eval_summary.json"
     summary_path.parent.mkdir(parents=True, exist_ok=True)
-    summary_path.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+    summary_path.write_text(
+        json.dumps(
+            out,
+            indent=2,
+            ensure_ascii=False,
+            allow_nan=False,
+        ),
+        encoding="utf-8",
+    )
     print(f"[task_eval] summary={summary_path}")
     artifact_dir = str(getattr(args, "artifact_dir", ""))
     if artifact_dir:

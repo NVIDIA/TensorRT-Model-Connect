@@ -7,9 +7,14 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import copy
+import ctypes
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import errno
+import fcntl
+import hashlib
 import html
 import json
 import math
@@ -23,7 +28,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 import yaml
 
@@ -76,6 +81,20 @@ LEGACY_E2E_REASON = (
 
 class ValidationError(RuntimeError):
     """The requested validation cannot be resolved or executed."""
+
+
+_RENAME_NOREPLACE = 1
+_LIBC = ctypes.CDLL(None, use_errno=True)
+_LIBC_RENAMEAT2 = getattr(_LIBC, "renameat2", None)
+if _LIBC_RENAMEAT2 is not None:
+    _LIBC_RENAMEAT2.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    _LIBC_RENAMEAT2.restype = ctypes.c_int
 
 
 @dataclass(frozen=True)
@@ -207,6 +226,69 @@ def _open_real_directory(path: Path) -> int:
     return descriptor
 
 
+@contextmanager
+def _validation_output_publication_lock(
+    output: Path,
+) -> Iterator[None]:
+    """Serialize report generation for one validation output."""
+    _ensure_real_directory(output, description="validation output")
+    descriptor = _open_real_directory(output)
+    locked = False
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            locked = True
+        except OSError as exc:
+            raise ValidationError(
+                f"cannot lock validation output for publication {output}: "
+                f"{exc}"
+            ) from exc
+        visible_descriptor = _open_real_directory(output)
+        try:
+            locked_metadata = os.fstat(descriptor)
+            visible_metadata = os.fstat(visible_descriptor)
+            if (
+                locked_metadata.st_dev,
+                locked_metadata.st_ino,
+            ) != (
+                visible_metadata.st_dev,
+                visible_metadata.st_ino,
+            ):
+                raise ValidationError(
+                    "validation output changed while acquiring its "
+                    f"publication lock: {output}"
+                )
+        finally:
+            os.close(visible_descriptor)
+        yield
+    finally:
+        active_error = sys.exc_info()[1]
+        cleanup_errors: list[str] = []
+        try:
+            if locked:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                except OSError as exc:
+                    cleanup_errors.append(f"unlock failed: {exc}")
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                cleanup_errors.append(f"descriptor close failed: {exc}")
+        if cleanup_errors:
+            cleanup_message = (
+                "validation output publication lock cleanup incomplete: "
+                + " | ".join(cleanup_errors)
+            )
+            if active_error is not None:
+                if hasattr(active_error, "add_note"):
+                    active_error.add_note(cleanup_message)
+                else:
+                    print(cleanup_message, file=sys.stderr)
+            else:
+                raise ValidationError(cleanup_message)
+
+
 def _validate_atomic_destination(directory_fd: int, name: str, path: Path) -> None:
     try:
         metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
@@ -248,6 +330,207 @@ def _create_atomic_artifact(
             ) from exc
         return descriptor, temporary_name
     raise ValidationError(f"cannot reserve temporary validation artifact for {path}")
+
+
+def _rename_noreplace_at(
+    source_fd: int,
+    source_name: str,
+    destination_fd: int,
+    destination_name: str,
+) -> None:
+    """Atomically rename without replacing a concurrently-created target."""
+    if _LIBC_RENAMEAT2 is None:
+        raise ValidationError(
+            "validation transactions require renameat2(RENAME_NOREPLACE)"
+        )
+    ctypes.set_errno(0)
+    result = _LIBC_RENAMEAT2(
+        source_fd,
+        os.fsencode(source_name),
+        destination_fd,
+        os.fsencode(destination_name),
+        _RENAME_NOREPLACE,
+    )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number in {errno.ENOSYS, errno.EOPNOTSUPP}:
+        raise ValidationError(
+            "validation transaction filesystem does not support "
+            "renameat2(RENAME_NOREPLACE)"
+        )
+    raise OSError(
+        error_number,
+        os.strerror(error_number),
+        destination_name,
+    )
+
+
+def _rename_to_unique_noreplace(
+    source_fd: int,
+    source_name: str,
+    destination_fd: int,
+    *,
+    prefix: str,
+    expected: os.stat_result,
+) -> tuple[str, BaseException | None]:
+    for _ in range(100):
+        destination_name = f"{prefix}.{secrets.token_hex(12)}"
+        try:
+            deferred_error = _rename_expected_noreplace_at(
+                source_fd,
+                source_name,
+                destination_fd,
+                destination_name,
+                expected=expected,
+            )
+        except FileExistsError:
+            continue
+        except ValidationError as exc:
+            if _stat_at(destination_fd, destination_name) is not None:
+                return destination_name, exc
+            raise
+        return destination_name, deferred_error
+    raise ValidationError(
+        f"cannot reserve validation transaction recovery name for "
+        f"{source_name}"
+    )
+
+
+def _metadata_identity(
+    metadata: os.stat_result,
+) -> tuple[int, int]:
+    return metadata.st_dev, metadata.st_ino
+
+
+def _same_file_version(
+    current: os.stat_result,
+    expected: os.stat_result,
+) -> bool:
+    return (
+        stat.S_ISREG(current.st_mode)
+        and _metadata_identity(current) == _metadata_identity(expected)
+        and current.st_nlink == expected.st_nlink
+        and current.st_size == expected.st_size
+        and current.st_ctime_ns == expected.st_ctime_ns
+        and current.st_mtime_ns == expected.st_mtime_ns
+    )
+
+
+def _same_directory_version(
+    current: os.stat_result,
+    expected: os.stat_result,
+) -> bool:
+    return (
+        stat.S_ISDIR(current.st_mode)
+        and _metadata_identity(current) == _metadata_identity(expected)
+        and current.st_ctime_ns == expected.st_ctime_ns
+        and current.st_mtime_ns == expected.st_mtime_ns
+    )
+
+
+def _stat_at(
+    directory_fd: int,
+    name: str,
+) -> os.stat_result | None:
+    try:
+        return os.stat(
+            name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return None
+
+
+def _rename_expected_noreplace_at(
+    source_fd: int,
+    source_name: str,
+    destination_fd: int,
+    destination_name: str,
+    *,
+    expected: os.stat_result,
+) -> BaseException | None:
+    """Rename one expected inode and reconcile success followed by an error."""
+    deferred_error: BaseException | None = None
+    try:
+        _rename_noreplace_at(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+        )
+    except BaseException as exc:
+        deferred_error = exc
+    source = _stat_at(source_fd, source_name)
+    destination = _stat_at(destination_fd, destination_name)
+    source_matches = (
+        source is not None
+        and _metadata_identity(source) == _metadata_identity(expected)
+    )
+    destination_matches = (
+        destination is not None
+        and _metadata_identity(destination) == _metadata_identity(expected)
+    )
+    if destination_matches and not source_matches:
+        return deferred_error
+    if deferred_error is not None and source_matches and not destination_matches:
+        raise deferred_error
+    raise ValidationError(
+        "validation transaction rename outcome is ambiguous for "
+        f"{source_name} -> {destination_name}"
+    ) from deferred_error
+
+
+def _regular_file_digest_at(
+    directory_fd: int,
+    name: str,
+    *,
+    maximum_bytes: int,
+) -> tuple[os.stat_result, bytes]:
+    descriptor = os.open(
+        name,
+        (
+            os.O_RDONLY
+            | os.O_NONBLOCK
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0)
+        ),
+        dir_fd=directory_fd,
+    )
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size > maximum_bytes
+        ):
+            raise ValidationError(
+                f"invalid validation transaction file: {name}"
+            )
+        digest = hashlib.sha256()
+        consumed = 0
+        while chunk := os.read(descriptor, 1024 * 1024):
+            consumed += len(chunk)
+            if consumed > maximum_bytes:
+                raise ValidationError(
+                    "validation transaction file exceeds "
+                    f"{maximum_bytes} bytes: {name}"
+                )
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        visible = _stat_at(directory_fd, name)
+        if (
+            not _same_file_version(after, before)
+            or visible is None
+            or not _same_file_version(visible, after)
+        ):
+            raise ValidationError(
+                f"validation transaction file changed while hashing: {name}"
+            )
+        return after, digest.digest()
+    finally:
+        os.close(descriptor)
 
 
 def _verify_visible_artifact_parent(path: Path, directory_fd: int) -> None:
@@ -1014,9 +1297,12 @@ def _remove_directory_tree_at(
         _secure_directory_flags(),
         dir_fd=parent_fd,
     )
+    root_metadata = os.fstat(root_fd)
     try:
         pending: list[tuple[str, ...]] = [()]
-        entries_to_remove: list[tuple[tuple[str, ...], bool]] = []
+        entries_to_remove: list[
+            tuple[tuple[str, ...], os.stat_result]
+        ] = []
         visited = 0
         while pending:
             relative = pending.pop()
@@ -1039,23 +1325,38 @@ def _remove_directory_tree_at(
                                 f"{MAX_TRANSACTION_TREE_ENTRIES} entries"
                             )
                         child = (*relative, entry.name)
-                        is_directory = entry.is_dir(
+                        metadata = entry.stat(
                             follow_symlinks=False
                         )
                         entries_to_remove.append(
-                            (child, is_directory)
+                            (child, metadata)
                         )
-                        if is_directory:
+                        if stat.S_ISDIR(metadata.st_mode):
                             pending.append(child)
             finally:
                 os.close(directory_fd)
-        for relative, is_directory in reversed(entries_to_remove):
+        for relative, expected in reversed(entries_to_remove):
             directory_fd = _open_relative_directory_at(
                 root_fd,
                 relative[:-1],
             )
             try:
-                if is_directory:
+                current = _stat_at(directory_fd, relative[-1])
+                matches = current is not None and (
+                    (
+                        stat.S_ISDIR(current.st_mode)
+                        and _metadata_identity(current)
+                        == _metadata_identity(expected)
+                    )
+                    if stat.S_ISDIR(expected.st_mode)
+                    else _same_file_version(current, expected)
+                )
+                if not matches:
+                    raise ValidationError(
+                        "validation transaction cleanup entry changed: "
+                        f"{relative[-1]}"
+                    )
+                if stat.S_ISDIR(expected.st_mode):
                     os.rmdir(relative[-1], dir_fd=directory_fd)
                 else:
                     os.unlink(relative[-1], dir_fd=directory_fd)
@@ -1063,6 +1364,16 @@ def _remove_directory_tree_at(
                 os.close(directory_fd)
     finally:
         os.close(root_fd)
+    visible_root = _stat_at(parent_fd, name)
+    if (
+        visible_root is None
+        or not stat.S_ISDIR(visible_root.st_mode)
+        or _metadata_identity(visible_root)
+        != _metadata_identity(root_metadata)
+    ):
+        raise ValidationError(
+            f"validation transaction cleanup root changed: {name}"
+        )
     os.rmdir(name, dir_fd=parent_fd)
 
 
@@ -1084,6 +1395,146 @@ def _open_relative_directory_at(
         os.close(descriptor)
         raise
     return descriptor
+
+
+def _directory_tree_fingerprint_at(
+    parent_fd: int,
+    name: str,
+) -> tuple[os.stat_result, bytes]:
+    root_fd = os.open(
+        name,
+        _secure_directory_flags(),
+        dir_fd=parent_fd,
+    )
+    try:
+        root_before = os.fstat(root_fd)
+        digest = hashlib.sha256()
+        pending: list[tuple[str, ...]] = [()]
+        visited = 0
+        total_bytes = 0
+        while pending:
+            relative = pending.pop()
+            if len(relative) > MAX_TRANSACTION_TREE_DEPTH:
+                raise ValidationError(
+                    "validation transaction fingerprint nesting exceeds "
+                    f"{MAX_TRANSACTION_TREE_DEPTH}"
+                )
+            directory_fd = _open_relative_directory_at(
+                root_fd,
+                relative,
+            )
+            try:
+                before = os.fstat(directory_fd)
+                with os.scandir(directory_fd) as entries:
+                    names = sorted(
+                        (entry.name for entry in entries),
+                        key=os.fsencode,
+                    )
+                encoded_relative = b"/".join(
+                    os.fsencode(component) for component in relative
+                )
+                digest.update(b"D")
+                digest.update(len(encoded_relative).to_bytes(8, "big"))
+                digest.update(encoded_relative)
+                digest.update(
+                    stat.S_IMODE(before.st_mode).to_bytes(4, "big")
+                )
+                for child_name in names:
+                    visited += 1
+                    if visited > MAX_TRANSACTION_TREE_ENTRIES:
+                        raise ValidationError(
+                            "validation transaction fingerprint exceeds "
+                            f"{MAX_TRANSACTION_TREE_ENTRIES} entries"
+                        )
+                    child = (*relative, child_name)
+                    child_metadata = os.stat(
+                        child_name,
+                        dir_fd=directory_fd,
+                        follow_symlinks=False,
+                    )
+                    encoded_child = b"/".join(
+                        os.fsencode(component) for component in child
+                    )
+                    if stat.S_ISDIR(child_metadata.st_mode):
+                        child_fd = os.open(
+                            child_name,
+                            _secure_directory_flags(),
+                            dir_fd=directory_fd,
+                        )
+                        try:
+                            opened = os.fstat(child_fd)
+                            if (
+                                _metadata_identity(opened)
+                                != _metadata_identity(child_metadata)
+                            ):
+                                raise ValidationError(
+                                    "validation transaction directory "
+                                    f"changed while fingerprinting: "
+                                    f"{child_name}"
+                                )
+                        finally:
+                            os.close(child_fd)
+                        pending.append(child)
+                        continue
+                    if not stat.S_ISREG(child_metadata.st_mode):
+                        raise ValidationError(
+                            "validation transaction tree contains a "
+                            f"non-regular entry: {child_name}"
+                        )
+                    remaining_bytes = (
+                        MAX_REPORT_MEDIA_BYTES - total_bytes
+                    )
+                    file_metadata, file_digest = (
+                        _regular_file_digest_at(
+                            directory_fd,
+                            child_name,
+                            maximum_bytes=remaining_bytes,
+                        )
+                    )
+                    if (
+                        _metadata_identity(file_metadata)
+                        != _metadata_identity(child_metadata)
+                    ):
+                        raise ValidationError(
+                            "validation transaction file changed while "
+                            f"fingerprinting: {child_name}"
+                        )
+                    total_bytes += file_metadata.st_size
+                    digest.update(b"F")
+                    digest.update(len(encoded_child).to_bytes(8, "big"))
+                    digest.update(encoded_child)
+                    digest.update(
+                        stat.S_IMODE(file_metadata.st_mode).to_bytes(
+                            4,
+                            "big",
+                        )
+                    )
+                    digest.update(
+                        file_metadata.st_size.to_bytes(8, "big")
+                    )
+                    digest.update(file_digest)
+                after = os.fstat(directory_fd)
+                if not _same_directory_version(after, before):
+                    raise ValidationError(
+                        "validation transaction directory changed while "
+                        f"fingerprinting: {name}"
+                    )
+            finally:
+                os.close(directory_fd)
+        root_after = os.fstat(root_fd)
+        visible = _stat_at(parent_fd, name)
+        if (
+            not _same_directory_version(root_after, root_before)
+            or visible is None
+            or not _same_directory_version(visible, root_after)
+        ):
+            raise ValidationError(
+                "validation transaction tree changed while "
+                f"fingerprinting: {name}"
+            )
+        return root_after, digest.digest()
+    finally:
+        os.close(root_fd)
 
 
 def _cleanup_case_artifact_stage(
@@ -1139,10 +1590,17 @@ class _CaseDirectoryUpdate:
     stage: _CaseArtifactStage
     next_name: str
     next_metadata: os.stat_result
+    next_fingerprint: bytes
     original_metadata: os.stat_result | None
+    original_fingerprint: bytes | None
     backup_name: str = ""
+    backup_metadata: os.stat_result | None = None
+    backup_fingerprint: bytes | None = None
+    installed_metadata: os.stat_result | None = None
     backed_up: bool = False
     installed: bool = False
+    preserve_backup: bool = False
+    preserve_next: bool = False
     anchor_fd: int | None = None
 
 
@@ -1170,40 +1628,72 @@ def _prepare_case_directory_update(
             f"validation staged reproduction must be a directory: "
             f"{stage.path / 'repro'}"
         )
+    staged_repro, staged_fingerprint = (
+        _directory_tree_fingerprint_at(stage.stage_fd, "repro")
+    )
     try:
-        original = os.stat(
-            "repro",
-            dir_fd=stage.case_fd,
-            follow_symlinks=False,
+        original, original_fingerprint = (
+            _directory_tree_fingerprint_at(stage.case_fd, "repro")
         )
     except FileNotFoundError:
         original = None
+        original_fingerprint = None
     if original is not None and not stat.S_ISDIR(original.st_mode):
         raise ValidationError(
             "validation reproduction path must be a directory: "
             f"{stage.case_dir / 'repro'}"
         )
-    next_name = f".repro-next.{secrets.token_hex(12)}"
-    os.mkdir(next_name, 0o700, dir_fd=stage.case_fd)
+    next_name, deferred_error = _rename_to_unique_noreplace(
+        stage.stage_fd,
+        "repro",
+        stage.case_fd,
+        prefix=".repro-next",
+        expected=staged_repro,
+    )
     try:
-        os.rename(
-            "repro",
-            next_name,
-            src_dir_fd=stage.stage_fd,
-            dst_dir_fd=stage.case_fd,
+        next_metadata, next_fingerprint = (
+            _directory_tree_fingerprint_at(
+                stage.case_fd,
+                next_name,
+            )
         )
-    except BaseException:
-        os.rmdir(next_name, dir_fd=stage.case_fd)
+        if next_fingerprint != staged_fingerprint:
+            raise ValidationError(
+                "validation staged reproduction changed while moving into "
+                f"transaction state: {stage.case_dir / next_name}"
+            )
+        if deferred_error is not None:
+            raise deferred_error
+    except BaseException as exc:
+        recovery_error: BaseException | None = None
+        try:
+            recovery_error = _rename_expected_noreplace_at(
+                stage.case_fd,
+                next_name,
+                stage.stage_fd,
+                "repro",
+                expected=staged_repro,
+            )
+        except BaseException as rollback_exc:
+            recovery_error = rollback_exc
+        if recovery_error is not None:
+            note = (
+                "validation staged reproduction recovery incomplete; "
+                f"preserved path {stage.case_dir / next_name}: "
+                f"{recovery_error}"
+            )
+            if hasattr(exc, "add_note"):
+                exc.add_note(note)
+            else:
+                print(note, file=sys.stderr)
         raise
     update = _CaseDirectoryUpdate(
         stage=stage,
         next_name=next_name,
-        next_metadata=os.stat(
-            next_name,
-            dir_fd=stage.case_fd,
-            follow_symlinks=False,
-        ),
+        next_metadata=next_metadata,
+        next_fingerprint=next_fingerprint,
         original_metadata=original,
+        original_fingerprint=original_fingerprint,
     )
     _release_case_artifact_stage(stage)
     return update
@@ -1231,10 +1721,11 @@ def _verify_case_directory_target(
         if visible_case_fd is not None:
             os.close(visible_case_fd)
     try:
-        staged = os.stat(
-            update.next_name,
-            dir_fd=case_fd,
-            follow_symlinks=False,
+        staged, staged_fingerprint = (
+            _directory_tree_fingerprint_at(
+                case_fd,
+                update.next_name,
+            )
         )
     except FileNotFoundError as exc:
         raise ValidationError(
@@ -1247,19 +1738,19 @@ def _verify_case_directory_target(
         or staged.st_ino != update.next_metadata.st_ino
         or staged.st_ctime_ns != update.next_metadata.st_ctime_ns
         or staged.st_mtime_ns != update.next_metadata.st_mtime_ns
+        or staged_fingerprint != update.next_fingerprint
     ):
         raise ValidationError(
             "validation staged reproduction changed before report "
             f"publication: {stage.case_dir / update.next_name}"
         )
     try:
-        current = os.stat(
-            "repro",
-            dir_fd=case_fd,
-            follow_symlinks=False,
+        current, current_fingerprint = (
+            _directory_tree_fingerprint_at(case_fd, "repro")
         )
     except FileNotFoundError:
         current = None
+        current_fingerprint = None
     expected = update.original_metadata
     if expected is None:
         if current is not None:
@@ -1275,6 +1766,7 @@ def _verify_case_directory_target(
         or current.st_ino != expected.st_ino
         or current.st_ctime_ns != expected.st_ctime_ns
         or current.st_mtime_ns != expected.st_mtime_ns
+        or current_fingerprint != update.original_fingerprint
     ):
         raise ValidationError(
             "validation reproduction changed before report publication: "
@@ -1294,41 +1786,121 @@ def _commit_case_directory_update(
         )
         assert case_fd is not None
         if update.original_metadata is not None:
-            update.backup_name = (
-                f".repro-previous.{secrets.token_hex(12)}"
-            )
-            os.mkdir(update.backup_name, 0o700, dir_fd=case_fd)
-            os.rename(
-                "repro",
+            (
                 update.backup_name,
-                src_dir_fd=case_fd,
-                dst_dir_fd=case_fd,
+                deferred_error,
+            ) = _rename_to_unique_noreplace(
+                case_fd,
+                "repro",
+                case_fd,
+                prefix=".repro-previous",
+                expected=update.original_metadata,
             )
             update.backed_up = True
-        os.rename(
+            (
+                update.backup_metadata,
+                update.backup_fingerprint,
+            ) = _directory_tree_fingerprint_at(
+                case_fd,
+                update.backup_name,
+            )
+            if (
+                update.backup_metadata is None
+                or not stat.S_ISDIR(update.backup_metadata.st_mode)
+                or _metadata_identity(update.backup_metadata)
+                != _metadata_identity(update.original_metadata)
+                or update.backup_metadata.st_mtime_ns
+                != update.original_metadata.st_mtime_ns
+                or update.backup_fingerprint
+                != update.original_fingerprint
+            ):
+                raise ValidationError(
+                    "validation reproduction changed while moving it to "
+                    f"transaction backup: "
+                    f"{update.stage.case_dir / 'repro'}"
+                )
+            if deferred_error is not None:
+                raise deferred_error
+        deferred_error = _rename_expected_noreplace_at(
+            case_fd,
             update.next_name,
+            case_fd,
             "repro",
-            src_dir_fd=case_fd,
-            dst_dir_fd=case_fd,
+            expected=update.next_metadata,
         )
         update.installed = True
-        installed = os.stat(
-            "repro",
-            dir_fd=case_fd,
-            follow_symlinks=False,
+        update.installed_metadata = update.next_metadata
+        if deferred_error is not None:
+            raise deferred_error
+        installed, installed_fingerprint = (
+            _directory_tree_fingerprint_at(case_fd, "repro")
         )
         if (
-            not stat.S_ISDIR(installed.st_mode)
+            installed is None
+            or not stat.S_ISDIR(installed.st_mode)
             or installed.st_dev != update.next_metadata.st_dev
             or installed.st_ino != update.next_metadata.st_ino
             or installed.st_mtime_ns
             != update.next_metadata.st_mtime_ns
+            or installed_fingerprint != update.next_fingerprint
         ):
             raise ValidationError(
                 "validation staged reproduction changed during report "
                 f"publication: {update.stage.case_dir / 'repro'}"
             )
+        update.installed_metadata = installed
+        _verify_committed_case_directory_update(update)
     finally:
+        if update.anchor_fd is None:
+            _release_case_artifact_stage(update.stage)
+
+
+def _verify_committed_case_directory_update(
+    update: _CaseDirectoryUpdate,
+) -> None:
+    if not update.installed or update.installed_metadata is None:
+        raise ValidationError(
+            "validation reproduction transaction is not installed: "
+            f"{update.stage.case_dir / 'repro'}"
+        )
+    if update.anchor_fd is None:
+        _acquire_case_artifact_stage(update.stage)
+    visible_case_fd: int | None = None
+    try:
+        visible_case_fd = _open_real_directory(update.stage.case_dir)
+        if (
+            _directory_identity(visible_case_fd)
+            != update.stage.case_identity
+        ):
+            raise ValidationError(
+                "validation case directory changed after report "
+                f"publication: {update.stage.case_dir}"
+            )
+        try:
+            visible, visible_fingerprint = (
+                _directory_tree_fingerprint_at(
+                    visible_case_fd,
+                    "repro",
+                )
+            )
+        except FileNotFoundError:
+            visible = None
+            visible_fingerprint = None
+        if (
+            visible is None
+            or not _same_directory_version(
+                visible,
+                update.installed_metadata,
+            )
+            or visible_fingerprint != update.next_fingerprint
+        ):
+            raise ValidationError(
+                "validation reproduction is not visible after report "
+                f"publication: {update.stage.case_dir / 'repro'}"
+            )
+    finally:
+        if visible_case_fd is not None:
+            os.close(visible_case_fd)
         if update.anchor_fd is None:
             _release_case_artifact_stage(update.stage)
 
@@ -1338,6 +1910,7 @@ def _rollback_case_directory_update(
 ) -> None:
     if update.anchor_fd is None:
         _acquire_case_artifact_stage(update.stage)
+    conflicts: list[str] = []
     try:
         case_fd = (
             update.anchor_fd
@@ -1346,21 +1919,139 @@ def _rollback_case_directory_update(
         )
         assert case_fd is not None
         if update.installed:
-            os.rename(
-                "repro",
-                update.next_name,
-                src_dir_fd=case_fd,
-                dst_dir_fd=case_fd,
-            )
+            current = _stat_at(case_fd, "repro")
+            expected = update.installed_metadata or update.next_metadata
+            if (
+                current is not None
+                and stat.S_ISDIR(current.st_mode)
+                and _metadata_identity(current)
+                == _metadata_identity(expected)
+            ):
+                moved_name, deferred_error = (
+                    _rename_to_unique_noreplace(
+                    case_fd,
+                    "repro",
+                    case_fd,
+                    prefix=".repro-rollback",
+                    expected=expected,
+                    )
+                )
+                moved, moved_fingerprint = (
+                    _directory_tree_fingerprint_at(
+                        case_fd,
+                        moved_name,
+                    )
+                )
+                update.next_name = moved_name
+                if (
+                    not stat.S_ISDIR(moved.st_mode)
+                    or _metadata_identity(moved)
+                    != _metadata_identity(expected)
+                    or moved_fingerprint != update.next_fingerprint
+                ):
+                    update.preserve_next = True
+                    conflicts.append(
+                        "transaction reproduction changed while moving to "
+                        f"recovery path "
+                        f"{update.stage.case_dir / moved_name}"
+                    )
+                else:
+                    update.next_metadata = moved
+                    if (
+                        not _same_directory_version(current, expected)
+                        or deferred_error is not None
+                    ):
+                        update.preserve_next = True
+                        conflicts.append(
+                            "transaction reproduction was modified; "
+                            f"preserved at "
+                            f"{update.stage.case_dir / moved_name}"
+                        )
+            else:
+                conflicts.append(
+                    "concurrent reproduction left untouched at "
+                    f"{update.stage.case_dir / 'repro'}"
+                )
             update.installed = False
         if update.backed_up:
-            os.rename(
-                update.backup_name,
-                "repro",
-                src_dir_fd=case_fd,
-                dst_dir_fd=case_fd,
+            try:
+                backup, backup_fingerprint = (
+                    _directory_tree_fingerprint_at(
+                        case_fd,
+                        update.backup_name,
+                    )
+                )
+            except FileNotFoundError:
+                backup = None
+                backup_fingerprint = None
+            expected_backup = update.backup_metadata
+            if (
+                backup is None
+                or expected_backup is None
+                or not _same_directory_version(
+                    backup,
+                    expected_backup,
+                )
+                or backup_fingerprint
+                != update.backup_fingerprint
+            ):
+                update.preserve_backup = True
+                conflicts.append(
+                    "reproduction backup changed; preserved recovery path "
+                    f"{update.stage.case_dir / update.backup_name}"
+                )
+            elif _stat_at(case_fd, "repro") is not None:
+                update.preserve_backup = True
+                conflicts.append(
+                    "concurrent reproduction prevented rollback; original "
+                    f"preserved at "
+                    f"{update.stage.case_dir / update.backup_name}"
+                )
+            else:
+                try:
+                    deferred_error = _rename_expected_noreplace_at(
+                        case_fd,
+                        update.backup_name,
+                        case_fd,
+                        "repro",
+                        expected=backup,
+                    )
+                except FileExistsError:
+                    update.preserve_backup = True
+                    conflicts.append(
+                        "concurrent reproduction prevented rollback; "
+                        f"original preserved at "
+                        f"{update.stage.case_dir / update.backup_name}"
+                    )
+                else:
+                    (
+                        restored,
+                        restored_fingerprint,
+                    ) = _directory_tree_fingerprint_at(
+                        case_fd,
+                        "repro",
+                    )
+                    if (
+                        _metadata_identity(restored)
+                        != _metadata_identity(backup)
+                        or restored_fingerprint
+                        != update.backup_fingerprint
+                    ):
+                        conflicts.append(
+                            "reproduction changed while restoring rollback "
+                            f"target {update.stage.case_dir / 'repro'}"
+                        )
+                    update.backed_up = False
+                    if deferred_error is not None:
+                        conflicts.append(
+                            "reproduction rollback rename reported an "
+                            "error after the original was restored"
+                        )
+        if conflicts:
+            raise ValidationError(
+                "validation reproduction rollback incomplete: "
+                + "; ".join(conflicts)
             )
-            update.backed_up = False
     finally:
         if update.anchor_fd is None:
             _release_case_artifact_stage(update.stage)
@@ -1368,12 +2059,13 @@ def _rollback_case_directory_update(
 
 def _finalize_case_directory_update(
     update: _CaseDirectoryUpdate,
-) -> None:
+) -> list[str]:
+    errors: list[str] = []
     if update.anchor_fd is None:
         try:
             _acquire_case_artifact_stage(update.stage)
-        except ValidationError:
-            return
+        except ValidationError as exc:
+            return [str(exc)]
     try:
         case_fd = (
             update.anchor_fd
@@ -1381,46 +2073,97 @@ def _finalize_case_directory_update(
             else update.stage.case_fd
         )
         assert case_fd is not None
-        for name in (update.backup_name, update.next_name):
-            if not name:
+        cleanup = (
+            (
+                update.backup_name,
+                update.backup_metadata,
+                update.preserve_backup,
+            ),
+            (
+                update.next_name,
+                update.next_metadata,
+                update.preserve_next,
+            ),
+        )
+        for name, expected, preserve in cleanup:
+            if not name or expected is None or preserve:
                 continue
             try:
-                _remove_directory_tree_at(case_fd, name)
-            except (FileNotFoundError, OSError, ValidationError):
-                pass
-        try:
-            with os.scandir(case_fd) as entries:
-                visited = 0
-                for entry in entries:
-                    visited += 1
-                    if visited > MAX_TRANSACTION_TREE_ENTRIES:
-                        break
-                    if (
-                        not entry.name.startswith(".repro-next.")
-                        or not entry.is_dir(follow_symlinks=False)
-                    ):
-                        continue
-                    metadata = os.stat(
-                        entry.name,
-                        dir_fd=case_fd,
-                        follow_symlinks=False,
+                current, current_fingerprint = (
+                    _directory_tree_fingerprint_at(case_fd, name)
+                )
+            except FileNotFoundError:
+                continue
+            expected_fingerprint = (
+                update.backup_fingerprint
+                if name == update.backup_name
+                else update.next_fingerprint
+            )
+            if (
+                not _same_directory_version(current, expected)
+                or current_fingerprint != expected_fingerprint
+            ):
+                errors.append(
+                    "validation transaction preserved changed directory "
+                    f"recovery path {update.stage.case_dir / name}"
+                )
+                continue
+            try:
+                quarantine_name, deferred_error = (
+                    _rename_to_unique_noreplace(
+                        case_fd,
+                        name,
+                        case_fd,
+                        prefix=".repro-cleanup",
+                        expected=current,
                     )
-                    if (
-                        metadata.st_dev
-                        == update.next_metadata.st_dev
-                        and metadata.st_ino
-                        == update.next_metadata.st_ino
-                    ):
-                        _remove_directory_tree_at(
-                            case_fd,
-                            entry.name,
-                        )
-                        break
-        except (FileNotFoundError, OSError, ValidationError):
-            pass
+                )
+            except (OSError, ValidationError) as exc:
+                errors.append(
+                    "validation transaction could not quarantine "
+                    f"{update.stage.case_dir / name}: {exc}"
+                )
+                continue
+            try:
+                quarantined, quarantined_fingerprint = (
+                    _directory_tree_fingerprint_at(
+                        case_fd,
+                        quarantine_name,
+                    )
+                )
+            except (OSError, ValidationError) as exc:
+                errors.append(
+                    "validation transaction preserved unverifiable "
+                    f"directory recovery path "
+                    f"{update.stage.case_dir / quarantine_name}: {exc}"
+                )
+                continue
+            if (
+                deferred_error is not None
+                or _metadata_identity(quarantined)
+                != _metadata_identity(expected)
+                or quarantined_fingerprint != expected_fingerprint
+            ):
+                errors.append(
+                    "validation transaction preserved directory recovery "
+                    f"path {update.stage.case_dir / quarantine_name}"
+                )
+                continue
+            try:
+                _remove_directory_tree_at(
+                    case_fd,
+                    quarantine_name,
+                )
+            except (FileNotFoundError, OSError, ValidationError) as exc:
+                errors.append(
+                    "validation transaction cleanup incomplete; preserved "
+                    f"or changed path "
+                    f"{update.stage.case_dir / quarantine_name}: {exc}"
+                )
     finally:
         if update.anchor_fd is None:
             _release_case_artifact_stage(update.stage)
+    return errors
 
 
 @dataclass
@@ -1429,11 +2172,18 @@ class _FileUpdate:
     parent_fd: int | None
     parent_identity: tuple[int, int]
     original_metadata: os.stat_result | None
+    original_digest: bytes | None
     next_name: str
     next_metadata: os.stat_result
+    payload_digest: bytes
     backup_name: str = ""
+    backup_metadata: os.stat_result | None = None
+    backup_digest: bytes | None = None
+    installed_metadata: os.stat_result | None = None
     backed_up: bool = False
     installed: bool = False
+    preserve_backup: bool = False
+    preserve_next: bool = False
     closed: bool = False
     anchor_fd: int | None = None
 
@@ -1463,6 +2213,14 @@ def _prepare_file_update(path: Path, payload: bytes) -> _FileUpdate:
                 f"validation transaction target must be a single-link "
                 f"regular file: {path}"
             )
+        if original is None:
+            original_digest = None
+        else:
+            original, original_digest = _regular_file_digest_at(
+                parent_fd,
+                path.name,
+                maximum_bytes=MAX_REPORT_ARTIFACT_BYTES,
+            )
         descriptor, next_name = _create_atomic_artifact(
             parent_fd,
             path,
@@ -1478,8 +2236,10 @@ def _prepare_file_update(path: Path, payload: bytes) -> _FileUpdate:
             parent_fd=parent_fd,
             parent_identity=_directory_identity(parent_fd),
             original_metadata=original,
+            original_digest=original_digest,
             next_name=next_name,
             next_metadata=next_metadata,
+            payload_digest=hashlib.sha256(payload).digest(),
         )
         os.close(parent_fd)
         update.parent_fd = None
@@ -1500,14 +2260,28 @@ def _verify_file_update_target(update: _FileUpdate) -> None:
     _acquire_file_update(update)
     assert update.parent_fd is not None
     _verify_visible_artifact_parent(update.path, update.parent_fd)
+    staged, staged_digest = _regular_file_digest_at(
+        update.parent_fd,
+        update.next_name,
+        maximum_bytes=MAX_REPORT_ARTIFACT_BYTES,
+    )
+    if (
+        not _same_file_version(staged, update.next_metadata)
+        or staged_digest != update.payload_digest
+    ):
+        raise ValidationError(
+            "validation transaction staged file changed: "
+            f"{update.path}"
+        )
     try:
-        current = os.stat(
+        current, current_digest = _regular_file_digest_at(
+            update.parent_fd,
             update.path.name,
-            dir_fd=update.parent_fd,
-            follow_symlinks=False,
+            maximum_bytes=MAX_REPORT_ARTIFACT_BYTES,
         )
     except FileNotFoundError:
         current = None
+        current_digest = None
     expected = update.original_metadata
     if expected is None:
         if current is not None:
@@ -1524,6 +2298,7 @@ def _verify_file_update_target(update: _FileUpdate) -> None:
         or current.st_size != expected.st_size
         or current.st_ctime_ns != expected.st_ctime_ns
         or current.st_mtime_ns != expected.st_mtime_ns
+        or current_digest != update.original_digest
     ):
         raise ValidationError(
             f"validation transaction target changed: {update.path}"
@@ -1564,10 +2339,10 @@ def _commit_file_update(update: _FileUpdate) -> None:
     try:
         _verify_file_update_target(update)
         assert update.parent_fd is not None
-        visible_next = os.stat(
+        visible_next, visible_next_digest = _regular_file_digest_at(
+            update.parent_fd,
             update.next_name,
-            dir_fd=update.parent_fd,
-            follow_symlinks=False,
+            maximum_bytes=MAX_REPORT_ARTIFACT_BYTES,
         )
         if (
             not stat.S_ISREG(visible_next.st_mode)
@@ -1579,98 +2354,365 @@ def _commit_file_update(update: _FileUpdate) -> None:
             != update.next_metadata.st_ctime_ns
             or visible_next.st_mtime_ns
             != update.next_metadata.st_mtime_ns
+            or visible_next_digest != update.payload_digest
         ):
             raise ValidationError(
                 "validation transaction staged file changed: "
                 f"{update.path}"
             )
         if update.original_metadata is not None:
-            descriptor, update.backup_name = _create_atomic_artifact(
-                update.parent_fd,
-                update.path.with_name(
-                    f".{update.path.name}.previous"
-                ),
-            )
-            os.close(descriptor)
-            os.replace(
-                update.path.name,
+            (
                 update.backup_name,
-                src_dir_fd=update.parent_fd,
-                dst_dir_fd=update.parent_fd,
+                deferred_error,
+            ) = _rename_to_unique_noreplace(
+                update.parent_fd,
+                update.path.name,
+                update.parent_fd,
+                prefix=f".{update.path.name}.previous",
+                expected=update.original_metadata,
             )
             update.backed_up = True
-        os.replace(
+            (
+                update.backup_metadata,
+                update.backup_digest,
+            ) = _regular_file_digest_at(
+                update.parent_fd,
+                update.backup_name,
+                maximum_bytes=MAX_REPORT_ARTIFACT_BYTES,
+            )
+            if (
+                update.backup_metadata is None
+                or not stat.S_ISREG(update.backup_metadata.st_mode)
+                or update.backup_metadata.st_nlink != 1
+                or _metadata_identity(update.backup_metadata)
+                != _metadata_identity(update.original_metadata)
+                or update.backup_metadata.st_size
+                != update.original_metadata.st_size
+                or update.backup_metadata.st_mtime_ns
+                != update.original_metadata.st_mtime_ns
+                or update.backup_digest != update.original_digest
+            ):
+                raise ValidationError(
+                    "validation transaction target changed while moving "
+                    f"to backup: {update.path}"
+                )
+            if deferred_error is not None:
+                raise deferred_error
+        deferred_error = _rename_expected_noreplace_at(
+            update.parent_fd,
             update.next_name,
+            update.parent_fd,
             update.path.name,
-            src_dir_fd=update.parent_fd,
-            dst_dir_fd=update.parent_fd,
+            expected=update.next_metadata,
         )
-        update.next_name = ""
         update.installed = True
-        installed = os.stat(
+        update.installed_metadata = update.next_metadata
+        if deferred_error is not None:
+            raise deferred_error
+        installed, installed_digest = _regular_file_digest_at(
+            update.parent_fd,
             update.path.name,
-            dir_fd=update.parent_fd,
-            follow_symlinks=False,
+            maximum_bytes=MAX_REPORT_ARTIFACT_BYTES,
         )
         if (
-            not stat.S_ISREG(installed.st_mode)
+            installed is None
+            or not stat.S_ISREG(installed.st_mode)
             or installed.st_dev != update.next_metadata.st_dev
             or installed.st_ino != update.next_metadata.st_ino
             or installed.st_nlink != update.next_metadata.st_nlink
             or installed.st_size != update.next_metadata.st_size
             or installed.st_mtime_ns
             != update.next_metadata.st_mtime_ns
+            or installed_digest != update.payload_digest
         ):
             raise ValidationError(
                 "validation staged file changed during publication: "
                 f"{update.path}"
             )
+        update.installed_metadata = installed
+        _verify_committed_file_update(update)
     finally:
         _release_file_update(update)
+
+
+def _verify_committed_file_update(update: _FileUpdate) -> None:
+    if not update.installed or update.installed_metadata is None:
+        raise ValidationError(
+            f"validation transaction is not installed: {update.path}"
+        )
+    visible_parent_fd: int | None = None
+    try:
+        visible_parent_fd = _open_real_directory(update.path.parent)
+        if (
+            _directory_identity(visible_parent_fd)
+            != update.parent_identity
+        ):
+            raise ValidationError(
+                "validation transaction parent changed after publication: "
+                f"{update.path.parent}"
+            )
+        try:
+            visible, visible_digest = _regular_file_digest_at(
+                visible_parent_fd,
+                update.path.name,
+                maximum_bytes=MAX_REPORT_ARTIFACT_BYTES,
+            )
+        except FileNotFoundError:
+            visible = None
+            visible_digest = None
+        if (
+            visible is None
+            or not _same_file_version(
+                visible,
+                update.installed_metadata,
+            )
+            or visible_digest != update.payload_digest
+        ):
+            raise ValidationError(
+                "validation transaction target is not visible after "
+                f"publication: {update.path}"
+            )
+    finally:
+        if visible_parent_fd is not None:
+            os.close(visible_parent_fd)
 
 
 def _rollback_file_update(update: _FileUpdate) -> None:
     _acquire_file_update(update)
+    conflicts: list[str] = []
     try:
         assert update.parent_fd is not None
+        if update.installed:
+            current = _stat_at(update.parent_fd, update.path.name)
+            expected = update.installed_metadata or update.next_metadata
+            if (
+                current is not None
+                and stat.S_ISREG(current.st_mode)
+                and _metadata_identity(current)
+                == _metadata_identity(expected)
+            ):
+                moved_name, deferred_error = (
+                    _rename_to_unique_noreplace(
+                    update.parent_fd,
+                    update.path.name,
+                    update.parent_fd,
+                    prefix=f".{update.path.name}.rollback",
+                    expected=expected,
+                    )
+                )
+                moved, moved_digest = _regular_file_digest_at(
+                    update.parent_fd,
+                    moved_name,
+                    maximum_bytes=MAX_REPORT_ARTIFACT_BYTES,
+                )
+                update.next_name = moved_name
+                if (
+                    not stat.S_ISREG(moved.st_mode)
+                    or _metadata_identity(moved)
+                    != _metadata_identity(expected)
+                    or moved_digest != update.payload_digest
+                ):
+                    update.preserve_next = True
+                    conflicts.append(
+                        "transaction file changed while moving to recovery "
+                        f"path {update.path.parent / moved_name}"
+                    )
+                else:
+                    update.next_metadata = moved
+                    if (
+                        not _same_file_version(current, expected)
+                        or deferred_error is not None
+                    ):
+                        update.preserve_next = True
+                        conflicts.append(
+                            "transaction file was modified; preserved at "
+                            f"{update.path.parent / moved_name}"
+                        )
+            else:
+                conflicts.append(
+                    f"concurrent file left untouched at {update.path}"
+                )
+            update.installed = False
         if update.backed_up:
-            os.replace(
-                update.backup_name,
-                update.path.name,
-                src_dir_fd=update.parent_fd,
-                dst_dir_fd=update.parent_fd,
+            try:
+                backup, backup_digest = _regular_file_digest_at(
+                    update.parent_fd,
+                    update.backup_name,
+                    maximum_bytes=MAX_REPORT_ARTIFACT_BYTES,
+                )
+            except FileNotFoundError:
+                backup = None
+                backup_digest = None
+            expected_backup = update.backup_metadata
+            if (
+                backup is None
+                or expected_backup is None
+                or not _same_file_version(
+                    backup,
+                    expected_backup,
+                )
+                or backup_digest != update.backup_digest
+            ):
+                update.preserve_backup = True
+                conflicts.append(
+                    "transaction backup changed; preserved recovery path "
+                    f"{update.path.parent / update.backup_name}"
+                )
+            elif _stat_at(update.parent_fd, update.path.name) is not None:
+                update.preserve_backup = True
+                conflicts.append(
+                    f"concurrent file prevented rollback at {update.path}; "
+                    f"original preserved at "
+                    f"{update.path.parent / update.backup_name}"
+                )
+            else:
+                try:
+                    deferred_error = _rename_expected_noreplace_at(
+                        update.parent_fd,
+                        update.backup_name,
+                        update.parent_fd,
+                        update.path.name,
+                        expected=backup,
+                    )
+                except FileExistsError:
+                    update.preserve_backup = True
+                    conflicts.append(
+                        "concurrent file prevented rollback; original "
+                        f"preserved at "
+                        f"{update.path.parent / update.backup_name}"
+                    )
+                else:
+                    restored, restored_digest = _regular_file_digest_at(
+                        update.parent_fd,
+                        update.path.name,
+                        maximum_bytes=MAX_REPORT_ARTIFACT_BYTES,
+                    )
+                    if (
+                        _metadata_identity(restored)
+                        != _metadata_identity(backup)
+                        or restored_digest != update.backup_digest
+                    ):
+                        conflicts.append(
+                            "transaction target changed while restoring "
+                            f"{update.path}"
+                        )
+                    update.backed_up = False
+                    if deferred_error is not None:
+                        conflicts.append(
+                            "file rollback rename reported an error after "
+                            "the original was restored"
+                        )
+        if conflicts:
+            raise ValidationError(
+                "validation file rollback incomplete: "
+                + "; ".join(conflicts)
             )
-            update.backup_name = ""
-            update.backed_up = False
-            update.installed = False
-        elif update.installed:
-            os.unlink(
-                update.path.name,
-                dir_fd=update.parent_fd,
-            )
-            update.installed = False
     finally:
         _release_file_update(update)
 
 
-def _finalize_file_update(update: _FileUpdate) -> None:
+def _finalize_file_update(update: _FileUpdate) -> list[str]:
     if update.closed:
-        return
+        return []
+    errors: list[str] = []
     try:
         _acquire_file_update(update)
         assert update.parent_fd is not None
-        for name in (update.backup_name, update.next_name):
-            if not name:
+        cleanup = (
+            (
+                update.backup_name,
+                update.backup_metadata,
+                update.preserve_backup,
+            ),
+            (
+                update.next_name,
+                update.next_metadata,
+                update.preserve_next,
+            ),
+        )
+        for name, expected, preserve in cleanup:
+            if not name or expected is None or preserve:
                 continue
             try:
-                os.unlink(name, dir_fd=update.parent_fd)
-            except OSError:
-                pass
-    except ValidationError:
-        pass
+                current, current_digest = _regular_file_digest_at(
+                    update.parent_fd,
+                    name,
+                    maximum_bytes=MAX_REPORT_ARTIFACT_BYTES,
+                )
+            except FileNotFoundError:
+                continue
+            expected_digest = (
+                update.backup_digest
+                if name == update.backup_name
+                else update.payload_digest
+            )
+            if (
+                not _same_file_version(current, expected)
+                or current_digest != expected_digest
+            ):
+                errors.append(
+                    "validation transaction preserved changed file "
+                    f"recovery path {update.path.parent / name}"
+                )
+                continue
+            try:
+                quarantine_name, deferred_error = (
+                    _rename_to_unique_noreplace(
+                        update.parent_fd,
+                        name,
+                        update.parent_fd,
+                        prefix=f".{update.path.name}.cleanup",
+                        expected=current,
+                    )
+                )
+            except (OSError, ValidationError) as exc:
+                errors.append(
+                    "validation transaction could not quarantine "
+                    f"{update.path.parent / name}: {exc}"
+                )
+                continue
+            try:
+                quarantined, quarantined_digest = (
+                    _regular_file_digest_at(
+                        update.parent_fd,
+                        quarantine_name,
+                        maximum_bytes=MAX_REPORT_ARTIFACT_BYTES,
+                    )
+                )
+            except (OSError, ValidationError) as exc:
+                errors.append(
+                    "validation transaction preserved unverifiable file "
+                    f"recovery path "
+                    f"{update.path.parent / quarantine_name}: {exc}"
+                )
+                continue
+            if (
+                deferred_error is not None
+                or _metadata_identity(quarantined)
+                != _metadata_identity(expected)
+                or quarantined_digest != expected_digest
+            ):
+                errors.append(
+                    "validation transaction preserved file recovery path "
+                    f"{update.path.parent / quarantine_name}"
+                )
+                continue
+            try:
+                os.unlink(
+                    quarantine_name,
+                    dir_fd=update.parent_fd,
+                )
+            except OSError as exc:
+                errors.append(
+                    "validation transaction cleanup incomplete at "
+                    f"{update.path.parent / quarantine_name}: {exc}"
+                )
+    except (OSError, ValidationError) as exc:
+        errors.append(str(exc))
     finally:
         update.closed = True
         _release_file_update(update)
+    return errors
 
 
 def _read_stage_artifact(
@@ -1727,47 +2769,6 @@ def _read_stage_artifact(
     finally:
         os.close(descriptor)
         _release_case_artifact_stage(stage)
-
-
-def _publish_case_artifact_stage(
-    case_dir: Path,
-    stage: _CaseArtifactStage,
-) -> None:
-    if case_dir != stage.case_dir:
-        raise ValidationError(
-            f"validation report stage belongs to a different case: "
-            f"{stage.path}"
-        )
-    artifact_payload = _read_stage_artifact(
-        stage,
-        DISAGREEMENT_ARTIFACT_NAME,
-        maximum_bytes=MAX_REPORT_ARTIFACT_BYTES,
-    )
-    directory_update = _prepare_case_directory_update(stage)
-    file_update = _prepare_file_update(
-        case_dir / DISAGREEMENT_ARTIFACT_NAME,
-        artifact_payload,
-    )
-    updates: list[tuple[str, Any]] = [
-        ("directory", directory_update),
-        ("file", file_update),
-    ]
-    try:
-        _commit_case_directory_update(directory_update)
-        _commit_file_update(file_update)
-    except BaseException:
-        for kind, update in reversed(updates):
-            try:
-                if kind == "directory":
-                    _rollback_case_directory_update(update)
-                else:
-                    _rollback_file_update(update)
-            except OSError:
-                pass
-        raise
-    finally:
-        _finalize_case_directory_update(directory_update)
-        _finalize_file_update(file_update)
 
 
 def _reject_nonstandard_json_constant(value: str) -> None:
@@ -2994,6 +3995,7 @@ _PRIMARY_COMPARISON_METRICS = (
     "vector_pass_rate",
     "top1_agreement",
     "backend_pixel_agreement",
+    "mean_backend_mask_iou",
     "mean_pairwise_ordering_agreement",
     "token_prefix_agreement",
     "token_agreement_rate",
@@ -3006,33 +4008,93 @@ _PRIMARY_METRIC_BY_MODE = {
     "diffusion_text_parity": "token_agreement_rate",
     "encoder_embedding_parity": "vector_pass_rate",
     "image_classification_parity": "top1_agreement",
+    "mcq": "prediction_agreement_rate",
     "ocrbench_v2": "prediction_agreement_rate",
+    "prompted_segmentation_parity": "mean_backend_mask_iou",
     "reranking_parity": "mean_pairwise_ordering_agreement",
     "semantic_segmentation_parity": "backend_pixel_agreement",
     "time_series_parity": "sample_agreement_rate",
+    "tts_intelligibility": "prediction_agreement_rate",
+}
+_VALID_COUNT_REQUIRED_MODES = (
+    set(_PRIMARY_METRIC_BY_MODE) - {"continuation"}
+)
+_REQUIRED_PASS_METRICS_BY_MODE = {
+    "asr_transcript": (
+        "accuracy_drop_from_hf",
+        "normalized_transcript_exact_agreement_rate",
+        "correctness_agreement_rate",
+    ),
+    "image_classification_parity": (
+        "top1_accuracy_drop_from_hf",
+    ),
+    "mcq": ("accuracy_drop_from_hf",),
+    "ocrbench_v2": (
+        "accuracy_drop_from_hf",
+        "correctness_agreement_rate",
+    ),
+    "prompted_segmentation_parity": (
+        "hf_mean_ground_truth_iou",
+        "trtfb_mean_ground_truth_iou",
+        "ground_truth_iou_drop_from_hf",
+    ),
+    "semantic_segmentation_parity": (
+        "backend_mean_iou",
+        "mean_iou_drop_from_hf",
+    ),
+    "time_series_parity": (
+        "mean_relative_l2",
+        "max_relative_l2",
+        "max_absolute_error",
+    ),
+    "tts_intelligibility": (
+        "pass_rate_drop_from_hf",
+        "correctness_agreement_rate",
+    ),
+}
+_GENERIC_GATED_MODES = {
+    "asr_transcript",
+    "mcq",
+    "ocrbench_v2",
+    "tts_intelligibility",
+}
+_GATE_METRIC_ALIASES = {
+    "backend_mask_iou": "mean_backend_mask_iou",
+    "correctness_agreement": "correctness_agreement_rate",
+    "prediction_agreement": "prediction_agreement_rate",
 }
 _COMPARISON_METRICS = (
     *_PRIMARY_COMPARISON_METRICS,
     "overall_pass_rate",
+    "count",
+    "exact_count",
     "passed_count",
     "valid_count",
     "skipped_count",
+    "total_count",
+    "initial_latents_match_rate",
     "token_id_prefix_agreement",
     "normalized_transcript_exact_agreement_rate",
     "correctness_agreement_rate",
+    "initial_latents_match_rate",
     "divergence_rate",
     "divergent_count",
     "hf_accuracy",
     "trtfb_accuracy",
     "accuracy_delta_trtfb_minus_hf",
     "accuracy_drop_from_hf",
+    "pass_rate_drop_from_hf",
     "hf_top1_accuracy",
     "trtfb_top1_accuracy",
     "top1_accuracy_drop_from_hf",
     "hf_mean_iou",
     "trtfb_mean_iou",
     "backend_mean_iou",
+    "mean_backend_mask_iou",
+    "hf_mean_ground_truth_iou",
+    "trtfb_mean_ground_truth_iou",
     "mean_iou_drop_from_hf",
+    "ground_truth_iou_drop_from_hf",
     "mean_vector_cosine",
     "min_vector_cosine",
     "mean_pair_cosine_abs_delta",
@@ -3041,6 +4103,50 @@ _COMPARISON_METRICS = (
     "max_relative_l2",
     "max_absolute_error",
 )
+_COUNT_COMPARISON_METRICS = {
+    "count",
+    "exact_count",
+    "passed_count",
+    "valid_count",
+    "skipped_count",
+    "total_count",
+    "divergent_count",
+}
+_UNIT_INTERVAL_COMPARISON_METRICS = {
+    *_PRIMARY_COMPARISON_METRICS,
+    "overall_pass_rate",
+    "token_id_prefix_agreement",
+    "normalized_transcript_exact_agreement_rate",
+    "correctness_agreement_rate",
+    "divergence_rate",
+    "hf_accuracy",
+    "trtfb_accuracy",
+    "hf_top1_accuracy",
+    "trtfb_top1_accuracy",
+    "hf_mean_iou",
+    "trtfb_mean_iou",
+    "backend_mean_iou",
+    "mean_backend_mask_iou",
+    "hf_mean_ground_truth_iou",
+    "trtfb_mean_ground_truth_iou",
+}
+_SIGNED_UNIT_COMPARISON_METRICS = {
+    "accuracy_delta_trtfb_minus_hf",
+    "accuracy_drop_from_hf",
+    "pass_rate_drop_from_hf",
+    "top1_accuracy_drop_from_hf",
+    "mean_iou_drop_from_hf",
+    "ground_truth_iou_drop_from_hf",
+    "mean_vector_cosine",
+    "min_vector_cosine",
+}
+_NONNEGATIVE_COMPARISON_METRICS = {
+    "mean_pair_cosine_abs_delta",
+    "max_pair_cosine_abs_delta",
+    "mean_relative_l2",
+    "max_relative_l2",
+    "max_absolute_error",
+}
 _EXECUTION_ERROR_FIELDS = ("error", "exception", "traceback", "failure_class")
 
 
@@ -3055,8 +4161,18 @@ def _is_comparison_gate_failure(raw_result: Mapping[str, Any]) -> bool:
 
 def _raw_comparison(result: Mapping[str, Any]) -> dict[str, Any]:
     raw_result = result.get("raw_result")
-    if isinstance(raw_result, dict) and raw_result:
-        return dict(raw_result)
+    if isinstance(raw_result, Mapping) and raw_result:
+        normalized = dict(raw_result)
+        if (
+            result.get("schema_version")
+            != "trtmc.validation-result/v2"
+            and not normalized.get("status")
+            and result.get("status")
+        ):
+            normalized["status"] = result["status"]
+        return normalized
+    if result.get("schema_version") == "trtmc.validation-result/v2":
+        return {}
     status = str(result.get("status", "") or "")
     return {"status": status} if status else {}
 
@@ -3065,16 +4181,34 @@ def _execution_details(
     result: Mapping[str, Any],
     raw_result: Mapping[str, Any],
 ) -> dict[str, Any]:
+    exit_code = result.get("returncode")
+    raw_status = str(raw_result.get("status", "") or "")
+    error_type = str(raw_result.get("error_type", "") or "")
     comparison_gate_failure = _is_comparison_gate_failure(raw_result)
-    has_error = any(
-        raw_result.get(name)
-        for name in _EXECUTION_ERROR_FIELDS
-        if name != "error" or not comparison_gate_failure
+    gate_failures = raw_result.get("gate_failures")
+    invalid_gate_status = (
+        isinstance(gate_failures, list)
+        and bool(gate_failures)
+        and raw_status not in {"fail", "failed"}
     )
-    completed = bool(raw_result) and not has_error
+    has_error = (
+        bool(error_type and not comparison_gate_failure)
+        or any(
+            raw_result.get(name)
+            for name in _EXECUTION_ERROR_FIELDS
+            if name != "error" or not comparison_gate_failure
+        )
+        or invalid_gate_status
+    )
+    compatible_exit = exit_code == 0 or (
+        exit_code == 1
+        and raw_status in {"fail", "failed"}
+        and not has_error
+    )
+    completed = bool(raw_result) and not has_error and compatible_exit
     return {
         "status": "completed" if completed else "error",
-        "exit_code": result.get("returncode"),
+        "exit_code": exit_code,
     }
 
 
@@ -3336,6 +4470,11 @@ def _normalize_execution_result(
         allowed_statuses={"completed", "error", "not_run"},
         field="execution",
     )
+    exit_code = execution.get("exit_code")
+    if exit_code is not None and type(exit_code) is not int:
+        raise ValidationError(
+            "validation result execution.exit_code must be an integer or null"
+        )
     if "attempt_count" in execution:
         attempt_count = execution["attempt_count"]
         if type(attempt_count) is not int or attempt_count < 1:
@@ -3343,8 +4482,20 @@ def _normalize_execution_result(
                 "validation result execution.attempt_count must be a "
                 "positive integer"
             )
+    retry_fields = {
+        "attempt_count",
+        "max_attempts",
+        "retry_count",
+        "attempts",
+    }
+    present_retry_fields = retry_fields.intersection(execution)
+    if present_retry_fields and present_retry_fields != retry_fields:
+        raise ValidationError(
+            "validation result execution retry evidence must include "
+            "attempt_count, max_attempts, retry_count, and attempts"
+        )
     attempts = execution.get("attempts")
-    if attempts is not None and not isinstance(attempts, list):
+    if "attempts" in execution and not isinstance(attempts, list):
         raise ValidationError(
             "validation result execution.attempts must be a list"
         )
@@ -3357,6 +4508,127 @@ def _normalize_execution_result(
             "validation result execution.attempt_count must equal the "
             "number of execution.attempts"
         )
+    if present_retry_fields == retry_fields:
+        attempt_count = execution["attempt_count"]
+        max_attempts = execution["max_attempts"]
+        retry_count = execution["retry_count"]
+        assert isinstance(attempts, list)
+        if type(max_attempts) is not int or max_attempts < attempt_count:
+            raise ValidationError(
+                "validation result execution.max_attempts must be an "
+                "integer at least as large as attempt_count"
+            )
+        if (
+            type(retry_count) is not int
+            or retry_count != attempt_count - 1
+        ):
+            raise ValidationError(
+                "validation result execution.retry_count must equal "
+                "attempt_count minus one"
+        )
+        for expected_attempt, record in enumerate(attempts, start=1):
+            if not isinstance(record, Mapping):
+                raise ValidationError(
+                    "validation result execution.attempts entries must "
+                    "be objects"
+                )
+            if (
+                type(record.get("attempt")) is not int
+                or record["attempt"] != expected_attempt
+            ):
+                raise ValidationError(
+                    "validation result execution.attempts must use "
+                    "integer, contiguous one-based attempt numbers"
+                )
+            execution_status = record.get("execution_status")
+            if (
+                not isinstance(execution_status, str)
+                or execution_status
+                not in {
+                    "completed",
+                    "error",
+                    "not_run",
+                }
+            ):
+                raise ValidationError(
+                    "validation result execution.attempts "
+                    "execution_status is invalid"
+                )
+            validation_status = record.get("validation_status")
+            if (
+                not isinstance(validation_status, str)
+                or validation_status
+                not in {
+                    "passed",
+                    "failed",
+                    "skipped",
+                    "not_compared",
+                }
+            ):
+                raise ValidationError(
+                    "validation result execution.attempts "
+                    "validation_status is invalid"
+                )
+            for field in (
+                "worker_log",
+                "execution_log",
+                "comparison_result",
+                "error_type",
+                "error",
+            ):
+                if not isinstance(record.get(field, ""), str):
+                    raise ValidationError(
+                        "validation result execution.attempts "
+                        f"{field} must be a string"
+                    )
+            error_type = str(record.get("error_type", ""))
+            error = str(record.get("error", ""))
+            if expected_attempt < attempt_count:
+                if (
+                    execution_status != "error"
+                    or validation_status != "failed"
+                    or not (error_type or error)
+                ):
+                    raise ValidationError(
+                        "validation result non-final retry attempts must "
+                        "record an evidenced execution error and failed "
+                        "validation"
+                    )
+            elif execution_status == "completed":
+                if validation_status not in {"passed", "failed"}:
+                    raise ValidationError(
+                        "validation result completed final attempt must "
+                        "pass or fail validation"
+                    )
+                if (
+                    error_type
+                    not in {"", "BenchmarkGateError"}
+                    or (
+                        validation_status == "passed"
+                        and (error_type or error)
+                    )
+                ):
+                    raise ValidationError(
+                        "validation result completed final attempt has "
+                        "incompatible error evidence"
+                    )
+            elif execution_status == "error":
+                if (
+                    validation_status != "failed"
+                    or not (error_type or error)
+                ):
+                    raise ValidationError(
+                        "validation result errored final attempt must "
+                        "record evidence and failed validation"
+                    )
+            elif validation_status not in {
+                "skipped",
+                "not_compared",
+            }:
+                raise ValidationError(
+                    "validation result not-run final attempt must be "
+                    "skipped or not compared"
+                )
     return execution
 
 
@@ -3411,7 +4683,12 @@ def _normalize_comparison_result(
                 "exactly match comparison.metrics at primary_metric.name"
             )
         comparison["primary_metric"] = dict(primary)
-    comparison["mode"] = str(comparison.get("mode", "") or "")
+    mode = comparison.get("mode", "")
+    if not isinstance(mode, str):
+        raise ValidationError(
+            "validation result comparison.mode must be a string"
+        )
+    comparison["mode"] = mode
     return comparison
 
 
@@ -3433,8 +4710,271 @@ def _normalize_validation_result(
     )
 
 
+def _validate_raw_metric_relationships(
+    raw_result: Mapping[str, Any],
+) -> None:
+    raw_status = str(raw_result.get("status", "") or "")
+    passed = raw_status in {"pass", "passed"}
+    mode = str(raw_result.get("mode", "") or "")
+    expected_primary = _PRIMARY_METRIC_BY_MODE.get(mode)
+    if passed and expected_primary is not None:
+        primary_value = raw_result.get(expected_primary)
+        if (
+            not isinstance(primary_value, (int, float))
+            or isinstance(primary_value, bool)
+            or not math.isfinite(primary_value)
+        ):
+            raise ValidationError(
+                "passed validation result for mode "
+                f"{mode!r} must include finite raw_result."
+                f"{expected_primary}"
+            )
+    if passed:
+        required = _REQUIRED_PASS_METRICS_BY_MODE.get(mode, ())
+        missing = [
+            name
+            for name in required
+            if (
+                not isinstance(raw_result.get(name), (int, float))
+                or isinstance(raw_result.get(name), bool)
+                or not math.isfinite(raw_result[name])
+            )
+        ]
+        if missing:
+            raise ValidationError(
+                f"passed {mode or '<missing>'} comparison is missing raw "
+                "metric evidence: "
+                + ", ".join(missing)
+            )
+    if passed and mode in _GENERIC_GATED_MODES:
+        counts = ("valid_count", "skipped_count", "total_count")
+        missing_counts = [
+            name
+            for name in counts
+            if type(raw_result.get(name)) is not int
+        ]
+        if missing_counts:
+            raise ValidationError(
+                f"passed {mode} comparison is missing raw count evidence: "
+                + ", ".join(missing_counts)
+            )
+        if (
+            raw_result["valid_count"] <= 0
+            or raw_result["skipped_count"] != 0
+            or raw_result["valid_count"] != raw_result["total_count"]
+        ):
+            raise ValidationError(
+                f"passed {mode} comparison requires a non-empty valid set, "
+                "zero skipped samples, and valid_count equal to total_count"
+            )
+    supported_mode = mode in _PRIMARY_METRIC_BY_MODE
+    if passed and supported_mode and mode != "continuation":
+        gates = raw_result.get("gates")
+        if not isinstance(gates, Mapping) or not gates:
+            raise ValidationError(
+                f"passed {mode} comparison must include its non-empty raw "
+                "gate configuration"
+            )
+    else:
+        gates = raw_result.get("gates", {})
+        if gates is None:
+            gates = {}
+    if passed and supported_mode and gates:
+        if not isinstance(gates, Mapping):
+            raise ValidationError(
+                "validation result raw_result.gates must be an object"
+            )
+        violations: list[str] = []
+        for gate, required in gates.items():
+            if not isinstance(gate, str) or not gate:
+                raise ValidationError(
+                    "validation result raw_result.gates names must be "
+                    "non-empty strings"
+                )
+            if (
+                not isinstance(required, (int, float))
+                or isinstance(required, bool)
+                or not math.isfinite(required)
+            ):
+                raise ValidationError(
+                    "validation result raw_result.gates."
+                    f"{gate} must be a finite number"
+                )
+            if gate.startswith("min_"):
+                metric = gate[len("min_") :]
+                operator = "min"
+            elif gate.startswith("max_"):
+                metric = gate[len("max_") :]
+                operator = "max"
+            else:
+                metric = gate
+                operator = "min"
+            metric = _GATE_METRIC_ALIASES.get(metric, metric)
+            if gate == "require_matching_initial_latents":
+                metric = "initial_latents_match_rate"
+            actual = raw_result.get(metric)
+            if actual is None:
+                actual = raw_result.get(gate)
+            if actual is None:
+                nested = raw_result.get("metrics")
+                summary = (
+                    nested.get(metric)
+                    if isinstance(nested, Mapping)
+                    else None
+                )
+                if isinstance(summary, Mapping):
+                    actual = summary.get(
+                        "min" if operator == "min" else "max"
+                    )
+            if (
+                not isinstance(actual, (int, float))
+                or isinstance(actual, bool)
+                or not math.isfinite(actual)
+            ):
+                violations.append(f"{gate} metric {metric} is unavailable")
+            elif (
+                operator == "min"
+                and actual < required
+            ) or (
+                operator == "max"
+                and actual > required
+            ):
+                violations.append(
+                    f"{gate} actual={actual} required={required}"
+                )
+        if violations:
+            raise ValidationError(
+                f"passed {mode} comparison violates raw_result.gates: "
+                + "; ".join(violations)
+            )
+
+    if mode == "diffusion_image_clip_parity" and passed:
+        required = (
+            "overall_pass_rate",
+            "passed_count",
+            "valid_count",
+            "skipped_count",
+        )
+        missing = [name for name in required if name not in raw_result]
+        if missing:
+            raise ValidationError(
+                "passed diffusion comparison is missing raw count evidence: "
+                + ", ".join(missing)
+            )
+        if (
+            raw_result["valid_count"] <= 0
+            or raw_result["passed_count"] != raw_result["valid_count"]
+            or raw_result["skipped_count"] != 0
+        ):
+            raise ValidationError(
+                "passed diffusion comparison requires a non-empty valid "
+                "set, every valid sample passed, and zero skipped samples"
+            )
+
+    if mode != "continuation":
+        return
+    continuation_fields = (
+        "count",
+        "exact_count",
+        "divergent_count",
+        "exact_match_rate",
+        "divergence_rate",
+    )
+    if passed:
+        missing = [
+            name for name in continuation_fields if name not in raw_result
+        ]
+        if missing:
+            raise ValidationError(
+                "passed continuation comparison is missing raw sample "
+                "evidence: "
+                + ", ".join(missing)
+            )
+        if raw_result["count"] <= 0:
+            raise ValidationError(
+                "passed continuation comparison requires at least one sample"
+            )
+    if all(name in raw_result for name in ("count", "exact_count", "divergent_count")):
+        count = raw_result["count"]
+        exact_count = raw_result["exact_count"]
+        divergent_count = raw_result["divergent_count"]
+        if exact_count + divergent_count != count:
+            raise ValidationError(
+                "continuation exact_count plus divergent_count must equal "
+                "count"
+            )
+        if "exact_match_rate" in raw_result:
+            expected_exact_rate = exact_count / count if count else 0.0
+            if not math.isclose(
+                raw_result["exact_match_rate"],
+                expected_exact_rate,
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            ):
+                raise ValidationError(
+                    "continuation exact_match_rate conflicts with sample "
+                    "counts"
+                )
+        if "divergence_rate" in raw_result:
+            expected_divergence_rate = (
+                divergent_count / count if count else 0.0
+            )
+            if not math.isclose(
+                raw_result["divergence_rate"],
+                expected_divergence_rate,
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            ):
+                raise ValidationError(
+                    "continuation divergence_rate conflicts with sample "
+                    "counts"
+                )
+    divergent_count = raw_result.get("divergent_count")
+    divergence_rate = raw_result.get("divergence_rate")
+    exact_match_rate = raw_result.get("exact_match_rate")
+    if (
+        type(divergent_count) is int
+        and divergent_count > 0
+        and (
+            divergence_rate == 0
+            or exact_match_rate == 1
+        )
+    ):
+        raise ValidationError(
+            "continuation divergence evidence conflicts with exact-match "
+            "metrics"
+        )
+    if passed:
+        evaluation_policy = raw_result.get("evaluation_policy")
+        if evaluation_policy != "threshold_gated":
+            raise ValidationError(
+                "diagnostic-only continuation evidence cannot be published "
+                "as passed reference consistency"
+            )
+        if not isinstance(gates, Mapping) or not gates:
+            raise ValidationError(
+                "passed threshold-gated continuation comparison must include "
+                "its non-empty raw gate configuration"
+            )
+
+
 def _normalize_result(result: Mapping[str, Any]) -> dict[str, Any]:
     normalized = dict(result)
+    if "status" in normalized and not isinstance(
+        normalized["status"],
+        str,
+    ):
+        raise ValidationError(
+            "validation result legacy status must be a string"
+        )
+    if (
+        "returncode" in normalized
+        and normalized["returncode"] is not None
+        and type(normalized["returncode"]) is not int
+    ):
+        raise ValidationError(
+            "validation result returncode must be an integer or null"
+        )
     if "schema_version" in normalized:
         schema_version = normalized["schema_version"]
         if (
@@ -3449,6 +4989,56 @@ def _normalize_result(result: Mapping[str, Any]) -> dict[str, Any]:
                 "validation result schema_version must be one of "
                 "trtmc.validation-result/v1 or "
                 "trtmc.validation-result/v2"
+            )
+    declared_raw_result = normalized.get("raw_result")
+    if (
+        "raw_result" in normalized
+        and declared_raw_result is not None
+        and not isinstance(declared_raw_result, Mapping)
+    ):
+        raise ValidationError(
+            "validation result raw_result must be an object or null"
+        )
+    if (
+        isinstance(declared_raw_result, Mapping)
+        and "status" in declared_raw_result
+        and isinstance(declared_raw_result["status"], str)
+        and isinstance(normalized.get("status"), str)
+    ):
+        aliases = {
+            "pass": "passed",
+            "fail": "failed",
+            "skip": "skipped",
+        }
+        raw_declared_status = aliases.get(
+            declared_raw_result["status"],
+            declared_raw_result["status"],
+        )
+        outer_status = aliases.get(
+            normalized["status"],
+            normalized["status"],
+        )
+        if raw_declared_status != outer_status:
+            raise ValidationError(
+                "validation result legacy status conflicts with "
+                "raw_result.status"
+            )
+    if normalized.get("schema_version") == "trtmc.validation-result/v2":
+        v2_without_comparison_evidence = bool(
+            normalized.get("not_compared_reason")
+        ) or normalized.get("executor") == "e2e" or isinstance(
+            normalized.get("raw_results"),
+            list,
+        )
+        if not v2_without_comparison_evidence and (
+            not isinstance(declared_raw_result, Mapping)
+            or not declared_raw_result
+            or not isinstance(declared_raw_result.get("status"), str)
+            or not declared_raw_result["status"]
+        ):
+            raise ValidationError(
+                "validation result v2 runnable result must include a "
+                "non-empty raw_result with an explicit status"
             )
     if "not_compared_reason" in normalized and not isinstance(
         normalized["not_compared_reason"],
@@ -3477,6 +5067,327 @@ def _normalize_result(result: Mapping[str, Any]) -> dict[str, Any]:
             }
         )
     raw_result = _raw_comparison(normalized)
+    without_comparison_evidence = bool(
+        normalized.get("not_compared_reason")
+    ) or normalized.get("executor") == "e2e" or isinstance(
+        normalized.get("raw_results"),
+        list,
+    )
+    if not raw_result and not without_comparison_evidence:
+        raise ValidationError(
+            "validation runnable result must include raw comparison "
+            "evidence or a legacy outer status"
+        )
+    raw_status_value = raw_result.get("status")
+    if (
+        "status" in raw_result
+        and not isinstance(raw_status_value, str)
+    ):
+        raise ValidationError(
+            "validation result raw_result.status must be a string"
+        )
+    if raw_result and raw_status_value not in {
+        "pass",
+        "passed",
+        "fail",
+        "failed",
+        "skip",
+        "skipped",
+    }:
+        raise ValidationError(
+            "validation result raw_result.status must be one of pass, "
+            "passed, fail, failed, skip, or skipped"
+        )
+    for field in ("model", "suite", "workload"):
+        if field in raw_result and not isinstance(
+            raw_result[field],
+            str,
+        ):
+            raise ValidationError(
+                f"validation result raw_result.{field} must be a string"
+            )
+    if "mode" in raw_result and not isinstance(
+        raw_result["mode"],
+        str,
+    ):
+        raise ValidationError(
+            "validation result raw_result.mode must be a string"
+        )
+    for field in (
+        "error_type",
+        "error",
+        "exception",
+        "traceback",
+        "failure_class",
+    ):
+        if field in raw_result and not isinstance(
+            raw_result[field],
+            str,
+        ):
+            raise ValidationError(
+                f"validation result raw_result.{field} must be a string"
+            )
+    if (
+        "gate_failures" in raw_result
+        and not isinstance(raw_result["gate_failures"], list)
+    ):
+        raise ValidationError(
+            "validation result raw_result.gate_failures must be a list"
+        )
+    if (
+        "gates" in raw_result
+        and not isinstance(raw_result["gates"], Mapping)
+    ):
+        raise ValidationError(
+            "validation result raw_result.gates must be an object"
+        )
+    if (
+        "metrics" in raw_result
+        and not isinstance(raw_result["metrics"], Mapping)
+    ):
+        raise ValidationError(
+            "validation result raw_result.metrics must be an object"
+        )
+    for field in _COMPARISON_METRICS:
+        if field not in raw_result:
+            continue
+        metric = raw_result[field]
+        if metric is None and raw_status_value in {"fail", "failed"}:
+            continue
+        if (
+            not isinstance(metric, (int, float))
+            or isinstance(metric, bool)
+            or not math.isfinite(metric)
+        ):
+            raise ValidationError(
+                "validation result raw_result."
+                f"{field} must be a finite number"
+            )
+        if (
+            field in _COUNT_COMPARISON_METRICS
+            and (type(metric) is not int or metric < 0)
+        ):
+            raise ValidationError(
+                "validation result raw_result."
+                f"{field} must be a non-negative integer"
+            )
+        if (
+            field in _UNIT_INTERVAL_COMPARISON_METRICS
+            and not 0.0 <= metric <= 1.0
+        ):
+            raise ValidationError(
+                "validation result raw_result."
+                f"{field} must be in [0, 1]"
+            )
+        if (
+            field in _SIGNED_UNIT_COMPARISON_METRICS
+            and not -1.0 <= metric <= 1.0
+        ):
+            raise ValidationError(
+                "validation result raw_result."
+                f"{field} must be in [-1, 1]"
+            )
+        if (
+            field in _NONNEGATIVE_COMPARISON_METRICS
+            and metric < 0
+        ):
+            raise ValidationError(
+                "validation result raw_result."
+                f"{field} must be non-negative"
+            )
+    nested_metrics = raw_result.get("metrics")
+    if isinstance(nested_metrics, Mapping):
+        for name, summary in nested_metrics.items():
+            if not isinstance(name, str) or not name:
+                raise ValidationError(
+                    "validation result raw_result.metrics names must be "
+                    "non-empty strings"
+                )
+            if not isinstance(summary, Mapping):
+                raise ValidationError(
+                    "validation result raw_result.metrics."
+                    f"{name} must be an object"
+                )
+            mean = summary.get("mean")
+            if (
+                not isinstance(mean, (int, float))
+                or isinstance(mean, bool)
+                or not math.isfinite(mean)
+            ):
+                raise ValidationError(
+                    "validation result raw_result.metrics."
+                    f"{name}.mean must be a finite number"
+                )
+            minimum = summary.get("min", mean)
+            maximum = summary.get("max", mean)
+            for field, value in (
+                ("min", minimum),
+                ("max", maximum),
+            ):
+                if (
+                    not isinstance(value, (int, float))
+                    or isinstance(value, bool)
+                    or not math.isfinite(value)
+                ):
+                    raise ValidationError(
+                        "validation result raw_result.metrics."
+                        f"{name}.{field} must be a finite number"
+                    )
+            if not minimum <= mean <= maximum:
+                raise ValidationError(
+                    "validation result raw_result.metrics."
+                    f"{name} must satisfy min <= mean <= max"
+                )
+            if "count" in summary and (
+                type(summary["count"]) is not int
+                or summary["count"] < 0
+            ):
+                raise ValidationError(
+                    "validation result raw_result.metrics."
+                    f"{name}.count must be a non-negative integer"
+                )
+            for field in ("gated_count", "passed_count"):
+                if field in summary and (
+                    type(summary[field]) is not int
+                    or summary[field] < 0
+                ):
+                    raise ValidationError(
+                        "validation result raw_result.metrics."
+                        f"{name}.{field} must be a non-negative integer"
+                    )
+            count = summary.get("count")
+            gated_count = summary.get("gated_count")
+            nested_passed_count = summary.get("passed_count")
+            if (
+                type(count) is int
+                and type(gated_count) is int
+                and gated_count > count
+            ):
+                raise ValidationError(
+                    "validation result raw_result.metrics."
+                    f"{name}.gated_count cannot exceed count"
+                )
+            if (
+                type(gated_count) is int
+                and type(nested_passed_count) is int
+                and nested_passed_count > gated_count
+            ):
+                raise ValidationError(
+                    "validation result raw_result.metrics."
+                    f"{name}.passed_count cannot exceed gated_count"
+                )
+            if (
+                raw_status_value in {"pass", "passed"}
+                and type(gated_count) is int
+                and gated_count > 0
+                and type(nested_passed_count) is int
+                and nested_passed_count != gated_count
+            ):
+                raise ValidationError(
+                    "passed validation result raw_result.metrics."
+                    f"{name} must pass every gated sample"
+                )
+            if (
+                name in raw_result
+                and raw_result[name] != mean
+            ):
+                raise ValidationError(
+                    "validation result raw metric conflicts with nested "
+                    f"mean for {name}"
+                )
+    passed_count = raw_result.get("passed_count")
+    valid_count = raw_result.get("valid_count")
+    if (
+        type(passed_count) is int
+        and type(valid_count) is int
+        and passed_count > valid_count
+    ):
+        raise ValidationError(
+            "validation result raw_result.passed_count cannot exceed "
+            "valid_count"
+        )
+    overall_pass_rate = raw_result.get("overall_pass_rate")
+    if (
+        type(passed_count) is int
+        and type(valid_count) is int
+        and isinstance(overall_pass_rate, (int, float))
+        and not isinstance(overall_pass_rate, bool)
+    ):
+        expected_rate = (
+            passed_count / valid_count if valid_count else 0.0
+        )
+        if not math.isclose(
+            overall_pass_rate,
+            expected_rate,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise ValidationError(
+                "validation result raw_result.overall_pass_rate "
+                "conflicts with passed_count and valid_count"
+            )
+    for reference_name, candidate_name, delta_name, factor in (
+        (
+            "hf_accuracy",
+            "trtfb_accuracy",
+            "accuracy_delta_trtfb_minus_hf",
+            1,
+        ),
+        (
+            "hf_accuracy",
+            "trtfb_accuracy",
+            "accuracy_drop_from_hf",
+            -1,
+        ),
+        (
+            "hf_accuracy",
+            "trtfb_accuracy",
+            "pass_rate_drop_from_hf",
+            -1,
+        ),
+        (
+            "hf_top1_accuracy",
+            "trtfb_top1_accuracy",
+            "top1_accuracy_drop_from_hf",
+            -1,
+        ),
+        (
+            "hf_mean_iou",
+            "trtfb_mean_iou",
+            "mean_iou_drop_from_hf",
+            -1,
+        ),
+        (
+            "hf_mean_ground_truth_iou",
+            "trtfb_mean_ground_truth_iou",
+            "ground_truth_iou_drop_from_hf",
+            -1,
+        ),
+    ):
+        if all(
+            name in raw_result
+            for name in (
+                reference_name,
+                candidate_name,
+                delta_name,
+            )
+        ):
+            expected_delta = factor * (
+                raw_result[candidate_name]
+                - raw_result[reference_name]
+            )
+            if not math.isclose(
+                raw_result[delta_name],
+                expected_delta,
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            ):
+                raise ValidationError(
+                    "validation result raw_result."
+                    f"{delta_name} conflicts with {reference_name} and "
+                    f"{candidate_name}"
+                )
+    _validate_raw_metric_relationships(raw_result)
     execution = _normalize_execution_result(
         normalized.get("execution"),
         fallback=_execution_details(normalized, raw_result),
@@ -3488,6 +5399,13 @@ def _normalize_result(result: Mapping[str, Any]) -> dict[str, Any]:
     validation = _normalize_validation_result(
         normalized.get("validation"),
         fallback=_validation_details(execution, comparison),
+    )
+    _validate_result_evidence_consistency(
+        normalized,
+        raw_result=raw_result,
+        execution=execution,
+        comparison=comparison,
+        validation=validation,
     )
     reference_environment = normalized.get("reference_environment", [])
     if reference_environment is None:
@@ -3522,10 +5440,169 @@ def _normalize_result(result: Mapping[str, Any]) -> dict[str, Any]:
         normalized["precision_contract"] = precision_contract
     else:
         normalized.pop("precision_contract", None)
+    if raw_result:
+        normalized["raw_result"] = dict(raw_result)
     normalized.pop("returncode", None)
     normalized.pop("status", None)
     _validate_result_status_consistency(normalized)
     return normalized
+
+
+def _validate_result_evidence_consistency(
+    result: Mapping[str, Any],
+    *,
+    raw_result: Mapping[str, Any],
+    execution: Mapping[str, Any],
+    comparison: Mapping[str, Any],
+    validation: Mapping[str, Any],
+) -> None:
+    not_compared_reason = str(
+        result.get("not_compared_reason", "") or ""
+    )
+    if not_compared_reason:
+        if raw_result and result.get("executor") != "e2e":
+            raise ValidationError(
+                "validation result not_compared_reason cannot override raw "
+                "comparison evidence"
+            )
+        return
+    if not raw_result:
+        return
+    expected_model = result.get("model")
+    expected_workload = result.get("workload")
+    for field, expected in (
+        ("model", expected_model),
+        ("suite", expected_workload),
+        ("workload", expected_workload),
+    ):
+        if field in raw_result and raw_result[field] != expected:
+            raise ValidationError(
+                "validation result raw_result."
+                f"{field} conflicts with the canonical binding"
+            )
+    legacy_exit_code = result.get("returncode")
+    if legacy_exit_code is not None and type(legacy_exit_code) is not int:
+        raise ValidationError(
+            "validation result returncode must be an integer or null"
+        )
+    canonical_exit_code = execution.get("exit_code")
+    if (
+        "returncode" in result
+        and isinstance(result.get("execution"), Mapping)
+        and "exit_code" in result["execution"]
+        and legacy_exit_code != canonical_exit_code
+    ):
+        raise ValidationError(
+            "validation result returncode conflicts with "
+            "execution.exit_code"
+        )
+    exit_code = (
+        canonical_exit_code
+        if canonical_exit_code is not None
+        else legacy_exit_code
+    )
+    expected_execution = _execution_details(
+        {"returncode": exit_code},
+        raw_result,
+    )
+    if expected_execution["status"] == "completed":
+        if (
+            raw_result.get("model") != result.get("model")
+            or raw_result.get("suite") != result.get("workload")
+        ):
+            raise ValidationError(
+                "completed validation result must include exact raw "
+                "model and suite binding evidence"
+            )
+    expected_comparison = _comparison_details(
+        raw_result,
+        expected_execution,
+    )
+    expected_validation = _validation_details(
+        expected_execution,
+        expected_comparison,
+    )
+    if expected_validation["status"] == "passed":
+        mode = raw_result.get("mode")
+        if (
+            not isinstance(mode, str)
+            or mode not in _PRIMARY_METRIC_BY_MODE
+        ):
+            raise ValidationError(
+                "passed validation result must name a supported raw_result."
+                "mode"
+            )
+        primary_metric = _PRIMARY_METRIC_BY_MODE[mode]
+        primary_value = raw_result.get(primary_metric)
+        if (
+            not isinstance(primary_value, (int, float))
+            or isinstance(primary_value, bool)
+            or not math.isfinite(primary_value)
+        ):
+            raise ValidationError(
+                "passed validation result for mode "
+                f"{mode!r} must include finite raw_result."
+                f"{primary_metric}"
+            )
+        if mode in _VALID_COUNT_REQUIRED_MODES and (
+            type(raw_result.get("valid_count")) is not int
+            or raw_result["valid_count"] <= 0
+        ):
+            raise ValidationError(
+                "passed validation result for mode "
+                f"{mode!r} requires a positive raw_result.valid_count"
+            )
+    attempts = execution.get("attempts")
+    if isinstance(attempts, list) and attempts:
+        final_attempt = attempts[-1]
+        if (
+            final_attempt.get("execution_status")
+            != execution.get("status")
+            or final_attempt.get("validation_status")
+            != validation.get("status")
+        ):
+            raise ValidationError(
+                "validation result final retry attempt must match the "
+                "final execution and validation statuses"
+            )
+        for field in ("error_type", "error"):
+            if final_attempt.get(field, "") != raw_result.get(field, ""):
+                raise ValidationError(
+                    "validation result final retry attempt "
+                    f"{field} must match raw_result.{field}"
+                )
+    evidence_fields = (
+        "mode",
+        "primary_metric",
+        "metrics",
+        "failures",
+    )
+    mismatched_fields = [
+        field
+        for field in evidence_fields
+        if comparison.get(field) != expected_comparison.get(field)
+    ]
+    if mismatched_fields:
+        raise ValidationError(
+            "validation result canonical comparison evidence conflicts "
+            "with raw evidence for fields "
+            + ", ".join(mismatched_fields)
+        )
+    actual = (
+        execution["status"],
+        comparison["status"],
+        validation["status"],
+    )
+    expected = (
+        expected_execution["status"],
+        expected_comparison["status"],
+        expected_validation["status"],
+    )
+    if actual != expected:
+        raise ValidationError(
+            "validation result canonical statuses conflict with raw "
+            f"evidence: got {actual}, expected {expected}"
+        )
 
 
 def _validate_result_status_consistency(
@@ -3613,39 +5690,72 @@ def _comparison_result(
     sample_limit: int = 0,
 ) -> dict[str, Any]:
     workload = _required_workload(binding)
-    summary_path = case_dir / "validation" / workload / "eval_summary.json"
-    raw_result: dict[str, Any] = {}
-    summary = _read_json_artifact(summary_path, missing_ok=True)
-    if summary is not None:
-        if not isinstance(summary, Mapping):
-            raise ValidationError(
-                f"comparison summary must contain an object: {summary_path}"
-            )
-        candidates = summary.get("results", [])
-        if not isinstance(candidates, list):
-            raise ValidationError(
-                f"comparison summary results must be a list: {summary_path}"
-            )
-        for candidate in candidates:
-            if not isinstance(candidate, Mapping):
-                continue
-            if candidate.get("model") == binding.model:
-                raw_result = dict(candidate)
-                break
-        if not raw_result:
-            raw_result = next(
-                (dict(candidate) for candidate in candidates if isinstance(candidate, Mapping)),
-                {},
-            )
-    if not raw_result:
-        raw_result = {
+    summary_path = _comparison_summary_path(binding, case_dir)
+    def comparison_process_error(message: str) -> dict[str, Any]:
+        return {
             "status": "failed",
             "error_type": "ComparisonProcessError",
-            "error": (
+            "error": message,
+        }
+
+    raw_result: dict[str, Any] = {}
+    try:
+        summary = _read_json_artifact(summary_path, missing_ok=True)
+    except ValidationError as exc:
+        raw_result = comparison_process_error(
+            f"comparison wrote an invalid summary to {summary_path}: {exc}"
+        )
+        summary = None
+    if summary is not None:
+        if not isinstance(summary, Mapping):
+            raw_result = comparison_process_error(
+                f"comparison summary must contain an object: {summary_path}"
+            )
+        else:
+            candidates = summary.get("results", [])
+            if not isinstance(candidates, list):
+                raw_result = comparison_process_error(
+                    "comparison summary results must be a list: "
+                    f"{summary_path}"
+                )
+            elif (
+                len(candidates) == 1
+                and isinstance(candidates[0], Mapping)
+                and candidates[0].get("model") == binding.model
+            ):
+                raw_result = dict(candidates[0])
+            elif candidates:
+                raw_result = comparison_process_error(
+                    "comparison must write exactly one result for requested "
+                    f"model {binding.model!r} to {summary_path}"
+                )
+    if not raw_result:
+        raw_result = comparison_process_error(
                 f"comparison exited with code {returncode} without writing "
                 f"a model result to {summary_path}"
-            ),
-        }
+        )
+    raw_status = str(raw_result.get("status", "") or "")
+    if raw_status not in {
+        "pass",
+        "passed",
+        "fail",
+        "failed",
+    }:
+        raw_result = comparison_process_error(
+                f"comparison wrote invalid status "
+                f"{raw_status or '<missing>'!r} for requested model "
+                f"{binding.model!r}"
+        )
+        raw_status = "failed"
+    if returncode not in {0, 1} or (
+        returncode == 1
+        and raw_status not in {"fail", "failed"}
+    ):
+        raw_result = comparison_process_error(
+                f"comparison exited with code {returncode} while reporting "
+                f"status {raw_status or '<missing>'!r} for requested model "
+                f"{binding.model!r}"
+        )
     status = str(raw_result.get("status", "") or "")
     if status not in {"passed", "failed", "skipped"}:
         status = "passed" if returncode == 0 else "failed"
@@ -3673,8 +5783,7 @@ def _comparison_result(
         "reference_vanilla_available": False,
         "trtmc_vanilla_available": False,
     }
-    return _normalize_result(
-        {
+    result_payload = {
             "schema_version": "trtmc.validation-result/v2",
             "model": binding.model,
             "workload": binding.workload,
@@ -3702,7 +5811,26 @@ def _comparison_result(
             "disagreements": disagreements,
             "execution_log": str(case_dir / "execution.log"),
             "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+    }
+    try:
+        return _normalize_result(result_payload)
+    except ValidationError as exc:
+        if raw_result.get("error_type") == "ComparisonProcessError":
+            raise
+        result_payload["status"] = "failed"
+        result_payload["raw_result"] = comparison_process_error(
+            "comparison wrote malformed model evidence for "
+            f"{binding.model!r}: {exc}"
+        )
+        return _normalize_result(result_payload)
+
+
+def _comparison_summary_path(binding: Binding, case_dir: Path) -> Path:
+    return (
+        case_dir
+        / "validation"
+        / _required_workload(binding)
+        / "eval_summary.json"
     )
 
 
@@ -3743,6 +5871,12 @@ def run_binding(
         reference_python=environment.base_python,
         reference_sources=reference_sources,
     )
+    summary_path = _comparison_summary_path(binding, case_dir)
+    _ensure_real_directory(
+        summary_path.parent,
+        description="comparison summary parent",
+    )
+    _atomic_write_json(summary_path, {"results": []})
     returncode = _run_subprocess(command, case_dir / "execution.log", process_env)
     result = _comparison_result(
         binding,
@@ -4703,6 +6837,7 @@ def _read_report_result(
     path: Path,
     *,
     include_size: bool = False,
+    include_identity: bool = False,
 ) -> Any:
     _validate_report_result_path(output, path)
     relative = path.relative_to(output)
@@ -4789,7 +6924,14 @@ def _read_report_result(
             operation="reading",
         )
         _verify_visible_artifact_parent(path, workload_descriptor)
-        return (loaded, len(payload)) if include_size else loaded
+        identity = _metadata_identity(metadata)
+        if include_size and include_identity:
+            return loaded, len(payload), identity
+        if include_size:
+            return loaded, len(payload)
+        if include_identity:
+            return loaded, identity
+        return loaded
     except (OSError, ValueError) as exc:
         raise ValidationError(f"cannot open validation result {path}: {exc}") from exc
     finally:
@@ -5423,7 +7565,44 @@ def _open_report_transaction_anchors(
     return anchors
 
 
+def _verify_report_transaction_visibility(
+    entries: Sequence[tuple[str, Any]],
+) -> None:
+    for kind, update in entries:
+        if kind == "directory":
+            _verify_committed_case_directory_update(update)
+        else:
+            _verify_committed_file_update(update)
+
+
+def _rollback_report_transaction(
+    entries: Sequence[tuple[str, Any]],
+) -> list[str]:
+    errors: list[str] = []
+    for kind, update in reversed(entries):
+        try:
+            if kind == "directory":
+                _rollback_case_directory_update(update)
+            else:
+                _rollback_file_update(update)
+        except (OSError, ValidationError) as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+    return errors
+
+
 def write_report(
+    output: Path,
+    *,
+    result_paths: Sequence[Path] | None = None,
+) -> tuple[Path, Path, dict[str, Any]]:
+    with _validation_output_publication_lock(output):
+        return _write_report_locked(
+            output,
+            result_paths=result_paths,
+        )
+
+
+def _write_report_locked(
     output: Path,
     *,
     result_paths: Sequence[Path] | None = None,
@@ -5494,6 +7673,7 @@ def write_report(
                 if (
                     run_status == "running"
                     or validation_counts["not_compared"]
+                    or validation_counts["skipped"]
                 )
                 else "passed"
             ),
@@ -5612,36 +7792,75 @@ def write_report(
                     _commit_case_directory_update(update)
                 else:
                     _commit_file_update(update)
-        except BaseException:
-            for kind, update in reversed(transaction_entries):
-                try:
-                    if kind == "directory":
-                        _rollback_case_directory_update(update)
-                    else:
-                        _rollback_file_update(update)
-                except (OSError, ValidationError):
-                    pass
+            _verify_report_transaction_visibility(
+                transaction_entries
+            )
+        except BaseException as exc:
+            rollback_errors = _rollback_report_transaction(
+                transaction_entries
+            )
+            if rollback_errors:
+                raise ValidationError(
+                    "validation report transaction failed and rollback "
+                    "was incomplete: "
+                    + " | ".join(rollback_errors)
+                ) from exc
             raise
         return json_path, html_path, report
     finally:
-        for kind, update in transaction_entries:
-            if kind == "directory":
-                _finalize_case_directory_update(update)
+        cleanup_errors: list[str] = []
+        try:
+            for kind, update in transaction_entries:
+                try:
+                    if kind == "directory":
+                        cleanup_errors.extend(
+                            _finalize_case_directory_update(update)
+                        )
+                    else:
+                        cleanup_errors.extend(
+                            _finalize_file_update(update)
+                        )
+                except (OSError, ValidationError) as exc:
+                    cleanup_errors.append(
+                        "validation transaction cleanup failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+            for stage in stages.values():
+                try:
+                    anchored_case_fd = transaction_anchors.get(
+                        _transaction_parent_path(stage.case_dir)
+                    )
+                    _cleanup_case_artifact_stage(
+                        stage,
+                        anchored_case_fd=anchored_case_fd,
+                    )
+                except (OSError, ValidationError) as exc:
+                    cleanup_errors.append(
+                        "validation report stage cleanup incomplete: "
+                        f"{stage.path}: {exc}"
+                    )
+        finally:
+            for descriptor in transaction_anchors.values():
+                try:
+                    os.close(descriptor)
+                except OSError as exc:
+                    cleanup_errors.append(
+                        "validation transaction anchor close failed: "
+                        f"{exc}"
+                    )
+        if cleanup_errors:
+            cleanup_message = (
+                "validation report cleanup incomplete: "
+                + " | ".join(cleanup_errors)
+            )
+            active_error = sys.exc_info()[1]
+            if active_error is not None:
+                if hasattr(active_error, "add_note"):
+                    active_error.add_note(cleanup_message)
+                else:
+                    print(cleanup_message, file=sys.stderr)
             else:
-                _finalize_file_update(update)
-        for stage in stages.values():
-            try:
-                anchored_case_fd = transaction_anchors.get(
-                    _transaction_parent_path(stage.case_dir)
-                )
-                _cleanup_case_artifact_stage(
-                    stage,
-                    anchored_case_fd=anchored_case_fd,
-                )
-            except (OSError, ValidationError):
-                pass
-        for descriptor in transaction_anchors.values():
-            os.close(descriptor)
+                raise ValidationError(cleanup_message)
 
 
 def _print_result(result: Mapping[str, Any], comparison: Path, report: Path) -> None:
@@ -5960,7 +8179,11 @@ def _run_supervised_binding(
         if launch_error:
             raise ValidationError(launch_error)
         try:
-            loaded = _read_report_result(arguments.output, comparison_path)
+            loaded, read_identity = _read_report_result(
+                arguments.output,
+                comparison_path,
+                include_identity=True,
+            )
         except ValidationError as exc:
             raise ValidationError(
                 f"worker exited with code {returncode} without a valid "
@@ -5969,10 +8192,13 @@ def _run_supervised_binding(
         current_comparison_identity = _regular_artifact_identity(
             comparison_path,
         )
+        if current_comparison_identity != read_identity:
+            raise ValidationError(
+                "worker comparison.json changed after it was read"
+            )
         if (
             previous_comparison_identity is not None
-            and current_comparison_identity
-            == previous_comparison_identity
+            and read_identity == previous_comparison_identity
         ):
             raise ValidationError(
                 "worker did not replace its stale comparison.json"
@@ -5980,9 +8206,76 @@ def _run_supervised_binding(
         _validate_report_json_depth(loaded, path=comparison_path)
         if not isinstance(loaded, Mapping):
             raise ValidationError("worker comparison.json must contain an object")
+        raw_evidence = loaded.get("raw_result")
+        if not isinstance(raw_evidence, Mapping) or not raw_evidence:
+            raise ValidationError(
+                "runnable binding worker comparison.json must include "
+                "non-empty raw_result evidence"
+            )
+        raw_status = raw_evidence.get("status")
+        if not isinstance(raw_status, str) or raw_status not in {
+            "pass",
+            "passed",
+            "fail",
+            "failed",
+        }:
+            raise ValidationError(
+                "runnable worker raw_result must include an explicit "
+                "comparison status"
+            )
         result = _normalize_result(loaded)
         if result.get("model") != binding.model or result.get("workload") != binding.workload:
             raise ValidationError("worker wrote comparison.json for a different binding")
+        execution_completed = (
+            result["execution"]["status"] == "completed"
+        )
+        raw_model = raw_evidence.get("model")
+        raw_suite = raw_evidence.get("suite")
+        raw_workload = raw_evidence.get("workload")
+        if (
+            (
+                execution_completed
+                and (
+                    raw_model != binding.model
+                    or raw_suite != binding.workload
+                )
+            )
+            or (
+                raw_model is not None
+                and raw_model != binding.model
+            )
+            or (
+                raw_suite is not None
+                and raw_suite != binding.workload
+            )
+            or (
+                raw_workload is not None
+                and raw_workload != binding.workload
+            )
+        ):
+            raise ValidationError(
+                "worker raw_result evidence belongs to a different binding"
+            )
+        if result["validation"]["status"] in {
+            "not_compared",
+            "skipped",
+        }:
+            raise ValidationError(
+                "worker did not complete a comparison for a runnable binding"
+            )
+        if type(result["execution"].get("exit_code")) is not int:
+            raise ValidationError(
+                "runnable worker result must include an integer "
+                "execution.exit_code"
+            )
+        expected_returncode = (
+            1 if result["validation"]["status"] == "failed" else 0
+        )
+        if returncode != expected_returncode:
+            raise ValidationError(
+                f"worker exited with code {returncode}, but its result "
+                f"requires exit code {expected_returncode}"
+            )
     except (OSError, ValueError, ValidationError) as exc:
         result = _worker_error_result(
             binding,

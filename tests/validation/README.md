@@ -97,12 +97,14 @@ bindings that would fall back to `task_eval.py` or E2E execution.
 
 Every agreement or disagreement therefore means that both backends consumed
 the aligned prepared inputs and produced outputs that were evaluated by the
-declared comparator. A model without that complete contract stays in the
-catalog with `not_compared_reason`. `--all` records it as a white **Not
-compared** row without launching E2E, creating a reference environment, or
-building an engine. Such rows make the aggregate report status `incomplete`;
-they are not agreements, disagreements, execution errors, or attempted model
-failures.
+declared, threshold-gated comparator. A task-eval suite whose comparison is
+explicitly diagnostic-only may still be run directly for investigation, but
+it is not a runnable reference-consistency binding. A model without the
+complete threshold-gated contract stays in the catalog with
+`not_compared_reason`. `--all` records it as a white **Not compared** row
+without launching E2E, creating a reference environment, or building an
+engine. Such rows make the aggregate report status `incomplete`; they are not
+agreements, disagreements, execution errors, or attempted model failures.
 
 `--all --dry-run` keeps these models visible with `workload: null`,
 `status: not_compared`, and the reason. CI matrix generation can select only
@@ -175,6 +177,20 @@ The resolved TRTMC base precision, quantization format, reference precision,
 and comparison kind are stored in `comparison.json` and shown in the HTML
 report. Reference cache keys include the effective reference dtype, so only
 variants with the same reference computation can reuse an entry.
+
+Report publication through `write_report` uses an exclusive advisory lock on
+the output-root directory. The lock covers input reads, staging, commit or
+rollback, recovery cleanup, and descriptor closure. The CLI completes its case
+and run producers before it calls `write_report`; cooperating report
+regenerators for the same output root must use that same path. A separate
+process must not concurrently write case, run, or report artifacts in that
+output root. Hidden `.report-stage-*` paths and transaction `.next`,
+`.previous`, `.rollback`, and `.cleanup` names are private recovery state;
+external writers must not create or mutate them. Writes that bypass the
+advisory lock are outside the supported concurrency contract. Identity and
+content checks reject many detected races, but they do not make unsupported
+concurrent mutation safe. Publication requires Linux
+`renameat2(RENAME_NOREPLACE)` and directory `flock` support.
 
 ## Add or extend a model
 

@@ -21,7 +21,7 @@ documentation` job uses Python 3.12 and Node 20 and runs all of these checks:
 Reproduce the full job from the repository root:
 
 ```bash
-python3 -m pytest \
+PYTHONPATH=python:. python3 -m pytest \
   tests/tools/test_check_doc_file_references.py \
   tests/tools/test_check_doc_commands.py \
   tests/tools/test_runtime_strategy_matrix_checker.py \
@@ -86,12 +86,15 @@ python3 tools/trtmc_validate.py --all
 Eligibility excludes manifests that require multiple devices, are marked
 `skip`, or use `ci_tier: l0_only`; readiness alone does not select a model. At
 this audited repository snapshot, the dry run resolves 105 eligible bindings:
-97 use dataset-backed reference workloads and 8 are explicitly marked
-`not_compared_reason` because no independent comparator is currently
-available. Treat those numbers as a repository snapshot, not a permanent API
-promise; rerun `--all --dry-run` after catalog changes. Every runnable binding
-must select an independent native reference runner and cannot silently fall
-back to either model-owned E2E or the `tools/task_eval.py` CLI.
+91 use dataset-backed, threshold-gated reference workloads and 14 are
+explicitly marked `not_compared_reason` because no complete threshold-gated
+comparison contract is currently available. Treat those numbers as a
+repository snapshot, not a permanent API promise; rerun `--all --dry-run`
+after catalog changes. Every runnable binding must select an independent
+native reference runner and cannot silently fall back to either model-owned
+E2E or the `tools/task_eval.py` CLI. Diagnostic-only task-eval suites remain
+available for investigation, but cannot publish a passed reference-consistency
+result.
 
 The all-model supervisor uses one isolated worker process per model and, by
 default, records a failed worker before continuing. Use
@@ -110,6 +113,20 @@ not-compared entries make the aggregate report incomplete but do not by
 themselves fail the process. The report keeps execution, comparison, and final
 validation status separate and records bounded reproduction evidence.
 
+Report publication through `write_report` is transactional and serialized by
+an exclusive advisory lock on the output-root directory. The lock covers input
+reads, staging, commit or rollback, recovery cleanup, and anchor closure. The
+CLI waits for its case and run producers before it enters `write_report`, and
+cooperating report regenerators for the same output root must also use that
+path. A separate process must not concurrently write case, run, or report
+artifacts in that output root. Names beginning with `.report-stage-` or
+containing transaction suffixes such as `.next`, `.previous`, `.rollback`, or
+`.cleanup` are private recovery state and must not be created or changed by
+other processes. Writes that bypass the advisory lock are outside the supported
+concurrency contract. Identity and content checks reject many detected races,
+but they do not make unsupported concurrent mutation safe. Publication
+requires Linux `renameat2(RENAME_NOREPLACE)` and directory `flock` support.
+
 Dataset-backed workloads use the sample limit declared for their task. Override
 one run with `--limit`, where zero requests the complete dataset:
 
@@ -125,7 +142,7 @@ do not launch a worker.
 This workflow needs the model checkpoint, its reference environment and
 dataset, a compatible TRTMC bundle/runtime, and usually target GPU hardware.
 `--dry-run` proves binding and planning only; documentation CI does not execute
-the 97 runnable comparisons in the 105-entry plan. See
+the 91 runnable comparisons in the 105-entry plan. See
 `tests/validation/README.md` for the artifact and model-onboarding contracts.
 
 ## Model-owned E2E

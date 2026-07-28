@@ -322,7 +322,7 @@ validation as absent or optional. Reproduce every gate from the repository
 root:
 
 ```bash
-python3 -m pytest \
+PYTHONPATH=python:. python3 -m pytest \
   tests/tools/test_check_doc_file_references.py \
   tests/tools/test_check_doc_commands.py \
   tests/tools/test_runtime_strategy_matrix_checker.py \

@@ -69,15 +69,19 @@ flowchart LR
   Core --> Loader["BackendLoader"]
   Loader --> TrtDso["libtrtmc_backend_trt.so"]
   Loader --> RtxDso["libtrtmc_backend_trt_rtx.so"]
+  Core --> BackendApi["IBackend / ITrtModule interfaces"]
+  ModelDSO --> BackendApi
+  TrtDso --> BackendApi
+  RtxDso --> BackendApi
   TrtDso --> LibNvinfer["matching TensorRT runtime"]
   RtxDso --> RtxRuntime["TensorRT-RTX runtime"]
-  ModelDSO --> TrtDso
-  ModelDSO --> RtxDso
 ```
 
 The public runtime uses `IBackend` and `ITrtModule` interfaces. TensorRT headers
-and ABI-sensitive runtime calls stay behind backend shared objects. Model
-pipelines, helpers, and CUDA kernels stay in separate
+and ABI-sensitive runtime calls stay behind backend shared objects. Core loads
+the selected backend DSO and injects its `IBackend*` through `PipelineContext`;
+model DSOs call that interface at runtime and do not link directly to backend
+DSOs. Model pipelines, helpers, and CUDA kernels stay in separate
 `libtrtmc_model_<owner>.so` files and link back to `trtmc_core`.
 
 ## Python package

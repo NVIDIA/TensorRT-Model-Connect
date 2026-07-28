@@ -577,6 +577,12 @@ suites:
       scorer: ocrbench_v2
     build:
       min_max_cache_length: 1024
+    # OCRBench produces task-specific continuous scores. Until per-family
+    # tolerances are calibrated, fail closed on any HF/TRTMC correctness
+    # disagreement instead of treating an empty gate set as a pass.
+    gates:
+      max_accuracy_drop_from_hf: 0.0
+      min_correctness_agreement: 1.0
     ci:
       eligible: false
       lane: local_only

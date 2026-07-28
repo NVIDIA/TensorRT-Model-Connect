@@ -13,15 +13,12 @@ sample_limits:
   coco2017_prompted_segmentation: 20
   dpg_bench_diffusion_image: 5
   etth1_time_series_parity: 10
-  flores200_en_fr_riva_translation_parity: 10
   gedit_bench_image_edit: 5
-  humaneval_code_continuation_parity: 10
   imagenette_image_classification: 100
   librispeech_clean_asr: 10
   librispeech_clean_asr_streaming: 5
   mmlu_continuation_parity: 10
   mmlu_five_shot_mcq: 20
-  newstest2019_en_ru_marian_translation_parity: 10
   ocrbench_v2_unified: 5
   openwebtext_elf_diffusion_text: 5
   sana_wm_benchmark_diffusion_video: 2
@@ -29,9 +26,7 @@ sample_limits:
   stsbenchmark_encoder_embedding_parity: 50
   vlm_mmmu_pro_vision_fixed_mcq: 5
   vlm_mmmu_pro_vision_mcq: 5
-  wikitext103_distilgpt2_continuation_parity: 20
   wmt14_de_en_elf_diffusion_text: 5
-  wmt14_en_de_t5_translation_parity: 10
   xsum_elf_diffusion_text: 5
 
 # Model-first validation bindings. Workload names refer to aligned input,
@@ -77,8 +72,9 @@ models:
     default: etth1_time_series_parity
     workloads: [etth1_time_series_parity]
   codegen-350m:
-    default: humaneval_code_continuation_parity
-    workloads: [humaneval_code_continuation_parity]
+    not_compared_reason: >-
+      HumanEval continuation output is diagnostic-only; no threshold-gated
+      reference consistency contract is calibrated.
   convbert-base:
     default: stsbenchmark_encoder_embedding_parity
     workloads: [stsbenchmark_encoder_embedding_parity]
@@ -98,8 +94,9 @@ models:
     default: stsbenchmark_encoder_embedding_parity
     workloads: [stsbenchmark_encoder_embedding_parity]
   distilgpt2:
-    default: wikitext103_distilgpt2_continuation_parity
-    workloads: [wikitext103_distilgpt2_continuation_parity]
+    not_compared_reason: >-
+      WikiText-103 continuation output is diagnostic-only; no threshold-gated
+      reference consistency contract is calibrated.
   dpr-ctx-encoder:
     default: stsbenchmark_encoder_embedding_parity
     workloads: [stsbenchmark_encoder_embedding_parity]
@@ -168,8 +165,9 @@ models:
     default: mmlu_continuation_parity
     workloads: [mmlu_continuation_parity]
   marian-en-ru:
-    default: newstest2019_en_ru_marian_translation_parity
-    workloads: [newstest2019_en_ru_marian_translation_parity]
+    not_compared_reason: >-
+      WMT translation output is diagnostic-only; no threshold-gated reference
+      consistency contract is calibrated.
   minitron-4b-depth:
     default: mmlu_continuation_parity
     workloads: [mmlu_continuation_parity]
@@ -289,8 +287,9 @@ models:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]
   riva-translate-4b:
-    default: flores200_en_fr_riva_translation_parity
-    workloads: [flores200_en_fr_riva_translation_parity]
+    not_compared_reason: >-
+      FLORES translation output is diagnostic-only; no threshold-gated
+      reference consistency contract is calibrated.
   roberta-base:
     default: stsbenchmark_encoder_embedding_parity
     workloads: [stsbenchmark_encoder_embedding_parity]
@@ -316,11 +315,13 @@ models:
     default: mmlu_continuation_parity
     workloads: [mmlu_continuation_parity]
   starcoder2-3b:
-    default: humaneval_code_continuation_parity
-    workloads: [humaneval_code_continuation_parity]
+    not_compared_reason: >-
+      HumanEval continuation output is diagnostic-only; no threshold-gated
+      reference consistency contract is calibrated.
   t5-small:
-    default: wmt14_en_de_t5_translation_parity
-    workloads: [wmt14_en_de_t5_translation_parity]
+    not_compared_reason: >-
+      WMT translation output is diagnostic-only; no threshold-gated reference
+      consistency contract is calibrated.
   timesfm-2.0-500m-official:
     default: etth1_time_series_parity
     workloads: [etth1_time_series_parity]

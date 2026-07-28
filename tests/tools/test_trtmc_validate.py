@@ -9,6 +9,8 @@ import json
 import os
 from pathlib import Path
 import shlex
+import stat
+import subprocess
 import sys
 
 import pytest
@@ -18,6 +20,65 @@ from tools import trtmc_compare
 from tools import trtmc_disagreements
 from tools import trtmc_reference
 from tools import trtmc_validate
+
+
+def _raw_evidence(
+    model: str,
+    workload: str,
+    status: str,
+    **extra,
+) -> dict:
+    evidence = {
+        "model": model,
+        "suite": workload,
+        "status": status,
+    }
+    if status in {"pass", "passed"}:
+        evidence.update(
+            {
+                "mode": "mcq",
+                "prediction_agreement_rate": 1.0,
+                "accuracy_drop_from_hf": 0.0,
+                "valid_count": 1,
+                "skipped_count": 0,
+                "total_count": 1,
+                "gates": {
+                    "max_accuracy_drop_from_hf": 0.0,
+                    "min_prediction_agreement": 1.0,
+                },
+            }
+        )
+    evidence.update(extra)
+    return evidence
+
+
+def _assert_output_lock_held(output: Path) -> None:
+    descriptor = os.open(output, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(BlockingIOError):
+            trtmc_validate.fcntl.flock(
+                descriptor,
+                trtmc_validate.fcntl.LOCK_EX
+                | trtmc_validate.fcntl.LOCK_NB,
+            )
+    finally:
+        os.close(descriptor)
+
+
+def _assert_output_lock_available(output: Path) -> None:
+    descriptor = os.open(output, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        trtmc_validate.fcntl.flock(
+            descriptor,
+            trtmc_validate.fcntl.LOCK_EX
+            | trtmc_validate.fcntl.LOCK_NB,
+        )
+        trtmc_validate.fcntl.flock(
+            descriptor,
+            trtmc_validate.fcntl.LOCK_UN,
+        )
+    finally:
+        os.close(descriptor)
 
 
 def _canonical_disagreement_record(
@@ -58,7 +119,7 @@ def test_model_workload_catalog_covers_every_validation_eligible_model():
     assert len(catalog["models"]) == len(eligible_models) == 105
     assert sum(
         "not_compared_reason" in spec for spec in catalog["models"].values()
-    ) == 8
+    ) == 14
     assert all(
         "e2e" not in spec.get("workloads", [])
         for spec in catalog["models"].values()
@@ -110,8 +171,11 @@ def test_all_help_and_docs_name_validation_eligibility_boundaries():
         .read_text(encoding="utf-8")
         .split()
     )
-    assert "97 use dataset-backed reference workloads" in website_text
-    assert "8 are explicitly marked `not_compared_reason`" in website_text
+    assert (
+        "91 use dataset-backed, threshold-gated reference workloads"
+        in website_text
+    )
+    assert "14 are explicitly marked `not_compared_reason`" in website_text
     assert "explicit E2E fallback" not in website_text
     assert "E2E bindings have no dataset slice" not in website_text
 
@@ -148,7 +212,7 @@ def test_every_dataset_backed_validation_binding_has_native_reference_runner():
             missing.append((model_name, workload, dataset_kind))
 
     assert not missing
-    assert len({model for model, _workload in bindings}) == 97
+    assert len({model for model, _workload in bindings}) == 91
 
 
 def test_resolve_binding_defaults_and_rejects_undeclared_workload():
@@ -683,6 +747,73 @@ def test_supervised_binding_replaces_stale_result_with_worker_crash(tmp_path, mo
     assert json.loads(comparison.read_text(encoding="utf-8")) == result
 
 
+def test_supervised_binding_rejects_stale_result_swapped_after_read(
+    tmp_path,
+    monkeypatch,
+):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--output",
+            str(tmp_path / "results"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "workload-a")
+    case_dir = arguments.output / binding.model / binding.workload
+    case_dir.mkdir(parents=True)
+    comparison = case_dir / "comparison.json"
+    stale = {
+        "model": binding.model,
+        "workload": binding.workload,
+        "returncode": 0,
+        "raw_result": {
+            "model": binding.model,
+            "suite": binding.workload,
+            "status": "passed",
+        },
+    }
+    comparison.write_text(json.dumps(stale), encoding="utf-8")
+    replacement = case_dir / "replacement.json"
+    replacement.write_text(json.dumps(stale), encoding="utf-8")
+    real_read = trtmc_validate._read_report_result
+    swapped = False
+
+    def swap_after_read(output, path, **kwargs):
+        nonlocal swapped
+        loaded = real_read(output, path, **kwargs)
+        if not swapped:
+            os.replace(replacement, comparison)
+            swapped = True
+        return loaded
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_run_subprocess",
+        lambda *_args, **_kwargs: 0,
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_read_report_result",
+        swap_after_read,
+    )
+
+    result = trtmc_validate._run_supervised_binding(
+        binding,
+        arguments=arguments,
+        catalog={"sample_limits": {"workload-a": 5}},
+    )
+
+    assert swapped
+    assert result["execution"] == {"status": "error", "exit_code": 0}
+    assert result["validation"]["status"] == "failed"
+    assert result["raw_result"]["error_type"] == "WorkerProcessError"
+    assert "changed after it was read" in result["raw_result"]["error"]
+
+
 def test_supervised_binding_accepts_fresh_worker_result(tmp_path, monkeypatch):
     arguments = trtmc_validate.build_parser().parse_args(
         [
@@ -707,7 +838,11 @@ def test_supervised_binding_accepts_fresh_worker_result(tmp_path, monkeypatch):
                     "workload": binding.workload,
                     "status": "passed",
                     "returncode": 0,
-                    "raw_result": {"status": "passed"},
+                    "raw_result": _raw_evidence(
+                        binding.model,
+                        binding.workload,
+                        "passed",
+                    ),
                     "reproduce": {
                         "dataset": {
                             "command": "internal worker command",
@@ -734,6 +869,319 @@ def test_supervised_binding_accepts_fresh_worker_result(tmp_path, monkeypatch):
     assert result["validation"]["status"] == "passed"
     assert result["worker_log"].endswith("/model-a/workload-a/worker.log")
     assert "--model-worker" not in result["reproduce"]["dataset"]["command"]
+
+
+def test_supervised_binding_rejects_passing_result_from_crashed_worker(
+    tmp_path,
+    monkeypatch,
+):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--output",
+            str(tmp_path / "results"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "workload-a")
+    comparison = (
+        arguments.output
+        / binding.model
+        / binding.workload
+        / "comparison.json"
+    )
+
+    def crash_after_pass(_command, _log_path, _env):
+        comparison.write_text(
+            json.dumps(
+                {
+                    "model": binding.model,
+                    "workload": binding.workload,
+                    "returncode": 0,
+                    "raw_result": _raw_evidence(
+                        binding.model,
+                        binding.workload,
+                        "passed",
+                    ),
+                }
+            ),
+            encoding="utf-8",
+        )
+        return 9
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_run_subprocess",
+        crash_after_pass,
+    )
+
+    result = trtmc_validate._run_supervised_binding(
+        binding,
+        arguments=arguments,
+        catalog={"sample_limits": {"workload-a": 5}},
+    )
+
+    assert result["execution"] == {"status": "error", "exit_code": 9}
+    assert result["comparison"]["status"] == "not_run"
+    assert result["validation"]["status"] == "failed"
+    assert result["raw_result"]["error_type"] == "WorkerProcessError"
+    assert "requires exit code 0" in result["raw_result"]["error"]
+
+
+def test_supervised_binding_accepts_worker_disagreement_exit_code(
+    tmp_path,
+    monkeypatch,
+):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--output",
+            str(tmp_path / "results"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "workload-a")
+    comparison = (
+        arguments.output
+        / binding.model
+        / binding.workload
+        / "comparison.json"
+    )
+
+    def disagree(_command, _log_path, _env):
+        comparison.write_text(
+            json.dumps(
+                {
+                    "model": binding.model,
+                    "workload": binding.workload,
+                    "returncode": 1,
+                    "raw_result": {
+                        "model": binding.model,
+                        "suite": binding.workload,
+                        "status": "failed",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return 1
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_run_subprocess",
+        disagree,
+    )
+
+    result = trtmc_validate._run_supervised_binding(
+        binding,
+        arguments=arguments,
+        catalog={"sample_limits": {"workload-a": 5}},
+    )
+
+    assert result["execution"] == {"status": "completed", "exit_code": 1}
+    assert result["comparison"]["status"] == "disagreement"
+    assert result["validation"]["status"] == "failed"
+    assert result["raw_result"].get("error_type") is None
+
+
+def test_supervised_binding_rejects_not_compared_runnable_result(
+    tmp_path,
+    monkeypatch,
+):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--output",
+            str(tmp_path / "results"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "workload-a")
+    comparison = (
+        arguments.output
+        / binding.model
+        / binding.workload
+        / "comparison.json"
+    )
+
+    def not_compared(_command, _log_path, _env):
+        comparison.write_text(
+            json.dumps(
+                {
+                    "model": binding.model,
+                    "workload": binding.workload,
+                    "not_compared_reason": "unexpected",
+                    "execution": {
+                        "status": "not_run",
+                        "exit_code": None,
+                    },
+                    "comparison": {"status": "not_run"},
+                    "validation": {"status": "not_compared"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return 0
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_run_subprocess",
+        not_compared,
+    )
+
+    result = trtmc_validate._run_supervised_binding(
+        binding,
+        arguments=arguments,
+        catalog={"sample_limits": {"workload-a": 5}},
+    )
+
+    assert result["execution"] == {"status": "error", "exit_code": 0}
+    assert result["validation"]["status"] == "failed"
+    assert "runnable binding" in result["raw_result"]["error"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "model": "model-a",
+            "workload": "workload-a",
+            "execution": {"status": "completed", "exit_code": 0},
+            "comparison": {"status": "agreement"},
+            "validation": {"status": "passed"},
+        },
+        {
+            "model": "model-a",
+            "workload": "workload-a",
+            "raw_result": {
+                "model": "model-a",
+                "status": "skipped",
+            },
+        },
+        {
+            "model": "model-a",
+            "workload": "workload-a",
+            "raw_result": {
+                "model": "model-a",
+                "status": "passed",
+            },
+            "execution": {"status": "completed", "exit_code": None},
+        },
+        {
+            "model": "model-a",
+            "workload": "workload-a",
+            "returncode": 0,
+            "raw_result": {
+                "model": "model-a",
+                "status": "passed",
+                "prediction_agreement_rate": 0.25,
+            },
+            "comparison": {
+                "status": "agreement",
+                "metrics": {"prediction_agreement_rate": 1.0},
+                "primary_metric": {
+                    "name": "prediction_agreement_rate",
+                    "value": 1.0,
+                },
+            },
+        },
+        {
+            "model": "model-a",
+            "workload": "workload-a",
+            "returncode": 0,
+            "raw_result": {
+                "model": "model-b",
+                "status": "passed",
+            },
+        },
+        {
+            "model": "model-a",
+            "workload": "workload-a",
+            "status": "passed",
+            "returncode": 0,
+            "raw_result": {"mode": "fabricated"},
+        },
+        {
+            "model": "model-a",
+            "workload": "workload-a",
+            "returncode": 0,
+            "raw_result": {"status": "passed"},
+        },
+        {
+            "model": "model-a",
+            "workload": "workload-a",
+            "returncode": 0,
+            "raw_result": {
+                "model": [],
+                "suite": "workload-a",
+                "status": "passed",
+            },
+        },
+    ],
+    ids=[
+        "canonical-only",
+        "skipped",
+        "missing-exit-code",
+        "conflicting-metrics",
+        "raw-binding-mismatch",
+        "missing-raw-status",
+        "missing-raw-binding",
+        "malformed-raw-binding",
+    ],
+)
+def test_supervised_binding_rejects_unverifiable_worker_evidence(
+    tmp_path,
+    monkeypatch,
+    payload,
+):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--output",
+            str(tmp_path / "results"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "workload-a")
+    comparison = (
+        arguments.output
+        / binding.model
+        / binding.workload
+        / "comparison.json"
+    )
+
+    def write_unverifiable_result(_command, _log_path, _env):
+        comparison.write_text(json.dumps(payload), encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_run_subprocess",
+        write_unverifiable_result,
+    )
+
+    result = trtmc_validate._run_supervised_binding(
+        binding,
+        arguments=arguments,
+        catalog={"sample_limits": {"workload-a": 5}},
+    )
+
+    assert result["execution"] == {"status": "error", "exit_code": 0}
+    assert result["comparison"]["status"] == "not_run"
+    assert result["validation"]["status"] == "failed"
+    assert result["raw_result"]["error_type"] == "WorkerProcessError"
 
 
 def test_all_dry_run_emits_machine_readable_ci_cases(monkeypatch, capsys):
@@ -809,29 +1257,52 @@ def test_single_ci_case_writes_stable_result_and_exit_code(
     catalog = {"sample_limits": {"workload-a": 5}}
 
     def run_binding(binding, *, arguments, task_models, suites):
-        result = {
-            "schema_version": "trtmc.validation-result/v2",
-            "model": binding.model,
-            "workload": binding.workload,
-            "execution": {"status": "completed", "exit_code": 0},
-            "comparison": {
-                "status": comparison_status,
-                "mode": "test",
-                "primary_metric": None,
-                "metrics": {},
-                "failures": [],
-            },
-            "validation": {"status": validation_status},
-            "reproduce": {
-                "dataset": {
-                    "command": "python tools/trtmc_validate.py model-a workload-a",
-                    "sample_limit": arguments.limit,
-                    "prepared_input_count": arguments.limit,
+        raw_result = (
+            _raw_evidence(
+                binding.model,
+                binding.workload,
+                "passed",
+            )
+            if validation_status == "passed"
+            else {
+                "model": binding.model,
+                "suite": binding.workload,
+                "mode": "mcq",
+                "status": "failed",
+                "prediction_agreement_rate": 0.5,
+                "gate_failures": [
+                    {
+                        "gate": "min_prediction_agreement_rate",
+                        "metric": "prediction_agreement_rate",
+                        "actual": 0.5,
+                        "required": 0.98,
+                    }
+                ],
+                "error_type": "BenchmarkGateError",
+                "error": "comparison gate failed",
+            }
+        )
+        result = trtmc_validate._normalize_result(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": binding.model,
+                "workload": binding.workload,
+                "returncode": 0,
+                "raw_result": raw_result,
+                "reproduce": {
+                    "dataset": {
+                        "command": (
+                            "python tools/trtmc_validate.py "
+                            "model-a workload-a"
+                        ),
+                        "sample_limit": arguments.limit,
+                        "prepared_input_count": arguments.limit,
+                    },
+                    "hf": [],
+                    "trtmc": [],
                 },
-                "hf": [],
-                "trtmc": [],
-            },
-        }
+            }
+        )
         case_dir = arguments.output / binding.model / binding.workload
         case_dir.mkdir(parents=True, exist_ok=True)
         (case_dir / "comparison.json").write_text(
@@ -1076,11 +1547,17 @@ def test_write_report_links_each_comparison(tmp_path):
     comparison = case_dir / "comparison.json"
     comparison.write_text(
         json.dumps(
-            {
-                "model": "model-a",
-                "workload": "workload-a",
-                "status": "passed",
-                "reference_environment": [
+                {
+                    "model": "model-a",
+                    "workload": "workload-a",
+                    "status": "passed",
+                    "returncode": 0,
+                    "raw_result": _raw_evidence(
+                        "model-a",
+                        "workload-a",
+                        "passed",
+                    ),
+                    "reference_environment": [
                     {"name": "reference_common", "python": "/profiles/python"}
                 ],
                 "reproduce": {
@@ -1137,6 +1614,370 @@ def test_write_report_links_each_comparison(tmp_path):
     assert "$ trtmc run" in document
 
 
+def test_write_report_holds_output_lock_for_entire_publication(
+    tmp_path,
+    monkeypatch,
+):
+    locked = False
+    operations = []
+    expected = (
+        tmp_path / "report.json",
+        tmp_path / "report.html",
+        {"validation_status": "passed"},
+    )
+
+    def record_lock(_descriptor, operation):
+        nonlocal locked
+        operations.append(operation)
+        if operation == trtmc_validate.fcntl.LOCK_EX:
+            assert not locked
+            locked = True
+        else:
+            assert operation == trtmc_validate.fcntl.LOCK_UN
+            assert locked
+            locked = False
+
+    def publish_while_locked(output, *, result_paths):
+        assert locked
+        assert output == tmp_path
+        assert result_paths == []
+        return expected
+
+    monkeypatch.setattr(trtmc_validate.fcntl, "flock", record_lock)
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_write_report_locked",
+        publish_while_locked,
+    )
+
+    assert trtmc_validate.write_report(
+        tmp_path,
+        result_paths=[],
+    ) == expected
+    assert not locked
+    assert operations == [
+        trtmc_validate.fcntl.LOCK_EX,
+        trtmc_validate.fcntl.LOCK_UN,
+    ]
+
+
+def test_write_report_releases_output_lock_after_failure(
+    tmp_path,
+    monkeypatch,
+):
+    locked = False
+
+    def record_lock(_descriptor, operation):
+        nonlocal locked
+        if operation == trtmc_validate.fcntl.LOCK_EX:
+            locked = True
+        else:
+            assert operation == trtmc_validate.fcntl.LOCK_UN
+            assert locked
+            locked = False
+
+    def fail_while_locked(_output, *, result_paths):
+        assert locked
+        assert result_paths == []
+        raise OSError("injected publication failure")
+
+    monkeypatch.setattr(trtmc_validate.fcntl, "flock", record_lock)
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_write_report_locked",
+        fail_while_locked,
+    )
+
+    with pytest.raises(OSError, match="injected publication failure"):
+        trtmc_validate.write_report(
+            tmp_path,
+            result_paths=[],
+        )
+    assert not locked
+
+
+def test_write_report_creates_missing_output_root(
+    tmp_path,
+):
+    output = tmp_path / "new-output"
+
+    json_path, html_path, report = trtmc_validate.write_report(
+        output,
+        result_paths=[],
+    )
+
+    assert output.is_dir()
+    assert json_path == output / "report.json"
+    assert html_path == output / "report.html"
+    assert json.loads(json_path.read_text(encoding="utf-8")) == report
+    assert html_path.is_file()
+    assert report["validation_status"] == "failed"
+
+
+def test_output_publication_lock_preserves_body_error_when_unlock_fails(
+    tmp_path,
+    monkeypatch,
+):
+    output = tmp_path / "output"
+    output.mkdir()
+    real_flock = trtmc_validate.fcntl.flock
+
+    def fail_unlock(descriptor, operation):
+        if operation == trtmc_validate.fcntl.LOCK_UN:
+            raise OSError("injected unlock failure")
+        return real_flock(descriptor, operation)
+
+    monkeypatch.setattr(
+        trtmc_validate.fcntl,
+        "flock",
+        fail_unlock,
+    )
+
+    with pytest.raises(RuntimeError, match="business failure") as raised:
+        with trtmc_validate._validation_output_publication_lock(output):
+            raise RuntimeError("business failure")
+
+    assert any(
+        "injected unlock failure" in note
+        for note in getattr(raised.value, "__notes__", [])
+    )
+    descriptor = os.open(output, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        real_flock(
+            descriptor,
+            trtmc_validate.fcntl.LOCK_EX
+            | trtmc_validate.fcntl.LOCK_NB,
+        )
+        real_flock(descriptor, trtmc_validate.fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+def test_output_publication_lock_serializes_independent_processes(
+    tmp_path,
+):
+    marker = tmp_path / "child-entered"
+    script = (
+        "import fcntl, os, pathlib, sys\n"
+        "descriptor = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)\n"
+        "print('ready', flush=True)\n"
+        "fcntl.flock(descriptor, fcntl.LOCK_EX)\n"
+        "pathlib.Path(sys.argv[2]).write_text('entered', encoding='utf-8')\n"
+        "fcntl.flock(descriptor, fcntl.LOCK_UN)\n"
+        "os.close(descriptor)\n"
+    )
+    process = None
+    with trtmc_validate._validation_output_publication_lock(
+        tmp_path
+    ):
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                script,
+                str(tmp_path),
+                str(marker),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert process.stdout is not None
+        assert process.stdout.readline().strip() == "ready"
+        assert not marker.exists()
+
+    assert process is not None
+    _stdout, stderr = process.communicate(timeout=5)
+    assert process.returncode == 0, stderr
+    assert marker.read_text(encoding="utf-8") == "entered"
+
+
+def test_output_publication_lock_rejects_replaced_visible_root(
+    tmp_path,
+    monkeypatch,
+):
+    output = tmp_path / "output"
+    output.mkdir()
+    moved = tmp_path / "output-before-lock"
+    real_flock = trtmc_validate.fcntl.flock
+    replaced = False
+
+    def replace_after_lock(descriptor, operation):
+        nonlocal replaced
+        real_flock(descriptor, operation)
+        if (
+            operation == trtmc_validate.fcntl.LOCK_EX
+            and not replaced
+        ):
+            output.rename(moved)
+            output.mkdir()
+            replaced = True
+
+    monkeypatch.setattr(
+        trtmc_validate.fcntl,
+        "flock",
+        replace_after_lock,
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="output changed while acquiring",
+    ):
+        trtmc_validate.write_report(
+            output,
+            result_paths=[],
+        )
+
+    assert replaced
+    assert not (output / "report.json").exists()
+    assert not (moved / "report.json").exists()
+
+
+def test_report_lock_covers_all_successful_publication_phases(
+    tmp_path,
+    monkeypatch,
+):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    case_dir.mkdir(parents=True)
+    comparison = case_dir / "comparison.json"
+    comparison.write_text(
+        json.dumps(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    phases = set()
+    real_preflight = trtmc_validate._preflight_report_disagreements
+    real_commit = trtmc_validate._commit_file_update
+    real_verify = trtmc_validate._verify_report_transaction_visibility
+    real_finalize = trtmc_validate._finalize_file_update
+
+    def check_preflight(*args, **kwargs):
+        _assert_output_lock_held(tmp_path)
+        phases.add("preflight")
+        return real_preflight(*args, **kwargs)
+
+    def check_commit(update):
+        _assert_output_lock_held(tmp_path)
+        phases.add("commit")
+        return real_commit(update)
+
+    def check_visibility(entries):
+        _assert_output_lock_held(tmp_path)
+        phases.add("visibility")
+        return real_verify(entries)
+
+    def check_finalize(update):
+        _assert_output_lock_held(tmp_path)
+        phases.add("finalize")
+        return real_finalize(update)
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_preflight_report_disagreements",
+        check_preflight,
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_commit_file_update",
+        check_commit,
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_verify_report_transaction_visibility",
+        check_visibility,
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_finalize_file_update",
+        check_finalize,
+    )
+
+    trtmc_validate.write_report(
+        tmp_path,
+        result_paths=[comparison],
+    )
+
+    assert phases == {
+        "preflight",
+        "commit",
+        "visibility",
+        "finalize",
+    }
+    _assert_output_lock_available(tmp_path)
+
+
+def test_report_lock_covers_rollback_and_releases_after_failure(
+    tmp_path,
+    monkeypatch,
+):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    case_dir.mkdir(parents=True)
+    comparison = case_dir / "comparison.json"
+    comparison.write_text(
+        json.dumps(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    real_commit = trtmc_validate._commit_file_update
+    real_rollback = trtmc_validate._rollback_file_update
+    injected = False
+    rollback_checked = False
+
+    def fail_after_commit(update):
+        nonlocal injected
+        real_commit(update)
+        if not injected:
+            injected = True
+            raise OSError("injected commit failure")
+
+    def check_rollback(update):
+        nonlocal rollback_checked
+        _assert_output_lock_held(tmp_path)
+        rollback_checked = True
+        return real_rollback(update)
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_commit_file_update",
+        fail_after_commit,
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_rollback_file_update",
+        check_rollback,
+    )
+
+    with pytest.raises(OSError, match="injected commit failure"):
+        trtmc_validate.write_report(
+            tmp_path,
+            result_paths=[comparison],
+        )
+
+    assert injected
+    assert rollback_checked
+    _assert_output_lock_available(tmp_path)
+
+
 def test_all_report_only_contains_results_created_by_current_run(
     tmp_path,
     monkeypatch,
@@ -1174,6 +2015,12 @@ def test_all_report_only_contains_results_created_by_current_run(
             "model": selected.model,
             "workload": selected.workload,
             "status": "passed",
+            "returncode": 0,
+            "raw_result": _raw_evidence(
+                selected.model,
+                selected.workload,
+                "passed",
+            ),
             "reproduce": {},
         }
         case_dir = trtmc_validate._prepare_case_directory(
@@ -1249,6 +2096,12 @@ def test_report_read_rejects_swapped_workload_directory(
                 "model": "model-a",
                 "workload": "workload-a",
                 "status": "passed",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                ),
             }
         ),
         encoding="utf-8",
@@ -1549,12 +2402,18 @@ def test_report_does_not_refresh_disagreement_artifact_from_raw_work_dir(
     work_dir.mkdir()
     (case_dir / "comparison.json").write_text(
         json.dumps(
-            {
-                "model": "model-a",
-                "workload": "workload-a",
-                "status": "passed",
-                "raw_result": {"work_dir": str(work_dir)},
-            }
+                {
+                    "model": "model-a",
+                    "workload": "workload-a",
+                    "status": "passed",
+                    "returncode": 0,
+                    "raw_result": _raw_evidence(
+                        "model-a",
+                        "workload-a",
+                        "passed",
+                        work_dir=str(work_dir),
+                    ),
+                }
         ),
         encoding="utf-8",
     )
@@ -1583,6 +2442,12 @@ def test_report_rejects_disagreement_artifact_path_outside_case(tmp_path):
                 "model": "model-a",
                 "workload": "workload-a",
                 "status": "failed",
+                "returncode": 1,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "failed",
+                ),
                 "disagreements": {
                     "count": 1,
                     "path": str(external),
@@ -1615,6 +2480,12 @@ def test_report_rejects_unsafe_disagreement_artifact(
                 "model": "model-a",
                 "workload": "workload-a",
                 "status": "failed",
+                "returncode": 1,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "failed",
+                ),
                 "disagreements": {
                     "count": 1,
                     "path": "disagreements.jsonl",
@@ -1684,11 +2555,17 @@ def test_report_does_not_render_unsafe_case_media(
     )
     (case_dir / "comparison.json").write_text(
         json.dumps(
-            {
-                "model": "model-a",
-                "workload": "workload-a",
-                "status": "failed",
-                "disagreements": {
+                {
+                    "model": "model-a",
+                    "workload": "workload-a",
+                    "status": "failed",
+                    "returncode": 1,
+                    "raw_result": _raw_evidence(
+                        "model-a",
+                        "workload-a",
+                        "failed",
+                    ),
+                    "disagreements": {
                     "count": 1,
                     "path": "disagreements.jsonl",
                 },
@@ -1747,11 +2624,17 @@ def test_report_does_not_render_noncanonical_media_url(
     )
     (case_dir / "comparison.json").write_text(
         json.dumps(
-            {
-                "model": "model-a",
-                "workload": "workload-a",
-                "status": "failed",
-                "disagreements": {
+                {
+                    "model": "model-a",
+                    "workload": "workload-a",
+                    "status": "failed",
+                    "returncode": 1,
+                    "raw_result": _raw_evidence(
+                        "model-a",
+                        "workload-a",
+                        "failed",
+                    ),
+                    "disagreements": {
                     "count": 1,
                     "path": "disagreements.jsonl",
                 },
@@ -1782,7 +2665,13 @@ def test_report_rejects_symlinked_work_dir_inside_case(tmp_path):
                 "model": "model-a",
                 "workload": "workload-a",
                 "status": "passed",
-                "raw_result": {"work_dir": str(work_dir)},
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                    work_dir=str(work_dir),
+                ),
             }
         ),
         encoding="utf-8",
@@ -1840,10 +2729,13 @@ def test_report_allows_external_input_media_but_rejects_external_outputs(
                 "model": "model-a",
                 "workload": "workload-a",
                 "status": "failed",
-                "raw_result": {
-                    "status": "failed",
-                    "work_dir": str(work_dir),
-                },
+                "returncode": 1,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "failed",
+                    work_dir=str(work_dir),
+                ),
             }
         ),
         encoding="utf-8",
@@ -1887,10 +2779,13 @@ def test_report_wraps_invalid_disagreement_json_as_validation_error(
                 "model": "model-a",
                 "workload": "workload-a",
                 "status": "failed",
-                "raw_result": {
-                    "status": "failed",
-                    "work_dir": str(work_dir),
-                },
+                "returncode": 1,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "failed",
+                    work_dir=str(work_dir),
+                ),
             }
         ),
         encoding="utf-8",
@@ -1939,10 +2834,13 @@ def test_report_wraps_invalid_reproduction_seed_as_validation_error(
                 "model": "model-a",
                 "workload": "workload-a",
                 "status": "failed",
-                "raw_result": {
-                    "status": "failed",
-                    "work_dir": str(work_dir),
-                },
+                "returncode": 1,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "failed",
+                    work_dir=str(work_dir),
+                ),
             }
         ),
         encoding="utf-8",
@@ -2383,6 +3281,7 @@ def test_result_rejects_unhashable_primary_metric_name(tmp_path):
             {
                 "model": "model-a",
                 "workload": "workload-a",
+                "raw_result": {"status": "passed"},
                 "execution": {"status": "completed"},
                 "comparison": {
                     "status": "agreement",
@@ -2413,6 +3312,10 @@ def test_result_nested_status_defaults_are_normalized(tmp_path):
             {
                 "model": "model-a",
                 "workload": "workload-a",
+                "raw_result": {
+                    "status": "failed",
+                    "error": "runner crashed",
+                },
                 "execution": {},
                 "comparison": {},
                 "validation": {},
@@ -2439,6 +3342,7 @@ def test_result_rejects_invalid_attempt_count(tmp_path):
             {
                 "model": "model-a",
                 "workload": "workload-a",
+                "raw_result": {"status": "passed"},
                 "execution": {
                     "status": "completed",
                     "attempt_count": {},
@@ -2453,6 +3357,305 @@ def test_result_rejects_invalid_attempt_count(tmp_path):
         match="attempt_count must be a positive integer",
     ):
         trtmc_validate.write_report(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("execution", "message"),
+    [
+        (
+            {
+                "status": "completed",
+                "exit_code": 0,
+                "attempt_count": 1,
+                "max_attempts": 0,
+                "retry_count": 0,
+                "attempts": [
+                    {
+                        "attempt": 1,
+                        "execution_status": "completed",
+                        "validation_status": "passed",
+                    }
+                ],
+            },
+            "max_attempts",
+        ),
+        (
+            {
+                "status": "completed",
+                "exit_code": 0,
+                "attempt_count": 1,
+                "max_attempts": 1,
+                "retry_count": 99,
+                "attempts": [
+                    {
+                        "attempt": 1,
+                        "execution_status": "completed",
+                        "validation_status": "passed",
+                    }
+                ],
+            },
+            "retry_count",
+        ),
+        (
+            {
+                "status": "completed",
+                "exit_code": 0,
+                "attempt_count": 1,
+                "max_attempts": 1,
+                "retry_count": 0,
+                "attempts": [
+                    {
+                        "attempt": True,
+                        "execution_status": "completed",
+                        "validation_status": "passed",
+                    }
+                ],
+            },
+            "integer, contiguous",
+        ),
+        (
+            {
+                "status": "completed",
+                "exit_code": 0,
+                "attempt_count": 1,
+                "max_attempts": 1,
+                "retry_count": 0,
+                "attempts": [
+                    {
+                        "attempt": 1,
+                        "execution_status": [],
+                        "validation_status": "passed",
+                    }
+                ],
+            },
+            "execution_status is invalid",
+        ),
+        (
+            {
+                "status": "completed",
+                "exit_code": 0,
+                "attempt_count": 1,
+                "max_attempts": 1,
+                "retry_count": 0,
+                "attempts": [
+                    {
+                        "attempt": 1,
+                        "execution_status": "completed",
+                        "validation_status": {},
+                    }
+                ],
+            },
+            "validation_status is invalid",
+        ),
+        (
+            {
+                "status": "completed",
+                "exit_code": 0,
+                "attempt_count": 2,
+                "max_attempts": 2,
+                "retry_count": 1,
+                "attempts": [
+                    {
+                        "attempt": 1,
+                        "execution_status": "completed",
+                        "validation_status": "passed",
+                    },
+                    {
+                        "attempt": 2,
+                        "execution_status": "completed",
+                        "validation_status": "passed",
+                    },
+                ],
+            },
+            "non-final retry attempts",
+        ),
+        (
+            {
+                "status": "completed",
+                "exit_code": 0,
+                "attempt_count": 2,
+                "max_attempts": 2,
+                "retry_count": 1,
+                "attempts": [
+                    {
+                        "attempt": 1,
+                        "execution_status": "error",
+                        "validation_status": "passed",
+                        "error_type": "WorkerProcessError",
+                    },
+                    {
+                        "attempt": 2,
+                        "execution_status": "completed",
+                        "validation_status": "passed",
+                    },
+                ],
+            },
+            "non-final retry attempts",
+        ),
+        (
+            {
+                "status": "completed",
+                "exit_code": 0,
+                "attempt_count": 1,
+                "max_attempts": 1,
+                "retry_count": 0,
+                "attempts": [
+                    {
+                        "attempt": 1,
+                        "execution_status": "completed",
+                        "validation_status": "passed",
+                        "error_type": "WorkerProcessError",
+                        "error": "worker crashed",
+                    }
+                ],
+            },
+            "incompatible error evidence",
+        ),
+        (
+            {
+                "status": "completed",
+                "exit_code": 0,
+                "attempt_count": 1,
+                "max_attempts": 1,
+                "retry_count": 0,
+                "attempts": [
+                    {
+                        "attempt": 1,
+                        "execution_status": "error",
+                        "validation_status": "failed",
+                        "error_type": "WorkerProcessError",
+                        "error": "worker crashed",
+                    }
+                ],
+            },
+            "final retry attempt must match",
+        ),
+    ],
+)
+def test_result_rejects_inconsistent_retry_evidence(
+    execution,
+    message,
+):
+    with pytest.raises(trtmc_validate.ValidationError, match=message):
+        trtmc_validate._normalize_result(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": "model-a",
+                "workload": "workload-a",
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                ),
+                "execution": execution,
+                "comparison": {"status": "agreement"},
+                "validation": {"status": "passed"},
+            }
+        )
+
+
+@pytest.mark.parametrize("attempt", [True, 1.0])
+def test_result_rejects_non_integer_retry_attempt_number(attempt):
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="integer, contiguous",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": "model-a",
+                "workload": "workload-a",
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                ),
+                "execution": {
+                    "status": "completed",
+                    "exit_code": 0,
+                    "attempt_count": 1,
+                    "max_attempts": 1,
+                    "retry_count": 0,
+                    "attempts": [
+                        {
+                            "attempt": attempt,
+                            "execution_status": "completed",
+                            "validation_status": "passed",
+                        }
+                    ],
+                },
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("raw_extra", "exit_code", "execution_status", "final_error"),
+    [
+        (
+            {
+                "error_type": "WorkerProcessError",
+                "error": "worker crashed",
+            },
+            1,
+            "error",
+            {
+                "error_type": "DifferentError",
+                "error": "different failure",
+            },
+        ),
+        (
+            {
+                "error_type": "BenchmarkGateError",
+                "error": "gate failed",
+                "gate_failures": [{"gate": "minimum"}],
+            },
+            1,
+            "completed",
+            {},
+        ),
+    ],
+)
+def test_result_rejects_final_retry_error_evidence_mismatch(
+    raw_extra,
+    exit_code,
+    execution_status,
+    final_error,
+):
+    validation_status = "failed"
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="must match raw_result",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": exit_code,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "failed",
+                    **raw_extra,
+                ),
+                "execution": {
+                    "status": execution_status,
+                    "exit_code": exit_code,
+                    "attempt_count": 1,
+                    "max_attempts": 1,
+                    "retry_count": 0,
+                    "attempts": [
+                        {
+                            "attempt": 1,
+                            "execution_status": execution_status,
+                            "validation_status": validation_status,
+                            **final_error,
+                        }
+                    ],
+                },
+                "validation": {"status": validation_status},
+            }
+        )
 
 
 def test_report_rejects_result_identity_mismatch(tmp_path):
@@ -2582,6 +3785,15 @@ def test_write_report_surfaces_quantized_reference_precision_contract(
                 "raw_result": {
                     "status": "passed",
                     "mode": "mcq",
+                    "prediction_agreement_rate": 1.0,
+                    "accuracy_drop_from_hf": 0.0,
+                    "valid_count": 1,
+                    "skipped_count": 0,
+                    "total_count": 1,
+                    "gates": {
+                        "min_prediction_agreement_rate": 0.98,
+                        "max_accuracy_drop_from_hf": 0.01,
+                    },
                     "precision_contract": {
                         "trtmc_base_precision": "bf16",
                         "trtmc_quantization": "fp8",
@@ -2791,6 +4003,12 @@ def test_write_report_does_not_render_validation_wrapper(tmp_path):
                 "model": "model-a",
                 "workload": "workload-a",
                 "status": "failed",
+                "returncode": 1,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "failed",
+                ),
                 "reproduce": {
                     "hf": ["python hf.py --prompt '<hello>'"],
                     "trtmc": [],
@@ -2840,7 +4058,13 @@ def test_write_report_recovers_json_logged_runner_command(tmp_path):
                 "model": "model-a",
                 "workload": "workload-a",
                 "status": "passed",
-                "raw_result": {"work_dir": str(work_dir)},
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                    work_dir=str(work_dir),
+                ),
                 "reproduce": {"hf": ["python hf.py"], "trtmc": ["trtmc build"]},
             }
         ),
@@ -2884,10 +4108,13 @@ def test_report_bounds_large_sample_commands_and_selects_disagreement(tmp_path):
                 "model": "model-a",
                 "workload": "workload-a",
                 "status": "failed",
-                "raw_result": {
-                    "status": "failed",
-                    "work_dir": str(work_dir),
-                },
+                "returncode": 1,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "failed",
+                    work_dir=str(work_dir),
+                ),
                 "reproduce": {
                     "dataset": {
                         "command": ("python tools/trtmc_validate.py model-a --limit 10000"),
@@ -3017,7 +4244,13 @@ def test_report_adds_failed_sample_results_and_native_commands(tmp_path):
                 "model": "model-a",
                 "workload": "workload-a",
                 "status": "failed",
-                "raw_result": {"status": "failed", "work_dir": str(work_dir)},
+                "returncode": 1,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "failed",
+                    work_dir=str(work_dir),
+                ),
             }
         ),
         encoding="utf-8",
@@ -3531,7 +4764,13 @@ def test_report_bounds_inline_failed_samples_but_keeps_full_artifact(tmp_path):
                 "model": "model-a",
                 "workload": "workload-a",
                 "status": "failed",
-                "raw_result": {"status": "failed", "work_dir": str(work_dir)},
+                "returncode": 1,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "failed",
+                    work_dir=str(work_dir),
+                ),
             }
         ),
         encoding="utf-8",
@@ -3579,6 +4818,12 @@ def test_report_validates_disagreement_rows_beyond_inline_preview(
                 "model": "model-a",
                 "workload": "workload-a",
                 "status": "failed",
+                "returncode": 1,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "failed",
+                ),
                 "disagreements": {
                     "count": (
                         trtmc_disagreements.INLINE_DISAGREEMENT_LIMIT + 1
@@ -3610,6 +4855,12 @@ def test_report_rejects_disagreement_metadata_count_mismatch(tmp_path):
                 "model": "model-a",
                 "workload": "workload-a",
                 "status": "failed",
+                "returncode": 1,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "failed",
+                ),
                 "disagreements": {
                     "count": 2,
                     "path": "disagreements.jsonl",
@@ -3799,10 +5050,13 @@ def test_disagreement_reproduction_paths_are_unique_for_colliding_sample_ids(
                 "model": "model-a",
                 "workload": "workload-a",
                 "status": "failed",
-                "raw_result": {
-                    "status": "failed",
-                    "work_dir": str(work_dir),
-                },
+                "returncode": 1,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "failed",
+                    work_dir=str(work_dir),
+                ),
             }
         ),
         encoding="utf-8",
@@ -4136,6 +5390,25 @@ def test_run_binding_wires_reference_source_command_and_environment(
         },
         elf_reference_repo=tmp_path / "references" / "elf",
     )
+    summary = (
+        arguments.output
+        / "elf-b"
+        / "elf-workload"
+        / "validation"
+        / "elf-workload"
+        / "eval_summary.json"
+    )
+    summary.parent.mkdir(parents=True)
+    summary.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {"model": "elf-b", "status": "passed"}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(
@@ -4156,6 +5429,9 @@ def test_run_binding_wires_reference_source_command_and_environment(
     def run(command, _log_path, environment):
         captured["command"] = command
         captured["environment"] = environment
+        captured["summary_before_run"] = json.loads(
+            summary.read_text(encoding="utf-8")
+        )
         return 0
 
     monkeypatch.setattr(trtmc_validate, "_run_subprocess", run)
@@ -4185,6 +5461,7 @@ def test_run_binding_wires_reference_source_command_and_environment(
     command = captured["command"]
     assert command[command.index("--elf-reference-repo") + 1] == str(selection.elf_reference_repo)
     assert captured["environment"]["EXTERNAL_REFERENCE_SENTINEL"] == "present"
+    assert captured["summary_before_run"] == {"results": []}
 
 
 def test_compare_entrypoint_forwards_to_validation_backend(monkeypatch):
@@ -4247,11 +5524,29 @@ def test_result_statuses_separate_execution_from_agreement(
     comparison,
     validation,
 ):
+    if raw_result["status"] == "passed":
+        raw_result = {
+            **_raw_evidence(
+                "model-a",
+                "workload-a",
+                "passed",
+            ),
+            **raw_result,
+        }
+    else:
+        raw_result = {
+            **raw_result,
+            "model": "model-a",
+            "suite": "workload-a",
+        }
     result = trtmc_validate._normalize_result(
         {
             "model": "model-a",
             "workload": "workload-a",
             "status": raw_result["status"],
+            "returncode": (
+                0 if raw_result["status"] == "passed" else 1
+            ),
             "raw_result": raw_result,
         }
     )
@@ -4286,6 +5581,1323 @@ def test_comparison_result_marks_missing_summary_as_execution_error(
     assert result["validation"]["status"] == "failed"
     assert result["raw_result"]["error_type"] == "ComparisonProcessError"
     assert "without writing" in result["raw_result"]["error"]
+
+
+@pytest.mark.parametrize(
+    "results",
+    [
+        [{"model": "model-other", "status": "passed"}],
+        [
+            {"model": "model-a", "status": "passed"},
+            {"model": "model-a", "status": "passed"},
+        ],
+        [
+            {"model": "model-a", "status": "passed"},
+            {"model": "model-other", "status": "failed"},
+        ],
+    ],
+    ids=["wrong-model", "duplicate-model", "extra-model"],
+)
+def test_comparison_result_requires_one_exact_model_result(
+    tmp_path,
+    results,
+):
+    summary = (
+        tmp_path
+        / "validation"
+        / "workload-a"
+        / "eval_summary.json"
+    )
+    summary.parent.mkdir(parents=True)
+    summary.write_text(
+        json.dumps({"results": results}),
+        encoding="utf-8",
+    )
+
+    result = trtmc_validate._comparison_result(
+        trtmc_validate.Binding("model-a", "workload-a"),
+        case_dir=tmp_path,
+        returncode=0,
+        reference_environment=trtmc_validate.EnvironmentSelection(
+            base_python="/profiles/python",
+            names_and_paths=(),
+            overrides={},
+        ),
+        dataset_command="python tools/trtmc_validate.py model-a",
+    )
+
+    assert result["execution"]["status"] == "error"
+    assert result["comparison"]["status"] == "not_run"
+    assert result["validation"]["status"] == "failed"
+    assert result["raw_result"]["error_type"] == "ComparisonProcessError"
+
+
+@pytest.mark.parametrize("reported_status", ["passed", "skipped"])
+def test_comparison_result_rejects_success_from_crashed_process(
+    tmp_path,
+    reported_status,
+):
+    summary = (
+        tmp_path
+        / "validation"
+        / "workload-a"
+        / "eval_summary.json"
+    )
+    summary.parent.mkdir(parents=True)
+    summary.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "model": "model-a",
+                        "status": reported_status,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = trtmc_validate._comparison_result(
+        trtmc_validate.Binding("model-a", "workload-a"),
+        case_dir=tmp_path,
+        returncode=9,
+        reference_environment=trtmc_validate.EnvironmentSelection(
+            base_python="/profiles/python",
+            names_and_paths=(),
+            overrides={},
+        ),
+        dataset_command="python tools/trtmc_validate.py model-a",
+    )
+
+    assert result["execution"] == {"status": "error", "exit_code": 9}
+    assert result["comparison"]["status"] == "not_run"
+    assert result["validation"]["status"] == "failed"
+    assert result["raw_result"]["error_type"] == "ComparisonProcessError"
+    assert "exited with code 9" in result["raw_result"]["error"]
+
+
+def test_comparison_result_rejects_skipped_requested_comparison(tmp_path):
+    summary = (
+        tmp_path
+        / "validation"
+        / "workload-a"
+        / "eval_summary.json"
+    )
+    summary.parent.mkdir(parents=True)
+    summary.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "model": "model-a",
+                        "status": "skipped",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = trtmc_validate._comparison_result(
+        trtmc_validate.Binding("model-a", "workload-a"),
+        case_dir=tmp_path,
+        returncode=0,
+        reference_environment=trtmc_validate.EnvironmentSelection(
+            base_python="/profiles/python",
+            names_and_paths=(),
+            overrides={},
+        ),
+        dataset_command="python tools/trtmc_validate.py model-a",
+    )
+
+    assert result["execution"] == {"status": "error", "exit_code": 0}
+    assert result["comparison"]["status"] == "not_run"
+    assert result["validation"]["status"] == "failed"
+    assert result["raw_result"]["error_type"] == "ComparisonProcessError"
+
+
+def test_empty_task_eval_boundaries_publish_standard_failed_reports(
+    tmp_path,
+):
+    summaries = {
+        "time-series": (
+            "time_series_parity",
+            task_eval.compare_time_series_prediction_sets(
+                {"responses": []},
+                {"responses": []},
+                gates={
+                    "max_relative_l2": 0.01,
+                    "max_absolute_error": 0.1,
+                    "min_sample_agreement_rate": 1.0,
+                },
+            ),
+        ),
+        "encoder": (
+            "encoder_embedding_parity",
+            task_eval.compare_encoder_embedding_prediction_sets(
+                {"responses": []},
+                {"responses": []},
+                gates={
+                    "min_vector_cosine": 0.99,
+                    "min_vector_pass_rate": 1.0,
+                    "max_pair_cosine_abs_delta": 0.02,
+                },
+            ),
+        ),
+    }
+    result_paths = []
+    for model, (mode, summary) in summaries.items():
+        assert summary["status"] == "failed"
+        json.dumps(summary, allow_nan=False)
+        case_dir = tmp_path / model / "workload-a"
+        case_dir.mkdir(parents=True)
+        result_path = case_dir / "comparison.json"
+        result_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "trtmc.validation-result/v2",
+                    "model": model,
+                    "workload": "workload-a",
+                    "returncode": 1,
+                    "raw_result": {
+                        **summary,
+                        "model": model,
+                        "suite": "workload-a",
+                        "mode": mode,
+                    },
+                },
+                allow_nan=False,
+            ),
+            encoding="utf-8",
+        )
+        result_paths.append(result_path)
+
+    _, _, report = trtmc_validate.write_report(
+        tmp_path,
+        result_paths=result_paths,
+    )
+
+    assert report["validation_status"] == "failed"
+    assert [result["validation"]["status"] for result in report["results"]] == [
+        "failed",
+        "failed",
+    ]
+    assert all(
+        result["execution"]["status"] == "completed"
+        for result in report["results"]
+    )
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    ["WorkerProcessError", "ComparisonProcessError", "ValueError"],
+)
+def test_result_treats_error_type_only_as_execution_error(error_type):
+    result = trtmc_validate._normalize_result(
+        {
+            "model": "model-a",
+            "workload": "workload-a",
+            "returncode": 1,
+            "raw_result": {
+                "status": "failed",
+                "error_type": error_type,
+            },
+        }
+    )
+
+    assert result["execution"] == {"status": "error", "exit_code": 1}
+    assert result["comparison"]["status"] == "not_run"
+    assert result["validation"]["status"] == "failed"
+
+
+def test_result_rejects_canonical_pass_that_conflicts_with_raw_error():
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="conflict with raw evidence",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": "model-a",
+                "workload": "workload-a",
+                "raw_result": {
+                    "status": "failed",
+                    "error": "backend crashed",
+                },
+                "execution": {
+                    "status": "completed",
+                    "exit_code": 0,
+                },
+                "comparison": {"status": "agreement"},
+                "validation": {"status": "passed"},
+            }
+        )
+
+
+def test_result_rejects_gate_failures_reported_as_pass():
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="conflict with raw evidence",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "raw_result": {
+                    "status": "passed",
+                    "error_type": "BenchmarkGateError",
+                    "error": "gate failed",
+                    "gate_failures": [{"gate": "minimum"}],
+                },
+                "execution": {
+                    "status": "completed",
+                    "exit_code": 0,
+                },
+                "comparison": {"status": "agreement"},
+                "validation": {"status": "passed"},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "gate_failures",
+    [{"gate": "minimum"}, "minimum", 1, None],
+)
+def test_result_rejects_non_list_raw_gate_failures(gate_failures):
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="raw_result.gate_failures must be a list",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": 0,
+                "raw_result": {
+                    "status": "passed",
+                    "gate_failures": gate_failures,
+                },
+            }
+        )
+
+
+@pytest.mark.parametrize("metrics", [[], "accuracy", 1, None])
+def test_result_rejects_non_object_raw_metrics(metrics):
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="raw_result.metrics must be an object",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": 0,
+                "raw_result": {
+                    "status": "passed",
+                    "metrics": metrics,
+                },
+            }
+        )
+
+
+@pytest.mark.parametrize("mode", [[], {}, 0, False])
+def test_result_rejects_non_string_raw_mode(mode):
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="raw_result.mode must be a string",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                    mode=mode,
+                ),
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("passed_count", -1, "non-negative integer"),
+        ("valid_count", 1.5, "non-negative integer"),
+        ("prediction_agreement_rate", 2.5, r"must be in \[0, 1\]"),
+        ("divergence_rate", -1.0, r"must be in \[0, 1\]"),
+        ("mean_vector_cosine", 1.5, r"must be in \[-1, 1\]"),
+        ("mean_relative_l2", -0.1, "must be non-negative"),
+    ],
+)
+def test_result_rejects_out_of_range_raw_metrics(
+    field,
+    value,
+    message,
+):
+    with pytest.raises(trtmc_validate.ValidationError, match=message):
+        trtmc_validate._normalize_result(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                    **{field: value},
+                ),
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("metrics", "message"),
+    [
+        ({"score": 0.5}, "score must be an object"),
+        (
+            {"score": {"mean": "bad"}},
+            "score.mean must be a finite number",
+        ),
+        (
+            {"score": {"mean": 0.5, "min": 0.8}},
+            "min <= mean <= max",
+        ),
+        (
+            {"score": {"mean": 0.5, "count": -1}},
+            "count must be a non-negative integer",
+        ),
+        (
+            {
+                "score": {
+                    "mean": 0.5,
+                    "count": 1,
+                    "gated_count": -1,
+                }
+            },
+            "gated_count must be a non-negative integer",
+        ),
+        (
+            {
+                "score": {
+                    "mean": 0.5,
+                    "count": 1,
+                    "gated_count": 2,
+                    "passed_count": 1,
+                }
+            },
+            "gated_count cannot exceed count",
+        ),
+        (
+            {
+                "score": {
+                    "mean": 0.5,
+                    "count": 2,
+                    "gated_count": 1,
+                    "passed_count": 2,
+                }
+            },
+            "passed_count cannot exceed gated_count",
+        ),
+    ],
+)
+def test_result_rejects_malformed_nested_raw_metrics(
+    metrics,
+    message,
+):
+    with pytest.raises(trtmc_validate.ValidationError, match=message):
+        trtmc_validate._normalize_result(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                    metrics=metrics,
+                ),
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (
+            {
+                "passed_count": 2,
+                "valid_count": 1,
+            },
+            "passed_count cannot exceed valid_count",
+        ),
+        (
+            {
+                "passed_count": 1,
+                "valid_count": 2,
+                "overall_pass_rate": 1.0,
+            },
+            "overall_pass_rate conflicts",
+        ),
+        (
+            {
+                "overall_pass_rate": 1.0,
+                "metrics": {
+                    "overall_pass_rate": {
+                        "mean": 0.0,
+                    }
+                },
+            },
+            "raw metric conflicts with nested mean",
+        ),
+        (
+            {
+                "hf_accuracy": 0.8,
+                "trtfb_accuracy": 0.7,
+                "accuracy_delta_trtfb_minus_hf": 0.2,
+            },
+            "accuracy_delta_trtfb_minus_hf conflicts",
+        ),
+        (
+            {
+                "hf_mean_ground_truth_iou": 0.8,
+                "trtfb_mean_ground_truth_iou": 0.7,
+                "ground_truth_iou_drop_from_hf": -0.1,
+            },
+            "ground_truth_iou_drop_from_hf conflicts",
+        ),
+    ],
+)
+def test_result_rejects_internally_inconsistent_raw_metrics(
+    extra,
+    message,
+):
+    with pytest.raises(trtmc_validate.ValidationError, match=message):
+        trtmc_validate._normalize_result(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                    **extra,
+                ),
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("mode", "primary_metric"),
+    sorted(trtmc_validate._PRIMARY_METRIC_BY_MODE.items()),
+)
+def test_passed_known_mode_requires_its_primary_metric(
+    mode,
+    primary_metric,
+):
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match=rf"raw_result\.{primary_metric}",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": 0,
+                "raw_result": {
+                    "model": "model-a",
+                    "suite": "workload-a",
+                    "status": "passed",
+                    "mode": mode,
+                },
+            }
+        )
+
+
+def test_passed_prompted_segmentation_requires_ground_truth_gate_metrics():
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="missing raw metric evidence",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                    mode="prompted_segmentation_parity",
+                    mean_backend_mask_iou=1.0,
+                ),
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "counts",
+    [
+        {
+            "overall_pass_rate": 0.0,
+            "passed_count": 0,
+            "valid_count": 0,
+            "skipped_count": 0,
+        },
+        {
+            "overall_pass_rate": 1.0,
+            "passed_count": 1,
+            "valid_count": 1,
+            "skipped_count": 9,
+        },
+        {
+            "overall_pass_rate": 0.5,
+            "passed_count": 1,
+            "valid_count": 2,
+            "skipped_count": 0,
+        },
+    ],
+)
+def test_passed_diffusion_result_requires_consistent_nonempty_counts(
+    counts,
+):
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="passed diffusion comparison",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                    mode="diffusion_image_clip_parity",
+                    **counts,
+                ),
+            }
+        )
+
+
+def test_passed_continuation_result_rejects_contradictory_divergence():
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="exact_count plus divergent_count",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                    mode="continuation",
+                    count=1,
+                    exact_count=1,
+                    divergent_count=1,
+                    exact_match_rate=1.0,
+                    divergence_rate=0.0,
+                    token_prefix_agreement=1.0,
+                ),
+            }
+        )
+
+
+def test_diagnostic_only_continuation_cannot_publish_passed_agreement():
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="diagnostic-only continuation evidence",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                    mode="continuation",
+                    evaluation_policy="diagnostic_only",
+                    gates={},
+                    count=1,
+                    exact_count=0,
+                    divergent_count=1,
+                    exact_match_rate=0.0,
+                    divergence_rate=1.0,
+                    token_prefix_agreement=0.0,
+                ),
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {
+            "mode": "encoder_embedding_parity",
+            "vector_pass_rate": 0.0,
+            "min_vector_cosine": 0.0,
+            "max_pair_cosine_abs_delta": 1.0,
+            "gates": {
+                "min_vector_cosine": 0.999,
+                "min_vector_pass_rate": 1.0,
+                "max_pair_cosine_abs_delta": 0.02,
+            },
+        },
+        {
+            "mode": "reranking_parity",
+            "mean_pairwise_ordering_agreement": 0.0,
+            "sample_pass_rate": 0.0,
+            "metrics": {
+                "pairwise_ordering_agreement": {
+                    "mean": 0.0,
+                    "min": 0.0,
+                }
+            },
+            "gates": {
+                "pairwise_ordering_agreement": 1.0,
+                "min_sample_pass_rate": 1.0,
+            },
+        },
+        {
+            "mode": "time_series_parity",
+            "sample_agreement_rate": 0.0,
+            "mean_relative_l2": 1.0,
+            "max_relative_l2": 1.0,
+            "max_absolute_error": 1.0,
+            "gates": {
+                "min_sample_agreement_rate": 1.0,
+                "max_relative_l2": 0.01,
+                "max_absolute_error": 0.1,
+            },
+        },
+        {
+            "mode": "image_classification_parity",
+            "top1_agreement": 0.0,
+            "top1_accuracy_drop_from_hf": 1.0,
+            "gates": {
+                "min_top1_agreement": 0.98,
+                "max_top1_accuracy_drop_from_hf": 0.01,
+            },
+        },
+        {
+            "mode": "semantic_segmentation_parity",
+            "backend_pixel_agreement": 0.0,
+            "backend_mean_iou": 0.0,
+            "mean_iou_drop_from_hf": 1.0,
+            "gates": {
+                "min_backend_pixel_agreement": 0.98,
+                "min_backend_mean_iou": 0.95,
+                "max_mean_iou_drop_from_hf": 0.01,
+            },
+        },
+        {
+            "mode": "prompted_segmentation_parity",
+            "mean_backend_mask_iou": 0.0,
+            "hf_mean_ground_truth_iou": 1.0,
+            "trtfb_mean_ground_truth_iou": 0.0,
+            "ground_truth_iou_drop_from_hf": 1.0,
+            "gates": {
+                "min_backend_mask_iou": 0.7,
+                "max_ground_truth_iou_drop_from_hf": 0.05,
+            },
+        },
+        {
+            "mode": "diffusion_text_parity",
+            "token_agreement_rate": 0.0,
+            "shared_sampling_inputs_match_rate": 0.0,
+            "corpus_bleu_abs_delta": 1.0,
+            "gates": {
+                "max_corpus_bleu_abs_delta": 0.5,
+                "min_shared_sampling_inputs_match_rate": 1.0,
+            },
+        },
+        {
+            "mode": "diffusion_image_clip_parity",
+            "overall_pass_rate": 1.0,
+            "passed_count": 1,
+            "valid_count": 1,
+            "skipped_count": 0,
+            "total_count": 1,
+            "metrics": {
+                "pixel_mean": {
+                    "mean": 0.0,
+                    "min": 0.0,
+                    "max": 0.0,
+                    "count": 1,
+                    "gated_count": 1,
+                    "passed_count": 1,
+                }
+            },
+            "gates": {"min_pixel_mean": 0.15},
+        },
+        {
+            "mode": "continuation",
+            "evaluation_policy": "threshold_gated",
+            "count": 1,
+            "exact_count": 0,
+            "divergent_count": 1,
+            "exact_match_rate": 0.0,
+            "divergence_rate": 1.0,
+            "token_prefix_agreement": 0.0,
+            "gates": {"min_token_prefix_agreement": 0.98},
+        },
+    ],
+    ids=[
+        "encoder",
+        "reranking",
+        "time-series",
+        "image-classification",
+        "semantic-segmentation",
+        "prompted-segmentation",
+        "diffusion-text",
+        "diffusion-image",
+        "continuation",
+    ],
+)
+def test_passed_result_recomputes_supported_mode_gates(extra):
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="violates raw_result.gates",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                    **extra,
+                ),
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {
+            "mode": "encoder_embedding_parity",
+            "vector_pass_rate": 1.0,
+            "min_vector_cosine": 0.999,
+            "max_pair_cosine_abs_delta": 0.01,
+            "gates": {
+                "min_vector_cosine": 0.999,
+                "min_vector_pass_rate": 1.0,
+                "max_pair_cosine_abs_delta": 0.02,
+            },
+        },
+        {
+            "mode": "reranking_parity",
+            "mean_pairwise_ordering_agreement": 1.0,
+            "sample_pass_rate": 1.0,
+            "metrics": {
+                "pairwise_ordering_agreement": {
+                    "mean": 1.0,
+                    "min": 1.0,
+                }
+            },
+            "gates": {
+                "pairwise_ordering_agreement": 1.0,
+                "min_sample_pass_rate": 1.0,
+            },
+        },
+        {
+            "mode": "time_series_parity",
+            "sample_agreement_rate": 1.0,
+            "mean_relative_l2": 0.001,
+            "max_relative_l2": 0.005,
+            "max_absolute_error": 0.05,
+            "gates": {
+                "min_sample_agreement_rate": 1.0,
+                "max_relative_l2": 0.01,
+                "max_absolute_error": 0.1,
+            },
+        },
+    ],
+    ids=["encoder", "reranking", "time-series"],
+)
+def test_passed_result_accepts_satisfied_specialized_gates(extra):
+    result = trtmc_validate._normalize_result(
+        {
+            "schema_version": "trtmc.validation-result/v2",
+            "model": "model-a",
+            "workload": "workload-a",
+            "returncode": 0,
+            "raw_result": _raw_evidence(
+                "model-a",
+                "workload-a",
+                "passed",
+                **extra,
+            ),
+        }
+    )
+
+    assert result["validation"]["status"] == "passed"
+
+
+def test_real_mcq_producer_status_reaches_canonical_report(tmp_path):
+    answers = {
+        "requests": [
+            {
+                "answer": "A",
+                "subject": "subject",
+            }
+        ]
+    }
+    hf = {"responses": [{"sample_id": "one", "output_text": "A"}]}
+    gates = {
+        "max_accuracy_drop_from_hf": 0.01,
+        "min_prediction_agreement": 0.98,
+    }
+    expected = {
+        "matching": (hf, "passed"),
+        "divergent": (
+            {"responses": [{"sample_id": "one", "output_text": "B"}]},
+            "failed",
+        ),
+    }
+
+    for label, (trtfb, expected_status) in expected.items():
+        output = tmp_path / label
+        model = f"model-{label}"
+        workload = "mmlu_five_shot_mcq"
+        case_dir = output / model / workload
+        case_dir.mkdir(parents=True)
+        raw_result = task_eval.build_reference_comparison_result(
+            base_result={"model": model, "suite": workload},
+            scorer="mcq",
+            summary=task_eval.compare_prediction_sets(
+                hf,
+                trtfb,
+                answers,
+                scorer="mcq",
+            ),
+            gates=gates,
+        )
+        (case_dir / "comparison.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "trtmc.validation-result/v2",
+                    "model": model,
+                    "workload": workload,
+                    "returncode": (
+                        0 if raw_result["status"] == "passed" else 1
+                    ),
+                    "raw_result": raw_result,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        _, _, report = trtmc_validate.write_report(output)
+
+        assert report["results"][0]["validation"]["status"] == expected_status
+
+
+def test_result_rejects_conflicting_outer_and_raw_status():
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="legacy status conflicts with raw_result.status",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "status": "failed",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                ),
+            }
+        )
+
+
+def test_result_does_not_pass_without_integer_exit_evidence():
+    result = trtmc_validate._normalize_result(
+        {
+            "schema_version": "trtmc.validation-result/v2",
+            "model": "model-a",
+            "workload": "workload-a",
+            "raw_result": {"status": "passed"},
+        }
+    )
+
+    assert result["execution"] == {
+        "status": "error",
+        "exit_code": None,
+    }
+    assert result["validation"] == {"status": "failed"}
+
+
+def test_result_completed_requires_exact_raw_binding():
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="must include exact raw model and suite",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": "model-a",
+                "workload": "workload-a",
+                "raw_result": {"status": "passed"},
+                "execution": {
+                    "status": "completed",
+                    "exit_code": 0,
+                },
+                "comparison": {"status": "agreement"},
+                "validation": {"status": "passed"},
+            }
+        )
+
+
+@pytest.mark.parametrize("returncode", [[], {}])
+def test_result_rejects_malformed_legacy_returncode(returncode):
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="returncode must be an integer or null",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": returncode,
+                "raw_result": {"status": "passed"},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("error_type", 0),
+        ("error", {}),
+        ("exception", []),
+        ("traceback", {}),
+        ("failure_class", False),
+    ],
+)
+def test_result_rejects_non_string_raw_error_fields(field, value):
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match=rf"raw_result.{field} must be a string",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": 0,
+                "raw_result": {
+                    "status": "passed",
+                    field: value,
+                },
+            }
+        )
+
+
+@pytest.mark.parametrize("status", ["banana", "success", "error"])
+def test_result_rejects_unknown_raw_status(status):
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="raw_result.status must be one of",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": 0,
+                "raw_result": {
+                    "model": "model-a",
+                    "suite": "workload-a",
+                    "status": status,
+                },
+            }
+        )
+
+
+def test_result_rejects_non_string_canonical_comparison_mode():
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="comparison.mode must be a string",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                ),
+                "comparison": {"mode": []},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "raw_result",
+    [{"mode": "fabricated"}, {}, None],
+)
+def test_result_v2_rejects_missing_raw_comparison_evidence(raw_result):
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="v2 runnable result must include a non-empty raw_result",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": "model-a",
+                "workload": "workload-a",
+                "status": "passed",
+                "returncode": 0,
+                "raw_result": raw_result,
+            }
+        )
+
+
+def test_result_v2_rejects_canonical_only_runnable_pass():
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="v2 runnable result must include a non-empty raw_result",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": "model-a",
+                "workload": "workload-a",
+                "execution": {
+                    "status": "completed",
+                    "exit_code": 0,
+                },
+                "comparison": {"status": "agreement"},
+                "validation": {"status": "passed"},
+            }
+        )
+
+
+def test_result_rejects_legacy_canonical_only_runnable_pass():
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="must include raw comparison evidence",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "execution": {
+                    "status": "completed",
+                    "exit_code": 0,
+                },
+                "comparison": {"status": "agreement"},
+                "validation": {"status": "passed"},
+            }
+        )
+
+
+def test_result_legacy_migration_is_idempotent():
+    migrated = trtmc_validate._normalize_result(
+        {
+            "model": "model-a",
+            "workload": "workload-a",
+            "status": "passed",
+            "returncode": 0,
+            "raw_result": _raw_evidence(
+                "model-a",
+                "workload-a",
+                "passed",
+            ),
+        }
+    )
+
+    assert migrated["schema_version"] == "trtmc.validation-result/v2"
+    assert migrated["raw_result"] == _raw_evidence(
+        "model-a",
+        "workload-a",
+        "passed",
+    )
+    assert trtmc_validate._normalize_result(migrated) == migrated
+
+
+@pytest.mark.parametrize("raw_result", [[], "passed", 1])
+def test_result_rejects_non_object_raw_evidence(raw_result):
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="raw_result must be an object or null",
+    ):
+        trtmc_validate._normalize_result(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": "model-a",
+                "workload": "workload-a",
+                "raw_result": raw_result,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("model", "model-b"),
+        ("suite", "workload-b"),
+        ("workload", "workload-b"),
+    ],
+)
+def test_write_report_rejects_raw_binding_mismatch(
+    tmp_path,
+    field,
+    value,
+):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    case_dir.mkdir(parents=True)
+    comparison = case_dir / "comparison.json"
+    comparison.write_text(
+        json.dumps(
+            {
+                "schema_version": "trtmc.validation-result/v2",
+                "model": "model-a",
+                "workload": "workload-a",
+                "returncode": 0,
+                "raw_result": {
+                    "status": "passed",
+                    field: value,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match=rf"raw_result.{field} conflicts with the canonical binding",
+    ):
+        trtmc_validate.write_report(
+            tmp_path,
+            result_paths=[comparison],
+        )
+
+    assert not (tmp_path / "report.json").exists()
+    assert not (tmp_path / "report.html").exists()
+
+
+def test_comparison_result_rejects_invalid_summary_status(tmp_path):
+    summary = (
+        tmp_path
+        / "validation"
+        / "workload-a"
+        / "eval_summary.json"
+    )
+    summary.parent.mkdir(parents=True)
+    summary.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {"model": "model-a", "status": "unknown"}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = trtmc_validate._comparison_result(
+        trtmc_validate.Binding("model-a", "workload-a"),
+        case_dir=tmp_path,
+        returncode=0,
+        reference_environment=trtmc_validate.EnvironmentSelection(
+            base_python="/profiles/python",
+            names_and_paths=(),
+            overrides={},
+        ),
+        dataset_command="python tools/trtmc_validate.py model-a",
+    )
+
+    assert result["execution"]["status"] == "error"
+    assert result["comparison"]["status"] == "not_run"
+    assert result["validation"]["status"] == "failed"
+    assert "invalid status" in result["raw_result"]["error"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "NOT-JSON",
+        json.dumps([]),
+        json.dumps({"results": {}}),
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "model": "model-a",
+                        "suite": "workload-a",
+                        "status": "passed",
+                        "gate_failures": {},
+                    }
+                ]
+            }
+        ),
+    ],
+    ids=[
+        "invalid-json",
+        "non-object-summary",
+        "non-list-results",
+        "malformed-model-evidence",
+    ],
+)
+def test_comparison_result_classifies_malformed_output_as_process_error(
+    tmp_path,
+    payload,
+):
+    summary = (
+        tmp_path
+        / "validation"
+        / "workload-a"
+        / "eval_summary.json"
+    )
+    summary.parent.mkdir(parents=True)
+    summary.write_text(payload, encoding="utf-8")
+
+    result = trtmc_validate._comparison_result(
+        trtmc_validate.Binding("model-a", "workload-a"),
+        case_dir=tmp_path,
+        returncode=0,
+        reference_environment=trtmc_validate.EnvironmentSelection(
+            base_python="/profiles/python",
+            names_and_paths=(),
+            overrides={},
+        ),
+        dataset_command="python tools/trtmc_validate.py model-a",
+    )
+
+    assert result["execution"] == {
+        "status": "error",
+        "exit_code": 0,
+    }
+    assert result["comparison"]["status"] == "not_run"
+    assert result["validation"]["status"] == "failed"
+    assert result["raw_result"]["error_type"] == (
+        "ComparisonProcessError"
+    )
 
 
 def test_write_report_rolls_back_all_outputs_after_commit_failure(
@@ -4383,19 +6995,1217 @@ def test_write_report_rolls_back_all_outputs_after_commit_failure(
         )
 
 
+def test_write_report_isolates_cleanup_errors_and_closes_all_anchors(
+    tmp_path,
+    monkeypatch,
+):
+    result_paths = []
+    for suffix in ("a", "b"):
+        model = f"model-{suffix}"
+        workload = f"workload-{suffix}"
+        case_dir = tmp_path / model / workload
+        case_dir.mkdir(parents=True)
+        comparison = case_dir / "comparison.json"
+        comparison.write_text(
+            json.dumps(
+                {
+                    "model": model,
+                    "workload": workload,
+                    "status": "passed",
+                }
+            ),
+            encoding="utf-8",
+        )
+        result_paths.append(comparison)
+    (tmp_path / "report.json").write_bytes(b"OLD-REPORT")
+    (tmp_path / "report.html").write_bytes(b"OLD-HTML")
+
+    cleanup_phase = False
+    injected = False
+    finalize_calls = 0
+    real_verify = trtmc_validate._verify_report_transaction_visibility
+    real_digest = trtmc_validate._regular_file_digest_at
+    real_finalize = trtmc_validate._finalize_file_update
+
+    def verify_then_mark_cleanup(entries):
+        nonlocal cleanup_phase
+        real_verify(entries)
+        cleanup_phase = True
+
+    def fail_first_cleanup_digest(directory_fd, name, *, maximum_bytes):
+        nonlocal injected
+        if (
+            cleanup_phase
+            and not injected
+            and ".previous." in name
+        ):
+            injected = True
+            raise OSError("injected cleanup digest failure")
+        return real_digest(
+            directory_fd,
+            name,
+            maximum_bytes=maximum_bytes,
+        )
+
+    def count_finalize(update):
+        nonlocal finalize_calls
+        finalize_calls += 1
+        return real_finalize(update)
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_verify_report_transaction_visibility",
+        verify_then_mark_cleanup,
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_regular_file_digest_at",
+        fail_first_cleanup_digest,
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_finalize_file_update",
+        count_finalize,
+    )
+    descriptors_before = len(os.listdir("/proc/self/fd"))
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="validation report cleanup incomplete",
+    ):
+        trtmc_validate.write_report(
+            tmp_path,
+            result_paths=result_paths,
+        )
+
+    descriptors_after = len(os.listdir("/proc/self/fd"))
+    assert injected
+    assert finalize_calls == 4
+    assert descriptors_after == descriptors_before
+    assert (tmp_path / "report.json").is_file()
+    assert (tmp_path / "report.html").is_file()
+    preserved = [
+        path
+        for path in tmp_path.rglob("*")
+        if path.name.startswith(".comparison.json.previous.")
+        or path.name.startswith(".report.json.previous.")
+        or path.name.startswith(".report.html.previous.")
+    ]
+    assert len(preserved) == 1
+    _assert_output_lock_available(tmp_path)
+
+
+def test_file_transaction_rejects_original_swap_before_backup(
+    tmp_path,
+    monkeypatch,
+):
+    target = tmp_path / "report.json"
+    target.write_bytes(b"ORIGINAL")
+    original_away = tmp_path / "original-away.json"
+    update = trtmc_validate._prepare_file_update(
+        target,
+        b"TRANSACTION",
+    )
+    original_verify = trtmc_validate._verify_file_update_target
+    swapped = False
+
+    def verify_then_swap(candidate):
+        nonlocal swapped
+        original_verify(candidate)
+        if not swapped:
+            target.rename(original_away)
+            target.write_bytes(b"CONCURRENT")
+            swapped = True
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_verify_file_update_target",
+        verify_then_swap,
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="changed while moving to backup",
+    ):
+        trtmc_validate._commit_file_update(update)
+    trtmc_validate._rollback_file_update(update)
+    trtmc_validate._finalize_file_update(update)
+
+    assert swapped
+    assert target.read_bytes() == b"CONCURRENT"
+    assert original_away.read_bytes() == b"ORIGINAL"
+    assert not any(
+        child.name.startswith(
+            (".report.json.previous.", ".report.json.rollback.")
+        )
+        for child in tmp_path.iterdir()
+    )
+
+
+def test_directory_transaction_rejects_original_swap_before_backup(
+    tmp_path,
+    monkeypatch,
+):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    repro = case_dir / "repro"
+    repro.mkdir(parents=True)
+    (repro / "original.txt").write_bytes(b"ORIGINAL")
+    stage = trtmc_validate._create_case_artifact_stage(case_dir)
+    staged_repro = stage.path / "repro"
+    staged_repro.mkdir()
+    (staged_repro / "new.txt").write_bytes(b"TRANSACTION")
+    update = trtmc_validate._prepare_case_directory_update(stage)
+    original_away = case_dir / "original-away"
+    original_verify = trtmc_validate._verify_case_directory_target
+    swapped = False
+
+    def verify_then_swap(candidate):
+        nonlocal swapped
+        original_verify(candidate)
+        if not swapped:
+            repro.rename(original_away)
+            repro.mkdir()
+            (repro / "concurrent.txt").write_bytes(b"CONCURRENT")
+            swapped = True
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_verify_case_directory_target",
+        verify_then_swap,
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="changed while moving it to transaction backup",
+    ):
+        trtmc_validate._commit_case_directory_update(update)
+    trtmc_validate._rollback_case_directory_update(update)
+    trtmc_validate._finalize_case_directory_update(update)
+    trtmc_validate._cleanup_case_artifact_stage(stage)
+
+    assert swapped
+    assert (repro / "concurrent.txt").read_bytes() == b"CONCURRENT"
+    assert (original_away / "original.txt").read_bytes() == b"ORIGINAL"
+    assert not any(
+        child.name.startswith(
+            (".repro-previous.", ".repro-next.", ".repro-rollback.")
+        )
+        for child in case_dir.iterdir()
+    )
+
+
+def test_file_transaction_reconciles_backup_rename_success_then_error(
+    tmp_path,
+    monkeypatch,
+):
+    target = tmp_path / "report.json"
+    target.write_bytes(b"ORIGINAL")
+    update = trtmc_validate._prepare_file_update(
+        target,
+        b"TRANSACTION",
+    )
+    real_rename = trtmc_validate._rename_noreplace_at
+    injected = False
+
+    def rename_then_raise(
+        source_fd,
+        source_name,
+        destination_fd,
+        destination_name,
+    ):
+        nonlocal injected
+        real_rename(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+        )
+        if (
+            not injected
+            and source_name == target.name
+            and destination_name.startswith(
+                ".report.json.previous."
+            )
+        ):
+            injected = True
+            raise OSError("injected after successful backup rename")
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_rename_noreplace_at",
+        rename_then_raise,
+    )
+
+    with pytest.raises(
+        OSError,
+        match="after successful backup rename",
+    ):
+        trtmc_validate._commit_file_update(update)
+    trtmc_validate._rollback_file_update(update)
+    assert trtmc_validate._finalize_file_update(update) == []
+
+    assert injected
+    assert target.read_bytes() == b"ORIGINAL"
+    assert [path.name for path in tmp_path.iterdir()] == [
+        "report.json"
+    ]
+
+
+def test_directory_transaction_reconciles_backup_rename_success_then_error(
+    tmp_path,
+    monkeypatch,
+):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    repro = case_dir / "repro"
+    repro.mkdir(parents=True)
+    (repro / "original.txt").write_bytes(b"ORIGINAL")
+    stage = trtmc_validate._create_case_artifact_stage(case_dir)
+    staged_repro = stage.path / "repro"
+    staged_repro.mkdir()
+    (staged_repro / "new.txt").write_bytes(b"TRANSACTION")
+    update = trtmc_validate._prepare_case_directory_update(stage)
+    real_rename = trtmc_validate._rename_noreplace_at
+    injected = False
+
+    def rename_then_raise(
+        source_fd,
+        source_name,
+        destination_fd,
+        destination_name,
+    ):
+        nonlocal injected
+        real_rename(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+        )
+        if (
+            not injected
+            and source_name == "repro"
+            and destination_name.startswith(".repro-previous.")
+        ):
+            injected = True
+            raise OSError("injected after successful backup rename")
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_rename_noreplace_at",
+        rename_then_raise,
+    )
+
+    with pytest.raises(
+        OSError,
+        match="after successful backup rename",
+    ):
+        trtmc_validate._commit_case_directory_update(update)
+    trtmc_validate._rollback_case_directory_update(update)
+    assert trtmc_validate._finalize_case_directory_update(update) == []
+    trtmc_validate._cleanup_case_artifact_stage(stage)
+
+    assert injected
+    assert (repro / "original.txt").read_bytes() == b"ORIGINAL"
+    assert [path.name for path in case_dir.iterdir()] == ["repro"]
+
+
+def test_directory_prepare_recovers_stage_after_rename_success_then_error(
+    tmp_path,
+    monkeypatch,
+):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    repro = case_dir / "repro"
+    repro.mkdir(parents=True)
+    (repro / "original.txt").write_bytes(b"ORIGINAL")
+    stage = trtmc_validate._create_case_artifact_stage(case_dir)
+    staged_repro = stage.path / "repro"
+    staged_repro.mkdir()
+    (staged_repro / "new.txt").write_bytes(b"TRANSACTION")
+    real_rename = trtmc_validate._rename_noreplace_at
+    injected = False
+
+    def rename_then_raise(
+        source_fd,
+        source_name,
+        destination_fd,
+        destination_name,
+    ):
+        nonlocal injected
+        real_rename(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+        )
+        if (
+            not injected
+            and source_name == "repro"
+            and destination_name.startswith(".repro-next.")
+        ):
+            injected = True
+            raise OSError("injected after successful prepare rename")
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_rename_noreplace_at",
+        rename_then_raise,
+    )
+
+    with pytest.raises(
+        OSError,
+        match="after successful prepare rename",
+    ):
+        trtmc_validate._prepare_case_directory_update(stage)
+
+    assert injected
+    assert (stage.path / "repro" / "new.txt").read_bytes() == b"TRANSACTION"
+    assert (repro / "original.txt").read_bytes() == b"ORIGINAL"
+    assert not any(
+        child.name.startswith(".repro-next.")
+        for child in case_dir.iterdir()
+    )
+    trtmc_validate._cleanup_case_artifact_stage(stage)
+    assert [path.name for path in case_dir.iterdir()] == ["repro"]
+
+
+def test_directory_prepare_recovers_stage_after_fingerprint_failure(
+    tmp_path,
+    monkeypatch,
+):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    repro = case_dir / "repro"
+    repro.mkdir(parents=True)
+    (repro / "original.txt").write_bytes(b"ORIGINAL")
+    stage = trtmc_validate._create_case_artifact_stage(case_dir)
+    staged_repro = stage.path / "repro"
+    staged_repro.mkdir()
+    (staged_repro / "new.txt").write_bytes(b"TRANSACTION")
+    real_fingerprint = trtmc_validate._directory_tree_fingerprint_at
+    injected = False
+
+    def fail_next_fingerprint(directory_fd, name):
+        nonlocal injected
+        if (
+            not injected
+            and directory_fd == stage.case_fd
+            and name.startswith(".repro-next.")
+        ):
+            injected = True
+            raise OSError("injected post-move fingerprint failure")
+        return real_fingerprint(directory_fd, name)
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_directory_tree_fingerprint_at",
+        fail_next_fingerprint,
+    )
+
+    with pytest.raises(
+        OSError,
+        match="post-move fingerprint failure",
+    ):
+        trtmc_validate._prepare_case_directory_update(stage)
+
+    assert injected
+    assert (stage.path / "repro" / "new.txt").read_bytes() == b"TRANSACTION"
+    assert (repro / "original.txt").read_bytes() == b"ORIGINAL"
+    assert not any(
+        child.name.startswith(".repro-next.")
+        for child in case_dir.iterdir()
+    )
+    trtmc_validate._cleanup_case_artifact_stage(stage)
+    assert [path.name for path in case_dir.iterdir()] == ["repro"]
+
+
+def test_file_transaction_rejects_staged_content_mutation_during_install(
+    tmp_path,
+    monkeypatch,
+):
+    target = tmp_path / "report.json"
+    target.write_bytes(b"ORIGINAL")
+    update = trtmc_validate._prepare_file_update(
+        target,
+        b"TRANSACTION",
+    )
+    real_rename = trtmc_validate._rename_noreplace_at
+    injected = False
+
+    def mutate_then_rename(
+        source_fd,
+        source_name,
+        destination_fd,
+        destination_name,
+    ):
+        nonlocal injected
+        if (
+            not injected
+            and source_name == update.next_name
+            and destination_name == target.name
+        ):
+            descriptor = os.open(
+                source_name,
+                os.O_WRONLY,
+                dir_fd=source_fd,
+            )
+            try:
+                os.pwrite(descriptor, b"MALICIOUS!!", 0)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.utime(
+                source_name,
+                ns=(
+                    update.next_metadata.st_atime_ns,
+                    update.next_metadata.st_mtime_ns,
+                ),
+                dir_fd=source_fd,
+                follow_symlinks=False,
+            )
+            injected = True
+        real_rename(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+        )
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_rename_noreplace_at",
+        mutate_then_rename,
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="staged file changed during publication",
+    ):
+        trtmc_validate._commit_file_update(update)
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="rollback incomplete",
+    ):
+        trtmc_validate._rollback_file_update(update)
+    trtmc_validate._finalize_file_update(update)
+
+    assert injected
+    assert target.read_bytes() == b"ORIGINAL"
+    recovery = [
+        path
+        for path in tmp_path.iterdir()
+        if ".rollback." in path.name
+    ]
+    assert len(recovery) == 1
+    assert recovery[0].read_bytes() == b"MALICIOUS!!"
+
+
+def test_directory_transaction_rejects_staged_mutation_during_install(
+    tmp_path,
+    monkeypatch,
+):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    repro = case_dir / "repro"
+    repro.mkdir(parents=True)
+    (repro / "original.txt").write_bytes(b"ORIGINAL")
+    stage = trtmc_validate._create_case_artifact_stage(case_dir)
+    staged_repro = stage.path / "repro"
+    staged_repro.mkdir()
+    (staged_repro / "new.txt").write_bytes(b"TRANSACTION")
+    update = trtmc_validate._prepare_case_directory_update(stage)
+    real_rename = trtmc_validate._rename_noreplace_at
+    injected = False
+
+    def mutate_then_rename(
+        source_fd,
+        source_name,
+        destination_fd,
+        destination_name,
+    ):
+        nonlocal injected
+        if (
+            not injected
+            and source_name == update.next_name
+            and destination_name == "repro"
+        ):
+            directory_fd = os.open(
+                source_name,
+                os.O_RDONLY | os.O_DIRECTORY,
+                dir_fd=source_fd,
+            )
+            try:
+                descriptor = os.open(
+                    "attacker.txt",
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+                try:
+                    os.write(descriptor, b"MALICIOUS")
+                finally:
+                    os.close(descriptor)
+            finally:
+                os.close(directory_fd)
+            injected = True
+        real_rename(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+        )
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_rename_noreplace_at",
+        mutate_then_rename,
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="staged reproduction changed during report publication",
+    ):
+        trtmc_validate._commit_case_directory_update(update)
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="rollback incomplete",
+    ):
+        trtmc_validate._rollback_case_directory_update(update)
+    trtmc_validate._finalize_case_directory_update(update)
+    trtmc_validate._cleanup_case_artifact_stage(stage)
+
+    assert injected
+    assert (repro / "original.txt").read_bytes() == b"ORIGINAL"
+    recovery = [
+        path
+        for path in case_dir.iterdir()
+        if path.name.startswith(".repro-rollback.")
+    ]
+    assert len(recovery) == 1
+    assert (recovery[0] / "attacker.txt").read_bytes() == b"MALICIOUS"
+
+
+def test_file_rollback_preserves_in_place_concurrent_modification(
+    tmp_path,
+    monkeypatch,
+):
+    target = tmp_path / "report.json"
+    target.write_bytes(b"ORIGINAL")
+    update = trtmc_validate._prepare_file_update(
+        target,
+        b"TRANSACTION",
+    )
+    trtmc_validate._commit_file_update(update)
+    real_rename = trtmc_validate._rename_noreplace_at
+    injected = False
+
+    def modify_then_rename(
+        source_fd,
+        source_name,
+        destination_fd,
+        destination_name,
+    ):
+        nonlocal injected
+        if (
+            not injected
+            and source_name == target.name
+            and ".rollback." in destination_name
+        ):
+            descriptor = os.open(
+                source_name,
+                os.O_WRONLY | os.O_TRUNC,
+                dir_fd=source_fd,
+            )
+            try:
+                os.write(descriptor, b"CONCURRENT-MODIFICATION")
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            injected = True
+        real_rename(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+        )
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_rename_noreplace_at",
+        modify_then_rename,
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="rollback incomplete",
+    ):
+        trtmc_validate._rollback_file_update(update)
+    trtmc_validate._finalize_file_update(update)
+
+    assert injected
+    assert target.read_bytes() == b"ORIGINAL"
+    recovery = [
+        path
+        for path in tmp_path.iterdir()
+        if ".rollback." in path.name
+    ]
+    assert len(recovery) == 1
+    assert recovery[0].read_bytes() == b"CONCURRENT-MODIFICATION"
+
+
+def test_directory_rollback_preserves_in_place_concurrent_modification(
+    tmp_path,
+    monkeypatch,
+):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    repro = case_dir / "repro"
+    repro.mkdir(parents=True)
+    (repro / "original.txt").write_bytes(b"ORIGINAL")
+    stage = trtmc_validate._create_case_artifact_stage(case_dir)
+    staged_repro = stage.path / "repro"
+    staged_repro.mkdir()
+    (staged_repro / "new.txt").write_bytes(b"TRANSACTION")
+    update = trtmc_validate._prepare_case_directory_update(stage)
+    trtmc_validate._commit_case_directory_update(update)
+    real_rename = trtmc_validate._rename_noreplace_at
+    injected = False
+
+    def modify_then_rename(
+        source_fd,
+        source_name,
+        destination_fd,
+        destination_name,
+    ):
+        nonlocal injected
+        if (
+            not injected
+            and source_name == "repro"
+            and destination_name.startswith(".repro-rollback.")
+        ):
+            directory_fd = os.open(
+                source_name,
+                os.O_RDONLY | os.O_DIRECTORY,
+                dir_fd=source_fd,
+            )
+            try:
+                descriptor = os.open(
+                    "concurrent.txt",
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+                try:
+                    os.write(descriptor, b"CONCURRENT")
+                finally:
+                    os.close(descriptor)
+            finally:
+                os.close(directory_fd)
+            injected = True
+        real_rename(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+        )
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_rename_noreplace_at",
+        modify_then_rename,
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="rollback incomplete",
+    ):
+        trtmc_validate._rollback_case_directory_update(update)
+    trtmc_validate._finalize_case_directory_update(update)
+    trtmc_validate._cleanup_case_artifact_stage(stage)
+
+    assert injected
+    assert (repro / "original.txt").read_bytes() == b"ORIGINAL"
+    recovery = [
+        path
+        for path in case_dir.iterdir()
+        if path.name.startswith(".repro-rollback.")
+    ]
+    assert len(recovery) == 1
+    assert (recovery[0] / "concurrent.txt").read_bytes() == b"CONCURRENT"
+
+
+def test_file_finalize_quarantines_and_preserves_racing_replacement(
+    tmp_path,
+    monkeypatch,
+):
+    target = tmp_path / "report.json"
+    target.write_bytes(b"ORIGINAL")
+    update = trtmc_validate._prepare_file_update(
+        target,
+        b"TRANSACTION",
+    )
+    trtmc_validate._commit_file_update(update)
+    backup_name = update.backup_name
+    preserved = tmp_path / "preserved-original"
+    real_rename = trtmc_validate._rename_noreplace_at
+    injected = False
+
+    def replace_then_rename(
+        source_fd,
+        source_name,
+        destination_fd,
+        destination_name,
+    ):
+        nonlocal injected
+        if not injected and source_name == backup_name:
+            os.rename(
+                source_name,
+                preserved.name,
+                src_dir_fd=source_fd,
+                dst_dir_fd=source_fd,
+            )
+            descriptor = os.open(
+                source_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=source_fd,
+            )
+            try:
+                os.write(descriptor, b"CONCURRENT")
+            finally:
+                os.close(descriptor)
+            injected = True
+        real_rename(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+        )
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_rename_noreplace_at",
+        replace_then_rename,
+    )
+
+    cleanup_errors = trtmc_validate._finalize_file_update(update)
+
+    assert injected
+    assert cleanup_errors
+    assert target.read_bytes() == b"TRANSACTION"
+    assert preserved.read_bytes() == b"ORIGINAL"
+    quarantined = [
+        path
+        for path in tmp_path.iterdir()
+        if ".cleanup." in path.name
+    ]
+    assert len(quarantined) == 1
+    assert quarantined[0].read_bytes() == b"CONCURRENT"
+
+
+def test_directory_finalize_quarantines_and_preserves_racing_replacement(
+    tmp_path,
+    monkeypatch,
+):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    repro = case_dir / "repro"
+    repro.mkdir(parents=True)
+    (repro / "original.txt").write_bytes(b"ORIGINAL")
+    stage = trtmc_validate._create_case_artifact_stage(case_dir)
+    staged_repro = stage.path / "repro"
+    staged_repro.mkdir()
+    (staged_repro / "new.txt").write_bytes(b"TRANSACTION")
+    update = trtmc_validate._prepare_case_directory_update(stage)
+    trtmc_validate._commit_case_directory_update(update)
+    backup_name = update.backup_name
+    preserved = case_dir / "preserved-original"
+    real_rename = trtmc_validate._rename_noreplace_at
+    injected = False
+
+    def replace_then_rename(
+        source_fd,
+        source_name,
+        destination_fd,
+        destination_name,
+    ):
+        nonlocal injected
+        if not injected and source_name == backup_name:
+            os.rename(
+                source_name,
+                preserved.name,
+                src_dir_fd=source_fd,
+                dst_dir_fd=source_fd,
+            )
+            os.mkdir(source_name, 0o700, dir_fd=source_fd)
+            descriptor = os.open(
+                f"{source_name}/concurrent.txt",
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=source_fd,
+            )
+            try:
+                os.write(descriptor, b"CONCURRENT")
+            finally:
+                os.close(descriptor)
+            injected = True
+        real_rename(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+        )
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_rename_noreplace_at",
+        replace_then_rename,
+    )
+
+    cleanup_errors = (
+        trtmc_validate._finalize_case_directory_update(update)
+    )
+    trtmc_validate._cleanup_case_artifact_stage(stage)
+
+    assert injected
+    assert cleanup_errors
+    assert (repro / "new.txt").read_bytes() == b"TRANSACTION"
+    assert (preserved / "original.txt").read_bytes() == b"ORIGINAL"
+    quarantined = [
+        path
+        for path in case_dir.iterdir()
+        if path.name.startswith(".repro-cleanup.")
+    ]
+    assert len(quarantined) == 1
+    assert (
+        quarantined[0] / "concurrent.txt"
+    ).read_bytes() == b"CONCURRENT"
+
+
+def test_file_transaction_never_overwrites_concurrent_install_target(
+    tmp_path,
+    monkeypatch,
+):
+    target = tmp_path / "report.json"
+    target.write_bytes(b"ORIGINAL")
+    update = trtmc_validate._prepare_file_update(
+        target,
+        b"TRANSACTION",
+    )
+    original_rename = trtmc_validate._rename_noreplace_at
+    injected = False
+
+    def inject_target(
+        source_fd,
+        source_name,
+        destination_fd,
+        destination_name,
+    ):
+        nonlocal injected
+        if (
+            source_name == update.next_name
+            and destination_name == target.name
+            and not injected
+        ):
+            target.write_bytes(b"CONCURRENT")
+            injected = True
+        original_rename(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+        )
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_rename_noreplace_at",
+        inject_target,
+    )
+
+    with pytest.raises(FileExistsError):
+        trtmc_validate._commit_file_update(update)
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="concurrent file prevented rollback",
+    ) as raised:
+        trtmc_validate._rollback_file_update(update)
+    trtmc_validate._finalize_file_update(update)
+
+    assert injected
+    assert target.read_bytes() == b"CONCURRENT"
+    backups = tuple(tmp_path.glob(".report.json.previous.*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == b"ORIGINAL"
+    assert str(backups[0]) in str(raised.value)
+
+
+def test_directory_transaction_never_overwrites_concurrent_install_target(
+    tmp_path,
+    monkeypatch,
+):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    repro = case_dir / "repro"
+    repro.mkdir(parents=True)
+    (repro / "original.txt").write_bytes(b"ORIGINAL")
+    stage = trtmc_validate._create_case_artifact_stage(case_dir)
+    staged_repro = stage.path / "repro"
+    staged_repro.mkdir()
+    (staged_repro / "new.txt").write_bytes(b"TRANSACTION")
+    update = trtmc_validate._prepare_case_directory_update(stage)
+    original_rename = trtmc_validate._rename_noreplace_at
+    injected = False
+
+    def inject_target(
+        source_fd,
+        source_name,
+        destination_fd,
+        destination_name,
+    ):
+        nonlocal injected
+        if (
+            source_name == update.next_name
+            and destination_name == "repro"
+            and not injected
+        ):
+            repro.mkdir()
+            (repro / "concurrent.txt").write_bytes(b"CONCURRENT")
+            injected = True
+        original_rename(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+        )
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_rename_noreplace_at",
+        inject_target,
+    )
+
+    with pytest.raises(FileExistsError):
+        trtmc_validate._commit_case_directory_update(update)
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="concurrent reproduction prevented rollback",
+    ) as raised:
+        trtmc_validate._rollback_case_directory_update(update)
+    trtmc_validate._finalize_case_directory_update(update)
+    trtmc_validate._cleanup_case_artifact_stage(stage)
+
+    assert injected
+    assert (repro / "concurrent.txt").read_bytes() == b"CONCURRENT"
+    backups = tuple(case_dir.glob(".repro-previous.*"))
+    assert len(backups) == 1
+    assert (backups[0] / "original.txt").read_bytes() == b"ORIGINAL"
+    assert str(backups[0]) in str(raised.value)
+
+
+def test_file_transaction_rejects_target_swap_after_install(
+    tmp_path,
+    monkeypatch,
+):
+    target = tmp_path / "report.json"
+    target.write_bytes(b"ORIGINAL")
+    transaction_away = tmp_path / "transaction-away.json"
+    update = trtmc_validate._prepare_file_update(
+        target,
+        b"TRANSACTION",
+    )
+    original_verify = trtmc_validate._verify_committed_file_update
+    swapped = False
+
+    def swap_then_verify(candidate):
+        nonlocal swapped
+        if not swapped:
+            target.rename(transaction_away)
+            target.write_bytes(b"CONCURRENT")
+            swapped = True
+        original_verify(candidate)
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_verify_committed_file_update",
+        swap_then_verify,
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="not visible after publication",
+    ):
+        trtmc_validate._commit_file_update(update)
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="concurrent file prevented rollback",
+    ):
+        trtmc_validate._rollback_file_update(update)
+    trtmc_validate._finalize_file_update(update)
+
+    assert swapped
+    assert target.read_bytes() == b"CONCURRENT"
+    assert transaction_away.read_bytes() == b"TRANSACTION"
+    backups = tuple(tmp_path.glob(".report.json.previous.*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == b"ORIGINAL"
+
+
+def test_directory_transaction_rejects_target_swap_after_install(
+    tmp_path,
+    monkeypatch,
+):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    repro = case_dir / "repro"
+    repro.mkdir(parents=True)
+    (repro / "original.txt").write_bytes(b"ORIGINAL")
+    stage = trtmc_validate._create_case_artifact_stage(case_dir)
+    staged_repro = stage.path / "repro"
+    staged_repro.mkdir()
+    (staged_repro / "new.txt").write_bytes(b"TRANSACTION")
+    update = trtmc_validate._prepare_case_directory_update(stage)
+    transaction_away = case_dir / "transaction-away"
+    original_verify = (
+        trtmc_validate._verify_committed_case_directory_update
+    )
+    swapped = False
+
+    def swap_then_verify(candidate):
+        nonlocal swapped
+        if not swapped:
+            repro.rename(transaction_away)
+            repro.mkdir()
+            (repro / "concurrent.txt").write_bytes(b"CONCURRENT")
+            swapped = True
+        original_verify(candidate)
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_verify_committed_case_directory_update",
+        swap_then_verify,
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="not visible after report publication",
+    ):
+        trtmc_validate._commit_case_directory_update(update)
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="concurrent reproduction prevented rollback",
+    ):
+        trtmc_validate._rollback_case_directory_update(update)
+    trtmc_validate._finalize_case_directory_update(update)
+    trtmc_validate._cleanup_case_artifact_stage(stage)
+
+    assert swapped
+    assert (repro / "concurrent.txt").read_bytes() == b"CONCURRENT"
+    assert (transaction_away / "new.txt").read_bytes() == b"TRANSACTION"
+    backups = tuple(case_dir.glob(".repro-previous.*"))
+    assert len(backups) == 1
+    assert (backups[0] / "original.txt").read_bytes() == b"ORIGINAL"
+
+
+def test_report_transaction_rejects_parent_swap_after_final_precheck(
+    tmp_path,
+    monkeypatch,
+):
+    output = tmp_path / "results"
+    output.mkdir()
+    (output / "report.json").write_bytes(b"OLD-JSON")
+    (output / "report.html").write_bytes(b"OLD-HTML")
+    moved_output = tmp_path / "results-original"
+    original_verify = trtmc_validate._verify_file_update_target
+    swapped = False
+
+    def verify_then_swap(update):
+        nonlocal swapped
+        original_verify(update)
+        if update.path.name == "report.html" and not swapped:
+            output.rename(moved_output)
+            output.mkdir()
+            (output / "sentinel").write_bytes(b"REPLACEMENT")
+            swapped = True
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_verify_file_update_target",
+        verify_then_swap,
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="parent changed after publication",
+    ):
+        trtmc_validate.write_report(output, result_paths=[])
+
+    assert swapped
+    assert (output / "sentinel").read_bytes() == b"REPLACEMENT"
+    assert sorted(child.name for child in output.iterdir()) == [
+        "sentinel"
+    ]
+    assert (moved_output / "report.json").read_bytes() == b"OLD-JSON"
+    assert (moved_output / "report.html").read_bytes() == b"OLD-HTML"
+    assert not any(
+        child.name.startswith(".report")
+        for child in moved_output.iterdir()
+    )
+
+
+def test_report_final_visibility_sweep_preserves_concurrent_target(
+    tmp_path,
+    monkeypatch,
+):
+    output = tmp_path / "results"
+    output.mkdir()
+    report_json = output / "report.json"
+    report_html = output / "report.html"
+    report_json.write_bytes(b"OLD-JSON")
+    report_html.write_bytes(b"OLD-HTML")
+    transaction_json = output / "transaction-report.json"
+    original_verify = (
+        trtmc_validate._verify_report_transaction_visibility
+    )
+    swapped = False
+
+    def swap_then_verify(entries):
+        nonlocal swapped
+        if not swapped:
+            report_json.rename(transaction_json)
+            report_json.write_bytes(b"CONCURRENT")
+            swapped = True
+        original_verify(entries)
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_verify_report_transaction_visibility",
+        swap_then_verify,
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="rollback was incomplete",
+    ) as raised:
+        trtmc_validate.write_report(output, result_paths=[])
+
+    assert swapped
+    assert report_json.read_bytes() == b"CONCURRENT"
+    assert report_html.read_bytes() == b"OLD-HTML"
+    assert transaction_json.exists()
+    backups = tuple(output.glob(".report.json.previous.*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == b"OLD-JSON"
+    assert str(backups[0]) in str(raised.value)
+
+
 def test_transaction_cleanup_handles_1100_levels_without_recursion(
     monkeypatch,
 ):
     depth = 1100
     removed = []
+    directory_metadata = os.stat_result(
+        (stat.S_IFDIR | 0o700, 1, 1, 1, 0, 0, 0, 0, 0, 0)
+    )
 
     class Entry:
         name = "d"
 
         @staticmethod
-        def is_dir(*, follow_symlinks):
+        def stat(*, follow_symlinks):
             assert follow_symlinks is False
-            return True
+            return directory_metadata
 
     class Entries:
         def __init__(self, directory_depth):
@@ -4414,6 +8224,16 @@ def test_transaction_cleanup_handles_1100_levels_without_recursion(
 
     monkeypatch.setattr(trtmc_validate.os, "open", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(trtmc_validate.os, "close", lambda _descriptor: None)
+    monkeypatch.setattr(
+        trtmc_validate.os,
+        "fstat",
+        lambda _descriptor: directory_metadata,
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_stat_at",
+        lambda _descriptor, _name: directory_metadata,
+    )
     monkeypatch.setattr(
         trtmc_validate.os,
         "scandir",
@@ -4452,6 +8272,11 @@ def test_execution_error_with_zero_disagreements_clears_stale_repro(
             {
                 "model": "model-a",
                 "workload": "workload-a",
+                "raw_result": {
+                    "status": "failed",
+                    "error_type": "WorkerProcessError",
+                    "error": "worker crashed",
+                },
                 "execution": {"status": "error", "exit_code": 1},
                 "comparison": {
                     "status": "not_run",
@@ -4549,6 +8374,7 @@ def test_result_rejects_primary_metric_value_mismatch():
             {
                 "model": "model-a",
                 "workload": "workload-a",
+                "raw_result": {"status": "passed"},
                 "execution": {"status": "completed"},
                 "comparison": {
                     "status": "agreement",
@@ -4584,6 +8410,12 @@ def test_report_aggregates_running_and_failed_run_status(
                 "model": "model-a",
                 "workload": "workload-a",
                 "status": "passed",
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                ),
             }
         ),
         encoding="utf-8",
@@ -4719,10 +8551,13 @@ def test_report_refresh_preserves_command_count_and_representative(
                 "model": "model-a",
                 "workload": "workload-a",
                 "status": "passed",
-                "raw_result": {
-                    "status": "passed",
-                    "work_dir": str(work_dir),
-                },
+                "returncode": 0,
+                "raw_result": _raw_evidence(
+                    "model-a",
+                    "workload-a",
+                    "passed",
+                    work_dir=str(work_dir),
+                ),
                 "reproduce": {
                     "hf": ["python reference.py"],
                     "trtmc": ["trtmc run model.trtfb"],
@@ -4846,10 +8681,13 @@ def test_write_report_handles_40_staged_cases_with_nofile_limit_64(
                     "model": model,
                     "workload": workload,
                     "status": "passed",
-                    "raw_result": {
-                        "status": "passed",
-                        "work_dir": str(work_dir),
-                    },
+                    "returncode": 0,
+                    "raw_result": _raw_evidence(
+                        model,
+                        workload,
+                        "passed",
+                        work_dir=str(work_dir),
+                    ),
                 }
             ),
             encoding="utf-8",
@@ -4985,10 +8823,13 @@ def test_report_enforces_aggregate_disagreement_media_budget(
                     "model": model,
                     "workload": workload,
                     "status": "failed",
-                    "raw_result": {
-                        "status": "failed",
-                        "work_dir": str(work_dir),
-                    },
+                    "returncode": 1,
+                    "raw_result": _raw_evidence(
+                        model,
+                        workload,
+                        "failed",
+                        work_dir=str(work_dir),
+                    ),
                 }
             ),
             encoding="utf-8",
