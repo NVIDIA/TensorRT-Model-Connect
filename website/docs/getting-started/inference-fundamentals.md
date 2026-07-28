@@ -27,7 +27,7 @@ TensorRT-Model-Connect does not train models. It starts with a trained model che
 
 ## What is a model checkpoint?
 
-A checkpoint is the saved state of a trained model. HuggingFace-style checkpoints normally contain:
+A checkpoint is the saved state of a trained model. Hugging Face-style checkpoints normally contain:
 
 | File or concept | Meaning |
 | --- | --- |
@@ -161,7 +161,7 @@ flowchart TD
 ```
 
 A bundle lets a C++ process load a model without rediscovering the original
-HuggingFace structure. A native bundle carries `config.json`, TensorRT plans,
+Hugging Face structure. A native bundle carries `config.json`, TensorRT plans,
 assets, and a `runtime_strategy`; an optimized-runtime bundle carries
 `optimized_runtime.json`, opaque implementation metadata, and a
 content-addressed artifact tree containing its exact implementation DSO. The

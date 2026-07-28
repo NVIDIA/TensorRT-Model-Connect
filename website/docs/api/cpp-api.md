@@ -65,7 +65,8 @@ auto result = lease->generate("Hello");
 `acquire()` waits for an available lane; `try_acquire()` reports exhaustion
 without waiting. Destroying or moving over a lease releases its lane.
 `PipelinePool` keeps mutable execution state isolated per lane and coordinates
-adapter maintenance across lanes.
+adapter maintenance across lanes. `size()` returns the fixed lane count and
+`available()` returns the currently unleased count.
 
 `from_bundle_pool()` does not support optimized-runtime bundles and throws
 before loading their implementation DSO. The delegated runtime owns its own
@@ -90,6 +91,16 @@ contract.
 as `std::string`. `generate_image_batch()` returns
 `std::vector<ImageResult>`.
 
+Additional `IPipeline` capability and metadata methods are:
+
+| Method | Contract |
+| --- | --- |
+| `default_max_new_tokens()` | Runtime-owned default used when a caller does not supply a positive request limit. |
+| `supports_image_generation()` | Reports whether image-generation entry points are implemented. |
+| `generate_audio_streaming()` | Streams generated PCM chunks through an `AudioChunkCallback`. |
+| `model_id()` | Returns the loaded model identifier. |
+| `pipeline_type()` | Returns the concrete runtime pipeline type used in capability errors and diagnostics. |
+
 `ImageResult::pixels` is frame-major, interleaved float32 data in
 `[T, H, W, C]` order with values in `[0, 1]`. Its length is
 `num_frames * height * width * channels`; a single image has
@@ -112,6 +123,71 @@ cfg.num_steps = 28;
 cfg.use_chat_template = true;
 cfg.enable_thinking = false;
 ```
+
+The complete field inventory is:
+
+| Fields | Contract |
+| --- | --- |
+| `max_new_tokens`, `num_samples` | Output limit and non-autoregressive sample count. |
+| `temperature`, `top_k`, `top_p`, `min_p`, `seed`, `eos_token_id` | Token sampling and termination controls. |
+| `guidance_scale`, `cfg_scale`, `num_steps`, `sde_gamma` | Diffusion, flow-matching, and conditional-guidance controls; negative sentinel values select model defaults where supported. |
+| `initial_latents`, `condition_latents`, `condition_mask`, `sampling_steps`, `sde_noises` | Optional packed raw-state inputs. Shapes remain model-owned and must match the selected bundle contract. |
+| `negative_prompt`, `height`, `width` | Text-to-image negative prompt and output-size overrides. Empty or non-positive values select bundle defaults. |
+| `text_generation_mode`, `block_length`, `confidence_threshold` | Text-diffusion or speculative mode, block length, and confidence threshold. |
+| `tail_frames` | Additional speech-to-speech frames after the input. |
+| `use_chat_template`, `enable_thinking` | Tokenizer chat-template and reasoning-mode selection. |
+| `stop_on_boxed_answer`, `stop_check_interval` | Optional boxed-answer stopping behavior and polling interval. |
+| `lora_adapter_id` | Loaded dynamic adapter ID. Empty selects the base model. |
+
+## Dynamic LoRA lifecycle
+
+Check `supports_lora_adapters()` before maintenance. A LoRA-capable
+`IPipeline` exposes `load_lora_adapter(adapter_id, adapter_path)`,
+`unload_lora_adapter(adapter_id)`, and `loaded_lora_adapters()`.
+`GenerateConfig::lora_adapter_id` selects one registered adapter for a request;
+an empty value clears adapter bindings and uses the base model.
+
+```cpp
+if (!pipe->supports_lora_adapters()) {
+    throw std::runtime_error("bundle was not built for dynamic LoRA");
+}
+
+pipe->load_lora_adapter("product-style", "/tmp/my-peft-adapter");
+trtmc::GenerateConfig cfg;
+cfg.lora_adapter_id = "product-style";
+auto result = pipe->generate("Describe the image.", image, height, width, cfg);
+pipe->unload_lora_adapter("product-style");
+```
+
+Qwen-VL accepts a standard PEFT directory containing `adapter_config.json`
+and `adapter_model.safetensors`. Loading fails when the engine has no dynamic
+LoRA inputs, the ID is empty, the directory or files are invalid, the PEFT
+mode is unsupported, tensors do not match the engine targets/shapes/dtypes, or
+the adapter rank exceeds the engine capacity. Selecting or unloading an
+unknown ID throws. Loading the same ID replaces its cached weights; unloading
+an active ID first clears the current binding. A request that already acquired
+adapter weights keeps shared ownership until it finishes, while subsequent
+selection of an unloaded ID fails.
+
+One `IPipeline` still must not execute concurrent requests. For multiple
+lanes, perform adapter maintenance through `PipelinePool`:
+
+```cpp
+if (!pool->supports_lora_adapters()) {
+    throw std::runtime_error("one or more lanes do not support dynamic LoRA");
+}
+pool->load_lora_adapter("product-style", "/tmp/my-peft-adapter");
+auto ids = pool->loaded_lora_adapters();
+pool->unload_lora_adapter("product-style");
+```
+
+Pool maintenance blocks new `acquire()` calls and waits for all outstanding
+leases to return before touching adapters. Loading applies the ID to every
+lane, skips lanes that already contain it, and rolls back newly loaded lanes
+if a later lane fails. `supports_lora_adapters()` is true only when every lane
+supports the feature. Unloading removes the ID from every lane and throws when
+none contains it. `loaded_lora_adapters()` also waits for the maintenance
+barrier and returns the shared registry view.
 
 ## Streaming transcription
 

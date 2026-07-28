@@ -95,7 +95,7 @@ Write a one-paragraph explanation of model checkpoints, tensors, tokens, logits,
 :::
 
 :::tip Progress check
-You are ready to move on when you can draw the path from prompt text to `TextResult` and explain why a `.trtfb` bundle is not the same thing as a HuggingFace checkpoint.
+You are ready to move on when you can draw the path from prompt text to `TextResult` and explain why a `.trtfb` bundle is not the same thing as a Hugging Face checkpoint.
 :::
 
 <details>

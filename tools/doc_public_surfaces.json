@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "surfaces": {
+    "native_cli_options": {
+      "documents": [
+        "website/docs/api/cli-reference.md"
+      ],
+      "allowlist": {
+        "--kv_cache_size": {
+          "canonical": "--kv-cache-size",
+          "reason": "Deprecated underscore compatibility alias; new documentation uses the canonical hyphenated spelling."
+        }
+      }
+    },
+    "python_build_parameters": {
+      "documents": [
+        "website/docs/api/python-builder.md"
+      ],
+      "allowlist": {}
+    },
+    "benchmark_cli_options": {
+      "documents": [
+        "website/docs/reference/benchmarking.md"
+      ],
+      "allowlist": {}
+    },
+    "cpp_pipeline_methods": {
+      "documents": [
+        "website/docs/api/cpp-api.md"
+      ],
+      "allowlist": {}
+    },
+    "generate_config_fields": {
+      "documents": [
+        "website/docs/api/cpp-api.md"
+      ],
+      "allowlist": {}
+    },
+    "pipeline_pool_methods": {
+      "documents": [
+        "website/docs/api/cpp-api.md"
+      ],
+      "allowlist": {}
+    },
+    "config_schema_entries": {
+      "documents": [
+        "website/docs/features/config-and-backends.md"
+      ],
+      "allowlist": {}
+    },
+    "github_workflows": {
+      "documents": [
+        "website/docs/reference/testing.md"
+      ],
+      "allowlist": {}
+    }
+  }
+}

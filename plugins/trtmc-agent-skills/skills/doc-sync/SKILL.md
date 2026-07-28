@@ -325,14 +325,17 @@ root:
 PYTHONPATH=python:. python3 -m pytest \
   tests/tools/test_check_doc_file_references.py \
   tests/tools/test_check_doc_commands.py \
+  tests/tools/test_check_doc_public_surfaces.py \
   tests/tools/test_runtime_strategy_matrix_checker.py \
   tests/tools/test_model_owned_validation_scripts.py \
+  tests/tools/test_task_eval.py \
   tests/tools/test_test_impact.py \
   tests/tools/test_trtmc_validate.py \
   tests/tools/test_perf_matrix.py::test_release_suite_covers_every_non_l0_ready_model_profile \
   -q
 PYTHONPATH=python:. python3 tools/test_impact.py --validate
 python3 tools/check_doc_file_references.py --strict --tracked
+python3 tools/check_doc_public_surfaces.py
 python3 tools/check_doc_commands.py
 PYTHONPATH=python:. python3 tools/check_runtime_strategy_matrix.py
 npm --prefix website ci
@@ -340,23 +343,27 @@ npm --prefix website run build
 git diff --check
 ```
 
-Install `pytest` and `PyYAML` first if the validation environment does not
-provide them. Use Node 20 for the website commands to match CI.
+Install `numpy`, `Pillow`, `pytest`, and `PyYAML` first if the validation
+environment does not provide them. Use Node 20 for the website commands to
+match CI.
 
 The pytest bundle protects the file-reference and command checkers, the live
-runtime-strategy matrix, model-owned validation scripts, selective-test
-classification, canonical reference-consistency and report behavior, and
-release-suite coverage for every non-L0-ready model profile.
+public-surface coverage gate, runtime-strategy matrix, model-owned validation
+scripts, task evaluation, selective-test classification, canonical
+reference-consistency and report behavior, and release-suite coverage for
+every non-L0-ready model profile.
 `tools/test_impact.py --validate` protects selective-test ownership; the strict
-reference checker verifies tracked paths and numeric claims; the command
-checker validates documented shell syntax and known argument contracts; the
-matrix checker compares strategies with descriptors, source, tests, and runner
-commands; and the clean install plus production build validates the complete
-Docusaurus site. `git diff --check` is an additional local patch-quality check,
-not a step in the GitHub workflow. Use Node 20 to match CI. Run additional
-focused tests when a behavioral rewrite depends on another contract, and
-record any environment-dependent gate that could not run rather than calling
-the mandatory workflow nonexistent.
+reference checker verifies tracked paths and numeric claims; the
+public-surface checker maps live CLI/API/schema/workflow tokens to reference
+pages or reasoned allowlist entries; the command checker validates documented
+shell syntax and known argument contracts; the matrix checker compares
+strategies with descriptors, source, tests, and runner commands; and the clean
+install plus production build validates the complete Docusaurus site.
+`git diff --check` is an additional local patch-quality check, not a step in
+the GitHub workflow. Use Node 20 to match CI. Run additional focused tests when
+a behavioral rewrite depends on another contract, and record any
+environment-dependent gate that could not run rather than calling the
+mandatory workflow nonexistent.
 
 ## Summary Report
 

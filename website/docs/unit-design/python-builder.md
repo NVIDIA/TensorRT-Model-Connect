@@ -139,7 +139,7 @@ methods are:
 
 | Method | Purpose |
 | --- | --- |
-| `matches(model_type)` | Decide whether this plugin handles a HuggingFace model type. |
+| `matches(model_type)` | Decide whether this plugin handles a Hugging Face model type. |
 | `load_weights(model_dir, config, precision=...)` | Read and normalize checkpoint tensors. |
 | `build_engine(config, weights, max_cache_length, ...)` | Build the main TensorRT engine plan. |
 
@@ -191,7 +191,7 @@ native builder. They resolve the checkpoint and family, inspect only that
 family's implementation manifests, and describe the active CUDA target. A
 model-owned provider profile must match all of these:
 
-- canonical HuggingFace model ID and pinned revision;
+- canonical Hugging Face model ID and pinned revision;
 - exact target OS, architecture, platform kind, GPU architecture/name, and
   minimum memory;
 - supported public build options; and

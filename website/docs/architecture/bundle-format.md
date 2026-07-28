@@ -15,7 +15,7 @@ supported payload shapes:
 
 ```mermaid
 flowchart TD
-  Checkpoint["HuggingFace checkpoint<br/>config + weights + tokenizer"] --> Builder["Python builder"]
+  Checkpoint["Hugging Face checkpoint<br/>config + weights + tokenizer"] --> Builder["Python builder"]
   Builder --> Bundle[".trtfb bundle"]
   Bundle --> Runtime["C++ runtime"]
   Runtime --> Pipeline["IPipeline"]
@@ -87,7 +87,7 @@ bool ok = trtmc::IsBundle("/tmp/model.trtfb");
 | Field | Meaning |
 | --- | --- |
 | `model_id` | Source model identifier. |
-| `model_type` | HuggingFace model type when available. |
+| `model_type` | Hugging Face model type when available. |
 | `family` | Python builder family plugin. |
 | `precision` | Build precision. |
 | `trt_version`, `trt_abi` | Build-time TensorRT metadata. |

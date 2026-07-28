@@ -17,7 +17,7 @@ Goal reference:
 
 ## Goal
 
-Keep the TensorRT Model Connect (MC) CLI, Python, C++, and C-linkage subset
+Keep the TensorRT-Model-Connect (MC) CLI, Python, C++, and C-linkage subset
 unchanged,
 while allowing a qualified model deployment to use a third-party optimized
 runtime such as TensorRT Edge-LLM.

@@ -47,29 +47,48 @@ failure is terminal rather than a native fallback.
 
 | Input | Meaning |
 | --- | --- |
-| HuggingFace repo ID | The builder resolves and downloads model files. |
+| Hugging Face repo ID | The builder resolves and downloads model files. |
 | Local directory | The builder reads local `config.json`, weights, tokenizer, and model-specific assets. |
 | Diffusers model directory | The builder uses `model_index.json` and `find_diffusion_plugin()`. |
 
-## Important options
+## Complete `build()` parameter reference
 
-| Option | Purpose |
+`build()` currently has 31 public parameters. The source signature and this
+table are checked together by the documentation workflow.
+
+| Parameter | Purpose |
 | --- | --- |
-| `model_revision` | Hugging Face commit, tag, or branch to resolve. |
-| `trust_remote_code` | Strict `bool`, default `False`. Permit reviewed repository-provided tokenizer code. With `build()`, pin `model_revision`; with `build_bundle()`, use a reviewed immutable local snapshot. |
+| `model_id_or_path` | Hugging Face repository ID or resolved local model directory. |
+| `output_path` | Destination `.trtfb` bundle path. |
 | `max_cache_length` | Default KV cache length for decoder-style bundles. |
+| `model_revision` | Hugging Face commit, tag, or branch to resolve. |
 | `decoder_engine_layout` | `split` or `dual_profile` for supported decoders. |
+| `dynamic_kv_cache` | Build decoder bundles with runtime-resizable KV cache support. |
+| `dynamic_kv_profile_rows_override` | Explicit dynamic-KV profile upper bounds. |
 | `precision` | Engine precision: `fp32`, `fp16`, or `bf16`. |
 | `fp32_layers` | Model-local layer indices that should compute in FP32. |
 | `quantize` | Structured quantization format such as `fp8` or `int4_awq`. |
-| `dynamic_kv_cache` | Build decoder bundles with runtime-resizable KV cache support. |
-| `dynamic_kv_profile_rows_override` | Explicit dynamic-KV profile upper bounds. |
-| `parallel_config` | Programmatic tensor-parallel build configuration. |
+| `quant_scales` | Path to precomputed quantization scales when the selected quantizer accepts them. |
+| `quant_calibration_samples` | Maximum calibration sample count; defaults to 512. |
+| `verbose` | Emit detailed builder diagnostics. |
+| `trust_remote_code` | Strict `bool`, default `False`. Permit reviewed repository-provided tokenizer code. With `build()`, pin `model_revision`; with `build_bundle()`, use a reviewed immutable local snapshot. |
+| `fp8_scales` | FP8 scale mapping or serialized scale source used by compatible native families. |
+| `save_fp8_scales` | Optional output path for calibrated FP8 scales. |
 | `rtx` | Build for TensorRT-RTX backend selection. |
-| `diffusion_overrides` | Image/video shape and inference-step overrides for diffusion models. |
-| `max_batch_size` | Maximum supported diffusion batch size, subject to family component policy. |
+| `triattention_stats_path` | TriAttention statistics input used for KV compaction. |
+| `triattention_kv_budget` | Retained KV-token budget. |
+| `triattention_divide_length` | Compaction scoring division length; defaults to 128. |
+| `triattention_recent_window` | Recent-token protection window; defaults to 128. |
+| `triattention_score_aggregation` | Score aggregation mode, currently `mean` or `max`. |
+| `triattention_count_prompt_tokens` | Include prompt tokens in TriAttention accounting. |
+| `triattention_protect_prefill` | Protect prefill tokens during compaction. |
+| `triattention_disable_mlr` | Disable the MLR score component. |
+| `triattention_disable_trig` | Disable the trigonometric score component. |
 | `family_build_options` | Opaque model-family build options for the selected plugin. |
+| `parallel_config` | Programmatic tensor-parallel build configuration. |
+| `diffusion_overrides` | Image/video shape and inference-step overrides for diffusion models. |
 | `build_timing_path` | Structured build-timing JSON output path. |
+| `max_batch_size` | Maximum supported diffusion batch size, subject to family component policy. |
 
 Both `build()` and `build_bundle()` reject non-boolean
 `trust_remote_code` values, including strings such as `"false"`. When the

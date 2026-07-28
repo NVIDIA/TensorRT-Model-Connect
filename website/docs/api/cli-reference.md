@@ -150,6 +150,69 @@ These shared options have route-specific contracts:
 
 Text-generation options include `--max-new-tokens`, `--greedy`, `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--seed`, `--chat-template`, and `--no-thinking`.
 
+### Complete native long-option index
+
+The native parser accepts the following canonical long options. An option is
+valid only on the command whose synopsis or section describes it; this table is
+an inventory, not a claim that every option is accepted by every command.
+
+| Area | Canonical options |
+| --- | --- |
+| Help and version | `--help`, `--version` |
+| Primary inputs | `--prompt`, `--prompts-file`, `--image`, `--audio`, `--audio-in`, `--document`, `--field-input`, `--branch-input`, `--trunk-input` |
+| Output selection | `--output`, `--output-json`, `--audio-out`, `--list-engines` |
+| Runtime loading and config | `--hf-python`, `--backend-dir`, `--model-plugin-dir`, `--runtime-cache`, `--kv-cache-size`, `--cuda-graphs`, `--config`, `--set` |
+| Text generation | `--max-new-tokens`, `--greedy`, `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--seed`, `--chat-template`, `--no-thinking`, `--generation-mode`, `--block-length`, `--threshold`, `--num-samples`, `--tail-frames` |
+| Diffusion and raw-state generation | `--num-steps`, `--num-inference-steps`, `--guidance-scale`, `--cfg-scale`, `--sde-gamma`, `--initial-latents-raw`, `--condition-latents-raw`, `--condition-mask-raw`, `--sampling-steps-raw`, `--sde-noise-raw`, `--negative-prompt`, `--height`, `--width`, `--num-images` |
+| Dynamic adapters | `--lora-adapter`, `--lora-adapter-id` |
+| Transcription | `--beam-size`, `--language`, `--source-language`, `--target-language`, `--task`, `--punctuation`, `--no-punctuation`, `--timestamps`, `--no-timestamps`, `--max-input-seconds`, `--segment-length-seconds`, `--stream`, `--chunk-ms`, `--att-context-size`, `--pad-and-drop-preencoded` |
+| Audio streaming | `--chunk-frames` |
+| Segmentation and detection | `--point-x`, `--point-y`, `--background`, `--score-threshold` |
+| Measurement | `--benchmark`, `--warmup` |
+
+`--threshold` supplies the generation confidence threshold, while
+`--score-threshold` supplies object-detection confidence. `--background`
+marks a prompted-segmentation point as background instead of foreground.
+`--chunk-frames` controls generated-audio stream chunks;
+`--chunk-ms` controls transcription input chunks. The legacy
+`--kv_cache_size` spelling remains accepted for compatibility, but new scripts
+must use `--kv-cache-size`.
+
+### Qwen-VL dynamic LoRA
+
+Dynamic LoRA must be enabled when building the base engine. It currently
+supports Qwen2.5-VL only and is incompatible with tensor-parallel Qwen-VL
+builds. `qwen_vl_lora.max_rank` must be between 1 and 256 when enabled:
+
+```bash
+trtmc build Qwen/Qwen2.5-VL-3B-Instruct \
+  -o /tmp/qwen-vl-lora.trtfb \
+  --set qwen_vl_lora.enabled=true \
+  --set qwen_vl_lora.max_rank=64 \
+  --set qwen_vl_lora.target_modules=q_proj,k_proj,v_proj,o_proj
+```
+
+Load one standard PEFT adapter directory and select it for the request:
+
+```bash
+trtmc run /tmp/qwen-vl-lora.trtfb \
+  --prompt "Describe the image." \
+  --image /tmp/example.png \
+  --lora-adapter /tmp/my-peft-adapter \
+  --lora-adapter-id product-style
+```
+
+The directory must contain `adapter_config.json` and
+`adapter_model.safetensors`. The runtime rejects non-LoRA PEFT modes, DoRA,
+rsLoRA, QALoRA, adapted bias, `modules_to_save`, per-module rank/alpha
+patterns, unsupported target modules, incomplete A/B tensor pairs, and ranks
+or shapes that exceed the engine contract. `--lora-adapter-id` must not be
+empty; when omitted while `--lora-adapter` is present, the CLI uses
+`default`. Supplying an adapter to an engine built without dynamic LoRA inputs
+fails during loading. The one-shot CLI loads the adapter before generation,
+sets `GenerateConfig::lora_adapter_id`, and exits after that request; use the
+C++ lifecycle API for a long-lived adapter registry.
+
 Object detection is exposed through `trtmc detect` for a pipeline that
 implements `IPipeline::detect`. The current model manifests and E2E catalog do
 not provide an object-detection model, so command availability alone is not

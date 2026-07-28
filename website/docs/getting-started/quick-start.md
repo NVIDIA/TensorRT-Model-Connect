@@ -42,13 +42,13 @@ $TRTMC build Qwen/Qwen3-0.6B \
   --max-cache-length 256
 ```
 
-`trtmc build` resolves the HuggingFace model and family. It first checks
+`trtmc build` resolves the Hugging Face model and family. It first checks
 whether an exact qualified optimized-runtime profile claims the
 model/revision/active-target/options tuple. If none does, as expected for this
 native tutorial's option tuple, the matching Python family plugin builds
 TensorRT engine plan bytes and writes the `.trtfb` bundle.
 
-First builds can be slow because the builder may download model files and compile TensorRT engines. If the command fails before TensorRT starts, check model ID, HuggingFace auth, network/cache, and Python dependencies first.
+First builds can be slow because the builder may download model files and compile TensorRT engines. If the command fails before TensorRT starts, check model ID, Hugging Face auth, network/cache, and Python dependencies first.
 
 ## 3. Inspect The Bundle
 
@@ -108,7 +108,7 @@ If generation fails, classify the failure before changing code:
 
 | Failure | Usually means |
 | --- | --- |
-| Build cannot download model | HuggingFace model ID, auth, network, or cache problem. |
+| Build cannot download model | Hugging Face model ID, auth, network, or cache problem. |
 | Build fails inside TensorRT | Unsupported graph, shape/profile issue, or TensorRT environment issue. |
 | Inspection fails | Bundle was not written correctly, the path is wrong, or the runtime library environment is incomplete. |
 | Runtime says no plugin registered | The strategy has no manifest owner, or its owning model DSO is missing/unloadable from the model-plugin search path. |

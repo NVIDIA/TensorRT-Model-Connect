@@ -30,7 +30,7 @@ Start with these eight blocks before reading the full source-level map:
 
 | Layer | Block | Question it answers |
 | --- | --- | --- |
-| Source model | HuggingFace checkpoint | What model files did we start from? |
+| Source model | Hugging Face checkpoint | What model files did we start from? |
 | Build adapter | Native `FamilyPlugin` or exact-qualified optimized adapter | Which family-owned code claims this build request? |
 | Build artifact | Native TensorRT plans or optimized provider artifacts | What execution payload did the selected path produce? |
 | Bundle contract | `.trtfb` | What exactly crosses from Python build time to C++ run time? |
@@ -131,7 +131,7 @@ flowchart TB
 
 | Block | Source | What it abstracts | Why it exists |
 | --- | --- | --- | --- |
-| `ModelConfig` | `python/tensorrt_model_connect/config.py` | HuggingFace config differences. | Many model repos use different key names for the same concepts. This gives builders one typed view. |
+| `ModelConfig` | `python/tensorrt_model_connect/config.py` | Hugging Face config differences. | Many model repos use different key names for the same concepts. This gives builders one typed view. |
 | `FamilyPlugin` | `python/tensorrt_model_connect/families/base.py` | A model-family adapter. | Matching, weight loading, graph construction, modality-specific components, and quantization hooks vary by family. |
 | `WeightDict` and checkpoint mapper | `python/tensorrt_model_connect/checkpoint_mapper.py` | Normalized weight names and tensors. | Builders need stable tensor names even when checkpoint layouts differ. |
 | Family-owned graph helpers | `python/tensorrt_model_connect/families/<family>/graph_ops.py` and `graph_blocks.py` when present | TensorRT graph operations and reusable blocks for one family. | Helpers stay beside the model code that defines their assumptions; there are no repository-root graph helper modules. |

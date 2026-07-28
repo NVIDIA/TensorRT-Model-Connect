@@ -1,7 +1,7 @@
 ---
 slug: /
 title: TensorRT-Model-Connect Documentation
-description: User documentation for building TensorRT bundles from HuggingFace models and running them from the C++ runtime.
+description: User documentation for building TensorRT bundles from Hugging Face models and running them from the C++ runtime.
 ---
 
 import useBaseUrl from '@docusaurus/useBaseUrl';
@@ -16,7 +16,7 @@ If any phrase in that sentence is new, use this short translation:
 | Phrase | Meaning |
 | --- | --- |
 | Deep learning inference | Running a trained model on a new request. |
-| Python-first checkpoint | Model files released for Python libraries such as HuggingFace Transformers or Diffusers. |
+| Python-first checkpoint | Model files released for Python libraries such as Hugging Face Transformers or Diffusers. |
 | TensorRT artifact | A compiled GPU execution plan built for an NVIDIA inference environment. |
 | Native C++ task API | A C++ interface with methods such as `generate`, `transcribe`, `generate_image`, `segment`, and `solve`. |
 
@@ -60,7 +60,7 @@ The project is intentionally split into two phases:
 ```mermaid
 flowchart TB
   subgraph Build["Build phase: Python"]
-    HF["HuggingFace model directory"] --> Config["ModelConfig"]
+    HF["Hugging Face model directory"] --> Config["ModelConfig"]
     Config --> Route{"qualified provider<br/>profile matches?"}
     Route -->|no| Family["native FamilyPlugin"]
     Family --> TRT["TensorRT engine plans"]
@@ -137,7 +137,7 @@ TensorRT-Model-Connect addresses that by separating "understand the model" from 
 
 | Concern | Where it lives | Why |
 | --- | --- | --- |
-| Read HuggingFace config and weights | Python builder | Python has the richest ecosystem for model formats and checkpoint conversion. |
+| Read Hugging Face config and weights | Python builder | Python has the richest ecosystem for model formats and checkpoint conversion. |
 | Construct TensorRT graphs | Python builder | Build-time logic can use TensorRT Python APIs and model-specific adapters. |
 | Package engines, tokenizer assets, config, and metadata | `.trtfb` bundle | The bundle becomes the stable build/runtime handoff. |
 | Load, validate, and dispatch the bundle | C++ runtime | Deployment code can stay native and task-oriented. |

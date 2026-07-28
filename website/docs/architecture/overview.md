@@ -19,7 +19,7 @@ The boundary between those responsibilities is the `.trtfb` bundle.
 3. `trtmc build` first offers an exact model/revision/target tuple to a
    family-owned optimized-runtime adapter. It uses the native family builder
    when no qualified adapter profile claims that tuple.
-4. Native bundles dispatch by `runtime_strategy`, not by HuggingFace model
+4. Native bundles dispatch by `runtime_strategy`, not by Hugging Face model
    name. A model-owned runtime DSO registers each native strategy.
 5. Optimized-runtime bundles instead carry `optimized_runtime.json` plus an
    embedded implementation DSO and artifact tree. They bypass native strategy,
@@ -30,7 +30,7 @@ The boundary between those responsibilities is the `.trtfb` bundle.
 ```mermaid
 flowchart LR
   subgraph Source["Source model"]
-    HF["HuggingFace or local checkpoint"]
+    HF["Hugging Face or local checkpoint"]
     HFConfig["config.json"]
     HFWeights["weights"]
     HFTokenizer["tokenizer or processor assets"]
@@ -98,7 +98,7 @@ The split is not just a language preference. It separates two very different job
 
 | Job | Best environment | Reason |
 | --- | --- | --- |
-| Understand a new HuggingFace checkpoint | Python | Model repos, tokenizers, diffusers, Transformers, calibration flows, and checkpoint format utilities are Python-first. |
+| Understand a new Hugging Face checkpoint | Python | Model repos, tokenizers, diffusers, Transformers, calibration flows, and checkpoint format utilities are Python-first. |
 | Build optimized artifacts | Python native builder or family-owned provider adapter | Build logic needs flexible graph construction, weight transforms, calibration, and exact model/revision/target qualification. |
 | Run user requests | C++ | Deployment systems need stable native APIs, explicit memory ownership, predictable latency, and minimal Python in the request path. |
 | Isolate TensorRT ABI | Backend DSO | TensorRT runtime versions can differ; the core runtime should not leak one `libnvinfer` ABI into every build. |
@@ -144,7 +144,7 @@ identity shapes as it moves through the stack:
 
 | Identity | Example | Source of truth | Used by |
 | --- | --- | --- | --- |
-| HuggingFace model type | `qwen3`, `whisper`, `flux` | `config.json` from the model repo | Python `ModelConfig` and family matching. |
+| Hugging Face model type | `qwen3`, `whisper`, `flux` | `config.json` from the model repo | Python `ModelConfig` and family matching. |
 | Builder family | `qwen`, `whisper`, `flux`, `pixart` | `python/tensorrt_model_connect/families/<family>/MODEL.toml` and its package | Weight loading and engine construction. |
 | Native runtime strategy | `qwen_decoder_kv_cache`, `whisper_speech_to_text`, `diffusion_flux` | Native bundle config and `src/runtime/models/<owner>/MODEL.toml` | Native model DSO selection, plugin lookup, and pipeline construction. |
 | Optimized implementation/profile | `qwen.tensorrt-edge-llm` plus a qualified Qwen/A100 profile | Family-owned `IMPLEMENTATION.toml` and profile TOMLs, serialized as `optimized_runtime.json` | Embedded implementation DSO selection and delegated pipeline construction. |
@@ -220,7 +220,7 @@ The important builder abstractions are:
 
 | Abstraction | Source | Responsibility |
 | --- | --- | --- |
-| `ModelConfig` | `python/tensorrt_model_connect/config.py` | Normalizes HuggingFace config fields into one typed view. |
+| `ModelConfig` | `python/tensorrt_model_connect/config.py` | Normalizes Hugging Face config fields into one typed view. |
 | `FamilyPlugin` | `python/tensorrt_model_connect/families/base.py` | Per-family matching, weight loading, engine building, optional quantization hooks, and optional modality-specific build methods. |
 | Family-owned graph builders | `python/tensorrt_model_connect/families/<family>/graph_ops.py`, `graph_blocks.py`, and dedicated builders when present | Convert that family's model structure and weights into TensorRT networks or compiled components. There are no repository-root `graph_ops.py` or `graph_blocks.py` modules. |
 | Quantization units | `python/tensorrt_model_connect/quantization/` | Plan quantization, calibration, scale loading, and family-specific exclusions. |

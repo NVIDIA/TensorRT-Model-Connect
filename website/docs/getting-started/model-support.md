@@ -48,7 +48,7 @@ Keep these levels separate:
 | Passing exact-revision E2E result | The named model contract passed for that revision and test environment. |
 | Performance or promotion artifact | The measured model, bundle, hardware, software stack, command, and acceptance threshold passed. |
 
-A HuggingFace repository that merely resembles a listed family is not
+A Hugging Face repository that merely resembles a listed family is not
 automatically supported. Its model type or pipeline class must resolve through
 the family descriptor, and its exact checkpoint/configuration still needs
 appropriate build and E2E evidence.

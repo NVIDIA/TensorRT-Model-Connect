@@ -30,6 +30,41 @@ Model-owned schemas instead live beside their owners:
 - Registration: the owner's `runtime_config_schemas` entry in
   `src/runtime/models/<owner>/MODEL.toml`
 
+## Live schema catalog
+
+This is the current registered namespace/field inventory. The documentation
+gate derives the same tokens from the Python and C++ schema declarations, so a
+new field must be added here or explicitly classified as internal with a
+reason.
+
+| Namespace and owner | Registered fields | Allowed layers |
+| --- | --- | --- |
+| `platform` (shared host/runtime) | `platform.source_dir`, `platform.trt_log_stderr`, `platform.trt_log_min_severity` | Session request, platform profile |
+| `runtime` (shared decode runtime) | `runtime.disable_cuda_graph`, `runtime.prefer_gpu_greedy` | Session request, platform profile |
+| `text_trace` (shared text diagnostics) | `text_trace.step_trace_path`, `text_trace.step_trace_start_pos`, `text_trace.step_trace_end_pos`, `text_trace.step_trace_topk` | Session request, platform profile |
+| `triattention` (shared KV compaction) | `triattention.enabled`, `triattention.kv_budget`, `triattention.divide_length`, `triattention.recent_window`, `triattention.score_aggregation`, `triattention.per_layer_aggregation`, `triattention.count_prompt_tokens`, `triattention.protect_prefill`, `triattention.disable_mlr`, `triattention.disable_trig`, `triattention.offset_max_length`, `triattention.stats_section`, `triattention.debug`, `triattention.profile`, `triattention.runtime_bucket_rows`, `triattention.disable_gpu_selection`, `triattention.disable_gpu_compaction`, `triattention.disable_gpu_state`, `triattention.zero_tail`, `triattention.dump_keep_path`, `triattention.dump_compaction_index`, `triattention.abort_after_dump`, `triattention.dump_score_cache`, `triattention.dump_score_values` | Core fields: bundle default/session; `stats_section`: build/bundle; diagnostics: session |
+| `audio_bark` (Bark) | `audio_bark.dump_path`, `audio_bark.greedy`, `audio_bark.seed`, `audio_bark.fine_temperature` | Session request, platform profile |
+| `audio_magpie` (Magpie TTS) | `audio_magpie.greedy`, `audio_magpie.cfg_scale`, `audio_magpie.temperature`, `audio_magpie.finished_limit`, `audio_magpie.seed`, `audio_magpie.max_source_positions` | Sampling fields: session/platform; `max_source_positions`: build/bundle |
+| `wan2_2_ti2v` (Wan 2.2 TI2V) | `wan2_2_ti2v.easycache_enabled`, `wan2_2_ti2v.easycache_threshold`, `wan2_2_ti2v.easycache_first_exact_steps`, `wan2_2_ti2v.easycache_last_exact_steps`, `wan2_2_ti2v.easycache_max_consecutive_reuse`, `wan2_2_ti2v.late_cfg_enabled` | Session request, platform profile |
+| `sana_wm` (SANA-WM) | `sana_wm.image_path`, `sana_wm.action`, `sana_wm.translation_speed`, `sana_wm.rotation_speed_deg`, `sana_wm.num_frames`, `sana_wm.fps`, `sana_wm.flow_shift`, `sana_wm.intrinsics`, `sana_wm.no_refiner` | Session request, platform profile |
+| `qwen_vl_lora` (Qwen-VL build) | `qwen_vl_lora.enabled`, `qwen_vl_lora.max_rank`, `qwen_vl_lora.target_modules` | Build time, bundle default, build CLI request |
+| `qwen_vl_vision` (Qwen-VL build) | `qwen_vl_vision.image_height`, `qwen_vl_vision.image_width` | Build time, bundle default, build CLI request |
+
+The Qwen-VL build schemas have these exact defaults and validation rules:
+
+| Field | Type and default | Additional contract |
+| --- | --- | --- |
+| `qwen_vl_lora.enabled` | `bool`, `false` | Dynamic binding currently supports Qwen2.5-VL only and rejects tensor-parallel builds. |
+| `qwen_vl_lora.max_rank` | `int32`, `0` | Schema range is 0 through 256; enabling LoRA requires 1 through 256. |
+| `qwen_vl_lora.target_modules` | `string`, `q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj` | Comma-separated non-empty subset of exactly those seven projection names. |
+| `qwen_vl_vision.image_height` | `int32`, `448` | Positive and divisible by the model's `patch_size * spatial_merge_size`. Rectangular profiles currently support Qwen2.5-VL only. |
+| `qwen_vl_vision.image_width` | `int32`, `448` | Same alignment and family restrictions as height. |
+
+These are build settings even though the build CLI currently contributes
+`--config` and `--set` values at `SessionRequest` priority before forwarding
+them to the family builder. They do not imply that a loaded optimized runtime
+accepts runtime config overrides.
+
 Build routing happens before the native schema-driven builder: `trtmc build`
 first offers the model, revision, target, and public option tuple to an exact
 qualified optimized profile. If one claims it, that family-owned adapter owns

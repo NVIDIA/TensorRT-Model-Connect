@@ -37,7 +37,7 @@ This handout teaches the full path for decoder text generation: build a bundle, 
 
 After this tutorial, you should be able to explain:
 
-- Why a HuggingFace checkpoint must be converted before this C++ runtime can serve it.
+- Why a Hugging Face checkpoint must be converted before this C++ runtime can serve it.
 - What is inside the `.trtfb` bundle.
 - How `family` differs from `runtime_strategy`.
 - What prefill, decode, KV cache, logits, and sampling mean during generation.
@@ -117,7 +117,7 @@ Save the build command in your learning log and record whether the failure point
 :::
 
 :::warning First build cost
-The first run may download model files from HuggingFace and compile TensorRT engines. That is normal. Treat download/auth/cache failures differently from TensorRT graph-build failures.
+The first run may download model files from Hugging Face and compile TensorRT engines. That is normal. Treat download/auth/cache failures differently from TensorRT graph-build failures.
 :::
 
 <details>
@@ -165,7 +165,7 @@ Record the exact `runtime_strategy` and engine section names. If you cannot find
 
 :::tip Progress check
 You are ready to continue when you can explain why this native bundle uses
-`runtime_strategy`, not the HuggingFace model name, for C++ dispatch—and why a
+`runtime_strategy`, not the Hugging Face model name, for C++ dispatch—and why a
 bundle containing `optimized_runtime.json` would take the separate embedded
 implementation path first.
 :::

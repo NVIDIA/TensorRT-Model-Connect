@@ -11,7 +11,7 @@ bundle metadata.
 
 On the native path, family plugins can:
 
-- Match a HuggingFace `model_type` or diffusers pipeline class.
+- Match a Hugging Face `model_type` or diffusers pipeline class.
 - Load and normalize weights.
 - Emit the concrete model-owned runtime strategy implemented by the matching
   C++ model DSO.

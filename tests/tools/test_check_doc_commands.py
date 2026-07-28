@@ -3553,6 +3553,31 @@ def test_no_argparse_script_is_not_reported_as_an_ambiguous_contract(
     assert cdc.check_command_block(block, tmp_path) == []
 
 
+def test_argparse_contract_supports_python_without_try_star(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = tmp_path / "tools" / "python310_cli.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        'parser.add_argument("--value", required=True)\n'
+        "parser.parse_args()\n",
+        encoding="utf-8",
+    )
+
+    cdc._argparse_program_contract.cache_clear()
+    monkeypatch.delattr(cdc.ast, "TryStar", raising=False)
+    try:
+        contract = cdc._argparse_program_contract(script)
+    finally:
+        cdc._argparse_program_contract.cache_clear()
+
+    assert contract is not None
+    assert "--value" in contract.root.options
+
+
 def test_argparse_helper_arguments_attach_to_the_called_parser(
     tmp_path: Path,
 ) -> None:

@@ -212,6 +212,17 @@ Use `--no-build` for a strict CI run that must fail when no bundle exists, or
 resolves the planned cache path without downloading a model or building an
 engine.
 
+Additional resolver and execution controls are:
+
+| Option | Contract |
+| --- | --- |
+| `--bundle-cache PATH` | Override the managed bundle-cache root used for compatible automatic builds. |
+| `--manifest-root PATH` | Resolve `MODEL.toml` and E2E benchmark profiles from an alternate catalog root. It applies to both `run` and `list models`. |
+| `--case NAME` | Select a literal named case; repeat to select several. Named cases remain independent and never form a Cartesian product. |
+| `--runtime-dir PATH` | Repeatable directory added to both backend and model-plugin runtime search paths. |
+| `--worker PATH` | Use one explicit `trtmc_benchmark_worker` executable instead of packaged, source-build, or `PATH` discovery. |
+| `--telemetry auto|off` | Enable best-effort low-frequency GPU telemetry or disable it. Sampling surrounds the worker process and is outside the timed public-pipeline calls. |
+
 ## Architecture
 
 ```mermaid

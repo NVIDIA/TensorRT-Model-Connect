@@ -144,6 +144,8 @@ _SHELL_ONLY_WORDS = {
 _VENDORED_FIXTURE_DOC_RE = re.compile(r"^tests/e2e/models/[^/]+/data/hf/[^/]+/README\.md$")
 _NESTED_SHELL_LANGUAGE = "_nested-shell"
 _MAX_NESTED_SHELL_DEPTH = 4
+_TRY_STAR_NODE = getattr(ast, "TryStar", None)
+_TRY_NODE_TYPES = (ast.Try,) if _TRY_STAR_NODE is None else (ast.Try, _TRY_STAR_NODE)
 
 
 @dataclass(frozen=True)
@@ -2043,8 +2045,7 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
                     ast.For,
                     ast.AsyncFor,
                     ast.While,
-                    ast.Try,
-                    ast.TryStar,
+                    *_TRY_NODE_TYPES,
                     ast.With,
                     ast.AsyncWith,
                     ast.Match,
@@ -2090,7 +2091,7 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
                 return None
             selected = statement.body if bool(condition) else statement.orelse
             return block_abrupt_state(selected, binding)
-        if isinstance(statement, (ast.Try, ast.TryStar)):
+        if isinstance(statement, _TRY_NODE_TYPES):
             final_state = block_abrupt_state(
                 statement.finalbody,
                 binding,
@@ -2278,7 +2279,7 @@ def _argparse_program_contract(script_path: Path) -> ProgramSpec | None:
                 contexts = reachable
                 continue
 
-            if isinstance(parent, (ast.Try, ast.TryStar)):
+            if isinstance(parent, _TRY_NODE_TYPES):
                 if child in parent.body:
                     prior = parent.body[: parent.body.index(child)]
                     if any(statement_may_raise(statement) for statement in prior):

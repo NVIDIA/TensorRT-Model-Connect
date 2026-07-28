@@ -5018,6 +5018,7 @@ def test_eval_one_model_diffusion_uses_clip_parity_summary(
             "valid_count": 1,
             "skipped_count": 0,
             "total_count": 1,
+            "initial_latents_match_rate": 1.0,
             "metrics": {},
             "samples": [],
         }
@@ -5684,6 +5685,7 @@ def test_eval_records_model_failure_and_continues(tmp_path: Path, monkeypatch) -
             "prediction_agreement_rate": 1.0,
             "hf_reused": False,
             "bundle_built": True,
+            "status": "passed",
         }
 
     monkeypatch.setattr(task_eval, "eval_one_model", fake_eval_one_model)
@@ -5813,6 +5815,7 @@ def test_eval_accepts_reranking_dataset_kind(tmp_path: Path, monkeypatch) -> Non
             "min_pairwise_ordering_agreement": 1.0,
             "hf_reused": False,
             "bundle_built": False,
+            "status": "passed",
         },
     )
     args = argparse.Namespace(

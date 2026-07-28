@@ -19,9 +19,9 @@ flowchart TB
 | --- | --- | --- |
 | NVIDIA driver | Lets containers use the GPU. | `nvidia-smi` fails or no GPU appears in Docker. |
 | Docker + NVIDIA Container Toolkit | Gives a repeatable CUDA/TensorRT environment. | Container launches without GPU access. |
-| Python builder environment | Resolves HuggingFace models and builds bundles. | Missing `transformers`, TensorRT Python package, model auth, or network/cache access. |
+| Python builder environment | Resolves Hugging Face models and builds bundles. | Missing `transformers`, TensorRT Python package, model auth, or network/cache access. |
 | C++ runtime environment | Loads bundle metadata and either native model/backend DSOs or an optimized bundle's embedded implementation DSO. | Missing shared libraries, native TensorRT ABI/backend mismatch, or optimized descriptor/artifact/factory identity mismatch. |
-| HuggingFace cache | Stores downloaded model files. | First run is slow, offline build fails, gated model needs login/token. |
+| Hugging Face cache | Stores downloaded model files. | First run is slow, offline build fails, gated model needs login/token. |
 
 ## 1. Start The Dev Container
 
@@ -90,9 +90,9 @@ The quick-start model is:
 Qwen/Qwen3-0.6B
 ```
 
-On the first build, `./build/trtmc build` may download model files from HuggingFace into the cache visible inside the container. Expect network access, cache writes, GPU memory use during TensorRT build, and a build time that is much longer than normal program startup.
+On the first build, `./build/trtmc build` may download model files from Hugging Face into the cache visible inside the container. Expect network access, cache writes, GPU memory use during TensorRT build, and a build time that is much longer than normal program startup.
 
-For gated or private models, log in or provide the required HuggingFace token before running `./build/trtmc build`.
+For gated or private models, log in or provide the required Hugging Face token before running `./build/trtmc build`.
 
 ## 5. First-Failure Triage
 
@@ -100,7 +100,7 @@ For gated or private models, log in or provide the required HuggingFace token be
 | --- | --- | --- |
 | Docker cannot see the GPU | Host/container setup | `nvidia-smi` on host and inside container. |
 | `ModuleNotFoundError` during build | Python builder env | Use `pip install -e . -C py-only=true` without `--no-deps`, or install the missing package in the container. |
-| HuggingFace 401/403/not found | Model resolution | Check model ID, network, auth token, and gated model access. |
+| Hugging Face 401/403/not found | Model resolution | Check model ID, network, auth token, and gated model access. |
 | CMake cannot find CUDA headers or `cudart` | Native build env | Confirm CUDA development files are installed in the container. |
 | `libtorch.so` missing for `./build/trtmc` | Runtime library path | Run inside container or export the container's library paths. |
 | TensorRT ABI mismatch | Bundle/runtime compatibility | Rebuild the bundle in the same TensorRT environment or load the matching backend DSO. |

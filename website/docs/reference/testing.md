@@ -8,17 +8,19 @@ title: Testing Reference
 every pull request, pushes to `main`, and manual runs. Its `Validate
 documentation` job uses Python 3.12 and Node 20 and runs all of these checks:
 
-1. Unit tests for the file-reference, command, runtime-strategy-matrix,
-   model-owned validation-script, selective-impact, and reference-consistency
-   and report validators, plus release-suite coverage for every non-L0-ready
-   model profile.
+1. Unit tests for the file-reference, command, public-surface,
+   runtime-strategy-matrix, model-owned validation-script, task-evaluation,
+   selective-impact, and reference-consistency and report validators, plus
+   release-suite coverage for every non-L0-ready model profile.
 2. `tools/test_impact.py --validate` to prove documentation and validator
    changes still select the intended focused checks.
 3. Strict tracked-document references and checked numeric claims.
-4. Documented shell-command syntax and local CLI/argument contracts.
-5. The live runtime-strategy matrix against descriptors, source, tests, and
+4. Public CLI, API, config-schema, and workflow source tokens mapped to a
+   current documentation page or a narrow allowlist entry with a reason.
+5. Documented shell-command syntax and local CLI/argument contracts.
+6. The live runtime-strategy matrix against descriptors, source, tests, and
    runner commands.
-6. A clean lockfile install followed by a production Docusaurus build.
+7. A clean lockfile install followed by a production Docusaurus build.
 
 Reproduce the full job from the repository root:
 
@@ -26,14 +28,17 @@ Reproduce the full job from the repository root:
 PYTHONPATH=python:. python3 -m pytest \
   tests/tools/test_check_doc_file_references.py \
   tests/tools/test_check_doc_commands.py \
+  tests/tools/test_check_doc_public_surfaces.py \
   tests/tools/test_runtime_strategy_matrix_checker.py \
   tests/tools/test_model_owned_validation_scripts.py \
+  tests/tools/test_task_eval.py \
   tests/tools/test_test_impact.py \
   tests/tools/test_trtmc_validate.py \
   tests/tools/test_perf_matrix.py::test_release_suite_covers_every_non_l0_ready_model_profile \
   -q
 PYTHONPATH=python:. python3 tools/test_impact.py --validate
 python3 tools/check_doc_file_references.py --strict --tracked
+python3 tools/check_doc_public_surfaces.py
 python3 tools/check_doc_commands.py
 PYTHONPATH=python:. python3 tools/check_runtime_strategy_matrix.py
 npm --prefix website ci
@@ -41,10 +46,34 @@ npm --prefix website run build
 git diff --check
 ```
 
-Install `pytest` and `PyYAML` first if the Python environment does not provide
-them. `npm ci` uses `website/package-lock.json` and replaces that workspace's
-installed dependency tree; use Node 20 to match CI. `git diff --check` is an
-additional local patch-quality check rather than a step in the GitHub job.
+Install `numpy`, `Pillow`, `pytest`, and `PyYAML` first if the Python
+environment does not provide them. `npm ci` uses
+`website/package-lock.json` and replaces that workspace's installed dependency
+tree; use Node 20 to match CI. `git diff --check` is an additional local
+patch-quality check rather than a step in the GitHub job.
+
+The public-surface checker uses `tools/doc_public_surfaces.json`. It extracts
+complete C++ CLI option string literals, the Python `build()` signature,
+`trtmc-bench` argparse actions, public pipeline and pool methods,
+`GenerateConfig` fields, Python/C++ config schemas, and active workflow files
+from source. Every token must occur in its mapped reference page. Compatibility
+aliases or intentionally internal tokens require an exact allowlist entry with
+a specific reason; stale entries fail.
+
+## Active workflow inventory
+
+Workflow existence and documentation are checked together:
+
+| Workflow | Trigger and evidence boundary |
+| --- | --- |
+| `.github/workflows/docs-validation.yml` | Pull requests, pushes to `main`, and manual runs; host-only documentation/static evidence. |
+| `.github/workflows/legal.yml` | Reusable, `main`, or manual exact-revision legal-document and source-header certification. |
+| `.github/workflows/trtmc-ci.yml` | One-shot `run-ci` label on a pull request; validates the pinned GitHub merge snapshot and dispatches premerge proof. |
+| `.github/workflows/model-proof.yml` | Reusable isolated model-owned premerge/nightly proof on configured self-hosted hardware. |
+| `.github/workflows/nightly.yml` | Scheduled or manual all-model inventory, isolated proofs, packaging, and aggregate nightly evidence. |
+| `.github/workflows/optimized-runtime-proof.yml` | Reusable or manual exact-profile optimized-runtime qualification; selection alone is not hardware proof. |
+| `.github/workflows/performance.yml` | Reusable or manual release performance matrix on configured self-hosted hardware. |
+| `.github/workflows/pages.yml` | Pushes affecting `website/**` on `main`, or manual runs; builds and deploys only the documentation site to GitHub Pages. |
 
 ## CPU and repository checks
 
