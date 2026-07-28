@@ -3551,6 +3551,21 @@ def test_ensure_bundle_replaces_mismatched_precision(
     assert [command[1] for command in commands] == ["inspect", "build"]
 
 
+def test_bundle_reuse_rejects_unrecognized_precision(monkeypatch) -> None:
+    monkeypatch.setattr(task_eval, "runtime_tensorrt_abi", lambda: "11.2")
+
+    assert not task_eval._bundle_can_be_reused(
+        {
+            "TRT ABI": "11.2",
+            "Max cache length": "256",
+            "Precision": "unknown",
+        },
+        max_cache_length=256,
+        expected_precision="fp32",
+        allow_unknown=False,
+    )
+
+
 def test_suite_build_cache_minimum_overrides_manifest_cache() -> None:
     suite = {"build": {"min_max_cache_length": 1024}}
     model = {"max_cache_length": 256}

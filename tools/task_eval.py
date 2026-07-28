@@ -8574,14 +8574,16 @@ def _bundle_can_be_reused(
         if raw_precision is None:
             if not allow_unknown:
                 return False
-        elif (
-            _canonical_reference_precision(
-                raw_precision,
-                field="bundle precision",
-            )
-            != expected_precision
-        ):
-            return False
+        else:
+            try:
+                bundle_precision = _canonical_reference_precision(
+                    raw_precision,
+                    field="bundle precision",
+                )
+            except ValueError:
+                return False
+            if bundle_precision != expected_precision:
+                return False
     bundle_abi = inspection.get("TRT ABI", "")
     runtime_abi = runtime_tensorrt_abi()
     return not bundle_abi or not runtime_abi or bundle_abi == runtime_abi
