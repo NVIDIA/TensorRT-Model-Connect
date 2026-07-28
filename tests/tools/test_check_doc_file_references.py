@@ -1,25 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the documentation-reference and inventory checks in
+"""Unit tests for the pure path-extraction helpers in
 ``tools/check_doc_file_references.py``.
 
 Intent:
     ``check_doc_file_references.py`` is the CI gate that enforces
     ISO 26262-6 §7.4.1 compliance by catching phantom/stale file references
-    in documentation. The pure extraction helpers cover paths, numerical
-    claims, and the public family-plugin inventory. A silent regression in
-    those helpers would let phantom paths or stale launch-facing support
-    claims slip past the gate.
+    in documentation. Its two pure helpers — ``_expand_path`` (h/cpp and
+    h/hpp shorthand expansion) and ``extract_path_references`` (regex
+    extraction, wildcard/placeholder filtering, and trailing-punctuation
+    cleanup) — are the extraction front door. A silent regression in
+    either would let phantom paths slip past the gate unnoticed. These
+    tests lock their documented behavior using raw in-memory strings so
+    that no filesystem or subprocess is required.
 
 Preconditions:
     ``tools.check_doc_file_references`` is importable (pure-stdlib module
     with no third-party dependencies).
 
 Postconditions:
-    Path shorthand and filtering behavior remains stable. Qualified public
-    support counts and family inventories are compared with the repository,
-    and the two launch-facing support pages remain synchronized.
+    ``_expand_path`` expands the h/cpp and h/hpp shorthand forms and
+    otherwise returns the input unchanged; ``extract_path_references``
+    captures backtick-quoted paths that start with a known repo prefix
+    with 1-based line numbers, skips wildcard and placeholder paths, and
+    strips trailing punctuation. The shorthand expansion is preserved
+    end-to-end with both entries sharing one line number.
 
 Trace IDs:
     - ARCH-CI-QUALITY-GATES (ISO 26262-6 §7.4.1 doc-reference gate)
@@ -29,8 +35,6 @@ Trace IDs:
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 from tools import check_doc_file_references as cdfr
 
@@ -134,92 +138,3 @@ def test_extract_path_references_h_cpp_shorthand_yields_two_entries_same_line() 
     assert refs == [(1, "src/foo.h"), (1, "src/foo.cpp")]
     # The two entries share exactly one line number; guard the invariant.
     assert {line for line, _path in refs} == {1}
-
-
-# ---------------------------------------------------------------------------
-# Public model-support claims
-# ---------------------------------------------------------------------------
-
-
-def test_extract_numerical_claims_checks_qualified_public_counts() -> None:
-    content = (
-        "The checkout contains 71 Python family plugins, "
-        "197 E2E model manifests, and 74 E2E family indexes.\n"
-        "It has 36 C++ runtime strategy keys.\n"
-    )
-    actual_counts = {
-        "family_plugins": 78,
-        "families_total_py": 500,
-        "manifests": 203,
-        "family_indexes": 78,
-        "runtime_strategy_keys": 79,
-    }
-
-    findings = cdfr.extract_numerical_claims(
-        content,
-        "website/docs/getting-started/model-support.md",
-        actual_counts,
-    )
-
-    assert len(findings) == 4
-    messages = [finding.message for finding in findings]
-    assert any("71 Python family plugin" in message for message in messages)
-    assert any("197 E2E model manifest" in message for message in messages)
-    assert any("74 E2E family indexes" in message for message in messages)
-    assert any("36 C++ runtime strategy keys" in message for message in messages)
-
-
-def test_extract_numerical_claims_accepts_current_public_counts() -> None:
-    content = (
-        "The checkout contains 78 Python family plugins, "
-        "203 E2E model manifests, and 78 E2E family indexes.\n"
-        "It has 79 C++ runtime strategy keys.\n"
-    )
-    actual_counts = {
-        "family_plugins": 78,
-        "families_total_py": 500,
-        "manifests": 203,
-        "family_indexes": 78,
-        "runtime_strategy_keys": 79,
-    }
-
-    findings = cdfr.extract_numerical_claims(
-        content,
-        "website/docs/getting-started/model-support.md",
-        actual_counts,
-    )
-
-    assert findings == []
-
-
-def test_extract_family_inventory_claims_reports_drift() -> None:
-    content = (
-        "## Family plugin inventory\n\n"
-        "The current Python plugin inventory is:\n\n"
-        "```text\n"
-        "alpha, removed\n"
-        "```\n"
-    )
-
-    findings = cdfr.extract_family_inventory_claims(
-        content,
-        "website/docs/getting-started/model-support.md",
-        {"alpha", "beta"},
-    )
-
-    assert len(findings) == 1
-    assert "missing: beta" in findings[0].message
-    assert "not registered: removed" in findings[0].message
-
-
-def test_public_model_support_pages_match_repository_inventory() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    public_support_docs = [
-        repo_root / "website" / "docs" / "intro.md",
-        repo_root / "website" / "docs" / "getting-started" / "model-support.md",
-    ]
-
-    report = cdfr.check_doc_paths(public_support_docs, repo_root)
-
-    assert report.findings == []
-    assert report.docs_scanned == 2

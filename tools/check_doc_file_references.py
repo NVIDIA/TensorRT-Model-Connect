@@ -8,7 +8,7 @@ ISO 26262-6 §7.4.1 compliance gate: architecture docs must describe only
 implemented code. This tool catches phantom file references and stale counts.
 
 Usage:
-    python tools/check_doc_file_references.py [--strict] [PATH ...]
+    python tools/check_doc_file_references.py [--strict] [website/docs/wiki/]
 
 Exit codes:
     0: All checks passed
@@ -139,39 +139,12 @@ def extract_path_references(
 # Patterns for numerical claims.  Each tuple:
 #   (compiled regex, claim_kind, group index for the number)
 _CLAIM_PATTERNS: List[Tuple[re.Pattern, str, int]] = [
-    # "68 manifests", "68 E2E model manifests", "50 per-model JSON manifests"
-    (
-        re.compile(
-            r"\b(\d+)\s+(?:E2E\s+model\s+|per-model\s+|JSON\s+)*"
-            r"manifest(?:s|[\s-]+file)",
-            re.I,
-        ),
-        "manifests",
-        1,
-    ),
+    # "68 manifests", "68 JSON manifest files", "68 JSON manifests", "50 per-model JSON manifests"
+    (re.compile(r"\b(\d+)\s+(?:per-model\s+)?(?:JSON\s+)?manifest(?:s|[\s-]+file)", re.I), "manifests", 1),
     # "50 models" in E2E context (e.g. "All 50 models")
     (re.compile(r"\b(?:All\s+)?(\d+)\s+models\b", re.I), "models_e2e", 1),
-    # "53 auto-discovered plugins", "78 Python family plugins"
-    (
-        re.compile(
-            r"\b(\d+)\s+(?:auto-discovered\s+|Python\s+family\s+)?plugin",
-            re.I,
-        ),
-        "family_plugins",
-        1,
-    ),
-    # "78 family indexes", "78 E2E family indexes"
-    (
-        re.compile(r"\b(\d+)\s+(?:E2E\s+)?family\s+index(?:es)?\b", re.I),
-        "family_indexes",
-        1,
-    ),
-    # "79 C++ runtime strategy keys"
-    (
-        re.compile(r"\b(\d+)\s+C\+\+\s+runtime\s+strategy\s+keys?\b", re.I),
-        "runtime_strategy_keys",
-        1,
-    ),
+    # "53 auto-discovered plugins", "50 plugins"
+    (re.compile(r"\b(\d+)\s+(?:auto-discovered\s+)?plugin", re.I), "family_plugins", 1),
     # "74 test files" in builder context
     (re.compile(r"\b(\d+)\s+test\s+file", re.I), "test_files_generic", 1),
     # "61 test executables" in C++ context
@@ -207,21 +180,12 @@ def _get_actual_counts(repo_root: Path) -> dict:
     else:
         counts["manifests"] = 0
 
-    # E2E family indexes
-    if manifest_dir.is_dir():
-        counts["family_indexes"] = len(list(manifest_dir.glob("*/MODEL.toml")))
-    else:
-        counts["family_indexes"] = 0
-
     # Family plugins (excluding __init__.py and base.py)
     families_dir = repo_root / "python" / "tensorrt_model_connect" / "families"
     if families_dir.is_dir():
         flat_plugins = [
             f for f in families_dir.iterdir()
-            if f.is_file()
-            and f.suffix == ".py"
-            and not f.name.startswith("_")
-            and f.name != "base.py"
+            if f.is_file() and f.suffix == ".py" and f.name not in ("__init__.py", "base.py")
         ]
         package_plugins = [
             d / "plugin.py" for d in families_dir.iterdir()
@@ -230,28 +194,8 @@ def _get_actual_counts(repo_root: Path) -> dict:
         counts["family_plugins"] = len(
             flat_plugins + package_plugins
         )
-        counts["family_plugin_names"] = sorted(
-            [plugin.stem for plugin in flat_plugins]
-            + [plugin.parent.name for plugin in package_plugins]
-        )
     else:
         counts["family_plugins"] = 0
-        counts["family_plugin_names"] = []
-
-    # Runtime strategy keys declared by model metadata
-    runtime_models_dir = repo_root / "src" / "runtime" / "models"
-    runtime_strategy_keys: set[str] = set()
-    if runtime_models_dir.is_dir():
-        strategy_array = re.compile(
-            r"^runtime_strategies\s*=\s*\[(.*?)\]",
-            re.MULTILINE | re.DOTALL,
-        )
-        quoted_value = re.compile(r'"([^"]+)"')
-        for metadata_file in runtime_models_dir.glob("*/MODEL.toml"):
-            content = metadata_file.read_text(encoding="utf-8")
-            for match in strategy_array.finditer(content):
-                runtime_strategy_keys.update(quoted_value.findall(match.group(1)))
-    counts["runtime_strategy_keys"] = len(runtime_strategy_keys)
 
     # Total family .py files (for "N Python files in the families directory" claims)
     if families_dir.is_dir():
@@ -352,12 +296,6 @@ def extract_numerical_claims(
                 elif claim_kind == "family_plugins":
                     actual_key = "family_plugins"
                     label = "family plugins (excluding __init__.py and base.py)"
-                elif claim_kind == "family_indexes":
-                    actual_key = "family_indexes"
-                    label = "E2E family indexes (tests/e2e/models/<family>/MODEL.toml)"
-                elif claim_kind == "runtime_strategy_keys":
-                    actual_key = "runtime_strategy_keys"
-                    label = "runtime strategy keys (src/runtime/models/<family>/MODEL.toml)"
                 elif claim_kind == "cpp_test_executables":
                     actual_key = "cpp_tests"
                     label = "C++ test files (.cpp)"
@@ -400,74 +338,27 @@ def extract_numerical_claims(
     return findings
 
 
-def extract_family_inventory_claims(
-    content: str, doc_file: str, actual_families: set[str]
-) -> List[Finding]:
-    """Check a documented family-plugin inventory against plugin packages."""
-    heading = "## Family plugin inventory"
-    if heading not in content:
-        return []
-
-    section = content.split(heading, 1)[1]
-    match = re.search(r"```text\s*\n(.*?)\n```", section, re.DOTALL)
-    if match is None:
-        return [
-            Finding(
-                level="ERROR",
-                doc_file=doc_file,
-                line_no=content.splitlines().index(heading) + 1,
-                message="Family plugin inventory must use a fenced text block",
-            )
-        ]
-
-    documented_families = {
-        family.strip()
-        for family in match.group(1).replace("\n", " ").split(",")
-        if family.strip()
-    }
-    missing = sorted(actual_families - documented_families)
-    extra = sorted(documented_families - actual_families)
-    if not missing and not extra:
-        return []
-
-    details = []
-    if missing:
-        details.append(f"missing: {', '.join(missing)}")
-    if extra:
-        details.append(f"not registered: {', '.join(extra)}")
-    inventory_line = content[: content.index(match.group(0))].count("\n") + 1
-    return [
-        Finding(
-            level="WARNING",
-            doc_file=doc_file,
-            line_no=inventory_line,
-            message="Family plugin inventory is stale (" + "; ".join(details) + ")",
-        )
-    ]
-
-
 # ---------------------------------------------------------------------------
 # Main check logic
 # ---------------------------------------------------------------------------
 
-def check_doc_paths(scan_paths: List[Path], repo_root: Path) -> CheckReport:
-    """Scan explicit Markdown files or directories and verify references."""
+def check_docs(
+    scan_dir: Path, repo_root: Path
+) -> CheckReport:
+    """Scan markdown files and verify references."""
     report = CheckReport()
     actual_counts = _get_actual_counts(repo_root)
 
-    md_files: set[Path] = set()
-    for scan_path in scan_paths:
-        if scan_path.is_file() and scan_path.suffix == ".md":
-            md_files.add(scan_path)
-            continue
-        for root_dir, _dirs, files in os.walk(scan_path):
-            for fname in files:
-                if fname.endswith(".md"):
-                    md_files.add(Path(root_dir) / fname)
+    # Find all .md files
+    md_files: List[Path] = []
+    for root_dir, _dirs, files in os.walk(scan_dir):
+        for fname in sorted(files):
+            if fname.endswith(".md"):
+                md_files.append(Path(root_dir) / fname)
 
     report.docs_scanned = len(md_files)
 
-    for md_path in sorted(md_files):
+    for md_path in md_files:
         content = md_path.read_text(encoding="utf-8", errors="replace")
         rel_doc = str(md_path.relative_to(repo_root))
 
@@ -492,22 +383,9 @@ def check_doc_paths(scan_paths: List[Path], repo_root: Path) -> CheckReport:
         report.findings.extend(claim_findings)
         report.claims_checked += len(claim_findings)
 
-        inventory_findings = extract_family_inventory_claims(
-            content,
-            rel_doc,
-            set(actual_counts["family_plugin_names"]),
-        )
-        report.findings.extend(inventory_findings)
-        report.claims_checked += len(inventory_findings)
-
     # Add actual counts to report for summary
     report._actual_counts = actual_counts  # type: ignore[attr-defined]
     return report
-
-
-def check_docs(scan_dir: Path, repo_root: Path) -> CheckReport:
-    """Scan one Markdown directory and verify references."""
-    return check_doc_paths([scan_dir], repo_root)
 
 
 # ---------------------------------------------------------------------------
@@ -521,14 +399,10 @@ def parse_args() -> argparse.Namespace:
         epilog=__doc__,
     )
     parser.add_argument(
-        "scan_paths",
-        nargs="*",
-        default=["website/docs/wiki/"],
-        metavar="PATH",
-        help=(
-            "Markdown file or directory to scan; accepts multiple paths "
-            "(default: website/docs/wiki/)"
-        ),
+        "scan_dir",
+        nargs="?",
+        default="website/docs/wiki/",
+        help="Directory to scan for .md files (default: website/docs/wiki/)",
     )
     parser.add_argument(
         "--repo-root",
@@ -553,33 +427,23 @@ def main() -> int:
         # tools/check_doc_file_references.py -> repo root is ../
         repo_root = Path(__file__).resolve().parent.parent
 
-    scan_paths = [(repo_root / path).resolve() for path in args.scan_paths]
-    invalid_paths = [
-        path
-        for path in scan_paths
-        if not path.exists() or (path.is_file() and path.suffix != ".md")
-    ]
-    if invalid_paths:
-        for path in invalid_paths:
-            print(f"ERROR: Markdown scan path does not exist: {path}", file=sys.stderr)
+    scan_dir = (repo_root / args.scan_dir).resolve()
+    if not scan_dir.is_dir():
+        print(f"ERROR: Scan directory does not exist: {scan_dir}", file=sys.stderr)
         return 1
 
     print(f"Repository root: {repo_root}")
-    print("Scanning:")
-    for path in scan_paths:
-        print(f"  {path}")
+    print(f"Scanning: {scan_dir}")
     print()
 
-    report = check_doc_paths(scan_paths, repo_root)
+    report = check_docs(scan_dir, repo_root)
 
     # Print actual counts
     counts = getattr(report, "_actual_counts", {})
     if counts:
         print("=== Actual file counts ===")
         print(f"  E2E manifests (tests/e2e/models/<family>/manifests/*.json): {counts.get('manifests', '?')}")
-        print(f"  E2E family indexes (<family>/MODEL.toml):              {counts.get('family_indexes', '?')}")
         print(f"  Family plugins (excl __init__/base):               {counts.get('family_plugins', '?')}")
-        print(f"  Runtime strategy keys (<family>/MODEL.toml):        {counts.get('runtime_strategy_keys', '?')}")
         print(f"  Family dir total .py files:                        {counts.get('families_total_py', '?')}")
         print(f"  C++ test files (tests/cpp/*.cpp):                  {counts.get('cpp_tests', '?')}")
         print(f"  Builder test files (tests/builder/test_*.py):      {counts.get('builder_tests', '?')}")

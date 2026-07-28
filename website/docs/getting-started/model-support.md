@@ -2,12 +2,16 @@
 title: Model Support
 ---
 
-Model support is defined by two source-of-truth surfaces:
+import ModelSupportInventory from '@site/src/components/ModelSupportInventory';
+
+The published support inventory is generated at documentation build time from
+three source-of-truth surfaces:
 
 - Python family plugins under `python/tensorrt_model_connect/families/`.
 - E2E manifests under `tests/e2e/models/`.
+- Runtime strategy metadata under `src/runtime/models/`.
 
-The current checkout contains 78 Python family plugins, 203 E2E model manifests, and 78 E2E family indexes.
+<ModelSupportInventory />
 
 ## Support Levels
 
@@ -39,21 +43,7 @@ The E2E manifests are the most concrete proof because they name the model ID, ru
 
 ## Family plugin inventory
 
-The current Python plugin inventory is:
-
-```text
-albert, bark, bart, bert, bloom, canary, chronos_bolt, codegen, convbert,
-deberta, deepseek_ocr, deepseek_v2, distilbert, dpr, eagle_vlm, electra,
-elf_flow, falcon, flux, fnet, gemma, glm, gpt2, gpt_neo, gpt_neox,
-gpt_oss, granite, internlm, internvl, lance, llama, locateanything,
-ltx_video, m2m_100, magpie_tts, mamba, marian, mistral, mixtral,
-modernbert, mpnet, nemotron, nemotron_h, nemotron_labs_diffusion,
-nemotron_speech_streaming, olmo, olmo2, opt, patchtsmixer, patchtst,
-personaplex, phi, phi4_multimodal, phi_moe, pixart, qwen, qwen3_5,
-qwen3_omni, qwen_image, qwen_moe, qwen_vl, roberta, rwkv, sam, sam3,
-sana_wm, segformer, stablelm, starcoder2, t5, timesfm, timm_vit,
-wan2_2_ti2v, wan_t2v, whisper, xglm, xlnet, z_image
-```
+<ModelSupportInventory variant="families" />
 
 ## How support is resolved
 

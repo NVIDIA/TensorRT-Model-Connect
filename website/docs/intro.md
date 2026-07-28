@@ -5,6 +5,7 @@ description: User documentation for building TensorRT bundles from HuggingFace m
 ---
 
 import useBaseUrl from '@docusaurus/useBaseUrl';
+import ModelSupportInventory from '@site/src/components/ModelSupportInventory';
 
 
 TensorRT-Model-Connect is a deployment stack for deep learning inference.
@@ -130,9 +131,7 @@ TensorRT-Model-Connect addresses that by separating "understand the model" from 
 
 The facts in these pages were refreshed from the current checkout:
 
-- 78 Python family plugins under `python/tensorrt_model_connect/families/`.
-- 203 E2E model manifests and 78 family indexes under `tests/e2e/models/`.
-- 79 C++ runtime strategy keys registered by model manifests under `src/runtime/models/`.
+<ModelSupportInventory variant="facts" />
 
 ## Reading order
 
