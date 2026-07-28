@@ -15,6 +15,7 @@ const sidebars = {
         'getting-started/environment-and-repro',
         'getting-started/inference-fundamentals',
         'getting-started/quick-start',
+        'getting-started/wan2-2-thor-from-scratch',
         'getting-started/installation',
         'getting-started/build-and-run',
         'getting-started/model-support'

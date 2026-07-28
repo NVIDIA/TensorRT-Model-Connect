@@ -106,7 +106,7 @@ If generation fails, classify the failure before changing code:
 ## Jetson Thor: Wan2.2 720p In Two Commands
 
 Use TensorRT 11.2.0.113 and an aarch64 Model Connect wheel built from
-`main@00acabb1` or later. Install both wheels once; the `wan` extra is needed
+`main@ec61f242` or later. Install both wheels once; the `wan` extra is needed
 only while the bundle is built:
 
 ```bash
@@ -139,6 +139,10 @@ The first command downloads the pinned checkpoint from Hugging Face, verifies
 its contents, loads the packaged FP8 scales, and builds the target-specific
 TensorRT bundle. No local checkpoint path, quantization JSON, plugin path, or
 backend selector is needed.
+
+For a board that does not already have Docker, TensorRT, Model Connect, or a
+checkpoint cache, follow [Wan2.2 On A Fresh Jetson Thor](wan2-2-thor-from-scratch.md)
+instead.
 
 The official bundle profile already supplies 1280x704, 121 frames, 50 steps,
 CFG 5, flow shift 5, and 24 FPS. The runtime defaults supply the 7/2 exact-step
