@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "runtime/models/z_image/gpu_matmul.h"
 #include "runtime/models/z_image/pipeline.h"
 
 #include <iostream>
@@ -60,6 +61,16 @@ void test_zimage_attention_mask() {
           "Z-Image attention mask hides unused fixed caption slots");
 }
 
+void test_zimage_gpu_matmul_policy() {
+    check(trtmc::z_image_should_use_gpu_matmul(4096, 64, 3840),
+          "Z-Image 1024px patch embedding uses GPU matmul");
+    check(trtmc::z_image_should_use_gpu_matmul(512, 2560, 3840),
+          "Z-Image caption projection uses GPU matmul");
+    check(!trtmc::z_image_should_use_gpu_matmul(1, 256, 3840),
+          "Z-Image timestep projection stays on CPU below threshold");
+    check(!trtmc::z_image_should_use_gpu_matmul(1, 16, 16), "Z-Image tiny projections stay on CPU");
+}
+
 } // namespace
 
 int main() {
@@ -67,6 +78,7 @@ int main() {
     test_zimage_initial_latent_contract();
     test_zimage_text_encoder_input_shape();
     test_zimage_attention_mask();
+    test_zimage_gpu_matmul_policy();
     if (failures > 0) {
         std::cerr << failures << " z-image pipeline test(s) FAILED\n";
     }

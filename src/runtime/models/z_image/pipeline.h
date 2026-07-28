@@ -20,6 +20,8 @@
 
 namespace trtmc {
 
+class ZImageGpuMatmul;
+
 /// Internal layout descriptor for Z-Image (latent grid, patches, dims).
 /// Declared here so that ``ZImagePipeline`` private helpers can refer to it
 /// without dragging the full pipeline body into the header.
@@ -177,6 +179,7 @@ class ZImagePipeline final : public IPipeline {
     std::unique_ptr<TrtModule> text_encoder_;
     std::unique_ptr<TrtModule> denoiser_;
     std::unique_ptr<TrtModule> vae_;
+    std::unique_ptr<ZImageGpuMatmul> gpu_matmul_;
     ZImageDiffusionConfig config_;
     ZImageCommonPreprocessorWeights weights_;
     ZImagePreprocessorWeights z_weights_;

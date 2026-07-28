@@ -6,10 +6,12 @@
 #include "runtime/models/z_image/pipeline.h"
 
 #include "runtime/domains/diffusion/diffusion_math.h"
+#include "runtime/models/z_image/gpu_matmul.h"
 #include "runtime/models/z_image/z_image_batch_utils.h"
 #include "runtime/models/z_image/z_image_scheduler_helpers.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -44,6 +46,15 @@ constexpr float kRopeTheta = 256.0F;
 constexpr int32_t kRopeDimT = 32;
 constexpr int32_t kRopeDimH = 48;
 constexpr int32_t kRopeDimW = 48;
+
+void run_preprocessor_matmul(ZImageGpuMatmul* gpu_matmul, const float* lhs, const float* rhs,
+                             const float* bias, float* output, int32_t rows, int32_t inner,
+                             int32_t columns, bool& used_gpu) {
+    used_gpu = z_image_should_use_gpu_matmul(rows, inner, columns) && gpu_matmul != nullptr &&
+               gpu_matmul->run(lhs, rhs, bias, output, rows, inner, columns);
+    if (!used_gpu)
+        cpu_matmul_bias(lhs, rhs, bias, output, rows, inner, columns);
+}
 
 // ---------------------------------------------------------------------------
 // Layout helper (``ZImageLayout`` is declared in pipeline.h so private
@@ -198,7 +209,8 @@ ZImagePipeline::ZImagePipeline(std::unique_ptr<TrtModule> text_encoder,
                                int32_t tensor_parallel_rank, int32_t tensor_parallel_size)
     : distributed_owner_(std::move(distributed_owner)), tensor_parallel_rank_(tensor_parallel_rank),
       tensor_parallel_size_(tensor_parallel_size), text_encoder_(std::move(text_encoder)),
-      denoiser_(std::move(denoiser)), vae_(std::move(vae)), config_(std::move(config)),
+      denoiser_(std::move(denoiser)), vae_(std::move(vae)),
+      gpu_matmul_(std::make_unique<ZImageGpuMatmul>()), config_(std::move(config)),
       weights_(std::move(weights)), z_weights_(std::move(z_weights)),
       tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
       bundle_path_(std::move(bundle_path)) {
@@ -388,6 +400,7 @@ bool ZImagePipeline::run_denoiser_batched(
 
 void ZImagePipeline::project_caption(const std::vector<float>& text_emb, int32_t actual_len,
                                      int32_t padded_len, std::vector<float>& projected) const {
+    const auto timing_start = std::chrono::steady_clock::now();
     const int32_t te_dim = config_.text_encoder_dim;
     const int32_t dit_dim = config_.dit_dim;
     const int32_t text_seq = config_.text_seq_len;
@@ -415,8 +428,10 @@ void ZImagePipeline::project_caption(const std::vector<float>& text_emb, int32_t
 
     // Linear(te_dim, dit_dim) + bias
     projected.resize(static_cast<std::size_t>(text_seq) * static_cast<std::size_t>(dit_dim));
-    cpu_matmul_bias(normed.data(), z_weights_.cap_proj_weight.data(),
-                    z_weights_.cap_proj_bias.data(), projected.data(), text_seq, te_dim, dit_dim);
+    bool used_gpu = false;
+    run_preprocessor_matmul(gpu_matmul_.get(), normed.data(), z_weights_.cap_proj_weight.data(),
+                            z_weights_.cap_proj_bias.data(), projected.data(), text_seq, te_dim,
+                            dit_dim, used_gpu);
 
     // Fill padding positions (actual_len..text_seq) with cap_pad_token
     if (!z_weights_.cap_pad_token.empty()) {
@@ -431,6 +446,11 @@ void ZImagePipeline::project_caption(const std::vector<float>& text_emb, int32_t
     }
 
     (void)padded_len; // padded_len used for RoPE, not projection
+    const auto elapsed =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - timing_start)
+            .count();
+    std::cerr << "[trtmc.preprocess_timing] label=\"z_image_caption_projection\" execute_ms="
+              << elapsed << " launches=1 implementation=\"" << (used_gpu ? "gpu" : "cpu") << "\"\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -644,8 +664,9 @@ ImageResult ZImagePipeline::decode_z_image_result(int32_t z_dim, int32_t h_lat, 
 
 namespace {
 
-void compute_timestep_embedding(const ZImagePreprocessorWeights& z_weights, int32_t freq_dim,
-                                float raw_timestep, std::vector<float>& temb_out) {
+int32_t compute_timestep_embedding(ZImageGpuMatmul* gpu_matmul,
+                                   const ZImagePreprocessorWeights& z_weights, int32_t freq_dim,
+                                   float raw_timestep, std::vector<float>& temb_out) {
     const float t_for_embedding = 1000.0F - raw_timestep;
     const int32_t half = freq_dim / 2;
     std::vector<float> sinusoidal(static_cast<std::size_t>(freq_dim));
@@ -658,13 +679,20 @@ void compute_timestep_embedding(const ZImagePreprocessorWeights& z_weights, int3
 
     const int32_t mid_dim = static_cast<int32_t>(z_weights.t_embedder_mlp_0_bias.size());
     std::vector<float> h1(static_cast<std::size_t>(mid_dim));
-    cpu_matmul_bias(sinusoidal.data(), z_weights.t_embedder_mlp_0_weight.data(),
-                    z_weights.t_embedder_mlp_0_bias.data(), h1.data(), 1, freq_dim, mid_dim);
+    int32_t gpu_launches = 0;
+    bool used_gpu = false;
+    run_preprocessor_matmul(gpu_matmul, sinusoidal.data(), z_weights.t_embedder_mlp_0_weight.data(),
+                            z_weights.t_embedder_mlp_0_bias.data(), h1.data(), 1, freq_dim, mid_dim,
+                            used_gpu);
+    gpu_launches += used_gpu ? 1 : 0;
     cpu_silu_inplace(h1.data(), static_cast<std::size_t>(mid_dim));
 
     temb_out.resize(static_cast<std::size_t>(freq_dim));
-    cpu_matmul_bias(h1.data(), z_weights.t_embedder_mlp_2_weight.data(),
-                    z_weights.t_embedder_mlp_2_bias.data(), temb_out.data(), 1, mid_dim, freq_dim);
+    run_preprocessor_matmul(gpu_matmul, h1.data(), z_weights.t_embedder_mlp_2_weight.data(),
+                            z_weights.t_embedder_mlp_2_bias.data(), temb_out.data(), 1, mid_dim,
+                            freq_dim, used_gpu);
+    gpu_launches += used_gpu ? 1 : 0;
+    return gpu_launches;
 }
 
 std::vector<std::uint32_t> resolve_batch_seeds(const std::vector<std::string>& prompts,
@@ -974,27 +1002,43 @@ bool ZImagePipeline::run_denoise_loop_for_chunk(
     std::vector<float> denoiser_output;
     std::vector<float> sample_noise_pred;
     std::vector<float> noise_pred(static_cast<std::size_t>(batch) * latent_size);
+    double patch_embedding_ms = 0.0;
+    double timestep_embedding_ms = 0.0;
+    int32_t patch_gpu_launches = 0;
+    int32_t timestep_gpu_launches = 0;
 
     for (int32_t step = 0; step < num_inference_steps; ++step) {
         const float raw_timestep = scheduler.timesteps[static_cast<std::size_t>(step)];
 
-        compute_timestep_embedding(z_weights_, freq_dim, raw_timestep, temb_one);
+        auto timing_start = std::chrono::steady_clock::now();
+        timestep_gpu_launches += compute_timestep_embedding(gpu_matmul_.get(), z_weights_, freq_dim,
+                                                            raw_timestep, temb_one);
+        timestep_embedding_ms += std::chrono::duration<double, std::milli>(
+                                     std::chrono::steady_clock::now() - timing_start)
+                                     .count();
         for (int32_t b = 0; b < batch; ++b) {
             std::copy(temb_one.begin(), temb_one.end(),
                       temb_b.begin() +
                           static_cast<std::ptrdiff_t>(b) * static_cast<std::ptrdiff_t>(freq_dim));
         }
 
+        timing_start = std::chrono::steady_clock::now();
         for (int32_t b = 0; b < batch; ++b) {
             const auto* sample_latents_ptr =
                 latents.data() + static_cast<std::size_t>(b) * latent_size;
             sample_latents.assign(sample_latents_ptr, sample_latents_ptr + latent_size);
             patchify_2d(sample_latents, layout.z_dim, layout.h_lat, layout.w_lat, patches);
-            cpu_matmul_bias(patches.data(), z_weights_.x_embed_weight.data(),
-                            z_weights_.x_embed_bias.data(),
-                            hidden_b.data() + static_cast<std::size_t>(b) * hidden_size,
-                            layout.num_patches, layout.patch_dim, layout.dit_dim);
+            bool used_gpu = false;
+            run_preprocessor_matmul(gpu_matmul_.get(), patches.data(),
+                                    z_weights_.x_embed_weight.data(),
+                                    z_weights_.x_embed_bias.data(),
+                                    hidden_b.data() + static_cast<std::size_t>(b) * hidden_size,
+                                    layout.num_patches, layout.patch_dim, layout.dit_dim, used_gpu);
+            patch_gpu_launches += used_gpu ? 1 : 0;
         }
+        patch_embedding_ms += std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - timing_start)
+                                  .count();
 
         if (engine_is_batched) {
             if (!run_denoiser_batched(hidden_b, caption_projected_b, temb_b, rope_cos_b, rope_sin_b,
@@ -1027,6 +1071,12 @@ bool ZImagePipeline::run_denoise_loop_for_chunk(
         scheduler.step(noise_pred.data(), latents.data(), latents.data(), latents.size(), step);
         log_step_stats(step, num_inference_steps, raw_timestep, latents);
     }
+    std::cerr << "[trtmc.preprocess_timing] label=\"z_image_patch_embedding\" execute_ms="
+              << patch_embedding_ms << " launches=" << (num_inference_steps * batch)
+              << " gpu_launches=" << patch_gpu_launches << "\n";
+    std::cerr << "[trtmc.preprocess_timing] label=\"z_image_timestep_embedding\" execute_ms="
+              << timestep_embedding_ms << " launches=" << (num_inference_steps * 2)
+              << " gpu_launches=" << timestep_gpu_launches << "\n";
     return true;
 }
 
