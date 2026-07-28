@@ -1029,6 +1029,17 @@ class TestFamilyPlugin:
 
 
 class TestSharedModules:
+    def test_graph_tooling_triggers_owned_units(self, imap):
+        """Opt-in graph tooling runs its focused builder and tools suites."""
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/graph_patch.py",
+            imap,
+        )
+        assert match.rule == "graph_tooling"
+        assert match.models == []
+        assert match.unit_tiers == ["builder", "tools"]
+        assert match.rebuild_cpp is False
+
     def test_shared_module_all_models(self, imap):
         """checkpoint_mapper.py -> all models (no escalation)."""
         match = test_impact.classify_file(

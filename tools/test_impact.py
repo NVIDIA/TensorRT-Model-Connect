@@ -1408,6 +1408,20 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestUnitTiers.test_benchmark_python_triggers_owned_units",),
         ),
         ClassificationRule(
+            priority=96,
+            name="graph_tooling",
+            matcher=_regex_rule(
+                r"python/tensorrt_model_connect/graph_[A-Za-z0-9_]+\.py$"
+            ),
+            resolver=_match_result(
+                "graph_tooling",
+                _no_models,
+                ["builder", "tools"],
+                False,
+            ),
+            covered_by=("TestSharedModules.test_graph_tooling_triggers_owned_units",),
+        ),
+        ClassificationRule(
             priority=100,
             name="shared_builder_module",
             matcher=_path_startswith("python/tensorrt_model_connect/"),
