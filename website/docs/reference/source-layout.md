@@ -3,19 +3,23 @@ title: Source Layout
 ---
 
 This page is a map of the current repository. Native model support is
-deliberately split across three matching, model-owned descriptors:
+deliberately split across three linked, model-owned descriptors:
 
 | Path | Authority |
 | --- | --- |
-| `python/tensorrt_model_connect/families/<family>/MODEL.toml` | Python family discovery, aliases, capabilities, and adapters |
-| `src/runtime/models/<family>/MODEL.toml` | Runtime DSO name, plugin entry points, strategy keys, config schemas, and C++ tests |
-| `tests/e2e/models/<family>/MODEL.toml` | E2E manifests, model-local plugins, defaults, and test ownership |
+| `python/tensorrt_model_connect/families/<builder-family>/MODEL.toml` | Python family discovery, aliases, capabilities, and adapters |
+| `src/runtime/models/<runtime-owner>/MODEL.toml` | Runtime DSO name, plugin entry points, strategy keys, config schemas, and C++ tests |
+| `tests/e2e/models/<e2e-family>/MODEL.toml` | E2E manifests, model-local plugins, defaults, and test ownership |
 
-The `<family>` directory name and descriptor `id` must agree. At this revision,
-all three trees contain 78 family descriptors. The E2E descriptors declare 203
-JSON manifests; runtime descriptors declare 79 unique strategy keys because one
-family exposes two strategies. Treat these numbers as a checked snapshot, not a
-constant: the descriptor files are the source of truth.
+Each directory name must agree with the `id` in its own descriptor. The three
+physical names usually match, but their link is the exact
+`runtime_strategy`, not filename equality: current builder/E2E owners
+`magpie_tts` and `wan_t2v` map to runtime owners `magpie` and `wan`,
+respectively. At this revision, all three trees contain 78 descriptors. The E2E
+descriptors declare 203 JSON manifests; runtime descriptors declare 79 unique
+strategy keys because one runtime owner exposes two strategies. Treat these
+numbers as a checked snapshot, not a constant: the descriptor files are the
+source of truth.
 
 ## Top-level directories
 

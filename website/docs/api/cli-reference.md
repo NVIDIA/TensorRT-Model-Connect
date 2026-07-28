@@ -54,8 +54,30 @@ python -m tensorrt_model_connect build <hf-repo-or-local-dir> -o <output.trtfb>
 | `--verbose` | Enable verbose TensorRT builder output. |
 
 For families that require a tokenizer, `trtmc build` fails instead of writing
-an unusable bundle when `tokenizer.json` cannot be reused or generated. If
-generation needs repository-provided code, review that code and pin
+an unusable bundle when `tokenizer.json` cannot be reused or generated.
+Repair is an in-place transaction in the resolved checkpoint directory:
+standard slow-to-fast conversion runs first, then the family fallback.
+Success can create or replace the local `tokenizer.json`, so a local input
+directory must be writable; use a writable copy when the source snapshot must
+remain immutable. For diffusion builds, the family-owned tokenizer-section
+hook selects directories and invokes the same repair callback before
+special-token detection and config reconciliation.
+
+Before repair, an existing original is atomically moved to
+`original-tokenizer.json` in a hidden `tokenizer-recovery-*` directory. If
+that directory cannot be reserved or the move fails, the original remains
+untouched. On ordinary repair failure, the builder removes the candidate and
+restores the original. When an original existed, a candidate-cleanup or
+restoration failure reports the durable path that still preserves it for
+manual recovery. With no original, ordinary cleanup leaves
+`tokenizer.json` absent; if that cleanup itself fails, the unsuccessful
+candidate can remain at the canonical path and the terminal error reports the
+cleanup failure rather than an original-recovery path. No bundle is written
+after a failed repair. Once a compatible replacement commits, cleanup of the
+quarantined old artifact is best-effort: a cleanup failure does not undo or
+misreport the successful repair, and a warning identifies the recovery
+directory where cleanup residue may remain.
+If generation needs repository-provided code, review that code and pin
 `--model-revision` to the reviewed commit before passing
 `--trust-remote-code`.
 

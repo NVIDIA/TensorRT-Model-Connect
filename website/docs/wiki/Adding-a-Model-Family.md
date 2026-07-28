@@ -5,16 +5,21 @@ guide is [Add a Model Family](../extend/add-model-family.md).
 
 ## Required ownership roots
 
-A family owns three directories with the same ID:
+Native support links three ownership directories:
 
 ```text
-python/tensorrt_model_connect/families/<family>/
-src/runtime/models/<family>/
-tests/e2e/models/<family>/
+python/tensorrt_model_connect/families/<builder-family>/
+src/runtime/models/<runtime-owner>/
+tests/e2e/models/<e2e-family>/
 ```
 
-Each directory requires a `MODEL.toml`. Do not create a flat
-`families/<family>.py` module and do not edit a central CMake plugin list.
+Each directory requires a `MODEL.toml`, and each descriptor's `id` matches its
+own directory. The names normally match, but the exact `runtime_strategy`
+links the Python and E2E owners to the C++ owner. Existing compatibility
+mappings include `magpie_tts` → `magpie` and `wan_t2v` → `wan`; the
+builder/E2E names are on the left and the runtime owner is on the right. Do not
+create a flat `families/<builder-family>.py` module and do not edit a central
+CMake plugin list.
 
 ## Python side
 
@@ -50,7 +55,7 @@ unrelated family.
 
 ## Runtime side
 
-`src/runtime/models/<family>/MODEL.toml` declares:
+`src/runtime/models/<runtime-owner>/MODEL.toml` declares:
 
 - `id`
 - `runtime_library`
@@ -64,7 +69,7 @@ normally family-qualified, such as `gpt2_decoder_kv_cache`.
 
 ## E2E side
 
-`tests/e2e/models/<family>/MODEL.toml` lists the JSON manifests and supplies
+`tests/e2e/models/<e2e-family>/MODEL.toml` lists the JSON manifests and supplies
 task defaults. Each buildable manifest needs the exact `runtime_strategy`, a
 `task_strategy` (or a matrix mapping), and a non-empty `testcases` array.
 
@@ -87,7 +92,7 @@ PYTHONPATH=python:. python3 -m pytest \
   tests/tools/test_model_plugin_encapsulation_static.py -q
 
 PYTHONPATH=python:. python3 -m pytest \
-  tests/e2e/models/<family> \
+  tests/e2e/models/<e2e-family> \
   --e2e-model <manifest-name> \
   --engine-dir /path/to/engines \
   --trtmc-binary ./build/trtmc \

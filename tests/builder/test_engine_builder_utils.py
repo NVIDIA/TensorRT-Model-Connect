@@ -15,6 +15,8 @@ Postconditions: HF directories are correctly identified, tokenizer special-token
 from __future__ import annotations
 
 import json
+import os
+import stat
 import sys
 import types
 from pathlib import Path
@@ -701,6 +703,109 @@ class TestEnsureTokenizerJson:
         )
 
     @pytest.mark.parametrize(
+        "path_kind",
+        ("fifo", "directory", "device"),
+    )
+    def test_native_compatibility_rejects_nonregular_paths_without_reading(
+        self,
+        tmp_path,
+        path_kind,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        if path_kind == "fifo":
+            os.mkfifo(tokenizer_path)
+        elif path_kind == "directory":
+            tokenizer_path.mkdir()
+        else:
+            tokenizer_path.symlink_to("/dev/null")
+
+        assert (
+            engine_builder._native_tokenizer_json_error(tokenizer_path)
+            == "tokenizer.json must resolve to a regular file"
+        )
+
+    def test_native_compatibility_accepts_symlink_to_regular_file(
+        self,
+        tmp_path,
+    ):
+        target_path = tmp_path / "stored-tokenizer.json"
+        target_path.write_text(
+            json.dumps(_native_tokenizer_payload("BPE")),
+            encoding="utf-8",
+        )
+        tokenizer_path = tmp_path / "tokenizer.json"
+        tokenizer_path.symlink_to(target_path.name)
+
+        assert engine_builder._native_tokenizer_json_error(tokenizer_path) is None
+
+    def test_native_compatibility_reports_invalid_utf8_without_escaping(
+        self,
+        tmp_path,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        tokenizer_path.write_bytes(b"\xff\xfe")
+
+        assert (
+            "cannot decode tokenizer.json as UTF-8"
+            in engine_builder._native_tokenizer_json_error(tokenizer_path)
+        )
+
+    def test_native_compatibility_reports_deep_json_without_recursion_escape(
+        self,
+        tmp_path,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        tokenizer_path.write_text(
+            '{"model":{"type":"BPE","vocab":{"a":0},"merges":[]},'
+            f'"ignored":{"[" * 20000}0{"]" * 20000}' + "}",
+            encoding="utf-8",
+        )
+
+        error = engine_builder._native_tokenizer_json_error(tokenizer_path)
+
+        assert error is not None
+        assert "nesting" in error
+
+    @pytest.mark.parametrize("model_type", ("BPE", "WordPiece"))
+    def test_native_compatibility_rejects_negative_required_added_token_ids(
+        self,
+        tmp_path,
+        model_type,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        tokenizer_path.write_text(
+            json.dumps(
+                _native_tokenizer_payload(
+                    model_type,
+                    added_tokens=[{"content": "<s>", "id": -1}],
+                )
+            ),
+            encoding="utf-8",
+        )
+
+        assert (
+            "added_tokens[0].id must be non-negative"
+            in engine_builder._native_tokenizer_json_error(tokenizer_path)
+        )
+
+    def test_native_compatibility_preserves_optional_unigram_negative_id(
+        self,
+        tmp_path,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        tokenizer_path.write_text(
+            json.dumps(
+                _native_tokenizer_payload(
+                    "Unigram",
+                    added_tokens=[{"content": "<s>", "id": -1}],
+                )
+            ),
+            encoding="utf-8",
+        )
+
+        assert engine_builder._native_tokenizer_json_error(tokenizer_path) is None
+
+    @pytest.mark.parametrize(
         ("raw", "message"),
         (
             (
@@ -1278,6 +1383,7 @@ class TestEnsureTokenizerJson:
 
         tokenizer = json.loads((tmp_path / "tokenizer.json").read_text())
         assert tokenizer["model"]["vocab"]["hello"] == 5
+        assert not list(tmp_path.glob(".trtmc-*"))
 
     def test_missing_fast_tokenizer_delegates_to_family_plugin(
         self,
@@ -1429,6 +1535,318 @@ class TestEnsureTokenizerJson:
 
         assert tokenizer_path.read_bytes() == original
         assert not tokenizer_path.is_symlink()
+        assert not list(tmp_path.glob(".trtmc-*"))
+
+    def test_deep_existing_json_reaches_normal_repair_failure_and_rollback(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        original = (
+            '{"model":{"type":"BPE","vocab":{"a":0},"merges":[]},'
+            f'"ignored":{"[" * 20000}0{"]" * 20000}' + "}"
+        ).encode()
+        tokenizer_path.write_bytes(original)
+        monkeypatch.setattr(
+            engine_builder,
+            "_generate_standard_tokenizer_json_transactionally",
+            lambda *args, **kwargs: "conversion unavailable",
+        )
+
+        with pytest.raises(RuntimeError, match="refusing to write a bundle"):
+            _ensure_tokenizer_json(tmp_path)
+
+        assert tokenizer_path.read_bytes() == original
+        assert not list(tmp_path.glob(".trtmc-*"))
+
+    def test_standard_cleanup_failure_preserves_original_at_recovery_path(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        original = b'{"malformed":"standard cleanup recovery"}'
+        tokenizer_path.write_bytes(original)
+
+        class FailingAutoTokenizer:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                raise RuntimeError("conversion unavailable")
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FailingAutoTokenizer),
+        )
+        monkeypatch.setattr(
+            engine_builder,
+            "_remove_tokenizer_candidate",
+            lambda _path: (_ for _ in ()).throw(
+                OSError("deterministic cleanup failure")
+            ),
+        )
+
+        error = engine_builder._generate_standard_tokenizer_json_transactionally(
+            tmp_path,
+            tokenizer_path,
+            trust_remote_code=False,
+        )
+
+        assert error is not None
+        assert "original tokenizer.json is preserved at" in error
+        recovery_paths = list(
+            tmp_path.glob(
+                ".trtmc-tokenizer-recovery-*/original-tokenizer.json"
+            )
+        )
+        assert len(recovery_paths) == 1
+        assert recovery_paths[0].read_bytes() == original
+        assert not tokenizer_path.exists()
+
+    @pytest.mark.parametrize(
+        "partial_cleanup",
+        (False, True),
+        ids=("complete-cleanup", "partial-cleanup"),
+    )
+    def test_standard_committed_repair_cleanup_is_best_effort(
+        self,
+        tmp_path,
+        monkeypatch,
+        capsys,
+        partial_cleanup,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        tokenizer_path.write_text(
+            '{"malformed":"discard only after commit"}',
+            encoding="utf-8",
+        )
+
+        class ValidTokenizer:
+            @staticmethod
+            def save_pretrained(path):
+                (Path(path) / "tokenizer.json").write_text(
+                    json.dumps(_native_tokenizer_payload("BPE")),
+                    encoding="utf-8",
+                )
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                return ValidTokenizer()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+        )
+        if partial_cleanup:
+            real_rmtree = engine_builder.shutil.rmtree
+
+            def fail_after_partial_recovery_cleanup(path, *args, **kwargs):
+                cleanup_path = Path(path)
+                if cleanup_path.name.startswith(
+                    ".trtmc-tokenizer-recovery-"
+                ):
+                    (
+                        cleanup_path / "original-tokenizer.json"
+                    ).unlink()
+                    (cleanup_path / "cleanup-residue").write_text(
+                        "partial",
+                        encoding="utf-8",
+                    )
+                    raise OSError("deterministic partial cleanup failure")
+                return real_rmtree(path, *args, **kwargs)
+
+            monkeypatch.setattr(
+                engine_builder.shutil,
+                "rmtree",
+                fail_after_partial_recovery_cleanup,
+            )
+
+        error = engine_builder._generate_standard_tokenizer_json_transactionally(
+            tmp_path,
+            tokenizer_path,
+            trust_remote_code=False,
+        )
+
+        assert error is None
+        assert (
+            json.loads(tokenizer_path.read_text())["model"]["type"]
+            == "BPE"
+        )
+        stderr = capsys.readouterr().err
+        recovery_dirs = list(
+            tmp_path.glob(".trtmc-tokenizer-recovery-*")
+        )
+        if partial_cleanup:
+            assert len(recovery_dirs) == 1
+            assert (
+                recovery_dirs[0] / "cleanup-residue"
+            ).read_text() == "partial"
+            assert not (
+                recovery_dirs[0] / "original-tokenizer.json"
+            ).exists()
+            assert (
+                "recovery directory may contain residual files" in stderr
+            )
+            assert "original tokenizer.json is preserved" not in stderr
+        else:
+            assert not recovery_dirs
+            assert "cleanup of the previous artifact" not in stderr
+
+    def test_outer_family_committed_repair_survives_partial_cleanup(
+        self,
+        tmp_path,
+        monkeypatch,
+        capsys,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        tokenizer_path.write_text(
+            '{"malformed":"outer family original"}',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            engine_builder,
+            "_generate_standard_tokenizer_json_transactionally",
+            lambda *args, **kwargs: "conversion unavailable",
+        )
+
+        class SuccessfulPlugin:
+            @staticmethod
+            def ensure_tokenizer_json(model_dir, **kwargs):
+                (Path(model_dir) / "tokenizer.json").write_text(
+                    json.dumps(_native_tokenizer_payload("BPE")),
+                    encoding="utf-8",
+                )
+                return True
+
+        real_rmtree = engine_builder.shutil.rmtree
+
+        def fail_after_partial_recovery_cleanup(path, *args, **kwargs):
+            cleanup_path = Path(path)
+            if cleanup_path.name.startswith(
+                ".trtmc-required-tokenizer-recovery-"
+            ):
+                (cleanup_path / "original-tokenizer.json").unlink()
+                (cleanup_path / "cleanup-residue").write_text(
+                    "partial",
+                    encoding="utf-8",
+                )
+                raise OSError("deterministic partial cleanup failure")
+            return real_rmtree(path, *args, **kwargs)
+
+        monkeypatch.setattr(
+            engine_builder.shutil,
+            "rmtree",
+            fail_after_partial_recovery_cleanup,
+        )
+
+        _ensure_tokenizer_json(tmp_path, plugin=SuccessfulPlugin())
+
+        assert (
+            json.loads(tokenizer_path.read_text())["model"]["type"]
+            == "BPE"
+        )
+        recovery_dirs = list(
+            tmp_path.glob(".trtmc-required-tokenizer-recovery-*")
+        )
+        assert len(recovery_dirs) == 1
+        assert (
+            recovery_dirs[0] / "cleanup-residue"
+        ).read_text() == "partial"
+        assert not (
+            recovery_dirs[0] / "original-tokenizer.json"
+        ).exists()
+        stderr = capsys.readouterr().err
+        assert "recovery directory may contain residual files" in stderr
+        assert "original tokenizer.json is preserved" not in stderr
+        assert "family tokenizer hook failed" not in stderr
+
+    def test_outer_cleanup_failure_preserves_original_directory_and_reports_path(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        tokenizer_path.mkdir()
+        (tokenizer_path / "original.bin").write_bytes(b"directory bytes")
+        monkeypatch.setattr(
+            engine_builder,
+            "_generate_standard_tokenizer_json_transactionally",
+            lambda *args, **kwargs: "conversion unavailable",
+        )
+
+        class FailingPlugin:
+            @staticmethod
+            def ensure_tokenizer_json(model_dir, **kwargs):
+                (Path(model_dir) / "tokenizer.json").write_text(
+                    '{"malformed":"failed family candidate"}',
+                    encoding="utf-8",
+                )
+                return False
+
+        monkeypatch.setattr(
+            engine_builder,
+            "_remove_tokenizer_candidate",
+            lambda _path: (_ for _ in ()).throw(
+                OSError("deterministic cleanup failure")
+            ),
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="original tokenizer.json is preserved at",
+        ):
+            _ensure_tokenizer_json(tmp_path, plugin=FailingPlugin())
+
+        recovery_paths = list(
+            tmp_path.glob(
+                ".trtmc-required-tokenizer-recovery-*/"
+                "original-tokenizer.json"
+            )
+        )
+        assert len(recovery_paths) == 1
+        assert stat.S_ISDIR(recovery_paths[0].lstat().st_mode)
+        assert (
+            recovery_paths[0] / "original.bin"
+        ).read_bytes() == b"directory bytes"
+        assert tokenizer_path.read_text() == (
+            '{"malformed":"failed family candidate"}'
+        )
+
+    def test_quarantine_move_failure_keeps_original_at_canonical_path(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        tokenizer_path = tmp_path / "tokenizer.json"
+        original = b'{"malformed":"canonical bytes survive"}'
+        tokenizer_path.write_bytes(original)
+        real_replace = engine_builder.os.replace
+
+        def fail_quarantine_move(source, destination):
+            if (
+                Path(source) == tokenizer_path
+                and ".trtmc-required-tokenizer-recovery-"
+                in str(destination)
+            ):
+                raise OSError("deterministic quarantine move failure")
+            return real_replace(source, destination)
+
+        monkeypatch.setattr(
+            engine_builder.os,
+            "replace",
+            fail_quarantine_move,
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="original remains at its canonical path",
+        ):
+            _ensure_tokenizer_json(tmp_path)
+
+        assert tokenizer_path.read_bytes() == original
         assert not list(tmp_path.glob(".trtmc-*"))
 
     def test_family_hook_cannot_approve_incompatible_tokenizer(

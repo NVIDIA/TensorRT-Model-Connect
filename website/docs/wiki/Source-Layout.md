@@ -16,17 +16,22 @@ of truth for native family/build/runtime/E2E ownership.
 Use these ownership roots:
 
 ```text
-python/tensorrt_model_connect/families/<family>/MODEL.toml
-src/runtime/models/<family>/MODEL.toml
-tests/e2e/models/<family>/MODEL.toml
+python/tensorrt_model_connect/families/<builder-family>/MODEL.toml
+src/runtime/models/<runtime-owner>/MODEL.toml
+tests/e2e/models/<e2e-family>/MODEL.toml
 ```
+
+Each descriptor `id` matches its own directory. Names normally match across
+the roots, but the exact `runtime_strategy` is authoritative when they differ:
+current builder/E2E owners `magpie_tts` and `wan_t2v` map to runtime owners
+`magpie` and `wan`.
 
 An optimized implementation stays family-owned but uses a separate contract:
 
 ```text
-python/tensorrt_model_connect/families/<family>/<implementation>/IMPLEMENTATION.toml
-python/tensorrt_model_connect/families/<family>/<implementation>/profiles/*.toml
-tests/e2e/models/<family>/<implementation>/QUALIFICATION.<target>.toml
+python/tensorrt_model_connect/families/<builder-family>/<implementation>/IMPLEMENTATION.toml
+python/tensorrt_model_connect/families/<builder-family>/<implementation>/profiles/*.toml
+tests/e2e/models/<e2e-family>/<implementation>/QUALIFICATION.<target>.toml
 ```
 
 `IMPLEMENTATION.toml` owns the isolated build adapter and embedded runtime

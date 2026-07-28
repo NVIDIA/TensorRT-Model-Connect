@@ -45,7 +45,7 @@ descriptor. It is not a complete onboarding command.
 Create:
 
 ```text
-python/tensorrt_model_connect/families/<family>/
+python/tensorrt_model_connect/families/<builder-family>/
   MODEL.toml
   __init__.py
   plugin.py
@@ -116,9 +116,11 @@ src/runtime/models/<runtime-owner>/
   <model-owned state, sampler, helpers, and CUDA sources>
 ```
 
-Use the same name for `<family>` and `<runtime-owner>` unless an existing
-compatibility boundary requires a different physical owner. A minimal runtime
-descriptor is:
+Use the same name for `<builder-family>`, `<runtime-owner>`, and
+`<e2e-family>` unless an existing compatibility boundary requires a different
+physical owner. Current exceptions map builder/E2E owner `magpie_tts` to
+runtime owner `magpie`, and `wan_t2v` to `wan`. A minimal runtime descriptor
+is:
 
 ```toml
 id = "example"
@@ -149,19 +151,19 @@ declare them in this same `MODEL.toml` with `runtime_tests` or
 Create:
 
 ```text
-tests/e2e/models/<family>/
+tests/e2e/models/<e2e-family>/
   MODEL.toml
   manifests/<case-name>.json
-  test_<family>_e2e.py
+  test_<e2e-family>_e2e.py
   runner.py
   e2e_plugins/
   <focused family tests and optional thresholds>
 ```
 
-Copy the small `test_<family>_e2e.py` shim from the closest current family,
+Copy the small `test_<e2e-family>_e2e.py` shim from the closest current family,
 rename it for the new family, and keep its import of the sibling `runner.py`.
 This entry point is required: `tools/test_impact.py` selects
-`test_<family>_e2e.py::test_model_e2e[<manifest-name>]` for model-owned E2E
+`test_<e2e-family>_e2e.py::test_model_e2e[<manifest-name>]` for model-owned E2E
 coverage. The descriptor and `runner.py` alone do not create that pytest node.
 
 The E2E index declares every JSON manifest and the defaults for each task
@@ -239,17 +241,62 @@ tokenizer probe and to family fallbacks that can load repository code; it is
 false by default. An optimized adapter receives the public option separately
 and may reject it.
 
+### Optional tokenizer repair hook
+
+If the native family requires tokenizer repair that standard Hugging Face
+slow-to-fast conversion cannot provide, add:
+
+```python
+def ensure_tokenizer_json(
+    self,
+    model_dir,
+    *,
+    previous_error=None,
+    trust_remote_code=False,
+) -> bool:
+    ...
+```
+
+Once repair is needed, standard conversion always runs first. The family hook
+runs only after it fails and while any rejected original `tokenizer.json` is
+quarantined in a durable hidden recovery directory. Do not depend on that
+original remaining at its canonical path. Return true only after writing
+`model_dir/tokenizer.json` as a non-empty regular, non-symlink file accepted by
+the native tokenizer validator. A false return, exception, missing file,
+unsafe file type, or incompatible content causes the outer transaction to
+remove the candidate and restore the original.
+
+Successful repair creates or replaces `tokenizer.json` in the resolved model
+directory, so local checkpoint directories must be writable. When an original
+existed, a failed-candidate cleanup or restore failure identifies the concrete
+`original-tokenizer.json` path retained for manual recovery. With no original,
+ordinary failed-candidate cleanup leaves the canonical path absent; if cleanup
+itself fails, the unsuccessful candidate can remain there and the terminal
+error reports that cleanup failure without claiming an original-recovery path.
+If the initial recovery directory cannot be prepared or the initial move
+fails, the canonical original remains untouched and repair stops. Cleanup of
+an old artifact after a compatible replacement commits is best-effort. A
+cleanup failure does not turn the successful repair into a hook or build
+failure; the compatible canonical file remains installed and a warning names
+the recovery directory where cleanup residue may remain.
+
+For diffusion families,
+`diffusion_tokenizer_bundle_sections()` owns tokenizer-directory priority and
+must invoke its supplied `ensure_tokenizer_json` callback for each required
+directory before returning sections. The builder then detects special tokens
+and reconciles bundle config from the repaired files.
+
 ## 7. Run the declared E2E case
 
 Use the manifest `name`, not the filename stem:
 
 ```bash
 E2E_MODEL=example-small-fp16
-FAMILY=example
+E2E_FAMILY=example
 ENGINE_DIR=/tmp/trtmc-example-engines
 
 PYTHONPATH=python:. pytest \
-  "tests/e2e/models/${FAMILY}/test_${FAMILY}_e2e.py::test_model_e2e[${E2E_MODEL}]" \
+  "tests/e2e/models/${E2E_FAMILY}/test_${E2E_FAMILY}_e2e.py::test_model_e2e[${E2E_MODEL}]" \
   -v \
   --e2e-model "$E2E_MODEL" \
   --engine-dir "$ENGINE_DIR" \

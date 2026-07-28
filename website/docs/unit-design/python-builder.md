@@ -54,6 +54,43 @@ Think of `engine_builder.py` as the build coordinator:
 6. Collect tokenizer and asset files for the selected path.
 7. Write `BundleInfo` and `BundleSection` entries.
 
+### Tokenizer repair transaction
+
+For a native family that requires a tokenizer, the coordinator validates
+`tokenizer.json` before deriving special-token metadata or writing the bundle.
+A missing or incompatible file, including an undersized WordPiece export,
+enters a transaction rooted in the resolved model directory. Standard
+Hugging Face slow-to-fast conversion is attempted first. If it fails, the
+coordinator calls the optional family `ensure_tokenizer_json` hook, passing
+`previous_error` and `trust_remote_code` only when the hook accepts those
+keywords.
+
+Before either attempt, an existing `tokenizer.json` is atomically moved to
+`original-tokenizer.json` in a unique hidden `tokenizer-recovery-*` directory,
+so the family hook sees no rejected file to short-circuit on. If that initial
+recovery directory cannot be reserved or the initial move fails, the canonical
+original stays untouched and repair stops. Commit requires a truthy hook result
+and a non-empty regular, non-symlink file that passes the native tokenizer
+validator. A successful commit creates or replaces the canonical file in place
+and then removes the quarantined old file on a best-effort basis. A
+post-commit cleanup failure does not misreport the repair as failed: the
+compatible canonical replacement remains installed and a warning names the
+recovery directory where cleanup residue may remain. Failed candidates are
+removed and an existing original is restored. When an original existed, a
+candidate-cleanup or restore failure leaves it at a durable recovery path
+included in the terminal error. With no original, ordinary cleanup leaves the
+canonical path absent; if cleanup itself fails, the unsuccessful candidate may
+remain and the error reports that failure without claiming an original
+recovery file. The resolved model directory must be writable, and callers that
+need an immutable snapshot must supply a writable copy.
+
+Diffusion families own tokenizer-directory priority in
+`diffusion_tokenizer_bundle_sections()`. That hook receives the same
+single-directory `ensure_tokenizer_json` callback. The coordinator collects
+those repaired sections before it detects tokenizer special-token behavior,
+then reconciles both generated and family-provided `config_json` metadata with
+the repaired tokenizer.
+
 ## Family plugins
 
 This section describes the native build path; exact-qualified optimized
@@ -98,6 +135,8 @@ Optional methods add modality and optimization behavior:
 | --- | --- |
 | `build_vision_engine` and `get_vl_config` | Vision-language models. |
 | `build_components` and `get_diffusion_config` | Diffusion models with text encoder, denoiser, and VAE components. |
+| `ensure_tokenizer_json` | Family fallback after standard tokenizer conversion fails; must return success and leave a native-compatible regular file. |
+| `diffusion_tokenizer_bundle_sections` | Select diffusion tokenizer directories and invoke the supplied repair callback before returning bundle sections. |
 | `quant_exclude_patterns`, `calibration_data`, `quant_adapter` | Family-specific quantization control. |
 | `fp8_calibrate` | FP8 calibration flows. |
 
@@ -110,6 +149,8 @@ classDiagram
     +build_engine(config, weights, max_cache_length)
     +build_vision_engine(...)
     +build_components(...)
+    +ensure_tokenizer_json(...)
+    +diffusion_tokenizer_bundle_sections(...)
     +quant_exclude_patterns(format)
     +quant_adapter(format)
     +fp8_calibrate(...)

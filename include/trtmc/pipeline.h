@@ -575,7 +575,7 @@ struct TrtmcPipelineOptions {
 // buffer of N entries) and is responsible for releasing the per-result
 // `pixels` buffer via trtmc_image_result_free.
 struct trtmc_image_result_t {
-    float* pixels;            // malloc'd [C*H*W] float32 in [0,1]. nullptr on error.
+    float* pixels;            // malloc'd [num_pixels] float32 in [0,1]. nullptr on error.
     int32_t height;           // image height in pixels
     int32_t width;            // image width in pixels
     int32_t channels;         // number of channels (typically 3)
@@ -604,9 +604,14 @@ void trtmc_image_result_free(trtmc_image_result_t* result);
 // Generate a batch of images. `prompts` is an array of `num_prompts`
 // null-terminated C strings; `seeds` is an array of `num_seeds` uint32_t
 // per-sample seeds. `num_prompts` must equal `num_seeds`.
-// `out_results` is a caller-owned array of `num_prompts`
-// trtmc_image_result_t that the function fills; each result's `pixels`
-// buffer is malloc'd and must be released with trtmc_image_result_free.
+// When `out_results` is non-null and `num_prompts` is positive, it must point
+// to a caller-owned writable array of at least `num_prompts` entries. The
+// function zero-initializes every such entry before validating the remaining
+// arguments or invoking the runtime; release any prior `pixels` allocations
+// before reusing an array. On success, each result's `pixels` buffer is
+// malloc'd and must be released with trtmc_image_result_free. On any non-zero
+// return, every entry remains zero-initialized (`pixels` is nullptr) and
+// contains no allocation to release.
 // Returns TRTMC_OK on success, a non-zero TRTMC_ERR_* code on failure.
 int trtmc_generate_batch(trtmc_pipeline_t handle, const char* const* prompts, int num_prompts,
                          const std::uint32_t* seeds, int num_seeds, int num_inference_steps,

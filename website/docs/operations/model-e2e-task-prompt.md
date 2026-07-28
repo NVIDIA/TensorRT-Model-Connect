@@ -1,23 +1,34 @@
 # Model E2E Task Checklist
 
-Use this checklist for a native single-model bring-up. The three model-owned
-descriptors, not a generic strategy table, define that contract. A delegated
-optimized-runtime qualification instead adds a family-owned implementation
-manifest/profile and `QUALIFICATION.*.toml`; use its producer proof in
-addition to, not as a replacement for, the native support inventory.
+Use this checklist for a native single-model bring-up. Three linked model-owned
+descriptors, not a generic strategy table or an assumed shared directory name,
+define that contract. A delegated optimized-runtime qualification instead adds
+a family-owned implementation manifest/profile and `QUALIFICATION.*.toml`; use
+its producer proof in addition to, not as a replacement for, the native support
+inventory.
 
 ## Inputs
 
-- Family ID: the common `<family>` directory name
+- Builder family: the Python owner directory name, `<builder-family>`
+- Runtime owner: the C++ DSO owner directory name, `<runtime-owner>`
+- E2E family: the test owner directory name, `<e2e-family>`
 - Hugging Face model ID and immutable revision
 - Python descriptor:
-  `python/tensorrt_model_connect/families/<family>/MODEL.toml`
+  `python/tensorrt_model_connect/families/<builder-family>/MODEL.toml`
 - Runtime descriptor:
-  `src/runtime/models/<family>/MODEL.toml`
+  `src/runtime/models/<runtime-owner>/MODEL.toml`
 - E2E descriptor:
-  `tests/e2e/models/<family>/MODEL.toml`
+  `tests/e2e/models/<e2e-family>/MODEL.toml`
 - Runtime strategy: an exact key declared by the runtime descriptor
 - Task strategy: the runner/comparator contract declared by the E2E manifest
+
+The three names usually match, and each descriptor's `id` must match its own
+directory. They are not required to be one physical name, however. The Python
+plugin's `runtime_strategy` and the E2E manifest's `runtime_strategy` select
+the runtime owner. Current compatibility examples are
+`magpie_tts` → `magpie` and `wan_t2v` → `wan`; in both cases the builder and
+E2E names use the left-hand value while the runtime directory uses the
+right-hand value.
 
 Do not substitute generic labels such as `decoder_kv_cache` or
 `vision_language` for a family-owned strategy. For example, current Qwen text
@@ -40,7 +51,8 @@ generation uses `qwen_decoder_kv_cache`.
 
 ## Local checks
 
-Replace `<family>` and `<manifest-name>` with literal values before running:
+Replace `<e2e-family>` and `<manifest-name>` with literal values before
+running:
 
 ```bash
 DOC_REMOTE="github"
@@ -74,7 +86,7 @@ PYTHONPATH=python:. python3 tools/model_ci.py impact \
   --head HEAD
 
 PYTHONPATH=python:. python3 -m pytest \
-  tests/e2e/models/<family> \
+  tests/e2e/models/<e2e-family> \
   --e2e-model <manifest-name> \
   --engine-dir /path/to/engines \
   --trtmc-binary ./build/trtmc \

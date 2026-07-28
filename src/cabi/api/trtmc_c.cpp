@@ -178,17 +178,30 @@ int validate_batch_args(trtmc_pipeline_t handle, const char* const* prompts, int
     return TRTMC_OK;
 }
 
-// Copy results into caller-owned C structs. On OOM, frees what was already
-// produced and returns TRTMC_ERR_RUNTIME with last_error set.
-int copy_results_to_c(const std::vector<trtmc::ImageResult>& results,
-                      trtmc_image_result_t* out_results, int num_prompts) {
+// Establish the public error-state contract before validating any other
+// argument or entering the runtime. A non-null out_results pointer with a
+// positive num_prompts denotes a caller-provided array of that many writable
+// entries.
+void zero_output_results(trtmc_image_result_t* out_results, int num_prompts) {
+    if (out_results == nullptr || num_prompts <= 0) {
+        return;
+    }
     for (int i = 0; i < num_prompts; ++i) {
         std::memset(&out_results[i], 0, sizeof(trtmc_image_result_t));
     }
+}
+
+// Copy results into caller-owned C structs. On OOM, frees what was already
+// produced, restores every entry to its zero state, and returns
+// TRTMC_ERR_RUNTIME with last_error set.
+int copy_results_to_c(const std::vector<trtmc::ImageResult>& results,
+                      trtmc_image_result_t* out_results, int num_prompts) {
+    zero_output_results(out_results, num_prompts);
     for (int i = 0; i < num_prompts; ++i) {
         if (!to_c_image_result(results[static_cast<std::size_t>(i)], &out_results[i])) {
             for (int j = 0; j < i; ++j)
                 trtmc_image_result_free(&out_results[j]);
+            zero_output_results(out_results, num_prompts);
             set_last_error("trtmc_generate_batch: out-of-memory copying pixels");
             return TRTMC_ERR_RUNTIME;
         }
@@ -202,6 +215,7 @@ int trtmc_generate_batch(trtmc_pipeline_t handle, const char* const* prompts, in
                          const std::uint32_t* seeds, int num_seeds, int num_inference_steps,
                          float guidance_scale, trtmc_image_result_t* out_results) {
     clear_last_error();
+    zero_output_results(out_results, num_prompts);
     if (int rc = validate_batch_args(handle, prompts, num_prompts, seeds, num_seeds, out_results);
         rc != TRTMC_OK) {
         return rc;

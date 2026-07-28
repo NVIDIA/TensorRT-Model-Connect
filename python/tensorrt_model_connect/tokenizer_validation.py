@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
+import stat
 from pathlib import Path
 from typing import Any, Callable
 
@@ -148,29 +150,39 @@ def _invalid_json_scalar_error(
     value: object,
     path: str = "tokenizer.json",
 ) -> str | None:
-    if type(value) is float and not math.isfinite(value):
-        return f"{path} contains a non-finite or JSON-overflow number"
-    if type(value) is int:
-        try:
-            native_float = float(value)
-        except OverflowError:
-            return f"{path} contains an integer outside the native JSON number envelope"
-        if not math.isfinite(native_float):
-            return f"{path} contains an integer outside the native JSON number envelope"
-    if isinstance(value, str) and _has_unpaired_surrogate(value):
-        return f"{path} contains an unpaired UTF-16 surrogate"
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if _has_unpaired_surrogate(key):
-                return f"{path} contains a key with an unpaired UTF-16 surrogate"
-            error = _invalid_json_scalar_error(child, f"{path}[{key!r}]")
-            if error:
-                return error
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            error = _invalid_json_scalar_error(child, f"{path}[{index}]")
-            if error:
-                return error
+    pending: list[tuple[object, str]] = [(value, path)]
+    while pending:
+        current, current_path = pending.pop()
+        if type(current) is float and not math.isfinite(current):
+            return (
+                f"{current_path} contains a non-finite or JSON-overflow number"
+            )
+        if type(current) is int:
+            try:
+                native_float = float(current)
+            except OverflowError:
+                return (
+                    f"{current_path} contains an integer outside the native "
+                    "JSON number envelope"
+                )
+            if not math.isfinite(native_float):
+                return (
+                    f"{current_path} contains an integer outside the native "
+                    "JSON number envelope"
+                )
+        if isinstance(current, str) and _has_unpaired_surrogate(current):
+            return f"{current_path} contains an unpaired UTF-16 surrogate"
+        if isinstance(current, dict):
+            for key, child in reversed(tuple(current.items())):
+                if _has_unpaired_surrogate(key):
+                    return (
+                        f"{current_path} contains a key with an unpaired "
+                        "UTF-16 surrogate"
+                    )
+                pending.append((child, f"{current_path}[{key!r}]"))
+        elif isinstance(current, list):
+            for index in range(len(current) - 1, -1, -1):
+                pending.append((current[index], f"{current_path}[{index}]"))
     return None
 
 
@@ -203,6 +215,8 @@ def _added_tokens_error(
                 return error
         token_id = token.get("id", -1)
         content = token.get("content", "")
+        if required and token_id < 0:
+            return f"{path}.id must be non-negative"
         resizes_native_vocab = (
             token_id >= 0
             and (model_type in {"BPE", "WordPiece"} or bool(content))
@@ -772,6 +786,30 @@ def _reject_json_constant(value: str) -> None:
     raise ValueError(f"non-standard numeric constant {value}")
 
 
+def _read_regular_utf8_file(path: Path) -> tuple[str | None, str | None]:
+    """Read a path without blocking and only after its target is a regular file."""
+    descriptor: int | None = None
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(path, flags)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            return None, "tokenizer.json must resolve to a regular file"
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            descriptor = None
+            return stream.read(), None
+    except UnicodeError as exc:
+        return None, f"cannot decode tokenizer.json as UTF-8: {exc}"
+    except OSError as exc:
+        return None, f"cannot read tokenizer.json: {exc}"
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
 def native_tokenizer_json_error(tokenizer_path: Path) -> str | None:
     """Return why ``tokenizer.json`` is incompatible with native tokenizers.
 
@@ -779,15 +817,19 @@ def native_tokenizer_json_error(tokenizer_path: Path) -> str | None:
     and Unigram constructors type-convert. Unknown fields that those
     constructors safely ignore remain allowed.
     """
+    raw_document, read_error = _read_regular_utf8_file(tokenizer_path)
+    if read_error is not None:
+        return read_error
+    assert raw_document is not None
     try:
         document = json.loads(
-            tokenizer_path.read_text(encoding="utf-8"),
+            raw_document,
             parse_constant=_reject_json_constant,
         )
-    except OSError as exc:
-        return f"cannot read tokenizer.json: {exc}"
     except (json.JSONDecodeError, ValueError) as exc:
         return f"invalid tokenizer.json: {exc}"
+    except RecursionError:
+        return "invalid tokenizer.json: nesting exceeds the JSON decoder limit"
 
     scalar_error = _invalid_json_scalar_error(document)
     if scalar_error:
@@ -823,12 +865,15 @@ def native_tokenizer_json_error(tokenizer_path: Path) -> str | None:
         else:
             return "cannot identify a native BPE, WordPiece, or Unigram model"
 
-    if model_type == "BPE":
-        error = _bpe_error(document, model)
-    elif model_type == "WordPiece":
-        error = _wordpiece_error(document, model)
-    else:
-        error = _unigram_error(document, model)
+    try:
+        if model_type == "BPE":
+            error = _bpe_error(document, model)
+        elif model_type == "WordPiece":
+            error = _wordpiece_error(document, model)
+        else:
+            error = _unigram_error(document, model)
+    except RecursionError:
+        return "tokenizer.json nesting exceeds the native validation limit"
     if error:
         return error
     return _added_tokens_error(document, model_type, len(model["vocab"]))

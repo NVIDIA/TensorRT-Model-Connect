@@ -9,9 +9,9 @@
 // Trace ID:       UT-ABI-CPP-03
 // Architecture:   ARCH-FAC-001
 // Unit Design:    UD-CABI-01
-// Intent:         C ABI batch image generation: argument validation + happy path
+// Intent:         C ABI batch image generation: validation, error state, happy path
 // Preconditions:  trtmc::IPipeline default `generate_image_batch` available
-// Postconditions: bad inputs return TRTMC_ERR_INVALID_ARG; happy path fills out_results
+// Postconditions: errors zero out_results; happy path fills caller-owned results
 // =============================================================================
 
 // =============================================================================
@@ -23,9 +23,9 @@
 //   existing C-ABI tests (`test_c_abi_entry`, `test_c_abi_runtime_regression`)
 //   skip pipeline creation because it requires a real `.trtfb` bundle and a
 //   GPU. We follow the same pattern here for the argument-validation cases
-//   (null handle / null prompts / mismatched lengths) and additionally use a
-//   tiny in-test fake IPipeline to exercise the happy path end-to-end without
-//   needing a bundle or a GPU.
+//   (null handle / null prompts / mismatched lengths), runtime failures, and
+//   the documented zero-on-error result state. A tiny in-test fake IPipeline
+//   exercises the happy path end-to-end without needing a bundle or a GPU.
 //
 // Dependencies:
 //   - trtmc/pipeline.h: trtmc_generate_batch, trtmc_image_result_t,
@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -49,6 +50,25 @@ void check(bool condition, const char* test_name) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
+}
+
+void set_result_sentinel(trtmc_image_result_t& result) {
+    result.pixels = reinterpret_cast<float*>(static_cast<std::uintptr_t>(0x1));
+    result.height = 101;
+    result.width = 102;
+    result.channels = 103;
+    result.num_frames = 104;
+    result.num_pixels = 105;
+}
+
+void set_result_sentinels(trtmc_image_result_t* results, int count) {
+    for (int i = 0; i < count; ++i)
+        set_result_sentinel(results[i]);
+}
+
+bool is_zero_result(const trtmc_image_result_t& result) {
+    return result.pixels == nullptr && result.height == 0 && result.width == 0 &&
+           result.channels == 0 && result.num_frames == 0 && result.num_pixels == 0;
 }
 
 // Minimal IPipeline subclass that returns a deterministic ImageResult per
@@ -80,20 +100,83 @@ class FakeImagePipeline final : public trtmc::IPipeline {
     const char* pipeline_type() const override { return "fake_image"; }
 };
 
+class ThrowingImagePipeline final : public trtmc::IPipeline {
+  public:
+    trtmc::ImageResult generate_image(const std::string&, const trtmc::GenerateConfig&) override {
+        throw std::runtime_error("intentional batch runtime failure");
+    }
+
+    const char* model_id() const override { return "fake/throwing-image"; }
+    const char* pipeline_type() const override { return "fake_throwing_image"; }
+};
+
+class WrongCountImagePipeline final : public trtmc::IPipeline {
+  public:
+    std::vector<trtmc::ImageResult> generate_image_batch(const std::vector<std::string>&,
+                                                         const std::vector<std::uint32_t>&,
+                                                         const trtmc::GenerateConfig&) override {
+        return {trtmc::ImageResult{}};
+    }
+
+    const char* model_id() const override { return "fake/wrong-count-image"; }
+    const char* pipeline_type() const override { return "fake_wrong_count_image"; }
+};
+
 // -- Argument validation ---------------------------------------------------
 
-void test_invalid_args_return_invalid_arg() {
-    // One consolidated check covering the common invalid-arg shapes.
+void test_invalid_args_zero_every_valid_output_slot() {
     FakeImagePipeline pipe;
     const char* prompts[] = {"a", "b"};
     std::uint32_t seeds[] = {1, 2, 3};
-    trtmc_image_result_t out[2]{};
+    trtmc_image_result_t out[2];
 
+    set_result_sentinels(out, 2);
     check(trtmc_generate_batch(nullptr, prompts, 1, seeds, 1, 4, 7.5F, out) ==
               TRTMC_ERR_INVALID_ARG,
           "null handle returns TRTMC_ERR_INVALID_ARG");
+    check(is_zero_result(out[0]), "null handle zeroes output slot");
+
+    set_result_sentinels(out, 2);
     check(trtmc_generate_batch(&pipe, prompts, 2, seeds, 3, 4, 7.5F, out) == TRTMC_ERR_INVALID_ARG,
           "num_prompts != num_seeds returns TRTMC_ERR_INVALID_ARG");
+    check(is_zero_result(out[0]) && is_zero_result(out[1]),
+          "count mismatch zeroes every output slot");
+
+    set_result_sentinels(out, 2);
+    check(trtmc_generate_batch(&pipe, nullptr, 2, seeds, 2, 4, 7.5F, out) == TRTMC_ERR_INVALID_ARG,
+          "null prompts array returns TRTMC_ERR_INVALID_ARG");
+    check(is_zero_result(out[0]) && is_zero_result(out[1]),
+          "null prompts array zeroes every output slot");
+
+    const char* prompts_with_null[] = {"a", nullptr};
+    set_result_sentinels(out, 2);
+    check(trtmc_generate_batch(&pipe, prompts_with_null, 2, seeds, 2, 4, 7.5F, out) ==
+              TRTMC_ERR_INVALID_ARG,
+          "null prompt entry returns TRTMC_ERR_INVALID_ARG");
+    check(is_zero_result(out[0]) && is_zero_result(out[1]),
+          "null prompt entry zeroes every output slot");
+}
+
+void test_runtime_errors_zero_every_output_slot() {
+    const char* prompts[] = {"a", "b"};
+    std::uint32_t seeds[] = {1, 2};
+    trtmc_image_result_t out[2];
+
+    ThrowingImagePipeline throwing_pipe;
+    set_result_sentinels(out, 2);
+    check(trtmc_generate_batch(&throwing_pipe, prompts, 2, seeds, 2, 4, 7.5F, out) ==
+              TRTMC_ERR_RUNTIME,
+          "pipeline exception returns TRTMC_ERR_RUNTIME");
+    check(is_zero_result(out[0]) && is_zero_result(out[1]),
+          "pipeline exception zeroes every output slot");
+
+    WrongCountImagePipeline wrong_count_pipe;
+    set_result_sentinels(out, 2);
+    check(trtmc_generate_batch(&wrong_count_pipe, prompts, 2, seeds, 2, 4, 7.5F, out) ==
+              TRTMC_ERR_RUNTIME,
+          "pipeline result-count mismatch returns TRTMC_ERR_RUNTIME");
+    check(is_zero_result(out[0]) && is_zero_result(out[1]),
+          "pipeline result-count mismatch zeroes every output slot");
 }
 
 // -- Happy path -----------------------------------------------------------
@@ -146,7 +229,8 @@ void test_image_result_free_null_safe() {
 } // namespace
 
 int main() {
-    test_invalid_args_return_invalid_arg();
+    test_invalid_args_zero_every_valid_output_slot();
+    test_runtime_errors_zero_every_output_slot();
     test_batch_fills_results_and_propagates_seeds();
     test_image_result_free_null_safe();
 

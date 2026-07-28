@@ -50,18 +50,59 @@ _LIST_MARKER_RE = re.compile(
 _PLACEHOLDER_RE = re.compile(r"<[^>\n]+>|(?<!\$)\{[A-Za-z][A-Za-z0-9_.-]*\}")
 _PROMPT_RE = re.compile(r"^(?P<indent>[ \t]*)\$\s+")
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _BACKTICK_RUN_RE = re.compile(r"`+")
 _ARGPARSE_NEGATIVE_NUMBER_RE = re.compile(r"(?:-\d+|-\d*\.\d+)\Z")
-_COMMAND_HEAD_RE = re.compile(
-    r"^(?:\$\s+)?(?:env\s+)?"
-    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
-    r"(?:python3?|pytest|py\.test|pip3?|cmake|ctest|git|gh|docker|npm|npx|"
-    r"bash|sh|source|rg|find|make|trtmc|curl|wget|nvidia-smi|"
-    r"ls|mkdir|touch|cp|mv|rm|chmod|sed|awk|jq|head|tail|cat|echo|"
-    r"printf|test|timeout|tee|tar|export|unset|"
-    r"\$[A-Za-z_][A-Za-z0-9_]*|\./[A-Za-z0-9_.\-/]+)"
-    r"(?:\s|$)"
+_INLINE_COMMAND_NAMES = frozenset(
+    {
+        "awk",
+        "bash",
+        "cat",
+        "chmod",
+        "cmake",
+        "cp",
+        "ctest",
+        "curl",
+        "docker",
+        "echo",
+        "export",
+        "find",
+        "gh",
+        "git",
+        "head",
+        "jq",
+        "ls",
+        "make",
+        "mkdir",
+        "mv",
+        "npm",
+        "npx",
+        "nvidia-smi",
+        "pip",
+        "pip3",
+        "printf",
+        "py.test",
+        "pytest",
+        "python",
+        "python3",
+        "rg",
+        "rm",
+        "sed",
+        "sh",
+        "source",
+        "tail",
+        "tar",
+        "tee",
+        "test",
+        "timeout",
+        "touch",
+        "trtmc",
+        "unset",
+        "wget",
+    }
 )
+_SHELL_VARIABLE_COMMAND_RE = re.compile(r"^\$[A-Za-z_][A-Za-z0-9_]*$")
+_RELATIVE_COMMAND_RE = re.compile(r"^\./[A-Za-z0-9_.\-/]+$")
 _LOCAL_PREFIXES = (
     ".github/",
     "cmake/",
@@ -406,7 +447,7 @@ def extract_inline_commands(path: Path, content: str) -> list[ShellBlock]:
         chunk = "\n".join(chunk_lines)
         for opening_offset, span in _inline_code_spans(chunk):
             body = span.replace("\n", " ").strip()
-            if _COMMAND_HEAD_RE.match(body):
+            if _is_inline_command(body):
                 commands.append(
                     ShellBlock(
                         path=path,
@@ -657,14 +698,102 @@ def _block_commands(block: ShellBlock) -> Iterable[tuple[int, list[str]]]:
         yield offset, list(command.tokens)
 
 
+def _is_static_env_operand(token: str) -> bool:
+    """Return whether an ``env`` option operand is statically knowable."""
+    return bool(token) and not any(
+        marker in token
+        for marker in ("$", "`", "\x00", "DOC_PLACEHOLDER")
+    )
+
+
 def _strip_shell_wrappers(tokens: list[str]) -> list[str]:
-    """Drop leading assignments and the portable ``env`` wrapper."""
+    """Drop statically understood assignments and ``env`` wrappers.
+
+    Unknown or dynamic ``env`` options return no command so callers skip the
+    invocation instead of treating an option operand as an executable.
+    """
     remaining = list(tokens)
-    if remaining and remaining[0] == "env":
-        remaining.pop(0)
-    while remaining and _ENV_ASSIGNMENT_RE.match(remaining[0]):
-        remaining.pop(0)
-    return remaining
+    while True:
+        while remaining and _ENV_ASSIGNMENT_RE.match(remaining[0]):
+            remaining.pop(0)
+        if not remaining or remaining[0] not in {"env", "/usr/bin/env"}:
+            return remaining
+
+        index = 1
+        while index < len(remaining):
+            token = remaining[index]
+            if token == "--":
+                index += 1
+                break
+            if token in {"-i", "--ignore-environment", "-"}:
+                index += 1
+                continue
+            if token in {"-u", "--unset"}:
+                if (
+                    index + 1 >= len(remaining)
+                    or _ENV_NAME_RE.fullmatch(remaining[index + 1]) is None
+                ):
+                    return []
+                index += 2
+                continue
+            if token.startswith("-u") and token != "-u":
+                if _ENV_NAME_RE.fullmatch(token[2:]) is None:
+                    return []
+                index += 1
+                continue
+            if token.startswith("--unset="):
+                if _ENV_NAME_RE.fullmatch(token.partition("=")[2]) is None:
+                    return []
+                index += 1
+                continue
+            if token in {"-C", "--chdir"}:
+                if (
+                    index + 1 >= len(remaining)
+                    or not _is_static_env_operand(remaining[index + 1])
+                ):
+                    return []
+                index += 2
+                continue
+            if token.startswith("-C") and token != "-C":
+                if not _is_static_env_operand(token[2:]):
+                    return []
+                index += 1
+                continue
+            if token.startswith("--chdir="):
+                if not _is_static_env_operand(token.partition("=")[2]):
+                    return []
+                index += 1
+                continue
+            if token.startswith("-"):
+                return []
+            break
+
+        remaining = remaining[index:]
+
+
+def _is_inline_command(body: str) -> bool:
+    """Return whether an inline code span begins with a supported command.
+
+    Reusing the shell tokenizer and wrapper parser keeps inline discovery in
+    sync with fenced-command validation. In particular, quoted or empty
+    assignments and repeated GNU ``env`` wrappers cannot be represented
+    reliably by a coarse regular expression.
+    """
+    commands = _shell_commands(body)
+    if not commands:
+        return False
+    tokens = list(commands[0].tokens)
+    if tokens and tokens[0] == "$":
+        tokens.pop(0)
+    tokens = _strip_shell_wrappers(tokens)
+    if not tokens:
+        return False
+    command = tokens[0]
+    return (
+        command in _INLINE_COMMAND_NAMES
+        or _RELATIVE_COMMAND_RE.fullmatch(command) is not None
+        or _SHELL_VARIABLE_COMMAND_RE.fullmatch(command) is not None
+    )
 
 
 def _shell_c_payload(tokens: Sequence[str]) -> str | None:

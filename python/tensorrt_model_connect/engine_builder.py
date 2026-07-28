@@ -841,6 +841,105 @@ def _remove_tokenizer_candidate(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
+def _reserve_tokenizer_recovery_path(
+    model_dir: Path,
+    *,
+    prefix: str,
+) -> tuple[Path, Path]:
+    """Reserve a durable location outside transaction temporary directories."""
+    recovery_dir = Path(tempfile.mkdtemp(prefix=prefix, dir=model_dir))
+    return recovery_dir, recovery_dir / "original-tokenizer.json"
+
+
+def _discard_empty_tokenizer_recovery_dir(
+    recovery_dir: Path | None,
+    recovery_path: Path | None,
+    *,
+    discard_original: bool,
+) -> None:
+    if recovery_dir is None or recovery_path is None:
+        return
+    if discard_original:
+        try:
+            shutil.rmtree(recovery_dir)
+        except Exception as exc:
+            # The validated candidate is already committed. Cleanup is
+            # intentionally best-effort because rmtree() may have removed
+            # only part of the old artifact before failing; turning that into
+            # a repair failure would neither restore the old tokenizer nor
+            # accurately describe the canonical file.
+            try:
+                print(
+                    "[trtmc build] tokenizer.json repair succeeded, but "
+                    "cleanup of the previous artifact was incomplete; "
+                    "the recovery directory may contain residual files at "
+                    f"'{recovery_dir}': {exc}",
+                    file=sys.stderr,
+                )
+            except Exception:
+                pass
+        return
+    if _tokenizer_path_is_present(recovery_path):
+        return
+    try:
+        recovery_dir.rmdir()
+    except OSError:
+        pass
+
+
+def _rollback_tokenizer_candidate(
+    tokenizer_path: Path,
+    quarantined_path: Path,
+    *,
+    recovery_path: Path | None,
+) -> None:
+    """Restore an original without exposing it to failed candidate cleanup."""
+    original_recoverable = _tokenizer_path_is_present(quarantined_path)
+    if original_recoverable:
+        if recovery_path is None:
+            raise RuntimeError(
+                "cannot safely roll back tokenizer.json without a reserved "
+                "recovery path"
+            )
+        if quarantined_path != recovery_path:
+            try:
+                os.replace(quarantined_path, recovery_path)
+            except Exception as exc:
+                raise RuntimeError(
+                    "failed to move the original tokenizer.json to its durable "
+                    f"recovery path '{recovery_path}'; it remains preserved at "
+                    f"'{quarantined_path}': {exc}"
+                ) from exc
+
+    try:
+        _remove_tokenizer_candidate(tokenizer_path)
+    except Exception as exc:
+        recovery_detail = (
+            f"; the original tokenizer.json is preserved at '{recovery_path}'"
+            if original_recoverable
+            else ""
+        )
+        raise RuntimeError(
+            "failed to remove the unsuccessful tokenizer.json candidate"
+            f"{recovery_detail}: {exc}"
+        ) from exc
+
+    if not original_recoverable:
+        return
+    assert recovery_path is not None
+    try:
+        os.replace(recovery_path, tokenizer_path)
+    except Exception as exc:
+        raise RuntimeError(
+            "failed to restore the original tokenizer.json; it remains "
+            f"preserved at '{recovery_path}': {exc}"
+        ) from exc
+    try:
+        recovery_path.parent.rmdir()
+    except OSError:
+        pass
+
+
 def _generated_tokenizer_file_error(path: Path) -> str | None:
     """Reject relocatable or empty generated candidates before validation."""
     try:
@@ -865,13 +964,31 @@ def _generate_standard_tokenizer_json_transactionally(
     """Generate and install tokenizer.json without clobbering the original."""
     had_original = _tokenizer_path_is_present(tokenizer_path)
     installed = False
+    recovery_dir: Path | None = None
+    recovery_path: Path | None = None
+    if had_original:
+        try:
+            recovery_dir, recovery_path = _reserve_tokenizer_recovery_path(
+                model_dir,
+                prefix=".trtmc-tokenizer-recovery-",
+            )
+        except Exception as exc:
+            return (
+                "slow tokenizer conversion failed before modifying the "
+                f"original tokenizer.json: {exc}"
+            )
     try:
         with tempfile.TemporaryDirectory(
             prefix=".trtmc-tokenizer-repair-",
             dir=model_dir,
         ) as temporary_dir:
             temporary_path = Path(temporary_dir)
-            quarantined_path = temporary_path / "original-tokenizer.json"
+            quarantined_path = (
+                recovery_path
+                if had_original
+                else temporary_path / "original-tokenizer.json"
+            )
+            assert quarantined_path is not None
             generated_dir = temporary_path / "generated"
             generated_dir.mkdir()
             if had_original:
@@ -934,11 +1051,19 @@ def _generate_standard_tokenizer_json_transactionally(
                 return f"slow tokenizer conversion failed: {exc}"
             finally:
                 if not installed:
-                    _remove_tokenizer_candidate(tokenizer_path)
-                    if _tokenizer_path_is_present(quarantined_path):
-                        os.replace(quarantined_path, tokenizer_path)
+                    _rollback_tokenizer_candidate(
+                        tokenizer_path,
+                        quarantined_path,
+                        recovery_path=recovery_path,
+                    )
     except Exception as exc:
         return f"slow tokenizer conversion failed: {exc}"
+    finally:
+        _discard_empty_tokenizer_recovery_dir(
+            recovery_dir,
+            recovery_path,
+            discard_original=installed,
+        )
 
 
 def _ensure_tokenizer_json(
@@ -991,9 +1116,33 @@ def _ensure_tokenizer_json(
         prefix=".trtmc-required-tokenizer-repair-",
         dir=model_dir,
     ) as temporary_dir:
-        quarantined_path = Path(temporary_dir) / "original-tokenizer.json"
+        temporary_path = Path(temporary_dir)
+        recovery_dir: Path | None = None
+        recovery_path: Path | None = None
         if original_present:
-            os.replace(tokenizer_path, quarantined_path)
+            recovery_dir, recovery_path = _reserve_tokenizer_recovery_path(
+                model_dir,
+                prefix=".trtmc-required-tokenizer-recovery-",
+            )
+        quarantined_path = (
+            recovery_path
+            if original_present
+            else temporary_path / "original-tokenizer.json"
+        )
+        assert quarantined_path is not None
+        if original_present:
+            try:
+                os.replace(tokenizer_path, quarantined_path)
+            except Exception as exc:
+                _discard_empty_tokenizer_recovery_dir(
+                    recovery_dir,
+                    recovery_path,
+                    discard_original=False,
+                )
+                raise RuntimeError(
+                    "failed to quarantine the incompatible tokenizer.json; "
+                    f"the original remains at its canonical path: {exc}"
+                ) from exc
 
         try:
             # --- Attempt 1: standard HF slow → fast conversion ---
@@ -1006,6 +1155,11 @@ def _ensure_tokenizer_json(
             )
             if slow_tokenizer_error is None:
                 repair_committed = True
+                _discard_empty_tokenizer_recovery_dir(
+                    recovery_dir,
+                    recovery_path,
+                    discard_original=True,
+                )
                 print(
                     "[trtmc build] Generated tokenizer.json from slow tokenizer",
                     file=sys.stderr,
@@ -1016,9 +1170,13 @@ def _ensure_tokenizer_json(
             family_ensure = getattr(plugin, "ensure_tokenizer_json", None)
             if callable(family_ensure):
                 kwargs = {}
+                family_repair_committed = False
                 if _call_supports_kwarg(family_ensure, "previous_error"):
                     kwargs["previous_error"] = slow_tokenizer_error
-                if _call_supports_kwarg(family_ensure, "trust_remote_code"):
+                if _call_supports_kwarg(
+                    family_ensure,
+                    "trust_remote_code",
+                ):
                     kwargs["trust_remote_code"] = trust_remote_code
                 try:
                     family_reported_success = bool(
@@ -1044,8 +1202,8 @@ def _ensure_tokenizer_json(
                         and not family_wordpiece_needs_rebuild
                     ):
                         repair_committed = True
-                        return
-                    if family_reported_success:
+                        family_repair_committed = True
+                    elif family_reported_success:
                         family_failure = (
                             "undersized WordPiece tokenizer.json"
                             if family_wordpiece_needs_rebuild
@@ -1065,6 +1223,15 @@ def _ensure_tokenizer_json(
                     family_tokenizer_error = (
                         f"family tokenizer hook failed: {exc}"
                     )
+                if family_repair_committed:
+                    # Keep post-commit cleanup outside the hook exception
+                    # boundary so it cannot be misclassified as a hook error.
+                    _discard_empty_tokenizer_recovery_dir(
+                        recovery_dir,
+                        recovery_path,
+                        discard_original=True,
+                    )
+                    return
 
             errors = "; ".join(
                 error
@@ -1082,15 +1249,17 @@ def _ensure_tokenizer_json(
                 "required tokenizer. Review any repository-provided tokenizer "
                 "code before explicitly setting trust_remote_code=True. Pin "
                 "the model revision through build(model_revision=...), or "
-                "call build_bundle() only with an immutable local snapshot "
-                "whose contents you reviewed. "
+                "call build_bundle() only with a reviewed, revision-fixed, "
+                "writable local snapshot or copy. "
                 f"Details: {errors}"
             )
         finally:
             if not repair_committed:
-                _remove_tokenizer_candidate(tokenizer_path)
-                if _tokenizer_path_is_present(quarantined_path):
-                    os.replace(quarantined_path, tokenizer_path)
+                _rollback_tokenizer_candidate(
+                    tokenizer_path,
+                    quarantined_path,
+                    recovery_path=recovery_path,
+                )
 
 
 def _prepare_tokenizer_special_frame(

@@ -230,6 +230,134 @@ def test_literal_shell_c_payloads_reuse_cli_contracts_and_source_lines() -> None
     ]
 
 
+def test_literal_env_wrapped_shell_payloads_reuse_cli_contracts() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    payload = "python3 tools/trtmc_validate.py --definitely-invalid"
+    bodies = (
+        f"env -i bash -c {shlex.quote(payload)}\n",
+        f"env - sh -c {shlex.quote(payload)}\n",
+        (
+            "/usr/bin/env --ignore-environment MODE=test sh -c "
+            f"{shlex.quote(payload)}\n"
+        ),
+        f"env -u HOME bash -c {shlex.quote(payload)}\n",
+        f"env --unset=HOME sh -c {shlex.quote(payload)}\n",
+        (
+            "MODE=test env -i /usr/bin/env --unset HOME -- bash -c "
+            f"{shlex.quote(payload)}\n"
+        ),
+        (
+            "docker exec trtmc-dev /usr/bin/env --unset HOME bash -c "
+            f"{shlex.quote(payload)}\n"
+        ),
+    )
+
+    for body in bodies:
+        block = cdc.ShellBlock(
+            path=Path("README.md"),
+            line=10,
+            language="bash",
+            body=body,
+        )
+        assert [
+            finding.message
+            for finding in cdc.check_command_block(block, repo_root)
+        ] == [
+            "unknown option for `tools/trtmc_validate.py`: "
+            "--definitely-invalid"
+        ]
+
+
+def test_dynamic_env_wrappers_are_skipped_safely() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    payload = shlex.quote(
+        "python3 tools/trtmc_validate.py --definitely-invalid"
+    )
+    block = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=10,
+        language="bash",
+        body=(
+            f'env -S "$ENV_ARGS" bash -c {payload}\n'
+            f'env --unset "$ENV_NAME" bash -c {payload}\n'
+            f'env --chdir "$WORKDIR" bash -c {payload}\n'
+        ),
+    )
+
+    assert cdc.check_command_block(block, repo_root) == []
+    assert list(cdc.shell_validation_blocks(block)) == [block]
+
+
+def test_static_env_chdir_wrappers_reuse_nested_cli_contracts() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    payload = shlex.quote(
+        "python3 tools/trtmc_validate.py --definitely-invalid"
+    )
+    bodies = (
+        f"env --chdir /tmp bash -c {payload}\n",
+        f"env --chdir='/tmp/work tree' sh -c {payload}\n",
+        f"env -C /tmp bash -c {payload}\n",
+        f"env -C/tmp sh -c {payload}\n",
+        (
+            "docker exec trtmc-dev env --chdir /tmp bash -c "
+            f"{payload}\n"
+        ),
+        (
+            "docker exec trtmc-dev /usr/bin/env -C/tmp sh -c "
+            f"{payload}\n"
+        ),
+    )
+
+    for body in bodies:
+        block = cdc.ShellBlock(
+            path=Path("README.md"),
+            line=10,
+            language="bash",
+            body=body,
+        )
+        assert [
+            finding.message
+            for finding in cdc.check_command_block(block, repo_root)
+        ] == [
+            "unknown option for `tools/trtmc_validate.py`: "
+            "--definitely-invalid"
+        ]
+
+
+def test_static_env_wrappers_preserve_valid_nested_commands() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    block = cdc.ShellBlock(
+        path=Path("README.md"),
+        line=10,
+        language="bash",
+        body=(
+            "MODE=test /usr/bin/env -i --unset HOME bash -c "
+            "'python3 tools/trtmc_validate.py --list'\n"
+            "docker exec trtmc-dev env -uHOME sh -c "
+            "'python3 tools/trtmc_validate.py --all --dry-run'\n"
+        ),
+    )
+
+    assert cdc.check_command_block(block, repo_root) == []
+    assert len(list(cdc.shell_validation_blocks(block))) == 3
+    inline = cdc.extract_inline_commands(
+        Path("README.md"),
+        (
+            "Run `EMPTY= LABEL='two words' env -i env --chdir '/tmp/work tree' "
+            "--unset HOME -- bash -c "
+            "'python3 tools/trtmc_validate.py --definitely-invalid'`."
+        ),
+    )
+    assert len(inline) == 1
+    assert [
+        finding.message
+        for finding in cdc.check_command_block(inline[0], repo_root)
+    ] == [
+        "unknown option for `tools/trtmc_validate.py`: "
+        "--definitely-invalid"
+    ]
+
+
 def test_literal_shell_c_payload_syntax_and_local_inputs_are_checked(
     tmp_path: Path,
 ) -> None:

@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import sys
 import types
 from pathlib import Path
 
 import pytest
+import tensorrt_model_connect.families.internlm.tokenizer_json as internlm_tokenizer_json
 
 from tensorrt_model_connect.engine_builder import _ensure_tokenizer_json
 from tensorrt_model_connect.families.internlm.tokenizer_json import (
@@ -132,6 +135,7 @@ def test_ensure_tokenizer_json_overwrites_malformed_existing_file(
     assert calls[1][0] == "save"
     assert Path(calls[1][1]).parent.parent == tmp_path
     assert json.loads(tokenizer_path.read_text())["model"]["type"] == "BPE"
+    assert not list(tmp_path.glob(".internlm-tokenizer-*"))
 
 
 def test_ensure_tokenizer_json_shortcuts_only_native_compatible_existing_file(
@@ -264,6 +268,113 @@ def test_ensure_tokenizer_json_preserves_malformed_file_when_loader_fails(
     assert tokenizer_path.read_bytes() == original
 
 
+def test_committed_repair_survives_partial_recovery_cleanup(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    tokenizer_path = tmp_path / "tokenizer.json"
+    tokenizer_path.write_text(
+        '{"malformed":"discard only after commit"}',
+        encoding="utf-8",
+    )
+
+    class ValidTokenizer:
+        is_fast = True
+
+        @staticmethod
+        def save_pretrained(path):
+            _write_valid_bpe_tokenizer(Path(path))
+
+    class FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            return ValidTokenizer()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+    )
+    real_rmtree = internlm_tokenizer_json.shutil.rmtree
+
+    def fail_after_partial_recovery_cleanup(path, *args, **kwargs):
+        cleanup_path = Path(path)
+        if cleanup_path.name.startswith(
+            ".internlm-tokenizer-recovery-"
+        ):
+            (cleanup_path / "original-tokenizer.json").unlink()
+            (cleanup_path / "cleanup-residue").write_text(
+                "partial",
+                encoding="utf-8",
+            )
+            raise OSError("deterministic partial cleanup failure")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        internlm_tokenizer_json.shutil,
+        "rmtree",
+        fail_after_partial_recovery_cleanup,
+    )
+
+    assert ensure_tokenizer_json(tmp_path)
+    assert json.loads(tokenizer_path.read_text())["model"]["type"] == "BPE"
+    recovery_dirs = list(
+        tmp_path.glob(".internlm-tokenizer-recovery-*")
+    )
+    assert len(recovery_dirs) == 1
+    assert (
+        recovery_dirs[0] / "cleanup-residue"
+    ).read_text() == "partial"
+    assert not (
+        recovery_dirs[0] / "original-tokenizer.json"
+    ).exists()
+    stderr = capsys.readouterr().err
+    assert "recovery directory may contain residual files" in stderr
+    assert "original tokenizer.json is preserved" not in stderr
+
+
+def test_cleanup_failure_preserves_fifo_original_at_recovery_path(
+    monkeypatch,
+    tmp_path,
+):
+    tokenizer_path = tmp_path / "tokenizer.json"
+    os.mkfifo(tokenizer_path)
+
+    class FailingAutoTokenizer:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            raise RuntimeError("conversion unavailable")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        types.SimpleNamespace(AutoTokenizer=FailingAutoTokenizer),
+    )
+    monkeypatch.setattr(
+        internlm_tokenizer_json,
+        "_remove_candidate",
+        lambda _path: (_ for _ in ()).throw(
+            OSError("deterministic cleanup failure")
+        ),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="original tokenizer.json is preserved at",
+    ):
+        ensure_tokenizer_json(tmp_path)
+
+    recovery_paths = list(
+        tmp_path.glob(
+            ".internlm-tokenizer-recovery-*/original-tokenizer.json"
+        )
+    )
+    assert len(recovery_paths) == 1
+    assert stat.S_ISFIFO(recovery_paths[0].lstat().st_mode)
+    assert not tokenizer_path.exists()
+
+
 def test_required_repair_preserves_original_across_both_failed_generators(
     monkeypatch,
     tmp_path,
@@ -355,6 +466,6 @@ def test_required_internlm_tokenizer_generation_fails_closed_by_default(
     assert "Review any repository-provided tokenizer code" in message
     assert "trust_remote_code=True" in message
     assert "build(model_revision=...)" in message
-    assert "immutable local snapshot" in message
+    assert "reviewed, revision-fixed, writable local snapshot or copy" in message
     assert trust_values == [False, False]
     assert not (tmp_path / "tokenizer.json").exists()

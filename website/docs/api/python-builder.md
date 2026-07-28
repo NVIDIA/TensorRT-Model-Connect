@@ -78,7 +78,62 @@ bundle if it cannot reuse or generate `tokenizer.json`. Review any
 repository-provided tokenizer code before explicitly setting
 `trust_remote_code=True`. For `build()`, pin `model_revision` to the reviewed
 commit. Because `build_bundle()` accepts a local directory rather than a
-revision, pass it an immutable local snapshot whose contents you reviewed.
+revision, pass it a reviewed, revision-fixed local snapshot. Tokenizer repair
+may require a writable copy as described below.
+
+## Tokenizer repair mutates the resolved model directory
+
+On the native path, a family that requires a tokenizer reuses a compatible
+`tokenizer.json`. If that file is missing, incompatible, or an undersized
+WordPiece export, the builder starts a transaction in the resolved model
+directory. It tries standard Hugging Face slow-to-fast conversion first and
+then, if available, the family-owned `ensure_tokenizer_json` fallback. A
+successful repair creates or replaces `tokenizer.json` in that directory
+before special-token metadata is detected and before the bundle is written.
+The resolved local directory therefore must be writable; a caller that needs
+an immutable source snapshot should build from a writable copy.
+
+Before either attempt, the transaction atomically quarantines an existing file
+at `original-tokenizer.json` in a unique hidden `tokenizer-recovery-*`
+directory. If that initial move fails, the canonical original remains
+untouched and repair stops; the same is true if the recovery directory cannot
+be reserved. If both attempts fail, the builder removes the unsuccessful
+candidate and restores the original bytes and file type.
+When an original existed, candidate-cleanup or restoration failures are
+terminal and report the durable recovery path that still retains it for manual
+recovery. If there was no original, ordinary failed-repair cleanup leaves
+`tokenizer.json` absent. If that cleanup itself fails, the unsuccessful
+candidate can remain at the canonical path and the terminal error reports the
+cleanup failure; there is no original-recovery path to report. No bundle is
+written after a failed repair. After a validated replacement commits, the
+builder removes the quarantined old artifact on a best-effort basis. A
+post-commit cleanup failure leaves the new compatible canonical
+`tokenizer.json` committed, does not turn the repair into a failure, and emits
+a warning identifying the recovery directory where cleanup residue may
+remain.
+
+The optional family hook has this effective contract:
+
+```python
+def ensure_tokenizer_json(
+    self,
+    model_dir,
+    *,
+    previous_error=None,
+    trust_remote_code=False,
+) -> bool: ...
+```
+
+The builder passes optional keywords only when the hook accepts them. The hook
+runs only after standard conversion fails, while the rejected original is
+quarantined. It must return a truthy value and leave
+`model_dir/tokenizer.json` as a non-empty regular, non-symlink file accepted by
+the native tokenizer validator; otherwise the outer transaction rolls it
+back. Diffusion plugins choose their tokenizer directories through
+`diffusion_tokenizer_bundle_sections()` and invoke its supplied
+`ensure_tokenizer_json` callback for each required directory. Those repairs
+finish before diffusion special-token detection and before generated or
+pre-rendered bundle config is reconciled with the repaired tokenizer.
 
 ## Family plugin protocol
 
