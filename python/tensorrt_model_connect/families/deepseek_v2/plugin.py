@@ -64,6 +64,19 @@ from .standard_decoder_builder import _apply_norm, _mark_debug_output
 
 trt = trt_compat.get_trt()
 
+
+def _validate_router_score_bias(
+    value: np.ndarray,
+    checkpoint_key: str,
+) -> np.ndarray:
+    bias = np.asarray(value, dtype=np.float32)
+    if not np.isfinite(bias).all():
+        raise ValueError(
+            f"DeepSeek router score bias contains non-finite values: "
+            f"{checkpoint_key}")
+    return bias
+
+
 class DeepSeekV2Plugin:
     name = "deepseek_v2"
     runtime_strategy = "deepseek_v2_decoder_kv_cache"
@@ -212,8 +225,11 @@ class DeepSeekV2Plugin:
                 correction_bias_key = (
                     f"{hf_prefix}.mlp.gate.e_score_correction_bias")
                 if _has_tensor(readers, correction_bias_key):
-                    weights[f"{prefix}.router_score_bias"] = _load_tensor(
-                        readers, correction_bias_key).astype(np.float32)
+                    weights[f"{prefix}.router_score_bias"] = (
+                        _validate_router_score_bias(
+                            _load_tensor(readers, correction_bias_key),
+                            correction_bias_key,
+                        ))
 
                 # Per-expert weights
                 for e in range(n_routed_experts):

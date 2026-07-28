@@ -1,6 +1,7 @@
 {
   "name": "deepseek-v2-tiny-tp2",
-  "hf_id": "yujiepan/deepseek-v3-tiny-random",
+  "hf_id": "katuni4ka/tiny-random-deepseek-v3",
+  "hf_revision": "ba144b0d3331a5892aa588d82722d382be2b6e6b",
   "bundle": "deepseek-v2-tiny-tp2.trtfb",
   "family": "deepseek_v2",
   "runtime_strategy": "deepseek_v2_decoder_kv_cache",
@@ -57,7 +58,7 @@
           "gating": true
         }
       ],
-      "notes": "DeepSeek-V2 tiny TP2 repro using the same checkpoint, prompt, generation length, and thresholds as deepseek-v2-tiny. TP4 is invalid because this checkpoint has 2 attention heads."
+      "notes": "DeepSeek-V3 tiny TP2 repro using the same finite checkpoint, prompt, generation length, and thresholds as deepseek-v2-tiny."
     }
   ]
 }

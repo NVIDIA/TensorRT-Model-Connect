@@ -101,40 +101,47 @@ def _group_limited_topk(
         topk_group,
         1 << 1,
     ).get_output(1)
-    selected_groups_1d = _reshape(
-        network, selected_groups, (topk_group,))
 
-    candidate_scores = network.add_gather(
-        grouped_scores, selected_groups_1d, 0).get_output(0)
-    expert_ids = np.arange(
-        n_routed_experts, dtype=np.int32).reshape(
-            n_group, experts_per_group)
-    expert_ids_tensor = graph_ops.add_constant(
+    expert_group_ids = np.repeat(
+        np.arange(n_group, dtype=np.int32), experts_per_group).reshape(
+            1, n_routed_experts)
+    expert_group_ids_tensor = graph_ops.add_constant(
         network,
-        expert_ids.shape,
-        expert_ids,
+        expert_group_ids.shape,
+        expert_group_ids,
         dtype=np.int32,
     )
-    candidate_ids = network.add_gather(
-        expert_ids_tensor, selected_groups_1d, 0).get_output(0)
+    masked_scores = graph_ops.add_constant(
+        network,
+        (1, n_routed_experts),
+        np.zeros((1, n_routed_experts), dtype=np.float32),
+        dtype=np.float32,
+    )
+    for group_position in range(topk_group):
+        selected_group = network.add_slice(
+            selected_groups,
+            start=(0, group_position),
+            shape=(1, 1),
+            stride=(1, 1),
+        ).get_output(0)
+        in_selected_group = network.add_elementwise(
+            expert_group_ids_tensor,
+            selected_group,
+            trt.ElementWiseOperation.EQUAL,
+        ).get_output(0)
+        masked_scores = network.add_select(
+            in_selected_group,
+            choice_scores,
+            masked_scores,
+        ).get_output(0)
 
-    candidate_count = topk_group * experts_per_group
-    candidate_scores_2d = _reshape(
-        network, candidate_scores, (1, candidate_count))
-    candidate_ids_1d = _reshape(
-        network, candidate_ids, (candidate_count,))
-    selected_candidates = network.add_topk(
-        candidate_scores_2d,
+    selected_experts = network.add_topk(
+        masked_scores,
         trt.TopKOperation.MAX,
         num_experts_per_tok,
         1 << 1,
-    ).get_output(1)
-    selected_candidates_1d = _reshape(
-        network, selected_candidates, (num_experts_per_tok,))
-    selected_expert_ids = network.add_gather(
-        candidate_ids_1d, selected_candidates_1d, 0).get_output(0)
-    return _reshape(
-        network, selected_expert_ids, (1, num_experts_per_tok))
+    )
+    return selected_experts.get_output(1)
 
 
 def add_router(

@@ -280,6 +280,14 @@ def test_deepseek_v3_noaux_router_contract_is_supported():
     )
 
 
+def test_deepseek_v3_rejects_non_finite_router_score_bias():
+    with pytest.raises(ValueError, match="non-finite"):
+        deepseek_v2._validate_router_score_bias(
+            np.array([0.0, np.nan], dtype=np.float32),
+            "model.layers.1.mlp.gate.e_score_correction_bias",
+        )
+
+
 @pytest.mark.parametrize(
     ("scoring_func", "n_routed_experts", "n_group"),
     [
