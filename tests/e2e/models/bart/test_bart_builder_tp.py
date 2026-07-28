@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 import importlib
 from types import SimpleNamespace
 
@@ -131,3 +132,88 @@ def test_bart_plugin_routes_parallel_builds(monkeypatch):
     assert kwargs["parallel_config"] == parallel
     assert kwargs["verbose"] is True
     assert kwargs["debug_layer_outputs"] is True
+
+
+def test_bart_tp_cross_attention_uses_source_padding_mask(monkeypatch):
+    class FakeLayer:
+        def __init__(self, output):
+            self.output = output
+            self.reshape_dims = None
+            self.axis = None
+
+        def get_output(self, index):
+            assert index == 0
+            return self.output
+
+    class FakeNetwork:
+        def add_shuffle(self, tensor):
+            return FakeLayer(("shuffle", tensor))
+
+        def add_concatenation(self, tensors):
+            return FakeLayer(("concatenation", tuple(tensors)))
+
+        def add_elementwise(self, left, right, operation):
+            return FakeLayer(("elementwise", left, right, operation))
+
+    def passthrough(_network, tensor, *_args, **_kwargs):
+        return tensor
+
+    attention_masks = []
+
+    def capture_attention(
+        _network, query, _key, _value, *, mask=None, **_kwargs
+    ):
+        attention_masks.append(mask)
+        return query
+
+    monkeypatch.setattr(
+        decoder_tp_builder.graph_ops, "add_matmul_rhs_constant", passthrough
+    )
+    monkeypatch.setattr(
+        decoder_tp_builder.graph_ops, "add_bias_sum", passthrough
+    )
+    monkeypatch.setattr(
+        decoder_tp_builder.graph_ops, "add_layer_norm_native", passthrough
+    )
+    monkeypatch.setattr(
+        decoder_tp_builder.graph_ops, "add_activation", passthrough
+    )
+    monkeypatch.setattr(
+        decoder_tp_builder.graph_ops,
+        "add_attention_from_rows",
+        capture_attention,
+    )
+    monkeypatch.setattr(
+        decoder_tp_builder,
+        "add_all_reduce_sum",
+        lambda _network, tensor, _tp_size: tensor,
+    )
+
+    self_attention_mask = object()
+    cross_attention_mask = object()
+    decoder_tp_builder._add_bart_tp_decoder_layer(
+        network=FakeNetwork(),
+        hidden=object(),
+        cache_k=object(),
+        cache_v=object(),
+        cross_k=object(),
+        cross_v=object(),
+        attention_mask=self_attention_mask,
+        cross_attention_mask=cross_attention_mask,
+        eps=1e-5,
+        weights=defaultdict(lambda: np.zeros(1, dtype=np.float32)),
+        prefix="layer.0",
+        hidden_size=16,
+        local_attention_size=8,
+        local_heads=2,
+        head_dim=4,
+        local_ffn_dim=16,
+        max_cache_length=8,
+        max_enc_seq=8,
+        tp_size=2,
+    )
+
+    assert attention_masks == [
+        ("shuffle", self_attention_mask),
+        ("shuffle", cross_attention_mask),
+    ]
