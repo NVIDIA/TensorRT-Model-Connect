@@ -67,6 +67,30 @@ def _optimized_cli_public_options(args: argparse.Namespace) -> dict:
     return public_options
 
 
+def _load_fp8_scales(path: str | Path) -> dict[str, object]:
+    """Load a user-provided FP8 scale map from a UTF-8 JSON file."""
+
+    scales_path = Path(path)
+    try:
+        with scales_path.open(encoding="utf-8") as scales_file:
+            scales = json.load(scales_file)
+    except OSError as exc:
+        raise ValueError(
+            f"could not read FP8 scales file {scales_path}: {exc}"
+        ) from exc
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(
+            f"invalid JSON in FP8 scales file {scales_path}: {exc}"
+        ) from exc
+
+    if not isinstance(scales, dict):
+        raise ValueError(
+            f"FP8 scales file {scales_path} must contain a JSON object, "
+            f"got {type(scales).__name__}"
+        )
+    return scales
+
+
 def _cmd_build(args: argparse.Namespace) -> int:
     if not args.model:
         print("Error: model (HF repo ID or local directory) required",
@@ -167,9 +191,11 @@ def _cmd_build(args: argparse.Namespace) -> int:
     fp8_scales = None
     fp8_auto = getattr(args, 'fp8', False)
     if getattr(args, 'fp8_scales', None):
-        import json as _json
-        with open(args.fp8_scales) as _f:
-            fp8_scales = _json.load(_f)
+        try:
+            fp8_scales = _load_fp8_scales(args.fp8_scales)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
         print(f"[trtmc build] Loaded FP8 scales from {args.fp8_scales} "
               f"({len(fp8_scales)} layers)", file=sys.stderr)
     elif fp8_auto:

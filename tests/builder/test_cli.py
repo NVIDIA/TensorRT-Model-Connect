@@ -297,6 +297,22 @@ class TestCmdInspect:
 class TestCmdBuildMocked:
     """Tests for _cmd_build with mocked engine_builder."""
 
+    @staticmethod
+    def _fp8_build_args(tmp_path, scales_path):
+        return argparse.Namespace(
+            model="some-model",
+            output=str(tmp_path / "out.trtfb"),
+            max_cache_length=256,
+            precision="fp16",
+            method="trt",
+            quantize=None,
+            quant_scales=None,
+            quant_calibration_samples=512,
+            verbose=False,
+            fp8_scales=str(scales_path),
+            _skip_profile_resolution=True,
+        )
+
     def test_build_calls_engine_builder_with_correct_args(self, tmp_path):
         """Verify _cmd_build passes model, output, cache length, verbose to build()."""
         from tensorrt_model_connect.build_cli import _cmd_build
@@ -590,6 +606,85 @@ class TestCmdBuildMocked:
             assert result == 1
         finally:
             eb._build_native_impl = original_build
+
+    def test_missing_fp8_scales_fails_before_native_build(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        from tensorrt_model_connect.build_cli import _cmd_build
+        import tensorrt_model_connect.engine_builder as eb
+
+        native_calls = []
+        monkeypatch.setattr(eb, "_try_build_optimized_runtime",
+                            lambda *args, **kwargs: None)
+        monkeypatch.setattr(eb, "_build_native_impl",
+                            lambda *args, **kwargs: native_calls.append(kwargs))
+        scales_path = tmp_path / "missing-scales.json"
+
+        result = _cmd_build(self._fp8_build_args(tmp_path, scales_path))
+
+        assert result == 1
+        assert native_calls == []
+        stderr = capsys.readouterr().err
+        assert str(scales_path) in stderr
+        assert "could not read FP8 scales file" in stderr
+
+    @pytest.mark.parametrize(
+        ("contents", "expected_error"),
+        [
+            ("not-json", "invalid JSON in FP8 scales file"),
+            ("[]", "must contain a JSON object, got list"),
+            ("1", "must contain a JSON object, got int"),
+        ],
+    )
+    def test_invalid_fp8_scales_fails_before_native_build(
+        self, monkeypatch, tmp_path, capsys, contents, expected_error
+    ):
+        from tensorrt_model_connect.build_cli import _cmd_build
+        import tensorrt_model_connect.engine_builder as eb
+
+        native_calls = []
+        monkeypatch.setattr(eb, "_try_build_optimized_runtime",
+                            lambda *args, **kwargs: None)
+        monkeypatch.setattr(eb, "_build_native_impl",
+                            lambda *args, **kwargs: native_calls.append(kwargs))
+        scales_path = tmp_path / "invalid-scales.json"
+        scales_path.write_text(contents, encoding="utf-8")
+
+        result = _cmd_build(self._fp8_build_args(tmp_path, scales_path))
+
+        assert result == 1
+        assert native_calls == []
+        stderr = capsys.readouterr().err
+        assert str(scales_path) in stderr
+        assert expected_error in stderr
+
+    def test_valid_fp8_scales_reach_native_build(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        from tensorrt_model_connect.build_cli import _cmd_build
+        import tensorrt_model_connect.engine_builder as eb
+
+        native_calls = []
+        monkeypatch.setattr(eb, "_try_build_optimized_runtime",
+                            lambda *args, **kwargs: None)
+        monkeypatch.setattr(eb, "_build_native_impl",
+                            lambda *args, **kwargs: native_calls.append(kwargs))
+        scales_path = tmp_path / "scales.json"
+        scales = {
+            "transformer.block.0": {
+                "input_scale": 0.5,
+                "weight_scale": 0.25,
+            }
+        }
+        scales_path.write_text(json.dumps(scales), encoding="utf-8")
+
+        result = _cmd_build(self._fp8_build_args(tmp_path, scales_path))
+
+        assert result == 0
+        assert len(native_calls) == 1
+        assert native_calls[0]["fp8_scales"] == scales
+        stderr = capsys.readouterr().err
+        assert f"Loaded FP8 scales from {scales_path}" in stderr
 
     def test_build_reexecs_into_declared_python_profile(self, monkeypatch, tmp_path):
         """Families with declared profiles should re-exec into that Python profile."""
