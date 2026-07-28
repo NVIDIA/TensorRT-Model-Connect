@@ -58,6 +58,13 @@ except ImportError:
         cudart = None  # type: ignore[assignment]
 
 
+class _OmittedMaxCacheLength(int):
+    """Preserve the public 256 default while detecting an omitted argument."""
+
+
+_OMITTED_MAX_CACHE_LENGTH = _OmittedMaxCacheLength(256)
+
+
 def _setup_trt_import(rtx: bool) -> None:
     """Select the TensorRT Python backend before any TRT API is touched."""
     if not rtx:
@@ -1822,7 +1829,7 @@ def _build_diffusion_bundle(
 def _build_native_impl(
     model_id_or_path: str,
     output_path: str,
-    max_cache_length: int | None = None,
+    max_cache_length: int | None = _OMITTED_MAX_CACHE_LENGTH,
     *,
     model_revision: str | None = None,
     decoder_engine_layout: str = "split",
@@ -1869,6 +1876,8 @@ def _build_native_impl(
         fp8_scales: Per-layer FP8 scales dict, or ``"auto"`` for auto-calibration.
         save_fp8_scales: Path to save calibrated FP8 scales JSON.
     """
+    if max_cache_length is _OMITTED_MAX_CACHE_LENGTH:
+        max_cache_length = None
     revision_kwargs = {"revision": model_revision} if model_revision else {}
     model_dir = _resolve_model(model_id_or_path, **revision_kwargs)
     build_bundle._model_id_or_path_orig = model_id_or_path
@@ -1992,7 +2001,7 @@ def _try_build_optimized_runtime(
 def build(
     model_id_or_path: str,
     output_path: str,
-    max_cache_length: int | None = None,
+    max_cache_length: int | None = _OMITTED_MAX_CACHE_LENGTH,
     *,
     model_revision: str | None = None,
     decoder_engine_layout: str = "split",
@@ -2031,6 +2040,8 @@ def build(
     """
 
     build_arguments = dict(locals())
+    if build_arguments["max_cache_length"] is _OMITTED_MAX_CACHE_LENGTH:
+        build_arguments["max_cache_length"] = None
     public_options = {
         name: value
         for name, value in build_arguments.items()
