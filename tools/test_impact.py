@@ -1910,7 +1910,9 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                 {
                     "tools/check_doc_commands.py",
                     "tools/check_doc_file_references.py",
+                    "tools/check_doc_public_surfaces.py",
                     "tools/check_runtime_strategy_matrix.py",
+                    "tools/doc_public_surfaces.json",
                 }
             ),
             resolver=_match_result(
@@ -2077,8 +2079,14 @@ _EXPLICIT_TOOLS_TEST_TARGETS = {
     "scripts/validate_family.sh": ("tests/tools/test_model_owned_validation_scripts.py",),
     "tools/check_doc_commands.py": ("tests/tools/test_check_doc_commands.py",),
     "tools/check_doc_file_references.py": ("tests/tools/test_check_doc_file_references.py",),
+    "tools/check_doc_public_surfaces.py": (
+        "tests/tools/test_check_doc_public_surfaces.py",
+    ),
     "tools/check_runtime_strategy_matrix.py": (
         "tests/tools/test_runtime_strategy_matrix_checker.py",
+    ),
+    "tools/doc_public_surfaces.json": (
+        "tests/tools/test_check_doc_public_surfaces.py",
     ),
     "tools/nightly_issue_tracker.py": (
         "tests/tools/test_github_actions_ci.py",

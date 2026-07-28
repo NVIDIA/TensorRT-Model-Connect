@@ -1701,7 +1701,9 @@ class TestUnitTiers:
         [
             "tools/check_doc_commands.py",
             "tools/check_doc_file_references.py",
+            "tools/check_doc_public_surfaces.py",
             "tools/check_runtime_strategy_matrix.py",
+            "tools/doc_public_surfaces.json",
         ],
     )
     def test_documentation_validation_tools(self, imap, path):
@@ -3600,8 +3602,16 @@ class TestCoverageMapIntegration:
                 "tests/tools/test_check_doc_file_references.py",
             ),
             (
+                "tools/check_doc_public_surfaces.py",
+                "tests/tools/test_check_doc_public_surfaces.py",
+            ),
+            (
                 "tools/check_runtime_strategy_matrix.py",
                 "tests/tools/test_runtime_strategy_matrix_checker.py",
+            ),
+            (
+                "tools/doc_public_surfaces.json",
+                "tests/tools/test_check_doc_public_surfaces.py",
             ),
         ],
     )
