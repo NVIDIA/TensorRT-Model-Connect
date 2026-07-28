@@ -11,6 +11,8 @@ Postconditions: Bundle config overrides compute correct K-cache head_dim and wei
 
 from __future__ import annotations
 
+import importlib
+
 import numpy as np
 import pytest
 
@@ -20,6 +22,8 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 try:
     from tensorrt_model_connect.config import ModelConfig
     import tensorrt_model_connect.families.deepseek_v2 as deepseek_v2
+    moe_routing = importlib.import_module(
+        "tensorrt_model_connect.families.deepseek_v2.moe_routing")
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
@@ -82,6 +86,10 @@ def test_load_weights_v2_lite_dense_and_moe_routing(
         "moe_intermediate_size": 5,
         "norm_topk_prob": True,
         "routed_scaling_factor": 1.5,
+        "scoring_func": "sigmoid",
+        "topk_method": "noaux_tc",
+        "n_group": 1,
+        "topk_group": 1,
     }
     cfg = ModelConfig(
         model_type="deepseek_v2",
@@ -123,6 +131,9 @@ def test_load_weights_v2_lite_dense_and_moe_routing(
 
     # Layer 1 MoE.
     tensors["model.layers.1.mlp.gate.weight"] = _seq(2, 8, start=900)
+    tensors["model.layers.1.mlp.gate.e_score_correction_bias"] = np.array(
+        [0.25, -0.5], dtype=np.float32
+    )
     for expert in range(2):
         ep = f"model.layers.1.mlp.experts.{expert}"
         tensors[f"{ep}.gate_proj.weight"] = _seq(5, 8, start=950 + expert * 100)
@@ -156,6 +167,10 @@ def test_load_weights_v2_lite_dense_and_moe_routing(
 
     # Layer 1 is MoE.
     assert "layer.1.router" in weights
+    np.testing.assert_allclose(
+        weights["layer.1.router_score_bias"],
+        tensors["model.layers.1.mlp.gate.e_score_correction_bias"],
+    )
     assert "layer.1.w_gate" not in weights
     for expert in range(2):
         assert f"layer.1.expert.{expert}.w_gate" in weights
@@ -181,6 +196,10 @@ def test_load_weights_v2_lite_dense_and_moe_routing(
     assert weights["_shared_intermediate_size"] == 5
     assert weights["_norm_topk_prob"] is True
     assert weights["_routed_scaling_factor"] == 1.5
+    assert weights["_scoring_func"] == "sigmoid"
+    assert weights["_topk_method"] == "noaux_tc"
+    assert weights["_n_group"] == 1
+    assert weights["_topk_group"] == 1
 
 
 def test_load_weights_q_lora_branch_with_present_final_and_lm_head(
@@ -248,3 +267,38 @@ def test_matches_accepts_v2_and_v3_aliases():
     assert deepseek_v2.plugin.matches("deepseek_v2")
     assert deepseek_v2.plugin.matches("DeepSeek_V3")
     assert not deepseek_v2.plugin.matches("deepseek_v1")
+
+
+def test_deepseek_v3_noaux_router_contract_is_supported():
+    moe_routing.validate_router_contract(
+        scoring_func="sigmoid",
+        topk_method="noaux_tc",
+        n_routed_experts=256,
+        num_experts_per_tok=8,
+        n_group=8,
+        topk_group=4,
+    )
+
+
+@pytest.mark.parametrize(
+    ("scoring_func", "n_routed_experts", "n_group"),
+    [
+        ("softmax", 256, 8),
+        ("sigmoid", 255, 8),
+        ("sigmoid", 8, 8),
+    ],
+)
+def test_deepseek_v3_noaux_router_contract_rejects_invalid_grouping(
+    scoring_func: str,
+    n_routed_experts: int,
+    n_group: int,
+):
+    with pytest.raises(ValueError):
+        moe_routing.validate_router_contract(
+            scoring_func=scoring_func,
+            topk_method="noaux_tc",
+            n_routed_experts=n_routed_experts,
+            num_experts_per_tok=8,
+            n_group=n_group,
+            topk_group=4,
+        )

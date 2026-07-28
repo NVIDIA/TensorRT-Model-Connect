@@ -12,6 +12,7 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
+from . import moe_routing
 from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
 from .standard_decoder_builder import _apply_norm, _mark_debug_output
 
@@ -151,32 +152,26 @@ def _add_deepseek_tp_moe_block(
     tp_size: int,
     norm_topk_prob: bool = False,
     routed_scaling_factor: float = 1.0,
+    scoring_func: str = "softmax",
+    topk_method: str = "greedy",
+    n_group: int = 1,
+    topk_group: int = 1,
 ) -> trt.ITensor:
-    router_logits = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, n_routed_experts,
-        weights[f"{prefix}.router"])
-    sm = network.add_softmax(router_logits)
-    sm.axes = 1 << 1
-    topk = network.add_topk(
-        sm.get_output(0), trt.TopKOperation.MAX,
-        num_experts_per_tok, 1 << 1)
-    top_values = topk.get_output(0)
-    top_indices = topk.get_output(1)
-
-    if norm_topk_prob:
-        sum_val = network.add_reduce(
-            top_values, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True)
-        scaled_weights = network.add_elementwise(
-            top_values, sum_val.get_output(0), trt.ElementWiseOperation.DIV
-        ).get_output(0)
-    elif routed_scaling_factor != 1.0:
-        scale_c = graph_ops.add_constant(
-            network, (1, 1),
-            np.array([[routed_scaling_factor]], dtype=np.float32))
-        scaled_weights = network.add_elementwise(
-            top_values, scale_c, trt.ElementWiseOperation.PROD).get_output(0)
-    else:
-        scaled_weights = top_values
+    top_indices, scaled_weights = moe_routing.add_router(
+        network,
+        inp,
+        weights[f"{prefix}.router"],
+        hidden_size=hidden_size,
+        n_routed_experts=n_routed_experts,
+        num_experts_per_tok=num_experts_per_tok,
+        scoring_func=scoring_func,
+        topk_method=topk_method,
+        correction_bias=weights.get(f"{prefix}.router_score_bias"),
+        n_group=n_group,
+        topk_group=topk_group,
+        norm_topk_prob=norm_topk_prob,
+        routed_scaling_factor=routed_scaling_factor,
+    )
 
     expert_outputs = []
     for expert_idx in range(n_routed_experts):
@@ -200,8 +195,14 @@ def _add_deepseek_tp_moe_block(
         w_slice = network.add_slice(
             scaled_weights, start=(0, top_idx), shape=(1, 1), stride=(1, 1))
         expert_out = network.add_gather(stacked_out, idx_flat.get_output(0), 0)
+        selected_weight = w_slice.get_output(0)
+        if selected_weight.dtype != expert_out.get_output(0).dtype:
+            selected_weight = network.add_cast(
+                selected_weight,
+                expert_out.get_output(0).dtype,
+            ).get_output(0)
         scaled = network.add_elementwise(
-            expert_out.get_output(0), w_slice.get_output(0),
+            expert_out.get_output(0), selected_weight,
             trt.ElementWiseOperation.PROD)
         if routed_local is None:
             routed_local = scaled.get_output(0)
@@ -407,6 +408,10 @@ def _add_decoder_layer_tp(
     tp_size: int,
     norm_topk_prob: bool = False,
     routed_scaling_factor: float = 1.0,
+    scoring_func: str = "softmax",
+    topk_method: str = "greedy",
+    n_group: int = 1,
+    topk_group: int = 1,
 ) -> dict[str, trt.ITensor]:
     norm1 = _apply_norm(
         network, hidden, hidden_size,
@@ -447,7 +452,11 @@ def _add_decoder_layer_tp(
             hidden_size, n_routed_experts, moe_intermediate,
             num_experts_per_tok, shared_intermediate, tp_size,
             norm_topk_prob=norm_topk_prob,
-            routed_scaling_factor=routed_scaling_factor)
+            routed_scaling_factor=routed_scaling_factor,
+            scoring_func=scoring_func,
+            topk_method=topk_method,
+            n_group=n_group,
+            topk_group=topk_group)
     else:
         mlp_out = _add_swiglu_tp(
             network, norm2, hidden_size, dense_intermediate,
@@ -534,6 +543,18 @@ def build_deepseek_v2_tp_engine(
     dense_intermediate = int(config.intermediate_size) // parallel.tp_size
     norm_topk_prob = bool(rank_weights["_norm_topk_prob"])
     routed_scaling_factor = float(rank_weights["_routed_scaling_factor"])
+    scoring_func = str(rank_weights["_scoring_func"])
+    topk_method = str(rank_weights["_topk_method"])
+    n_group = int(rank_weights["_n_group"])
+    topk_group = int(rank_weights["_topk_group"])
+    moe_routing.validate_router_contract(
+        scoring_func=scoring_func,
+        topk_method=topk_method,
+        n_routed_experts=n_routed_experts,
+        num_experts_per_tok=num_experts_per_tok,
+        n_group=n_group,
+        topk_group=topk_group,
+    )
 
     k_head_dim = qk_nope_head_dim + qk_rope_head_dim
     attention_size = num_heads * k_head_dim
@@ -609,6 +630,10 @@ def build_deepseek_v2_tp_engine(
             tp_size=parallel.tp_size,
             norm_topk_prob=norm_topk_prob,
             routed_scaling_factor=routed_scaling_factor,
+            scoring_func=scoring_func,
+            topk_method=topk_method,
+            n_group=n_group,
+            topk_group=topk_group,
         )
         hidden_state = result["hidden"]
         present_k_outputs.append(result["present_k"])

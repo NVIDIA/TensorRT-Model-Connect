@@ -53,6 +53,7 @@ from .checkpoint_mapper import (
     _transpose_2d,
 )
 from . import graph_ops
+from . import moe_routing
 from . import graph_blocks
 from ...parallel_config import (
     normalize_parallel_config,
@@ -208,6 +209,11 @@ class DeepSeekV2Plugin:
                 weights[f"{prefix}.router"] = _transpose_2d(
                     router_raw, "router")
                 del router_raw
+                correction_bias_key = (
+                    f"{hf_prefix}.mlp.gate.e_score_correction_bias")
+                if _has_tensor(readers, correction_bias_key):
+                    weights[f"{prefix}.router_score_bias"] = _load_tensor(
+                        readers, correction_bias_key).astype(np.float32)
 
                 # Per-expert weights
                 for e in range(n_routed_experts):
@@ -293,6 +299,10 @@ class DeepSeekV2Plugin:
         weights["_shared_intermediate_size"] = shared_intermediate  # type: ignore[assignment]
         weights["_norm_topk_prob"] = raw.get("norm_topk_prob", False)  # type: ignore[assignment]
         weights["_routed_scaling_factor"] = raw.get("routed_scaling_factor", 1.0)  # type: ignore[assignment]
+        weights["_scoring_func"] = raw.get("scoring_func", "softmax")  # type: ignore[assignment]
+        weights["_topk_method"] = raw.get("topk_method", "greedy")  # type: ignore[assignment]
+        weights["_n_group"] = raw.get("n_group", 1)  # type: ignore[assignment]
+        weights["_topk_group"] = raw.get("topk_group", 1)  # type: ignore[assignment]
 
         return weights
 
@@ -339,6 +349,18 @@ class DeepSeekV2Plugin:
         shared_intermediate: int = weights["_shared_intermediate_size"]
         norm_topk_prob: bool = weights["_norm_topk_prob"]
         routed_scaling_factor: float = weights["_routed_scaling_factor"]
+        scoring_func = str(weights["_scoring_func"])
+        topk_method = str(weights["_topk_method"])
+        n_group = int(weights["_n_group"])
+        topk_group = int(weights["_topk_group"])
+        moe_routing.validate_router_contract(
+            scoring_func=scoring_func,
+            topk_method=topk_method,
+            n_routed_experts=n_routed_experts,
+            num_experts_per_tok=num_experts_per_tok,
+            n_group=n_group,
+            topk_group=topk_group,
+        )
         dense_intermediate = config.intermediate_size
 
         # K head dim = nope + rope; this is the per-head cache dimension
@@ -507,6 +529,10 @@ class DeepSeekV2Plugin:
                 dense_intermediate=dense_intermediate,
                 norm_topk_prob=norm_topk_prob,
                 routed_scaling_factor=routed_scaling_factor,
+                scoring_func=scoring_func,
+                topk_method=topk_method,
+                n_group=n_group,
+                topk_group=topk_group,
                 dtype=layer_np_dtype,
             )
 
@@ -892,6 +918,10 @@ def _add_moe_with_shared_experts(
     shared_intermediate: int,
     norm_topk_prob: bool = False,
     routed_scaling_factor: float = 1.0,
+    scoring_func: str = "softmax",
+    topk_method: str = "greedy",
+    n_group: int = 1,
+    topk_group: int = 1,
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """MoE block with shared experts (DeepSeek-V2 style).
@@ -903,41 +933,21 @@ def _add_moe_with_shared_experts(
     4. Compute shared expert output (always active)
     5. Final = routed_output + shared_output
     """
-    # 1. Router logits
-    router_logits = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, n_routed_experts,
-        weights[f"{prefix}.router"], dtype=dtype)
-
-    # 2. Softmax over router logits
-    sm = network.add_softmax(router_logits)
-    sm.axes = 1 << 1
-
-    # 3. TopK selection
-    topk = network.add_topk(
-        sm.get_output(0), trt.TopKOperation.MAX,
-        num_experts_per_tok, 1 << 1)
-    top_values = topk.get_output(0)   # [1, top_k]
-    top_indices = topk.get_output(1)  # [1, top_k]
-
-    # 4. Scale routing weights (matches HF route_tokens_to_experts)
-    if norm_topk_prob:
-        # Renormalize: values / sum(values)
-        sum_val = network.add_reduce(
-            top_values, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True)
-        scaled_weights = network.add_elementwise(
-            top_values, sum_val.get_output(0),
-            trt.ElementWiseOperation.DIV).get_output(0)  # [1, top_k]
-    elif routed_scaling_factor != 1.0:
-        # Multiply by routed_scaling_factor
-        scale_c = graph_ops.add_constant(
-            network, (1, 1),
-            np.array([[routed_scaling_factor]], dtype=dtype), dtype=dtype)
-        scaled_weights = network.add_elementwise(
-            top_values, scale_c,
-            trt.ElementWiseOperation.PROD).get_output(0)
-    else:
-        # V2-Lite: use raw softmax top-k values directly (scaling=1.0)
-        scaled_weights = top_values
+    top_indices, scaled_weights = moe_routing.add_router(
+        network,
+        inp,
+        weights[f"{prefix}.router"],
+        hidden_size=hidden_size,
+        n_routed_experts=n_routed_experts,
+        num_experts_per_tok=num_experts_per_tok,
+        scoring_func=scoring_func,
+        topk_method=topk_method,
+        correction_bias=weights.get(f"{prefix}.router_score_bias"),
+        n_group=n_group,
+        topk_group=topk_group,
+        norm_topk_prob=norm_topk_prob,
+        routed_scaling_factor=routed_scaling_factor,
+    )
 
     # 5. Compute ALL routed expert outputs and stack
     expert_outputs = []
@@ -968,14 +978,20 @@ def _add_moe_with_shared_experts(
         w_slice = network.add_slice(
             scaled_weights,
             start=(0, k), shape=(1, 1), stride=(1, 1))
+        selected_weight = w_slice.get_output(0)
 
         # Gather expert output
         expert_out = network.add_gather(
             stacked_out, idx_flat.get_output(0), 0)
+        if selected_weight.dtype != expert_out.get_output(0).dtype:
+            selected_weight = network.add_cast(
+                selected_weight,
+                expert_out.get_output(0).dtype,
+            ).get_output(0)
 
         # Scale
         scaled_expert = network.add_elementwise(
-            expert_out.get_output(0), w_slice.get_output(0),
+            expert_out.get_output(0), selected_weight,
             trt.ElementWiseOperation.PROD)
 
         if result is None:
@@ -1038,6 +1054,10 @@ def _add_deepseek_v2_decoder_layer(
     dense_intermediate: int,
     norm_topk_prob: bool = False,
     routed_scaling_factor: float = 1.0,
+    scoring_func: str = "softmax",
+    topk_method: str = "greedy",
+    n_group: int = 1,
+    topk_group: int = 1,
     dtype: np.dtype = np.float32,
 ) -> dict[str, trt.ITensor]:
     """Add one DeepSeek-V2 decoder layer: MLA attention + (dense MLP or MoE)."""
@@ -1093,6 +1113,10 @@ def _add_deepseek_v2_decoder_layer(
             num_experts_per_tok, shared_intermediate,
             norm_topk_prob=norm_topk_prob,
             routed_scaling_factor=routed_scaling_factor,
+            scoring_func=scoring_func,
+            topk_method=topk_method,
+            n_group=n_group,
+            topk_group=topk_group,
             dtype=dtype)
     else:
         mlp_out = graph_blocks.add_swiglu_mlp(
