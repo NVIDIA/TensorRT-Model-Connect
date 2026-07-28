@@ -366,7 +366,6 @@ jobs:
       TRTMC_GRAPH_PATCH_NVIDIA_SMI_TIMEOUT: "2m"
       TRTMC_GRAPH_PATCH_TRT_PREFLIGHT_TIMEOUT: "2m"
       TRTMC_GRAPH_PATCH_TEST_TIMEOUT: "10m"
-      GRAPH_PATCH_OUTPUT_DIR: ${{ runner.temp }}/trtmc-graph-patch-real-trt-${{ github.run_id }}-${{ github.run_attempt }}
       PYTHONHASHSEED: "0"
 
     steps:
@@ -401,6 +400,7 @@ jobs:
         timeout-minutes: 40
         env:
           TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
+          GRAPH_PATCH_OUTPUT_DIR: ${{ runner.temp }}/trtmc-graph-patch-real-trt-${{ github.run_id }}-${{ github.run_attempt }}
         run: >-
           python3 -m tools.ci graph-patch-real-trt
           --revision "${{ needs.legal.outputs.tested_sha }}"
@@ -409,6 +409,8 @@ jobs:
       - name: Upload graph-patch gate evidence
         if: ${{ always() && steps.gate.outcome != 'skipped' }}
         uses: actions/upload-artifact@v4
+        env:
+          GRAPH_PATCH_OUTPUT_DIR: ${{ runner.temp }}/trtmc-graph-patch-real-trt-${{ github.run_id }}-${{ github.run_attempt }}
         with:
           name: graph-patch-real-trt-${{ needs.legal.outputs.tested_sha }}-${{ github.run_attempt }}
           path: ${{ env.GRAPH_PATCH_OUTPUT_DIR }}

@@ -692,6 +692,13 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert '--revision "${{ needs.legal.outputs.tested_sha }}"' in graph_patch
     assert "actions/upload-artifact@v4" in graph_patch
     assert "if-no-files-found: error" in graph_patch
+    job_environment = graph_patch.split("    env:", maxsplit=1)[1].split(
+        "\n\n    steps:", maxsplit=1
+    )[0]
+    assert "runner.temp" not in job_environment
+    assert graph_patch.count(
+        "GRAPH_PATCH_OUTPUT_DIR: ${{ runner.temp }}/trtmc-graph-patch-real-trt-"
+    ) == 2
 
     assert "- legal" in model_proof
     assert "- impact" in model_proof
