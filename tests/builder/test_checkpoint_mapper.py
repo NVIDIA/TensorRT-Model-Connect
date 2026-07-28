@@ -27,6 +27,7 @@ _QWEN_ROOT = Path(__file__).resolve().parents[2] / "python/tensorrt_model_connec
 _MAPPER_MODULE = "weights" if (_QWEN_ROOT / "weights/__init__.py").is_file() else "checkpoint_mapper"
 _mapper = import_module(f"tensorrt_model_connect.families.qwen.{_MAPPER_MODULE}")
 _transpose_2d = _mapper._transpose_2d
+_copy_to_numpy = _mapper._copy_to_numpy
 _repeat_head_norm = _mapper._repeat_head_norm
 _has_tensor = _mapper._has_tensor
 _load_tensor = _mapper._load_tensor
@@ -61,6 +62,20 @@ class TestTranspose2d:
         result = _transpose_2d(arr, "test")
         assert result.dtype == np.float32
         assert result.flags["C_CONTIGUOUS"]
+
+
+def test_copy_to_numpy_transposes_bfloat16_to_fp16():
+    """Torch BF16 inputs convert directly into contiguous FP16 outputs."""
+    torch = pytest.importorskip("torch")
+    source = torch.tensor(
+        [[1.0, -2.5, 3.25], [4.5, 5.75, -6.0]], dtype=torch.bfloat16)
+
+    result = _copy_to_numpy(source, np.float16, transpose_name="test")
+
+    expected = source.float().numpy().T.astype(np.float16)
+    np.testing.assert_array_equal(result, expected)
+    assert result.dtype == np.float16
+    assert result.flags["C_CONTIGUOUS"]
 
 
 class TestRepeatHeadNorm:
@@ -129,7 +144,8 @@ class TestLoadStandardWeights:
                           vocab: int = 32,
                           num_heads: int = 4,
                           num_kv_heads: int = 4,
-                          mlp_size: int = 32) -> Path:
+                          mlp_size: int = 32,
+                          tensor_dtype=np.float32) -> Path:
         """Create a minimal model directory with safetensors."""
         from safetensors.numpy import save_file
 
@@ -141,31 +157,32 @@ class TestLoadStandardWeights:
 
         # Embedding
         tensors["model.embed_tokens.weight"] = np.random.randn(
-            vocab, hidden).astype(np.float32)
+            vocab, hidden).astype(tensor_dtype)
 
         for i in range(num_layers):
             prefix = f"model.layers.{i}"
             tensors[f"{prefix}.input_layernorm.weight"] = np.random.randn(
-                hidden).astype(np.float32)
+                hidden).astype(tensor_dtype)
             tensors[f"{prefix}.post_attention_layernorm.weight"] = \
-                np.random.randn(hidden).astype(np.float32)
+                np.random.randn(hidden).astype(tensor_dtype)
             tensors[f"{prefix}.self_attn.q_proj.weight"] = np.random.randn(
-                hidden, hidden).astype(np.float32)
+                hidden, hidden).astype(tensor_dtype)
             tensors[f"{prefix}.self_attn.k_proj.weight"] = np.random.randn(
-                kv_hidden, hidden).astype(np.float32)
+                kv_hidden, hidden).astype(tensor_dtype)
             tensors[f"{prefix}.self_attn.v_proj.weight"] = np.random.randn(
-                kv_hidden, hidden).astype(np.float32)
+                kv_hidden, hidden).astype(tensor_dtype)
             tensors[f"{prefix}.self_attn.o_proj.weight"] = np.random.randn(
-                hidden, hidden).astype(np.float32)
+                hidden, hidden).astype(tensor_dtype)
             tensors[f"{prefix}.mlp.gate_proj.weight"] = np.random.randn(
-                mlp_size, hidden).astype(np.float32)
+                mlp_size, hidden).astype(tensor_dtype)
             tensors[f"{prefix}.mlp.up_proj.weight"] = np.random.randn(
-                mlp_size, hidden).astype(np.float32)
+                mlp_size, hidden).astype(tensor_dtype)
             tensors[f"{prefix}.mlp.down_proj.weight"] = np.random.randn(
-                hidden, mlp_size).astype(np.float32)
+                hidden, mlp_size).astype(tensor_dtype)
 
-        tensors["model.norm.weight"] = np.random.randn(hidden).astype(np.float32)
-        tensors["lm_head.weight"] = np.random.randn(vocab, hidden).astype(np.float32)
+        tensors["model.norm.weight"] = np.random.randn(hidden).astype(tensor_dtype)
+        tensors["lm_head.weight"] = np.random.randn(
+            vocab, hidden).astype(tensor_dtype)
 
         save_file(tensors, str(tmp_path / "model.safetensors"))
         return tmp_path
@@ -203,6 +220,67 @@ class TestLoadStandardWeights:
         assert fp16_weights["embedding"].dtype == np.float16
         assert fp16_weights["layer.0.w_q"].dtype == np.float16
         assert fp16_weights["layer.0.input_norm"].dtype == np.float32
+
+    @pytest.mark.parametrize("precision", ["fp16", "bf16"])
+    def test_reduced_precision_matrices_bypass_fp32_staging(
+        self, tmp_path, monkeypatch, precision,
+    ):
+        """FP16/BF16 builds copy rank-2 tensors directly to final storage."""
+        from safetensors import safe_open
+
+        tensor_dtype = np.float16
+        if precision == "bf16":
+            ml_dtypes = pytest.importorskip("ml_dtypes")
+            tensor_dtype = ml_dtypes.bfloat16
+
+        config = {
+            "model_type": "standard_decoder",
+            "vocab_size": 32,
+            "hidden_size": 16,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+        }
+        model_dir = self._create_model_dir(
+            tmp_path, config, num_layers=1, num_kv_heads=2,
+            tensor_dtype=tensor_dtype)
+        cfg = ModelConfig.from_dir(model_dir)
+
+        fp32_shapes = []
+        original_to_numpy_fp32 = _mapper._to_numpy_fp32
+
+        def record_fp32_conversion(tensor):
+            fp32_shapes.append(tuple(tensor.shape))
+            return original_to_numpy_fp32(tensor)
+
+        monkeypatch.setattr(_mapper, "_to_numpy_fp32", record_fp32_conversion)
+        weights = load_standard_weights(model_dir, cfg, precision=precision)
+
+        assert fp32_shapes
+        assert all(len(shape) == 1 for shape in fp32_shapes)
+        matrix_keys = (
+            "embedding",
+            "layer.0.w_q",
+            "layer.0.w_k",
+            "layer.0.w_v",
+            "layer.0.w_o",
+            "layer.0.w_gate",
+            "layer.0.w_up",
+            "layer.0.w_down",
+            "w_out",
+        )
+        for key in matrix_keys:
+            assert weights[key].dtype == np.float16
+            assert weights[key].flags["C_CONTIGUOUS"]
+
+        with safe_open(str(model_dir / "model.safetensors"), framework="numpy") as reader:
+            q_source = reader.get_tensor(
+                "model.layers.0.self_attn.q_proj.weight")
+            embedding_source = reader.get_tensor("model.embed_tokens.weight")
+        np.testing.assert_array_equal(
+            weights["layer.0.w_q"], q_source.T.astype(np.float16))
+        np.testing.assert_array_equal(
+            weights["embedding"], embedding_source.astype(np.float16))
 
     def test_transpose_applied(self, tmp_path):
         """Verify projections are transposed from [out, in] to [in, out]."""
