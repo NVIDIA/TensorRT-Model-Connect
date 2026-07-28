@@ -1,0 +1,190 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: TensorRT-Model-Connect CI Dispatch
+
+run-name: >-
+  PR #${{ github.event.pull_request.number || inputs.pr_number }} · internal CI
+
+on:
+  pull_request_target:
+    branches:
+      - main
+    types:
+      - labeled
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Open pull request number to test
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  authorize:
+    name: Authorize trusted trigger
+    if: >-
+      ${{
+        github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
+        github.ref == 'refs/heads/main' &&
+        (
+          github.event_name == 'workflow_dispatch' ||
+          github.event.label.name == 'run-ci'
+        )
+      }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      pr_number: ${{ steps.snapshot.outputs.pr_number }}
+      base_sha: ${{ steps.snapshot.outputs.base_sha }}
+      head_sha: ${{ steps.snapshot.outputs.head_sha }}
+      merge_sha: ${{ steps.snapshot.outputs.merge_sha }}
+
+    steps:
+      # This trusted workflow reads PR metadata only. It never checks out or
+      # executes the pull-request head or merge commit.
+      - name: Capture exact pull-request snapshot
+        id: snapshot
+        env:
+          ACTOR: ${{ github.triggering_actor }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::Invalid pull request number"
+            exit 1
+          }
+
+          actor_permission="$(
+            gh api --method GET \
+              "/repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" \
+              --jq '.permission'
+          )"
+          case "$actor_permission" in
+            write|admin) ;;
+            *)
+              echo "::error::Only actors with write, maintain, or admin access may dispatch CI."
+              exit 1
+              ;;
+          esac
+
+          pull="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          state="$(jq -er '.state' <<<"$pull")"
+          base_ref="$(jq -er '.base.ref' <<<"$pull")"
+          head_sha="$(jq -er '.head.sha' <<<"$pull")"
+          merge_sha="$(jq -er '.merge_commit_sha' <<<"$pull")"
+
+          test "$state" = "open"
+          test "$base_ref" = "main"
+          for sha in "$head_sha" "$merge_sha"; do
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "::error::GitHub did not provide an exact pull-request snapshot"
+              exit 1
+            }
+          done
+
+          merge="$(
+            gh api --method GET \
+              "/repos/$GITHUB_REPOSITORY/git/commits/$merge_sha"
+          )"
+          parent_count="$(jq -er '.parents | length' <<<"$merge")"
+          test "$parent_count" -eq 2 || {
+            echo "::error::Expected a two-parent pull-request merge snapshot"
+            exit 1
+          }
+          base_sha="$(jq -er '.parents[0].sha' <<<"$merge")"
+          merge_head_sha="$(jq -er '.parents[1].sha' <<<"$merge")"
+          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
+          test "$merge_head_sha" = "$head_sha" || {
+            echo "::error::Merge snapshot head does not match the pull-request head"
+            exit 1
+          }
+
+          {
+            echo "pr_number=$PR_NUMBER"
+            echo "base_sha=$base_sha"
+            echo "head_sha=$head_sha"
+            echo "merge_sha=$merge_sha"
+          } >> "$GITHUB_OUTPUT"
+
+  dispatch:
+    name: Dispatch internal CI
+    needs: authorize
+    runs-on: ubuntu-24.04
+    environment: ci-dispatch
+    timeout-minutes: 5
+    concurrency:
+      group: trtmc-ci-dispatch-${{ needs.authorize.outputs.merge_sha }}
+      cancel-in-progress: false
+    permissions:
+      statuses: write
+
+    steps:
+      - name: Mark internal CI pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MERGE_SHA: ${{ needs.authorize.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          gh api --silent --method POST \
+            "/repos/$GITHUB_REPOSITORY/statuses/$MERGE_SHA" \
+            -f state=pending \
+            -f context="trtmc/premerge/required" \
+            -f description="PENDING: TensorRT-Model-Connect premerge" \
+            -f target_url="https://github.com/$GITHUB_REPOSITORY/tree/$MERGE_SHA/tests"
+
+      - name: Dispatch exact snapshot
+        env:
+          BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
+          GH_TOKEN: ${{ secrets.TRTMC_CI_DISPATCH_TOKEN }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          MERGE_SHA: ${{ needs.authorize.outputs.merge_sha }}
+          PRIVATE_CI_OWNER: ${{ secrets.TRTMC_PRIVATE_CI_OWNER }}
+          PRIVATE_CI_REPOSITORY: ${{ secrets.TRTMC_PRIVATE_CI_REPOSITORY }}
+          PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          [[ "$PRIVATE_CI_OWNER" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$ ]]
+          [[ "$PRIVATE_CI_REPOSITORY" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$ ]]
+
+          jq -n \
+            --arg pr_number "$PR_NUMBER" \
+            --arg base_sha "$BASE_SHA" \
+            --arg head_sha "$HEAD_SHA" \
+            --arg merge_sha "$MERGE_SHA" \
+            '{
+              ref: "main",
+              inputs: {
+                pr_number: $pr_number,
+                base_sha: $base_sha,
+                head_sha: $head_sha,
+                merge_sha: $merge_sha
+              }
+            }' > "$RUNNER_TEMP/internal-ci-dispatch.json"
+
+          if ! gh api --silent --method POST \
+            "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/actions/workflows/premerge.yml/dispatches" \
+            --input "$RUNNER_TEMP/internal-ci-dispatch.json" \
+            >/dev/null 2>&1; then
+            echo "::error::Internal CI dispatch request failed"
+            exit 1
+          fi
+
+      - name: Mark dispatch failure
+        if: ${{ failure() || cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MERGE_SHA: ${{ needs.authorize.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          gh api --silent --method POST \
+            "/repos/$GITHUB_REPOSITORY/statuses/$MERGE_SHA" \
+            -f state=failure \
+            -f context="trtmc/premerge/required" \
+            -f description="FAIL: internal CI dispatch failed" \
+            -f target_url="https://github.com/$GITHUB_REPOSITORY/tree/$MERGE_SHA/tests"
