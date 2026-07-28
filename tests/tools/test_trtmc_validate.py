@@ -368,6 +368,11 @@ def test_all_supervisor_applies_model_failure_policy(
     monkeypatch.setattr(trtmc_validate, "write_run_metadata", lambda output: output)
     monkeypatch.setattr(
         trtmc_validate,
+        "finalize_run_metadata",
+        lambda output: output,
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
         "write_report",
         lambda output: (
             output / "report.json",
@@ -499,6 +504,11 @@ def test_all_supervisor_records_not_compared_without_launching_worker(
         unexpected_worker,
     )
     monkeypatch.setattr(trtmc_validate, "write_run_metadata", lambda output: output)
+    monkeypatch.setattr(
+        trtmc_validate,
+        "finalize_run_metadata",
+        lambda output: output,
+    )
     monkeypatch.setattr(
         trtmc_validate,
         "write_report",
@@ -1192,6 +1202,29 @@ def test_write_report_records_total_duration(tmp_path, monkeypatch):
 
     assert report["summary"]["duration_seconds"] == 10_923.5
     assert "3h 02m 04s total duration" in html_path.read_text(encoding="utf-8")
+
+
+def test_write_report_preserves_finalized_duration(tmp_path, monkeypatch):
+    (tmp_path / "run.json").write_text(
+        json.dumps(
+            {
+                "started_at": "2026-07-25T01:02:03+00:00",
+                "finished_at": "2026-07-25T01:02:13+00:00",
+                "duration_seconds": 10.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_utc_now",
+        lambda: datetime(2026, 7, 25, 4, 4, 6, tzinfo=timezone.utc),
+    )
+
+    _, html_path, report = trtmc_validate.write_report(tmp_path)
+
+    assert report["summary"]["duration_seconds"] == 10.0
+    assert "0h 00m 10s total duration" in html_path.read_text(encoding="utf-8")
 
 
 def test_write_report_does_not_render_validation_wrapper(tmp_path):
@@ -1902,6 +1935,24 @@ def test_run_metadata_records_source_and_exact_command(monkeypatch, tmp_path):
     assert metadata["source_revision"] == "abc123"
     assert metadata["cuda_visible_devices"] == "1"
     assert metadata["command"] == "tools/trtmc_validate.py model-a"
+    assert metadata["finished_at"] is None
+    assert metadata["duration_seconds"] is None
+
+
+def test_finalize_run_metadata_records_completion(monkeypatch, tmp_path):
+    started_at = datetime(2026, 7, 25, 1, 2, 3, tzinfo=timezone.utc)
+    finished_at = datetime(2026, 7, 25, 4, 4, 6, 500000, tzinfo=timezone.utc)
+    (tmp_path / "run.json").write_text(
+        json.dumps({"started_at": started_at.isoformat()}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(trtmc_validate, "_utc_now", lambda: finished_at)
+
+    path = trtmc_validate.finalize_run_metadata(tmp_path)
+    metadata = json.loads(path.read_text(encoding="utf-8"))
+
+    assert metadata["finished_at"] == finished_at.isoformat()
+    assert metadata["duration_seconds"] == 10_923.5
 
 
 def test_comparison_command_uses_validation_entrypoint(tmp_path):

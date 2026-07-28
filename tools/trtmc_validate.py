@@ -1329,8 +1329,23 @@ def write_run_metadata(output: Path) -> Path:
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
         "command": shlex.join(sys.argv),
         "started_at": _utc_now().isoformat(),
+        "finished_at": None,
+        "duration_seconds": None,
     }
     path = output / "run.json"
+    path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    return path
+
+
+def finalize_run_metadata(output: Path) -> Path:
+    path = output / "run.json"
+    metadata = json.loads(path.read_text(encoding="utf-8"))
+    finished_at = _utc_now()
+    metadata["finished_at"] = finished_at.isoformat()
+    metadata["duration_seconds"] = _elapsed_seconds(
+        metadata.get("started_at"),
+        finished_at,
+    )
     path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     return path
 
@@ -2039,10 +2054,12 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
     run_path = output / "run.json"
     if run_path.is_file():
         report["run"] = json.loads(run_path.read_text(encoding="utf-8"))
-        duration_seconds = _elapsed_seconds(
-            report["run"].get("started_at"),
-            generated_at,
-        )
+        duration_seconds = report["run"].get("duration_seconds")
+        if duration_seconds is None:
+            duration_seconds = _elapsed_seconds(
+                report["run"].get("started_at"),
+                generated_at,
+            )
         if duration_seconds is not None:
             report["summary"]["duration_seconds"] = duration_seconds
     json_path = output / "report.json"
@@ -2563,6 +2580,8 @@ def _run_all_bindings(
                 flush=True,
             )
             break
+    finalize_run_metadata(arguments.output)
+    write_report(arguments.output)
     if failed:
         return 1
     return 2 if not_compared and not arguments.all else 0
