@@ -171,25 +171,17 @@ static double keys_cubic(double x) {
     return 0.0;
 }
 
-static AntialiasWeights make_bicubic_antialias_weights(int32_t input_size, int32_t output_size) {
-    constexpr int32_t interp_size = 4;
-    const double scale = static_cast<double>(input_size) / output_size;
-    const double support = scale >= 1.0 ? (interp_size * 0.5) * scale : interp_size * 0.5;
-    const int32_t kernel_size = static_cast<int32_t>(std::ceil(support)) * 2 + 1;
+static int32_t aligned_coefficient_stride(int32_t kernel_size) {
+    int32_t stride = kernel_size;
+    while (stride % static_cast<int32_t>(sizeof(int32_t)) != 0)
+        ++stride;
+    return stride;
+}
 
-    // PyTorch pads each int16 coefficient row to a 32-bit-aligned size in its
-    // optimized uint8 path. The padding does not participate in convolution.
-    int32_t coefficient_stride = kernel_size;
-    while (coefficient_stride % static_cast<int32_t>(sizeof(int32_t)) != 0)
-        ++coefficient_stride;
-
-    AntialiasWeights result;
-    result.starts.resize(static_cast<std::size_t>(output_size));
-    result.sizes.resize(static_cast<std::size_t>(output_size));
-    result.values.assign(static_cast<std::size_t>(output_size) * coefficient_stride, 0);
-    result.stride = coefficient_stride;
-
-    std::vector<double> floating(static_cast<std::size_t>(output_size) * kernel_size, 0.0);
+static double build_floating_antialias_weights(int32_t input_size, int32_t output_size,
+                                               double scale, double support, int32_t kernel_size,
+                                               AntialiasWeights& result,
+                                               std::vector<double>& floating) {
     double maximum_weight = 0.0;
     for (int32_t output_index = 0; output_index < output_size; ++output_index) {
         const double center = scale * (output_index + 0.5);
@@ -214,7 +206,12 @@ static AntialiasWeights make_bicubic_antialias_weights(int32_t input_size, int32
             }
         }
     }
+    return maximum_weight;
+}
 
+static void quantize_antialias_weights(const std::vector<double>& floating, int32_t output_size,
+                                       int32_t kernel_size, double maximum_weight,
+                                       AntialiasWeights& result) {
     // Select the greatest fixed-point precision whose largest coefficient fits
     // in int16, exactly as PyTorch's uint8 antialias implementation does.
     for (; result.precision < 22; ++result.precision) {
@@ -229,7 +226,7 @@ static AntialiasWeights make_bicubic_antialias_weights(int32_t input_size, int32
         const double* source =
             floating.data() + static_cast<std::size_t>(output_index) * kernel_size;
         int16_t* destination =
-            result.values.data() + static_cast<std::size_t>(output_index) * coefficient_stride;
+            result.values.data() + static_cast<std::size_t>(output_index) * result.stride;
         for (int32_t index = 0; index < kernel_size; ++index) {
             const double value = source[index] * multiplier;
             destination[index] =
@@ -237,6 +234,26 @@ static AntialiasWeights make_bicubic_antialias_weights(int32_t input_size, int32
                                                  : static_cast<int32_t>(value + 0.5));
         }
     }
+}
+
+static AntialiasWeights make_bicubic_antialias_weights(int32_t input_size, int32_t output_size) {
+    constexpr int32_t interp_size = 4;
+    const double scale = static_cast<double>(input_size) / output_size;
+    const double support = scale >= 1.0 ? (interp_size * 0.5) * scale : interp_size * 0.5;
+    const int32_t kernel_size = static_cast<int32_t>(std::ceil(support)) * 2 + 1;
+
+    // PyTorch pads each int16 coefficient row to a 32-bit-aligned size in its
+    // optimized uint8 path. The padding does not participate in convolution.
+    AntialiasWeights result;
+    result.stride = aligned_coefficient_stride(kernel_size);
+    result.starts.resize(static_cast<std::size_t>(output_size));
+    result.sizes.resize(static_cast<std::size_t>(output_size));
+    result.values.assign(static_cast<std::size_t>(output_size) * result.stride, 0);
+
+    std::vector<double> floating(static_cast<std::size_t>(output_size) * kernel_size, 0.0);
+    const double maximum_weight = build_floating_antialias_weights(
+        input_size, output_size, scale, support, kernel_size, result, floating);
+    quantize_antialias_weights(floating, output_size, kernel_size, maximum_weight, result);
     return result;
 }
 
@@ -249,11 +266,67 @@ static uint8_t fixed_point_pixel(const uint8_t* source, int32_t source_stride,
     return static_cast<uint8_t>(std::clamp(value >> precision, 0, 255));
 }
 
+static bool valid_resize_dimensions(const unsigned char* raw, int32_t width, int32_t height,
+                                    int32_t target_width, int32_t target_height) {
+    return raw != nullptr && width > 0 && height > 0 && target_width > 0 && target_height > 0;
+}
+
+static std::vector<unsigned char> resize_bicubic_horizontal(const unsigned char* raw, int32_t width,
+                                                            int32_t height, int32_t target_width) {
+    const auto weights = make_bicubic_antialias_weights(width, target_width);
+    std::vector<unsigned char> resized(static_cast<std::size_t>(height) * target_width * 3);
+    parallel_for_ranges(height, 16, [&](int32_t begin_y, int32_t end_y) {
+        for (int32_t y = begin_y; y < end_y; ++y) {
+            for (int32_t x = 0; x < target_width; ++x) {
+                const int32_t start = weights.starts[static_cast<std::size_t>(x)];
+                const int32_t count = weights.sizes[static_cast<std::size_t>(x)];
+                const int16_t* coefficients =
+                    weights.values.data() + static_cast<std::size_t>(x) * weights.stride;
+                for (int32_t channel = 0; channel < 3; ++channel) {
+                    const auto source_offset =
+                        (static_cast<std::size_t>(y) * width + start) * 3 + channel;
+                    const auto destination_offset =
+                        (static_cast<std::size_t>(y) * target_width + x) * 3 + channel;
+                    resized[destination_offset] = fixed_point_pixel(
+                        raw + source_offset, 3, coefficients, count, weights.precision);
+                }
+            }
+        }
+    });
+    return resized;
+}
+
+static std::vector<unsigned char> resize_bicubic_vertical(const unsigned char* raw, int32_t width,
+                                                          int32_t height, int32_t target_height) {
+    const auto weights = make_bicubic_antialias_weights(height, target_height);
+    std::vector<unsigned char> resized(static_cast<std::size_t>(target_height) * width * 3);
+    const int32_t row_stride = width * 3;
+    parallel_for_ranges(target_height, 16, [&](int32_t begin_y, int32_t end_y) {
+        for (int32_t y = begin_y; y < end_y; ++y) {
+            const int32_t start = weights.starts[static_cast<std::size_t>(y)];
+            const int32_t count = weights.sizes[static_cast<std::size_t>(y)];
+            const int16_t* coefficients =
+                weights.values.data() + static_cast<std::size_t>(y) * weights.stride;
+            for (int32_t x = 0; x < width; ++x) {
+                for (int32_t channel = 0; channel < 3; ++channel) {
+                    const auto source_offset =
+                        (static_cast<std::size_t>(start) * width + x) * 3 + channel;
+                    const auto destination_offset =
+                        (static_cast<std::size_t>(y) * width + x) * 3 + channel;
+                    resized[destination_offset] = fixed_point_pixel(
+                        raw + source_offset, row_stride, coefficients, count, weights.precision);
+                }
+            }
+        }
+    });
+    return resized;
+}
+
 std::vector<unsigned char> qwen_vl_resize_bicubic_antialias_u8(const unsigned char* raw,
                                                                int32_t width, int32_t height,
                                                                int32_t target_width,
                                                                int32_t target_height) {
-    if (raw == nullptr || width <= 0 || height <= 0 || target_width <= 0 || target_height <= 0)
+    if (!valid_resize_dimensions(raw, width, height, target_width, target_height))
         return {};
     if (width == target_width && height == target_height) {
         return {raw, raw + static_cast<std::size_t>(width) * height * 3};
@@ -262,55 +335,14 @@ std::vector<unsigned char> qwen_vl_resize_bicubic_antialias_u8(const unsigned ch
     std::vector<unsigned char> horizontal;
     const unsigned char* vertical_source = raw;
     if (width != target_width) {
-        const auto weights = make_bicubic_antialias_weights(width, target_width);
-        horizontal.resize(static_cast<std::size_t>(height) * target_width * 3);
-        parallel_for_ranges(height, 16, [&](int32_t begin_y, int32_t end_y) {
-            for (int32_t y = begin_y; y < end_y; ++y) {
-                for (int32_t x = 0; x < target_width; ++x) {
-                    const int32_t start = weights.starts[static_cast<std::size_t>(x)];
-                    const int32_t count = weights.sizes[static_cast<std::size_t>(x)];
-                    const int16_t* coefficients =
-                        weights.values.data() + static_cast<std::size_t>(x) * weights.stride;
-                    for (int32_t channel = 0; channel < 3; ++channel) {
-                        const auto source_offset =
-                            (static_cast<std::size_t>(y) * width + start) * 3 + channel;
-                        const auto destination_offset =
-                            (static_cast<std::size_t>(y) * target_width + x) * 3 + channel;
-                        horizontal[destination_offset] = fixed_point_pixel(
-                            raw + source_offset, 3, coefficients, count, weights.precision);
-                    }
-                }
-            }
-        });
+        horizontal = resize_bicubic_horizontal(raw, width, height, target_width);
         vertical_source = horizontal.data();
     }
 
     if (height == target_height)
         return horizontal;
 
-    const auto weights = make_bicubic_antialias_weights(height, target_height);
-    std::vector<unsigned char> resized(static_cast<std::size_t>(target_height) * target_width * 3);
-    const int32_t row_stride = target_width * 3;
-    parallel_for_ranges(target_height, 16, [&](int32_t begin_y, int32_t end_y) {
-        for (int32_t y = begin_y; y < end_y; ++y) {
-            const int32_t start = weights.starts[static_cast<std::size_t>(y)];
-            const int32_t count = weights.sizes[static_cast<std::size_t>(y)];
-            const int16_t* coefficients =
-                weights.values.data() + static_cast<std::size_t>(y) * weights.stride;
-            for (int32_t x = 0; x < target_width; ++x) {
-                for (int32_t channel = 0; channel < 3; ++channel) {
-                    const auto source_offset =
-                        (static_cast<std::size_t>(start) * target_width + x) * 3 + channel;
-                    const auto destination_offset =
-                        (static_cast<std::size_t>(y) * target_width + x) * 3 + channel;
-                    resized[destination_offset] =
-                        fixed_point_pixel(vertical_source + source_offset, row_stride, coefficients,
-                                          count, weights.precision);
-                }
-            }
-        }
-    });
-    return resized;
+    return resize_bicubic_vertical(vertical_source, target_width, height, target_height);
 }
 
 // Convert resized uint8 HWC buffer to float32 CHW, normalizing per channel.
@@ -811,17 +843,56 @@ static void build_dynamic_window_padding(const std::vector<int32_t>& group_count
     }
 }
 
+static bool valid_dynamic_patch_config(const LoadedImage& loaded,
+                                       const QwenVlPreprocessConfig& config) {
+    return config.patch_size > 0 && config.merge_size > 0 && config.temporal_patch_size > 0 &&
+           config.vision_num_heads > 0 && config.vision_embed_dim % config.vision_num_heads == 0 &&
+           loaded.channels > 0;
+}
+
+static void copy_dynamic_patch(const LoadedImage& loaded, const QwenVlPreprocessConfig& config,
+                               int32_t group_columns, int32_t group_h, int32_t group_w,
+                               int32_t merge_h, int32_t merge_w, int32_t patch_vector,
+                               std::vector<float>& destination) {
+    const int32_t patch = config.patch_size;
+    const int32_t merge = config.merge_size;
+    const std::size_t patch_index =
+        ((static_cast<std::size_t>(group_h) * group_columns + group_w) * merge + merge_h) * merge +
+        merge_w;
+    float* patch_destination = destination.data() + patch_index * patch_vector;
+    for (int32_t channel = 0; channel < loaded.channels; ++channel) {
+        for (int32_t temporal = 0; temporal < config.temporal_patch_size; ++temporal) {
+            for (int32_t patch_h = 0; patch_h < patch; ++patch_h) {
+                const int32_t source_h = (group_h * merge + merge_h) * patch + patch_h;
+                const int32_t source_w = (group_w * merge + merge_w) * patch;
+                const std::size_t source =
+                    (static_cast<std::size_t>(channel) * loaded.target_height + source_h) *
+                        loaded.target_width +
+                    source_w;
+                const std::size_t target =
+                    ((static_cast<std::size_t>(channel) * config.temporal_patch_size + temporal) *
+                         patch +
+                     patch_h) *
+                    patch;
+                std::copy_n(loaded.img_chw.data() + source, patch, patch_destination + target);
+            }
+        }
+    }
+}
+
 static QwenVlPreprocessedImage
 preprocess_qwen_smart_resize_patchify(const LoadedImage& loaded,
                                       const QwenVlPreprocessConfig& config) {
     QwenVlPreprocessedImage result;
     const int32_t patch = config.patch_size;
     const int32_t merge = config.merge_size;
+    if (!valid_dynamic_patch_config(loaded, config)) {
+        std::cerr << "[trtmc] Invalid dynamic Qwen-VL patch configuration" << std::endl;
+        return result;
+    }
     const int32_t grid_h = loaded.target_height / patch;
     const int32_t grid_w = loaded.target_width / patch;
-    if (patch <= 0 || merge <= 0 || grid_h % merge || grid_w % merge ||
-        config.temporal_patch_size <= 0 || config.vision_num_heads <= 0 ||
-        config.vision_embed_dim % config.vision_num_heads) {
+    if (grid_h % merge != 0 || grid_w % merge != 0) {
         std::cerr << "[trtmc] Invalid dynamic Qwen-VL patch configuration" << std::endl;
         return result;
     }
@@ -836,37 +907,8 @@ preprocess_qwen_smart_resize_patchify(const LoadedImage& loaded,
             for (int32_t group_w = 0; group_w < group_columns; ++group_w) {
                 for (int32_t merge_h = 0; merge_h < merge; ++merge_h) {
                     for (int32_t merge_w = 0; merge_w < merge; ++merge_w) {
-                        const std::size_t patch_index =
-                            ((static_cast<std::size_t>(group_h) * group_columns + group_w) * merge +
-                             merge_h) *
-                                merge +
-                            merge_w;
-                        float* patch_destination =
-                            result.pixel_values.data() + patch_index * patch_vector;
-                        for (int32_t channel = 0; channel < loaded.channels; ++channel) {
-                            for (int32_t temporal = 0; temporal < config.temporal_patch_size;
-                                 ++temporal) {
-                                for (int32_t patch_h = 0; patch_h < patch; ++patch_h) {
-                                    const int32_t source_h =
-                                        (group_h * merge + merge_h) * patch + patch_h;
-                                    const int32_t source_w = (group_w * merge + merge_w) * patch;
-                                    const std::size_t source =
-                                        (static_cast<std::size_t>(channel) * loaded.target_height +
-                                         source_h) *
-                                            loaded.target_width +
-                                        source_w;
-                                    const std::size_t destination =
-                                        ((static_cast<std::size_t>(channel) *
-                                              config.temporal_patch_size +
-                                          temporal) *
-                                             patch +
-                                         patch_h) *
-                                        patch;
-                                    std::copy_n(loaded.img_chw.data() + source, patch,
-                                                patch_destination + destination);
-                                }
-                            }
-                        }
+                        copy_dynamic_patch(loaded, config, group_columns, group_h, group_w, merge_h,
+                                           merge_w, patch_vector, result.pixel_values);
                     }
                 }
             }
