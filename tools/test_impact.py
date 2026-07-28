@@ -1410,9 +1410,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ClassificationRule(
             priority=96,
             name="graph_tooling",
-            matcher=_regex_rule(
-                r"python/tensorrt_model_connect/graph_[A-Za-z0-9_]+\.py$"
-            ),
+            matcher=_path_equals("python/tensorrt_model_connect/graph_patch.py"),
             resolver=_match_result(
                 "graph_tooling",
                 _no_models,

@@ -1040,6 +1040,15 @@ class TestSharedModules:
         assert match.unit_tiers == ["builder", "tools"]
         assert match.rebuild_cpp is False
 
+    def test_future_graph_module_remains_broad_impact(self, imap):
+        """A naming coincidence must not silently bypass model validation."""
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/graph_future_runtime.py",
+            imap,
+        )
+        assert match.rule == "shared_builder_module"
+        assert sorted(match.models) == sorted(imap.all_model_names)
+
     def test_shared_module_all_models(self, imap):
         """checkpoint_mapper.py -> all models (no escalation)."""
         match = test_impact.classify_file(
