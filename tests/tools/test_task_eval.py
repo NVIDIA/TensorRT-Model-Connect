@@ -3661,7 +3661,36 @@ def test_text_reference_auto_dtype_follows_engine_precision(
     assert dtype == expected
 
 
-def test_explicit_reference_dtype_overrides_engine_precision(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "dataset_kind",
+    [
+        "asr_chat_json",
+        "seedtts_json",
+        "vlm_chat_json",
+        "vlm_unified_json",
+    ],
+)
+def test_native_multimodal_reference_dtype_follows_engine_precision(
+    tmp_path: Path,
+    dataset_kind: str,
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps({"dataset_kind": dataset_kind}),
+        encoding="utf-8",
+    )
+
+    dtype = task_eval.resolve_hf_reference_dtype(
+        argparse.Namespace(hf_dtype="auto"),
+        {"precision": "fp32"},
+        work_dir,
+    )
+
+    assert dtype == "float32"
+
+
+def test_explicit_reference_dtype_must_match_engine_precision(tmp_path: Path) -> None:
     work_dir = tmp_path / "work"
     work_dir.mkdir()
     (work_dir / "manifest.json").write_text(
@@ -3669,13 +3698,113 @@ def test_explicit_reference_dtype_overrides_engine_precision(tmp_path: Path) -> 
         encoding="utf-8",
     )
 
-    dtype = task_eval.resolve_hf_reference_dtype(
-        argparse.Namespace(hf_dtype="bfloat16"),
-        {"precision": "fp16"},
+    with pytest.raises(
+        ValueError,
+        match="reference precision bf16 does not match TRTMC base precision fp16",
+    ):
+        task_eval.resolve_hf_reference_dtype(
+            argparse.Namespace(hf_dtype="bfloat16"),
+            {"precision": "fp16"},
+            work_dir,
+        )
+
+
+@pytest.mark.parametrize("quantization_format", ["fp8", "nvfp4", "mxfp8"])
+def test_quantized_reference_requires_explicit_base_precision(
+    tmp_path: Path,
+    quantization_format: str,
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps({"dataset_kind": "mmlu_five_shot_json"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=rf"{quantization_format.upper()}.*requires task_eval.reference_precision",
+    ):
+        task_eval.resolve_hf_reference_dtype(
+            argparse.Namespace(hf_dtype="auto"),
+            {
+                "name": "quantized-model",
+                "precision": "bf16",
+                "quantization": {"format": quantization_format},
+            },
+            work_dir,
+        )
+
+
+def test_quantized_reference_contract_records_candidate_and_base_precision(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset_kind": "mmlu_five_shot_json",
+                "task_eval": {"reference_precision": "bf16"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    model = {
+        "name": "quantized-model",
+        "precision": "bf16",
+        "quantization": {"format": "fp8"},
+    }
+
+    contract = task_eval.resolve_reference_precision_contract(
+        argparse.Namespace(hf_dtype="auto"),
+        model,
         work_dir,
     )
 
-    assert dtype == "bfloat16"
+    assert contract == {
+        "trtmc_base_precision": "bf16",
+        "trtmc_quantization": "fp8",
+        "reference_precision": "bf16",
+        "reference_dtype": "bfloat16",
+        "comparison": "quantized_vs_unquantized_reference",
+    }
+    assert (
+        task_eval.resolve_hf_reference_dtype(
+            argparse.Namespace(hf_dtype="auto"),
+            model,
+            work_dir,
+        )
+        == "bfloat16"
+    )
+
+
+def test_legacy_fp8_scale_model_is_treated_as_quantized(tmp_path: Path) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset_kind": "diffusion_prompt_json",
+                "task_eval": {"reference_precision": "bf16"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    contract = task_eval.resolve_reference_precision_contract(
+        argparse.Namespace(hf_dtype="auto"),
+        {
+            "name": "flux-2-dev-fp8",
+            "precision": "fp16",
+            "fp8_scales": "scales.json",
+        },
+        work_dir,
+    )
+
+    assert contract["trtmc_quantization"] == "fp8"
+    assert contract["reference_precision"] == "bf16"
+    assert contract["comparison"] == "quantized_vs_unquantized_reference"
 
 
 def test_non_transformers_reference_keeps_auto_dtype(tmp_path: Path) -> None:

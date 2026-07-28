@@ -81,6 +81,8 @@ def _model_dtype(torch_module: Any, name: str) -> str | Any:
         return torch_module.float16
     if name == "bfloat16":
         return torch_module.bfloat16
+    if name == "float32":
+        return torch_module.float32
     return "auto"
 
 
@@ -846,7 +848,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample-id", default="")
     parser.add_argument(
         "--dtype",
-        choices=("auto", "float16", "bfloat16"),
+        choices=("auto", "float16", "bfloat16", "float32"),
         default="auto",
     )
     parser.add_argument("--device", default="cuda")

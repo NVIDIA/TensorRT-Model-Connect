@@ -36,6 +36,9 @@
       "ci_tier": "multi_device",
       "reference_family": "diffusers_image_gen",
       "user_contract": "diffusion_image",
+      "task_eval": {
+        "reference_precision": "bf16"
+      },
       "description": "FLUX.2-dev FP8 L0 tensor-parallel representative at 384px with full text shape and reduced denoising steps",
       "preflight_requirements": [
         {

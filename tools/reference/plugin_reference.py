@@ -219,6 +219,13 @@ def _model_manifest_path(manifest: Mapping[str, Any]) -> Path:
 
 def _load_reference_plugin(manifest: Mapping[str, Any]) -> tuple[Any, Any]:
     case = load_manifest(_model_manifest_path(manifest))
+    task_config = manifest.get("task_eval", {})
+    if isinstance(task_config, Mapping):
+        reference_precision = str(
+            task_config.get("reference_precision", "") or ""
+        )
+        if reference_precision:
+            case.metadata["reference_precision"] = reference_precision
     activate_model_plugins(str(case.metadata.get("model_test_dir", "") or ""))
     reference = get_reference(case.reference_backend)
     if reference is None:
@@ -754,7 +761,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample-id", default="")
     parser.add_argument(
         "--dtype",
-        choices=("auto", "float16", "bfloat16"),
+        choices=("auto", "float16", "bfloat16", "float32"),
         default="auto",
     )
     parser.add_argument("--device", default="cuda")

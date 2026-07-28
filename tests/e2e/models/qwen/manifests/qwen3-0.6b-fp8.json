@@ -25,7 +25,8 @@
       "task_eval": {
         "reference_backend": "hf_transformers",
         "reference_family": "chat_qwen3_posttrained",
-        "user_contract": "chat_response"
+        "user_contract": "chat_response",
+        "reference_precision": "bf16"
       },
       "max_new_tokens": 10,
       "notes": "FP8 quantization can perturb raw logit distributions while preserving decoded answer semantics. Require the model-owned expected answer plus the default logit and token agreement gates for output confidence."

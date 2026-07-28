@@ -15,6 +15,7 @@ def test_flux2_fp8_manifest_uses_end_to_end_image_contract() -> None:
     manifest_path = Path(__file__).with_name("manifests") / "flux-2-dev-fp8.json"
     case = load_manifest(manifest_path)
 
+    assert case.metadata["task_eval"]["reference_precision"] == "bf16"
     assert case.reference_family == "diffusers_image_gen"
     assert case.user_contract == "diffusion_image"
     assert [stage.name for stage in case.stages] == ["end_to_end"]

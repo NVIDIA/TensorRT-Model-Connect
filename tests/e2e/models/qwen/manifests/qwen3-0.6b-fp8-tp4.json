@@ -42,6 +42,9 @@
       "expected_answers": [
         "Paris"
       ],
+      "task_eval": {
+        "reference_precision": "bf16"
+      },
       "max_new_tokens": 10,
       "ci_tier": "multi_device",
       "preflight_requirements": [

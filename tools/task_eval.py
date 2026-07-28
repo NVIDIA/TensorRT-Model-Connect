@@ -8697,6 +8697,145 @@ def _namespace_for_run_hf(
     )
 
 
+_REFERENCE_PRECISION_TO_DTYPE = {
+    "fp16": "float16",
+    "float16": "float16",
+    "bf16": "bfloat16",
+    "bfloat16": "bfloat16",
+    "fp32": "float32",
+    "float32": "float32",
+}
+_REFERENCE_DTYPE_TO_PRECISION = {
+    dtype: precision
+    for precision, dtype in (
+        ("fp16", "float16"),
+        ("bf16", "bfloat16"),
+        ("fp32", "float32"),
+    )
+}
+_NATIVE_PRECISION_DATASET_KINDS = {
+    "asr_chat_json",
+    "mmlu_five_shot_json",
+    "seedtts_json",
+    "text_generation_json",
+    "sts_pair_jsonl",
+    "vlm_chat_json",
+    "vlm_unified_json",
+}
+
+
+def _canonical_reference_precision(value: Any, *, field: str) -> str:
+    normalized = str(value or "").strip().lower()
+    dtype = _REFERENCE_PRECISION_TO_DTYPE.get(normalized)
+    if dtype is None:
+        supported = ", ".join(("fp16", "bf16", "fp32"))
+        raise ValueError(f"{field} must be one of {supported}; got {value!r}")
+    return _REFERENCE_DTYPE_TO_PRECISION[dtype]
+
+
+def _model_quantization_format(model: Mapping[str, Any]) -> str:
+    quantization = model.get("quantization", {})
+    if isinstance(quantization, Mapping):
+        quant_format = str(quantization.get("format", "") or "").strip().lower()
+        if quant_format and quant_format != "none":
+            return quant_format
+    if model.get("fp8_scales"):
+        return "fp8"
+    return ""
+
+
+def _configured_reference_precision(
+    model: Mapping[str, Any],
+    work_dir: Path,
+) -> str:
+    task_config = model.get("task_eval", {})
+    configured = (
+        task_config.get("reference_precision")
+        if isinstance(task_config, Mapping)
+        else None
+    )
+    manifest_path = work_dir / "manifest.json"
+    if manifest_path.is_file():
+        work_config = work_manifest(work_dir).get("task_eval", {})
+        if isinstance(work_config, Mapping):
+            configured = work_config.get("reference_precision", configured)
+    if configured in (None, ""):
+        return ""
+    return _canonical_reference_precision(
+        configured,
+        field="task_eval.reference_precision",
+    )
+
+
+def resolve_reference_precision_contract(
+    args: argparse.Namespace,
+    model: Mapping[str, Any],
+    work_dir: Path,
+) -> dict[str, str]:
+    """Resolve the declared TRTMC/reference precision relationship."""
+
+    base_precision = _canonical_reference_precision(
+        model.get("precision", "fp32"),
+        field="TRTMC base precision",
+    )
+    quantization = _model_quantization_format(model)
+    configured = _configured_reference_precision(model, work_dir)
+    requested_dtype = str(getattr(args, "hf_dtype", "auto") or "auto")
+    requested = (
+        ""
+        if requested_dtype == "auto"
+        else _canonical_reference_precision(
+            requested_dtype,
+            field="--hf-dtype",
+        )
+    )
+
+    if quantization and not configured:
+        model_name = str(model.get("name", "") or "quantized model")
+        raise ValueError(
+            f"{model_name} uses {quantization.upper()} quantization and requires "
+            "task_eval.reference_precision"
+        )
+    if requested and configured and requested != configured:
+        raise ValueError(
+            f"--hf-dtype {requested} conflicts with "
+            f"task_eval.reference_precision {configured}"
+        )
+
+    reference_precision = requested or configured
+    if not reference_precision:
+        reference_precision = (
+            base_precision
+            if _work_dataset_kind(work_dir) in _NATIVE_PRECISION_DATASET_KINDS
+            else "auto"
+        )
+
+    if not quantization and reference_precision not in {"auto", base_precision}:
+        raise ValueError(
+            f"reference precision {reference_precision} does not match "
+            f"TRTMC base precision {base_precision}"
+        )
+
+    comparison = (
+        "quantized_vs_unquantized_reference"
+        if quantization
+        else "aligned"
+        if reference_precision == base_precision
+        else "reference_defined"
+    )
+    return {
+        "trtmc_base_precision": base_precision,
+        "trtmc_quantization": quantization or "none",
+        "reference_precision": reference_precision,
+        "reference_dtype": (
+            _REFERENCE_PRECISION_TO_DTYPE[reference_precision]
+            if reference_precision != "auto"
+            else "auto"
+        ),
+        "comparison": comparison,
+    }
+
+
 def resolve_hf_reference_dtype(
     args: argparse.Namespace,
     model: Mapping[str, Any],
@@ -8704,23 +8843,11 @@ def resolve_hf_reference_dtype(
 ) -> str:
     """Resolve the reference dtype for native Transformers parity workloads."""
 
-    requested = str(getattr(args, "hf_dtype", "auto") or "auto")
-    if requested != "auto":
-        return requested
-    if _work_dataset_kind(work_dir) not in {
-        "mmlu_five_shot_json",
-        "text_generation_json",
-        "sts_pair_jsonl",
-    }:
-        return requested
-    return {
-        "fp16": "float16",
-        "float16": "float16",
-        "bf16": "bfloat16",
-        "bfloat16": "bfloat16",
-        "fp32": "float32",
-        "float32": "float32",
-    }.get(str(model.get("precision", "")).lower(), requested)
+    return resolve_reference_precision_contract(
+        args,
+        model,
+        work_dir,
+    )["reference_dtype"]
 
 
 def _namespace_for_run_trtfb(
@@ -9902,6 +10029,11 @@ def eval_one_model(
         sample_seed=args.sample_seed,
         task_eval_config=task_eval_config,
     )
+    precision_contract = (
+        None
+        if no_hf_reference
+        else resolve_reference_precision_contract(args, model, work_dir)
+    )
 
     prompt_token_limit = int(task_eval_config.get("prompt_token_limit", 0) or 0)
     prompt_normalization: dict[str, Any] | None = None
@@ -10029,7 +10161,6 @@ def eval_one_model(
         "max_prompt_tokens": max_prompt_len,
         "generation_cache_headroom": generation_headroom,
         "reference_backend": reference_backend,
-        "reference_dtype": resolve_hf_reference_dtype(args, model, work_dir),
         "hf_reference_status": reference_mode
         if no_hf_reference
         else "reused"
@@ -10041,6 +10172,9 @@ def eval_one_model(
         "bundle_built": built,
         "model_plugin_dir": str(getattr(args, "model_plugin_dir", "") or ""),
     }
+    if precision_contract is not None:
+        base_result["reference_dtype"] = precision_contract["reference_dtype"]
+        base_result["precision_contract"] = precision_contract
     if prompt_normalization is not None:
         base_result["prompt_normalization"] = prompt_normalization
 

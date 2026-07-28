@@ -144,6 +144,35 @@ An unimplemented consistency contract uses `execution: not_run`,
 The HTML report renders each status as an independent colored signal and shows
 the primary agreement metric next to it.
 
+## Precision contract
+
+Native Transformers text, embedding, VLM, and speech references use the
+model manifest's FP16, BF16, or FP32 base precision. An explicit
+`--hf-dtype` must match an unquantized TRTMC model's base precision; validation
+rejects a conflicting override before inference.
+
+Quantized candidates must declare their unquantized reference precision in the
+model testcase's validation configuration:
+
+```json
+"precision": "bf16",
+"quantization": {"format": "fp8"},
+"task_eval": {
+  "reference_precision": "bf16"
+}
+```
+
+This means TRTMC FP8 with a BF16 base is compared with an unquantized HF BF16
+reference. It is a quantization-quality comparison, not an assertion that HF
+executed FP8 kernels. The same contract applies to FP4, NVFP4, MXFP, or future
+quantization formats when those candidates are added. A quantized manifest
+without `task_eval.reference_precision` fails before reference inference.
+
+The resolved TRTMC base precision, quantization format, reference precision,
+and comparison kind are stored in `comparison.json` and shown in the HTML
+report. Reference cache keys include the effective reference dtype, so only
+variants with the same reference computation can reuse an entry.
+
 ## Add or extend a model
 
 1. Reuse or add a dataset workload in

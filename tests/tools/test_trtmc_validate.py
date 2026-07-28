@@ -1054,6 +1054,47 @@ def test_write_report_links_each_comparison(tmp_path):
     assert "$ trtmc run" in document
 
 
+def test_write_report_surfaces_quantized_reference_precision_contract(
+    tmp_path: Path,
+) -> None:
+    case_dir = tmp_path / "quantized-model" / "mmlu_five_shot_mcq"
+    case_dir.mkdir(parents=True)
+    (case_dir / "comparison.json").write_text(
+        json.dumps(
+            {
+                "model": "quantized-model",
+                "workload": "mmlu_five_shot_mcq",
+                "status": "passed",
+                "raw_result": {
+                    "status": "passed",
+                    "mode": "mcq",
+                    "precision_contract": {
+                        "trtmc_base_precision": "bf16",
+                        "trtmc_quantization": "fp8",
+                        "reference_precision": "bf16",
+                        "reference_dtype": "bfloat16",
+                        "comparison": "quantized_vs_unquantized_reference",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, html_path, report = trtmc_validate.write_report(tmp_path)
+
+    assert report["results"][0]["precision_contract"] == {
+        "trtmc_base_precision": "bf16",
+        "trtmc_quantization": "fp8",
+        "reference_precision": "bf16",
+        "reference_dtype": "bfloat16",
+        "comparison": "quantized_vs_unquantized_reference",
+    }
+    document = html_path.read_text(encoding="utf-8")
+    assert "TRTMC FP8 (BF16 base) vs HF BF16" in document
+    assert "Quantized candidate vs unquantized reference" in document
+
+
 def test_traffic_light_counts_are_mutually_exclusive():
     def result(validation, comparison):
         return {

@@ -46,6 +46,7 @@ def test_fp8_and_topp_use_deterministic_mmlu_validation_contract() -> None:
         assert model["reference_family"] == "chat_qwen3_posttrained"
         assert model["user_contract"] == "chat_response"
         assert task_eval.suite_match_reason(suite, model) == (True, "selected")
+    assert models["qwen3-0.6b-fp8"]["task_eval"]["reference_precision"] == "bf16"
     assert set(models) < set(suite["default_model_names"])
     assert topp_e2e.reference_backend == "invariant_only"
     assert topp_e2e.reference_family == "sampling_top_p"

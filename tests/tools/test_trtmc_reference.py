@@ -582,6 +582,35 @@ def test_reference_entrypoint_accepts_float32_dtype() -> None:
     assert arguments.dtype == "float32"
 
 
+def test_remaining_native_reference_runners_accept_float32_dtype() -> None:
+    common = [
+        "--model",
+        "org/model",
+        "--prompts",
+        "/tmp/prompts.jsonl",
+        "--answers",
+        "/tmp/answers.json",
+        "--manifest",
+        "/tmp/manifest.json",
+        "--predictions",
+        "/tmp/predictions.json",
+        "--raw-output",
+        "/tmp/raw.jsonl",
+        "--dtype",
+        "float32",
+    ]
+
+    for module in (plugin_reference, transformers_vlm, speech):
+        assert module.build_parser().parse_args(common).dtype == "float32"
+
+    torch_module = SimpleNamespace(float32=object())
+    assert (
+        transformers_vlm._model_dtype(torch_module, "float32")
+        is torch_module.float32
+    )
+    assert speech._model_dtype(torch_module, "float32") is torch_module.float32
+
+
 def test_encoder_reference_metadata_is_direct_and_sample_selectable(
     tmp_path: Path,
 ) -> None:
@@ -800,6 +829,45 @@ def test_plugin_reference_preserves_direct_subprocess_command() -> None:
     ]
     assert output.command_was_run == output.metadata["command"]
     assert subprocess_module.run is fake_subprocess_run
+
+
+def test_plugin_reference_applies_task_eval_reference_precision(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    case = SimpleNamespace(
+        metadata={"model_test_dir": ""},
+        reference_backend="hf_diffusers",
+    )
+    reference = object()
+    monkeypatch.setattr(
+        plugin_reference,
+        "_model_manifest_path",
+        lambda _manifest: tmp_path / "model.json",
+    )
+    monkeypatch.setattr(plugin_reference, "load_manifest", lambda _path: case)
+    monkeypatch.setattr(
+        plugin_reference,
+        "activate_model_plugins",
+        lambda _path: None,
+    )
+    monkeypatch.setattr(
+        plugin_reference,
+        "get_reference",
+        lambda _name: reference,
+    )
+
+    loaded_case, loaded_reference = plugin_reference._load_reference_plugin(
+        {
+            "task_eval": {
+                "model_manifest": "model.json",
+                "reference_precision": "bf16",
+            }
+        }
+    )
+
+    assert loaded_case.metadata["reference_precision"] == "bf16"
+    assert loaded_reference is reference
 
 
 def test_vlm_reference_metadata_is_direct_and_sample_selectable(

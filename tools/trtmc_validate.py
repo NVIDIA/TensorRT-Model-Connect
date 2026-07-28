@@ -1137,6 +1137,10 @@ def _normalize_result(result: Mapping[str, Any]) -> dict[str, Any]:
     validation = normalized.get("validation")
     if not isinstance(validation, dict):
         validation = _validation_details(execution, comparison)
+    precision_contract = normalized.get("precision_contract")
+    if not isinstance(precision_contract, dict):
+        candidate = raw_result.get("precision_contract")
+        precision_contract = dict(candidate) if isinstance(candidate, dict) else {}
     normalized.update(
         {
             "schema_version": "trtmc.validation-result/v2",
@@ -1146,6 +1150,10 @@ def _normalize_result(result: Mapping[str, Any]) -> dict[str, Any]:
             "reproduce": _normalize_reproduction(normalized.get("reproduce")),
         }
     )
+    if precision_contract:
+        normalized["precision_contract"] = precision_contract
+    else:
+        normalized.pop("precision_contract", None)
     normalized.pop("returncode", None)
     normalized.pop("status", None)
     return normalized
@@ -1745,13 +1753,34 @@ def _render_comparison(result: Mapping[str, Any]) -> str:
     )
     mode = str(comparison.get("mode", "") or "")
     not_compared_reason = str(result.get("not_compared_reason", "") or "")
-    detail_text = mode or not_compared_reason
-    detail = (
-        f'<div class="detail">{html.escape(detail_text)}</div>'
-        if detail_text
-        else ""
+    details = [value for value in (mode, not_compared_reason) if value]
+    contract = result.get("precision_contract", {})
+    if isinstance(contract, Mapping) and contract:
+        base = str(contract.get("trtmc_base_precision", "") or "").upper()
+        quantization = str(
+            contract.get("trtmc_quantization", "") or ""
+        ).upper()
+        reference = str(
+            contract.get("reference_precision", "") or ""
+        ).upper()
+        candidate = (
+            f"{quantization} ({base} base)"
+            if quantization and quantization != "NONE"
+            else base
+        )
+        if candidate and reference:
+            details.append(f"TRTMC {candidate} vs HF {reference}")
+        comparison_kind = str(contract.get("comparison", "") or "")
+        if comparison_kind == "quantized_vs_unquantized_reference":
+            details.append("Quantized candidate vs unquantized reference")
+        elif comparison_kind == "aligned":
+            details.append("Aligned precision")
+        elif comparison_kind == "reference_defined":
+            details.append("Reference-defined precision")
+    return signal + "".join(
+        f'<div class="detail">{html.escape(detail)}</div>'
+        for detail in details
     )
-    return signal + detail
 
 
 def _format_metric_value(name: str, value: Any) -> str:
