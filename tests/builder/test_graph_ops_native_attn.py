@@ -28,6 +28,7 @@ from tests.builder.owned_graph_modules import load_family_graph_ops, load_graph_
 
 pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
 graph_ops = load_graph_ops()
+qwen_graph_ops = load_family_graph_ops("qwen")
 qwen_vl_graph_ops = load_family_graph_ops("qwen_vl")
 
 
@@ -363,6 +364,75 @@ class TestAddApplyRopeNative:
 
         np.testing.assert_allclose(result, ref, atol=1e-3,
                                    err_msg="multi-token native RoPE mismatch")
+
+    @requires_trt
+    def test_active_position_cache_matches_high_position_reference(self):
+        """Active rank-3 caches avoid a serialized context-capacity table."""
+        import tensorrt as trt
+
+        num_heads, head_dim = 4, 128
+        attention_size = num_heads * head_dim
+        rope_theta = 1_000_000.0
+        positions = np.array([0, 3, 40_934, 131_071], dtype=np.int32)
+
+        rng = np.random.default_rng(20260728)
+        x = rng.standard_normal(
+            (len(positions), attention_size)
+        ).astype(np.float32)
+        inv_freq = qwen_graph_ops.make_native_active_rope_inv_freq(
+            head_dim, rope_theta
+        )
+
+        def build(network, trt_inputs):
+            cos_active, sin_active = qwen_graph_ops.add_active_rope_cache(
+                network,
+                trt_inputs["pos"],
+                inv_freq,
+                trt.float32,
+            )
+            out = qwen_graph_ops.add_apply_rope_native(
+                network,
+                trt_inputs["x"],
+                num_heads,
+                head_dim,
+                cos_active,
+                sin_active,
+                None,
+                head_dim,
+                interleaved=False,
+                sequence_length=None,
+            )
+            return {
+                "out": out,
+                "cos": cos_active,
+                "sin": sin_active,
+            }
+
+        result = _run_strongly_typed(build, {"x": x, "pos": positions})
+
+        angles = positions.astype(np.float32)[:, None] * inv_freq[None, :]
+        cos_ref = np.asarray(np.cos(angles), dtype=np.float32)
+        sin_ref = np.asarray(np.sin(angles), dtype=np.float32)
+        rows = []
+        for row in range(len(positions)):
+            cos_full = np.concatenate([cos_ref[row], cos_ref[row]])
+            sin_full = np.concatenate([sin_ref[row], sin_ref[row]])
+            rows.append(
+                _ref_rope(
+                    x[row : row + 1],
+                    cos_full,
+                    sin_full,
+                    num_heads,
+                    head_dim,
+                )
+            )
+        ref = np.concatenate(rows, axis=0)
+
+        assert result["cos"].shape == (1, len(positions), head_dim // 2)
+        assert result["sin"].shape == (1, len(positions), head_dim // 2)
+        np.testing.assert_allclose(result["cos"][0], cos_ref, atol=1e-7)
+        np.testing.assert_allclose(result["sin"][0], sin_ref, atol=1e-7)
+        np.testing.assert_allclose(result["out"], ref, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------

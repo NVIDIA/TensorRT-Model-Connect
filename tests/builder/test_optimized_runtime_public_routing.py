@@ -148,7 +148,9 @@ def test_python_build_treats_omitted_and_explicit_defaults_identically(
     assert calls[0]["precision"] == "fp32"
 
 
-def test_python_build_preserves_native_call_when_no_capsule_matches(monkeypatch) -> None:
+def test_python_build_preserves_omitted_native_capacity_for_family_default(
+    monkeypatch,
+) -> None:
     import tensorrt_model_connect.engine_builder as engine_builder
 
     native_calls: list[dict] = []
@@ -169,7 +171,16 @@ def test_python_build_preserves_native_call_when_no_capsule_matches(monkeypatch)
     assert native_calls[0]["model_id_or_path"] == "native/model"
     assert native_calls[0]["output_path"] == "native.trtfb"
     assert native_calls[0]["precision"] is None
-    assert native_calls[0]["max_cache_length"] == 256
+    assert native_calls[0]["max_cache_length"] is None
+
+    engine_builder.build(
+        "native/model",
+        "explicit.trtfb",
+        max_cache_length=256,
+    )
+
+    assert len(native_calls) == 2
+    assert native_calls[1]["max_cache_length"] == 256
 
 
 def test_cli_delegation_uses_existing_options_without_native_discovery(monkeypatch) -> None:
@@ -346,7 +357,7 @@ def test_build_cli_does_not_expose_runtime_selection_or_target_flags() -> None:
     assert "--target" not in result.stdout
     assert "--runtime" not in result.stdout
     assert "optimized-runtime" not in result.stdout.lower()
-    assert "--max-cache-length" in result.stdout
+    assert "--max-cache-length" not in result.stdout
 
 
 def test_optimized_factory_header_is_private() -> None:

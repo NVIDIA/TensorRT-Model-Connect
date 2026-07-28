@@ -8,6 +8,7 @@ runtime_strategies = ["qwen_decoder_kv_cache"]
 runtime_tests = [
   "test_qwen_tensor_names|test_qwen_tensor_names.cpp|_|_|_",
   "test_qwen_sampler|test_qwen_sampler.cpp|trtmc_model_qwen|_|_",
+  "test_qwen_native_kv_cache|test_qwen_native_kv_cache.cpp|trtmc_model_qwen,trtmc_backend_trt|_|REQUIRES_TRT,REQUIRES_GPU",
 ]
 [validation_profiles]
 decoder_debug = ["qwen_decoder_kv_cache"]

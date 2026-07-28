@@ -251,6 +251,67 @@ static void test_generate_stops_at_eos() {
     cudaStreamDestroy(stream);
 }
 
+static void test_generate_stops_at_any_default_eos() {
+    auto engine = build_mock_decoder();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
+                                                         engine->createExecutionContext(), stream);
+    auto cache = std::make_unique<trtmc::LlamaKvCache>(1, 8, 4, stream);
+
+    trtmc::LlamaTextGenConfig cfg;
+    cfg.vocab_size = 4;
+    cfg.id_eos = 1;
+    cfg.id_eos_ids = {1, 2};
+    cfg.has_position_input = false;
+
+    trtmc::LlamaTextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 10;
+
+    auto result = pipeline.generate_ids({1}, gen_cfg);
+    check(result.token_ids == std::vector<int32_t>({1, 2}),
+          "second configured EOS stops generation");
+
+    cudaStreamDestroy(stream);
+}
+
+static void test_explicit_eos_override_replaces_default_set() {
+    auto engine = build_mock_decoder();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
+                                                         engine->createExecutionContext(), stream);
+    auto cache = std::make_unique<trtmc::LlamaKvCache>(1, 8, 4, stream);
+
+    trtmc::LlamaTextGenConfig cfg;
+    cfg.vocab_size = 4;
+    cfg.id_eos = 1;
+    cfg.id_eos_ids = {1, 2};
+    cfg.has_position_input = false;
+
+    trtmc::LlamaTextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 3;
+    gen_cfg.eos_token_id = 3;
+
+    auto result = pipeline.generate_ids({1}, gen_cfg);
+    check(result.token_ids == std::vector<int32_t>({1, 2, 2, 2}),
+          "explicit scalar EOS override replaces the default EOS set");
+
+    cudaStreamDestroy(stream);
+}
+
 static void test_generate_max_tokens() {
     auto engine = build_mock_decoder();
     if (!engine) {
@@ -436,6 +497,8 @@ int main() {
     test_argmax();
     test_pipeline_construction();
     test_generate_stops_at_eos();
+    test_generate_stops_at_any_default_eos();
+    test_explicit_eos_override_replaces_default_set();
     test_generate_max_tokens();
     test_zero_max_tokens();
     test_kv_reset_is_logical_and_masks_stale_rows();
