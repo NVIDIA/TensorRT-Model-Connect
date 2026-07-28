@@ -26,26 +26,12 @@ class LlamaPlugin:
 
     def default_build_precision(self, config: ModelConfig) -> str:
         capability = native_kv_architecture_capability(config)
-        if capability.eligible:
-            return "bf16"
-        if capability.applicable:
-            raise ValueError(
-                "Unsupported dense Llama native-KV model-only build: "
-                + capability.reason
-            )
-        return "fp32"
+        return "bf16" if capability.eligible else "fp32"
 
     def default_max_cache_length(self, config: ModelConfig) -> int:
         """Use the model's complete context for native Llama."""
         capability = native_kv_architecture_capability(config)
-        if capability.eligible:
-            return int(config.max_position_embeddings)
-        if capability.applicable:
-            raise ValueError(
-                "Unsupported dense Llama native-KV model-only build: "
-                + capability.reason
-            )
-        return 256
+        return int(config.max_position_embeddings) if capability.eligible else 256
 
     def supports_split_decoder_roles(self, config: ModelConfig) -> bool:
         return not bool(config.raw.get("_fp32_layers"))
@@ -73,12 +59,6 @@ class LlamaPlugin:
             quantized=quant_ctx is not None,
             debug_layer_outputs=debug_layer_outputs,
         )
-        if capability.applicable and not capability.eligible:
-            config.raw.pop("_native_kv_cache_metadata", None)
-            raise ValueError(
-                "Unsupported dense Llama native-KV build: "
-                + capability.reason
-            )
         if capability.eligible:
             validate_native_kv_weights(config, weights)
             config.raw["_decoder_engine_layout_supported"] = True

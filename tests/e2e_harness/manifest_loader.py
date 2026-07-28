@@ -520,10 +520,11 @@ def _build_inputs(manifest: dict, defaults: dict[str, Any]) -> dict:
 
     # Max new tokens
     inputs["max_new_tokens"] = manifest.get("max_new_tokens", 30)
-    inputs["max_cache_length"] = manifest.get(
-        "max_cache_length",
-        manifest.get("build_args", {}).get("max_cache_length", 256),
-    )
+    build_args = manifest.get("build_args", {})
+    if "max_cache_length" in manifest:
+        inputs["max_cache_length"] = manifest["max_cache_length"]
+    elif "max_cache_length" in build_args:
+        inputs["max_cache_length"] = build_args["max_cache_length"]
 
     # Generation parameters (optional, default to each runtime's configured value)
     for key in ("temperature", "top_p", "top_k", "min_p", "seed"):

@@ -222,6 +222,48 @@ def test_ci_engine_build_guard_passes_manifest_identity_to_builder(
     assert command[command.index("-o") + 1] == str(Path(ctx.engine_dir) / case.bundle)
 
 
+@pytest.mark.parametrize(
+    ("max_cache_length", "expected_flag"),
+    ((None, False), (256, True)),
+)
+def test_bundle_build_only_emits_declared_max_cache_length(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    max_cache_length: int | None,
+    expected_flag: bool,
+) -> None:
+    case = _make_case("unit-build")
+    if max_cache_length is not None:
+        case.inputs["max_cache_length"] = max_cache_length
+    ctx = _make_ctx(tmp_path, case)
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        commands.append(cmd)
+        Path(cmd[cmd.index("-o") + 1]).write_bytes(b"bundle")
+        Path(cmd[cmd.index("--build-timing-json") + 1]).write_text(
+            '{"total_s": 1.0}\n',
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout="built", stderr="")
+
+    monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+
+    bundle, _elapsed, error, _build_info = orchestrator._resolve_bundle(
+        case,
+        ctx,
+    )
+    repro = orchestrator._build_repro_commands(case, ctx, bundle, {})
+
+    assert error == ""
+    assert len(commands) == 1
+    assert ("--max-cache-length" in commands[0]) is expected_flag
+    assert ("--max-cache-length" in repro["build_bundle"]) is expected_flag
+    if expected_flag:
+        index = commands[0].index("--max-cache-length")
+        assert commands[0][index + 1] == str(max_cache_length)
+
+
 def test_ci_bundle_build_recovers_one_sigsegv_in_a_fresh_process(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

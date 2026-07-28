@@ -335,8 +335,6 @@ def _resolve_bundle(
         candidate = project_root / hf_id
         if candidate.exists():
             hf_id = str(candidate)
-    max_cache = case.inputs.get("max_cache_length", 256)
-
     build_args = case.metadata.get("build_args", {})
     build_method = _manifest_build_method(build_args)
 
@@ -349,9 +347,11 @@ def _resolve_bundle(
         hf_id,
         "-o",
         str(bundle_path),
-        "--max-cache-length",
-        str(max_cache),
     ]
+    if "max_cache_length" in case.inputs:
+        cmd.extend(
+            ["--max-cache-length", str(case.inputs["max_cache_length"])]
+        )
     if case.hf_revision:
         cmd.extend(["--model-revision", case.hf_revision])
     _append_declared_build_cli_args(cmd, case)
@@ -779,7 +779,6 @@ def _build_repro_commands(
     repro: dict[str, str] = {}
 
     # Build command
-    max_cache = case.inputs.get("max_cache_length", 256)
     bundle_target = bundle_path or str(Path(ctx.engine_dir) / case.bundle)
     build_parts = [
         ctx.build_python_path() or "python",
@@ -789,9 +788,11 @@ def _build_repro_commands(
         case.hf_id,
         "-o",
         bundle_target,
-        "--max-cache-length",
-        str(max_cache),
     ]
+    if "max_cache_length" in case.inputs:
+        build_parts.extend(
+            ["--max-cache-length", str(case.inputs["max_cache_length"])]
+        )
     if case.hf_revision:
         build_parts.extend(["--model-revision", case.hf_revision])
     build_method = _manifest_build_method(case.metadata.get("build_args", {}))

@@ -78,21 +78,11 @@ class QwenPlugin:
 
     def default_build_precision(self, config: ModelConfig) -> str:
         capability = native_kv_architecture_capability(config)
-        if capability.applicable and not capability.eligible:
-            raise ValueError(
-                "Unsupported dense Qwen3 native-KV model: "
-                + capability.reason
-            )
         return "bf16" if capability.eligible else "fp32"
 
     def default_max_cache_length(self, config: ModelConfig) -> int:
         """Use the model's complete context for native Qwen3."""
         capability = native_kv_architecture_capability(config)
-        if capability.applicable and not capability.eligible:
-            raise ValueError(
-                "Unsupported dense Qwen3 native-KV model: "
-                + capability.reason
-            )
         return int(config.max_position_embeddings) if capability.eligible else 256
 
     def load_weights(
@@ -116,12 +106,6 @@ class QwenPlugin:
             quantized=quant_ctx is not None,
             debug_layer_outputs=debug_layer_outputs,
         )
-        if capability.applicable and not capability.eligible:
-            config.raw.pop("_native_kv_cache_metadata", None)
-            raise ValueError(
-                "Unsupported dense Qwen3 native-KV build: "
-                + capability.reason
-            )
         if capability.eligible:
             validate_native_kv_weights(config, weights)
             config.raw["_decoder_engine_layout_supported"] = True

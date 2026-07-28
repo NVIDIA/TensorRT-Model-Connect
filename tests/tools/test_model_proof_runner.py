@@ -540,6 +540,44 @@ def test_wan22_premerge_selects_standalone_l0_manifest(tmp_path: Path) -> None:
     assert "model_reference_cache" not in selection
 
 
+def test_qwen_premerge_selects_native_defaults_l0(tmp_path: Path) -> None:
+    selection = _run_test_selection(tmp_path, "qwen", "premerge")
+
+    assert selection["suite"] == "premerge"
+    assert [
+        (
+            case["name"],
+            case["model"],
+            case["manifest"],
+            case["ci_tier"],
+        )
+        for case in selection["e2e_cases"]
+    ] == [
+        (
+            "qwen3-0.6b-native-l0",
+            "qwen3-0.6b-native-l0",
+            "qwen3-0.6b-native-l0.json",
+            "l0_only",
+        )
+    ]
+
+
+def test_qwen_nightly_keeps_production_cases(tmp_path: Path) -> None:
+    selection = _run_test_selection(tmp_path, "qwen", "nightly")
+
+    assert selection["suite"] == "nightly"
+    assert {case["name"] for case in selection["e2e_cases"]} == {
+        "qwen3-0.6b-fp16",
+        "qwen3-0.6b-fp8",
+        "qwen3-0.6b-topp",
+        "qwen3-4b-instruct-2507",
+    }
+    assert all(
+        case["ci_tier"] != "l0_only"
+        for case in selection["e2e_cases"]
+    )
+
+
 @pytest.mark.parametrize(
     ("family", "expected_family_tests"),
     (

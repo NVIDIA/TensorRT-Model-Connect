@@ -300,9 +300,4 @@ def prefer_native_default(
 ) -> bool:
     """Route dense Qwen3 to native KV without a user-facing build flag."""
 
-    capability = native_kv_architecture_capability(config)
-    if capability.applicable and not capability.eligible:
-        raise ValueError(
-            "Unsupported dense Qwen3 native-KV model: " + capability.reason
-        )
-    return capability.eligible
+    return native_kv_architecture_capability(config).eligible
