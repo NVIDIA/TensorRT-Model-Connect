@@ -18,6 +18,7 @@
 #include "runtime/models/pixart/pixart_dpmsolver.h"
 #include "runtime/models/pixart/pixart_generation_conditioning.h"
 #include "runtime/models/pixart/pixart_generation_plan.h"
+#include "runtime/models/pixart/pixart_matmul_policy.h"
 
 #include <algorithm>
 #include <cmath>
@@ -213,6 +214,17 @@ void test_pixart_initial_latents_honor_override_and_requested_seed() {
     check(seed_one != seed_two, "PixArt requested seed changes generated initial latents");
 }
 
+void test_pixart_large_matmuls_use_gpu_policy() {
+    check(trtmc::pixart_should_use_gpu_matmul(4096, 64, 1152),
+          "PixArt patch projection uses GPU matmul");
+    check(trtmc::pixart_should_use_gpu_matmul(120, 4096, 1152),
+          "PixArt text projection uses GPU matmul");
+    check(!trtmc::pixart_should_use_gpu_matmul(1, 256, 1152),
+          "PixArt small timestep projection stays on CPU");
+    check(!trtmc::pixart_should_use_gpu_matmul(0, 4096, 1152),
+          "PixArt invalid matmul dimensions stay on CPU");
+}
+
 } // namespace
 
 int main() {
@@ -222,6 +234,7 @@ int main() {
     test_pixart_dpmsolver_matches_diffusers_order_two_golden();
     test_pixart_null_attention_mask_only_keeps_eos_token();
     test_pixart_initial_latents_honor_override_and_requested_seed();
+    test_pixart_large_matmuls_use_gpu_policy();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " PixArt denoising seam test(s) failed\n";
