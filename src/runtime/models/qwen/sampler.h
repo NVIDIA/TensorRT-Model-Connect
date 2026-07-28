@@ -30,6 +30,7 @@ struct QwenSamplingParams {
     float repetition_penalty{1.0f};
     int32_t seed{-1}; // -1 = deterministic (argmax)
     int32_t eos_token_id{-1};
+    std::vector<int32_t> eos_token_ids;
 };
 
 /// Factory options for choosing concrete sampler implementations.
@@ -78,8 +79,14 @@ class QwenISampler {
 /// Forward-declared here; defined in sampler.cpp alongside the factory.
 struct GenerateConfig; // defined in trtmc/pipeline.h
 
+QwenSamplingParams
+qwen_sampling_params_from_config(const GenerateConfig& cfg,
+                                 const std::vector<int32_t>& default_eos_token_ids);
 QwenSamplingParams qwen_sampling_params_from_config(const GenerateConfig& cfg,
                                                     int32_t default_eos = -1);
+
+/// Return true when token_id matches any effective EOS token.
+bool qwen_is_eos_token(const QwenSamplingParams& params, int32_t token_id);
 
 /// Factory: create sampler from QwenSamplingParams.
 /// - top_k <= 1 && top_p/min_p disabled && seed == -1 => GreedySampler

@@ -30,9 +30,17 @@
 
 namespace trtmc {
 
+bool qwen_is_eos_token(const QwenSamplingParams& params, int32_t token_id) {
+    if (!params.eos_token_ids.empty()) {
+        return std::find(params.eos_token_ids.begin(), params.eos_token_ids.end(), token_id) !=
+               params.eos_token_ids.end();
+    }
+    return params.eos_token_id >= 0 && token_id == params.eos_token_id;
+}
+
 // Shared argmax helper — returns {token_id, logprob} for the highest logit.
 static QwenSampleResult argmax_over_logits(const float* logits, int32_t vocab_size,
-                                           int32_t eos_token_id) {
+                                           const QwenSamplingParams& params) {
     QwenSampleResult result;
     const float* best = logits;
     for (int32_t i = 1; i < vocab_size; ++i) {
@@ -41,7 +49,7 @@ static QwenSampleResult argmax_over_logits(const float* logits, int32_t vocab_si
     }
     result.token_id = static_cast<int32_t>(best - logits);
     result.logprob = *best;
-    result.is_eos = (result.token_id == eos_token_id);
+    result.is_eos = qwen_is_eos_token(params, result.token_id);
     return result;
 }
 
@@ -182,11 +190,11 @@ class GreedySampler final : public QwenISampler {
         if (vocab_size <= 0 || logits == nullptr) {
             QwenSampleResult result;
             result.token_id = 0;
-            result.is_eos = (0 == params.eos_token_id);
+            result.is_eos = qwen_is_eos_token(params, 0);
             return result;
         }
 
-        return argmax_over_logits(logits, vocab_size, params.eos_token_id);
+        return argmax_over_logits(logits, vocab_size, params);
     }
 
     QwenLogitsLocation logits_location() const override { return QwenLogitsLocation::HOST; }
@@ -210,12 +218,12 @@ class TopKSampler final : public QwenISampler {
 
         if (vocab_size <= 0 || logits == nullptr) {
             result.token_id = 0;
-            result.is_eos = (0 == params.eos_token_id);
+            result.is_eos = qwen_is_eos_token(params, 0);
             return result;
         }
 
         if (greedy_equivalent(params))
-            return argmax_over_logits(logits, vocab_size, params.eos_token_id);
+            return argmax_over_logits(logits, vocab_size, params);
 
         const FilteredDistribution dist = build_filtered_distribution(logits, vocab_size, params);
 
@@ -233,7 +241,7 @@ class TopKSampler final : public QwenISampler {
                 result.token_id = dist.indices[static_cast<std::size_t>(i)];
                 result.logprob = std::log(std::max(dist.probs[static_cast<std::size_t>(i)],
                                                    std::numeric_limits<float>::min()));
-                result.is_eos = (result.token_id == params.eos_token_id);
+                result.is_eos = qwen_is_eos_token(params, result.token_id);
                 return result;
             }
         }
@@ -241,7 +249,7 @@ class TopKSampler final : public QwenISampler {
         result.token_id = dist.indices[static_cast<std::size_t>(dist.keep - 1)];
         result.logprob = std::log(std::max(dist.probs[static_cast<std::size_t>(dist.keep - 1)],
                                            std::numeric_limits<float>::min()));
-        result.is_eos = (result.token_id == params.eos_token_id);
+        result.is_eos = qwen_is_eos_token(params, result.token_id);
         return result;
     }
 
@@ -278,12 +286,12 @@ class TorchCudaMultinomialSampler final : public QwenISampler {
 
         if (vocab_size <= 0 || logits == nullptr) {
             result.token_id = 0;
-            result.is_eos = (0 == params.eos_token_id);
+            result.is_eos = qwen_is_eos_token(params, 0);
             return result;
         }
 
         if (greedy_equivalent(params))
-            return argmax_over_logits(logits, vocab_size, params.eos_token_id);
+            return argmax_over_logits(logits, vocab_size, params);
 
         const FilteredDistribution dist = build_filtered_distribution(logits, vocab_size, params);
         ensure_execution_policy(vocab_size);
@@ -312,7 +320,7 @@ class TorchCudaMultinomialSampler final : public QwenISampler {
             }
         }
         result.logprob = std::log(std::max(picked_prob, std::numeric_limits<float>::min()));
-        result.is_eos = (result.token_id == params.eos_token_id);
+        result.is_eos = qwen_is_eos_token(params, result.token_id);
         return result;
     }
 
@@ -381,7 +389,7 @@ class GpuGreedySampler final : public QwenISampler {
         QwenSampleResult result;
         if (vocab_size <= 0 || logits == nullptr) {
             result.token_id = 0;
-            result.is_eos = (0 == params.eos_token_id);
+            result.is_eos = qwen_is_eos_token(params, 0);
             return result;
         }
 
@@ -397,7 +405,7 @@ class GpuGreedySampler final : public QwenISampler {
 
         result.token_id = h_token_id_;
         result.logprob = h_logit_val_;
-        result.is_eos = (result.token_id == params.eos_token_id);
+        result.is_eos = qwen_is_eos_token(params, result.token_id);
         return result;
     }
 
@@ -417,16 +425,26 @@ class GpuGreedySampler final : public QwenISampler {
 // Factory
 // ─────────────────────────────────────────────────────────────
 
-QwenSamplingParams qwen_sampling_params_from_config(const GenerateConfig& cfg,
-                                                    int32_t default_eos) {
+QwenSamplingParams
+qwen_sampling_params_from_config(const GenerateConfig& cfg,
+                                 const std::vector<int32_t>& default_eos_token_ids) {
     QwenSamplingParams p;
     p.temperature = cfg.temperature;
     p.top_k = cfg.top_k;
     p.top_p = cfg.top_p;
     p.min_p = cfg.min_p;
     p.seed = cfg.seed;
-    p.eos_token_id = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : default_eos;
+    p.eos_token_ids =
+        (cfg.eos_token_id >= 0) ? std::vector<int32_t>{cfg.eos_token_id} : default_eos_token_ids;
+    p.eos_token_id = p.eos_token_ids.empty() ? -1 : p.eos_token_ids.front();
     return p;
+}
+
+QwenSamplingParams qwen_sampling_params_from_config(const GenerateConfig& cfg,
+                                                    int32_t default_eos) {
+    const std::vector<int32_t> defaults =
+        default_eos >= 0 ? std::vector<int32_t>{default_eos} : std::vector<int32_t>{};
+    return qwen_sampling_params_from_config(cfg, defaults);
 }
 
 std::unique_ptr<QwenISampler>

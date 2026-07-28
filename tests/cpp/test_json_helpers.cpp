@@ -419,6 +419,19 @@ bool test_extract_json_int_array_basic() {
     return true;
 }
 
+// Intention: Verify a scalar value is not confused with a later array.
+// Setup:     Scalar EOS followed by an unrelated integer array.
+// Mechanism: Calls extract_json_int_array for EOS and expects no array values.
+bool test_extract_json_int_array_rejects_scalar() {
+    const std::string json = R"({"eos_token_id": 2, "other_ids": [5, 7]})";
+    const auto values = trtmc::extract_json_int_array(json, "eos_token_id", 8);
+    if (!values.empty()) {
+        std::cerr << "extract_json_int_array_rejects_scalar: unexpected values" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // Intention: Verify invalid int token stops array parsing.
 // Setup:     JSON with malformed middle element.
 // Mechanism: Calls extract_json_int_array and checks prefix-only behavior.
@@ -480,6 +493,7 @@ int main() {
     run("extract_json_float_array_max_count", test_extract_json_float_array_max_count);
     run("extract_json_float_array_invalid", test_extract_json_float_array_stops_on_invalid_token);
     run("extract_json_int_array_basic", test_extract_json_int_array_basic);
+    run("extract_json_int_array_rejects_scalar", test_extract_json_int_array_rejects_scalar);
     run("extract_json_int_array_invalid", test_extract_json_int_array_stops_on_invalid_token);
     run("string_array_basic", test_extract_json_string_array_basic);
     run("string_array_empty", test_extract_json_string_array_empty);

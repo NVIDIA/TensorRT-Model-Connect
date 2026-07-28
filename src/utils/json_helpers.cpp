@@ -72,8 +72,8 @@ bool find_key_colon(const std::string& text, const std::string& key, std::size_t
 }
 
 bool find_array_start(const std::string& text, std::size_t colon, std::size_t& open_bracket) {
-    open_bracket = text.find('[', colon + 1);
-    return open_bracket != std::string::npos;
+    open_bracket = skip_whitespace(text, colon + 1);
+    return open_bracket < text.size() && text[open_bracket] == '[';
 }
 
 std::size_t scan_while(const std::string& text, std::size_t pos, bool (*is_allowed)(char)) {

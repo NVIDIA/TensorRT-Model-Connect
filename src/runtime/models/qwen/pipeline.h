@@ -30,6 +30,7 @@ struct QwenTextGenConfig {
     int32_t vocab_size{0};
     int32_t id_bos{0};
     int32_t id_eos{0};
+    std::vector<int32_t> id_eos_ids;
     bool has_position_input{true};
     std::string chat_template_format{};
     std::string token_id_name{"token_id"};

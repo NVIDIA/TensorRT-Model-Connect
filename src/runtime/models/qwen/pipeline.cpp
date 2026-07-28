@@ -150,6 +150,14 @@ single_decoder_context(std::unique_ptr<TrtModule> decoder) {
     return decoders;
 }
 
+QwenTextGenConfig normalize_eos_token_ids(QwenTextGenConfig config) {
+    if (config.id_eos_ids.empty() && config.id_eos >= 0)
+        config.id_eos_ids.push_back(config.id_eos);
+    if (!config.id_eos_ids.empty())
+        config.id_eos = config.id_eos_ids.front();
+    return config;
+}
+
 std::string normalize_generation_mode(std::string mode) {
     std::transform(mode.begin(), mode.end(), mode.begin(),
                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
@@ -291,8 +299,8 @@ QwenTextGenerationPipeline::QwenTextGenerationPipeline(
     std::shared_ptr<void> distributed_owner)
     : distributed_owner_(std::move(distributed_owner)), decoders_(std::move(decoders)),
       prefill_(std::move(prefill)), linear_spec_lora_prefill_(std::move(linear_spec_lora_prefill)),
-      state_(std::move(state)), config_(std::move(config)), stream_(stream),
-      tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
+      state_(std::move(state)), config_(normalize_eos_token_ids(std::move(config))),
+      stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
       sampler_(std::move(sampler)), logits_output_name_(config_.logits_output_name) {
     if (decoders_.empty()) {
         throw std::runtime_error("QwenTextGenerationPipeline: no decoder modules");
@@ -350,9 +358,8 @@ TextResult QwenTextGenerationPipeline::generate(const std::string& prompt,
 
     auto input_ids = encode_prompt(*tokenizer_, config_, prompt, cfg);
     int32_t max_new = (cfg.max_new_tokens > 0) ? cfg.max_new_tokens : 128;
-    int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
 
-    auto sp = qwen_sampling_params_from_config(cfg, eos);
+    auto sp = qwen_sampling_params_from_config(cfg, config_.id_eos_ids);
     last_setup_ms_ = 0.0;
     auto timed = generate_from_ids(input_ids, max_new, sp, cfg);
 
@@ -372,8 +379,7 @@ QwenTextGenerationPipeline::GenerationResult
 QwenTextGenerationPipeline::generate_ids(const std::vector<int32_t>& input_ids,
                                          const GenerateConfig& cfg) {
     int32_t max_new = cfg.max_new_tokens; // honour exact value (0 = no generation)
-    int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
-    auto sp = qwen_sampling_params_from_config(cfg, eos);
+    auto sp = qwen_sampling_params_from_config(cfg, config_.id_eos_ids);
     return GenerationResult{generate_from_ids(input_ids, max_new, sp, cfg).token_ids};
 }
 
@@ -676,7 +682,7 @@ bool QwenTextGenerationPipeline::append_tokens_until_eos(const std::vector<int32
                                                          const QwenSamplingParams& params) const {
     for (int32_t token : tokens) {
         output.push_back(token);
-        if (params.eos_token_id >= 0 && token == params.eos_token_id)
+        if (qwen_is_eos_token(params, token))
             return true;
     }
     return false;
@@ -747,7 +753,7 @@ bool QwenTextGenerationPipeline::append_linear_spec_tokens(const std::vector<int
         const int32_t token = ar_tokens[static_cast<std::size_t>(i)];
         output.push_back(token);
         ++generated;
-        if (params.eos_token_id >= 0 && token == params.eos_token_id)
+        if (qwen_is_eos_token(params, token))
             return true;
     }
     return false;
@@ -875,7 +881,7 @@ QwenTextGenerationPipeline::generate_linear_spec_from_ids(const std::vector<int3
 
     std::vector<int32_t> output = input_ids;
     output.push_back(next_token);
-    if (params.eos_token_id >= 0 && next_token == params.eos_token_id) {
+    if (qwen_is_eos_token(params, next_token)) {
         return TimedGenResult{std::move(output),
                               std::chrono::duration<double, std::milli>(t1 - t0).count(), 0.0};
     }
@@ -949,12 +955,12 @@ int32_t QwenTextGenerationPipeline::run_decode_loop(
     for (int32_t step = 0; step < max_new_tokens; ++step) {
         const float* sample_ptr = gpu_sampling ? d_logits_ptr_ : logits.data();
         const QwenSampleResult result = sampler->sample(sample_ptr, vocab_size, params);
+        const bool is_eos = result.is_eos || qwen_is_eos_token(params, result.token_id);
         output.push_back(result.token_id);
         ++steps;
-        if (should_stop_on_answer(output, prompt_token_count, cfg, steps, stop_interval,
-                                  result.is_eos))
+        if (should_stop_on_answer(output, prompt_token_count, cfg, steps, stop_interval, is_eos))
             break;
-        if (result.is_eos)
+        if (is_eos)
             break;
         if (gpu_sampling)
             run_step_device(result.token_id);

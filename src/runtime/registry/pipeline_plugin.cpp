@@ -59,6 +59,9 @@ void parse_cache_and_tokens(const std::string& config_text, int32_t max_cache_le
     }
     cfg.id_bos = extract_json_int_or_first_array(config_text, "bos_token_id", -1);
     cfg.id_eos = extract_json_int_or_first_array(config_text, "eos_token_id", -1);
+    cfg.id_eos_ids = extract_json_int_array(config_text, "eos_token_id", 256);
+    if (cfg.id_eos_ids.empty() && cfg.id_eos >= 0)
+        cfg.id_eos_ids.push_back(cfg.id_eos);
 }
 
 void parse_strategy_and_tokenizer_flags(const std::string& config_text, BaseConfig& cfg) {

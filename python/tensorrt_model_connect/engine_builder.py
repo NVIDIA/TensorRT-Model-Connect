@@ -627,6 +627,16 @@ def _get_gpu_name() -> str:
     return ""
 
 
+def _apply_generation_config_eos(model_dir: Path, config: dict) -> None:
+    """Apply Hugging Face generation-config EOS precedence to runtime config."""
+    generation_config_path = model_dir / "generation_config.json"
+    if not generation_config_path.exists():
+        return
+    generation_config = json.loads(generation_config_path.read_text(encoding="utf-8"))
+    if "eos_token_id" in generation_config:
+        config["eos_token_id"] = generation_config["eos_token_id"]
+
+
 def _detect_tokenizer_add_special_tokens(model_dir: Path) -> bool:
     """Detect whether the HF tokenizer adds special tokens (BOS/EOS) by default.
 
@@ -1289,6 +1299,7 @@ def build_bundle(
 
     def make_runtime_config_json(source: bytes | None) -> bytes:
         cfg_dict = json.loads(source) if source is not None else dict(config.raw)
+        _apply_generation_config_eos(model_dir_path, cfg_dict)
         runtime_strategy = getattr(plugin, "runtime_strategy", None)
         if runtime_strategy:
             cfg_dict["runtime_strategy"] = runtime_strategy

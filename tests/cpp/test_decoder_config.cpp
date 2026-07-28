@@ -145,6 +145,28 @@ static void test_decoder_tokenizer_config() {
           "decoder: tokenizer_add_special_tokens_present = true");
     check(cfg.id_bos == 151643, "decoder: bos_token_id");
     check(cfg.id_eos == 151645, "decoder: eos_token_id from array");
+    check(cfg.id_eos_ids == std::vector<int32_t>({151645, 151643}),
+          "decoder: all eos_token_id values from array");
+}
+
+// -----------------------------------------------------------------------------
+// Intention: Verify scalar EOS remains compatible with legacy model configs.
+// Setup:     Config with a scalar eos_token_id.
+// Mechanism: Assert both the legacy scalar and effective EOS list are populated.
+// -----------------------------------------------------------------------------
+static void test_decoder_scalar_eos_config() {
+    const std::string config = R"({
+        "vocab_size": 32000,
+        "hidden_size": 1024,
+        "num_hidden_layers": 4,
+        "num_attention_heads": 8,
+        "eos_token_id": 2
+    })";
+
+    const auto cfg = trtmc::parse_base_config(config, 128);
+    check(cfg.id_eos == 2, "decoder: scalar eos_token_id");
+    check(cfg.id_eos_ids == std::vector<int32_t>({2}),
+          "decoder: scalar eos_token_id becomes one-element list");
 }
 
 // -----------------------------------------------------------------------------
@@ -212,6 +234,7 @@ int main() {
     test_decoder_gqa_attention_size();
     test_decoder_mha();
     test_decoder_tokenizer_config();
+    test_decoder_scalar_eos_config();
     test_decoder_cache_length_override();
     test_decoder_cache_length_cap();
     test_missing_runtime_strategy_stays_empty();

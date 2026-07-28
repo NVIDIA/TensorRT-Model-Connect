@@ -55,6 +55,7 @@ struct BaseConfig {
     bool tokenizer_add_special_tokens{false};
     bool tokenizer_add_special_tokens_present{false};
     IoMap io_map;
+    std::vector<int32_t> id_eos_ids;
 };
 
 // Parse universal base config from config.json text.
