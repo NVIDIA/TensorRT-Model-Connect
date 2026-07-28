@@ -13,6 +13,7 @@ prefixes = [
   "llama",
 ]
 debug_runner = "debug_runner.py|runner_from_bundle"
+default_build_route = "build_routing.py|prefer_native_default"
 debug_runtime_strategies = [
   "llama_decoder_kv_cache",
 ]

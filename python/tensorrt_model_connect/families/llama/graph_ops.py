@@ -9,6 +9,7 @@ Tensor names and shapes must stay compatible with the C++ bundle runtime.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import math
 from typing import Any
 
 import numpy as np
@@ -443,6 +444,134 @@ def validate_native_rope_dim(
     return rotary_embedding_dim
 
 
+def make_native_active_rope_inv_freq(
+    head_dim: int,
+    rope_theta: float,
+    partial_rotary_factor: float = 1.0,
+    *,
+    rope_scaling: Mapping[str, Any] | None = None,
+) -> np.ndarray:
+    """Return HF/Torch-exact frequencies for native active-position RoPE.
+
+    Hugging Face initializes Llama inverse frequencies on CPU with Torch before
+    moving the model to the inference device. NumPy ``power`` can differ from
+    that operation by one ULP at long positions. The legacy indexed-table
+    helper below is intentionally unchanged.
+    """
+    rotary_ndims = validate_native_rope_dim(
+        int(head_dim * partial_rotary_factor))
+    rope_theta = float(rope_theta)
+    if not np.isfinite(rope_theta) or rope_theta <= 0.0:
+        raise ValueError(
+            "TRT native RoPE requires rope_theta to be finite and positive; "
+            f"got {rope_theta}")
+    try:
+        import torch
+    except (ImportError, OSError) as exc:
+        raise RuntimeError(
+            "TensorRT native Llama KV build requires PyTorch in the Model "
+            "Connect build environment to generate Hugging Face-exact RoPE "
+            "frequencies"
+        ) from exc
+
+    with torch.no_grad():
+        exponents = torch.arange(
+            0,
+            rotary_ndims,
+            2,
+            dtype=torch.int64,
+            device="cpu",
+        ).to(dtype=torch.float32) / rotary_ndims
+        inv_freq = 1.0 / (rope_theta ** exponents)
+        if rope_scaling:
+            rope_type = str(
+                rope_scaling.get("rope_type")
+                or rope_scaling.get("type")
+                or ""
+            ).lower()
+            if rope_type in ("", "default"):
+                rope_scaling = None
+            elif rope_type != "llama3":
+                raise ValueError(
+                    "native active-position RoPE supports only llama3 scaling"
+                )
+        if rope_scaling:
+            factor = float(rope_scaling["factor"])
+            low = float(rope_scaling["low_freq_factor"])
+            high = float(rope_scaling["high_freq_factor"])
+            original = int(
+                rope_scaling["original_max_position_embeddings"]
+            )
+            wavelength = 2 * math.pi / inv_freq
+            low_wavelength = original / low
+            high_wavelength = original / high
+            scaled = torch.where(
+                wavelength > low_wavelength,
+                inv_freq / factor,
+                inv_freq,
+            )
+            smooth = (
+                original / wavelength - low
+            ) / (high - low)
+            interpolated = (
+                (1 - smooth) * scaled / factor + smooth * scaled
+            )
+            medium = (
+                ~(wavelength < high_wavelength)
+                * ~(wavelength > low_wavelength)
+            )
+            inv_freq = torch.where(medium, interpolated, scaled)
+    return np.asarray(
+        inv_freq.detach().cpu().contiguous().numpy(),
+        dtype=np.float32,
+    ).copy()
+
+
+def add_active_rope_cache(
+    network: trt.INetworkDefinition,
+    position_id: trt.ITensor,
+    inv_freq: np.ndarray,
+    output_dtype: trt.DataType,
+) -> tuple[trt.ITensor, trt.ITensor]:
+    """Build ``[1, Sq, D/2]`` cos/sin tensors for active positions only."""
+    inv_freq = np.asarray(inv_freq, dtype=np.float32)
+    if inv_freq.ndim != 1 or inv_freq.size == 0:
+        raise ValueError(
+            "active RoPE inverse frequencies must be a non-empty rank-1 array")
+
+    pos_float = network.add_cast(position_id, trt.float32).get_output(0)
+    pos_col = network.add_shuffle(pos_float)
+    pos_col.reshape_dims = (-1, 1)
+    inv_freq_tensor = add_constant(
+        network,
+        (1, int(inv_freq.size)),
+        inv_freq.reshape(1, -1),
+        dtype=np.float32,
+    )
+    angles = network.add_elementwise(
+        pos_col.get_output(0),
+        inv_freq_tensor,
+        trt.ElementWiseOperation.PROD,
+    ).get_output(0)
+    cos_2d = network.add_unary(
+        angles, trt.UnaryOperation.COS).get_output(0)
+    sin_2d = network.add_unary(
+        angles, trt.UnaryOperation.SIN).get_output(0)
+
+    cos_3d = network.add_shuffle(cos_2d)
+    cos_3d.reshape_dims = (1, -1, int(inv_freq.size))
+    sin_3d = network.add_shuffle(sin_2d)
+    sin_3d.reshape_dims = (1, -1, int(inv_freq.size))
+    cos_cache = cos_3d.get_output(0)
+    sin_cache = sin_3d.get_output(0)
+    if cos_cache.dtype != output_dtype:
+        cos_cache = network.add_cast(
+            cos_cache, output_dtype).get_output(0)
+        sin_cache = network.add_cast(
+            sin_cache, output_dtype).get_output(0)
+    return cos_cache, sin_cache
+
+
 def make_rope_table_half_dim(
     max_cache_length: int,
     head_dim: int,
@@ -693,7 +822,7 @@ def add_apply_rope_native(
     head_dim: int,
     cos_cache_2d: trt.ITensor,
     sin_cache_2d: trt.ITensor,
-    position_id: trt.ITensor,
+    position_id: trt.ITensor | None,
     rotary_embedding_dim: int,
     interleaved: bool = False,
     sequence_length: int | None = 1,
@@ -703,11 +832,17 @@ def add_apply_rope_native(
     Handles both single-token decoder steps and dynamic-Sq prefill/decode
     graphs without a manual rotate-half matmul chain.
 
-    Shape contract (IRotaryEmbeddingLayer with position_ids):
+    Shape contract with indexed, full-capacity caches:
       input:           [1, num_heads, Sq, head_dim]  (reshaped internally)
       cos_cache_2d:    [max_S, rotary_embedding_dim // 2]  (2-D constant)
       sin_cache_2d:    [max_S, rotary_embedding_dim // 2]  (2-D constant)
       position_id:     [Sq] int32, reshaped to [1, Sq] internally
+
+    Shape contract with active-position caches:
+      input:           [1, num_heads, Sq, head_dim]
+      cos_cache_2d:    [1, Sq, rotary_embedding_dim // 2]
+      sin_cache_2d:    [1, Sq, rotary_embedding_dim // 2]
+      position_id:     None; the caches already correspond to active positions
       interleaved:     False → rotate-half (LLaMA/Qwen)
                        True  → adjacent-pair (CodeGen/GPT-J)
 
@@ -717,7 +852,8 @@ def add_apply_rope_native(
         head_dim:             Per-head dimension.
         cos_cache_2d:         Pre-built 2-D cos table constant.
         sin_cache_2d:         Pre-built 2-D sin table constant.
-        position_id:          Runtime position indices, shape [Sq] int32.
+        position_id:          Runtime position indices, shape [Sq] int32, or
+                              ``None`` for active-position rank-3 caches.
         rotary_embedding_dim: Number of head dims that participate in RoPE.
         interleaved:          Frequency layout (see above).
         sequence_length:      Static Sq, or None for runtime-dynamic Sq.
@@ -731,11 +867,6 @@ def add_apply_rope_native(
     inp_4d = reshape_rows_to_heads_4d(
         network, inp, num_heads, head_dim, sequence_length)
 
-    # Reshape position_id [Sq] -> [1, Sq] (batch=1).
-    seq_dim = -1 if sequence_length is None else sequence_length
-    pos_2d = network.add_shuffle(position_id)
-    pos_2d.reshape_dims = (1, seq_dim)
-
     rope = network.add_rotary_embedding(
         inp_4d,
         cos_cache_2d,
@@ -743,7 +874,12 @@ def add_apply_rope_native(
         interleaved,
         rotary_embedding_dim,
     )
-    rope.set_input(3, pos_2d.get_output(0))
+    if position_id is not None:
+        # Reshape position_id [Sq] -> [1, Sq] (batch=1).
+        seq_dim = -1 if sequence_length is None else sequence_length
+        pos_2d = network.add_shuffle(position_id)
+        pos_2d.reshape_dims = (1, seq_dim)
+        rope.set_input(3, pos_2d.get_output(0))
 
     return reshape_heads_4d_to_rows(
         network, rope.get_output(0), attention_size, sequence_length)
@@ -824,6 +960,135 @@ def add_attention_core(
     if mask is not None and not causal:
         attn.mask = mask
     return _cast_back_to_trt_dtype(network, attn.get_output(0), output_dtype)
+
+
+def add_native_kv_cache_attention_from_rows(
+    network: trt.INetworkDefinition,
+    q: trt.ITensor,
+    k_update: trt.ITensor,
+    v_update: trt.ITensor,
+    cache_k: trt.ITensor,
+    cache_v: trt.ITensor,
+    cache_write_indices: trt.ITensor,
+    key_value_lengths: trt.ITensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    q_seq: int | None,
+    scale: float | None = None,
+    tag: str | None = None,
+) -> dict[str, trt.ITensor]:
+    """Update a user-owned KV cache and attend over its active prefix.
+
+    ``IKVCacheUpdateLayer`` writes this step's K/V rows into the static,
+    full-capacity cache in place. ``IAttention`` consumes the aliased cache
+    outputs, while ``key_value_lengths`` limits work to the valid prefix.
+    ``LOWER_RIGHT`` causal alignment gives correct autoregressive semantics
+    when the query sequence is shorter than the active KV sequence.
+
+    Cache inputs and outputs have shape ``[1, Hkv, capacity, D]``. The runtime
+    must bind each output to the same device address as its corresponding
+    input, as required by TensorRT's KV-cache aliasing contract.
+    """
+    if not hasattr(network, "add_kv_cache_update") or not hasattr(
+        network, "add_attention_v2"
+    ):
+        raise RuntimeError(
+            "Llama native KV cache requires TensorRT add_kv_cache_update "
+            "and add_attention_v2 support"
+        )
+
+    k_update_4d = reshape_rows_to_heads_4d(
+        network,
+        k_update,
+        num_kv_heads,
+        head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".k_update",
+    )
+    v_update_4d = reshape_rows_to_heads_4d(
+        network,
+        v_update,
+        num_kv_heads,
+        head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".v_update",
+    )
+
+    update_k = network.add_kv_cache_update(
+        cache_k,
+        k_update_4d,
+        cache_write_indices,
+        trt.KVCacheMode.LINEAR,
+    )
+    update_v = network.add_kv_cache_update(
+        cache_v,
+        v_update_4d,
+        cache_write_indices,
+        trt.KVCacheMode.LINEAR,
+    )
+    if update_k is None or update_v is None:
+        raise RuntimeError("TensorRT failed to create Llama KV-cache update layers")
+    if tag:
+        update_k.name = tag + ".cache_k_update"
+        update_v.name = tag + ".cache_v_update"
+    updated_k = update_k.get_output(0)
+    updated_v = update_v.get_output(0)
+
+    q_4d = reshape_rows_to_heads_4d(
+        network,
+        q,
+        num_heads,
+        head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".q",
+    )
+    if scale is None:
+        scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
+    if q_4d.dtype != trt.bfloat16:
+        raise ValueError("Llama native KV attention requires BF16 queries")
+    # Keep the exact score scale until the Q product, matching HF SDPA.  If
+    # the constant is rounded to BF16 first, near-tied logits can diverge at
+    # long context even though IAttention itself remains on the fused path.
+    q_scale_input = network.add_cast(q_4d, trt.float32).get_output(0)
+    scale_t = add_constant(
+        network,
+        (1, 1, 1, 1),
+        np.array([[[[scale]]]]),
+        dtype=np.float32,
+    )
+    q_scaled = network.add_elementwise(
+        q_scale_input, scale_t, trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    q_scaled = network.add_cast(q_scaled, trt.bfloat16).get_output(0)
+
+    attention = network.add_attention_v2(
+        q_scaled,
+        updated_k,
+        updated_v,
+        trt.AttentionNormalizationOp.SOFTMAX,
+        trt.CausalMaskKind.LOWER_RIGHT,
+    )
+    if attention is None:
+        raise RuntimeError("TensorRT failed to create Llama native attention")
+    attention.decomposable = False
+    attention.key_value_lengths = key_value_lengths
+    if tag:
+        attention.name = tag
+
+    context = reshape_heads_4d_to_rows(
+        network,
+        attention.get_output(0),
+        num_heads * head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".ctx",
+    )
+    return {
+        "context": context,
+        "present_k": updated_k,
+        "present_v": updated_v,
+    }
 
 
 def _scalar_constant_for_trt_dtype(

@@ -91,19 +91,29 @@ class TrtModuleImpl final : public ITrtModule {
     void* distributed_communicator_{nullptr};
     bool has_dynamic_shapes_{false};
     bool use_cuda_graph_{false};
+    bool alias_groups_ready_{true};
     std::unique_ptr<CudaGraphExec> cuda_graph_;
     std::vector<std::shared_ptr<void>> keep_alive_;
     std::unordered_map<std::string, void*> initial_external_bindings_;
     std::unordered_map<std::string, BufferEntry> buffers_;
+    std::unordered_map<std::string, std::string> alias_input_by_output_;
+    std::unordered_map<std::string, std::vector<std::string>> alias_outputs_by_input_;
     std::unordered_map<std::string, std::vector<uint8_t>> host_output_staging_;
     std::unordered_map<std::string, DeviceTensor> output_device_tensors_;
     std::string timing_label_{"engine"};
     std::vector<TimingEvent> timing_events_;
 
     void allocate_buffers(nvinfer1::ICudaEngine* engine);
+    void discover_tensor_aliases(nvinfer1::ICudaEngine* engine);
     void
     validate_initial_external_bindings(nvinfer1::ICudaEngine* engine,
                                        const std::vector<ModuleExternalBinding>& external_bindings);
+    void bind_alias_group(const std::string& input_name, void* ptr);
+    bool should_allocate_input(const std::string& name, std::size_t nbytes) const;
+    void validate_alias_outputs_exist(const std::vector<std::string>& output_names) const;
+    void bind_alias_outputs_or_invalidate(const std::vector<std::string>& output_names, void* ptr);
+    void reset_alias_cuda_graph_if_rebound(void* previous_ptr, void* ptr);
+    void validate_alias_groups_bound() const;
     void free_buffers();
     void detect_dynamic_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io);
     void allocate_input_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io,

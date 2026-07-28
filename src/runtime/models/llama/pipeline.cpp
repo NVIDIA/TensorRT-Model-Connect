@@ -150,6 +150,14 @@ single_decoder_context(std::unique_ptr<TrtModule> decoder) {
     return decoders;
 }
 
+LlamaTextGenConfig normalize_eos_token_ids(LlamaTextGenConfig config) {
+    if (config.id_eos_ids.empty() && config.id_eos >= 0)
+        config.id_eos_ids.push_back(config.id_eos);
+    if (!config.id_eos_ids.empty())
+        config.id_eos = config.id_eos_ids.front();
+    return config;
+}
+
 std::string normalize_generation_mode(std::string mode) {
     std::transform(mode.begin(), mode.end(), mode.begin(),
                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
@@ -291,8 +299,8 @@ LlamaTextGenerationPipeline::LlamaTextGenerationPipeline(
     std::shared_ptr<void> distributed_owner)
     : distributed_owner_(std::move(distributed_owner)), decoders_(std::move(decoders)),
       prefill_(std::move(prefill)), linear_spec_lora_prefill_(std::move(linear_spec_lora_prefill)),
-      state_(std::move(state)), config_(std::move(config)), stream_(stream),
-      tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
+      state_(std::move(state)), config_(normalize_eos_token_ids(std::move(config))),
+      stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
       sampler_(std::move(sampler)), logits_output_name_(config_.logits_output_name) {
     if (decoders_.empty()) {
         throw std::runtime_error("LlamaTextGenerationPipeline: no decoder modules");
@@ -350,9 +358,7 @@ TextResult LlamaTextGenerationPipeline::generate(const std::string& prompt,
 
     auto input_ids = encode_prompt(*tokenizer_, config_, prompt, cfg);
     int32_t max_new = (cfg.max_new_tokens > 0) ? cfg.max_new_tokens : 128;
-    int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
-
-    auto sp = llama_sampling_params_from_config(cfg, eos);
+    auto sp = llama_sampling_params_from_config(cfg, config_.id_eos_ids);
     last_setup_ms_ = 0.0;
     auto timed = generate_from_ids(input_ids, max_new, sp, cfg);
 
@@ -372,8 +378,7 @@ LlamaTextGenerationPipeline::GenerationResult
 LlamaTextGenerationPipeline::generate_ids(const std::vector<int32_t>& input_ids,
                                           const GenerateConfig& cfg) {
     int32_t max_new = cfg.max_new_tokens; // honour exact value (0 = no generation)
-    int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
-    auto sp = llama_sampling_params_from_config(cfg, eos);
+    auto sp = llama_sampling_params_from_config(cfg, config_.id_eos_ids);
     return GenerationResult{generate_from_ids(input_ids, max_new, sp, cfg).token_ids};
 }
 
@@ -411,16 +416,46 @@ bool batched_prefill_supported(const TrtModule* prefill, const LlamaTextGenConfi
                                LlamaInferenceState* state) {
     if (prefill == nullptr || sq <= 0)
         return false;
-    if (cfg.prefill_max_length > 0 && sq > cfg.prefill_max_length)
-        return false;
     if (cfg.num_layers <= 0 || cfg.vocab_size <= 0)
         return false;
     return dynamic_cast<LlamaKvCache*>(state) != nullptr;
 }
+
+int32_t resolve_prefill_chunk_limit(const LlamaKvCache& kv, const LlamaTextGenConfig& cfg,
+                                    int32_t sq) {
+    if (kv.needs_attention_mask()) {
+        if (cfg.prefill_max_length > 0 && sq > cfg.prefill_max_length)
+            return 0;
+        return sq;
+    }
+    if (cfg.prefill_max_length <= 0)
+        throw std::runtime_error("Llama native KV prefill engine has no valid profile capacity");
+    return cfg.prefill_max_length;
+}
+
+void validate_generation_capacity(const std::vector<int32_t>& input_ids, int32_t max_new_tokens,
+                                  LlamaInferenceState* state, const TrtModule* module) {
+    if (module == nullptr || !module->has_input("cache_write_indices") ||
+        !module->has_input("key_value_lengths")) {
+        return;
+    }
+    const auto* kv = dynamic_cast<const LlamaKvCache*>(state);
+    if (kv == nullptr)
+        return;
+
+    const auto capacity = static_cast<std::size_t>(kv->max_length());
+    if (input_ids.size() > capacity ||
+        (max_new_tokens > 0 &&
+         static_cast<std::size_t>(max_new_tokens) > capacity - input_ids.size())) {
+        throw std::runtime_error(
+            "Llama requested prompt and generation exceed the model's fixed KV cache capacity");
+    }
+}
 } // namespace
 
 bool LlamaTextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>& input_ids,
-                                                      std::vector<float>& logits) {
+                                                      std::vector<float>& logits,
+                                                      bool retain_device_logits) {
     const auto sq = static_cast<int32_t>(input_ids.size());
     if (!batched_prefill_supported(prefill_.get(), config_, sq, state_.get()))
         return false;
@@ -430,42 +465,95 @@ bool LlamaTextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>
     // decode module(s), so we rebind the cache_k/cache_v inputs onto the
     // prefill execution context before running.
     kv->bind_cache_inputs(*prefill_);
-
-    TensorMap inputs;
-    Tensor tok_t;
-    tok_t.data = const_cast<int32_t*>(input_ids.data());
-    tok_t.shape = {static_cast<int64_t>(sq)};
-    tok_t.dtype = DType::kInt32;
-    inputs[config_.token_id_name] = tok_t;
-    state_->prepare_step(inputs, sq);
-
-    TensorMap outputs = prefill_->forward(inputs);
-    auto logits_it = outputs.find(config_.logits_output_name);
-    if (logits_it == outputs.end())
-        return false;
-
-    const auto vocab = static_cast<std::size_t>(config_.vocab_size);
-    const auto& lt = logits_it->second;
-    if (static_cast<std::size_t>(lt.numel()) < vocab)
-        return false;
-    logits.resize(vocab);
-    const auto offset = static_cast<std::size_t>(lt.numel()) - vocab;
-    std::memcpy(logits.data(), static_cast<const float*>(lt.data) + offset, vocab * sizeof(float));
+    if (sq > kv->max_length()) {
+        throw std::runtime_error("Llama sequence exceeds the model's fixed KV cache capacity");
+    }
 
     std::vector<const void*> pk, pv;
     if (!gather_prefill_kv_pointers(*prefill_, config_, pk, pv))
         return false;
-    kv->write_prefill_kv(pk, pv, sq);
-    if (config_.log_runtime_stats) {
-        std::cerr << "[trtmc] Batched prefill (";
-        if (!config_.prefill_log_label.empty()) {
-            std::cerr << config_.prefill_log_label;
-        } else {
-            std::cerr << "profile " << config_.prefill_profile_index;
-        }
-        std::cerr << "): " << sq << " tokens in one call\n";
+
+    const int32_t chunk_limit = resolve_prefill_chunk_limit(*kv, config_, sq);
+    if (chunk_limit == 0)
+        return false;
+
+    int32_t chunk_count = 0;
+    for (int32_t start = 0; start < sq;) {
+        const int32_t chunk_size = std::min(chunk_limit, sq - start);
+        run_prefill_chunk(input_ids.data() + start, chunk_size, pk, pv, *kv, logits,
+                          retain_device_logits);
+        ++chunk_count;
+        start += chunk_size;
     }
+
+    log_batched_prefill(sq, chunk_count, chunk_limit);
     return true;
+}
+
+void LlamaTextGenerationPipeline::run_prefill_chunk(const int32_t* token_ids, int32_t chunk_size,
+                                                    const std::vector<const void*>& present_k,
+                                                    const std::vector<const void*>& present_v,
+                                                    LlamaKvCache& kv, std::vector<float>& logits,
+                                                    bool retain_device_logits) {
+    TensorMap inputs;
+    Tensor token_tensor;
+    token_tensor.data = const_cast<int32_t*>(token_ids);
+    token_tensor.shape = {static_cast<int64_t>(chunk_size)};
+    token_tensor.dtype = DType::kInt32;
+    inputs[config_.token_id_name] = token_tensor;
+    state_->prepare_step(inputs, chunk_size);
+
+    TensorMap outputs = prefill_->forward(inputs);
+    const auto logits_it = outputs.find(config_.logits_output_name);
+    if (logits_it == outputs.end()) {
+        throw std::runtime_error(
+            "LlamaTextGenerationPipeline: prefill module has no logits output");
+    }
+
+    const auto& logits_tensor = logits_it->second;
+    const auto vocab = static_cast<std::size_t>(config_.vocab_size);
+    if (static_cast<std::size_t>(logits_tensor.numel()) < vocab) {
+        throw std::runtime_error(
+            "LlamaTextGenerationPipeline: prefill logits are smaller than vocabulary");
+    }
+
+    logits.resize(vocab);
+    const auto logits_offset = static_cast<std::size_t>(logits_tensor.numel()) - vocab;
+    std::memcpy(logits.data(), static_cast<const float*>(logits_tensor.data) + logits_offset,
+                vocab * sizeof(float));
+    if (retain_device_logits) {
+        const auto* device_logits =
+            static_cast<const float*>(prefill_->device_ptr(config_.logits_output_name));
+        if (device_logits == nullptr) {
+            throw std::runtime_error(
+                "LlamaTextGenerationPipeline: prefill logits have no device buffer");
+        }
+        d_logits_ptr_ = device_logits + logits_offset;
+    }
+    kv.append_prefill_kv(present_k, present_v, chunk_size);
+}
+
+void LlamaTextGenerationPipeline::log_batched_prefill(int32_t token_count, int32_t chunk_count,
+                                                      int32_t chunk_limit) const {
+    if (!config_.log_runtime_stats)
+        return;
+
+    std::cerr << "[trtmc] Batched prefill (";
+    if (!config_.prefill_log_label.empty()) {
+        std::cerr << config_.prefill_log_label;
+    } else {
+        std::cerr << "profile " << config_.prefill_profile_index;
+    }
+    std::cerr << "): " << token_count << " tokens in " << chunk_count << " call";
+    if (chunk_count != 1)
+        std::cerr << 's';
+    std::cerr << " (max chunk=" << chunk_limit << ")\n";
+}
+
+const TrtModule* LlamaTextGenerationPipeline::generation_capacity_module() const {
+    if (prefill_ != nullptr)
+        return prefill_.get();
+    return decoders_.front().module.get();
 }
 
 void LlamaTextGenerationPipeline::prime_decoder_after_batched_prefill(
@@ -492,9 +580,9 @@ void LlamaTextGenerationPipeline::prime_decoder_after_batched_prefill(
 
 void LlamaTextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
                                               std::vector<float>& logits, bool gpu_sampling) {
-    // Fast path: batched prefill engine writes K/V for the whole prompt in
-    // one forward and returns last-token logits on host.
-    if (!gpu_sampling && run_prefill_batched(input_ids, logits)) {
+    // Fast path: batched prefill writes K/V in profile-bounded chunks and
+    // exposes last-token logits on the sampler's requested host or device path.
+    if (run_prefill_batched(input_ids, logits, gpu_sampling)) {
         prime_decoder_after_batched_prefill(input_ids);
         state_->mark_prefill_complete();
         return;
@@ -604,6 +692,7 @@ void LlamaTextGenerationPipeline::reset_generation_context() {
     using Clock = std::chrono::steady_clock;
     const auto start = Clock::now();
     state_->reset();
+    d_logits_ptr_ = nullptr;
     state_bound_ = false;
     for (auto& decoder_ctx : decoders_)
         decoder_ctx.module->reset_execution_context();
@@ -676,7 +765,7 @@ bool LlamaTextGenerationPipeline::append_tokens_until_eos(const std::vector<int3
                                                           const LlamaSamplingParams& params) const {
     for (int32_t token : tokens) {
         output.push_back(token);
-        if (params.eos_token_id >= 0 && token == params.eos_token_id)
+        if (llama_is_eos_token(params, token))
             return true;
     }
     return false;
@@ -746,7 +835,7 @@ bool LlamaTextGenerationPipeline::append_linear_spec_tokens(
         const int32_t token = ar_tokens[static_cast<std::size_t>(i)];
         output.push_back(token);
         ++generated;
-        if (params.eos_token_id >= 0 && token == params.eos_token_id)
+        if (llama_is_eos_token(params, token))
             return true;
     }
     return false;
@@ -758,6 +847,8 @@ LlamaTextGenerationPipeline::TimedGenResult LlamaTextGenerationPipeline::generat
     using Clock = std::chrono::steady_clock;
     if (max_new_tokens == 0 || input_ids.empty())
         return TimedGenResult{input_ids, 0.0, 0.0};
+    validate_generation_capacity(input_ids, max_new_tokens, state_.get(),
+                                 generation_capacity_module());
 
     const std::string mode = resolve_generation_mode(cfg);
     if (mode == "diffusion" || mode == "dlm")
@@ -876,7 +967,7 @@ LlamaTextGenerationPipeline::generate_linear_spec_from_ids(const std::vector<int
 
     std::vector<int32_t> output = input_ids;
     output.push_back(next_token);
-    if (params.eos_token_id >= 0 && next_token == params.eos_token_id) {
+    if (llama_is_eos_token(params, next_token)) {
         return TimedGenResult{std::move(output),
                               std::chrono::duration<double, std::milli>(t1 - t0).count(), 0.0};
     }
@@ -950,12 +1041,12 @@ int32_t LlamaTextGenerationPipeline::run_decode_loop(
     for (int32_t step = 0; step < max_new_tokens; ++step) {
         const float* sample_ptr = gpu_sampling ? d_logits_ptr_ : logits.data();
         const LlamaSampleResult result = sampler->sample(sample_ptr, vocab_size, params);
+        const bool is_eos = result.is_eos || llama_is_eos_token(params, result.token_id);
         output.push_back(result.token_id);
         ++steps;
-        if (should_stop_on_answer(output, prompt_token_count, cfg, steps, stop_interval,
-                                  result.is_eos))
+        if (should_stop_on_answer(output, prompt_token_count, cfg, steps, stop_interval, is_eos))
             break;
-        if (result.is_eos)
+        if (is_eos)
             break;
         if (gpu_sampling)
             run_step_device(result.token_id);

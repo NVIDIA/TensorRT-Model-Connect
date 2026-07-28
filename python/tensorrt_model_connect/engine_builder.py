@@ -26,6 +26,7 @@ from .engine_build_budget import enforce_single_full_bundle_build
 from .families import (
     available_plugin_ids,
     family_has_capability,
+    family_prefers_native_default_build,
     find_plugin,
     find_diffusion_plugin,
     resolve_config_from_model_dir,
@@ -834,7 +835,7 @@ def _prepare_tokenizer_special_frame(
 def build_bundle(
     model_dir: str,
     output_path: str,
-    max_cache_length: int = 256,
+    max_cache_length: int | None = None,
     *,
     decoder_engine_layout: str = "split",
     dynamic_kv_cache: bool = False,
@@ -869,7 +870,9 @@ def build_bundle(
     Args:
         model_dir: Path to HF model directory with config.json + safetensors.
         output_path: Where to write the .trtfb bundle.
-        max_cache_length: KV cache length for the engine.
+        max_cache_length: KV cache length for the engine. ``None`` selects the
+            model-owned default; decoder families may use the model's official
+            context capacity.
         decoder_engine_layout: ``"split"`` builds separate prefill/decode
             engines for supported decoder LLMs. ``"dual_profile"`` keeps the
             low-VRAM single-engine/multi-profile layout.
@@ -900,6 +903,8 @@ def build_bundle(
 
     diffusion_entrypoint = _resolve_diffusion_entrypoint(model_dir_path)
     if diffusion_entrypoint is not None:
+        if max_cache_length is None:
+            max_cache_length = 256
         _, diffusion_plugin = diffusion_entrypoint
         precision = str(
             precision
@@ -925,6 +930,16 @@ def build_bundle(
     config.raw["_decoder_engine_layout"] = decoder_engine_layout
     config.raw["_fp32_layers"] = sorted(set(fp32_layers or ()))
     config.raw["_family_build_options"] = dict(family_build_options or {})
+    config.raw["_parallel_build_enabled"] = bool(parallel.enabled)
+    config.raw["_rtx_build_requested"] = bool(rtx)
+    config.raw["_runtime_dynamic_kv_requested"] = bool(
+        dynamic_kv_cache or triattention_stats_path
+    )
+    # Family routing chooses defaults before the quantization context exists.
+    # Preserve the user's build mode on the parsed config so a native-only
+    # family does not select its full-context defaults for an unsupported
+    # quantized build and only fall back after loading the checkpoint.
+    config.raw["_quantized_build_requested"] = bool(quantize)
     _apply_family_builder_capabilities(config)
     print(f"[trtmc build] Model: {config.model_type} "
           f"(layers={config.num_hidden_layers}, hidden={config.hidden_size}, "
@@ -939,7 +954,23 @@ def build_bundle(
             f"Supported: {supported}")
 
     print(f"[trtmc build] Family: {plugin.name}", file=sys.stderr)
-    precision = str(precision or "fp32").lower()
+    default_precision = getattr(plugin, "default_build_precision", "fp32")
+    if callable(default_precision):
+        default_precision = default_precision(config)
+    precision = str(precision or default_precision).lower()
+    config.raw["_resolved_build_precision"] = precision
+    if max_cache_length is None:
+        default_capacity = getattr(plugin, "default_max_cache_length", None)
+        max_cache_length = int(
+            default_capacity(config) if callable(default_capacity) else 256
+        )
+        print(
+            "[trtmc build] KV cache capacity: "
+            f"{max_cache_length} tokens (model default)",
+            file=sys.stderr,
+        )
+    if max_cache_length < 1:
+        raise ValueError("max_cache_length must be >= 1")
 
     # 3. Load weights
     t1 = time.monotonic()
@@ -1791,7 +1822,7 @@ def _build_diffusion_bundle(
 def _build_native_impl(
     model_id_or_path: str,
     output_path: str,
-    max_cache_length: int = 256,
+    max_cache_length: int | None = None,
     *,
     model_revision: str | None = None,
     decoder_engine_layout: str = "split",
@@ -1831,7 +1862,8 @@ def _build_native_impl(
         model_id_or_path: HF repo ID or local directory with config.json + safetensors.
         output_path: Where to write the .trtfb bundle.
         model_revision: Optional Hugging Face revision to resolve for remote model IDs.
-        max_cache_length: KV cache length for the engine.
+        max_cache_length: Explicit KV cache length for the engine. ``None``
+            lets the selected family resolve its model-owned default.
         decoder_engine_layout: ``"split"`` or ``"dual_profile"``.
         verbose: Print detailed TRT builder logs.
         fp8_scales: Per-layer FP8 scales dict, or ``"auto"`` for auto-calibration.
@@ -1915,6 +1947,7 @@ def _try_build_optimized_runtime(
     from .runtime_provider.orchestrator import try_build_optimized_runtime
 
     resolved_model_ref = model_id_or_path
+    model_config: ModelConfig | None = None
     try:
         revision_kwargs = {"revision": model_revision} if model_revision else {}
         resolved_model_ref = _resolve_model(model_id_or_path, **revision_kwargs)
@@ -1928,13 +1961,19 @@ def _try_build_optimized_runtime(
                 or ""
             )
         else:
-            selected_family = str(resolve_family_id(ModelConfig.from_dir(model_dir)) or "")
+            model_config = ModelConfig.from_dir(model_dir)
+            selected_family = str(resolve_family_id(model_config) or "")
     except Exception:
         # Optimized dispatch is optional. Preserve the native path's exact
         # model-resolution behavior and diagnostics when family discovery
         # cannot resolve the request in this environment.
         return None
     if not selected_family:
+        return None
+    if (
+        model_config is not None
+        and family_prefers_native_default_build(model_config)
+    ):
         return None
 
     return try_build_optimized_runtime(
@@ -1953,7 +1992,7 @@ def _try_build_optimized_runtime(
 def build(
     model_id_or_path: str,
     output_path: str,
-    max_cache_length: int = 256,
+    max_cache_length: int | None = None,
     *,
     model_revision: str | None = None,
     decoder_engine_layout: str = "split",
@@ -2001,6 +2040,8 @@ def build(
     # native builder to resolve a model-owned precision.
     if public_options["precision"] is None:
         public_options["precision"] = "fp32"
+    if public_options["max_cache_length"] is None:
+        public_options["max_cache_length"] = 256
     revision_kwargs = (
         {"model_revision": model_revision} if model_revision else {}
     )

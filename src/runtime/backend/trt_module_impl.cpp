@@ -69,6 +69,7 @@ TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecution
     if (!ctx_)
         return;
     try {
+        discover_tensor_aliases(engine);
         validate_initial_external_bindings(engine, external_bindings);
     } catch (const std::exception& error) {
         std::cerr << "[trt_module] Invalid external binding: " << error.what() << '\n';
@@ -93,6 +94,34 @@ TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecution
     allocate_buffers(engine);
 }
 
+void TrtModuleImpl::discover_tensor_aliases(nvinfer1::ICudaEngine* engine) {
+#if NV_TENSORRT_MAJOR >= 11
+    for (int32_t index = 0; index < engine->getNbIOTensors(); ++index) {
+        const char* raw_output_name = engine->getIOTensorName(index);
+        if (raw_output_name == nullptr ||
+            engine->getTensorIOMode(raw_output_name) != nvinfer1::TensorIOMode::kOUTPUT) {
+            continue;
+        }
+        const char* raw_input_name = engine->getAliasedInputTensor(raw_output_name);
+        if (raw_input_name == nullptr)
+            continue;
+        if (!engine_has_io_tensor(engine, raw_input_name) ||
+            engine->getTensorIOMode(raw_input_name) != nvinfer1::TensorIOMode::kINPUT) {
+            throw std::invalid_argument("Aliased output '" + std::string(raw_output_name) +
+                                        "' refers to invalid input '" +
+                                        std::string(raw_input_name) + "'");
+        }
+        const std::string output_name(raw_output_name);
+        const std::string input_name(raw_input_name);
+        alias_input_by_output_.emplace(output_name, input_name);
+        alias_outputs_by_input_[input_name].push_back(output_name);
+        alias_groups_ready_ = false;
+    }
+#else
+    (void)engine;
+#endif
+}
+
 void TrtModuleImpl::validate_initial_external_bindings(
     nvinfer1::ICudaEngine* engine, const std::vector<ModuleExternalBinding>& external_bindings) {
     for (const auto& binding : external_bindings) {
@@ -105,6 +134,11 @@ void TrtModuleImpl::validate_initial_external_bindings(
 
         if (!engine_has_io_tensor(engine, binding.tensor_name))
             throw std::invalid_argument("unknown tensor '" + binding.tensor_name + "'");
+        if (alias_input_by_output_.count(binding.tensor_name) != 0 ||
+            alias_outputs_by_input_.count(binding.tensor_name) != 0) {
+            throw std::invalid_argument("TensorRT alias tensor '" + binding.tensor_name +
+                                        "' must be bound after module creation");
+        }
 
         const auto dims = engine->getTensorShape(binding.tensor_name.c_str());
         if (dims_are_dynamic(dims)) {
@@ -309,7 +343,7 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const s
     if (external != initial_external_bindings_.end()) {
         entry.d_ptr = external->second;
         entry.is_external = true;
-    } else if (nbytes > 0) {
+    } else if (should_allocate_input(name, nbytes)) {
         auto err = cudaMalloc(&entry.d_ptr, nbytes);
         if (err != cudaSuccess)
             entry.d_ptr = nullptr;
@@ -365,6 +399,11 @@ void TrtModuleImpl::allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32
         entry.nbytes = nbytes;
         entry.is_input = false;
 
+        if (alias_input_by_output_.count(name) != 0) {
+            buffers_[name] = std::move(entry);
+            continue;
+        }
+
         const auto external = initial_external_bindings_.find(name);
         if (external != initial_external_bindings_.end()) {
             entry.d_ptr = external->second;
@@ -391,7 +430,6 @@ void TrtModuleImpl::allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32
 void TrtModuleImpl::allocate_buffers(nvinfer1::ICudaEngine* engine) {
     const int32_t num_io = engine->getNbIOTensors();
     const int32_t num_profiles = engine->getNbOptimizationProfiles();
-
     detect_dynamic_shapes(engine, num_io);
 
     // Pass 1: allocate input buffers (use profile-0 max shape for dynamic inputs).
@@ -409,6 +447,96 @@ void TrtModuleImpl::allocate_buffers(nvinfer1::ICudaEngine* engine) {
 
     initial_external_bindings_.clear();
     cudaStreamSynchronize(stream_);
+}
+
+bool TrtModuleImpl::should_allocate_input(const std::string& name, std::size_t nbytes) const {
+    return nbytes > 0 && alias_outputs_by_input_.count(name) == 0;
+}
+
+void TrtModuleImpl::validate_alias_outputs_exist(
+    const std::vector<std::string>& output_names) const {
+    for (const auto& output_name : output_names) {
+        if (buffers_.count(output_name) == 0) {
+            throw std::invalid_argument("Incomplete TensorRT alias group for output '" +
+                                        output_name + "'");
+        }
+    }
+}
+
+void TrtModuleImpl::bind_alias_outputs_or_invalidate(const std::vector<std::string>& output_names,
+                                                     void* ptr) {
+    for (const auto& output_name : output_names) {
+        auto output = buffers_.find(output_name);
+        BufferEntry candidate_output = output->second;
+        candidate_output.d_ptr = ptr;
+        candidate_output.is_external = true;
+        if (!bind_tensor_address(output_name, candidate_output)) {
+            // TensorRT address updates are not transactional. Once part of a
+            // group has changed, discard the context rather than risk enqueue
+            // with mixed state addresses.
+            if (cuda_graph_)
+                cuda_graph_->reset();
+            delete ctx_;
+            ctx_ = nullptr;
+            throw std::runtime_error("TensorRT rejected external alias output '" + output_name +
+                                     "'");
+        }
+    }
+}
+
+void TrtModuleImpl::reset_alias_cuda_graph_if_rebound(void* previous_ptr, void* ptr) {
+    if (previous_ptr != ptr && use_cuda_graph_ && cuda_graph_)
+        cuda_graph_->reset();
+}
+
+void TrtModuleImpl::bind_alias_group(const std::string& input_name, void* ptr) {
+    if (ptr == nullptr)
+        throw std::invalid_argument("External alias buffer for '" + input_name + "' is null");
+
+    auto input = buffers_.find(input_name);
+    const auto outputs = alias_outputs_by_input_.find(input_name);
+    if (input == buffers_.end() || outputs == alias_outputs_by_input_.end()) {
+        throw std::invalid_argument("Incomplete TensorRT alias group for input '" + input_name +
+                                    "'");
+    }
+    validate_alias_outputs_exist(outputs->second);
+
+    BufferEntry candidate_input = input->second;
+    candidate_input.d_ptr = ptr;
+    candidate_input.is_external = true;
+    if (!bind_tensor_address(input_name, candidate_input)) {
+        throw std::runtime_error("TensorRT rejected external alias input '" + input_name + "'");
+    }
+
+    bind_alias_outputs_or_invalidate(outputs->second, ptr);
+
+    reset_alias_cuda_graph_if_rebound(input->second.d_ptr, ptr);
+    input->second.d_ptr = ptr;
+    input->second.is_external = true;
+    for (const auto& output_name : outputs->second) {
+        auto& output = buffers_.at(output_name);
+        output.d_ptr = ptr;
+        output.is_external = true;
+    }
+    alias_groups_ready_ = false;
+}
+
+void TrtModuleImpl::validate_alias_groups_bound() const {
+    for (const auto& [input_name, output_names] : alias_outputs_by_input_) {
+        const auto input = buffers_.find(input_name);
+        if (input == buffers_.end() || input->second.d_ptr == nullptr) {
+            throw std::runtime_error("TensorRT alias input '" + input_name +
+                                     "' has no external buffer");
+        }
+        for (const auto& output_name : output_names) {
+            const auto output = buffers_.find(output_name);
+            if (output == buffers_.end() || output->second.d_ptr == nullptr ||
+                output->second.d_ptr != input->second.d_ptr) {
+                throw std::runtime_error("TensorRT alias output '" + output_name +
+                                         "' is not bound to input '" + input_name + "'");
+            }
+        }
+    }
 }
 
 void TrtModuleImpl::free_buffers() {
@@ -492,6 +620,12 @@ void TrtModuleImpl::forward_async(const TensorMap& inputs) {
 }
 
 void TrtModuleImpl::execute_enqueue() {
+    if (!ctx_)
+        throw std::runtime_error("TensorRT execution context is unavailable");
+    if (!alias_groups_ready_) {
+        validate_alias_groups_bound();
+        alias_groups_ready_ = true;
+    }
     record_timed_enqueue();
 }
 
@@ -737,6 +871,16 @@ void TrtModuleImpl::bind_external(const std::string& name, void* external_device
     auto it = buffers_.find(name);
     if (it == buffers_.end())
         return;
+
+    if (alias_input_by_output_.count(name) != 0) {
+        throw std::invalid_argument("Bind TensorRT alias input '" +
+                                    alias_input_by_output_.at(name) + "', not output '" + name +
+                                    "'");
+    }
+    if (alias_outputs_by_input_.count(name) != 0) {
+        bind_alias_group(name, external_device_ptr);
+        return;
+    }
 
     auto& entry = it->second;
 

@@ -3,11 +3,8 @@
 
 """Qwen family plugin — Qwen, Qwen2, Qwen3, QwQ (text-only, not VL).
 
-Calls the standard decoder builder, which now dispatches to the
-dual-profile builder by default (one engine, two optimization profiles —
-profile 0 = batched prefill, profile 1 = single-token decode). Quantized
-and TriAttention (``dynamic_kv_cache``) bundles fall back to the legacy
-single-profile graph automatically inside the standard builder.
+Dense Qwen3 uses the family-owned TensorRT native KV path. Other Qwen
+variants retain their existing legacy graph routes.
 """
 
 from __future__ import annotations
@@ -16,6 +13,12 @@ from .config import ModelConfig
 from .checkpoint_mapper import WeightDict, load_standard_weights
 from ...parallel_config import normalize_parallel_config
 from ...quantization.adapters import StandardDecoderCalibrationAdapter
+from .build_routing import (
+    native_kv_architecture_capability,
+    native_kv_build_capability,
+)
+from .native_kv_contract import validate_native_kv_weights
+from .dual_profile_decoder_builder import build_dual_profile_decoder_engine
 from .standard_decoder_builder import build_standard_decoder_engine
 from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
 
@@ -73,6 +76,25 @@ class QwenPlugin:
             return False
         return mt.startswith("qwen") or mt.startswith("qwq")
 
+    def default_build_precision(self, config: ModelConfig) -> str:
+        capability = native_kv_architecture_capability(config)
+        if capability.applicable and not capability.eligible:
+            raise ValueError(
+                "Unsupported dense Qwen3 native-KV model: "
+                + capability.reason
+            )
+        return "bf16" if capability.eligible else "fp32"
+
+    def default_max_cache_length(self, config: ModelConfig) -> int:
+        """Use the model's complete context for native Qwen3."""
+        capability = native_kv_architecture_capability(config)
+        if capability.applicable and not capability.eligible:
+            raise ValueError(
+                "Unsupported dense Qwen3 native-KV model: "
+                + capability.reason
+            )
+        return int(config.max_position_embeddings) if capability.eligible else 256
+
     def load_weights(
         self, model_dir: str, config: ModelConfig,
         *, precision: str = "fp32",
@@ -86,6 +108,47 @@ class QwenPlugin:
         debug_layer_outputs: bool = False,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
+        capability = native_kv_build_capability(
+            config,
+            precision=precision,
+            max_cache_length=max_cache_length,
+            parallel_enabled=parallel.enabled,
+            quantized=quant_ctx is not None,
+            debug_layer_outputs=debug_layer_outputs,
+        )
+        if capability.applicable and not capability.eligible:
+            config.raw.pop("_native_kv_cache_metadata", None)
+            raise ValueError(
+                "Unsupported dense Qwen3 native-KV build: "
+                + capability.reason
+            )
+        if capability.eligible:
+            validate_native_kv_weights(config, weights)
+            config.raw["_decoder_engine_layout_supported"] = True
+            config.raw["_native_kv_cache_metadata"] = {
+                "native_kv_contract_version": 1,
+                "native_kv_cache": True,
+            }
+            role = str(
+                config.raw.get("_decoder_engine_role", "")
+            )
+            if role not in ("prefill", "decode"):
+                raise ValueError(
+                    "native Qwen3 requires explicit split engine role "
+                    f"'prefill' or 'decode', got {role!r}"
+                )
+            return build_dual_profile_decoder_engine(
+                config,
+                weights,
+                max_cache_length,
+                precision="bf16",
+                quant_ctx=None,
+                verbose=verbose,
+                profile_mode=role,
+                native_kv_cache=True,
+            )
+
+        config.raw.pop("_native_kv_cache_metadata", None)
         if parallel.enabled:
             if debug_layer_outputs:
                 raise NotImplementedError(
@@ -108,6 +171,13 @@ class QwenPlugin:
             verbose=verbose,
             debug_layer_outputs=debug_layer_outputs,
         )
+
+    def get_bundle_config_overrides(
+        self, config: ModelConfig,
+    ) -> dict | None:
+        """Mark bundles that use the native KV runtime contract."""
+        metadata = config.raw.get("_native_kv_cache_metadata")
+        return dict(metadata) if isinstance(metadata, dict) else None
 
     def calibration_data(self, format_name: str) -> list[str] | None:
         return list(self._CALIBRATION_PROMPTS)

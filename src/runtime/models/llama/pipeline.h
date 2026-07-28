@@ -30,6 +30,7 @@ struct LlamaTextGenConfig {
     int32_t vocab_size{0};
     int32_t id_bos{0};
     int32_t id_eos{0};
+    std::vector<int32_t> id_eos_ids;
     bool has_position_input{true};
     std::string chat_template_format{};
     std::string token_id_name{"token_id"};
@@ -42,9 +43,8 @@ struct LlamaTextGenConfig {
 
     // Batched-prefill plumbing — populated when the bundle ships with a
     // dedicated prefill optimization profile. The runtime forwards the
-    // whole prompt through `prefill_module` once (writing per-layer K/V
-    // into the shared cache via write_prefill_kv) before falling back to
-    // the per-token decode loop.
+    // prompt through `prefill_module` in one or more profile-bounded chunks
+    // before falling back to the per-token decode loop.
     std::string present_k_pattern{"present_k_{i}"};
     std::string present_v_pattern{"present_v_{i}"};
     int32_t prefill_max_length{0};
@@ -189,7 +189,14 @@ class LlamaTextGenerationPipeline final : public IPipeline {
                            TrtModule* prefill_override = nullptr);
     // Returns true if the batched prefill engine handled the prompt; false
     // means caller must fall back to the per-token decode loop.
-    bool run_prefill_batched(const std::vector<int32_t>& input_ids, std::vector<float>& logits);
+    bool run_prefill_batched(const std::vector<int32_t>& input_ids, std::vector<float>& logits,
+                             bool retain_device_logits);
+    void run_prefill_chunk(const int32_t* token_ids, int32_t chunk_size,
+                           const std::vector<const void*>& present_k,
+                           const std::vector<const void*>& present_v, LlamaKvCache& kv,
+                           std::vector<float>& logits, bool retain_device_logits);
+    void log_batched_prefill(int32_t token_count, int32_t chunk_count, int32_t chunk_limit) const;
+    const TrtModule* generation_capacity_module() const;
     void prime_decoder_after_batched_prefill(const std::vector<int32_t>& input_ids);
     bool should_stop_on_answer(const std::vector<int32_t>& output, int32_t prompt_token_count,
                                const GenerateConfig& cfg, int32_t steps, int32_t stop_interval,
