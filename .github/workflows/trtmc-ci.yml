@@ -177,6 +177,7 @@ jobs:
       mode: ${{ steps.impact.outputs.mode }}
       run_unit_tests: ${{ steps.impact.outputs.run_unit_tests }}
       unit_scope: ${{ steps.impact.outputs.unit_scope }}
+      run_graph_patch_trt: ${{ steps.impact.outputs.run_graph_patch_trt }}
 
     steps:
       - name: Check out pinned merge snapshot
@@ -215,6 +216,7 @@ jobs:
           MODE: ${{ steps.impact.outputs.mode }}
           RUN_UNIT_TESTS: ${{ steps.impact.outputs.run_unit_tests }}
           UNIT_SCOPE: ${{ steps.impact.outputs.unit_scope }}
+          RUN_GRAPH_PATCH_TRT: ${{ steps.impact.outputs.run_graph_patch_trt }}
         run: |
           {
             echo "### Model impact"
@@ -225,6 +227,7 @@ jobs:
             echo "- Representative fallback models: \`$FALLBACK_MODELS\`"
             echo "- Run source-only units: \`$RUN_UNIT_TESTS\`"
             echo "- Unit scope: \`$UNIT_SCOPE\`"
+            echo "- Run real-TensorRT graph-patch gate: \`$RUN_GRAPH_PATCH_TRT\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   source-quality:
@@ -333,12 +336,99 @@ jobs:
             rm -rf "$DOCKER_CONFIG"
           fi
 
+  graph-patch-real-trt:
+    name: 4 / Graph patch / Real TensorRT
+    needs:
+      - legal
+      - impact
+      - source-quality
+      - unit-tests
+    if: >-
+      ${{
+        always() &&
+        needs.legal.outputs.authorized == 'true' &&
+        needs.impact.outputs.run_graph_patch_trt == 'true' &&
+        needs.source-quality.result == 'success' &&
+        needs.impact.outputs.run_unit_tests == 'true' &&
+        needs.unit-tests.result == 'success'
+      }}
+    runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
+    # 150m > 90m image setup + 40m gate + 10m upload/cleanup reserve.
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      packages: read
+    env:
+      TRTMC_CI_IMAGE: ${{ vars.TRTMC_MANYLINUX_CI_IMAGE || 'trtmc-dev-gb300:manylinux_2_39' }}
+      TRTMC_MODEL_PROOF_SLOTS_PER_GPU: ${{ vars.TRTMC_MODEL_PROOF_SLOTS_PER_GPU || '4' }}
+      TRTMC_MODEL_PROOF_GPU_LOCK_DIR: ${{ vars.TRTMC_MODEL_PROOF_GPU_LOCK_DIR || '/tmp/trtmc-model-proof-gpu-locks' }}
+      TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS: "600"
+      TRTMC_GRAPH_PATCH_NVIDIA_SMI_TIMEOUT: "2m"
+      TRTMC_GRAPH_PATCH_TRT_PREFLIGHT_TIMEOUT: "2m"
+      TRTMC_GRAPH_PATCH_TEST_TIMEOUT: "10m"
+      GRAPH_PATCH_OUTPUT_DIR: ${{ runner.temp }}/trtmc-graph-patch-real-trt-${{ github.run_id }}-${{ github.run_attempt }}
+      PYTHONHASHSEED: "0"
+
+    steps:
+      - name: Check out pinned merge snapshot
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.legal.outputs.tested_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+          lfs: false
+
+      - name: Log in to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          docker_config="${RUNNER_TEMP}/trtmc-docker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-graph-patch"
+          mkdir -p "$docker_config"
+          echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
+          printf '%s' "$GHCR_TOKEN" | DOCKER_CONFIG="$docker_config" docker login ghcr.io \
+            --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Ensure CI Docker image
+        id: ci_image
+        timeout-minutes: 90
+        run: python3 -m tools.ci image ensure
+
+      - name: Run leased real-TensorRT graph-patch gate
+        id: gate
+        # 40m > 10m lease + 14m commands + 6m timeout kill grace + 5m cleanup.
+        timeout-minutes: 40
+        env:
+          TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
+        run: >-
+          python3 -m tools.ci graph-patch-real-trt
+          --revision "${{ needs.legal.outputs.tested_sha }}"
+          --output-dir "$GRAPH_PATCH_OUTPUT_DIR"
+
+      - name: Upload graph-patch gate evidence
+        if: ${{ always() && steps.gate.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: graph-patch-real-trt-${{ needs.legal.outputs.tested_sha }}-${{ github.run_attempt }}
+          path: ${{ env.GRAPH_PATCH_OUTPUT_DIR }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Clean graph-patch gate state
+        if: ${{ always() }}
+        run: |
+          if [ -n "${DOCKER_CONFIG:-}" ]; then
+            rm -rf "$DOCKER_CONFIG"
+          fi
+
   model-proof:
-    name: 4 / Model / ${{ matrix.model }} [${{ matrix.selection_kind }}]
+    name: 5 / Model / ${{ matrix.model }} [${{ matrix.selection_kind }}]
     needs:
       - legal
       - impact
       - unit-tests
+      - graph-patch-real-trt
     if: >-
       ${{
         always() &&
@@ -349,6 +439,12 @@ jobs:
            needs.unit-tests.result == 'success') ||
           (needs.impact.outputs.run_unit_tests == 'false' &&
            needs.unit-tests.result == 'skipped')
+        ) &&
+        (
+          (needs.impact.outputs.run_graph_patch_trt == 'true' &&
+           needs.graph-patch-real-trt.result == 'success') ||
+          (needs.impact.outputs.run_graph_patch_trt == 'false' &&
+           needs.graph-patch-real-trt.result == 'skipped')
         )
       }}
     strategy:
@@ -365,11 +461,12 @@ jobs:
     secrets: inherit
 
   no-model:
-    name: 4 / No model changes
+    name: 5 / No model changes
     needs:
       - legal
       - impact
       - unit-tests
+      - graph-patch-real-trt
     if: >-
       ${{
         always() &&
@@ -380,6 +477,12 @@ jobs:
            needs.unit-tests.result == 'success') ||
           (needs.impact.outputs.run_unit_tests == 'false' &&
            needs.unit-tests.result == 'skipped')
+        ) &&
+        (
+          (needs.impact.outputs.run_graph_patch_trt == 'true' &&
+           needs.graph-patch-real-trt.result == 'success') ||
+          (needs.impact.outputs.run_graph_patch_trt == 'false' &&
+           needs.graph-patch-real-trt.result == 'skipped')
         )
       }}
     runs-on: ubuntu-latest
@@ -398,7 +501,7 @@ jobs:
           esac >> "$GITHUB_STEP_SUMMARY"
 
   report:
-    name: 5 / Combined HTML report
+    name: 6 / Combined HTML report
     needs:
       - legal
       - impact
@@ -662,6 +765,7 @@ jobs:
       - impact
       - source-quality
       - unit-tests
+      - graph-patch-real-trt
       - model-proof
       - no-model
       - report
@@ -680,6 +784,8 @@ jobs:
           SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
           UNIT_RESULT: ${{ needs.unit-tests.result }}
           RUN_UNIT_TESTS: ${{ needs.impact.outputs.run_unit_tests }}
+          GRAPH_PATCH_TRT_RESULT: ${{ needs.graph-patch-real-trt.result }}
+          RUN_GRAPH_PATCH_TRT: ${{ needs.impact.outputs.run_graph_patch_trt }}
           MODEL_RESULT: ${{ needs.model-proof.result }}
           NO_MODEL_RESULT: ${{ needs.no-model.result }}
           REPORT_RESULT: ${{ needs.report.result }}
@@ -726,6 +832,28 @@ jobs:
               ;;
             *)
               echo "::error::Invalid run_unit_tests output: $RUN_UNIT_TESTS"
+              exit 1
+              ;;
+          esac
+          case "$RUN_GRAPH_PATCH_TRT" in
+            true)
+              test "$RUN_UNIT_TESTS" = "true" || {
+                echo "::error::The real-TensorRT graph-patch gate requires source units"
+                exit 1
+              }
+              test "$GRAPH_PATCH_TRT_RESULT" = "success" || {
+                echo "::error::Real-TensorRT graph-patch result: $GRAPH_PATCH_TRT_RESULT"
+                exit 1
+              }
+              ;;
+            false)
+              test "$GRAPH_PATCH_TRT_RESULT" = "skipped" || {
+                echo "::error::Real-TensorRT graph-patch gate ran unexpectedly: $GRAPH_PATCH_TRT_RESULT"
+                exit 1
+              }
+              ;;
+            *)
+              echo "::error::Invalid run_graph_patch_trt output: $RUN_GRAPH_PATCH_TRT"
               exit 1
               ;;
           esac

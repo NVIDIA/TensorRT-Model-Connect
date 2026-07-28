@@ -35,6 +35,12 @@ class CiCommand:
         commands.add_parser("e2e", help="Run the parallel E2E scheduler")
         coverage = commands.add_parser("coverage", help="Run a standalone coverage wrapper")
         coverage.add_argument("language", choices=("all", "cpp", "python"))
+        graph_patch = commands.add_parser(
+            "graph-patch-real-trt",
+            help="Run the leased real-TensorRT graph-patch gate",
+        )
+        graph_patch.add_argument("--output-dir", type=Path)
+        graph_patch.add_argument("--revision", default="HEAD")
         proof = commands.add_parser("model-proof", help="Run one hermetic model certification")
         proof.add_argument("--model", required=True)
         proof.add_argument("--suite", default="premerge")
@@ -101,6 +107,18 @@ class CiCommand:
                 if remaining:
                     self.parser.error(f"unrecognized combined coverage arguments: {remaining}")
                 coverage_runner.all_reports()
+            return 0
+        if arguments.command == "graph-patch-real-trt":
+            if remaining:
+                self.parser.error(f"unrecognized graph-patch arguments: {' '.join(remaining)}")
+            from .context import CiContext
+            from .graph_patch import GraphPatchRealTrtRunner
+
+            GraphPatchRealTrtRunner(
+                CiContext(env=dict(os.environ)),
+                output_dir=arguments.output_dir,
+                revision=arguments.revision,
+            ).run_host()
             return 0
         if (
             arguments.command == "model-reference-cache"

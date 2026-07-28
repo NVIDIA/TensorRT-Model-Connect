@@ -62,6 +62,7 @@ def test_ci_orchestration_uses_the_class_based_python_entrypoint() -> None:
         "coverage.py",
         "docker_image.py",
         "e2e_scheduler.py",
+        "graph_patch.py",
         "model_proof.py",
         "pipeline.py",
         "stage.py",
@@ -71,6 +72,8 @@ def test_ci_orchestration_uses_the_class_based_python_entrypoint() -> None:
         "CoverageRunner",
         "DockerImageManager",
         "E2EParallelRunner",
+        "GraphPatchRealTrtRunner",
+        "GraphPatchRealTrtGate",
         "ModelProofRunner",
         "CiPipeline",
         "ContainerStageRunner",
@@ -511,7 +514,7 @@ def test_github_workflows_publish_html_reports_for_nightly_and_model_proof() -> 
 
     premerge = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
     assert "model-proof.yml" in premerge
-    assert "5 / Combined HTML report" in premerge
+    assert "6 / Combined HTML report" in premerge
     assert "Download isolated model proof artifacts" in premerge
     assert "merge-multiple: false" in premerge
     assert (
@@ -621,9 +624,12 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
 
     legal = text.split("\n  legal:", maxsplit=1)[1].split("\n  impact:", maxsplit=1)[0]
     impact = text.split("\n  impact:", maxsplit=1)[1].split("\n  unit-tests:", maxsplit=1)[0]
-    unit_tests = text.split("\n  unit-tests:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[
-        0
-    ]
+    unit_tests = text.split("\n  unit-tests:", maxsplit=1)[1].split(
+        "\n  graph-patch-real-trt:", maxsplit=1
+    )[0]
+    graph_patch = text.split("\n  graph-patch-real-trt:", maxsplit=1)[1].split(
+        "\n  model-proof:", maxsplit=1
+    )[0]
     model_proof = text.split("\n  model-proof:", maxsplit=1)[1].split("\n  no-model:", maxsplit=1)[
         0
     ]
@@ -647,6 +653,7 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert "fallback_models: ${{ steps.impact.outputs.fallback_models }}" in impact
     assert "run_unit_tests: ${{ steps.impact.outputs.run_unit_tests }}" in impact
     assert "unit_scope: ${{ steps.impact.outputs.unit_scope }}" in impact
+    assert "run_graph_patch_trt: ${{ steps.impact.outputs.run_graph_patch_trt }}" in impact
     assert "Directly affected models" in impact
     assert "Representative fallback models" in impact
 
@@ -670,17 +677,38 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert 'unit_scratch="${RUNNER_TEMP}/trtmc-premerge-unit-' in unit_tests
     assert 'rm -rf -- "$unit_scratch"' in unit_tests
 
+    for dependency in ("legal", "impact", "source-quality", "unit-tests"):
+        assert f"- {dependency}" in graph_patch
+    assert "name: 4 / Graph patch / Real TensorRT" in graph_patch
+    assert "needs.impact.outputs.run_graph_patch_trt == 'true'" in graph_patch
+    assert "needs.source-quality.result == 'success'" in graph_patch
+    assert "needs.unit-tests.result == 'success'" in graph_patch
+    assert (
+        "runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || "
+        "vars.TRTMC_RUNNER_LABELS" in graph_patch
+    )
+    assert "python3 -m tools.ci image ensure" in graph_patch
+    assert "python3 -m tools.ci graph-patch-real-trt" in graph_patch
+    assert '--revision "${{ needs.legal.outputs.tested_sha }}"' in graph_patch
+    assert "actions/upload-artifact@v4" in graph_patch
+    assert "if-no-files-found: error" in graph_patch
+
     assert "- legal" in model_proof
     assert "- impact" in model_proof
     assert "- unit-tests" in model_proof
+    assert "- graph-patch-real-trt" in model_proof
     assert "needs.legal.outputs.authorized == 'true'" in model_proof
     assert "needs.impact.outputs.has_models == 'true'" in model_proof
     assert "needs.impact.outputs.run_unit_tests == 'true'" in model_proof
     assert "needs.impact.outputs.run_unit_tests == 'false'" in model_proof
     assert "needs.unit-tests.result == 'success'" in model_proof
     assert "needs.unit-tests.result == 'skipped'" in model_proof
+    assert "needs.impact.outputs.run_graph_patch_trt == 'true'" in model_proof
+    assert "needs.impact.outputs.run_graph_patch_trt == 'false'" in model_proof
+    assert "needs.graph-patch-real-trt.result == 'success'" in model_proof
+    assert "needs.graph-patch-real-trt.result == 'skipped'" in model_proof
     assert "uses: ./.github/workflows/model-proof.yml" in model_proof
-    assert "name: 4 / Model / ${{ matrix.model }} [${{ matrix.selection_kind }}]" in model_proof
+    assert "name: 5 / Model / ${{ matrix.model }} [${{ matrix.selection_kind }}]" in model_proof
     assert "fail-fast: true" in model_proof
     assert "continue-on-error" not in model_proof
     assert "max-parallel:" not in model_proof
@@ -692,14 +720,17 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert "- legal" in no_model
     assert "- impact" in no_model
     assert "- unit-tests" in no_model
+    assert "- graph-patch-real-trt" in no_model
     assert "needs.legal.outputs.authorized == 'true'" in no_model
     assert "needs.impact.outputs.has_models == 'false'" in no_model
+    assert "needs.graph-patch-real-trt.result == 'success'" in no_model
+    assert "needs.graph-patch-real-trt.result == 'skipped'" in no_model
     assert 'none) echo "No model-owned, platform, or unit inputs changed."' in no_model
     assert 'unit) echo "Unit tests cover this change; no model proof is required."' in no_model
 
     for dependency in ("legal", "impact", "unit-tests", "model-proof", "no-model"):
         assert f"- {dependency}" in report
-    assert "5 / Combined HTML report" in report
+    assert "6 / Combined HTML report" in report
     assert "always()" in report
     assert "github.event.label.name == 'run-ci'" in report
     assert "needs.legal.outputs.authorized == 'true'" not in report
@@ -720,13 +751,80 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert "Upload combined model proof HTML report" in report
     assert "Enforce combined report certification" in report
 
-    for dependency in ("legal", "impact", "unit-tests", "model-proof", "no-model", "report"):
+    for dependency in (
+        "legal",
+        "impact",
+        "unit-tests",
+        "graph-patch-real-trt",
+        "model-proof",
+        "no-model",
+        "report",
+    ):
         assert f"- {dependency}" in required
     assert "'Premerge CI' || 'Ignored label / Premerge CI'" in required
     assert "always()" in required
     assert 'test "$MODEL_RESULT" = "success"' in required
     assert 'test "$UNIT_RESULT" = "success"' in required
+    assert 'test "$GRAPH_PATCH_TRT_RESULT" = "success"' in required
+    assert 'test "$GRAPH_PATCH_TRT_RESULT" = "skipped"' in required
     assert 'test "$REPORT_RESULT" = "success"' in required
+
+
+def test_graph_patch_timeout_hierarchy_and_cleanup_ownership_are_fail_closed() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
+    graph_patch = workflow.split("\n  graph-patch-real-trt:", maxsplit=1)[1].split(
+        "\n  model-proof:", maxsplit=1
+    )[0]
+
+    job_timeout = int(
+        re.search(r"(?m)^    timeout-minutes: ([0-9]+)$", graph_patch).group(1)  # type: ignore[union-attr]
+    )
+    image_step = graph_patch.split("      - name: Ensure CI Docker image", maxsplit=1)[1].split(
+        "      - name:", maxsplit=1
+    )[0]
+    gate_step = graph_patch.split(
+        "      - name: Run leased real-TensorRT graph-patch gate", maxsplit=1
+    )[1].split("      - name:", maxsplit=1)[0]
+    image_timeout = int(
+        re.search(r"timeout-minutes: ([0-9]+)", image_step).group(1)  # type: ignore[union-attr]
+    )
+    gate_timeout = int(
+        re.search(r"timeout-minutes: ([0-9]+)", gate_step).group(1)  # type: ignore[union-attr]
+    )
+
+    def duration_seconds(name: str) -> int:
+        match = re.search(rf'(?m)^      {name}: "([0-9]+)([smh])"$', graph_patch)
+        assert match, name
+        multiplier = {"s": 1, "m": 60, "h": 3600}[match.group(2)]
+        return int(match.group(1)) * multiplier
+
+    lease_match = re.search(
+        r'(?m)^      TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS: "([0-9]+)"$',
+        graph_patch,
+    )
+    assert lease_match
+    lease_seconds = int(lease_match.group(1))
+    inner_seconds = sum(
+        duration_seconds(name)
+        for name in (
+            "TRTMC_GRAPH_PATCH_NVIDIA_SMI_TIMEOUT",
+            "TRTMC_GRAPH_PATCH_TRT_PREFLIGHT_TIMEOUT",
+            "TRTMC_GRAPH_PATCH_TEST_TIMEOUT",
+        )
+    )
+    command_kill_grace_seconds = 3 * 2 * 60
+    cleanup_reserve_seconds = 5 * 60
+    upload_and_job_cleanup_reserve_seconds = 10 * 60
+
+    assert gate_timeout * 60 > (
+        lease_seconds + inner_seconds + command_kill_grace_seconds + cleanup_reserve_seconds
+    )
+    assert job_timeout * 60 > (
+        image_timeout * 60 + gate_timeout * 60 + upload_and_job_cleanup_reserve_seconds
+    )
+    assert lease_seconds == 600
+    assert '"timeout", "--kill-after=2m"' in _ci_source("context.py")
+    assert "docker rm -f" not in graph_patch
 
 
 def test_premerge_ci_requires_gpu_free_source_quality() -> None:
@@ -1631,7 +1729,7 @@ def test_premerge_unit_container_is_unprivileged_offline_and_cpu_only() -> None:
     start = _ci_source("container.py", "environment.py")
     workflow = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
     unit_tests = workflow.split("\n  unit-tests:", maxsplit=1)[1].split(
-        "\n  model-proof:", maxsplit=1
+        "\n  graph-patch-real-trt:", maxsplit=1
     )[0]
 
     for option in (

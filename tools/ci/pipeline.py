@@ -13,6 +13,7 @@ from collections.abc import Callable
 from .context import CiContext
 from .coverage import CoverageRunner
 from .e2e import E2ERunner
+from .graph_patch import GraphPatchRealTrtGate
 from .package import WheelPackageManager
 from .process import CiError
 from .quality import EnvironmentVerifier, ImpactAnalyzer, SourceQualityChecks, UnitTestRunner
@@ -30,6 +31,7 @@ class CiPipeline:
         self.package = WheelPackageManager(context)
         self.coverage = CoverageRunner(context)
         self.e2e = E2ERunner(context)
+        self.graph_patch = GraphPatchRealTrtGate(context)
         self.stages: dict[str, list[tuple[str, Callable[[], None]]]] = {
             "setup": [
                 ("Install trtmc pip package", self.package.install_once),
@@ -69,6 +71,11 @@ class CiPipeline:
             ],
             "premerge-unit": [
                 ("Source-only C++ and Python unit tests", self.units.premerge),
+            ],
+            "graph-patch-real-trt": [
+                ("GPU and TensorRT preflight", self.graph_patch.preflight),
+                ("Real TensorRT graph-patch test", self.graph_patch.run_test),
+                ("Certify graph-patch JUnit", self.graph_patch.enforce),
             ],
             "cpp-coverage": [
                 ("Setup TensorRT-Model-Connect source checks", self.environment.verify),

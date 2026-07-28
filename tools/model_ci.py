@@ -147,6 +147,33 @@ FULL_UNIT_TEST_ONLY_EXACT = frozenset(
         "tools/test_impact.py",
     }
 )
+
+# These three files define one self-contained graph-patch contract.  The core
+# and smoke test need builder units; the runner also needs the complete tools
+# suite.  All three require the dedicated real-TensorRT gate, but do not by
+# themselves change a model-owned implementation.  Keep this list exact: CI
+# wiring, generic tooling, and adjacent platform code remain broad changes and
+# continue to select representative model proofs.
+GRAPH_PATCH_TRT_EXACT = frozenset(
+    {
+        "python/tensorrt_model_connect/graph_patch.py",
+        "tests/builder/test_graph_patch_real_trt.py",
+        "tools/ci/graph_patch.py",
+    }
+)
+GRAPH_PATCH_TRT_FULL_UNIT_EXACT = frozenset({"tools/ci/graph_patch.py"})
+# These shared entrypoints wire the graph-patch gate into CI.  They retain
+# their ordinary broad CI/tooling classification (full units plus
+# representative model proof) and add the real-TensorRT gate; changing gate
+# wiring must never narrow their existing impact.
+GRAPH_PATCH_TRT_TRIGGER_EXACT = frozenset(
+    {
+        ".github/workflows/trtmc-ci.yml",
+        "tools/ci/__main__.py",
+        "tools/ci/pipeline.py",
+    }
+)
+
 UNIT_TEST_ONLY_PREFIXES = (
     "tests/builder/",
     "tests/cpp/",
@@ -628,6 +655,8 @@ def _classify_path(path: str, catalog: OwnershipCatalog) -> tuple[str, str | Non
             "model-coupled test has no isolated model owner; move it into a "
             f"MODEL.toml contract or use a synthetic plugin before changing it: {path}"
         )
+    if path in GRAPH_PATCH_TRT_EXACT:
+        return "graph_patch_trt", None
     if path in UNIT_TEST_ONLY_EXACT:
         return "unit_cli", None
     if path in FULL_UNIT_TEST_ONLY_EXACT or any(
@@ -728,6 +757,7 @@ def _result(
     fallback_models: Iterable[str] = (),
     run_unit_tests: bool = False,
     unit_scope: str = "none",
+    run_graph_patch_trt: bool = False,
 ) -> dict[str, object]:
     selected = sorted(set(models))
     direct = set(selected if direct_models is None else direct_models)
@@ -740,7 +770,7 @@ def _result(
     if len(scheduled) != len(set(scheduled)) or set(scheduled) != set(selected):
         raise ModelCIError("matrix model order must contain each affected model exactly once")
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "mode": mode,
         "has_models": bool(selected),
         "expected_count": len(selected),
@@ -758,6 +788,7 @@ def _result(
         },
         "run_unit_tests": run_unit_tests,
         "unit_scope": unit_scope,
+        "run_graph_patch_trt": run_graph_patch_trt,
         "changes": changes,
     }
 
@@ -933,6 +964,7 @@ def calculate_impact(
     fallback_selected: set[str] = set()
     broad_change = False
     unit_scope = "none"
+    run_graph_patch_trt = False
     pyproject_task_eval_only = _is_task_eval_optional_extra_only_change(
         repo_root,
         comparison_base,
@@ -951,6 +983,8 @@ def calculate_impact(
                 continue
             seen_path_revision.add((path, catalog.revision))
             kind, owner = _classify_path(path, catalog)
+            if path in GRAPH_PATCH_TRT_TRIGGER_EXACT:
+                run_graph_patch_trt = True
             if path == "pyproject.toml" and pyproject_task_eval_only:
                 kind = "unit_tests"
             item = {"path": path, "kind": kind}
@@ -958,6 +992,10 @@ def calculate_impact(
                 item["model"] = owner
                 affected.add(owner)
                 unit_scope = _merge_unit_scope(unit_scope, "builder")
+            elif kind == "graph_patch_trt":
+                run_graph_patch_trt = True
+                requested_scope = "all" if path in GRAPH_PATCH_TRT_FULL_UNIT_EXACT else "builder"
+                unit_scope = _merge_unit_scope(unit_scope, requested_scope)
             elif kind == "unit_cli":
                 unit_scope = _merge_unit_scope(unit_scope, "cli")
             elif kind == "unit_tests":
@@ -1026,6 +1064,7 @@ def calculate_impact(
         fallback_models=fallback_selected,
         run_unit_tests=unit_scope != "none" or broad_change,
         unit_scope="all" if broad_change else unit_scope,
+        run_graph_patch_trt=run_graph_patch_trt,
     )
     result["base_revision"] = base_catalog.revision
     result["head_revision"] = head_catalog.revision
@@ -1043,6 +1082,7 @@ def _write_github_output(path: Path, result: dict[str, object]) -> None:
         "mode": str(result["mode"]),
         "run_unit_tests": str(bool(result["run_unit_tests"])).lower(),
         "unit_scope": str(result["unit_scope"]),
+        "run_graph_patch_trt": str(bool(result["run_graph_patch_trt"])).lower(),
     }
     if "expected_cases_by_model" in result:
         outputs["expected_cases_by_model"] = json.dumps(

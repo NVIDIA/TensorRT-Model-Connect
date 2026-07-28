@@ -217,7 +217,7 @@ def test_validate_and_all_emit_deterministic_matrix_and_github_outputs(
     )
 
     assert validated["models"] == ["model_a", "model_b"]
-    assert result["schema_version"] == 3
+    assert result["schema_version"] == 4
     assert result["direct_models"] == ["model_a", "model_b"]
     assert result["fallback_models"] == []
     assert result["matrix"] == {
@@ -242,6 +242,7 @@ def test_validate_and_all_emit_deterministic_matrix_and_github_outputs(
         "mode=all",
         "run_unit_tests=false",
         "unit_scope=none",
+        "run_graph_patch_trt=false",
         'expected_cases_by_model={"model_a":["model_a"],"model_b":["model_b"]}',
         "expected_result_count=2",
     ]
@@ -576,6 +577,7 @@ def test_impact_treats_legal_and_docs_as_no_model_change(tmp_path: Path) -> None
     assert result["matrix"] == {"include": []}
     assert result["run_unit_tests"] is False
     assert result["unit_scope"] == "none"
+    assert result["run_graph_patch_trt"] is False
 
 
 def test_impact_treats_platform_change_as_fixed_fallback(tmp_path: Path) -> None:
@@ -637,6 +639,160 @@ def test_cli_and_unit_test_changes_run_units_without_model_proofs(
     assert result["matrix"] == {"include": []}
     assert result["run_unit_tests"] is True
     assert result["unit_scope"] == expected_scope
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_scope"),
+    (
+        ("python/tensorrt_model_connect/graph_patch.py", "builder"),
+        ("tests/builder/test_graph_patch_real_trt.py", "builder"),
+        ("tools/ci/graph_patch.py", "all"),
+    ),
+)
+def test_graph_patch_contract_runs_units_and_real_trt_without_model_proofs(
+    tmp_path: Path,
+    path: str,
+    expected_scope: str,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(repo, path, "# changed graph-patch contract\n")
+    head = _commit(repo, "change graph-patch contract")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "unit"
+    assert result["affected_models"] == []
+    assert result["direct_models"] == []
+    assert result["fallback_models"] == []
+    assert result["matrix"] == {"include": []}
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == expected_scope
+    assert result["run_graph_patch_trt"] is True
+    assert {
+        classification["kind"]
+        for change in result["changes"]
+        for classification in change["classifications"]
+    } == {"graph_patch_trt"}
+
+
+def test_graph_patch_contract_mixed_with_model_change_preserves_model_proof(
+    tmp_path: Path,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(
+        repo,
+        "python/tensorrt_model_connect/graph_patch.py",
+        "# changed graph-patch contract\n",
+    )
+    _write(
+        repo,
+        "python/tensorrt_model_connect/families/model_b/graph_ops.py",
+        "# changed model graph\n",
+    )
+    head = _commit(repo, "change graph-patch contract and model")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "models"
+    assert result["affected_models"] == ["model_b"]
+    assert result["direct_models"] == ["model_b"]
+    assert result["fallback_models"] == []
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "builder"
+    assert result["run_graph_patch_trt"] is True
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        ".github/workflows/trtmc-ci.yml",
+        "tools/ci/__main__.py",
+        "tools/ci/pipeline.py",
+    ),
+)
+def test_graph_patch_shared_wiring_adds_gate_without_narrowing_broad_impact(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(repo, path, "# changed shared graph-patch wiring\n")
+    head = _commit(repo, "change shared graph-patch wiring")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "fallback"
+    assert result["affected_models"] == ["model_a"]
+    assert result["direct_models"] == []
+    assert result["fallback_models"] == ["model_a"]
+    assert result["matrix"] == {"include": [{"model": "model_a", "selection_kind": "fallback"}]}
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "all"
+    assert result["run_graph_patch_trt"] is True
+    assert {
+        classification["kind"]
+        for change in result["changes"]
+        for classification in change["classifications"]
+    } == {"ci_tooling"}
+
+
+def test_unrelated_ci_wiring_does_not_trigger_graph_patch_gate(tmp_path: Path) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(repo, "tools/ci/context.py", "# changed unrelated CI wiring\n")
+    head = _commit(repo, "change unrelated CI wiring")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "fallback"
+    assert result["unit_scope"] == "all"
+    assert result["affected_models"] == ["model_a"]
+    assert result["run_graph_patch_trt"] is False
+
+
+def test_graph_patch_impact_exports_real_trt_gate_decision(tmp_path: Path) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(
+        repo,
+        "python/tensorrt_model_connect/graph_patch.py",
+        "# changed graph-patch contract\n",
+    )
+    head = _commit(repo, "change graph-patch contract")
+    output = tmp_path / "github-output"
+
+    result = _run(
+        repo,
+        "impact",
+        "--base",
+        base,
+        "--head",
+        head,
+        "--platform-change-policy",
+        "fallback",
+        "--fallback-model",
+        "model_a",
+        "--github-output",
+        str(output),
+    )
+
+    assert json.loads(result.stdout)["run_graph_patch_trt"] is True
+    assert "run_graph_patch_trt=true" in output.read_text(encoding="utf-8").splitlines()
+
+
+def test_deleting_graph_patch_contract_still_requires_real_trt_gate(
+    tmp_path: Path,
+) -> None:
+    repo, _ = _make_repo(tmp_path)
+    path = repo / "python/tensorrt_model_connect/graph_patch.py"
+    _write(repo, path.relative_to(repo).as_posix(), "# graph-patch contract\n")
+    base = _commit(repo, "add graph-patch contract")
+    path.unlink()
+    head = _commit(repo, "delete graph-patch contract")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "unit"
+    assert result["affected_models"] == []
+    assert result["unit_scope"] == "builder"
+    assert result["run_graph_patch_trt"] is True
 
 
 @pytest.mark.parametrize("path", ("src/cli/main.cpp", "src/cli/args.h"))

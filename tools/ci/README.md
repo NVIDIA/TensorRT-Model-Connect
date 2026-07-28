@@ -19,9 +19,12 @@ flowchart LR
     B --> C[Ownership and impact]
     B --> D[Source quality]
     C --> E[C++ and Python units]
-    E --> F1[Model A proof]
-    E --> F2[Model B proof]
-    E --> FN[Model N proof]
+    E --> GP{Graph-patch paths changed?}
+    GP -->|yes| GT[Leased real-TensorRT gate]
+    GP -->|no| F1[Model A proof]
+    GT --> F1
+    GT --> F2[Model B proof]
+    GT --> FN[Model N proof]
     F1 --> G[Combined HTML report]
     F2 --> G
     FN --> G
@@ -43,6 +46,7 @@ python3 -m tools.ci pipeline source-quality
 python3 -m tools.ci image ensure
 python3 -m tools.ci container start
 python3 -m tools.ci stage premerge-unit
+python3 -m tools.ci graph-patch-real-trt
 python3 -m tools.ci model-proof --model patchtsmixer --suite premerge
 ```
 
@@ -104,7 +108,26 @@ actual unit work to `UnitTestRunner` and `CoverageRunner`.
 The unit gate admits the model matrix. Source Quality joins the final required
 `Premerge CI` check, so it cannot be bypassed even though it runs in parallel.
 
-### 4. Prove each affected model in isolation
+### 4. Prove graph-patch rewiring in real TensorRT when required
+
+An exact change to `python/tensorrt_model_connect/graph_patch.py`, its real-TRT
+test, or the gate runner selects source units plus one conditional GPU job; it
+does not select a model proof on its own. The host-side runner acquires a shared
+slot through the same `GpuLease` protocol as model proofs, then starts the
+immutable CI image with only the leased GPU visible. Inside that container the
+gate checks NVIDIA/CUDA/TensorRT availability, builds the real TensorRT smoke
+network, and emits JUnit. Certification requires at least one test and exactly
+zero failures, errors, and skips.
+
+Changes to the shared workflow or its `tools.ci` command/pipeline dispatch keep
+their ordinary full-unit plus representative-model fallback and add this gate;
+the extra trigger never narrows their existing shared-platform coverage.
+
+When a diff also changes a model, that model keeps its ordinary proof. Its proof
+waits for this gate, avoiding same-PR GPU contention. A graph-patch-only diff
+continues through the no-model branch after the GPU gate passes.
+
+### 5. Prove each affected model in isolation
 
 Each matrix job runs:
 
@@ -148,7 +171,7 @@ phases may remain not-run when their required input could not be produced.
 The combined report and scheduled failure-issue reconciliation are still
 attempted, while publication remains gated on complete success.
 
-### 5. Compose one report
+### 6. Compose one report
 
 After every selected model passes, the Combined HTML Report job downloads all
 per-model artifacts and generates one report. Certification checks require:
@@ -184,6 +207,7 @@ selection and breadth differ.
 | `docker_image.py` | Fingerprint, build, cache, and verify the CI image | Host |
 | `container.py` | Construct trusted or hardened long-lived containers | Host |
 | `stage.py` | Enter a container and propagate cancellation | Host |
+| `graph_patch.py` | Lease a GPU and certify the real-TensorRT graph-patch smoke | Host and container |
 | `quality.py` | Run impact support, source quality, and unit tests | Container |
 | `coverage.py` | Select tests, collect coverage, and enforce thresholds | Container |
 | `package.py` | Build, validate, install, and smoke-test wheels | Container |
@@ -224,7 +248,7 @@ the producing class remains the source of truth for optional evidence fields.
 
 - **Functionality / units:** `CiCommand` defines the public command tree and
   creates exactly one owning class for `image`, `container`, `stage`,
-  `pipeline`, `e2e`, `coverage`, or `model-proof`.
+  `pipeline`, `e2e`, `coverage`, `graph-patch-real-trt`, or `model-proof`.
 - **Inputs:** `sys.argv` strings plus `os.environ`. A model-proof request, for
   example, is `{model: str, suite: "premerge"|"nightly", revision: str,
   output_dir: Path|None, inner: bool}`.
@@ -236,8 +260,8 @@ the producing class remains the source of truth for optional evidence fields.
 ### `pipeline.py`
 
 - **Functionality / units:** `CiPipeline` maps a stage name such as
-  `source-quality`, `premerge-unit`, `package`, or `full-e2e` to a short
-  ordered list of class methods.
+  `source-quality`, `premerge-unit`, `graph-patch-real-trt`, `package`, or
+  `full-e2e` to a short ordered list of class methods.
 - **Inputs:** A `CiContext` and one stage-name string from
   `python3 -m tools.ci pipeline <stage>`.
 - **Outputs:** The ordered operations' files and process side effects. If
@@ -326,6 +350,31 @@ the producing class remains the source of truth for optional evidence fields.
 - **Boundary:** It bridges host execution to
   `python3 -m tools.ci pipeline <stage>`; stage policy remains in
   `pipeline.py`.
+
+### `graph_patch.py`
+
+- **Functionality / units:** `GraphPatchRealTrtRunner` acquires one shared
+  `GpuLease`, runs the immutable CI image with only that GPU visible, and
+  cleans the exact run-owned container. Once it holds the lease, it also
+  reclaims a stale graph-gate or ordinary model-proof container only when
+  immutable-ID inspection confirms the same GPU, lock namespace, and an
+  overlapping valid slot set. `GraphPatchRealTrtGate` performs the
+  GPU/CUDA/TensorRT preflight, invokes only
+  `tests/builder/test_graph_patch_real_trt.py::test_multi_instance_rewire_compiles_real_tensorrt_network`,
+  and certifies its xUnit2 JUnit.
+- **Inputs:** The checked-out source, `TRTMC_CI_IMAGE`, the model-proof GPU
+  lease environment, pinned `--revision`, optional `--output-dir`, and the
+  pipeline-stage JUnit path `TRTMC_GRAPH_PATCH_JUNIT`.
+- **Outputs:** `junit.xml`, `preflight.json`, `gpu-lease.json`, and
+  `runner-evidence.json` in the run-owned artifact directory plus
+  `source-revision.txt`. Runner evidence records the immutable local image ID,
+  GPU lock namespace, unique container owner labels, and pinned source
+  revision. A passing status requires the checkout to match that revision,
+  exactly one leased GPU to be visible, TensorRT to create a builder, at least
+  one test, and exactly zero failures, errors, and skips.
+- **Boundary:** It owns this model-neutral hardware gate only. `model_ci.py`
+  decides when it is required, `docker_image.py` owns the image, `gpu_lease.py`
+  owns allocation fairness, and model-owned E2E remains in model proof.
 
 ### `quality.py`
 
