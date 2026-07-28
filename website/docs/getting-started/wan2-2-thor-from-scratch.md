@@ -132,10 +132,11 @@ model DSOs.
 ```bash
 REVISION="$(git rev-parse HEAD)"
 IMAGE="trtmc-wan22-thor:${REVISION:0:12}"
+WAN22_DOCKERFILE="python/tensorrt_model_connect/families/wan2_2_ti2v/Dockerfile.thor"
 
 docker build --pull \
   --build-arg "TRTMC_SOURCE_REVISION=$REVISION" \
-  --file Dockerfile.wan22-thor \
+  --file "$WAN22_DOCKERFILE" \
   --tag "$IMAGE" \
   .
 

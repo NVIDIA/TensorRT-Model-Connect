@@ -9,12 +9,16 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DOCKERFILE = REPO_ROOT / "Dockerfile.wan22-thor"
-DOCKERIGNORE = REPO_ROOT / "Dockerfile.wan22-thor.dockerignore"
+WAN22_FAMILY = (
+    REPO_ROOT / "python/tensorrt_model_connect/families/wan2_2_ti2v"
+)
+DOCKERFILE = WAN22_FAMILY / "Dockerfile.thor"
+DOCKERIGNORE = WAN22_FAMILY / "Dockerfile.thor.dockerignore"
 GUIDE = REPO_ROOT / "website/docs/getting-started/wan2-2-thor-from-scratch.md"
 
 
 def test_wan22_thor_image_is_pinned_and_model_specific() -> None:
+    assert (DOCKERFILE.parent / "MODEL.toml").is_file()
     text = DOCKERFILE.read_text(encoding="utf-8")
 
     required = (
@@ -75,7 +79,7 @@ def test_wan22_thor_guide_covers_fresh_host_and_full_generation() -> None:
         "docker login ghcr.io",
         "docker logout ghcr.io",
         "read access to the linked package",
-        "Dockerfile.wan22-thor",
+        "python/tensorrt_model_connect/families/wan2_2_ti2v/Dockerfile.thor",
         "--model-revision 921dbaf3f1674a56f47e83fb80a34bac8a8f203e",
         "--set wan2_2_ti2v.easycache_enabled=true",
         "--set wan2_2_ti2v.easycache_threshold=1.0",

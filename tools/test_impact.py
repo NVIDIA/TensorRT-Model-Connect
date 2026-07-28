@@ -1087,14 +1087,6 @@ def _hf_id_models(hf_ids: Set[str]) -> ModelsResolver:
     return _resolver
 
 
-def _wan22_thor_deployment_models(
-    context: RuleContext,
-    imap: ImpactMap,
-) -> List[str]:
-    del context
-    return sorted(imap.family_to_models.get("wan2_2_ti2v", []))
-
-
 def _runtime_strategy_models(
     strategies_getter: Callable[[RuleContext, ImpactMap], List[str]],
 ) -> ModelsResolver:
@@ -1871,23 +1863,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             matcher=_path_startswith("benchmarks/performance/"),
             resolver=_match_result("release_performance", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_release_performance_triggers_tools_tier",),
-        ),
-        ClassificationRule(
-            priority=458,
-            name="wan22_thor_deployment",
-            matcher=_path_in(
-                {
-                    "Dockerfile.wan22-thor",
-                    "Dockerfile.wan22-thor.dockerignore",
-                }
-            ),
-            resolver=_match_result(
-                "wan22_thor_deployment",
-                _wan22_thor_deployment_models,
-                ["tools"],
-                False,
-            ),
-            covered_by=("TestWan22ThorDeployment.test_deployment_assets_select_wan22",),
         ),
         ClassificationRule(
             priority=460,
