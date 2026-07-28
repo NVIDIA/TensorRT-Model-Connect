@@ -501,6 +501,8 @@ entries:
     model: nemotron-h-nano-9b
     workload:
       testcase: nemotron-h-nano-9b
+      runtime:
+        cuda_graphs: true
     baseline:
       runner: hf-transformers
       mode: hf-eager

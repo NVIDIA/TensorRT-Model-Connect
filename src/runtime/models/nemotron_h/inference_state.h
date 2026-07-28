@@ -55,8 +55,8 @@ class NemotronHInferenceState {
     // Pipelines call this instead of manually constructing mask/position tensors.
     virtual void prepare_step(TensorMap& inputs, int32_t seq_len = 1) = 0;
 
-    // Update state after one decode step. Copies "present" outputs
-    // into "cache" inputs, advances position.
+    // Update state after one decode step. Makes "present" outputs available
+    // as the next inputs and advances position.
     // n_tokens: number of tokens processed in this step (default 1).
     //           >1 for batched prefill / multi-token steps.
     virtual void advance(int32_t n_tokens = 1) = 0;

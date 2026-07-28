@@ -31,6 +31,7 @@
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/trt_common.h"
 #include "trtmc/runtime/tensor.h"
+#include "trtmc/runtime/trt_backend.h"
 #include "trtmc/runtime/trt_module.h"
 
 #include <NvInfer.h>
@@ -51,8 +52,8 @@ static void check(bool condition, const char* test_name) {
 
 static trtmc::TrtLogger g_logger;
 
-// Build a tiny TRT engine: y = x (identity), fixed shape [4] float32
-static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity_engine() {
+// Build a tiny TRT plan: y = x (identity), fixed shape [4] float32
+static trtmc::TrtUniquePtr<nvinfer1::IHostMemory> build_identity_plan() {
     auto builder = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
     if (!builder)
         return nullptr;
@@ -72,8 +73,12 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity_engine() {
     out->setName("y");
     network->markOutput(*out);
 
-    auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(
+    return trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(
         builder->buildSerializedNetwork(*network, *config));
+}
+
+static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity_engine() {
+    auto plan = build_identity_plan();
     if (!plan)
         return nullptr;
 
@@ -325,6 +330,28 @@ static void test_module_enable_after_normal_run() {
     cudaStreamDestroy(stream);
 }
 
+static void test_backend_honors_cuda_graph_option() {
+    auto plan = build_identity_plan();
+    if (!plan)
+        return;
+
+    auto* backend = trtmc_create_backend();
+    check(backend != nullptr, "backend_option: backend created");
+    if (!backend)
+        return;
+
+    trtmc::ModuleCreateOptions options;
+    options.cuda_graphs = true;
+    auto module = backend->create_module(plan->data(), plan->size(), options);
+    check(module != nullptr, "backend_option: module created");
+    if (module) {
+        check(module->cuda_graph_active(), "backend_option: CUDA graph option honored");
+    }
+
+    module.reset();
+    trtmc_destroy_backend(backend);
+}
+
 int main() {
     // CudaGraphExec unit tests
     test_default_state();
@@ -338,6 +365,7 @@ int main() {
     test_module_cuda_graph_correctness();
     test_module_cuda_graph_multiple_runs();
     test_module_enable_after_normal_run();
+    test_backend_honors_cuda_graph_option();
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;

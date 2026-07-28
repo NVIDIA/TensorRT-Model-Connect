@@ -5,6 +5,7 @@
 
 // Unit tests for recurrent-owned output initializers.
 
+#include "runtime/models/nemotron_h/recurrent_generation_plan.h"
 #include "runtime/models/nemotron_h/recurrent_output_initializers.h"
 
 #include <array>
@@ -87,12 +88,32 @@ void test_nemotron_h_recurrent_contracts() {
           "nemotron-h contract initializes outputs to zero");
 }
 
+void test_recurrent_host_transfer_plan() {
+    check(!under_test::prefill_step_needs_logits(0, 27),
+          "nemotron-h skips unused first-prefill logits");
+    check(!under_test::prefill_step_needs_logits(25, 27),
+          "nemotron-h skips unused intermediate-prefill logits");
+    check(under_test::prefill_step_needs_logits(26, 27),
+          "nemotron-h copies final-prefill logits for sampling");
+
+    const std::vector<trtmc::TensorInfo> outputs = {
+        {"logits", {128000}, trtmc::DType::kFloat32, false},
+        {"present_ssm_0", {36864, 128}, trtmc::DType::kFloat32, false},
+        {"present_conv_0", {12352, 4}, trtmc::DType::kFloat32, false},
+    };
+    const auto summary = under_test::host_visible_output_summary(outputs);
+    check(summary.tensor_count == 1, "nemotron-h exposes only logits to the host");
+    check(summary.bytes == 128000 * sizeof(float),
+          "nemotron-h host-visible bytes exclude recurrent state");
+}
+
 } // namespace
 
 int main() {
     test_initialize_rwkv_outputs();
     test_initialize_mamba_outputs();
     test_nemotron_h_recurrent_contracts();
+    test_recurrent_host_transfer_plan();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " recurrent output initializer test(s) failed\n";

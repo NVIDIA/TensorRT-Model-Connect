@@ -54,6 +54,11 @@ void keep_backend_resources(ITrtModule& module,
         module.keep_alive(distributed_owner);
 }
 
+void apply_module_options(ITrtModule& module, const ModuleCreateOptions& options) {
+    if (options.cuda_graphs)
+        module.enable_cuda_graph();
+}
+
 } // namespace
 
 class TrtBackend final : public IBackend, public IPreboundBackend {
@@ -105,6 +110,7 @@ class TrtBackend final : public IBackend, public IPreboundBackend {
                                                        options.distributed_communicator);
             if (!mod->ok())
                 throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
+            apply_module_options(*mod, options);
             keep_backend_resources(*mod, engine, stream_owner, options.distributed_owner);
             return mod;
         };
@@ -152,6 +158,7 @@ class TrtBackend final : public IBackend, public IPreboundBackend {
                                                        options.distributed_communicator);
             if (!mod->ok())
                 throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
+            apply_module_options(*mod, options);
             keep_backend_resources(*mod, engine, stream_owner, options.distributed_owner);
             out.modules.push_back(BackendProfileModule{profile_idx, std::move(mod)});
         }
@@ -195,6 +202,7 @@ class TrtBackend final : public IBackend, public IPreboundBackend {
                                                           lane_options.distributed_communicator);
             if (!module->ok())
                 throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
+            apply_module_options(*module, lane_options);
             keep_backend_resources(*module, engine, stream_owner, lane_options.distributed_owner);
             out.modules.push_back(std::move(module));
         }
@@ -237,6 +245,7 @@ class TrtBackend final : public IBackend, public IPreboundBackend {
             throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
         }
 
+        apply_module_options(*module, options);
         keep_backend_resources(*module,
                                std::shared_ptr<nvinfer1::ICudaEngine>(
                                    engine, [](nvinfer1::ICudaEngine* p) { delete p; }),

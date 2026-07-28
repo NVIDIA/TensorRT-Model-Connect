@@ -113,6 +113,58 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder() {
         rt->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
+static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_state_decoder() {
+    auto builder = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+    if (!builder)
+        return nullptr;
+    auto network = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
+    auto config = trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
+    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
+
+    auto* state = network->addInput("state_0", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{1, {4}});
+    auto* present = network->addIdentity(*state);
+    present->getOutput(0)->setName("present_state_0");
+    network->markOutput(*present->getOutput(0));
+
+    auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(
+        builder->buildSerializedNetwork(*network, *config));
+    if (!plan)
+        return nullptr;
+    auto runtime = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
+        runtime->deserializeCudaEngine(plan->data(), plan->size()));
+}
+
+static void test_recurrent_state_updates_in_place() {
+    auto engine = build_mock_state_decoder();
+    if (!engine) {
+        std::cerr << "SKIP: can't build recurrent state engine\n";
+        return;
+    }
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    trtmc::TrtModuleImpl module(engine.get(), engine->createExecutionContext(), stream);
+    trtmc::NemotronHRecurrentState state(
+        1, {trtmc::NemotronHRecurrentState::TensorSpec{"state", {4}, "present_state"}}, stream);
+    module.enable_cuda_graph();
+    state.bind_to(module);
+
+    void* state_buffer = module.device_ptr("state_0");
+    void* present_buffer = module.device_ptr("present_state_0");
+    check(state_buffer == present_buffer,
+          "recurrent state keeps input and output at one device address");
+    state.advance();
+
+    check(module.device_ptr("state_0") == state_buffer,
+          "recurrent state input address remains stable");
+    check(module.device_ptr("present_state_0") == state_buffer,
+          "recurrent state output address remains stable");
+    check(state.device_memory_bytes() == 4 * sizeof(float),
+          "in-place recurrent state allocates one device buffer");
+    cudaStreamDestroy(stream);
+}
+
 static void test_mamba_pipeline() {
     auto engine = build_mock_decoder();
     if (!engine) {
@@ -315,6 +367,7 @@ static void test_argmax_recurrent() {
 
 int main() {
     test_argmax_recurrent();
+    test_recurrent_state_updates_in_place();
     test_mamba_pipeline();
     test_rwkv_pipeline();
     test_hybrid_pipeline();

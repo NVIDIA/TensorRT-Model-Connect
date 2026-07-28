@@ -484,7 +484,7 @@ def _validate_workload(case: Mapping[str, Any]) -> None:
     workload = case["workload"]
     if not isinstance(workload, Mapping):
         raise PerfMatrixError(f"case {case['id']} workload must be an object")
-    unsupported = sorted(set(workload) - {"testcase", "request"})
+    unsupported = sorted(set(workload) - {"testcase", "request", "runtime"})
     if unsupported:
         raise PerfMatrixError(
             f"case {case['id']} workload has unsupported fields: {', '.join(unsupported)}"
@@ -498,6 +498,9 @@ def _validate_workload(case: Mapping[str, Any]) -> None:
     request = workload.get("request", {})
     if not isinstance(request, Mapping):
         raise PerfMatrixError(f"case {case['id']} workload.request must be an object")
+    runtime = workload.get("runtime", {})
+    if not isinstance(runtime, Mapping):
+        raise PerfMatrixError(f"case {case['id']} workload.runtime must be an object")
 
 
 def _validate_measurement(case: Mapping[str, Any]) -> None:
@@ -933,6 +936,9 @@ def _candidate_base_argv(case: Mapping[str, Any], options: RunOptions) -> list[s
     request = workload.get("request", {})
     for name, value in sorted((request or {}).items()):
         argv.extend(["--set", f"request.{name}={_yaml_cli_value(value)}"])
+    runtime = workload.get("runtime", {})
+    for name, value in sorted((runtime or {}).items()):
+        argv.extend(["--set", f"runtime.{name}={_yaml_cli_value(value)}"])
     return argv
 
 

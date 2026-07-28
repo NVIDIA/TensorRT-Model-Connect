@@ -66,7 +66,7 @@ class RecurrentPipeline final : public IPipeline {
                                            int32_t max_new_tokens,
                                            const NemotronHSamplingParams& params);
 
-    void run_step(int32_t token_id, std::vector<float>& logits);
+    void run_step(int32_t token_id, std::vector<float>& logits, bool copy_logits);
 
     using SteadyClock = std::chrono::steady_clock;
     void report_timing(SteadyClock::time_point t_prefill_start,
@@ -83,6 +83,8 @@ class RecurrentPipeline final : public IPipeline {
     double prof_forward_ms_{0};
     double prof_logits_copy_ms_{0};
     double prof_advance_ms_{0};
+    std::size_t prof_logits_copy_bytes_{0};
+    int prof_logits_copies_{0};
     int prof_steps_{0};
 };
 

@@ -76,7 +76,7 @@ struct PipelineContext {
     const std::string& bundle_path;        // filesystem path to .trtfb file
     IBackend* backend;                     // Backend for creating ITrtModule instances
     const std::string& runtime_cache_path; // RTX: JIT kernel cache file path
-    bool cuda_graphs;                      // RTX: whole-graph CUDA capture
+    bool cuda_graphs;                      // Enable backend-supported CUDA Graph execution
     std::uint64_t kv_cache_size_bytes{0};  // 0 = use bundle max_cache_length (TriAttention)
     // Resolved layered config (schema-driven). Nullable: plugins not yet
     // migrated to the registry ignore it; migrated plugins query their

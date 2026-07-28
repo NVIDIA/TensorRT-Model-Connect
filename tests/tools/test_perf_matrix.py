@@ -249,7 +249,10 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert len(raw_entries) == 77
     assert len(raw_additional) == 28
     assert excluded_profiles == {}
-    assert all(set(entry["workload"]) <= {"testcase", "request"} for entry in raw_entries)
+    assert all(
+        set(entry["workload"]) <= {"testcase", "request", "runtime"}
+        for entry in raw_entries
+    )
     assert all(entry["workload"].get("testcase") for entry in raw_entries)
     assert all(entry.get("model") and entry.get("inherit") for entry in raw_additional)
     assert not any("priority" in entry for entry in raw_entries)
@@ -301,6 +304,9 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert by_id["opt.generate"]["workload"]["request"]["max_new_tokens"] == 10
     assert by_id["deepseek_ocr.generate"]["baseline"]["precision"] == "bf16"
     assert by_id["nemotron_h.generate"]["baseline"]["mode"] == "hf-eager"
+    assert by_id["nemotron_h.generate"]["workload"]["runtime"] == {
+        "cuda_graphs": True
+    }
     nemotron_baseline = by_id["nemotron_speech_streaming.transcribe"]["baseline"]
     assert {
         key: nemotron_baseline[key] for key in ("runner", "adapter", "mode", "reference_backend")
@@ -1261,6 +1267,35 @@ def test_resolution_failure_is_recorded_without_stopping_other_entries(
     assert failures[case["id"]]["stage"] == "candidate-preflight"
     assert failures[case["id"]]["reason"] == "profile unavailable"
     assert failures[case["id"]]["argv"][-1] == "--dry-run"
+
+
+def test_candidate_command_forwards_workload_runtime_overrides(tmp_path: Path) -> None:
+    case = {
+        "id": "nemotron_h.generate",
+        "family": "nemotron_h",
+        "model": "nemotron-h-nano-9b",
+        "workload": {
+            "testcase": "nemotron-h-nano-9b",
+            "runtime": {"cuda_graphs": True},
+        },
+        "measurement": {"warmup": 2, "iterations": 10},
+        "baseline": {
+            "runner": "hf-transformers",
+            "asset_loading_included": False,
+        },
+    }
+    options = Namespace(
+        trtmc_bench="trtmc-bench",
+        trtmc_worker=None,
+        bundle_cache=None,
+        bundle_roots=(),
+        runtime_dirs=(),
+    )
+
+    perf_matrix._validate_workload(case)
+    argv = perf_matrix._candidate_base_argv(case, options)
+
+    assert "runtime.cuda_graphs=true" in argv
 
 
 def test_task_reference_can_require_local_model_files_per_case(tmp_path: Path) -> None:

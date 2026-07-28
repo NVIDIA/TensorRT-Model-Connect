@@ -6,6 +6,7 @@
 #include "runtime/models/nemotron_h/pipeline.h"
 
 #include "runtime/models/nemotron_h/chat_templates.h"
+#include "runtime/models/nemotron_h/recurrent_generation_plan.h"
 
 #include <algorithm>
 #include <chrono>
@@ -102,16 +103,17 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
     state_->bind_to(*decoder_);
 
     prof_prepare_ms_ = prof_forward_ms_ = prof_logits_copy_ms_ = prof_advance_ms_ = 0;
+    prof_logits_copy_bytes_ = 0;
+    prof_logits_copies_ = 0;
     prof_steps_ = 0;
 
     std::vector<float> logits;
 
     // ── Prefill phase ──
     auto t_prefill_start = SteadyClock::now();
-    for (std::size_t i = 0; i + 1 < input_ids.size(); ++i)
-        run_step(input_ids[i], logits);
-
-    run_step(input_ids.back(), logits);
+    for (std::size_t i = 0; i < input_ids.size(); ++i)
+        run_step(input_ids[i], logits,
+                 nemotron_h_recurrent::prefill_step_needs_logits(i, input_ids.size()));
     auto t_prefill_end = SteadyClock::now();
 
     // ── Decode phase ──
@@ -125,7 +127,7 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
         output.push_back(result.token_id);
         if (result.is_eos)
             break;
-        run_step(result.token_id, logits);
+        run_step(result.token_id, logits, true);
         ++decode_steps;
     }
     auto t_decode_end = SteadyClock::now();
@@ -173,21 +175,16 @@ void RecurrentPipeline::report_timing(SteadyClock::time_point t_prefill_start,
         std::cerr << "[trtmc-perf]   state advance: " << (prof_advance_ms_ / prof_steps_)
                   << " ms\n";
 
-        std::size_t output_bytes = 0;
-        for (const auto& info : decoder_->output_info()) {
-            std::size_t n = 1;
-            for (auto d : info.shape)
-                n *= static_cast<std::size_t>(d);
-            n *= dtype_size(info.dtype);
-            output_bytes += n;
-        }
-        std::cerr << "[trtmc-perf]   D2H output size: " << std::setprecision(1)
-                  << (output_bytes / (1024.0 * 1024.0)) << " MB (" << decoder_->output_info().size()
-                  << " tensors)\n";
+        const auto host_outputs =
+            nemotron_h_recurrent::host_visible_output_summary(decoder_->output_info());
+        std::cerr << "[trtmc-perf]   host-visible output: " << std::setprecision(1)
+                  << (prof_logits_copy_bytes_ / (1024.0 * 1024.0)) << " MB total ("
+                  << host_outputs.tensor_count << " tensor/copy, " << prof_logits_copies_
+                  << " copies)\n";
     }
 }
 
-void RecurrentPipeline::run_step(int32_t token_id, std::vector<float>& logits) {
+void RecurrentPipeline::run_step(int32_t token_id, std::vector<float>& logits, bool copy_logits) {
     auto t0 = SteadyClock::now();
 
     TensorMap inputs;
@@ -207,9 +204,11 @@ void RecurrentPipeline::run_step(int32_t token_id, std::vector<float>& logits) {
     // Only the logits tensor (~512 KB) needs to reach CPU for sampling.
     decoder_->forward_async(inputs);
 
+    // Wait for TRT kernel to finish before reading logits or advancing state.
+    decoder_->sync();
+
     // Resolve logits device pointer + size once on first call.
     if (!logits_device_ptr_) {
-        decoder_->sync(); // must sync before first device_ptr query
         logits_device_ptr_ = decoder_->device_ptr("logits");
         if (!logits_device_ptr_)
             throw std::runtime_error(std::string(name_) + ": no 'logits' output");
@@ -225,20 +224,20 @@ void RecurrentPipeline::run_step(int32_t token_id, std::vector<float>& logits) {
             throw std::runtime_error(std::string(name_) + ": logits tensor has zero size");
     }
 
-    // Wait for TRT kernel to finish.
-    decoder_->sync();
-
     auto t2 = SteadyClock::now();
 
-    // D2H logits only (~512 KB). Synchronous cudaMemcpy is faster than
-    // cudaMemcpyAsync+sync here because it bypasses stream ordering overhead.
-    logits.resize(logits_numel_);
-    cudaMemcpy(logits.data(), logits_device_ptr_, logits_numel_ * sizeof(float),
-               cudaMemcpyDeviceToHost);
+    if (copy_logits) {
+        // D2H logits only (~512 KB). Intermediate prefill logits are not sampled.
+        logits.resize(logits_numel_);
+        const auto copy_bytes = logits_numel_ * sizeof(float);
+        cudaMemcpy(logits.data(), logits_device_ptr_, copy_bytes, cudaMemcpyDeviceToHost);
+        prof_logits_copy_bytes_ += copy_bytes;
+        ++prof_logits_copies_;
+    }
 
     auto t3 = SteadyClock::now();
 
-    // D2D state copies (present -> state) — async on the CUDA stream.
+    // Advance the logical position; recurrent buffers update in place.
     state_->advance();
 
     auto t4 = SteadyClock::now();
