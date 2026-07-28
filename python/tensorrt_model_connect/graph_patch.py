@@ -60,7 +60,13 @@ class GraphPatchError(ValueError):
 def _json_value(value: Any) -> Any:
     """Convert metadata and backend values into deterministic JSON values."""
 
-    if value is None or isinstance(value, (str, bool, int)):
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise GraphPatchError("Graph metadata strings must be valid UTF-8") from exc
+        return value
+    if value is None or isinstance(value, (bool, int)):
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
@@ -93,10 +99,118 @@ def _fingerprint(payload: Mapping[str, Any]) -> str:
 
 
 def _validate_fingerprint(expected: Any, actual: str, artifact: str) -> None:
-    if expected is not None and expected != actual:
+    if (
+        not isinstance(expected, str)
+        or len(expected) != 64
+        or any(character not in "0123456789abcdef" for character in expected)
+    ):
+        raise GraphPatchError(
+            f"{artifact} fingerprint must be a 64-character lowercase SHA-256 digest"
+        )
+    if expected != actual:
         raise GraphPatchError(
             f"{artifact} fingerprint mismatch: expected {expected}, computed {actual}"
         )
+
+
+def _reject_unknown_fields(
+    value: Mapping[str, Any],
+    allowed: set[str],
+    where: str,
+) -> None:
+    if not isinstance(value, Mapping):
+        raise GraphPatchError(f"{where} must be a JSON object")
+    non_string_keys = [key for key in value if not isinstance(key, str)]
+    if non_string_keys:
+        raise GraphPatchError(f"{where} object keys must be strings")
+    unknown = set(value) - allowed
+    if unknown:
+        raise GraphPatchError(f"Unknown {where} fields: {sorted(unknown)}")
+
+
+def _require_exact_fields(
+    value: Mapping[str, Any],
+    expected: set[str],
+    where: str,
+) -> None:
+    _reject_unknown_fields(value, expected, where)
+    missing = expected - set(value)
+    if missing:
+        raise GraphPatchError(f"Missing {where} fields: {sorted(missing)}")
+
+
+def _require_string(value: Any, where: str, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value):
+        qualifier = "a string" if allow_empty else "a non-empty string"
+        raise GraphPatchError(f"{where} must be {qualifier}")
+    return value
+
+
+def _require_optional_string(value: Any, where: str) -> str | None:
+    if value is None:
+        return None
+    return _require_string(value, where)
+
+
+def _require_array(value: Any, where: str) -> list[Any]:
+    if type(value) is not list:
+        raise GraphPatchError(f"{where} must be a JSON array")
+    return value
+
+
+def _require_string_array(
+    value: Any,
+    where: str,
+    *,
+    allow_null: bool = False,
+) -> tuple[str | None, ...]:
+    raw = _require_array(value, where)
+    result: list[str | None] = []
+    for index, item in enumerate(raw):
+        if item is None and allow_null:
+            result.append(None)
+            continue
+        result.append(_require_string(item, f"{where}[{index}]"))
+    return tuple(result)
+
+
+def _load_json_object(value: str | bytes, where: str) -> Mapping[str, Any]:
+    """Decode one strict JSON object without silently collapsing duplicate keys."""
+
+    if isinstance(value, bytes):
+        try:
+            text = value.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise GraphPatchError(f"{where} must be valid UTF-8: {exc}") from exc
+    elif isinstance(value, str):
+        text = value
+    else:
+        raise GraphPatchError(f"{where} must be a string or UTF-8 bytes")
+
+    def object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                raise GraphPatchError(f"{where} contains duplicate object key {key!r}")
+            result[key] = item
+        return result
+
+    def reject_constant(constant: str) -> None:
+        raise GraphPatchError(f"{where} contains non-finite number {constant}")
+
+    try:
+        decoded = json.loads(
+            text,
+            object_pairs_hook=object_pairs,
+            parse_constant=reject_constant,
+        )
+    except GraphPatchError:
+        raise
+    except (json.JSONDecodeError, RecursionError, TypeError, ValueError) as exc:
+        raise GraphPatchError(f"{where} is not valid JSON: {exc}") from exc
+    if not isinstance(decoded, Mapping):
+        raise GraphPatchError(f"{where} JSON must contain an object")
+    return decoded
 
 
 @dataclass(frozen=True)
@@ -126,14 +240,17 @@ class LayerIdentityContract:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "LayerIdentityContract":
-        unknown = set(value) - {"provider_id", "schema_version"}
-        if unknown:
-            raise GraphPatchError(
-                f"Unknown layer identity contract fields: {sorted(str(item) for item in unknown)}"
-            )
+        _require_exact_fields(
+            value,
+            {"provider_id", "schema_version"},
+            "layer identity contract",
+        )
         contract = cls(
-            provider_id=value.get("provider_id"),
-            schema_version=value.get("schema_version"),
+            provider_id=_require_string(
+                value["provider_id"],
+                "Layer identity contract provider_id",
+            ),
+            schema_version=value["schema_version"],
         )
         contract.validate()
         return contract
@@ -166,17 +283,39 @@ class Tensor:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "Tensor":
+        _require_exact_fields(
+            value,
+            {
+                "id",
+                "name",
+                "dtype",
+                "shape",
+                "producer",
+                "consumers",
+                "is_shape_tensor",
+                "location",
+            },
+            "tensor",
+        )
+        shape = _require_array(value["shape"], "Tensor shape")
+        for index, dimension in enumerate(shape):
+            try:
+                _json_value(dimension)
+            except GraphPatchError as exc:
+                raise GraphPatchError(f"Tensor shape[{index}] is invalid: {exc}") from exc
+        consumers = _require_string_array(value["consumers"], "Tensor consumers")
+        is_shape_tensor = value["is_shape_tensor"]
+        if is_shape_tensor is not None and type(is_shape_tensor) is not bool:
+            raise GraphPatchError("Tensor is_shape_tensor must be a boolean or null")
         return cls(
-            id=str(value["id"]),
-            name=str(value.get("name", "")),
-            dtype=(None if value.get("dtype") is None else str(value.get("dtype"))),
-            shape=tuple(value.get("shape", ())),
-            producer=(None if value.get("producer") is None else str(value.get("producer"))),
-            consumers=tuple(str(item) for item in value.get("consumers", ())),
-            is_shape_tensor=(
-                None if value.get("is_shape_tensor") is None else bool(value.get("is_shape_tensor"))
-            ),
-            location=(None if value.get("location") is None else str(value.get("location"))),
+            id=_require_string(value["id"], "Tensor id"),
+            name=_require_string(value["name"], "Tensor name", allow_empty=True),
+            dtype=_require_optional_string(value["dtype"], "Tensor dtype"),
+            shape=tuple(shape),
+            producer=_require_optional_string(value["producer"], "Tensor producer"),
+            consumers=consumers,
+            is_shape_tensor=is_shape_tensor,
+            location=_require_optional_string(value["location"], "Tensor location"),
         )
 
 
@@ -209,29 +348,50 @@ class Node:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "Node":
+        _require_exact_fields(
+            value,
+            {
+                "id",
+                "name",
+                "op",
+                "inputs",
+                "outputs",
+                "identity",
+                "provenance",
+            },
+            "node",
+        )
         raw_identity = value.get("identity", {})
         raw_provenance = value.get("provenance", {})
         if not isinstance(raw_identity, Mapping):
             raise GraphPatchError("Node identity must be a JSON object")
-        unknown_identity = set(raw_identity) - {"attributes", "complete"}
-        if unknown_identity:
-            raise GraphPatchError(
-                f"Unknown node identity fields: {sorted(str(item) for item in unknown_identity)}"
-            )
-        raw_identity_attributes = raw_identity.get("attributes", {})
+        _require_exact_fields(
+            raw_identity,
+            {"attributes", "complete"},
+            "node identity",
+        )
+        raw_identity_attributes = raw_identity["attributes"]
         if not isinstance(raw_identity_attributes, Mapping):
             raise GraphPatchError("Node identity attributes must be a JSON object")
-        identity_complete = raw_identity.get("complete", False)
+        identity_complete = raw_identity["complete"]
         if type(identity_complete) is not bool:
             raise GraphPatchError("Node identity complete must be a boolean")
         if not isinstance(raw_provenance, Mapping):
             raise GraphPatchError("Node provenance must be a JSON object")
         return cls(
-            id=str(value["id"]),
-            name=str(value.get("name", "")),
-            op=str(value.get("op", "")),
-            inputs=tuple(None if item is None else str(item) for item in value.get("inputs", ())),
-            outputs=tuple(None if item is None else str(item) for item in value.get("outputs", ())),
+            id=_require_string(value["id"], "Node id"),
+            name=_require_string(value["name"], "Node name", allow_empty=True),
+            op=_require_string(value["op"], "Node op"),
+            inputs=_require_string_array(
+                value["inputs"],
+                "Node inputs",
+                allow_null=True,
+            ),
+            outputs=_require_string_array(
+                value["outputs"],
+                "Node outputs",
+                allow_null=True,
+            ),
             identity_attributes=_json_value(raw_identity_attributes),
             identity_complete=identity_complete,
             provenance=_json_value(raw_provenance),
@@ -331,30 +491,60 @@ class GraphSnapshot:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "GraphSnapshot":
+        _require_exact_fields(
+            value,
+            {
+                "schema_version",
+                "name",
+                "nodes",
+                "tensors",
+                "inputs",
+                "outputs",
+                "metadata",
+                "identity",
+                "fingerprint",
+            },
+            "graph snapshot",
+        )
         raw_metadata = value.get("metadata", {})
         raw_identity = value.get("identity", {})
         if not isinstance(raw_metadata, Mapping):
             raise GraphPatchError("Graph metadata must be a JSON object")
         if not isinstance(raw_identity, Mapping):
             raise GraphPatchError("Graph identity must be a JSON object")
-        unknown_identity = set(raw_identity) - {"contract", "complete"}
-        if unknown_identity:
-            raise GraphPatchError(
-                f"Unknown graph identity fields: {sorted(str(item) for item in unknown_identity)}"
-            )
-        raw_contract = raw_identity.get("contract")
+        _require_exact_fields(
+            raw_identity,
+            {"contract", "complete"},
+            "graph identity",
+        )
+        raw_contract = raw_identity["contract"]
         if raw_contract is not None and not isinstance(raw_contract, Mapping):
             raise GraphPatchError("Graph identity contract must be a JSON object or null")
-        identity_complete = raw_identity.get("complete", False)
+        identity_complete = raw_identity["complete"]
         if type(identity_complete) is not bool:
             raise GraphPatchError("Graph identity complete must be a boolean")
+        schema_version = value["schema_version"]
+        if type(schema_version) is not int:
+            raise GraphPatchError("Graph snapshot schema_version must be an integer")
+        raw_nodes = _require_array(value["nodes"], "Graph snapshot nodes")
+        raw_tensors = _require_array(value["tensors"], "Graph snapshot tensors")
         snapshot = cls(
-            schema_version=int(value.get("schema_version", GRAPH_SNAPSHOT_SCHEMA_VERSION)),
-            name=str(value.get("name", "")),
-            nodes=tuple(Node.from_dict(node) for node in value.get("nodes", ())),
-            tensors=tuple(Tensor.from_dict(tensor) for tensor in value.get("tensors", ())),
-            inputs=tuple(str(item) for item in value.get("inputs", ())),
-            outputs=tuple(str(item) for item in value.get("outputs", ())),
+            schema_version=schema_version,
+            name=_require_string(
+                value["name"],
+                "Graph snapshot name",
+                allow_empty=True,
+            ),
+            nodes=tuple(Node.from_dict(node) for node in raw_nodes),
+            tensors=tuple(Tensor.from_dict(tensor) for tensor in raw_tensors),
+            inputs=_require_string_array(
+                value["inputs"],
+                "Graph snapshot inputs",
+            ),
+            outputs=_require_string_array(
+                value["outputs"],
+                "Graph snapshot outputs",
+            ),
             metadata=_json_value(raw_metadata),
             identity_contract=(
                 None if raw_contract is None else LayerIdentityContract.from_dict(raw_contract)
@@ -381,10 +571,7 @@ class GraphSnapshot:
 
     @classmethod
     def from_json(cls, value: str | bytes) -> "GraphSnapshot":
-        decoded = json.loads(value)
-        if not isinstance(decoded, Mapping):
-            raise GraphPatchError("Graph snapshot JSON must contain an object")
-        return cls.from_dict(decoded)
+        return cls.from_dict(_load_json_object(value, "Graph snapshot"))
 
     def _validate_references(self) -> None:
         node_ids = [node.id for node in self.nodes]
@@ -422,6 +609,40 @@ class GraphSnapshot:
                 "Graph inputs/outputs reference unknown tensors: "
                 f"{sorted(unknown_inputs | unknown_outputs)}"
             )
+        if len(self.inputs) != len(set(self.inputs)):
+            raise GraphPatchError("Graph snapshot contains duplicate graph input tensor IDs")
+        if len(self.outputs) != len(set(self.outputs)):
+            raise GraphPatchError("Graph snapshot contains duplicate graph output tensor IDs")
+
+        node_by_id = {node.id: node for node in self.nodes}
+        tensor_by_id = {tensor.id: tensor for tensor in self.tensors}
+        for node in self.nodes:
+            for tensor_id in {item for item in node.inputs if item is not None}:
+                expected_uses = sum(item == tensor_id for item in node.inputs)
+                actual_uses = tensor_by_id[tensor_id].consumers.count(node.id)
+                if actual_uses != expected_uses:
+                    raise GraphPatchError(
+                        f"Node {node.id} input references and tensor {tensor_id} "
+                        "consumer references disagree"
+                    )
+            for tensor_id in {item for item in node.outputs if item is not None}:
+                if tensor_by_id[tensor_id].producer != node.id:
+                    raise GraphPatchError(
+                        f"Node {node.id} output and tensor {tensor_id} producer disagree"
+                    )
+        for tensor in self.tensors:
+            if tensor.producer is not None:
+                producer = node_by_id[tensor.producer]
+                if producer.outputs.count(tensor.id) != 1:
+                    raise GraphPatchError(
+                        f"Tensor {tensor.id} producer and node {producer.id} outputs disagree"
+                    )
+            for consumer_id in set(tensor.consumers):
+                consumer = node_by_id[consumer_id]
+                if consumer.inputs.count(tensor.id) != tensor.consumers.count(consumer_id):
+                    raise GraphPatchError(
+                        f"Tensor {tensor.id} consumers and node {consumer_id} inputs disagree"
+                    )
 
     def _validate_identity(self) -> None:
         if self.identity_contract is not None:
@@ -503,22 +724,67 @@ class RegionArtifact:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "RegionArtifact":
-        graph = value.get("graph", {})
-        selection = value.get("selection", {})
-        boundary = value.get("boundary", {})
-        metadata = value.get("metadata", {})
+        _require_exact_fields(
+            value,
+            {
+                "schema_version",
+                "graph",
+                "selection",
+                "boundary",
+                "nodes",
+                "tensors",
+                "metadata",
+                "region_fingerprint",
+            },
+            "region artifact",
+        )
+        graph = value["graph"]
+        selection = value["selection"]
+        boundary = value["boundary"]
+        metadata = value["metadata"]
         if not all(isinstance(item, Mapping) for item in (graph, selection, boundary, metadata)):
             raise GraphPatchError("Region graph, selection, boundary, and metadata must be objects")
+        _require_exact_fields(graph, {"name", "fingerprint"}, "region graph")
+        _require_exact_fields(selection, {"nodes"}, "region selection")
+        _require_exact_fields(
+            boundary,
+            {"inputs", "outputs", "internal"},
+            "region boundary",
+        )
+        schema_version = value["schema_version"]
+        if type(schema_version) is not int:
+            raise GraphPatchError("Region artifact schema_version must be an integer")
+        raw_nodes = _require_array(value["nodes"], "Region artifact nodes")
+        raw_tensors = _require_array(value["tensors"], "Region artifact tensors")
         artifact = cls(
-            schema_version=int(value.get("schema_version", REGION_ARTIFACT_SCHEMA_VERSION)),
-            graph_name=str(graph.get("name", "")),
-            graph_fingerprint=str(graph.get("fingerprint", "")),
-            selected_node_ids=tuple(str(item) for item in selection.get("nodes", ())),
-            nodes=tuple(Node.from_dict(node) for node in value.get("nodes", ())),
-            tensors=tuple(Tensor.from_dict(tensor) for tensor in value.get("tensors", ())),
-            input_tensor_ids=tuple(str(item) for item in boundary.get("inputs", ())),
-            output_tensor_ids=tuple(str(item) for item in boundary.get("outputs", ())),
-            internal_tensor_ids=tuple(str(item) for item in boundary.get("internal", ())),
+            schema_version=schema_version,
+            graph_name=_require_string(
+                graph["name"],
+                "Region graph name",
+                allow_empty=True,
+            ),
+            graph_fingerprint=_require_string(
+                graph["fingerprint"],
+                "Region graph fingerprint",
+            ),
+            selected_node_ids=_require_string_array(
+                selection["nodes"],
+                "Region selected nodes",
+            ),
+            nodes=tuple(Node.from_dict(node) for node in raw_nodes),
+            tensors=tuple(Tensor.from_dict(tensor) for tensor in raw_tensors),
+            input_tensor_ids=_require_string_array(
+                boundary["inputs"],
+                "Region boundary inputs",
+            ),
+            output_tensor_ids=_require_string_array(
+                boundary["outputs"],
+                "Region boundary outputs",
+            ),
+            internal_tensor_ids=_require_string_array(
+                boundary["internal"],
+                "Region boundary internal tensors",
+            ),
             metadata=_json_value(metadata),
         )
         if artifact.schema_version != REGION_ARTIFACT_SCHEMA_VERSION:
@@ -528,7 +794,7 @@ class RegionArtifact:
                 f"{REGION_ARTIFACT_SCHEMA_VERSION}"
             )
         _validate_fingerprint(
-            value.get("region_fingerprint"),
+            value["region_fingerprint"],
             artifact.fingerprint,
             "Region artifact",
         )
@@ -536,10 +802,7 @@ class RegionArtifact:
 
     @classmethod
     def from_json(cls, value: str | bytes) -> "RegionArtifact":
-        decoded = json.loads(value)
-        if not isinstance(decoded, Mapping):
-            raise GraphPatchError("Region artifact JSON must contain an object")
-        return cls.from_dict(decoded)
+        return cls.from_dict(_load_json_object(value, "Region artifact"))
 
 
 @dataclass(frozen=True)
@@ -558,7 +821,7 @@ class GraphRegionSelection:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "GraphRegionSelection":
-        unknown = set(value) - {
+        allowed = {
             "schema_version",
             "kind",
             "graph",
@@ -566,25 +829,30 @@ class GraphRegionSelection:
             "boundary",
             "instance",
         }
-        if unknown:
-            raise GraphPatchError(
-                f"Unknown graph-region fields: {sorted(str(item) for item in unknown)}"
-            )
-        graph = value.get("graph", {})
-        selection = value.get("selection", {})
-        boundary = value.get("boundary", {})
+        _reject_unknown_fields(value, allowed, "graph-region")
+        missing = {"schema_version", "kind", "graph", "selection", "boundary"} - set(value)
+        if missing:
+            raise GraphPatchError(f"Missing graph-region fields: {sorted(missing)}")
+        graph = value["graph"]
+        selection = value["selection"]
+        boundary = value["boundary"]
         if not all(isinstance(item, Mapping) for item in (graph, selection, boundary)):
             raise GraphPatchError("Region graph, selection, and boundary must be JSON objects")
-        for where, item, allowed in (
-            ("graph", graph, {"model", "stage", "fingerprint"}),
-            ("selection", selection, {"node_ids"}),
-            ("boundary", boundary, {"inputs", "outputs"}),
-        ):
-            extra = set(item) - allowed
-            if extra:
-                raise GraphPatchError(
-                    f"Unknown {where} fields: {sorted(str(key) for key in extra)}"
-                )
+        _require_exact_fields(
+            graph,
+            {"model", "stage", "fingerprint"},
+            "graph-region graph",
+        )
+        _require_exact_fields(
+            selection,
+            {"node_ids"},
+            "graph-region selection",
+        )
+        _require_exact_fields(
+            boundary,
+            {"inputs", "outputs"},
+            "graph-region boundary",
+        )
 
         def parse_tensor_refs(
             raw: Any,
@@ -597,12 +865,12 @@ class GraphRegionSelection:
             for index, reference in enumerate(raw):
                 if not isinstance(reference, Mapping):
                     raise GraphPatchError(f"{where}[{index}] must be a JSON object")
-                extra = set(reference) - {"tensor_id"}
-                if extra:
-                    raise GraphPatchError(
-                        f"Unknown {where}[{index}] fields: {sorted(str(key) for key in extra)}"
-                    )
-                tensor_id = reference.get("tensor_id")
+                _require_exact_fields(
+                    reference,
+                    {"tensor_id"},
+                    f"{where}[{index}]",
+                )
+                tensor_id = reference["tensor_id"]
                 if not isinstance(tensor_id, str) or not tensor_id:
                     raise GraphPatchError(f"{where}[{index}].tensor_id must be a non-empty string")
                 if tensor_id in seen:
@@ -611,7 +879,7 @@ class GraphRegionSelection:
                 ordered.append(tensor_id)
             return tuple(ordered)
 
-        raw_node_ids = selection.get("node_ids", ())
+        raw_node_ids = selection["node_ids"]
         if not isinstance(raw_node_ids, Sequence) or isinstance(
             raw_node_ids, (str, bytes, bytearray)
         ):
@@ -624,7 +892,7 @@ class GraphRegionSelection:
         if len(selected_node_ids) != len(set(selected_node_ids)):
             raise GraphPatchError("selection.node_ids contains duplicate node IDs")
 
-        fingerprint = graph.get("fingerprint")
+        fingerprint = graph["fingerprint"]
         if not isinstance(fingerprint, str) or not fingerprint:
             raise GraphPatchError("graph.fingerprint must be a non-empty string")
         schema_version = value.get("schema_version")
@@ -644,18 +912,18 @@ class GraphRegionSelection:
         instance = value.get("instance", {})
         if not isinstance(instance, Mapping):
             raise GraphPatchError("instance must be a JSON object")
-        model = graph.get("model", "")
-        stage = graph.get("stage", "")
+        model = graph["model"]
+        stage = graph["stage"]
         if not isinstance(model, str):
             raise GraphPatchError("graph.model must be a string")
         if not isinstance(stage, str):
             raise GraphPatchError("graph.stage must be a string")
         input_tensor_ids = parse_tensor_refs(
-            boundary.get("inputs", ()),
+            boundary["inputs"],
             "boundary.inputs",
         )
         output_tensor_ids = parse_tensor_refs(
-            boundary.get("outputs", ()),
+            boundary["outputs"],
             "boundary.outputs",
         )
 
@@ -673,10 +941,7 @@ class GraphRegionSelection:
 
     @classmethod
     def from_json(cls, value: str | bytes) -> "GraphRegionSelection":
-        decoded = json.loads(value)
-        if not isinstance(decoded, Mapping):
-            raise GraphPatchError("Graph-region JSON must contain an object")
-        return cls.from_dict(decoded)
+        return cls.from_dict(_load_json_object(value, "Graph-region"))
 
     def to_dict(self) -> dict[str, Any]:
         value: dict[str, Any] = {
@@ -796,16 +1061,11 @@ class GraphRegionSelectionSet:
                 model=selection.model,
                 stage=selection.stage,
             )
-        unknown = set(value) - {
-            "schema_version",
-            "kind",
-            "graph",
-            "regions",
-        }
-        if unknown:
-            raise GraphPatchError(
-                f"Unknown graph-region-set fields: {sorted(str(item) for item in unknown)}"
-            )
+        _require_exact_fields(
+            value,
+            {"schema_version", "kind", "graph", "regions"},
+            "graph-region-set",
+        )
         if kind != GRAPH_REGION_SELECTION_SET_KIND:
             raise GraphPatchError(
                 "Unsupported graph-region-set kind "
@@ -822,19 +1082,22 @@ class GraphRegionSelectionSet:
                 f"{GRAPH_REGION_SELECTION_SET_SCHEMA_VERSION}"
             )
 
-        graph = value.get("graph", {})
+        graph = value["graph"]
         if not isinstance(graph, Mapping):
             raise GraphPatchError("Region-set graph must be a JSON object")
-        unknown_graph = set(graph) - {"model", "stage", "fingerprint", "build"}
-        if unknown_graph:
-            raise GraphPatchError(
-                f"Unknown graph fields: {sorted(str(item) for item in unknown_graph)}"
-            )
-        fingerprint = graph.get("fingerprint")
+        _reject_unknown_fields(
+            graph,
+            {"model", "stage", "fingerprint", "build"},
+            "graph-region-set graph",
+        )
+        missing_graph = {"model", "stage", "fingerprint"} - set(graph)
+        if missing_graph:
+            raise GraphPatchError(f"Missing graph-region-set graph fields: {sorted(missing_graph)}")
+        fingerprint = graph["fingerprint"]
         if not isinstance(fingerprint, str) or not fingerprint:
             raise GraphPatchError("graph.fingerprint must be a non-empty string")
-        model = graph.get("model", "")
-        stage = graph.get("stage", "")
+        model = graph["model"]
+        stage = graph["stage"]
         if not isinstance(model, str):
             raise GraphPatchError("graph.model must be a string")
         if not isinstance(stage, str):
@@ -843,7 +1106,7 @@ class GraphRegionSelectionSet:
         if not isinstance(build, Mapping):
             raise GraphPatchError("graph.build must be a JSON object")
 
-        raw_regions = value.get("regions")
+        raw_regions = value["regions"]
         if not isinstance(raw_regions, Sequence) or isinstance(
             raw_regions,
             (str, bytes, bytearray),
@@ -856,16 +1119,14 @@ class GraphRegionSelectionSet:
         for index, raw_region in enumerate(raw_regions):
             if not isinstance(raw_region, Mapping):
                 raise GraphPatchError(f"regions[{index}] must be a JSON object")
-            unknown_region = set(raw_region) - {
-                "selection",
-                "boundary",
-                "instance",
-            }
-            if unknown_region:
-                raise GraphPatchError(
-                    f"Unknown regions[{index}] fields: "
-                    f"{sorted(str(item) for item in unknown_region)}"
-                )
+            _reject_unknown_fields(
+                raw_region,
+                {"selection", "boundary", "instance"},
+                f"regions[{index}]",
+            )
+            missing_region = {"selection", "boundary"} - set(raw_region)
+            if missing_region:
+                raise GraphPatchError(f"Missing regions[{index}] fields: {sorted(missing_region)}")
             region_document = {
                 "schema_version": GRAPH_REGION_SELECTION_SCHEMA_VERSION,
                 "kind": GRAPH_REGION_SELECTION_KIND,
@@ -874,8 +1135,8 @@ class GraphRegionSelectionSet:
                     "stage": stage,
                     "fingerprint": fingerprint,
                 },
-                "selection": raw_region.get("selection", {}),
-                "boundary": raw_region.get("boundary", {}),
+                "selection": raw_region["selection"],
+                "boundary": raw_region["boundary"],
                 "instance": raw_region.get("instance", {}),
             }
             selection = GraphRegionSelection.from_dict(region_document)
@@ -907,10 +1168,7 @@ class GraphRegionSelectionSet:
 
     @classmethod
     def from_json(cls, value: str | bytes) -> "GraphRegionSelectionSet":
-        decoded = json.loads(value)
-        if not isinstance(decoded, Mapping):
-            raise GraphPatchError("Graph-region-set JSON must contain an object")
-        return cls.from_dict(decoded)
+        return cls.from_dict(_load_json_object(value, "Graph-region-set"))
 
     def to_dict(self) -> dict[str, Any]:
         graph: dict[str, Any] = {

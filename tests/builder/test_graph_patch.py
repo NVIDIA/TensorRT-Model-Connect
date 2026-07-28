@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import tensorrt_model_connect.graph_patch as graph_patch_module
 from tensorrt_model_connect.graph_patch import (
     GraphPatchError,
     GraphRegionSelection,
@@ -272,6 +274,112 @@ def test_snapshot_json_round_trip_and_structural_fingerprint() -> None:
     )
     assert moved_source_line.nodes[2].provenance != snapshot.nodes[2].provenance
     assert moved_source_line.fingerprint == snapshot.fingerprint
+
+
+def test_snapshot_json_rejects_unknown_fields_at_every_record_level() -> None:
+    network, _ = _attention_network()
+    snapshot = _complete_snapshot(network)
+
+    top_level = snapshot.to_dict()
+    top_level["semantic_mapping"] = {}
+    with pytest.raises(GraphPatchError, match="Unknown graph snapshot fields"):
+        GraphSnapshot.from_dict(top_level)
+
+    node_level = snapshot.to_dict()
+    node_level["nodes"][0]["semantic_mapping"] = {}
+    with pytest.raises(GraphPatchError, match="Unknown node fields"):
+        GraphSnapshot.from_dict(node_level)
+
+    tensor_level = snapshot.to_dict()
+    tensor_level["tensors"][0]["semantic_mapping"] = {}
+    with pytest.raises(GraphPatchError, match="Unknown tensor fields"):
+        GraphSnapshot.from_dict(tensor_level)
+
+
+@pytest.mark.parametrize(
+    "mutate,message",
+    [
+        (lambda value: value.pop("fingerprint"), "Missing graph snapshot fields"),
+        (
+            lambda value: value.__setitem__("schema_version", "1"),
+            "schema_version must be an integer",
+        ),
+        (
+            lambda value: value.__setitem__("name", 7),
+            "Graph snapshot name must be a string",
+        ),
+        (
+            lambda value: value["nodes"][0].__setitem__("id", 7),
+            "Node id must be a non-empty string",
+        ),
+        (
+            lambda value: value["tensors"][0].__setitem__("is_shape_tensor", 1),
+            "is_shape_tensor must be a boolean or null",
+        ),
+        (
+            lambda value: value["identity"].pop("complete"),
+            "Missing graph identity fields",
+        ),
+        (
+            lambda value: value["metadata"].__setitem__("bad", "\ud800"),
+            "valid UTF-8",
+        ),
+    ],
+)
+def test_snapshot_dict_rejects_missing_fields_and_type_coercion(
+    mutate: Any,
+    message: str,
+) -> None:
+    network, _ = _attention_network()
+    value = _complete_snapshot(network).to_dict()
+    mutate(value)
+
+    with pytest.raises(GraphPatchError, match=message):
+        GraphSnapshot.from_dict(value)
+
+
+def test_snapshot_rejects_disagreement_between_node_and_tensor_edges() -> None:
+    network, _ = _attention_network()
+    snapshot = _complete_snapshot(network)
+    consumer = snapshot.nodes[2]
+    changed_consumer = replace(
+        consumer,
+        inputs=(snapshot.inputs[0], *consumer.inputs[1:]),
+    )
+    inconsistent = replace(
+        snapshot,
+        nodes=(*snapshot.nodes[:2], changed_consumer, *snapshot.nodes[3:]),
+    )
+
+    with pytest.raises(GraphPatchError, match="consumer references disagree"):
+        GraphSnapshot.from_dict(inconsistent.to_dict())
+
+
+@pytest.mark.parametrize(
+    "document,message",
+    [
+        ('{"name":"first","name":"second"}', "duplicate object key 'name'"),
+        ('{"metadata":{"value":NaN}}', "non-finite number NaN"),
+    ],
+)
+def test_snapshot_json_decoder_rejects_ambiguous_values(
+    document: str,
+    message: str,
+) -> None:
+    with pytest.raises(GraphPatchError, match=message):
+        GraphSnapshot.from_json(document)
+
+
+def test_snapshot_json_decoder_normalizes_recursion_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_with_recursion(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise RecursionError("artifact nesting is too deep")
+
+    monkeypatch.setattr(graph_patch_module.json, "loads", fail_with_recursion)
+    with pytest.raises(GraphPatchError, match="not valid JSON"):
+        GraphSnapshot.from_json("{}")
 
 
 def test_complete_identity_round_trip_and_operation_drift_changes_fingerprint() -> None:
@@ -1008,7 +1116,7 @@ def test_selection_document_requires_kind_and_schema_version(field: str) -> None
     value = _selection_document(snapshot)
     value.pop(field)
 
-    with pytest.raises(GraphPatchError, match="Unsupported"):
+    with pytest.raises(GraphPatchError, match="Missing graph-region fields"):
         GraphRegionSelection.from_dict(value)
 
 
