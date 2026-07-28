@@ -78,7 +78,6 @@ def test_wan22_runtime_settings_are_declarative_and_model_owned() -> None:
     checked_paths = [
         *RUNTIME_ROOT.glob("*.cpp"),
         *RUNTIME_ROOT.glob("*.h"),
-        REPO_ROOT / "website/docs/getting-started/quick-start.md",
     ]
     leftovers = [
         str(path.relative_to(REPO_ROOT))

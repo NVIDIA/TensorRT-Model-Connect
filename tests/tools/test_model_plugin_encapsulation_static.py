@@ -9076,6 +9076,15 @@ def test_audio_speech_comparator_sidecars_are_task_owned() -> None:
     assert not violations, _format_violations(violations)
 
 
+def test_wan22_quick_start_uses_declarative_runtime_settings() -> None:
+    """Keep the full-checkout Wan2.2 instructions free of tuning env vars."""
+
+    quick_start = REPO_ROOT / "website" / "docs" / "getting-started" / "quick-start.md"
+    text = quick_start.read_text(encoding="utf-8")
+
+    assert "TRTMC_" "WAN22_" not in text
+
+
 def test_generated_e2e_task_sidecars_are_task_owned() -> None:
     """Trace: ARCH-MODPLUG-001
     Intent: prevent generated E2E sidecars from carrying active behavior for
