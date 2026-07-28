@@ -2,7 +2,11 @@
 title: Python Builder Units
 ---
 
-The Python builder turns a Python-first checkpoint into a native runtime bundle. It owns model understanding, graph construction, quantization preparation, and bundle serialization.
+The Python builder turns a Python-first checkpoint into either a native TRT
+bundle or an exact-qualified optimized-runtime bundle. Native family plugins
+own model understanding, graph construction, and quantization preparation;
+family-owned optimized adapters own the provider-specific artifact path. The
+shared coordinator selects one path and serializes its bundle.
 
 ```mermaid
 flowchart TD
@@ -10,7 +14,12 @@ flowchart TD
   CLI --> ConfigLayer["runtime_config CLI merge"]
   CLI --> EngineBuilder["engine_builder.py"]
   EngineBuilder --> ModelConfig["ModelConfig"]
-  EngineBuilder --> FamilyLookup["families/__init__.py"]
+  ModelConfig --> NativeDefault{"model-owned native<br/>default route?"}
+  NativeDefault -->|yes| FamilyLookup["families/__init__.py"]
+  NativeDefault -->|no| Provider{"qualified provider<br/>profile matches?"}
+  Provider -->|yes| Adapter["family-owned optimized adapter"]
+  Adapter --> OptimizedBundle["optimized bundle packager"]
+  Provider -->|no| FamilyLookup
   FamilyLookup --> Family["FamilyPlugin"]
   Family --> Weights["load_weights"]
   Family --> BuildMain["build_engine"]
@@ -30,26 +39,61 @@ The CLI should stay thin. It should translate user intent into builder options a
 
 ## Engine builder
 
-`python/tensorrt_model_connect/engine_builder.py` orchestrates model resolution, plugin selection, weight loading, engine building, and bundle writing.
+`python/tensorrt_model_connect/engine_builder.py` orchestrates model resolution,
+optimized-provider selection, native plugin selection, weight loading, engine
+building, and bundle writing.
 
 Think of `engine_builder.py` as the build coordinator:
 
 1. Resolve the model path or ID.
 2. Read `config.json` through `ModelConfig`.
-3. Select a `FamilyPlugin`.
-4. Build the requested engine components.
-5. Collect tokenizer and asset files.
-6. Write `BundleInfo` and `BundleSection` entries.
+3. Resolve the owning family without loading every family package.
+4. Honor the family's model-owned `default_build_route` when it claims the
+   resolved architecture; eligible dense Qwen3 and Llama use this path and skip
+   provider probing.
+5. Otherwise probe optimized implementations only inside that family. If
+   exactly one qualified model/revision/target/options profile claims the
+   request, run its adapter and write a generic optimized-runtime bundle.
+6. If no provider claims the request, select the native `FamilyPlugin` and build
+   the requested engine components.
+7. Collect tokenizer and asset files for the selected path.
+8. Write `BundleInfo` and `BundleSection` entries.
 
 ## Family plugins
 
-`python/tensorrt_model_connect/families/` owns raw TRT family support. Each plugin declares matching logic and build behavior. Auto-discovery lives in `families/__init__.py`.
+This section describes the native build path; exact-qualified optimized
+implementations use the separate adapter contract below.
 
-The `FamilyPlugin` protocol is the contract. Required methods are:
+`python/tensorrt_model_connect/families/` owns raw TRT family support. Each
+family package has a `MODEL.toml` descriptor and exports its package-level
+`plugin` from `__init__.py`; the implementation normally lives in `plugin.py`.
+The descriptor's `module` field is specialization/tooling metadata and does
+not select an arbitrary runtime-discovery module. Discovery in
+`families/__init__.py` has three input-specific flows:
+
+1. A full config uses `architecture_patterns` to import bounded candidates and
+   check `matches_config()` first. If none matches, `_ensure_discovered()`
+   preserves the legacy compatibility fallback:
+   `pkgutil.iter_modules()` imports every non-private module/package under
+   `families/` and runs its `matches_config()`/`matches()` predicates.
+2. A string or `model_type` tries a direct descriptor ID first, then
+   alias/prefix candidates, and finally the same all-package fallback.
+3. A Diffusers pipeline class uses descriptor
+   `diffusion_pipeline_classes` only; matching packages are imported, and
+   there is no `pkgutil` fallback.
+
+A loose `families/<family>.py` file can therefore be observed by the legacy
+scan, but it does not participate in the complete descriptor contract and is
+not sufficient for supported model ownership. Keep aliases and architecture
+patterns accurate so normal requests remain on the bounded descriptor-first
+route.
+
+For native builds, the `FamilyPlugin` protocol is the contract. Required
+methods are:
 
 | Method | Purpose |
 | --- | --- |
-| `matches(model_type)` | Decide whether this plugin handles a HuggingFace model type. |
+| `matches(model_type)` | Decide whether this plugin handles a Hugging Face model type. |
 | `load_weights(model_dir, config, precision=...)` | Read and normalize checkpoint tensors. |
 | `build_engine(config, weights, max_cache_length, ...)` | Build the main TensorRT engine plan. |
 
@@ -59,6 +103,8 @@ Optional methods add modality and optimization behavior:
 | --- | --- |
 | `build_vision_engine` and `get_vl_config` | Vision-language models. |
 | `build_components` and `get_diffusion_config` | Diffusion models with text encoder, denoiser, and VAE components. |
+| `ensure_tokenizer_json` | Best-effort family fallback after standard tokenizer generation fails. |
+| `diffusion_tokenizer_bundle_sections` | Select diffusion tokenizer directories and invoke the supplied tokenizer-preparation callback before returning bundle sections. |
 | `quant_exclude_patterns`, `calibration_data`, `quant_adapter` | Family-specific quantization control. |
 | `fp8_calibrate` | FP8 calibration flows. |
 
@@ -71,6 +117,7 @@ classDiagram
     +build_engine(config, weights, max_cache_length)
     +build_vision_engine(...)
     +build_components(...)
+    +diffusion_tokenizer_bundle_sections(...)
     +quant_exclude_patterns(format)
     +quant_adapter(format)
     +fp8_calibrate(...)
@@ -81,20 +128,65 @@ classDiagram
 
 | Unit | Purpose |
 | --- | --- |
-| `graph_ops.py` | Atomic TensorRT graph operations. |
-| `graph_blocks.py` | Reusable transformer and model blocks. |
-| `standard_decoder_builder.py` | Parameterized decoder engine builder. |
+| `families/<family>/graph_ops.py` | Family-owned TensorRT graph operations when that family defines them. |
+| `families/<family>/graph_blocks.py` | Family-owned reusable blocks when that family defines them. |
+| `families/<family>/standard_decoder_builder.py` | A family-owned decoder engine builder where present. |
 | Dedicated builders | Vision, encoder, diffusion, codec, and model-specific engines. |
 
-The design goal is to avoid repeating TensorRT layer wiring in every family plugin. A family plugin should describe what is family-specific: weight naming, architecture variations, optional components, and config metadata.
+There are no repository-root `graph_ops.py` or `graph_blocks.py` modules.
+Reuse within a family is encouraged, while helpers whose assumptions are
+model-specific remain under the owning family package.
+
+## Build-route selection
+
+Both the CLI and public Python `build()` API resolve the checkpoint and family
+before choosing a route. A matching family-owned `default_build_route` selects
+native immediately; eligible dense Qwen3 and Llama currently use that route.
+Other requests inspect only that family's implementation manifests and
+describe the active CUDA target. A model-owned provider profile must match all
+of these:
+
+- canonical Hugging Face model ID and pinned revision;
+- exact target OS, architecture, platform kind, GPU architecture/name, and
+  minimum memory;
+- supported public build options; and
+- a current qualification state and semantic-source hash.
+
+One successful claim invokes that adapter in an isolated process and writes a
+bundle that is self-contained for the implementation DSO and provider-produced
+artifacts: `optimized_runtime.json`, opaque implementation metadata,
+`optimized_runtime_artifacts/...`, and the exact `libtrtmc_impl_*.so`. It is
+not a hermetic operating-system or GPU-runtime image. The host must still
+supply the matching NVIDIA driver (`libcuda.so.1`), versioned CUDA runtime
+(`libcudart.so.<major>`), TensorRT (`libnvinfer.so.<major>`), dynamic loader,
+and compatible system libraries. More than one claim is an error. No claim
+returns control to the native build; a selected adapter's build failure is
+terminal.
+
+This optimized path does not require a synthetic native `runtime_strategy`,
+`src/runtime/models/<owner>/MODEL.toml`, or model DSO. Its exact
+implementation/profile/qualification records and embedded implementation DSO
+are the support contract.
+
+The current Qwen TensorRT Edge-LLM adapter owns three qualified Qwen3/A100
+SM80/FP16 profiles. This is exact profile support, not a generic preference for
+Edge-LLM on every Qwen request.
 
 ## Native TRT build path
 
-`trtmc build` now uses the native TRT family plugins under `python/tensorrt_model_connect/families/`. The builder emits TensorRT plans and a bundle `runtime_strategy` consumed by the C++ runtime.
+When the family claims its native default, or when no optimized profile claims
+a request that reached the probe, `trtmc build` uses native TRT family plugins
+under `python/tensorrt_model_connect/families/`. The builder emits TensorRT
+plans and the exact model-owned `runtime_strategy` consumed by the C++ native
+loader. That key must match one strategy declared by a single
+`src/runtime/models/<owner>/MODEL.toml`.
 
 ## Runtime config
 
-`python/tensorrt_model_connect/runtime_config/` mirrors C++ config schema logic for build-time and bundle-time config resolution.
+`python/tensorrt_model_connect/runtime_config/` provides Python mirrors of the
+C++ schema and merge helpers. The five layers below are the general
+`ConfigBundle` model, not a claim that every layer is wired into the current
+native build/load path.
 
 The merge order is:
 
@@ -106,7 +198,16 @@ flowchart BT
   Platform --> Session["SessionRequest"]
 ```
 
-Higher layers override lower layers only where the schema allows them. The builder writes bundle defaults; the runtime can merge session overrides and write `effective_config.json` next to the bundle.
+Higher layers override lower layers only where the schema allows them. The
+ordinary native builder does not automatically write build-time `--config` or
+`--set` values into `config.json.defaults`, and binary header
+`BundleInfo.defaults` is not passed to the runtime resolver. A producer supplies
+`BundleDefault` only by explicitly writing a top-level `defaults` object into
+the materialized `config.json` section. `PipelineFactory` currently combines
+that optional `BundleDefault` with `SessionRequest` from runtime
+`--config`/`--set`; it does not inject separate `BuildTime` or
+`PlatformProfile` contributions. Successful runtime resolution writes
+`<bundle>.effective_config.json` next to the bundle.
 
 ## Builder unit test strategy
 

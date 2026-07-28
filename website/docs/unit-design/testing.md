@@ -49,7 +49,14 @@ Use for:
 - Runtime core classes.
 - Domain helpers and generation plans.
 
-C++ tests should protect ownership boundaries. If a plugin should be registered without editing the factory, test the registry. If a cache class should satisfy `IInferenceState`, test the lifecycle directly.
+C++ tests should protect ownership boundaries. If a plugin should be
+registered without editing the factory, test native model-DSO loading, backend
+selection, and the strategy registry. For an optimized implementation, test
+that `optimized_runtime.json` claims the bundle before native dispatch, that
+the integrity-bound embedded `libtrtmc_impl_*.so` is the only accepted
+implementation library, and that identity/ABI mismatches fail closed. Test
+each model-owned inference-state or cache lifecycle directly against that
+owner's contract.
 
 ## Tool tests
 
@@ -72,7 +79,14 @@ Paths:
 - `tests/e2e/models/*/manifests/*.json`
 - `tests/e2e_harness/`
 
-E2E manifests are user-contract evidence. They define the model, bundle, family, runtime strategy, reference backend, prompts or modality inputs, and pass/fail thresholds.
+E2E manifests are user-contract evidence. A native manifest defines the model,
+bundle, family, exact `runtime_strategy`, reference backend, prompts or modality
+inputs, and pass/fail thresholds. An optimized implementation instead adds the
+family-owned `IMPLEMENTATION.toml`, an exact qualified `profiles/*.toml` entry,
+and matching `QUALIFICATION.*.toml` producer proof. Its built bundle carries
+`optimized_runtime.json`, implementation metadata, integrity-bound artifacts,
+and the embedded implementation DSO; its public `runtime_strategy` may be
+empty.
 
 ```mermaid
 flowchart LR
@@ -89,8 +103,9 @@ flowchart LR
 
 | Change type | Minimum useful coverage |
 | --- | --- |
-| New Python family using existing runtime strategy | Family plugin tests plus one E2E manifest. |
-| New runtime strategy | C++ registry/plugin tests, pipeline tests, CLI/API test if exposed, and one E2E manifest. |
+| New native supported model | Family plugin tests, model-owned runtime DSO/registry/backend tests, and one exact-model E2E manifest. |
+| Additional native strategy for an existing runtime owner | Owner manifest and plugin tests, pipeline tests, CLI/API test if exposed, and one E2E manifest. |
+| New optimized implementation/profile | `IMPLEMENTATION.toml` and profile validation, matching `QUALIFICATION.*.toml`, embedded-DSO/host fail-closed tests, and retained qualified parity/performance artifacts. |
 | New config namespace | Python and C++ config schema tests, CLI `--set` tests, effective config checks. |
 | New quantization format | Quantization plan tests, calibration/scale tests, one numerical E2E. |
 | New report or scheduling behavior | Tool tests plus one small fixture artifact. |
@@ -104,7 +119,14 @@ E2E is the highest-level user contract, but it is not a replacement for unit tes
 | --- | --- |
 | A named model manifest can run through the public CLI/runtime. | Every edge case inside a cache, tokenizer, or scheduler. |
 | Output matches an oracle within the manifest's tolerance. | That performance is optimal. |
-| Bundle metadata and runtime strategy are coherent. | That every unsupported configuration fails clearly. |
+| Bundle metadata and the selected native strategy or optimized implementation/profile are coherent. | That every unsupported configuration fails clearly. |
 | The verifier path works for that modality. | That the builder internals are fully covered. |
 
 Use E2E for confidence that a feature works as users see it. Use unit tests to make failures precise and cheap to debug.
+
+Timing evidence also follows the implementation boundary. Native pipelines may
+populate `setup_ms`, `prefill_ms`, and `decode_ms` in `TextResult`; optimized
+providers populate only timing their delegated API can support. A zero phase
+value is not proof of zero latency. When a trustworthy phase split is
+unavailable, retain synchronized wall-clock measurements around the public
+pipeline call and label phase metrics unavailable.

@@ -36,23 +36,24 @@ compatible NVIDIA driver/CUDA runtime libraries.
 ## 2. Build A Bundle
 
 ```bash
-$TRTMC build Qwen/Qwen3-0.6B \
-  -o /tmp/qwen3-0.6b.trtfb \
-  --precision fp16 \
-  --max-cache-length 256
+$TRTMC build Qwen/Qwen3-0.6B
 ```
 
-`trtmc build` resolves the HuggingFace model, selects the matching Python family plugin, builds TensorRT engine plan bytes, and writes a self-contained `.trtfb` bundle.
+`trtmc build` resolves the Hugging Face model and family. Eligible dense Qwen3
+declares a model-owned native default, so this model-only command skips the
+optimized-provider probe and builds BF16 split prefill/decode engines with the
+checkpoint's full context capacity. The omitted output path is derived as
+`Qwen3-0.6B.trtfb`.
 
-First builds can be slow because the builder may download model files and compile TensorRT engines. If the command fails before TensorRT starts, check model ID, HuggingFace auth, network/cache, and Python dependencies first.
+First builds can be slow because the builder may download model files and compile TensorRT engines. If the command fails before TensorRT starts, check model ID, Hugging Face auth, network/cache, and Python dependencies first.
 
 ## 3. Inspect The Bundle
 
 Inspect the bundle:
 
 ```bash
-$TRTMC inspect /tmp/qwen3-0.6b.trtfb
-$TRTMC inspect /tmp/qwen3-0.6b.trtfb --list-engines
+$TRTMC inspect Qwen3-0.6B.trtfb
+$TRTMC inspect Qwen3-0.6B.trtfb --list-engines
 ```
 
 Expected fields include:
@@ -60,16 +61,25 @@ Expected fields include:
 ```text
 Model ID:           Qwen/Qwen3-0.6B
 Family:             qwen
-Runtime strategy:   decoder_kv_cache
-Precision:          fp16
+Runtime strategy:   qwen_decoder_kv_cache
+Precision:          bf16
 ```
 
-Inspection should become the first debugging habit. The important fields are `family`, `precision`, `runtime_strategy`, engine sections, tokenizer assets, and TensorRT compatibility metadata.
+Inspection should become the first debugging habit. For this native bundle,
+the important fields are `family`, `precision`, `runtime_strategy`,
+`max_cache_length` (40960 for this checkpoint), `engine_plan` (decode),
+`prefill_engine_plan`, tokenizer assets, and TensorRT compatibility metadata.
+For an
+optimized bundle, the regular inspector can confirm that
+`optimized_runtime.json` and the embedded artifact section names are present.
+It does not currently decode the descriptor's implementation/profile identity,
+and `--list-engines` does not treat embedded optimized-runtime `.engine` files
+as native plan sections.
 
 ## 4. Run Deterministic Inference
 
 ```bash
-$TRTMC run /tmp/qwen3-0.6b.trtfb \
+$TRTMC run Qwen3-0.6B.trtfb \
   --prompt "What is the capital of France? Answer in one word." \
   --max-new-tokens 10 \
   --greedy
@@ -85,10 +95,10 @@ If generation succeeds, you have proven this path:
 
 ```mermaid
 flowchart LR
-  Build["trtmc build"] --> Bundle["/tmp/qwen3-0.6b.trtfb"]
+  Build["trtmc build"] --> Bundle["Qwen3-0.6B.trtfb"]
   Bundle --> Inspect["inspect metadata"]
   Bundle --> Load["trtmc::load"]
-  Load --> Strategy["decoder_kv_cache"]
+  Load --> Strategy["qwen_decoder_kv_cache"]
   Strategy --> Generate["IPipeline::generate"]
   Generate --> Text["TextResult"]
 ```
@@ -97,10 +107,10 @@ If generation fails, classify the failure before changing code:
 
 | Failure | Usually means |
 | --- | --- |
-| Build cannot download model | HuggingFace model ID, auth, network, or cache problem. |
+| Build cannot download model | Hugging Face model ID, auth, network, or cache problem. |
 | Build fails inside TensorRT | Unsupported graph, shape/profile issue, or TensorRT environment issue. |
 | Inspection fails | Bundle was not written correctly, the path is wrong, or the runtime library environment is incomplete. |
-| Runtime says no plugin registered | The binary was built without the plugin for the bundle's `runtime_strategy`. |
+| Runtime says no plugin registered | The strategy has no manifest owner, or its owning model DSO is missing/unloadable from the model-plugin search path. |
 | Output differs between runs | Sampling is enabled. Use `--greedy` or a fixed `--seed` for smoke tests. |
 
 ## Jetson Thor: Wan2.2 720p In Two Commands

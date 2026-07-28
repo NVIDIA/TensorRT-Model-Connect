@@ -6,31 +6,49 @@ Validation should prove that the runtime under test matches an appropriate oracl
 
 ```mermaid
 flowchart TB
-  Bundle["Bundle under test"] --> Runtime["TRTF runtime"]
+  Bundle["Bundle under test"] --> Runtime["TRTMC runtime"]
   Input["Canonical input"] --> Runtime
   Input --> Oracle["Reference oracle"]
-  Runtime --> Output["TRTF output"]
+  Runtime --> Output["TRTMC output"]
   Oracle --> Reference["Reference output"]
   Output --> Compare["Comparator and thresholds"]
   Reference --> Compare
   Compare --> Report["Pass/fail + artifacts"]
 ```
 
+For release model-profile comparisons, GB300 prerequisites, traffic-light
+semantics, and retained performance evidence, use the
+[Performance Benchmarking Reference](../../reference/benchmarking.md#release-performance-matrix).
+
 ## Focused E2E validation
 
 ```bash
-pytest tests/test_e2e.py::test_e2e[qwen3-0.6b-fp16] -v \
-  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
-  --trtmc-binary ./build/trtmc
+ENGINE_DIR=/tmp/trtmc-engines
+mkdir -p "${ENGINE_DIR}"
+PYTHONPATH=python:. python3 -m pytest \
+  'tests/e2e/models/qwen/test_qwen_e2e.py::test_model_e2e[qwen3-0.6b-fp16]' -v \
+  --engine-dir "${ENGINE_DIR}" \
+  --trtmc-binary ./build/trtmc \
+  --model-plugin-dir ./build/models
 ```
 
-The model manifest supplies the family, runtime strategy, bundle name, prompt or modality input, thresholds, reference backend, and test contract.
+For this native case, the model manifest supplies the family, exact
+`runtime_strategy`, bundle name, prompt or modality input, thresholds,
+reference backend, and test contract.
+
+An optimized-runtime case uses a different selection chain:
+`IMPLEMENTATION.toml`, an exact qualified profile under `profiles/*.toml`, and
+a matching `QUALIFICATION.*.toml` producer descriptor. The resulting bundle
+contains `optimized_runtime.json`, implementation metadata, integrity-bound
+artifacts, and an embedded `libtrtmc_impl_*.so`. Its public
+`runtime_strategy` may be empty because it bypasses the native strategy,
+model-DSO, and backend-DSO selection path.
 
 Read the manifest before debugging a failure. It tells you what the test is trying to prove.
 
 | Manifest field category | Why it matters |
 | --- | --- |
-| Model and bundle fields | Identify the artifact and expected strategy. |
+| Model and bundle fields | Identify the artifact and the native strategy or optimized implementation/profile. |
 | Input fields | Define prompt, image, audio, numeric context, or generation settings. |
 | Oracle fields | Define what implementation or verifier is trusted for comparison. |
 | Threshold fields | Define acceptable numerical, textual, image, audio, or task-specific differences. |
@@ -39,12 +57,16 @@ Read the manifest before debugging a failure. It tells you what the test is tryi
 ## C++ unit tests
 
 ```bash
-ctest --test-dir build --output-on-failure -R 'test_pipeline_registry|test_pipeline_api'
+ctest --test-dir build --output-on-failure --no-tests=error \
+  -R 'test_pipeline_registry|test_pipeline_api'
 ```
 
 Use this when changing pipeline interfaces, registries, plugin manifests, bundle parsing, or runtime core behavior.
 
-C++ unit tests should make runtime failures local. For example, if `TextGenerationPipeline` fails an E2E, the unit tests should help separate registry failure, bundle parsing, tokenizer behavior, cache lifecycle, and sampler behavior.
+C++ unit tests should make runtime failures local. For example, if a
+model-owned text-generation pipeline fails an E2E, the unit tests should help
+separate DSO/registry failure, bundle parsing, tokenizer behavior, cache
+lifecycle, and sampler behavior.
 
 ## Builder tests
 
@@ -74,7 +96,10 @@ Use tool tests when changing diff tools, report generation, performance comparis
 
 Report:
 
-- GPU, driver, CUDA, TensorRT version, and backend DSO.
+- GPU, driver, CUDA, and TensorRT version.
+- For a native bundle: exact `runtime_strategy`, model DSO, and backend DSO.
+- For an optimized bundle: implementation ID, profile ID,
+  `QUALIFICATION.*.toml` producer, and embedded implementation DSO.
 - Bundle path and build command.
 - Prompt length and generated token count.
 - Whether the number is wall-clock CLI latency, per-token decode time, or raw engine enqueue time.
@@ -88,13 +113,34 @@ flowchart LR
 
 These numbers answer different questions. Do not compare them as if they measure the same thing.
 
-For raw engine enqueue timing, use the dedicated engine timing path when available:
+The `run` command prints `setup_ms`, `prefill_ms`, `decode_ms`, and the
+prefill-plus-decode total returned through `TextResult`; no timing environment
+variable is required. Those phase values are provider-reported, not guaranteed
+wall-clock measurements. For repeatable phase measurements when the selected
+pipeline populates them, use the same benchmark command with a fixed prompt,
+warmup count, iteration count, and decoding flags:
 
 ```bash
-TRTMC_ENGINE_TIMING=1 ./build/trtmc run /tmp/qwen3.trtfb \
+./build/trtmc run /tmp/qwen3.trtfb \
   --prompt "Benchmark prompt" \
-  --max-new-tokens 64
+  --max-new-tokens 64 \
+  --greedy \
+  --benchmark 20 \
+  --warmup 3
 ```
+
+The CLI benchmark averages the phase values returned by the pipeline; it does
+not independently time each public call. Native text pipelines commonly
+populate these fields. A provider that cannot expose a trustworthy phase split
+may return zero. The qualified Qwen Edge-LLM adapter does exactly that, so its
+zero prefill/decode values and any throughput derived from them are
+unavailable—not zero-latency results.
+
+When phase timing is unavailable, use a benchmark worker or qualification
+runner that synchronizes the device and measures wall time around the public
+pipeline call. Record that result as public-call wall latency. Use a
+model-specific profiler for engine-only timing, and identify the exact tool and
+measurement boundary in the report.
 
 ## Validation taxonomy
 
@@ -116,12 +162,18 @@ Use this template in reports:
 Model:
 Bundle:
 Family:
+Execution path: native | optimized
 Runtime strategy:
+Implementation ID:
+Profile ID:
+Qualification descriptor:
 Build command:
 Run command:
 GPU:
 Driver/CUDA/TensorRT:
+Model DSO:
 Backend DSO:
+Embedded implementation DSO:
 Input:
 Output length or shape:
 Warmup iterations:

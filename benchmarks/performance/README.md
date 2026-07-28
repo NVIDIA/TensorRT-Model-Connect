@@ -14,13 +14,18 @@ The suite contains one row for every release-relevant single-process model
 profile marked `ready` in the benchmark catalog. Profiles whose names contain an
 `l0` segment are shorter PR-smoke duplicates and are deliberately excluded.
 Other temporary omissions must be named under `excluded_profiles` with a reason.
-The suite currently has 104 model-profile comparisons across 76 families and 77
+The suite currently has 105 model-profile comparisons across 76 families and 77
 `(family, operation)` contracts because some families expose multiple profiles
 and `eagle_vlm` exposes both `embed` and `rerank`. Catalog profiles marked
 `distributed` require their own multi-process launch and are not silently
 included in this single-GPU matrix.
 
 ## Commands
+
+These commands use the checked-in GB300 CI environment. Export the four
+`TRTMC_PERF_*` paths listed under [Environment configuration](#environment-configuration)
+before running them; `check` performs the same worker, storage, bundle, and
+reference preflight as `run`.
 
 Validate the complete matrix without running performance measurements:
 

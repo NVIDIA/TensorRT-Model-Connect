@@ -1,222 +1,107 @@
 # Architecture Extensibility Assessment
 
-Status of non-standard architecture support. MoE, Mamba/SSM, vision-language (Qwen-VL), and diffusion (Wan2.1 T2V) are fully implemented. DeepSeek MLA and hybrid SSM+Attention are planned.
-
-## Executive Summary
-
-With the Python build / C++ runtime split, adding a new family is Python-only **when it reuses an existing `runtime_strategy`** already handled by a C++ model runtime folder in `src/runtime/models/`. New strategy/state types require a new model runtime folder plus one manifest entry in `cmake/trtmc_pipeline_plugins.cmake` -- no edits to `pipeline_factory.cpp` are needed.
-
-As of 2026-02-20, MoE, Mamba/SSM, vision-language, and diffusion (T2V) support are **fully implemented**. The standard decoder builder is parameterized to support LayerNorm, GELU, learned positions, and multiple activations. The VL image preprocessor supports 4 strategies with configurable interpolation. The diffusion pipeline supports text-to-video with T5 encoding, DiT denoising, and causal 3D VAE decoding.
-
-| Architecture Class | Current Support | Effort to Add New Instance | Where Changes Needed |
-|---|---|---|---|
-| Standard decoder (RMSNorm + RoPE + SwiGLU) | **Works today** (15+ families) | ~30 LOC Python | Python plugin only |
-| Extended decoder (LayerNorm, GELU, learned positions) | **Works today** (25+ families) | ~60 LOC Python | Python plugin only |
-| MoE decoder (top-k softmax / SparseMixer routing) | **Works today** (4 families) | ~300 LOC Python | Python graph builder + checkpoint mapper |
-| SSM / Mamba | **Works today** (Mamba 130M-2.8B) | ~400 LOC Python | Python graph builder + Mamba-owned runtime files if state behavior changes |
-| RWKV | **Works today** | ~400 LOC Python | Python graph builder + RWKV-owned runtime files if state behavior changes |
-| Vision-Language | **Works today** (Qwen-VL, InternVL, Phi4) | ~200 LOC Python | Python vision builder + plugin VL config |
-| Diffusion (T2V/T2I) | **Works today** (Wan, FLUX, Z-Image, PixArt) | ~500 LOC Python | Python builders + family plugin |
-| Encoder-only | **Works today** (BERT, ELECTRA, etc.) | ~60 LOC Python | Python plugin only |
-| Encoder-decoder (seq2seq) | **Works today** (T5, Marian, M2M-100) | ~300 LOC Python + C++ | Python + C++ plugin |
-| Multi-Latent Attention -- MLA (DeepSeek-V2/V3) | **Not yet implemented** | ~400 LOC Python + C++ | Python graph builder + C++ KV cache shape |
-| Hybrid SSM+Attention | **Works today** (Nemotron-H) | ~500 LOC Python + C++ | Python + C++ hybrid state (implemented) |
-
----
-
-## What Is Easy (Python-Only When Reusing Existing `runtime_strategy`)
-
-### Adding a standard dense decoder family
-
-Create a Python plugin file in `python/tensorrt_model_connect/families/` with a checkpoint mapper. Uses the parameterized standard decoder builder. ~30-60 LOC.
-
-**Implemented**: Qwen, LLaMA, Mistral, Gemma, Phi, Granite, InternLM (standard decoder); StarCoder2, GPT-2, OPT, Falcon, StableLM, OLMo, XGLM, GPT-NeoX, GPT-Neo, CodeGen, BLOOM, Nemotron (extended decoder).
-
-### Adding a new MoE family
-
-Write a Python graph builder for the expert routing logic. The C++ runtime uses the same KV-cache backend (routing is handled in the TRT graph). ~300 LOC.
-
-**Implemented**: Phi-MoE (SparseMixer routing), Mixtral (standard top-2 softmax routing). Both use `runtime_strategy="decoder_moe"`.
-
-### Adding a new Mamba/SSM family
-
-Write a Python graph builder for the SSM architecture. The C++ `src/runtime/models/mamba/plugin.cpp` constructs a `RecurrentPipeline` with `MambaRecurrentState` for `runtime_strategy="mamba_ssm_recurrent"`. ~400 LOC Python.
-
-**Implemented**: Mamba (130M-2.8B, selective scan + conv1d).
-
-### Adding a new Vision-Language family
-
-Write a Python plugin with `build_vision_engine()` for the vision encoder and `get_vl_config()` to specify preprocessing parameters (preprocessor_type, interpolation, prompt template, etc.). The C++ runtime handles 4 preprocessing strategies out of the box. ~200 LOC Python.
-
-**Implemented**: Qwen-VL (Qwen2.5-VL, ViT + 3D RoPE + spatial merge, `runtime_strategy="vision_language"`).
-
-### Adding a new Diffusion family
-
-Write a Python family plugin that composes the shared builders (`t5_encoder_builder`, `standard_dit_builder`, `causal_vae_3d_builder`). The C++ `DiffusionBackendBase` provides shared infrastructure; family-specific backends extend it. ~500 LOC Python.
-
-**Implemented**: Wan2.1-T2V (1.3B-14B, flow-match Euler scheduler, `runtime_strategy="diffusion"`).
-
----
-
-## What Requires C++ Changes
-
-### Different state management (done for Mamba/SSM/RWKV/Hybrid)
-
-The C++ runtime supports multiple state management patterns via the plugin registry. Each model runtime folder in `src/runtime/models/` exposes a manifest-listed registrar for one or more `runtime_strategy` strings. Decoder strategies are duplicated into the owning family runtime folders so model changes do not couple through a shared text-generation runtime:
-- `<family>_decoder_kv_cache` / `<family>_decoder_moe` -> `<family>/plugin.cpp` -> `<family>/pipeline.cpp` (`TextGenerationPipeline`) + `KvCache`
-- `mamba_ssm_recurrent` -> `mamba/plugin.cpp` -> `RecurrentPipeline` + `MambaRecurrentState`
-- `rwkv_recurrent` -> `rwkv/plugin.cpp` -> `RecurrentPipeline` + `RwkvRecurrentState`
-- hybrid Mamba-attention strategies -> `nemotron_h/plugin.cpp` / `qwen3_5/plugin.cpp` -> `RecurrentPipeline` + family-owned hybrid state
-- `vision_language` -> `vision_language/plugin.cpp` -> `VLPipeline`
-- `diffusion_flux`/`diffusion_wan`/`diffusion_zimage`/`diffusion_pixart` -> separate model runtime folders
-
-New state types require:
-1. A new model runtime folder under `src/runtime/models/` with a plugin `.cpp` implementing `IPipelinePlugin`
-2. Manifest registration via `REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST`
-3. A source/symbol entry in `cmake/trtmc_pipeline_plugins.cmake`
-4. A new or existing pipeline class in that model runtime folder
-
-No edits to `pipeline_factory.cpp` are needed -- the registry handles dispatch automatically.
-
-### Different KV cache shapes (DeepSeek MLA)
-
-Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, attention_size]`) should be implemented in the owning model runtime instead of a shared `DeviceKvCache` class.
-
----
-
-## Architecture-Specific Deep Dives
-
-### MoE (Phi-MoE -- IMPLEMENTED)
-
-**Status**: Fully implemented. Phi-MoE plugin with SparseMixer routing.
-
-**Python** (`families/phi_moe.py`):
-- Checkpoint mapper: Maps router weights + per-expert gate/up/down projections
-- Custom graph builder: SparseMixer routing (independent masked softmax, not standard top-k), per-expert SwiGLU MLPs with gather/scatter dispatch
-- LayerNorm with bias, separate Q/K/V/O with biases
-
-**C++**: No shared runtime changes. A MoE family owns its `<family>/plugin.cpp` and `<family>/pipeline.cpp` copy, and routing remains encoded in that family's TRT graph.
-
-### Mamba / SSM (IMPLEMENTED)
-
-**Status**: Fully implemented. Mamba plugin with selective scan + C++ MambaBackend.
-
-**Python** (`families/mamba.py`):
-- Checkpoint mapper: Maps SSM weights (in_proj, conv1d, x_proj, dt_proj, A_log, D, out_proj)
-- Custom graph builder: Selective scan, causal conv1d with cached state, input-dependent discretization
-- Engine I/O: token_id + per-layer conv_state/ssm_state inputs, logits + present_conv/present_ssm outputs
-
-**C++** (plugin-based):
-- `src/runtime/models/mamba/plugin.cpp`: Self-registering plugin for `mamba_ssm_recurrent` strategy
-- Constructs `RecurrentPipeline` with `MambaRecurrentState` (conv_state + ssm_state specs)
-- State management via family-owned recurrent state (`src/runtime/models/<family>/recurrent_state.h`)
-
-**Debug runner**: `MambaTrtRunner` in `debug_runner.py` for pure-Python Mamba TRT inference.
-
-### Vision-Language -- VL (Qwen-VL -- IMPLEMENTED)
-
-**Status**: Fully implemented. Qwen-VL plugin with vision encoder + text decoder.
-
-**Python** (`families/qwen_vl.py`):
-- Checkpoint mapper: Standard Qwen weights for text decoder + vision-specific weights (visual.* prefix)
-- Vision engine builder: ViT with 3D RoPE + spatial merge (via `qwen_vl_vision_builder.py`)
-- Text decoder: Standard Qwen2.5 with `embed_input=True` for VL prefill
-- `get_vl_config()` returns preprocessor_type, interpolation, prompt template, token config
-
-**C++** (`src/runtime/models/<vl-family>/image_preprocessor.h/cpp`):
-- 4 image preprocessing strategies: `qwen_merge_group`, `simple_chw`, `center_crop_chw`, `aspect_preserve_chw`
-- Configurable interpolation: `bicubic` (default), `bilinear`, `nearest`
-- Config parsed from bundle's `config.json` + `preprocessor_config.json`
-- `format_vl_prompt()` for prompt template expansion
-
-**Python debug runner** (`debug_runner.py`):
-- `VisionTrtRunner`, `VLTrtRunner` for pure-Python VL inference
-- `preprocess_image_for_trt()` dispatches to 4 strategies matching C++
-- `_resolve_pil_interpolation()` maps mode strings to PIL constants
-- Single-image constraint enforced via `NotImplementedError` for multi-image input
-
-**Adding a new VL family**: Create a plugin with `build_vision_engine()` and `get_vl_config()` methods. The `preprocessor_type` and `interpolation` fields in `get_vl_config()` control C++ image preprocessing. See `families/qwen_vl.py` for an example.
-
-### Diffusion -- T2V (Wan2.1 -- IMPLEMENTED)
-
-**Status**: Fully implemented. Wan2.1 text-to-video plugin with T5 encoder, DiT denoiser, and causal 3D VAE decoder.
-
-**Python** (`families/wan_t2v.py`):
-- Family plugin that composes three shared builders:
-  - `t5_encoder_builder.py`: UMT5 encoder (4096D, 24 layers, 226 token sequence)
-  - `standard_dit_builder.py`: DiT denoiser (1536D, 12 heads, 30 layers for 1.3B) with AdaLN modulation, QK norm, 3D RoPE
-  - `causal_vae_3d_builder.py`: Causal 3D VAE decoder (16 latent channels, per-frame with temporal caches)
-- `_serialize_preprocessor_weights()`: Packs DiT preprocessor weights (patch embedding, timestep MLP, text projection) into binary with JSON index
-- `get_diffusion_config()`: Returns pipeline configuration with preset latent statistics, scheduler type, guidance scale
-
-**Python debug runner** (`families/<family>/diffusion_runner.py`):
-- `DiffusionRunner`: family-owned pure-Python TRT diffusion pipeline
-  - `encode_text()`: T5 encoder with attention masking, zeros padding positions
-  - `denoise()`: Flow-match Euler denoising loop with classifier-free guidance (CFG)
-  - `decode_video()`: Frame-by-frame VAE decode with causal convolution caches
-  - `generate()`: Full pipeline: text encode -> denoise -> VAE decode
-
-**C++** (plugin-based):
-- `wan_plugin.cpp`: Self-registering plugin for `diffusion_wan` and `diffusion_pixart` strategies. Constructs `WanPipeline`.
-- `flux_plugin.cpp`: Plugin for `diffusion_flux`. Constructs `FluxPipeline`.
-- `zimage_plugin.cpp`: Plugin for `diffusion_zimage`. Constructs `ZImagePipeline`.
-- Model-local diffusion helper copies in each diffusion runtime folder, for example `src/runtime/models/flux/diffusion_helpers.h/cpp`.
-- Pipeline implementations in `src/runtime/models/wan/pipeline.cpp`, `flux_pipeline.cpp`, `z_image_pipeline.cpp`.
-- Diffusion config and preprocessor weight types in model-owned headers such as `src/runtime/models/flux/flux_diffusion_types.h` and `src/runtime/models/wan/wan_diffusion_types.h`.
-- Qwen Image-owned `FlowMatchEulerScheduler` in `src/runtime/models/qwen_image/qwen_image_scheduler.cpp`.
-
-**Schedulers**:
-- Flow matching: `z_t = (1-t)*x + t*noise`, Euler step: `z_{t-dt} = z_t - dt*v`
-- Configurable shift parameter for timestep adjustment
-- C++ Qwen Image implementation in `src/runtime/models/qwen_image/qwen_image_scheduler.cpp`,
-  Python copies under `python/tensorrt_model_connect/families/<family>/schedulers/`
-
-**Testing**: See [Testing and Validation](Testing-and-Validation.md#diffusion-domain-tests) for the 9-step component validation and frame quality checks.
-
-**Adding a new diffusion family**: Create a plugin with `build_components()` that composes the shared builders, plus `get_diffusion_config()` for pipeline parameters. If the scheduler differs, add a family-owned scheduler under `families/<family>/schedulers/`. If the architecture differs significantly from DiT, create a new builder module and C++ backend extending `DiffusionBackendBase`. See `families/wan_t2v.py` for an example.
-
-### DeepSeek MLA (Multi-Latent Attention)
-
-**Python changes**:
-- Checkpoint mapper: Compressed Q/KV projections (`w_dq`, `w_uk`, `w_uv`, `kv_lora_rank`)
-- Graph builder: Decomposed attention with low-rank KV
-
-**C++ changes**:
-- Model-owned cache implementation for the family that needs different cache shapes per layer
-
-**Estimated work**: ~300 LOC Python + ~100 LOC C++.
-
-### Hybrid SSM+Attention (Jamba, Zamba)
-
-**Python + C++ changes**: Combination of Mamba and attention approaches.
-- Per-layer type: some layers attention (KV cache), some Mamba (recurrent state)
-- `HybridStepState` that manages both state types
-
-**Estimated work**: ~500 LOC Python + ~300 LOC C++.
-
----
-
-## Recommended Approach for New Families
-
-### Tier 1: Python-only (existing runtime strategy), standard builder (implemented for 40+ families)
-Standard and extended decoders using the parameterized graph builder:
-- Already done: Qwen, LLaMA, Mistral, Gemma, Phi, Granite, InternLM, StarCoder2, GPT-2, OPT, Falcon, StableLM, OLMo, XGLM, GPT-NeoX, GPT-Neo, CodeGen, BLOOM, Nemotron
-- Candidates: Yi (use llama), Baichuan, DeepSeek-dense, CodeLlama (use llama), Vicuna (use llama)
-- ~30-60 LOC each, fully parallelizable
-
-### Tier 2: Python custom graph builder (existing C++ plugin), implemented for 15+ families
-Non-standard graph topologies with existing C++ backends:
-- Already done: Phi-MoE (MoE, Python only), Mixtral (MoE, Python only), Mamba (SSM, Python + existing C++ backend), Qwen-VL (VL, Python + existing C++ image preprocessor), Wan2.1-T2V (diffusion, Python builders + C++ diffusion backend)
-- Candidates: Other Mamba variants, LLaVA/InternVL (can reuse simple_chw/aspect_preserve_chw preprocessor), other DiT-based diffusion models (can reuse shared builders)
-- ~200-500 LOC each
-
-### Tier 3: Python + new C++ plugin (done for RWKV, Hybrid, Seq2Seq, Marian)
-Fundamentally different architectures requiring new C++ state management or pipeline logic:
-- RWKV (`src/runtime/models/rwkv/plugin.cpp` -- **implemented**)
-- Hybrid SSM+Attention (`src/runtime/models/nemotron_h/plugin.cpp`, `src/runtime/models/qwen3_5/plugin.cpp` -- **implemented**)
-- T5 encoder-decoder (`t5_plugin.cpp` -- **implemented**)
-- Marian machine translation (`marian_plugin.cpp` -- **implemented**)
-- Seq2seq encoder-decoder (`seq2seq_plugin.cpp` -- **implemented**)
-- DeepSeek MLA (Python + C++ cache shape, ~400 LOC total -- **not yet implemented**)
-
-Each tier can be worked on independently. Tier 1 and 2 families are fully parallelizable since they only touch Python plugins with no shared file edits.
+Status: current mechanism assessment; supported models are defined by
+descriptors and E2E evidence, not this prose page.
+
+## Extension boundary
+
+A checkpoint can reuse an existing family identity only when its configuration
+and user-visible task contract match that family. Reusing the native
+implementation further requires a compatible weight layout, TensorRT graph,
+bundle contract, and runtime state. Otherwise choose either a new native family
+across the Python, Runtime, and E2E trees or an exact delegated optimized
+implementation for the existing family; the two ownership contracts are not
+interchangeable.
+
+There are two distinct extension routes:
+
+- Native support owns three descriptors:
+  `python/tensorrt_model_connect/families/<family>/MODEL.toml`,
+  `src/runtime/models/<runtime-owner>/MODEL.toml`, and
+  `tests/e2e/models/<family>/MODEL.toml`. It also owns a concrete
+  `runtime_strategy` and `libtrtmc_model_<owner>.so`.
+- A delegated optimized implementation for an existing family owns a
+  family-local `IMPLEMENTATION.toml`, exact `profiles/*.toml`, an isolated
+  adapter and `libtrtmc_impl_*.so`, plus
+  `tests/e2e/models/<family>/<adapter>/QUALIFICATION.*.toml`. It does not need a
+  synthetic native runtime strategy or native runtime descriptor merely to
+  represent that implementation/profile.
+
+Reusing a generic task shape does not imply reusing a native runtime strategy.
+`task_strategy` selects the runner/comparator contract; `runtime_strategy`
+selects a concrete native model DSO. An optimized bundle instead identifies its
+exact implementation/profile with `optimized_runtime.json`.
+
+## Cost by kind of change
+
+| Change | Expected ownership |
+| --- | --- |
+| Another native checkpoint with an identical family contract | Native E2E manifest data and focused evidence |
+| Exact optimized deployment tuple for an existing family | Family-local implementation/profile data, isolated adapter/runtime DSO, and producer qualification evidence |
+| New weight/config variant within a family | Python family plugin and tests; runtime only if bundle/state changes |
+| New graph semantics | Family-local builder/checkpoint logic and parity evidence |
+| New runtime state or operation | Family-owned C++ plugin/pipeline and C++ plus E2E tests |
+| New reusable task contract | E2E runner/comparator/threshold registration |
+| New shared infrastructure | Shared code plus broad impact proof; must remain model-independent |
+
+## Current mechanism
+
+- Python family discovery indexes
+  `python/tensorrt_model_connect/families/*/MODEL.toml` but keeps three lookup
+  flows separate. A full config tries architecture-pattern candidates before
+  `pkgutil.iter_modules()` imports every non-private family module/package as a
+  compatibility fallback. A string or `model_type` tries a direct descriptor
+  ID, then alias/prefix candidates, then that fallback. A Diffusers pipeline
+  class uses descriptor `diffusion_pipeline_classes` only and has no `pkgutil`
+  fallback. Descriptor routes import the package-level `plugin` from
+  `__init__.py`; `module` is specialization/tooling metadata rather than an
+  arbitrary runtime import selector.
+- Native Runtime CMake scans `src/runtime/models/*/MODEL.toml`; those model DSOs
+  register unique strategy keys with `PipelineRegistry`.
+- Native E2E discovery scans `tests/e2e/models/*/MODEL.toml`.
+- After family resolution, a matching family-owned `default_build_route` may
+  select native immediately; eligible dense Qwen3 and Llama currently do so.
+  Other requests scan `IMPLEMENTATION.toml` only inside that selected family.
+  Exactly one qualified profile may claim the model revision, active target,
+  and effective options. One claim writes `optimized_runtime.json` and embeds
+  the implementation DSO; no claim continues to the native builder.
+- `tools/model_ci.py` validates ownership and creates isolated model
+  projections.
+- `tools/test_impact.py` selects affected models and task coverage.
+
+No manual edit to a factory switch or central plugin target list is required.
+Once an optimized adapter has claimed a request, its build or bundle-load error
+is terminal rather than a fallback to native dispatch.
+
+## Support claims
+
+“Implemented” means source exists. “Tested” requires relevant current tests.
+“Parity-qualified” requires comparison artifacts for the exact checkpoint and
+configuration. “Performance-qualified” additionally requires exact hardware
+and benchmark evidence. For an optimized route, qualification is bounded by the
+exact model ID, immutable revision, target, public options, profile state, and
+its `QUALIFICATION.*.toml` producer proof. Use
+[Model Support](../getting-started/model-support.md) and the owning descriptors
+for user-facing coverage; do not infer qualification from an architecture class
+or an `IMPLEMENTATION.toml` alone.
+
+## Verify an extension
+
+```bash
+PYTHONPATH=python:. python3 tools/model_ci.py validate
+PYTHONPATH=python:. python3 tools/test_impact.py --validate
+PYTHONPATH=python:. python3 tools/check_runtime_strategy_matrix.py
+python3 tools/ci/optimized_runtime_qualifications.py --all
+PYTHONPATH=python:. python3 -m pytest \
+  tests/tools/test_model_plugin_encapsulation_static.py \
+  tests/tools/test_runtime_strategy_matrix_checker.py \
+  tests/tools/test_optimized_runtime_qualifications.py \
+  tests/builder/test_manifest_validation.py \
+  tests/builder/test_optimized_runtime_orchestrator.py \
+  tests/builder/test_optimized_runtime_capsules.py -q
+```
+
+Native model/GPU claims additionally require the selected E2E manifest on its
+declared environment. Optimized claims require the entrypoint and
+digest-pinned environment declared by the matching `QUALIFICATION.*.toml`;
+host-only contract tests do not replace that producer run.
