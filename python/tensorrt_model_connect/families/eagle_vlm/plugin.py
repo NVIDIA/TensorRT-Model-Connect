@@ -42,6 +42,9 @@ if TYPE_CHECKING:
     pass
 
 
+_RERANKER_FP32_TAIL_LAYERS = 8
+
+
 def _is_reranker(config: ModelConfig) -> bool:
     """Detect reranking mode from config."""
     if config.raw.get("is_reranker", False):
@@ -436,6 +439,22 @@ def _build_eagle_engine(
     eps_tensor = graph_ops.add_constant(
         network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype),
         dtype=work_np_dtype)
+    keep_reranker_tail_fp32 = is_reranker and work_np_dtype != np.float32
+    tail_cos_half_tensor = cos_half_tensor
+    tail_sin_half_tensor = sin_half_tensor
+    tail_eps_tensor = eps_tensor
+    if keep_reranker_tail_fp32:
+        # Ranking can hinge on score margins below FP16 resolution. Keep only
+        # a bounded transformer tail and classification head in FP32 rather
+        # than doubling the complete engine with an all-FP32 build.
+        tail_cos_half_tensor = graph_ops.add_constant(
+            network, cos_half_np.shape, cos_half_np, dtype=np.float32)
+        tail_sin_half_tensor = graph_ops.add_constant(
+            network, sin_half_np.shape, sin_half_np, dtype=np.float32)
+        tail_eps_tensor = graph_ops.add_constant(
+            network, (1, 1),
+            np.array([config.rms_norm_eps], dtype=np.float32),
+            dtype=np.float32)
     attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
 
     # --- Build padding attention mask from attention_mask input ---
@@ -468,6 +487,10 @@ def _build_eagle_engine(
     pad_mask_2d = network.add_elementwise(
         query_zeros, pad_mask_row.get_output(0), trt.ElementWiseOperation.SUM)
     pad_mask_4d = graph_ops.add_2d_mask_to_4d(network, pad_mask_2d.get_output(0))
+    tail_pad_mask_4d = pad_mask_4d
+    if keep_reranker_tail_fp32 and pad_mask_4d.dtype != trt.float32:
+        tail_pad_mask_4d = network.add_cast(
+            pad_mask_4d, trt.float32).get_output(0)
 
     # --- Encoder layers (no KV cache -- full self-attention over seq_length) ---
     # Single-pass encoder: process all positions at once.
@@ -478,31 +501,45 @@ def _build_eagle_engine(
 
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"
+        is_reranker_tail = (
+            keep_reranker_tail_fp32
+            and layer_idx >= max(num_layers - _RERANKER_FP32_TAIL_LAYERS, 0))
+        layer_np_dtype = np.float32 if is_reranker_tail else work_np_dtype
+        layer_eps_tensor = tail_eps_tensor if is_reranker_tail else eps_tensor
+        layer_cos_half_tensor = (
+            tail_cos_half_tensor if is_reranker_tail else cos_half_tensor)
+        layer_sin_half_tensor = (
+            tail_sin_half_tensor if is_reranker_tail else sin_half_tensor)
+        layer_pad_mask_4d = (
+            tail_pad_mask_4d if is_reranker_tail else pad_mask_4d)
+        if is_reranker_tail and hidden_state.dtype != trt.float32:
+            hidden_state = network.add_cast(
+                hidden_state, trt.float32).get_output(0)
 
         # Pre-norm
         norm1 = graph_blocks.apply_norm(
             network, hidden_state, hidden,
             weights[f"{prefix}.input_norm"],
-            None, eps_tensor, "rmsnorm", dtype=work_np_dtype)
+            None, layer_eps_tensor, "rmsnorm", dtype=layer_np_dtype)
 
         # Self-attention: Q, K, V projections
         q = graph_ops.add_matmul_rhs_constant(
             network, norm1, hidden, attention_size, weights[f"{prefix}.w_q"],
-            dtype=work_np_dtype)
+            dtype=layer_np_dtype)
         k = graph_ops.add_matmul_rhs_constant(
             network, norm1, hidden, kv_attention_size, weights[f"{prefix}.w_k"],
-            dtype=work_np_dtype)
+            dtype=layer_np_dtype)
         v = graph_ops.add_matmul_rhs_constant(
             network, norm1, hidden, kv_attention_size, weights[f"{prefix}.w_v"],
-            dtype=work_np_dtype)
+            dtype=layer_np_dtype)
 
         q_rope = graph_ops.add_apply_rope_native(
             network, q, num_heads, head_dim,
-            cos_half_tensor, sin_half_tensor, rope_position_ids,
+            layer_cos_half_tensor, layer_sin_half_tensor, rope_position_ids,
             head_dim, sequence_length=seq_length)
         k_rope = graph_ops.add_apply_rope_native(
             network, k, num_kv_heads, head_dim,
-            cos_half_tensor, sin_half_tensor, rope_position_ids,
+            layer_cos_half_tensor, layer_sin_half_tensor, rope_position_ids,
             head_dim, sequence_length=seq_length)
 
         attn_concat = graph_ops.add_attention_from_rows(
@@ -510,13 +547,13 @@ def _build_eagle_engine(
             num_heads=num_heads, head_dim=head_dim,
             num_kv_heads=num_kv_heads,
             q_seq=seq_length, kv_seq=seq_length,
-            mask=pad_mask_4d,
+            mask=layer_pad_mask_4d,
             scale=attn_scale)
 
         # Output projection
         proj_out = graph_ops.add_matmul_rhs_constant(
             network, attn_concat, attention_size, hidden,
-            weights[f"{prefix}.w_o"], dtype=work_np_dtype)
+            weights[f"{prefix}.w_o"], dtype=layer_np_dtype)
 
         # Residual
         residual1 = network.add_elementwise(
@@ -527,12 +564,12 @@ def _build_eagle_engine(
         norm2 = graph_blocks.apply_norm(
             network, residual1.get_output(0), hidden,
             weights[f"{prefix}.post_attn_norm"],
-            None, eps_tensor, "rmsnorm", dtype=work_np_dtype)
+            None, layer_eps_tensor, "rmsnorm", dtype=layer_np_dtype)
 
         mlp_out = graph_blocks.add_swiglu_mlp(
             network, norm2, weights=weights, prefix=prefix,
             hidden_size=hidden, mlp_size=mlp_size,
-            dtype=work_np_dtype)
+            dtype=layer_np_dtype)
 
         # Final residual
         residual2 = network.add_elementwise(
@@ -543,9 +580,16 @@ def _build_eagle_engine(
     # --- Final norm ---
     final_norm = weights.get("final_norm")
     if final_norm is not None and len(final_norm) > 0:
+        final_norm_dtype = (
+            np.float32 if keep_reranker_tail_fp32 else work_np_dtype)
+        final_eps_tensor = (
+            tail_eps_tensor if keep_reranker_tail_fp32 else eps_tensor)
+        if keep_reranker_tail_fp32 and hidden_state.dtype != trt.float32:
+            hidden_state = network.add_cast(
+                hidden_state, trt.float32).get_output(0)
         hidden_state = graph_blocks.apply_norm(
             network, hidden_state, hidden, final_norm, None,
-            eps_tensor, "rmsnorm", dtype=work_np_dtype)
+            final_eps_tensor, "rmsnorm", dtype=final_norm_dtype)
 
     # --- Output ---
     if is_reranker and "score_weight" in weights:

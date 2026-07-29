@@ -90,6 +90,101 @@ def test_eagle_vlm_prefers_rope_parameters_over_legacy_alias() -> None:
     assert plugin_module._resolve_rope_scaling(Config())["factor"] == 8.0
 
 
+def test_eagle_vlm_fp16_reranker_keeps_bounded_tail_in_fp32(
+    monkeypatch,
+) -> None:
+    plugin_module = importlib.import_module(
+        "tensorrt_model_connect.families.eagle_vlm.plugin")
+    graph_blocks = importlib.import_module(
+        "tensorrt_model_connect.families.eagle_vlm.graph_blocks")
+    trt_compat = importlib.import_module("tensorrt_model_connect.trt_compat")
+    trt = trt_compat.get_trt()
+    original_apply_norm = graph_blocks.apply_norm
+    num_layers = plugin_module._RERANKER_FP32_TAIL_LAYERS + 2
+
+    class FinalNormCaptured(RuntimeError):
+        pass
+
+    calls = []
+
+    def capture_tail_norms(
+        network,
+        inp,
+        hidden_size,
+        gamma,
+        beta,
+        eps_tensor,
+        norm_type,
+        *,
+        dtype,
+        eps=None,
+    ):
+        calls.append({
+            "input_dtype": inp.dtype,
+            "eps_dtype": eps_tensor.dtype,
+            "dtype": dtype,
+        })
+        if len(calls) == 2 * num_layers + 1:
+            raise FinalNormCaptured
+        return original_apply_norm(
+            network,
+            inp,
+            hidden_size,
+            gamma,
+            beta,
+            eps_tensor,
+            norm_type,
+            dtype=dtype,
+            eps=eps,
+        )
+
+    monkeypatch.setattr(graph_blocks, "apply_norm", capture_tail_norms)
+
+    class RerankerConfig(_Config):
+        raw = {"is_reranker": True}
+        num_hidden_layers = num_layers
+        rms_norm_eps = 1e-5
+        rope_theta = 10_000.0
+
+    weights = _weights()
+    layer_weight_names = (
+        "input_norm",
+        "post_attn_norm",
+        "w_q",
+        "w_k",
+        "w_v",
+        "w_o",
+        "w_gate",
+        "w_up",
+        "w_down",
+    )
+    for layer_idx in range(1, num_layers):
+        for name in layer_weight_names:
+            weights[f"layer.{layer_idx}.{name}"] = (
+                weights[f"layer.0.{name}"].copy())
+
+    with pytest.raises(FinalNormCaptured):
+        plugin_module._build_eagle_engine(
+            RerankerConfig(),
+            weights,
+            max_cache_length=4,
+            is_reranker=True,
+            precision="fp16",
+        )
+
+    fp16_call = {
+        "input_dtype": trt.float16,
+        "eps_dtype": trt.float16,
+        "dtype": np.float16,
+    }
+    fp32_call = {
+        "input_dtype": trt.float32,
+        "eps_dtype": trt.float32,
+        "dtype": np.float32,
+    }
+    assert calls == [fp16_call] * 4 + [fp32_call] * 17
+
+
 def test_eagle_vlm_tp_shards_text_backbone_weights() -> None:
     from tensorrt_model_connect.families.eagle_vlm import tp_builder
 
