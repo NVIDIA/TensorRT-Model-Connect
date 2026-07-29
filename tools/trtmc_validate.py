@@ -1413,6 +1413,132 @@ def _comparison_result(
     })
 
 
+def _should_revalidate_reused_bundle(
+    result: Mapping[str, Any],
+    arguments: argparse.Namespace,
+) -> bool:
+    """Return whether one accuracy failure needs a fresh-bundle confirmation.
+
+    This is intentionally separate from the worker execution retry policy:
+    comparison disagreements are normally never retried.  The sole exception
+    is a completed comparison that explicitly reports it reused a bundle.  A
+    single forced rebuild distinguishes a stale-cache false positive from a
+    reproducible model-family accuracy failure.
+    """
+    if bool(getattr(arguments, "force_build", False)) or bool(
+        getattr(arguments, "no_build", False)
+    ):
+        return False
+    execution = result.get("execution", {})
+    validation = result.get("validation", {})
+    raw_result = result.get("raw_result", {})
+    return (
+        isinstance(execution, Mapping)
+        and execution.get("status") == "completed"
+        and isinstance(validation, Mapping)
+        and validation.get("status") == "failed"
+        and isinstance(raw_result, Mapping)
+        and raw_result.get("bundle_built") is False
+    )
+
+
+def _archive_reused_bundle_failure(
+    *,
+    case_dir: Path,
+    result: Mapping[str, Any],
+) -> dict[str, str]:
+    """Preserve the pre-rebuild comparison receipt and its small text logs."""
+    archived: dict[str, str] = {}
+    comparison = case_dir / "comparison.reused-bundle.json"
+    comparison.write_text(
+        json.dumps(result, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    archived["comparison_result"] = str(comparison)
+    workload = str(result.get("workload", "") or "")
+    summary = case_dir / "validation" / workload / "eval_summary.json"
+    if summary.is_file():
+        target = summary.with_name("eval_summary.reused-bundle.json")
+        summary.replace(target)
+        archived["eval_summary.json"] = str(target)
+    for name in ("execution.log", "disagreements.jsonl"):
+        source = case_dir / name
+        if not source.is_file():
+            continue
+        target = case_dir / f"{source.stem}.reused-bundle{source.suffix}"
+        shutil.copy2(source, target)
+        archived[name] = str(target)
+    return archived
+
+
+def _reused_bundle_failure_receipt(
+    result: Mapping[str, Any],
+    archived: Mapping[str, str],
+) -> dict[str, Any]:
+    """Keep the first disagreement self-contained in the published result."""
+    execution = result.get("execution", {})
+    validation = result.get("validation", {})
+    comparison = result.get("comparison", {})
+    raw_result = result.get("raw_result", {})
+    return {
+        "execution_status": (
+            str(execution.get("status", ""))
+            if isinstance(execution, Mapping)
+            else ""
+        ),
+        "validation_status": (
+            str(validation.get("status", ""))
+            if isinstance(validation, Mapping)
+            else ""
+        ),
+        "comparison_status": (
+            str(comparison.get("status", ""))
+            if isinstance(comparison, Mapping)
+            else ""
+        ),
+        "bundle_built": (
+            raw_result.get("bundle_built")
+            if isinstance(raw_result, Mapping)
+            else None
+        ),
+        "error_type": (
+            str(raw_result.get("error_type", "") or "")
+            if isinstance(raw_result, Mapping)
+            else ""
+        ),
+        "error": (
+            str(raw_result.get("error", "") or "")
+            if isinstance(raw_result, Mapping)
+            else ""
+        ),
+        "metrics": (
+            dict(comparison.get("metrics", {}))
+            if isinstance(comparison, Mapping)
+            and isinstance(comparison.get("metrics"), Mapping)
+            else {}
+        ),
+        "artifacts": dict(archived),
+    }
+
+
+def _bundle_revalidation_outcome(result: Mapping[str, Any]) -> str:
+    raw_result = result.get("raw_result", {})
+    rebuilt = (
+        raw_result.get("bundle_built")
+        if isinstance(raw_result, Mapping)
+        else None
+    )
+    execution = result.get("execution", {})
+    validation = result.get("validation", {})
+    if not isinstance(execution, Mapping) or execution.get("status") != "completed":
+        return "rebuild_execution_error"
+    if rebuilt is not True:
+        return "rebuild_not_confirmed"
+    if isinstance(validation, Mapping) and validation.get("status") == "passed":
+        return "recovered_after_rebuild"
+    return "confirmed_after_rebuild"
+
+
 def run_binding(
     binding: Binding,
     *,
@@ -1470,6 +1596,37 @@ def run_binding(
         task_type=task_type,
         user_contract=user_contract,
     )
+    if _should_revalidate_reused_bundle(result, arguments):
+        initial_result = result
+        archived = _archive_reused_bundle_failure(
+            case_dir=case_dir,
+            result=initial_result,
+        )
+        rebuild_command = [*command, "--force-build"]
+        rebuild_returncode = _run_subprocess(
+            rebuild_command,
+            case_dir / "execution.log",
+            process_env,
+        )
+        result = _comparison_result(
+            binding,
+            case_dir=case_dir,
+            returncode=rebuild_returncode,
+            reference_environment=environment,
+            dataset_command=dataset_command,
+            sample_limit=int(arguments.limit or 0),
+        )
+        result["bundle_revalidation"] = {
+            "attempted": True,
+            "trigger": "accuracy_failure_with_reused_bundle",
+            "attempt_count": 1,
+            "outcome": _bundle_revalidation_outcome(result),
+            "initial": _reused_bundle_failure_receipt(
+                initial_result,
+                archived,
+            ),
+            "rebuild_command": shlex.join(rebuild_command),
+        }
 
     comparison = case_dir / "comparison.json"
     comparison.write_text(

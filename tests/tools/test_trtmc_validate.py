@@ -2702,6 +2702,232 @@ def test_run_binding_wires_reference_source_command_and_environment(
     assert captured["environment"]["EXTERNAL_REFERENCE_SENTINEL"] == "present"
 
 
+def _run_binding_with_comparison_results(
+    *,
+    tmp_path,
+    monkeypatch,
+    raw_results,
+    extra_args=(),
+):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "model-a",
+            "workload-a",
+            "--output",
+            str(tmp_path / "results"),
+            "--dataset",
+            str(tmp_path / "dataset.json"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+            *extra_args,
+        ]
+    )
+    commands = []
+    monkeypatch.setattr(
+        trtmc_validate,
+        "ensure_environments",
+        lambda _profiles, _base: trtmc_validate.EnvironmentSelection(
+            base_python="/profiles/python",
+            names_and_paths=(),
+            overrides={},
+        ),
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "ensure_reference_sources",
+        lambda _family, _cache: trtmc_validate.ReferenceSourceSelection(
+            environment={},
+        ),
+    )
+
+    def run(command, log_path, _environment):
+        commands.append(command)
+        log_path.write_text(f"run {len(commands)}\n", encoding="utf-8")
+        summary = (
+            log_path.parent
+            / "validation"
+            / "workload-a"
+            / "eval_summary.json"
+        )
+        summary.parent.mkdir(parents=True, exist_ok=True)
+        summary.write_text(
+            json.dumps({"run": len(commands)}),
+            encoding="utf-8",
+        )
+        return 0
+
+    comparisons = iter(raw_results)
+
+    def comparison_result(binding, **_kwargs):
+        raw_result = next(comparisons)
+        return trtmc_validate._normalize_result(
+            {
+                "model": binding.model,
+                "workload": binding.workload,
+                "status": raw_result["status"],
+                "returncode": 0,
+                "raw_result": raw_result,
+            }
+        )
+
+    monkeypatch.setattr(trtmc_validate, "_run_subprocess", run)
+    monkeypatch.setattr(trtmc_validate, "_comparison_result", comparison_result)
+    result = trtmc_validate.run_binding(
+        trtmc_validate.Binding("model-a", "workload-a"),
+        arguments=arguments,
+        task_models={
+            "model-a": {
+                "family": "family-a",
+                "runtime_strategy": "text_generation",
+                "reference_backend": "hf_transformers",
+                "execution_profiles": {},
+            }
+        },
+        suites={"workload-a": {}},
+    )
+    return result, commands, arguments
+
+
+def test_reused_bundle_accuracy_failure_rebuilds_once_and_recovers(
+    tmp_path,
+    monkeypatch,
+):
+    result, commands, arguments = _run_binding_with_comparison_results(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        raw_results=[
+            {
+                "status": "failed",
+                "bundle_built": False,
+                "prediction_agreement_rate": 0.25,
+                "gate_failures": [
+                    {
+                        "gate": "min_prediction_agreement_rate",
+                        "actual": 0.25,
+                        "required": 1.0,
+                    }
+                ],
+                "error_type": "BenchmarkGateError",
+                "error": (
+                    "min_prediction_agreement_rate actual=0.25 required=1.0"
+                ),
+            },
+            {
+                "status": "passed",
+                "bundle_built": True,
+                "prediction_agreement_rate": 1.0,
+            },
+        ],
+    )
+
+    assert len(commands) == 2
+    assert "--force-build" not in commands[0]
+    assert commands[1][-1] == "--force-build"
+    assert result["validation"]["status"] == "passed"
+    assert result["bundle_revalidation"]["outcome"] == "recovered_after_rebuild"
+    initial_receipt = result["bundle_revalidation"]["initial"]
+    assert initial_receipt["validation_status"] == "failed"
+    assert initial_receipt["bundle_built"] is False
+    assert initial_receipt["error_type"] == "BenchmarkGateError"
+    assert "actual=0.25" in initial_receipt["error"]
+    assert initial_receipt["metrics"]["prediction_agreement_rate"] == 0.25
+    initial = Path(initial_receipt["artifacts"]["comparison_result"])
+    assert initial.is_file()
+    initial_summary = Path(
+        initial_receipt["artifacts"]["eval_summary.json"]
+    )
+    assert json.loads(initial_summary.read_text(encoding="utf-8")) == {"run": 1}
+    assert (
+        arguments.output
+        / "model-a"
+        / "workload-a"
+        / "execution.reused-bundle.log"
+    ).is_file()
+
+
+def test_reused_bundle_accuracy_failure_rebuilds_once_and_confirms_failure(
+    tmp_path,
+    monkeypatch,
+):
+    result, commands, _arguments = _run_binding_with_comparison_results(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        raw_results=[
+            {
+                "status": "failed",
+                "bundle_built": False,
+                "prediction_agreement_rate": 0.25,
+            },
+            {
+                "status": "failed",
+                "bundle_built": True,
+                "prediction_agreement_rate": 0.50,
+            },
+        ],
+    )
+
+    assert len(commands) == 2
+    assert commands[1].count("--force-build") == 1
+    assert result["validation"]["status"] == "failed"
+    assert result["bundle_revalidation"]["outcome"] == "confirmed_after_rebuild"
+
+
+def test_passing_reused_bundle_does_not_trigger_rebuild(
+    tmp_path,
+    monkeypatch,
+):
+    result, commands, _arguments = _run_binding_with_comparison_results(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        raw_results=[
+            {
+                "status": "passed",
+                "bundle_built": False,
+                "prediction_agreement_rate": 1.0,
+            }
+        ],
+    )
+
+    assert len(commands) == 1
+    assert "--force-build" not in commands[0]
+    assert result["validation"]["status"] == "passed"
+    assert "bundle_revalidation" not in result
+
+
+@pytest.mark.parametrize(
+    ("flag", "forwarded"),
+    [
+        ("--force-build", "--force-build"),
+        ("--no-build", "--require-prebuilt-bundles"),
+    ],
+)
+def test_explicit_bundle_build_policy_does_not_trigger_revalidation(
+    tmp_path,
+    monkeypatch,
+    flag,
+    forwarded,
+):
+    result, commands, _arguments = _run_binding_with_comparison_results(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        raw_results=[
+            {
+                "status": "failed",
+                "bundle_built": False,
+                "prediction_agreement_rate": 0.25,
+            }
+        ],
+        extra_args=(flag,),
+    )
+
+    assert len(commands) == 1
+    assert forwarded in commands[0]
+    assert result["validation"]["status"] == "failed"
+    assert "bundle_revalidation" not in result
+
+
 def test_compare_entrypoint_forwards_to_validation_backend(monkeypatch):
     captured = []
 
