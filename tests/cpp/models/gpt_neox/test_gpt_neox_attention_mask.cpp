@@ -68,8 +68,7 @@ void test_batched_prefill_mask_uses_numerically_safe_sentinel() {
     check(mask[1 * 7 + 4] == 0.0F && mask[1 * 7 + 5] == 0.0F,
           "prefill row 1 sees prompt tokens 0 and 1");
     check_masked(mask[1 * 7 + 6], "prefill row 1 masks future token 2");
-    check(mask[2 * 7 + 4] == 0.0F && mask[2 * 7 + 5] == 0.0F &&
-              mask[2 * 7 + 6] == 0.0F,
+    check(mask[2 * 7 + 4] == 0.0F && mask[2 * 7 + 5] == 0.0F && mask[2 * 7 + 6] == 0.0F,
           "prefill row 2 sees the full causal prefix");
 }
 
