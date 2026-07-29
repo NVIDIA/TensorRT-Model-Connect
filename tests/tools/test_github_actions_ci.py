@@ -41,6 +41,114 @@ def _single_default_model_config(filename: str) -> tuple[Path, dict]:
     return defaults[0]
 
 
+def test_internal_ci_bridge_only_dispatches_an_exact_trusted_snapshot() -> None:
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml"
+    ).read_text(encoding="utf-8")
+    legacy_premerge = (
+        REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml"
+    ).read_text(encoding="utf-8")
+    authorize = workflow.split("\n  authorize:", maxsplit=1)[1].split(
+        "\n  dispatch:", maxsplit=1
+    )[0]
+    dispatch = workflow.split("\n  dispatch:", maxsplit=1)[1]
+    authorize_permissions = authorize.split(
+        "    permissions:", maxsplit=1
+    )[1].split("\n    outputs:", maxsplit=1)[0]
+    dispatch_permissions = dispatch.split("    permissions:", maxsplit=1)[1].split(
+        "\n\n", maxsplit=1
+    )[0]
+
+    assert "pull_request_target:" in workflow
+    assert "name: TensorRT-Model-Connect Internal CI Bridge" in workflow
+    assert "types: [labeled]" in workflow
+    assert "github.event.label.name == 'run-internal-ci'" in workflow
+    assert "run-internal-ci" not in legacy_premerge
+    assert "/labels/run-ci" not in workflow
+    assert "workflow_dispatch:" in workflow
+    assert "github.repository == 'NVIDIA/TensorRT-Model-Connect'" in workflow
+    assert "github.event_name == 'workflow_dispatch'" in workflow
+    assert "github.event_name == 'pull_request_target'" in workflow
+    assert "github.ref == 'refs/heads/main'" in workflow
+    assert "permissions: {}" in workflow
+    assert authorize_permissions.strip() == "pull-requests: write"
+    assert dispatch_permissions.strip() == "statuses: write"
+
+    assert "collaborators/$ACTOR/permission" in authorize
+    assert "write|maintain|admin)" in authorize
+    assert "Only actors with write, maintain, or admin access" in authorize
+    assert "environment:" not in authorize
+    assert "secrets." not in authorize
+    assert "statuses: write" not in authorize
+    assert 'pull="$(gh api --method GET' in authorize
+    assert 'test "$state" = "open"' in authorize
+    assert 'test "$base_repo" = "$GITHUB_REPOSITORY"' in authorize
+    assert 'test "$base_ref" = "main"' in authorize
+    assert 'if [ "$EVENT_NAME" = "pull_request_target" ]; then' in authorize
+    assert 'test "$base_sha" = "$EVENT_BASE_SHA"' in authorize
+    assert 'test "$head_sha" = "$EVENT_HEAD_SHA"' in authorize
+    for name in ("base_sha", "head_sha", "merge_sha"):
+        assert f'[[ "${name}" =~ ^[0-9a-f]{{40}}$ ]]' in authorize
+        assert f'echo "{name}=${name}"' in authorize
+    assert "pr_number=$PR_NUMBER" in authorize
+    assert (
+        "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/run-internal-ci"
+    ) in authorize
+    assert "gh api --silent --method DELETE" in authorize
+
+    assert "needs: authorize" in dispatch
+    assert "environment: ci-dispatch" in dispatch
+    secret_references = set(re.findall(r"secrets\.([A-Z][A-Z0-9_]*)", workflow))
+    assert secret_references == {
+        "TRTMC_CI_DISPATCH_TOKEN",
+        "TRTMC_PRIVATE_CI_OWNER",
+        "TRTMC_PRIVATE_CI_REPOSITORY",
+    }
+    for secret in secret_references:
+        assert secret not in authorize
+        assert secret in dispatch
+    assert workflow.count("${{ secrets.TRTMC_CI_DISPATCH_TOKEN }}") == 1
+
+    assert "actions/create-github-app-token@" not in workflow
+    assert "permission-checks:" not in workflow
+    assert "actions/checkout@" not in workflow
+    assert "private_ci_bridge.py" not in workflow
+    assert "self-hosted" not in workflow
+    assert "secrets: inherit" not in workflow
+    assert "NVIDIA-dev/TensorRT-Model-Connect-CI" not in workflow
+    assert (
+        "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/"
+        "actions/workflows/premerge.yml/dispatches"
+    ) in workflow
+    assert re.search(r'"/repos/[A-Za-z0-9]', workflow) is None
+    assert '[[ "$PRIVATE_CI_OWNER" =~ ^[A-Za-z0-9]' in workflow
+    assert '[[ "$PRIVATE_CI_REPOSITORY" =~ ^[A-Za-z0-9]' in workflow
+    assert 'echo "$PRIVATE_CI_' not in dispatch
+    assert "GITHUB_STEP_SUMMARY" not in dispatch
+
+    assert "/repos/$GITHUB_REPOSITORY/statuses/$MERGE_SHA" in dispatch
+    assert "-f state=pending" in dispatch
+    assert "-f state=failure" in dispatch
+    assert dispatch.count("-f context=trtmc/premerge/required") == 2
+    assert '-f description="PENDING: TensorRT-Model-Connect premerge"' in dispatch
+    assert (
+        '-f description="FAIL: TensorRT-Model-Connect premerge dispatch"'
+    ) in dispatch
+    assert dispatch.count(
+        '-f target_url="https://github.com/$GITHUB_REPOSITORY/tree/$MERGE_SHA/tests"'
+    ) == 2
+    assert dispatch.index("/statuses/$MERGE_SHA") < dispatch.index(
+        "actions/workflows/premerge.yml/dispatches"
+    )
+
+    assert 'ref: "main"' in dispatch
+    for name in ("pr_number", "base_sha", "head_sha", "merge_sha"):
+        assert f"{name}: ${name}" in dispatch
+    assert "umask 077" in dispatch
+    assert 'trap \'rm -f "$payload"\' EXIT' in dispatch
+    assert 'if: ${{ failure() }}' in dispatch
+
+
 def test_ci_orchestration_uses_the_class_based_python_entrypoint() -> None:
     legacy_scripts = (
         ".github/scripts/ensure-ci-docker-image.sh",
