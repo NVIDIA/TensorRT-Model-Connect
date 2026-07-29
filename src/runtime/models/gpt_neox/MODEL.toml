@@ -5,5 +5,8 @@ id = "gpt_neox"
 runtime_library = "libtrtmc_model_gpt_neox.so"
 runtime_plugins = ["plugin.cpp|register_gpt_neox_plugin"]
 runtime_strategies = ["gpt_neox_decoder_kv_cache"]
+runtime_tests = [
+  "test_gpt_neox_attention_mask|test_gpt_neox_attention_mask.cpp|trtmc_model_gpt_neox|_|_",
+]
 [validation_profiles]
 decoder_debug = ["gpt_neox_decoder_kv_cache"]

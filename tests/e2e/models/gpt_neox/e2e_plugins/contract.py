@@ -103,6 +103,27 @@ def levenshtein_ned(a: str, b: str) -> float:
     return prev[-1] / max_len
 
 
+def generated_token_ids(output) -> list[int] | None:
+    raw_tokens = (output.data or {}).get("token_ids")
+    if not isinstance(raw_tokens, list):
+        return None
+    try:
+        return [int(token) for token in raw_tokens]
+    except (TypeError, ValueError):
+        return None
+
+
+def positional_token_agreement(lhs: list[int], rhs: list[int]) -> float:
+    total = max(len(lhs), len(rhs))
+    if total == 0:
+        return 1.0
+    matches = sum(
+        lhs[index] == rhs[index]
+        for index in range(min(len(lhs), len(rhs)))
+    )
+    return matches / total
+
+
 def make_pass(stage_name: str, metrics, rule: str = ""):
     from tests.e2e_harness.contracts import CompareResult
     return CompareResult(
@@ -220,6 +241,58 @@ class GptNeoxCausalContinuationPlugin:
                 note=f"first {prefix_len} chars",
             ),
         }
+
+        token_gate_ok = True
+        token_threshold = threshold.metrics.get(
+            "contract_token_agreement_rate")
+        if token_threshold is not None:
+            trt_tokens = generated_token_ids(trt_output)
+            ref_tokens = generated_token_ids(ref_output)
+            if trt_tokens is None or ref_tokens is None:
+                missing = []
+                if trt_tokens is None:
+                    missing.append("TRT")
+                if ref_tokens is None:
+                    missing.append("HF reference")
+                metrics["generated_token_ids_available"] = MetricResult(
+                    value=0.0,
+                    threshold=1.0,
+                    operator="==",
+                    passed=False,
+                    note=f"missing generated token IDs from {' and '.join(missing)}",
+                )
+                return make_fail(
+                    "full_generation",
+                    metrics,
+                    "generated token IDs required for configured token parity",
+                    metrics["generated_token_ids_available"].note,
+                )
+
+            token_agreement = positional_token_agreement(
+                trt_tokens, ref_tokens)
+            token_exact = trt_tokens == ref_tokens
+            exact_required = float(token_threshold) >= 1.0
+            metrics["generated_token_agreement_rate"] = MetricResult(
+                value=token_agreement,
+                threshold=float(token_threshold),
+                operator=">=",
+                passed=token_agreement >= float(token_threshold),
+                note=(
+                    f"TRT tokens={len(trt_tokens)}, "
+                    f"HF reference tokens={len(ref_tokens)}"
+                ),
+            )
+            metrics["generated_token_exact"] = MetricResult(
+                value=1.0 if token_exact else 0.0,
+                threshold=1.0 if exact_required else None,
+                operator="==" if exact_required else "",
+                passed=token_exact if exact_required else True,
+            )
+            token_gate_ok = (
+                token_agreement >= float(token_threshold)
+                and (token_exact or not exact_required)
+            )
+
         if reconstruction_check:
             metrics["non_empty_trt_text"] = MetricResult(
                 value=1.0 if trt_text else 0.0,
@@ -236,11 +309,16 @@ class GptNeoxCausalContinuationPlugin:
                 note="visible HF reconstruction text",
             )
 
-        passed = ned <= ned_threshold
+        passed = ned <= ned_threshold and token_gate_ok
         rule = (
             "seq2seq reconstruction parity against HF reference"
             if reconstruction_check
-            else "ned <= threshold (continuation parity)"
+            else (
+                "ned <= threshold and configured generated-token parity "
+                "(continuation parity)"
+                if token_threshold is not None
+                else "ned <= threshold (continuation parity)"
+            )
         )
         if passed:
             return make_pass("full_generation", metrics, rule)
@@ -248,7 +326,10 @@ class GptNeoxCausalContinuationPlugin:
             "full_generation",
             metrics,
             rule,
-            f"Continuation diverged: NED={ned:.3f}",
+            (
+                f"Continuation diverged: NED={ned:.3f}, "
+                f"token_gate_ok={token_gate_ok}"
+            ),
         )
 
 plugin = GptNeoxCausalContinuationPlugin()

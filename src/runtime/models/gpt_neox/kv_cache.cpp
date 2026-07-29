@@ -67,7 +67,7 @@ GptNeoxKvCache::GptNeoxKvCache(int32_t num_layers, int32_t max_length, int32_t k
 }
 
 // Masked score constant is model-local.
-static constexpr float kMaskedScore = -1.0e4F;
+static constexpr float kMaskedScore = -1.0e9F;
 
 void GptNeoxKvCache::build_attention_mask(std::vector<float>& mask) const {
     // DEPRECATED: use prepare_step() instead.
