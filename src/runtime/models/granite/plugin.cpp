@@ -10,15 +10,14 @@
 #include "runtime/models/granite/chat_templates.h"
 #include "runtime/models/granite/pipeline.h"
 #include "runtime/models/granite/tensor_names.h"
-#include "runtime/models/granite/triattention_kv_cache.h"
 #include "trtmc/config/config_bundle.h"
-#include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -34,29 +33,11 @@ struct KvCacheRuntimeSizing {
     int32_t runtime_rows{0};
     std::uint64_t row_bytes{0};
     std::uint64_t cache_bytes{0};
-    bool override_applied{false};
-    bool clamped_to_bundle_max{false};
 };
 
 struct TensorParallelRuntimeConfig {
     bool enabled{false};
     int32_t tp_size{1};
-};
-
-struct TensorParallelRuntime {
-    TensorParallelRuntimeConfig config;
-    DistributedRuntimeGroup group;
-};
-
-struct DecoderProfileInfo {
-    int32_t profile_idx{0};
-    int32_t kv_rows{0};
-};
-
-struct DecoderProfileRoles {
-    int32_t prefill_profile_idx{-1};
-    int32_t prefill_max_length{0};
-    std::vector<DecoderProfileInfo> decode_profiles;
 };
 
 int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
@@ -69,40 +50,32 @@ int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
 }
 
 int32_t cache_row_dim_from_module(const TrtModule& module, const std::string& tensor_name) {
-    const int32_t static_dim = dim_at(module.tensor_shape(tensor_name), 1);
+    const auto row_dim = [](const std::vector<int64_t>& shape) -> int32_t {
+        if (shape.size() == 2)
+            return dim_at(shape, 1);
+        if (shape.size() == 4) {
+            const int32_t heads = dim_at(shape, 1);
+            const int32_t head_dim = dim_at(shape, 3);
+            if (heads > 0 && head_dim > 0 &&
+                heads <= std::numeric_limits<int32_t>::max() / head_dim) {
+                return heads * head_dim;
+            }
+        }
+        return -1;
+    };
+
+    const int32_t static_dim = row_dim(module.tensor_shape(tensor_name));
     if (static_dim > 0)
         return static_dim;
     const int32_t profile_count = module.optimization_profile_count();
     for (int32_t profile_idx = 0; profile_idx < profile_count; ++profile_idx) {
-        const int32_t profile_dim = dim_at(
-            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax), 1);
+        const int32_t profile_dim = row_dim(
+            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax));
         if (profile_dim > 0)
             return profile_dim;
     }
     throw std::runtime_error("Unable to infer KV row width from engine tensor '" + tensor_name +
                              "'");
-}
-
-bool cache_input_is_dynamic(const TrtModule& module, const std::string& tensor_name) {
-    const auto shape = module.tensor_shape(tensor_name);
-    return !shape.empty() && shape[0] == -1;
-}
-
-bool cache_input_supports_runtime_rows(const TrtModule& module, const std::string& tensor_name) {
-    if (!cache_input_is_dynamic(module, tensor_name))
-        return false;
-    const int32_t num_profiles = module.optimization_profile_count();
-    if (num_profiles <= 0)
-        return false;
-    for (int32_t profile_idx = 0; profile_idx < num_profiles; ++profile_idx) {
-        const int32_t min_rows = dim_at(
-            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMin), 0);
-        const int32_t max_rows = dim_at(
-            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax), 0);
-        if (min_rows > 0 && max_rows > min_rows)
-            return true;
-    }
-    return false;
 }
 
 TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::string& config_json) {
@@ -113,65 +86,9 @@ TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::stri
     return cfg;
 }
 
-std::string tp_engine_section_name(int32_t rank) {
-    return "engine_plan_tp_rank" + std::to_string(rank);
-}
-
-int32_t profile_token_max_length(const TrtModule& module, const std::string& token_id_name,
-                                 int32_t profile_idx) {
-    return dim_at(
-        module.input_profile_shape(token_id_name, profile_idx, ProfileShapeSelector::kMax), 0);
-}
-
-int32_t profile_cache_rows(const TrtModule& module, const std::string& cache_name,
-                           int32_t profile_idx, int32_t fallback_rows) {
-    const int32_t static_rows = dim_at(module.tensor_shape(cache_name), 0);
-    if (static_rows > 0)
-        return static_rows;
-
-    if (profile_idx >= 0 && profile_idx < module.optimization_profile_count()) {
-        const int32_t max_rows = dim_at(
-            module.input_profile_shape(cache_name, profile_idx, ProfileShapeSelector::kMax), 0);
-        if (max_rows > 0)
-            return max_rows;
-    }
-    return fallback_rows;
-}
-
-DecoderProfileRoles detect_decoder_profile_roles(const TrtModule& module,
-                                                 const std::string& token_id_name,
-                                                 const std::string& cache_k_name,
-                                                 int32_t fallback_rows) {
-    DecoderProfileRoles roles;
-    const int32_t num_profiles = module.optimization_profile_count();
-    if (num_profiles <= 0) {
-        roles.decode_profiles.push_back(DecoderProfileInfo{0, fallback_rows});
-        return roles;
-    }
-
-    for (int32_t profile_idx = 0; profile_idx < num_profiles; ++profile_idx) {
-        const int32_t token_max = profile_token_max_length(module, token_id_name, profile_idx);
-        if (token_max > 1) {
-            if (token_max > roles.prefill_max_length) {
-                roles.prefill_profile_idx = profile_idx;
-                roles.prefill_max_length = token_max;
-            }
-            continue;
-        }
-
-        roles.decode_profiles.push_back(DecoderProfileInfo{
-            profile_idx, profile_cache_rows(module, cache_k_name, profile_idx, fallback_rows)});
-    }
-
-    if (roles.decode_profiles.empty()) {
-        const int32_t fallback_profile =
-            roles.prefill_profile_idx >= 0 ? roles.prefill_profile_idx : 0;
-        roles.decode_profiles.push_back(DecoderProfileInfo{
-            fallback_profile,
-            profile_cache_rows(module, cache_k_name, fallback_profile, fallback_rows)});
-    }
-
-    return roles;
+int32_t profile_token_length(const TrtModule& module, const std::string& token_id_name,
+                             ProfileShapeSelector selector) {
+    return dim_at(module.input_profile_shape(token_id_name, 0, selector), 0);
 }
 
 std::string format_bytes(std::uint64_t bytes) {
@@ -194,58 +111,157 @@ std::string format_bytes(std::uint64_t bytes) {
     return oss.str();
 }
 
-KvCacheRuntimeSizing
-resolve_kv_cache_runtime_sizing(const PipelineContext& ctx, const TrtModule& module,
-                                const GraniteKvCacheNames& kv_names, DType cache_dtype,
-                                const GraniteTriAttentionConfig& tri_cfg, int32_t kv_dim) {
+void require_native_kv_inputs(const TrtModule& module, const GraniteKvCacheNames& kv_names) {
+    const bool has_write_indices = module.has_input(kv_names.cache_write_indices);
+    const bool has_kv_lengths = module.has_input(kv_names.key_value_lengths);
+    if (!has_write_indices || !has_kv_lengths)
+        throw std::runtime_error("Granite bundles must use TensorRT native KV inputs "
+                                 "cache_write_indices and key_value_lengths");
+}
+
+void validate_native_kv_marker(const std::string& config_json) {
+    const bool declares_native_kv = extract_json_bool(config_json, "native_kv_cache", false);
+    if (!declares_native_kv ||
+        extract_json_int(config_json, "native_kv_contract_version", 0) != 1) {
+        throw std::runtime_error("Granite native KV metadata does not match the engine contract");
+    }
+}
+
+bool valid_native_cache_shape(const std::vector<int64_t>& shape, const PipelineContext& ctx) {
+    if (shape.size() != 4)
+        return false;
+    if (shape[0] != 1 || shape[1] != ctx.config.num_kv_heads)
+        return false;
+    if (shape[2] != ctx.config.max_cache_length)
+        return false;
+    return shape[3] == 64 || shape[3] == 128;
+}
+
+std::uint64_t checked_multiply(std::uint64_t lhs, std::uint64_t rhs) {
+    if (lhs != 0 && rhs > std::numeric_limits<std::uint64_t>::max() / lhs)
+        throw std::overflow_error("Granite native KV byte accounting overflow");
+    return lhs * rhs;
+}
+
+void admit_native_kv_allocation(const PipelineContext& ctx, const KvCacheRuntimeSizing& sizing) {
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    const cudaError_t status = cudaMemGetInfo(&free_bytes, &total_bytes);
+    if (status != cudaSuccess) {
+        throw std::runtime_error(std::string("Granite native KV CUDA memory query failed: ") +
+                                 cudaGetErrorString(status));
+    }
+
+    constexpr std::uint64_t kTwoGiB = 2ULL << 30;
+    const auto free = static_cast<std::uint64_t>(free_bytes);
+    const auto total = static_cast<std::uint64_t>(total_bytes);
+    const auto reserve = std::max(kTwoGiB, total / 10);
+    const auto available = free > reserve ? free - reserve : 0;
+    if (sizing.cache_bytes > available) {
+        throw std::runtime_error(
+            "Granite native KV cache admission failed before allocation: capacity=" +
+            std::to_string(ctx.config.max_cache_length) +
+            " tokens, required=" + format_bytes(sizing.cache_bytes) +
+            ", free=" + format_bytes(free) + ", reserve=" + format_bytes(reserve));
+    }
+}
+
+void reject_native_kv_size_override(const PipelineContext& ctx) {
+    if (ctx.kv_cache_size_bytes != 0) {
+        throw std::invalid_argument(
+            "Granite native TensorRT KV cache allocates the model's complete fixed "
+            "capacity; kv_cache_size_bytes is not supported");
+    }
+}
+
+void reject_legacy_cache_runtime(const PipelineContext& ctx) {
+    if (ctx.runtime_config == nullptr)
+        return;
+    bool enabled = false;
+    try {
+        enabled = ctx.runtime_config->get<bool>("triattention", "enabled");
+    } catch (const std::exception&) {
+        // A runtime without the retired schema has nothing to reject.
+    }
+    if (enabled)
+        throw std::invalid_argument(
+            "Granite native KV does not support the retired TriAttention cache");
+}
+
+KvCacheRuntimeSizing resolve_kv_cache_runtime_sizing(const PipelineContext& ctx, DType cache_dtype,
+                                                     int32_t kv_dim) {
     KvCacheRuntimeSizing sizing;
-    const auto elem_bytes = static_cast<std::uint64_t>(dtype_size(cache_dtype));
-    sizing.row_bytes = static_cast<std::uint64_t>(ctx.config.num_layers) *
-                       static_cast<std::uint64_t>(kv_dim) * elem_bytes * 2ULL;
-    if (sizing.row_bytes == 0)
-        throw std::runtime_error("Computed zero bytes per KV row");
-
     const int32_t bundle_max_rows = ctx.config.max_cache_length;
+    if (ctx.config.num_layers <= 0 || kv_dim <= 0 || bundle_max_rows <= 0)
+        throw std::runtime_error("Granite KV geometry must be positive");
+    sizing.row_bytes = checked_multiply(
+        checked_multiply(checked_multiply(static_cast<std::uint64_t>(ctx.config.num_layers),
+                                          static_cast<std::uint64_t>(kv_dim)),
+                         static_cast<std::uint64_t>(dtype_size(cache_dtype))),
+        2);
     sizing.runtime_rows = bundle_max_rows;
-    sizing.cache_bytes = static_cast<std::uint64_t>(bundle_max_rows) * sizing.row_bytes;
+    sizing.cache_bytes =
+        checked_multiply(static_cast<std::uint64_t>(bundle_max_rows), sizing.row_bytes);
 
-    if (ctx.kv_cache_size_bytes == 0)
-        return sizing;
-
-    if (!cache_input_supports_runtime_rows(module, kv_names.cache_k.front())) {
-        throw std::runtime_error(
-            "This bundle was not built with runtime-resizable KV cache support. "
-            "Rebuild with trtmc build --dynamic-kv-cache to use --kv-cache-size.");
-    }
-
-    const std::uint64_t requested_rows_u64 = ctx.kv_cache_size_bytes / sizing.row_bytes;
-    if (requested_rows_u64 == 0) {
-        throw std::runtime_error("--kv-cache-size is smaller than one KV row (" +
-                                 format_bytes(sizing.row_bytes) + ")");
-    }
-
-    std::uint64_t runtime_rows_u64 = requested_rows_u64;
-    if (runtime_rows_u64 > static_cast<std::uint64_t>(bundle_max_rows)) {
-        runtime_rows_u64 = static_cast<std::uint64_t>(bundle_max_rows);
-        sizing.clamped_to_bundle_max = true;
-    }
-    if (runtime_rows_u64 > static_cast<std::uint64_t>(std::numeric_limits<int32_t>::max())) {
-        throw std::runtime_error("Resolved KV cache rows exceed int32 runtime limits");
-    }
-
-    sizing.runtime_rows = static_cast<int32_t>(runtime_rows_u64);
-    sizing.cache_bytes = runtime_rows_u64 * sizing.row_bytes;
-    sizing.override_applied = true;
-
-    if (tri_cfg.enabled && sizing.runtime_rows < tri_cfg.kv_budget) {
-        const auto minimum_bytes = static_cast<std::uint64_t>(tri_cfg.kv_budget) * sizing.row_bytes;
-        throw std::runtime_error(
-            "--kv-cache-size resolves to " + std::to_string(sizing.runtime_rows) +
-            " rows, but this TriAttention bundle needs at least " +
-            std::to_string(tri_cfg.kv_budget) + " rows (" + format_bytes(minimum_bytes) + ")");
-    }
-
+    reject_native_kv_size_override(ctx);
     return sizing;
+}
+
+void validate_native_kv_runtime(const PipelineContext& ctx, const TrtModule& module,
+                                const GraniteKvCacheNames& kv_names, DType cache_dtype,
+                                const TensorParallelRuntimeConfig& tp_config) {
+    validate_native_kv_marker(ctx.config_json);
+    require_native_kv_inputs(module, kv_names);
+    if (!module.has_output(ctx.config.io_map.logits) ||
+        module.tensor_dtype(ctx.config.io_map.logits) != DType::kFloat32) {
+        throw std::runtime_error("Granite native KV requires FP32 logits output");
+    }
+    if (cache_dtype != DType::kFloat16 || tp_config.enabled) {
+        throw std::runtime_error("Granite native KV requires FP16 and a single-GPU runtime");
+    }
+
+    if (!valid_native_cache_shape(module.tensor_shape(kv_names.cache_k.front()), ctx)) {
+        throw std::runtime_error("Granite native KV requires cache shape "
+                                 "[1,num_kv_heads,capacity,head_dim] with head_dim 64 or 128");
+    }
+}
+
+void reject_tensor_parallel(const TensorParallelRuntimeConfig& tp_config) {
+    if (tp_config.enabled)
+        throw std::runtime_error("Granite native KV does not support tensor-parallel bundles");
+}
+
+void validate_decode_profile(const TrtModule& module, const std::string& token_id_name) {
+    if (profile_token_length(module, token_id_name, ProfileShapeSelector::kMin) != 1 ||
+        profile_token_length(module, token_id_name, ProfileShapeSelector::kOpt) != 1 ||
+        profile_token_length(module, token_id_name, ProfileShapeSelector::kMax) != 1) {
+        throw std::runtime_error("Granite native decode engine profile must be fixed to one token");
+    }
+}
+
+int32_t validate_prefill_profile(const TrtModule& module, const std::string& token_id_name,
+                                 int32_t cache_capacity) {
+    const int32_t min_length =
+        profile_token_length(module, token_id_name, ProfileShapeSelector::kMin);
+    const int32_t opt_length =
+        profile_token_length(module, token_id_name, ProfileShapeSelector::kOpt);
+    const int32_t max_length =
+        profile_token_length(module, token_id_name, ProfileShapeSelector::kMax);
+    if (min_length != 1 || opt_length < min_length || opt_length > max_length || max_length <= 1 ||
+        max_length > cache_capacity) {
+        throw std::runtime_error(
+            "Granite native prefill profile must be ordered, start at one token, "
+            "span multiple tokens, and fit the KV capacity");
+    }
+    return max_length;
+}
+
+void validate_matching_kv_width(const TrtModule& module, const GraniteKvCacheNames& kv_names,
+                                int32_t expected_kv_dim) {
+    if (cache_row_dim_from_module(module, kv_names.cache_k.front()) != expected_kv_dim) {
+        throw std::runtime_error(
+            "Granite native prefill and decode engines must use the same KV row width");
+    }
 }
 
 } // namespace
@@ -253,7 +269,6 @@ resolve_kv_cache_runtime_sizing(const PipelineContext& ctx, const TrtModule& mod
 class DecoderPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
-        load_ffi_kernels_from_bundle(ctx.bundle);
         apply_text_trace_from_registry(ctx.runtime_config);
 
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
@@ -262,59 +277,43 @@ class DecoderPlugin final : public IPipelinePlugin {
         build_kv_names(ctx, io, kv_names);
 
         const DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
-        GraniteTriAttentionConfig tri_cfg = granite_parse_triattention_bundle_config(
-            ctx.config_json, ctx.config.max_cache_length, ctx.runtime_config);
+        reject_legacy_cache_runtime(ctx);
 
-        TensorParallelRuntime tp_runtime;
-        tp_runtime.config = parse_tensor_parallel_runtime_config(ctx.config_json);
-        if (tp_runtime.config.enabled)
-            tp_runtime.group = initialize_tensor_parallel_group(tp_runtime.config.tp_size);
+        const auto tp_config = parse_tensor_parallel_runtime_config(ctx.config_json);
+        reject_tensor_parallel(tp_config);
 
-        const std::string engine_section = tp_runtime.config.enabled
-                                               ? tp_engine_section_name(tp_runtime.group.rank)
-                                               : std::string("engine_plan");
-        auto profile_modules =
-            load_decoder_profile_modules(ctx, engine_section, nullptr, &tp_runtime);
-        if (profile_modules.modules.empty())
-            throw std::runtime_error("No decoder engine profiles were loaded");
-        TrtModule& metadata_module = *profile_modules.modules.front().module;
+        auto decoder = load_single_profile_module(ctx, "engine_plan", nullptr, "decode");
+        validate_native_kv_runtime(ctx, *decoder, kv_names, cache_dtype, tp_config);
+        validate_decode_profile(*decoder, io.token_id);
+        const int32_t kv_dim = cache_row_dim_from_module(*decoder, kv_names.cache_k.front());
+        const auto sizing = resolve_kv_cache_runtime_sizing(ctx, cache_dtype, kv_dim);
+        cudaStream_t stream = decoder->stream();
 
-        const int32_t kv_dim = cache_row_dim_from_module(metadata_module, kv_names.cache_k.front());
-        const auto sizing = resolve_kv_cache_runtime_sizing(ctx, metadata_module, kv_names,
-                                                            cache_dtype, tri_cfg, kv_dim);
+        auto prefill_module =
+            load_single_profile_module(ctx, "prefill_engine_plan", stream, "prefill");
+        validate_native_kv_runtime(ctx, *prefill_module, kv_names, cache_dtype, tp_config);
+        validate_matching_kv_width(*prefill_module, kv_names, kv_dim);
+        const int32_t prefill_max_length =
+            validate_prefill_profile(*prefill_module, io.token_id, sizing.runtime_rows);
 
-        const auto decode_profile_roles = detect_decoder_profile_roles(
-            metadata_module, io.token_id, kv_names.cache_k.front(), ctx.config.max_cache_length);
+        std::vector<GraniteTextGenerationPipeline::DecoderContext> decoders;
+        decoders.push_back(
+            GraniteTextGenerationPipeline::DecoderContext{sizing.runtime_rows, std::move(decoder)});
 
-        std::unique_ptr<TrtModule> prefill_module;
-        auto decoders = build_decoder_contexts(std::move(profile_modules), sizing.runtime_rows,
-                                               decode_profile_roles, prefill_module);
-        cudaStream_t stream = decoders.front().module->stream();
-
-        int32_t prefill_profile_idx = decode_profile_roles.prefill_profile_idx;
-        int32_t prefill_max_length = decode_profile_roles.prefill_max_length;
-        std::string prefill_log_label;
-        if (!tp_runtime.config.enabled) {
-            auto split_prefill_module =
-                load_split_prefill_module(ctx, stream, io, kv_names, prefill_profile_idx,
-                                          prefill_max_length, prefill_log_label);
-            if (split_prefill_module)
-                prefill_module = std::move(split_prefill_module);
-        }
-
-        auto state =
-            build_inference_state(ctx, sizing, tri_cfg, cache_dtype, kv_dim, kv_names, stream);
+        // Split prefill deserialization can consume additional execution-context
+        // memory. Admit the KV allocation against the free memory that remains
+        // after every engine/context needed by this pipeline has been loaded.
+        admit_native_kv_allocation(ctx, sizing);
+        auto state = build_inference_state(ctx, sizing, cache_dtype, kv_dim, kv_names, stream);
         log_kv_cache_sizing(ctx, sizing, state.get());
 
         GraniteTextGenConfig tgc;
         populate_text_gen_config(ctx, tgc, io, decoders.front(), ctx.runtime_config);
         apply_chat_template_format(ctx.bundle, tgc);
-        // Wire batched prefill: the pipeline forwards the whole prompt
-        // through `prefill_module` (TRT optimization profile 0) and copies
-        // per-layer K/V into the shared cache via write_prefill_kv.
+        // Native TensorRT KV engines update the shared aliased cache in place.
         tgc.prefill_max_length = prefill_max_length;
-        tgc.prefill_profile_index = prefill_profile_idx;
-        tgc.prefill_log_label = std::move(prefill_log_label);
+        tgc.prefill_profile_index = 0;
+        tgc.prefill_log_label = "prefill engine";
         tgc.num_layers = ctx.config.num_layers;
         tgc.kv_dim = kv_dim;
         tgc.present_k_pattern = io.present_k_pattern;
@@ -322,33 +321,42 @@ class DecoderPlugin final : public IPipelinePlugin {
 
         return std::make_unique<GraniteTextGenerationPipeline>(
             std::move(decoders), std::move(state), tgc, stream, std::move(tokenizer),
-            ctx.bundle.info.model_id, nullptr, std::move(prefill_module), nullptr,
-            tp_runtime.group.owner);
+            ctx.bundle.info.model_id, nullptr, std::move(prefill_module), nullptr);
     }
 
   private:
-    static std::unique_ptr<TrtModule>
-    load_split_prefill_module(const PipelineContext& ctx, cudaStream_t stream, const IoMap& io,
-                              const GraniteKvCacheNames& kv_names, int32_t& prefill_profile_idx,
-                              int32_t& prefill_max_length, std::string& prefill_log_label) {
-        if (find_section(ctx.bundle, "prefill_engine_plan") == nullptr)
-            return nullptr;
+    static std::unique_ptr<TrtModule> load_single_profile_module(const PipelineContext& ctx,
+                                                                 const std::string& section_name,
+                                                                 cudaStream_t stream,
+                                                                 const char* role) {
+        auto* plan = find_section(ctx.bundle, section_name);
+        if (plan == nullptr || plan->empty())
+            throw std::runtime_error(section_name + " section is missing");
+        if (ctx.backend == nullptr)
+            throw std::runtime_error("No backend loaded");
 
-        auto split_prefill_modules =
-            load_decoder_profile_modules(ctx, "prefill_engine_plan", stream, nullptr);
-        if (split_prefill_modules.modules.empty())
-            return nullptr;
+        ModuleCreateOptions opts;
+        opts.stream = stream;
+        opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
+        opts.cuda_graphs = ctx.cuda_graphs;
 
-        const auto prefill_roles =
-            detect_decoder_profile_roles(*split_prefill_modules.modules.front().module, io.token_id,
-                                         kv_names.cache_k.front(), ctx.config.max_cache_length);
-        prefill_profile_idx = prefill_roles.prefill_profile_idx;
-        prefill_max_length = prefill_roles.prefill_max_length;
-        auto prefill_module = extract_prefill_module(std::move(split_prefill_modules),
-                                                     prefill_roles, "prefill_engine_plan");
-        if (prefill_module)
-            prefill_log_label = "prefill engine";
-        return prefill_module;
+        const auto t0 = std::chrono::steady_clock::now();
+        auto modules = ctx.backend->create_profile_modules(plan->data(), plan->size(), opts,
+                                                           std::vector<int32_t>{0});
+        const auto t1 = std::chrono::steady_clock::now();
+        const double load_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        log_trt_load_timing(section_name.c_str(), load_ms, plan->size());
+        if (modules.modules.size() != 1 || modules.modules.front().profile_idx != 0 ||
+            !modules.modules.front().module) {
+            throw std::runtime_error("Granite native " + std::string(role) +
+                                     " engine must expose exactly profile 0");
+        }
+        if (modules.modules.front().module->optimization_profile_count() != 1) {
+            throw std::runtime_error("Granite native " + std::string(role) +
+                                     " engine must contain exactly one optimization profile");
+        }
+        modules.modules.front().module->set_timing_label(section_name + ":" + role);
+        return std::move(modules.modules.front().module);
     }
 
     static void apply_text_trace_from_registry(const config::ConfigBundle* cfg) {
@@ -365,49 +373,9 @@ class DecoderPlugin final : public IPipelinePlugin {
         }
     }
 
-    static BackendProfileModules
-    load_decoder_profile_modules(const PipelineContext& ctx, const std::string& section_name,
-                                 cudaStream_t stream, const TensorParallelRuntime* tp_runtime) {
-        auto* plan = find_section(ctx.bundle, section_name);
-        if (plan == nullptr || plan->empty())
-            throw std::runtime_error(section_name + " section is missing");
-        if (ctx.backend == nullptr)
-            throw std::runtime_error("No backend loaded");
-
-        auto profile_rows = extract_json_int_array(ctx.config_json, "dynamic_kv_profile_rows", 16);
-        const int32_t profile_candidates =
-            profile_rows.empty() ? 2 : static_cast<int32_t>(profile_rows.size() + 1);
-        std::vector<int32_t> profile_indices;
-        profile_indices.reserve(static_cast<std::size_t>(profile_candidates));
-        for (int32_t i = 0; i < profile_candidates; ++i)
-            profile_indices.push_back(i);
-
-        ModuleCreateOptions opts;
-        opts.stream = stream;
-        opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
-        opts.cuda_graphs = ctx.cuda_graphs;
-        if (tp_runtime != nullptr && tp_runtime->config.enabled) {
-            opts.distributed_communicator = tp_runtime->group.communicator;
-            opts.distributed_owner = tp_runtime->group.owner;
-        }
-
-        const auto t0 = std::chrono::steady_clock::now();
-        auto modules =
-            ctx.backend->create_profile_modules(plan->data(), plan->size(), opts, profile_indices);
-        const auto t1 = std::chrono::steady_clock::now();
-        const double load_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        log_trt_load_timing(section_name.c_str(), load_ms, plan->size());
-        for (auto& entry : modules.modules) {
-            entry.module->set_timing_label(entry.profile_idx == 0 ? section_name + ":profile0"
-                                                                  : section_name + ":decode");
-        }
-        return modules;
-    }
-
     static void build_kv_names(const PipelineContext& ctx, const IoMap& io,
                                GraniteKvCacheNames& kv_names) {
         kv_names.position_id = io.position_id;
-        kv_names.attention_mask = io.attention_mask;
         for (int32_t i = 0; i < ctx.config.num_layers; ++i) {
             kv_names.cache_k.push_back(granite_expand_layer_name(io.cache_k_pattern, i));
             kv_names.cache_v.push_back(granite_expand_layer_name(io.cache_v_pattern, i));
@@ -416,104 +384,26 @@ class DecoderPlugin final : public IPipelinePlugin {
         }
     }
 
-    static std::unique_ptr<TrtModule>
-    extract_prefill_module(BackendProfileModules profile_modules,
-                           const DecoderProfileRoles& profile_roles, const char* section_name) {
-        if (profile_roles.prefill_profile_idx < 0)
-            return nullptr;
-        for (auto& entry : profile_modules.modules) {
-            if (entry.profile_idx != profile_roles.prefill_profile_idx)
-                continue;
-            entry.module->set_timing_label(std::string(section_name) + ":prefill");
-            return std::move(entry.module);
-        }
-        return nullptr;
-    }
-
-    static BackendProfileModule* find_profile_module(BackendProfileModules& profile_modules,
-                                                     int32_t profile_idx) {
-        auto found = std::find_if(
-            profile_modules.modules.begin(), profile_modules.modules.end(),
-            [&](const BackendProfileModule& entry) { return entry.profile_idx == profile_idx; });
-        if (found == profile_modules.modules.end())
-            return nullptr;
-        return &*found;
-    }
-
-    static void extract_engine_plan_prefill_module(BackendProfileModules& profile_modules,
-                                                   const DecoderProfileRoles& profile_roles,
-                                                   std::unique_ptr<TrtModule>& prefill_module) {
-        if (profile_roles.prefill_profile_idx < 0)
-            return;
-        auto* entry = find_profile_module(profile_modules, profile_roles.prefill_profile_idx);
-        if (entry == nullptr || !entry->module)
-            return;
-        entry->module->set_timing_label("engine_plan:prefill");
-        prefill_module = std::move(entry->module);
-    }
-
-    static std::vector<GraniteTextGenerationPipeline::DecoderContext>
-    build_decoder_contexts(BackendProfileModules profile_modules, int32_t runtime_rows,
-                           const DecoderProfileRoles& profile_roles,
-                           std::unique_ptr<TrtModule>& prefill_module) {
-        std::vector<GraniteTextGenerationPipeline::DecoderContext> decoders;
-        decoders.reserve(profile_modules.modules.size());
-        for (const auto& profile : profile_roles.decode_profiles) {
-            if (profile.kv_rows > runtime_rows && !decoders.empty())
-                break;
-            auto* found = find_profile_module(profile_modules, profile.profile_idx);
-            if (found == nullptr || !found->module)
-                continue;
-            found->module->set_timing_label("engine_plan:decode");
-            decoders.push_back(GraniteTextGenerationPipeline::DecoderContext{
-                profile.kv_rows, std::move(found->module)});
-        }
-
-        extract_engine_plan_prefill_module(profile_modules, profile_roles, prefill_module);
-
-        if (decoders.empty())
-            throw std::runtime_error("No decoder profile available for engine_plan");
-        return decoders;
-    }
-
-    static std::unique_ptr<GraniteInferenceState>
-    build_inference_state(const PipelineContext& ctx, const KvCacheRuntimeSizing& sizing,
-                          GraniteTriAttentionConfig& tri_cfg, DType cache_dtype, int32_t kv_dim,
-                          GraniteKvCacheNames& kv_names, cudaStream_t stream) {
-        std::unique_ptr<GraniteInferenceState> state;
-        if (tri_cfg.enabled) {
-            auto* stats_sec = find_section(ctx.bundle, tri_cfg.stats_section);
-            if (stats_sec == nullptr || stats_sec->empty())
-                throw std::runtime_error("TriAttention stats section is missing: " +
-                                         tri_cfg.stats_section);
-            std::string stats_json(stats_sec->begin(), stats_sec->end());
-            GraniteTriAttentionStats tri_stats = granite_parse_triattention_stats_json(
-                stats_json, ctx.config.num_heads, ctx.config.num_kv_heads, ctx.config.num_layers);
-            state = std::make_unique<GraniteTriAttentionKvCache>(
-                ctx.config.num_layers, ctx.config.num_kv_heads, sizing.runtime_rows, kv_dim, stream,
-                std::move(tri_cfg), std::move(tri_stats), cache_dtype, std::move(kv_names));
-        } else {
-            state =
-                std::make_unique<GraniteKvCache>(ctx.config.num_layers, sizing.runtime_rows, kv_dim,
-                                                 stream, cache_dtype, std::move(kv_names));
-        }
+    static std::unique_ptr<GraniteKvCache> build_inference_state(const PipelineContext& ctx,
+                                                                 const KvCacheRuntimeSizing& sizing,
+                                                                 DType cache_dtype, int32_t kv_dim,
+                                                                 GraniteKvCacheNames& kv_names,
+                                                                 cudaStream_t stream) {
+        auto state =
+            std::make_unique<GraniteKvCache>(ctx.config.num_layers, sizing.runtime_rows, kv_dim,
+                                             stream, cache_dtype, std::move(kv_names));
         if (!state->ok())
             throw std::runtime_error("Failed to create GraniteKvCache");
         return state;
     }
 
     static void log_kv_cache_sizing(const PipelineContext& ctx, const KvCacheRuntimeSizing& sizing,
-                                    GraniteInferenceState* state) {
+                                    const GraniteKvCache* state) {
         std::cerr << "[trtmc] KV cache rows=" << sizing.runtime_rows
                   << " (bundle max=" << ctx.config.max_cache_length
                   << ", row=" << format_bytes(sizing.row_bytes)
                   << ", cache=" << format_bytes(sizing.cache_bytes) << ", state="
                   << format_bytes(static_cast<std::uint64_t>(state->device_memory_bytes())) << ")";
-        if (sizing.override_applied) {
-            std::cerr << " [requested=" << format_bytes(ctx.kv_cache_size_bytes) << "]";
-            if (sizing.clamped_to_bundle_max)
-                std::cerr << " [clamped-to-bundle-max]";
-        }
         std::cerr << '\n';
     }
 

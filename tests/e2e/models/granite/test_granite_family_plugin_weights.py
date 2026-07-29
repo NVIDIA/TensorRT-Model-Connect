@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 
 from tests.builder.family_plugin_test_support import (
     ModelConfig,
@@ -12,6 +13,7 @@ from tests.builder.family_plugin_test_support import (
     _write_config,
     _write_safetensors,
 )
+
 
 class TestGranitePlugin:
     """Granite plugin: decoder with attention_multiplier."""
@@ -49,9 +51,14 @@ class TestGranitePlugin:
             "num_hidden_layers": self.LAYERS,
             "num_attention_heads": self.HEADS,
             "num_key_value_heads": self.KV_HEADS,
+            "embedding_multiplier": 12.0,
+            "attention_multiplier": 0.015625,
+            "residual_multiplier": 0.22,
+            "logits_scaling": 8.0,
         }
         tensors = self._make_tensors(
-            self.VOCAB, self.HIDDEN, self.LAYERS, self.HEADS, self.KV_HEADS, self.MLP)
+            self.VOCAB, self.HIDDEN, self.LAYERS, self.HEADS, self.KV_HEADS, self.MLP
+        )
         _write_config(tmp_path, config)
         _write_safetensors(tmp_path, tensors)
 
@@ -59,9 +66,41 @@ class TestGranitePlugin:
         weights = plugin.load_weights(str(tmp_path), cfg)
 
         assert "embedding" in weights
+        np.testing.assert_array_equal(
+            weights["embedding"],
+            tensors["model.embed_tokens.weight"].astype(np.float32)
+            * config["embedding_multiplier"],
+        )
+        standard_attention_scale = 1.0 / np.sqrt(self.HIDDEN // self.HEADS)
+        np.testing.assert_array_equal(
+            weights["layer.0.w_q"],
+            tensors["model.layers.0.self_attn.q_proj.weight"].T.astype(
+                np.float32,
+            )
+            * (config["attention_multiplier"] / standard_attention_scale),
+        )
+        np.testing.assert_array_equal(
+            weights["layer.0.w_o"],
+            tensors["model.layers.0.self_attn.o_proj.weight"].T.astype(
+                np.float32,
+            )
+            * config["residual_multiplier"],
+        )
+        np.testing.assert_array_equal(
+            weights["layer.0.w_down"],
+            tensors["model.layers.0.mlp.down_proj.weight"].T.astype(
+                np.float32,
+            )
+            * config["residual_multiplier"],
+        )
+        np.testing.assert_array_equal(
+            weights["w_out"],
+            tensors["lm_head.weight"].T.astype(np.float32) / config["logits_scaling"],
+        )
 
     def test_matches(self):
         from tensorrt_model_connect.families.granite import plugin
+
         assert plugin.matches("granite")
         assert plugin.matches("granitemoeshared")
         assert not plugin.matches("llama")

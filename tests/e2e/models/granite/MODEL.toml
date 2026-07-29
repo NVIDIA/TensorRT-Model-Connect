@@ -4,7 +4,6 @@
 id = "granite"
 plugin = "granite"
 test_manifests = [
-  "manifests/granite-3.1-2b-tp4.json",
   "manifests/granite-3.1-2b.json",
 ]
 

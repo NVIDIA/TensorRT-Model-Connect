@@ -5,12 +5,8 @@
 
 #include "plugin_helpers.h"
 
-#include "trtmc/runtime/trt_backend.h"
 #include "utils/json_helpers.h"
 
-#include <chrono>
-#include <cstring>
-#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -18,19 +14,9 @@
 #include <string_view>
 #include <utility>
 
-#if TRTMC_HAS_TVM_FFI
-#include "plugins/tvm_ffi_module_loader.h"
-#endif
-
 namespace trtmc {
 
 namespace {
-
-using SteadyClock = std::chrono::steady_clock;
-
-double elapsed_ms(SteadyClock::time_point start, SteadyClock::time_point end) {
-    return std::chrono::duration<double, std::milli>(end - start).count();
-}
 
 class SpecialFrameTokenizer final : public ITokenizer {
   public:
@@ -84,7 +70,7 @@ void log_trt_load_timing(const char* label, double load_deserialize_ms, std::siz
 
 // Tokenizer helpers.
 
-bool detect_add_special_tokens(const BundleFile& bundle) {
+static bool detect_add_special_tokens(const BundleFile& bundle) {
     if (bundle.info.tokenizer_add_special_tokens_present)
         return bundle.info.tokenizer_add_special_tokens;
 
@@ -162,45 +148,8 @@ std::shared_ptr<ITokenizer> try_create_native_tokenizer_kind(TokenizerFactory fa
 
 } // namespace
 
-bool is_bpe_tokenizer_json(const BundleFile& bundle) {
-    auto* tok_data = find_section(bundle, "tokenizer.json");
-    if (!tok_data || tok_data->empty())
-        return false;
-    // Quick string search — avoid full JSON parse just for type detection
-    std::string_view json(tok_data->data(), tok_data->size());
-    return json.find("\"type\":\"BPE\"") != std::string_view::npos ||
-           json.find("\"type\": \"BPE\"") != std::string_view::npos;
-}
-
-std::shared_ptr<ITokenizer> try_create_native_bpe(const BundleFile& bundle, bool add_special,
-                                                  bool throw_on_failure) {
-    auto* tok_data = find_section(bundle, "tokenizer.json");
-    if (!tok_data || tok_data->empty())
-        return nullptr;
-    try {
-        auto tok = CreateBpeTokenizer(tok_data->data(), tok_data->size(), add_special);
-        if (tok) {
-            std::cerr << "[trtmc] Using native BPE tokenizer" << std::endl;
-        }
-        return tok;
-    } catch (const std::exception& e) {
-        // "Not a BPE tokenizer" -> non-BPE model (WordPiece, Unigram), allow fallback
-        std::string msg = e.what();
-        bool is_non_bpe = msg.find("Not a BPE") != std::string::npos;
-
-        if (throw_on_failure || (!is_non_bpe && is_bpe_tokenizer_json(bundle))) {
-            // BPE model but native failed -> error, no silent fallback
-            throw std::runtime_error(std::string("Native BPE tokenizer failed for BPE model: ") +
-                                     e.what());
-        }
-        std::cerr << "[trtmc] Native BPE unavailable (" << e.what()
-                  << "), falling back to HF Python" << std::endl;
-    }
-    return nullptr;
-}
-
-std::shared_ptr<ITokenizer> try_create_native_tokenizer(const BundleFile& bundle,
-                                                        bool add_special_tokens) {
+static std::shared_ptr<ITokenizer> try_create_native_tokenizer(const BundleFile& bundle,
+                                                               bool add_special_tokens) {
     auto* tok_data = find_section(bundle, "tokenizer.json");
     if (!tok_data || tok_data->empty())
         return nullptr;
@@ -227,250 +176,12 @@ std::shared_ptr<ITokenizer> create_tokenizer_from_bundle(const BundleFile& bundl
     return try_create_native_tokenizer(bundle, add_special);
 }
 
-// TRT module loading (delegated to IBackend).
-
-LoadedModule load_trt_module_from_plan(IBackend* backend, const std::vector<char>* plan,
-                                       const char* label, const ModuleCreateOptions& options) {
-    if (!plan || plan->empty())
-        throw std::runtime_error(std::string("Bundle missing ") + label);
-    if (!backend)
-        throw std::runtime_error("No backend loaded");
-
-    LoadedModule result;
-    const auto t0 = SteadyClock::now();
-    result.module = backend->create_module(plan->data(), plan->size(), options);
-    const auto t1 = SteadyClock::now();
-    log_trt_load_timing(label, elapsed_ms(t0, t1), plan->size());
-    if (!result.module || !result.module->ok())
-        throw std::runtime_error(std::string("Failed to create ITrtModule for ") + label);
-    result.module->set_timing_label(label ? label : "engine");
-    return result;
-}
-
-LoadedModule try_load_trt_module_from_plan(IBackend* backend, const std::vector<char>* plan,
-                                           const char* label, const ModuleCreateOptions& options) {
-    if (!plan || plan->empty())
-        return LoadedModule{};
-    try {
-        return load_trt_module_from_plan(backend, plan, label, options);
-    } catch (...) {
-        std::cerr << "[trtmc] WARNING: failed to load optional engine: " << label << std::endl;
-        return LoadedModule{};
-    }
-}
-
-std::unique_ptr<ITrtModule> extract_optional_module(IBackend* backend,
-                                                    const std::vector<char>* plan,
-                                                    const char* label,
-                                                    const ModuleCreateOptions& options) {
-    auto loaded = try_load_trt_module_from_plan(backend, plan, label, options);
-    if (loaded.module && loaded.module->ok())
-        return std::move(loaded.module);
-    return nullptr;
-}
-
-// Dual-profile module loading (delegated to IBackend).
-
-DualProfileModules load_dual_profile_modules(IBackend* backend, const std::vector<char>* plan,
-                                             const char* label,
-                                             const ModuleCreateOptions& options) {
-    if (!plan || plan->empty())
-        throw std::runtime_error(std::string("Bundle missing ") + label);
-    if (!backend)
-        throw std::runtime_error("No backend loaded");
-
-    const auto t0 = SteadyClock::now();
-    auto pair = backend->create_dual_profile_modules(plan->data(), plan->size(), options);
-    const auto t1 = SteadyClock::now();
-    log_trt_load_timing(label, elapsed_ms(t0, t1), plan->size());
-    if (!pair.decode || !pair.decode->ok())
-        throw std::runtime_error(std::string("Failed to create dual-profile modules for ") + label);
-
-    DualProfileModules out;
-    out.prefill = std::move(pair.prefill);
-    out.decode = std::move(pair.decode);
-    if (out.prefill)
-        out.prefill->set_timing_label(std::string(label ? label : "engine") + ":prefill");
-    if (out.decode)
-        out.decode->set_timing_label(std::string(label ? label : "engine") + ":decode");
-    return out;
-}
-
-// Config helpers.
-
-int32_t compute_kv_dim(const BaseConfig& cfg) {
-    int32_t hd = (cfg.head_dim > 0) ? cfg.head_dim
-                                    : ((cfg.num_heads > 0) ? cfg.hidden_size / cfg.num_heads : 128);
-    int32_t kv_heads = (cfg.num_kv_heads > 0) ? cfg.num_kv_heads : cfg.num_heads;
-    return kv_heads * hd;
-}
-
 DType cache_dtype_from_precision(const std::string& precision) {
     if (precision == "fp16")
         return DType::kFloat16;
     if (precision == "bf16")
         return DType::kBFloat16;
     return DType::kFloat32;
-}
-
-// Section data conversion.
-
-std::vector<float> section_to_floats(const std::vector<char>* sec) {
-    if (!sec || sec->empty())
-        return {};
-    std::size_t count = sec->size() / sizeof(float);
-    std::vector<float> out(count);
-    std::memcpy(out.data(), sec->data(), count * sizeof(float));
-    return out;
-}
-
-std::vector<int32_t> section_to_int32s(const std::vector<char>* sec) {
-    if (!sec || sec->empty())
-        return {};
-    std::size_t count = sec->size() / sizeof(int32_t);
-    std::vector<int32_t> out(count);
-    std::memcpy(out.data(), sec->data(), count * sizeof(int32_t));
-    return out;
-}
-
-bool has_section_data(const std::vector<char>* d) {
-    return d && !d->empty();
-}
-
-MelFilterbank load_mel_filterbank(const BundleFile& bundle) {
-    MelFilterbank fb;
-    const auto* data = find_section(bundle, "mel_filterbank");
-    if (data == nullptr || data->empty())
-        return fb;
-
-    // Format: [n_freq_bins(int32), n_mel_bins(int32), float32 data...]
-    if (data->size() < 2 * sizeof(int32_t))
-        return fb;
-
-    int32_t header[2] = {0, 0};
-    std::memcpy(header, data->data(), sizeof(header));
-    fb.n_freq_bins = header[0];
-    fb.n_mel_bins = header[1];
-
-    if (fb.n_freq_bins <= 0 || fb.n_mel_bins <= 0)
-        return fb;
-
-    const auto expected_data_size = static_cast<std::size_t>(fb.n_freq_bins) *
-                                    static_cast<std::size_t>(fb.n_mel_bins) * sizeof(float);
-    const auto payload_offset = 2 * sizeof(int32_t);
-    if (data->size() < payload_offset + expected_data_size) {
-        fb.n_freq_bins = 0;
-        fb.n_mel_bins = 0;
-        return fb;
-    }
-
-    fb.data.resize(static_cast<std::size_t>(fb.n_freq_bins) * fb.n_mel_bins);
-    std::memcpy(fb.data.data(), data->data() + payload_offset, expected_data_size);
-    return fb;
-}
-
-std::unique_ptr<ITokenizer> create_clip_tokenizer_from_bundle(const BundleFile& bundle) {
-    auto* tok_data = find_section(bundle, "clip_tokenizer.json");
-    if (!tok_data || tok_data->empty())
-        return nullptr;
-    try {
-        auto tok =
-            CreateBpeTokenizer(tok_data->data(), tok_data->size(), /*add_special_tokens=*/true);
-        if (tok)
-            std::cerr << "[trtmc] Using native BPE CLIP tokenizer" << std::endl;
-        return tok;
-    } catch (const std::exception& e) {
-        std::cerr << "[trtmc] WARNING: CLIP tokenizer failed: " << e.what() << std::endl;
-    }
-    return nullptr;
-}
-
-// ─── FFI kernel loading ───
-
-#if TRTMC_HAS_TVM_FFI
-
-namespace {
-
-// Write a bundle section to a temporary .so file, returning the path.
-std::string write_kernel_so_to_temp(const std::string& global_name, const char* data,
-                                    std::size_t size) {
-    std::string safe_name = global_name;
-    for (auto& c : safe_name) {
-        if (c == '.')
-            c = '_';
-    }
-    std::string tmp_path = "/tmp/trtmc_kernel_" + safe_name + ".so";
-    std::ofstream ofs(tmp_path, std::ios::binary);
-    ofs.write(data, static_cast<std::streamsize>(size));
-    return tmp_path;
-}
-
-// Load a single kernel entry from the manifest and register it via TVM-FFI.
-void load_single_kernel(const BundleFile& bundle, const std::string& obj) {
-    std::string global_name = extract_json_string(obj, "global_name", "");
-    std::string func_name = extract_json_string(obj, "func_name", "run");
-    std::string section_name = extract_json_string(obj, "section", "");
-
-    if (global_name.empty() || section_name.empty())
-        return;
-
-    const auto* so_sec = find_section(bundle, section_name);
-    if (!so_sec || so_sec->empty()) {
-        std::cerr << "[ffi] Kernel .so section not found: " << section_name << '\n';
-        return;
-    }
-
-    std::string tmp_path = write_kernel_so_to_temp(global_name, so_sec->data(), so_sec->size());
-    if (load_tvm_ffi_module_func(tmp_path, func_name, global_name)) {
-        std::cerr << "[ffi] Loaded kernel: " << global_name << '\n';
-    } else {
-        std::cerr << "[ffi] Failed to load kernel: " << global_name << " from " << section_name
-                  << '\n';
-    }
-}
-
-// Find the "kernels" JSON array bounds within the manifest string.
-// Returns {start_after_bracket, closing_bracket} or {npos, npos}.
-std::pair<std::size_t, std::size_t> find_kernels_array_bounds(const std::string& s) {
-    auto pos = s.find("\"kernels\"");
-    if (pos == std::string::npos)
-        return {std::string::npos, std::string::npos};
-    auto arr_start = s.find('[', pos);
-    if (arr_start == std::string::npos)
-        return {std::string::npos, std::string::npos};
-    auto arr_end = s.find(']', arr_start);
-    return {arr_start + 1, arr_end};
-}
-
-} // namespace
-
-#endif // TRTMC_HAS_TVM_FFI
-
-void load_ffi_kernels_from_bundle(const BundleFile& bundle) {
-#if TRTMC_HAS_TVM_FFI
-    const auto* manifest_sec = find_section(bundle, "kernel_manifest.json");
-    if (!manifest_sec)
-        return;
-
-    std::string manifest_str(manifest_sec->begin(), manifest_sec->end());
-    auto [cur, arr_end] = find_kernels_array_bounds(manifest_str);
-    if (cur == std::string::npos || arr_end == std::string::npos)
-        return;
-
-    while (cur < arr_end) {
-        auto obj_start = manifest_str.find('{', cur);
-        if (obj_start == std::string::npos || obj_start >= arr_end)
-            break;
-        auto obj_end = manifest_str.find('}', obj_start);
-        if (obj_end == std::string::npos)
-            break;
-
-        load_single_kernel(bundle, manifest_str.substr(obj_start, obj_end - obj_start + 1));
-        cur = obj_end + 1;
-    }
-#else
-    (void)bundle;
-#endif
 }
 
 } // namespace trtmc
