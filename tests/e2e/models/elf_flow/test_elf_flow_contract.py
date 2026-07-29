@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -701,3 +702,70 @@ def test_elf_l0_manifests_use_upstream_replay_contract() -> None:
             assert build_env["TRTMC_ELF_TIMING_CACHE_GENERATE"] == "0"
             assert build_env["TRTMC_ELF_TIMING_CACHE_PATH"] == ""
             assert build_env["TRTMC_ELF_TIMING_CACHE_METADATA_PATH"] == ""
+
+
+def test_xsum_reference_precision_and_premerge_replacement_are_explicit() -> None:
+    xsum = json.loads(
+        (ELF_MODEL_DIR / "manifests/elf-b-xsum-l0.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    translation = json.loads(
+        (ELF_MODEL_DIR / "manifests/elf-b-de-en-l0.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert xsum["precision"] == "fp16"
+    assert xsum["task_eval"]["reference_precision"] == "fp16"
+    source_text = xsum["testcases"][0]["inputs"]["source_text"]
+    assert hashlib.sha256(source_text.encode()).hexdigest() == (
+        "e0f08475d7a5201b26100eb22c4a53265492a7ca5a92d547a8230a4478ed0415"
+    )
+    artifact_path = ELF_MODEL_DIR / Path(
+        xsum["testcases"][0]["inputs"]["elf_replay_artifact"]
+    )
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    replay_dir = artifact_path.parent
+    assert artifact["source_sample_id"] == "39070183"
+    assert (
+        artifact["source_run"]
+        == "trtmc-validate-gb300-2-20260726-c8291be0-all105"
+    )
+    assert artifact["reference_precision"] == "fp16"
+    assert artifact["seed"] == 46
+    assert "condition_latents_raw" not in artifact["files"]
+    assert "condition_mask_raw" not in artifact["files"]
+    assert hashlib.sha256(
+        (replay_dir / artifact["files"]["initial_latents_raw"]).read_bytes()
+    ).hexdigest() == (
+        "5153428af20ad73e2ba40e72a7d7cbd5dd10bf4cc7026bbdaad91fb12ae4ddd0"
+    )
+    assert hashlib.sha256(
+        (replay_dir / artifact["files"]["sampling_steps_raw"]).read_bytes()
+    ).hexdigest() == (
+        "79c790d0590ebf5d1838da98ed968b0e7c6b4309d56d50890ae3b0e025cc982e"
+    )
+    expected = [
+        json.loads(line)
+        for line in (
+            replay_dir / artifact["files"]["expected_generated_jsonl_path"]
+        )
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line
+    ]
+    normalized_expected = json.dumps(
+        expected,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    assert hashlib.sha256(normalized_expected).hexdigest() == (
+        "ee7f87f8e8e8f376b5606473a50ca9a8278934d61abef5b3cd5d30b2f23aa3de"
+    )
+    assert translation["testcases"][0]["ci_tier"] == "nightly_only"
+    assert (
+        translation["testcases"][0]["l0_replacement"]
+        == xsum["testcases"][0]["name"]
+    )

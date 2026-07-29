@@ -1,8 +1,6 @@
 {
   "cfg_scale": 2.0,
   "files": {
-    "condition_latents_raw": "condition_latents.f32",
-    "condition_mask_raw": "condition_mask.f32",
     "expected_generated_jsonl_path": "expected.jsonl",
     "initial_latents_raw": "initial_latents.f32",
     "sampling_steps_raw": "sampling_steps.f32"
@@ -13,9 +11,12 @@
   "model_id": "embedded-language-flows/ELF-B-xsum",
   "num_samples": 1,
   "num_sampling_steps": 64,
+  "reference_precision": "fp16",
   "sde_gamma": 0.0,
-  "seed": 42,
+  "seed": 46,
   "self_cond_cfg_scale": 1.0,
+  "source_run": "trtmc-validate-gb300-2-20260726-c8291be0-all105",
+  "source_sample_id": "39070183",
   "terminal_token_ids": [1],
   "text_encoder_dim": 512,
   "variant": "ode64-cfg2"

@@ -551,6 +551,7 @@ def test_runner_rejects_an_unknown_suite_before_starting_docker() -> None:
         ("canary", "canary-1b-v2"),
         ("nemotron_labs_diffusion", "nemotron-labs-diffusion-8b-l0"),
         ("qwen_image", "qwen-image-l0"),
+        ("elf_flow", "elf-b-xsum-l0"),
     ),
 )
 def test_premerge_selects_one_nested_l0_replacement(

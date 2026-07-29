@@ -1571,6 +1571,8 @@ def test_elf_metadata_points_to_official_reference_entrypoint(tmp_path: Path) ->
             str(tmp_path / "raw.jsonl"),
             "--repro-metadata",
             str(metadata),
+            "--dtype",
+            "float16",
         ]
     )
     manifest = {
@@ -1590,9 +1592,73 @@ def test_elf_metadata_points_to_official_reference_entrypoint(tmp_path: Path) ->
     assert command[1].endswith("tools/elf_hf_reference.py")
     assert command[command.index("--dataset") + 1] == "{reference_input_jsonl}"
     assert command[command.index("--seed") + 1] == "{reference_sample_seed}"
+    assert command[command.index("--precision") + 1] == "fp16"
     assert payload["base_seed"] == 42
     assert "elf_prepared.py" not in " ".join(command)
     assert "validation/engine.py" not in " ".join(command)
+
+
+@pytest.mark.parametrize(
+    ("dtype", "expected_precision"),
+    (
+        ("auto", None),
+        ("float16", "fp16"),
+        ("bfloat16", "bf16"),
+        ("float32", "fp32"),
+    ),
+)
+def test_elf_adapter_maps_reference_dtype_to_upstream_precision(
+    tmp_path: Path,
+    dtype: str,
+    expected_precision: str | None,
+) -> None:
+    repo = tmp_path / "elf"
+    config = repo / "src/configs/model.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("{}\n", encoding="utf-8")
+    arguments = elf_prepared.build_parser().parse_args(
+        [
+            "--model",
+            "org/elf",
+            "--elf-reference-repo",
+            str(repo),
+            "--prompts",
+            str(tmp_path / "prompts.jsonl"),
+            "--answers",
+            str(tmp_path / "answers.json"),
+            "--manifest",
+            str(tmp_path / "manifest.json"),
+            "--predictions",
+            str(tmp_path / "predictions.json"),
+            "--raw-output",
+            str(tmp_path / "raw.jsonl"),
+            "--dtype",
+            dtype,
+        ]
+    )
+    manifest = {
+        "task_eval": {
+            "reference": {
+                "config": "src/configs/model.yaml",
+                "checkpoint": "org/elf",
+            }
+        },
+        "generation": {"generation_mode": "conditional"},
+    }
+
+    command = elf_prepared._direct_command(
+        arguments,
+        manifest,
+        "dataset.jsonl",
+        "predictions.json",
+        "artifacts",
+        "42",
+    )
+
+    if expected_precision is None:
+        assert "--precision" not in command
+    else:
+        assert command[command.index("--precision") + 1] == expected_precision
 
 
 def test_speech_runner_dispatches_asr_without_engine_wrapper(

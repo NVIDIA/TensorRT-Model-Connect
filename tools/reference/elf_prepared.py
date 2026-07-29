@@ -18,6 +18,15 @@ from typing import Any, Mapping, Sequence
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ELF_REFERENCE = REPO_ROOT / "tools" / "elf_hf_reference.py"
 SCHEMA_VERSION = "trtmc.native-reference-reproduction/v1"
+_DTYPE_TO_ELF_PRECISION = {
+    "auto": "",
+    "float16": "fp16",
+    "fp16": "fp16",
+    "bfloat16": "bf16",
+    "bf16": "bf16",
+    "float32": "fp32",
+    "fp32": "fp32",
+}
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -108,6 +117,17 @@ def _config_path(arguments: argparse.Namespace, reference: Mapping[str, Any]) ->
     return arguments.elf_reference_repo / path
 
 
+def _elf_precision(dtype: str) -> str:
+    normalized = str(dtype or "auto").strip().lower()
+    try:
+        return _DTYPE_TO_ELF_PRECISION[normalized]
+    except KeyError as exc:
+        supported = ", ".join(sorted(_DTYPE_TO_ELF_PRECISION))
+        raise ValueError(
+            f"ELF reference dtype must be one of {supported}; got {dtype!r}"
+        ) from exc
+
+
 def _direct_command(
     arguments: argparse.Namespace,
     manifest: Mapping[str, Any],
@@ -148,6 +168,9 @@ def _direct_command(
         "--seed",
         seed,
     ]
+    precision = _elf_precision(arguments.dtype)
+    if precision:
+        command.extend(["--precision", precision])
     if arguments.local_files_only:
         command.append("--local-files-only")
     return command
