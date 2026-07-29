@@ -13,8 +13,15 @@ from tests.e2e.models.sam3.e2e_plugins.references import hf_transformers as sam3
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageSpec
 
 
+SAM3_REVISION = "3c879f39826c281e95690f02c7821c4de09afae7"
+
+
 def test_reference_uses_cached_model_ref(monkeypatch, tmp_path) -> None:
     captured: dict[str, object] = {}
+
+    def _fake_resolve_cached_model_ref(hf_id: str, revision: str) -> str:
+        captured["model_ref_request"] = (hf_id, revision)
+        return "/cached/sam3"
 
     def _fake_run(cmd, **kwargs):
         import numpy as np
@@ -41,7 +48,7 @@ def test_reference_uses_cached_model_ref(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         sam3_reference,
         "_resolve_cached_model_ref",
-        lambda hf_id: "/cached/sam3",
+        _fake_resolve_cached_model_ref,
     )
     monkeypatch.setattr(sam3_hf_base.subprocess, "run", _fake_run)
 
@@ -52,6 +59,7 @@ def test_reference_uses_cached_model_ref(monkeypatch, tmp_path) -> None:
         runtime_strategy="sam3_prompted_segmentation",
         task_strategy="prompted_segmentation",
         reference_family="prompted_segmentation_sam3",
+        hf_revision=SAM3_REVISION,
         inputs={"image": "data/test_img.jpeg", "prompt": "ear"},
         metadata={"trust_remote_code": False, "precision": "fp32"},
     )
@@ -68,17 +76,21 @@ def test_reference_uses_cached_model_ref(monkeypatch, tmp_path) -> None:
     cmd = captured["cmd"]
     assert cmd[:2] == ["/ref/python", "-c"]
     script = cmd[2]
+    assert captured["model_ref_request"] == ("facebook/sam3", SAM3_REVISION)
     assert "model_ref = '/cached/sam3'" in script
-    assert "def _load_sam3_processor(" in script
+    assert f"model_revision = '{SAM3_REVISION}'" in script
+    assert 'load_kwargs["revision"] = model_revision' in script
+    assert "def _load_sam3_processor(model_ref):" in script
     assert "Sam3Processor.from_pretrained(" in script
     assert "except Exception as processor_error:" in script
     assert '"target_size": 1008' in script
     assert "Sam3ImageProcessorFast(**image_processor_kwargs)" in script
     assert "AutoTokenizer.from_pretrained(" in script
-    assert "processor = _load_sam3_processor(model_ref, trust_remote_code)" in script
-    assert "model_ref, trust_remote_code=trust_remote_code" in script
+    assert "processor = _load_sam3_processor(model_ref)" in script
+    assert "model_ref, **load_kwargs)" in script
     assert "Sam3Model.from_pretrained(" in script
     assert "model_ref, torch_dtype=torch.float32" in script
+    assert "**load_kwargs).to(device)" in script
     assert "model.eval()" in script
     assert "with torch.no_grad():" in script
     for forbidden in ("torch.compile", "torch.export", "aoti", "onnx"):
