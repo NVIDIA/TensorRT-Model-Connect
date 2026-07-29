@@ -955,7 +955,7 @@ def build_bundle(
 
     if parallel.cp_enabled:
         raise NotImplementedError(
-            "Context parallelism is currently supported for FLUX.1 diffusion only")
+            "Context parallelism is currently supported for diffusion family plugins only")
 
     # 1. Parse config
     config = ModelConfig.from_dir(model_dir_path)
