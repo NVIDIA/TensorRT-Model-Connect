@@ -271,8 +271,6 @@ class FluxPlugin:
         from .flux_dit_builder import build_flux_dit_engine, load_flux_dit_weights
         from .flux_dit_tp_builder import (
             build_flux_dit_engine as build_flux_dit_tp_engine)
-        from .flux_dit_cp_builder import (
-            build_flux_dit_engine as build_flux_dit_cp_engine)
         from ...parallel_config import (
             normalize_parallel_config,
             require_tensorrt_11_for_distributed,
@@ -443,6 +441,9 @@ class FluxPlugin:
         dit_rank_plans = None
         with timed_trt_compile(build_timing, "flux_dit"):
             if parallel.cp_enabled:
+                from .flux_dit_cp_builder import (
+                    build_flux_dit_engine as build_flux_dit_cp_engine)
+
                 print(
                     f"[flux] Building shared FLUX DiT Ulysses CP{parallel.cp_size} plan ...",
                     file=sys.stderr,
