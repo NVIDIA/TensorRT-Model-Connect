@@ -132,10 +132,15 @@ class QwenVLPlugin:
     runtime_strategy = "qwen_vl_vision_language"
     runtime_capabilities = {"decoder_kv"}
     embed_input = True
+    supports_split_embed_input = True
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
         return "qwen" in mt and "vl" in mt
+
+    def supports_split_decoder_roles(self, config: ModelConfig) -> bool:
+        # Qwen3-VL uses a separate deepstack decoder contract.
+        return not _is_qwen3_vl(config)
 
     def load_weights(
         self, model_dir: str, config: ModelConfig,

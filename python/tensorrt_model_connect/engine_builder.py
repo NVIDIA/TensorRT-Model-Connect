@@ -465,14 +465,17 @@ def _can_build_split_decoder_engines(
 
     The split layout relies on ``standard_decoder_builder`` honoring the
     internal ``_decoder_engine_role`` passthrough. Custom MoE, recurrent,
-    VL/embed-input, TriAttention, and dynamic-KV runtimes keep their existing
-    single-engine behavior until they opt into the same contract.
+    TriAttention, and dynamic-KV runtimes keep their existing single-engine
+    behavior until they opt into the same contract. Embed-input families must
+    additionally opt in because their prefill engine has a different input
+    contract from an ordinary text decoder.
     """
     if not _is_decoder_kv_runtime(plugin, runtime_strategy):
         return False
     if dynamic_kv_cache or triattention_enabled:
         return False
-    if bool(getattr(plugin, "embed_input", False)):
+    if (bool(getattr(plugin, "embed_input", False)) and
+            not bool(getattr(plugin, "supports_split_embed_input", False))):
         return False
     return _plugin_supports_split_decoder_roles(plugin, config)
 
@@ -1166,8 +1169,16 @@ def build_bundle(
                 config.raw["_decoder_engine_role"] = previous_role
 
     def _build_split_plugin_engine_with_role(role: str) -> bytes:
-        with trt_compat.scoped_timing_cache(_split_timing_cache_scope(role)):
-            return _build_plugin_engine_with_role(role)
+        previous_active = config.raw.get("_active_split_decoder_build")
+        config.raw["_active_split_decoder_build"] = True
+        try:
+            with trt_compat.scoped_timing_cache(_split_timing_cache_scope(role)):
+                return _build_plugin_engine_with_role(role)
+        finally:
+            if previous_active is None:
+                config.raw.pop("_active_split_decoder_build", None)
+            else:
+                config.raw["_active_split_decoder_build"] = previous_active
 
     split_supported = (
         not parallel.enabled and

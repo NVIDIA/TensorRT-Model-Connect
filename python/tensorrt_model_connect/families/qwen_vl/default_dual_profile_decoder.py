@@ -187,15 +187,17 @@ def build_dual_profile_decoder_engine(
       prefill on the prompt.
     * ``"prefill"``: one prefill profile only. This is used by split-engine
       bundles, where decode is served by a separate fixed-Sq=1 engine.
+    * ``"decode"``: one fixed-Sq=1 decode profile only. This is the companion
+      engine for split-engine bundles.
 
     Dynamic-KV cache bucket profiles are only meaningful in ``dual_profile``
     mode. In either mode, cache_k/cache_v inputs are declared dynamic when
     bucket profiles are requested so each profile can constrain their row count.
     """
     _supports_config(config, weights)
-    if profile_mode not in ("dual_profile", "prefill"):
+    if profile_mode not in ("dual_profile", "prefill", "decode"):
         raise ValueError(
-            "profile_mode must be 'dual_profile' or 'prefill', "
+            "profile_mode must be 'dual_profile', 'prefill', or 'decode', "
             f"got {profile_mode!r}")
 
     if max_prefill_length is None:
@@ -343,6 +345,8 @@ def build_dual_profile_decoder_engine(
         _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
                      cache_rows_min=1, cache_rows_opt=max_cache_length,
                      cache_rows_max=max_cache_length)
+    elif profile_mode == "decode":
+        _add_profile(1, 1, fixed=True)
     elif _os_dbg.environ.get("TRTMC_DECODE_ONLY_DEBUG") == "1":
         # Diagnostic: build a one-profile engine with dynamic-shape inputs
         # but Sq pinned to 1. Lets us isolate dynamic-shape enqueueV3
@@ -698,7 +702,11 @@ def build_dual_profile_decoder_engine(
         network.mark_output(pv)
 
     if verbose:
-        mode_label = "prefill-profile" if profile_mode == "prefill" else "dual-profile"
+        mode_label = {
+            "prefill": "prefill-profile",
+            "decode": "decode-profile",
+            "dual_profile": "dual-profile",
+        }[profile_mode]
         print(f"[trtmc build] Building {mode_label} engine "
               f"(layers={num_layers}, hidden={hidden}, attn={attention_size}, "
               f"kv={kv_attention_size}, "
