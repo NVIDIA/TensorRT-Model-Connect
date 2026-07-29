@@ -12,6 +12,8 @@
 
 #include <NvInferRuntime.h>
 #include <cstring>
+#include <exception>
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -58,12 +60,29 @@ class TvmFfiKernelCreator : public nvinfer1::IPluginCreator {
             }
         }
 
-        return new TvmFfiKernelPlugin(kernel_name, shape_spec);
+        try {
+            return new TvmFfiKernelPlugin(kernel_name, shape_spec);
+        } catch (const std::exception& error) {
+            std::cerr << "[TvmFfiKernelCreator] Failed to create plugin: " << error.what() << '\n';
+            return nullptr;
+        } catch (...) {
+            std::cerr << "[TvmFfiKernelCreator] Failed to create plugin\n";
+            return nullptr;
+        }
     }
 
     nvinfer1::IPluginV2* deserializePlugin(char const* /*name*/, void const* data,
                                            size_t length) noexcept override {
-        return new TvmFfiKernelPlugin(data, length);
+        try {
+            return new TvmFfiKernelPlugin(data, length);
+        } catch (const std::exception& error) {
+            std::cerr << "[TvmFfiKernelCreator] Failed to deserialize plugin: " << error.what()
+                      << '\n';
+            return nullptr;
+        } catch (...) {
+            std::cerr << "[TvmFfiKernelCreator] Failed to deserialize plugin\n";
+            return nullptr;
+        }
     }
 
   private:

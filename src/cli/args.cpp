@@ -188,6 +188,7 @@ void print_usage() {
         << "Usage:\n"
            "  trtmc build           <hf-model-or-dir> -o <bundle.trtfb> [builder args...]\n"
            "  trtmc kernel slots    <hf-model-or-dir> [--model-revision REV]\n"
+           "  trtmc graph           <inspect|list|select> [args...]\n"
            "  trtmc run             <bundle.trtfb> --prompt \"text\" [--image PATH] "
            "[--max-new-tokens N] [--temperature F] [--top-p F] [--min-p F] "
            "[--top-k N] [--seed N] [--benchmark N] [--warmup N] [--hf-python PATH] "
@@ -237,6 +238,7 @@ void print_usage() {
            "  --model-plugin-dir PATH\n"
            "                        Extra directory to search for libtrtmc_model_*.so\n"
            "  --runtime-cache PATH   TRT-RTX JIT kernel cache file (speeds up repeat runs)\n"
+           "  --kernel-bindings PATH Bind slot-ready engines to TVM-FFI kernels at load time\n"
            "  --cuda-graphs          Enable TRT-RTX CUDA graph capture (reduces launch overhead)\n"
            "\n"
            "Build uses a sibling python3/python when installed in an environment bin "
@@ -263,7 +265,7 @@ CliArgs parse_args(int argc, char** argv) {
         return args;
     }
 
-    if (args.command == "build" || args.command == "kernel") {
+    if (args.command == "build" || args.command == "graph" || args.command == "kernel") {
         for (int i = 2; i < argc; ++i)
             args.build_args.emplace_back(argv[i]);
         return args;
@@ -693,6 +695,10 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if (arg == "--runtime-cache" && need_value(arg)) {
             args.runtime_cache = argv[++i];
+            continue;
+        }
+        if (arg == "--kernel-bindings" && need_value(arg)) {
+            args.kernel_bindings_path = argv[++i];
             continue;
         }
         if (arg == "--backend-dir" && need_value(arg)) {

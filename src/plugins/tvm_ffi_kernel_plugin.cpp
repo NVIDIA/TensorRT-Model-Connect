@@ -9,12 +9,14 @@
 
 #include "plugins/tvm_ffi_kernel_plugin.h"
 
+#include "plugins/tvm_ffi_runtime_bindings.h"
 #include "utils/json_helpers.h"
 
 #include <cstdint>
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <tvm/ffi/c_api.h>
 #include <tvm/ffi/extra/c_env_api.h>
@@ -45,6 +47,8 @@ TvmFfiOutputSpec parse_single_output_spec(const std::string& obj) {
         spec.dtype = 2;
     else if (dt == "float16" || dt == "half")
         spec.dtype = 1;
+    else if (dt == "int32")
+        spec.dtype = 3;
     else
         spec.dtype = 0;
     return spec;
@@ -101,20 +105,40 @@ TvmFfiKernelPlugin::TvmFfiKernelPlugin(const std::string& kernel_name,
     parse_shape_spec();
 }
 
-TvmFfiKernelPlugin::TvmFfiKernelPlugin(const void* data, size_t /*length*/) {
+TvmFfiKernelPlugin::TvmFfiKernelPlugin(const void* data, size_t length) {
+    if (data == nullptr)
+        throw std::runtime_error("TvmFfiKernelPlugin serialization data is null");
     auto* p = static_cast<const char*>(data);
+    std::size_t remaining = length;
     auto read_str = [&]() -> std::string {
+        if (remaining < sizeof(uint32_t))
+            throw std::runtime_error("Truncated TvmFfiKernelPlugin serialization");
         uint32_t len = 0;
-        std::memcpy(&len, p, 4);
-        p += 4;
+        std::memcpy(&len, p, sizeof(len));
+        p += sizeof(len);
+        remaining -= sizeof(len);
+        if (static_cast<std::size_t>(len) > remaining)
+            throw std::runtime_error("Truncated TvmFfiKernelPlugin string");
         std::string s(p, len);
         p += len;
+        remaining -= len;
         return s;
     };
     kernel_name_ = read_str();
     shape_spec_ = read_str();
+    if (remaining != 0)
+        throw std::runtime_error("Trailing bytes in TvmFfiKernelPlugin serialization");
     parse_shape_spec();
+    if (is_runtime_tvm_ffi_kernel_name(kernel_name_)) {
+        bound_fn_ = active_tvm_ffi_binding(kernel_name_);
+        if (bound_fn_ == nullptr) {
+            throw std::runtime_error("No load-time TVM-FFI binding for slot '" + kernel_name_ +
+                                     "'");
+        }
+    }
 }
+
+TvmFfiKernelPlugin::~TvmFfiKernelPlugin() = default;
 
 namespace {
 
@@ -173,6 +197,19 @@ void TvmFfiKernelPlugin::parse_shape_spec() {
     workspace_bytes_ = static_cast<int64_t>(extract_json_int(shape_spec_, "workspace_bytes", 0));
     output_specs_ = parse_outputs_array(shape_spec_, num_outputs_);
     extra_args_ = parse_extra_args(shape_spec_);
+    if (num_inputs_ <= 0 || num_outputs_ <= 0 || workspace_bytes_ < 0 ||
+        output_specs_.size() != static_cast<std::size_t>(num_outputs_)) {
+        throw std::runtime_error("Invalid TvmFfiKernelPlugin shape specification");
+    }
+    for (const auto& output : output_specs_) {
+        if (output.same_as_input_index < -1 || output.same_as_input_index >= num_inputs_) {
+            throw std::runtime_error("TvmFfiKernelPlugin output input index is out of range");
+        }
+        for (int32_t dimension : output.dims) {
+            if (dimension <= 0)
+                throw std::runtime_error("TvmFfiKernelPlugin fixed dimensions must be positive");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -232,6 +269,8 @@ nvinfer1::DataType TvmFfiKernelPlugin::getOutputDataType(int32_t index,
             return nvinfer1::DataType::kBF16;
         if (spec.dtype == 1)
             return nvinfer1::DataType::kHALF;
+        if (spec.dtype == 3)
+            return nvinfer1::DataType::kINT32;
         if (spec.same_as_input_index >= 0)
             return inputTypes[spec.same_as_input_index];
     }
@@ -243,9 +282,14 @@ nvinfer1::DataType TvmFfiKernelPlugin::getOutputDataType(int32_t index,
 // ---------------------------------------------------------------------------
 
 TvmFfiKernelPlugin* TvmFfiKernelPlugin::clone() const noexcept {
-    auto* p = new TvmFfiKernelPlugin(kernel_name_, shape_spec_);
-    p->namespace_ = namespace_;
-    return p;
+    try {
+        auto p = std::make_unique<TvmFfiKernelPlugin>(kernel_name_, shape_spec_);
+        p->namespace_ = namespace_;
+        p->bound_fn_ = bound_fn_;
+        return p.release();
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 nvinfer1::DimsExprs
@@ -388,11 +432,11 @@ void append_extra_args(TVMFFIAny* args, int32_t base_idx,
     }
 }
 
-bool resolve_tvm_ffi_function(const std::string& kernel_name, void** function) {
+bool resolve_tvm_ffi_function(const std::string& kernel_name, TvmFfiBoundFunctionPtr* function) {
     if (*function != nullptr)
         return true;
-    TVMFFIByteArray name{kernel_name.data(), kernel_name.size()};
-    if (TVMFFIFunctionGetGlobal(&name, function) == 0 && *function != nullptr)
+    *function = resolve_global_tvm_ffi_function(kernel_name);
+    if (*function != nullptr)
         return true;
     std::cerr << "[TvmFfiKernelPlugin] Failed to resolve kernel: " << kernel_name << '\n';
     return false;
@@ -426,7 +470,7 @@ int32_t TvmFfiKernelPlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDesc,
                                     nvinfer1::PluginTensorDesc const* outputDesc,
                                     void const* const* inputs, void* const* outputs,
                                     void* workspace, cudaStream_t stream) noexcept {
-    if (!resolve_tvm_ffi_function(kernel_name_, &cached_fn_))
+    if (!resolve_tvm_ffi_function(kernel_name_, &bound_fn_))
         return -1;
 
     // 2. Build argument array: [inputs..., workspace_tmp, outputs..., extra_args...]
@@ -465,7 +509,7 @@ int32_t TvmFfiKernelPlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDesc,
         return -1;
 
     append_extra_args(args.data(), arg_idx, extra_args_);
-    return invoke_tvm_ffi_function(cached_fn_, args.data(), total_args, device_id, stream,
+    return invoke_tvm_ffi_function(bound_fn_->handle(), args.data(), total_args, device_id, stream,
                                    kernel_name_);
 }
 

@@ -2,220 +2,287 @@
 title: "Bring Your Own Kernel"
 ---
 
-This tutorial replaces Qwen3-8B decode attention with a FlashInfer TVM-FFI
-kernel. The same workflow works for any kernel that implements a slot already
-published by a model family.
+This tutorial replaces one explicitly selected region of a native TensorRT
+graph with a load-time TVM-FFI kernel slot.
 
-You bring only:
+The workflow is:
 
-- a trusted TVM-FFI shared library (`.so`);
-- a small YAML file.
+```text
+graph inspect -> graph list -> graph select -> build --graph-patch
+              -> kernel-bindings.json -> load a pipeline
+```
 
-You do not edit Model Connect and you do not write TensorRT C++. The Qwen
-family owns where the slot connects to the TensorRT graph.
+There is no semantic lowering map. You inspect the TensorRT graph that Model
+Connect is about to compile, copy the exact node IDs that you want to replace,
+and bring a compatible TVM-FFI DSO. The model family does not need a new slot
+or a code change.
 
-Before you start, complete [Installation](../../getting-started/installation.md),
-clone this repository, and run every command below from its root directory.
-Building the included exporter requires an SM 10.3 GPU; on another supported
-GPU, bring an already compiled DSO that implements the same slot instead. The
-reference Qwen3-8B build produced about 31 GB per bundle, so reserve at least
-70 GB of disk for the native and patched pair.
+This is a raw TensorRT graph workflow. Layer names and operations help you
+navigate, but they are not a stable model-level semantic API.
 
-## 1. See the available slots
+## Before you start
 
-Pin the model revision so that the model and slot contract cannot change under
-you:
+You need:
+
+- a native TensorRT build of Model Connect with TVM-FFI enabled;
+- a trusted TVM-FFI DSO for the target GPU;
+- enough resources to build the selected model;
+- one pinned model revision and one fixed set of build options.
+
+Run the commands from the repository root. This example uses Qwen3-8B only to
+make the commands concrete; it does not assume a particular attention
+implementation or promise a speedup.
 
 ```bash
 export MODEL=Qwen/Qwen3-8B
 export REVISION=b968826d9c46dd6066d109eabc6255188de91218
+export WORK="$PWD/artifacts/qwen3-graph-slot"
+mkdir -p "$WORK"
 
-trtmc kernel slots "$MODEL" --model-revision "$REVISION"
+BUILD_ARGS=(
+  "$MODEL"
+  --model-revision "$REVISION"
+  --precision bf16
+  --max-cache-length 40960
+  --decoder-engine-layout split
+)
 ```
 
-For this tutorial, the output includes:
+Use the same `BUILD_ARGS` for inspection, the patched build, and the native
+comparison build. A different revision, precision, cache length, layout, or
+graph-producing implementation invalidates the selection.
+
+## 1. Capture the TensorRT graph
+
+Capture the decode graph immediately before TensorRT serialization:
+
+```bash
+trtmc graph inspect \
+  --engine-role decode \
+  --snapshot "$WORK/decode.graph.json" \
+  "${BUILD_ARGS[@]}"
+```
+
+Inspection stops before engine compilation. The snapshot contains the ordered
+TensorRT layers, tensors, engine role, build metadata, and a graph fingerprint.
+For a split decoder, use `--engine-role prefill` instead to inspect the prefill
+engine. `dual_profile` is also available for a dual-profile decoder build.
+
+## 2. List nodes and choose a region
+
+Filter the display by node ID, operation, or layer name:
+
+```bash
+trtmc graph list "$WORK/decode.graph.json" \
+  --match '*attention*' | tee "$WORK/decode.nodes.txt"
+```
+
+The columns are:
 
 ```text
-qwen.decode_attention@1
-  Single-token post-RoPE grouped-query attention over native Qwen KV cache exposed as 64-token pages.
-  inputs:
-    query: bfloat16 [num_query_heads, head_dim]
-    key: bfloat16 [1, num_kv_heads, kv_capacity, head_dim]
-    value: bfloat16 [1, num_kv_heads, kv_capacity, head_dim]
-    key_value_lengths: int32 [1]
-    page_offsets: int32 [1]
-    page_table: int32 [num_pages]
-  outputs:
-    context: bfloat16 same_as_input_0
-  workspace: 0 bytes
-  instances (36):
-    decoder.layers.0.decode_attention
-    ...
-    decoder.layers.35.decode_attention
-  model arguments:
-    softmax_scale: float32
+ID        OP        NAME        INPUTS        OUTPUTS
+node:...  ...       ...         tensor:...    tensor:...
 ```
 
-A slot is a model-owned call site. It defines tensor shapes, data types,
-workspace, argument order, and how inputs and outputs connect to TensorRT.
-YAML selects a slot; it does not try to rediscover model semantics.
-For this slot, `key_value_lengths[0]` is the live prefix length,
-`page_offsets[0]` is zero, and `page_table` is the identity mapping over
-64-token pages.
+Use `OP`, `NAME`, and tensor edges to find the region, then copy its node IDs.
+Start with the smallest region that matches your kernel. The selected nodes
+must form one connected, convex region: a graph path cannot leave the region
+and later re-enter it.
 
-## 2. Prepare a TVM-FFI kernel
+TensorRT 11 displays one `IAttention` as adjacent `ATTENTION_INPUT` and
+`ATTENTION_OUTPUT` nodes. Select both when replacing the complete attention
+operation. Model Connect includes typed attention ports such as
+`key_value_lengths` in the ordered boundary even though TensorRT does not
+expose those ports through ordinary `get_input()` calls.
 
-If you already have a compatible DSO, skip this step. This repository also
-contains the small FlashInfer CuTe exporter used by the example:
+`--match` only filters what `list` displays; it does not select anything. Node
+IDs are explicit on purpose. `graph select` does not accept a model semantic
+name, wildcard, regular expression, or lowering map.
+
+## 3. Lock the selection and ABI
+
+The following IDs are examples. Replace them with IDs copied from your own
+`graph list` output:
 
 ```bash
-python -m pip install \
-  "flashinfer-python==0.6.15" \
-  "nvidia-cutlass-dsl==4.5.0" \
-  "apache-tvm-ffi==0.1.12"
+export BINDING_ID=my.decode_attention@1
+NODES=(node:120 node:121)
 
-mkdir -p artifacts/qwen3-byok
-
-python python/tensorrt_model_connect/families/qwen/examples/byok_flashinfer/export_flashinfer_kernel.py \
-  --output artifacts/qwen3-byok/flashinfer-qwen3.so
+trtmc graph select "$WORK/decode.graph.json" \
+  --nodes "${NODES[@]}" \
+  --binding-id "$BINDING_ID" \
+  --workspace-bytes 0 \
+  --output-shape-like-input 0 \
+  -o "$WORK/decode-attention.selection.json"
 ```
 
-The exporter requires FlashInfer, CUTLASS DSL, TVM FFI, CUDA PyTorch, and an
-SM 10.3 GPU. It exports a function named `run` with the ABI owned by
-`qwen.decode_attention@1`. The example was tested with FlashInfer 0.6.15,
-CUTLASS DSL 4.5.0, and Apache TVM FFI 0.1.12.
+`graph select` prints each ordered input and output tensor ID, TensorRT name,
+dtype, and shape, followed by `abi_sha256`. It also writes a selection JSON
+containing:
 
-For the pinned Qwen3-8B revision, the symbolic dimensions above resolve to
-32 query heads, 8 KV heads, head dimension 128, and KV capacity 40960. It uses
-64-token pages, so the page table has 640 entries. The included exporter is
-statically specialized to those values and an SM 10.3 GPU; do not reuse its DSO
-for another model merely because that model publishes a slot with the same name.
+- the graph fingerprint and engine role;
+- `abi_sha256`, derived from the ordered tensor contracts, workspace, and
+  extra arguments;
+- the exact selected node and boundary tensor IDs.
 
-:::warning Trusted native code only
-A DSO can execute native code when it is loaded. SHA-256 checks identity, not
-safety. Use only a library that you trust.
-:::
+The Qwen decode attention output has the same dynamic dimensions as boundary
+`input[0]`, so the example names that relationship explicitly. For a different
+region, choose the matching index from the snapshot; the input and output dtype
+and declared shape must match. Remove the option for a fixed-shape output.
+Model Connect never guesses a relationship from two matching `-1`
+placeholders.
 
-## 3. Write the YAML
-
-Copy your DSO beside the YAML, calculate its digest, and fill the example
-template:
+If the kernel needs fixed scalar or null arguments, add one strict JSON object
+per argument, in call order:
 
 ```bash
-export WORK="$PWD/artifacts/qwen3-byok"
-export DSO="$WORK/flashinfer-qwen3.so"
-
-sha256sum "$DSO"
-
-sed "s/@SHA256@/$(sha256sum "$DSO" | awk '{print $1}')/" \
-  python/tensorrt_model_connect/families/qwen/examples/byok_flashinfer/qwen3-flashinfer.yaml.in \
-  > "$WORK/qwen3-flashinfer.yaml"
-
-cat "$WORK/qwen3-flashinfer.yaml"
+trtmc graph select "$WORK/decode.graph.json" \
+  --nodes "${NODES[@]}" \
+  --binding-id "$BINDING_ID" \
+  --workspace-bytes 0 \
+  --output-shape-like-input 0 \
+  --extra-arg '{"type":"int","value":32}' \
+  --extra-arg '{"type":"float","value":0.5}' \
+  -o "$WORK/decode-attention.selection.json"
 ```
 
-The complete contract is intentionally small:
+Allowed types are `none`, signed 32-bit `int`, finite `float`, and null `ptr`.
+`none` and `ptr` have no `value` field.
 
-```yaml
-schema_version: 1
-slot: qwen.decode_attention@1
-instances:
-  all: true
-  expect_count: 36
-kernel:
-  library: ./flashinfer-qwen3.so
-  sha256: <the lowercase SHA-256 printed above>
-  function: run
-```
+## 4. Implement the TVM-FFI function
 
-`expect_count` prevents an accidental partial replacement if a different
-model variant has another layer count. To replace only specific layers, use:
+Use the boundary records printed by `graph select` to export a TVM-FFI module
+function, such as `run`, with this fixed call order:
 
-```yaml
-instances:
-  ids:
-    - decoder.layers.0.decode_attention
-```
+1. boundary input DLTensors in `input_tensor_ids` order;
+2. when `workspace_bytes` is nonzero, one CUDA `uint8` workspace DLTensor;
+3. boundary output DLTensors in `output_tensor_ids` order;
+4. extra arguments in their declared order.
 
-Qwen owns the slot's tensor ABI, so the YAML does not repeat shapes, ports,
-workspace, TensorRT layer names, or Model Connect's internal function alias.
+The function must write the declared outputs. A raw third-party kernel is not
+automatically compatible; wrap or export it through TVM-FFI with this exact
+contract. Changing a boundary dtype, shape, argument order, workspace size, or
+extra argument changes the engine ABI and requires a new selection and build.
 
-## 4. Build native and patched bundles
+## 5. Build a slot-ready bundle
 
-First build the native comparison bundle:
+Build with the same model revision and options used for inspection:
 
 ```bash
-trtmc build "$MODEL" \
-  --model-revision "$REVISION" \
-  --precision bf16 \
-  --max-cache-length 40960 \
-  -o "$WORK/qwen3-native.trtfb"
+trtmc build "${BUILD_ARGS[@]}" \
+  --graph-patch "$WORK/decode-attention.selection.json" \
+  -o "$WORK/qwen3-slot-ready.trtfb"
 ```
 
-Then add only `--kernel`:
+Build reconstructs the graph, verifies its fingerprint, rewires the selected
+region to a `TvmFfiKernel` layer, and stores `kernel_slots.json` in the bundle.
+That section contains the binding ID and ABI SHA-256. The plugin name is
+derived as `trtmc.slot.<binding-id>` instead of being repeated in the schema.
+
+The DSO is not embedded in this bundle. The TensorRT engine and its slot ABI
+are now fixed; the compatible DSO is chosen when a pipeline is loaded.
+
+## 6. Write the strict runtime binding manifest
+
+Copy your trusted DSO beside the manifest under an immutable, content-addressed
+name:
 
 ```bash
-trtmc build "$MODEL" \
-  --model-revision "$REVISION" \
-  --precision bf16 \
-  --max-cache-length 40960 \
-  --kernel "$WORK/qwen3-flashinfer.yaml" \
-  -o "$WORK/qwen3-flashinfer.trtfb"
+export SOURCE_DSO=/path/to/your/kernel.so
+export DSO_SHA256="$(sha256sum "$SOURCE_DSO" | awk '{print $1}')"
+export DSO="$WORK/kernel.$DSO_SHA256.so"
+cp "$SOURCE_DSO" "$DSO"
+export SELECTION="$WORK/decode-attention.selection.json"
+
+export ABI_SHA256="$(
+  python -c 'import json,sys; print(json.load(open(sys.argv[1]))["abi_sha256"])' \
+    "$SELECTION"
+)"
+
+cat > "$WORK/kernel-bindings.json" <<EOF
+{
+  "schema_version": 1,
+  "bindings": [
+    {
+      "id": "$BINDING_ID",
+      "abi_sha256": "$ABI_SHA256",
+      "library": "./kernel.$DSO_SHA256.so",
+      "sha256": "$DSO_SHA256",
+      "function": "run"
+    }
+  ]
+}
+EOF
 ```
 
-Build validates the YAML, DSO digest, slot, and instance count. It then
-connects the slot directly and embeds the exact DSO in the output bundle.
-There is no capture, lowering-map, selection-lock, or graph-patch workflow.
+The schema is exact: missing or unknown fields fail. The library path must be
+relative to the manifest, each DSO digest must match, and every slot in the
+bundle must be bound exactly once. A digest verifies identity, not safety; load
+only trusted native code.
 
-## 5. Check correctness
+## 7. Load and run
 
-Run deterministic generation through both bundles:
+A slot-ready bundle requires `--kernel-bindings`:
 
 ```bash
-PROMPT="$(<"$PWD/python/tensorrt_model_connect/families/qwen/examples/byok_flashinfer/prompt.txt")"
-COMMON_ARGS=(
-  --prompt "$PROMPT"
-  --max-new-tokens 64
+trtmc run "$WORK/qwen3-slot-ready.trtfb" \
+  --kernel-bindings "$WORK/kernel-bindings.json" \
+  --prompt "Explain grouped-query attention in one sentence." \
+  --max-new-tokens 32 \
   --greedy
-)
-
-trtmc run "$WORK/qwen3-native.trtfb" "${COMMON_ARGS[@]}" \
-  > "$WORK/native.txt"
-
-trtmc run "$WORK/qwen3-flashinfer.trtfb" "${COMMON_ARGS[@]}" \
-  > "$WORK/flashinfer.txt"
-
-diff -u "$WORK/native.txt" "$WORK/flashinfer.txt"
 ```
 
-An empty diff passes this smoke. If it fails, use the native bundle and fix
-the kernel or YAML.
+The runtime checks that the manifest-declared ABI hash matches the bundle, then
+validates the DSO hash and loads the named module function while it constructs
+the pipeline. TVM-FFI does not expose a function signature for the runtime to
+compare with the tensor contract, so the kernel author must implement the ABI
+printed by `graph select`. A slot-ready load fails if that model defers
+TensorRT engine deserialization until first inference; v1 binds only during
+pipeline loading.
 
-## 6. Check performance does not regress
+You can load the same bundle into a new pipeline with another DSO when that DSO
+uses the same binding ID and ABI hash. Existing pipelines keep the function
+they loaded: editing the manifest or loading another pipeline does not rebind a
+running pipeline. Use a distinct immutable filename for each DSO version;
+overwriting a loaded `.so` path is not a supported swap mechanism. Destroy and
+load a new pipeline to switch kernels.
 
-Use a longer fixed prompt so attention work is measurable, then benchmark both
-bundles on the same idle GPU:
+## 8. Check correctness and performance
+
+Build a native baseline with the same `BUILD_ARGS`, compare deterministic
+outputs, and benchmark both bundles on the same idle GPU:
 
 ```bash
-PERF_UNIT='Grouped-query attention shares key and value heads across several query heads, reducing cache bandwidth while preserving distinct query projections. This fixed paragraph creates a stable decode benchmark with enough context for attention work to be measurable. '
-PERF_PROMPT=
-for _ in {1..12}; do
-  PERF_PROMPT+="$PERF_UNIT"
-done
+trtmc build "${BUILD_ARGS[@]}" -o "$WORK/qwen3-native.trtfb"
+
+trtmc run "$WORK/qwen3-native.trtfb" \
+  --prompt "Explain grouped-query attention in one sentence." \
+  --max-new-tokens 32 --greedy > "$WORK/native.txt"
+
+trtmc run "$WORK/qwen3-slot-ready.trtfb" \
+  --kernel-bindings "$WORK/kernel-bindings.json" \
+  --prompt "Explain grouped-query attention in one sentence." \
+  --max-new-tokens 32 --greedy > "$WORK/external.txt"
+
+diff -u "$WORK/native.txt" "$WORK/external.txt"
+```
+
+An empty diff is a useful smoke test, not a complete numerical qualification.
+Use the same prompt and idle GPU for a simple no-regression gate:
+
+```bash
+PERF_PROMPT='Explain grouped-query attention, KV caching, and decode latency.'
 
 trtmc run "$WORK/qwen3-native.trtfb" \
   --prompt "$PERF_PROMPT" --max-new-tokens 64 --greedy \
   --warmup 3 --benchmark 10 > "$WORK/native.perf.log" 2>&1
 
-trtmc run "$WORK/qwen3-flashinfer.trtfb" \
+trtmc run "$WORK/qwen3-slot-ready.trtfb" \
+  --kernel-bindings "$WORK/kernel-bindings.json" \
   --prompt "$PERF_PROMPT" --max-new-tokens 64 --greedy \
-  --warmup 3 --benchmark 10 > "$WORK/flashinfer.perf.log" 2>&1
-```
+  --warmup 3 --benchmark 10 > "$WORK/external.perf.log" 2>&1
 
-Compare decode throughput:
-
-```bash
-python - "$WORK/native.perf.log" "$WORK/flashinfer.perf.log" <<'PY'
+python - "$WORK/native.perf.log" "$WORK/external.perf.log" <<'PY'
 import re
 import sys
 
@@ -227,26 +294,42 @@ def throughput(path):
     return values[-1]
 
 native = throughput(sys.argv[1])
-patched = throughput(sys.argv[2])
-print(f"native={native:.2f} patched={patched:.2f} tokens/s")
-if patched < native:
+external = throughput(sys.argv[2])
+print(f"native={native:.2f} external={external:.2f} tokens/s")
+if external < native:
     raise SystemExit("FAIL: the external kernel is slower")
-print("PASS: patched is not slower than native")
+print("PASS: the external kernel is not slower")
 PY
 ```
 
-The gate is simple: on the same model revision, prompt, settings, and hardware,
-the patched throughput must be at least the native throughput. In the reference
-SM 10.3 run used to qualify this example, native measured 88.68 tokens/s and
-FlashInfer measured 94.62 tokens/s, with byte-identical generated text. Treat
-those numbers as a receipt, not a promise for different hardware.
+Accept the kernel only if it meets your numerical tolerance and this gate.
+This tutorial makes no performance claim for a particular external DSO.
 
-## What requires a Model Connect change?
+## Current limits
 
-- Another kernel for `qwen.decode_attention@1`: no change; bring YAML + DSO.
-- A different subset of the 36 instances: no change; edit `instances`.
-- A new operation boundary or tensor ABI: the owning model family adds one
-  new versioned slot.
+- Only native TensorRT bundles with TVM-FFI enabled are supported. Explicit
+  graph slots currently reject TensorRT-RTX, optimized-runtime, quantized, and
+  tensor-parallel builds.
+- One build can replace one connected, convex region with exactly one output
+  boundary in one engine role.
+- A region cannot include a network output, shape or host tensor, control-flow
+  or collective layer, or an existing plugin layer.
+- A selected output must have fixed positive dimensions or the same dtype and
+  shape as a boundary input.
+- Boundary tensors must be linear, rank 8 or lower, and use BF16, FP16, FP32,
+  or INT32.
+- The selection is tied to the exact captured graph and build settings.
+- Kernel binding happens only while a new pipeline is loaded; there is no
+  in-place rebind API for a running pipeline.
+- v1 rejects a model that defers its selected engine's TensorRT deserialization
+  until inference instead of completing it during pipeline load.
+- Slot-ready bundles load through the CLI or the C++ binding overload; the
+  current C-linkage API has no kernel-binding argument.
 
-This boundary keeps every model family encapsulated while letting kernel
-authors use the same two-file workflow.
+## Existing family-owned Direct Slots
+
+The earlier Direct Slot workflow remains supported. When a model family
+already publishes the boundary you need, use `trtmc kernel slots` and
+`trtmc build --kernel <manifest.yaml>`. That YAML flow is simpler and keeps the
+semantic call site family-owned. Use explicit graph selection only when you
+need a raw TensorRT region that the family does not publish.

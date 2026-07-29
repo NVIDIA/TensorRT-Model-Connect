@@ -1153,12 +1153,15 @@ def build_bundle(
         )
 
     def _build_plugin_engine_with_role(role: str) -> bytes:
+        from .graph_build import engine_role
+
         previous_role = config.raw.get("_decoder_engine_role")
         config.raw["_decoder_engine_role"] = role
         try:
-            return plugin.build_engine(
-                config, weights, max_cache_length, verbose=verbose,
-                **extra_kwargs)
+            with engine_role(role):
+                return plugin.build_engine(
+                    config, weights, max_cache_length, verbose=verbose,
+                    **extra_kwargs)
         finally:
             if previous_role is None:
                 config.raw.pop("_decoder_engine_role", None)
@@ -1168,6 +1171,13 @@ def build_bundle(
     def _build_split_plugin_engine_with_role(role: str) -> bytes:
         with trt_compat.scoped_timing_cache(_split_timing_cache_scope(role)):
             return _build_plugin_engine_with_role(role)
+
+    from .graph_build import inspection_role
+
+    target_inspection_role = inspection_role()
+    if target_inspection_role is not None:
+        _build_plugin_engine_with_role(target_inspection_role)
+        raise RuntimeError("graph inspection did not reach TensorRT serialization")
 
     split_supported = (
         not parallel.enabled and
@@ -1388,6 +1398,12 @@ def build_bundle(
     # Add vision engine section if present
     if vision_plan is not None:
         sections.append(BundleSection("vision_engine_plan", vision_plan))
+
+    from .graph_build import kernel_slots_section
+
+    slot_section = kernel_slots_section()
+    if slot_section is not None:
+        sections.append(BundleSection("kernel_slots.json", slot_section))
 
     # Add extra engine sections owned by the active family plugin.
     for ename, eplan in extra_engines.items():

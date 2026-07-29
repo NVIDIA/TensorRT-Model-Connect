@@ -437,12 +437,16 @@ class _BuilderProxy(_HandleProxy):
         )
 
     def build_serialized_network(self, network: Any, config: Any) -> Any:
+        raw_network = unwrap(network)
+        from .graph_build import process_network
+
+        process_network(raw_network)
         raw_config = unwrap(config)
         _apply_builder_config_env(raw_config)
         timing_cache = _attach_timing_cache(raw_config)
         try:
             return _wrap_result(
-                self._raw.build_serialized_network(unwrap(network), raw_config),
+                self._raw.build_serialized_network(raw_network, raw_config),
                 self._trt_module,
             )
         finally:
@@ -450,6 +454,22 @@ class _BuilderProxy(_HandleProxy):
 
 
 class _NetworkProxy(_HandleProxy):
+    def _add_attention(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        attention = getattr(self._raw, method)(
+            *[unwrap(arg) for arg in args],
+            **{key: unwrap(value) for key, value in kwargs.items()},
+        )
+        from .graph_build import record_attention
+
+        record_attention(self._raw, attention)
+        return attention
+
+    def add_attention(self, *args: Any, **kwargs: Any) -> Any:
+        return self._add_attention("add_attention", *args, **kwargs)
+
+    def add_attention_v2(self, *args: Any, **kwargs: Any) -> Any:
+        return self._add_attention("add_attention_v2", *args, **kwargs)
+
     def add_matrix_multiply(
         self,
         lhs: Any,

@@ -77,6 +77,10 @@ void test_build_forwards_args_verbatim() {
     auto kernel = parse({"trtmc", "kernel", "slots", "Example/Decoder-0.6B"});
     check(kernel.command == "kernel" && kernel.build_args.size() == 2,
           "kernel command forwards to Python");
+
+    auto graph = parse({"trtmc", "graph", "list", "graph.json"});
+    check(graph.command == "graph" && graph.build_args.size() == 2,
+          "graph command forwards to Python");
 }
 
 void test_run_parses_common_flags() {
@@ -116,6 +120,8 @@ void test_run_parses_common_flags() {
                        "/tmp/models",
                        "--runtime-cache",
                        "/tmp/cache",
+                       "--kernel-bindings",
+                       "/tmp/bindings.json",
                        "--cuda-graphs"});
     check(args.command == "run", "run command");
     check(args.bundle_path == "bundle.trtfb", "run bundle");
@@ -140,6 +146,7 @@ void test_run_parses_common_flags() {
               args.model_plugin_search_paths[0] == "/tmp/models",
           "run model plugin dir");
     check(args.runtime_cache == "/tmp/cache", "run runtime cache");
+    check(args.kernel_bindings_path == "/tmp/bindings.json", "run kernel bindings");
     check(args.cuda_graphs, "run cuda graphs");
 }
 
@@ -257,6 +264,11 @@ void test_missing_value_fails() {
     auto args = parse({"trtmc", "run", "bundle.trtfb", "--prompt"});
     check(args.parse_error, "missing value parse error");
     check(args.error_message == "--prompt requires a value", "missing value message");
+
+    auto bindings = parse({"trtmc", "run", "bundle.trtfb", "--kernel-bindings"});
+    check(bindings.parse_error, "missing kernel bindings value parse error");
+    check(bindings.error_message == "--kernel-bindings requires a value",
+          "missing kernel bindings value message");
 }
 
 void test_missing_prompt_is_distinct_from_empty_prompt() {

@@ -34,6 +34,7 @@ replaces unsafe filename characters with `-`.
 | --- | --- |
 | `-o`, `--output PATH` | Output bundle path. Defaults to the sanitized model basename plus `.trtfb`. |
 | `--kernel FILE.yaml` | Replace a family-owned kernel slot with the trusted TVM-FFI DSO declared by this YAML manifest. Requires the native TensorRT backend. |
+| `--graph-patch REGION.json` | Replace one explicitly selected TensorRT region with a load-time TVM-FFI slot. Requires the native TensorRT backend. |
 | `--model-revision REV` | Build a Hugging Face commit, tag, or branch instead of its default revision. |
 | `--trust-remote-code` | Accepted for E2E-command compatibility. The current build dispatcher does not forward this flag as a universal remote-code gate; family/model loaders own their loading behavior. Review the checkpoint and family implementation, and do not assume omitting this flag prevents every remote-code path. |
 | `--decoder-engine-layout split|dual_profile` | Select separate prefill/decode engines or one multi-profile decoder engine. |
@@ -92,12 +93,49 @@ path; it cannot be combined with `--rtx`. See
 [Bring Your Own Kernel](../tutorials/beginner/bring-your-own-kernel.md) for the
 end-to-end workflow.
 
+## `trtmc graph`
+
+Capture a raw TensorRT graph, list its explicit node IDs, and select one region:
+
+```bash
+trtmc graph inspect \
+  --snapshot graph.json \
+  [--engine-role prefill|decode|dual_profile] \
+  <hf-repo-or-local-dir> [build options...]
+
+trtmc graph list graph.json [--match GLOB]
+
+trtmc graph select graph.json \
+  --nodes NODE_ID [NODE_ID ...] \
+  --binding-id ID \
+  [--workspace-bytes N] [--output-shape-like-input INPUT_INDEX] \
+  [--extra-arg JSON]... \
+  -o region.json
+```
+
+`inspect` passes the model and all following options verbatim to `trtmc build`,
+captures immediately before TensorRT serialization, and does not compile a
+bundle. Put its own `--snapshot` and `--engine-role` options before the model.
+`list` prints node IDs, operation and layer names, and tensor edges; `--match`
+only filters displayed IDs, operations, or names. `select` still accepts only
+explicit node IDs and prints the ordered boundary tensor IDs, names, dtypes,
+shapes, and ABI hash. Each `--extra-arg` is one strict JSON object whose type is
+`none`, `int`, `float`, or `ptr`. A dynamic output additionally requires
+`--output-shape-like-input`; fixed outputs reject that option.
+
+Build the same model revision and options with `--graph-patch region.json` to
+produce a slot-ready native bundle. The selection must describe one connected,
+convex region and must still match the live graph fingerprint. See
+[Bring Your Own Kernel](../tutorials/beginner/bring-your-own-kernel.md) for the
+load-time binding workflow and current limitations.
+
 ## Runtime commands
 
 `trtmc` also inspects and runs bundles from C++.
 
 ```bash
-trtmc run <bundle.trtfb> --prompt "text" [--image PATH] [--greedy]
+trtmc run <bundle.trtfb> --prompt "text" [--image PATH] [--greedy] \
+  [--kernel-bindings kernel-bindings.json]
 trtmc encode <bundle.trtfb> --prompt "text"
 trtmc segment <bundle.trtfb> --image PATH --output PATH
 trtmc segment-prompted <bundle.trtfb> --image PATH --output DIR [--point-x F --point-y F]
@@ -129,16 +167,20 @@ nonzero for an otherwise valid optimized bundle.
 
 Depending on the command, shared load/run options include `--hf-python`,
 `--backend-dir`, repeatable `--model-plugin-dir`, `--runtime-cache`,
-`--cuda-graphs`, `--benchmark`, `--warmup`, `--config`, and repeatable
-`--set`. `trtmc --help` prints one combined synopsis for all commands; it is
-not separate per-command help. Read the relevant command section in that
-combined output and this reference for the accepted options.
+`--kernel-bindings`, `--cuda-graphs`, `--benchmark`, `--warmup`, `--config`,
+and repeatable `--set`. `trtmc --help` prints one combined synopsis for all
+commands; it is not separate per-command help. Read the relevant command
+section in that combined output and this reference for the accepted options.
 
 These shared options have route-specific contracts:
 
 - On native TensorRT-RTX bundles, `--runtime-cache` names a JIT kernel cache
   file. On an optimized-runtime bundle, it names the root directory where the
   host materializes the integrity-bound artifact cache.
+- `--kernel-bindings` is required for a native bundle containing
+  `kernel_slots.json` and rejected for bundles without slots. Its strict JSON
+  manifest binds every slot exactly once to a relative TVM-FFI DSO path,
+  exported function, matching ABI SHA-256, and matching DSO SHA-256.
 - For Python builds, `--config` accepts `.json`, `.yaml`, and `.yml` profiles;
   YAML requires PyYAML. The C++ load/run `--config` surface accepts `.json`
   only and rejects YAML with a conversion error. The current Qwen
@@ -157,7 +199,7 @@ an inventory, not a claim that every option is accepted by every command.
 | Help and version | `--help`, `--version` |
 | Primary inputs | `--prompt`, `--prompts-file`, `--image`, `--audio`, `--audio-in`, `--document`, `--field-input`, `--branch-input`, `--trunk-input` |
 | Output selection | `--output`, `--output-json`, `--audio-out`, `--list-engines` |
-| Runtime loading and config | `--hf-python`, `--backend-dir`, `--model-plugin-dir`, `--runtime-cache`, `--kv-cache-size`, `--cuda-graphs`, `--config`, `--set` |
+| Runtime loading and config | `--hf-python`, `--backend-dir`, `--model-plugin-dir`, `--runtime-cache`, `--kernel-bindings`, `--kv-cache-size`, `--cuda-graphs`, `--config`, `--set` |
 | Text generation | `--max-new-tokens`, `--greedy`, `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--seed`, `--chat-template`, `--no-thinking`, `--generation-mode`, `--block-length`, `--threshold`, `--num-samples`, `--tail-frames` |
 | Diffusion and raw-state generation | `--num-steps`, `--num-inference-steps`, `--guidance-scale`, `--cfg-scale`, `--sde-gamma`, `--initial-latents-raw`, `--condition-latents-raw`, `--condition-mask-raw`, `--sampling-steps-raw`, `--sde-noise-raw`, `--negative-prompt`, `--height`, `--width`, `--num-images` |
 | Dynamic adapters | `--lora-adapter`, `--lora-adapter-id` |

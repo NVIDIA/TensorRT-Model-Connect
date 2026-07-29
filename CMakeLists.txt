@@ -392,6 +392,7 @@ if(TRTMC_ENABLE_TVM_FFI)
     set(_trtmc_has_tvm_ffi TRUE)
     target_sources(trtmc_core PRIVATE
       src/plugins/tvm_ffi_module_loader.cpp
+      src/plugins/tvm_ffi_runtime_bindings.cpp
     )
     target_compile_definitions(trtmc_core PUBLIC TRTMC_HAS_TVM_FFI=1)
     target_include_directories(trtmc_core SYSTEM PRIVATE ${TRTMC_TVM_FFI_INCLUDE_DIR})
@@ -485,16 +486,19 @@ if(_trtmc_has_tvm_ffi AND _trtmc_can_build_trt_backend)
   add_library(trtmc_tvm_ffi_plugin SHARED
     src/plugins/tvm_ffi_kernel_plugin.cpp
     src/plugins/tvm_ffi_kernel_creator.cpp
-    src/plugins/tvm_ffi_module_loader.cpp
-    src/utils/json_helpers.cpp
   )
   target_include_directories(trtmc_tvm_ffi_plugin PRIVATE ${PROJECT_SOURCE_DIR}/src)
   target_include_directories(trtmc_tvm_ffi_plugin SYSTEM PRIVATE
     ${TRTMC_TRT_INCLUDE_DIR} ${TRTMC_CUDA_INCLUDE_DIR} ${TRTMC_TVM_FFI_INCLUDE_DIR})
   target_link_libraries(trtmc_tvm_ffi_plugin PRIVATE
-    ${TRTMC_TRT_LIBRARY} ${TRTMC_CUDART_LIBRARY} ${TRTMC_TVM_FFI_LIBRARY})
+    trtmc_core ${TRTMC_TRT_LIBRARY} ${TRTMC_CUDART_LIBRARY} ${TRTMC_TVM_FFI_LIBRARY})
   target_compile_definitions(trtmc_tvm_ffi_plugin PRIVATE TRTMC_HAS_TRT=1 TRTMC_HAS_TVM_FFI=1)
   target_compile_options(trtmc_tvm_ffi_plugin PRIVATE -Wall -Wextra -Wpedantic)
+  set_target_properties(trtmc_tvm_ffi_plugin PROPERTIES
+    BUILD_RPATH "\$ORIGIN"
+    BUILD_RPATH_USE_ORIGIN TRUE
+    INSTALL_RPATH "\$ORIGIN"
+  )
   message(STATUS "TVM-FFI plugin shared library: trtmc_tvm_ffi_plugin.so")
 endif()
 
@@ -945,6 +949,26 @@ trtmc_add_test(test_io_map)
 trtmc_add_test(test_decoder_config)
 
 # TVM-FFI plugin
+if(_trtmc_has_tvm_ffi)
+  add_library(trtmc_test_tvm_ffi_runtime_kernel SHARED EXCLUDE_FROM_ALL
+    tests/cpp/test_tvm_ffi_runtime_bindings.cpp
+  )
+  target_compile_definitions(trtmc_test_tvm_ffi_runtime_kernel
+    PRIVATE TRTMC_TVM_FFI_BINDINGS_TEST_DSO=1)
+  target_include_directories(trtmc_test_tvm_ffi_runtime_kernel
+    SYSTEM PRIVATE ${TRTMC_TVM_FFI_INCLUDE_DIR})
+  target_link_libraries(trtmc_test_tvm_ffi_runtime_kernel
+    PRIVATE ${TRTMC_TVM_FFI_LIBRARY})
+
+  trtmc_add_test(test_tvm_ffi_runtime_bindings)
+  add_dependencies(test_tvm_ffi_runtime_bindings trtmc_test_tvm_ffi_runtime_kernel)
+  target_compile_definitions(test_tvm_ffi_runtime_bindings PRIVATE
+    TRTMC_TEST_TVM_FFI_BINDINGS_DSO="$<TARGET_FILE:trtmc_test_tvm_ffi_runtime_kernel>")
+  target_include_directories(test_tvm_ffi_runtime_bindings
+    SYSTEM PRIVATE ${TRTMC_TVM_FFI_INCLUDE_DIR})
+  target_link_libraries(test_tvm_ffi_runtime_bindings PRIVATE ${TRTMC_TVM_FFI_LIBRARY})
+endif()
+
 trtmc_add_test(test_tvm_ffi_plugin REQUIRES_TRT REQUIRES_GPU)
 if(TARGET test_tvm_ffi_plugin AND _trtmc_has_tvm_ffi)
   target_include_directories(test_tvm_ffi_plugin SYSTEM PRIVATE ${TRTMC_TVM_FFI_INCLUDE_DIR})

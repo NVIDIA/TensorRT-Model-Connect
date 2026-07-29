@@ -6,6 +6,7 @@
 #include "trtmc/runtime/pipeline_factory.h"
 
 #include "bundle/bundle_format.h"
+#include "plugins/tvm_ffi_runtime_bindings.h"
 #include "runtime/backend/backend_loader.h"
 #include "runtime/backend/trt_version.h"
 #include "runtime/core/trt_common.h"
@@ -26,6 +27,7 @@
 #include <algorithm>
 #include <exception>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -255,6 +257,59 @@ IBackend* load_backend_for_bundle(const BundleFile& bundle, const std::string& c
     return backend;
 }
 
+const BundleSectionInfo* find_kernel_slots_section(const BundleInfo& info) {
+    const auto section = std::find_if(
+        info.sections.begin(), info.sections.end(),
+        [](const BundleSectionInfo& entry) { return entry.name == "kernel_slots.json"; });
+    return section == info.sections.end() ? nullptr : &*section;
+}
+
+void reject_optimized_runtime_kernel_bindings(const BundleInfo& info,
+                                              const std::string& bindings_path) {
+    if (is_optimized_runtime_bundle(info) &&
+        (find_kernel_slots_section(info) != nullptr || !bindings_path.empty())) {
+        throw std::invalid_argument(
+            "Load-time TVM-FFI kernel bindings require a native TensorRT bundle");
+    }
+}
+
+#if TRTMC_HAS_TVM_FFI
+std::shared_ptr<const TvmFfiBindingSet>
+load_runtime_kernel_bindings(const std::string& bundle_path, const BundleInfo& info,
+                             const std::string& bindings_path) {
+    const auto* section = find_kernel_slots_section(info);
+    if (section == nullptr) {
+        if (!bindings_path.empty()) {
+            throw std::invalid_argument(
+                "Kernel bindings were provided, but the bundle has no kernel_slots.json");
+        }
+        return nullptr;
+    }
+    if (bindings_path.empty())
+        throw std::invalid_argument("A slot-ready bundle requires --kernel-bindings");
+    if (section->size == 0 || section->size > 1024U * 1024U)
+        throw std::runtime_error("kernel_slots.json must contain between 1 byte and 1 MiB");
+
+    const auto bytes = ReadBundleSection(bundle_path, *section);
+    const std::string descriptor(bytes.begin(), bytes.end());
+    return TvmFfiBindingSet::Load(descriptor, bindings_path);
+}
+
+void require_runtime_binding_capture(const std::shared_ptr<const TvmFfiBindingSet>& bindings) {
+    if (bindings != nullptr && !bindings->was_captured()) {
+        throw std::runtime_error(
+            "Slot-ready bundles require TensorRT engines to be deserialized during pipeline load");
+    }
+}
+#else
+void reject_runtime_kernel_bindings_without_tvm_ffi(const BundleInfo& info,
+                                                    const std::string& bindings_path) {
+    if (find_kernel_slots_section(info) != nullptr || !bindings_path.empty()) {
+        throw std::runtime_error("Load-time kernel bindings require a build with TVM-FFI enabled");
+    }
+}
+#endif
+
 } // namespace
 
 std::optional<config::ConfigBundle>
@@ -287,10 +342,16 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
     optimized_options.runtime_cache_path = runtime_cache_path;
     optimized_options.cuda_graphs = cuda_graphs;
     const BundleInfo header = ReadBundleHeader(bundle_path);
+    reject_optimized_runtime_kernel_bindings(header, /*bindings_path=*/"");
     if (auto optimized_runtime_pipeline =
             try_make_optimized_runtime_pipeline(bundle_path, header, optimized_options)) {
         return optimized_runtime_pipeline;
     }
+#if TRTMC_HAS_TVM_FFI
+    auto runtime_bindings = load_runtime_kernel_bindings(bundle_path, header, /*bindings_path=*/"");
+#else
+    reject_runtime_kernel_bindings_without_tvm_ffi(header, /*bindings_path=*/"");
+#endif
 
     auto materialized = detail::materialize_pipeline_bundle(bundle_path);
     BundleFile bundle = std::move(materialized.bundle);
@@ -333,7 +394,18 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
                         cuda_graphs,
                         /*kv_cache_size_bytes=*/0,
                         resolved ? &*resolved : nullptr};
-    auto pipeline = plugin->create(ctx);
+    std::unique_ptr<IPipeline> pipeline;
+    {
+#if TRTMC_HAS_TVM_FFI
+        std::unique_ptr<ScopedTvmFfiBindings> binding_scope;
+        if (runtime_bindings != nullptr)
+            binding_scope = std::make_unique<ScopedTvmFfiBindings>(runtime_bindings);
+#endif
+        pipeline = plugin->create(ctx);
+    }
+#if TRTMC_HAS_TVM_FFI
+    require_runtime_binding_capture(runtime_bindings);
+#endif
 
     std::cerr << "[trtmc] Pipeline loaded (strategy=" << strategy << ", backend=trt_new_runtime)"
               << std::endl;
@@ -342,11 +414,23 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
 
 std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundle_path,
                                                         const LoadOptions& options) {
+    return from_bundle(bundle_path, options, /*kernel_bindings_path=*/"");
+}
+
+std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundle_path,
+                                                        const LoadOptions& options,
+                                                        const std::string& kernel_bindings_path) {
     const BundleInfo header = ReadBundleHeader(bundle_path);
+    reject_optimized_runtime_kernel_bindings(header, kernel_bindings_path);
     if (auto optimized_runtime_pipeline =
             try_make_optimized_runtime_pipeline(bundle_path, header, options)) {
         return optimized_runtime_pipeline;
     }
+#if TRTMC_HAS_TVM_FFI
+    auto runtime_bindings = load_runtime_kernel_bindings(bundle_path, header, kernel_bindings_path);
+#else
+    reject_runtime_kernel_bindings_without_tvm_ffi(header, kernel_bindings_path);
+#endif
     auto materialized = detail::materialize_pipeline_bundle(bundle_path);
     BundleFile bundle = std::move(materialized.bundle);
     std::string config_text = std::move(materialized.config_text);
@@ -377,7 +461,18 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
                         options.cuda_graphs,
                         options.kv_cache_size_bytes,
                         resolved ? &*resolved : nullptr};
-    auto pipeline = plugin->create(ctx);
+    std::unique_ptr<IPipeline> pipeline;
+    {
+#if TRTMC_HAS_TVM_FFI
+        std::unique_ptr<ScopedTvmFfiBindings> binding_scope;
+        if (runtime_bindings != nullptr)
+            binding_scope = std::make_unique<ScopedTvmFfiBindings>(runtime_bindings);
+#endif
+        pipeline = plugin->create(ctx);
+    }
+#if TRTMC_HAS_TVM_FFI
+    require_runtime_binding_capture(runtime_bindings);
+#endif
 
     std::cerr << "[trtmc] Pipeline loaded (strategy=" << strategy << ", backend=trt_new_runtime)"
               << std::endl;
@@ -387,14 +482,27 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
 std::unique_ptr<PipelinePool> PipelineFactory::from_bundle_pool(const std::string& bundle_path,
                                                                 std::size_t pool_size,
                                                                 const LoadOptions& options) {
+    return from_bundle_pool(bundle_path, pool_size, options, /*kernel_bindings_path=*/"");
+}
+
+std::unique_ptr<PipelinePool>
+PipelineFactory::from_bundle_pool(const std::string& bundle_path, std::size_t pool_size,
+                                  const LoadOptions& options,
+                                  const std::string& kernel_bindings_path) {
     if (pool_size == 0)
         throw std::invalid_argument("Pipeline pool size must be positive");
 
     const BundleInfo header = ReadBundleHeader(bundle_path);
+    reject_optimized_runtime_kernel_bindings(header, kernel_bindings_path);
     if (is_optimized_runtime_bundle(header))
         throw std::invalid_argument(
             "PipelineFactory::from_bundle_pool does not support optimized-runtime bundles; use "
             "from_bundle because the delegated runtime owns batching and scheduling");
+#if TRTMC_HAS_TVM_FFI
+    auto runtime_bindings = load_runtime_kernel_bindings(bundle_path, header, kernel_bindings_path);
+#else
+    reject_runtime_kernel_bindings_without_tvm_ffi(header, kernel_bindings_path);
+#endif
 
     auto materialized = detail::materialize_pipeline_bundle(bundle_path);
     BundleFile bundle = std::move(materialized.bundle);
@@ -423,7 +531,18 @@ std::unique_ptr<PipelinePool> PipelineFactory::from_bundle_pool(const std::strin
                         options.cuda_graphs,
                         options.kv_cache_size_bytes,
                         resolved ? &*resolved : nullptr};
-    auto pipelines = plugin->create_pool(ctx, pool_size);
+    std::vector<std::unique_ptr<IPipeline>> pipelines;
+    {
+#if TRTMC_HAS_TVM_FFI
+        std::unique_ptr<ScopedTvmFfiBindings> binding_scope;
+        if (runtime_bindings != nullptr)
+            binding_scope = std::make_unique<ScopedTvmFfiBindings>(runtime_bindings);
+#endif
+        pipelines = plugin->create_pool(ctx, pool_size);
+    }
+#if TRTMC_HAS_TVM_FFI
+    require_runtime_binding_capture(runtime_bindings);
+#endif
     auto pool = std::make_unique<PipelinePool>(std::move(pipelines));
 
     std::cerr << "[trtmc] Pipeline pool loaded (strategy=" << strategy << ", lanes=" << pool_size
@@ -438,6 +557,11 @@ std::unique_ptr<IPipeline> load(const std::string& bundle_path, const std::strin
 
 std::unique_ptr<IPipeline> load(const std::string& bundle_path, const LoadOptions& options) {
     return PipelineFactory::from_bundle(bundle_path, options);
+}
+
+std::unique_ptr<IPipeline> load(const std::string& bundle_path, const LoadOptions& options,
+                                const std::string& kernel_bindings_path) {
+    return PipelineFactory::from_bundle(bundle_path, options, kernel_bindings_path);
 }
 
 } // namespace trtmc

@@ -524,6 +524,8 @@ std::unique_ptr<IPipeline> load(const std::string& bundle_path, const std::strin
                                 const std::string& runtime_cache_path = "",
                                 bool cuda_graphs = false);
 std::unique_ptr<IPipeline> load(const std::string& bundle_path, const LoadOptions& options);
+std::unique_ptr<IPipeline> load(const std::string& bundle_path, const LoadOptions& options,
+                                const std::string& kernel_bindings_path);
 
 } // namespace trtmc
 

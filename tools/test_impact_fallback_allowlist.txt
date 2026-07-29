@@ -156,6 +156,9 @@ shared_builder_module python/tensorrt_model_connect/config.py # shared Python bu
 shared_builder_module python/tensorrt_model_connect/debug_runner.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/engine_build_budget.py # shared build-budget policy surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/engine_builder.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/graph_build.py # opt-in raw graph slot build hook; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/graph_cli.py # opt-in raw graph slot CLI; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/graph_patch.py # opt-in raw graph capture and rewiring; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/hf_snapshot.py # shared HF snapshot selection used by every builder and gated offline preflight; broad all-model impact is intentional
 shared_builder_module python/tensorrt_model_connect/engine_defs/__init__.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/engine_defs/base.py # shared Python builder surface; broad builder impact is intentional
@@ -195,4 +198,5 @@ shared_builder_module python/tensorrt_model_connect/runtime_config/schemas/triat
 shared_builder_module python/tensorrt_model_connect/triattention_export.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/triattention_runtime.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/trt_compat.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/tvm_ffi_plugin.py # shared TVM-FFI plugin insertion helper; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/tokenizer_conversion.py # shared tokenizer conversion primitives used by family adapters; broad builder impact is intentional

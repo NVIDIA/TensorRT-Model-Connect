@@ -29,9 +29,16 @@ class PipelineFactory {
                                                   bool cuda_graphs = false);
     static std::unique_ptr<IPipeline> from_bundle(const std::string& bundle_path,
                                                   const LoadOptions& options);
+    static std::unique_ptr<IPipeline> from_bundle(const std::string& bundle_path,
+                                                  const LoadOptions& options,
+                                                  const std::string& kernel_bindings_path);
     static std::unique_ptr<PipelinePool> from_bundle_pool(const std::string& bundle_path,
                                                           std::size_t pool_size,
                                                           const LoadOptions& options = {});
+    static std::unique_ptr<PipelinePool> from_bundle_pool(const std::string& bundle_path,
+                                                          std::size_t pool_size,
+                                                          const LoadOptions& options,
+                                                          const std::string& kernel_bindings_path);
 };
 
 } // namespace trtmc

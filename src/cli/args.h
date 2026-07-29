@@ -80,6 +80,7 @@ struct CliArgs {
     float max_input_seconds{0.0F};
     float segment_length_seconds{0.0F};
     std::string runtime_cache;
+    std::string kernel_bindings_path;
     std::vector<std::string> backend_search_paths;
     std::vector<std::string> model_plugin_search_paths;
     bool cuda_graphs{false};

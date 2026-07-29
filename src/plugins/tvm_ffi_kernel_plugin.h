@@ -14,16 +14,19 @@
 
 #include <NvInferRuntime.h>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace trtmc {
 
+class TvmFfiBoundFunction;
+
 // Parsed output specification from shape_spec JSON.
 struct TvmFfiOutputSpec {
     std::vector<int32_t> dims;
     int32_t same_as_input_index{-1};
-    int32_t dtype{0}; // 0 = float32, 1 = float16, 2 = bfloat16
+    int32_t dtype{0}; // 0 = float32, 1 = float16, 2 = bfloat16, 3 = int32
 };
 
 // Extra scalar/pointer argument passed after tensors in TVMFFIFunctionCall.
@@ -38,6 +41,7 @@ class TvmFfiKernelPlugin : public nvinfer1::IPluginV2DynamicExt {
     TvmFfiKernelPlugin() = default;
     TvmFfiKernelPlugin(const std::string& kernel_name, const std::string& shape_spec);
     TvmFfiKernelPlugin(const void* data, size_t length);
+    ~TvmFfiKernelPlugin() override;
 
     // IPluginV2
     char const* getPluginType() const noexcept override;
@@ -86,7 +90,7 @@ class TvmFfiKernelPlugin : public nvinfer1::IPluginV2DynamicExt {
     int64_t workspace_bytes_{0};
     std::vector<TvmFfiOutputSpec> output_specs_;
     std::vector<TvmFfiExtraArg> extra_args_;
-    void* cached_fn_{nullptr};
+    std::shared_ptr<const TvmFfiBoundFunction> bound_fn_;
 };
 
 } // namespace trtmc

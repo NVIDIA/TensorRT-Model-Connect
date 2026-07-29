@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import json
 import os
 import subprocess
@@ -46,6 +47,23 @@ _PROFILE_REEXEC_BOOTSTRAP = (
     "runpy.run_module("
     "'tensorrt_model_connect.__main__', run_name='__main__', alter_sys=True)"
 )
+
+
+def _graph_metadata(args: argparse.Namespace) -> dict[str, object]:
+    """Build settings that must match when an explicit graph slot is applied."""
+
+    return {
+        "model": args.model,
+        "model_revision": getattr(args, "model_revision", None),
+        "precision": getattr(args, "precision", None),
+        "max_cache_length": getattr(args, "max_cache_length", None),
+        "decoder_engine_layout": getattr(args, "decoder_engine_layout", "split"),
+        "dynamic_kv_cache": bool(getattr(args, "dynamic_kv_cache", False)),
+        "quantize": getattr(args, "quantize", None),
+        "tensor_parallel_size": int(
+            getattr(args, "tensor_parallel_size", 1) or 1
+        ),
+    }
 
 
 def _optimized_cli_public_options(args: argparse.Namespace) -> dict:
@@ -120,8 +138,36 @@ def _cmd_build(args: argparse.Namespace) -> int:
         )
 
     kernel_path = getattr(args, "kernel", None)
+    graph_snapshot = getattr(args, "graph_snapshot", None)
+    graph_patch = getattr(args, "graph_patch", None)
+    if kernel_path and (graph_snapshot or graph_patch):
+        print("Error: --kernel cannot be combined with explicit graph slots", file=sys.stderr)
+        return 1
+    if graph_snapshot and graph_patch:
+        print(
+            "Error: --graph-snapshot and --graph-patch are mutually exclusive",
+            file=sys.stderr,
+        )
+        return 1
+    graph_mode = graph_snapshot is not None or graph_patch is not None
     if kernel_path and getattr(args, "rtx", False):
         print("Error: --kernel requires the native TensorRT backend",
+              file=sys.stderr)
+        return 1
+    if graph_mode and getattr(args, "rtx", False):
+        print("Error: explicit graph slots require the native TensorRT backend",
+              file=sys.stderr)
+        return 1
+    if graph_mode and int(getattr(args, "tensor_parallel_size", 1) or 1) != 1:
+        print("Error: explicit graph slots currently require --tensor-parallel-size 1",
+              file=sys.stderr)
+        return 1
+    if graph_mode and (
+        getattr(args, "quantize", None) is not None
+        or getattr(args, "fp8", False)
+        or getattr(args, "fp8_scales", None) is not None
+    ):
+        print("Error: explicit graph slots do not support quantized builds yet",
               file=sys.stderr)
         return 1
 
@@ -136,7 +182,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             {"model_revision": model_revision} if model_revision else {}
         )
         optimized = None
-        if kernel_path is None:
+        if kernel_path is None and not graph_mode:
             optimized = _try_build_optimized_runtime(
                 args.model,
                 args.output,
@@ -285,53 +331,92 @@ def _cmd_build(args: argparse.Namespace) -> int:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
 
-    try:
-        build(
-            model_id_or_path=args.model,
-            model_revision=getattr(args, "model_revision", None),
-            output_path=args.output,
-            max_cache_length=args.max_cache_length,
-            decoder_engine_layout=getattr(args, "decoder_engine_layout", "split"),
-            dynamic_kv_cache=getattr(args, "dynamic_kv_cache", False),
-            dynamic_kv_profile_rows_override=getattr(args, "dynamic_kv_profile_rows", None),
-            precision=args.precision,
-            fp32_layers=getattr(args, "fp32_layers", None),
-            quantize=quantize,
-            quant_scales=args.quant_scales,
-            quant_calibration_samples=args.quant_calibration_samples,
-            verbose=args.verbose,
-            fp8_scales=fp8_scales,
-            save_fp8_scales=save_fp8_scales,
-            rtx=getattr(args, 'rtx', False),
-            triattention_stats_path=getattr(args, "triattention_stats", None),
-            triattention_kv_budget=getattr(args, "triattention_kv_budget", None),
-            triattention_divide_length=getattr(args, "triattention_divide_length", 128),
-            triattention_recent_window=getattr(args, "triattention_recent_window", 0),
-            triattention_score_aggregation=getattr(
-                args, "triattention_score_aggregation", "mean"),
-            triattention_count_prompt_tokens=getattr(
-                args, "triattention_count_prompt_tokens", True),
-            triattention_protect_prefill=getattr(args, "triattention_protect_prefill", True),
-            triattention_disable_mlr=getattr(args, "triattention_disable_mlr", False),
-            triattention_disable_trig=getattr(args, "triattention_disable_trig", False),
-            family_build_options=family_build_options,
-            parallel_config=parallel_config,
-            build_timing_path=getattr(args, "build_timing_json", None),
-            max_batch_size=int(getattr(args, "max_batch_size", 1) or 1),
-            diffusion_overrides={
-                key: value
-                for key, value in {
-                    "image_height": getattr(args, "image_height", None),
-                    "image_width": getattr(args, "image_width", None),
-                    "video_height": getattr(args, "video_height", None),
-                    "video_width": getattr(args, "video_width", None),
-                    "video_num_frames": getattr(args, "video_num_frames", None),
-                    "num_inference_steps": getattr(args, "num_inference_steps", None),
-                }.items()
-                if value is not None
-            },
+    graph_context = nullcontext()
+    if graph_snapshot:
+        from .graph_build import inspect_graph
+
+        graph_context = inspect_graph(
+            graph_snapshot,
+            engine_role=getattr(args, "graph_role", "decode"),
+            metadata=_graph_metadata(args),
         )
+    elif graph_patch:
+        from .graph_build import apply_graph_slot
+
+        graph_context = apply_graph_slot(
+            graph_patch,
+            metadata=_graph_metadata(args),
+        )
+
+    try:
+        with graph_context:
+            build(
+                model_id_or_path=args.model,
+                model_revision=getattr(args, "model_revision", None),
+                output_path=args.output,
+                max_cache_length=args.max_cache_length,
+                decoder_engine_layout=getattr(args, "decoder_engine_layout", "split"),
+                dynamic_kv_cache=getattr(args, "dynamic_kv_cache", False),
+                dynamic_kv_profile_rows_override=getattr(
+                    args, "dynamic_kv_profile_rows", None
+                ),
+                precision=args.precision,
+                fp32_layers=getattr(args, "fp32_layers", None),
+                quantize=quantize,
+                quant_scales=args.quant_scales,
+                quant_calibration_samples=args.quant_calibration_samples,
+                verbose=args.verbose,
+                fp8_scales=fp8_scales,
+                save_fp8_scales=save_fp8_scales,
+                rtx=getattr(args, "rtx", False),
+                triattention_stats_path=getattr(args, "triattention_stats", None),
+                triattention_kv_budget=getattr(args, "triattention_kv_budget", None),
+                triattention_divide_length=getattr(
+                    args, "triattention_divide_length", 128
+                ),
+                triattention_recent_window=getattr(
+                    args, "triattention_recent_window", 0
+                ),
+                triattention_score_aggregation=getattr(
+                    args, "triattention_score_aggregation", "mean"
+                ),
+                triattention_count_prompt_tokens=getattr(
+                    args, "triattention_count_prompt_tokens", True
+                ),
+                triattention_protect_prefill=getattr(
+                    args, "triattention_protect_prefill", True
+                ),
+                triattention_disable_mlr=getattr(
+                    args, "triattention_disable_mlr", False
+                ),
+                triattention_disable_trig=getattr(
+                    args, "triattention_disable_trig", False
+                ),
+                family_build_options=family_build_options,
+                parallel_config=parallel_config,
+                build_timing_path=getattr(args, "build_timing_json", None),
+                max_batch_size=int(getattr(args, "max_batch_size", 1) or 1),
+                diffusion_overrides={
+                    key: value
+                    for key, value in {
+                        "image_height": getattr(args, "image_height", None),
+                        "image_width": getattr(args, "image_width", None),
+                        "video_height": getattr(args, "video_height", None),
+                        "video_width": getattr(args, "video_width", None),
+                        "video_num_frames": getattr(args, "video_num_frames", None),
+                        "num_inference_steps": getattr(
+                            args, "num_inference_steps", None
+                        ),
+                    }.items()
+                    if value is not None
+                },
+            )
     except Exception as e:
+        from .graph_build import GraphInspectionComplete
+
+        if isinstance(e, GraphInspectionComplete):
+            print(f"[trtmc graph] Snapshot saved: {e}", file=sys.stderr)
+            return 0
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
@@ -662,6 +747,12 @@ def _cmd_kernel(args: argparse.Namespace) -> int:
     return run(args)
 
 
+def _cmd_graph(args: argparse.Namespace) -> int:
+    from .graph_cli import run
+
+    return run(args)
+
+
 def main() -> None:
     # RTX selection MUST happen before ANY tensorrt_model_connect module touches TRT.
     # We do an early argv scan before argparse touches anything.
@@ -689,6 +780,18 @@ def main() -> None:
         "--kernel",
         metavar="YAML",
         help="Replace a family-owned kernel slot using this YAML manifest",
+    )
+    build_p.add_argument(
+        "--graph-patch",
+        metavar="JSON",
+        help="Replace one explicitly selected TensorRT region with a runtime FFI slot",
+    )
+    build_p.add_argument("--graph-snapshot", default=None, help=argparse.SUPPRESS)
+    build_p.add_argument(
+        "--graph-role",
+        choices=["prefill", "decode", "dual_profile"],
+        default="decode",
+        help=argparse.SUPPRESS,
     )
     build_p.add_argument(
         "--model-revision",
@@ -852,13 +955,20 @@ def main() -> None:
     from .kernel_cli import configure_parser as configure_kernel_parser
     configure_kernel_parser(kernel_p)
 
+    graph_p = subparsers.add_parser(
+        "graph",
+        help="Inspect and explicitly select raw TensorRT graph nodes",
+    )
+    from .graph_cli import configure_parser as configure_graph_parser
+    configure_graph_parser(graph_p)
+
     # python -m tensorrt_model_connect version
     subparsers.add_parser("version", help="Show version info")
 
     # Keep direct module compatibility: `python -m tensorrt_model_connect
     # <model-dir> -o out.trtfb` still means build. The public native CLI uses
     # explicit `trtmc build`.
-    command_names = {"build", "inspect", "kernel", "version"}
+    command_names = {"build", "graph", "inspect", "kernel", "version"}
     cli_argv = sys.argv[1:]
     if cli_argv and cli_argv[0] not in command_names and cli_argv[0] not in ("--help", "-h"):
         cli_argv = ["build"] + cli_argv
@@ -872,6 +982,7 @@ def main() -> None:
         "build": _cmd_build,
         "inspect": _cmd_inspect,
         "kernel": _cmd_kernel,
+        "graph": _cmd_graph,
         "version": _cmd_version,
     }
 
