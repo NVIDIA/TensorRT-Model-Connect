@@ -1,169 +1,182 @@
 ---
 title: Bundle Format
+description: The physical and semantic contract carried by a .trtfb artifact.
 ---
 
-`.trtfb` is the repository's build/runtime artifact contract. It has two
-supported payload shapes:
+`.trtfb` is the build/run boundary of TensorRT-Model-Connect. It is a
+self-describing container with a JSON header and named binary sections.
 
-- A native bundle carries model-owned TensorRT plans and assets. The runtime
-  installation supplies the core, a compatible backend DSO, and the owning
-  model DSO selected by `runtime_strategy`.
-- An optimized-runtime bundle carries `optimized_runtime.json`, opaque
-  implementation metadata, and a content-addressed artifact tree that includes
-  the exact `libtrtmc_impl_*.so`. It does not use the native model-plugin index
-  or backend-DSO path.
+Two payload shapes use the same outer format:
 
-```mermaid
-flowchart TD
-  Checkpoint["Hugging Face checkpoint<br/>config + weights + tokenizer"] --> Builder["Python builder"]
-  Builder --> Bundle[".trtfb bundle"]
-  Bundle --> Runtime["C++ runtime"]
-  Runtime --> Pipeline["IPipeline"]
-```
+| Shape | Bundle owns | Runtime installation owns |
+| --- | --- | --- |
+| Native | `runtime_strategy`, `config.json`, TensorRT plans, tokenizer/processor assets, family metadata | Core runtime, owning model DSO, compatible backend DSO |
+| Optimized | `optimized_runtime.json`, private implementation metadata, integrity-bound artifact tree, exact implementation DSO | Core host plus compatible driver/CUDA/TensorRT/loader/system libraries |
 
-The bundle is not just an engine file. It is a container with a JSON header and named binary sections.
+## Physical layout
 
 ```mermaid
 flowchart TB
   subgraph File["model.trtfb"]
     Magic["bytes 0-7<br/>TRTFB magic"]
-    Len["bytes 8-15<br/>JSON header length"]
-    Header["JSON header<br/>metadata + section table"]
-    Data["binary section payloads"]
+    Length["bytes 8-15<br/>little-endian JSON header length"]
+    Header["UTF-8 JSON header<br/>metadata + section table"]
+    Payloads["contiguous binary section payloads"]
   end
 
-  Header --> Meta["model_id, family, precision,<br/>optional runtime_strategy, TRT ABI"]
-  Header --> Table["sections{name -> offset,size}"]
-  Data --> Native["native: config.json,<br/>plans and assets"]
-  Data --> Optimized["optimized: optimized_runtime.json,<br/>implementation metadata and artifact tree"]
+  Header --> Identity["model, family, precision,<br/>TensorRT and dispatch metadata"]
+  Header --> Table["section name -> offset + size"]
+  Payloads --> Native["native sections:<br/>config, plans, tokenizers, assets"]
+  Payloads --> Optimized["optimized sections:<br/>descriptor, implementation metadata,<br/>embedded artifact tree"]
 ```
 
-## What a bundle contains
+The exact magic bytes and length encoding are shared by:
 
-Typical native sections include:
+- `python/tensorrt_model_connect/bundle_writer.py`;
+- `src/bundle/bundle_format.h`;
+- `src/bundle/bundle_format.cpp`.
 
-- `config.json`
-- One or more TensorRT engine plans
-- Tokenizer assets
-- Family-specific metadata
-- Optional `kernel_slots.json` for a load-time TVM-FFI slot
+The section offsets in the JSON table are relative to the beginning of the
+binary payload area, after the header.
 
-`effective_config.json` is not a bundle section. When schema-driven config is
-resolved, the builder/runtime writes that audit artifact next to the bundle.
+## Header metadata
 
-Different strategies expect different section sets:
+The public C++ `BundleInfo` in `include/trtmc/bundle.h` exposes:
 
-| Strategy style | Typical sections |
+| Field group | Meaning |
 | --- | --- |
-| Decoder text generation | `engine_plan`, tokenizer files, `config.json`. |
-| Vision-language | Text decoder engine, optional `vision_engine_plan`, image preprocessing metadata, tokenizer assets. |
-| Diffusion | Text encoder plans, `denoiser_plan`, `vae_decoder_plan`, scheduler and latent config. |
-| Speech-to-text | Encoder/decoder or RNNT plans, mel/filterbank metadata, tokenizer assets. |
-| Text-to-audio | Semantic/acoustic/codec plans, tokenizer or phoneme assets, audio generation metadata. |
+| `model_id`, `model_type`, `family` | Source and builder identity |
+| `precision` | Recorded build precision |
+| `trt_version`, `trt_abi`, `gpu_name` | Build/runtime compatibility metadata |
+| `created_at` | Producer timestamp when recorded |
+| `vocab_size`, `hidden_size`, `num_layers` | Common model dimensions |
+| `num_attention_heads`, `num_key_value_heads` | Common attention dimensions |
+| `max_cache_length` | Recorded default cache capacity for decoder-like artifacts |
+| `runtime_strategy` | Native dispatch key; empty is valid for optimized bundles |
+| `tokenizer_add_special_tokens`, `tokenizer_add_special_tokens_present` | Tokenizer compatibility metadata |
+| `sections` | Public name/offset/size inventory |
+| `max_batch_size` | Per-component diffusion batch envelope |
 
-An optimized-runtime bundle instead requires:
+Not every field applies to every modality. Consumers should use section and
+capability checks rather than infer a decoder layout from zero/default-valued
+metadata.
 
-- `optimized_runtime.json`, containing the implementation, profile, model,
-  downstream-runtime, factory-ABI, metadata-section, and artifact-tree
-  identities.
-- `implementation.json`, whose model-owned meaning is opaque
-  to the generic host.
-- `optimized_runtime_artifacts/...`, including the exact implementation DSO
-  named by the descriptor and its runtime-owned payload.
+## Native payload
 
-`config.json` is optional in this shape. The provider can include it for
-inspection or private use, but optimized dispatch does not depend on it.
+A native bundle normally contains `config.json` plus model-owned plans and
+assets. Common section shapes include:
 
-The public bundle inspection API is in `include/trtmc/bundle.h`:
+| Task shape | Typical sections |
+| --- | --- |
+| Decoder text generation | Prefill/decode or dual-profile engine plans, tokenizer assets, config |
+| Vision-language | Decoder `engine_plan`, optional split `prefill_engine_plan`, optional vision plan, image-processing metadata, tokenizer assets |
+| Diffusion/image/video | Text encoder, denoiser, VAE, scheduler, and latent metadata |
+| Speech | Encoder/decoder or RNNT plans, filterbank/mel metadata, tokenizer assets |
+| Audio generation | Semantic, acoustic, codec, tokenizer/phoneme, and audio metadata |
+
+These names are examples, not a universal required set. The owning
+`IPipelinePlugin` validates the exact sections its strategy consumes.
+Graph-patched native bundles additionally carry `kernel_slots.json` for their
+load-time TVM-FFI binding contract; the external kernel DSO is not embedded.
+For example, current Qwen2.5-VL can emit split prefill/decode sections for a
+supported single-GPU fixed-cache request, while Qwen3-VL, tensor-parallel,
+dynamic-KV/TriAttention, or explicit dual-profile requests use another actual
+layout. The bundle's `config.json.decoder_engine_layout` and section table
+record the result.
+
+For native dispatch, `runtime_strategy` is the critical identity. It selects
+one model owner in the generated runtime index; loading that model DSO
+registers the concrete `IPipelinePlugin`.
+
+`task_strategy` is not the bundle dispatch key. It belongs to E2E task
+orchestration and may group several model-owned native strategies.
+
+## Optimized payload
+
+An optimized bundle contains:
+
+- `optimized_runtime.json`, with implementation, profile, model, target,
+  factory, metadata-section, and artifact-tree identities;
+- private implementation metadata, commonly in `implementation.json`; and
+- `optimized_runtime_artifacts/...`, containing the exact implementation DSO
+  and provider-produced runtime artifacts.
+
+`config.json` is optional for this shape. The generic host does not use it to
+select a native strategy.
+
+`PipelineFactory` checks the header for `optimized_runtime.json` before native
+bundle materialization. Descriptor presence claims the optimized path. The host
+validates bounded identities and paths, verifies the artifact-tree digest,
+materializes the tree in the runtime cache, loads only the embedded
+implementation DSO, validates its private factory, and asks it for an
+`IPipeline`.
+
+There is no native fallback after that descriptor is present.
+
+## Header versus `config.json`
+
+The header is intended for fast inspection and section lookup without creating
+a pipeline. Native `config.json` carries richer strategy-specific construction
+data such as:
+
+- `runtime_strategy`;
+- engine/backend selection metadata;
+- IO maps and tensor names;
+- family-specific fields;
+- an optional top-level `defaults` object for schema-controlled bundle
+  defaults.
+
+When metadata exists in both places, code should use the same precedence and
+compatibility rules as `PipelineFactory`, not invent a separate reader policy.
+
+## Sidecar files are not sections
+
+Successful schema-driven configuration resolution may write
+`<bundle>.effective_config.json` beside a bundle. Build timing and validation
+reports may also be stored nearby.
+
+Those files are diagnostics/evidence, not `.trtfb` sections. Moving the bundle
+does not move its sidecars automatically.
+
+## Inspection
+
+Use the public C++ API to inspect metadata without constructing a pipeline:
 
 ```cpp
-trtmc::BundleInfo info = trtmc::InspectBundle("/tmp/model.trtfb");
-bool ok = trtmc::IsBundle("/tmp/model.trtfb");
+#include <trtmc/bundle.h>
+
+auto info = trtmc::InspectBundle("/tmp/model.trtfb");
+bool has_magic = trtmc::IsBundle("/tmp/model.trtfb");
 ```
 
-## Core metadata
+The CLI provides the same user workflow:
 
-`BundleInfo` exposes:
-
-| Field | Meaning |
-| --- | --- |
-| `model_id` | Source model identifier. |
-| `model_type` | Hugging Face model type when available. |
-| `family` | Python builder family plugin. |
-| `precision` | Build precision. |
-| `trt_version`, `trt_abi` | Build-time TensorRT metadata. |
-| `gpu_name` | GPU metadata captured by the builder. |
-| `vocab_size`, `hidden_size`, `num_layers` | Common model dimensions. |
-| `max_cache_length` | Default cache capacity for decoder-like models. |
-| `runtime_strategy` | Native runtime plugin dispatch key; it may be empty for an optimized-runtime bundle. |
-
-## Native runtime strategy
-
-For a native bundle, the most important dispatch field is `runtime_strategy`.
-It selects the owning C++ model DSO and then the registered runtime plugin; it
-does not select the Python family package.
-
-Current strategy keys are model-owned. Qwen, LLaMA, and Mistral use
-`qwen_decoder_kv_cache`, `llama_decoder_kv_cache`, and
-`mistral_decoder_kv_cache`, respectively. Their E2E manifests share the
-`text_generation_causal` task strategy, but that task label is not stored as
-the runtime dispatch key.
-
-```mermaid
-flowchart LR
-  Bundle[".trtfb header"] --> Strategy["runtime_strategy"]
-  Strategy --> Index["Generated model plugin index"]
-  Index --> ModelDSO["Owning libtrtmc_model_*.so"]
-  ModelDSO --> Registry["PipelineRegistry"]
-  Registry --> Plugin["IPipelinePlugin"]
-  Plugin --> Pipeline["Concrete pipeline"]
+```bash
+trtmc inspect /tmp/model.trtfb
+trtmc inspect /tmp/model.trtfb --list-engines
 ```
 
-If runtime creation fails, inspect `runtime_strategy` first. A valid strategy
-must resolve through the generated index to an owning model DSO, and that DSO
-must be present and loadable from the configured model-plugin search paths.
-Loading the DSO registers the plugin; model plugins are not compiled into the
-`trtmc` executable.
+`--list-engines` recognizes native plan naming conventions. Optimized artifacts
+use implementation-owned paths, so an optimized bundle can be valid even when
+that command reports no native engine sections.
 
-## Optimized-runtime descriptor
+Inspection proves that the container and metadata can be read. It does not load
+the model/backend or implementation DSO and does not prove inference.
 
-`PipelineFactory` checks for the `optimized_runtime.json` section before it
-materializes `config.json` or resolves a native strategy. Presence of the
-section unambiguously claims the optimized path:
+## Compatibility and security boundaries
 
-```mermaid
-flowchart LR
-  Bundle[".trtfb header"] --> Descriptor["optimized_runtime.json"]
-  Descriptor --> Verify["validate identities, limits,<br/>paths and artifact tree SHA-256"]
-  Verify --> Cache["materialize embedded artifact tree<br/>in runtime cache"]
-  Cache --> Impl["dlopen exact embedded libtrtmc_impl_*.so"]
-  Impl --> Factory["validate private factory ABI,<br/>toolchain and runtime identity"]
-  Factory --> Pipeline["Concrete IPipeline"]
-```
-
-The host never substitutes an installed same-name DSO and never falls back to
-native dispatch after an optimized descriptor is present. The current
-family-owned implementation is Qwen with TensorRT Edge-LLM; its three exact
-Qwen3 revision/A100 SM80/FP16 profiles are marked qualified in the profile
-TOMLs. That qualification is tuple-specific and does not imply that every Qwen
-checkpoint or target uses the optimized path.
-
-## Header versus config section
-
-Every bundle has a JSON header. Native bundles also require a `config.json`
-section; optimized-runtime bundles may omit it.
-
-| Location | Purpose |
-| --- | --- |
-| Header | Fast inspection metadata and the section table. C++ can read this without loading every engine section. |
-| `config.json` section | Native runtime construction details such as tensor IO names, modality-specific fields, engine backend, scheduler settings, and strategy-specific config. Optional for optimized-runtime bundles. |
-
-The native runtime reads both locations. `ReadBundleFile()` parses the
-container, while `PipelineFactory` extracts `config.json` and passes both the
-parsed base config and raw JSON to the plugin through `PipelineContext`. The
-optimized host instead reads sections directly from the header table and
-passes opaque implementation metadata plus the materialized artifact path to
-the embedded factory.
+- Native engine plans require a compatible TensorRT runtime/backend ABI.
+- Model DSOs and backend DSOs must be discoverable from the installation or
+  explicit search paths.
+- Optimized artifacts are content-addressed and bounded before
+  materialization; unsafe paths, unexpected identities, or digest mismatches
+  fail closed.
+- The host never substitutes an installed same-name optimized implementation
+  DSO.
+- Neither bundle shape includes the complete driver, CUDA, TensorRT, dynamic
+  loader, or operating-system environment.
+- Legal runtime shapes remain constrained by the optimization profiles built
+  into the selected plans or implementation.
 
 ## Load-time TVM-FFI slots
 
@@ -188,39 +201,5 @@ V1 also fails closed when a model defers engine deserialization beyond the
 pipeline-load call, and the current C-linkage entrypoints do not expose a
 kernel-binding parameter.
 
-## Compatibility boundaries
-
-Bundles are deployable artifacts, but they are not universally portable binaries.
-
-| Boundary | What it means |
-| --- | --- |
-| Native TensorRT version and ABI | A native load checks bundle TensorRT metadata and backend DSO metadata before executing. |
-| GPU and shape profile | Native engines and optimized provider artifacts are built for target/profile constraints selected at build time. |
-| Tokenizer/preprocessor assets | A bundle must include the assets the runtime plugin expects. |
-| Native runtime strategy support | For a native bundle, the runtime installation must provide the owning model DSO and a generated index entry for the bundle strategy. |
-| Load-time TVM-FFI slot | The runtime needs TVM-FFI support, every slot needs one strict external binding, and the binding ABI hash must match. |
-| Optimized implementation identity | For an optimized bundle, the descriptor, embedded implementation DSO, factory ABI/toolchain identity, downstream runtime identity, and artifact-tree hash must all agree. |
-| Config schema | New schema-controlled runtime knobs should have defaults so older bundles can still load when possible. |
-
-## How to reason about a bundle
-
-Use this checklist when debugging:
-
-1. Does
-   `PYTHONPATH=python python3 -m tensorrt_model_connect inspect <bundle.trtfb>`
-   report the expected model, family, precision, and section inventory?
-2. Does `./build/trtmc inspect` parse the same bundle from the C++ side and,
-   for a native bundle, report the expected `runtime_strategy`?
-3. Does the section table contain `optimized_runtime.json`?
-   - If no, are the expected native engine sections present, does
-     `src/runtime/models/<owner>/MODEL.toml` declare the strategy, and is its
-     `libtrtmc_model_<owner>.so` available in a model-plugin search path?
-   - If yes, treat CLI inspection as a section-presence check only. The current
-     Python and C++ inspectors do not decode the descriptor payload. Verify the
-     implementation/profile identities, artifact-tree hash, and named embedded
-     `libtrtmc_impl_*.so` through the family-owned provider qualification and
-     bundle-contract tests; the runtime loader enforces the same contract.
-4. For a native bundle, does TensorRT ABI detection select a compatible
-   backend DSO?
-5. Are tokenizer, image, audio, scheduler, or delegated-runtime assets present
-   for the concrete pipeline?
+Continue with [Runtime Lifecycle](runtime-lifecycle.md) to see how these
+identities drive pipeline construction.

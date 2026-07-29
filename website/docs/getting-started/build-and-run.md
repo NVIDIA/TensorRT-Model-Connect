@@ -1,10 +1,15 @@
 ---
-title: Build and Run
+title: Model Recipes
 ---
 
-All examples use `$TRTMC` for the unified CLI. Set it to `trtmc` when using a
-release wheel, or `./build/trtmc` when using a source build inside the dev
-container.
+This page is an optional task index after the
+[Quick Start](quick-start.md), not a second Getting Started path. Each model
+can add its own dependencies, memory requirements, and qualified hardware
+boundary.
+
+The examples use `$TRTMC` for the unified CLI. Set it to `trtmc` when using a
+release wheel, or `./build/trtmc` when using a source build inside the
+development container.
 
 ```bash
 TRTMC=trtmc
@@ -12,28 +17,18 @@ TRTMC=trtmc
 # TRTMC=./build/trtmc
 ```
 
-Run [Installation](installation.md) or
-[Environment and First Repro](environment-and-repro.md) first if either command
-fails.
+If the command itself is unavailable, return to
+[Prerequisites and Environment](environment-and-repro.md) and
+[Installation](installation.md). If you have not yet built and run the Qwen
+first-inference bundle, complete the Quick Start before choosing a recipe here.
 
 ## Text generation
 
-```bash
-$TRTMC build Qwen/Qwen3-0.6B
-
-$TRTMC run Qwen3-0.6B.trtfb \
-  --prompt "Write one sentence about TensorRT." \
-  --max-new-tokens 32 \
-  --temperature 0.7 \
-  --top-p 0.9
-```
-
-The model-only Qwen3 command derives `Qwen3-0.6B.trtfb` and uses the eligible
-family's native BF16, full-context, split-engine defaults. Useful runtime knobs
-include `--greedy`, `--top-k`, `--top-p`, `--min-p`, `--seed`,
-`--chat-template`, and `--no-thinking`. Use `--greedy` for deterministic smoke
-tests before trying sampling. Qwen text generation uses the native C++ BPE
-tokenizer from the bundle, so `--hf-python` is not needed for this path.
+The canonical build-inspect-run sequence lives only in the
+[Quick Start](quick-start.md). Continue with the
+[Text Generation tutorial](../tutorials/beginner/text-generation.md) to learn
+sampling, deterministic decoding, chat templates, and other request-time
+controls without repeating setup.
 
 ## Vision-language generation
 
@@ -76,21 +71,10 @@ Streaming paths are exposed through `trtmc transcribe --stream` for cache-aware 
 
 ## Diffusion and video
 
-```bash
-$TRTMC build black-forest-labs/FLUX.2-dev \
-  -o /tmp/flux2.trtfb \
-  --precision fp16 \
-  --image-height 1024 \
-  --image-width 1024 \
-  --num-inference-steps 28
-
-$TRTMC generate-video /tmp/flux2.trtfb \
-  --prompt "A photo of a cat sitting on a windowsill at sunset" \
-  --output /tmp/flux2-frames \
-  --num-steps 28
-```
-
-Image diffusion and video diffusion use separate runtime strategies, but both use the same bundle and C++ runtime entrypoint family.
+Follow [Diffusion, Vision, and Time-Series Pipelines](../tutorials/intermediate/diffusion-and-time-series.md)
+for FLUX, PixArt-Sigma, Wan, and the hardware-qualified Jetson Thor Wan2.2
+recipe. Those workloads are intentionally kept out of the first-inference
+path: they have larger artifacts, longer builds, and model-specific profiles.
 
 ## Segmentation
 

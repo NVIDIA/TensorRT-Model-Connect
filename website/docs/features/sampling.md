@@ -5,6 +5,14 @@ probability mass is >= `top_p`, then renormalizes and samples from that nucleus.
 Combined with temperature scaling, optional top-k pre-filtering, and optional
 min-p filtering.
 
+The CLI example uses the Learning-path selector:
+
+```bash
+export TRTMC=trtmc
+# Source build inside the development container:
+# export TRTMC=./build/trtmc
+```
+
 ## Algorithm
 
 Current implementation status: top-p/top-k/min-p filtering is host-side. The
@@ -33,7 +41,7 @@ to disabled top-p behavior.
 
 ### CLI
 ```bash
-./build/trtmc run bundle.trtfb --prompt "Once upon a time" \
+$TRTMC run bundle.trtfb --prompt "Once upon a time" \
   --temperature 0.7 --top-p 0.9 --min-p 0.05 --top-k 50 --seed 42
 ```
 

@@ -4,6 +4,14 @@ title: C++ API and C-Linkage Subset
 
 The public C++ API is centered on `include/trtmc/pipeline.h`.
 
+:::note C-linkage status
+
+The C++ API is the primary native interface. The C-linkage header exposes a
+useful C++-compatible subset for shims and FFI experiments, but it is not yet a
+complete stable pure-C ownership API.
+
+:::
+
 ## Load a bundle
 
 ```cpp
@@ -57,6 +65,89 @@ schema-driven JSON file on the C++ path. `set_tokens` supplies repeatable
 `namespace.field=value` session overrides; those values win over the file.
 The current Qwen Edge-LLM optimized implementation rejects both runtime config
 surfaces instead of silently ignoring them.
+
+## Inspect a bundle without loading it
+
+`include/trtmc/bundle.h` exposes metadata inspection independently of
+`IPipeline` construction:
+
+```cpp
+#include <trtmc/bundle.h>
+
+#include <iostream>
+
+int main() {
+    const std::string path = "/tmp/model.trtfb";
+    if (!trtmc::IsBundle(path)) {
+        return 1;
+    }
+
+    trtmc::BundleInfo info = trtmc::InspectBundle(path);
+    std::cout << info.model_id << "\n"
+              << info.family << "\n"
+              << info.runtime_strategy << "\n";
+
+    for (const trtmc::BundleSectionInfo& section : info.sections) {
+        std::cout << section.name << " " << section.offset << " "
+                  << section.size << "\n";
+    }
+}
+```
+
+`IsBundle()` checks the `.trtfb` magic bytes; it is not a full compatibility
+or engine-load proof. `InspectBundle()` returns `BundleInfo`, including model,
+precision, TensorRT/ABI, shape, tokenizer, runtime-strategy, and section
+metadata. Each `BundleSectionInfo` contains the section name, byte offset, and
+size. `BundleInfo::max_batch_size` is a `MaxBatchSize` envelope with separate
+`dit`, `text_encoder`, and `vae` caps; absent JSON values currently default to
+one.
+
+See [Bundle Format](../architecture/bundle-format.md) for layout and
+compatibility semantics.
+
+## Tokenizer API
+
+`include/trtmc/tokenizer.h` defines the public `ITokenizer` interface:
+
+```cpp
+std::vector<int32_t> encode(const std::string& text) const;
+std::string decode(const std::vector<int32_t>& ids) const;
+int32_t id_for_token(std::string_view token) const;
+std::string token_for_id(int32_t id) const;
+```
+
+The factories return an owning `std::unique_ptr<ITokenizer>`:
+
+| Factory | Input contract |
+| --- | --- |
+| `CreateVocabTokenizer()` | An ordered token vocabulary. |
+| `CreateIpaTokenizer()` | Phoneme dictionary, heteronyms, vocabulary, and config byte buffers. |
+| `CreateBpeTokenizer()` | A tokenizer JSON buffer; special tokens are off by default. |
+| `CreateWordPieceTokenizer()` | A tokenizer JSON buffer; special tokens are on by default. |
+| `CreateUnigramTokenizer()` | A tokenizer JSON buffer; special tokens are on by default. |
+
+These factories expose tokenizer mechanics; they do not choose the correct
+tokenizer or special-token policy for a bundle. Prefer `trtmc::load()` when the
+model-owned runtime should resolve and validate its packaged tokenizer assets.
+
+## Audio and image I/O helpers
+
+`include/trtmc/trtmc_io.hpp` exposes convenience helpers in `trtmc::io`:
+
+| Helper | Contract |
+| --- | --- |
+| `write_wav(AudioResult, path)` | Writes mono IEEE float32 WAV. |
+| `read_wav(path)` | Reads float32 or int16 WAV, downmixes channels to mono, and returns `AudioResult`. |
+| `read_image(path)` | Returns `LoadedImage` with float RGB HWC pixels in `[0, 1]`; decode failure can return an empty value. |
+| `save_png(path, pixels, width, height)` | Writes float RGB HWC pixels after clamping and uint8 conversion. |
+| `save_png(ImageResult, path)` | Writes the first frame only and expects at least `H*W*3` values. |
+| `decode_image(path, h, w)` | Legacy wrapper; prefer `read_image()`. |
+
+The header provides WAV implementations inline; image decoding and PNG writing
+link through `trtmc_core`. The `ImageResult` overload follows the current
+three-channel HWC producer convention. It does not resolve the public
+`ImageResult` layout inconsistency described under [Result types](#result-types)
+and should not be used as evidence that every model emits the same strides.
 
 ## Concurrent requests
 
@@ -169,6 +260,7 @@ The complete field inventory is:
 | --- | --- |
 | `max_new_tokens`, `num_samples` | Output limit and non-autoregressive sample count. |
 | `temperature`, `top_k`, `top_p`, `min_p`, `seed`, `eos_token_id` | Token sampling and termination controls. |
+| `source_language_token_id`, `forced_bos_token_id` | Request-level M2M-100/NLLB language framing. Both default to `-1` (disabled); enabled values must be non-negative. The source token is appended after source EOS, and forced BOS becomes the decoder's first token. |
 | `guidance_scale`, `cfg_scale`, `num_steps`, `sde_gamma` | Diffusion, flow-matching, and conditional-guidance controls; negative sentinel values select model defaults where supported. |
 | `initial_latents`, `condition_latents`, `condition_mask`, `sampling_steps`, `sde_noises` | Optional packed raw-state inputs. Shapes remain model-owned and must match the selected bundle contract. |
 | `negative_prompt`, `height`, `width` | Text-to-image negative prompt and output-size overrides. Empty or non-positive values select bundle defaults. |

@@ -103,14 +103,22 @@ Run repository descriptor validation first:
 python3 tools/model_ci.py validate
 ```
 
-Configure and build the owner target after replacing `example` with the real
-owner:
+Configure the project after replacing `example` with the real owner. Read the
+owner's `runtime_tests` entries and build both its model DSO and the exact test
+target that exercises the new strategy:
 
 ```bash
 cmake -S . -B build -DTRTMC_BUILD_TESTS=ON
-cmake --build build --target trtmc_model_example
-ctest --test-dir build --output-on-failure --no-tests=error -R 'example'
+rg -n 'runtime_tests|test_' src/runtime/models/example/MODEL.toml
+cmake --build build --target trtmc_model_example test_example_runtime
+ctest --test-dir build --output-on-failure --no-tests=error \
+  -R '^test_example_runtime$'
 ```
+
+`runtime_tests` executables are `EXCLUDE_FROM_ALL`: building only
+`trtmc_model_example` does not build them. Substitute the literal target name
+declared in the manifest; if you intentionally want every configured C++ unit
+target, build `trtmc_cpp_tests` before running CTest.
 
 Finally run the exact E2E model manifest with the newly built model plugin:
 

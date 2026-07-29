@@ -5,6 +5,14 @@ title: Configurable Canary Decoding
 This tutorial builds a Canary bundle from a local NeMo checkpoint and uses the
 offline decoding controls exposed by the CLI and C++ API.
 
+Select the CLI before running an example:
+
+```bash
+export TRTMC=trtmc
+# Source build inside the development container:
+# export TRTMC=./build/trtmc
+```
+
 ## Build from a local checkpoint
 
 The input may be a `.nemo` archive or a directory containing one compatible
@@ -13,12 +21,12 @@ Canary archive. No remote model identifier is required.
 ```bash
 CANARY_NEMO=/models/canary-1b-v2.nemo
 
-./build/trtmc build "$CANARY_NEMO" \
+$TRTMC build "$CANARY_NEMO" \
   -o /tmp/canary-1b-v2.trtfb \
   --precision fp16 \
   --max-cache-length 128
 
-./build/trtmc inspect /tmp/canary-1b-v2.trtfb --list-engines
+$TRTMC inspect /tmp/canary-1b-v2.trtfb --list-engines
 ```
 
 The builder reads `model_config.yaml`, the checkpoint weights, prompt defaults,
@@ -32,7 +40,7 @@ Omitting the new controls preserves English greedy transcription with
 punctuation and no timestamps:
 
 ```bash
-./build/trtmc transcribe /tmp/canary-1b-v2.trtfb \
+$TRTMC transcribe /tmp/canary-1b-v2.trtfb \
   --audio /data/input.wav \
   --max-new-tokens 80
 ```
@@ -41,7 +49,7 @@ punctuation and no timestamps:
 The explicit form is:
 
 ```bash
-./build/trtmc transcribe /tmp/canary-1b-v2.trtfb \
+$TRTMC transcribe /tmp/canary-1b-v2.trtfb \
   --audio /data/french.wav \
   --source-language fr \
   --target-language fr \
@@ -54,7 +62,7 @@ Canary 1B v2 translates between English and each other supported language.
 The source and target must differ for `translate`; one of them must be `en`.
 
 ```bash
-./build/trtmc transcribe /tmp/canary-1b-v2.trtfb \
+$TRTMC transcribe /tmp/canary-1b-v2.trtfb \
   --audio /data/english.wav \
   --source-language en \
   --target-language fr \
@@ -80,7 +88,7 @@ remove remaining punctuation from decoded text. `--punctuation` is the default.
 ## Duration, segmentation, and timestamps
 
 ```bash
-./build/trtmc transcribe /tmp/canary-1b-v2.trtfb \
+$TRTMC transcribe /tmp/canary-1b-v2.trtfb \
   --audio /data/long.wav \
   --segment-length-seconds 20 \
   --max-input-seconds 300 \
@@ -118,7 +126,7 @@ Repeat `--audio` to process more than one input. Decoding flags are batch-wide,
 results retain input order, and every output line starts with its source path.
 
 ```bash
-./build/trtmc transcribe /tmp/canary-1b-v2.trtfb \
+$TRTMC transcribe /tmp/canary-1b-v2.trtfb \
   --audio /data/one.wav \
   --audio /data/two.wav \
   --source-language en \

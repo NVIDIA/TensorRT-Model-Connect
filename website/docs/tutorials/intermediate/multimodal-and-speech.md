@@ -4,6 +4,17 @@ title: Intermediate Tutorial - Multimodal and Speech
 
 This tutorial exercises non-text modalities that still use the same bundle/runtime contract.
 
+Select the CLI before running an example:
+
+```bash
+export TRTMC=trtmc
+# Source build inside the development container:
+# export TRTMC=./build/trtmc
+```
+
+Commands that use `tests/...` sample assets require a repository checkout and
+must run from its root; the CLI itself may still come from the installed wheel.
+
 By this point you should recognize the common pattern:
 
 ```mermaid
@@ -19,12 +30,12 @@ The difference between text, vision, and speech is mostly the preprocessing, com
 ## Vision-language
 
 ```bash
-./build/trtmc build Qwen/Qwen2.5-VL-3B-Instruct \
+$TRTMC build Qwen/Qwen2.5-VL-3B-Instruct \
   -o /tmp/qwen25vl.trtfb \
   --precision fp16 \
   --max-cache-length 384
 
-./build/trtmc run /tmp/qwen25vl.trtfb \
+$TRTMC run /tmp/qwen25vl.trtfb \
   --prompt "Describe this image in one sentence." \
   --image tests/assets/test_image.jpg \
   --max-new-tokens 48
@@ -35,11 +46,43 @@ runtime plugin creates `QwenVlPipeline`, preprocesses the image, injects image
 embeddings into the prompt flow, and decodes text. InternVL uses its own
 `InternVlPipeline` in a separate model DSO.
 
+On GitHub `main` commit `e6b798cdb145c38caf1ede8eda7f5ce83f894138`,
+Qwen2.5-VL opts its embed-input decoder into separate `prefill_engine_plan`
+and `engine_plan` sections; the runtime loads both and uses the matching
+prefill/decode module. That split applies to the default single-GPU,
+fixed-cache, non-TriAttention request. Qwen3-VL's deepstack decoder,
+tensor-parallel builds, dynamic-KV/TriAttention builds, and an explicit
+`dual_profile` request use their supported fallback layouts. Inspect
+`config.json` and the section list instead of assuming every Qwen-VL
+generation uses the same engine shape.
+
+The split decoder can opt into decomposed decode attention with
+`--set qwen_vl_decoder.decode_attention=decomposed`. The same namespace exposes
+`max_prefill_length`, `opt_prefill_length`, and `builder_workspace_gib` as
+build-time profile controls. Decomposed attention is rejected outside an active
+split-decode build. For dynamic Qwen2.5-VL images, the runtime derives the
+merged mRoPE grid from the preprocessed image grid instead of assuming the
+fixed-profile dimensions.
+
+The Qwen3-VL decoder builder also accepts BF16. In that mode the decoder and
+KV cache use BF16 while the separate vision tower stays FP32:
+
+```bash
+$TRTMC build Qwen/Qwen3-VL-2B-Instruct \
+  -o /tmp/qwen3vl-bf16.trtfb \
+  --precision bf16 \
+  --max-cache-length 384
+```
+
+This is an implementation contract, not a qualification claim: the checked-in
+`qwen3-vl-2b` E2E manifest still selects FP16. Retain target-hardware parity
+evidence before presenting a BF16 build as qualified.
+
 Qwen2.5-VL can instead build a dynamic vision profile that applies Qwen
 smart-resize at runtime:
 
 ```bash
-./build/trtmc build Qwen/Qwen2.5-VL-3B-Instruct \
+$TRTMC build Qwen/Qwen2.5-VL-3B-Instruct \
   -o /tmp/qwen25vl-dynamic.trtfb \
   --precision fp16 \
   --max-cache-length 384 \
@@ -59,8 +102,12 @@ flowchart TD
   Vision --> Embeds["Image embeddings"]
   Tok --> Merge["Prompt + image token embedding merge"]
   Embeds --> Merge
-  Merge --> Decoder["Text decoder engine"]
-  Decoder --> Sampler["Sampler"]
+  Merge --> Layout{"Actual decoder layout"}
+  Layout --> Single["Single or dual-profile engine"]
+  Layout --> Prefill["prefill_engine_plan"]
+  Prefill --> Decode["engine_plan (decode)"]
+  Single --> Sampler["Sampler"]
+  Decode --> Sampler
   Sampler --> Text["TextResult"]
 ```
 
@@ -76,11 +123,11 @@ Key ideas:
 ## Speech-to-text
 
 ```bash
-./build/trtmc build openai/whisper-large-v3-turbo \
+$TRTMC build openai/whisper-large-v3-turbo \
   -o /tmp/whisper.trtfb \
   --precision fp16
 
-./build/trtmc transcribe /tmp/whisper.trtfb \
+$TRTMC transcribe /tmp/whisper.trtfb \
   --audio tests/e2e/models/whisper/data/Recording.wav \
   --max-new-tokens 224
 ```
@@ -108,7 +155,12 @@ The important beginner mistake is to treat audio as if it were text. Speech mode
 ## Streaming ASR
 
 ```bash
-./build/trtmc transcribe /tmp/nemotron-rnnt.trtfb \
+$TRTMC build nvidia/nemotron-speech-streaming-en-0.6b \
+  -o /tmp/nemotron-rnnt.trtfb \
+  --precision fp16 \
+  --max-cache-length 128
+
+$TRTMC transcribe /tmp/nemotron-rnnt.trtfb \
   --audio tests/e2e/models/whisper/data/Recording.wav \
   --stream \
   --chunk-ms 160 \
@@ -150,7 +202,11 @@ Streaming adds two concerns that offline transcription does not have:
 ## Text-to-audio
 
 ```bash
-./build/trtmc generate-audio /tmp/magpie.trtfb \
+$TRTMC build nvidia/magpie_tts_multilingual_357m \
+  -o /tmp/magpie.trtfb \
+  --precision fp16
+
+$TRTMC generate-audio /tmp/magpie.trtfb \
   --prompt "A calm narration for a product demo." \
   --output /tmp/out.wav
 ```

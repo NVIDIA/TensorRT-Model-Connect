@@ -50,7 +50,20 @@ profiles described in `benchmarks/performance/README.md` are additional
 operator prerequisites; dependency installation is outside the measured
 campaign.
 
-Run the complete matrix, one exact row, or resume an interrupted run:
+Reference precision is resolved from the suite row's explicit
+`baseline.precision`, then the selected testcase's `reference_precision`, then
+the model manifest's top-level `reference_precision`, and finally the resolved
+TRTMC model precision. The chosen value is passed to the reference runner,
+recorded as `resolved_settings.baseline_precision` in `results.json`, and
+checked against the runner result. A mismatch is a contract mismatch and does
+not receive a performance light.
+
+Diffusers media references also reject non-finite numeric pixels before image
+conversion can hide the invalid values. Such output is a reference execution
+failure, not a completed performance comparison.
+
+Run the complete matrix, one exact row, resume an interrupted run, or
+regenerate an existing report with task-level preparation evidence:
 
 ```bash
 python3 tools/perf_matrix.py run \
@@ -60,14 +73,28 @@ python3 tools/perf_matrix.py run \
   benchmarks/performance/release.yaml \
   --environment benchmarks/performance/environments/gb300.yaml \
   --entry gpt2.generate
-python3 tools/perf_matrix.py resume artifacts/perf/<run-id>
+python3 tools/perf_matrix.py resume artifacts/perf/example-run
+python3 tools/perf_matrix.py report artifacts/perf/example-run \
+  --preparation-receipt artifacts/perf/bundle-preparation.json
 ```
 
 Every new run writes `results.json` and `report.html` below the configured
 results root. The JSON records resolved configuration, provenance, raw
 samples, exact leaf commands, timing policies, and bundle preparation; the
-HTML shows candidate/reference p50 values and the traffic light. Green,
-yellow, and red are completed comparison results and therefore return zero.
+HTML shows candidate/reference p50 values and the traffic light. The report's
+self-contained controls can filter by text, traffic light, or bundle
+preparation status without a server.
+
+A separately run bundle-preparation step can be attached with the `report`
+command shown above. The receipt must use schema
+`trtmc.perf-bundle-preparation/v1`, scope `test_task`, the run's exact Git
+commit, and the exact model and bundle paths consumed by that campaign.
+Revision mismatches, duplicate records, invalid build times, and unused bundle
+paths are rejected. A matching preparation receipt takes precedence over a
+later cache hit, so a task-level rebuild remains visible as `Built`.
+
+Green, yellow, and red are completed comparison results and therefore return
+zero.
 Configuration errors, command failures, incomplete measurements, and timing or
 output-contract mismatches return nonzero and do not receive a performance
 light.

@@ -5,6 +5,9 @@ title: CLI Reference
 ## `trtmc build`
 
 `trtmc build` builds `.trtfb` bundles through the Python builder package.
+In the usage signatures below, replace values inside `<...>` and omit the
+angle brackets; items inside `[...]` are optional syntax, not literal shell
+text.
 
 ```bash
 trtmc build <hf-repo-or-local-dir> [-o <output.trtfb>] [options]
@@ -37,7 +40,7 @@ replaces unsafe filename characters with `-`.
 | `--graph-patch REGION.json` | Replace one explicitly selected TensorRT region with a load-time TVM-FFI slot. Requires the native TensorRT backend. |
 | `--model-revision REV` | Build a Hugging Face commit, tag, or branch instead of its default revision. |
 | `--trust-remote-code` | Accepted for E2E-command compatibility. The current build dispatcher does not forward this flag as a universal remote-code gate; family/model loaders own their loading behavior. Review the checkpoint and family implementation, and do not assume omitting this flag prevents every remote-code path. |
-| `--decoder-engine-layout split|dual_profile` | Select separate prefill/decode engines or one multi-profile decoder engine. |
+| `--decoder-engine-layout split|dual_profile` | Request separate prefill/decode engines or one multi-profile decoder engine. Unsupported split requests log a fallback; inspect `config.json.decoder_engine_layout` and bundle sections for the actual result. |
 | `--dynamic-kv-cache` | Enable runtime-resizable KV cache support. |
 | `--tensor-parallel-size N`, `--tp-size N` | Build a supported decoder for TP size `1`, `2`, `4`, or `8`. |
 | `--dynamic-kv-profile-rows A,B,C` | Override dynamic-KV optimization profiles. |
@@ -141,6 +144,7 @@ contract and current limitations.
 
 ```bash
 trtmc run <bundle.trtfb> --prompt "text" [--image PATH] [--greedy] \
+  [--source-language-token-id N] [--forced-bos-token-id N] \
   [--kernel-bindings kernel-bindings.json]
 trtmc encode <bundle.trtfb> --prompt "text"
 trtmc segment <bundle.trtfb> --image PATH --output PATH
@@ -192,7 +196,12 @@ These shared options have route-specific contracts:
   only and rejects YAML with a conversion error. The current Qwen
   optimized-runtime route rejects runtime `--config` and `--set` altogether.
 
-Text-generation options include `--max-new-tokens`, `--greedy`, `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--seed`, `--chat-template`, and `--no-thinking`.
+Text-generation options include `--max-new-tokens`, `--greedy`, `--temperature`,
+`--top-k`, `--top-p`, `--min-p`, `--seed`, `--chat-template`, and
+`--no-thinking`. For M2M-100/NLLB requests, `--source-language-token-id`
+supplies the non-negative language token after the source EOS and
+`--forced-bos-token-id` supplies the non-negative first decoder token. Omitting
+them preserves the model's legacy request framing.
 
 ### Complete native long-option index
 
@@ -206,7 +215,7 @@ an inventory, not a claim that every option is accepted by every command.
 | Primary inputs | `--prompt`, `--prompts-file`, `--image`, `--audio`, `--audio-in`, `--document`, `--field-input`, `--branch-input`, `--trunk-input` |
 | Output selection | `--output`, `--output-json`, `--audio-out`, `--list-engines` |
 | Runtime loading and config | `--hf-python`, `--backend-dir`, `--model-plugin-dir`, `--runtime-cache`, `--kernel-bindings`, `--kv-cache-size`, `--cuda-graphs`, `--config`, `--set` |
-| Text generation | `--max-new-tokens`, `--greedy`, `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--seed`, `--chat-template`, `--no-thinking`, `--generation-mode`, `--block-length`, `--threshold`, `--num-samples`, `--tail-frames` |
+| Text generation | `--max-new-tokens`, `--source-language-token-id`, `--forced-bos-token-id`, `--greedy`, `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--seed`, `--chat-template`, `--no-thinking`, `--generation-mode`, `--block-length`, `--threshold`, `--num-samples`, `--tail-frames` |
 | Diffusion and raw-state generation | `--num-steps`, `--num-inference-steps`, `--guidance-scale`, `--cfg-scale`, `--sde-gamma`, `--initial-latents-raw`, `--condition-latents-raw`, `--condition-mask-raw`, `--sampling-steps-raw`, `--sde-noise-raw`, `--negative-prompt`, `--height`, `--width`, `--num-images` |
 | Dynamic adapters | `--lora-adapter`, `--lora-adapter-id` |
 | Transcription | `--beam-size`, `--language`, `--source-language`, `--target-language`, `--task`, `--punctuation`, `--no-punctuation`, `--timestamps`, `--no-timestamps`, `--max-input-seconds`, `--segment-length-seconds`, `--stream`, `--chunk-ms`, `--att-context-size`, `--pad-and-drop-preencoded` |

@@ -3,229 +3,150 @@ title: Learning Path
 description: A course-style path for learning TensorRT-Model-Connect from inference fundamentals to extension work.
 ---
 
-Use this page like a course handout. Each stage tells you what to read, what to do, what evidence to record, and what you should be able to explain before moving on.
-
-<div className="trtmc-handout-meta">
-  <div>
-    <strong>Audience</strong>
-    <span>Readers new to inference and TensorRT deployment.</span>
-  </div>
-  <div>
-    <strong>Method</strong>
-    <span>Concept, command, inspection, explanation, validation.</span>
-  </div>
-  <div>
-    <strong>Outcome</strong>
-    <span>Understand the project well enough to use and extend it.</span>
-  </div>
-  <div>
-    <strong>Artifact</strong>
-    <span>A built `.trtfb` bundle and a written learning log.</span>
-  </div>
-</div>
+This page is the tutorial index and the recommended order for learning the
+project. Start only after completing [Getting Started](getting-started/overview.md);
+the first stages reuse the Qwen bundle from the Quick Start instead of asking
+you to rebuild it.
 
 ```mermaid
 flowchart LR
-  F1["F1: vocabulary"] --> F2["F2: build, inspect, run"]
-  F2 --> E1["E1: loader and runtime"]
-  E1 --> E2["E2: source ownership"]
-  E2 --> D1["D1: compare modalities"]
-  D1 --> C1["C1: extend and validate"]
+  GS["Getting Started<br/>first text inference"] --> F["Foundations<br/>inspect and explain"]
+  F --> T["Text generation<br/>control decoding"]
+  T --> M["More modalities<br/>vision, speech, diffusion, time-series"]
+  M --> A["Advanced use<br/>quantize, validate, benchmark"]
+  A --> C["Optional contributor branch<br/>architecture and extensions"]
 ```
 
-## Information Boxes
+You do not have to complete every modality. Follow the common path through text
+generation, then choose the branches that match your workload.
 
-The handouts use consistent information categories:
+Keep one CLI selector in the same shell for the Learning path:
 
-:::info Required reading
-Read this before attempting the task. The goal is to build the right mental model before running commands.
-:::
+```bash
+export TRTMC=trtmc
+# Source build inside the development container:
+# export TRTMC=./build/trtmc
+```
 
-:::danger Required task
-Complete this task and keep the command output or observation in your learning log.
-:::
+## Stage 0: Complete the first inference
 
-:::tip Progress check
-Use this to decide whether you are ready for the next stage.
-:::
+Read and run these pages in order:
 
-:::note Further reading
-Use these links when you need a deeper explanation, but do not block the main path on them.
-:::
+1. [Prerequisites and Environment](getting-started/environment-and-repro.md)
+2. [Installation](getting-started/installation.md)
+3. [Quick Start](getting-started/quick-start.md)
 
-:::warning Common trap
-This marks a misunderstanding that usually sends debugging in the wrong direction.
-:::
+**Milestone:** `trtmc run` (or `./build/trtmc run`) returns generated text from
+`Qwen3-0.6B.trtfb`, and `inspect` reports the `qwen` family and
+`qwen_decoder_kv_cache` runtime strategy.
 
-## Learning Log
+If that milestone does not pass, stay in Getting Started. Architecture,
+quantization, and other model recipes will add variables without fixing the
+environment boundary.
 
-Create a learning log as you work through the course. The point is not paperwork; it is to make sure you can reconstruct the reasoning instead of only replaying commands.
+## Stage 1: Learn the bundle workflow
 
-<div className="trtmc-log-template">
-  <p><strong>Stage:</strong> Name of the stage.</p>
-  <p><strong>Command or file:</strong> The command you ran or source file you read.</p>
-  <p><strong>Observation:</strong> What changed, what output mattered, or what file proved the point.</p>
-  <p><strong>Explanation:</strong> One or two sentences in your own words.</p>
-  <p><strong>Next question:</strong> The next thing you still cannot explain.</p>
-</div>
+Read:
 
-## Course Outcomes
+- [Glossary](getting-started/glossary.md) when a term is unfamiliar.
+- [Inference Fundamentals](getting-started/inference-fundamentals.md) for the
+  checkpoint-to-result mental model.
+- [Inspect Bundles](tutorials/beginner/inspect-bundles.md) for artifact-first
+  debugging.
 
-After completing the path, you should be able to:
+Use the bundle you already built. Inspect its metadata and engine list, then
+identify which evidence came from model conversion, which was stored in the
+bundle, and which was produced only when the C++ runtime loaded it.
 
-- Explain what inference is and how it differs from training.
-- Describe why TensorRT engines are build artifacts, not raw checkpoints.
-- Build and inspect a `.trtfb` bundle.
-- Trace a request from `trtmc::load()` to a concrete `IPipeline`.
-- Explain the difference between a Python family, a model-owned C++ runtime
-  strategy, and an E2E task strategy.
-- Plan the complete Python/runtime/E2E slice for a new supported model.
+**Milestone:** you can explain why a Hugging Face checkpoint, a TensorRT engine,
+and a `.trtfb` bundle are different artifacts.
 
-## Stage F1: Learn the Vocabulary
+## Stage 2: Control text generation
 
-:::info Required reading
+Continue with [Text Generation](tutorials/beginner/text-generation.md). Reuse
+`Qwen3-0.6B.trtfb` to compare deterministic greedy decoding with sampling
+controls such as temperature, top-k, top-p, min-p, and a fixed seed.
 
-- [Glossary](getting-started/glossary.md)
-- [Inference Fundamentals](getting-started/inference-fundamentals.md)
+Use the [CLI Reference](api/cli-reference.md) when you need the exact option
+surface. The tutorial teaches the behavior; the API menu is the lookup source.
 
-:::
+**Milestone:** you can choose deterministic or sampled decoding intentionally
+and can reproduce a seeded request.
 
-:::danger Required task
-Write a one-paragraph explanation of model checkpoints, tensors, tokens, logits, TensorRT engines, prefill, decode, KV cache, and bundles. Do not use source code terms yet.
-:::
+## Stage 3: Choose another modality
 
-:::tip Progress check
-You are ready to move on when you can draw the path from prompt text to `TextResult` and explain why a `.trtfb` bundle is not the same thing as a Hugging Face checkpoint.
-:::
+Choose one or more branches:
 
-<details>
-<summary>Further reading</summary>
+| Goal | Tutorial | What changes from text generation |
+| --- | --- | --- |
+| Image-conditioned text or speech/audio | [Multimodal and Speech](tutorials/intermediate/multimodal-and-speech.md) | Preprocessing, bundle sections, task method, and output type. |
+| Canary ASR decoding details | [Canary Decoding](tutorials/intermediate/canary-decoding.md) | Timestamp-aware token handling and speech-specific decoding. |
+| Image/video diffusion or time-series | [Diffusion, Vision, and Time-Series](tutorials/intermediate/diffusion-and-time-series.md) | Denoising or forecasting replaces token-by-token generation. |
 
-- [Architecture Overview](architecture/overview.md)
-- [Bundle Format](architecture/bundle-format.md)
+The diffusion tutorial includes progressively larger FLUX, PixArt, Wan, and
+Thor-qualified Wan2.2 recipes. Do not use the Thor recipe as a first-run
+environment test.
 
-</details>
+Use [Model Recipes](getting-started/build-and-run.md) only as an optional task
+index. Each recipe can add model-specific dependencies and hardware demands;
+it is not another Getting Started path.
 
-## Stage F2: Build and Run One Model
+**Milestone:** for the modality you chose, you can name the input
+preprocessing, engine components, public task method, and returned result type.
 
-:::info Required reading
+## Stage 4: Tune advanced behavior
 
-- [Environment and First Repro](getting-started/environment-and-repro.md)
-- [Quick Start](getting-started/quick-start.md)
-- [Beginner Tutorial - Inspect Bundles](tutorials/beginner/inspect-bundles.md)
-- [Beginner Tutorial - Text Generation](tutorials/beginner/text-generation.md)
+Read:
 
-:::
+- [Quantization and Runtime Knobs](tutorials/advanced/quantization-and-runtime-knobs.md)
+- [Sampling](features/sampling.md)
+- [Quantization](features/quantization.md)
+- [Configuration and Backends](features/config-and-backends.md)
 
-:::danger Required task
-Build one native text-generation bundle, inspect it, and run deterministic
-generation. Record the exact `family`, `runtime_strategy`, engine section
-names, tokenizer assets, precision, and TensorRT metadata. Then inspect the
-optimized-runtime bundle contract in [Bundle Format](architecture/bundle-format.md)
-and record why `optimized_runtime.json` replaces native strategy dispatch.
-:::
+Change one variable at a time and inspect the resulting bundle. A smaller or
+faster build is not automatically an accuracy-equivalent build.
 
-:::tip Progress check
-You are ready to move on when you can explain which part of the output came from the Python builder, which part came from the bundle, and which part came from the C++ runtime.
-:::
+**Milestone:** you can identify whether a setting belongs to build-time model
+conversion, bundle metadata, runtime configuration, or request-time decoding.
 
-:::warning Common trap
-Do not treat a successful text response as the whole validation. You also need
-to inspect the bundle and confirm the native runtime strategy or the presence
-of optimized descriptor/artifact sections. The current inspector does not
-decode optimized implementation/profile values; use the family-owned
-qualification evidence and runtime load result to validate that exact identity.
-:::
+## Stage 5: Validate and benchmark
 
-## Stage E1: Understand the System
+Follow [Validation and Benchmarking](tutorials/advanced/validation-and-benchmarking.md),
+then use [Testing](reference/testing.md) and
+[Benchmarking](reference/benchmarking.md) as references.
 
-:::info Required reading
+Record the exact model revision, bundle configuration, hardware/software
+cohort, command, oracle, and thresholds. A successful documentation build or a
+single plausible output is not model-parity evidence.
 
-- [Architecture Overview](architecture/overview.md)
-- [Runtime Plugins](architecture/runtime-plugins.md)
-- [Build System](architecture/build-system.md)
+**Milestone:** another developer can reproduce what you measured and can tell
+which claims your evidence does and does not support.
 
-:::
+## Stage 6: Optional architecture and contributor branch
 
-:::danger Required task
-Trace both branches of `trtmc::load()`. For a native bundle, follow
-`PipelineFactory`, `PipelineRegistry`, `IPipelinePlugin`, `IBackend`, and the
-concrete `IPipeline`. For an optimized bundle, follow
-`optimized_runtime_host.cpp`, embedded artifact materialization, the private
-factory, and the returned `IPipeline`. Add the source paths you inspected to
-your learning log.
-:::
+Stop here if you only need to use the product. To understand or change the
+implementation, continue with:
 
-:::tip Progress check
-You are ready to move on when you can explain why native bundles dispatch
-through `runtime_strategy`, why optimized bundles dispatch through
-`optimized_runtime.json`, and why neither path uses a central switch on model
-names.
-:::
+1. [Architecture Overview](architecture/overview.md)
+2. [Units and Ownership](architecture/units-and-ownership.md)
+3. [Build Pipeline](architecture/build-pipeline.md)
+4. [Runtime Lifecycle](architecture/runtime-lifecycle.md)
+5. [Validation Design](architecture/validation-design.md)
+6. [Extension Overview](extend/overview.md)
 
-## Stage E2: Learn the Source Units
+Then choose the extension guide owned by your change:
 
-:::info Required reading
-
-- [Unit Design Overview](unit-design/overview.md)
-- [Building Blocks](unit-design/building-blocks.md)
-- [Python Builder Units](unit-design/python-builder.md)
-- [C++ Runtime Units](unit-design/cpp-runtime.md)
-
-:::
-
-:::danger Required task
-Pick a hypothetical new decoder model and identify the first three files or modules you would inspect before editing. Then pick a hypothetical new request-time task and identify the runtime units you would inspect.
-:::
-
-:::tip Progress check
-You are ready to move on when you can distinguish model knowledge, artifact evidence, runtime behavior, and user-facing API changes.
-:::
-
-## Stage D1: Compare Modalities
-
-:::info Required reading
-
-- [Intermediate Tutorial - Multimodal and Speech](tutorials/intermediate/multimodal-and-speech.md)
-- [Intermediate Tutorial - Diffusion and Time-Series](tutorials/intermediate/diffusion-and-time-series.md)
-- [Features - Model Families](features/model-families.md)
-- [Features - Runtime Strategies](features/runtime-strategies.md)
-
-:::
-
-:::danger Required task
-For each task represented by a current E2E manifest, name the preprocessing,
-engine components, postprocessing, and public `IPipeline` method. Treat
-`detect()` as an API surface, not supported-model evidence, until a
-model-owned object-detection descriptor and E2E manifest exist.
-:::
-
-:::tip Progress check
-You are ready to move on when you can explain which differences are task differences and which differences are only model-family conversion details.
-:::
-
-## Stage C1: Extend and Validate
-
-:::info Required reading
-
-- [Extend Overview](extend/overview.md)
 - [Add a Model Family](extend/add-model-family.md)
+- [Add an Optimized Runtime Implementation](extend/add-optimized-runtime.md)
 - [Add a Runtime Strategy](extend/add-runtime-strategy.md)
-- [Advanced Tutorial - Validation and Benchmarking](tutorials/advanced/validation-and-benchmarking.md)
+- [Add a Configuration Schema](extend/add-config-schema.md)
+- [Validate a Model Contribution](extend/model-validation.md)
+- [Contributing](extend/contributing.md)
 
-:::
+[Bring Your Own Kernel](tutorials/beginner/bring-your-own-kernel.md) is an
+extension workflow, not part of the beginner or common user path. Use it only
+when replacing or adding a kernel implementation is the goal.
 
-:::danger Required task
-For a hypothetical new model, name its Python family descriptor/package,
-unique runtime strategy and DSO owner, C++ tests, E2E descriptor/manifest, and
-documentation evidence. For an existing model change, identify which part of
-that vertical slice owns the behavior.
-:::
-
-:::tip Progress check
-You finish the course when you can explain the implementation plan before opening an editor, and the plan names the owning abstraction for every change.
-:::
-
-The extension is ready for review only when its descriptors agree, its
-model-owned DSO loads the emitted strategy, and the exact-model E2E evidence
-uses the intended oracle and thresholds.
+**Milestone:** before editing, you can name the model-owned Python descriptor,
+runtime strategy and DSO owner, public API boundary, tests, E2E manifest, and
+documentation that form the vertical slice of your change.

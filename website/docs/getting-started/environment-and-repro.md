@@ -1,109 +1,120 @@
 ---
-title: Environment and First Repro
+title: Prerequisites and Environment
+description: Select and verify the environment before installing TensorRT-Model-Connect.
 ---
 
-This page is the first-run contract. Complete it before building a model bundle.
+Complete this page before [Installation](installation.md). It helps you select
+an install path; it does not install the project or build a model.
 
-## The Stack In One Picture
+## 1. Choose an environment
 
-```mermaid
-flowchart TB
-  Host["Linux host<br/>GPU driver + Docker"] --> Container["Dev container<br/>CUDA + TensorRT + Python deps"]
-  Container --> Runtime["trtmc or ./build/trtmc<br/>build + C++ runtime CLI"]
-  Runtime --> Builder["Python bundle builder"]
-  Builder --> Bundle["model.trtfb"]
-  Bundle --> Runtime
-```
+TensorRT-Model-Connect is not a CPU-only Python package. Building and running a
+bundle requires a compatible NVIDIA GPU software stack.
 
-| Layer | Why it exists | What usually fails here |
+| Path | Use it when | Current boundary |
 | --- | --- | --- |
-| NVIDIA driver | Lets containers use the GPU. | `nvidia-smi` fails or no GPU appears in Docker. |
-| Docker + NVIDIA Container Toolkit | Gives a repeatable CUDA/TensorRT environment. | Container launches without GPU access. |
-| Python builder environment | Resolves Hugging Face models and builds bundles. | Missing `transformers`, TensorRT Python package, model auth, or network/cache access. |
-| C++ runtime environment | Loads bundle metadata and either native model/backend DSOs or an optimized bundle's embedded implementation DSO. | Missing shared libraries, native TensorRT ABI/backend mismatch, or optimized descriptor/artifact/factory identity mismatch. |
-| Hugging Face cache | Stores downloaded model files. | First run is slow, offline build fails, gated model needs login/token. |
+| Published aarch64 wheel | You have a matching Linux aarch64 host and the release artifacts. | Python 3.10 or 3.12, glibc 2.39 or newer, and the matching official TensorRT 11.1.0.106 cohort. |
+| Repository dev container | You are developing from source in the repository's GB300/aarch64 environment. | Linux host, NVIDIA driver, Docker, NVIDIA Container Toolkit, and enough access to build the image. |
 
-## 1. Start The Dev Container
+Do not combine binaries, bundles, or TensorRT libraries from different
+cohorts. A bundle contains TensorRT compatibility metadata, but it does not
+contain the host driver, CUDA runtime, dynamic loader, or every system library.
 
-From the repository root on the host:
+:::info Why x86_64 qualification is not a newcomer path
+
+The retained x86_64 profile metadata covers exact Qwen revisions, A100 SM80,
+FP16, an external Edge-LLM implementation, and profile-specific options. The
+public source tree publishes the pinned TensorRT-Edge-LLM dependency lock and
+profile metadata, but it does not vendor that dependency or publish the former
+target-hardware runner and qualification artifacts. This is not the native
+BF16/full-context command used by the site's first-inference path, and it does
+not establish a generally downloadable x86_64 wheel. See the [advanced profile
+boundary](installation.md#x86_64-optimized-profiles) only when reviewing that
+exact tuple.
+
+:::
+
+## 2. Check the host
+
+On the host, record:
 
 ```bash
+uname -m
+getconf GNU_LIBC_VERSION
+python3 --version
+nvidia-smi
+docker --version
+```
+
+Expected signals depend on the path you selected:
+
+- The architecture printed by `uname -m` must match the aarch64 wheel or
+  repository-container path used by this newcomer flow.
+- The published wheel path requires glibc 2.39 or newer; for example,
+  `getconf GNU_LIBC_VERSION` must report `glibc 2.39` or a later version.
+- Python must be 3.10 or 3.12 for the documented wheel paths.
+- `nvidia-smi` must show the target GPU and a working driver.
+- Docker is required for the repository dev-container path, not for an already
+  installed wheel.
+
+For the container path, the NVIDIA Container Toolkit must also allow a
+container to see the GPU. If the repository container launches but
+`nvidia-smi` fails inside it, fix the host/container boundary before building
+TensorRT-Model-Connect.
+
+## 3. Prepare the source container
+
+Skip this section when you are installing a published wheel.
+
+Clone the repository, then run the repository scripts from its root:
+
+```bash
+git clone https://github.com/NVIDIA/TensorRT-Model-Connect.git
+cd TensorRT-Model-Connect
+
 ./scripts/docker_build_gb300.sh
 ./scripts/docker_run_gb300.sh
 ```
 
-Then enter the container shell created by the script. In agent workspaces, the running container may be named `trtf-dev-gb300-agent-N` instead of `trtf-dev-gb300`. Source-build commands in the website assume you are inside the matching container.
+`docker_run_gb300.sh` starts an interactive shell in the container with the
+repository mounted at `/workspace/tensorrt-model-connect`, the Hugging Face
+cache mounted from the host, and GPU access requested through Docker. Keep that
+shell open for the source-install and Quick Start commands.
 
 :::warning Host versus container
-If `./build/trtmc --help` fails on the host with `libtorch.so: cannot open shared object file`, you are outside the runtime environment used by these tutorials. Enter the dev container or export the same library paths used there.
+Source-build commands in this site assume you are inside that container. A
+source-built `./build/trtmc` can fail on the host with a missing shared library
+even when it works in the development environment.
 :::
 
-## 2. Install The Builder And Build The Runtime
+## 4. Budget for the first model
 
-Inside the container:
-
-```bash
-pip install -e . -C py-only=true
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-```
-
-If the dev image already has all Python dependencies installed and you are intentionally avoiding dependency resolution, this shorter install is acceptable:
-
-```bash
-pip install --no-deps -e . -C py-only=true
-```
-
-Do not use `--no-deps` in a fresh Python environment. The builder depends on
-packages such as `safetensors`, `numpy`, `ml_dtypes`, `onnx`, `onnxscript`,
-`transformers`, and `tensorrt`. Use `--no-deps` only when the dev image already
-provides those packages.
-
-## 3. Prove The Tools Work
-
-Run these commands before building a model:
-
-```bash
-python -c "import transformers, tensorrt; print('python inference deps ok')"
-./build/trtmc version
-./build/trtmc --help
-```
-
-Expected signals:
-
-```text
-python inference deps ok
-trtmc 0.1.0
-TRT support: yes
-Usage:
-  trtmc build ...
-  trtmc run ...
-```
-
-If `./build/trtmc version` fails, debug the C++ runtime environment. If `./build/trtmc build ...` fails, debug Python dependencies, model resolution, or TensorRT build errors.
-
-## 4. Know What The First Model Build Does
-
-The quick-start model is:
+The Quick Start builds:
 
 ```text
 Qwen/Qwen3-0.6B
 ```
 
-On the first build, `./build/trtmc build` may download model files from Hugging Face into the cache visible inside the container. Expect network access, cache writes, GPU memory use during TensorRT build, and a build time that is much longer than normal program startup.
+The first build may download checkpoint files and compile multiple TensorRT
+plans. It needs network access or a populated Hugging Face cache, write access
+for the bundle, and substantially more time than normal application startup.
 
-For gated or private models, log in or provide the required Hugging Face token before running `./build/trtmc build`.
+The default native path uses the checkpoint's complete 40,960-token context.
+Its fixed BF16 KV allocation is 4.375 GiB by itself. This number excludes model
+weights, TensorRT plans, build workspace, runtime allocations, and host-side
+cache files; do not use it as a total-memory estimate.
 
-## 5. First-Failure Triage
+## 5. Know the failure boundaries
 
 | Symptom | Likely boundary | Next check |
 | --- | --- | --- |
-| Docker cannot see the GPU | Host/container setup | `nvidia-smi` on host and inside container. |
-| `ModuleNotFoundError` during build | Python builder env | Use `pip install -e . -C py-only=true` without `--no-deps`, or install the missing package in the container. |
-| Hugging Face 401/403/not found | Model resolution | Check model ID, network, auth token, and gated model access. |
-| CMake cannot find CUDA headers or `cudart` | Native build env | Confirm CUDA development files are installed in the container. |
-| `libtorch.so` missing for `./build/trtmc` | Runtime library path | Run inside container or export the container's library paths. |
-| TensorRT ABI mismatch | Bundle/runtime compatibility | Rebuild the bundle in the same TensorRT environment or load the matching backend DSO. |
-| `No plugin registered for runtime_strategy` | Model-plugin discovery | Confirm the strategy has a manifest owner and its model DSO is available in the configured search paths. |
+| `nvidia-smi` fails | Host driver or GPU access | Fix the host before starting installation. |
+| Docker cannot see the GPU | NVIDIA Container Toolkit | Verify the Docker GPU runtime configuration. |
+| Wheel architecture is incompatible | Install-path selection | Match Python, architecture, glibc, and TensorRT cohort. |
+| Hugging Face 401/403/not found | Model resolution | Check model ID, network, auth, and gated-model access. |
+| CMake cannot find CUDA or TensorRT | Native build environment | Use the repository container or provide the matching development files explicitly. |
+| `libtorch.so` or another DSO is missing | Runtime library environment | Run in the installed/container environment instead of moving one executable by itself. |
+| TensorRT ABI mismatch | Bundle/runtime cohort | Build and run with compatible TensorRT environments. |
 
-Once this page passes, continue to [Quick Start](quick-start.md).
+Continue to [Installation](installation.md). Return here instead of changing
+model flags when the failure is an environment mismatch.

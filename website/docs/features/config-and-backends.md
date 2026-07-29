@@ -2,6 +2,14 @@
 title: Config and Backends
 ---
 
+The CLI examples use one selector for an installed wheel or source build:
+
+```bash
+export TRTMC=trtmc
+# Source build inside the development container:
+# export TRTMC=./build/trtmc
+```
+
 ## Schema-driven config
 
 Both build and runtime CLIs expose a generic config surface:
@@ -44,6 +52,7 @@ This is the current registered namespace/field inventory.
 | `audio_magpie` (Magpie TTS) | `audio_magpie.greedy`, `audio_magpie.cfg_scale`, `audio_magpie.temperature`, `audio_magpie.finished_limit`, `audio_magpie.seed`, `audio_magpie.max_source_positions` | Sampling fields: session/platform; `max_source_positions`: build/bundle |
 | `wan2_2_ti2v` (Wan 2.2 TI2V) | `wan2_2_ti2v.easycache_enabled`, `wan2_2_ti2v.easycache_threshold`, `wan2_2_ti2v.easycache_first_exact_steps`, `wan2_2_ti2v.easycache_last_exact_steps`, `wan2_2_ti2v.easycache_max_consecutive_reuse`, `wan2_2_ti2v.late_cfg_enabled` | Session request, platform profile |
 | `sana_wm` (SANA-WM) | `sana_wm.image_path`, `sana_wm.action`, `sana_wm.translation_speed`, `sana_wm.rotation_speed_deg`, `sana_wm.num_frames`, `sana_wm.fps`, `sana_wm.flow_shift`, `sana_wm.intrinsics`, `sana_wm.no_refiner` | Session request, platform profile |
+| `qwen_vl_decoder` (Qwen-VL build) | `qwen_vl_decoder.decode_attention`, `qwen_vl_decoder.max_prefill_length`, `qwen_vl_decoder.opt_prefill_length`, `qwen_vl_decoder.builder_workspace_gib` | Build time, bundle default, build CLI request |
 | `qwen_vl_lora` (Qwen-VL build) | `qwen_vl_lora.enabled`, `qwen_vl_lora.max_rank`, `qwen_vl_lora.target_modules` | Build time, bundle default, build CLI request |
 | `qwen_vl_vision` (Qwen-VL build) | `qwen_vl_vision.image_height`, `qwen_vl_vision.image_width`, `qwen_vl_vision.dynamic_resolution`, `qwen_vl_vision.min_pixels`, `qwen_vl_vision.opt_pixels`, `qwen_vl_vision.max_pixels` | Build time, bundle default, build CLI request |
 
@@ -51,6 +60,10 @@ The Qwen-VL build schemas have these exact defaults and validation rules:
 
 | Field | Type and default | Additional contract |
 | --- | --- | --- |
+| `qwen_vl_decoder.decode_attention` | `string`, `native` | Accepts `native` or `decomposed`; decomposed decode is valid only for an active split-decoder build. |
+| `qwen_vl_decoder.max_prefill_length` | `int32`, `0` | Nonnegative; zero lets the builder use the cache-length bound for the prefill maximum. |
+| `qwen_vl_decoder.opt_prefill_length` | `int32`, `64` | Must be positive and is clamped to the effective prefill maximum. |
+| `qwen_vl_decoder.builder_workspace_gib` | `int32`, `1` | Must be positive and controls the decoder builder workspace independently of the cache bound. |
 | `qwen_vl_lora.enabled` | `bool`, `false` | Dynamic binding currently supports Qwen2.5-VL only and rejects tensor-parallel builds. |
 | `qwen_vl_lora.max_rank` | `int32`, `0` | Schema range is 0 through 256; enabling LoRA requires 1 through 256. |
 | `qwen_vl_lora.target_modules` | `string`, `q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj` | Comma-separated non-empty subset of exactly those seven projection names. |
@@ -133,7 +146,7 @@ The native runtime path loads TensorRT backends dynamically:
 Use `--backend-dir` to add explicit backend search directories:
 
 ```bash
-./build/trtmc run /tmp/model.trtfb \
+$TRTMC run /tmp/model.trtfb \
   --prompt "Hello" \
   --backend-dir /opt/trtmc/backends
 ```
@@ -164,7 +177,7 @@ For an optimized bundle, use a directory as the cache root rather than an RTX
 cache-file name:
 
 ```bash
-./build/trtmc run /tmp/optimized.trtfb \
+$TRTMC run /tmp/optimized.trtfb \
   --prompt "Hello" \
   --runtime-cache /tmp/trtmc-optimized-cache
 ```

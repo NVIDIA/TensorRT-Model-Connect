@@ -16,6 +16,10 @@ details, internal packages, and the complete report remain private. Neither the
 Source bridge nor Internal premerge triggers on a push to `main`, so merging a
 passing PR does not rerun the same premerge suite.
 
+Source has no separate pull-request documentation-validation workflow. The
+Pages workflow builds the site before deployment from `main`, but it is not a
+pull-request documentation gate.
+
 ## Local documentation validation
 
 Use the checks that are present on this snapshot. The following is a
@@ -48,6 +52,21 @@ validates repository-relative paths and selected numeric claims. The
 runtime-strategy checker compares native descriptors, source, tests, and runner
 commands. A successful Docusaurus build proves that this site is buildable; it
 does not by itself prove every documented behavior or command.
+
+The runtime-strategy checker is a useful drift diagnostic, but it is not green
+on this snapshot:
+
+```bash
+PYTHONPATH=python:. python3 tools/check_runtime_strategy_matrix.py
+```
+
+At commit `e6b798cdb145c38caf1ede8eda7f5ce83f894138`, it exits nonzero because
+`diffusion_sana_wm` is absent from both
+`tests/runtime_strategy_matrix.yaml` and the E2E manifests. It also finds no
+discoverable runner class for Canary and Whisper speech-to-text, Nemotron
+streaming speech-to-text, PersonaPlex speech-to-speech, or Qwen3-Omni
+omni-multimodal. Treat these as codebase validation gaps; a documentation-only
+change must not claim that this checker passes.
 
 ## Active workflow inventory
 
@@ -86,10 +105,14 @@ assuming the whole suite is CPU-only.
 
 ## Model-first reference consistency
 
-`tools/trtmc_validate.py` is the Dev/QA entry point for proving that one TRTMC
-model agrees with its original reference implementation. Model-to-workload
-ownership is declared in `tests/validation/model_workloads.yaml`; the command
-does not infer a generic task from the model name.
+`tools/trtmc_validate.py` is the supported Dev/QA entry point for proving that
+one TRTMC model agrees with its original reference implementation. The shared
+execution implementation now lives in `tools/validation/engine.py`; the former
+task-eval executable has been retired. Prepared manifests retain the `task_eval`
+metadata key only as a stable artifact and reference-cache schema.
+Model-to-workload ownership is declared in
+`tests/validation/model_workloads.yaml`; the command does not infer a generic
+task from the model name.
 
 Run a model's default binding, choose another declared workload, inspect the
 current all-model plan without executing it, or run every validation-eligible
@@ -102,15 +125,31 @@ python3 tools/trtmc_validate.py --all --dry-run
 python3 tools/trtmc_validate.py --all
 ```
 
+Qwen3-Omni now has a model-plugin validation binding, and the validation
+runner forwards `--model-plugin-dir` to each Omni runtime stage:
+
+```bash
+python3 tools/trtmc_validate.py \
+  qwen3-omni-30b-a3b-instruct \
+  seedtts_en_omni_audio_parity \
+  --model-plugin-dir ./build/models
+```
+
+That workload reads
+`/mnt/data/seedtts-en-omni-audio/dataset.json` and is declared `local_only` for
+a GB300 environment with roughly 280 GB of model/reference state. It is not a
+host-only documentation check; run it only in the prepared target environment
+and retain its model artifacts and comparison report.
+
 Eligibility excludes manifests that require multiple devices, are marked
 `skip`, or use `ci_tier: l0_only`; readiness alone does not select a model. At
-commit `7e5ac705ad6f70f6f91e69d73e4d10fc048afad3`, an actual
-`--all --dry-run` resolves 105 bindings: 97 runnable bindings and 8 entries
-with `status: "not_compared"` and a `reason`. Treat those counts as snapshot
-evidence, not a permanent API promise; rerun the dry run after catalog changes.
-Runnable bindings use the reference runner selected for their prepared dataset
-kind. Entries without an implemented aligned comparison remain visible as not
-compared instead of launching a model worker.
+commit `e6b798cdb145c38caf1ede8eda7f5ce83f894138`, an actual
+`--all --dry-run` resolves 105 bindings, all runnable; the current catalog has
+zero `not_compared` entries. Treat those counts as snapshot evidence, not a
+permanent API promise; rerun the dry run after catalog changes. Runnable
+bindings use the reference runner selected for their prepared dataset kind. If
+a future model lacks an implemented aligned comparison, it remains visible as
+`not_compared` instead of launching a model worker.
 
 The supervisor starts one isolated worker process per **attempt**. By default,
 each runnable binding permits at most two attempts and waits five seconds
@@ -152,18 +191,19 @@ do not launch a worker.
 
 This workflow needs the model checkpoint, its reference environment and
 dataset, a compatible TRTMC bundle/runtime, and usually target GPU hardware.
-`--dry-run` proves binding and planning only; it does not execute the 97
-runnable comparisons in the 105-entry plan. See
+`--dry-run` proves binding and planning only; it does not execute the 105
+runnable comparisons in the current 105-entry plan. See
 `tests/validation/README.md` for the artifact and model-onboarding contracts.
 
 ## Model-owned E2E
 
-Replace placeholders with literal values:
+This concrete command runs the current Qwen native L0 manifest. Replace its
+literal family and manifest values when validating another owner:
 
 ```bash
 PYTHONPATH=python:. python3 -m pytest \
-  tests/e2e/models/<family> \
-  --e2e-model <manifest-name> \
+  tests/e2e/models/qwen \
+  --e2e-model qwen3-0.6b-native-l0 \
   --engine-dir /path/to/engines \
   --trtmc-binary ./build/trtmc \
   --model-plugin-dir ./build/models \
@@ -174,8 +214,9 @@ Add `--hf-python /path/to/python` only when the selected runtime needs a Python
 helper. E2E requires the checkpoint, a compatible GPU/TensorRT environment,
 and the CLI binary. The remaining runtime evidence depends on the bundle path:
 a native bundle needs its owning model and backend DSOs; an optimized-runtime
-bundle must contain the qualified implementation metadata, integrity-bound
-artifact tree, and embedded implementation DSO.
+bundle must contain its declared implementation metadata, integrity-bound
+artifact tree, and embedded implementation DSO. Target-environment parity and
+performance proof is a separate evidence layer.
 
 `tests/test_e2e.py` is the repository-wide compatibility entry point. Model
 work should normally select the owning `tests/e2e/models/<family>/` tree so
@@ -201,12 +242,16 @@ An optimized implementation has a separate evidence chain:
 
 - family-owned `IMPLEMENTATION.toml`, including the private
   `libtrtmc_impl_*.so` factory identity
-- an exact qualified profile under `profiles/*.toml`, binding the model
-  revision, target, options, and semantic hash
-- a matching model-owned `QUALIFICATION.*.toml` producer descriptor and its
-  retained parity/performance artifacts
+- an exact profile under `profiles/*.toml`, binding the model revision, target,
+  options, declared qualification state, and semantic hash
+- focused implementation/profile and bundle-contract tests
 - a built bundle containing `optimized_runtime.json`, `implementation.json`,
   the integrity-bound artifact tree, and the embedded implementation DSO
+
+Source currently has no active optimized-runtime hardware qualification route.
+A profile's qualification-state field participates in declaration and routing;
+it is not, by itself, current Source hardware proof. Target-environment or
+private parity/performance evidence must be evaluated separately.
 
 `PipelineFactory` checks `optimized_runtime.json` before native strategy
 dispatch. Consequently, an optimized bundle's public `runtime_strategy` may be
@@ -221,19 +266,16 @@ source of truth.
 
 | Evidence | Native bundle | Optimized-runtime bundle |
 | --- | --- | --- |
-| Build/selection identity | Family `MODEL.toml` and exact `runtime_strategy` | `IMPLEMENTATION.toml` plus an exact qualified `profiles/*.toml` entry |
-| Qualification authority | Model-owned E2E manifest and retained comparison artifacts | Matching `QUALIFICATION.*.toml` producer proof and retained parity/performance artifacts |
+| Build/selection identity | Family `MODEL.toml` and exact `runtime_strategy` | `IMPLEMENTATION.toml` plus an exact `profiles/*.toml` entry |
+| Qualification authority | Model-owned E2E manifest and retained comparison artifacts | Target-environment/private proof outside Source; Source publishes no active optimized-runtime hardware qualification route or raw proof artifacts |
 | Bundle dispatch | `config.json` and `runtime_strategy` | `optimized_runtime.json` and `implementation.json` |
 | Runtime libraries | Owning `libtrtmc_model_*.so` and selected `libtrtmc_backend_*.so` | Exact embedded `libtrtmc_impl_*.so`; no native strategy/model/backend dispatch |
 | Timing evidence | Provider-populated `setup_ms`, `prefill_ms`, and `decode_ms`, when available | Provider-populated phase timing when available; otherwise synchronized public-call wall time |
 
 The CLI prints the phase fields returned by `TextResult`, but providers are not
-required to expose every phase. A zero phase value can mean unavailable; for
-example, the qualified Qwen Edge-LLM adapter deliberately reports zero
-prefill/decode timing because its pinned downstream API has no trustworthy
-split. Do not turn those zeros into latency or throughput claims. Use the
-qualification performance runner or another synchronized wall-clock
-measurement and label that metric explicitly.
+required to expose every phase. A zero phase value can mean unavailable; do not
+turn zeros into latency or throughput claims. If synchronized public-call wall
+time is used instead, label the metric and measurement boundary explicitly.
 
 ## Choosing evidence
 
@@ -241,7 +283,7 @@ measurement and label that metric explicitly.
 | --- | --- |
 | Python family plugin | Focused builder tests and one representative E2E case |
 | Native runtime model DSO | Focused C++ tests, strategy/descriptor checks, backend-load evidence, and matching E2E |
-| Optimized implementation | Implementation/profile/qualification contract tests, embedded-DSO host tests, and matching qualified E2E/performance artifacts |
+| Optimized implementation | Source implementation/profile/bundle contract tests and embedded-DSO host tests, plus target-environment parity/performance proof when required; Source CI does not supply that hardware proof |
 | Shared runtime/config | Focused unit tests plus affected-model selection |
 | Public C++ API / C-linkage subset | API/ABI tests and CLI smoke |
 | E2E runner/comparator | Focused harness tests and representative artifact |

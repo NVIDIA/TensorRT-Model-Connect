@@ -71,15 +71,28 @@ contract and is normally family-qualified (for example,
 
 ## Verify the layout
 
-Run the repository-owned consistency checks:
+Run the repository-owned descriptor and focused contract checks:
 
 ```bash
-PYTHONPATH=python:. python3 tools/check_runtime_strategy_matrix.py
+PYTHONPATH=python:. python3 tools/model_ci.py validate
+PYTHONPATH=python:. python3 tools/test_impact.py --validate
 PYTHONPATH=python:. python3 -m pytest \
   tests/tools/test_model_plugin_encapsulation_static.py \
   tests/builder/test_manifest_validation.py \
   tests/tools/test_runtime_strategy_matrix_checker.py -q
 ```
+
+The broader runtime-strategy matrix command is a drift diagnostic:
+
+```bash
+PYTHONPATH=python:. python3 tools/check_runtime_strategy_matrix.py
+```
+
+At GitHub `main` commit
+`e6b798cdb145c38caf1ede8eda7f5ce83f894138`, it exits nonzero because
+`diffusion_sana_wm` is absent from the matrix and five speech/omni task entries
+have no discoverable runner class. Report that known baseline separately from
+new changes; do not present the command as a passing consistency check.
 
 Use `tools/test_impact.py` for change selection. Do not infer ownership from an
 old document count or from a removed shared runtime directory.

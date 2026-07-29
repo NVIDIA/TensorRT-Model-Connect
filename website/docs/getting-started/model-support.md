@@ -1,8 +1,13 @@
 ---
-title: Model Support
+title: Model Support Reference
 ---
 
 import ModelSupportInventory from '@site/src/components/ModelSupportInventory';
+
+This page is a support and evidence reference, not a prerequisite for your
+first inference. New users should complete
+[Getting Started](overview.md) before using this inventory to choose another
+model.
 
 Native model support is defined by three model-owned descriptor roots:
 

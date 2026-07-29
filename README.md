@@ -2,8 +2,8 @@
 
 ![TensorRT-Model-Connect build and runtime map](website/static/img/diagrams/trtmc-system-map.svg)
 
-[Documentation](website/docs/intro.md) |
-[Quick Start](website/docs/getting-started/quick-start.md) |
+[Documentation site](https://nvidia.github.io/TensorRT-Model-Connect/) |
+[First NLP Inference](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/quick-start) |
 [GitHub Actions](https://github.com/NVIDIA/TensorRT-Model-Connect/actions) |
 [Docs source](website/docs/intro.md)
 
@@ -24,7 +24,7 @@ environment must still resolve a compatible NVIDIA driver, CUDA/TensorRT
 cohort, dynamic loader, and system libraries.
 
 To build and run native Wan2.2 TI2V-5B at 720p, follow the
-[two-command Jetson Thor guide](website/docs/getting-started/quick-start.md#jetson-thor-wan22-720p-in-two-commands).
+[optional Jetson Thor example](website/docs/getting-started/quick-start.md#optional-advanced-example-jetson-thor-wan22-720p).
 
 For source development, open Codex or another repo-aware coding agent and ask:
 
@@ -38,7 +38,8 @@ Success means the final `./build/trtmc run` command prints generated text.
 
 ## Manual Fallback
 
-Use the [Environment and First Repro](website/docs/getting-started/environment-and-repro.md) and [Quick Start](website/docs/getting-started/quick-start.md) guides for the full manual path. The short version is:
+Use [Getting Started](website/docs/getting-started/overview.md) for the full
+prerequisites-to-first-inference path. The short version is:
 
 ```bash
 git clone https://github.com/NVIDIA/TensorRT-Model-Connect.git
@@ -75,10 +76,9 @@ builds and tests the wheel in the repository Dockerfile image before release.
 
 | Need | Link |
 | --- | --- |
-| Learn the project | [Learning Path](website/docs/learning-path.md) |
-| Build and run models | [Build and Run](website/docs/getting-started/build-and-run.md) |
-| Check model coverage | [Model Support](website/docs/getting-started/model-support.md) |
-| Use CLI, Python, or C++ APIs | [API Overview](website/docs/api/overview.md) |
-| Understand internals | [Architecture](website/docs/architecture/overview.md) |
-| Run validation | [Testing](website/docs/reference/testing.md) |
-| Measure model performance | [Performance Benchmarking](website/docs/reference/benchmarking.md) |
+| Complete the newcomer path | [Getting Started](website/docs/getting-started/overview.md) |
+| Learn from beginner to advanced | [Learn & Tutorials](website/docs/learning-path.md) |
+| Use CLI, Python, or C++ APIs | [API Reference](website/docs/api/overview.md) |
+| Understand internals | [Architecture & Design](website/docs/architecture/overview.md) |
+| Add or contribute functionality | [Contribute & Extend](website/docs/extend/overview.md) |
+| Research features and design history | [Feature Reference & Context](website/docs/features/overview.md) |

@@ -33,8 +33,10 @@ Use this page whenever a tutorial uses an unfamiliar deployment or inference ter
 | Hugging Face model ID | A repo name such as `Qwen/Qwen3-0.6B`. | `trtmc build` resolves it to a local model directory, downloading files if needed. |
 | Precision | Numeric format used by engine weights/activations. | `fp16` is common for fast GPU smoke tests; `fp32` is larger and usually slower. |
 | Quantization | Lower-precision representation such as FP8 or INT4. | Reduces footprint or latency when supported by the family and backend. |
+| DSO (dynamic shared object) | A Linux shared library loaded while a process is running. | Native bundles use installed model/backend DSOs; optimized bundles carry their exact implementation DSO. |
 | Backend DSO | A runtime-loaded shared library. | `libtrtmc_backend_trt.so` and `libtrtmc_backend_trt_rtx.so` isolate TensorRT ABI-sensitive calls. |
 | ABI | Binary compatibility contract between compiled code and libraries. | TensorRT version mismatches can prevent an engine from loading. |
+| Qualified profile | A support statement for one exact tested tuple. | It binds a model revision, implementation, target hardware/software, and public options; it is not a promise for nearby models or machines. |
 
 ## Project Building Blocks
 

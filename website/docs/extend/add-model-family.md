@@ -85,8 +85,8 @@ Keep the three discovery flows distinct:
    `diffusion_pipeline_classes` from descriptors. It imports matching packages
    and has no `pkgutil` fallback.
 
-See [Python Builder Units](../unit-design/python-builder.md#family-plugins) for
-the live flow.
+See [Build Pipeline](../architecture/build-pipeline.md#2-resolve-the-owning-family)
+for the live flow.
 
 `plugin.py` must provide:
 
@@ -102,6 +102,24 @@ Keep config adapters, checkpoint mapping, graph helpers, builders, calibration
 policy, and optional debug hooks in this family package. The old repository-root
 `graph_ops.py`, `graph_blocks.py`, and `standard_decoder_builder.py` ownership
 model has been retired.
+
+### Optional split decoder contract
+
+Opt into separate prefill/decode engines only when the family builder and
+runtime implement both roles. Provide
+`supports_split_decoder_roles(config) -> bool` (or the equivalent
+`split_decoder_roles` family capability) and make the family builder honor the
+internal prefill/decode role passed by the generic engine builder. A family
+with `embed_input = True` must also set `supports_split_embed_input = True`
+only after its prefill engine accepts the embedding-input contract and its
+decode engine handles the matching one-token role.
+
+The generic builder does not select split layout for tensor parallelism,
+dynamic KV, or TriAttention. An unsupported split request falls back to the
+family's existing single-engine path. Tests must inspect the emitted
+`config.json.decoder_engine_layout`: an actual split result must contain both
+`prefill_engine_plan` and decode `engine_plan`, while a fallback must not claim
+split merely because the request asked for it.
 
 ## 3. Add the runtime model DSO
 

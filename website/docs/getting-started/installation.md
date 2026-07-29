@@ -65,15 +65,10 @@ wheel with Python 3.12. The TensorRT-Model-Connect wheel installs:
 - packaged TensorRT backend DSOs,
 - the pinned official `tensorrt==11.1.0.106` Python dependency.
 
-Quick smoke test:
-
-```bash
-trtmc build Qwen/Qwen3-0.6B
-trtmc run Qwen3-0.6B.trtfb \
-  --prompt "The capital of France is" \
-  --max-new-tokens 20 \
-  --greedy
-```
+Installation is complete when `trtmc version` and `trtmc build --help`
+succeed. Continue to
+[Your First NLP Inference](quick-start.md) for the single canonical
+build-inspect-run smoke test; it is intentionally not duplicated here.
 
 ### x86_64 optimized profiles
 
@@ -88,15 +83,10 @@ Use this path when you need the same pip-installable artifact that release
 validation produces. The commands below are the current GB300/aarch64 release
 path.
 
-```bash
-git clone https://github.com/NVIDIA/TensorRT-Model-Connect.git
-cd TensorRT-Model-Connect
-
-./scripts/docker_build_gb300.sh
-./scripts/docker_run_gb300.sh
-```
-
-Inside the dev container, build one Python 3.12 wheel:
+Continue in the repository-root dev-container shell opened by
+[Prerequisites and Environment](environment-and-repro.md#3-prepare-the-source-container).
+Do not clone again or try to start Docker from inside that container. Build one
+Python 3.12 wheel there:
 
 ```bash
 python -m pip install --upgrade build auditwheel
@@ -125,8 +115,13 @@ python3.12 -m venv /tmp/trtmc-wheel-smoke
 /tmp/trtmc-wheel-smoke/bin/python -m pip install --upgrade pip
 /tmp/trtmc-wheel-smoke/bin/python -m pip install \
   dist/tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl
-/tmp/trtmc-wheel-smoke/bin/trtmc version
+. /tmp/trtmc-wheel-smoke/bin/activate
+trtmc version
 ```
+
+Keep this virtual environment active while following
+[Your First NLP Inference](quick-start.md), where `TRTMC=trtmc` will now refer
+to this installed wheel.
 
 Run wheel builds from the repository root. Do not point `python -m build` at a
 package subdirectory.
@@ -139,15 +134,8 @@ backend DSOs. The container commands below use the current GB300/aarch64
 development environment; an x86_64 environment must provide its matching
 TensorRT/CUDA cohort.
 
-```bash
-git clone https://github.com/NVIDIA/TensorRT-Model-Connect.git
-cd TensorRT-Model-Connect
-
-./scripts/docker_build_gb300.sh
-./scripts/docker_run_gb300.sh
-```
-
-Inside the dev container:
+Continue in the same repository-root dev-container shell prepared on the
+previous page:
 
 ```bash
 pip install -e . -C py-only=true

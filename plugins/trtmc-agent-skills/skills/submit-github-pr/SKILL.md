@@ -33,19 +33,26 @@ git push -u github HEAD
 Create the PR:
 
 ```bash
+PR_HEAD_BRANCH=$(git branch --show-current)
+PR_TITLE="docs: describe the change"
+PR_BODY_FILE=/tmp/trtmc-pr-body.md
+test -n "$PR_HEAD_BRANCH"
+test -s "$PR_BODY_FILE"
 gh pr create \
   --repo NVIDIA/TensorRT-Model-Connect \
   --base main \
-  --head <branch-name> \
-  --title "<type(scope): concise summary>" \
-  --body-file <pr-body.md>
+  --head "$PR_HEAD_BRANCH" \
+  --title "$PR_TITLE" \
+  --body-file "$PR_BODY_FILE"
 ```
 
 If `gh` is not authenticated but a GitHub token is available, prefer a temporary
-environment variable and do not print the token:
+environment variable sourced from the user's secret manager, and do not print
+the token:
 
 ```bash
-GH_TOKEN=<redacted> gh pr view --repo NVIDIA/TensorRT-Model-Connect
+GH_TOKEN="${GITHUB_TOKEN:?Set GITHUB_TOKEN from your secret manager first}" \
+  gh pr view --repo NVIDIA/TensorRT-Model-Connect
 ```
 
 ## ADR Check
@@ -63,7 +70,7 @@ Create an ADR when the diff introduces or substantially changes any of these:
 |--------|-----------|
 | New runtime strategy | New plugin/strategy registration or runtime pipeline path |
 | New family plugin | New family module under `python/tensorrt_model_connect/families/` |
-| New pipeline class | New `.cpp` or `.h` under `src/runtime/domains/` or an equivalent runtime path |
+| New pipeline class | New `.cpp` or `.h` under an owning model runtime directory such as `src/runtime/models/qwen/`, or under a shared runtime domain in `src/runtime/domains/` |
 | Config schema change | New persisted config field or parser behavior |
 | New E2E task strategy | New harness runner or comparator family |
 | New comparator/reference | New comparator/reference mechanism used by tests |
@@ -81,7 +88,15 @@ LAST_NUM=$(ls website/docs/context/adr/[0-9]*.md 2>/dev/null | sort -V | tail -1
 NEXT_NUM=$(printf "%04d" $((10#${LAST_NUM:-0} + 1)))
 ```
 
-Create `website/docs/context/adr/${NEXT_NUM}-<slug>.md`:
+Choose a concrete kebab-case slug and confirm the resulting path:
+
+```bash
+ADR_SLUG=concise-decision-title
+ADR_PATH="website/docs/context/adr/${NEXT_NUM}-${ADR_SLUG}.md"
+printf '%s\n' "$ADR_PATH"
+```
+
+Create the file at `$ADR_PATH` with this template:
 
 ```markdown
 ---
@@ -127,14 +142,16 @@ Provide these repo-specific facts to `$write-git-messages`:
 - Any risk, rollback, compatibility, security, or dependency concerns found
   while preparing the PR.
 
-After drafting, write the body to a temporary file and pass it with
-`gh pr create --body-file <pr-body.md>`.
+After drafting, write the body to `$PR_BODY_FILE` and pass it with
+`gh pr create --body-file "$PR_BODY_FILE"`.
 
 ## After Creation
 
 ```bash
 gh pr view --repo NVIDIA/TensorRT-Model-Connect --web
-gh pr checks --repo NVIDIA/TensorRT-Model-Connect <pr-number>
+PR_NUMBER=$(gh pr view --repo NVIDIA/TensorRT-Model-Connect --json number --jq .number)
+test -n "$PR_NUMBER"
+gh pr checks --repo NVIDIA/TensorRT-Model-Connect "$PR_NUMBER"
 ```
 
 ## Start Exact-Head Premerge

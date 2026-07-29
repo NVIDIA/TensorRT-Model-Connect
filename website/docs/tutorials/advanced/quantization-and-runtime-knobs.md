@@ -4,6 +4,18 @@ title: Advanced Tutorial - Quantization and Runtime Knobs
 
 This tutorial covers build-time precision, post-training quantization, runtime cache sizing, and backend selection.
 
+Select the CLI before running an example:
+
+```bash
+export TRTMC=trtmc
+# Source build inside the development container:
+# export TRTMC=./build/trtmc
+```
+
+The FP8 example that reads `tests/e2e/...` requires a repository checkout and
+must run from its root; the selected CLI may still come from an installed
+wheel.
+
 The advanced knobs change either:
 
 - How the bundle is built.
@@ -33,7 +45,7 @@ profile claims the request is terminal.
 ## Precision
 
 ```bash
-./build/trtmc build Qwen/Qwen3-0.6B \
+$TRTMC build Qwen/Qwen3-0.6B \
   -o /tmp/qwen3-fp16.trtfb \
   --precision fp16
 ```
@@ -60,13 +72,19 @@ native default do not re-enter provider selection when precision changes.
 ## Quantization
 
 ```bash
-./build/trtmc build Qwen/Qwen3-0.6B \
+$TRTMC build Qwen/Qwen3-0.6B \
   -o /tmp/qwen3-fp8.trtfb \
   --quantize fp8 \
   --quant-calibration-samples 512
 ```
 
 The current quantization surface accepts `fp8`, `int8`, `int8_sq`, `int4`, `int4_awq`, `nvfp4`, and `w4a8`. Family plugins can exclude weight patterns, provide calibration data, and return a family-specific calibration adapter through the `FamilyPlugin` protocol.
+
+Qwen2.5-VL and Qwen3-VL use image-plus-text calibration rather than the
+generic causal-language-model adapter. See
+[Qwen-VL calibration inputs](../../features/quantization.md#qwen-vl-calibration-inputs)
+for the paired-manifest, image-directory, placeholder, and evidence
+boundaries.
 
 ```mermaid
 flowchart TD
@@ -97,7 +115,7 @@ native builder without probing a provider.
 ## Reusing scales
 
 ```bash
-./build/trtmc build black-forest-labs/FLUX.2-dev \
+$TRTMC build black-forest-labs/FLUX.2-dev \
   -o /tmp/flux2-fp8.trtfb \
   --fp8-scales tests/e2e/models/flux/data/flux2-fp8-scales.json
 ```
@@ -107,7 +125,7 @@ Use `--save-fp8-scales` when you want to reuse calibrated scales across builds.
 ## Dynamic KV cache
 
 ```bash
-./build/trtmc build Qwen/Qwen3-0.6B \
+$TRTMC build Qwen/Qwen3-0.6B \
   -o /tmp/qwen3-dynamic.trtfb \
   --dynamic-kv-cache \
   --dynamic-kv-profile-rows 256,512,1024
@@ -116,7 +134,7 @@ Use `--save-fp8-scales` when you want to reuse calibrated scales across builds.
 At runtime, override the cache memory budget with:
 
 ```bash
-./build/trtmc run /tmp/qwen3-dynamic.trtfb \
+$TRTMC run /tmp/qwen3-dynamic.trtfb \
   --prompt "Summarize dynamic KV cache." \
   --kv-cache-size 512MB
 ```
@@ -140,7 +158,7 @@ flowchart LR
 ## Native backend DSO search
 
 ```bash
-./build/trtmc run /tmp/model.trtfb \
+$TRTMC run /tmp/model.trtfb \
   --prompt "Hello" \
   --backend-dir /opt/trtmc/backends
 ```
@@ -160,7 +178,7 @@ model/backend DSO chain, so `--backend-dir` does not select its runtime.
 Build an RTX-targeted bundle:
 
 ```bash
-./build/trtmc build Qwen/Qwen3-0.6B \
+$TRTMC build Qwen/Qwen3-0.6B \
   -o /tmp/qwen3-rtx.trtfb \
   --rtx
 ```
@@ -168,7 +186,7 @@ Build an RTX-targeted bundle:
 Run with a runtime cache:
 
 ```bash
-./build/trtmc run /tmp/qwen3-rtx.trtfb \
+$TRTMC run /tmp/qwen3-rtx.trtfb \
   --prompt "Hello" \
   --runtime-cache /tmp/trtmc-rtx.cache \
   --cuda-graphs
@@ -192,7 +210,7 @@ flowchart TD
 
 ## Advanced knob checklist
 
-First run regular `trtmc inspect <bundle.trtfb>` and record whether the section
+First run regular `trtmc inspect /tmp/model.trtfb` and record whether the section
 list contains `optimized_runtime.json`. Regular inspection proves the bundle
 kind but does not decode the optimized implementation/profile fields. Changing
 precision or quantization can switch between optimized and native builds, so

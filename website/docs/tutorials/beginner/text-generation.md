@@ -7,6 +7,14 @@ import useBaseUrl from '@docusaurus/useBaseUrl';
 
 This handout teaches the full path for decoder text generation: build a bundle, inspect the artifact, run the C++ runtime, and explain the request loop. It assumes you can run shell commands, but it does not assume prior deep learning inference knowledge.
 
+Select the CLI before using this page directly:
+
+```bash
+export TRTMC=trtmc
+# Source build inside the development container:
+# export TRTMC=./build/trtmc
+```
+
 <div className="trtmc-handout-meta">
   <div>
     <strong>Level</strong>
@@ -44,7 +52,11 @@ After this tutorial, you should be able to explain:
 - Which source-level building blocks are involved in `IPipeline::generate`.
 
 :::info Required reading
-Before running commands, read [Glossary](/getting-started/glossary), [Environment and First Repro](/getting-started/environment-and-repro), [Inference Fundamentals](/getting-started/inference-fundamentals), and [Inspect Bundles](inspect-bundles.md). Keep the glossary and bundle-inspection page open while working through this tutorial.
+Before running commands, read [Glossary](/getting-started/glossary),
+[Prerequisites and Environment](/getting-started/environment-and-repro),
+[Inference Fundamentals](/getting-started/inference-fundamentals), and
+[Inspect Bundles](inspect-bundles.md). Keep the glossary and bundle-inspection
+page open while working through this tutorial.
 :::
 
 ## Stage 1: Understand the Artifact You Are Building
@@ -77,10 +89,10 @@ Do not use "Qwen support" and "text generation support" as if they mean the same
 
 ## Stage 2: Build the Bundle
 
-Run this inside the dev container:
+Run this in the wheel or source-build environment selected in Getting Started:
 
 ```bash
-./build/trtmc build Qwen/Qwen3-0.6B
+$TRTMC build Qwen/Qwen3-0.6B
 ```
 
 What happens:
@@ -131,7 +143,7 @@ The first run may download model files from Hugging Face and compile TensorRT en
 Inspect the bundle metadata:
 
 ```bash
-./build/trtmc inspect Qwen3-0.6B.trtfb
+$TRTMC inspect Qwen3-0.6B.trtfb
 ```
 
 Confirm that the output reports:
@@ -143,7 +155,7 @@ Confirm that the output reports:
 Then list engine sections:
 
 ```bash
-./build/trtmc inspect Qwen3-0.6B.trtfb --list-engines
+$TRTMC inspect Qwen3-0.6B.trtfb --list-engines
 ```
 
 You are looking for the pieces that the C++ runtime will later consume:
@@ -172,7 +184,7 @@ implementation path first.
 ## Stage 4: Run Deterministic Generation
 
 ```bash
-./build/trtmc run Qwen3-0.6B.trtfb \
+$TRTMC run Qwen3-0.6B.trtfb \
   --prompt "What is the capital of France? Answer in one word." \
   --max-new-tokens 10 \
   --greedy
@@ -186,7 +198,7 @@ Runtime creation follows this path:
 
 ```mermaid
 flowchart TD
-  Run["./build/trtmc run"] --> Load["trtmc::load"]
+  Run["$TRTMC run"] --> Load["trtmc::load"]
   Load --> Factory["PipelineFactory"]
   Factory --> Read["ReadBundleFile"]
   Read --> Strategy["qwen_decoder_kv_cache"]

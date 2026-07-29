@@ -148,6 +148,26 @@ PyTorch or Transformers runs a model through general-purpose framework operators
 
 TensorRT-Model-Connect keeps the checkpoint-facing complexity in Python and the request-time execution in C++.
 
+### Hugging Face and TensorRT-Model-Connect play different roles
+
+The project uses Hugging Face execution as a reference and
+TensorRT-Model-Connect as the system under test. They start from the same model
+intent, but they do not use the same artifact or dispatch path:
+
+| Concern | Hugging Face reference | TensorRT-Model-Connect |
+| --- | --- | --- |
+| Model execution | A framework model runs eagerly or through framework compilation. | Python builds native TensorRT plans or invokes an exact qualified provider; C++ runs the bundle through `IPipeline`. |
+| Family selection | Auto classes and checkpoint config select Python model code. | Family `MODEL.toml` descriptors and plugin matching select the owning builder. |
+| Weights | Framework modules load checkpoint tensors. | A native family mapper feeds a TensorRT graph, or a qualified family adapter owns conversion. |
+| Artifact | Checkpoint, config, and tokenizer files. | A self-describing `.trtfb` bundle. |
+| Runtime dispatch | A Python model class. | A native strategy selects one model DSO/plugin, or `optimized_runtime.json` selects the embedded implementation DSO. |
+| Validation role | External reference oracle. | Deployment system being validated. |
+
+A bundle that builds or produces plausible output is not automatically
+parity-qualified. The relevant E2E manifest chooses a task-specific comparator,
+and reproducible evidence records the exact model revision, inputs, precision,
+bundle, code revision, and comparison artifact.
+
 ## Why bundles exist
 
 The `.trtfb` bundle is the handoff between build and runtime.

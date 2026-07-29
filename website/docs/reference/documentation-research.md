@@ -23,12 +23,19 @@ Applied rules:
 - The first screen is documentation, not marketing.
 - Quick start is short and runnable.
 - The home page now acts as a course entry point: it explains the promise, shows a visual map, and routes by learner intent.
-- Tutorials are grouped by beginner, intermediate, and advanced workflows.
+- Learning and tutorials share one beginner-to-advanced path with optional
+  modality and contributor branches.
 - The learning path includes outcomes and proof points, not only reading links.
 - Learning pages now use course-handout units: required reading, required tasks, progress checks, common traps, learning-log prompts, further reading, and optional exercises.
-- Reference pages are separated from conceptual architecture pages.
+- API reference is separated from conceptual architecture pages.
 - Extension docs are task-oriented and name exact files to edit.
-- Architecture and unit design pages use diagrams first, then source-level tables.
+- Architecture and unit design share one section and use canonical block or
+  sequence diagrams before source-level tables.
+- Current feature contracts and historical feature context share a categorized
+  archive that is intentionally outside the newcomer path.
+- The former Wiki Archive and Operations menus are not active navigation
+  areas; their useful content is integrated into maintained sections and old
+  routes redirect for compatibility.
 - Selected high-traffic surfaces use standalone SVG illustrations. These are
   maintained assets, not automatic fallbacks for Mermaid blocks; Mermaid-only
   diagrams depend on the client-side renderer.

@@ -2,23 +2,10 @@
 title: Python Builder API
 ---
 
-The Python package lives under `python/tensorrt_model_connect/`.
-
-## Install
-
-```bash
-pip install -e . -C py-only=true
-```
-
-This is a developer-only editable install. It points imports at
-`python/tensorrt_model_connect/` and skips the native wheel build. It does not
-install the native `trtmc` executable or backend DSOs; pair it with a CMake
-source build when using `./build/trtmc`.
-
-Use `pip install --no-deps -e . -C py-only=true` only in a dev container that already has the declared dependencies installed. In a fresh Python environment, skipping dependencies will hide required packages such as `transformers`, `safetensors`, `onnx`, `onnxscript`, and `tensorrt`.
-The release wheel installs the same builder package plus the native `trtmc`
-executable and declares TensorRT as a dependency; use the wheel when you want
-`trtmc build` and `trtmc run` available from one pip install.
+The Python package lives under `python/tensorrt_model_connect/`. Complete
+[Installation](../getting-started/installation.md) before using this reference.
+Editable developer installs and release-wheel boundaries are documented there,
+not duplicated on the API page.
 
 ## Public package exports
 
@@ -126,6 +113,15 @@ API or CLI directly for other task-specific operations.
 | `diffusion_overrides` | Image/video shape and inference-step overrides for diffusion models. |
 | `build_timing_path` | Structured build-timing JSON output path. |
 | `max_batch_size` | Maximum supported diffusion batch size, subject to family component policy. |
+
+`decoder_engine_layout` is a requested layout, not a guarantee. A split build
+requires a native decoder-KV runtime, no tensor parallelism, no dynamic KV or
+TriAttention, and explicit family support for separate prefill/decode roles.
+An embed-input family must opt into that contract separately. When a requested
+split is unsupported, the builder logs the fallback and uses the family's
+existing single-engine path. The emitted `config.json.decoder_engine_layout`
+records the actual `split`, `dual_profile`, or `single` result, and only an
+actual split bundle contains `prefill_engine_plan`.
 
 ## Family plugin protocol
 

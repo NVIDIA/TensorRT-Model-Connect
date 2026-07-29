@@ -6,39 +6,65 @@
 const sidebars = {
   docs: [
     'intro',
-    'learning-path',
     {
       type: 'category',
       label: 'Getting Started',
+      link: {
+        type: 'doc',
+        id: 'getting-started/overview'
+      },
       items: [
-        'getting-started/glossary',
         'getting-started/environment-and-repro',
-        'getting-started/inference-fundamentals',
-        'getting-started/quick-start',
         'getting-started/installation',
-        'getting-started/build-and-run',
-        'getting-started/model-support'
+        'getting-started/glossary',
+        'getting-started/quick-start'
       ]
     },
     {
       type: 'category',
-      label: 'Tutorials',
+      label: 'Learn & Tutorials',
+      link: {
+        type: 'doc',
+        id: 'learning-path'
+      },
       items: [
-        'tutorials/beginner/inspect-bundles',
-        'tutorials/beginner/text-generation',
-        'tutorials/beginner/bring-your-own-kernel',
-        'tutorials/intermediate/multimodal-and-speech',
-        'tutorials/intermediate/canary-decoding',
-        'tutorials/intermediate/diffusion-and-time-series',
-        'tutorials/advanced/quantization-and-runtime-knobs',
-        'tutorials/advanced/validation-and-benchmarking'
+        {
+          type: 'category',
+          label: 'Beginner: Understand One Inference',
+          items: [
+            'getting-started/inference-fundamentals',
+            'tutorials/beginner/inspect-bundles',
+            'tutorials/beginner/text-generation'
+          ]
+        },
+        {
+          type: 'category',
+          label: 'Intermediate: Model Recipes',
+          items: [
+            'getting-started/build-and-run',
+            'tutorials/intermediate/multimodal-and-speech',
+            'tutorials/intermediate/canary-decoding',
+            'tutorials/intermediate/diffusion-and-time-series'
+          ]
+        },
+        {
+          type: 'category',
+          label: 'Advanced: Optimize and Validate',
+          items: [
+            'tutorials/advanced/quantization-and-runtime-knobs',
+            'tutorials/advanced/validation-and-benchmarking'
+          ]
+        }
       ]
     },
     {
       type: 'category',
-      label: 'API Manual',
+      label: 'API Reference',
+      link: {
+        type: 'doc',
+        id: 'api/overview'
+      },
       items: [
-        'api/overview',
         'api/python-builder',
         'api/cli-reference',
         'api/cpp-api'
@@ -46,103 +72,109 @@ const sidebars = {
     },
     {
       type: 'category',
-      label: 'Architecture',
+      label: 'Architecture & Design',
+      link: {
+        type: 'doc',
+        id: 'architecture/overview'
+      },
       items: [
-        'architecture/overview',
-        'architecture/bundle-format',
-        'architecture/runtime-plugins',
-        'architecture/build-system'
+        {
+          type: 'category',
+          label: 'System Architecture',
+          items: [
+            'architecture/bundle-format',
+            'architecture/runtime-lifecycle',
+            'architecture/build-system'
+          ]
+        },
+        {
+          type: 'category',
+          label: 'Component Design',
+          items: [
+            'architecture/units-and-ownership',
+            'architecture/build-pipeline',
+            'architecture/validation-design'
+          ]
+        },
+        'reference/source-layout'
       ]
     },
     {
       type: 'category',
-      label: 'Unit Design',
+      label: 'Contribute & Extend',
+      link: {
+        type: 'doc',
+        id: 'extend/overview'
+      },
       items: [
-        'unit-design/overview',
-        'unit-design/building-blocks',
-        'unit-design/python-builder',
-        'unit-design/cpp-runtime',
-        'unit-design/testing'
-      ]
-    },
-    {
-      type: 'category',
-      label: 'Features',
-      items: [
-        'features/model-families',
-        'features/runtime-strategies',
-        'features/tvm-ffi',
-        'features/quantization',
-        'features/sampling',
-        'features/config-and-backends'
-      ]
-    },
-    {
-      type: 'category',
-      label: 'Extend',
-      items: [
-        'extend/overview',
+        'extend/contributing',
         'extend/add-model-family',
+        'extend/add-optimized-runtime',
         'extend/add-runtime-strategy',
-        'extend/add-config-schema'
+        'extend/add-config-schema',
+        'extend/model-validation',
+        'tutorials/beginner/bring-your-own-kernel'
       ]
     },
     {
       type: 'category',
-      label: 'Reference',
-      items: [
-        'reference/source-layout',
-        'reference/testing',
-        'reference/benchmarking',
-        'reference/profiling',
-        'reference/e2e-l0-replacements',
-        'reference/documentation-research'
-      ]
-    },
-    {
-      type: 'category',
-      label: 'Feature Context',
+      label: 'Feature Reference & Context',
       collapsed: true,
+      link: {
+        type: 'doc',
+        id: 'features/overview'
+      },
       items: [
-        'context/triattention-native-cpp-worklog',
-        'context/config-registry-status',
-        'context/model-plugin-encapsulation-plan',
-        'context/optimized-runtime-family-adapter-plan',
-        'context/adr/README'
-      ]
-    },
-    {
-      type: 'category',
-      label: 'Operations',
-      collapsed: true,
-      items: [
-        'operations/ai-agent-system',
-        'operations/ai-local-pipeline',
-        'operations/ai-staging',
-        'operations/model-e2e-task-prompt'
-      ]
-    },
-    {
-      type: 'category',
-      label: 'Wiki Archive',
-      collapsed: true,
-      items: [
-        'wiki/Home',
-        'wiki/Architecture-Overview',
-        'wiki/Static-Design',
-        'wiki/Dynamic-Design',
-        'wiki/Pipeline-Deep-Dive',
-        'wiki/Source-Layout',
-        'wiki/Runtime-Target-Architecture',
-        'wiki/Testing-and-Validation',
-        'wiki/Traceability-Matrix',
-        'wiki/ISO-26262-Compliance',
-        'wiki/Adding-a-Model-Family',
-        'wiki/Architecture-Extensibility-Assessment',
-        'wiki/HF-vs-TRT-Comparison',
-        'wiki/TRT-Internals',
-        'wiki/FP8-Quantization-Guide',
-        'wiki/Agentic-Quantization-Core-Minimal-Plan'
+        {
+          type: 'category',
+          label: 'Model & Runtime Integration',
+          items: [
+            'getting-started/model-support',
+            'features/model-families',
+            'features/runtime-strategies',
+            'context/optimized-runtime-family-adapter-plan',
+            'context/model-plugin-encapsulation-plan'
+          ]
+        },
+        {
+          type: 'category',
+          label: 'Inference Behavior & Optimizations',
+          items: [
+            'features/tvm-ffi',
+            'features/sampling',
+            'features/triattention',
+            'context/triattention-native-cpp-worklog'
+          ]
+        },
+        {
+          type: 'category',
+          label: 'Build, Quantization & Configuration',
+          items: [
+            'features/quantization',
+            'features/config-and-backends',
+            'context/config-registry-status'
+          ]
+        },
+        {
+          type: 'category',
+          label: 'Validation, CI & Performance',
+          items: [
+            'reference/testing',
+            'reference/benchmarking',
+            'reference/profiling',
+            'reference/e2e-l0-replacements',
+            'context/traceability-and-safety'
+          ]
+        },
+        {
+          type: 'category',
+          label: 'Design & Project History',
+          items: [
+            'context/adr/README',
+            'context/ai-staging-history',
+            'reference/documentation-research'
+          ]
+        }
       ]
     }
   ]

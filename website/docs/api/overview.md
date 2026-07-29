@@ -1,8 +1,10 @@
 ---
-title: API Manual
+title: API Reference
 ---
 
-TensorRT-Model-Connect exposes four public entry layers.
+TensorRT-Model-Connect exposes four public entry layers. This section is a
+reference: begin with [your first NLP inference](../getting-started/quick-start.md)
+if you have not yet built and run a bundle.
 
 | API | Entry point | Best for |
 | --- | --- | --- |

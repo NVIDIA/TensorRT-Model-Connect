@@ -12,8 +12,8 @@ decisions.
 Until a decision is captured as an ADR, use the implementation and its tests as
 the source of truth. The maintained
 [architecture overview](../../architecture/overview.md) describes system
-boundaries, and the [unit-design overview](../../unit-design/overview.md)
-links to component-level contracts. Family-owned `MODEL.toml` descriptors,
+boundaries, and [Units and Ownership](../../architecture/units-and-ownership.md)
+links them to component-level contracts. Family-owned `MODEL.toml` descriptors,
 runtime registrations, E2E manifests, and the Git history provide the
 authoritative details for a particular model path. Status-labeled documents in
 `website/docs/context/` may explain active plans or investigations, but they
