@@ -15,7 +15,8 @@
 // Preconditions:  TRT headers and CUDA available
 // Postconditions: Pipelines construct with mock engines and expose correct interfaces;
 //                 embed/encode/rerank methods return non-empty results;
-//                 rerank uses the checkpoint prompt template and pooling contract;
+//                 rerank uses the checkpoint prompt template, separator tokens,
+//                 and pooling contract;
 //                 invalid inputs and score shapes are rejected with std::exception;
 //                 score output name, 4D logits shape, and size==1 output branch covered
 // =============================================================================
@@ -66,12 +67,34 @@ class FixedTokenizer : public trtmc::ITokenizer {
     mutable std::string last_encoded_text;
 };
 
+class SeparatorTokenizer : public trtmc::ITokenizer {
+  public:
+    std::vector<int32_t> encode(const std::string&) const override {
+        return {128000, 10, 720, 720, 20};
+    }
+    std::string decode(const std::vector<int32_t>&) const override { return "test"; }
+    int32_t id_for_token(std::string_view token) const override {
+        if (token == "ĠĊ")
+            return 720;
+        if (token == "ĠĊĠĊ")
+            return 33006;
+        return -1;
+    }
+    std::string token_for_id(int32_t) const override { return ""; }
+};
+
 class FakeScoreModule final : public trtmc::ITrtModule {
   public:
     FakeScoreModule(std::vector<float> scores, std::vector<int64_t> shape)
         : scores_(std::move(scores)), shape_(std::move(shape)) {}
 
-    trtmc::TensorMap forward(const trtmc::TensorMap&) override {
+    trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
+        const auto input = inputs.find("input_ids");
+        if (input != inputs.end() && input->second.data && input->second.shape.size() == 1) {
+            const auto size = static_cast<std::size_t>(input->second.shape.front());
+            const auto* ids = static_cast<const int32_t*>(input->second.data);
+            input_ids_.assign(ids, ids + size);
+        }
         return {{"score", trtmc::Tensor{scores_.data(), shape_, trtmc::DType::kFloat32}}};
     }
     trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
@@ -106,10 +129,12 @@ class FakeScoreModule final : public trtmc::ITrtModule {
     void bind_external(const std::string&, void*) override {}
     bool ok() const override { return true; }
     void keep_alive(std::shared_ptr<void>) override {}
+    const std::vector<int32_t>& input_ids() const { return input_ids_; }
 
   private:
     std::vector<float> scores_;
     std::vector<int64_t> shape_;
+    std::vector<int32_t> input_ids_;
 };
 
 // ---------------------------------------------------------------------------
@@ -315,6 +340,19 @@ static void test_encoder_rerank() {
           "rerank: uses the checkpoint prompt template");
 }
 
+static void test_encoder_rerank_canonicalizes_checkpoint_separator_tokens() {
+    auto tokenizer = std::make_shared<SeparatorTokenizer>();
+    auto module = std::make_unique<FakeScoreModule>(std::vector<float>{1.0f, 2.0f, 3.0f, 4.0f},
+                                                    std::vector<int64_t>{4, 1});
+    auto* module_ptr = module.get();
+    trtmc::EncoderPipeline pipeline(std::move(module), "reranking", tokenizer, "", "avg");
+
+    const float score = pipeline.rerank("query", "doc");
+    check(std::abs(score - 2.5f) < 1e-6f, "rerank separator: pools the canonical token sequence");
+    check(module_ptr->input_ids() == std::vector<int32_t>({128000, 10, 33006, 20}),
+          "rerank separator: merges the native separator pieces like HF");
+}
+
 static void test_encoder_rerank_preserves_last_and_scalar_outputs() {
     auto tokenizer = std::make_shared<FixedTokenizer>();
     auto last_module = std::make_unique<FakeScoreModule>(std::vector<float>{0.1f, 0.2f, 0.3f, 0.9f},
@@ -510,6 +548,7 @@ int main() {
     test_encoder_embed_mode();
     test_encoder_encode_mode();
     test_encoder_rerank();
+    test_encoder_rerank_canonicalizes_checkpoint_separator_tokens();
     test_encoder_rerank_preserves_last_and_scalar_outputs();
     test_encoder_rerank_rejects_invalid_score_shape();
     test_encoder_int32_mask();

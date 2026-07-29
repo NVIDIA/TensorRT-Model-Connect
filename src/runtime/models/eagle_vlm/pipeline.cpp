@@ -68,6 +68,31 @@ std::size_t checked_element_count(const std::vector<int64_t>& shape) {
     return count;
 }
 
+// The pinned Nemotron reranker processor's fixed " \n \n " separator is
+// encoded by the HF fast tokenizer as the single vocabulary token "ĠĊĠĊ".
+// TRTMC's BPE tokenizer currently preserves the two pre-tokenized "ĠĊ"
+// pieces instead. Canonicalize that merge at this family-owned input boundary
+// so the engine sees the checkpoint's exact token sequence.
+void canonicalize_reranking_separator_tokens(const ITokenizer& tokenizer,
+                                             std::vector<int32_t>& ids) {
+    const auto separator_piece = tokenizer.id_for_token("ĠĊ");
+    const auto merged_separator = tokenizer.id_for_token("ĠĊĠĊ");
+    if (separator_piece < 0 || merged_separator < 0 || separator_piece == merged_separator)
+        return;
+
+    std::vector<int32_t> canonical;
+    canonical.reserve(ids.size());
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        if (i + 1 < ids.size() && ids[i] == separator_piece && ids[i + 1] == separator_piece) {
+            canonical.push_back(merged_separator);
+            ++i;
+        } else {
+            canonical.push_back(ids[i]);
+        }
+    }
+    ids = std::move(canonical);
+}
+
 } // namespace
 
 // ─── EncoderPipeline ───
@@ -128,6 +153,7 @@ float EncoderPipeline::rerank(const std::string& query, const std::string& docum
     // contract and changes the token sequence.
     std::string combined = "question:" + query + " \n \n passage:" + document;
     auto ids = tokenizer_->encode(combined);
+    canonicalize_reranking_separator_tokens(*tokenizer_, ids);
     if (ids.empty())
         throw std::runtime_error("EncoderPipeline: reranking input produced no tokens");
 
