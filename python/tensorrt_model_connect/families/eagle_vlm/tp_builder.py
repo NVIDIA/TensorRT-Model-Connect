@@ -16,7 +16,7 @@ from ...parallel_config import (
     normalize_parallel_config,
     shard_standard_decoder_weights,
 )
-from .plugin import _make_llama3_rope_table_half_dim
+from .plugin import _make_llama3_rope_table_half_dim, _resolve_rope_scaling
 
 if TYPE_CHECKING:
     from .config import ModelConfig
@@ -114,8 +114,8 @@ def build_eagle_vlm_tp_engine(
     hidden_state = merged.get_output(0)
 
     graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
-    rope_params = config.raw.get("llm_config", {}).get("rope_parameters", {})
-    rope_type = rope_params.get("rope_type", "")
+    rope_params = _resolve_rope_scaling(config)
+    rope_type = rope_params.get("rope_type") or rope_params.get("type", "")
     if rope_type == "llama3":
         cos_half_np = _make_llama3_rope_table_half_dim(
             seq_length, head_dim, config.rope_theta, True,

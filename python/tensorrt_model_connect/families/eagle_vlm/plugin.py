@@ -56,6 +56,19 @@ def _is_reranker(config: ModelConfig) -> bool:
     return False
 
 
+def _resolve_rope_scaling(config: ModelConfig) -> dict:
+    """Return the checkpoint RoPE scaling contract across HF schema versions."""
+    raw = config.raw
+    llm_config = raw.get("llm_config")
+    sources = (llm_config, raw) if isinstance(llm_config, dict) else (raw,)
+    for source in sources:
+        for key in ("rope_parameters", "rope_scaling"):
+            value = source.get(key)
+            if isinstance(value, dict):
+                return value
+    return {}
+
+
 class EagleVLMPlugin:
     name = "eagle_vlm"
 
@@ -389,9 +402,10 @@ def _build_eagle_engine(
 
     # --- RoPE tables ---
     graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
-    # Check for Llama3 RoPE scaling (from rope_parameters in llm_config)
-    rope_params = config.raw.get("llm_config", {}).get("rope_parameters", {})
-    rope_type = rope_params.get("rope_type", "")
+    # Hugging Face 5.x calls this rope_parameters, while the pinned Nemotron
+    # checkpoint still publishes llm_config.rope_scaling.
+    rope_params = _resolve_rope_scaling(config)
+    rope_type = rope_params.get("rope_type") or rope_params.get("type", "")
     if rope_type == "llama3":
         cos_half_np = _make_llama3_rope_table_half_dim(
             seq_length, head_dim, config.rope_theta, True,
@@ -535,17 +549,21 @@ def _build_eagle_engine(
 
     # --- Output ---
     if is_reranker and "score_weight" in weights:
-        # Reranking: apply score head to last token's hidden state
-        # Take last position: hidden_state[seq_length-1, :]
-        # For now, output all positions; C++ will pick the right one
+        # The pinned CrossEncoderHead is explicitly FP32 and casts the final
+        # hidden states before applying its linear projection. Preserve that
+        # small mixed-precision boundary instead of accumulating the score head
+        # in FP16.
+        score_input = hidden_state
+        if score_input.dtype != trt.float32:
+            score_input = network.add_cast(score_input, trt.float32).get_output(0)
         score = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden,
+            network, score_input, hidden,
             weights["score_weight"].shape[1], weights["score_weight"],
-            dtype=work_np_dtype)
+            dtype=np.float32)
         if "score_bias" in weights:
             score = graph_ops.add_bias_sum(
                 network, score, weights["score_weight"].shape[1],
-                weights["score_bias"], dtype=work_np_dtype)
+                weights["score_bias"], dtype=np.float32)
         if score.dtype != trt.float32:
             score = network.add_cast(score, trt.float32).get_output(0)
         score.name = "score"

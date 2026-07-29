@@ -55,6 +55,41 @@ def _weights() -> WeightDict:
     })
 
 
+def test_eagle_vlm_resolves_nested_legacy_rope_scaling() -> None:
+    plugin_module = importlib.import_module(
+        "tensorrt_model_connect.families.eagle_vlm.plugin")
+
+    class Config(_Config):
+        raw = {
+            "llm_config": {
+                "rope_scaling": {
+                    "rope_type": "llama3",
+                    "factor": 32.0,
+                },
+            },
+        }
+
+    assert plugin_module._resolve_rope_scaling(Config()) == {
+        "rope_type": "llama3",
+        "factor": 32.0,
+    }
+
+
+def test_eagle_vlm_prefers_rope_parameters_over_legacy_alias() -> None:
+    plugin_module = importlib.import_module(
+        "tensorrt_model_connect.families.eagle_vlm.plugin")
+
+    class Config(_Config):
+        raw = {
+            "llm_config": {
+                "rope_parameters": {"rope_type": "llama3", "factor": 8.0},
+                "rope_scaling": {"rope_type": "llama3", "factor": 32.0},
+            },
+        }
+
+    assert plugin_module._resolve_rope_scaling(Config())["factor"] == 8.0
+
+
 def test_eagle_vlm_tp_shards_text_backbone_weights() -> None:
     from tensorrt_model_connect.families.eagle_vlm import tp_builder
 
