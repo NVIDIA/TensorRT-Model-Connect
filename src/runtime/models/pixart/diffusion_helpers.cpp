@@ -122,6 +122,7 @@ PixArtDiffusionConfig make_diffusion_config(const std::string& json) {
     dc.freq_dim = extract_json_int(json, "freq_dim", 256);
     dc.text_seq_len = extract_json_int(json, "text_seq_len", 512);
     dc.text_encoder_dim = extract_json_int(json, "text_encoder_dim", 4096);
+    dc.tokenizer_special_suffix_ids = extract_json_int_array(json, "tokenizer_special_suffix_ids");
     dc.num_vae_caches = extract_json_int(json, "num_vae_caches", 0);
     const auto latent_stat_count = static_cast<std::size_t>(dc.z_dim > 0 ? dc.z_dim : 16);
     dc.latents_mean = extract_json_float_array(json, "latents_mean", latent_stat_count);

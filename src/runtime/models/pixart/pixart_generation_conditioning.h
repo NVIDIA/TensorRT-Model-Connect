@@ -7,6 +7,8 @@
 
 #include "runtime/models/pixart/pixart_generation_plan.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -26,6 +28,51 @@ struct PixArtTextConditioning {
     std::vector<float> text_projected;
     std::vector<float> null_text;
 };
+
+// Diffusers normalizes every PixArt prompt with lower().strip() even when the optional
+// clean-caption dependencies are unavailable. Keep that baseline preprocessing in native C++.
+inline std::string preprocess_pixart_prompt(const std::string& prompt) {
+    const auto is_space = [](unsigned char value) { return std::isspace(value) != 0; };
+    const auto first = std::find_if_not(prompt.begin(), prompt.end(), is_space);
+    const auto last = std::find_if_not(prompt.rbegin(), prompt.rend(), is_space).base();
+    if (first >= last)
+        return {};
+
+    std::string normalized(first, last);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+    return normalized;
+}
+
+// HF truncates prompt content while retaining the tokenizer's special suffix. The native
+// tokenizer frames the full prompt first, so the PixArt runtime must apply the same ordering.
+inline std::vector<int32_t>
+normalize_pixart_t5_input_ids(const std::vector<int32_t>& input_ids, std::size_t sequence_length,
+                              const std::vector<int32_t>& special_suffix_ids) {
+    if (input_ids.size() <= sequence_length)
+        return input_ids;
+
+    const std::size_t suffix_length = std::min(sequence_length, special_suffix_ids.size());
+    const std::size_t content_length = sequence_length - suffix_length;
+
+    std::vector<int32_t> normalized;
+    normalized.reserve(sequence_length);
+    normalized.insert(normalized.end(), input_ids.begin(), input_ids.begin() + content_length);
+    normalized.insert(normalized.end(), special_suffix_ids.end() - suffix_length,
+                      special_suffix_ids.end());
+    return normalized;
+}
+
+inline std::vector<float> make_pixart_t5_attention_mask(const std::vector<int32_t>& input_ids,
+                                                        std::size_t sequence_length) {
+    std::vector<float> mask(sequence_length, -1e9F);
+    const std::size_t token_count = std::min(sequence_length, input_ids.size());
+    for (std::size_t index = 0; index < token_count; ++index) {
+        if (input_ids[index] != 0)
+            mask[index] = 0.0F;
+    }
+    return mask;
+}
 
 inline std::vector<float> make_pixart_null_attention_mask(std::size_t sequence_length) {
     std::vector<float> mask(sequence_length, -10000.0F);

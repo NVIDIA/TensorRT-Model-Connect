@@ -48,7 +48,11 @@ class PixArtPlugin:
     _T5_D_FF = 10240
     _T5_NUM_LAYERS = 24
     _T5_VOCAB_SIZE = 32128
-    _T5_MAX_SEQ_LEN = 120  # PixArt default max_sequence_length
+    _T5_MAX_SEQ_LEN_BY_PIPELINE = {
+        "PixArtAlphaPipeline": 120,
+        "PixArtSigmaPipeline": 300,
+    }
+    _T5_MAX_SEQ_LEN_FALLBACK = 120
 
     # PixArt DiT params (XL-2 configuration)
     _DIT_DIM = 1152  # 16 heads * 72 head_dim
@@ -78,6 +82,13 @@ class PixArtPlugin:
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
         return mt in ("pixart", "pixart_sigma", "pixart_alpha", "pixartsigma", "pixartalpha")
+
+    def _text_sequence_length(self, config: ModelConfig) -> int:
+        """Return the Diffusers text-length contract for this PixArt pipeline."""
+        pipeline_class = str(config.raw.get("_class_name", "") or "")
+        return self._T5_MAX_SEQ_LEN_BY_PIPELINE.get(
+            pipeline_class, self._T5_MAX_SEQ_LEN_FALLBACK
+        )
 
     def load_weights(
         self,
@@ -199,6 +210,7 @@ class PixArtPlugin:
         t5_d_ff = t5_cfg.get("d_ff", self._T5_D_FF)
         t5_num_layers = t5_cfg.get("num_layers", self._T5_NUM_LAYERS)
         t5_vocab_size = t5_cfg.get("vocab_size", self._T5_VOCAB_SIZE)
+        text_seq_len = self._text_sequence_length(config)
 
         # Image and latent dimensions
         img_h = config.raw.get("image_height", self._IMAGE_HEIGHT)
@@ -236,7 +248,7 @@ class PixArtPlugin:
                 d_ff=t5_d_ff,
                 num_layers=t5_num_layers,
                 vocab_size=t5_vocab_size,
-                max_seq_len=self._T5_MAX_SEQ_LEN,
+                max_seq_len=text_seq_len,
                 precision=t5_precision,
                 verbose=verbose,
             )
@@ -271,7 +283,7 @@ class PixArtPlugin:
                         ffn_dim=ffn_dim,
                         context_dim=cross_attn_dim,
                         num_patches=num_patches,
-                        text_seq_len=self._T5_MAX_SEQ_LEN,
+                        text_seq_len=text_seq_len,
                         qk_norm=False,
                         cross_attn_norm=False,
                         ffn_activation="gelu_approximate",
@@ -288,7 +300,7 @@ class PixArtPlugin:
                     ffn_dim=ffn_dim,
                     context_dim=cross_attn_dim,
                     num_patches=num_patches,
-                    text_seq_len=self._T5_MAX_SEQ_LEN,
+                    text_seq_len=text_seq_len,
                     precision=dit_precision,
                     verbose=verbose,
                 )
@@ -465,7 +477,7 @@ class PixArtPlugin:
             "scale_factor_temporal": 1,
             "scale_factor_spatial": self._VAE_SCALE_FACTOR,
             "freq_dim": 256,  # Sinusoidal timestep embedding dim
-            "text_seq_len": self._T5_MAX_SEQ_LEN,
+            "text_seq_len": self._text_sequence_length(config),
             # Empty: DDIM models skip Wan-style denormalization.
             # VAE scaling (1/scaling_factor) is handled in the 2D VAE decode.
             "latents_mean": [],

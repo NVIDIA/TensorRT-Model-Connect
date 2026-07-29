@@ -264,7 +264,11 @@ def test_build_components_uses_transformer_and_t5_configs(
         },
     }
 
-    config = _cfg(image_height=256, image_width=384)
+    config = _cfg(
+        image_height=256,
+        image_width=384,
+        _class_name="PixArtSigmaPipeline",
+    )
     config.raw["_fp32_layers"] = [2]
     out = pixart_mod.plugin.build_components(
         str(model_dir),
@@ -286,6 +290,8 @@ def test_build_components_uses_transformer_and_t5_configs(
     assert calls["build_vae_2d_decoder_engine"][1]["precision"] == "fp32"
     assert calls["build_standard_dit_engine"][1]["num_patches"] == 96
     assert calls["build_standard_dit_engine"][1]["context_dim"] == 64
+    assert calls["build_t5_encoder_engine"][1]["max_seq_len"] == 300
+    assert calls["build_standard_dit_engine"][1]["text_seq_len"] == 300
     assert calls["_serialize_preprocessor_weights"][0][1] == 1024
     assert calls["_serialize_preprocessor_weights"][0][2] == 32
 
@@ -399,6 +405,7 @@ def test_get_diffusion_config_uses_transformer_overrides() -> None:
     Postconditions: dit_dim/head/layer values are computed from overrides.
     """
     cfg = _cfg(
+        _class_name="PixArtSigmaPipeline",
         _transformer_config={
             "num_attention_heads": 5,
             "attention_head_dim": 6,
@@ -417,9 +424,19 @@ def test_get_diffusion_config_uses_transformer_overrides() -> None:
     assert dc["dit_num_layers"] == 3
     assert dc["image_height"] == 640
     assert dc["image_width"] == 832
+    assert dc["text_seq_len"] == 300
     assert dc["use_rope"] == 0
     assert dc["pos_embed_base_size"] == 64
     assert dc["pos_embed_interpolation_scale"] == 2
+
+
+def test_get_diffusion_config_keeps_pixart_alpha_text_length() -> None:
+    """PixArt Alpha retains the 120-token Diffusers pipeline contract."""
+    dc = pixart_mod.plugin.get_diffusion_config(
+        _cfg(_class_name="PixArtAlphaPipeline")
+    )
+
+    assert dc["text_seq_len"] == 120
 
 
 def test_load_pixart_dit_weights_maps_optional_biases(

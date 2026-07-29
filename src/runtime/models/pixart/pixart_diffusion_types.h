@@ -35,6 +35,7 @@ struct PixArtDiffusionConfig {
     int32_t freq_dim{0};
     int32_t text_seq_len{0};
     int32_t text_encoder_dim{0};
+    std::vector<int32_t> tokenizer_special_suffix_ids;
 
     int32_t num_vae_caches{0};
     std::vector<float> latents_mean;

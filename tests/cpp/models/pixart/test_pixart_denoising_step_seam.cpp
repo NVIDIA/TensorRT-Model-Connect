@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -188,6 +189,32 @@ void test_pixart_null_attention_mask_only_keeps_eos_token() {
           "PixArt null mask rejects padding tokens");
 }
 
+void test_pixart_t5_truncation_preserves_bundled_eos_suffix() {
+    std::vector<int32_t> input_ids(149);
+    std::iota(input_ids.begin(), input_ids.end(), 2);
+    input_ids.back() = 1;
+
+    const auto normalized = trtmc::diffusion::normalize_pixart_t5_input_ids(input_ids, 120, {1});
+    check(normalized.size() == 120, "PixArt truncates T5 input to the engine sequence length");
+    check(std::equal(normalized.begin(), normalized.end() - 1, input_ids.begin()),
+          "PixArt preserves the leading 119 content tokens");
+    check(normalized.back() == 1, "PixArt preserves the bundled terminal EOS after truncation");
+
+    const auto mask = trtmc::diffusion::make_pixart_t5_attention_mask(normalized, 120);
+    check(mask.size() == normalized.size(),
+          "PixArt T5 IDs and attention mask use the same normalized length");
+    check(std::all_of(mask.begin(), mask.end(), [](float value) { return value == 0.0F; }),
+          "PixArt T5 attention mask keeps the normalized EOS token");
+}
+
+void test_pixart_prompt_preprocessing_matches_diffusers_baseline() {
+    const auto normalized = trtmc::diffusion::preprocess_pixart_prompt(" \tA Vibrant MACARON.\n");
+    check(normalized == "a vibrant macaron.",
+          "PixArt prompt preprocessing lowercases and strips surrounding whitespace");
+    check(trtmc::diffusion::preprocess_pixart_prompt(" \n\t").empty(),
+          "PixArt prompt preprocessing handles whitespace-only prompts");
+}
+
 void test_pixart_initial_latents_honor_override_and_requested_seed() {
     std::vector<float> latents;
     std::string error;
@@ -233,6 +260,8 @@ int main() {
     test_pixart_position_scale_matches_diffusers_for_runtime_grid();
     test_pixart_dpmsolver_matches_diffusers_order_two_golden();
     test_pixart_null_attention_mask_only_keeps_eos_token();
+    test_pixart_t5_truncation_preserves_bundled_eos_suffix();
+    test_pixart_prompt_preprocessing_matches_diffusers_baseline();
     test_pixart_initial_latents_honor_override_and_requested_seed();
     test_pixart_large_matmuls_use_gpu_policy();
 

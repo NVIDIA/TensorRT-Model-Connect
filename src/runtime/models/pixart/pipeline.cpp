@@ -480,13 +480,9 @@ bool PixArtPipeline::run_t5_encoder(const std::vector<int32_t>& input_ids,
     const auto copy_len = std::min(static_cast<std::size_t>(seq_len), input_ids.size());
     std::copy_n(input_ids.begin(), copy_len, padded_ids.begin());
 
-    // Build attention mask: 0.0 for real tokens, -1e9 for padding
-    std::vector<float> mask(static_cast<std::size_t>(seq_len), -1e9F);
-    for (int32_t i = 0; i < seq_len; ++i) {
-        if (padded_ids[static_cast<std::size_t>(i)] != 0) {
-            mask[static_cast<std::size_t>(i)] = 0.0F;
-        }
-    }
+    // Derive the T5 mask from the exact normalized IDs sent to the encoder.
+    std::vector<float> mask =
+        diffusion::make_pixart_t5_attention_mask(padded_ids, static_cast<std::size_t>(seq_len));
 
     // Build TensorMap inputs
     TensorMap inputs;
@@ -1095,7 +1091,10 @@ ImageResult PixArtPipeline::generate_image(const std::string& prompt, const Gene
     // Tokenize prompt
     std::vector<int32_t> input_ids;
     if (tokenizer_) {
-        input_ids = tokenizer_->encode(prompt);
+        input_ids = tokenizer_->encode(diffusion::preprocess_pixart_prompt(prompt));
+        input_ids = diffusion::normalize_pixart_t5_input_ids(
+            input_ids, static_cast<std::size_t>(config_.text_seq_len),
+            config_.tokenizer_special_suffix_ids);
     }
 
     const int32_t requested_steps = (cfg.num_steps > 0) ? cfg.num_steps : -1;
