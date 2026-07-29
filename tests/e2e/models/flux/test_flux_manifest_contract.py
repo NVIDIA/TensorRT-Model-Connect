@@ -12,15 +12,30 @@ from tests.e2e_harness.manifest_loader import load_manifest
 
 def test_flux2_fp8_manifest_uses_end_to_end_image_contract() -> None:
     """FLUX.2 FP8 should not inherit unrelated optional debug substages."""
-    manifest_path = Path(__file__).with_name("manifests") / "flux-2-dev-fp8.json"
+    manifests_dir = Path(__file__).with_name("manifests")
+
+    for manifest_name in ("flux-2-dev.json", "flux-2-dev-fp8.json"):
+        case = load_manifest(manifests_dir / manifest_name)
+
+        assert case.metadata["task_eval"]["reference_precision"] == "bf16"
+        assert case.reference_family == "diffusers_image_gen"
+        assert case.user_contract == "diffusion_image"
+        assert [stage.name for stage in case.stages] == ["end_to_end"]
+        assert all(stage.required for stage in case.stages)
+
+    fp8_case = load_manifest(manifests_dir / "flux-2-dev-fp8.json")
+    flux2_case = load_manifest(manifests_dir / "flux-2-dev.json")
+    assert flux2_case.metadata["precision"] == "bf16"
+    assert "Wan-specific" in fp8_case.metadata["notes"]
+
+
+def test_flux_schnell_reference_precision_matches_candidate() -> None:
+    """The non-quantized FLUX.1 reference must use the bundle precision."""
+    manifest_path = Path(__file__).with_name("manifests") / "flux-schnell.json"
     case = load_manifest(manifest_path)
 
-    assert case.metadata["task_eval"]["reference_precision"] == "bf16"
-    assert case.reference_family == "diffusers_image_gen"
-    assert case.user_contract == "diffusion_image"
-    assert [stage.name for stage in case.stages] == ["end_to_end"]
-    assert all(stage.required for stage in case.stages)
-    assert "Wan-specific" in case.metadata["notes"]
+    assert case.metadata["precision"] == "fp16"
+    assert case.metadata["task_eval"]["reference_precision"] == "fp16"
 
 
 def test_flux_production_defaults_run_end_to_end_contract_once() -> None:

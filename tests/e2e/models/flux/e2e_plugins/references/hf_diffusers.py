@@ -110,8 +110,17 @@ class HfDiffusersReference:
         default_reference_precision = (
             "bf16" if model_type in {"flux.2", "flux2"} else "fp32"
         )
+        task_config = case.metadata.get("task_eval", {})
+        task_reference_precision = (
+            task_config.get("reference_precision")
+            if isinstance(task_config, dict)
+            else None
+        )
         reference_precision = str(
-            case.metadata.get("reference_precision", default_reference_precision)
+            case.metadata.get(
+                "reference_precision",
+                task_reference_precision or default_reference_precision,
+            )
         ).lower()
         reference_torch_dtype = {
             "fp16": "torch.float16",
@@ -167,10 +176,10 @@ if raw_latents.size != expected_size:
     )
 unpacked_latents = torch.from_numpy(raw_latents.reshape(initial_latents_shape)).to("cuda")
 if model_type in ("flux.2", "flux2"):
-    hf_latents = unpacked_latents.to(dtype=torch.bfloat16)
+    hf_latents = unpacked_latents.to(dtype=reference_torch_dtype)
 else:
     hf_latents = pipe._pack_latents(
-        unpacked_latents.to(dtype=torch.float32),
+        unpacked_latents.to(dtype=reference_torch_dtype),
         initial_latents_shape[0],
         initial_latents_shape[1],
         initial_latents_shape[2],
