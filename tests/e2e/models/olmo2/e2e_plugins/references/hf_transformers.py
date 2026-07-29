@@ -116,7 +116,7 @@ def _decode_vl_generated_text(
     return ""
 
 
-def _resolve_cached_model_ref(hf_id: str) -> str:
+def _resolve_cached_model_ref(hf_id: str, revision: str = "") -> str:
     """Prefer a locally cached HF snapshot to avoid Hub API rate limits."""
     if not hf_id:
         return hf_id
@@ -127,7 +127,10 @@ def _resolve_cached_model_ref(hf_id: str) -> str:
     try:
         from huggingface_hub import snapshot_download
 
-        return snapshot_download(hf_id, local_files_only=True)
+        snapshot_kwargs: dict[str, object] = {"local_files_only": True}
+        if revision:
+            snapshot_kwargs["revision"] = revision
+        return snapshot_download(hf_id, **snapshot_kwargs)
     except Exception:
         return hf_id
 
@@ -322,12 +325,13 @@ class HfTransformersReference:
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
         logits_path = str(Path(model_dir) / "hf_logits.npy")
         text_path = str(Path(model_dir) / "hf_text.txt")
+        token_path = str(Path(model_dir) / "hf_generated_tokens.json")
 
         prompt = case.inputs.get("prompt", "The capital of France is")
         max_new_tokens = case.inputs.get("max_new_tokens", 30)
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
-        model_ref = _resolve_cached_model_ref(hf_id)
+        model_ref = _resolve_cached_model_ref(hf_id, case.hf_revision)
         torch_dtype_expr = _torch_dtype_for_case(case)
 
         contract_config = case.metadata.get("contract_config", {})
@@ -335,7 +339,7 @@ class HfTransformersReference:
         enable_thinking = contract_config.get("enable_thinking", True)
 
         script = textwrap.dedent(f"""\
-            import sys, numpy as np, torch
+            import json, sys, numpy as np, torch
             from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer
 
             hf_id = {hf_id!r}
@@ -345,6 +349,7 @@ class HfTransformersReference:
             trust_remote_code = {trust_remote_code!r}
             logits_path = {logits_path!r}
             text_path = {text_path!r}
+            token_path = {token_path!r}
             use_chat_template = {use_chat_template!r}
             enable_thinking = {enable_thinking!r}
 
@@ -382,8 +387,10 @@ class HfTransformersReference:
             else:
                 model = AutoModelForCausalLM.from_pretrained(model_ref, **load_kwargs)
             model.eval()
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            model.to(device)
 
-            ids_tensor = torch.tensor([input_ids], dtype=torch.long)
+            ids_tensor = torch.tensor([input_ids], dtype=torch.long, device=device)
             all_logits = []
 
             with torch.no_grad():
@@ -394,19 +401,23 @@ class HfTransformersReference:
                         do_sample=False, num_beams=1)
                     generated_token_ids = output_ids[0].tolist()
                     # Re-run to get logits for each decoder step
-                    decoder_ids = torch.tensor([generated_token_ids], dtype=torch.long)
+                    decoder_ids = torch.tensor(
+                        [generated_token_ids], dtype=torch.long, device=device)
                     outputs = model(ids_tensor, decoder_input_ids=decoder_ids)
                     for i in range(outputs.logits.shape[1]):
                         all_logits.append(_np(outputs.logits[0, i]))
                     text = tokenizer.decode(generated_token_ids, skip_special_tokens=True)
                 else:
-                    # Decoder-only: step-by-step autoregressive
-                    outputs = model(ids_tensor)
+                    # Decoder-only: prefill once, then reuse HF's KV cache.
+                    # Re-running the complete long prompt for every generated
+                    # token makes one bounded accuracy sentinel scale
+                    # quadratically with prompt length.
+                    outputs = model(ids_tensor, use_cache=True)
+                    past_key_values = outputs.past_key_values
                     prefill_logits = _np(outputs.logits[0])
                     for i in range(len(input_ids)):
                         all_logits.append(prefill_logits[i])
 
-                    gen_ids = list(input_ids)
                     generated_token_ids = []
                     eos_id = getattr(tokenizer, "eos_token_id", None)
                     for _ in range(max_new_tokens):
@@ -414,14 +425,21 @@ class HfTransformersReference:
                         generated_token_ids.append(next_token)
                         if eos_id is not None and next_token == eos_id:
                             break
-                        gen_ids.append(next_token)
-                        ids_tensor = torch.tensor([gen_ids], dtype=torch.long)
-                        outputs = model(ids_tensor)
+                        ids_tensor = torch.tensor(
+                            [[next_token]], dtype=torch.long, device=device)
+                        outputs = model(
+                            ids_tensor,
+                            past_key_values=past_key_values,
+                            use_cache=True,
+                        )
+                        past_key_values = outputs.past_key_values
                         all_logits.append(_np(outputs.logits[0, -1]))
                     text = tokenizer.decode(generated_token_ids, skip_special_tokens=True)
 
             with open(text_path, "w") as f:
                 f.write(text)
+            with open(token_path, "w") as f:
+                json.dump({{"token_ids": generated_token_ids}}, f)
 
             # Pad and save logits
             max_len = max(l.shape[0] for l in all_logits)
@@ -443,7 +461,10 @@ class HfTransformersReference:
             case_name=case.name,
             stage_name=stage.name,
             env=_reference_env(ctx),
-            output_readers=(_existing_path_reader(logits_path, "logits_path"),),
+            output_readers=(
+                _existing_path_reader(logits_path, "logits_path"),
+                _json_output_reader(token_path),
+            ),
             text_reader=lambda: _read_text_artifact(text_path),
             logits_reader=(
                 lambda: logits_path if Path(logits_path).is_file() else None
