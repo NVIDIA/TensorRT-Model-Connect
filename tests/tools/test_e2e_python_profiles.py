@@ -81,6 +81,16 @@ def test_resolve_case_profile_names_apply_manifest_profiles():
     }
 
 
+def test_golden_snapshot_overrides_family_reference_profile():
+    case = _make_case(
+        family="lance",
+        runtime_strategy="lance_vision_language",
+        reference_backend="golden_snapshot",
+    )
+
+    assert resolve_case_profile_names(case)["reference"] == "base"
+
+
 def test_resolve_case_python_profiles_uses_manifest_profile_named_env(monkeypatch, tmp_path):
     wrapper = tmp_path / "specialized-python"
     wrapper.write_text("", encoding="utf-8")
