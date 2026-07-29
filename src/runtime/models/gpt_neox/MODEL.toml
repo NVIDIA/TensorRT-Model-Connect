@@ -7,3 +7,7 @@ runtime_plugins = ["plugin.cpp|register_gpt_neox_plugin"]
 runtime_strategies = ["gpt_neox_decoder_kv_cache"]
 [validation_profiles]
 decoder_debug = ["gpt_neox_decoder_kv_cache"]
+
+runtime_tests = [
+  "test_gpt_neox_native_kv_cache|test_gpt_neox_native_kv_cache.cpp|trtmc_model_gpt_neox|_|REQUIRES_GPU",
+]

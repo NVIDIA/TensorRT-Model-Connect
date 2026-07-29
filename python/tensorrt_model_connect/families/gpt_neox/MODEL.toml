@@ -4,7 +4,7 @@
 id = "gpt_neox"
 plugin = "gpt_neox"
 module = "plugin"
-capabilities = ["split_decoder_roles", "debug_layer_outputs"]
+capabilities = ["split_decoder_roles"]
 aliases = [
   "gpt_neox",
   "gptneox",
@@ -12,7 +12,4 @@ aliases = [
 prefixes = [
   "gpt_neox",
 ]
-debug_runner = "debug_runner.py|runner_from_bundle"
-debug_runtime_strategies = [
-  "gpt_neox_decoder_kv_cache",
-]
+default_build_route = "build_routing.py|prefer_native_default"

@@ -31,6 +31,11 @@ struct NativeKvTrace {
     std::vector<NativeKvCall> calls;
 };
 
+enum class LegacyKvPolicy {
+    kSupported,
+    kRejected,
+};
+
 class NativeKvModuleStub final : public ITrtModule {
   public:
     NativeKvModuleStub(cudaStream_t stream, int32_t layers, int32_t capacity, int32_t kv_heads,
@@ -160,10 +165,10 @@ inline int32_t scalar(const TensorMap& inputs, const std::string& name) {
     return *static_cast<const int32_t*>(inputs.at(name).data);
 }
 
-template <typename Cache, typename Mutate>
+template <typename Cache, DType CacheDType, typename Mutate>
 bool rejects_native_contract(cudaStream_t stream, Mutate mutate) {
-    Cache cache(1, 11, 2, stream, DType::kFloat16);
-    NativeKvModuleStub module(stream, 1, 11, 1, 2, DType::kFloat16);
+    Cache cache(1, 11, 2, stream, CacheDType);
+    NativeKvModuleStub module(stream, 1, 11, 1, 2, CacheDType);
     mutate(module);
     try {
         cache.bind_cache_inputs(module);
@@ -173,7 +178,8 @@ bool rejects_native_contract(cudaStream_t stream, Mutate mutate) {
     return false;
 }
 
-template <typename Pipeline, typename Cache, typename Config>
+template <typename Pipeline, typename Cache, typename Config, DType CacheDType = DType::kFloat16,
+          LegacyKvPolicy LegacyPolicy = LegacyKvPolicy::kSupported>
 int run_native_kv_contract_tests(const char* model) {
     int failures = 0;
     const auto check = [&](bool condition, const std::string& message) {
@@ -186,31 +192,35 @@ int run_native_kv_contract_tests(const char* model) {
     if (cudaStreamCreate(&stream) != cudaSuccess)
         return 1;
 
-    check(rejects_native_contract<Cache>(
+    check(rejects_native_contract<Cache, CacheDType>(
               stream,
               [](auto& module) { module.set_tensor("key_value_lengths", {2}, DType::kInt32); }),
           "rejects a non-scalar key_value_lengths input");
-    check(rejects_native_contract<Cache>(
+    check(rejects_native_contract<Cache, CacheDType>(
               stream,
               [](auto& module) { module.set_tensor("cache_write_indices", {1}, DType::kFloat32); }),
           "rejects a non-int32 cache_write_indices input");
-    check(rejects_native_contract<Cache>(
+    check(rejects_native_contract<Cache, CacheDType>(
               stream,
-              [](auto& module) { module.set_tensor("cache_k_0", {1, 1, 10, 2}, DType::kFloat16); }),
+              [](auto& module) { module.set_tensor("cache_k_0", {1, 1, 10, 2}, CacheDType); }),
           "rejects a cache with the wrong capacity");
-    check(rejects_native_contract<Cache>(
+    check(rejects_native_contract<Cache, CacheDType>(
               stream,
-              [](auto& module) { module.set_tensor("cache_k_0", {1, 1, 11, 2}, DType::kFloat32); }),
+              [](auto& module) {
+                  constexpr DType wrong_dtype =
+                      CacheDType == DType::kFloat32 ? DType::kFloat16 : DType::kFloat32;
+                  module.set_tensor("cache_k_0", {1, 1, 11, 2}, wrong_dtype);
+              }),
           "rejects a cache with the wrong dtype");
 
     {
-        Cache cache(1, 11, 2, stream, DType::kFloat16);
-        NativeKvModuleStub prefill(stream, 1, 11, 1, 2, DType::kFloat16);
-        NativeKvModuleStub decode(stream, 1, 11, 1, 2, DType::kFloat16);
+        Cache cache(1, 11, 2, stream, CacheDType);
+        NativeKvModuleStub prefill(stream, 1, 11, 1, 2, CacheDType);
+        NativeKvModuleStub decode(stream, 1, 11, 1, 2, CacheDType);
         cache.bind_cache_inputs(prefill);
         cache.bind_to(decode);
-        check(cache.ok() && cache.device_memory_bytes() == 88,
-              "allocates one state-owned FP16 K/V cache");
+        check(cache.ok() && cache.device_memory_bytes() == 44 * dtype_size(CacheDType),
+              "allocates one state-owned native K/V cache");
         check(prefill.device_ptr("cache_k_0") == cache.cache_k(0).data() &&
                   prefill.device_ptr("present_k_0") == cache.cache_k(0).data(),
               "prefill cache and present K share state storage");
@@ -224,7 +234,8 @@ int run_native_kv_contract_tests(const char* model) {
                   scalar(inputs, "key_value_lengths") == 4,
               "native metadata describes the current write without a dense mask");
 
-        cache.set_position(10);
+        for (int i = 0; i < 10; ++i)
+            cache.advance();
         inputs.clear();
         cache.prepare_step(inputs);
         check(scalar(inputs, "cache_write_indices") == 10 &&
@@ -242,15 +253,26 @@ int run_native_kv_contract_tests(const char* model) {
     }
 
     {
-        Cache cache(1, 11, 2, stream, DType::kFloat16);
-        NativeKvModuleStub legacy(stream, 1, 11, 1, 2, DType::kFloat16, false);
-        cache.bind_to(legacy);
-        TensorMap inputs;
-        cache.prepare_step(inputs);
-        cache.advance();
-        check(cache.needs_attention_mask() && inputs.count("attention_mask") == 1 &&
-                  inputs.count("cache_write_indices") == 0 && cache.position() == 1,
-              "legacy attention-mask cache path still advances normally");
+        Cache cache(1, 11, 2, stream, CacheDType);
+        NativeKvModuleStub legacy(stream, 1, 11, 1, 2, CacheDType, false);
+        if constexpr (LegacyPolicy == LegacyKvPolicy::kRejected) {
+            bool rejected = false;
+            try {
+                cache.bind_to(legacy);
+            } catch (const std::runtime_error&) {
+                rejected = true;
+            }
+            check(rejected && cache.position() == 0,
+                  "legacy attention-mask cache contract is rejected");
+        } else {
+            cache.bind_to(legacy);
+            TensorMap inputs;
+            cache.prepare_step(inputs);
+            cache.advance();
+            check(cache.needs_attention_mask() && inputs.count("attention_mask") == 1 &&
+                      inputs.count("cache_write_indices") == 0 && cache.position() == 1,
+                  "legacy attention-mask cache path still advances normally");
+        }
     }
 
     const auto make_config = [] {
@@ -276,11 +298,11 @@ int run_native_kv_contract_tests(const char* model) {
     {
         auto prefill_trace = std::make_shared<NativeKvTrace>();
         auto decode_trace = std::make_shared<NativeKvTrace>();
-        auto prefill = std::make_unique<NativeKvModuleStub>(stream, 1, 11, 1, 2, DType::kFloat16,
-                                                            true, prefill_trace);
-        auto decoder = std::make_unique<NativeKvModuleStub>(stream, 1, 11, 1, 2, DType::kFloat16,
-                                                            true, decode_trace);
-        auto cache = std::make_unique<Cache>(1, 11, 2, stream, DType::kFloat16);
+        auto prefill = std::make_unique<NativeKvModuleStub>(stream, 1, 11, 1, 2, CacheDType, true,
+                                                            prefill_trace);
+        auto decoder = std::make_unique<NativeKvModuleStub>(stream, 1, 11, 1, 2, CacheDType, true,
+                                                            decode_trace);
+        auto cache = std::make_unique<Cache>(1, 11, 2, stream, CacheDType);
         Cache* cache_ptr = cache.get();
         std::vector<typename Pipeline::DecoderContext> decoders;
         decoders.push_back(typename Pipeline::DecoderContext{11, std::move(decoder)});
@@ -311,11 +333,11 @@ int run_native_kv_contract_tests(const char* model) {
     {
         auto prefill_trace = std::make_shared<NativeKvTrace>();
         auto decode_trace = std::make_shared<NativeKvTrace>();
-        auto prefill = std::make_unique<NativeKvModuleStub>(stream, 1, 11, 1, 2, DType::kFloat16,
-                                                            true, prefill_trace);
-        auto decoder = std::make_unique<NativeKvModuleStub>(stream, 1, 11, 1, 2, DType::kFloat16,
-                                                            true, decode_trace);
-        auto cache = std::make_unique<Cache>(1, 11, 2, stream, DType::kFloat16);
+        auto prefill = std::make_unique<NativeKvModuleStub>(stream, 1, 11, 1, 2, CacheDType, true,
+                                                            prefill_trace);
+        auto decoder = std::make_unique<NativeKvModuleStub>(stream, 1, 11, 1, 2, CacheDType, true,
+                                                            decode_trace);
+        auto cache = std::make_unique<Cache>(1, 11, 2, stream, CacheDType);
         Cache* cache_ptr = cache.get();
         std::vector<typename Pipeline::DecoderContext> decoders;
         decoders.push_back(typename Pipeline::DecoderContext{11, std::move(decoder)});

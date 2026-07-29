@@ -38,6 +38,7 @@ pytest.importorskip("tensorrt_model_connect.config")
 
 from tests.builder.family_plugin_tester import FamilyPluginTester
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
+from tests.builder.family_plugin_tester import TinyModelSpec
 
 
 class GPTNeoXPluginTester(FamilyPluginTester):
@@ -54,12 +55,43 @@ class GPTNeoXPluginTester(FamilyPluginTester):
 
     plugin_module = "tensorrt_model_connect.families.gpt_neox"
     model_type = "gpt_neox"
+    spec = TinyModelSpec(
+        vocab_size=32,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        head_dim=64,
+        max_position_embeddings=128,
+        max_cache_length=128,
+    )
 
     def get_config_dict(self) -> dict:
         d = super().get_config_dict()
-        d["rotary_pct"] = 0.5
-        d["use_parallel_residual"] = True
+        d.update(
+            {
+                "architectures": ["GPTNeoXForCausalLM"],
+                "hidden_act": "gelu",
+                "rotary_pct": 0.25,
+                "use_parallel_residual": True,
+                "_decoder_engine_layout": "split",
+                "_decoder_engine_role": "decode",
+            }
+        )
         return d
+
+    def expected_engine_input_names(self) -> set[str]:
+        names = {
+            "token_id",
+            "position_id",
+            "cache_write_indices",
+            "key_value_lengths",
+        }
+        for layer in range(self.spec.num_hidden_layers):
+            names.add(f"cache_k_{layer}")
+            names.add(f"cache_v_{layer}")
+        return names
 
     def make_hf_tensors(self) -> dict[str, np.ndarray]:
         """Create synthetic HF tensors matching GPT-NeoX's weight layout.

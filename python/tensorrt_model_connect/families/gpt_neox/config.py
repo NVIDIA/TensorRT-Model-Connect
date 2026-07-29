@@ -28,7 +28,7 @@ class ModelConfig:
     eos_token_id: int = -1
     pad_token_id: int = -1
     tie_word_embeddings: bool = False
-    max_position_embeddings: int = 8192
+    max_position_embeddings: int = 0
     hidden_act: str = ""
 
     # Explicit head_dim from config.json (0 = not set, fall back to computed).
@@ -155,7 +155,7 @@ class ModelConfig:
         # rope_theta: check top-level first, then rope_parameters dict
         # (some model configs store it there),
         # then rope_scaling dict.
-        rope_theta = d.get("rope_theta", None)
+        rope_theta = d.get("rope_theta", d.get("rotary_emb_base"))
         if rope_theta is None:
             rope_params = d.get("rope_parameters")
             if isinstance(rope_params, dict):
@@ -189,7 +189,7 @@ class ModelConfig:
             pad_token_id=d.get("pad_token_id", -1) or -1,
             tie_word_embeddings=d.get("tie_word_embeddings", False),
             max_position_embeddings=d.get("max_position_embeddings",
-                                          d.get("n_positions", 8192)),
+                                          d.get("n_positions", 0)),
             hidden_act=d.get("hidden_act", "") or d.get("activation_function", ""),
             _head_dim=d.get("head_dim", 0),
             raw=original_raw,

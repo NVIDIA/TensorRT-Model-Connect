@@ -52,23 +52,6 @@ std::unique_ptr<ITrtModule> extract_optional_module(IBackend* backend,
                                                     const char* label,
                                                     const ModuleCreateOptions& options = {});
 
-// Dual-profile TRT module group: one shared backend engine, two module
-// contexts (one per optimization profile). Weights live once in GPU memory
-// and both modules share the CUDA stream. Use `decode->stream()` to obtain
-// the shared stream.
-struct DualProfileModules {
-    std::unique_ptr<ITrtModule> prefill; // batched Sq profile (null if single-profile)
-    std::unique_ptr<ITrtModule> decode;  // Sq=1 profile, or the only profile if single-profile
-};
-
-// Load an engine from a serialized plan via the backend and create two
-// execution contexts — one per optimization profile — sharing the engine.
-// When the engine has fewer than 2 profiles, `prefill` is left null and
-// `decode` holds the single-profile context (legacy bundles).
-DualProfileModules load_dual_profile_modules(IBackend* backend, const std::vector<char>* plan,
-                                             const char* label,
-                                             const ModuleCreateOptions& options = {});
-
 // Detect whether the bundle's config requests add_special_tokens for the tokenizer.
 bool detect_add_special_tokens(const BundleFile& bundle);
 
@@ -123,10 +106,5 @@ MelFilterbank load_mel_filterbank(const BundleFile& bundle);
 // Used for dual-tokenizer models (e.g., FLUX: CLIP + T5).
 // Returns nullptr if clip_tokenizer.json section is absent.
 std::unique_ptr<ITokenizer> create_clip_tokenizer_from_bundle(const BundleFile& bundle);
-
-// Load all TVM-FFI kernels listed in the bundle's kernel_manifest.json.
-// Must be called BEFORE deserializing any TRT engine that uses FFI plugins.
-// No-op if the bundle has no kernel_manifest.json section (non-FFI bundles).
-void load_ffi_kernels_from_bundle(const BundleFile& bundle);
 
 } // namespace trtmc

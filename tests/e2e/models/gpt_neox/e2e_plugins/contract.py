@@ -103,6 +103,17 @@ def levenshtein_ned(a: str, b: str) -> float:
     return prev[-1] / max_len
 
 
+def generated_token_ids(output) -> list[int] | None:
+    """Return generated token IDs, or ``None`` when the oracle omitted them."""
+    raw_tokens = (output.data or {}).get("token_ids")
+    if not isinstance(raw_tokens, list):
+        return None
+    try:
+        return [int(token) for token in raw_tokens]
+    except (TypeError, ValueError):
+        return None
+
+
 def make_pass(stage_name: str, metrics, rule: str = ""):
     from tests.e2e_harness.contracts import CompareResult
     return CompareResult(
@@ -220,6 +231,44 @@ class GptNeoxCausalContinuationPlugin:
                 note=f"first {prefix_len} chars",
             ),
         }
+
+        trt_tokens = generated_token_ids(trt_output)
+        ref_tokens = generated_token_ids(ref_output)
+        if trt_tokens is None or ref_tokens is None:
+            missing = []
+            if trt_tokens is None:
+                missing.append("TRT")
+            if ref_tokens is None:
+                missing.append("HF reference")
+            metrics["generated_token_ids_available"] = MetricResult(
+                value=0.0,
+                threshold=1.0,
+                operator="==",
+                passed=False,
+                note=f"missing generated token IDs from {' and '.join(missing)}",
+            )
+            return make_fail(
+                "full_generation",
+                metrics,
+                "exact generated tokens and text required",
+                metrics["generated_token_ids_available"].note,
+            )
+
+        token_exact = trt_tokens == ref_tokens
+        text_exact = (trt_output.text or "") == (ref_output.text or "")
+        metrics["generated_token_exact"] = MetricResult(
+            value=1.0 if token_exact else 0.0,
+            threshold=1.0,
+            operator="==",
+            passed=token_exact,
+            note=f"TRT tokens={len(trt_tokens)}, HF tokens={len(ref_tokens)}",
+        )
+        metrics["generated_text_exact"] = MetricResult(
+            value=1.0 if text_exact else 0.0,
+            threshold=1.0,
+            operator="==",
+            passed=text_exact,
+        )
         if reconstruction_check:
             metrics["non_empty_trt_text"] = MetricResult(
                 value=1.0 if trt_text else 0.0,
@@ -236,19 +285,19 @@ class GptNeoxCausalContinuationPlugin:
                 note="visible HF reconstruction text",
             )
 
-        passed = ned <= ned_threshold
-        rule = (
-            "seq2seq reconstruction parity against HF reference"
-            if reconstruction_check
-            else "ned <= threshold (continuation parity)"
-        )
+        passed = token_exact and text_exact
+        rule = "generated token IDs and decoded text exactly match HF"
         if passed:
             return make_pass("full_generation", metrics, rule)
         return make_fail(
             "full_generation",
             metrics,
             rule,
-            f"Continuation diverged: NED={ned:.3f}",
+            (
+                "Continuation diverged: "
+                f"token_exact={token_exact}, text_exact={text_exact}, "
+                f"NED={ned:.3f}"
+            ),
         )
 
 plugin = GptNeoxCausalContinuationPlugin()

@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .build_routing import native_kv_build_capability
 from .config import ModelConfig
 from .checkpoint_mapper import (
     WeightDict,
@@ -25,8 +26,8 @@ from .checkpoint_mapper import (
     _transpose_2d,
 )
 from ...parallel_config import normalize_parallel_config
-from .standard_decoder_builder import build_standard_decoder_engine
-from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
+from .native_decoder_builder import build_native_decoder_engine
+from .native_kv_contract import validate_native_kv_weights
 
 
 class GPTNeoXPlugin:
@@ -37,12 +38,23 @@ class GPTNeoXPlugin:
     def matches(self, model_type: str) -> bool:
         return model_type.lower() in ("gpt_neox", "gptneox")
 
+    def default_build_precision(self, config: ModelConfig) -> str:
+        del config
+        return "fp16"
+
+    def default_max_cache_length(self, config: ModelConfig) -> int:
+        """Use the checkpoint's official context without a user build flag."""
+        return int(config.max_position_embeddings)
+
     def supports_split_decoder_roles(self, config: ModelConfig) -> bool:
-        return not bool(config.raw.get("_fp32_layers"))
+        del config
+        return True
 
     def load_weights(
         self, model_dir: str, config: ModelConfig,
+        *, precision: str = "fp32",
     ) -> WeightDict:
+        del precision
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
 
@@ -161,39 +173,54 @@ class GPTNeoXPlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
+        max_cache_length: int, *, precision: str = "fp16",
         quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
-        # GPT-NeoX uses partial rotary: rotary_pct (default 0.25)
-        rotary_pct = config.raw.get("rotary_pct", 0.25)
-        use_parallel = config.raw.get("use_parallel_residual", True)
-
         parallel = normalize_parallel_config(parallel_config)
-        if parallel.enabled:
-            return build_dual_profile_tp_decoder_engine(
-                config, weights, max_cache_length,
-                precision=precision, quant_ctx=quant_ctx,
-                norm_type="layernorm",
-                mlp_type="gelu_fc",
-                position_type="rope",
-                activation="gelu",
-                partial_rotary_factor=rotary_pct,
-                parallel_residual=use_parallel,
-                verbose=verbose,
-                parallel_config=parallel)
-        return build_standard_decoder_engine(
-            config, weights, max_cache_length,
-            precision=precision, quant_ctx=quant_ctx,
-            norm_type="layernorm",
-            mlp_type="gelu_fc",
-            position_type="rope",
-            activation="gelu",
-            partial_rotary_factor=rotary_pct,
-            parallel_residual=use_parallel,
+        capability = native_kv_build_capability(
+            config,
+            precision=precision,
+            max_cache_length=max_cache_length,
+            parallel_enabled=parallel.enabled,
+            quantized=quant_ctx is not None,
+            debug_layer_outputs=debug_layer_outputs,
+        )
+        if not capability.eligible:
+            config.raw.pop("_native_kv_cache_metadata", None)
+            raise ValueError(
+                "GPT-NeoX native KV build rejected: "
+                + capability.reason
+            )
+
+        validate_native_kv_weights(config, weights)
+        config.raw["_decoder_engine_layout_supported"] = True
+        config.raw["_native_kv_cache_metadata"] = {
+            "native_kv_contract_version": 1,
+            "native_kv_cache": True,
+        }
+        role = str(config.raw.get("_decoder_engine_role", ""))
+        if role not in ("prefill", "decode"):
+            raise ValueError(
+                "native GPT-NeoX requires explicit split engine role "
+                f"'prefill' or 'decode', got {role!r}"
+            )
+        return build_native_decoder_engine(
+            config,
+            weights,
+            max_cache_length,
+            precision="fp16",
             verbose=verbose,
-            debug_layer_outputs=debug_layer_outputs)
+            profile_mode=role,
+        )
+
+    def get_bundle_config_overrides(
+        self, config: ModelConfig,
+    ) -> dict | None:
+        """Mark bundles that satisfy the native runtime contract."""
+        metadata = config.raw.get("_native_kv_cache_metadata")
+        return dict(metadata) if isinstance(metadata, dict) else None
 
 
 plugin = GPTNeoXPlugin()

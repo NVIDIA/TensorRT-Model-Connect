@@ -52,7 +52,7 @@ def _write_safetensors(model_dir: Path, tensors: dict[str, np.ndarray],
 
 @requires_trt
 class TestGPTNeoXBuildEngine:
-    VOCAB, HIDDEN, LAYERS, HEADS = 32, 16, 1, 4
+    VOCAB, HIDDEN, LAYERS, HEADS = 32, 64, 1, 1
     MLP = HIDDEN * 4
 
     @staticmethod
@@ -83,9 +83,16 @@ class TestGPTNeoXBuildEngine:
         from tensorrt_model_connect.families.gpt_neox import plugin
         config = {
             "model_type": "gpt_neox",
+            "architectures": ["GPTNeoXForCausalLM"],
             "vocab_size": self.VOCAB, "hidden_size": self.HIDDEN,
+            "intermediate_size": self.MLP,
             "num_hidden_layers": self.LAYERS, "num_attention_heads": self.HEADS,
-            "rotary_pct": 0.5,
+            "max_position_embeddings": 32,
+            "hidden_act": "gelu",
+            "rotary_pct": 0.25,
+            "use_parallel_residual": True,
+            "_decoder_engine_layout": "split",
+            "_decoder_engine_role": "decode",
         }
         _write_config(tmp_path, config)
         _write_safetensors(tmp_path, self._make(

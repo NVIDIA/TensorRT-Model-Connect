@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""1:1 port of standard_checkpoint_mapper.cpp + tensor_math.cpp to Python.
+"""Map Hugging Face GPT-NeoX checkpoints into the native decoder contract.
 
 Loads HF safetensors and maps keys to the flat weight dict expected by
-standard_decoder_builder.py. All projections are transposed from HF
+native_decoder_builder.py. All projections are transposed from HF
 [out, in] layout to [in, out] for TRT matmul.
 """
 
@@ -41,23 +41,26 @@ def _transpose_2d(arr: np.ndarray, name: str, precision: str = "fp32") -> np.nda
 class WeightDict(dict):
     """A dict mapping logical weight names to flat float32 arrays.
 
-    Keys follow the convention used by standard_decoder_builder.py:
+    Keys follow the convention used by native_decoder_builder.py:
       - embedding: [vocab, hidden]
       - layer.{i}.input_norm: [hidden]
+      - layer.{i}.input_norm_beta: [hidden]
       - layer.{i}.w_q: [hidden, attention_size]
       - layer.{i}.w_k: [hidden, kv_attention_size]
       - layer.{i}.w_v: [hidden, kv_attention_size]
-      - layer.{i}.q_bias: [attention_size]       (optional)
-      - layer.{i}.k_bias: [kv_attention_size]    (optional)
-      - layer.{i}.v_bias: [kv_attention_size]    (optional)
-      - layer.{i}.q_norm: [attention_size]        (optional)
-      - layer.{i}.k_norm: [kv_attention_size]     (optional)
+      - layer.{i}.q_bias: [attention_size]
+      - layer.{i}.k_bias: [kv_attention_size]
+      - layer.{i}.v_bias: [kv_attention_size]
       - layer.{i}.w_o: [attention_size, hidden]
+      - layer.{i}.o_bias: [hidden]
       - layer.{i}.post_attn_norm: [hidden]
-      - layer.{i}.w_gate: [hidden, mlp_size]
-      - layer.{i}.w_up: [hidden, mlp_size]
-      - layer.{i}.w_down: [mlp_size, hidden]
+      - layer.{i}.post_attn_norm_beta: [hidden]
+      - layer.{i}.w_fc1: [hidden, mlp_size]
+      - layer.{i}.fc1_bias: [mlp_size]
+      - layer.{i}.w_fc2: [mlp_size, hidden]
+      - layer.{i}.fc2_bias: [hidden]
       - final_norm: [hidden]
+      - final_norm_beta: [hidden]
       - w_out: [hidden, vocab]
     """
 
