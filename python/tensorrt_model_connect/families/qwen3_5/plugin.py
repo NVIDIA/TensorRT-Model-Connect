@@ -467,10 +467,6 @@ class Qwen35Plugin:
                 network.add_cast(x, work_trt_dtype).get_output(0)
                 for x in conv_state_inputs
             ]
-            ssm_state_inputs = [
-                network.add_cast(x, work_trt_dtype).get_output(0)
-                for x in ssm_state_inputs
-            ]
             cache_k_inputs = [
                 network.add_cast(x, work_trt_dtype).get_output(0)
                 for x in cache_k_inputs
@@ -540,8 +536,9 @@ class Qwen35Plugin:
                     hidden=layer_cast(hidden_state),
                     conv_state_in=layer_cast(
                         conv_state_inputs[mamba_counter]),
-                    ssm_state_in=layer_cast(
-                        ssm_state_inputs[mamba_counter]),
+                    # Transformers casts the DeltaNet recurrence and its
+                    # persistent state to FP32 even for FP16 checkpoints.
+                    ssm_state_in=ssm_state_inputs[mamba_counter],
                     eps_tensor=layer_cast(eps_tensor),
                     weights=weights,
                     prefix=prefix,
@@ -859,20 +856,30 @@ def _add_deltanet_layer(
     v_t = v_heads.get_output(0)
 
     # ===== 7. Compute decay: -exp(A_log) * softplus(a + dt_bias) per head =====
+    # Transformers performs the decay and recurrent rule in FP32 even when
+    # the model projections use FP16.  Keeping these tensors in the model
+    # storage dtype quantizes the persistent state again on every token.
+    recurrent_dtype = trt.float32
+
+    def recurrent_cast(tensor: trt.ITensor) -> trt.ITensor:
+        if tensor.dtype == recurrent_dtype:
+            return tensor
+        return network.add_cast(tensor, recurrent_dtype).get_output(0)
+
     # A: [num_heads] (precomputed as -exp(A_log))
     A_const = graph_ops.add_constant(
-        network, (1, num_heads), weights[f"{prefix}.A"], dtype=dtype)
+        network, (1, num_heads), weights[f"{prefix}.A"], dtype=np.float32)
 
     # dt_bias: [num_heads]
     dt_bias_const = graph_ops.add_constant(
-        network, (1, num_heads), weights[f"{prefix}.dt_bias"], dtype=dtype)
+        network, (1, num_heads), weights[f"{prefix}.dt_bias"], dtype=np.float32)
     a_biased = network.add_elementwise(
-        a_raw, dt_bias_const, trt.ElementWiseOperation.SUM)
+        recurrent_cast(a_raw), dt_bias_const, trt.ElementWiseOperation.SUM)
 
     # softplus(a + dt_bias): log(1 + exp(x))
     a_exp = network.add_unary(a_biased.get_output(0), trt.UnaryOperation.EXP)
     one = graph_ops.add_constant(
-        network, (1, 1), np.array([1.0], dtype=dtype), dtype=dtype)
+        network, (1, 1), np.array([1.0], dtype=np.float32), dtype=np.float32)
     a_exp_p1 = network.add_elementwise(
         a_exp.get_output(0), one, trt.ElementWiseOperation.SUM)
     a_softplus = network.add_unary(
@@ -891,7 +898,7 @@ def _add_deltanet_layer(
     # b_raw: [1, num_heads]
     beta = network.add_activation(b_raw, trt.ActivationType.SIGMOID)
     # [1, num_heads] -> [num_heads, 1]
-    beta_reshaped = network.add_shuffle(beta.get_output(0))
+    beta_reshaped = network.add_shuffle(recurrent_cast(beta.get_output(0)))
     beta_reshaped.reshape_dims = (num_heads, 1)
 
     # ===== 9. Delta rule state update =====
@@ -901,12 +908,16 @@ def _add_deltanet_layer(
 
     # 9a. Decay state first: state = state * exp(g)
     decayed_state = network.add_elementwise(
-        decay_exp.get_output(0), ssm_state_in,
+        decay_exp.get_output(0), recurrent_cast(ssm_state_in),
         trt.ElementWiseOperation.PROD)
 
     # 9b. kv_mem = state^T @ k: read old value for this key
     # [H, V, K] @ [H, K, 1] = [H, V, 1]  (transpose state to swap K/V axes)
-    k_col = network.add_shuffle(k_t)
+    k_recurrent = recurrent_cast(k_t)
+    v_recurrent = recurrent_cast(v_t)
+    q_recurrent = recurrent_cast(q_expanded)
+
+    k_col = network.add_shuffle(k_recurrent)
     k_col.reshape_dims = (num_heads, head_dim, 1)
     kv_old_3d = network.add_matrix_multiply(
         decayed_state.get_output(0), trt.MatrixOperation.TRANSPOSE,
@@ -916,14 +927,14 @@ def _add_deltanet_layer(
 
     # 9c. delta = (v - kv_mem) * beta
     v_minus_old = network.add_elementwise(
-        v_t, kv_old.get_output(0), trt.ElementWiseOperation.SUB)
+        v_recurrent, kv_old.get_output(0), trt.ElementWiseOperation.SUB)
     v_delta = network.add_elementwise(
         v_minus_old.get_output(0), beta_reshaped.get_output(0),
         trt.ElementWiseOperation.PROD)
 
     # 9d. state_new = decayed_state + outer(k, delta)
     # outer: k[:, :, None] * delta[:, None, :] = [H, K, 1] @ [H, 1, V] = [H, K, V]
-    k_col2 = network.add_shuffle(k_t)
+    k_col2 = network.add_shuffle(k_recurrent)
     k_col2.reshape_dims = (num_heads, head_dim, 1)
     v_delta_row = network.add_shuffle(v_delta.get_output(0))
     v_delta_row.reshape_dims = (num_heads, 1, head_dim)
@@ -940,9 +951,9 @@ def _add_deltanet_layer(
     # HF applies: query *= 1/sqrt(k_dim)
     q_scale = graph_ops.add_constant(
         network, (1, 1),
-        np.array([1.0 / np.sqrt(head_dim)], dtype=dtype), dtype=dtype)
+        np.array([1.0 / np.sqrt(head_dim)], dtype=np.float32), dtype=np.float32)
     q_scaled = network.add_elementwise(
-        q_expanded, q_scale, trt.ElementWiseOperation.PROD)
+        q_recurrent, q_scale, trt.ElementWiseOperation.PROD)
     # [H, V, K] @ [H, K, 1] = [H, V, 1]
     q_col = network.add_shuffle(q_scaled.get_output(0))
     q_col.reshape_dims = (num_heads, head_dim, 1)
@@ -953,6 +964,13 @@ def _add_deltanet_layer(
     output_flat.reshape_dims = (1, d_inner)
 
     # ===== 10. Gated RMSNorm per-head: weight * norm(output) * silu(z) =====
+    # The reference recurrent kernel returns the attention output in the model
+    # storage dtype before Qwen3_5RMSNormGated casts it back to FP32.
+    recurrent_output = output_flat.get_output(0)
+    if recurrent_output.dtype != hidden.dtype:
+        recurrent_output = network.add_cast(
+            recurrent_output, hidden.dtype).get_output(0)
+
     # HF norm operates per head_v_dim: reshape to [num_heads, head_dim], norm, reshape back
     deltanet_norm_w = weights[f"{prefix}.deltanet_norm"]
     # Use same eps as HF Qwen3_5RMSNormGated (config.rms_norm_eps = 1e-6)
@@ -961,7 +979,7 @@ def _add_deltanet_layer(
         np.array([1e-6], dtype=np.float32), dtype=np.float32)
 
     # Reshape output and z to [num_heads, head_dim] for per-head norm
-    output_heads = network.add_shuffle(output_flat.get_output(0))
+    output_heads = network.add_shuffle(recurrent_output)
     output_heads.reshape_dims = (num_heads, head_dim)
     norm_input = output_heads.get_output(0)
     norm_output_dtype = norm_input.dtype
