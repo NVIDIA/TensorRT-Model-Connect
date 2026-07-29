@@ -9,9 +9,9 @@ on:
       - main
     paths:
       - "website/**"
-      - "python/tensorrt_model_connect/families/**"
-      - "src/runtime/models/**"
-      - "tests/e2e/models/**"
+      - "python/tensorrt_model_connect/families/*/MODEL.toml"
+      - "src/runtime/models/*/MODEL.toml"
+      - "tests/e2e/models/*/MODEL.toml"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
