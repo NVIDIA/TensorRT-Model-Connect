@@ -6,7 +6,7 @@
   "runtime_strategy": "whisper_speech_to_text",
   "task_strategy": "speech_to_text",
   "precision": "fp32",
-  "max_cache_length": 64,
+  "max_cache_length": 128,
   "trust_remote_code": false,
   "e2e_parallel_resource": "exclusive_gpu",
   "testcases": [

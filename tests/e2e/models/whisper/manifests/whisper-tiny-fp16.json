@@ -7,7 +7,7 @@
   "task_strategy": "speech_to_text",
   "precision": "fp16",
   "fp32_layers": [0],
-  "max_cache_length": 64,
+  "max_cache_length": 128,
   "trust_remote_code": false,
   "e2e_parallel_resource": "exclusive_gpu",
   "testcases": [
@@ -16,10 +16,11 @@
       "trace_id": "IT-E2E-WHSPT-FP16-01",
       "reference_family": "asr_whisper",
       "user_contract": "exact_transcript",
+      "reference_precision": "fp32",
       "test_type": "transcription",
       "prompt": "test",
-      "max_new_tokens": 10,
-      "test_input_audio": "data/Recording.wav"
+      "max_new_tokens": 120,
+      "test_input_audio": "data/librispeech-test-clean-6930-75918-0003.wav"
     },
     {
       "name": "whisper-tiny-fp16-asr-probe01",

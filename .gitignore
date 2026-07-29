@@ -132,4 +132,5 @@ engines
 *.ttrtb
 results.json
 !**/Recording.wav
+!tests/e2e/models/whisper/data/librispeech-test-clean-6930-75918-0003.wav
 worktrees/

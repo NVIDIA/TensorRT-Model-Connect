@@ -36,6 +36,7 @@ from .checkpoint_mapper import (
 )
 from . import graph_ops
 from . import graph_blocks
+from .prompt_metadata import whisper_decoder_prompt_metadata
 from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
@@ -484,6 +485,9 @@ class WhisperPlugin:
             "mel_chunk_length": raw.get("chunk_length", 30),
             "mel_sampling_rate": raw.get("sampling_rate", 16000),
         }
+
+    def get_bundle_config_overrides(self, config: ModelConfig) -> dict | None:
+        return whisper_decoder_prompt_metadata(config) or None
 
     def build_extra_engines(
         self,

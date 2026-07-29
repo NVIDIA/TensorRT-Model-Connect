@@ -813,6 +813,7 @@ class HfTransformersReference:
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
         torch_dtype_expr = _torch_dtype_for_case(case)
+        max_new_tokens = int(case.inputs.get("max_new_tokens", 100))
 
         script = textwrap.dedent(f"""\
             import json, torch, numpy as np
@@ -823,6 +824,7 @@ class HfTransformersReference:
             audio_path = {audio_path!r}
             trust_remote_code = {trust_remote_code!r}
             output_path = {output_path!r}
+            max_new_tokens = {max_new_tokens}
 
             processor = AutoProcessor.from_pretrained(
                 hf_id, trust_remote_code=trust_remote_code)
@@ -853,9 +855,10 @@ class HfTransformersReference:
             inputs = {{k: v.to(model_dtype) if v.is_floating_point() else v
                        for k, v in inputs.items()}}
             with torch.no_grad():
-                generated_ids = model.generate(**inputs, max_new_tokens=100)
+                generated_ids = model.generate(
+                    **inputs, max_new_tokens=max_new_tokens)
             text = processor.batch_decode(
-                generated_ids, skip_special_tokens=True)[0]
+                generated_ids, skip_special_tokens=True)[0].strip()
 
             result = {{"text": text}}
             with open(output_path, "w") as f:
