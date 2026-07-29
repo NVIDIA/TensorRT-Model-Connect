@@ -93,6 +93,43 @@ void canonicalize_reranking_separator_tokens(const ITokenizer& tokenizer,
     ids = std::move(canonical);
 }
 
+void validate_reranking_score_output(const EmbeddingResult& result,
+                                     const std::vector<int64_t>& shape, std::size_t token_count) {
+    if (result.data.empty())
+        throw std::runtime_error("EncoderPipeline: reranking engine produced no score output");
+
+    const auto element_count = checked_element_count(shape);
+    if (element_count != result.data.size())
+        throw std::runtime_error("EncoderPipeline: reranking score shape does not match its data");
+    if (element_count == 1)
+        return;
+    if (shape.size() < 2 || shape.back() != 1)
+        throw std::runtime_error(
+            "EncoderPipeline: reranking score output must have one value per position");
+    if (token_count > element_count)
+        throw std::runtime_error(
+            "EncoderPipeline: reranking score output is shorter than the token sequence");
+}
+
+float average_prefix(const std::vector<float>& values, std::size_t count) {
+    double sum = 0.0;
+    for (std::size_t i = 0; i < count; ++i)
+        sum += values[i];
+    return static_cast<float>(sum / static_cast<double>(count));
+}
+
+float select_reranking_score(const EmbeddingResult& result, const std::vector<int64_t>& shape,
+                             std::size_t token_count, const std::string& pooling) {
+    validate_reranking_score_output(result, shape, token_count);
+    if (result.data.size() == 1)
+        return result.data.front();
+    if (pooling == "avg")
+        return average_prefix(result.data, token_count);
+    if (pooling == "last")
+        return result.data[token_count - 1];
+    throw std::runtime_error("EncoderPipeline: unsupported reranking pooling mode: " + pooling);
+}
+
 } // namespace
 
 // ─── EncoderPipeline ───
@@ -158,43 +195,10 @@ float EncoderPipeline::rerank(const std::string& query, const std::string& docum
         throw std::runtime_error("EncoderPipeline: reranking input produced no tokens");
 
     auto output = encode_ids_with_shape(ids);
-    if (output.result.data.empty())
-        throw std::runtime_error("EncoderPipeline: reranking engine produced no score output");
-
-    const auto element_count = checked_element_count(output.shape);
-    if (element_count != output.result.data.size())
-        throw std::runtime_error("EncoderPipeline: reranking score shape does not match its data");
-
-    // A graph may already reduce the per-position logits to one final score.
-    if (element_count == 1)
-        return output.result.data.front();
-
     // Eagle's score head emits one scalar per sequence position as
     // [..., sequence, 1]. Apply the pooling contract recorded by the pinned
     // checkpoint to the valid input positions.
-    if (output.shape.size() < 2 || output.shape.back() != 1)
-        throw std::runtime_error(
-            "EncoderPipeline: reranking score output must have one value per position");
-
-    const auto positions = element_count / static_cast<std::size_t>(output.shape.back());
-    if (ids.size() > positions)
-        throw std::runtime_error(
-            "EncoderPipeline: reranking score output is shorter than the token sequence");
-
-    if (reranking_pooling_ == "avg") {
-        double sum = 0.0;
-        for (std::size_t i = 0; i < ids.size(); ++i)
-            sum += output.result.data[i];
-        return static_cast<float>(sum / static_cast<double>(ids.size()));
-    }
-    if (reranking_pooling_ == "last") {
-        const auto score_index = ids.size() - 1;
-        if (score_index >= output.result.data.size())
-            throw std::runtime_error("EncoderPipeline: reranking score index is out of bounds");
-        return output.result.data[score_index];
-    }
-    throw std::runtime_error("EncoderPipeline: unsupported reranking pooling mode: " +
-                             reranking_pooling_);
+    return select_reranking_score(output.result, output.shape, ids.size(), reranking_pooling_);
 }
 
 EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_ids) {
