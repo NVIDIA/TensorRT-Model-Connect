@@ -121,6 +121,21 @@ LEGAL_OR_DOC_EXACT = frozenset(
 )
 LEGAL_OR_DOC_PREFIXES = ("website/",)
 
+# Non-code inputs consumed directly by the CPU-only builder contract suite.
+# Classify these before the blanket documentation rule so a documentation
+# rewrite cannot skip the tests that define its normative contract.
+BUILDER_UNIT_TEST_INPUT_EXACT = frozenset(
+    {
+        "website/docs/wiki/Agentic-Quantization-Core-Minimal-Plan.md",
+    }
+)
+# Inputs consumed by the complete source-only tools/CI contract suite.
+FULL_UNIT_TEST_INPUT_EXACT = frozenset(
+    {
+        "tools/ci/README.md",
+    }
+)
+
 # These shared surfaces are covered by CPU/C++ unit tests and do not change a
 # model implementation or its isolated E2E contract. Model-root ownership is
 # resolved before this list, so model-owned C++ tests remain model impact.
@@ -621,6 +636,10 @@ def _classify_path(path: str, catalog: OwnershipCatalog) -> tuple[str, str | Non
         return "model", owner
     if under_model_root:
         raise ModelCIError(f"path is under a model root but has no MODEL.toml owner: {path}")
+    if path in BUILDER_UNIT_TEST_INPUT_EXACT:
+        return "unit_builder", None
+    if path in FULL_UNIT_TEST_INPUT_EXACT:
+        return "unit_tests", None
     if _is_legal_or_docs(path):
         return "legal_docs", None
     if path in MODEL_COUPLED_TEST_EXACT:
@@ -957,6 +976,8 @@ def calculate_impact(
             if owner is not None:
                 item["model"] = owner
                 affected.add(owner)
+                unit_scope = _merge_unit_scope(unit_scope, "builder")
+            elif kind == "unit_builder":
                 unit_scope = _merge_unit_scope(unit_scope, "builder")
             elif kind == "unit_cli":
                 unit_scope = _merge_unit_scope(unit_scope, "cli")

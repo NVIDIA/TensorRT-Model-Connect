@@ -578,6 +578,43 @@ def test_impact_treats_legal_and_docs_as_no_model_change(tmp_path: Path) -> None
     assert result["unit_scope"] == "none"
 
 
+@pytest.mark.parametrize(
+    ("path", "expected_scope", "expected_kind"),
+    (
+        (
+            "website/docs/wiki/Agentic-Quantization-Core-Minimal-Plan.md",
+            "builder",
+            "unit_builder",
+        ),
+        ("tools/ci/README.md", "all", "unit_tests"),
+    ),
+)
+def test_impact_runs_units_for_test_consumed_docs(
+    tmp_path: Path,
+    path: str,
+    expected_scope: str,
+    expected_kind: str,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(repo, path, "# Updated test-consumed documentation\n")
+    head = _commit(repo, "update test-consumed documentation")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "unit"
+    assert result["affected_models"] == []
+    assert result["direct_models"] == []
+    assert result["fallback_models"] == []
+    assert result["matrix"] == {"include": []}
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == expected_scope
+    assert {
+        classification["kind"]
+        for change in result["changes"]
+        for classification in change["classifications"]
+    } == {expected_kind}
+
+
 def test_impact_treats_platform_change_as_fixed_fallback(tmp_path: Path) -> None:
     repo, base = _make_repo(tmp_path)
     _write(repo, "src/runtime/core/core.cpp", "// changed platform core\n")
