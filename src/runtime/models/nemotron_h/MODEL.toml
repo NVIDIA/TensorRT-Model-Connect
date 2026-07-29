@@ -9,6 +9,7 @@ runtime_strategies = ["nemotron_h_hybrid_mamba_attention"]
 decoder_debug = ["nemotron_h_hybrid_mamba_attention"]
 
 runtime_tests = [
+  "test_nemotron_h_backend_cuda_graph|test_nemotron_h_backend_cuda_graph.cpp|trtmc_backend_trt|_|REQUIRES_TRT,REQUIRES_GPU",
   "test_nemotron_h_recurrent_output_initializers|test_nemotron_h_recurrent_output_initializers.cpp|_|_|_",
   "test_nemotron_h_recurrent_pipeline|test_nemotron_h_recurrent_pipeline.cpp|trtmc_model_nemotron_h,trtmc_backend_trt|_|REQUIRES_TRT",
 ]
