@@ -117,6 +117,7 @@ def _make_repo(
         'test = ["pytest>=7"]\n',
     )
     _write(repo, "CMakeLists.txt", "# platform build\n")
+    _write(repo, "examples/byok/identity_copy_kernel.cpp", "// BYOK example\n")
     _write(repo, "src/runtime/core/core.cpp", "// platform core\n")
     _write(repo, "README.md", "# Documentation\n")
     _write(repo, "tests/__init__.py", "")
@@ -1048,6 +1049,7 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
     assert not (output / "tests/cpp/models/model_b").exists()
     assert (output / "tests/cpp/models/model_a/test_model_a.cpp").is_file()
     assert (output / "src/runtime/core/core.cpp").is_file()
+    assert (output / "examples/byok/identity_copy_kernel.cpp").is_file()
     assert (output / "python/tensorrt_model_connect/families/__init__.py").is_file()
     assert (output / "tests/__init__.py").is_file()
     assert (output / "tests/builder/__init__.py").is_file()

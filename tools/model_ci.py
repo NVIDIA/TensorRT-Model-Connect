@@ -58,6 +58,7 @@ PLATFORM_PROJECTION_EXACT = frozenset(
         "_pyproject_backend.py",
         "conanfile.py",
         "conftest.py",
+        "examples/byok/identity_copy_kernel.cpp",
         "pyproject.toml",
         "ruff.toml",
         "scripts/generate_e2e_report.py",
