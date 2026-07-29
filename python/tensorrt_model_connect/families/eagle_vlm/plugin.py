@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     pass
 
 
-_RERANKER_FP32_TAIL_LAYERS = 8
+_RERANKER_FP32_TAIL_LAYERS = 16
 
 
 def _is_reranker(config: ModelConfig) -> bool:

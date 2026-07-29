@@ -100,6 +100,7 @@ def test_eagle_vlm_fp16_reranker_keeps_bounded_tail_in_fp32(
     trt_compat = importlib.import_module("tensorrt_model_connect.trt_compat")
     trt = trt_compat.get_trt()
     original_apply_norm = graph_blocks.apply_norm
+    assert plugin_module._RERANKER_FP32_TAIL_LAYERS == 16
     num_layers = plugin_module._RERANKER_FP32_TAIL_LAYERS + 2
 
     class FinalNormCaptured(RuntimeError):
@@ -182,7 +183,7 @@ def test_eagle_vlm_fp16_reranker_keeps_bounded_tail_in_fp32(
         "eps_dtype": trt.float32,
         "dtype": np.float32,
     }
-    assert calls == [fp16_call] * 4 + [fp32_call] * 17
+    assert calls == [fp16_call] * 4 + [fp32_call] * 33
 
 
 def test_eagle_vlm_tp_shards_text_backbone_weights() -> None:
