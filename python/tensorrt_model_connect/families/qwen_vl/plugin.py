@@ -315,6 +315,26 @@ class QwenVLPlugin:
                 if fixed_h != fixed_w else "merge_group_chw"
             )
 
+        if _is_qwen3_vl(config):
+            # Qwen3-VL's checkpoint chat template has no default system turn.
+            # Keep the image placeholder before user text exactly as rendered
+            # by AutoProcessor so visual positions and text tokens agree.
+            prompt_template = (
+                "<|im_start|>user\n"
+                "<|vision_start|>{image_pads}<|vision_end|>{prompt}<|im_end|>\n"
+                "<|im_start|>assistant\n"
+            )
+        else:
+            # Qwen2.5-VL includes the default system turn, then places the
+            # image placeholder before the user text.
+            prompt_template = (
+                "<|im_start|>system\n"
+                "You are a helpful assistant.<|im_end|>\n"
+                "<|im_start|>user\n"
+                "<|vision_start|>{image_pads}<|vision_end|>{prompt}<|im_end|>\n"
+                "<|im_start|>assistant\n"
+            )
+
         vl_cfg = {
             "image_token_id": 151655,
             "fixed_image_size": _DEFAULT_FIXED_IMAGE_SIZE,
@@ -324,13 +344,7 @@ class QwenVLPlugin:
             "dynamic_image_resolution": dynamic_resolution,
             "vision_output_dim": config.hidden_size,
             "preprocessor_type": preproc,
-            "vl_prompt_template": (
-                "<|im_start|>system\n"
-                "You are a helpful assistant.<|im_end|>\n"
-                "<|im_start|>user\n"
-                "{prompt}<|vision_start|>{image_pads}<|vision_end|><|im_end|>\n"
-                "<|im_start|>assistant\n"
-            ),
+            "vl_prompt_template": prompt_template,
             "image_token_str": "<|image_pad|>",
         }
 

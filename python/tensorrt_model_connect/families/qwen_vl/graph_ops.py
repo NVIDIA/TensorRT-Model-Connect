@@ -1215,7 +1215,6 @@ def add_apply_mrope_native(
     interleaved: bool = False,
     mrope_interleaved: bool = False,
 ) -> trt.ITensor:
-    """Apply Qwen2.5-VL temporal/height/width RoPE to one token."""
     rotary_embedding_dim = validate_native_rope_dim(rotary_embedding_dim)
     sections = _validate_mrope_sections(
         mrope_section, rotary_embedding_dim, mrope_interleaved)
