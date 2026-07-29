@@ -1689,17 +1689,18 @@ class TestUnitTiers:
     @pytest.mark.parametrize(
         "path",
         [
-            "tools/task_eval.py",
+            "tools/validation/engine.py",
             "tools/elf_hf_reference.py",
-            "tools/prepare_elf_task_eval_datasets.py",
-            "tools/prepare_media_task_eval_datasets.py",
+            "tools/prepare_elf_validation_datasets.py",
+            "tools/prepare_media_validation_datasets.py",
+            "tools/prepare_vision_validation_datasets.py",
         ],
     )
-    def test_task_eval_tool_triggers_tools_tier(self, imap, path):
-        """task_eval tool edits run tools-tier tests without E2E."""
+    def test_validation_engine_tool_triggers_tools_tier(self, imap, path):
+        """validation tool edits run tools-tier tests without E2E."""
         match = test_impact.classify_file(path, imap)
 
-        assert match.rule == "task_eval_tool"
+        assert match.rule == "validation_engine_tool"
         assert match.models == []
         assert match.unit_tiers == ["tools"]
         assert match.rebuild_cpp is False
@@ -1707,6 +1708,10 @@ class TestUnitTiers:
     @pytest.mark.parametrize(
         "path",
         [
+            "tools/validation/README.md",
+            "tools/validation/__init__.py",
+            "tools/validation/artifacts.py",
+            "tools/validation/catalog.py",
             "tools/reference/transformers_text.py",
             "tools/reference/transformers_encoder.py",
             "tools/reference/transformers_vlm.py",
@@ -1728,11 +1733,11 @@ class TestUnitTiers:
         assert match.unit_tiers == ["tools"]
         assert match.rebuild_cpp is False
 
-    def test_task_eval_suite_config_triggers_tools_tier(self, imap):
-        """task_eval suite config edits run tools-tier tests without E2E."""
-        match = test_impact.classify_file("tests/task_eval/validation_suites.yaml", imap)
+    def test_validation_suite_config_triggers_tools_tier(self, imap):
+        """validation suite config edits run tools-tier tests without E2E."""
+        match = test_impact.classify_file("tests/validation/workloads.yaml", imap)
 
-        assert match.rule == "task_eval_config"
+        assert match.rule == "validation_workload_config"
         assert match.models == []
         assert match.unit_tiers == ["tools"]
         assert match.rebuild_cpp is False
@@ -2043,7 +2048,7 @@ class CustomTorchReference:
     def test_diff_refinement_rules_are_named_in_dispatch_order(self, imap):
         """Diff refinement dispatch keeps named rules in reviewable order."""
         assert [rule.name for rule in test_impact.DIFF_REFINEMENT_RULES] == [
-            "pyproject_task_eval_optional_dependencies",
+            "pyproject_validation_optional_dependencies",
             "harness_shared_fp8_scales",
             "e2e_timing_estimates_known_models",
             "runtime_strategy_matrix_known_strategies",
@@ -2230,20 +2235,20 @@ diff --git a/tests/e2e_harness/manifest_loader.py b/tests/e2e_harness/manifest_l
         assert refined_loader.rule == "harness_shared_known_identifiers"
         assert refined_loader.models == expected
 
-    def test_task_eval_optional_dependencies_do_not_select_e2e_models(
+    def test_validation_optional_dependencies_do_not_select_e2e_models(
         self,
         imap,
         mock_repo,
         monkeypatch,
     ):
-        """A task-eval-only optional extra must not trigger every model E2E."""
+        """A validation-only optional extra must not trigger every model E2E."""
         diff = """
 diff --git a/pyproject.toml b/pyproject.toml
 index 8ab88813..8db12930 100644
 --- a/pyproject.toml
 +++ b/pyproject.toml
 @@ -36,0 +37 @@ clip = ["open-clip-torch>=2.20", "Pillow>=9.0"]
-+task-eval = ["rouge-score>=0.1.2", "sacrebleu>=2.4"]
++validation = ["rouge-score>=0.1.2", "sacrebleu>=2.4"]
 """
         monkeypatch.setattr(
             test_impact,
@@ -2266,19 +2271,19 @@ index 8ab88813..8db12930 100644
         assert result.matched_rules == [
             {
                 "file": "pyproject.toml",
-                "rule": "pyproject_task_eval_optional_dependencies",
+                "rule": "pyproject_validation_optional_dependencies",
                 "models": [],
             }
         ]
 
-    def test_task_eval_extra_mixed_with_default_dependency_stays_conservative(self, imap):
-        """Unrelated pyproject changes must not inherit the task-eval exemption."""
+    def test_validation_extra_mixed_with_default_dependency_stays_conservative(self, imap):
+        """Unrelated pyproject changes must not inherit the validation exemption."""
         diff = """
 diff --git a/pyproject.toml b/pyproject.toml
 @@ -20,0 +21 @@ dependencies = [
 +    "new-runtime-dependency>=1",
 @@ -36,0 +38 @@ clip = ["open-clip-torch>=2.20", "Pillow>=9.0"]
-+task-eval = ["rouge-score>=0.1.2", "sacrebleu>=2.4"]
++validation = ["rouge-score>=0.1.2", "sacrebleu>=2.4"]
 """
         broad = test_impact.classify_file("pyproject.toml", imap)
         refined = test_impact.maybe_refine_match_with_diff("pyproject.toml", broad, diff, imap)

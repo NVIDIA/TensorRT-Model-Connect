@@ -18,19 +18,20 @@ from tools import trtmc_reference
 from tools import trtmc_validate
 
 
-def test_validation_entrypoints_do_not_import_legacy_task_eval():
+def test_validation_entrypoints_use_narrow_engine_boundaries():
     for entrypoint in ("trtmc_validate.py", "trtmc_reference.py"):
         source = (trtmc_validate.REPO_ROOT / "tools" / entrypoint).read_text(
             encoding="utf-8"
         )
-        assert "import task_eval" not in source
-        assert "from tools import task_eval" not in source
+        assert "validation import engine" not in source
 
 
 def test_model_workload_catalog_covers_every_ready_model():
     catalog = trtmc_validate.load_catalog()
     suites = validation_catalog.load_suites()
-    task_models = trtmc_validate._task_eval_models(trtmc_validate.DEFAULT_MODELS)
+    task_models = trtmc_validate._validation_models(
+        trtmc_validate.DEFAULT_MODELS
+    )
     ready_models = trtmc_validate.ready_model_names()
 
     trtmc_validate.audit_catalog(
@@ -1339,7 +1340,7 @@ def test_write_report_does_not_render_validation_wrapper(tmp_path):
                 "reproduce": {
                     "hf": ["python hf.py --prompt '<hello>'"],
                     "trtmc": [],
-                    "validation": "python tools/task_eval.py eval --model model-a",
+                    "validation": "python tools/validation/engine.py eval --model model-a",
                 },
             }
         ),
@@ -1351,7 +1352,7 @@ def test_write_report_does_not_render_validation_wrapper(tmp_path):
     document = html_path.read_text(encoding="utf-8")
     assert "python hf.py --prompt &#x27;&lt;hello&gt;&#x27;" in document
     assert "Not reached; see comparison.json." in document
-    assert "task_eval.py" not in document
+    assert "validation/engine.py" not in document
     migrated = json.loads((case_dir / "comparison.json").read_text(encoding="utf-8"))
     assert "validation" not in migrated["reproduce"]
     assert set(migrated["reproduce"]) == {
@@ -1367,7 +1368,7 @@ def test_write_report_does_not_render_validation_wrapper(tmp_path):
 
 def test_write_report_recovers_json_logged_runner_command(tmp_path):
     case_dir = tmp_path / "model-a" / "workload-a"
-    work_dir = case_dir / "task-eval"
+    work_dir = case_dir / "validation"
     work_dir.mkdir(parents=True)
     (work_dir / "trtfb_run.log").write_text(
         json.dumps(
@@ -1608,7 +1609,7 @@ def test_report_adds_failed_sample_results_and_native_commands(tmp_path):
     assert "Reference vanilla command" in rendered
     assert "TRTMC vanilla command" in rendered
     for wrapper in (
-        "task_eval.py",
+        "validation/engine.py",
         "trtmc_compare.py",
         "trtmc_reference.py",
         "trtmc_validate.py",
@@ -1654,7 +1655,7 @@ def test_commands_from_logs_use_native_trtmc_jsonl(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (work_dir / "trtfb_run.log").write_text(
-        "$ python task_eval.py run-trtfb\n",
+        "$ python validation/engine.py run-trtfb\n",
         encoding="utf-8",
     )
     commands = (
@@ -1844,7 +1845,7 @@ def test_failed_sample_uses_recorded_trtmc_command_and_copies_media(tmp_path):
     )
     assert "<img " in rendered
     assert "<audio " in rendered
-    assert "task_eval.py" not in rendered
+    assert "validation/engine.py" not in rendered
 
 
 def test_failed_encoder_pair_expands_to_both_reproducible_samples():
@@ -2088,7 +2089,7 @@ def test_comparison_command_uses_validation_entrypoint(tmp_path):
         "/profiles/python",
         str(trtmc_validate.REPO_ROOT / "tools" / "trtmc_compare.py"),
     ]
-    assert "task_eval.py" not in " ".join(command)
+    assert "validation/engine.py" not in " ".join(command)
     assert command[command.index("--work-root") + 1] == str(
         tmp_path / "case" / "validation"
     )
@@ -2219,7 +2220,7 @@ def test_compare_entrypoint_forwards_to_validation_backend(monkeypatch):
         captured.extend(arguments)
         return 7
 
-    monkeypatch.setattr(trtmc_compare.task_eval, "main", run)
+    monkeypatch.setattr(trtmc_compare.engine, "main", run)
 
     assert trtmc_compare.main(["--suite", "suite-a"]) == 7
     assert captured == ["eval", "--suite", "suite-a"]

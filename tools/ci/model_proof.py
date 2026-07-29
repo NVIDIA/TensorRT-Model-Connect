@@ -22,7 +22,7 @@ from .context import CiContext
 from .gpu_lease import GpuLease
 from .model_proof_selection import ModelProofSelection, ModelProofSelector
 from .process import CiError
-from .task_eval import TaskEvalDatasetPreparer
+from .validation import ValidationDatasetPreparer
 
 
 CACHE_COPY_PROGRAM = r"""
@@ -300,9 +300,9 @@ class ModelProofRunner:
         ).returncode:
             raise CiError(f"CI image is not present: {image}")
         runtime_model = str(selection.payload["owners"]["runtime"])
-        task_eval_container = self._base_container_name() + "-task-eval-data"
-        self.container_name = task_eval_container
-        task_eval_dir = TaskEvalDatasetPreparer(
+        validation_container = self._base_container_name() + "-validation-data"
+        self.container_name = validation_container
+        validation_dir = ValidationDatasetPreparer(
             self.context,
             self.request.suite,
             runtime_model,
@@ -310,7 +310,7 @@ class ModelProofRunner:
             work,
             self.artifacts_dir,
             image,
-            task_eval_container,
+            validation_container,
             self._job_labels(),
         ).prepare()
         private_hub = self._prepare_hf_cache(projection, work, image, models_file)
@@ -338,7 +338,14 @@ class ModelProofRunner:
         (self.artifacts_dir / "gpu-lease.json").write_text(
             json.dumps(lease_evidence, indent=2) + "\n", encoding="utf-8"
         )
-        self._run_proof_container(projection, work, private_hub, image, selection, task_eval_dir)
+        self._run_proof_container(
+            projection,
+            work,
+            private_hub,
+            image,
+            selection,
+            validation_dir,
+        )
         for name in ("proof.json", "model-proof-report.html"):
             if not (self.artifacts_dir / name).is_file():
                 raise CiError(f"model proof did not emit {name}")
@@ -586,7 +593,7 @@ class ModelProofRunner:
         private_hub: Path,
         image: str,
         selection: ModelProofSelection,
-        task_eval_dir: Path | None,
+        validation_dir: Path | None,
     ) -> None:
         assert self.lease and self.artifacts_dir is not None and self.lease.gpu_id is not None
         name = self._base_container_name()
@@ -603,11 +610,11 @@ class ModelProofRunner:
             "--mount",
             f"type=bind,src={private_hub},dst=/hf-cache/hub",
         ]
-        if task_eval_dir is not None:
+        if validation_dir is not None:
             mounts.extend(
                 [
                     "--mount",
-                    f"type=bind,src={task_eval_dir},dst=/task-eval-data,readonly",
+                    f"type=bind,src={validation_dir},dst=/validation-data,readonly",
                 ]
             )
         command = [

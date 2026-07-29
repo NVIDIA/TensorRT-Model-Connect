@@ -485,7 +485,7 @@ def _load_asr(
     _options: Mapping[str, Any],
 ) -> Session:
     import torch
-    from tools.task_eval import _read_wav_float32, _resample_audio
+    from tools.validation.engine import _read_wav_float32, _resample_audio
 
     audio, sample_rate = _read_wav_float32(str(_asset_path(arguments, request, "audio_path")))
     target_rate = 16_000
@@ -495,7 +495,7 @@ def _load_asr(
 
     if arguments.family in {"canary", "nemotron_speech_streaming"}:
         import nemo.collections.asr as nemo_asr
-        from tools.task_eval import _transcription_text
+        from tools.validation.engine import _transcription_text
 
         model = (
             nemo_asr.models.ASRModel.from_pretrained(arguments.model, map_location="cpu")
@@ -507,7 +507,7 @@ def _load_asr(
         temporary = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         temporary.close()
         atexit.register(Path(temporary.name).unlink, missing_ok=True)
-        from tools.task_eval import _write_wav_pcm16
+        from tools.validation.engine import _write_wav_pcm16
 
         _write_wav_pcm16(Path(temporary.name), audio, target_rate)
 

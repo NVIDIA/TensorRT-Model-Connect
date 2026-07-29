@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prepare the fixed limit-10 media-generation task-eval datasets.
+"""Prepare fixed media-generation validation datasets.
 
 The converters consume official benchmark downloads and write only the small
-runtime slice needed by task-eval. They do not run model inference or benchmark
-judges. Relative asset paths in the output are resolved by ``tools/task_eval.py``.
+runtime slice needed by validation. They do not run model inference or benchmark
+judges. Relative asset paths are resolved by the validation engine.
 """
 
 from __future__ import annotations
@@ -117,12 +117,12 @@ def prepare_vbench(source_info: Path, output_root: Path, limit: int = 10) -> Pat
             }
         )
     if limit < 1 or limit > len(selected):
-        raise ValueError(f"VBench task-eval limit must be in [1, {len(selected)}]")
+        raise ValueError(f"VBench validation limit must be in [1, {len(selected)}]")
     selected = selected[:limit]
     return _write_json(
         output_root / "VBench" / "vbench_t2v_task_eval.json",
         {
-            "dataset": "VBench text-to-video prompt suite (task-eval slice)",
+            "dataset": "VBench text-to-video prompt suite (validation slice)",
             "source": VBENCH_SOURCE,
             "source_info_sha256": _sha256(source_info),
             "license": "Apache-2.0",
@@ -149,7 +149,7 @@ def prepare_gedit_rows(
 ) -> Path:
     """Write a task-diverse English GEdit slice from loaded dataset rows."""
     if limit < 1:
-        raise ValueError("GEdit task-eval limit must be positive")
+        raise ValueError("GEdit validation limit must be positive")
     output_dir.mkdir(parents=True, exist_ok=True)
     image_dir = output_dir / "images"
     image_dir.mkdir(parents=True, exist_ok=True)
@@ -200,7 +200,7 @@ def prepare_gedit_rows(
     return _write_json(
         output_dir / "gedit_bench_task_eval.json",
         {
-            "dataset": "GEdit-Bench English task-diverse task-eval slice",
+            "dataset": "GEdit-Bench English task-diverse validation slice",
             "source": GEDIT_SOURCE,
             "source_revision": GEDIT_REVISION,
             "license": "MIT",
@@ -326,7 +326,7 @@ def _first_intrinsics(matrix: np.ndarray) -> np.ndarray:
 def prepare_sana_wm(source_root: Path, output_root: Path, limit: int = 10) -> Path:
     """Prepare unique balanced scenes across the official 60-second splits."""
     if limit < 1 or limit > len(SANA_WM_ACTIONS):
-        raise ValueError(f"SANA-WM task-eval limit must be in [1, {len(SANA_WM_ACTIONS)}]")
+        raise ValueError(f"SANA-WM validation limit must be in [1, {len(SANA_WM_ACTIONS)}]")
     output_dir = output_root / "SANA-WM-Bench"
     requests: list[dict[str, Any]] = []
     simple_count = (limit + 1) // 2
@@ -390,7 +390,7 @@ def prepare_sana_wm(source_root: Path, output_root: Path, limit: int = 10) -> Pa
     return _write_json(
         output_dir / "sana_wm_task_eval.json",
         {
-            "dataset": "SANA-WM 80-scene benchmark task-eval parity slice",
+            "dataset": "SANA-WM 80-scene benchmark validation parity slice",
             "source": SANA_WM_SOURCE,
             "source_revision": SANA_WM_REVISION,
             "source_manifest_sha256": {

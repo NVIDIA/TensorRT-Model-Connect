@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prepare and evaluate the nightly ETTh1 task suite for eligible models.
+"""Prepare and evaluate the nightly ETTh1 validation suite for eligible models.
 
 Boundary: time-series task parity only; standard model E2E comparison remains mandatory.
 """
@@ -15,8 +15,8 @@ from .context import CiContext
 from .process import CiError
 
 
-class TaskEvalPolicy:
-    """Map runtime plugins to the reviewed nightly task-eval model IDs."""
+class ValidationPolicy:
+    """Map runtime plugins to the reviewed nightly validation model IDs."""
 
     MODELS = {
         "chronos_bolt": ("chronos-bolt-tiny-official",),
@@ -33,7 +33,7 @@ class TaskEvalPolicy:
         return cls.MODELS.get(runtime_model, ()) if suite == "nightly" else ()
 
 
-class TaskEvalDatasetPreparer:
+class ValidationDatasetPreparer:
     """Download and validate ETTh1 before the network-isolated proof starts."""
 
     DATASET = "etth1_time_series_parity/ETTh1.csv"
@@ -61,9 +61,9 @@ class TaskEvalDatasetPreparer:
         self.labels = labels
 
     def prepare(self) -> Path | None:
-        if not TaskEvalPolicy.models(self.suite, self.runtime_model):
+        if not ValidationPolicy.models(self.suite, self.runtime_model):
             return None
-        destination = self.work / "task-eval-data"
+        destination = self.work / "validation-data"
         destination.mkdir(parents=True, exist_ok=True)
         self.context.run(
             ["docker", "rm", "-f", self.container_name], check=False, capture_output=True
@@ -87,7 +87,7 @@ class TaskEvalDatasetPreparer:
             "--mount",
             f"type=bind,src={self.projection},dst=/src,readonly",
             "--mount",
-            f"type=bind,src={destination},dst=/task-eval-data",
+            f"type=bind,src={destination},dst=/validation-data",
             "--tmpfs",
             "/tmp:rw,exec,nosuid,nodev,size=256m",
             "--workdir",
@@ -102,16 +102,18 @@ class TaskEvalDatasetPreparer:
             "PYTHONDONTWRITEBYTECODE=1",
             self.image,
             "/opt/venv/bin/python",
-            "/src/tools/task_eval.py",
+            "/src/tools/validation/engine.py",
             "prepare-ci-dataset",
             "--suite",
             "etth1_time_series_parity",
             "--ci-lane",
             "nightly",
             "--dataset-cache-root",
-            "/task-eval-data",
+            "/validation-data",
         ]
-        with (self.artifacts / "task-eval-dataset.log").open("w", encoding="utf-8") as log:
+        with (self.artifacts / "validation-dataset.log").open(
+            "w", encoding="utf-8"
+        ) as log:
             result = self.context.commands.run(command, check=False, capture_output=True)
             log.write(result.stdout)
             if result.stderr:
@@ -123,25 +125,25 @@ class TaskEvalDatasetPreparer:
         return destination
 
 
-class TaskEvalRunner:
+class ValidationRunner:
     """Run the reviewed ETTh1 parity suite with the already-built model bundle."""
 
     def __init__(self, context: CiContext, suite: str, runtime_model: str):
         self.context = context
-        self.models = TaskEvalPolicy.models(suite, runtime_model)
+        self.models = ValidationPolicy.models(suite, runtime_model)
 
     def run(self) -> bool:
         if not self.models:
             return False
         names = self.context.output(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"])
         if "gb300" not in names.lower():
-            raise CiError("ETTh1 task-eval requires a GB300 GPU")
-        dataset = Path("/task-eval-data/etth1_time_series_parity/ETTh1.csv")
+            raise CiError("ETTh1 validation requires a GB300 GPU")
+        dataset = Path("/validation-data/etth1_time_series_parity/ETTh1.csv")
         if not dataset.is_file():
-            raise CiError("verified ETTh1 task-eval dataset is missing")
+            raise CiError("verified ETTh1 validation dataset is missing")
         command: list[str | Path] = [
             self.context.env.get("TRTMC_HF_PYTHON", "/opt/venv/bin/python"),
-            "/src/tools/task_eval.py",
+            "/src/tools/validation/engine.py",
             "eval",
             "--suite",
             "etth1_time_series_parity",
@@ -150,11 +152,11 @@ class TaskEvalRunner:
             "--dataset",
             dataset,
             "--dataset-cache-root",
-            "/work/task-eval-data",
+            "/work/validation-data",
             "--work-root",
-            "/work/task-eval",
+            "/work/validation",
             "--artifact-dir",
-            "/artifacts/task-eval",
+            "/artifacts/validation",
             "--engine-dir",
             "/work/engines",
             "--model-plugin-dir",

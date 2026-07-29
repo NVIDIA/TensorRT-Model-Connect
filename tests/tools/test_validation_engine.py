@@ -20,8 +20,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from tools import prepare_media_task_eval_datasets as prepare_media
-from tools import task_eval
+from tools import prepare_media_validation_datasets as prepare_media
+from tools.validation import engine as validation_engine
 
 
 def _write_mmlu(path: Path) -> None:
@@ -208,7 +208,7 @@ def _write_time_series_csv(path: Path, row_count: int = 40) -> None:
 
 
 def test_default_suites_include_etth1_time_series_parity() -> None:
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "etth1_time_series_parity")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "etth1_time_series_parity")
 
     assert suite["dataset"]["kind"] == "time_series_csv"
     assert suite["dataset"]["source_revision"] == (
@@ -226,8 +226,8 @@ def test_default_suites_include_etth1_time_series_parity() -> None:
         "patchtst-granite-official",
         "timesfm-2.0-500m-official",
     ]
-    models = task_eval.load_manifest_records()
-    plan = task_eval.build_plan([suite], models)
+    models = validation_engine.load_manifest_records()
+    plan = validation_engine.build_plan([suite], models)
     assert {row["model"] for row in plan if row["selected"]} == set(suite["default_model_names"])
     assert suite["ci"]["eligible"] is True
     assert suite["ci"]["lane"] == "nightly"
@@ -257,12 +257,12 @@ def test_prepare_time_series_csv_dataset_uses_time_major_windows(tmp_path: Path)
         "scoring": {"scorer": "time_series_parity"},
     }
 
-    task_eval.prepare_time_series_csv_dataset(
+    validation_engine.prepare_time_series_csv_dataset(
         dataset_path=dataset_path,
         work_dir=work_dir,
         suite=suite,
         limit=2,
-        task_eval_config={
+        validation_config={
             "time_series": {
                 "input_columns": ["A", "B"],
                 "target_columns": ["B"],
@@ -276,7 +276,7 @@ def test_prepare_time_series_csv_dataset_uses_time_major_windows(tmp_path: Path)
         },
     )
 
-    prompts = task_eval.load_jsonl(work_dir / "prompts.jsonl")
+    prompts = validation_engine.load_jsonl(work_dir / "prompts.jsonl")
     answers = json.loads((work_dir / "answers.json").read_text(encoding="utf-8"))
     manifest = json.loads((work_dir / "manifest.json").read_text(encoding="utf-8"))
     assert len(prompts) == len(answers["requests"]) == 2
@@ -293,7 +293,7 @@ def test_prepare_time_series_csv_dataset_uses_time_major_windows(tmp_path: Path)
 def test_time_series_case_replaces_manifest_probe_inputs() -> None:
     template = SimpleNamespace(name="template", inputs={"field_input": [999], "stale": True})
 
-    case = task_eval._time_series_case_for_request(
+    case = validation_engine._time_series_case_for_request(
         template,
         {
             "sample_id": "etth1_000001",
@@ -343,11 +343,11 @@ def test_time_series_trtfb_reuses_model_runner_and_writes_run_log(
             )
 
     monkeypatch.setattr(
-        task_eval,
-        "_load_time_series_task_eval_plugins",
+        validation_engine,
+        "_load_time_series_validation_plugins",
         lambda _work_dir: (template, object(), FakeRunner()),
     )
-    task_eval.run_time_series_trtfb(
+    validation_engine.run_time_series_trtfb(
         SimpleNamespace(
             work_dir=str(work_dir),
             raw_output="",
@@ -363,7 +363,7 @@ def test_time_series_trtfb_reuses_model_runner_and_writes_run_log(
     predictions = json.loads(
         (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
     )
-    log_row = task_eval.load_jsonl(work_dir / "trtfb_run.log")[0]
+    log_row = validation_engine.load_jsonl(work_dir / "trtfb_run.log")[0]
     assert captured_inputs == [{"field_input": [1.0, 2.0, 3.0]}]
     assert predictions["responses"][0]["output_values"] == [1.5, 2.5]
     assert log_row["sample_id"] == "etth1_011520"
@@ -384,7 +384,7 @@ def test_time_series_parity_requires_every_sample_to_pass() -> None:
         ]
     }
 
-    summary = task_eval.compare_time_series_prediction_sets(
+    summary = validation_engine.compare_time_series_prediction_sets(
         hf,
         trtfb,
         gates={
@@ -402,8 +402,8 @@ def test_time_series_parity_requires_every_sample_to_pass() -> None:
 
 
 def test_default_suites_include_ocrbench_v2_unified() -> None:
-    suites = task_eval.load_suites()
-    suite = task_eval.suite_by_id(suites, "ocrbench_v2_unified")
+    suites = validation_engine.load_suites()
+    suite = validation_engine.suite_by_id(suites, "ocrbench_v2_unified")
 
     assert suite["dataset"]["kind"] == "vlm_unified_json"
     assert suite["scoring"]["scorer"] == "ocrbench_v2"
@@ -412,8 +412,8 @@ def test_default_suites_include_ocrbench_v2_unified() -> None:
 
 
 def test_default_suites_include_librispeech_clean_asr() -> None:
-    suites = task_eval.load_suites()
-    suite = task_eval.suite_by_id(suites, "librispeech_clean_asr")
+    suites = validation_engine.load_suites()
+    suite = validation_engine.suite_by_id(suites, "librispeech_clean_asr")
 
     assert suite["dataset"]["kind"] == "asr_chat_json"
     assert suite["scoring"]["scorer"] == "asr_transcript"
@@ -425,7 +425,7 @@ def test_default_suites_include_librispeech_clean_asr() -> None:
 
 
 def test_default_suites_do_not_split_librispeech_asr_by_family() -> None:
-    suite_ids = {suite["id"] for suite in task_eval.load_suites()}
+    suite_ids = {suite["id"] for suite in validation_engine.load_suites()}
 
     assert "librispeech_clean_asr" in suite_ids
     assert "librispeech_clean_asr_whisper" not in suite_ids
@@ -433,7 +433,7 @@ def test_default_suites_do_not_split_librispeech_asr_by_family() -> None:
 
 
 def test_default_suites_include_seedtts_tts_intelligibility() -> None:
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "seedtts_en_tts_intelligibility")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "seedtts_en_tts_intelligibility")
 
     assert suite["dataset"]["kind"] == "seedtts_json"
     assert suite["scoring"]["scorer"] == "tts_intelligibility"
@@ -445,8 +445,8 @@ def test_default_suites_include_seedtts_tts_intelligibility() -> None:
 
 
 def test_default_suites_include_librispeech_clean_asr_streaming() -> None:
-    suites = task_eval.load_suites()
-    suite = task_eval.suite_by_id(suites, "librispeech_clean_asr_streaming")
+    suites = validation_engine.load_suites()
+    suite = validation_engine.suite_by_id(suites, "librispeech_clean_asr_streaming")
 
     assert suite["dataset"]["kind"] == "asr_chat_json"
     assert suite["scoring"]["scorer"] == "asr_transcript"
@@ -460,22 +460,22 @@ def test_default_suites_include_librispeech_clean_asr_streaming() -> None:
     assert suite["selectors"]["families"] == ["nemotron_speech_streaming"]
     model = next(
         model
-        for model in task_eval.load_manifest_records()
+        for model in validation_engine.load_manifest_records()
         if model["name"] == "nemotron-3.5-asr-streaming-0.6b"
     )
-    resolved = task_eval.resolve_suite_for_model(suite, model)
+    resolved = validation_engine.resolve_suite_for_model(suite, model)
     assert resolved["generation"]["language"] == "en-US"
     assert resolved["generation"]["streaming"] == {
         "enabled": True,
         "chunk_ms": 1120,
         "att_context_size": [56, 13],
     }
-    non_streaming = task_eval.suite_by_id(suites, "librispeech_clean_asr")
+    non_streaming = validation_engine.suite_by_id(suites, "librispeech_clean_asr")
     assert "nemotron_speech_streaming" in non_streaming["selectors"]["exclude_families"]
 
 
 def test_default_suites_include_text_generation_gap_models() -> None:
-    suites = task_eval.load_suites()
+    suites = validation_engine.load_suites()
     expected = {
         "humaneval_code_continuation_parity": ["codegen-350m", "starcoder2-3b"],
         "wikitext103_distilgpt2_continuation_parity": ["distilgpt2"],
@@ -485,7 +485,7 @@ def test_default_suites_include_text_generation_gap_models() -> None:
     }
 
     for suite_id, model_names in expected.items():
-        suite = task_eval.suite_by_id(suites, suite_id)
+        suite = validation_engine.suite_by_id(suites, suite_id)
         assert suite["dataset"]["kind"] == "text_generation_json"
         assert suite["scoring"]["scorer"] == "continuation"
         assert suite["default_model_names"] == model_names
@@ -496,14 +496,14 @@ def test_default_suites_include_text_generation_gap_models() -> None:
         "wmt14_en_de_t5_translation_parity",
         "flores200_en_fr_riva_translation_parity",
     ):
-        assert task_eval.suite_by_id(suites, suite_id)["scoring"]["task_metric"] == (
+        assert validation_engine.suite_by_id(suites, suite_id)["scoring"]["task_metric"] == (
             "sacrebleu"
         )
 
 
 def test_default_suites_include_one_dpg_bench_diffusion_image_suite() -> None:
-    suites = task_eval.load_suites()
-    suite = task_eval.suite_by_id(suites, "dpg_bench_diffusion_image")
+    suites = validation_engine.load_suites()
+    suite = validation_engine.suite_by_id(suites, "dpg_bench_diffusion_image")
 
     assert suite["dataset"]["kind"] == "diffusion_prompt_json"
     assert suite["selectors"]["task_strategies"] == ["diffusion_media_generation"]
@@ -534,9 +534,9 @@ def test_default_suites_include_one_dpg_bench_diffusion_image_suite() -> None:
 
 
 def test_default_suites_include_media_generation_gap_models() -> None:
-    suites = task_eval.load_suites()
+    suites = validation_engine.load_suites()
 
-    video = task_eval.suite_by_id(suites, "vbench_t2v_diffusion_video")
+    video = validation_engine.suite_by_id(suites, "vbench_t2v_diffusion_video")
     assert video["default_model_names"] == [
         "ltx-video-l0",
         "wan21-t2v-1.3b-l0",
@@ -547,19 +547,19 @@ def test_default_suites_include_media_generation_gap_models() -> None:
     assert video["generation"]["use_shared_initial_latents"] is True
     assert video["gates"]["min_trt_hf_image_clip_cosine"] == 0.85
     assert video["gates"]["require_matching_initial_latents"] == 1
-    models = {model["name"]: model for model in task_eval.load_manifest_records()}
-    ltx = task_eval.resolve_suite_for_model(video, models["ltx-video-l0"])
-    wan = task_eval.resolve_suite_for_model(video, models["wan21-t2v-1.3b-l0"])
+    models = {model["name"]: model for model in validation_engine.load_manifest_records()}
+    ltx = validation_engine.resolve_suite_for_model(video, models["ltx-video-l0"])
+    wan = validation_engine.resolve_suite_for_model(video, models["wan21-t2v-1.3b-l0"])
     assert ltx["generation"]["text_max_length"] == 128
     assert wan["generation"]["text_max_length"] == 226
 
-    image_edit = task_eval.suite_by_id(suites, "gedit_bench_image_edit")
+    image_edit = validation_engine.suite_by_id(suites, "gedit_bench_image_edit")
     assert image_edit["default_model_names"] == image_edit["selectors"]["model_names"]
     assert len(image_edit["default_model_names"]) == 1
     assert image_edit["dataset"]["asset_fields"] == ["image"]
     assert image_edit["gates"]["require_matching_initial_latents"] == 1
 
-    world_model = task_eval.suite_by_id(
+    world_model = validation_engine.suite_by_id(
         suites, "sana_wm_benchmark_diffusion_video"
     )
     assert world_model["default_model_names"] == ["sana-wm-bidirectional"]
@@ -569,31 +569,31 @@ def test_default_suites_include_media_generation_gap_models() -> None:
         "camera_intrinsics_file",
     ]
 
-    models = task_eval.load_manifest_records()
+    models = validation_engine.load_manifest_records()
     for suite in (video, image_edit, world_model):
-        selected = task_eval.selected_models_for_suite(
+        selected = validation_engine.selected_models_for_suite(
             suite, models, single_device_only=True
         )
         assert [model["name"] for model in selected] == suite["default_model_names"]
 
 
 def test_default_suites_include_model_aligned_vision_tasks() -> None:
-    suites = task_eval.load_suites()
+    suites = validation_engine.load_suites()
 
-    classification = task_eval.suite_by_id(suites, "imagenette_image_classification")
+    classification = validation_engine.suite_by_id(suites, "imagenette_image_classification")
     assert classification["dataset"]["kind"] == "image_classification_json"
     assert classification["scoring"]["task_metric"] == "top1_accuracy"
     assert classification["default_model_names"] == [
         "timm-vit-base-p16-224-augreg-in21k-ft-in1k"
     ]
 
-    semantic = task_eval.suite_by_id(suites, "ade20k_semantic_segmentation")
+    semantic = validation_engine.suite_by_id(suites, "ade20k_semantic_segmentation")
     assert semantic["dataset"]["kind"] == "semantic_segmentation_json"
     assert semantic["dataset"]["num_classes"] == 150
     assert semantic["scoring"]["task_metric"] == "mean_iou"
     assert semantic["default_model_names"] == ["segformer-b0-ade"]
 
-    prompted = task_eval.suite_by_id(suites, "coco2017_prompted_segmentation")
+    prompted = validation_engine.suite_by_id(suites, "coco2017_prompted_segmentation")
     assert prompted["dataset"]["kind"] == "prompted_segmentation_json"
     assert prompted["default_model_names"] == ["sam-vit-base", "sam3"]
     assert prompted["model_overrides"]["by_family"]["sam"]["prompt_mode"] == "point"
@@ -601,9 +601,9 @@ def test_default_suites_include_model_aligned_vision_tasks() -> None:
 
 
 def test_default_suites_include_scifact_reranking_parity() -> None:
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "beir_scifact_reranking")
-    selected = task_eval.selected_models_for_suite(
-        suite, task_eval.load_manifest_records(), single_device_only=True
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "beir_scifact_reranking")
+    selected = validation_engine.selected_models_for_suite(
+        suite, validation_engine.load_manifest_records(), single_device_only=True
     )
 
     assert suite["dataset"]["kind"] == "reranking_json"
@@ -633,16 +633,16 @@ def test_prepare_reranking_dataset_preserves_query_documents_and_gold(
         ),
         encoding="utf-8",
     )
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "beir_scifact_reranking")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "beir_scifact_reranking")
 
-    outputs = task_eval.prepare_reranking_dataset(
+    outputs = validation_engine.prepare_reranking_dataset(
         dataset_path=dataset,
         work_dir=tmp_path / "work",
         suite=suite,
         limit=1,
     )
 
-    prompts = task_eval.load_jsonl(outputs["prompts"])
+    prompts = validation_engine.load_jsonl(outputs["prompts"])
     answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
     assert prompts[0]["query"] == "Does the evidence support the claim?"
     assert prompts[0]["documents"] == ["relevant evidence", "distractor evidence"]
@@ -673,7 +673,7 @@ def test_reranking_parity_records_each_low_agreement_sample() -> None:
         ]
     }
 
-    summary = task_eval.compare_reranking_prediction_sets(
+    summary = validation_engine.compare_reranking_prediction_sets(
         hf,
         trtfb,
         answers,
@@ -714,12 +714,12 @@ def test_prepare_vision_datasets_resolves_model_specific_assets(tmp_path: Path) 
                 "label_name": "English springer",
                 "synset": "n02102040",
             },
-            task_eval.prepare_image_classification_dataset,
+            validation_engine.prepare_image_classification_dataset,
         ),
         (
             "ade20k_semantic_segmentation",
             {"id": "seg-1", "image": image.name, "mask": mask.name, "subset": "validation"},
-            task_eval.prepare_semantic_segmentation_dataset,
+            validation_engine.prepare_semantic_segmentation_dataset,
         ),
         (
             "coco2017_prompted_segmentation",
@@ -733,10 +733,10 @@ def test_prepare_vision_datasets_resolves_model_specific_assets(tmp_path: Path) 
                 "text_prompt": "dog",
                 "category": "dog",
             },
-            task_eval.prepare_prompted_segmentation_dataset,
+            validation_engine.prepare_prompted_segmentation_dataset,
         ),
     ]
-    suites = task_eval.load_suites()
+    suites = validation_engine.load_suites()
     for suite_id, request, prepare in cases:
         dataset = tmp_path / f"{suite_id}.json"
         dataset.write_text(
@@ -745,9 +745,9 @@ def test_prepare_vision_datasets_resolves_model_specific_assets(tmp_path: Path) 
         outputs = prepare(
             dataset_path=dataset,
             work_dir=tmp_path / f"work-{suite_id}",
-            suite=task_eval.suite_by_id(suites, suite_id),
+            suite=validation_engine.suite_by_id(suites, suite_id),
         )
-        rows = task_eval.load_jsonl(outputs["prompts"])
+        rows = validation_engine.load_jsonl(outputs["prompts"])
         assert len(rows) == 1
         assert rows[0]["image"] == str(image.resolve())
         manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
@@ -769,7 +769,7 @@ def test_image_classification_parity_separates_accuracy_and_agreement() -> None:
         ]
     }
 
-    summary = task_eval.compare_image_classification_prediction_sets(
+    summary = validation_engine.compare_image_classification_prediction_sets(
         hf, trtfb, answers, gates={"min_top1_agreement": 1.0}
     )
 
@@ -785,7 +785,7 @@ def test_image_classification_runner_forwards_model_plugin_dir(monkeypatch) -> N
     from tests.e2e.models.timm_vit.e2e_plugins.runners import image_classification
     from tests.e2e_harness.contracts import RunContext
 
-    case = task_eval.load_manifest(
+    case = validation_engine.load_manifest(
         Path(
             "tests/e2e/models/timm_vit/manifests/"
             "timm-vit-base-p16-224-augreg-in21k-ft-in1k.json"
@@ -829,7 +829,7 @@ def test_semantic_segmentation_parity_reports_dataset_miou(tmp_path: Path) -> No
         "responses": [{"sample_id": "seg", "class_map_path": str(paths["trtfb"])}]
     }
 
-    summary = task_eval.compare_semantic_segmentation_prediction_sets(
+    summary = validation_engine.compare_semantic_segmentation_prediction_sets(
         hf,
         trtfb,
         answers,
@@ -877,7 +877,7 @@ def test_semantic_segmentation_uses_raw_hf_map_for_backend_parity(
         "responses": [{"sample_id": "seg", "class_map_path": str(paths["trtfb"])}]
     }
 
-    summary = task_eval.compare_semantic_segmentation_prediction_sets(
+    summary = validation_engine.compare_semantic_segmentation_prediction_sets(
         hf,
         trtfb,
         answers,
@@ -927,7 +927,7 @@ def test_prompted_segmentation_uses_family_prompt_semantics(tmp_path: Path) -> N
         ]
     }
 
-    point = task_eval.compare_prompted_segmentation_prediction_sets(
+    point = validation_engine.compare_prompted_segmentation_prediction_sets(
         hf,
         trtfb,
         answers,
@@ -935,7 +935,7 @@ def test_prompted_segmentation_uses_family_prompt_semantics(tmp_path: Path) -> N
         prompt_mode="point",
         ground_truth_mask_field="instance_mask",
     )
-    text = task_eval.compare_prompted_segmentation_prediction_sets(
+    text = validation_engine.compare_prompted_segmentation_prediction_sets(
         hf,
         trtfb,
         answers,
@@ -989,7 +989,7 @@ def test_prompted_segmentation_empty_prediction_is_a_comparison_failure(
         ]
     }
 
-    summary = task_eval.compare_prompted_segmentation_prediction_sets(
+    summary = validation_engine.compare_prompted_segmentation_prediction_sets(
         hf,
         trtfb,
         answers,
@@ -1007,7 +1007,7 @@ def test_prompted_segmentation_empty_prediction_is_a_comparison_failure(
 def test_vision_response_preserves_prompted_segmentation_empty_prediction(
     tmp_path: Path,
 ) -> None:
-    response = task_eval._vision_response(
+    response = validation_engine._vision_response(
         case=SimpleNamespace(name="prompt"),
         source="trtfb",
         output=SimpleNamespace(
@@ -1063,18 +1063,18 @@ def test_vision_response_preserves_prompted_segmentation_empty_prediction(
 def test_vision_result_lines_use_task_specific_metrics(result, expected) -> None:
     result.update({"hf_reused": False, "bundle_built": False, "status": "passed"})
 
-    line = task_eval._format_result_line({"name": "vision-model"}, result)
+    line = validation_engine._format_result_line({"name": "vision-model"}, result)
 
     assert expected in line
 
 
 def test_default_suites_include_encoder_embedding_parity() -> None:
-    suite = task_eval.suite_by_id(
-        task_eval.load_suites(), "stsbenchmark_encoder_embedding_parity"
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(), "stsbenchmark_encoder_embedding_parity"
     )
-    models = task_eval.load_manifest_records()
+    models = validation_engine.load_manifest_records()
 
-    selected = task_eval.selected_models_for_suite(
+    selected = validation_engine.selected_models_for_suite(
         suite, models, single_device_only=True
     )
 
@@ -1092,16 +1092,16 @@ def test_default_suites_include_encoder_embedding_parity() -> None:
     assert len(selected) == 19
     assert {model["name"] for model in selected} == set(suite["default_model_names"])
     models_by_name = {model["name"]: model for model in models}
-    assert task_eval.resolve_suite_for_model(
+    assert validation_engine.resolve_suite_for_model(
         suite, models_by_name["bert-base-uncased"]
     )["gates"]["min_vector_cosine"] == 0.999
-    assert task_eval.resolve_suite_for_model(
+    assert validation_engine.resolve_suite_for_model(
         suite, models_by_name["convbert-base"]
     )["gates"]["min_vector_cosine"] == 0.95
-    assert task_eval.resolve_suite_for_model(
+    assert validation_engine.resolve_suite_for_model(
         suite, models_by_name["fnet-base"]
     )["gates"]["min_vector_cosine"] == 0.6
-    assert task_eval.resolve_suite_for_model(
+    assert validation_engine.resolve_suite_for_model(
         suite, models_by_name["fnet-base"]
     )["gates"]["max_pair_cosine_abs_delta"] == 0.1
 
@@ -1111,11 +1111,11 @@ def test_prepare_stsbenchmark_expands_each_pair_to_shared_sentence_inputs(
 ) -> None:
     dataset = tmp_path / "stsbenchmark_test.jsonl"
     _write_stsbenchmark(dataset)
-    suite = task_eval.suite_by_id(
-        task_eval.load_suites(), "stsbenchmark_encoder_embedding_parity"
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(), "stsbenchmark_encoder_embedding_parity"
     )
 
-    outputs = task_eval.prepare_sts_pair_dataset(
+    outputs = validation_engine.prepare_sts_pair_dataset(
         dataset_path=dataset,
         work_dir=tmp_path / "work",
         suite=suite,
@@ -1124,7 +1124,7 @@ def test_prepare_stsbenchmark_expands_each_pair_to_shared_sentence_inputs(
         sample_seed=None,
     )
 
-    prompts = task_eval.load_jsonl(outputs["prompts"])
+    prompts = validation_engine.load_jsonl(outputs["prompts"])
     answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
     manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
     assert [row["prompt"] for row in prompts] == [
@@ -1151,7 +1151,7 @@ def test_compare_encoder_embedding_predictions_gates_vector_and_pair_parity() ->
         ]
     }
 
-    summary = task_eval.compare_encoder_embedding_prediction_sets(
+    summary = validation_engine.compare_encoder_embedding_prediction_sets(
         hf,
         trt,
         gates={
@@ -1168,23 +1168,23 @@ def test_compare_encoder_embedding_predictions_gates_vector_and_pair_parity() ->
 
 
 def test_encoder_reference_uses_dpr_context_classes() -> None:
-    assert task_eval.encoder_reference_class_names("dpr_context_embed") == (
+    assert validation_engine.encoder_reference_class_names("dpr_context_embed") == (
         "DPRContextEncoder",
         "DPRContextEncoderTokenizerFast",
     )
-    assert task_eval.encoder_reference_class_names("encoder_base_features") == (
+    assert validation_engine.encoder_reference_class_names("encoder_base_features") == (
         "AutoModel",
         "AutoTokenizer",
     )
 
 
 def test_partiprompts_defaults_to_canonical_models_across_image_families() -> None:
-    suite = task_eval.suite_by_id(
-        task_eval.load_suites(), "dpg_bench_diffusion_image"
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(), "dpg_bench_diffusion_image"
     )
 
-    selected = task_eval.selected_models_for_suite(
-        suite, task_eval.load_manifest_records(), single_device_only=True
+    selected = validation_engine.selected_models_for_suite(
+        suite, validation_engine.load_manifest_records(), single_device_only=True
     )
 
     selected_names = [model["name"] for model in selected]
@@ -1200,13 +1200,13 @@ def test_partiprompts_defaults_to_canonical_models_across_image_families() -> No
 
 
 def test_explicit_partiprompts_model_can_select_compatible_non_default() -> None:
-    suite = task_eval.suite_by_id(
-        task_eval.load_suites(), "dpg_bench_diffusion_image"
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(), "dpg_bench_diffusion_image"
     )
 
-    selected = task_eval.selected_models_for_suite(
+    selected = validation_engine.selected_models_for_suite(
         suite,
-        task_eval.load_manifest_records(),
+        validation_engine.load_manifest_records(),
         selectors=["flux-2-dev-l0"],
         single_device_only=True,
     )
@@ -1215,12 +1215,12 @@ def test_explicit_partiprompts_model_can_select_compatible_non_default() -> None
 
 
 def test_partiprompts_uses_model_manifest_generation_and_profile_gates() -> None:
-    suite = task_eval.suite_by_id(
-        task_eval.load_suites(), "dpg_bench_diffusion_image"
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(), "dpg_bench_diffusion_image"
     )
-    models = {model["name"]: model for model in task_eval.load_manifest_records()}
+    models = {model["name"]: model for model in validation_engine.load_manifest_records()}
 
-    pixart_suite = task_eval.resolve_suite_for_model(
+    pixart_suite = validation_engine.resolve_suite_for_model(
         suite, models["pixart-sigma-1024"]
     )
     assert pixart_suite["generation"] == {
@@ -1238,7 +1238,7 @@ def test_partiprompts_uses_model_manifest_generation_and_profile_gates() -> None
     assert "max_prompt_clipscore_drop" not in pixart_suite["gates"]
     assert "min_hf_prompt_clipscore" not in pixart_suite["gates"]
 
-    flux_suite = task_eval.resolve_suite_for_model(
+    flux_suite = validation_engine.resolve_suite_for_model(
         suite, models["flux-schnell-l0"]
     )
     assert flux_suite["generation"]["image_height"] == 384
@@ -1247,14 +1247,14 @@ def test_partiprompts_uses_model_manifest_generation_and_profile_gates() -> None
     assert flux_suite["gates"]["psnr"] == 5.0
     assert flux_suite["gates"]["ssim"] == 0.1
 
-    non_default_flux_suite = task_eval.resolve_suite_for_model(
+    non_default_flux_suite = validation_engine.resolve_suite_for_model(
         suite, models["flux-2-dev"]
     )
     assert non_default_flux_suite["generation"]["image_height"] == 1024
     assert non_default_flux_suite["generation"]["num_inference_steps"] == 28
     assert non_default_flux_suite["gates"]["psnr"] == 5.0
 
-    z_image_suite = task_eval.resolve_suite_for_model(
+    z_image_suite = validation_engine.resolve_suite_for_model(
         suite, models["z-image-turbo"]
     )
     assert z_image_suite["generation"]["image_height"] == 1024
@@ -1262,7 +1262,7 @@ def test_partiprompts_uses_model_manifest_generation_and_profile_gates() -> None
 
 
 def test_partiprompts_has_no_family_specific_suite_ids() -> None:
-    suite_ids = {suite["id"] for suite in task_eval.load_suites()}
+    suite_ids = {suite["id"] for suite in validation_engine.load_suites()}
 
     assert "dpg_bench_diffusion_image" in suite_ids
     assert "partiprompts_pixart_diffusion_image" not in suite_ids
@@ -1285,13 +1285,13 @@ def test_custom_suite_file_does_not_add_builtin_suites(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    suites = task_eval.load_suites(custom)
+    suites = validation_engine.load_suites(custom)
 
     assert [suite["id"] for suite in suites] == ["custom_only"]
 
 
 def test_plan_selects_chat_text_generation_manifests() -> None:
-    suites = task_eval.load_suites()
+    suites = validation_engine.load_suites()
     models = [
         {
             "name": "decoder-chat",
@@ -1323,7 +1323,7 @@ def test_plan_selects_chat_text_generation_manifests() -> None:
         },
     ]
 
-    rows = task_eval.build_plan(
+    rows = validation_engine.build_plan(
         suites,
         models,
         suite_id="mmlu_five_shot_mcq",
@@ -1368,7 +1368,7 @@ def test_load_manifest_records_discovers_model_owned_manifests(tmp_path: Path) -
         encoding="utf-8",
     )
 
-    records = task_eval.load_manifest_records(tmp_path)
+    records = validation_engine.load_manifest_records(tmp_path)
 
     assert [record["name"] for record in records] == ["example-decoder"]
     assert records[0]["manifest"].endswith("example_decoder/manifests/example-decoder.json")
@@ -1379,19 +1379,19 @@ def test_load_manifest_records_discovers_model_owned_manifests(tmp_path: Path) -
 
 
 def test_default_model_names_match_selected_plan_models() -> None:
-    suites = task_eval.load_suites()
-    models = task_eval.load_manifest_records()
+    suites = validation_engine.load_suites()
+    models = validation_engine.load_manifest_records()
 
     for suite in suites:
-        rows = task_eval.build_plan(suites, models, suite_id=suite["id"])
+        rows = validation_engine.build_plan(suites, models, suite_id=suite["id"])
         selected_names = {row["model"] for row in rows if row["selected"]}
 
         assert selected_names == set(suite["default_model_names"]), suite["id"]
 
 
 def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
-    suites = task_eval.load_suites()
-    suite = dict(task_eval.suite_by_id(suites, "vlm_mmmu_pro_vision_mcq"))
+    suites = validation_engine.load_suites()
+    suite = dict(validation_engine.suite_by_id(suites, "vlm_mmmu_pro_vision_mcq"))
     suite.pop("default_model_names")
     suite["selectors"] = {
         **suite["selectors"],
@@ -1458,7 +1458,7 @@ def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
         },
     ]
 
-    rows = task_eval.build_plan([suite], models)
+    rows = validation_engine.build_plan([suite], models)
 
     selected = {row["model"]: row for row in rows}
     assert "vl-primary" in selected
@@ -1469,10 +1469,10 @@ def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
 
 
 def test_plan_selects_ocrbench_v2_unified_models() -> None:
-    suites = task_eval.load_suites()
-    models = task_eval.load_manifest_records()
+    suites = validation_engine.load_suites()
+    models = validation_engine.load_manifest_records()
 
-    rows = task_eval.build_plan(suites, models, suite_id="ocrbench_v2_unified")
+    rows = validation_engine.build_plan(suites, models, suite_id="ocrbench_v2_unified")
 
     selected = {row["model"]: row for row in rows}
     model_by_name = {model["name"]: model for model in models}
@@ -1484,10 +1484,10 @@ def test_plan_selects_ocrbench_v2_unified_models() -> None:
 
 
 def test_plan_selects_librispeech_asr_models() -> None:
-    suites = task_eval.load_suites()
-    models = task_eval.load_manifest_records()
+    suites = validation_engine.load_suites()
+    models = validation_engine.load_manifest_records()
 
-    rows = task_eval.build_plan(suites, models, suite_id="librispeech_clean_asr")
+    rows = validation_engine.build_plan(suites, models, suite_id="librispeech_clean_asr")
 
     selected = {row["model"]: row for row in rows}
     assert "whisper-tiny-fp16" in selected
@@ -1503,10 +1503,10 @@ def test_plan_selects_librispeech_asr_models() -> None:
 
 
 def test_plan_selects_librispeech_streaming_asr_models() -> None:
-    suites = task_eval.load_suites()
-    models = task_eval.load_manifest_records()
+    suites = validation_engine.load_suites()
+    models = validation_engine.load_manifest_records()
 
-    rows = task_eval.build_plan(suites, models, suite_id="librispeech_clean_asr_streaming")
+    rows = validation_engine.build_plan(suites, models, suite_id="librispeech_clean_asr_streaming")
 
     selected = {row["model"]: row for row in rows}
     assert "nemotron-speech-streaming-en-0.6b" in selected
@@ -1521,9 +1521,9 @@ def test_plan_selects_librispeech_streaming_asr_models() -> None:
 def test_prepare_mmlu_writes_answers_and_trtfb_jsonl(tmp_path: Path) -> None:
     dataset = tmp_path / "mmlu.json"
     _write_mmlu(dataset)
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "mmlu_five_shot_mcq")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "mmlu_five_shot_mcq")
 
-    outputs = task_eval.prepare_mmlu_dataset(
+    outputs = validation_engine.prepare_mmlu_dataset(
         dataset_path=dataset,
         work_dir=tmp_path / "work",
         suite=suite,
@@ -1531,7 +1531,7 @@ def test_prepare_mmlu_writes_answers_and_trtfb_jsonl(tmp_path: Path) -> None:
     )
 
     answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
-    prompts = task_eval.load_jsonl(outputs["prompts"])
+    prompts = validation_engine.load_jsonl(outputs["prompts"])
     manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
 
     assert len(answers["requests"]) == 1
@@ -1567,18 +1567,18 @@ def test_prepare_text_generation_json_preserves_dataset_sample_id(tmp_path: Path
         ),
         encoding="utf-8",
     )
-    suite = task_eval.suite_by_id(
-        task_eval.load_suites(), "humaneval_code_continuation_parity"
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(), "humaneval_code_continuation_parity"
     )
 
-    outputs = task_eval.prepare_task_dataset(
+    outputs = validation_engine.prepare_task_dataset(
         dataset_path=dataset,
         work_dir=tmp_path / "work",
         suite=suite,
         limit=10,
     )
 
-    prompts = task_eval.load_jsonl(outputs["prompts"])
+    prompts = validation_engine.load_jsonl(outputs["prompts"])
     answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
     manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
     assert answers["requests"][0]["sample_id"] == "HumanEval/0"
@@ -1624,7 +1624,7 @@ def test_load_hf_text_generation_model_selects_configured_auto_class(
         AutoModelForSeq2SeqLM=auto_model("seq2seq"),
     )
 
-    model, detected_seq2seq = task_eval.load_hf_text_generation_model(
+    model, detected_seq2seq = validation_engine.load_hf_text_generation_model(
         transformers,
         "example/model",
         model_kwargs={"torch_dtype": "auto"},
@@ -1656,7 +1656,7 @@ def test_prepare_diffusion_prompts_writes_stable_prompt_rows(tmp_path: Path) -> 
         "generation": {"seed": 42, "image_height": 384, "image_width": 384},
     }
 
-    outputs = task_eval.prepare_diffusion_prompt_dataset(
+    outputs = validation_engine.prepare_diffusion_prompt_dataset(
         dataset_path=dataset,
         work_dir=tmp_path / "work",
         suite=suite,
@@ -1664,7 +1664,7 @@ def test_prepare_diffusion_prompts_writes_stable_prompt_rows(tmp_path: Path) -> 
     )
 
     answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
-    prompts = task_eval.load_jsonl(outputs["prompts"])
+    prompts = validation_engine.load_jsonl(outputs["prompts"])
     manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
 
     assert answers["requests"] == [{
@@ -1702,17 +1702,17 @@ def test_prepare_task_dataset_dispatches_diffusion_prompt_json(tmp_path: Path) -
             "questions": [{"question": "Is the red cube above the blue sphere?"}],
         }],
     }), encoding="utf-8")
-    suite = task_eval.suite_by_id(
-        task_eval.load_suites(), "dpg_bench_diffusion_image"
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(), "dpg_bench_diffusion_image"
     )
 
-    outputs = task_eval.prepare_task_dataset(
+    outputs = validation_engine.prepare_task_dataset(
         dataset_path=dataset,
         work_dir=tmp_path / "work",
         suite=suite,
     )
 
-    prompt = task_eval.load_jsonl(outputs["prompts"])[0]
+    prompt = validation_engine.load_jsonl(outputs["prompts"])[0]
     assert prompt["prompt"] == "a red cube above a blue sphere"
     assert prompt["questions"] == [{"question": "Is the red cube above the blue sphere?"}]
     manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
@@ -1751,14 +1751,14 @@ def test_prepare_diffusion_json_resolves_declared_sample_assets(
         },
     }
 
-    outputs = task_eval.prepare_diffusion_prompt_json_dataset(
+    outputs = validation_engine.prepare_diffusion_prompt_json_dataset(
         dataset_path=dataset,
         work_dir=tmp_path / "work",
         suite=suite,
     )
 
     answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
-    prompts = task_eval.load_jsonl(outputs["prompts"])
+    prompts = validation_engine.load_jsonl(outputs["prompts"])
     assert answers["requests"][0]["image"] == str(condition.resolve())
     assert prompts[0]["image"] == str(condition.resolve())
 
@@ -1766,19 +1766,19 @@ def test_prepare_diffusion_json_resolves_declared_sample_assets(
 def test_prepare_mmlu_applies_gpt_oss_family_override(tmp_path: Path) -> None:
     dataset = tmp_path / "mmlu.json"
     _write_mmlu(dataset)
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "mmlu_five_shot_mcq")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "mmlu_five_shot_mcq")
     model = {"name": "gpt-oss-20b", "family": "gpt_oss", "task_eval": {}}
-    config = task_eval.effective_task_eval_config(suite, model)
+    config = validation_engine.effective_validation_config(suite, model)
 
-    outputs = task_eval.prepare_mmlu_dataset(
+    outputs = validation_engine.prepare_mmlu_dataset(
         dataset_path=dataset,
         work_dir=tmp_path / "work",
         suite=suite,
         limit=1,
-        task_eval_config=config,
+        validation_config=config,
     )
 
-    prompt = task_eval.load_jsonl(outputs["prompts"])[0]["prompt"]
+    prompt = validation_engine.load_jsonl(outputs["prompts"])[0]["prompt"]
     manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
     assert prompt == (
         "<|start|>system<|message|>You are a helpful assistant. "
@@ -1792,10 +1792,10 @@ def test_prepare_mmlu_applies_gpt_oss_family_override(tmp_path: Path) -> None:
 
 
 def test_non_gpt_oss_mmlu_model_keeps_suite_defaults() -> None:
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "mmlu_five_shot_mcq")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "mmlu_five_shot_mcq")
     model = {"name": "tinyllama-1.1b", "family": "llama", "task_eval": {}}
 
-    assert task_eval.effective_task_eval_config(suite, model) == {}
+    assert validation_engine.effective_validation_config(suite, model) == {}
 
 
 @pytest.mark.parametrize(
@@ -1810,8 +1810,8 @@ def test_non_gpt_oss_mmlu_model_keeps_suite_defaults() -> None:
 def test_continuation_suite_limits_prompts_to_model_context(
     model_name: str, prompt_token_limit: int
 ) -> None:
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "mmlu_continuation_parity")
-    config = task_eval.effective_task_eval_config(
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "mmlu_continuation_parity")
+    config = validation_engine.effective_validation_config(
         suite,
         {"name": model_name, "family": "", "task_eval": {}},
     )
@@ -1825,11 +1825,11 @@ def test_continuation_suite_limits_prompts_to_model_context(
 def test_continuation_suite_uses_aligned_fp32_comparison_for_sensitive_models(
     model_name: str,
 ) -> None:
-    suite = task_eval.suite_by_id(
-        task_eval.load_suites(),
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(),
         "mmlu_continuation_parity",
     )
-    config = task_eval.effective_task_eval_config(
+    config = validation_engine.effective_validation_config(
         suite,
         {"name": model_name, "family": "", "task_eval": {}},
     )
@@ -1838,8 +1838,8 @@ def test_continuation_suite_uses_aligned_fp32_comparison_for_sensitive_models(
 
 
 def test_mmlu_suite_disables_hf_cache_for_internlm() -> None:
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "mmlu_five_shot_mcq")
-    config = task_eval.effective_task_eval_config(
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "mmlu_five_shot_mcq")
+    config = validation_engine.effective_validation_config(
         suite,
         {"name": "internlm2-1.8b", "family": "internlm", "task_eval": {}},
     )
@@ -1863,7 +1863,7 @@ def test_truncate_prompt_rows_preserves_suffix_and_records_provenance() -> None:
         {"sample_id": "long", "prompt": "one two three four five"},
         {"sample_id": "short", "prompt": "six seven"},
     ]
-    summary = task_eval.truncate_prompt_rows(
+    summary = validation_engine.truncate_prompt_rows(
         rows,
         tokenizer=Tokenizer(),
         token_limit=3,
@@ -1902,7 +1902,7 @@ def test_hf_generation_overrides_reads_explicit_cache_setting(tmp_path: Path) ->
         json.dumps({"task_eval": {"hf_use_cache": False}}),
         encoding="utf-8",
     )
-    assert task_eval.hf_generation_overrides(work_dir) == {"use_cache": False}
+    assert validation_engine.hf_generation_overrides(work_dir) == {"use_cache": False}
 
 
 def test_model_reference_python_resolves_family_profile(monkeypatch) -> None:
@@ -1916,10 +1916,10 @@ def test_model_reference_python_resolves_family_profile(monkeypatch) -> None:
         calls.append(("resolve", profile, base_python))
         return "/profiles/deepseek-ocr/bin/python"
 
-    monkeypatch.setattr(task_eval, "normalize_execution_profiles", fake_normalize)
-    monkeypatch.setattr(task_eval, "resolve_profile_python", fake_resolve)
+    monkeypatch.setattr(validation_engine, "normalize_execution_profiles", fake_normalize)
+    monkeypatch.setattr(validation_engine, "resolve_profile_python", fake_resolve)
 
-    resolved = task_eval.model_reference_python(
+    resolved = validation_engine.model_reference_python(
         {
             "family": "deepseek_ocr",
             "runtime_strategy": "deepseek_ocr_vision_language",
@@ -1948,9 +1948,9 @@ def test_prepare_seedtts_writes_resolved_audio_and_scoring_contract(tmp_path: Pa
     dataset = tmp_path / "SeedTTS_en_meta" / "seedtts_en_meta.json"
     dataset.parent.mkdir()
     _write_seedtts(dataset)
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "seedtts_en_tts_intelligibility")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "seedtts_en_tts_intelligibility")
 
-    outputs = task_eval.prepare_seedtts_dataset(
+    outputs = validation_engine.prepare_seedtts_dataset(
         dataset_path=dataset,
         work_dir=tmp_path / "work",
         suite=suite,
@@ -1958,7 +1958,7 @@ def test_prepare_seedtts_writes_resolved_audio_and_scoring_contract(tmp_path: Pa
     )
 
     answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
-    prompts = task_eval.load_jsonl(outputs["prompts"])
+    prompts = validation_engine.load_jsonl(outputs["prompts"])
     manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
     reference_wav = str((dataset.parent / "reference.wav").resolve())
 
@@ -1986,9 +1986,9 @@ def test_prepare_vlm_mmmu_pro_vision_writes_image_prompt_jsonl(tmp_path: Path) -
     dataset_dir.mkdir()
     dataset = dataset_dir / "mmmu_pro_vision_dataset.json"
     _write_vlm_mmmu_pro_vision(dataset)
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "vlm_mmmu_pro_vision_mcq")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "vlm_mmmu_pro_vision_mcq")
 
-    outputs = task_eval.prepare_vlm_chat_dataset(
+    outputs = validation_engine.prepare_vlm_chat_dataset(
         dataset_path=dataset,
         work_dir=tmp_path / "work",
         suite=suite,
@@ -1996,7 +1996,7 @@ def test_prepare_vlm_mmmu_pro_vision_writes_image_prompt_jsonl(tmp_path: Path) -
     )
 
     answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
-    prompts = task_eval.load_jsonl(outputs["prompts"])
+    prompts = validation_engine.load_jsonl(outputs["prompts"])
     manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
 
     assert len(answers["requests"]) == 1
@@ -2023,9 +2023,9 @@ def test_prepare_ocrbench_unified_writes_image_prompt_jsonl(tmp_path: Path) -> N
     dataset_dir.mkdir(parents=True)
     dataset = dataset_dir / "dataset.json"
     _write_ocrbench_unified(dataset)
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "ocrbench_v2_unified")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "ocrbench_v2_unified")
 
-    outputs = task_eval.prepare_vlm_unified_dataset(
+    outputs = validation_engine.prepare_vlm_unified_dataset(
         dataset_path=dataset,
         work_dir=tmp_path / "work",
         suite=suite,
@@ -2033,7 +2033,7 @@ def test_prepare_ocrbench_unified_writes_image_prompt_jsonl(tmp_path: Path) -> N
     )
 
     answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
-    prompts = task_eval.load_jsonl(outputs["prompts"])
+    prompts = validation_engine.load_jsonl(outputs["prompts"])
     manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
 
     assert len(answers["requests"]) == 1
@@ -2070,10 +2070,10 @@ def test_prepare_ocrbench_unified_reports_missing_images(tmp_path: Path) -> None
     dataset = dataset_dir / "dataset.json"
     _write_ocrbench_unified(dataset)
     (dataset_dir / "images" / "ocrbench_v2_000000.jpg").unlink()
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "ocrbench_v2_unified")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "ocrbench_v2_unified")
 
     try:
-        task_eval.prepare_vlm_unified_dataset(
+        validation_engine.prepare_vlm_unified_dataset(
             dataset_path=dataset,
             work_dir=tmp_path / "work",
             suite=suite,
@@ -2093,9 +2093,9 @@ def test_prepare_asr_chat_dataset_writes_audio_prompt_jsonl(tmp_path: Path) -> N
     dataset_dir.mkdir()
     dataset = dataset_dir / "librispeech_clean_test.json"
     _write_asr_librispeech(dataset)
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "librispeech_clean_asr")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "librispeech_clean_asr")
 
-    outputs = task_eval.prepare_asr_chat_dataset(
+    outputs = validation_engine.prepare_asr_chat_dataset(
         dataset_path=dataset,
         work_dir=tmp_path / "work",
         suite=suite,
@@ -2103,7 +2103,7 @@ def test_prepare_asr_chat_dataset_writes_audio_prompt_jsonl(tmp_path: Path) -> N
     )
 
     answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
-    prompts = task_eval.load_jsonl(outputs["prompts"])
+    prompts = validation_engine.load_jsonl(outputs["prompts"])
     manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
     prepared_audio = tmp_path / "work" / "audio" / "clean_000000.wav"
 
@@ -2135,10 +2135,10 @@ def test_prepare_asr_chat_dataset_reports_missing_audio(tmp_path: Path) -> None:
     dataset = dataset_dir / "librispeech_clean_test.json"
     _write_asr_librispeech(dataset)
     (dataset_dir / "audio" / "sample.wav").unlink()
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "librispeech_clean_asr")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "librispeech_clean_asr")
 
     try:
-        task_eval.prepare_asr_chat_dataset(
+        validation_engine.prepare_asr_chat_dataset(
             dataset_path=dataset,
             work_dir=tmp_path / "work",
             suite=suite,
@@ -2165,10 +2165,10 @@ def test_prepare_vlm_fixed_suite_normalizes_image_and_messages(tmp_path: Path, m
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes(b"fixed image")
 
-    monkeypatch.setattr(task_eval, "_resize_image_to_square", fake_resize)
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "vlm_mmmu_pro_vision_fixed_mcq")
+    monkeypatch.setattr(validation_engine, "_resize_image_to_square", fake_resize)
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "vlm_mmmu_pro_vision_fixed_mcq")
 
-    outputs = task_eval.prepare_vlm_chat_dataset(
+    outputs = validation_engine.prepare_vlm_chat_dataset(
         dataset_path=dataset,
         work_dir=tmp_path / "work",
         suite=suite,
@@ -2176,7 +2176,7 @@ def test_prepare_vlm_fixed_suite_normalizes_image_and_messages(tmp_path: Path, m
     )
 
     answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
-    prompts = task_eval.load_jsonl(outputs["prompts"])
+    prompts = validation_engine.load_jsonl(outputs["prompts"])
     manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
     fixed_image = tmp_path / "work" / "images" / "test_case_1.png"
     merged_prompt = (
@@ -2224,7 +2224,7 @@ def test_vlm_reference_prompt_uses_native_messages() -> None:
         ]
     }
 
-    rendered = task_eval._vlm_chat_text(
+    rendered = validation_engine._vlm_chat_text(
         FakeProcessor(),
         request,
         "flattened prompt",
@@ -2239,7 +2239,7 @@ def test_vlm_reference_prompt_uses_manifest_owned_fallback_template() -> None:
     class FakeProcessor:
         pass
 
-    rendered = task_eval._vlm_chat_text(
+    rendered = validation_engine._vlm_chat_text(
         FakeProcessor(),
         {},
         "Which option matches the image?",
@@ -2256,9 +2256,9 @@ def test_prepare_cli_accepts_vlm_dataset_kind(tmp_path: Path) -> None:
     _write_vlm_mmmu_pro_vision(dataset)
     work_dir = tmp_path / "work"
 
-    rc = task_eval.cmd_prepare(
+    rc = validation_engine.cmd_prepare(
         argparse.Namespace(
-            suites=str(task_eval.DEFAULT_SUITES),
+            suites=str(validation_engine.DEFAULT_SUITES),
             suite="vlm_mmmu_pro_vision_mcq",
             dataset=str(dataset),
             work_dir=str(work_dir),
@@ -2269,7 +2269,7 @@ def test_prepare_cli_accepts_vlm_dataset_kind(tmp_path: Path) -> None:
     )
 
     assert rc == 0
-    assert task_eval.load_jsonl(work_dir / "prompts.jsonl")[0]["images"] == [
+    assert validation_engine.load_jsonl(work_dir / "prompts.jsonl")[0]["images"] == [
         str(dataset_dir / "images" / "sample.jpg")
     ]
 
@@ -2288,7 +2288,7 @@ def test_continuation_parity_reports_divergence_severity() -> None:
         ]
     }
 
-    summary = task_eval.compare_continuation_sets(hf, trtfb, tokenize=lambda s: s.split())
+    summary = validation_engine.compare_continuation_sets(hf, trtfb, tokenize=lambda s: s.split())
 
     assert summary["count"] == 2
     assert summary["divergence_metric_scope"] == "divergent_samples_only"
@@ -2330,7 +2330,7 @@ def test_continuation_parity_prefers_generated_token_ids() -> None:
         ]
     }
 
-    summary = task_eval.compare_continuation_sets(hf, trtfb, require_token_ids=True)
+    summary = validation_engine.compare_continuation_sets(hf, trtfb, require_token_ids=True)
 
     assert summary["comparison_granularity"] == "generated_token_ids"
     assert summary["exact_match_rate"] == 0.5
@@ -2353,7 +2353,7 @@ def test_continuation_parity_reports_no_divergence_without_empty_means() -> None
         ]
     }
 
-    summary = task_eval.compare_continuation_sets(
+    summary = validation_engine.compare_continuation_sets(
         predictions, predictions, require_token_ids=True
     )
 
@@ -2373,7 +2373,7 @@ def test_continuation_parity_requires_token_ids_when_requested() -> None:
     trtfb = {"responses": [{"sample_id": "a", "output_text": "x"}]}
 
     try:
-        task_eval.compare_continuation_sets(hf, trtfb, require_token_ids=True)
+        validation_engine.compare_continuation_sets(hf, trtfb, require_token_ids=True)
     except ValueError as exc:
         assert "generated_token_ids" in str(exc)
     else:
@@ -2394,18 +2394,18 @@ def test_continuation_suite_accepts_one_divergent_sample_in_ten() -> None:
     trtfb = json.loads(json.dumps(hf))
     trtfb["responses"][-1]["output_text"] = "different"
     trtfb["responses"][-1]["generated_token_ids"] = [9, 9]
-    summary = task_eval.compare_continuation_sets(
+    summary = validation_engine.compare_continuation_sets(
         hf, trtfb, require_token_ids=True
     )
     result = {
         "exact_match_rate": summary["exact_match_rate"],
         "token_prefix_agreement": summary["token_prefix_agreement"],
     }
-    suite = task_eval.suite_by_id(
-        task_eval.load_suites(), "mmlu_continuation_parity"
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(), "mmlu_continuation_parity"
     )
 
-    task_eval.apply_metric_gates(result, suite["gates"])
+    validation_engine.apply_metric_gates(result, suite["gates"])
 
     assert result["exact_match_rate"] == 0.9
     assert result["token_prefix_agreement"] == 0.9
@@ -2413,9 +2413,9 @@ def test_continuation_suite_accepts_one_divergent_sample_in_ten() -> None:
 
 
 def test_validation_suites_keep_continuation_and_drop_trace_cloze() -> None:
-    suites = task_eval.load_suites()
+    suites = validation_engine.load_suites()
     ids = {suite["id"] for suite in suites}
-    continuation = task_eval.suite_by_id(suites, "mmlu_continuation_parity")
+    continuation = validation_engine.suite_by_id(suites, "mmlu_continuation_parity")
 
     assert "mmlu_continuation_parity" in ids
     assert "mmlu_trace_cloze" not in ids
@@ -2452,7 +2452,7 @@ def test_compare_continuation_cli_writes_json_summary(tmp_path: Path) -> None:
     )
     output = tmp_path / "continuation.json"
 
-    rc = task_eval.cmd_compare_continuation(
+    rc = validation_engine.cmd_compare_continuation(
         argparse.Namespace(
             work_dir=str(work_dir),
             hf_predictions="",
@@ -2507,10 +2507,10 @@ def test_continuation_summary_markdown_prioritizes_divergence_severity(
             },
         ]
     }
-    summary = task_eval.compare_continuation_sets(hf, trtfb)
+    summary = validation_engine.compare_continuation_sets(hf, trtfb)
     output = tmp_path / "summary.md"
 
-    task_eval.write_continuation_summary_markdown(summary, output)
+    validation_engine.write_continuation_summary_markdown(summary, output)
 
     markdown = output.read_text(encoding="utf-8")
     assert markdown.startswith("# Continuation Divergence Summary\n")
@@ -2528,7 +2528,7 @@ def test_continuation_summary_markdown_prioritizes_divergence_severity(
 
 
 def test_continuation_result_line_prioritizes_divergence_severity() -> None:
-    line = task_eval._format_result_line(
+    line = validation_engine._format_result_line(
         {"name": "example"},
         {
             "mode": "continuation",
@@ -2557,7 +2557,7 @@ def test_continuation_result_line_prioritizes_divergence_severity() -> None:
 
 def test_dataset_benchmark_serializes_generated_token_ids() -> None:
     source = (
-        task_eval.REPO_ROOT / "examples" / "trtmc_dataset_benchmark.cpp"
+        validation_engine.REPO_ROOT / "examples" / "trtmc_dataset_benchmark.cpp"
     ).read_text(encoding="utf-8")
 
     assert '\\"generated_token_ids\\":[' in source
@@ -2565,7 +2565,7 @@ def test_dataset_benchmark_serializes_generated_token_ids() -> None:
 
 def test_dataset_benchmark_accepts_model_plugin_directory() -> None:
     source = (
-        task_eval.REPO_ROOT / "examples" / "trtmc_dataset_benchmark.cpp"
+        validation_engine.REPO_ROOT / "examples" / "trtmc_dataset_benchmark.cpp"
     ).read_text(encoding="utf-8")
 
     assert 'arg == "--model-plugin-dir"' in source
@@ -2592,7 +2592,7 @@ def test_convert_trtfb_uses_generated_text_field(tmp_path: Path) -> None:
     )
     predictions = tmp_path / "predictions.json"
 
-    task_eval.convert_trtfb_jsonl_to_predictions(raw, predictions)
+    validation_engine.convert_trtfb_jsonl_to_predictions(raw, predictions)
 
     payload = json.loads(predictions.read_text(encoding="utf-8"))
     assert payload["responses"][0]["output_text"] == "Answer: B"
@@ -2610,7 +2610,7 @@ def test_convert_trtfb_replaces_invalid_utf8_in_generated_text(
     )
     predictions = tmp_path / "predictions.json"
 
-    task_eval.convert_trtfb_jsonl_to_predictions(raw, predictions)
+    validation_engine.convert_trtfb_jsonl_to_predictions(raw, predictions)
 
     payload = json.loads(predictions.read_text(encoding="utf-8"))
     assert payload["responses"][0]["output_text"] == "bad \ufffd text"
@@ -2634,8 +2634,8 @@ def test_score_and_compare_mmlu_predictions(tmp_path: Path) -> None:
         ]
     }
 
-    hf_score = task_eval.score_predictions(hf, answers)
-    summary = task_eval.compare_prediction_sets(hf, trtfb, answers)
+    hf_score = validation_engine.score_predictions(hf, answers)
+    summary = validation_engine.compare_prediction_sets(hf, trtfb, answers)
 
     assert hf_score["overall_accuracy"] == 1.0
     assert summary["hf"]["overall_accuracy"] == 1.0
@@ -2648,11 +2648,11 @@ def test_score_and_compare_mmlu_predictions(tmp_path: Path) -> None:
 def test_gpt_oss_harmony_parser_rejects_control_only_predictions() -> None:
     parser = "gpt_oss_harmony_final_mcq"
 
-    assert task_eval.parse_model_prediction(
+    assert validation_engine.parse_model_prediction(
         "<|channel|>final<|message|> B", answer_parser=parser
     ) == "B"
-    assert task_eval.parse_model_prediction(" B", answer_parser=parser) == "B"
-    assert task_eval.parse_model_prediction("<|channel|>", answer_parser=parser) == ""
+    assert validation_engine.parse_model_prediction(" B", answer_parser=parser) == "B"
+    assert validation_engine.parse_model_prediction("<|channel|>", answer_parser=parser) == ""
 
 
 def test_required_valid_prediction_does_not_agree_on_empty_outputs() -> None:
@@ -2660,7 +2660,7 @@ def test_required_valid_prediction_does_not_agree_on_empty_outputs() -> None:
     hf = {"responses": [{"sample_id": "one", "output_text": "<|channel|>"}]}
     trtfb = {"responses": [{"sample_id": "one", "output_text": "\n\n"}]}
 
-    summary = task_eval.compare_prediction_sets(
+    summary = validation_engine.compare_prediction_sets(
         hf,
         trtfb,
         answers,
@@ -2679,7 +2679,7 @@ def test_score_predictions_parses_vlm_a_to_j_choices() -> None:
     answers = {"requests": [{"answer": "J", "subject": "History"}]}
     predictions = {"responses": [{"sample_id": "test_case_1", "output_text": "Answer: J"}]}
 
-    score = task_eval.score_predictions(predictions, answers)
+    score = validation_engine.score_predictions(predictions, answers)
 
     assert score["overall_accuracy"] == 1.0
     assert score["samples"][0]["parsed_prediction"] == "J"
@@ -2689,7 +2689,7 @@ def test_score_predictions_accepts_answer_aliases() -> None:
     answers = {"requests": [{"answer": "enabled", "answer_aliases": ["enabled", "on"]}]}
     predictions = {"responses": [{"sample_id": "ocrbench_v2_000000", "output_text": "on"}]}
 
-    score = task_eval.score_predictions(predictions, answers)
+    score = validation_engine.score_predictions(predictions, answers)
 
     assert score["overall_accuracy"] == 1.0
     assert score["samples"][0]["answer_aliases"] == ["on"]
@@ -2728,7 +2728,7 @@ def test_tts_intelligibility_scores_asr_and_waveform_health(tmp_path: Path) -> N
         ]
     }
 
-    score = task_eval.score_predictions(predictions, answers, scorer="tts_intelligibility")
+    score = validation_engine.score_predictions(predictions, answers, scorer="tts_intelligibility")
 
     assert score["overall_accuracy"] == 1.0
     assert score["mean_wer"] == 0.0
@@ -2759,7 +2759,7 @@ def test_tts_intelligibility_fails_wrong_or_missing_audio(tmp_path: Path) -> Non
         ]
     }
 
-    score = task_eval.score_predictions(predictions, answers, scorer="tts_intelligibility")
+    score = validation_engine.score_predictions(predictions, answers, scorer="tts_intelligibility")
 
     assert score["overall_accuracy"] == 0.0
     assert score["samples"][0]["correct"] is False
@@ -2799,7 +2799,7 @@ def test_tts_disagreement_reports_full_normalized_transcripts(tmp_path: Path) ->
         ]
     }
 
-    summary = task_eval.compare_prediction_sets(hf, trtfb, answers, scorer="tts_intelligibility")
+    summary = validation_engine.compare_prediction_sets(hf, trtfb, answers, scorer="tts_intelligibility")
 
     assert summary["disagreements"][0]["hf_prediction"] == (
         "i m never more aware of a room s acoustics"
@@ -2813,14 +2813,14 @@ def test_run_tts_trtfb_generates_audio_and_batches_asr(tmp_path: Path, monkeypat
     dataset = tmp_path / "SeedTTS_en_meta" / "seedtts_en_meta.json"
     dataset.parent.mkdir()
     _write_seedtts(dataset)
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "seedtts_en_tts_intelligibility")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "seedtts_en_tts_intelligibility")
     work_dir = tmp_path / "work"
-    task_eval.prepare_seedtts_dataset(
+    validation_engine.prepare_seedtts_dataset(
         dataset_path=dataset,
         work_dir=work_dir,
         suite=suite,
         limit=1,
-        task_eval_config={
+        validation_config={
             "family": "bark",
             "model_max_new_tokens": 12,
             "runtime_config": {"audio_magpie": {"seed": 42}},
@@ -2839,9 +2839,9 @@ def test_run_tts_trtfb_generates_audio_and_batches_asr(tmp_path: Path, monkeypat
         _write_pcm_wav(output)
         return Result()
 
-    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+    monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
     monkeypatch.setattr(
-        task_eval,
+        validation_engine,
         "_transcribe_audio_files",
         lambda paths, **_kwargs: ["The test sentence." for _path in paths],
     )
@@ -2860,7 +2860,7 @@ def test_run_tts_trtfb_generates_audio_and_batches_asr(tmp_path: Path, monkeypat
         cuda_visible_devices="",
     )
 
-    task_eval.run_tts_trtfb(args)
+    validation_engine.run_tts_trtfb(args)
 
     assert commands[0][:3] == ["build/trtmc", "generate-audio", "model.trtfb"]
     assert commands[0][commands[0].index("--max-new-tokens") + 1] == "12"
@@ -2891,7 +2891,7 @@ def test_ocrbench_v2_scores_short_vqa_with_contains() -> None:
         ]
     }
 
-    score = task_eval.score_predictions(predictions, answers, scorer="ocrbench_v2")
+    score = validation_engine.score_predictions(predictions, answers, scorer="ocrbench_v2")
 
     assert score["overall_accuracy"] == 1.0
     assert score["samples"][0]["score"] == 1.0
@@ -2920,7 +2920,7 @@ def test_ocrbench_v2_scores_counting_regression() -> None:
         ]
     }
 
-    score = task_eval.score_predictions(predictions, answers, scorer="ocrbench_v2")
+    score = validation_engine.score_predictions(predictions, answers, scorer="ocrbench_v2")
 
     assert score["overall_accuracy"] == 0.9
     assert score["samples"][0]["metric"] == "counting"
@@ -2946,7 +2946,7 @@ def test_ocrbench_v2_scores_text_grounding_iou_from_answer_coords() -> None:
         ]
     }
 
-    score = task_eval.score_predictions(predictions, answers, scorer="ocrbench_v2")
+    score = validation_engine.score_predictions(predictions, answers, scorer="ocrbench_v2")
 
     assert score["overall_accuracy"] == 0.5
     assert score["samples"][0]["metric"] == "bbox_iou"
@@ -2972,7 +2972,7 @@ def test_ocrbench_v2_scores_key_information_f1() -> None:
         ]
     }
 
-    score = task_eval.score_predictions(predictions, answers, scorer="ocrbench_v2")
+    score = validation_engine.score_predictions(predictions, answers, scorer="ocrbench_v2")
 
     assert score["overall_accuracy"] == 0.5
     assert score["samples"][0]["metric"] == "key_value_f1"
@@ -3008,7 +3008,7 @@ def test_ocrbench_v2_agreement_uses_correctness_not_text_match() -> None:
         ]
     }
 
-    summary = task_eval.compare_prediction_sets(hf, trtfb, answers, scorer="ocrbench_v2")
+    summary = validation_engine.compare_prediction_sets(hf, trtfb, answers, scorer="ocrbench_v2")
 
     assert summary["prediction_agreement_rate"] == 0.5
     assert summary["agreement_count"] == 1
@@ -3034,7 +3034,7 @@ def test_asr_transcript_scorer_reports_wer_cer_and_exact_rate() -> None:
         ]
     }
 
-    score = task_eval.score_predictions(predictions, answers, scorer="asr_transcript")
+    score = validation_engine.score_predictions(predictions, answers, scorer="asr_transcript")
 
     assert score["overall_accuracy"] == 0.5
     assert score["exact_match_rate"] == 0.5
@@ -3056,7 +3056,7 @@ def test_asr_transcript_scorer_strips_nemotron_language_tag() -> None:
         ]
     }
 
-    score = task_eval.score_predictions(predictions, answers, scorer="asr_transcript")
+    score = validation_engine.score_predictions(predictions, answers, scorer="asr_transcript")
 
     assert score["overall_accuracy"] == 1.0
     assert score["samples"][0]["normalized_prediction"] == (
@@ -3074,11 +3074,11 @@ def test_asr_transcript_scorer_marks_high_wer_wrong_and_skips_errors() -> None:
     predictions = {
         "responses": [
             {"sample_id": "a", "output_text": "wrong words here"},
-            {"sample_id": "b", "output_text": task_eval.ERROR_OUTPUT_TEXT},
+            {"sample_id": "b", "output_text": validation_engine.ERROR_OUTPUT_TEXT},
         ]
     }
 
-    score = task_eval.score_predictions(predictions, answers, scorer="asr_transcript")
+    score = validation_engine.score_predictions(predictions, answers, scorer="asr_transcript")
 
     assert score["overall_accuracy"] == 0.0
     assert score["valid_count"] == 1
@@ -3107,12 +3107,12 @@ def test_asr_transcript_agreement_uses_direct_transcript_similarity() -> None:
         ]
     }
 
-    summary = task_eval.compare_prediction_sets(hf, trtfb, answers, scorer="asr_transcript")
+    summary = validation_engine.compare_prediction_sets(hf, trtfb, answers, scorer="asr_transcript")
 
     expected_similarity = (
         1.0
         + 1.0
-        - task_eval._normalized_edit_distance("gamma delta", "totally wrong")
+        - validation_engine._normalized_edit_distance("gamma delta", "totally wrong")
     ) / 2.0
     assert summary["prediction_agreement_rate"] == pytest.approx(expected_similarity)
     assert summary["normalized_transcript_exact_agreement_rate"] == 0.5
@@ -3126,7 +3126,7 @@ def test_asr_transcript_agreement_uses_direct_transcript_similarity() -> None:
 
 
 def test_selected_models_for_suite_accepts_manifest_name() -> None:
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "mmlu_five_shot_mcq")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "mmlu_five_shot_mcq")
     models = [
         {
             "name": "decoder-chat",
@@ -3144,7 +3144,7 @@ def test_selected_models_for_suite_accepts_manifest_name() -> None:
         }
     ]
 
-    selected = task_eval.selected_models_for_suite(
+    selected = validation_engine.selected_models_for_suite(
         suite,
         models,
         selectors=["decoder-chat"],
@@ -3155,11 +3155,11 @@ def test_selected_models_for_suite_accepts_manifest_name() -> None:
 
 
 def test_seedtts_default_selection_uses_canonical_single_device_models() -> None:
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "seedtts_en_tts_intelligibility")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "seedtts_en_tts_intelligibility")
 
-    selected = task_eval.selected_models_for_suite(
+    selected = validation_engine.selected_models_for_suite(
         suite,
-        task_eval.load_manifest_records(),
+        validation_engine.load_manifest_records(),
         single_device_only=True,
     )
 
@@ -3171,10 +3171,10 @@ def test_seedtts_default_selection_uses_canonical_single_device_models() -> None
 
 
 def test_seedtts_plan_marks_only_default_models_selected() -> None:
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "seedtts_en_tts_intelligibility")
-    rows = task_eval.build_plan(
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "seedtts_en_tts_intelligibility")
+    rows = validation_engine.build_plan(
         [suite],
-        task_eval.load_manifest_records(),
+        validation_engine.load_manifest_records(),
         suite_id=suite["id"],
         include_non_matching=True,
     )
@@ -3227,16 +3227,16 @@ def test_waives_exclude_default_selection_but_explicit_model_can_debug(tmp_path:
         "decoder-waived  SKIP  (reference dependency unavailable)\n",
         encoding="utf-8",
     )
-    waives = task_eval.load_waives(waives_path)
+    waives = validation_engine.load_waives(waives_path)
 
-    selected = task_eval.selected_models_for_suite(suite, models, waives=waives)
-    explicit = task_eval.selected_models_for_suite(
+    selected = validation_engine.selected_models_for_suite(suite, models, waives=waives)
+    explicit = validation_engine.selected_models_for_suite(
         suite,
         models,
         selectors=["decoder-waived"],
         waives=waives,
     )
-    rows = task_eval.build_plan([suite], models, include_non_matching=True, waives=waives)
+    rows = validation_engine.build_plan([suite], models, include_non_matching=True, waives=waives)
     decoder_family_row = next(row for row in rows if row["model"] == "decoder-waived")
 
     assert [model["name"] for model in selected] == ["decoder-active"]
@@ -3256,7 +3256,7 @@ def test_build_bundle_command_uses_manifest_build_settings(tmp_path: Path) -> No
         "quantization": {"format": "fp8", "calibration_samples": 4},
     }
 
-    cmd = task_eval.build_bundle_command(
+    cmd = validation_engine.build_bundle_command(
         model,
         trtmc_binary="build/trtmc",
         bundle_path=tmp_path / "case.trtfb",
@@ -3282,7 +3282,7 @@ def test_build_bundle_command_passes_manifest_hf_revision(tmp_path: Path) -> Non
         "precision": "fp32",
     }
 
-    cmd = task_eval.build_bundle_command(
+    cmd = validation_engine.build_bundle_command(
         model,
         trtmc_binary="build/trtmc",
         bundle_path=tmp_path / "case.trtfb",
@@ -3304,7 +3304,7 @@ def test_build_bundle_command_passes_manifest_fp32_layers(tmp_path: Path) -> Non
         "fp32_layers": [2, 3, 4, 7, 8],
     }
 
-    cmd = task_eval.build_bundle_command(
+    cmd = validation_engine.build_bundle_command(
         model,
         trtmc_binary="build/trtmc",
         bundle_path=tmp_path / "case.trtfb",
@@ -3322,7 +3322,7 @@ def test_build_bundle_command_omits_fp32_layers_when_absent(tmp_path: Path) -> N
         "precision": "fp16",
     }
 
-    cmd = task_eval.build_bundle_command(
+    cmd = validation_engine.build_bundle_command(
         model,
         trtmc_binary="build/trtmc",
         bundle_path=tmp_path / "case.trtfb",
@@ -3348,9 +3348,9 @@ def test_ensure_bundle_replaces_existing_file_before_build(
         output.write_bytes(b"new")
         return Result()
 
-    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+    monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
 
-    result, built = task_eval.ensure_bundle(
+    result, built = validation_engine.ensure_bundle(
         {
             "name": "model",
             "hf_id": "org/model",
@@ -3383,9 +3383,9 @@ def test_ensure_bundle_applies_selected_cuda_device_to_build(
         return Result()
 
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "parent-device")
-    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+    monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
 
-    task_eval.ensure_bundle(
+    validation_engine.ensure_bundle(
         {
             "name": "model",
             "hf_id": "org/model",
@@ -3414,10 +3414,10 @@ def test_ensure_bundle_removes_partial_replacement_after_failed_build(
         Path(command[command.index("-o") + 1]).write_bytes(b"partial")
         return Result()
 
-    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+    monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="Bundle build failed"):
-        task_eval.ensure_bundle(
+        validation_engine.ensure_bundle(
             {
                 "name": "model",
                 "hf_id": "org/model",
@@ -3449,9 +3449,9 @@ def test_ensure_bundle_replaces_dangling_shared_bundle_symlink(
         output.write_bytes(b"new")
         return Result()
 
-    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+    monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
 
-    task_eval.ensure_bundle(
+    validation_engine.ensure_bundle(
         {
             "name": "model",
             "hf_id": "org/model",
@@ -3488,10 +3488,10 @@ def test_ensure_bundle_replaces_incompatible_tensorrt_abi(
         output.write_bytes(b"new")
         return Result()
 
-    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
-    monkeypatch.setattr(task_eval, "runtime_tensorrt_abi", lambda: "11.2")
+    monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
+    monkeypatch.setattr(validation_engine, "runtime_tensorrt_abi", lambda: "11.2")
 
-    _, built = task_eval.ensure_bundle(
+    _, built = validation_engine.ensure_bundle(
         {
             "name": "model",
             "hf_id": "org/model",
@@ -3533,10 +3533,10 @@ def test_ensure_bundle_replaces_mismatched_precision(
         output.write_bytes(b"fp32")
         return Result()
 
-    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
-    monkeypatch.setattr(task_eval, "runtime_tensorrt_abi", lambda: "11.2")
+    monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
+    monkeypatch.setattr(validation_engine, "runtime_tensorrt_abi", lambda: "11.2")
 
-    _, built = task_eval.ensure_bundle(
+    _, built = validation_engine.ensure_bundle(
         {
             "name": "model",
             "hf_id": "org/model",
@@ -3554,9 +3554,9 @@ def test_ensure_bundle_replaces_mismatched_precision(
 
 
 def test_bundle_reuse_rejects_unrecognized_precision(monkeypatch) -> None:
-    monkeypatch.setattr(task_eval, "runtime_tensorrt_abi", lambda: "11.2")
+    monkeypatch.setattr(validation_engine, "runtime_tensorrt_abi", lambda: "11.2")
 
-    assert not task_eval._bundle_can_be_reused(
+    assert not validation_engine._bundle_can_be_reused(
         {
             "TRT ABI": "11.2",
             "Max cache length": "256",
@@ -3572,25 +3572,25 @@ def test_suite_build_cache_minimum_overrides_manifest_cache() -> None:
     suite = {"build": {"min_max_cache_length": 1024}}
     model = {"max_cache_length": 256}
 
-    assert task_eval.requested_build_max_cache_length(suite, model) == 1024
-    assert task_eval.requested_build_max_cache_length(suite, model, prompt_max_tokens=2048) == 2048
-    assert task_eval.requested_build_max_cache_length(suite, model, 512) == 512
+    assert validation_engine.requested_build_max_cache_length(suite, model) == 1024
+    assert validation_engine.requested_build_max_cache_length(suite, model, prompt_max_tokens=2048) == 2048
+    assert validation_engine.requested_build_max_cache_length(suite, model, 512) == 512
 
 
 def test_continuation_reserves_generation_cache_headroom() -> None:
     assert (
-        task_eval.generation_cache_headroom(
+        validation_engine.generation_cache_headroom(
             scorer="continuation",
-            task_eval_config={},
+            validation_config={},
             generation={"max_new_tokens": 64},
             max_new_tokens=None,
         )
         == 64
     )
     assert (
-        task_eval.generation_cache_headroom(
+        validation_engine.generation_cache_headroom(
             scorer="continuation",
-            task_eval_config={},
+            validation_config={},
             generation={"max_new_tokens": 64},
             max_new_tokens=8,
         )
@@ -3602,18 +3602,18 @@ def test_non_continuation_only_reserves_explicit_generation_headroom() -> None:
     generation = {"max_new_tokens": 8}
 
     assert (
-        task_eval.generation_cache_headroom(
+        validation_engine.generation_cache_headroom(
             scorer="mcq",
-            task_eval_config={},
+            validation_config={},
             generation=generation,
             max_new_tokens=None,
         )
         == 0
     )
     assert (
-        task_eval.generation_cache_headroom(
+        validation_engine.generation_cache_headroom(
             scorer="mcq",
-            task_eval_config={"build_generation_headroom": True},
+            validation_config={"build_generation_headroom": True},
             generation=generation,
             max_new_tokens=None,
         )
@@ -3626,8 +3626,8 @@ def test_eval_continuation_builds_for_prompt_and_generated_tokens(
 ) -> None:
     dataset = tmp_path / "mmlu.json"
     _write_mmlu(dataset)
-    suite = task_eval.suite_by_id(
-        task_eval.load_suites(), "mmlu_continuation_parity"
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(), "mmlu_continuation_parity"
     )
     suite["model_overrides"]["by_model"]["decoder-small"] = {
         "comparison_precision": "fp32"
@@ -3658,7 +3658,7 @@ def test_eval_continuation_builds_for_prompt_and_generated_tokens(
 
     def fake_run_hf(_args, _model, work_dir):
         assert _model["precision"] == "fp32"
-        task_eval.write_predictions(work_dir / "hf_predictions.json", responses)
+        validation_engine.write_predictions(work_dir / "hf_predictions.json", responses)
 
     def fake_ensure_bundle(*_args, **kwargs):
         assert _args[0]["precision"] == "fp32"
@@ -3669,7 +3669,7 @@ def test_eval_continuation_builds_for_prompt_and_generated_tokens(
         return bundle, True
 
     def fake_run_trtfb(args):
-        task_eval.write_predictions(
+        validation_engine.write_predictions(
             Path(args.work_dir) / "trtfb_predictions.json", responses
         )
 
@@ -3678,21 +3678,21 @@ def test_eval_continuation_builds_for_prompt_and_generated_tokens(
         return 381
 
     monkeypatch.setattr(
-        task_eval,
+        validation_engine,
         "max_prompt_token_length",
         fake_max_prompt_token_length,
     )
     monkeypatch.setattr(
-        task_eval, "run_hf_reference_subprocess", fake_run_hf
+        validation_engine, "run_hf_reference_subprocess", fake_run_hf
     )
-    monkeypatch.setattr(task_eval, "ensure_bundle", fake_ensure_bundle)
-    monkeypatch.setattr(task_eval, "run_trtfb", fake_run_trtfb)
+    monkeypatch.setattr(validation_engine, "ensure_bundle", fake_ensure_bundle)
+    monkeypatch.setattr(validation_engine, "run_trtfb", fake_run_trtfb)
     monkeypatch.setattr(
-        task_eval,
+        validation_engine,
         "validate_text_input_token_contract",
         lambda **_kwargs: None,
     )
-    args = task_eval.build_arg_parser().parse_args(
+    args = validation_engine.build_arg_parser().parse_args(
         [
             "eval",
             "--dataset",
@@ -3707,7 +3707,7 @@ def test_eval_continuation_builds_for_prompt_and_generated_tokens(
         ]
     )
 
-    result = task_eval.eval_one_model(suite=suite, model=model, args=args)
+    result = validation_engine.eval_one_model(suite=suite, model=model, args=args)
 
     assert result["build_max_cache_length"] == 445
     assert result["generation_cache_headroom"] == 64
@@ -3721,10 +3721,10 @@ def test_prompt_length_validation_rejects_over_cache(tmp_path: Path, monkeypatch
         json.dumps({"prompt": "long prompt"}) + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(task_eval, "max_prompt_token_length", lambda **_kwargs: 513)
+    monkeypatch.setattr(validation_engine, "max_prompt_token_length", lambda **_kwargs: 513)
 
     try:
-        task_eval.validate_prompt_lengths_for_cache(
+        validation_engine.validate_prompt_lengths_for_cache(
             model={"name": "case", "hf_id": "org/model"},
             work_dir=work_dir,
             max_cache_length=512,
@@ -3761,7 +3761,7 @@ def test_max_prompt_token_length_uses_pinned_model_revision(
         SimpleNamespace(AutoTokenizer=AutoTokenizer),
     )
 
-    length = task_eval.max_prompt_token_length(
+    length = validation_engine.max_prompt_token_length(
         model_id="org/model",
         model_revision="0123456789abcdef",
         prompts_path=prompts,
@@ -3799,7 +3799,7 @@ def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch)
         captured["cmd"] = cmd
         return Result()
 
-    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+    monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
 
     args = argparse.Namespace(
         hf_python="/opt/deepseek-hf/bin/python3",
@@ -3826,10 +3826,10 @@ def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch)
         "trust_remote_code": False,
     }
 
-    task_eval.run_hf_reference_subprocess(args, model, work_dir)
+    validation_engine.run_hf_reference_subprocess(args, model, work_dir)
 
     assert captured["cmd"][0] == "/opt/deepseek-hf/bin/python3"
-    assert captured["cmd"][1:3] == [str(task_eval.REFERENCE_RUNNER), "run"]
+    assert captured["cmd"][1:3] == [str(validation_engine.REFERENCE_RUNNER), "run"]
     assert captured["cmd"][captured["cmd"].index("--model-revision") + 1] == (
         "0123456789abcdef"
     )
@@ -3864,7 +3864,7 @@ def test_text_reference_auto_dtype_follows_engine_precision(
         encoding="utf-8",
     )
 
-    dtype = task_eval.resolve_hf_reference_dtype(
+    dtype = validation_engine.resolve_hf_reference_dtype(
         argparse.Namespace(hf_dtype="auto"),
         {"precision": precision},
         work_dir,
@@ -3893,7 +3893,7 @@ def test_native_multimodal_reference_dtype_follows_engine_precision(
         encoding="utf-8",
     )
 
-    dtype = task_eval.resolve_hf_reference_dtype(
+    dtype = validation_engine.resolve_hf_reference_dtype(
         argparse.Namespace(hf_dtype="auto"),
         {"precision": "fp32"},
         work_dir,
@@ -3914,7 +3914,7 @@ def test_explicit_reference_dtype_must_match_engine_precision(tmp_path: Path) ->
         ValueError,
         match="reference precision bf16 does not match TRTMC base precision fp16",
     ):
-        task_eval.resolve_hf_reference_dtype(
+        validation_engine.resolve_hf_reference_dtype(
             argparse.Namespace(hf_dtype="bfloat16"),
             {"precision": "fp16"},
             work_dir,
@@ -3936,11 +3936,11 @@ def test_comparison_precision_overrides_both_candidate_and_reference(
         "quantization": {},
     }
 
-    model = task_eval.apply_comparison_precision(
+    model = validation_engine.apply_comparison_precision(
         original,
         {"comparison_precision": "fp32"},
     )
-    contract = task_eval.resolve_reference_precision_contract(
+    contract = validation_engine.resolve_reference_precision_contract(
         argparse.Namespace(hf_dtype="auto"),
         model,
         work_dir,
@@ -3958,7 +3958,7 @@ def test_comparison_precision_rejects_quantized_models() -> None:
         ValueError,
         match="FP8 quantization.*may only override unquantized base precision",
     ):
-        task_eval.apply_comparison_precision(
+        validation_engine.apply_comparison_precision(
             {
                 "name": "quantized-model",
                 "precision": "fp16",
@@ -3984,7 +3984,7 @@ def test_quantized_reference_requires_explicit_base_precision(
         ValueError,
         match=rf"{quantization_format.upper()}.*requires task_eval.reference_precision",
     ):
-        task_eval.resolve_hf_reference_dtype(
+        validation_engine.resolve_hf_reference_dtype(
             argparse.Namespace(hf_dtype="auto"),
             {
                 "name": "quantized-model",
@@ -4015,7 +4015,7 @@ def test_quantized_reference_contract_records_candidate_and_base_precision(
         "quantization": {"format": "fp8"},
     }
 
-    contract = task_eval.resolve_reference_precision_contract(
+    contract = validation_engine.resolve_reference_precision_contract(
         argparse.Namespace(hf_dtype="auto"),
         model,
         work_dir,
@@ -4029,7 +4029,7 @@ def test_quantized_reference_contract_records_candidate_and_base_precision(
         "comparison": "quantized_vs_unquantized_reference",
     }
     assert (
-        task_eval.resolve_hf_reference_dtype(
+        validation_engine.resolve_hf_reference_dtype(
             argparse.Namespace(hf_dtype="auto"),
             model,
             work_dir,
@@ -4051,7 +4051,7 @@ def test_legacy_fp8_scale_model_is_treated_as_quantized(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    contract = task_eval.resolve_reference_precision_contract(
+    contract = validation_engine.resolve_reference_precision_contract(
         argparse.Namespace(hf_dtype="auto"),
         {
             "name": "flux-2-dev-fp8",
@@ -4074,7 +4074,7 @@ def test_non_transformers_reference_keeps_auto_dtype(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    dtype = task_eval.resolve_hf_reference_dtype(
+    dtype = validation_engine.resolve_hf_reference_dtype(
         argparse.Namespace(hf_dtype="auto"),
         {"precision": "fp16"},
         work_dir,
@@ -4106,7 +4106,7 @@ def test_text_input_contract_reports_first_token_mismatch(
             return SimpleNamespace(ids=[10, 11, 12])
 
     monkeypatch.setattr(
-        task_eval,
+        validation_engine,
         "_load_text_input_contract",
         lambda **_kwargs: (
             HfTokenizer(),
@@ -4122,7 +4122,7 @@ def test_text_input_contract_reports_first_token_mismatch(
         RuntimeError,
         match=r"mmlu_000007.*first_difference=0.*HF=\[10, 11, 12\].*TRTMC=\[2, 10, 11, 12\]",
     ):
-        task_eval.validate_text_input_token_contract(
+        validation_engine.validate_text_input_token_contract(
             model={"name": "opt-125m", "hf_id": "facebook/opt-125m"},
             work_dir=work_dir,
             bundle_path=tmp_path / "opt-125m.trtfb",
@@ -4160,7 +4160,7 @@ def test_text_input_contract_records_aligned_token_digests(
             return SimpleNamespace(ids=[10, 11])
 
     monkeypatch.setattr(
-        task_eval,
+        validation_engine,
         "_load_text_input_contract",
         lambda **_kwargs: (
             HfTokenizer(),
@@ -4172,7 +4172,7 @@ def test_text_input_contract_records_aligned_token_digests(
         ),
     )
 
-    task_eval.validate_text_input_token_contract(
+    validation_engine.validate_text_input_token_contract(
         model={"name": "decoder", "hf_id": "org/decoder"},
         work_dir=work_dir,
         bundle_path=tmp_path / "decoder.trtfb",
@@ -4212,7 +4212,7 @@ def test_run_hf_reference_subprocess_passes_asr_family_metadata(
         captured["cmd"] = cmd
         return Result()
 
-    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+    monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
     args = argparse.Namespace(
         hf_python="",
         hf_dtype="auto",
@@ -4237,28 +4237,28 @@ def test_run_hf_reference_subprocess_passes_asr_family_metadata(
         "trust_remote_code": False,
     }
 
-    task_eval.run_hf_reference_subprocess(args, model, work_dir)
+    validation_engine.run_hf_reference_subprocess(args, model, work_dir)
 
     assert captured["cmd"][captured["cmd"].index("--family") + 1] == "canary"
     assert captured["cmd"][captured["cmd"].index("--reference-family") + 1] == "asr_canary"
 
 
 def test_asr_reference_detection_identifies_canary() -> None:
-    assert task_eval._is_canary_asr_reference(
+    assert validation_engine._is_canary_asr_reference(
         argparse.Namespace(
             model="nvidia/canary-1b-v2",
             family="",
             reference_family="",
         )
     )
-    assert task_eval._is_canary_asr_reference(
+    assert validation_engine._is_canary_asr_reference(
         argparse.Namespace(
             model="nvidia/other",
             family="canary",
             reference_family="",
         )
     )
-    assert task_eval._is_canary_asr_reference(
+    assert validation_engine._is_canary_asr_reference(
         argparse.Namespace(
             model="nvidia/other",
             family="",
@@ -4268,21 +4268,21 @@ def test_asr_reference_detection_identifies_canary() -> None:
 
 
 def test_nemo_asr_reference_detection_identifies_streaming() -> None:
-    assert task_eval._is_nemo_asr_reference(
+    assert validation_engine._is_nemo_asr_reference(
         argparse.Namespace(
             model="nvidia/nemotron-speech-streaming-en-0.6b",
             family="",
             reference_family="",
         )
     )
-    assert task_eval._is_nemo_asr_reference(
+    assert validation_engine._is_nemo_asr_reference(
         argparse.Namespace(
             model="nvidia/other",
             family="nemotron_speech_streaming",
             reference_family="",
         )
     )
-    assert task_eval._is_nemo_asr_reference(
+    assert validation_engine._is_nemo_asr_reference(
         argparse.Namespace(
             model="nvidia/canary-1b-v2",
             family="canary",
@@ -4292,7 +4292,7 @@ def test_nemo_asr_reference_detection_identifies_streaming() -> None:
 
 
 def test_nemotron_35_runtime_flags_enable_language_and_streaming() -> None:
-    flags = task_eval._asr_runtime_flags(
+    flags = validation_engine._asr_runtime_flags(
         {"language": "en-US"},
         {
             "streaming": {
@@ -4326,9 +4326,9 @@ def test_run_hf_reference_dispatches_asr_workdir(tmp_path: Path, monkeypatch) ->
     def fake_asr(_args):
         calls.append("asr")
 
-    monkeypatch.setattr(task_eval, "run_asr_hf_reference", fake_asr)
+    monkeypatch.setattr(validation_engine, "run_asr_hf_reference", fake_asr)
 
-    task_eval.run_hf_reference(argparse.Namespace(work_dir=str(work_dir)))
+    validation_engine.run_hf_reference(argparse.Namespace(work_dir=str(work_dir)))
 
     assert calls == ["asr"]
 
@@ -4347,9 +4347,9 @@ def test_run_hf_reference_dispatches_diffusion_prompt_workdir(
     def fake_diffusion(_args):
         calls.append("diffusion")
 
-    monkeypatch.setattr(task_eval, "run_diffusion_hf_reference", fake_diffusion)
+    monkeypatch.setattr(validation_engine, "run_diffusion_hf_reference", fake_diffusion)
 
-    task_eval.run_hf_reference(argparse.Namespace(work_dir=str(work_dir)))
+    validation_engine.run_hf_reference(argparse.Namespace(work_dir=str(work_dir)))
 
     assert calls == ["diffusion"]
 
@@ -4406,13 +4406,13 @@ def test_run_diffusion_hf_reference_writes_image_artifact_predictions(
         inputs={},
     )
     monkeypatch.setattr(
-        task_eval,
-        "_load_diffusion_task_eval_plugins",
+        validation_engine,
+        "_load_diffusion_validation_plugins",
         lambda _work_dir: (template, FakeReference(), object()),
         raising=False,
     )
 
-    task_eval.run_diffusion_hf_reference(argparse.Namespace(
+    validation_engine.run_diffusion_hf_reference(argparse.Namespace(
         work_dir=str(work_dir),
         predictions="hf_predictions.json",
         raw_output="hf_raw.jsonl",
@@ -4426,7 +4426,7 @@ def test_run_diffusion_hf_reference_writes_image_artifact_predictions(
 
 
 def test_captured_utf8_subprocess_replaces_invalid_native_output() -> None:
-    result = task_eval._run_captured_utf8_subprocess(
+    result = validation_engine._run_captured_utf8_subprocess(
         [
             sys.executable,
             "-c",
@@ -4458,10 +4458,10 @@ def test_run_trtfb_dispatches_diffusion_prompt_workdir(
         calls.append("diffusion")
 
     monkeypatch.setattr(
-        task_eval, "run_diffusion_trtfb", fake_diffusion, raising=False
+        validation_engine, "run_diffusion_trtfb", fake_diffusion, raising=False
     )
 
-    task_eval.run_trtfb(argparse.Namespace(work_dir=str(work_dir)))
+    validation_engine.run_trtfb(argparse.Namespace(work_dir=str(work_dir)))
 
     assert calls == ["diffusion"]
 
@@ -4478,7 +4478,7 @@ def test_dataset_benchmark_reproduction_is_direct_and_uses_single_input(
         "8",
     ]
 
-    task_eval._write_dataset_benchmark_reproduction(tmp_path, command)
+    validation_engine._write_dataset_benchmark_reproduction(tmp_path, command)
 
     payload = json.loads(
         (tmp_path / "trtfb_repro.json").read_text(encoding="utf-8")
@@ -4487,7 +4487,7 @@ def test_dataset_benchmark_reproduction_is_direct_and_uses_single_input(
     assert payload["command"][0] == "/workspace/build/trtmc_dataset_benchmark"
     assert payload["command"][2] == "{input_jsonl}"
     assert payload["command"][3] == "{trtmc_raw_jsonl}"
-    assert "task_eval.py" not in " ".join(payload["command"])
+    assert "validation_engine.py" not in " ".join(payload["command"])
 
 
 def test_dataset_benchmark_reproduction_preserves_per_sample_seed(
@@ -4502,7 +4502,7 @@ def test_dataset_benchmark_reproduction_preserves_per_sample_seed(
         "42",
     ]
 
-    task_eval._write_dataset_benchmark_reproduction(tmp_path, command)
+    validation_engine._write_dataset_benchmark_reproduction(tmp_path, command)
 
     payload = json.loads(
         (tmp_path / "trtfb_repro.json").read_text(encoding="utf-8")
@@ -4516,7 +4516,7 @@ def test_dataset_benchmark_reproduction_preserves_per_sample_seed(
 def test_native_trtmc_command_recorder_extracts_nested_model_command(
     tmp_path: Path,
 ) -> None:
-    task_eval._reset_native_trtmc_commands(tmp_path)
+    validation_engine._reset_native_trtmc_commands(tmp_path)
     output = SimpleNamespace(
         metadata={
             "cpp": {
@@ -4531,7 +4531,7 @@ def test_native_trtmc_command_recorder_extracts_nested_model_command(
         }
     )
 
-    task_eval._record_output_native_command(
+    validation_engine._record_output_native_command(
         tmp_path,
         "sample-7",
         output,
@@ -4542,7 +4542,7 @@ def test_native_trtmc_command_recorder_extracts_nested_model_command(
     )
     assert row["sample_id"] == "sample-7"
     assert row["command"][0:2] == ["/workspace/build/trtmc", "run"]
-    assert "task_eval.py" not in " ".join(row["command"])
+    assert "validation_engine.py" not in " ".join(row["command"])
 
 
 def test_run_diffusion_trtfb_writes_image_artifact_predictions(
@@ -4601,12 +4601,12 @@ def test_run_diffusion_trtfb_writes_image_artifact_predictions(
         inputs={},
     )
     monkeypatch.setattr(
-        task_eval,
-        "_load_diffusion_task_eval_plugins",
+        validation_engine,
+        "_load_diffusion_validation_plugins",
         lambda _work_dir: (template, object(), FakeRunner()),
     )
 
-    task_eval.run_diffusion_trtfb(argparse.Namespace(
+    validation_engine.run_diffusion_trtfb(argparse.Namespace(
         work_dir=str(work_dir),
         bundle=str(tmp_path / "bundles" / "flux-schnell-l0.trtfb"),
         trtmc_binary="build/trtmc",
@@ -4661,8 +4661,8 @@ def test_compare_diffusion_image_predictions_aggregates_model_comparator_metrics
             )
 
     monkeypatch.setattr(
-        task_eval,
-        "_load_diffusion_task_eval_comparator",
+        validation_engine,
+        "_load_diffusion_validation_comparator",
         lambda _work_dir: FakeComparator(),
         raising=False,
     )
@@ -4690,7 +4690,7 @@ def test_compare_diffusion_image_predictions_aggregates_model_comparator_metrics
         "questions": [{"question": "Is there a red cube?"}],
     }]}
 
-    summary = task_eval.compare_diffusion_image_predictions(
+    summary = validation_engine.compare_diffusion_image_predictions(
         hf,
         trt,
         answers,
@@ -4714,7 +4714,7 @@ def test_compare_diffusion_image_predictions_aggregates_model_comparator_metrics
 def test_diffusion_response_preserves_initial_latent_identity() -> None:
     from tests.e2e_harness.contracts import StageOutput
 
-    response = task_eval._diffusion_response(
+    response = validation_engine._diffusion_response(
         "sample-1",
         "hf",
         StageOutput(
@@ -4746,7 +4746,7 @@ def test_diffusion_sample_inputs_and_response_record_shared_conditions(
         task_strategy="diffusion_media_generation",
         inputs={"image": "/old/image.png", "action": "w-320"},
     )
-    case = task_eval._diffusion_case_for_prompt(
+    case = validation_engine._diffusion_case_for_prompt(
         template,
         {
             "sample_id": "gedit_000000",
@@ -4761,7 +4761,7 @@ def test_diffusion_sample_inputs_and_response_record_shared_conditions(
     assert case.inputs["image"] == str(condition)
     assert case.inputs["action"] == "w-160,d-160"
     assert case.inputs["seed"] == 45
-    response = task_eval._diffusion_response(
+    response = validation_engine._diffusion_response(
         case.name,
         "hf",
         StageOutput(
@@ -4772,7 +4772,7 @@ def test_diffusion_sample_inputs_and_response_record_shared_conditions(
     )
     assert response["seed"] == 45
     assert response["action"] == "w-160,d-160"
-    assert response["condition_image_sha256"] == task_eval._sha256_file(condition)
+    assert response["condition_image_sha256"] == validation_engine._sha256_file(condition)
 
 
 def test_diffusion_parity_rejects_mismatched_shared_sample_inputs(
@@ -4788,13 +4788,13 @@ def test_diffusion_parity_rejects_mismatched_shared_sample_inputs(
         "seed": 42,
     }
     monkeypatch.setattr(
-        task_eval,
-        "_load_diffusion_task_eval_comparator",
+        validation_engine,
+        "_load_diffusion_validation_comparator",
         lambda _work_dir: object(),
     )
 
     with pytest.raises(ValueError, match="shared input mismatch.*seed"):
-        task_eval.compare_diffusion_image_predictions(
+        validation_engine.compare_diffusion_image_predictions(
             {"responses": [base]},
             {"responses": [{**base, "seed": 43}]},
             {"requests": [{"sample_id": "sample-1", "prompt": "a moving object"}]},
@@ -4816,13 +4816,13 @@ def test_diffusion_parity_rejects_dataset_condition_digest_mismatch(
         "condition_image_sha256": "actual-digest",
     }
     monkeypatch.setattr(
-        task_eval,
-        "_load_diffusion_task_eval_comparator",
+        validation_engine,
+        "_load_diffusion_validation_comparator",
         lambda _work_dir: object(),
     )
 
     with pytest.raises(ValueError, match="dataset input mismatch.*condition_image"):
-        task_eval.compare_diffusion_image_predictions(
+        validation_engine.compare_diffusion_image_predictions(
             {"responses": [row]},
             {"responses": [row]},
             {
@@ -4866,8 +4866,8 @@ def test_diffusion_parity_rejects_mismatched_initial_latents(
             )
 
     monkeypatch.setattr(
-        task_eval,
-        "_load_diffusion_task_eval_comparator",
+        validation_engine,
+        "_load_diffusion_validation_comparator",
         lambda _work_dir: Comparator(),
     )
     base = {
@@ -4880,7 +4880,7 @@ def test_diffusion_parity_rejects_mismatched_initial_latents(
     }
 
     with pytest.raises(ValueError, match="initial latent"):
-        task_eval.compare_diffusion_image_predictions(
+        validation_engine.compare_diffusion_image_predictions(
             {"responses": [{**base, "initial_latents_sha256": "hf-hash"}]},
             {"responses": [{**base, "initial_latents_sha256": "trt-hash"}]},
             {"requests": [{"sample_id": "partiprompts_000000"}]},
@@ -4893,8 +4893,8 @@ def test_diffusion_parity_requires_declared_initial_latent_identity(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr(
-        task_eval,
-        "_load_diffusion_task_eval_comparator",
+        validation_engine,
+        "_load_diffusion_validation_comparator",
         lambda _work_dir: object(),
     )
     row = {
@@ -4907,7 +4907,7 @@ def test_diffusion_parity_requires_declared_initial_latent_identity(
     }
 
     with pytest.raises(ValueError, match="requires matching initial latents"):
-        task_eval.compare_diffusion_image_predictions(
+        validation_engine.compare_diffusion_image_predictions(
             {"responses": [row]},
             {"responses": [row]},
             {"requests": [{"sample_id": "partiprompts_000000"}]},
@@ -4930,13 +4930,13 @@ def test_compare_diffusion_image_predictions_requires_clip_metrics(
             )
 
     monkeypatch.setattr(
-        task_eval,
-        "_load_diffusion_task_eval_comparator",
+        validation_engine,
+        "_load_diffusion_validation_comparator",
         lambda _work_dir: ComparatorWithoutClip(),
     )
     monkeypatch.setattr(
-        task_eval,
-        "_compute_task_eval_clip_metrics",
+        validation_engine,
+        "_compute_validation_clip_metrics",
         lambda *_args: None,
         raising=False,
     )
@@ -4950,7 +4950,7 @@ def test_compare_diffusion_image_predictions_requires_clip_metrics(
     }
 
     try:
-        task_eval.compare_diffusion_image_predictions(
+        validation_engine.compare_diffusion_image_predictions(
             {"responses": [row]},
             {"responses": [row]},
             {"requests": [{"sample_id": "partiprompts_000000"}]},
@@ -4978,13 +4978,13 @@ def test_compare_diffusion_image_predictions_adds_generic_clip_metrics(
             )
 
     monkeypatch.setattr(
-        task_eval,
-        "_load_diffusion_task_eval_comparator",
+        validation_engine,
+        "_load_diffusion_validation_comparator",
         lambda _work_dir: PixArtComparator(),
     )
     monkeypatch.setattr(
-        task_eval,
-        "_compute_task_eval_clip_metrics",
+        validation_engine,
+        "_compute_validation_clip_metrics",
         lambda trt_dir, ref_dir, prompt: SimpleNamespace(
             trt_prompt_clipscore=24.0,
             hf_prompt_clipscore=25.0,
@@ -5003,7 +5003,7 @@ def test_compare_diffusion_image_predictions_adds_generic_clip_metrics(
         "prompt": "a red cube",
     }
 
-    summary = task_eval.compare_diffusion_image_predictions(
+    summary = validation_engine.compare_diffusion_image_predictions(
         {"responses": [{**row, "frames_dir": "/hf"}]},
         {"responses": [{**row, "frames_dir": "/trt"}]},
         {"requests": [{"sample_id": "partiprompts_000000"}]},
@@ -5034,13 +5034,13 @@ def test_diffusion_parity_gates_image_to_image_not_prompt_alignment(
             )
 
     monkeypatch.setattr(
-        task_eval,
-        "_load_diffusion_task_eval_comparator",
+        validation_engine,
+        "_load_diffusion_validation_comparator",
         lambda _work_dir: PixArtComparator(),
     )
     monkeypatch.setattr(
-        task_eval,
-        "_compute_task_eval_clip_metrics",
+        validation_engine,
+        "_compute_validation_clip_metrics",
         lambda *_args: SimpleNamespace(
             trt_prompt_clipscore=31.0,
             hf_prompt_clipscore=32.0,
@@ -5058,7 +5058,7 @@ def test_diffusion_parity_gates_image_to_image_not_prompt_alignment(
         "prompt": "a red cube",
     }
 
-    summary = task_eval.compare_diffusion_image_predictions(
+    summary = validation_engine.compare_diffusion_image_predictions(
         {"responses": [{**row, "frames_dir": "/hf"}]},
         {"responses": [{**row, "frames_dir": "/trt"}]},
         {"requests": [{"sample_id": "partiprompts_000000"}]},
@@ -5077,8 +5077,8 @@ def test_diffusion_parity_gates_image_to_image_not_prompt_alignment(
 def test_eval_one_model_passes_model_manifest_to_diffusion_prepare(
     tmp_path: Path, monkeypatch
 ) -> None:
-    suite = task_eval.suite_by_id(
-        task_eval.load_suites(), "dpg_bench_diffusion_image"
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(), "dpg_bench_diffusion_image"
     )
     model = {
         "name": "flux-schnell-l0",
@@ -5094,13 +5094,13 @@ def test_eval_one_model_passes_model_manifest_to_diffusion_prepare(
         pass
 
     def fake_prepare(**kwargs):
-        captured.update(kwargs["task_eval_config"])
+        captured.update(kwargs["validation_config"])
         raise Prepared
 
-    monkeypatch.setattr(task_eval, "prepare_task_dataset", fake_prepare)
+    monkeypatch.setattr(validation_engine, "prepare_task_dataset", fake_prepare)
 
     try:
-        task_eval.eval_one_model(
+        validation_engine.eval_one_model(
             suite=suite,
             model=model,
             args=argparse.Namespace(
@@ -5120,14 +5120,14 @@ def test_eval_one_model_passes_model_manifest_to_diffusion_prepare(
     assert captured["family"] == "flux"
 
 
-def test_flux_task_eval_build_command_preserves_diffusion_shape(tmp_path: Path) -> None:
+def test_flux_validation_build_command_preserves_diffusion_shape(tmp_path: Path) -> None:
     model = next(
         model
-        for model in task_eval.load_manifest_records()
+        for model in validation_engine.load_manifest_records()
         if model["name"] == "flux-schnell-l0"
     )
 
-    command = task_eval.build_bundle_command(
+    command = validation_engine.build_bundle_command(
         model,
         trtmc_binary="build/trtmc",
         bundle_path=tmp_path / "flux-schnell-l0.trtfb",
@@ -5142,11 +5142,11 @@ def test_flux_task_eval_build_command_preserves_diffusion_shape(tmp_path: Path) 
 def test_flux_fp8_build_command_resolves_model_owned_scales(tmp_path: Path) -> None:
     model = next(
         model
-        for model in task_eval.load_manifest_records()
+        for model in validation_engine.load_manifest_records()
         if model["name"] == "flux-2-dev-fp8"
     )
 
-    command = task_eval.build_bundle_command(
+    command = validation_engine.build_bundle_command(
         model,
         trtmc_binary="build/trtmc",
         bundle_path=tmp_path / "flux-2-dev-fp8.trtfb",
@@ -5154,7 +5154,7 @@ def test_flux_fp8_build_command_resolves_model_owned_scales(tmp_path: Path) -> N
 
     scales = Path(command[command.index("--fp8-scales") + 1])
     assert scales == (
-        task_eval.REPO_ROOT
+        validation_engine.REPO_ROOT
         / "tests/e2e/models/flux/data/flux2-fp8-scales.json"
     )
     assert scales.is_file()
@@ -5170,17 +5170,17 @@ def test_eval_one_model_diffusion_uses_clip_parity_summary(
         "category": "entity,relation",
         "questions": [{"question": "Is the red cube above the blue sphere?"}],
     }]}), encoding="utf-8")
-    suite = task_eval.suite_by_id(
-        task_eval.load_suites(), "dpg_bench_diffusion_image"
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(), "dpg_bench_diffusion_image"
     )
     model = next(
         model
-        for model in task_eval.load_manifest_records()
+        for model in validation_engine.load_manifest_records()
         if model["name"] == "flux-schnell-l0"
     )
 
     def fake_hf(_args, _model, work_dir):
-        task_eval.write_predictions(work_dir / "hf_predictions.json", [{
+        validation_engine.write_predictions(work_dir / "hf_predictions.json", [{
             "sample_id": "dpg_bench_000000", "returncode": 0, "num_frames": 1
         }])
 
@@ -5188,7 +5188,7 @@ def test_eval_one_model_diffusion_uses_clip_parity_summary(
         return kwargs["bundle_path"], True
 
     def fake_trt(args):
-        task_eval.write_predictions(Path(args.work_dir) / "trtfb_predictions.json", [{
+        validation_engine.write_predictions(Path(args.work_dir) / "trtfb_predictions.json", [{
             "sample_id": "dpg_bench_000000", "returncode": 0, "num_frames": 1
         }])
 
@@ -5209,12 +5209,12 @@ def test_eval_one_model_diffusion_uses_clip_parity_summary(
             "samples": [],
         }
 
-    monkeypatch.setattr(task_eval, "run_hf_reference_subprocess", fake_hf)
-    monkeypatch.setattr(task_eval, "ensure_bundle", fake_bundle)
-    monkeypatch.setattr(task_eval, "run_trtfb", fake_trt)
-    monkeypatch.setattr(task_eval, "compare_diffusion_image_predictions", fake_compare)
+    monkeypatch.setattr(validation_engine, "run_hf_reference_subprocess", fake_hf)
+    monkeypatch.setattr(validation_engine, "ensure_bundle", fake_bundle)
+    monkeypatch.setattr(validation_engine, "run_trtfb", fake_trt)
+    monkeypatch.setattr(validation_engine, "compare_diffusion_image_predictions", fake_compare)
     monkeypatch.setattr(
-        task_eval,
+        validation_engine,
         "max_prompt_token_length",
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("not for diffusion")),
     )
@@ -5257,7 +5257,7 @@ def test_eval_one_model_diffusion_uses_clip_parity_summary(
         chat_template=False,
     )
 
-    result = task_eval.eval_one_model(suite=suite, model=model, args=args)
+    result = validation_engine.eval_one_model(suite=suite, model=model, args=args)
 
     assert result["mode"] == "diffusion_image_clip_parity"
     assert result["overall_pass_rate"] == 1.0
@@ -5288,7 +5288,7 @@ def test_run_asr_trtfb_invokes_transcribe_per_audio(tmp_path: Path, monkeypatch)
         commands.append(cmd)
         return Result()
 
-    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+    monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
     args = argparse.Namespace(
         work_dir=str(work_dir),
         bundle="bundle.trtfb",
@@ -5301,7 +5301,7 @@ def test_run_asr_trtfb_invokes_transcribe_per_audio(tmp_path: Path, monkeypatch)
         hf_python="",
     )
 
-    task_eval.run_asr_trtfb(args)
+    validation_engine.run_asr_trtfb(args)
 
     assert commands == [
         [
@@ -5346,7 +5346,7 @@ def test_load_vlm_model_falls_back_between_auto_classes() -> None:
         AutoModelForImageTextToText = UnsupportedAutoModel
         AutoModel = SupportedAutoModel
 
-    model = task_eval._load_vlm_model(Transformers, "org/model", {})
+    model = validation_engine._load_vlm_model(Transformers, "org/model", {})
 
     assert isinstance(model, SupportedAutoModel)
     assert calls == ["unsupported", "supported", "eval"]
@@ -5367,7 +5367,7 @@ def test_vlm_chat_text_falls_back_when_chat_template_missing() -> None:
     }
 
     assert (
-        task_eval._vlm_chat_text(
+        validation_engine._vlm_chat_text(
             Processor(),
             request,
             "Extract text.",
@@ -5390,7 +5390,7 @@ def test_run_deepseek_ocr_hf_reference_writes_predictions(tmp_path: Path) -> Non
             assert text == "enabled"
             return argparse.Namespace(input_ids=[1, 2])
 
-    task_eval._run_deepseek_ocr_hf_reference(
+    validation_engine._run_deepseek_ocr_hf_reference(
         model=Model(),
         tokenizer=Tokenizer(),
         answers={"requests": [{"answer": "enabled"}]},
@@ -5418,7 +5418,7 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_trtfb(
 ) -> None:
     dataset = tmp_path / "mmlu.json"
     _write_mmlu(dataset)
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "mmlu_five_shot_mcq")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "mmlu_five_shot_mcq")
     model = {
         "name": "decoder-small",
         "hf_id": "example-org/decoder-small",
@@ -5431,7 +5431,7 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_trtfb(
     }
     work_dir = tmp_path / "work" / suite["id"] / model["name"]
     work_dir.mkdir(parents=True)
-    task_eval.prepare_mmlu_dataset(
+    validation_engine.prepare_mmlu_dataset(
         dataset_path=dataset,
         work_dir=work_dir,
         suite=suite,
@@ -5456,7 +5456,7 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_trtfb(
             encoding="utf-8",
         )
 
-    monkeypatch.setattr(task_eval, "max_prompt_token_length", lambda **_kwargs: 405)
+    monkeypatch.setattr(validation_engine, "max_prompt_token_length", lambda **_kwargs: 405)
 
     def fake_ensure_bundle(*_args, **kwargs):
         calls.append("build")
@@ -5480,9 +5480,9 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_trtfb(
             encoding="utf-8",
         )
 
-    monkeypatch.setattr(task_eval, "run_hf_reference_subprocess", fake_run_hf)
-    monkeypatch.setattr(task_eval, "ensure_bundle", fake_ensure_bundle)
-    monkeypatch.setattr(task_eval, "run_trtfb", fake_run_trtfb)
+    monkeypatch.setattr(validation_engine, "run_hf_reference_subprocess", fake_run_hf)
+    monkeypatch.setattr(validation_engine, "ensure_bundle", fake_ensure_bundle)
+    monkeypatch.setattr(validation_engine, "run_trtfb", fake_run_trtfb)
 
     args = argparse.Namespace(
         work_root=str(tmp_path / "work"),
@@ -5523,7 +5523,7 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_trtfb(
         chat_template=False,
     )
 
-    result = task_eval.eval_one_model(suite=suite, model=model, args=args)
+    result = validation_engine.eval_one_model(suite=suite, model=model, args=args)
 
     assert calls == ["hf-cache", "build", "trtfb-seed=123"]
     assert result["hf_reused"] is True
@@ -5538,7 +5538,7 @@ def test_eval_one_model_uses_vlm_prepare_outputs_for_vlm_suite(tmp_path: Path, m
     dataset_dir.mkdir()
     dataset = dataset_dir / "mmmu_pro_vision_dataset.json"
     _write_vlm_mmmu_pro_vision(dataset)
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "vlm_mmmu_pro_vision_mcq")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "vlm_mmmu_pro_vision_mcq")
     model = {
         "name": "vl-primary",
         "hf_id": "example-org/vl-primary",
@@ -5556,7 +5556,7 @@ def test_eval_one_model_uses_vlm_prepare_outputs_for_vlm_suite(tmp_path: Path, m
 
     def fake_run_hf(_args, _model, work_dir):
         calls.append("hf")
-        prompts = task_eval.load_jsonl(work_dir / "prompts.jsonl")
+        prompts = validation_engine.load_jsonl(work_dir / "prompts.jsonl")
         manifest = json.loads(Path(work_dir, "manifest.json").read_text(encoding="utf-8"))
         assert prompts[0]["images"] == [str(dataset_dir / "images" / "sample.jpg")]
         assert manifest["task_eval"] == {
@@ -5576,17 +5576,17 @@ def test_eval_one_model_uses_vlm_prepare_outputs_for_vlm_suite(tmp_path: Path, m
 
     def fake_run_trtfb(args):
         calls.append("trtfb")
-        prompts = task_eval.load_jsonl(Path(args.work_dir) / "prompts.jsonl")
+        prompts = validation_engine.load_jsonl(Path(args.work_dir) / "prompts.jsonl")
         assert prompts[0]["images"] == [str(dataset_dir / "images" / "sample.jpg")]
         Path(args.work_dir, "trtfb_predictions.json").write_text(
             json.dumps({"responses": [{"sample_id": "test_case_1", "output_text": "Answer: J"}]}),
             encoding="utf-8",
         )
 
-    monkeypatch.setattr(task_eval, "run_hf_reference_subprocess", fake_run_hf)
-    monkeypatch.setattr(task_eval, "ensure_bundle", fake_ensure_bundle)
-    monkeypatch.setattr(task_eval, "run_trtfb", fake_run_trtfb)
-    monkeypatch.setattr(task_eval, "max_prompt_token_length", lambda **_kwargs: 128)
+    monkeypatch.setattr(validation_engine, "run_hf_reference_subprocess", fake_run_hf)
+    monkeypatch.setattr(validation_engine, "ensure_bundle", fake_ensure_bundle)
+    monkeypatch.setattr(validation_engine, "run_trtfb", fake_run_trtfb)
+    monkeypatch.setattr(validation_engine, "max_prompt_token_length", lambda **_kwargs: 128)
 
     args = argparse.Namespace(
         work_root=str(tmp_path / "work"),
@@ -5627,7 +5627,7 @@ def test_eval_one_model_uses_vlm_prepare_outputs_for_vlm_suite(tmp_path: Path, m
         chat_template=False,
     )
 
-    result = task_eval.eval_one_model(suite=suite, model=model, args=args)
+    result = validation_engine.eval_one_model(suite=suite, model=model, args=args)
 
     assert calls == ["hf", "build", "trtfb"]
     assert result["trtfb_accuracy"] == 1.0
@@ -5641,7 +5641,7 @@ def test_eval_one_model_skips_prompt_length_check_for_asr_suite(
     dataset_dir.mkdir()
     dataset = dataset_dir / "librispeech_clean_test.json"
     _write_asr_librispeech(dataset)
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "librispeech_clean_asr")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "librispeech_clean_asr")
     model = {
         "name": "whisper-tiny-fp16",
         "hf_id": "openai/whisper-tiny",
@@ -5678,7 +5678,7 @@ def test_eval_one_model_skips_prompt_length_check_for_asr_suite(
 
     def fake_run_trtfb(args):
         calls.append("trtfb")
-        prompts = task_eval.load_jsonl(Path(args.work_dir) / "prompts.jsonl")
+        prompts = validation_engine.load_jsonl(Path(args.work_dir) / "prompts.jsonl")
         assert prompts[0]["audio"].endswith("clean_000000.wav")
         Path(args.work_dir, "trtfb_predictions.json").write_text(
             json.dumps(
@@ -5687,10 +5687,10 @@ def test_eval_one_model_skips_prompt_length_check_for_asr_suite(
             encoding="utf-8",
         )
 
-    monkeypatch.setattr(task_eval, "max_prompt_token_length", fake_prompt_length)
-    monkeypatch.setattr(task_eval, "run_hf_reference_subprocess", fake_run_hf)
-    monkeypatch.setattr(task_eval, "ensure_bundle", fake_ensure_bundle)
-    monkeypatch.setattr(task_eval, "run_trtfb", fake_run_trtfb)
+    monkeypatch.setattr(validation_engine, "max_prompt_token_length", fake_prompt_length)
+    monkeypatch.setattr(validation_engine, "run_hf_reference_subprocess", fake_run_hf)
+    monkeypatch.setattr(validation_engine, "ensure_bundle", fake_ensure_bundle)
+    monkeypatch.setattr(validation_engine, "run_trtfb", fake_run_trtfb)
 
     args = argparse.Namespace(
         work_root=str(tmp_path / "work"),
@@ -5731,7 +5731,7 @@ def test_eval_one_model_skips_prompt_length_check_for_asr_suite(
         chat_template=False,
     )
 
-    result = task_eval.eval_one_model(suite=suite, model=model, args=args)
+    result = validation_engine.eval_one_model(suite=suite, model=model, args=args)
 
     assert calls == ["hf", "build", "trtfb"]
     assert result["mode"] == "asr_transcript"
@@ -5751,7 +5751,7 @@ def test_eval_one_model_runs_hf_for_golden_snapshot_vlm_model(tmp_path: Path, mo
     dataset_dir.mkdir(parents=True)
     dataset = dataset_dir / "dataset.json"
     _write_ocrbench_unified(dataset)
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "ocrbench_v2_unified")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "ocrbench_v2_unified")
     model = {
         "name": "deepseek-ocr-l0",
         "hf_id": "deepseek-ai/DeepSeek-OCR-2",
@@ -5781,16 +5781,16 @@ def test_eval_one_model_runs_hf_for_golden_snapshot_vlm_model(tmp_path: Path, mo
 
     def fake_run_trtfb(args):
         calls.append("trtfb")
-        prompts = task_eval.load_jsonl(Path(args.work_dir) / "prompts.jsonl")
+        prompts = validation_engine.load_jsonl(Path(args.work_dir) / "prompts.jsonl")
         assert prompts[0]["images"] == [str(dataset_dir / "images" / "ocrbench_v2_000000.jpg")]
         Path(args.work_dir, "trtfb_predictions.json").write_text(
             json.dumps({"responses": [{"sample_id": "ocrbench_v2_000000", "output_text": "on"}]}),
             encoding="utf-8",
         )
 
-    monkeypatch.setattr(task_eval, "run_hf_reference_subprocess", fake_run_hf)
-    monkeypatch.setattr(task_eval, "ensure_bundle", fake_ensure_bundle)
-    monkeypatch.setattr(task_eval, "run_trtfb", fake_run_trtfb)
+    monkeypatch.setattr(validation_engine, "run_hf_reference_subprocess", fake_run_hf)
+    monkeypatch.setattr(validation_engine, "ensure_bundle", fake_ensure_bundle)
+    monkeypatch.setattr(validation_engine, "run_trtfb", fake_run_trtfb)
 
     args = argparse.Namespace(
         work_root=str(tmp_path / "work"),
@@ -5831,7 +5831,7 @@ def test_eval_one_model_runs_hf_for_golden_snapshot_vlm_model(tmp_path: Path, mo
         chat_template=False,
     )
 
-    result = task_eval.eval_one_model(suite=suite, model=model, args=args)
+    result = validation_engine.eval_one_model(suite=suite, model=model, args=args)
 
     assert calls == ["hf", "build", "trtfb"]
     assert result["mode"] == "ocrbench_v2"
@@ -5849,10 +5849,10 @@ def test_eval_records_model_failure_and_continues(tmp_path: Path, monkeypatch) -
         {"name": "ok", "hf_id": "org/ok", "bundle": "ok.trtfb"},
     ]
 
-    monkeypatch.setattr(task_eval, "load_suites", lambda *_args, **_kwargs: [suite])
-    monkeypatch.setattr(task_eval, "load_manifest_records", lambda *_args, **_kwargs: models)
+    monkeypatch.setattr(validation_engine, "load_suites", lambda *_args, **_kwargs: [suite])
+    monkeypatch.setattr(validation_engine, "load_manifest_records", lambda *_args, **_kwargs: models)
     monkeypatch.setattr(
-        task_eval,
+        validation_engine,
         "selected_models_for_suite",
         lambda *_args, **_kwargs: models,
     )
@@ -5873,7 +5873,7 @@ def test_eval_records_model_failure_and_continues(tmp_path: Path, monkeypatch) -
             "bundle_built": True,
         }
 
-    monkeypatch.setattr(task_eval, "eval_one_model", fake_eval_one_model)
+    monkeypatch.setattr(validation_engine, "eval_one_model", fake_eval_one_model)
 
     args = argparse.Namespace(
         suites="",
@@ -5891,7 +5891,7 @@ def test_eval_records_model_failure_and_continues(tmp_path: Path, monkeypatch) -
         disable_model_process_isolation=True,
     )
 
-    assert task_eval.cmd_eval(args) == 0
+    assert validation_engine.cmd_eval(args) == 0
 
     summary = json.loads(
         (tmp_path / "work" / suite["id"] / "eval_summary.json").read_text(encoding="utf-8")
@@ -5911,15 +5911,15 @@ def test_eval_preserves_failed_diffusion_gate_status(tmp_path: Path, monkeypatch
         "dataset": {"kind": "diffusion_prompt_tsv"},
     }
     model = {"name": "pixart", "hf_id": "org/pixart", "bundle": "pixart.trtfb"}
-    monkeypatch.setattr(task_eval, "load_suites", lambda *_args, **_kwargs: [suite])
-    monkeypatch.setattr(task_eval, "load_manifest_records", lambda *_args, **_kwargs: [model])
+    monkeypatch.setattr(validation_engine, "load_suites", lambda *_args, **_kwargs: [suite])
+    monkeypatch.setattr(validation_engine, "load_manifest_records", lambda *_args, **_kwargs: [model])
     monkeypatch.setattr(
-        task_eval,
+        validation_engine,
         "selected_models_for_suite",
         lambda *_args, **_kwargs: [model],
     )
     monkeypatch.setattr(
-        task_eval,
+        validation_engine,
         "eval_one_model",
         lambda **_kwargs: {
             "suite": suite["id"],
@@ -5950,7 +5950,7 @@ def test_eval_preserves_failed_diffusion_gate_status(tmp_path: Path, monkeypatch
         disable_model_process_isolation=True,
     )
 
-    assert task_eval.cmd_eval(args) == 0
+    assert validation_engine.cmd_eval(args) == 0
 
     summary = json.loads(
         (tmp_path / "work" / suite["id"] / "eval_summary.json").read_text()
@@ -5961,7 +5961,7 @@ def test_eval_preserves_failed_diffusion_gate_status(tmp_path: Path, monkeypatch
 
 
 def test_eval_parser_accepts_explicit_model_plugin_dir() -> None:
-    args = task_eval.build_arg_parser().parse_args([
+    args = validation_engine.build_arg_parser().parse_args([
         "eval",
         "--suite",
         "dpg_bench_diffusion_image",
@@ -5981,15 +5981,15 @@ def test_eval_accepts_reranking_dataset_kind(tmp_path: Path, monkeypatch) -> Non
         "hf_id": "org/reranker",
         "bundle": "reranker.trtfb",
     }
-    monkeypatch.setattr(task_eval, "load_suites", lambda *_args, **_kwargs: [suite])
-    monkeypatch.setattr(task_eval, "load_manifest_records", lambda *_args, **_kwargs: [model])
+    monkeypatch.setattr(validation_engine, "load_suites", lambda *_args, **_kwargs: [suite])
+    monkeypatch.setattr(validation_engine, "load_manifest_records", lambda *_args, **_kwargs: [model])
     monkeypatch.setattr(
-        task_eval,
+        validation_engine,
         "selected_models_for_suite",
         lambda *_args, **_kwargs: [model],
     )
     monkeypatch.setattr(
-        task_eval,
+        validation_engine,
         "eval_one_model",
         lambda **_kwargs: {
             "suite": suite["id"],
@@ -6018,7 +6018,7 @@ def test_eval_accepts_reranking_dataset_kind(tmp_path: Path, monkeypatch) -> Non
         disable_model_process_isolation=True,
     )
 
-    assert task_eval.cmd_eval(args) == 0
+    assert validation_engine.cmd_eval(args) == 0
 
 
 def test_eval_stops_after_oom_when_gpu_cleanup_is_not_confirmed(
@@ -6030,10 +6030,10 @@ def test_eval_stops_after_oom_when_gpu_cleanup_is_not_confirmed(
         {"name": "next", "hf_id": "org/next", "bundle": "next.trtfb"},
     ]
 
-    monkeypatch.setattr(task_eval, "load_suites", lambda *_args, **_kwargs: [suite])
-    monkeypatch.setattr(task_eval, "load_manifest_records", lambda *_args, **_kwargs: models)
+    monkeypatch.setattr(validation_engine, "load_suites", lambda *_args, **_kwargs: [suite])
+    monkeypatch.setattr(validation_engine, "load_manifest_records", lambda *_args, **_kwargs: models)
     monkeypatch.setattr(
-        task_eval,
+        validation_engine,
         "selected_models_for_suite",
         lambda *_args, **_kwargs: models,
     )
@@ -6054,7 +6054,7 @@ def test_eval_stops_after_oom_when_gpu_cleanup_is_not_confirmed(
             "gpu_cleanup_confirmed": False,
         }
 
-    monkeypatch.setattr(task_eval, "run_eval_model_worker", fake_run_worker)
+    monkeypatch.setattr(validation_engine, "run_eval_model_worker", fake_run_worker)
 
     args = argparse.Namespace(
         suites="",
@@ -6071,7 +6071,7 @@ def test_eval_stops_after_oom_when_gpu_cleanup_is_not_confirmed(
         fail_fast=False,
     )
 
-    assert task_eval.cmd_eval(args) == 0
+    assert validation_engine.cmd_eval(args) == 0
 
     summary = json.loads(
         (tmp_path / "work" / suite["id"] / "eval_summary.json").read_text(encoding="utf-8")
@@ -6127,10 +6127,10 @@ def _write_unconditional_text_requests(path: Path) -> None:
 def test_default_suites_include_elf_diffusion_text_tasks(
     suite_id: str, dataset_kind: str, model_name: str, task_metric: str
 ) -> None:
-    suites = task_eval.load_suites()
-    suite = task_eval.suite_by_id(suites, suite_id)
-    models = task_eval.load_manifest_records()
-    selected = task_eval.selected_models_for_suite(suite, models)
+    suites = validation_engine.load_suites()
+    suite = validation_engine.suite_by_id(suites, suite_id)
+    models = validation_engine.load_manifest_records()
+    selected = validation_engine.selected_models_for_suite(suite, models)
 
     assert suite["dataset"]["kind"] == dataset_kind
     assert suite["selectors"]["model_names"] == [model_name]
@@ -6146,9 +6146,9 @@ def test_default_suites_include_elf_diffusion_text_tasks(
 def test_prepare_conditional_text_dataset_preserves_sources_and_gold(tmp_path: Path) -> None:
     dataset = tmp_path / "conditional.jsonl"
     _write_conditional_text_jsonl(dataset)
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "wmt14_de_en_elf_diffusion_text")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "wmt14_de_en_elf_diffusion_text")
 
-    outputs = task_eval.prepare_conditional_text_jsonl_dataset(
+    outputs = validation_engine.prepare_conditional_text_jsonl_dataset(
         dataset_path=dataset,
         work_dir=tmp_path / "work",
         suite=suite,
@@ -6156,7 +6156,7 @@ def test_prepare_conditional_text_dataset_preserves_sources_and_gold(tmp_path: P
     )
 
     answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
-    prompts = task_eval.load_jsonl(outputs["prompts"])
+    prompts = validation_engine.load_jsonl(outputs["prompts"])
     manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
     assert answers["requests"][0]["answer"] == "Reference one"
     assert prompts[0]["source_text"] == "Quelle eins"
@@ -6168,15 +6168,15 @@ def test_prepare_conditional_text_dataset_preserves_sources_and_gold(tmp_path: P
 def test_prepare_unconditional_text_dataset_preserves_request_seeds(tmp_path: Path) -> None:
     dataset = tmp_path / "owt.json"
     _write_unconditional_text_requests(dataset)
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "openwebtext_elf_diffusion_text")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "openwebtext_elf_diffusion_text")
 
-    outputs = task_eval.prepare_unconditional_text_dataset(
+    outputs = validation_engine.prepare_unconditional_text_dataset(
         dataset_path=dataset,
         work_dir=tmp_path / "work",
         suite=suite,
     )
 
-    prompts = task_eval.load_jsonl(outputs["prompts"])
+    prompts = validation_engine.load_jsonl(outputs["prompts"])
     assert [(row["sample_id"], row["seed"], row["prompt"]) for row in prompts] == [
         ("owt-0", 42, ""),
         ("owt-1", 43, ""),
@@ -6235,12 +6235,12 @@ def test_diffusion_text_runner_replaces_e2e_replay_with_hf_shared_inputs(
             )
 
     monkeypatch.setattr(
-        task_eval,
-        "_load_diffusion_text_task_eval_runner",
+        validation_engine,
+        "_load_diffusion_text_validation_runner",
         lambda _work_dir: (template, FakeRunner()),
     )
 
-    task_eval.run_diffusion_text_trtfb(
+    validation_engine.run_diffusion_text_trtfb(
         SimpleNamespace(
             work_dir=str(work_dir),
             raw_output="",
@@ -6301,9 +6301,9 @@ def test_diffusion_text_scores_gold_and_unconditional_quality(monkeypatch) -> No
         SimpleNamespace(rouge_scorer=SimpleNamespace(RougeScorer=FakeRougeScorer)),
     )
 
-    bleu = task_eval.score_sacrebleu_predictions(predictions, answers)
-    rouge = task_eval.score_rouge_predictions(predictions, answers)
-    quality = task_eval.score_unconditional_text_predictions(
+    bleu = validation_engine.score_sacrebleu_predictions(predictions, answers)
+    rouge = validation_engine.score_rouge_predictions(predictions, answers)
+    quality = validation_engine.score_unconditional_text_predictions(
         predictions,
         {"requests": [{"sample_id": "a"}, {"sample_id": "b"}]},
         generation_ppl=24.1,
@@ -6361,18 +6361,18 @@ def test_continuation_translation_reports_bleu_without_gating_task_quality(
         SimpleNamespace(corpus_bleu=lambda _hypotheses, _references: next(scores)),
     )
 
-    diagnostics = task_eval.continuation_task_quality_diagnostics(
+    diagnostics = validation_engine.continuation_task_quality_diagnostics(
         "sacrebleu", hf, trtfb, answers
     )
 
     assert diagnostics["hf_corpus_bleu"] == 42.0
     assert diagnostics["trtfb_corpus_bleu"] == 37.5
     assert diagnostics["corpus_bleu_abs_delta"] == 4.5
-    assert task_eval.continuation_task_quality_diagnostics("", hf, trtfb, answers) == {}
+    assert validation_engine.continuation_task_quality_diagnostics("", hf, trtfb, answers) == {}
 
 
 def test_diffusion_text_hf_parity_uses_token_agreement_only() -> None:
-    result = task_eval.compare_diffusion_text_prediction_sets(
+    result = validation_engine.compare_diffusion_text_prediction_sets(
         {
             "responses": [
                 {
@@ -6413,7 +6413,7 @@ def test_diffusion_text_shared_inputs_match_through_reference_cache_symlink(
     materialized_root.symlink_to(cached_dir.parent, target_is_directory=True)
     materialized_input = materialized_root / "sample" / "initial_latents.f32"
 
-    result = task_eval.compare_diffusion_text_prediction_sets(
+    result = validation_engine.compare_diffusion_text_prediction_sets(
         {
             "responses": [
                 {
@@ -6443,7 +6443,7 @@ def test_diffusion_text_shared_inputs_match_through_reference_cache_symlink(
 
 def test_diffusion_text_hf_parity_requires_token_ids() -> None:
     with pytest.raises(ValueError, match="must contain token_ids or generated_token_ids"):
-        task_eval.compare_diffusion_text_prediction_sets(
+        validation_engine.compare_diffusion_text_prediction_sets(
             {
                 "responses": [
                     {
@@ -6510,13 +6510,13 @@ def test_diffusion_text_task_metric_deltas(
     diagnostics: dict[str, float],
     expected: dict[str, float],
 ) -> None:
-    assert task_eval.diffusion_text_task_metric_deltas(task_metric, diagnostics) == expected
+    assert validation_engine.diffusion_text_task_metric_deltas(task_metric, diagnostics) == expected
 
 
 def test_metric_gates_fail_on_missing_or_out_of_range_metrics() -> None:
     result = {"corpus_bleu": 19.0, "non_empty_rate": 1.0}
 
-    task_eval.apply_metric_gates(
+    validation_engine.apply_metric_gates(
         result,
         {"min_corpus_bleu": 20.0, "min_non_empty_rate": 0.99, "max_generation_ppl": 40.0},
     )
@@ -6547,9 +6547,9 @@ def _ci_suite(*, digest: str = "a" * 64) -> dict:
 
 
 def test_real_etth1_suite_is_nightly_ci_eligible() -> None:
-    suite = task_eval.suite_by_id(task_eval.load_suites(), "etth1_time_series_parity")
+    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "etth1_time_series_parity")
 
-    ci = task_eval.validate_ci_suite(suite, "nightly")
+    ci = validation_engine.validate_ci_suite(suite, "nightly")
 
     assert ci["limit"] == 10
     assert ci["sample_seed"] == 20260715
@@ -6558,7 +6558,7 @@ def test_real_etth1_suite_is_nightly_ci_eligible() -> None:
 
 def test_validate_ci_suite_rejects_wrong_lane() -> None:
     with pytest.raises(ValueError, match="belongs to lane"):
-        task_eval.validate_ci_suite(_ci_suite(), "premerge")
+        validation_engine.validate_ci_suite(_ci_suite(), "premerge")
 
 
 def test_ensure_ci_dataset_downloads_and_verifies_pinned_source(
@@ -6567,17 +6567,17 @@ def test_ensure_ci_dataset_downloads_and_verifies_pinned_source(
     content = b"date,OT\n2026-01-01,1.0\n"
     digest = hashlib.sha256(content).hexdigest()
     monkeypatch.setattr(
-        task_eval.urllib.request,
+        validation_engine.urllib.request,
         "urlopen",
         lambda _source, timeout: io.BytesIO(content),
     )
 
-    dataset = task_eval.ensure_ci_dataset(
+    dataset = validation_engine.ensure_ci_dataset(
         _ci_suite(digest=digest), explicit_path=None, cache_root=tmp_path / "cache"
     )
 
     assert dataset.read_bytes() == content
-    assert task_eval._sha256_file(dataset) == digest
+    assert validation_engine._sha256_file(dataset) == digest
 
 
 def test_ensure_ci_dataset_rejects_explicit_checksum_mismatch(tmp_path: Path) -> None:
@@ -6585,7 +6585,7 @@ def test_ensure_ci_dataset_rejects_explicit_checksum_mismatch(tmp_path: Path) ->
     dataset.write_text("wrong", encoding="utf-8")
 
     with pytest.raises(ValueError, match="wrong checksum"):
-        task_eval.ensure_ci_dataset(
+        validation_engine.ensure_ci_dataset(
             _ci_suite(), explicit_path=dataset, cache_root=tmp_path / "cache"
         )
 
@@ -6607,7 +6607,7 @@ def test_configure_ci_eval_uses_suite_models_limit_seed_and_dataset(tmp_path: Pa
         dataset_cache_root=str(tmp_path / "cache"),
     )
 
-    expected_models = task_eval.configure_ci_eval(args, _ci_suite(digest=digest))
+    expected_models = validation_engine.configure_ci_eval(args, _ci_suite(digest=digest))
 
     assert expected_models == ["chronos", "timesfm"]
     assert args.model == ["chronos", "timesfm"]
@@ -6634,7 +6634,7 @@ def test_configure_ci_eval_allows_a_fail_closed_model_subset(tmp_path: Path) -> 
         dataset_cache_root=str(tmp_path / "cache"),
     )
 
-    expected_models = task_eval.configure_ci_eval(
+    expected_models = validation_engine.configure_ci_eval(
         args,
         _ci_suite(digest=hashlib.sha256(dataset.read_bytes()).hexdigest()),
     )
@@ -6644,7 +6644,7 @@ def test_configure_ci_eval_allows_a_fail_closed_model_subset(tmp_path: Path) -> 
 
 
 def test_validate_eval_summary_fails_closed_on_failed_model() -> None:
-    passed, results = task_eval.validate_eval_summary(
+    passed, results = validation_engine.validate_eval_summary(
         {
             "results": [
                 {"model": "chronos", "status": "passed"},
@@ -6679,7 +6679,7 @@ def test_public_ci_artifacts_omit_private_runner_paths(tmp_path: Path) -> None:
     ]
     artifact_dir = tmp_path / "public"
 
-    task_eval.write_public_ci_artifacts(
+    validation_engine.write_public_ci_artifacts(
         suite=_ci_suite(),
         expected_models=["chronos", "timesfm"],
         results=results,

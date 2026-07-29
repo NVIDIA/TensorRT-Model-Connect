@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run model-owned reference plugins without task-eval orchestration."""
+"""Run model-owned reference plugins without validation orchestration."""
 
 from __future__ import annotations
 

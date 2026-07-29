@@ -71,7 +71,7 @@ python tools/trtmc_validate.py gpt2-125m --limit 0
 
 The command creates a reference environment only when one does not already
 exist, then prints the environment it used. Reference inference runs through
-`tools/trtmc_reference.py`, outside the task-eval CLI. Its result is keyed by
+`tools/trtmc_reference.py`, outside the validation engine process. Its result is keyed by
 the input slice and inference settings and reused from the shared reference
 cache when the key already exists. TRTMC variants may declare the same
 `reference_cache_identity` in `model_workloads.yaml` only when they use the
@@ -86,11 +86,11 @@ directories therefore do not retain another copy of the bundle.
 
 At completion the command prints the exact reference and TRTMC reproduction
 commands, the per-model `comparison.json`, and the aggregate `report.html`.
-Comparison runs through `tools/trtmc_compare.py`; task-eval
-commands are not part of the validation result or its reproduction contract.
+Comparison runs through `tools/trtmc_compare.py`; validation-engine commands
+are not part of the result or its reproduction contract.
 Every model/workload binding must resolve to an independent reference
 runner selected by the prepared dataset kind. A catalog-wide test rejects new
-bindings that would fall back to `task_eval.py` or E2E execution.
+bindings that have no independent native reference runner.
 
 Every agreement or disagreement therefore means that both backends consumed
 the aligned prepared inputs and produced outputs that were evaluated by the
@@ -116,7 +116,7 @@ samples. Each sample contains the exact input, both raw prediction records,
 the comparison evidence, and native single-sample commands when the backends
 provide them. The reference command invokes a standalone upstream-framework
 entrypoint and the TRTMC command invokes the model executable directly; neither
-command re-enters validation, comparison, or task-eval orchestration. The
+command re-enters validation or comparison orchestration. The
 complete set is written to `disagreements.jsonl`, while `comparison.json` and
 `report.json` retain only bounded metadata.
 
@@ -154,6 +154,10 @@ rejects a conflicting override before inference.
 Quantized candidates must declare their unquantized reference precision in the
 model testcase's validation configuration:
 
+The persisted manifest field remains named `task_eval` for compatibility with
+existing reference-cache keys and result artifacts. It is metadata only; no
+validation command imports or executes a task-eval module.
+
 ```json
 "precision": "bf16",
 "quantization": {"format": "fp8"},
@@ -176,7 +180,7 @@ variants with the same reference computation can reuse an entry.
 ## Add or extend a model
 
 1. Reuse or add a dataset workload in
-   `tests/task_eval/validation_suites.yaml`.
+   `tests/validation/workloads.yaml`.
 2. Add that workload under the model in `model_workloads.yaml`.
 3. Add a workload sample limit if the workload is new.
 4. Select one workload as the model default.

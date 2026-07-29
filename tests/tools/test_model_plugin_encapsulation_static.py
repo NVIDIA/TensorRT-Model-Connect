@@ -717,7 +717,7 @@ SHARED_REPORT_AND_IMPACT_TEST_FILES = (
     REPO_ROOT / "tests" / "tools" / "test_sampling_contract_plugin.py",
     REPO_ROOT / "tests" / "tools" / "test_schedule_e2e.py",
     REPO_ROOT / "tests" / "tools" / "test_sol_estimate.py",
-    REPO_ROOT / "tests" / "tools" / "test_task_eval.py",
+    REPO_ROOT / "tests" / "tools" / "test_validation_engine.py",
 )
 SHARED_REPORT_AND_PROFILE_TOOLS = (
     REPO_ROOT / "scripts" / "perf_evolve_prompt.py",

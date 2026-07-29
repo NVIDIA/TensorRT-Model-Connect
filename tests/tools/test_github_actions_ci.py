@@ -1207,3 +1207,92 @@ def test_selective_e2e_zero_model_path_still_generates_report_input_dir() -> Non
     )[1].split("return", maxsplit=1)[0]
     assert '"e2e_artifacts/artifacts"' in zero_model_block
     assert "mkdir(parents=True, exist_ok=True)" in zero_model_block
+
+
+def test_etth1_model_proofs_use_the_single_validation_engine_entry_point() -> None:
+    stage = _ci_source("validation.py", "model_proof.py", "model_proof_inner.py")
+    validation_engine = (
+        REPO_ROOT / "tools" / "validation" / "engine.py"
+    ).read_text()
+
+    assert '"/src/tools/validation/engine.py"' in stage
+    assert '"prepare-ci-dataset"' in stage
+    assert '"eval"' in stage
+    assert "validation_engine_ci.py" not in stage
+    for argument in (
+        "--suite",
+        "etth1_time_series_parity",
+        "--ci-lane",
+        "nightly",
+        "--engine-dir",
+        "/work/engines",
+        "--model-plugin-dir",
+        "/work/model-plugins",
+        "--require-prebuilt-bundles",
+    ):
+        assert f'"{argument}"' in stage
+    assert "ETTh1 validation requires a GB300 GPU" in stage
+    assert '"--network"' in stage and '"none"' in stage
+    assert "validate_eval_summary" in validation_engine
+    assert 'result.get("status") == "passed"' in validation_engine
+    assert "return complete and all" in validation_engine
+    assert (
+        '"work_dir"'
+        not in validation_engine.split("def _public_ci_result", maxsplit=1)[1].split(
+            ")", maxsplit=1
+        )[0]
+    )
+
+
+def test_etth1_dataset_preparation_imports_the_projected_python_package(
+    tmp_path: Path,
+) -> None:
+    from tools.ci.validation import ValidationDatasetPreparer
+
+    projection = tmp_path / "projection"
+    work = tmp_path / "work"
+    artifacts = tmp_path / "artifacts"
+    destination = work / "validation-data" / ValidationDatasetPreparer.DATASET
+    projection.mkdir()
+    artifacts.mkdir()
+    docker_commands: list[list[str]] = []
+
+    class Commands:
+        @staticmethod
+        def run(command, **_kwargs):
+            rendered = [str(item) for item in command]
+            docker_commands.append(rendered)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text("date,HUFL\n", encoding="utf-8")
+            return subprocess.CompletedProcess(rendered, 0, "", "")
+
+    class Context:
+        commands = Commands()
+
+        @staticmethod
+        def run(command, **_kwargs):
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+    result = ValidationDatasetPreparer(
+        Context(),
+        "nightly",
+        "timesfm",
+        projection,
+        work,
+        artifacts,
+        "ci-image",
+        "dataset-container",
+        [],
+    ).prepare()
+
+    assert result == destination.parents[1]
+    assert len(docker_commands) == 1
+    command = docker_commands[0]
+    image_index = command.index("ci-image")
+    assert command.index("PYTHONPATH=/src/python:/src") < image_index
+    assert command.index("PYTHONNOUSERSITE=1") < image_index
+    assert command[image_index + 1 : image_index + 4] == [
+        "/opt/venv/bin/python",
+        "/src/tools/validation/engine.py",
+        "prepare-ci-dataset",
+    ]

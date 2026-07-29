@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from tests.e2e_harness.manifest_loader import load_manifest
-from tools import task_eval
+from tools.validation import catalog as validation_catalog
 
 
 def test_premerge_native_manifest_uses_family_build_defaults() -> None:
@@ -59,11 +59,11 @@ def test_fp8_and_topp_use_deterministic_mmlu_validation_contract() -> None:
     manifest_dir = Path(__file__).with_name("manifests")
     topp_e2e = load_manifest(manifest_dir / "qwen3-0.6b-topp.json")
     models = {
-        name: task_eval.manifest_record(manifest_dir / f"{name}.json")
+        name: validation_catalog.manifest_record(manifest_dir / f"{name}.json")
         for name in ("qwen3-0.6b-fp8", "qwen3-0.6b-topp")
     }
-    suite = task_eval.suite_by_id(
-        task_eval.load_suites(),
+    suite = validation_catalog.suite_by_id(
+        validation_catalog.load_suites(),
         "mmlu_five_shot_mcq",
     )
 
@@ -71,7 +71,10 @@ def test_fp8_and_topp_use_deterministic_mmlu_validation_contract() -> None:
         assert model["reference_backend"] == "hf_transformers"
         assert model["reference_family"] == "chat_qwen3_posttrained"
         assert model["user_contract"] == "chat_response"
-        assert task_eval.suite_match_reason(suite, model) == (True, "selected")
+        assert validation_catalog.suite_match_reason(suite, model) == (
+            True,
+            "selected",
+        )
     assert models["qwen3-0.6b-fp8"]["task_eval"]["reference_precision"] == "bf16"
     assert set(models) < set(suite["default_model_names"])
     assert topp_e2e.reference_backend == "invariant_only"

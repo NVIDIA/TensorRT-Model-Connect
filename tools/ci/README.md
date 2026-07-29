@@ -136,7 +136,7 @@ The container half, `ModelProofInnerPipeline`, then runs linearly:
 4. Verify that only the requested model DSO was produced and loaded.
 5. Run model-owned C++ and Python tests.
 6. Run the model-owned E2E inference and reference comparison.
-7. Run eligible nightly task evaluation when the suite is `nightly`.
+7. Run eligible nightly reference validation when the suite is `nightly`.
 8. Generate `proof.json`, status evidence, logs, and the per-model HTML report.
 
 Failure at any step produces a fallback status and HTML artifact before the job
@@ -171,7 +171,8 @@ The scheduled Internal nightly workflow reuses the image, container, unit,
 model-proof, and reporting control plane. Its isolated model-proof matrix
 broadens selection to the full model inventory; separate jobs add package,
 coverage, semantic media assessment, diffusion/VLM gating, and eligible task
-evaluation. It does not invoke the retired monolithic `stage full-e2e` lane.
+reference-consistency validation. It does not invoke the retired monolithic
+`stage full-e2e` lane.
 
 Pre-merge and nightly therefore share the model-proof implementation while
 using different selections and additional nightly-only jobs. Neither the
@@ -205,7 +206,7 @@ path-scoped Pages builds are independent.
 | `model_proof.py` | Prepare caches, projection, lease, and proof container | Trusted host |
 | `model_proof_inner.py` | Build, test, compare, and report one model | Hermetic container |
 | `model_reference_cache.py` | Warm and verify pinned external model-reference checkouts | Trusted host |
-| `task_eval.py` | Prepare and run eligible nightly ETTh1 parity | Host and container |
+| `validation.py` | Prepare and run eligible nightly ETTh1 parity | Host and container |
 
 `scripts/schedule_e2e.py` is a compatibility entry point. The implementation is
 package-local in `tools/ci/e2e_schedule.py`, which avoids collisions with
@@ -632,20 +633,20 @@ the producing class remains the source of truth for optional evidence fields.
   cannot reach the network, peer model source, or host-wide cache; artifact
   upload and matrix aggregation stay in GitHub Actions.
 
-### `task_eval.py`
+### `validation.py`
 
-- **Functionality / units:** `TaskEvalPolicy` maps eligible time-series
-  runtimes; `TaskEvalDatasetPreparer` obtains and validates ETTh1 before the
-  offline proof; `TaskEvalRunner` runs the reviewed nightly parity suite using
+- **Functionality / units:** `ValidationPolicy` maps eligible time-series
+  runtimes; `ValidationDatasetPreparer` obtains and validates ETTh1 before the
+  offline proof; `ValidationRunner` runs the reviewed nightly parity suite using
   prebuilt bundles.
 - **Inputs:** `suite`, runtime-model ID, projected source, CI image, GB300 GPU,
   private work/artifact paths, and the verified ETTh1 dataset.
 - **Outputs:** Returns `None`/a dataset path during preparation and
   `False`/`True` when evaluation is skipped/run. Durable outputs include
-  `task-eval-dataset.log`, `task-eval/eval_summary.json`, and associated
-  task-evaluation evidence.
+  `validation-dataset.log`, `validation/eval_summary.json`, and associated
+  validation evidence.
 - **Boundary:** Network access is limited to pre-proof dataset preparation.
-  Task evaluation supplements nightly coverage and never replaces the standard
+  Dataset validation supplements nightly coverage and never replaces the standard
   model E2E/reference comparison.
 
 ## Data passed between stages

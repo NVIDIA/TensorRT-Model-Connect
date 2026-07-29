@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Convert the official ELLA DPG-Bench CSV into task-eval JSON.
+"""Convert the official ELLA DPG-Bench CSV into validation JSON.
 
 The first ten records are a fixed, human-reviewable slice spanning counting,
 attribute binding, spatial relationships, text rendering, and realistic scenes.

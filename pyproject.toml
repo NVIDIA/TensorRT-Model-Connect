@@ -39,7 +39,7 @@ chronos = ["chronos-forecasting>=2.2.2"]
 # CLIP-based semantic metrics on diffusion model outputs.  Gracefully skipped
 # at runtime when absent, but all CLIP gates become no-ops without it.
 clip = ["open-clip-torch>=2.20", "Pillow>=9.0"]
-task-eval = ["rouge-score>=0.1.2", "sacrebleu>=2.4"]
+validation = ["rouge-score>=0.1.2", "sacrebleu>=2.4"]
 
 [tool.conan-py-build.wheel]
 packages = ["python/tensorrt_model_connect"]

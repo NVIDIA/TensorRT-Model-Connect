@@ -237,7 +237,7 @@ suites:
       lane: local_only
       notes: >
         Run with --limit 10 on GB300. Generated code is not executed by
-        task-eval; HumanEval pass@1 remains a separate diagnostic.
+        validation; HumanEval pass@1 remains a separate diagnostic.
 
   - id: wikitext103_distilgpt2_continuation_parity
     description: >
@@ -913,7 +913,7 @@ suites:
       lane: local_only
       notes: >
         GB300-only sampled validation. Run with --limit 10; do not expand to
-        the full VBench prompt suite in task-eval.
+        the full VBench prompt suite in validation.
 
   - id: gedit_bench_image_edit
     description: >
@@ -1264,7 +1264,7 @@ suites:
       limit: 10
       sample_seed: 20260715
       notes: >
-        Run as a blocking nightly GB300 task-eval stage. ETTh1 is shared by all
+        Run as a blocking nightly GB300 validation stage. ETTh1 is shared by all
         five checkpoints, but output quality metrics are not mixed across their
         distinct forecast and regression contracts; this suite gates backend
         prediction parity. TimesFM remains gated at its reviewed tolerance while
@@ -1320,7 +1320,7 @@ suites:
       max_pair_cosine_abs_delta: 0.02
     model_profiles:
       # Match the model-owned, reviewed encoder E2E numerical contracts. These
-      # models have architecture-specific FP16 sensitivity; task-eval does not
+      # models have architecture-specific FP16 sensitivity; validation does not
       # invent looser thresholds for them.
       albert-base:
         gates:

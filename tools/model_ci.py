@@ -78,7 +78,7 @@ PLATFORM_PROJECTION_EXACT = frozenset(
         "tests/builder/family_plugin_tester.py",
         "tests/e2e_partition.py",
         "tests/runtime_strategy_matrix.yaml",
-        "tests/task_eval/validation_suites.yaml",
+        "tests/validation/workloads.yaml",
         "tests/test_e2e.py",
         "tests/test_e2e_selection.py",
         "tests/test_tvm_ffi_e2e.py",
@@ -94,7 +94,7 @@ PLATFORM_PROJECTION_EXACT = frozenset(
         "tools/reference/transformers_encoder.py",
         "tools/reference/transformers_text.py",
         "tools/reference/transformers_vlm.py",
-        "tools/task_eval.py",
+        "tools/validation/engine.py",
         "tools/test_impact.py",
         "tools/tool_helpers.py",
         "tools/trtmc_reference.py",
@@ -157,24 +157,25 @@ UNIT_TEST_ONLY_EXACT = frozenset(
         "src/runtime/config/cli_support.cpp",
     }
 )
-# Task-eval and the selective impact analyzer are certified by the complete
+# Validation and the selective impact analyzer are certified by the complete
 # source-only tools suite. Selective premerge proofs do not execute these
-# entrypoints; the all-model nightly separately consumes task-eval where
+# entrypoints; the all-model nightly separately consumes validation where
 # applicable, so treating a tool-only change as broad premerge model impact
 # would add GPU work without validating the changed behavior.
 FULL_UNIT_TEST_ONLY_EXACT = frozenset(
     {
         "tools/elf_hf_reference.py",
-        "tools/prepare_elf_task_eval_datasets.py",
-        "tools/prepare_media_task_eval_datasets.py",
-        "tools/task_eval.py",
+        "tools/prepare_elf_validation_datasets.py",
+        "tools/prepare_media_validation_datasets.py",
+        "tools/prepare_vision_validation_datasets.py",
+        "tools/validation/engine.py",
         "tools/test_impact.py",
     }
 )
 UNIT_TEST_ONLY_PREFIXES = (
     "tests/builder/",
     "tests/cpp/",
-    "tests/task_eval/",
+    "tests/validation/",
     "tests/tools/",
 )
 # These shared-location tests require real model plugins or GPU execution and
@@ -243,7 +244,7 @@ CI_OR_TOOLING_PREFIXES = (
 
 _MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _MANIFEST_ID_RE = re.compile(r'(?m)^\s*id\s*=\s*"([^"]+)"\s*$')
-_TASK_EVAL_OPTIONAL_EXTRA_RE = re.compile(r"task-eval\s*=\s*\[.*\]\s*\Z")
+_VALIDATION_OPTIONAL_EXTRA_RE = re.compile(r"validation\s*=\s*\[.*\]\s*\Z")
 
 
 class ModelCIError(RuntimeError):
@@ -708,12 +709,12 @@ def _diff_entries(repo_root: Path, base: str, head: str) -> tuple[DiffEntry, ...
     return tuple(entries)
 
 
-def _is_task_eval_optional_extra_only_change(
+def _is_validation_optional_extra_only_change(
     repo_root: Path,
     base: str,
     head: str,
 ) -> bool:
-    """Return whether pyproject changed only the one-line task-eval extra.
+    """Return whether pyproject changed only the one-line validation extra.
 
     Keep this deliberately fail-closed: comments, multiline rewrites, build
     metadata, and runtime dependency changes remain platform impact until a
@@ -741,7 +742,8 @@ def _is_task_eval_optional_extra_only_change(
         if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
     ]
     return bool(changed_lines) and all(
-        _TASK_EVAL_OPTIONAL_EXTRA_RE.fullmatch(line) is not None for line in changed_lines
+        _VALIDATION_OPTIONAL_EXTRA_RE.fullmatch(line) is not None
+        for line in changed_lines
     )
 
 
@@ -960,7 +962,7 @@ def calculate_impact(
     fallback_selected: set[str] = set()
     broad_change = False
     unit_scope = "none"
-    pyproject_task_eval_only = _is_task_eval_optional_extra_only_change(
+    pyproject_validation_only = _is_validation_optional_extra_only_change(
         repo_root,
         comparison_base,
         head_sha,
@@ -978,7 +980,7 @@ def calculate_impact(
                 continue
             seen_path_revision.add((path, catalog.revision))
             kind, owner = _classify_path(path, catalog)
-            if path == "pyproject.toml" and pyproject_task_eval_only:
+            if path == "pyproject.toml" and pyproject_validation_only:
                 kind = "unit_tests"
             item = {"path": path, "kind": kind}
             if owner is not None:

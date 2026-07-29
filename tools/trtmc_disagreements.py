@@ -17,7 +17,7 @@ from typing import Any, Mapping, Sequence
 SCHEMA_VERSION = "trtmc.validation-disagreement/v1"
 INLINE_DISAGREEMENT_LIMIT = 20
 _FORBIDDEN_REPRO_ENTRYPOINTS = (
-    "task_eval.py",
+    "validation/engine.py",
     "trtmc_compare.py",
     "trtmc_reference.py",
     "trtmc_validate.py",

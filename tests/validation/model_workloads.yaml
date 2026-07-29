@@ -36,7 +36,7 @@ sample_limits:
 
 # Model-first validation bindings. Workload names refer to aligned input,
 # reference inference, TRTMC inference, and output comparison contracts in
-# tests/task_eval/validation_suites.yaml. Models without that complete contract
+# tests/validation/workloads.yaml. Models without that complete contract
 # remain visible as not compared; E2E execution is never treated as reference
 # consistency.
 models:

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prepare model-aligned classification and segmentation task-eval datasets."""
+"""Prepare model-aligned classification and segmentation validation datasets."""
 
 from __future__ import annotations
 

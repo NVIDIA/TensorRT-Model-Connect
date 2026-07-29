@@ -1895,21 +1895,27 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ),
         ClassificationRule(
             priority=486,
-            name="task_eval_tool",
+            name="validation_engine_tool",
             matcher=_path_in({
-                "tools/task_eval.py",
+                "tools/validation/engine.py",
                 "tools/elf_hf_reference.py",
-                "tools/prepare_elf_task_eval_datasets.py",
-                "tools/prepare_media_task_eval_datasets.py",
+                "tools/prepare_elf_validation_datasets.py",
+                "tools/prepare_media_validation_datasets.py",
+                "tools/prepare_vision_validation_datasets.py",
             }),
-            resolver=_match_result("task_eval_tool", _no_models, ["tools"], False),
-            covered_by=("TestUnitTiers.test_task_eval_tool_triggers_tools_tier",),
+            resolver=_match_result(
+                "validation_engine_tool", _no_models, ["tools"], False
+            ),
+            covered_by=(
+                "TestUnitTiers.test_validation_engine_tool_triggers_tools_tier",
+            ),
         ),
         ClassificationRule(
             priority=487,
             name="validation_tool",
             matcher=_regex_rule(
-                r"tools/(?:reference/[^/]+\.py|"
+                r"tools/(?:validation/(?:[^/]+\.py|README\.md)|"
+                r"reference/[^/]+\.py|"
                 r"trtmc_(?:compare|disagreements|reference|validate)\.py)$"
             ),
             resolver=_match_result("validation_tool", _no_models, ["tools"], False),
@@ -1917,10 +1923,14 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ),
         ClassificationRule(
             priority=488,
-            name="task_eval_config",
-            matcher=_path_startswith("tests/task_eval/"),
-            resolver=_match_result("task_eval_config", _no_models, ["tools"], False),
-            covered_by=("TestUnitTiers.test_task_eval_suite_config_triggers_tools_tier",),
+            name="validation_workload_config",
+            matcher=_path_equals("tests/validation/workloads.yaml"),
+            resolver=_match_result(
+                "validation_workload_config", _no_models, ["tools"], False
+            ),
+            covered_by=(
+                "TestUnitTiers.test_validation_workload_config_triggers_tools_tier",
+            ),
         ),
         ClassificationRule(
             priority=489,
@@ -2763,12 +2773,12 @@ class CandidateTokenDiffRefinementRule(DiffRefinementRule):
         )
 
 
-class PyprojectTaskEvalOptionalDependenciesRule(DiffRefinementRule):
-    """Scope the isolated task-eval optional extra to tools validation."""
+class PyprojectValidationOptionalDependenciesRule(DiffRefinementRule):
+    """Scope the isolated validation optional extra to validation tools."""
 
-    name = "pyproject_task_eval_optional_dependencies"
+    name = "pyproject_validation_optional_dependencies"
     path = "pyproject.toml"
-    _assignment = re.compile(r"^task-eval\s*=\s*\[.*\]\s*$")
+    _assignment = re.compile(r"^validation\s*=\s*\[.*\]\s*$")
 
     def matches(self, path: str, lines: List[str], imap: ImpactMap) -> bool:
         del imap
@@ -3024,7 +3034,7 @@ class E2EWaivesModelLinesRule(DiffRefinementRule):
 
 
 DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
-    PyprojectTaskEvalOptionalDependenciesRule(),
+    PyprojectValidationOptionalDependenciesRule(),
     HarnessSharedFp8ScalesRule(),
     KnownModelTimingEstimateRule(),
     RuntimeStrategyMatrixRule(),

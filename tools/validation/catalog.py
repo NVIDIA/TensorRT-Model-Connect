@@ -15,7 +15,7 @@ from tests.e2e_harness.manifest_loader import iter_manifest_paths, load_manifest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SUITES = REPO_ROOT / "tests" / "task_eval" / "validation_suites.yaml"
+DEFAULT_SUITES = REPO_ROOT / "tests" / "validation" / "workloads.yaml"
 DEFAULT_MODELS_DIR = REPO_ROOT / "tests" / "e2e" / "models"
 
 
@@ -88,14 +88,14 @@ def manifest_record(path: Path) -> dict[str, Any]:
         if isinstance(canonical, dict):
             raw = {**raw, **canonical, "name": model_name}
     build_args = raw.get("build_args", {})
-    task_eval_config = raw.get("task_eval", {})
-    if not isinstance(task_eval_config, dict):
-        task_eval_config = {}
+    validation_config = raw.get("task_eval", {})
+    if not isinstance(validation_config, dict):
+        validation_config = {}
     runtime_strategy = str(raw.get("runtime_strategy") or "")
     task_strategy = str(raw.get("task_strategy") or runtime_strategy)
-    reference_family = str(task_eval_config.get("reference_family") or infer_reference_family(raw))
+    reference_family = str(validation_config.get("reference_family") or infer_reference_family(raw))
     reference_backend = str(
-        task_eval_config.get("reference_backend") or raw.get("reference_backend", "") or ""
+        validation_config.get("reference_backend") or raw.get("reference_backend", "") or ""
     )
     if not reference_backend:
         try:
@@ -105,7 +105,7 @@ def manifest_record(path: Path) -> dict[str, Any]:
         except Exception:
             reference_backend = "hf_transformers"
     user_contract = str(
-        task_eval_config.get("user_contract") or infer_user_contract(raw, reference_family)
+        validation_config.get("user_contract") or infer_user_contract(raw, reference_family)
     )
     distributed = raw.get("distributed_runtime", {})
     requires_multi_device = bool(distributed.get("enabled")) or (
@@ -150,7 +150,7 @@ def manifest_record(path: Path) -> dict[str, Any]:
         "video_height": raw.get("video_height"),
         "video_width": raw.get("video_width"),
         "num_inference_steps": raw.get("num_inference_steps"),
-        "task_eval": task_eval_config,
+        "task_eval": validation_config,
         "runtime_config": (
             raw.get("runtime_config", {}) if isinstance(raw.get("runtime_config", {}), dict) else {}
         ),

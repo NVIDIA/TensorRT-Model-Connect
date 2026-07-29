@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prepare reproducible ELF task-eval datasets under one dataset root."""
+"""Prepare reproducible ELF validation datasets under one dataset root."""
 
 from __future__ import annotations
 

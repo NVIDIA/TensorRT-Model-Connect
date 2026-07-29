@@ -405,9 +405,9 @@ profiler capture perturbs baseline latency, and model loading is not request
 latency. Keep those as separate runs/artifacts rather than mixing them into the
 baseline result.
 
-## Relationship to task evaluation and NVIDIA tools
+## Relationship to reference validation and NVIDIA tools
 
-`tools/task_eval.py` answers whether model outputs satisfy a task-quality
+`trtmc-validate` answers whether model outputs satisfy a reference-consistency
 contract using datasets, references, and comparators. `trtmc-bench` answers
 how the runtime performs for a resolved workload. A built-in testcase makes a
 benchmark runnable, but it is not proof of task quality; the result explicitly

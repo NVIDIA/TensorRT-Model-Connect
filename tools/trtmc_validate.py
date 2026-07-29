@@ -44,7 +44,7 @@ from tools import trtmc_disagreements  # noqa: E402
 
 
 DEFAULT_CATALOG = REPO_ROOT / "tests" / "validation" / "model_workloads.yaml"
-DEFAULT_SUITES = REPO_ROOT / "tests" / "task_eval" / "validation_suites.yaml"
+DEFAULT_SUITES = REPO_ROOT / "tests" / "validation" / "workloads.yaml"
 DEFAULT_MODELS = REPO_ROOT / "tests" / "e2e" / "models"
 DEFAULT_OUTPUT = REPO_ROOT / "artifacts" / "trtmc-validate"
 DEFAULT_ENGINE_DIR = DEFAULT_OUTPUT / "engines"
@@ -391,7 +391,7 @@ def resolve_sample_limit(
     return int(catalog["sample_limits"][binding.workload])
 
 
-def _task_eval_models(models_root: Path) -> dict[str, dict[str, Any]]:
+def _validation_models(models_root: Path) -> dict[str, dict[str, Any]]:
     return {
         str(model["name"]): model
         for model in validation_catalog.load_manifest_records(models_root)
@@ -2312,7 +2312,7 @@ def _load_validation_inputs(
     suites_list = validation_catalog.load_suites(arguments.suites)
     suites = {suite["id"]: suite for suite in suites_list}
     ready = ready_model_names(arguments.models_dir)
-    task_models = _task_eval_models(arguments.models_dir)
+    task_models = _validation_models(arguments.models_dir)
     audit_catalog(catalog, ready_models=ready, suite_names=suites)
     audit_workload_compatibility(
         catalog,

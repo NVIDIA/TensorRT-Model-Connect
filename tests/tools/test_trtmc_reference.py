@@ -535,7 +535,7 @@ def test_causal_reference_uses_native_transformers_entrypoint(
     assert command[1].endswith("tools/reference/transformers_text.py")
     assert command[command.index("--model-revision") + 1] == "0123456789abcdef"
     assert command[command.index("--experts-implementation") + 1] == "batched_mm"
-    assert "task_eval.py" not in " ".join(command)
+    assert "validation/engine.py" not in " ".join(command)
     assert (work_dir / "hf_native_run.log").is_symlink()
     assert (work_dir / "hf_native_repro.json").is_symlink()
 
@@ -574,7 +574,7 @@ def test_transformers_reference_metadata_is_direct_and_sample_selectable(
     assert command[command.index("--sample-id") + 1] == "{sample_id}"
     assert command[command.index("--prompts") + 1] == "{work_dir}/prompts.jsonl"
     assert command[command.index("--experts-implementation") + 1] == "batched_mm"
-    assert "task_eval.py" not in " ".join(command)
+    assert "validation/engine.py" not in " ".join(command)
 
 
 def test_transformers_text_forwards_experts_implementation(monkeypatch) -> None:
@@ -733,7 +733,7 @@ def test_encoder_reference_metadata_is_direct_and_sample_selectable(
     assert command[1].endswith("tools/reference/transformers_encoder.py")
     assert command[command.index("--sample-id") + 1] == "{sample_id}"
     assert command[command.index("--prompts") + 1] == "{work_dir}/prompts.jsonl"
-    assert "task_eval.py" not in " ".join(command)
+    assert "validation/engine.py" not in " ".join(command)
 
 
 def test_native_reference_runner_uses_prepared_dataset_kind(tmp_path: Path) -> None:
@@ -920,7 +920,7 @@ def test_plugin_reference_preserves_direct_subprocess_command() -> None:
     assert subprocess_module.run is fake_subprocess_run
 
 
-def test_plugin_reference_applies_task_eval_reference_precision(
+def test_plugin_reference_applies_validation_reference_precision(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -992,7 +992,7 @@ def test_vlm_reference_metadata_is_direct_and_sample_selectable(
     assert command[1].endswith("tools/reference/transformers_vlm.py")
     assert command[command.index("--sample-id") + 1] == "{sample_id}"
     assert command[command.index("--answers") + 1] == "{work_dir}/answers.json"
-    assert "task_eval.py" not in " ".join(command)
+    assert "validation/engine.py" not in " ".join(command)
 
 
 def test_speech_reference_metadata_is_direct_and_sample_selectable(
@@ -1033,7 +1033,7 @@ def test_speech_reference_metadata_is_direct_and_sample_selectable(
     assert command[command.index("--model-revision") + 1] == "0123456789abcdef"
     assert command[command.index("--sample-id") + 1] == "{sample_id}"
     assert command[command.index("--manifest") + 1] == "{work_dir}/manifest.json"
-    assert "task_eval.py" not in " ".join(command)
+    assert "validation/engine.py" not in " ".join(command)
 
 
 def test_magpie_reference_restores_exact_pinned_archive(
@@ -1171,10 +1171,10 @@ def test_elf_metadata_points_to_official_reference_entrypoint(tmp_path: Path) ->
     assert command[command.index("--seed") + 1] == "{reference_sample_seed}"
     assert payload["base_seed"] == 42
     assert "elf_prepared.py" not in " ".join(command)
-    assert "task_eval.py" not in " ".join(command)
+    assert "validation/engine.py" not in " ".join(command)
 
 
-def test_speech_runner_dispatches_asr_without_task_eval(
+def test_speech_runner_dispatches_asr_without_engine_wrapper(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1237,7 +1237,7 @@ def test_speech_runner_dispatches_asr_without_task_eval(
     assert json.loads(predictions.read_text(encoding="utf-8"))["responses"][0][
         "output_text"
     ] == "hello"
-    assert "task_eval.py" not in metadata.read_text(encoding="utf-8")
+    assert "validation/engine.py" not in metadata.read_text(encoding="utf-8")
 
 
 def test_nemotron35_asr_restores_nemo_archive_and_uses_language_manifest(

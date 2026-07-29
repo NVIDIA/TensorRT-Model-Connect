@@ -26,7 +26,7 @@ _MANIFEST_DIR = Path(__file__).parent / "manifests"
         "patchtst-granite-official.json",
     ),
 )
-def test_single_gpu_task_eval_reserves_an_exclusive_gpu(manifest_name: str) -> None:
+def test_single_gpu_validation_reserves_an_exclusive_gpu(manifest_name: str) -> None:
     manifest = json.loads((_MANIFEST_DIR / manifest_name).read_text(encoding="utf-8"))
 
     assert manifest["e2e_parallel_resource"] == "exclusive_gpu"

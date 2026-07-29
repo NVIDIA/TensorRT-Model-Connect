@@ -44,7 +44,7 @@ def test_supported_checkpoint_contract_accepts_legacy_architecture() -> None:
     _validate_supported_checkpoint_architecture(supported_checkpoint)
 
 
-def test_manifest_revision_reaches_task_eval_repro_command(tmp_path) -> None:
+def test_manifest_revision_reaches_validation_repro_command(tmp_path) -> None:
     manifest = Path(__file__).parent / "manifests" / "magpie-tts-357m.json"
     case = load_manifest(manifest)
     context = RunContext(case=case, engine_dir=str(tmp_path))

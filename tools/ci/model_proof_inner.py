@@ -20,7 +20,7 @@ from .context import CiContext
 from .model_proof import ModelProofRequest
 from .model_proof_selection import ModelProofSelection, ModelProofSelector
 from .process import CiError
-from .task_eval import TaskEvalRunner
+from .validation import ValidationRunner
 
 
 class ProofStatus:
@@ -38,7 +38,7 @@ class ProofStatus:
         "e2e_reference": "e2e/junit.xml, e2e/*/result.json",
         "engine_build_budget": "engine-builds/*.json, engine-build-verification.json",
         "result_verification": "e2e-verification.json",
-        "task_eval": "task-eval/eval_summary.json",
+        "validation": "validation/eval_summary.json",
         "html_report": "model-proof-report.html",
     }
 
@@ -472,7 +472,7 @@ class ModelProofInnerPipeline:
         self._run_cpp_tests(payload["runtime_tests"])
         self._run_python_tests(payload)
         verification = self._run_e2e(payload)
-        self._run_task_eval(runtime_model)
+        self._run_validation(runtime_model)
         digest = hashlib.sha256(dso.read_bytes()).hexdigest()
         proof = {
             "schema_version": 1,
@@ -527,17 +527,21 @@ class ModelProofInnerPipeline:
             json.dumps(proof, indent=2) + "\n", encoding="utf-8"
         )
 
-    def _run_task_eval(self, runtime_model: str) -> None:
+    def _run_validation(self, runtime_model: str) -> None:
         assert self.status
         self.status.step(
-            "task_eval",
+            "validation",
             "running",
-            "task-eval/eval_summary.json, task-eval/models/*/summary.json",
+            "validation/eval_summary.json, validation/models/*/summary.json",
         )
-        if TaskEvalRunner(self.context, self.request.suite, runtime_model).run():
-            self.status.step("task_eval", "passed")
+        if ValidationRunner(self.context, self.request.suite, runtime_model).run():
+            self.status.step("validation", "passed")
         else:
-            self.status.step("task_eval", "skipped", "not an ETTh1 time-series nightly model")
+            self.status.step(
+                "validation",
+                "skipped",
+                "not an ETTh1 time-series nightly model",
+            )
 
     def _validate_dso(self, runtime_model: str, runtime_library: str) -> Path:
         assert self.status

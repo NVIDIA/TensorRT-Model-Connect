@@ -15,13 +15,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tools import task_eval  # noqa: E402
+from tools.validation import engine  # noqa: E402
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Expose comparison as a validation command instead of a task-eval command."""
+    """Run comparison through the validation engine."""
     arguments = list(sys.argv[1:] if argv is None else argv)
-    return task_eval.main(["eval", *arguments])
+    return engine.main(["eval", *arguments])
 
 
 if __name__ == "__main__":
