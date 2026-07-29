@@ -993,7 +993,10 @@ def test_transcription_resolves_audio_artifact_and_reports_realtime_factor(
         _bundle(tmp_path, "whisper.bundle"),
     )
 
-    assert case.request["audio_path"] == "data/Recording.wav"
+    assert (
+        case.request["audio_path"]
+        == "data/librispeech-test-clean-6930-75918-0003.wav"
+    )
     assert len(case.request["audio_sha256"]) == 64
     assert case.sources["request.audio_path"] == "model testcase"
     assert case.sources["request.audio_sha256"] == "derived from model testcase"
