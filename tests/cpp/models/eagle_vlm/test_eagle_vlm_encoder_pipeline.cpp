@@ -15,7 +15,8 @@
 // Preconditions:  TRT headers and CUDA available
 // Postconditions: Pipelines construct with mock engines and expose correct interfaces;
 //                 embed/encode/rerank methods return non-empty results;
-//                 invalid inputs are rejected with std::exception;
+//                 rerank selects the last valid token's per-position score;
+//                 invalid inputs and score shapes are rejected with std::exception;
 //                 score output name, 4D logits shape, and size==1 output branch covered
 // =============================================================================
 
@@ -57,6 +58,52 @@ class FixedTokenizer : public trtmc::ITokenizer {
     std::string decode(const std::vector<int32_t>&) const override { return "test"; }
     int32_t id_for_token(std::string_view) const override { return 0; }
     std::string token_for_id(int32_t) const override { return ""; }
+};
+
+class FakeScoreModule final : public trtmc::ITrtModule {
+  public:
+    FakeScoreModule(std::vector<float> scores, std::vector<int64_t> shape)
+        : scores_(std::move(scores)), shape_(std::move(shape)) {}
+
+    trtmc::TensorMap forward(const trtmc::TensorMap&) override {
+        return {{"score", trtmc::Tensor{scores_.data(), shape_, trtmc::DType::kFloat32}}};
+    }
+    trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
+    void forward_device_async(const trtmc::DeviceTensorMap&) override {}
+    void forward_async(const trtmc::TensorMap&) override {}
+    void sync() override {}
+    cudaStream_t stream() const override { return nullptr; }
+    void enable_cuda_graph() override {}
+    bool cuda_graph_active() const override { return false; }
+    int32_t profile_idx() const override { return 0; }
+    std::vector<trtmc::TensorInfo> input_info() const override {
+        return {
+            {"input_ids", {4}, trtmc::DType::kInt32, true},
+            {"attention_mask", {4}, trtmc::DType::kInt32, true},
+        };
+    }
+    std::vector<trtmc::TensorInfo> output_info() const override {
+        return {{"score", shape_, trtmc::DType::kFloat32, false}};
+    }
+    bool has_input(const std::string& name) const override {
+        return name == "input_ids" || name == "attention_mask";
+    }
+    bool has_output(const std::string& name) const override { return name == "score"; }
+    trtmc::DType tensor_dtype(const std::string&) const override { return trtmc::DType::kFloat32; }
+    std::vector<int64_t> tensor_shape(const std::string&) const override { return shape_; }
+    std::vector<int64_t> input_profile_shape(const std::string&, int32_t,
+                                             trtmc::ProfileShapeSelector) const override {
+        return {4};
+    }
+    int32_t optimization_profile_count() const override { return 1; }
+    void* device_ptr(const std::string&) const override { return nullptr; }
+    void bind_external(const std::string&, void*) override {}
+    bool ok() const override { return true; }
+    void keep_alive(std::shared_ptr<void>) override {}
+
+  private:
+    std::vector<float> scores_;
+    std::vector<int64_t> shape_;
 };
 
 // ---------------------------------------------------------------------------
@@ -250,26 +297,30 @@ static void test_encoder_encode_mode() {
 }
 
 static void test_encoder_rerank() {
-    auto engine = build_encoder_engine_2d();
-    if (!engine) {
-        std::cerr << "SKIP encoder_rerank\n";
-        return;
-    }
-
-    cudaStream_t stream;
-    cudaStreamCreate(&stream);
-
-    auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                         engine->createExecutionContext(), stream);
     auto tokenizer = std::make_shared<FixedTokenizer>();
-    trtmc::EncoderPipeline pipeline(std::move(module), "rerank", tokenizer);
+    auto module = std::make_unique<FakeScoreModule>(std::vector<float>{0.1f, 0.2f, 0.3f, 0.9f},
+                                                    std::vector<int64_t>{4, 1});
+    trtmc::EncoderPipeline pipeline(std::move(module), "reranking", tokenizer);
 
-    // rerank() applies the supported cross-encoder text template and returns data[0]
+    // FixedTokenizer produces four real tokens. The engine deliberately emits
+    // distinct scores per position so this catches selecting data[0].
     float score = pipeline.rerank("query", "doc");
-    // Score is a float (from engine constant output = 0.1f at index 0)
-    check(score >= -1e6f && score <= 1e6f, "rerank: returns a finite float");
+    check(score == 0.9f, "rerank: selects the last valid token score");
+}
 
-    cudaStreamDestroy(stream);
+static void test_encoder_rerank_rejects_invalid_score_shape() {
+    auto tokenizer = std::make_shared<FixedTokenizer>();
+    auto module = std::make_unique<FakeScoreModule>(std::vector<float>{0.1f, 0.2f, 0.3f, 0.4f},
+                                                    std::vector<int64_t>{2, 2});
+    trtmc::EncoderPipeline pipeline(std::move(module), "reranking", tokenizer);
+
+    bool threw = false;
+    try {
+        pipeline.rerank("query", "doc");
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    check(threw, "rerank: invalid score shape throws");
 }
 
 static void test_encoder_int32_mask() {
@@ -412,6 +463,7 @@ int main() {
     test_encoder_embed_mode();
     test_encoder_encode_mode();
     test_encoder_rerank();
+    test_encoder_rerank_rejects_invalid_score_shape();
     test_encoder_int32_mask();
     test_encoder_validates();
     test_encoder_score_output();

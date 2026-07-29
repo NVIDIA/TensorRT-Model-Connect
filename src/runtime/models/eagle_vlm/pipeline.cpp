@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 
 namespace trtmc {
@@ -49,6 +50,22 @@ bool engine_mask_is_int32(const TrtModule& module) {
         if (info.name == "attention_mask")
             return info.dtype == DType::kInt32;
     return false;
+}
+
+std::size_t checked_element_count(const std::vector<int64_t>& shape) {
+    if (shape.empty())
+        throw std::runtime_error("EncoderPipeline: output tensor is missing shape metadata");
+
+    std::size_t count = 1;
+    for (const auto dim : shape) {
+        if (dim <= 0)
+            throw std::runtime_error("EncoderPipeline: output tensor has a non-positive dimension");
+        const auto size = static_cast<std::size_t>(dim);
+        if (count > std::numeric_limits<std::size_t>::max() / size)
+            throw std::runtime_error("EncoderPipeline: output tensor element count overflow");
+        count *= size;
+    }
+    return count;
 }
 
 } // namespace
@@ -109,11 +126,45 @@ float EncoderPipeline::rerank(const std::string& query, const std::string& docum
     // Nemotron rerank cross-encoder model card.
     std::string combined = "question:" + query + "   passage:" + document;
     auto ids = tokenizer_->encode(combined);
-    auto result = encode_ids(ids);
-    return result.data.empty() ? 0.0f : result.data[0];
+    if (ids.empty())
+        throw std::runtime_error("EncoderPipeline: reranking input produced no tokens");
+
+    auto output = encode_ids_with_shape(ids);
+    if (output.result.data.empty())
+        throw std::runtime_error("EncoderPipeline: reranking engine produced no score output");
+
+    const auto element_count = checked_element_count(output.shape);
+    if (element_count != output.result.data.size())
+        throw std::runtime_error("EncoderPipeline: reranking score shape does not match its data");
+
+    // A graph may already reduce the per-position logits to one final score.
+    if (element_count == 1)
+        return output.result.data.front();
+
+    // Eagle's score head emits one scalar per sequence position as
+    // [..., sequence, 1]. Match HF SequenceClassification, which selects the
+    // last non-padding token, instead of returning the first position.
+    if (output.shape.size() < 2 || output.shape.back() != 1)
+        throw std::runtime_error(
+            "EncoderPipeline: reranking score output must have one value per position");
+
+    const auto positions = element_count / static_cast<std::size_t>(output.shape.back());
+    if (ids.size() > positions)
+        throw std::runtime_error(
+            "EncoderPipeline: reranking score output is shorter than the token sequence");
+
+    const auto score_index = ids.size() - 1;
+    if (score_index >= output.result.data.size())
+        throw std::runtime_error("EncoderPipeline: reranking score index is out of bounds");
+    return output.result.data[score_index];
 }
 
 EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_ids) {
+    return encode_ids_with_shape(input_ids).result;
+}
+
+EncoderPipeline::EncodedOutput
+EncoderPipeline::encode_ids_with_shape(const std::vector<int32_t>& input_ids) {
     const auto n = input_ids.size();
     std::vector<int32_t> mask_i32(n, 1);
     std::vector<float> mask_f32(n, 1.0f);
@@ -142,20 +193,25 @@ EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_id
 
     auto outputs = encoder_->forward(inputs);
 
-    EmbeddingResult result;
+    EncodedOutput output;
     for (auto& [name, tensor] : outputs) {
         if (name.find("logits") != std::string::npos || name.find("embed") != std::string::npos ||
             name.find("output") != std::string::npos || name.find("hidden") != std::string::npos ||
             name.find("score") != std::string::npos) {
-            auto n = tensor.numel();
-            result.data.resize(static_cast<std::size_t>(n));
-            std::memcpy(result.data.data(), tensor.data, n * sizeof(float));
-            result.dim = static_cast<int32_t>(n);
+            const auto element_count = checked_element_count(tensor.shape);
+            if (!tensor.data)
+                throw std::runtime_error("EncoderPipeline: output tensor has no data");
+            if (element_count > static_cast<std::size_t>(std::numeric_limits<int32_t>::max()))
+                throw std::runtime_error("EncoderPipeline: output tensor is too large");
+            output.result.data.resize(element_count);
+            std::memcpy(output.result.data.data(), tensor.data, element_count * sizeof(float));
+            output.result.dim = static_cast<int32_t>(element_count);
+            output.shape = tensor.shape;
             break;
         }
     }
 
-    return result;
+    return output;
 }
 
 } // namespace trtmc

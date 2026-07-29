@@ -34,6 +34,13 @@ class EncoderPipeline final : public IPipeline {
     EmbeddingResult encode_ids(const std::vector<int32_t>& input_ids);
 
   private:
+    struct EncodedOutput {
+        EmbeddingResult result;
+        std::vector<int64_t> shape;
+    };
+
+    EncodedOutput encode_ids_with_shape(const std::vector<int32_t>& input_ids);
+
     std::unique_ptr<TrtModule> encoder_;
     std::string mode_; // "encoder_only", "embedding", "reranking"
     std::shared_ptr<ITokenizer> tokenizer_;
