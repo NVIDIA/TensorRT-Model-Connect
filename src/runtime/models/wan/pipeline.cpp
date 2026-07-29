@@ -17,6 +17,7 @@
 #include "runtime/models/wan/wan_matmul_policy.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -1226,6 +1227,9 @@ std::vector<int32_t> WanPipeline::tokenize_wan_prompt(const std::string& prompt)
 }
 
 ImageResult WanPipeline::generate_image(const std::string& prompt, const GenerateConfig& cfg) {
+    using Clock = std::chrono::steady_clock;
+    const auto t_start = Clock::now();
+
     // Tokenize prompt
     const std::vector<int32_t> input_ids = tokenize_wan_prompt(prompt);
 
@@ -1254,6 +1258,8 @@ ImageResult WanPipeline::generate_image(const std::string& prompt, const Generat
         std::cerr << "[diffusion] T5 conditioning failed: " << error << "\n";
         return video_to_image(result, config_.video_height, config_.video_width);
     }
+
+    const auto t_cond = Clock::now();
 
     // Build conditioning inputs for denoising (need encoder_attn_mask)
     const diffusion::WanConditioningInputs conditioning_inputs =
@@ -1321,6 +1327,8 @@ ImageResult WanPipeline::generate_image(const std::string& prompt, const Generat
                                       rope_sin, output, encoder_mask);
         };
 
+    const auto t_prep = Clock::now();
+
     // Run denoising loop
     if (!run_wan_denoising_loop(plan.num_inference_steps, plan.use_ddim, plan.use_unipc,
                                 plan.guidance_scale, layout, step_timesteps, pos_embed_2d,
@@ -1332,8 +1340,32 @@ ImageResult WanPipeline::generate_image(const std::string& prompt, const Generat
         return video_to_image(result, config_.video_height, config_.video_width);
     }
 
-    return finish_wan_generation(layout.z_dim, layout.t_lat, layout.h_lat, layout.w_lat, latents,
-                                 result);
+    const auto t_denoise = Clock::now();
+
+    ImageResult output = finish_wan_generation(layout.z_dim, layout.t_lat, layout.h_lat,
+                                               layout.w_lat, latents, result);
+    const auto t_vae = Clock::now();
+
+    if (distributed_rank_ == 0) {
+        const auto ms = [](auto start, auto end) {
+            return std::chrono::duration<double, std::milli>(end - start).count();
+        };
+        std::cerr << "\n[wan-perf] ===== Timing Summary =====\n"
+                  << "[wan-perf] Text encoding (T5):               " << ms(t_start, t_cond)
+                  << " ms\n"
+                  << "[wan-perf] Denoise prep (conditioning+RoPE): " << ms(t_cond, t_prep)
+                  << " ms\n"
+                  << "[wan-perf] Denoising (" << plan.num_inference_steps
+                  << " steps):            " << ms(t_prep, t_denoise) << " ms ("
+                  << ms(t_prep, t_denoise) / plan.num_inference_steps << " ms/step)\n"
+                  << "[wan-perf] VAE decode:                       " << ms(t_denoise, t_vae)
+                  << " ms\n"
+                  << "[wan-perf] Total E2E:                        " << ms(t_start, t_vae)
+                  << " ms\n"
+                  << "[wan-perf] ===========================\n";
+    }
+
+    return output;
 }
 
 } // namespace trtmc
