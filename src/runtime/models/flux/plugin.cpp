@@ -35,15 +35,13 @@ DistributedRuntimeConfig parse_distributed_runtime_config(const std::string& con
         mode = extract_json_string(config_json, "context_parallel_mode", "single");
     cfg.context_parallel = (mode == "context_parallel");
     cfg.world_size = cfg.context_parallel
-        ? extract_json_int(config_json, "context_parallel_size", 1)
-        : extract_json_int(config_json, "tensor_parallel_size", 1);
-    cfg.enabled
-        = ((mode == "tensor_parallel" || cfg.context_parallel) && cfg.world_size > 1);
+                         ? extract_json_int(config_json, "context_parallel_size", 1)
+                         : extract_json_int(config_json, "tensor_parallel_size", 1);
+    cfg.enabled = ((mode == "tensor_parallel" || cfg.context_parallel) && cfg.world_size > 1);
     return cfg;
 }
 
-std::string distributed_denoiser_section_name(
-    int32_t rank, bool context_parallel) {
+std::string distributed_denoiser_section_name(int32_t rank, bool context_parallel) {
     if (context_parallel)
         return "denoiser_plan_cp";
     return "denoiser_plan_tp_rank" + std::to_string(rank);
