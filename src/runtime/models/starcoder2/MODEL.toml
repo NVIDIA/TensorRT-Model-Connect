@@ -7,3 +7,7 @@ runtime_plugins = ["plugin.cpp|register_starcoder2_plugin"]
 runtime_strategies = ["starcoder2_decoder_kv_cache"]
 [validation_profiles]
 decoder_debug = ["starcoder2_decoder_kv_cache"]
+
+runtime_tests = [
+  "test_starcoder2_tokenizer_contract|test_starcoder2_tokenizer_contract.cpp|_|_|_",
+]

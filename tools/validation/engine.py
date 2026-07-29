@@ -9534,6 +9534,91 @@ def _read_bundle_section(bundle_path: Path, section_name: str) -> bytes:
         return data
 
 
+def _read_optional_bundle_json_object(
+    bundle_path: Path,
+    section_name: str,
+) -> dict[str, Any]:
+    """Read an optional JSON-object section without hiding malformed data."""
+
+    try:
+        raw = _read_bundle_section(bundle_path, section_name)
+    except ValueError as exc:
+        if str(exc) == f"{bundle_path} has no {section_name!r} section":
+            return {}
+        raise
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{bundle_path} {section_name} must contain an object")
+    return payload
+
+
+def _effective_bundle_tokenizer_payload(
+    source_payload: bytes,
+    tokenizer_config: Mapping[str, Any],
+) -> bytes:
+    """Apply a declared GPT-2 wrapper to its bundled backend tokenizer.
+
+    StarCoder2 publishes ``Sequence[Digits, ByteLevel]`` in tokenizer.json but
+    declares ``GPT2Tokenizer`` in tokenizer_config.json. Transformers replaces
+    that sequence with its ByteLevel component. The native BPE runtime already
+    uses GPT-2 splitting for this sequence, so input-contract validation must
+    compare the same effective tokenizer instead of the raw backend file.
+
+    Keep the refinement fail-closed: only the exact BPE/Digits/ByteLevel shape
+    with a matching add-prefix-space contract is rewritten.
+    """
+
+    tokenizer_class = str(tokenizer_config.get("tokenizer_class", "") or "")
+    if tokenizer_class.removesuffix("Fast") != "GPT2Tokenizer":
+        return source_payload
+
+    tokenizer = json.loads(source_payload.decode("utf-8"))
+    if not isinstance(tokenizer, dict):
+        raise ValueError("tokenizer.json must contain an object")
+    model = tokenizer.get("model")
+    pre_tokenizer = tokenizer.get("pre_tokenizer")
+    if (
+        not isinstance(model, dict)
+        or model.get("type") != "BPE"
+        or not isinstance(pre_tokenizer, dict)
+        or pre_tokenizer.get("type") != "Sequence"
+    ):
+        return source_payload
+
+    sequence = pre_tokenizer.get("pretokenizers")
+    if not isinstance(sequence, list) or len(sequence) != 2:
+        return source_payload
+    digits = [
+        item
+        for item in sequence
+        if isinstance(item, dict) and item.get("type") == "Digits"
+    ]
+    byte_levels = [
+        item
+        for item in sequence
+        if isinstance(item, dict) and item.get("type") == "ByteLevel"
+    ]
+    if (
+        len(digits) != 1
+        or digits[0].get("individual_digits") is not True
+        or len(byte_levels) != 1
+    ):
+        return source_payload
+
+    byte_level = dict(byte_levels[0])
+    configured_prefix = tokenizer_config.get("add_prefix_space")
+    if (
+        configured_prefix is not None
+        and (
+            not isinstance(configured_prefix, bool)
+            or byte_level.get("add_prefix_space") is not configured_prefix
+        )
+    ):
+        return source_payload
+    tokenizer["pre_tokenizer"] = byte_level
+    return json.dumps(tokenizer, separators=(",", ":")).encode("utf-8")
+
+
 def _load_text_input_contract(
     *,
     model: Mapping[str, Any],
@@ -9555,8 +9640,16 @@ def _load_text_input_contract(
         str(model["hf_id"]),
         **tokenizer_kwargs,
     )
+    tokenizer_payload = _read_bundle_section(bundle_path, "tokenizer.json")
+    tokenizer_config = _read_optional_bundle_json_object(
+        bundle_path,
+        "tokenizer_config.json",
+    )
     bundle_tokenizer = Tokenizer.from_str(
-        _read_bundle_section(bundle_path, "tokenizer.json").decode("utf-8")
+        _effective_bundle_tokenizer_payload(
+            tokenizer_payload,
+            tokenizer_config,
+        ).decode("utf-8")
     )
     bundle_config = json.loads(
         _read_bundle_section(bundle_path, "config.json").decode("utf-8")

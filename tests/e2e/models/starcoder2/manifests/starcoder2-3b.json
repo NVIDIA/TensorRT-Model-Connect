@@ -15,7 +15,7 @@
       "reference_family": "code_base_completion",
       "user_contract": "code_completion",
       "reference_precision": "fp32",
-      "prompt": "def fibonacci(n):",
+      "prompt": "def f():\n    0.5",
       "max_new_tokens": 20
     }
   ]
