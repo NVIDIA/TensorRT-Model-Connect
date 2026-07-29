@@ -101,6 +101,59 @@ def levenshtein_ned(a: str, b: str) -> float:
     return prev[-1] / max_len
 
 
+def generated_token_parity(trt_output, ref_output, threshold, metrics) -> bool:
+    token_threshold = threshold.metrics.get("contract_token_agreement_rate")
+    if token_threshold is None:
+        return True
+
+    outputs = (("TRT", trt_output), ("HF reference", ref_output))
+    tokens: list[list[int]] = []
+    missing: list[str] = []
+    for label, output in outputs:
+        raw = (output.data or {}).get("token_ids")
+        if not isinstance(raw, list):
+            missing.append(label)
+            continue
+        try:
+            tokens.append([int(token) for token in raw])
+        except (TypeError, ValueError):
+            missing.append(label)
+
+    if missing:
+        metrics["generated_token_ids_available"] = MetricResult(
+            value=0.0,
+            threshold=1.0,
+            operator="==",
+            passed=False,
+            note=f"missing generated token IDs from {' and '.join(missing)}",
+        )
+        return False
+
+    trt_tokens, ref_tokens = tokens
+    total = max(len(trt_tokens), len(ref_tokens))
+    matches = sum(
+        trt_tokens[index] == ref_tokens[index]
+        for index in range(min(len(trt_tokens), len(ref_tokens)))
+    )
+    agreement = matches / total if total else 1.0
+    exact = trt_tokens == ref_tokens
+    exact_required = float(token_threshold) >= 1.0
+    metrics["generated_token_agreement_rate"] = MetricResult(
+        value=agreement,
+        threshold=float(token_threshold),
+        operator=">=",
+        passed=agreement >= float(token_threshold),
+        note=f"TRT tokens={len(trt_tokens)}, HF reference tokens={len(ref_tokens)}",
+    )
+    metrics["generated_token_exact"] = MetricResult(
+        value=1.0 if exact else 0.0,
+        threshold=1.0 if exact_required else None,
+        operator="==" if exact_required else "",
+        passed=exact if exact_required else True,
+    )
+    return agreement >= float(token_threshold) and (exact or not exact_required)
+
+
 def make_pass(stage_name: str, metrics, rule: str = ""):
     from tests.e2e_harness.contracts import CompareResult
     return CompareResult(
@@ -193,8 +246,22 @@ class MistralChatInstructPlugin:
             ),
         }
 
-        passed = exact_match or ned <= ned_threshold
-        rule = "exact_match OR ned <= threshold"
+        token_parity = generated_token_parity(
+            trt_output, ref_output, threshold, metrics
+        )
+        strict_tokens = threshold.metrics.get(
+            "contract_token_agreement_rate"
+        ) is not None
+        passed = (
+            exact_match and token_parity
+            if strict_tokens
+            else exact_match or ned <= ned_threshold
+        )
+        rule = (
+            "exact normalized text AND exact configured token parity"
+            if strict_tokens
+            else "exact_match OR ned <= threshold"
+        )
         if passed:
             return make_pass("full_generation", metrics, rule)
         return make_fail(
@@ -237,13 +304,28 @@ class MistralTranslationPlugin:
             ),
         }
 
-        passed = exact or ned <= ned_threshold
+        token_parity = generated_token_parity(
+            trt_output, ref_output, threshold, metrics
+        )
+        strict_tokens = threshold.metrics.get(
+            "contract_token_agreement_rate"
+        ) is not None
+        passed = (
+            exact and token_parity
+            if strict_tokens
+            else exact or ned <= ned_threshold
+        )
+        rule = (
+            "exact normalized text AND exact configured token parity"
+            if strict_tokens
+            else "exact OR ned <= threshold"
+        )
         if passed:
-            return make_pass("full_generation", metrics, "exact OR ned <= threshold")
+            return make_pass("full_generation", metrics, rule)
         return make_fail(
             "full_generation",
             metrics,
-            "exact OR ned <= threshold",
+            rule,
             f"Translation diverged: NED={ned:.3f}",
         )
 

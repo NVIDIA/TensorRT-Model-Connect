@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""1:1 port of standard_checkpoint_mapper.cpp + tensor_math.cpp to Python.
+"""Map dense Hugging Face Mistral checkpoints into the native decoder layout.
 
-Loads HF safetensors and maps keys to the flat weight dict expected by
-standard_decoder_builder.py. All projections are transposed from HF
-[out, in] layout to [in, out] for TRT matmul.
+All projections are transposed from HF ``[out, in]`` layout to the
+``[in, out]`` layout consumed by TensorRT matmul layers.
 """
 
 from __future__ import annotations
@@ -51,9 +50,9 @@ def _repeat_head_norm(norm: np.ndarray, num_heads: int) -> np.ndarray:
 
 
 class WeightDict(dict):
-    """A dict mapping logical weight names to flat float32 arrays.
+    """A dict mapping logical names to the native decoder's weight arrays.
 
-    Keys follow the convention used by standard_decoder_builder.py:
+    Keys follow the native dense decoder convention:
       - embedding: [vocab, hidden]
       - layer.{i}.input_norm: [hidden]
       - layer.{i}.w_q: [hidden, attention_size]

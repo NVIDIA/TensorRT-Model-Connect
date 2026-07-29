@@ -3,27 +3,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// DecoderPlugin: handles this model-owned decoder runtime strategy.
-// Standard attention-based decoder with device-resident KV cache.
-
 #include "plugin_helpers.h"
 #include "runtime/models/mistral/chat_templates.h"
 #include "runtime/models/mistral/pipeline.h"
 #include "runtime/models/mistral/tensor_names.h"
-#include "runtime/models/mistral/triattention_kv_cache.h"
 #include "trtmc/config/config_bundle.h"
-#include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace trtmc {
@@ -31,221 +29,299 @@ namespace trtmc {
 namespace {
 
 struct KvCacheRuntimeSizing {
-    int32_t runtime_rows{0};
+    int32_t rows{0};
     std::uint64_t row_bytes{0};
     std::uint64_t cache_bytes{0};
-    bool override_applied{false};
-    bool clamped_to_bundle_max{false};
 };
 
-struct TensorParallelRuntimeConfig {
-    bool enabled{false};
-    int32_t tp_size{1};
-};
-
-struct TensorParallelRuntime {
-    TensorParallelRuntimeConfig config;
-    DistributedRuntimeGroup group;
-};
-
-struct DecoderProfileInfo {
-    int32_t profile_idx{0};
-    int32_t kv_rows{0};
-};
-
-struct DecoderProfileRoles {
-    int32_t prefill_profile_idx{-1};
-    int32_t prefill_max_length{0};
-    std::vector<DecoderProfileInfo> decode_profiles;
-};
-
-int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
-    if (dim < 0 || static_cast<std::size_t>(dim) >= shape.size())
+int32_t dim_at(const std::vector<int64_t>& shape, std::size_t dim) {
+    if (dim >= shape.size() || shape[dim] <= 0 ||
+        shape[dim] > std::numeric_limits<int32_t>::max()) {
         return -1;
-    const int64_t value = shape[static_cast<std::size_t>(dim)];
-    if (value <= 0 || value > std::numeric_limits<int32_t>::max())
-        return -1;
-    return static_cast<int32_t>(value);
-}
-
-int32_t cache_row_dim_from_module(const TrtModule& module, const std::string& tensor_name) {
-    const int32_t static_dim = dim_at(module.tensor_shape(tensor_name), 1);
-    if (static_dim > 0)
-        return static_dim;
-    const int32_t profile_count = module.optimization_profile_count();
-    for (int32_t profile_idx = 0; profile_idx < profile_count; ++profile_idx) {
-        const int32_t profile_dim = dim_at(
-            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax), 1);
-        if (profile_dim > 0)
-            return profile_dim;
     }
-    throw std::runtime_error("Unable to infer KV row width from engine tensor '" + tensor_name +
-                             "'");
+    return static_cast<int32_t>(shape[dim]);
 }
 
-bool cache_input_is_dynamic(const TrtModule& module, const std::string& tensor_name) {
+int32_t cache_row_width(const TrtModule& module, const std::string& tensor_name) {
     const auto shape = module.tensor_shape(tensor_name);
-    return !shape.empty() && shape[0] == -1;
-}
-
-bool cache_input_supports_runtime_rows(const TrtModule& module, const std::string& tensor_name) {
-    if (!cache_input_is_dynamic(module, tensor_name))
-        return false;
-    const int32_t num_profiles = module.optimization_profile_count();
-    if (num_profiles <= 0)
-        return false;
-    for (int32_t profile_idx = 0; profile_idx < num_profiles; ++profile_idx) {
-        const int32_t min_rows = dim_at(
-            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMin), 0);
-        const int32_t max_rows = dim_at(
-            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax), 0);
-        if (min_rows > 0 && max_rows > min_rows)
-            return true;
+    if (shape.size() != 4)
+        throw std::runtime_error("Mistral native KV tensor '" + tensor_name + "' must have rank 4");
+    const int32_t heads = dim_at(shape, 1);
+    const int32_t head_dim = dim_at(shape, 3);
+    if (heads <= 0 || head_dim <= 0 || heads > std::numeric_limits<int32_t>::max() / head_dim) {
+        throw std::runtime_error("Unable to infer Mistral native KV row width from '" +
+                                 tensor_name + "'");
     }
-    return false;
+    return heads * head_dim;
 }
 
-TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::string& config_json) {
-    TensorParallelRuntimeConfig cfg;
-    cfg.tp_size = extract_json_int(config_json, "tensor_parallel_size", 1);
-    const auto mode = extract_json_string(config_json, "tensor_parallel_mode", "single");
-    cfg.enabled = (mode == "tensor_parallel" && cfg.tp_size > 1);
-    return cfg;
-}
-
-std::string tp_engine_section_name(int32_t rank) {
-    return "engine_plan_tp_rank" + std::to_string(rank);
-}
-
-int32_t profile_token_max_length(const TrtModule& module, const std::string& token_id_name,
-                                 int32_t profile_idx) {
-    return dim_at(
-        module.input_profile_shape(token_id_name, profile_idx, ProfileShapeSelector::kMax), 0);
-}
-
-int32_t profile_cache_rows(const TrtModule& module, const std::string& cache_name,
-                           int32_t profile_idx, int32_t fallback_rows) {
-    const int32_t static_rows = dim_at(module.tensor_shape(cache_name), 0);
-    if (static_rows > 0)
-        return static_rows;
-
-    if (profile_idx >= 0 && profile_idx < module.optimization_profile_count()) {
-        const int32_t max_rows = dim_at(
-            module.input_profile_shape(cache_name, profile_idx, ProfileShapeSelector::kMax), 0);
-        if (max_rows > 0)
-            return max_rows;
+int32_t profile_token_length(const TrtModule& module, const std::string& token_name,
+                             ProfileShapeSelector selector, const std::string& section_name) {
+    const auto shape = module.input_profile_shape(token_name, 0, selector);
+    if (shape.size() != 1 || shape[0] <= 0 || shape[0] > std::numeric_limits<int32_t>::max()) {
+        throw std::runtime_error("Mistral native KV " + section_name +
+                                 " must expose a positive rank-1 token profile");
     }
-    return fallback_rows;
+    return static_cast<int32_t>(shape[0]);
 }
 
-DecoderProfileRoles detect_decoder_profile_roles(const TrtModule& module,
-                                                 const std::string& token_id_name,
-                                                 const std::string& cache_k_name,
-                                                 int32_t fallback_rows) {
-    DecoderProfileRoles roles;
-    const int32_t num_profiles = module.optimization_profile_count();
-    if (num_profiles <= 0) {
-        roles.decode_profiles.push_back(DecoderProfileInfo{0, fallback_rows});
-        return roles;
+struct TokenProfileLengths {
+    int32_t min{0};
+    int32_t opt{0};
+    int32_t max{0};
+};
+
+TokenProfileLengths read_token_profile(const TrtModule& module, const std::string& token_name,
+                                       const std::string& section_name) {
+    return {
+        profile_token_length(module, token_name, ProfileShapeSelector::kMin, section_name),
+        profile_token_length(module, token_name, ProfileShapeSelector::kOpt, section_name),
+        profile_token_length(module, token_name, ProfileShapeSelector::kMax, section_name),
+    };
+}
+
+void validate_decode_profile(const TokenProfileLengths& profile) {
+    if (profile.min != 1 || profile.opt != 1 || profile.max != 1) {
+        throw std::runtime_error(
+            "Mistral native KV engine_plan must be a single-token decode profile");
     }
+}
 
-    for (int32_t profile_idx = 0; profile_idx < num_profiles; ++profile_idx) {
-        const int32_t token_max = profile_token_max_length(module, token_id_name, profile_idx);
-        if (token_max > 1) {
-            if (token_max > roles.prefill_max_length) {
-                roles.prefill_profile_idx = profile_idx;
-                roles.prefill_max_length = token_max;
-            }
-            continue;
-        }
-
-        roles.decode_profiles.push_back(DecoderProfileInfo{
-            profile_idx, profile_cache_rows(module, cache_k_name, profile_idx, fallback_rows)});
+void validate_prefill_profile(const TokenProfileLengths& profile, int32_t cache_capacity) {
+    if (profile.min != 1 || profile.opt < profile.min || profile.opt > profile.max ||
+        profile.max <= 1 || profile.max > cache_capacity) {
+        throw std::runtime_error(
+            "Mistral native KV prefill_engine_plan must be a valid multi-token profile "
+            "within the fixed cache capacity");
     }
+}
 
-    if (roles.decode_profiles.empty()) {
-        const int32_t fallback_profile =
-            roles.prefill_profile_idx >= 0 ? roles.prefill_profile_idx : 0;
-        roles.decode_profiles.push_back(DecoderProfileInfo{
-            fallback_profile,
-            profile_cache_rows(module, cache_k_name, fallback_profile, fallback_rows)});
+int32_t validate_native_profile_role(const TrtModule& module, const std::string& token_name,
+                                     const std::string& section_name, bool prefill,
+                                     int32_t cache_capacity) {
+    if (module.optimization_profile_count() != 1 || module.profile_idx() != 0) {
+        throw std::runtime_error("Mistral native KV " + section_name +
+                                 " must contain exactly optimization profile 0");
     }
+    const auto profile = read_token_profile(module, token_name, section_name);
+    if (!prefill) {
+        validate_decode_profile(profile);
+        return 1;
+    }
+    validate_prefill_profile(profile, cache_capacity);
+    return profile.max;
+}
 
-    return roles;
+std::uint64_t checked_multiply(std::uint64_t lhs, std::uint64_t rhs) {
+    if (lhs != 0 && rhs > std::numeric_limits<std::uint64_t>::max() / lhs)
+        throw std::overflow_error("Mistral native KV byte accounting overflow");
+    return lhs * rhs;
 }
 
 std::string format_bytes(std::uint64_t bytes) {
-    std::ostringstream oss;
+    std::ostringstream out;
     constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
     constexpr double kMiB = 1024.0 * 1024.0;
-    oss.setf(std::ios::fixed);
-    oss.precision(2);
-    if (bytes >= static_cast<std::uint64_t>(kGiB)) {
-        oss << (static_cast<double>(bytes) / kGiB) << " GiB";
-        return oss.str();
-    }
-    if (bytes >= static_cast<std::uint64_t>(kMiB)) {
-        oss << (static_cast<double>(bytes) / kMiB) << " MiB";
-        return oss.str();
-    }
-    oss.unsetf(std::ios::floatfield);
-    oss.precision(6);
-    oss << bytes << " B";
-    return oss.str();
+    out.setf(std::ios::fixed);
+    out.precision(2);
+    if (bytes >= static_cast<std::uint64_t>(kGiB))
+        out << static_cast<double>(bytes) / kGiB << " GiB";
+    else if (bytes >= static_cast<std::uint64_t>(kMiB))
+        out << static_cast<double>(bytes) / kMiB << " MiB";
+    else
+        out << bytes << " B";
+    return out.str();
 }
 
-KvCacheRuntimeSizing
-resolve_kv_cache_runtime_sizing(const PipelineContext& ctx, const TrtModule& module,
-                                const MistralKvCacheNames& kv_names, DType cache_dtype,
-                                const MistralTriAttentionConfig& tri_cfg, int32_t kv_dim) {
+KvCacheRuntimeSizing resolve_kv_cache_sizing(const PipelineContext& ctx, DType cache_dtype,
+                                             int32_t kv_dim) {
+    if (ctx.kv_cache_size_bytes != 0) {
+        throw std::invalid_argument(
+            "Mistral native TensorRT KV cache always allocates the model's full capacity; "
+            "kv_cache_size_bytes is unsupported");
+    }
+    if (ctx.config.num_layers <= 0 || ctx.config.max_cache_length <= 0 || kv_dim <= 0)
+        throw std::runtime_error("Mistral native KV geometry must be positive");
+
     KvCacheRuntimeSizing sizing;
-    const auto elem_bytes = static_cast<std::uint64_t>(dtype_size(cache_dtype));
-    sizing.row_bytes = static_cast<std::uint64_t>(ctx.config.num_layers) *
-                       static_cast<std::uint64_t>(kv_dim) * elem_bytes * 2ULL;
-    if (sizing.row_bytes == 0)
-        throw std::runtime_error("Computed zero bytes per KV row");
-
-    const int32_t bundle_max_rows = ctx.config.max_cache_length;
-    sizing.runtime_rows = bundle_max_rows;
-    sizing.cache_bytes = static_cast<std::uint64_t>(bundle_max_rows) * sizing.row_bytes;
-
-    if (ctx.kv_cache_size_bytes == 0)
-        return sizing;
-
-    if (!cache_input_supports_runtime_rows(module, kv_names.cache_k.front())) {
-        throw std::runtime_error(
-            "This bundle was not built with runtime-resizable KV cache support. "
-            "Rebuild with trtmc build --dynamic-kv-cache to use --kv-cache-size.");
-    }
-
-    const std::uint64_t requested_rows_u64 = ctx.kv_cache_size_bytes / sizing.row_bytes;
-    if (requested_rows_u64 == 0) {
-        throw std::runtime_error("--kv-cache-size is smaller than one KV row (" +
-                                 format_bytes(sizing.row_bytes) + ")");
-    }
-
-    std::uint64_t runtime_rows_u64 = requested_rows_u64;
-    if (runtime_rows_u64 > static_cast<std::uint64_t>(bundle_max_rows)) {
-        runtime_rows_u64 = static_cast<std::uint64_t>(bundle_max_rows);
-        sizing.clamped_to_bundle_max = true;
-    }
-    if (runtime_rows_u64 > static_cast<std::uint64_t>(std::numeric_limits<int32_t>::max())) {
-        throw std::runtime_error("Resolved KV cache rows exceed int32 runtime limits");
-    }
-
-    sizing.runtime_rows = static_cast<int32_t>(runtime_rows_u64);
-    sizing.cache_bytes = runtime_rows_u64 * sizing.row_bytes;
-    sizing.override_applied = true;
-
-    if (tri_cfg.enabled && sizing.runtime_rows < tri_cfg.kv_budget) {
-        const auto minimum_bytes = static_cast<std::uint64_t>(tri_cfg.kv_budget) * sizing.row_bytes;
-        throw std::runtime_error(
-            "--kv-cache-size resolves to " + std::to_string(sizing.runtime_rows) +
-            " rows, but this TriAttention bundle needs at least " +
-            std::to_string(tri_cfg.kv_budget) + " rows (" + format_bytes(minimum_bytes) + ")");
-    }
-
+    sizing.rows = ctx.config.max_cache_length;
+    sizing.row_bytes = checked_multiply(
+        checked_multiply(checked_multiply(static_cast<std::uint64_t>(ctx.config.num_layers),
+                                          static_cast<std::uint64_t>(kv_dim)),
+                         static_cast<std::uint64_t>(dtype_size(cache_dtype))),
+        2);
+    sizing.cache_bytes =
+        checked_multiply(static_cast<std::uint64_t>(sizing.rows), sizing.row_bytes);
     return sizing;
+}
+
+void admit_kv_allocation(const PipelineContext& ctx, const KvCacheRuntimeSizing& sizing) {
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    const cudaError_t status = cudaMemGetInfo(&free_bytes, &total_bytes);
+    if (status != cudaSuccess) {
+        throw std::runtime_error(std::string("Mistral native KV CUDA memory query failed: ") +
+                                 cudaGetErrorString(status));
+    }
+
+    constexpr std::uint64_t kTwoGiB = 2ULL << 30;
+    const auto free = static_cast<std::uint64_t>(free_bytes);
+    const auto total = static_cast<std::uint64_t>(total_bytes);
+    const auto reserve = std::max(kTwoGiB, total / 10);
+    const auto available = free > reserve ? free - reserve : 0;
+    if (sizing.cache_bytes > available) {
+        throw std::runtime_error(
+            "Mistral native KV cache admission failed before allocation: capacity=" +
+            std::to_string(ctx.config.max_cache_length) +
+            " tokens, required=" + format_bytes(sizing.cache_bytes) +
+            ", free=" + format_bytes(free) + ", reserve=" + format_bytes(reserve));
+    }
+}
+
+void validate_native_bundle_metadata(const PipelineContext& ctx, DType cache_dtype) {
+    if (!extract_json_bool(ctx.config_json, "native_kv_cache", false) ||
+        extract_json_int(ctx.config_json, "native_kv_contract_version", 0) != 1) {
+        throw std::runtime_error(
+            "Mistral runtime only accepts native KV contract version 1 bundles");
+    }
+    if (extract_json_string(ctx.config_json, "decoder_engine_layout", "") != "split")
+        throw std::runtime_error("Mistral native KV runtime requires split prefill/decode engines");
+    if (cache_dtype != DType::kBFloat16)
+        throw std::runtime_error("Mistral native KV runtime requires BF16");
+    if (extract_json_string(ctx.config_json, "tensor_parallel_mode", "single") != "single" ||
+        extract_json_int(ctx.config_json, "tensor_parallel_size", 1) != 1) {
+        throw std::runtime_error("Mistral native KV runtime supports single-GPU bundles only");
+    }
+    if (ctx.config_json.find("\"triattention\"") != std::string::npos)
+        throw std::runtime_error("Mistral native KV runtime does not support TriAttention");
+}
+
+void validate_native_module_contract(const PipelineContext& ctx, const TrtModule& module,
+                                     const MistralKvCacheNames& names) {
+    if (!module.has_input(names.cache_write_indices) ||
+        !module.has_input(names.key_value_lengths)) {
+        throw std::runtime_error(
+            "Mistral native KV engine is missing cache_write_indices/key_value_lengths");
+    }
+
+    const std::vector<int64_t> expected_shape{1, ctx.config.num_kv_heads,
+                                              ctx.config.max_cache_length, 128};
+    if (names.cache_k.empty() || module.tensor_shape(names.cache_k.front()) != expected_shape) {
+        throw std::runtime_error(
+            "Mistral native KV requires cache shape [1,num_kv_heads,capacity,128]");
+    }
+}
+
+int32_t validate_native_bundle(const PipelineContext& ctx, const TrtModule& module,
+                               const MistralKvCacheNames& names, DType cache_dtype,
+                               const char* engine_role) {
+    validate_native_bundle_metadata(ctx, cache_dtype);
+    validate_native_module_contract(ctx, module, names);
+    const bool prefill = std::string(engine_role) == "prefill";
+    return validate_native_profile_role(module, ctx.config.io_map.token_id,
+                                        prefill ? "prefill_engine_plan" : "engine_plan", prefill,
+                                        ctx.config.max_cache_length);
+}
+
+std::unique_ptr<TrtModule> load_native_module(const PipelineContext& ctx,
+                                              const std::string& section_name,
+                                              cudaStream_t stream) {
+    const auto* plan = find_section(ctx.bundle, section_name);
+    if (plan == nullptr || plan->empty())
+        throw std::runtime_error("Mistral native KV bundle is missing " + section_name);
+    if (ctx.backend == nullptr)
+        throw std::runtime_error("No backend loaded");
+
+    ModuleCreateOptions options;
+    options.stream = stream;
+    options.runtime_cache_path = ctx.runtime_cache_path.c_str();
+    options.cuda_graphs = ctx.cuda_graphs;
+
+    const auto start = std::chrono::steady_clock::now();
+    auto modules = ctx.backend->create_profile_modules(plan->data(), plan->size(), options, {0});
+    const auto end = std::chrono::steady_clock::now();
+    log_trt_load_timing(section_name.c_str(),
+                        std::chrono::duration<double, std::milli>(end - start).count(),
+                        plan->size());
+    if (modules.modules.size() != 1 || modules.modules.front().profile_idx != 0 ||
+        !modules.modules.front().module) {
+        throw std::runtime_error("Mistral native KV " + section_name +
+                                 " failed to load exactly profile 0");
+    }
+    auto module = std::move(modules.modules.front().module);
+    if (module->optimization_profile_count() != 1 || module->profile_idx() != 0) {
+        throw std::runtime_error("Mistral native KV " + section_name +
+                                 " must contain exactly one optimization profile");
+    }
+    module->set_timing_label(section_name);
+    return module;
+}
+
+void build_kv_names(const PipelineContext& ctx, MistralKvCacheNames& names) {
+    const auto& io = ctx.config.io_map;
+    names.position_id = io.position_id;
+    for (int32_t layer = 0; layer < ctx.config.num_layers; ++layer) {
+        names.cache_k.push_back(mistral_expand_layer_name(io.cache_k_pattern, layer));
+        names.cache_v.push_back(mistral_expand_layer_name(io.cache_v_pattern, layer));
+        names.present_k.push_back(mistral_expand_layer_name(io.present_k_pattern, layer));
+        names.present_v.push_back(mistral_expand_layer_name(io.present_v_pattern, layer));
+    }
+}
+
+void apply_text_trace_from_registry(const config::ConfigBundle* config) {
+    if (config == nullptr)
+        return;
+    try {
+        apply_text_trace_config_from_registry(
+            config->get<std::string>("text_trace", "step_trace_path"),
+            config->get<std::int32_t>("text_trace", "step_trace_start_pos"),
+            config->get<std::int32_t>("text_trace", "step_trace_end_pos"),
+            config->get<std::int32_t>("text_trace", "step_trace_topk"));
+    } catch (const std::exception&) {
+        // The namespace is optional; an absent schema leaves tracing disabled.
+    }
+}
+
+void populate_text_config(const PipelineContext& ctx, MistralTextGenConfig& config,
+                          const TrtModule& decoder, int32_t prefill_max_length, int32_t kv_dim) {
+    const auto& io = ctx.config.io_map;
+    config.vocab_size = ctx.config.vocab_size;
+    config.id_bos = ctx.config.id_bos;
+    config.id_eos = ctx.config.id_eos;
+    config.has_position_input = decoder.has_input(io.position_id);
+    config.token_id_name = io.token_id;
+    config.logits_output_name = io.logits;
+    config.prefill_max_length = prefill_max_length;
+    config.prefill_profile_index = 0;
+    config.prefill_log_label = "prefill engine";
+    config.num_layers = ctx.config.num_layers;
+    config.kv_dim = kv_dim;
+    config.present_k_pattern = io.present_k_pattern;
+    config.present_v_pattern = io.present_v_pattern;
+    if (ctx.runtime_config != nullptr) {
+        try {
+            config.disable_cuda_graph =
+                ctx.runtime_config->get<bool>("runtime", "disable_cuda_graph");
+            config.prefer_gpu_greedy =
+                ctx.runtime_config->get<bool>("runtime", "prefer_gpu_greedy");
+            config.log_runtime_stats = ctx.runtime_config->get<bool>("platform", "trt_log_stderr");
+        } catch (const std::exception&) {
+            // Optional runtime schemas may be absent in embedding applications.
+        }
+    }
+
+    std::string chat_template;
+    const auto* tokenizer_config = find_section(ctx.bundle, "tokenizer_config.json");
+    if (tokenizer_config != nullptr && !tokenizer_config->empty()) {
+        chat_template = extract_json_string(
+            std::string(tokenizer_config->begin(), tokenizer_config->end()), "chat_template", "");
+    }
+    if (chat_template.empty()) {
+        const auto* template_section = find_section(ctx.bundle, "chat_template.jinja");
+        if (template_section != nullptr && !template_section->empty())
+            chat_template.assign(template_section->begin(), template_section->end());
+    }
+    config.chat_template_format = mistral_detect_chat_template_format(chat_template);
 }
 
 } // namespace
@@ -253,304 +329,40 @@ resolve_kv_cache_runtime_sizing(const PipelineContext& ctx, const TrtModule& mod
 class DecoderPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
-        load_ffi_kernels_from_bundle(ctx.bundle);
         apply_text_trace_from_registry(ctx.runtime_config);
-
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
-        const auto& io = ctx.config.io_map;
-        MistralKvCacheNames kv_names;
-        build_kv_names(ctx, io, kv_names);
 
+        MistralKvCacheNames names;
+        build_kv_names(ctx, names);
         const DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
-        MistralTriAttentionConfig tri_cfg = mistral_parse_triattention_bundle_config(
-            ctx.config_json, ctx.config.max_cache_length, ctx.runtime_config);
 
-        TensorParallelRuntime tp_runtime;
-        tp_runtime.config = parse_tensor_parallel_runtime_config(ctx.config_json);
-        if (tp_runtime.config.enabled)
-            tp_runtime.group = initialize_tensor_parallel_group(tp_runtime.config.tp_size);
+        auto decoder = load_native_module(ctx, "engine_plan", nullptr);
+        validate_native_bundle(ctx, *decoder, names, cache_dtype, "decode");
+        const int32_t kv_dim = cache_row_width(*decoder, names.cache_k.front());
+        const auto sizing = resolve_kv_cache_sizing(ctx, cache_dtype, kv_dim);
+        admit_kv_allocation(ctx, sizing);
 
-        const std::string engine_section = tp_runtime.config.enabled
-                                               ? tp_engine_section_name(tp_runtime.group.rank)
-                                               : std::string("engine_plan");
-        auto profile_modules =
-            load_decoder_profile_modules(ctx, engine_section, nullptr, &tp_runtime);
-        if (profile_modules.modules.empty())
-            throw std::runtime_error("No decoder engine profiles were loaded");
-        TrtModule& metadata_module = *profile_modules.modules.front().module;
+        cudaStream_t stream = decoder->stream();
+        auto prefill = load_native_module(ctx, "prefill_engine_plan", stream);
+        const int32_t prefill_max_length =
+            validate_native_bundle(ctx, *prefill, names, cache_dtype, "prefill");
 
-        const int32_t kv_dim = cache_row_dim_from_module(metadata_module, kv_names.cache_k.front());
-        const auto sizing = resolve_kv_cache_runtime_sizing(ctx, metadata_module, kv_names,
-                                                            cache_dtype, tri_cfg, kv_dim);
-
-        const auto decode_profile_roles = detect_decoder_profile_roles(
-            metadata_module, io.token_id, kv_names.cache_k.front(), ctx.config.max_cache_length);
-
-        std::unique_ptr<TrtModule> prefill_module;
-        auto decoders = build_decoder_contexts(std::move(profile_modules), sizing.runtime_rows,
-                                               decode_profile_roles, prefill_module);
-        cudaStream_t stream = decoders.front().module->stream();
-
-        int32_t prefill_profile_idx = decode_profile_roles.prefill_profile_idx;
-        int32_t prefill_max_length = decode_profile_roles.prefill_max_length;
-        std::string prefill_log_label;
-        if (!tp_runtime.config.enabled) {
-            auto split_prefill_module =
-                load_split_prefill_module(ctx, stream, io, kv_names, prefill_profile_idx,
-                                          prefill_max_length, prefill_log_label);
-            if (split_prefill_module)
-                prefill_module = std::move(split_prefill_module);
-        }
-
-        auto state =
-            build_inference_state(ctx, sizing, tri_cfg, cache_dtype, kv_dim, kv_names, stream);
-        log_kv_cache_sizing(ctx, sizing, state.get());
-
-        MistralTextGenConfig tgc;
-        populate_text_gen_config(ctx, tgc, io, decoders.front(), ctx.runtime_config);
-        apply_chat_template_format(ctx.bundle, tgc);
-        // Wire batched prefill: the pipeline forwards the whole prompt
-        // through `prefill_module` (TRT optimization profile 0) and copies
-        // per-layer K/V into the shared cache via write_prefill_kv.
-        tgc.prefill_max_length = prefill_max_length;
-        tgc.prefill_profile_index = prefill_profile_idx;
-        tgc.prefill_log_label = std::move(prefill_log_label);
-        tgc.num_layers = ctx.config.num_layers;
-        tgc.kv_dim = kv_dim;
-        tgc.present_k_pattern = io.present_k_pattern;
-        tgc.present_v_pattern = io.present_v_pattern;
-
-        return std::make_unique<MistralTextGenerationPipeline>(
-            std::move(decoders), std::move(state), tgc, stream, std::move(tokenizer),
-            ctx.bundle.info.model_id, nullptr, std::move(prefill_module), nullptr,
-            tp_runtime.group.owner);
-    }
-
-  private:
-    static std::unique_ptr<TrtModule>
-    load_split_prefill_module(const PipelineContext& ctx, cudaStream_t stream, const IoMap& io,
-                              const MistralKvCacheNames& kv_names, int32_t& prefill_profile_idx,
-                              int32_t& prefill_max_length, std::string& prefill_log_label) {
-        if (find_section(ctx.bundle, "prefill_engine_plan") == nullptr)
-            return nullptr;
-
-        auto split_prefill_modules =
-            load_decoder_profile_modules(ctx, "prefill_engine_plan", stream, nullptr);
-        if (split_prefill_modules.modules.empty())
-            return nullptr;
-
-        const auto prefill_roles =
-            detect_decoder_profile_roles(*split_prefill_modules.modules.front().module, io.token_id,
-                                         kv_names.cache_k.front(), ctx.config.max_cache_length);
-        prefill_profile_idx = prefill_roles.prefill_profile_idx;
-        prefill_max_length = prefill_roles.prefill_max_length;
-        auto prefill_module = extract_prefill_module(std::move(split_prefill_modules),
-                                                     prefill_roles, "prefill_engine_plan");
-        if (prefill_module)
-            prefill_log_label = "prefill engine";
-        return prefill_module;
-    }
-
-    static void apply_text_trace_from_registry(const config::ConfigBundle* cfg) {
-        if (cfg == nullptr)
-            return;
-        try {
-            apply_text_trace_config_from_registry(
-                cfg->get<std::string>("text_trace", "step_trace_path"),
-                cfg->get<std::int32_t>("text_trace", "step_trace_start_pos"),
-                cfg->get<std::int32_t>("text_trace", "step_trace_end_pos"),
-                cfg->get<std::int32_t>("text_trace", "step_trace_topk"));
-        } catch (const std::exception&) {
-            // Schema not registered or type mismatch — leave disabled.
-        }
-    }
-
-    static BackendProfileModules
-    load_decoder_profile_modules(const PipelineContext& ctx, const std::string& section_name,
-                                 cudaStream_t stream, const TensorParallelRuntime* tp_runtime) {
-        auto* plan = find_section(ctx.bundle, section_name);
-        if (plan == nullptr || plan->empty())
-            throw std::runtime_error(section_name + " section is missing");
-        if (ctx.backend == nullptr)
-            throw std::runtime_error("No backend loaded");
-
-        auto profile_rows = extract_json_int_array(ctx.config_json, "dynamic_kv_profile_rows", 16);
-        const int32_t profile_candidates =
-            profile_rows.empty() ? 2 : static_cast<int32_t>(profile_rows.size() + 1);
-        std::vector<int32_t> profile_indices;
-        profile_indices.reserve(static_cast<std::size_t>(profile_candidates));
-        for (int32_t i = 0; i < profile_candidates; ++i)
-            profile_indices.push_back(i);
-
-        ModuleCreateOptions opts;
-        opts.stream = stream;
-        opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
-        opts.cuda_graphs = ctx.cuda_graphs;
-        if (tp_runtime != nullptr && tp_runtime->config.enabled) {
-            opts.distributed_communicator = tp_runtime->group.communicator;
-            opts.distributed_owner = tp_runtime->group.owner;
-        }
-
-        const auto t0 = std::chrono::steady_clock::now();
-        auto modules =
-            ctx.backend->create_profile_modules(plan->data(), plan->size(), opts, profile_indices);
-        const auto t1 = std::chrono::steady_clock::now();
-        const double load_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        log_trt_load_timing(section_name.c_str(), load_ms, plan->size());
-        for (auto& entry : modules.modules) {
-            entry.module->set_timing_label(entry.profile_idx == 0 ? section_name + ":profile0"
-                                                                  : section_name + ":decode");
-        }
-        return modules;
-    }
-
-    static void build_kv_names(const PipelineContext& ctx, const IoMap& io,
-                               MistralKvCacheNames& kv_names) {
-        kv_names.position_id = io.position_id;
-        kv_names.attention_mask = io.attention_mask;
-        for (int32_t i = 0; i < ctx.config.num_layers; ++i) {
-            kv_names.cache_k.push_back(mistral_expand_layer_name(io.cache_k_pattern, i));
-            kv_names.cache_v.push_back(mistral_expand_layer_name(io.cache_v_pattern, i));
-            kv_names.present_k.push_back(mistral_expand_layer_name(io.present_k_pattern, i));
-            kv_names.present_v.push_back(mistral_expand_layer_name(io.present_v_pattern, i));
-        }
-    }
-
-    static std::unique_ptr<TrtModule>
-    extract_prefill_module(BackendProfileModules profile_modules,
-                           const DecoderProfileRoles& profile_roles, const char* section_name) {
-        if (profile_roles.prefill_profile_idx < 0)
-            return nullptr;
-        for (auto& entry : profile_modules.modules) {
-            if (entry.profile_idx != profile_roles.prefill_profile_idx)
-                continue;
-            entry.module->set_timing_label(std::string(section_name) + ":prefill");
-            return std::move(entry.module);
-        }
-        return nullptr;
-    }
-
-    static BackendProfileModule* find_profile_module(BackendProfileModules& profile_modules,
-                                                     int32_t profile_idx) {
-        auto found = std::find_if(
-            profile_modules.modules.begin(), profile_modules.modules.end(),
-            [&](const BackendProfileModule& entry) { return entry.profile_idx == profile_idx; });
-        if (found == profile_modules.modules.end())
-            return nullptr;
-        return &*found;
-    }
-
-    static void extract_engine_plan_prefill_module(BackendProfileModules& profile_modules,
-                                                   const DecoderProfileRoles& profile_roles,
-                                                   std::unique_ptr<TrtModule>& prefill_module) {
-        if (profile_roles.prefill_profile_idx < 0)
-            return;
-        auto* entry = find_profile_module(profile_modules, profile_roles.prefill_profile_idx);
-        if (entry == nullptr || !entry->module)
-            return;
-        entry->module->set_timing_label("engine_plan:prefill");
-        prefill_module = std::move(entry->module);
-    }
-
-    static std::vector<MistralTextGenerationPipeline::DecoderContext>
-    build_decoder_contexts(BackendProfileModules profile_modules, int32_t runtime_rows,
-                           const DecoderProfileRoles& profile_roles,
-                           std::unique_ptr<TrtModule>& prefill_module) {
-        std::vector<MistralTextGenerationPipeline::DecoderContext> decoders;
-        decoders.reserve(profile_modules.modules.size());
-        for (const auto& profile : profile_roles.decode_profiles) {
-            if (profile.kv_rows > runtime_rows && !decoders.empty())
-                break;
-            auto* found = find_profile_module(profile_modules, profile.profile_idx);
-            if (found == nullptr || !found->module)
-                continue;
-            found->module->set_timing_label("engine_plan:decode");
-            decoders.push_back(MistralTextGenerationPipeline::DecoderContext{
-                profile.kv_rows, std::move(found->module)});
-        }
-
-        extract_engine_plan_prefill_module(profile_modules, profile_roles, prefill_module);
-
-        if (decoders.empty())
-            throw std::runtime_error("No decoder profile available for engine_plan");
-        return decoders;
-    }
-
-    static std::unique_ptr<MistralInferenceState>
-    build_inference_state(const PipelineContext& ctx, const KvCacheRuntimeSizing& sizing,
-                          MistralTriAttentionConfig& tri_cfg, DType cache_dtype, int32_t kv_dim,
-                          MistralKvCacheNames& kv_names, cudaStream_t stream) {
-        std::unique_ptr<MistralInferenceState> state;
-        if (tri_cfg.enabled) {
-            auto* stats_sec = find_section(ctx.bundle, tri_cfg.stats_section);
-            if (stats_sec == nullptr || stats_sec->empty())
-                throw std::runtime_error("TriAttention stats section is missing: " +
-                                         tri_cfg.stats_section);
-            std::string stats_json(stats_sec->begin(), stats_sec->end());
-            MistralTriAttentionStats tri_stats = mistral_parse_triattention_stats_json(
-                stats_json, ctx.config.num_heads, ctx.config.num_kv_heads, ctx.config.num_layers);
-            state = std::make_unique<MistralTriAttentionKvCache>(
-                ctx.config.num_layers, ctx.config.num_kv_heads, sizing.runtime_rows, kv_dim, stream,
-                std::move(tri_cfg), std::move(tri_stats), cache_dtype, std::move(kv_names));
-        } else {
-            state =
-                std::make_unique<MistralKvCache>(ctx.config.num_layers, sizing.runtime_rows, kv_dim,
-                                                 stream, cache_dtype, std::move(kv_names));
-        }
+        auto state = std::make_unique<MistralKvCache>(ctx.config.num_layers, sizing.rows, kv_dim,
+                                                      stream, cache_dtype, std::move(names));
         if (!state->ok())
-            throw std::runtime_error("Failed to create MistralKvCache");
-        return state;
-    }
+            throw std::runtime_error("Failed to allocate Mistral native KV cache");
+        std::cerr << "[trtmc] KV cache rows=" << sizing.rows
+                  << " (row=" << format_bytes(sizing.row_bytes)
+                  << ", cache=" << format_bytes(sizing.cache_bytes) << ")\n";
 
-    static void log_kv_cache_sizing(const PipelineContext& ctx, const KvCacheRuntimeSizing& sizing,
-                                    MistralInferenceState* state) {
-        std::cerr << "[trtmc] KV cache rows=" << sizing.runtime_rows
-                  << " (bundle max=" << ctx.config.max_cache_length
-                  << ", row=" << format_bytes(sizing.row_bytes)
-                  << ", cache=" << format_bytes(sizing.cache_bytes) << ", state="
-                  << format_bytes(static_cast<std::uint64_t>(state->device_memory_bytes())) << ")";
-        if (sizing.override_applied) {
-            std::cerr << " [requested=" << format_bytes(ctx.kv_cache_size_bytes) << "]";
-            if (sizing.clamped_to_bundle_max)
-                std::cerr << " [clamped-to-bundle-max]";
-        }
-        std::cerr << '\n';
-    }
-
-    static void
-    populate_text_gen_config(const PipelineContext& ctx, MistralTextGenConfig& tgc, const IoMap& io,
-                             const MistralTextGenerationPipeline::DecoderContext& first_dec,
-                             const config::ConfigBundle* runtime_config) {
-        tgc.vocab_size = ctx.config.vocab_size;
-        tgc.id_bos = ctx.config.id_bos;
-        tgc.id_eos = ctx.config.id_eos;
-        tgc.has_position_input = first_dec.module->has_input(io.position_id);
-        tgc.token_id_name = io.token_id;
-        tgc.logits_output_name = io.logits;
-        if (runtime_config == nullptr)
-            return;
-        try {
-            tgc.disable_cuda_graph = runtime_config->get<bool>("runtime", "disable_cuda_graph");
-            tgc.prefer_gpu_greedy = runtime_config->get<bool>("runtime", "prefer_gpu_greedy");
-            tgc.log_runtime_stats = runtime_config->get<bool>("platform", "trt_log_stderr");
-        } catch (const std::exception&) {
-            // Schema not registered — stay at defaults.
-        }
-    }
-
-    static void apply_chat_template_format(const BundleFile& bundle, MistralTextGenConfig& tgc) {
-        std::string chat_tpl;
-        auto* tok_cfg_sec = find_section(bundle, "tokenizer_config.json");
-        if (tok_cfg_sec != nullptr && !tok_cfg_sec->empty()) {
-            const std::string tok_cfg_text(tok_cfg_sec->begin(), tok_cfg_sec->end());
-            chat_tpl = extract_json_string(tok_cfg_text, "chat_template", "");
-        }
-        if (chat_tpl.empty()) {
-            auto* tpl_sec = find_section(bundle, "chat_template.jinja");
-            if (tpl_sec != nullptr && !tpl_sec->empty())
-                chat_tpl.assign(tpl_sec->begin(), tpl_sec->end());
-        }
-        tgc.chat_template_format = mistral_detect_chat_template_format(chat_tpl);
+        MistralTextGenConfig config;
+        populate_text_config(ctx, config, *decoder, prefill_max_length, kv_dim);
+        std::vector<MistralTextGenerationPipeline::DecoderContext> decoders;
+        decoders.push_back(
+            MistralTextGenerationPipeline::DecoderContext{sizing.rows, std::move(decoder)});
+        return std::make_unique<MistralTextGenerationPipeline>(
+            std::move(decoders), std::move(state), std::move(config), stream, std::move(tokenizer),
+            ctx.bundle.info.model_id, nullptr, std::move(prefill));
     }
 };
 

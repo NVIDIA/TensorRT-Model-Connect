@@ -322,6 +322,7 @@ class HfTransformersReference:
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
         logits_path = str(Path(model_dir) / "hf_logits.npy")
         text_path = str(Path(model_dir) / "hf_text.txt")
+        token_path = str(Path(model_dir) / "hf_generated_tokens.json")
 
         prompt = case.inputs.get("prompt", "The capital of France is")
         max_new_tokens = case.inputs.get("max_new_tokens", 30)
@@ -335,7 +336,7 @@ class HfTransformersReference:
         enable_thinking = contract_config.get("enable_thinking", True)
 
         script = textwrap.dedent(f"""\
-            import sys, numpy as np, torch
+            import json, sys, numpy as np, torch
             from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer
 
             hf_id = {hf_id!r}
@@ -345,6 +346,7 @@ class HfTransformersReference:
             trust_remote_code = {trust_remote_code!r}
             logits_path = {logits_path!r}
             text_path = {text_path!r}
+            token_path = {token_path!r}
             use_chat_template = {use_chat_template!r}
             enable_thinking = {enable_thinking!r}
 
@@ -422,6 +424,8 @@ class HfTransformersReference:
 
             with open(text_path, "w") as f:
                 f.write(text)
+            with open(token_path, "w") as f:
+                json.dump({{"token_ids": generated_token_ids}}, f)
 
             # Pad and save logits
             max_len = max(l.shape[0] for l in all_logits)
@@ -443,7 +447,10 @@ class HfTransformersReference:
             case_name=case.name,
             stage_name=stage.name,
             env=_reference_env(ctx),
-            output_readers=(_existing_path_reader(logits_path, "logits_path"),),
+            output_readers=(
+                _existing_path_reader(logits_path, "logits_path"),
+                _json_output_reader(token_path),
+            ),
             text_reader=lambda: _read_text_artifact(text_path),
             logits_reader=(
                 lambda: logits_path if Path(logits_path).is_file() else None

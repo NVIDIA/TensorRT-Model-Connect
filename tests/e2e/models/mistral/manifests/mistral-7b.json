@@ -1,12 +1,10 @@
 {
   "name": "mistral-7b",
-  "hf_id": "mistralai/Mistral-7B-Instruct-v0.1",
+  "hf_id": "mistralai/Mistral-7B-Instruct-v0.3",
   "bundle": "mistral-7b.trtfb",
   "family": "mistral",
   "runtime_strategy": "mistral_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
-  "precision": "fp16",
-  "max_cache_length": 256,
   "trust_remote_code": false,
   "testcases": [
     {
@@ -20,6 +18,7 @@
       "l0_replacement_reason": "Mistral-7B scale stays nightly; mistral-7b-l0 keeps the Mistral decoder path with shorter decode for PR L0.",
       "prompt": "What is the capital of Japan? Answer in one word.",
       "max_new_tokens": 10,
+      "notes": "Nightly parity runs the native split-engine path with the checkpoint's full 32768-token physical KV capacity.",
       "metadata": {
         "contract_config": {
           "use_chat_template": true,

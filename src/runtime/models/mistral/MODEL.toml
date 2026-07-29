@@ -7,3 +7,7 @@ runtime_plugins = ["plugin.cpp|register_mistral_plugin"]
 runtime_strategies = ["mistral_decoder_kv_cache"]
 [validation_profiles]
 decoder_debug = ["mistral_decoder_kv_cache"]
+
+runtime_tests = [
+  "test_mistral_native_kv_cache|test_mistral_native_kv_cache.cpp|trtmc_model_mistral|_|REQUIRES_GPU",
+]
