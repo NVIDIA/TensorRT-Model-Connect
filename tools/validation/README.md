@@ -9,6 +9,9 @@ the comparison command, and nightly model-proof CI.
 - `catalog.py` loads workload definitions, projects E2E manifests, and resolves
   model/workload compatibility.
 - `artifacts.py` validates the durable prediction artifact contract.
+- `model_plugin_contract.py` selects fixed model-manifest testcase/stage
+  contracts and serializes model-owned stage outputs across the independent
+  reference and TRTMC processes.
 - `engine.py` prepares aligned inputs, runs TRTMC, compares reference and TRTMC
   outputs, evaluates gates, and writes machine-readable summaries.
 - `tools/trtmc_reference.py` owns independent reference execution and its

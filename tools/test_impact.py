@@ -1901,6 +1901,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                 "tools/elf_hf_reference.py",
                 "tools/prepare_elf_validation_datasets.py",
                 "tools/prepare_media_validation_datasets.py",
+                "tools/prepare_model_plugin_validation_datasets.py",
                 "tools/prepare_vision_validation_datasets.py",
             }),
             resolver=_match_result(

@@ -60,6 +60,8 @@ _TASK_TYPE_BY_USER_CONTRACT = {
     "code_completion": "Text → Code",
     "translation": "Text → Text",
     "seq2seq_output": "Text → Text",
+    "any-to-any": "Image + Text → Text",
+    "speech_response": "Audio → Audio",
     "vl_answer": "Image + Text → Text",
     "ocr_text": "Image → Text",
     "exact_transcript": "Audio → Text",
@@ -926,6 +928,7 @@ def _append_unique(commands: dict[str, list[str]], kind: str, command: str) -> N
 
 
 _PRIMARY_COMPARISON_METRICS = (
+    "sample_pass_rate",
     "sample_agreement_rate",
     "prediction_agreement_rate",
     "vector_pass_rate",
@@ -943,6 +946,7 @@ _PRIMARY_METRIC_BY_MODE = {
     "diffusion_text_parity": "token_agreement_rate",
     "encoder_embedding_parity": "vector_pass_rate",
     "image_classification_parity": "top1_agreement",
+    "model_plugin_parity": "sample_pass_rate",
     "ocrbench_v2": "prediction_agreement_rate",
     "reranking_parity": "mean_pairwise_ordering_agreement",
     "semantic_segmentation_parity": "backend_pixel_agreement",

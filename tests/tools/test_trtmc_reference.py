@@ -761,6 +761,12 @@ def test_native_reference_runner_uses_prepared_dataset_kind(tmp_path: Path) -> N
         "plugin_reference.py"
     )
 
+    manifest["dataset_kind"] = "model_plugin_json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert trtmc_reference._native_reference_runner(arguments).name == (
+        "plugin_reference.py"
+    )
+
     manifest["dataset_kind"] = "vlm_chat_json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     assert trtmc_reference._native_reference_runner(arguments).name == (
@@ -1419,6 +1425,73 @@ def test_plugin_reference_records_actual_command_during_inference(
     )["command"]
     assert command[1] == "/workspace/model/reference.py"
     assert "plugin_reference.py" not in " ".join(command)
+
+
+def test_model_plugin_reference_runs_manifest_owned_golden_snapshot(
+    tmp_path: Path,
+) -> None:
+    manifest_path = (
+        trtmc_reference.REPO_ROOT
+        / "tests/e2e/models/lance/manifests/lance-3b-x2t-image.json"
+    )
+    prompts = tmp_path / "prompts.jsonl"
+    prompts.write_text(
+        json.dumps(
+            {
+                "sample_id": "lance-sample",
+                "testcase": "lance-3b-x2t-image",
+                "stage": "full_generation",
+                "inputs": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    answers = tmp_path / "answers.json"
+    answers.write_text(
+        json.dumps({"requests": [{"sample_id": "lance-sample"}]}),
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "dataset_kind": "model_plugin_json",
+                "task_eval": {"model_manifest": str(manifest_path)},
+            }
+        ),
+        encoding="utf-8",
+    )
+    predictions = tmp_path / "hf_predictions.json"
+    arguments = plugin_reference.build_parser().parse_args(
+        [
+            "--model",
+            "bytedance-research/Lance",
+            "--prompts",
+            str(prompts),
+            "--answers",
+            str(answers),
+            "--manifest",
+            str(manifest),
+            "--predictions",
+            str(predictions),
+            "--raw-output",
+            str(tmp_path / "hf_raw.jsonl"),
+            "--repro-metadata",
+            str(tmp_path / "hf_native_repro.json"),
+            "--dtype",
+            "bfloat16",
+        ]
+    )
+
+    plugin_reference.run(arguments)
+
+    row = json.loads(predictions.read_text(encoding="utf-8"))["responses"][0]
+    assert row["sample_id"] == "lance-sample"
+    assert row["testcase"] == "lance-3b-x2t-image"
+    assert row["stage"] == "full_generation"
+    assert row["output_text"] == "White"
+    assert row["stage_output"]["text"] == "White"
 
 
 def test_elf_adapter_preserves_original_sample_seed_and_answer(

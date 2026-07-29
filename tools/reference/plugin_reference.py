@@ -26,6 +26,12 @@ from tests.e2e_harness.registry import (  # noqa: E402
     activate_model_plugins,
     get_reference,
 )
+from tools.validation.model_plugin_contract import (  # noqa: E402
+    manifest_path_from_work_manifest,
+    response_from_output,
+    select_case,
+    serialize_stage_output,
+)
 
 
 SCHEMA_VERSION = "trtmc.native-reference-reproduction/v1"
@@ -669,6 +675,69 @@ def _run_diffusion(
     return responses
 
 
+def _run_model_plugin(
+    *,
+    manifest: Mapping[str, Any],
+    rows: Sequence[tuple[int, dict[str, Any]]],
+    artifacts_dir: Path,
+    command_path: Path,
+) -> list[dict[str, Any]]:
+    manifest_path = manifest_path_from_work_manifest(
+        manifest,
+        repo_root=REPO_ROOT,
+    )
+    responses = []
+    for run_index, (source_index, prompt_row) in enumerate(rows):
+        case, stage = select_case(
+            manifest_path,
+            prompt_row,
+            source_index=source_index,
+        )
+        task_config = manifest.get("task_eval", {})
+        if isinstance(task_config, Mapping):
+            reference_precision = str(
+                task_config.get("reference_precision", "") or ""
+            )
+            if reference_precision:
+                case.metadata["reference_precision"] = reference_precision
+        activate_model_plugins(str(case.metadata.get("model_test_dir", "") or ""))
+        reference = get_reference(case.reference_backend)
+        if reference is None:
+            raise RuntimeError(
+                f"No reference plugin {case.reference_backend!r} for {case.family}"
+            )
+        sample_id = str(
+            prompt_row.get("sample_id", f"model_plugin_{source_index:06d}")
+        )
+        sample_artifacts = artifacts_dir / sample_id
+        output = _run_reference_stage(
+            reference,
+            case,
+            stage,
+            _context(case, sample_artifacts),
+        )
+        _record_native_command(command_path, sample_id, output)
+        serialized = serialize_stage_output(
+            output,
+            artifact_dir=sample_artifacts / "serialized",
+            sample_id=sample_id,
+        )
+        responses.append(
+            response_from_output(
+                sample_id=sample_id,
+                source="hf",
+                testcase=case.metadata["validation_manifest_case_name"],
+                output=output,
+                serialized_output=serialized,
+            )
+        )
+        print(
+            f"[reference.plugin.model] sample={run_index + 1}/{len(rows)}",
+            file=sys.stderr,
+        )
+    return responses
+
+
 def _run_dataset_kind(
     *,
     manifest: Mapping[str, Any],
@@ -713,11 +782,28 @@ def _run_dataset_kind(
             manifest,
             command_path,
         )
+    if dataset_kind == "model_plugin_json":
+        return _run_model_plugin(
+            manifest=manifest,
+            rows=rows,
+            artifacts_dir=artifacts_dir,
+            command_path=command_path,
+        )
     raise ValueError(f"Unsupported reference plugin dataset kind {dataset_kind!r}")
 
 
 def run(arguments: argparse.Namespace) -> None:
     manifest = _load_json(arguments.manifest)
+    reference_precision = {
+        "float16": "fp16",
+        "bfloat16": "bf16",
+        "float32": "fp32",
+    }.get(arguments.dtype)
+    if reference_precision:
+        task_config = manifest.get("task_eval", {})
+        task_config = dict(task_config) if isinstance(task_config, Mapping) else {}
+        task_config["reference_precision"] = reference_precision
+        manifest["task_eval"] = task_config
     rows = _selected_rows(
         _load_jsonl(arguments.prompts),
         arguments.sample_id,

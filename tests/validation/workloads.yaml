@@ -1544,3 +1544,205 @@ suites:
       notes: >
         P2021-only; use the full 1,000-request dataset for paper-comparable
         perplexity and entropy. Small --limit slices are smoke tests only.
+
+  - id: lance_x2t_image_model_parity
+    description: >
+      Lance image-to-text consistency on the upstream eager golden pair. The
+      model-owned golden reference and vision-language comparator are executed
+      independently from the TRTMC model-owned runner.
+    user_contract: any-to-any
+    default_model_names: [lance-3b-x2t-image]
+    dataset:
+      kind: model_plugin_json
+      default_path: /mnt/data/TRTMCValidation/lance-3b-x2t-image/dataset.json
+      input_asset_fields: [image]
+    selectors:
+      model_names: [lance-3b-x2t-image]
+    scoring:
+      scorer: model_plugin_parity
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: GB300-only model-owned reference consistency.
+
+  - id: nemotron_labs_generation_modes_model_parity
+    description: >
+      Nemotron Labs Diffusion consistency across AR, diffusion, linear
+      speculative, and LoRA-backed linear speculative generation modes.
+      Each mode selects its manifest testcase and native upstream reference.
+    user_contract: continuation_parity
+    default_model_names: [nemotron-labs-diffusion-8b]
+    dataset:
+      kind: model_plugin_json
+      default_path: /mnt/data/TRTMCValidation/nemotron-labs-diffusion-8b/dataset.json
+    selectors:
+      model_names: [nemotron-labs-diffusion-8b]
+    scoring:
+      scorer: model_plugin_parity
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: GB300-only model-owned reference consistency.
+
+  - id: nllb_flores_en_fr_model_parity
+    description: >
+      NLLB-200 English-to-French consistency on a fixed FLORES-200 devtest
+      slice. Source text is extracted once into the dataset so the native HF
+      reference and TRTMC runner receive identical strings.
+    user_contract: translation
+    default_model_names: [nllb-200-distilled-600m]
+    dataset:
+      kind: model_plugin_json
+      default_path: /mnt/data/TRTMCValidation/nllb-200-distilled-600m/dataset.json
+    selectors:
+      model_names: [nllb-200-distilled-600m]
+    scoring:
+      scorer: model_plugin_parity
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: GB300-only model-owned reference consistency.
+
+  - id: personaplex_recording_model_parity
+    description: >
+      PersonaPlex speech-to-speech consistency on the official recording and
+      greedy speech-token snapshot. Both sides consume the same WAV, while the
+      model-owned comparator checks speech token and waveform contracts.
+    user_contract: speech_response
+    default_model_names: [personaplex-7b]
+    dataset:
+      kind: model_plugin_json
+      default_path: /mnt/data/TRTMCValidation/personaplex-7b/dataset.json
+      input_asset_fields: [audio, speech_reference_tokens]
+    selectors:
+      model_names: [personaplex-7b]
+    scoring:
+      scorer: model_plugin_parity
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: GB300-only gated-model reference consistency.
+
+  - id: phi4_multimodal_mmmu_model_parity
+    description: >
+      Phi-4 Multimodal image-question consistency on five fixed,
+      distinct-subject MMMU-Pro Vision samples. The prepared dataset copies
+      only the selected images and aligns prompt/image inputs exactly.
+    user_contract: vl_answer
+    default_model_names: [phi4-multimodal]
+    dataset:
+      kind: model_plugin_json
+      default_path: /mnt/data/TRTMCValidation/phi4-multimodal/dataset.json
+      input_asset_fields: [image]
+    selectors:
+      model_names: [phi4-multimodal]
+    scoring:
+      scorer: model_plugin_parity
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: GB300-only model-owned reference consistency.
+
+  - id: qwen3_omni_talker_model_parity
+    description: >
+      Qwen3-Omni talker consistency against the provenance-pinned official HF
+      waveform. The model-owned comparator gates waveform similarity and audio
+      validity with aligned prompt, speaker, seed, and token budgets.
+    user_contract: tts_audio
+    default_model_names: [qwen3-omni-30b-a3b-instruct]
+    dataset:
+      kind: model_plugin_json
+      default_path: /mnt/data/TRTMCValidation/qwen3-omni-30b-a3b-instruct/dataset.json
+    selectors:
+      model_names: [qwen3-omni-30b-a3b-instruct]
+    scoring:
+      scorer: model_plugin_parity
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: GB300-only 280 GB model-owned reference consistency.
+
+  - id: wan21_vbench_model_parity
+    description: >
+      Wan2.1 text-to-video consistency on two fixed VBench prompts. Native HF
+      Diffusers and TRTMC consume the same prompt, seed, and shared initial
+      latent before model-owned frame comparison.
+    user_contract: diffusion_video
+    default_model_names: [wan21-t2v-1.3b]
+    dataset:
+      kind: diffusion_prompt_json
+      default_path: /mnt/data/TRTMCValidation/wan21-t2v-1.3b/dataset.json
+      prompt_field: prompt
+      subject_field: category
+    selectors:
+      model_names: [wan21-t2v-1.3b]
+    generation:
+      seed: 42
+      use_shared_initial_latents: true
+      text_max_length: 226
+    scoring:
+      scorer: diffusion_image_clip_parity
+    gates:
+      min_pixel_mean: 0.15
+      max_pixel_mean: 0.85
+      min_pixel_std: 0.05
+      temporal_consistency: 0.60
+      min_trt_hf_image_clip_cosine: 0.85
+      require_matching_initial_latents: 1
+      psnr: 2.0
+      ssim: -1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: GB300-only sampled native HF/TRTMC video consistency.
+
+  - id: wan22_official_ti2v_model_parity
+    description: >
+      Wan2.2 TI2V-5B consistency at the pinned official 1280x704,
+      121-frame, 50-step profile. The pinned official Wan implementation and
+      TRTMC generate aligned videos for model-owned numeric comparison.
+    user_contract: diffusion_video
+    default_model_names: [wan22-ti2v-5b]
+    dataset:
+      kind: diffusion_prompt_json
+      default_path: /mnt/data/TRTMCValidation/wan22-ti2v-5b/dataset.json
+      prompt_field: prompt
+      subject_field: category
+    selectors:
+      model_names: [wan22-ti2v-5b]
+    generation:
+      seed: 42
+    scoring:
+      scorer: diffusion_image_clip_parity
+    gates:
+      exact_num_frames: 121
+      exact_video_height: 704
+      exact_video_width: 1280
+      max_rmse_uint8: 1.0
+      max_pixel_mean: 0.98
+      max_temporal_motion_ratio: 2.0
+      min_active_transition_fraction: 0.9
+      min_cosine_uint8: 0.998
+      min_frame_cosine_uint8: 0.998
+      min_pixel_mean: 0.02
+      min_pixel_std: 0.01
+      min_temporal_motion_ratio: 0.5
+      min_temporal_profile_correlation: 0.75
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        GB300-only full official-profile validation; this workload can take
+        several hours for the reference and TRTMC pair.

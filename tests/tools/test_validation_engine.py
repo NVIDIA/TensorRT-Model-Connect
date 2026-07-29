@@ -1763,6 +1763,160 @@ def test_prepare_diffusion_json_resolves_declared_sample_assets(
     assert prompts[0]["image"] == str(condition.resolve())
 
 
+def test_prepare_model_plugin_dataset_resolves_nested_input_assets(
+    tmp_path: Path,
+) -> None:
+    image = tmp_path / "images" / "input.jpg"
+    image.parent.mkdir()
+    image.write_bytes(b"image")
+    dataset = tmp_path / "model_plugin.json"
+    dataset.write_text(
+        json.dumps(
+            {
+                "dataset": "fixed plugin inputs",
+                "requests": [
+                    {
+                        "sample_id": "sample-1",
+                        "testcase": "model-case",
+                        "stage": "full_generation",
+                        "inputs": {
+                            "prompt": "describe",
+                            "image": "images/input.jpg",
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    suite = {
+        "id": "model_plugin_suite",
+        "dataset": {
+            "kind": "model_plugin_json",
+            "input_asset_fields": ["image"],
+        },
+    }
+
+    outputs = validation_engine.prepare_model_plugin_dataset(
+        dataset_path=dataset,
+        work_dir=tmp_path / "work",
+        suite=suite,
+    )
+
+    prompts = validation_engine.load_jsonl(outputs["prompts"])
+    manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
+    assert prompts[0]["inputs"]["image"] == str(image.resolve())
+    assert prompts[0]["image"] == str(image.resolve())
+    assert prompts[0]["eval_index"] == 0
+    assert manifest["dataset_kind"] == "model_plugin_json"
+    assert manifest["request_count"] == 1
+
+
+def test_compare_model_plugin_prediction_sets_uses_model_comparator(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from tests.e2e_harness.contracts import (
+        CompareResult,
+        MetricResult,
+        StageOutput,
+        StageSpec,
+        StageStatus,
+    )
+    from tools.validation.model_plugin_contract import serialize_stage_output
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset_kind": "model_plugin_json",
+                "task_eval": {"model_manifest": "model.json"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    case = SimpleNamespace(
+        task_strategy="custom_strategy",
+        family="custom_family",
+        comparison_profile="default",
+        threshold_overrides={"score": 0.9},
+        metadata={
+            "model_test_dir": "tests/e2e/models/custom",
+            "validation_manifest_case_name": "custom-case",
+        },
+    )
+    stage = StageSpec(name="full_generation", required=True)
+    monkeypatch.setattr(
+        validation_engine,
+        "select_case",
+        lambda *_args, **_kwargs: (case, stage),
+    )
+    monkeypatch.setattr(
+        validation_engine,
+        "activate_model_plugins",
+        lambda _path: None,
+    )
+
+    class Comparator:
+        def compare(self, trt, ref, threshold, selected_stage):
+            assert trt.text == ref.text == "same"
+            assert threshold.metrics["score"] == 0.9
+            assert selected_stage.name == "full_generation"
+            return CompareResult(
+                stage_name=selected_stage.name,
+                status=StageStatus.PASSED.value,
+                metrics={
+                    "score": MetricResult(
+                        value=1.0,
+                        threshold=0.9,
+                        operator=">=",
+                        passed=True,
+                    )
+                },
+            )
+
+    monkeypatch.setattr(
+        validation_engine,
+        "get_comparator",
+        lambda _strategy: Comparator(),
+    )
+    output = StageOutput(stage_name="full_generation", text="same")
+    serialized = serialize_stage_output(
+        output,
+        artifact_dir=tmp_path / "artifacts",
+        sample_id="sample-1",
+    )
+    response = {
+        "sample_id": "sample-1",
+        "testcase": "custom-case",
+        "stage": "full_generation",
+        "stage_output": serialized,
+    }
+
+    summary = validation_engine.compare_model_plugin_prediction_sets(
+        {"responses": [response]},
+        {"responses": [response]},
+        {
+            "requests": [
+                {
+                    "sample_id": "sample-1",
+                    "testcase": "custom-case",
+                    "stage": "full_generation",
+                    "inputs": {},
+                }
+            ]
+        },
+        work_dir=work_dir,
+        gates={"min_sample_pass_rate": 1.0},
+    )
+
+    assert summary["status"] == "passed"
+    assert summary["sample_pass_rate"] == 1.0
+    assert summary["metrics"]["score"]["mean"] == 1.0
+    assert summary["cases"][0]["passed"] is True
+
+
 def test_prepare_mmlu_applies_gpt_oss_family_override(tmp_path: Path) -> None:
     dataset = tmp_path / "mmlu.json"
     _write_mmlu(dataset)

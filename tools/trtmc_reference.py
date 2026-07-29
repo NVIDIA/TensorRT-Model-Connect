@@ -43,6 +43,7 @@ _NATIVE_ENCODER_DATASET_KINDS = {"sts_pair_jsonl"}
 _NATIVE_PLUGIN_DATASET_KINDS = {
     "diffusion_prompt_json",
     "image_classification_json",
+    "model_plugin_json",
     "prompted_segmentation_json",
     "reranking_json",
     "semantic_segmentation_json",

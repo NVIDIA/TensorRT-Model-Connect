@@ -48,6 +48,13 @@ from tests.e2e_harness.registry import (  # noqa: E402
 )
 from tools.validation import artifacts as validation_artifacts  # noqa: E402
 from tools.validation import catalog as validation_catalog  # noqa: E402
+from tools.validation.model_plugin_contract import (  # noqa: E402
+    deserialize_stage_output,
+    manifest_path_from_work_manifest,
+    response_from_output,
+    select_case,
+    serialize_stage_output,
+)
 
 
 # Shared catalog and artifact Interfaces used by the engine.
@@ -993,6 +1000,124 @@ def prepare_diffusion_prompt_json_dataset(
     if validation_config:
         manifest["task_eval"] = validation_config
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
+
+
+def prepare_model_plugin_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+    validation_config: dict[str, Any] | None = None,
+) -> dict[str, Path]:
+    """Prepare fixed rows consumed by model-owned reference/runner plugins."""
+    data = json.loads(dataset_path.read_text(encoding="utf-8"))
+    requests = data.get("requests")
+    if not isinstance(requests, list):
+        raise ValueError(f"{dataset_path}: expected top-level 'requests' list")
+    dataset_config = suite.get("dataset", {})
+    asset_fields = dataset_config.get("input_asset_fields", [])
+    if not isinstance(asset_fields, list) or not all(
+        isinstance(field, str) and field for field in asset_fields
+    ):
+        raise ValueError(
+            f"Suite {suite['id']} dataset.input_asset_fields must be a list of strings"
+        )
+
+    indexed: list[tuple[int, dict[str, Any]]] = []
+    seen_ids: set[str] = set()
+    for source_position, request in enumerate(requests):
+        if not isinstance(request, dict):
+            raise ValueError(f"{dataset_path}: request {source_position} must be an object")
+        prepared = copy.deepcopy(request)
+        sample_id = str(
+            prepared.get("sample_id", f"model_plugin_{source_position:06d}")
+        ).strip()
+        if not sample_id:
+            raise ValueError(f"{dataset_path}: request {source_position} has no sample_id")
+        if sample_id in seen_ids:
+            raise ValueError(f"{dataset_path}: duplicate sample_id {sample_id!r}")
+        seen_ids.add(sample_id)
+        prepared["sample_id"] = sample_id
+        prepared.setdefault("dataset_index", source_position)
+        category = str(prepared.get("category", "") or "")
+        if subject and subject not in {
+            value.strip() for value in category.split(",")
+        }:
+            continue
+        inputs = prepared.get("inputs", {})
+        if not isinstance(inputs, dict):
+            raise ValueError(
+                f"{dataset_path}: request {source_position} inputs must be an object"
+            )
+        for field in asset_fields:
+            value = inputs.get(field)
+            if not isinstance(value, str) or not value:
+                raise ValueError(
+                    f"{dataset_path}: request {source_position} has no inputs.{field}"
+                )
+            asset_path = Path(value)
+            if not asset_path.is_absolute():
+                asset_path = dataset_path.parent / asset_path
+            if not asset_path.is_file():
+                raise FileNotFoundError(
+                    f"{dataset_path}: request {source_position} inputs.{field} "
+                    f"does not exist: {asset_path}"
+                )
+            inputs[field] = str(asset_path.resolve())
+            if field in {"audio", "image", "video", "video_path"}:
+                prepared[field] = inputs[field]
+        prepared["inputs"] = inputs
+        indexed.append((source_position, prepared))
+    if sample_seed is not None:
+        rng = random.Random(sample_seed)
+        rng.shuffle(indexed)
+    if limit > 0:
+        indexed = indexed[:limit]
+    if not indexed:
+        raise ValueError(
+            f"{dataset_path}: no model-plugin requests selected"
+        )
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    answers_path = work_dir / "answers.json"
+    prompts_path = work_dir / "prompts.jsonl"
+    manifest_path = work_dir / "manifest.json"
+    selected = [request for _source_position, request in indexed]
+    answers_path.write_text(
+        json.dumps(
+            _copy_dataset_header(data, selected),
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    with prompts_path.open("w", encoding="utf-8") as prompts_file:
+        for eval_index, (_source_position, request) in enumerate(indexed):
+            prompt_row = dict(request)
+            prompt_row["eval_index"] = eval_index
+            prompts_file.write(json.dumps(prompt_row, ensure_ascii=False) + "\n")
+    manifest = {
+        "suite": suite["id"],
+        "dataset": str(dataset_path),
+        "dataset_name": data.get("dataset", ""),
+        "dataset_version": data.get("version", ""),
+        "dataset_kind": "model_plugin_json",
+        "request_count": len(indexed),
+        "subject": subject or "all",
+        "limit": limit,
+        "sample_seed": sample_seed,
+        "files": {"answers": str(answers_path), "prompts": str(prompts_path)},
+    }
+    if validation_config:
+        manifest["task_eval"] = validation_config
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
     return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
 
 
@@ -2499,6 +2624,16 @@ def prepare_task_dataset(
         )
     if dataset_kind == "diffusion_prompt_json":
         return prepare_diffusion_prompt_json_dataset(
+            dataset_path=dataset_path,
+            work_dir=work_dir,
+            suite=suite,
+            limit=limit,
+            subject=subject,
+            sample_seed=sample_seed,
+            validation_config=validation_config,
+        )
+    if dataset_kind == "model_plugin_json":
+        return prepare_model_plugin_dataset(
             dataset_path=dataset_path,
             work_dir=work_dir,
             suite=suite,
@@ -5480,6 +5615,10 @@ def _is_reranking_dataset_kind(kind: str) -> bool:
     return kind == "reranking_json"
 
 
+def _is_model_plugin_dataset_kind(kind: str) -> bool:
+    return kind == "model_plugin_json"
+
+
 def work_scoring(work_dir: Path) -> dict[str, Any]:
     scoring = work_manifest(work_dir).get("scoring", {})
     return scoring if isinstance(scoring, dict) else {}
@@ -7991,9 +8130,105 @@ def run_encoder_embedding_trtfb(args: argparse.Namespace) -> None:
     write_predictions(pred_path, responses)
 
 
+def run_model_plugin_trtfb(args: argparse.Namespace) -> None:
+    from tests.e2e_harness.contracts import RunContext
+
+    work_dir = Path(args.work_dir)
+    manifest = work_manifest(work_dir)
+    manifest_path = manifest_path_from_work_manifest(
+        manifest,
+        repo_root=REPO_ROOT,
+    )
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    artifacts_dir = work_dir / "trtfb_artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = work_dir / (args.raw_output or "trtfb_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
+    metadata_path = work_dir / (args.log or "trtfb_run.log")
+    bundle_path = Path(args.bundle).resolve()
+    responses: list[dict[str, Any]] = []
+    _reset_native_trtmc_commands(work_dir)
+    with (
+        raw_path.open("w", encoding="utf-8") as raw_file,
+        metadata_path.open("w", encoding="utf-8") as metadata_file,
+    ):
+        for index, prompt_row in enumerate(prompt_rows):
+            case, stage = select_case(
+                manifest_path,
+                prompt_row,
+                source_index=index,
+            )
+            case.bundle = bundle_path.name
+            activate_model_plugins(
+                str(case.metadata.get("model_test_dir", "") or "")
+            )
+            runner = get_runner(case.task_strategy)
+            if runner is None:
+                raise RuntimeError(
+                    f"No runner plugin {case.task_strategy!r} for {case.family}"
+                )
+            sample_id = str(
+                prompt_row.get("sample_id", f"model_plugin_{index:06d}")
+            )
+            sample_artifacts = artifacts_dir / sample_id
+            context = RunContext(
+                case=case,
+                artifacts_dir=str(sample_artifacts),
+                binary_path=str(args.trtmc_binary),
+                hf_python=str(getattr(args, "hf_python", "") or ""),
+                runtime_python=str(getattr(args, "hf_python", "") or ""),
+                reference_python=str(getattr(args, "hf_python", "") or ""),
+                engine_dir=str(bundle_path.parent),
+                model_plugin_dir=str(
+                    getattr(args, "model_plugin_dir", "") or ""
+                ),
+            )
+            output = runner.run_stage(case, stage, context)
+            _record_output_native_command(work_dir, sample_id, output)
+            serialized = serialize_stage_output(
+                output,
+                artifact_dir=sample_artifacts / "serialized",
+                sample_id=sample_id,
+            )
+            response = response_from_output(
+                sample_id=sample_id,
+                source="trtfb",
+                testcase=case.metadata["validation_manifest_case_name"],
+                output=output,
+                serialized_output=serialized,
+            )
+            responses.append(response)
+            raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
+            raw_file.flush()
+            metadata_file.write(
+                json.dumps(
+                    {
+                        "sample_id": sample_id,
+                        "testcase": case.metadata[
+                            "validation_manifest_case_name"
+                        ],
+                        "stage": stage.name,
+                        "timing_s": float(output.timing_s),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            metadata_file.flush()
+            print(
+                f"[validation.model_plugin_trtfb] "
+                f"sample={index + 1}/{len(prompt_rows)}",
+                file=sys.stderr,
+            )
+    write_predictions(pred_path, responses)
+
+
 def run_trtfb(args: argparse.Namespace) -> None:
     work_dir = Path(args.work_dir)
     dataset_kind = _work_dataset_kind(work_dir)
+    if _is_model_plugin_dataset_kind(dataset_kind):
+        run_model_plugin_trtfb(args)
+        return
     if _is_reranking_dataset_kind(dataset_kind):
         run_reranking_trtfb(args)
         return
@@ -8497,6 +8732,7 @@ _REFERENCE_DTYPE_TO_PRECISION = {
 _NATIVE_PRECISION_DATASET_KINDS = {
     "asr_chat_json",
     "mmlu_five_shot_json",
+    "model_plugin_json",
     "seedtts_json",
     "text_generation_json",
     "sts_pair_jsonl",
@@ -9798,6 +10034,182 @@ def write_encoder_embedding_summary_markdown(summary: dict[str, Any], path: Path
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def compare_model_plugin_prediction_sets(
+    hf_predictions: dict[str, Any],
+    trtfb_predictions: dict[str, Any],
+    answers_data: dict[str, Any],
+    *,
+    work_dir: Path,
+    gates: Mapping[str, Any],
+) -> dict[str, Any]:
+    from tests.e2e_harness.contracts import StageStatus, ThresholdProfile
+
+    hf_rows = hf_predictions.get("responses", [])
+    trt_rows = trtfb_predictions.get("responses", [])
+    requests = answers_data.get("requests", [])
+    if not all(isinstance(rows, list) for rows in (hf_rows, trt_rows, requests)):
+        raise ValueError(
+            "model-plugin predictions and answers must contain response/request lists"
+        )
+    if len(hf_rows) != len(trt_rows) or len(hf_rows) != len(requests):
+        raise ValueError(
+            "HF predictions, TRTMC predictions, and model-plugin requests must "
+            f"have the same length: {len(hf_rows)}, {len(trt_rows)}, "
+            f"{len(requests)}"
+        )
+
+    manifest = work_manifest(work_dir)
+    manifest_path = manifest_path_from_work_manifest(
+        manifest,
+        repo_root=REPO_ROOT,
+    )
+    min_sample_pass_rate = float(gates.get("min_sample_pass_rate", 1.0))
+    threshold_overrides = {
+        str(name): float(value)
+        for name, value in gates.items()
+        if name != "min_sample_pass_rate"
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+    }
+    cases: list[dict[str, Any]] = []
+    metric_values: dict[str, list[float]] = defaultdict(list)
+    valid_count = 0
+    passed_count = 0
+    skipped_count = 0
+
+    for index, (request, hf_row, trt_row) in enumerate(
+        zip(requests, hf_rows, trt_rows, strict=True)
+    ):
+        if not all(
+            isinstance(row, dict) for row in (request, hf_row, trt_row)
+        ):
+            raise ValueError(f"model-plugin row {index} must contain objects")
+        sample_id = str(
+            request.get("sample_id", f"model_plugin_{index:06d}")
+        )
+        if (
+            str(hf_row.get("sample_id", "")) != sample_id
+            or str(trt_row.get("sample_id", "")) != sample_id
+        ):
+            raise ValueError(
+                f"model-plugin sample id mismatch at index {index}: "
+                f"expected={sample_id!r} hf={hf_row.get('sample_id')!r} "
+                f"trtfb={trt_row.get('sample_id')!r}"
+            )
+        case, stage = select_case(
+            manifest_path,
+            request,
+            source_index=index,
+        )
+        expected_case = str(
+            case.metadata["validation_manifest_case_name"]
+        )
+        if (
+            str(hf_row.get("testcase", "")) != expected_case
+            or str(trt_row.get("testcase", "")) != expected_case
+            or str(hf_row.get("stage", "")) != stage.name
+            or str(trt_row.get("stage", "")) != stage.name
+        ):
+            raise ValueError(
+                f"model-plugin contract mismatch for {sample_id}: "
+                f"expected testcase={expected_case!r} stage={stage.name!r}"
+            )
+        activate_model_plugins(
+            str(case.metadata.get("model_test_dir", "") or "")
+        )
+        comparator = get_comparator(case.task_strategy)
+        if comparator is None:
+            raise RuntimeError(
+                f"No comparator plugin {case.task_strategy!r} for {case.family}"
+            )
+        hf_payload = hf_row.get("stage_output")
+        trt_payload = trt_row.get("stage_output")
+        if not isinstance(hf_payload, Mapping) or not isinstance(
+            trt_payload, Mapping
+        ):
+            raise ValueError(
+                f"model-plugin predictions for {sample_id} have no stage_output"
+            )
+        threshold = ThresholdProfile(
+            task_strategy=case.task_strategy,
+            profile_name=case.comparison_profile,
+            metrics={
+                **{
+                    str(name): float(value)
+                    for name, value in case.threshold_overrides.items()
+                },
+                **threshold_overrides,
+            },
+        )
+        comparison = comparator.compare(
+            deserialize_stage_output(trt_payload),
+            deserialize_stage_output(hf_payload),
+            threshold,
+            stage,
+        )
+        metrics = {
+            name: {
+                "value": float(metric.value),
+                "threshold": metric.threshold,
+                "operator": metric.operator,
+                "passed": bool(metric.passed),
+                "note": metric.note,
+            }
+            for name, metric in comparison.metrics.items()
+        }
+        for name, metric in comparison.metrics.items():
+            metric_values[name].append(float(metric.value))
+        is_valid = comparison.status in {
+            StageStatus.PASSED.value,
+            StageStatus.FAILED.value,
+        }
+        is_passed = comparison.status == StageStatus.PASSED.value
+        valid_count += int(is_valid)
+        passed_count += int(is_passed)
+        skipped_count += int(not is_valid)
+        cases.append(
+            {
+                "sample_id": sample_id,
+                "testcase": expected_case,
+                "stage": stage.name,
+                "passed": is_passed,
+                "status": comparison.status,
+                "message": comparison.message,
+                "composite_rule": comparison.composite_rule,
+                "metrics": metrics,
+            }
+        )
+
+    sample_pass_rate = passed_count / valid_count if valid_count else 0.0
+    status = (
+        "passed"
+        if valid_count == len(cases)
+        and sample_pass_rate >= min_sample_pass_rate
+        else "failed"
+    )
+    metrics_summary = {
+        name: {
+            "mean": _mean(values),
+            "min": min(values),
+            "max": max(values),
+            "count": len(values),
+        }
+        for name, values in sorted(metric_values.items())
+        if values
+    }
+    return {
+        "status": status,
+        "sample_count": len(cases),
+        "valid_count": valid_count,
+        "passed_count": passed_count,
+        "skipped_count": skipped_count,
+        "sample_pass_rate": sample_pass_rate,
+        "metrics": metrics_summary,
+        "gates": {"min_sample_pass_rate": min_sample_pass_rate},
+        "cases": cases,
+    }
+
+
 def eval_one_model(
     *,
     suite: dict[str, Any],
@@ -9897,6 +10309,7 @@ def eval_one_model(
         and not _is_tts_dataset_kind(dataset_kind)
         and not _is_time_series_dataset_kind(dataset_kind)
         and not _is_vision_task_dataset_kind(dataset_kind)
+        and not _is_model_plugin_dataset_kind(dataset_kind)
     ):
         prompt_rows_path = work_dir / "prompts.jsonl"
         max_prompt_len = max_prompt_token_length(
@@ -9994,7 +10407,35 @@ def eval_one_model(
     if prompt_normalization is not None:
         base_result["prompt_normalization"] = prompt_normalization
 
-    if scorer == "time_series_parity":
+    if scorer == "model_plugin_parity":
+        hf_data = json.loads(
+            (work_dir / "hf_predictions.json").read_text(encoding="utf-8")
+        )
+        trtfb_data = json.loads(
+            (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
+        )
+        summary = compare_model_plugin_prediction_sets(
+            hf_data,
+            trtfb_data,
+            json.loads(answers_path.read_text(encoding="utf-8")),
+            work_dir=work_dir,
+            gates=suite.get("gates", {}),
+        )
+        (work_dir / "summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        result = {
+            **base_result,
+            "mode": scorer,
+            "status": summary["status"],
+            "valid_count": summary["valid_count"],
+            "passed_count": summary["passed_count"],
+            "skipped_count": summary["skipped_count"],
+            "sample_pass_rate": summary["sample_pass_rate"],
+            "metrics": summary["metrics"],
+        }
+    elif scorer == "time_series_parity":
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
         trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
         summary = compare_time_series_prediction_sets(

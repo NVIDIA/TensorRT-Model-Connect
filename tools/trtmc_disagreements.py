@@ -356,6 +356,7 @@ def _media_candidates(
         "condition_image",
         "hf_image",
         "image",
+        "image_path",
         "output_video",
         "segmented_image_path",
         "trtfb_image",

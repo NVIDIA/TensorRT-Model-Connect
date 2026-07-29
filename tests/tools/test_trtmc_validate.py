@@ -48,7 +48,7 @@ def test_model_workload_catalog_covers_every_ready_model():
     assert len(catalog["models"]) == len(ready_models) == 105
     assert sum(
         "not_compared_reason" in spec for spec in catalog["models"].values()
-    ) == 8
+    ) == 0
     assert all(
         "e2e" not in spec.get("workloads", [])
         for spec in catalog["models"].values()
@@ -98,7 +98,17 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
     }
 
     assert configured == declared
-    assert min(catalog["sample_limits"].values()) >= 2
+    assert min(catalog["sample_limits"].values()) >= 1
+    assert {
+        workload
+        for workload, limit in catalog["sample_limits"].items()
+        if limit == 1
+    } == {
+        "lance_x2t_image_model_parity",
+        "personaplex_recording_model_parity",
+        "qwen3_omni_talker_model_parity",
+        "wan22_official_ti2v_model_parity",
+    }
     assert max(catalog["sample_limits"].values()) == 100
     assert catalog["sample_limits"]["mmlu_five_shot_mcq"] == 20
     assert catalog["sample_limits"]["dpg_bench_diffusion_image"] == 5
@@ -134,7 +144,7 @@ def test_every_dataset_backed_validation_binding_has_native_reference_runner():
             missing.append((model_name, workload, dataset_kind))
 
     assert not missing
-    assert len({model for model, _workload in bindings}) == 97
+    assert len({model for model, _workload in bindings}) == 105
 
 
 def test_resolve_binding_defaults_and_rejects_undeclared_workload():
@@ -1213,6 +1223,33 @@ def test_diffusion_report_flattens_nested_reference_metrics():
     assert "No metrics" not in trtmc_validate._render_metrics(
         {"comparison": comparison}
     )
+
+
+def test_model_plugin_report_uses_sample_pass_rate_and_nested_metrics():
+    comparison = trtmc_validate._comparison_details(
+        {
+            "status": "passed",
+            "mode": "model_plugin_parity",
+            "sample_pass_rate": 1.0,
+            "passed_count": 4,
+            "valid_count": 4,
+            "metrics": {
+                "token_agreement_rate": {
+                    "mean": 0.99,
+                    "min": 0.97,
+                    "max": 1.0,
+                    "count": 4,
+                }
+            },
+        },
+        {"status": "completed"},
+    )
+
+    assert comparison["primary_metric"] == {
+        "name": "sample_pass_rate",
+        "value": 1.0,
+    }
+    assert comparison["metrics"]["token_agreement_rate"] == 0.99
 
 
 def test_legacy_e2e_result_is_not_reported_as_reference_agreement(tmp_path):
