@@ -27,7 +27,7 @@ manifest or model-specific E2E data.
 | --- | --- | --- |
 | `bark-large` | `bark-small` | Smaller Bark checkpoint. |
 | `deepseek-ocr` | `deepseek-ocr-l0` | Same checkpoint; shorter OCR decode. |
-| `deepseek-v2-lite` | `deepseek-v2-tiny` | Tiny DeepSeek-V2 checkpoint. |
+| `deepseek-v2-lite` | `deepseek-v2-tiny-fp16-l0` | Tiny FP16 DeepSeek-V2-compatible checkpoint. |
 | `flux-2-dev` | `flux-2-dev-l0` | Same checkpoint; 384px, 20-step image run. |
 | `flux-2-dev-fp8` | `flux-2-dev-fp8-l0` | Same checkpoint and FP8 scales; 384px, 20-step image run. |
 | `flux-schnell` | `flux-schnell-l0` | Same checkpoint; 384px, 20-step image run. |

@@ -6,6 +6,7 @@ plugin = "deepseek_v2"
 test_manifests = [
   "manifests/deepseek-v2-lite-tp4.json",
   "manifests/deepseek-v2-lite.json",
+  "manifests/deepseek-v2-tiny-fp16-l0.json",
   "manifests/deepseek-v2-tiny-tp2.json",
   "manifests/deepseek-v2-tiny.json",
 ]
