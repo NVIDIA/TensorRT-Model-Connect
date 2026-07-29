@@ -65,6 +65,7 @@ DEFAULT_ENGINE_DIR = DEFAULT_OUTPUT / "engines"
 DEFAULT_REFERENCE_CACHE = DEFAULT_OUTPUT / "references"
 COMMON_REFERENCE_PROFILE = "reference_common"
 NOT_COMPARED_DIRECTORY = "not-compared"
+DEFAULT_REUSED_BUNDLE_REVALIDATION_LIMIT = 1
 LEGACY_E2E_REASON = (
     "E2E execution does not compare aligned reference and TRTMC outputs."
 )
@@ -1430,16 +1431,83 @@ def _should_revalidate_reused_bundle(
     ):
         return False
     execution = result.get("execution", {})
+    comparison = result.get("comparison", {})
     validation = result.get("validation", {})
     raw_result = result.get("raw_result", {})
     return (
         isinstance(execution, Mapping)
         and execution.get("status") == "completed"
+        and isinstance(comparison, Mapping)
+        and comparison.get("status") == "disagreement"
         and isinstance(validation, Mapping)
         and validation.get("status") == "failed"
         and isinstance(raw_result, Mapping)
         and raw_result.get("bundle_built") is False
     )
+
+
+@dataclass
+class _ReusedBundleRevalidationBudget:
+    """Bound forced fresh-bundle confirmations across one validation run."""
+
+    limit: int
+    attempts_used: int = 0
+
+    def __post_init__(self) -> None:
+        self.limit = max(0, int(self.limit))
+        self.attempts_used = min(
+            self.limit,
+            max(0, int(self.attempts_used)),
+        )
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.limit - self.attempts_used)
+
+    def reserve(self) -> bool:
+        if self.remaining == 0:
+            return False
+        self.attempts_used += 1
+        return True
+
+    def record_worker_result(self, result: Mapping[str, Any]) -> None:
+        receipt = result.get("bundle_revalidation", {})
+        if not isinstance(receipt, Mapping) or receipt.get("attempted") is not True:
+            return
+        try:
+            attempt_count = int(receipt.get("attempt_count", 0) or 0)
+        except (TypeError, ValueError):
+            attempt_count = 0
+        self.attempts_used = min(
+            self.limit,
+            self.attempts_used + max(0, attempt_count),
+        )
+
+
+def _reused_bundle_revalidation_budget(
+    arguments: argparse.Namespace,
+) -> _ReusedBundleRevalidationBudget:
+    budget = getattr(arguments, "_reused_bundle_revalidation_budget", None)
+    if isinstance(budget, _ReusedBundleRevalidationBudget):
+        return budget
+    budget = _ReusedBundleRevalidationBudget(
+        limit=int(
+            getattr(
+                arguments,
+                "reused_bundle_revalidation_limit",
+                DEFAULT_REUSED_BUNDLE_REVALIDATION_LIMIT,
+            )
+        ),
+        attempts_used=int(
+            getattr(
+                arguments,
+                "reused_bundle_revalidation_attempts_used",
+                0,
+            )
+        ),
+    )
+    setattr(arguments, "_reused_bundle_revalidation_budget", budget)
+    return budget
 
 
 def _archive_reused_bundle_failure(
@@ -1597,36 +1665,53 @@ def run_binding(
         user_contract=user_contract,
     )
     if _should_revalidate_reused_bundle(result, arguments):
+        budget = _reused_bundle_revalidation_budget(arguments)
         initial_result = result
-        archived = _archive_reused_bundle_failure(
-            case_dir=case_dir,
-            result=initial_result,
-        )
-        rebuild_command = [*command, "--force-build"]
-        rebuild_returncode = _run_subprocess(
-            rebuild_command,
-            case_dir / "execution.log",
-            process_env,
-        )
-        result = _comparison_result(
-            binding,
-            case_dir=case_dir,
-            returncode=rebuild_returncode,
-            reference_environment=environment,
-            dataset_command=dataset_command,
-            sample_limit=int(arguments.limit or 0),
-        )
-        result["bundle_revalidation"] = {
-            "attempted": True,
-            "trigger": "accuracy_failure_with_reused_bundle",
-            "attempt_count": 1,
-            "outcome": _bundle_revalidation_outcome(result),
-            "initial": _reused_bundle_failure_receipt(
-                initial_result,
-                archived,
-            ),
-            "rebuild_command": shlex.join(rebuild_command),
-        }
+        if budget.reserve():
+            archived = _archive_reused_bundle_failure(
+                case_dir=case_dir,
+                result=initial_result,
+            )
+            rebuild_command = [*command, "--force-build"]
+            rebuild_returncode = _run_subprocess(
+                rebuild_command,
+                case_dir / "execution.log",
+                process_env,
+            )
+            result = _comparison_result(
+                binding,
+                case_dir=case_dir,
+                returncode=rebuild_returncode,
+                reference_environment=environment,
+                dataset_command=dataset_command,
+                sample_limit=int(arguments.limit or 0),
+            )
+            result["bundle_revalidation"] = {
+                "attempted": True,
+                "trigger": "accuracy_failure_with_reused_bundle",
+                "attempt_count": 1,
+                "run_attempt_limit": budget.limit,
+                "run_attempts_used": budget.attempts_used,
+                "outcome": _bundle_revalidation_outcome(result),
+                "initial": _reused_bundle_failure_receipt(
+                    initial_result,
+                    archived,
+                ),
+                "rebuild_command": shlex.join(rebuild_command),
+            }
+        else:
+            result["bundle_revalidation"] = {
+                "attempted": False,
+                "trigger": "accuracy_failure_with_reused_bundle",
+                "attempt_count": 0,
+                "run_attempt_limit": budget.limit,
+                "run_attempts_used": budget.attempts_used,
+                "outcome": "not_attempted_run_limit_reached",
+                "initial": _reused_bundle_failure_receipt(
+                    initial_result,
+                    {},
+                ),
+            }
 
     comparison = case_dir / "comparison.json"
     comparison.write_text(
@@ -2715,6 +2800,13 @@ def _nonnegative_float(value: str) -> float:
     return parsed
 
 
+def _nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be nonnegative")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Validate TRTMC against model reference implementations."
@@ -2739,6 +2831,21 @@ def build_parser() -> argparse.ArgumentParser:
         type=_nonnegative_float,
         default=5.0,
         help="delay before retrying a model worker after an execution error",
+    )
+    parser.add_argument(
+        "--reused-bundle-revalidation-limit",
+        type=_nonnegative_int,
+        default=DEFAULT_REUSED_BUNDLE_REVALIDATION_LIMIT,
+        help=(
+            "maximum failed reused bundles to confirm with a forced fresh build "
+            "across the complete run (default: 1)"
+        ),
+    )
+    parser.add_argument(
+        "--reused-bundle-revalidation-attempts-used",
+        type=_nonnegative_int,
+        default=0,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--model-worker",
@@ -2885,6 +2992,14 @@ def _worker_command(
         ("--hf-python", arguments.hf_python),
         ("--model-attempts", arguments.model_attempts),
         ("--model-retry-delay-seconds", arguments.model_retry_delay_seconds),
+        (
+            "--reused-bundle-revalidation-limit",
+            arguments.reused_bundle_revalidation_limit,
+        ),
+        (
+            "--reused-bundle-revalidation-attempts-used",
+            arguments.reused_bundle_revalidation_attempts_used,
+        ),
     ):
         command.extend([option, str(value)])
     for option, value in (
@@ -3065,15 +3180,21 @@ def _run_supervised_binding_with_retries(
     catalog: Mapping[str, Any],
 ) -> dict[str, Any]:
     case_dir = _case_directory(arguments.output, binding)
+    revalidation_budget = _reused_bundle_revalidation_budget(arguments)
     attempts = []
     result: dict[str, Any] = {}
     for attempt in range(1, arguments.model_attempts + 1):
+        attempt_arguments = copy.copy(arguments)
+        attempt_arguments.reused_bundle_revalidation_attempts_used = (
+            revalidation_budget.attempts_used
+        )
         result = _run_supervised_binding(
             binding,
-            arguments=arguments,
+            arguments=attempt_arguments,
             catalog=catalog,
             attempt=attempt,
         )
+        revalidation_budget.record_worker_result(result)
         execution = result.get("execution", {})
         execution_error = (
             isinstance(execution, Mapping)
@@ -3125,6 +3246,7 @@ def _run_all_bindings(
     catalog: Mapping[str, Any],
 ) -> int:
     _prepare_run_directories(arguments)
+    _reused_bundle_revalidation_budget(arguments)
     write_run_metadata(
         arguments.output,
         cuda_visible_devices=arguments.cuda_visible_devices,
@@ -3188,6 +3310,7 @@ def _run_bindings(
     suites: Mapping[str, dict[str, Any]],
 ) -> int:
     _prepare_run_directories(arguments)
+    revalidation_budget = _reused_bundle_revalidation_budget(arguments)
     if not arguments.model_worker:
         write_run_metadata(
             arguments.output,
@@ -3212,6 +3335,9 @@ def _run_bindings(
                 _print_result(result, comparison, report_path)
             continue
         binding_arguments = copy.copy(arguments)
+        binding_arguments._reused_bundle_revalidation_budget = (
+            revalidation_budget
+        )
         binding_arguments.limit = resolve_sample_limit(
             catalog,
             binding,

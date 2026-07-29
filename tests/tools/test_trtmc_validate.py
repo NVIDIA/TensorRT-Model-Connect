@@ -402,6 +402,17 @@ def test_all_defaults_to_continue_and_accepts_stop_policy():
     assert stop.on_model_failure == "stop"
     assert default.model_attempts == 2
     assert default.model_retry_delay_seconds == 5.0
+    assert default.reused_bundle_revalidation_limit == 1
+    assert default.reused_bundle_revalidation_attempts_used == 0
+
+
+def test_reused_bundle_revalidation_limit_rejects_negative_values():
+    parser = trtmc_validate.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            ["--all", "--reused-bundle-revalidation-limit", "-1"]
+        )
 
 
 @pytest.mark.parametrize(
@@ -568,6 +579,131 @@ def test_supervisor_retries_execution_error_but_not_disagreement(
     assert attempts == [1]
     assert disagreement["execution"]["status"] == "completed"
     assert disagreement["execution"]["attempt_count"] == 1
+
+
+def test_supervisor_propagates_revalidation_budget_to_next_worker(
+    tmp_path,
+    monkeypatch,
+):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--model-attempts",
+            "1",
+            "--output",
+            str(tmp_path / "results"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    seen = []
+
+    def run_worker(binding, *, arguments, catalog, attempt):
+        command = trtmc_validate._worker_command(binding, arguments)
+        option = "--reused-bundle-revalidation-attempts-used"
+        seen.append((binding.model, int(command[command.index(option) + 1])))
+        case_dir = trtmc_validate._case_directory(
+            arguments.output,
+            binding,
+        )
+        case_dir.mkdir(parents=True, exist_ok=True)
+        attempted = binding.model == "model-a"
+        return {
+            "model": binding.model,
+            "workload": binding.workload,
+            "execution": {"status": "completed", "exit_code": 0},
+            "validation": {
+                "status": "passed" if attempted else "failed",
+            },
+            "raw_result": {"status": "passed" if attempted else "failed"},
+            "bundle_revalidation": {
+                "attempted": attempted,
+                "attempt_count": 1 if attempted else 0,
+            },
+        }
+
+    monkeypatch.setattr(trtmc_validate, "_run_supervised_binding", run_worker)
+    catalog = {"sample_limits": {"workload-a": 1}}
+
+    trtmc_validate._run_supervised_binding_with_retries(
+        trtmc_validate.Binding("model-a", "workload-a"),
+        arguments=arguments,
+        catalog=catalog,
+    )
+    trtmc_validate._run_supervised_binding_with_retries(
+        trtmc_validate.Binding("model-b", "workload-a"),
+        arguments=arguments,
+        catalog=catalog,
+    )
+
+    assert seen == [("model-a", 0), ("model-b", 1)]
+
+
+def test_supervisor_retry_cannot_reset_revalidation_budget(
+    tmp_path,
+    monkeypatch,
+):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--model-attempts",
+            "2",
+            "--model-retry-delay-seconds",
+            "0",
+            "--output",
+            str(tmp_path / "results"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "workload-a")
+    seen = []
+
+    def run_worker(binding, *, arguments, catalog, attempt):
+        command = trtmc_validate._worker_command(binding, arguments)
+        option = "--reused-bundle-revalidation-attempts-used"
+        seen.append((attempt, int(command[command.index(option) + 1])))
+        case_dir = trtmc_validate._case_directory(
+            arguments.output,
+            binding,
+        )
+        case_dir.mkdir(parents=True, exist_ok=True)
+        rebuild_failed = attempt == 1
+        return {
+            "model": binding.model,
+            "workload": binding.workload,
+            "execution": {
+                "status": "error" if rebuild_failed else "completed",
+                "exit_code": 1,
+            },
+            "validation": {"status": "failed"},
+            "raw_result": {
+                "status": "failed",
+                "error_type": (
+                    "RebuildExecutionError" if rebuild_failed else ""
+                ),
+            },
+            "bundle_revalidation": {
+                "attempted": rebuild_failed,
+                "attempt_count": 1 if rebuild_failed else 0,
+            },
+        }
+
+    monkeypatch.setattr(trtmc_validate, "_run_supervised_binding", run_worker)
+
+    result = trtmc_validate._run_supervised_binding_with_retries(
+        binding,
+        arguments=arguments,
+        catalog={"sample_limits": {"workload-a": 1}},
+    )
+
+    assert seen == [(1, 0), (2, 1)]
+    assert result["execution"]["attempt_count"] == 2
+    assert result["execution"]["retry_count"] == 1
 
 
 def test_all_supervisor_records_not_compared_without_launching_worker(
@@ -2790,6 +2926,123 @@ def _run_binding_with_comparison_results(
     return result, commands, arguments
 
 
+def _run_multiple_bindings_with_comparison_results(
+    *,
+    tmp_path,
+    monkeypatch,
+    models,
+    raw_results,
+    extra_args=(),
+):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--model-worker",
+            "--output",
+            str(tmp_path / "results"),
+            "--dataset",
+            str(tmp_path / "dataset.json"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+            *extra_args,
+        ]
+    )
+    commands = []
+    monkeypatch.setattr(
+        trtmc_validate,
+        "ensure_environments",
+        lambda _profiles, _base: trtmc_validate.EnvironmentSelection(
+            base_python="/profiles/python",
+            names_and_paths=(),
+            overrides={},
+        ),
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "ensure_reference_sources",
+        lambda _family, _cache: trtmc_validate.ReferenceSourceSelection(
+            environment={},
+        ),
+    )
+
+    def run(command, log_path, _environment):
+        commands.append(command)
+        log_path.write_text(f"run {len(commands)}\n", encoding="utf-8")
+        workload = log_path.parent.name
+        summary = (
+            log_path.parent
+            / "validation"
+            / workload
+            / "eval_summary.json"
+        )
+        summary.parent.mkdir(parents=True, exist_ok=True)
+        summary.write_text(
+            json.dumps({"run": len(commands)}),
+            encoding="utf-8",
+        )
+        return 0
+
+    comparisons = iter(raw_results)
+
+    def comparison_result(binding, **_kwargs):
+        raw_result = next(comparisons)
+        return trtmc_validate._normalize_result(
+            {
+                "model": binding.model,
+                "workload": binding.workload,
+                "status": raw_result["status"],
+                "returncode": 0,
+                "raw_result": raw_result,
+            }
+        )
+
+    monkeypatch.setattr(trtmc_validate, "_run_subprocess", run)
+    monkeypatch.setattr(trtmc_validate, "_comparison_result", comparison_result)
+    bindings = [
+        trtmc_validate.Binding(model, "workload-a")
+        for model in models
+    ]
+    task_models = {
+        model: {
+            "family": "family-a",
+            "runtime_strategy": "text_generation",
+            "reference_backend": "hf_transformers",
+            "execution_profiles": {},
+        }
+        for model in models
+    }
+    returncode = trtmc_validate._run_bindings(
+        bindings,
+        arguments=arguments,
+        catalog={
+            "sample_limits": {"workload-a": 1},
+            "models": {
+                model: {
+                    "default": "workload-a",
+                    "workloads": ["workload-a"],
+                }
+                for model in models
+            },
+        },
+        task_models=task_models,
+        suites={"workload-a": {}},
+    )
+    results = {
+        model: json.loads(
+            (
+                arguments.output
+                / model
+                / "workload-a"
+                / "comparison.json"
+            ).read_text(encoding="utf-8")
+        )
+        for model in models
+    }
+    return results, commands, returncode, arguments
+
+
 def test_reused_bundle_accuracy_failure_rebuilds_once_and_recovers(
     tmp_path,
     monkeypatch,
@@ -2872,6 +3125,136 @@ def test_reused_bundle_accuracy_failure_rebuilds_once_and_confirms_failure(
     assert commands[1].count("--force-build") == 1
     assert result["validation"]["status"] == "failed"
     assert result["bundle_revalidation"]["outcome"] == "confirmed_after_rebuild"
+
+
+def test_reused_bundle_revalidation_limit_caps_multi_binding_run(
+    tmp_path,
+    monkeypatch,
+):
+    results, commands, returncode, arguments = (
+        _run_multiple_bindings_with_comparison_results(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            models=("model-a", "model-b"),
+            raw_results=[
+                {
+                    "status": "failed",
+                    "bundle_built": False,
+                    "prediction_agreement_rate": 0.25,
+                },
+                {
+                    "status": "passed",
+                    "bundle_built": True,
+                    "prediction_agreement_rate": 1.0,
+                },
+                {
+                    "status": "failed",
+                    "bundle_built": False,
+                    "prediction_agreement_rate": 0.50,
+                },
+            ],
+        )
+    )
+
+    assert arguments.reused_bundle_revalidation_limit == 1
+    assert len(commands) == 3
+    assert sum("--force-build" in command for command in commands) == 1
+    assert results["model-a"]["validation"]["status"] == "passed"
+    assert results["model-a"]["bundle_revalidation"]["attempted"] is True
+    assert (
+        results["model-a"]["bundle_revalidation"]["outcome"]
+        == "recovered_after_rebuild"
+    )
+    capped = results["model-b"]
+    assert capped["validation"]["status"] == "failed"
+    assert capped["comparison"]["status"] == "disagreement"
+    assert capped["raw_result"]["bundle_built"] is False
+    assert capped["bundle_revalidation"]["attempted"] is False
+    assert capped["bundle_revalidation"]["attempt_count"] == 0
+    assert capped["bundle_revalidation"]["run_attempt_limit"] == 1
+    assert capped["bundle_revalidation"]["run_attempts_used"] == 1
+    assert (
+        capped["bundle_revalidation"]["outcome"]
+        == "not_attempted_run_limit_reached"
+    )
+    assert (
+        capped["bundle_revalidation"]["initial"]["validation_status"]
+        == "failed"
+    )
+    assert returncode == 1
+
+
+def test_zero_revalidation_limit_preserves_original_disagreement(
+    tmp_path,
+    monkeypatch,
+):
+    result, commands, _arguments = _run_binding_with_comparison_results(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        raw_results=[
+            {
+                "status": "failed",
+                "bundle_built": False,
+                "prediction_agreement_rate": 0.25,
+            }
+        ],
+        extra_args=("--reused-bundle-revalidation-limit", "0"),
+    )
+
+    assert len(commands) == 1
+    assert "--force-build" not in commands[0]
+    assert result["comparison"]["status"] == "disagreement"
+    assert result["validation"]["status"] == "failed"
+    assert result["raw_result"]["bundle_built"] is False
+    assert result["bundle_revalidation"]["attempted"] is False
+    assert result["bundle_revalidation"]["run_attempt_limit"] == 0
+    assert result["bundle_revalidation"]["run_attempts_used"] == 0
+    assert (
+        result["bundle_revalidation"]["outcome"]
+        == "not_attempted_run_limit_reached"
+    )
+
+
+def test_nonaccuracy_failure_does_not_consume_revalidation_budget(
+    tmp_path,
+    monkeypatch,
+):
+    results, commands, returncode, _arguments = (
+        _run_multiple_bindings_with_comparison_results(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            models=("model-error", "model-accuracy"),
+            raw_results=[
+                {
+                    "status": "failed",
+                    "bundle_built": False,
+                    "error_type": "ReferenceSetupError",
+                    "error": "reference environment is unavailable",
+                },
+                {
+                    "status": "failed",
+                    "bundle_built": False,
+                    "prediction_agreement_rate": 0.25,
+                },
+                {
+                    "status": "passed",
+                    "bundle_built": True,
+                    "prediction_agreement_rate": 1.0,
+                },
+            ],
+        )
+    )
+
+    assert len(commands) == 3
+    assert sum("--force-build" in command for command in commands) == 1
+    assert results["model-error"]["execution"]["status"] == "error"
+    assert "bundle_revalidation" not in results["model-error"]
+    assert results["model-accuracy"]["validation"]["status"] == "passed"
+    assert (
+        results["model-accuracy"]["bundle_revalidation"]["outcome"]
+        == "recovered_after_rebuild"
+    )
+    assert returncode == 1
 
 
 def test_passing_reused_bundle_does_not_trigger_rebuild(
