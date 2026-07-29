@@ -83,13 +83,13 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     select_parser.add_argument(
         "--binding-id",
         required=True,
-        help="FFI binding ID used by the replacement",
+        help="FFI binding ID used by the replacement ([A-Za-z0-9_.@-]+)",
     )
     select_parser.add_argument(
         "--workspace-bytes",
         type=_nonnegative_int,
         default=0,
-        help="Replacement workspace size (default: 0)",
+        help="Replacement workspace size in bytes, 0..2147483647 (default: 0)",
     )
     select_parser.add_argument(
         "--output-shape-like-input",

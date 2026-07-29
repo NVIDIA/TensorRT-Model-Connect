@@ -29,14 +29,17 @@ You need:
 - enough resources to build the selected model;
 - one pinned model revision and one fixed set of build options.
 
-Run the commands from the repository root. This example uses Qwen3-8B only to
-make the commands concrete; it does not assume a particular attention
-implementation or promise a speedup.
+Run the commands from the repository root. This example uses Qwen3-8B and the
+small identity-copy TVM-FFI kernel shipped in `examples/byok/`. It first
+replaces a Qwen `logits + zero bias` region. That deliberately simple region
+makes the complete mechanism testable before you adapt the same steps to a real
+attention kernel. It is a load-and-correctness example, not a promised speedup.
 
 ```bash
 export MODEL=Qwen/Qwen3-8B
 export REVISION=b968826d9c46dd6066d109eabc6255188de91218
 export WORK="$PWD/artifacts/qwen3-graph-slot"
+export BUILD_DIR="$PWD/build-runtime-trt"
 mkdir -p "$WORK"
 
 BUILD_ARGS=(
@@ -70,11 +73,12 @@ engine. `dual_profile` is also available for a dual-profile decoder build.
 
 ## 2. List nodes and choose a region
 
-Filter the display by node ID, operation, or layer name:
+The POC region is at the end of the decode graph, so list its last layers:
 
 ```bash
 trtmc graph list "$WORK/decode.graph.json" \
-  --match '*attention*' | tee "$WORK/decode.nodes.txt"
+  | tee "$WORK/decode.nodes.txt" \
+  | tail -n 10
 ```
 
 The columns are:
@@ -84,16 +88,26 @@ ID        OP        NAME        INPUTS        OUTPUTS
 node:...  ...       ...         tensor:...    tensor:...
 ```
 
-Use `OP`, `NAME`, and tensor edges to find the region, then copy its node IDs.
-Start with the smallest region that matches your kernel. The selected nodes
-must form one connected, convex region: a graph path cannot leave the region
-and later re-enter it.
+For the pinned revision above, the tail includes this chain:
 
-TensorRT 11 displays one `IAttention` as adjacent `ATTENTION_INPUT` and
-`ATTENTION_OUTPUT` nodes. Select both when replacing the complete attention
-operation. Model Connect includes typed attention ports such as
-`key_value_lengths` in the ordered boundary even though TensorRT does not
-expose those ports through ordinary `get_input()` calls.
+```text
+node:3598  CONSTANT
+node:3599  CAST
+node:3600  ELEMENTWISE
+node:3601  CAST          -> logits
+```
+
+Qwen has no LM-head bias in this checkpoint, so Model Connect emits a zero
+constant, casts it to BF16, and adds it to the BF16 matrix-multiply result.
+Select the first three nodes and leave the final FP32 logits cast in the graph.
+If your IDs differ, use the chain shown by your own snapshot instead of copying
+these numbers.
+
+For another kernel, use `--match GLOB` to filter by node ID, operation, or layer
+name, then follow the tensor edges and copy the exact IDs. Start with the
+smallest region that matches the kernel. The selected nodes must form one
+connected, convex region: a graph path cannot leave the region and later
+re-enter it.
 
 `--match` only filters what `list` displays; it does not select anything. Node
 IDs are explicit on purpose. `graph select` does not accept a model semantic
@@ -101,19 +115,17 @@ name, wildcard, regular expression, or lowering map.
 
 ## 3. Lock the selection and ABI
 
-The following IDs are examples. Replace them with IDs copied from your own
-`graph list` output:
+Use the IDs verified in the previous step:
 
 ```bash
-export BINDING_ID=my.decode_attention@1
-NODES=(node:120 node:121)
+export BINDING_ID=qwen3.decode.logits_copy@1
+NODES=(node:3598 node:3599 node:3600)
 
 trtmc graph select "$WORK/decode.graph.json" \
   --nodes "${NODES[@]}" \
   --binding-id "$BINDING_ID" \
   --workspace-bytes 0 \
-  --output-shape-like-input 0 \
-  -o "$WORK/decode-attention.selection.json"
+  -o "$WORK/logits-copy.selection.json"
 ```
 
 `graph select` prints each ordered input and output tensor ID, TensorRT name,
@@ -125,25 +137,26 @@ containing:
   extra arguments;
 - the exact selected node and boundary tensor IDs.
 
-The Qwen decode attention output has the same dynamic dimensions as boundary
-`input[0]`, so the example names that relationship explicitly. For a different
-region, choose the matching index from the snapshot; the input and output dtype
-and declared shape must match. Remove the option for a fixed-shape output.
-Model Connect never guesses a relationship from two matching `-1`
-placeholders.
+This POC prints one BF16 `[1, 151936]` input and one BF16 `[1, 151936]`
+output. Both shapes are fixed, so it does not use
+`--output-shape-like-input`. A dynamic output requires that option with a
+boundary input of the same dtype and declared shape. A `-1` means your DSO must
+handle every runtime shape allowed by the built engine profile; Model Connect
+never guesses a relationship from matching `-1` placeholders.
 
 If the kernel needs fixed scalar or null arguments, add one strict JSON object
-per argument, in call order:
+per argument, in call order. Add lines like these immediately before `-o` in
+the `graph select` command that already succeeded above; keep or omit
+`--output-shape-like-input` according to that region's output:
 
-```bash
-trtmc graph select "$WORK/decode.graph.json" \
-  --nodes "${NODES[@]}" \
-  --binding-id "$BINDING_ID" \
-  --workspace-bytes 0 \
-  --output-shape-like-input 0 \
+```text
+Before:
+  -o "$WORK/logits-copy.selection.json"
+
+After:
   --extra-arg '{"type":"int","value":32}' \
   --extra-arg '{"type":"float","value":0.5}' \
-  -o "$WORK/decode-attention.selection.json"
+  -o "$WORK/logits-copy.selection.json"
 ```
 
 Allowed types are `none`, signed 32-bit `int`, finite `float`, and null `ptr`.
@@ -151,8 +164,25 @@ Allowed types are `none`, signed 32-bit `int`, finite `float`, and null `ptr`.
 
 ## 4. Implement the TVM-FFI function
 
-Use the boundary records printed by `graph select` to export a TVM-FFI module
-function, such as `run`, with this fixed call order:
+Build the supplied POC DSO from the same configured native build tree:
+
+```bash
+cmake --build "$BUILD_DIR" --target trtmc_byok_identity_copy -j
+export SOURCE_DSO="$BUILD_DIR/identity_copy_kernel.so"
+test -f "$SOURCE_DSO"
+```
+
+Its exported function is equivalent to:
+
+```cpp
+run(TensorView input, TensorView output)
+```
+
+It performs an asynchronous device-to-device copy on TensorRT's current CUDA
+stream. That is equivalent to the selected Qwen `logits + zero` region.
+
+For your own region, use the boundary records printed by `graph select` to
+export a TVM-FFI module function, such as `run`, with this fixed call order:
 
 1. boundary input DLTensors in `input_tensor_ids` order;
 2. when `workspace_bytes` is nonzero, one CUDA `uint8` workspace DLTensor;
@@ -163,6 +193,8 @@ The function must write the declared outputs. A raw third-party kernel is not
 automatically compatible; wrap or export it through TVM-FFI with this exact
 contract. Changing a boundary dtype, shape, argument order, workspace size, or
 extra argument changes the engine ABI and requires a new selection and build.
+The identity-copy DSO is only compatible with a one-input, one-output
+same-size contiguous boundary; it is not an attention implementation.
 
 ## 5. Build a slot-ready bundle
 
@@ -170,7 +202,7 @@ Build with the same model revision and options used for inspection:
 
 ```bash
 trtmc build "${BUILD_ARGS[@]}" \
-  --graph-patch "$WORK/decode-attention.selection.json" \
+  --graph-patch "$WORK/logits-copy.selection.json" \
   -o "$WORK/qwen3-slot-ready.trtfb"
 ```
 
@@ -188,11 +220,10 @@ Copy your trusted DSO beside the manifest under an immutable, content-addressed
 name:
 
 ```bash
-export SOURCE_DSO=/path/to/your/kernel.so
 export DSO_SHA256="$(sha256sum "$SOURCE_DSO" | awk '{print $1}')"
 export DSO="$WORK/kernel.$DSO_SHA256.so"
 cp "$SOURCE_DSO" "$DSO"
-export SELECTION="$WORK/decode-attention.selection.json"
+export SELECTION="$WORK/logits-copy.selection.json"
 
 export ABI_SHA256="$(
   python -c 'import json,sys; print(json.load(open(sys.argv[1]))["abi_sha256"])' \
@@ -255,55 +286,98 @@ outputs, and benchmark both bundles on the same idle GPU:
 ```bash
 trtmc build "${BUILD_ARGS[@]}" -o "$WORK/qwen3-native.trtfb"
 
+TEST_PROMPT='Explain grouped-query attention, KV caching, and decode latency.'
+MAX_NEW_TOKENS=64
+
 trtmc run "$WORK/qwen3-native.trtfb" \
-  --prompt "Explain grouped-query attention in one sentence." \
-  --max-new-tokens 32 --greedy > "$WORK/native.txt"
+  --prompt "$TEST_PROMPT" \
+  --max-new-tokens "$MAX_NEW_TOKENS" --greedy \
+  --output "$WORK/native.jsonl"
 
 trtmc run "$WORK/qwen3-slot-ready.trtfb" \
   --kernel-bindings "$WORK/kernel-bindings.json" \
-  --prompt "Explain grouped-query attention in one sentence." \
-  --max-new-tokens 32 --greedy > "$WORK/external.txt"
+  --prompt "$TEST_PROMPT" \
+  --max-new-tokens "$MAX_NEW_TOKENS" --greedy \
+  --output "$WORK/external.jsonl"
 
-diff -u "$WORK/native.txt" "$WORK/external.txt"
+diff -u "$WORK/native.jsonl" "$WORK/external.jsonl"
 ```
 
-An empty diff is a useful smoke test, not a complete numerical qualification.
-Use the same prompt and idle GPU for a simple no-regression gate:
+The JSONL includes both decoded text and exact token IDs. An empty diff is a
+useful smoke test, not a complete numerical qualification. Use the same prompt
+and idle GPU for a simple no-regression gate:
 
 ```bash
-PERF_PROMPT='Explain grouped-query attention, KV caching, and decode latency.'
-
 trtmc run "$WORK/qwen3-native.trtfb" \
-  --prompt "$PERF_PROMPT" --max-new-tokens 64 --greedy \
+  --prompt "$TEST_PROMPT" --max-new-tokens "$MAX_NEW_TOKENS" --greedy \
   --warmup 3 --benchmark 10 > "$WORK/native.perf.log" 2>&1
 
 trtmc run "$WORK/qwen3-slot-ready.trtfb" \
   --kernel-bindings "$WORK/kernel-bindings.json" \
-  --prompt "$PERF_PROMPT" --max-new-tokens 64 --greedy \
+  --prompt "$TEST_PROMPT" --max-new-tokens "$MAX_NEW_TOKENS" --greedy \
   --warmup 3 --benchmark 10 > "$WORK/external.perf.log" 2>&1
 
 python - "$WORK/native.perf.log" "$WORK/external.perf.log" <<'PY'
 import re
 import sys
 
-def throughput(path):
+def result(path):
     text = open(path, encoding="utf-8").read()
-    values = [float(x) for x in re.findall(r"tokens_per_sec=([0-9.]+)", text)]
-    if not values:
-        raise SystemExit(f"{path}: tokens_per_sec was not reported")
-    return values[-1]
+    matches = re.findall(
+        r"generated_tokens_mean=([0-9.]+).*tokens_per_sec=([0-9.]+)", text
+    )
+    if not matches:
+        raise SystemExit(f"{path}: benchmark token count and throughput were not reported")
+    generated_tokens, throughput = matches[-1]
+    return float(generated_tokens), float(throughput)
 
-native = throughput(sys.argv[1])
-external = throughput(sys.argv[2])
-print(f"native={native:.2f} external={external:.2f} tokens/s")
-if external < native:
-    raise SystemExit("FAIL: the external kernel is slower")
-print("PASS: the external kernel is not slower")
+native_tokens, native_throughput = result(sys.argv[1])
+external_tokens, external_throughput = result(sys.argv[2])
+print(
+    f"native={native_throughput:.2f} external={external_throughput:.2f} tokens/s; "
+    f"mean generated tokens={native_tokens:.2f}"
+)
+if external_tokens != native_tokens:
+    raise SystemExit(
+        "FAIL: generated-token means differ "
+        f"(native={native_tokens:.2f}, external={external_tokens:.2f})"
+    )
+if native_throughput <= 0 or external_throughput <= 0:
+    raise SystemExit("FAIL: throughput must be positive")
+ratio = external_throughput / native_throughput
+if ratio < 0.98:
+    raise SystemExit(f"FAIL: external/native throughput is {ratio:.4f}, below 0.98")
+print(f"PASS: external/native throughput is {ratio:.4f}")
 PY
 ```
 
-Accept the kernel only if it meets your numerical tolerance and this gate.
-This tutorial makes no performance claim for a particular external DSO.
+The `0.98` threshold allows a 2% shortfall for normal measurement noise; it is
+not a license for a known regression. Re-run on an idle GPU if the result is
+close to the boundary. Accept the kernel only if it meets your numerical
+tolerance and this gate. This tutorial makes no performance claim for a
+particular external DSO.
+
+## 9. Replace attention with your kernel
+
+After the POC passes, repeat the same workflow for attention:
+
+```bash
+trtmc graph list "$WORK/decode.graph.json" --match '*attention*'
+```
+
+TensorRT 11 displays one `IAttention` as adjacent `ATTENTION_INPUT` and
+`ATTENTION_OUTPUT` nodes. Select both for the complete attention operation, and
+include surrounding scale or layout nodes only when that matches your kernel's
+contract. Model Connect includes typed attention ports such as
+`key_value_lengths` in the ordered boundary even though TensorRT does not
+expose those ports through ordinary `get_input()` calls.
+
+Run `graph select` with those IDs, implement the exact printed TVM-FFI argument
+order, and rebuild the slot-ready bundle. A FlashInfer or CUDA-DSL export with a
+different rank, page-table argument, scale argument, or output layout needs a
+small TVM-FFI wrapper; a DSO built for a family-owned Direct Slot is not
+automatically compatible with a raw graph region. Keep the new kernel only
+after the same correctness and no-regression checks pass.
 
 ## Current limits
 
@@ -318,7 +392,8 @@ This tutorial makes no performance claim for a particular external DSO.
   shape as a boundary input.
 - Boundary tensors must be linear, rank 8 or lower, and use BF16, FP16, FP32,
   or INT32.
-- The selection is tied to the exact captured graph and build settings.
+- The selection is tied to the captured graph fingerprint and recorded build
+  metadata. Reuse identical `BUILD_ARGS`.
 - Kernel binding happens only while a new pipeline is loaded; there is no
   in-place rebind API for a running pipeline.
 - v1 rejects a model that defers its selected engine's TensorRT deserialization

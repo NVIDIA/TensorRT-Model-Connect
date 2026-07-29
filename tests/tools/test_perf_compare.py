@@ -106,6 +106,30 @@ def _make_bench_result(prefill_ms, decode_ms, num_tokens, gen_ids):
     }
 
 
+def test_bench_trtmc_cpp_parses_actual_mean_token_count(monkeypatch):
+    mod = _import_perf_compare()
+    completed = mock.Mock(
+        returncode=0,
+        stdout="generated text\n",
+        stderr=(
+            "[trtmc.benchmark] setup_ms=1.25 prefill_ms=2.50 decode_ms=100.00 "
+            "generated_tokens_mean=31.50 tokens_per_sec=999.99\n"
+        ),
+    )
+    monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: completed)
+
+    result = mod.bench_trtmc_cpp(
+        "trtmc", "model.trtfb", "prompt", 64, 3, 10, None, False
+    )
+
+    assert result == {
+        "prefill_times": [2.5],
+        "decode_times": [100.0],
+        "decode_token_counts": [31.5],
+        "gen_ids": [],
+    }
+
+
 class TestBuildJsonOutput:
     """Tests for build_json_output() — structured result dict."""
 

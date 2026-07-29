@@ -121,7 +121,9 @@ only filters displayed IDs, operations, or names. `select` still accepts only
 explicit node IDs and prints the ordered boundary tensor IDs, names, dtypes,
 shapes, and ABI hash. Each `--extra-arg` is one strict JSON object whose type is
 `none`, `int`, `float`, or `ptr`. A dynamic output additionally requires
-`--output-shape-like-input`; fixed outputs reject that option.
+`--output-shape-like-input`; fixed outputs reject that option. `--binding-id`
+accepts only ASCII letters, digits, `_`, `.`, `@`, and `-`.
+`--workspace-bytes` accepts values from 0 through 2147483647.
 
 Build the same model revision and options with `--graph-patch region.json` to
 produce a slot-ready native bundle. The selection must describe one connected,

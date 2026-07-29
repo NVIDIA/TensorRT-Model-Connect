@@ -379,7 +379,8 @@ def bench_trtmc_cpp(
     """Benchmark the C++ trtmc binary using --benchmark / --warmup flags.
 
     Parses timing from lines printed to stderr by the binary:
-      [trtmc.benchmark] prefill_ms=X decode_ms=Y tokens_per_sec=Z
+      [trtmc.benchmark] setup_ms=X prefill_ms=Y decode_ms=Z
+                        generated_tokens_mean=N tokens_per_sec=T
 
     Returns a dict with the same schema as bench_trt(), or None on error.
     """
@@ -409,9 +410,10 @@ def bench_trtmc_cpp(
               file=sys.stderr)
         return None
 
-    # Parse "[trtmc.benchmark] prefill_ms=X decode_ms=Y tokens_per_sec=Z"
+    # Parse the mean values reported by the C++ benchmark.
     m = re.search(
-        r"\[trtmc\.benchmark\]\s+prefill_ms=([\d.]+)\s+decode_ms=([\d.]+)"
+        r"\[trtmc\.benchmark\]\s+setup_ms=[\d.]+\s+prefill_ms=([\d.]+)"
+        r"\s+decode_ms=([\d.]+)\s+generated_tokens_mean=([\d.]+)"
         r"\s+tokens_per_sec=([\d.]+)",
         result.stderr)
     if not m:
@@ -423,7 +425,8 @@ def bench_trtmc_cpp(
 
     prefill_ms = float(m.group(1))
     decode_ms  = float(m.group(2))
-    tps        = float(m.group(3))
+    generated_tokens_mean = float(m.group(3))
+    tps        = float(m.group(4))
 
     if verbose:
         print(f"  [cpp] prefill={prefill_ms:.2f}ms decode={decode_ms:.2f}ms "
@@ -431,11 +434,10 @@ def bench_trtmc_cpp(
 
     # The C++ binary reports the mean over all timed iterations; synthesise
     # single-element lists so the same stats helpers work.
-    n_decode_tokens = int(round(tps * decode_ms / 1000.0)) if tps > 0 else max_new_tokens
     return {
         "prefill_times": [prefill_ms],
         "decode_times": [decode_ms],
-        "decode_token_counts": [n_decode_tokens],
+        "decode_token_counts": [generated_tokens_mean],
         "gen_ids": [],  # C++ binary doesn't return token IDs
     }
 

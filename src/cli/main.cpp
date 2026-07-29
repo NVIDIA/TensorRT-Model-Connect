@@ -519,12 +519,14 @@ int cmd_run(const CliArgs& args) {
             pipeline->generate(prompt, cfg);
 
         std::vector<double> setup_ms_v, prefill_ms_v, decode_ms_v;
+        std::size_t generated_tokens = 0;
         setup_ms_v.reserve(static_cast<std::size_t>(bench_n));
         prefill_ms_v.reserve(static_cast<std::size_t>(bench_n));
         decode_ms_v.reserve(static_cast<std::size_t>(bench_n));
 
         for (int r = 0; r < bench_n; ++r) {
             auto result = pipeline->generate(prompt, cfg);
+            generated_tokens += result.token_ids.size();
             setup_ms_v.push_back(result.setup_ms);
             prefill_ms_v.push_back(result.prefill_ms);
             decode_ms_v.push_back(result.decode_ms);
@@ -537,12 +539,18 @@ int cmd_run(const CliArgs& args) {
         const double smean = mean(setup_ms_v);
         const double pmean = mean(prefill_ms_v);
         const double dmean = mean(decode_ms_v);
-        const int ntoks = cfg.max_new_tokens;
+        const double generated_tokens_mean =
+            static_cast<double>(generated_tokens) / static_cast<double>(bench_n);
+        const double total_decode_ms = std::accumulate(decode_ms_v.begin(), decode_ms_v.end(), 0.0);
+        const double tokens_per_sec =
+            total_decode_ms > 0.0
+                ? static_cast<double>(generated_tokens) / (total_decode_ms / 1000.0)
+                : 0.0;
 
         std::cerr << std::fixed << std::setprecision(2);
         std::cerr << "[trtmc.benchmark] setup_ms=" << smean << " prefill_ms=" << pmean
-                  << " decode_ms=" << dmean
-                  << " tokens_per_sec=" << (ntoks > 0 ? ntoks / (dmean / 1000.0) : 0.0) << '\n';
+                  << " decode_ms=" << dmean << " generated_tokens_mean=" << generated_tokens_mean
+                  << " tokens_per_sec=" << tokens_per_sec << '\n';
 
         auto last = pipeline->generate(prompt, trtmc::GenerateConfig{cfg});
         std::cout << last.text << '\n';

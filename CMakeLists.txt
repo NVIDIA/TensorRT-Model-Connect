@@ -499,6 +499,19 @@ if(_trtmc_has_tvm_ffi AND _trtmc_can_build_trt_backend)
     BUILD_RPATH_USE_ORIGIN TRUE
     INSTALL_RPATH "\$ORIGIN"
   )
+
+  add_library(trtmc_byok_identity_copy SHARED EXCLUDE_FROM_ALL
+    examples/byok/identity_copy_kernel.cpp
+  )
+  target_include_directories(trtmc_byok_identity_copy SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR} ${TRTMC_TVM_FFI_INCLUDE_DIR})
+  target_link_libraries(trtmc_byok_identity_copy PRIVATE
+    ${TRTMC_CUDART_LIBRARY} ${TRTMC_TVM_FFI_LIBRARY})
+  set_target_properties(trtmc_byok_identity_copy PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "identity_copy_kernel"
+  )
+
   message(STATUS "TVM-FFI plugin shared library: trtmc_tvm_ffi_plugin.so")
 endif()
 
