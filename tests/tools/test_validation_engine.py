@@ -2963,6 +2963,40 @@ def test_tts_disagreement_reports_full_normalized_transcripts(tmp_path: Path) ->
     )
 
 
+def test_tts_intelligibility_gate_rejects_reference_pass_rate_drop() -> None:
+    result = validation_engine.tts_intelligibility_gate_result(
+        {
+            "hf": {"overall_accuracy": 1.0},
+            "trtfb": {"overall_accuracy": 1.0 / 3.0},
+            "correctness_agreement_rate": 1.0 / 3.0,
+        },
+        {
+            "max_pass_rate_drop_from_hf": 0.05,
+            "min_correctness_agreement": 0.95,
+        },
+    )
+
+    assert result["status"] == "failed"
+    assert result["pass_rate_drop_from_hf"] == pytest.approx(2.0 / 3.0)
+    assert result["correctness_agreement_rate"] == pytest.approx(1.0 / 3.0)
+
+
+def test_tts_intelligibility_gate_accepts_matching_correctness() -> None:
+    result = validation_engine.tts_intelligibility_gate_result(
+        {
+            "hf": {"overall_accuracy": 1.0},
+            "trtfb": {"overall_accuracy": 1.0},
+            "correctness_agreement_rate": 1.0,
+        },
+        {
+            "max_pass_rate_drop_from_hf": 0.05,
+            "min_correctness_agreement": 0.95,
+        },
+    )
+
+    assert result["status"] == "passed"
+
+
 def test_run_tts_trtfb_generates_audio_and_batches_asr(tmp_path: Path, monkeypatch) -> None:
     dataset = tmp_path / "SeedTTS_en_meta" / "seedtts_en_meta.json"
     dataset.parent.mkdir()

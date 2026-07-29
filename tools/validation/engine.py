@@ -5126,6 +5126,37 @@ def compare_prediction_sets(
     return summary
 
 
+def tts_intelligibility_gate_result(
+    summary: Mapping[str, Any],
+    gates: Mapping[str, Any],
+) -> dict[str, Any]:
+    max_pass_rate_drop = float(
+        gates.get("max_pass_rate_drop_from_hf", 0.05)
+    )
+    min_correctness_agreement = float(
+        gates.get("min_correctness_agreement", 0.95)
+    )
+    pass_rate_drop = (
+        float(summary["hf"]["overall_accuracy"])
+        - float(summary["trtfb"]["overall_accuracy"])
+    )
+    correctness_agreement = float(summary["correctness_agreement_rate"])
+    return {
+        "status": (
+            "passed"
+            if pass_rate_drop <= max_pass_rate_drop
+            and correctness_agreement >= min_correctness_agreement
+            else "failed"
+        ),
+        "pass_rate_drop_from_hf": pass_rate_drop,
+        "correctness_agreement_rate": correctness_agreement,
+        "gates": {
+            "max_pass_rate_drop_from_hf": max_pass_rate_drop,
+            "min_correctness_agreement": min_correctness_agreement,
+        },
+    }
+
+
 def _load_diffusion_validation_comparator(work_dir: Path) -> Any:
     case, _reference, _runner = _load_diffusion_validation_plugins(work_dir)
     comparator = get_comparator(case.task_strategy)
@@ -10855,6 +10886,13 @@ def eval_one_model(
                         "min_prediction_agreement": min_agreement,
                     },
                 }
+            )
+        elif scorer == "tts_intelligibility":
+            result.update(
+                tts_intelligibility_gate_result(
+                    summary,
+                    suite.get("gates", {}),
+                )
             )
     (work_dir / "eval_result.json").write_text(
         json.dumps(result, indent=2, ensure_ascii=False),
