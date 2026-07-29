@@ -63,6 +63,7 @@ class GemmaPlugin:
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False, parallel_config=None,
     ) -> bytes:
+        activation = _checkpoint_gated_activation(config)
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             return build_dual_profile_tp_decoder_engine(
@@ -70,11 +71,28 @@ class GemmaPlugin:
                 precision=precision,
                 quant_ctx=quant_ctx,
                 verbose=verbose,
+                activation=activation,
                 parallel_config=parallel)
 
         return build_standard_decoder_engine(
             config, weights, max_cache_length, precision=precision,
-            quant_ctx=quant_ctx, verbose=verbose)
+            quant_ctx=quant_ctx, verbose=verbose, activation=activation)
+
+
+def _checkpoint_gated_activation(config: ModelConfig) -> str:
+    """Return the checkpoint-declared activation for Gemma's gated MLP."""
+    activation = str(
+        config.hidden_act
+        or config.raw.get("hidden_activation")
+        or config.raw.get("hidden_act")
+        or ""
+    ).strip()
+    supported = {"gelu_pytorch_tanh", "gelu_new", "gelu", "silu"}
+    if activation not in supported:
+        raise ValueError(
+            "Gemma requires a supported checkpoint gated activation; "
+            f"got {activation or '<missing>'!r}")
+    return activation
 
 
 plugin = GemmaPlugin()

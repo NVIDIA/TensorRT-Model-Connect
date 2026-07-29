@@ -319,11 +319,12 @@ def add_swiglu_mlp(
     prefix: str,
     hidden_size: int,
     mlp_size: int,
+    activation: str = "silu",
     dtype: np.dtype = np.float32,
     quant_ctx: QuantContext | None = None,
     layer_prefix: str = "",
 ) -> trt.ITensor:
-    """Gate/up/down SwiGLU MLP. Returns output tensor."""
+    """Gate/up/down MLP with a checkpoint-selected gate activation."""
     matmul = _make_matmul_fn(network, dtype, quant_ctx)
     _lp = layer_prefix or prefix
 
@@ -332,11 +333,10 @@ def add_swiglu_mlp(
     up = matmul(inp, hidden_size, mlp_size,
                 weights[f"{prefix}.w_up"], f"{_lp}.w_up")
 
-    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(
-        gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+    activated = graph_ops.add_activation(
+        network, gate, activation, dtype=dtype)
     gated = network.add_elementwise(
-        swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+        activated, up, trt.ElementWiseOperation.PROD)
 
     mlp_out = matmul(gated.get_output(0), mlp_size, hidden_size,
                      weights[f"{prefix}.w_down"], f"{_lp}.w_down")

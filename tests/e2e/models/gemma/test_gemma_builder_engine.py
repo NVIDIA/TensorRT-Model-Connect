@@ -29,6 +29,12 @@ class GemmaPluginTester(FamilyPluginTester):
     plugin_module = "tensorrt_model_connect.families.gemma"
     model_type = "gemma"
 
+    def get_config_dict(self) -> dict:
+        config = super().get_config_dict()
+        config["hidden_act"] = "gelu_pytorch_tanh"
+        config["hidden_activation"] = "gelu_pytorch_tanh"
+        return config
+
 
 class TestGemmaEngine(FamilyPluginTestMixin):
     tester_class = GemmaPluginTester

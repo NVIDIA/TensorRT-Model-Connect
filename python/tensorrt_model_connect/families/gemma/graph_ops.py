@@ -296,8 +296,8 @@ def add_activation(
     activation_type: str,
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
-    """Dispatch activation by name: 'silu', 'gelu_new', 'gelu', 'relu', 'relu2'/'squared_relu'."""
-    if activation_type in ("gelu_new", "gelu"):
+    """Dispatch activation by checkpoint-compatible name."""
+    if activation_type in ("gelu_new", "gelu", "gelu_pytorch_tanh"):
         return add_gelu_new(network, inp, dtype=dtype)
     elif activation_type == "relu":
         act = network.add_activation(inp, trt.ActivationType.RELU)

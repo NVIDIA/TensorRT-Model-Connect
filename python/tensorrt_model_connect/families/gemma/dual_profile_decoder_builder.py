@@ -142,16 +142,17 @@ def _swiglu_mlp(
     prefix: str,
     hidden: int,
     mlp_size: int,
+    activation: str,
+    work_np_dtype: np.dtype,
 ) -> trt.ITensor:
     gate = matmul(inp, hidden, mlp_size,
                   weights[f"{prefix}.w_gate"], f"{prefix}.w_gate")
     up = matmul(inp, hidden, mlp_size,
                 weights[f"{prefix}.w_up"], f"{prefix}.w_up")
-    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(
-        gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+    activated = graph_ops.add_activation(
+        network, gate, activation, dtype=work_np_dtype)
     gated = network.add_elementwise(
-        swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+        activated, up, trt.ElementWiseOperation.PROD)
     mlp_out = matmul(gated.get_output(0), mlp_size, hidden,
                      weights[f"{prefix}.w_down"], f"{prefix}.w_down")
     return mlp_out
@@ -640,7 +641,8 @@ def build_dual_profile_decoder_engine(
             mlp_out = _swiglu_mlp(
                 network, norm2,
                 matmul=matmul, weights=weights, prefix=prefix,
-                hidden=hidden, mlp_size=mlp_size)
+                hidden=hidden, mlp_size=mlp_size,
+                activation=activation, work_np_dtype=work_np_dtype)
 
         # Final residual.
         if gemma2_norms:

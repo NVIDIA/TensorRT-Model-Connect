@@ -81,7 +81,7 @@ def build_standard_decoder_engine(
                   "gelu_fc" (2 projections: fc1/fc2 with activation).
         position_type: "rope" (rotary), "learned" (absolute position embeddings),
             or "alibi" (attention with linear biases, no position embeddings).
-        activation: Activation function for gelu_fc MLP ("gelu_new", "gelu", "relu", "relu2").
+        activation: Activation function for gated and gelu_fc MLPs.
         partial_rotary_factor: Fraction of head dims that get RoPE (default 1.0).
         interleaved_rope: If True, use interleaved RoPE (CodeGen/GPT-J) where
             adjacent dims (d, d+1) share frequencies. Default False uses
@@ -654,7 +654,8 @@ def _add_decoder_layer(
     else:
         mlp_out = graph_blocks.add_swiglu_mlp(
             network, norm2, weights=weights, prefix=prefix,
-            hidden_size=hidden_size, mlp_size=mlp_size, dtype=dtype,
+            hidden_size=hidden_size, mlp_size=mlp_size,
+            activation=activation, dtype=dtype,
             quant_ctx=quant_ctx, layer_prefix=prefix)
 
     # Final residual connection
