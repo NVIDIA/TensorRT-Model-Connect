@@ -30,6 +30,7 @@ struct QwenVlConfig {
     int32_t vocab_size{0};
     int32_t id_bos{0};
     int32_t id_eos{0};
+    std::vector<int32_t> id_eos_ids;
     int32_t image_token_id{-1};
     int32_t vision_output_dim{0};
     bool has_position_input{true};
@@ -116,7 +117,7 @@ class QwenVlPipeline final : public IPipeline {
         int32_t feature_dim, int32_t merged_grid_height, int32_t merged_grid_width,
         int32_t max_new_tokens, const QwenVlSamplingParams& params);
 
-    std::pair<int32_t, int32_t> resolve_gen_limits(const GenerateConfig& cfg) const;
+    int32_t resolve_max_new_tokens(const GenerateConfig& cfg) const;
 
     void reset_generation_context(int32_t prompt_length);
 

@@ -313,6 +313,7 @@ QwenVlConfig make_pipeline_config(const PipelineContext& ctx, const ITrtModule& 
     config.vocab_size = ctx.config.vocab_size;
     config.id_bos = ctx.config.id_bos;
     config.id_eos = ctx.config.id_eos;
+    config.id_eos_ids = ctx.config.id_eos_ids;
     config.image_token_id = extract_json_int(ctx.config_json, "image_token_id", -1);
     config.vision_output_dim = extract_json_int(ctx.config_json, "vision_output_dim", 0);
     config.has_position_input = decode.has_input("position_id");

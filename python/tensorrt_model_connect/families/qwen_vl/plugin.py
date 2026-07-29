@@ -59,6 +59,22 @@ def _is_qwen3_vl(config: ModelConfig) -> bool:
     return bool(vc.get("deepstack_visual_indexes"))
 
 
+def _add_nan_safe_deepstack_gate(
+    network: trt.INetworkDefinition,
+    deepstack_embed: trt.ITensor,
+    active: trt.ITensor,
+) -> trt.ITensor:
+    """Hard-zero an inactive DeepStack input without propagating NaNs."""
+    zero = graph_ops.add_constant(
+        network, (1, 1), np.zeros((1, 1), dtype=np.float32),
+        dtype=np.float32)
+    if zero.dtype != active.dtype:
+        zero = network.add_cast(zero, active.dtype).get_output(0)
+    condition = network.add_elementwise(
+        active, zero, trt.ElementWiseOperation.GREATER).get_output(0)
+    return network.add_select(condition, deepstack_embed, zero).get_output(0)
+
+
 def _fixed_image_dimensions(config: ModelConfig) -> tuple[int, int]:
     """Resolve and validate the fixed Qwen-VL vision profile dimensions."""
     family_options = config.raw.get("_family_build_options", {})
@@ -793,22 +809,8 @@ def _build_qwen3_vl_decoder(
                 fp32_ds_embed_inputs[layer_idx]
                 if layer_is_fp32 else ds_embed_inputs[layer_idx])
             assert layer_ds_active is not None
-            # NaN-safe gate: select(active > 0, deepstack_embed, 0) instead of
-            # deepstack_embed * active. On text/decode steps the embed buffer can
-            # carry uninitialized/NaN residue; a plain multiply propagates it as
-            # NaN * 0 = NaN and poisons every logit. The hard-zero branch keeps
-            # the inactive contribution exactly 0 regardless of the buffer.
-            ds_zero = graph_ops.add_constant(
-                network, (1, 1), np.zeros((1, 1), dtype=np.float32),
-                dtype=np.float32)
-            if ds_zero.dtype != layer_ds_active.dtype:
-                ds_zero = network.add_cast(
-                    ds_zero, layer_ds_active.dtype).get_output(0)
-            ds_cond = network.add_elementwise(
-                layer_ds_active, ds_zero,
-                trt.ElementWiseOperation.GREATER).get_output(0)
-            ds_gated = network.add_select(
-                ds_cond, layer_ds_embed, ds_zero).get_output(0)
+            ds_gated = _add_nan_safe_deepstack_gate(
+                network, layer_ds_embed, layer_ds_active)
             post_attn_ds = network.add_elementwise(
                 post_attn, ds_gated, trt.ElementWiseOperation.SUM)
             post_attn = post_attn_ds.get_output(0)

@@ -66,6 +66,14 @@ void sync_vision_config(QwenVlConfig& config, const QwenVlPreprocessConfig& prep
         config.vision_output_dim = preprocess.vision_output_dim;
 }
 
+QwenVlConfig normalize_eos_token_ids(QwenVlConfig config) {
+    if (config.id_eos_ids.empty() && config.id_eos >= 0)
+        config.id_eos_ids.push_back(config.id_eos);
+    if (!config.id_eos_ids.empty())
+        config.id_eos = config.id_eos_ids.front();
+    return config;
+}
+
 } // namespace
 
 QwenVlPipeline::QwenVlPipeline(std::unique_ptr<TrtModule> text_decoder,
@@ -89,9 +97,10 @@ QwenVlPipeline::QwenVlPipeline(std::unique_ptr<TrtModule> text_decoder,
                                std::unique_ptr<TrtModule> prefill,
                                std::shared_ptr<qwen_vl::LoraAdapterCache> adapter_cache)
     : text_decoder_(std::move(text_decoder)), prefill_(std::move(prefill)),
-      vision_encoder_(std::move(vision_encoder)), state_(std::move(state)), config_(config),
-      vl_preprocess_(std::move(vl_preprocess)), stream_(stream), tokenizer_(std::move(tokenizer)),
-      model_id_(std::move(model_id_str)), sampler_(std::move(sampler)) {
+      vision_encoder_(std::move(vision_encoder)), state_(std::move(state)),
+      config_(normalize_eos_token_ids(std::move(config))), vl_preprocess_(std::move(vl_preprocess)),
+      stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
+      sampler_(std::move(sampler)) {
     validate_pipeline_components(text_decoder_.get(), state_.get(), prefill_.get());
     sync_vision_config(config_, vl_preprocess_);
 
@@ -194,8 +203,8 @@ TextResult QwenVlPipeline::generate(const std::string& prompt, const GenerateCon
 
     select_lora_adapter(cfg.lora_adapter_id);
     auto input_ids = tokenizer_->encode(prompt);
-    auto [max_new, eos] = resolve_gen_limits(cfg);
-    auto sp = qwen_vl_sampling_params_from_config(cfg, eos);
+    const int32_t max_new = resolve_max_new_tokens(cfg);
+    auto sp = qwen_vl_sampling_params_from_config(cfg, config_.id_eos_ids);
     auto output_ids = generate_from_ids(input_ids, max_new, sp);
 
     std::vector<int32_t> new_tokens(
@@ -575,10 +584,8 @@ bool add_mrope_prefill_input(TrtModule& prefill, const std::vector<int32_t>& inp
 
 } // namespace
 
-std::pair<int32_t, int32_t> QwenVlPipeline::resolve_gen_limits(const GenerateConfig& cfg) const {
-    int32_t max_new = (cfg.max_new_tokens > 0) ? cfg.max_new_tokens : 128;
-    int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
-    return {max_new, eos};
+int32_t QwenVlPipeline::resolve_max_new_tokens(const GenerateConfig& cfg) const {
+    return (cfg.max_new_tokens > 0) ? cfg.max_new_tokens : 128;
 }
 
 QwenVlISampler* QwenVlPipeline::prepare_sampler(const QwenVlSamplingParams& params,
@@ -621,8 +628,8 @@ TextResult QwenVlPipeline::generate(const std::string& prompt, const float* imag
 
     // Format prompt, tokenize, generate with vision features
     auto input_ids = tokenizer_->encode(qwen_vl_format_prompt(prompt, vl_preprocess_, nf));
-    auto [max_new, eos] = resolve_gen_limits(cfg);
-    auto sp_vl = qwen_vl_sampling_params_from_config(cfg, eos);
+    const int32_t max_new = resolve_max_new_tokens(cfg);
+    auto sp_vl = qwen_vl_sampling_params_from_config(cfg, config_.id_eos_ids);
     const auto [merged_grid_height, merged_grid_width] =
         resolve_merged_grid(preprocessed, vl_preprocess_);
     auto out = generate_vl_from_ids(input_ids, features, deepstack_features, nf, dim,
@@ -639,8 +646,7 @@ QwenVlPipeline::GenerationResult QwenVlPipeline::generate_ids(const std::vector<
                                                               const GenerateConfig& cfg) {
     select_lora_adapter(cfg.lora_adapter_id);
     int32_t max_new = cfg.max_new_tokens;
-    int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
-    auto sp = qwen_vl_sampling_params_from_config(cfg, eos);
+    auto sp = qwen_vl_sampling_params_from_config(cfg, config_.id_eos_ids);
     return GenerationResult{generate_from_ids(input_ids, max_new, sp)};
 }
 
@@ -680,7 +686,7 @@ std::vector<int32_t> QwenVlPipeline::generate_from_ids(const std::vector<int32_t
     for (int32_t step = 0; step < max_new_tokens; ++step) {
         QwenVlSampleResult result = active_sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
-        if (result.is_eos)
+        if (result.is_eos || qwen_vl_is_eos_token(params, result.token_id))
             break;
         run_text_step(result.token_id, logits);
     }
@@ -791,7 +797,7 @@ void QwenVlPipeline::run_vl_decode_loop(QwenVlISampler* sampler, const QwenVlSam
     for (int32_t step = 0; step < max_new_tokens; ++step) {
         QwenVlSampleResult result = sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
-        if (result.is_eos)
+        if (result.is_eos || qwen_vl_is_eos_token(params, result.token_id))
             break;
         run_text_step(result.token_id, logits, mrope_position);
         if (mrope_position >= 0)
