@@ -103,6 +103,22 @@ def levenshtein_ned(a: str, b: str) -> float:
     return prev[-1] / max_len
 
 
+def generated_token_ids(output) -> list[int] | None:
+    value = (output.data or {}).get("token_ids")
+    if not isinstance(value, list) or not value:
+        return None
+    try:
+        return [int(token) for token in value]
+    except (TypeError, ValueError):
+        return None
+
+
+def token_agreement_rate(trt_tokens: list[int], ref_tokens: list[int]) -> float:
+    positions = max(len(trt_tokens), len(ref_tokens))
+    matches = sum(trt_token == ref_token for trt_token, ref_token in zip(trt_tokens, ref_tokens))
+    return matches / positions
+
+
 def make_pass(stage_name: str, metrics, rule: str = ""):
     from tests.e2e_harness.contracts import CompareResult
     return CompareResult(
@@ -172,6 +188,33 @@ class GlmCausalContinuationPlugin:
                 message=f"TRT C++ run failed (cpp_returncode={cpp_rc}){suffix}",
             )
 
+        trt_tokens = generated_token_ids(trt_output)
+        ref_tokens = generated_token_ids(ref_output)
+        if trt_tokens is None or ref_tokens is None:
+            missing = []
+            if trt_tokens is None:
+                missing.append("TRT")
+            if ref_tokens is None:
+                missing.append("HF reference")
+            metrics = {
+                "generated_token_ids_present": MetricResult(
+                    value=0.0,
+                    threshold=1.0,
+                    operator="==",
+                    passed=False,
+                    note=f"missing or invalid token_ids: {', '.join(missing)}",
+                ),
+            }
+            return make_fail(
+                "full_generation",
+                metrics,
+                "generated token IDs required from TRT and HF reference",
+                f"{' and '.join(missing)} produced no valid generated token IDs",
+            )
+
+        token_agreement = token_agreement_rate(trt_tokens, ref_tokens)
+        token_threshold = threshold.metrics.get("contract_token_agreement_rate", 1.0)
+
         prompt = case.inputs.get("prompt", "")
         config = contract_config(case)
         preserve_prompt_echo = bool(config.get("preserve_prompt_echo"))
@@ -201,11 +244,25 @@ class GlmCausalContinuationPlugin:
             )
 
         ned = levenshtein_ned(trt_text, ref_text)
+        exact_match = trt_text == ref_text
         ned_threshold = threshold.metrics.get("contract_ned_threshold", 0.25)
         prefix_len = min(50, min(len(trt_text), len(ref_text)))
         prefix_match = (trt_text[:prefix_len] == ref_text[:prefix_len]) if prefix_len > 0 else True
 
         metrics = {
+            "exact_match": MetricResult(
+                value=1.0 if exact_match else 0.0,
+                threshold=1.0,
+                operator="==",
+                passed=exact_match,
+            ),
+            "contract_token_agreement_rate": MetricResult(
+                value=token_agreement,
+                threshold=token_threshold,
+                operator=">=",
+                passed=token_agreement >= token_threshold,
+                note=f"TRT tokens={len(trt_tokens)}, HF tokens={len(ref_tokens)}",
+            ),
             "ned": MetricResult(
                 value=ned,
                 threshold=ned_threshold,
@@ -236,11 +293,18 @@ class GlmCausalContinuationPlugin:
                 note="visible HF reconstruction text",
             )
 
-        passed = ned <= ned_threshold
+        passed = (
+            token_agreement >= token_threshold
+            and exact_match
+            if "contract_token_agreement_rate" in threshold.metrics
+            else ned <= ned_threshold
+        )
         rule = (
             "seq2seq reconstruction parity against HF reference"
             if reconstruction_check
-            else "ned <= threshold (continuation parity)"
+            else (
+                "exact normalized text AND generated token agreement >= threshold"
+            )
         )
         if passed:
             return make_pass("full_generation", metrics, rule)
@@ -248,7 +312,7 @@ class GlmCausalContinuationPlugin:
             "full_generation",
             metrics,
             rule,
-            f"Continuation diverged: NED={ned:.3f}",
+            f"Continuation diverged: token agreement={token_agreement:.3f}, NED={ned:.3f}",
         )
 
 plugin = GlmCausalContinuationPlugin()

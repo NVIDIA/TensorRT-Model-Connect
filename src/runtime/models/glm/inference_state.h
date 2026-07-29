@@ -5,24 +5,7 @@
 
 #pragma once
 
-// GlmInferenceState: unified interface for autoregressive inference state.
-//
-// Both KV-cache attention state and recurrent state implementations expose
-// this interface. Pipelines and plugins program against it — never against
-// concrete state classes.
-//
-// The interface captures the lifecycle of per-sequence inference state:
-//   1. reset()        — prepare for a new sequence
-//   2. bind_to()      — bind state tensors to TRT engine I/O
-//   3. prepare_step() — write state-related inputs (mask, position) into TensorMap
-//   4. advance()      — update state after each decode step
-//   5. position()     — current sequence position
-//
-// Implementations:
-//   GlmKvCache          — dense append-only (current default)
-//   Family-owned recurrent state — recurrent tensor state
-//   Family-owned hybrid state — GlmKvCache + family-owned recurrent state composed
-//   (future: RingKvCache, PagedKvCache, MlaCache, SlidingWindowCache)
+// Minimal lifecycle shared by GLM's runtime-owned native KV cache.
 
 #include "trtmc/runtime/tensor.h"
 
@@ -41,7 +24,7 @@ class GlmInferenceState {
     // --- Lifecycle ---
 
     // Reset logical state for a new sequence. Implementations may retain device
-    // storage that remains hidden by logical lengths and attention masks.
+    // storage; native key-value lengths keep unwritten rows inactive.
     virtual void reset() = 0;
 
     // Bind all state tensors to the given TRT module.
@@ -49,26 +32,11 @@ class GlmInferenceState {
     // state tensors via the bound device pointers.
     virtual void bind_to(TrtModule& module) = 0;
 
-    // Write state-related inputs (mask, position, block table, etc.) into
-    // the TensorMap before engine.forward(). The state owns its buffers —
-    // Tensor.data pointers remain valid until the next prepare_step() call.
-    // Pipelines call this instead of manually constructing mask/position tensors.
+    // Write position and native KV scalar inputs before engine.forward().
     virtual void prepare_step(TensorMap& inputs, int32_t seq_len = 1) = 0;
 
-    // Update state after one decode step. Copies "present" outputs
-    // into "cache" inputs, advances position.
-    // n_tokens: number of tokens processed in this step (default 1).
-    //           >1 for batched prefill / multi-token steps.
+    // Advance logical state after one decode step.
     virtual void advance(int32_t n_tokens = 1) = 0;
-
-    // Provide the total prompt length before prefill starts.
-    // Cache policies that distinguish prompt and decode tokens can use this
-    // to protect prompt tokens even if compression triggers during prefill.
-    virtual void set_prompt_length(int32_t prompt_length) { (void)prompt_length; }
-
-    // Mark the transition from prompt prefill to autoregressive decoding.
-    // State types that do not distinguish the phases can ignore this.
-    virtual void mark_prefill_complete() {}
 
     // --- Queries ---
 
@@ -79,23 +47,11 @@ class GlmInferenceState {
     // -1 for unbounded (recurrent models with no cache length limit).
     virtual int32_t max_length() const = 0;
 
-    // Desired number of KV rows to expose to the decoder on the next step.
-    // Dynamic-KV runtimes can use this to choose an execution profile/context
-    // before prepare_step() binds the state tensors.
-    virtual int32_t preferred_cache_rows() const { return max_length(); }
-
     // Number of transformer/SSM layers.
     virtual int32_t num_layers() const = 0;
 
-    // Whether this state type needs an attention mask.
-    // GlmKvCache -> true. Family-owned recurrent state -> false.
-    virtual bool needs_attention_mask() const = 0;
-
     // Total device memory consumed by this state (bytes).
     virtual std::size_t device_memory_bytes() const = 0;
-
-    // Human-readable state type for diagnostics.
-    virtual const char* state_type() const = 0;
 
     // Whether all allocations succeeded.
     virtual bool ok() const = 0;

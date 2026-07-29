@@ -789,6 +789,13 @@ def _family_model_ids() -> set[str]:
     }
 
 
+def _uses_native_cpp_logits_trace(family: str) -> bool:
+    runner = E2E_MODELS / family / "e2e_plugins" / "runners" / "text_generation.py"
+    return runner.is_file() and "def _run_native_trace_logits(" in runner.read_text(
+        encoding="utf-8"
+    )
+
+
 def _format_violations(violations: list[tuple[Path, int, str]]) -> str:
     return "\n".join(
         f"{path.relative_to(REPO_ROOT)}:{line}: {detail}" for path, line, detail in violations
@@ -1693,7 +1700,6 @@ def test_text_decoder_triattention_cache_is_model_owned() -> None:
         "deepseek_v2",
         "falcon",
         "gemma",
-        "glm",
         "gpt2",
         "gpt_neo",
         "gpt_neox",
@@ -6070,9 +6076,22 @@ def test_shared_debug_runner_has_no_model_owned_runners() -> None:
         if not (strategy.endswith("_decoder_kv_cache") or strategy.endswith("_decoder_moe")):
             continue
         family_dir = plugin_path.parent
+        family = family_dir.name
         manifest = family_dir / "MODEL.toml"
         debug_runner = family_dir / "debug_runner.py"
         manifest_text = manifest.read_text(encoding="utf-8")
+        if _uses_native_cpp_logits_trace(family):
+            if 'debug_runner = "debug_runner.py|runner_from_bundle"' in manifest_text:
+                violations.append(
+                    (manifest, 0, "native C++ trace family retains debug_runner metadata")
+                )
+            if "debug_runtime_strategies" in manifest_text:
+                violations.append(
+                    (manifest, 0, "native C++ trace family retains debug strategy metadata")
+                )
+            if debug_runner.exists():
+                violations.append((debug_runner, 0, "native C++ trace family retains debug runner"))
+            continue
         if 'debug_runner = "debug_runner.py|runner_from_bundle"' not in manifest_text:
             violations.append(
                 (manifest, 0, "decoder family missing model-owned debug_runner metadata")
@@ -7589,10 +7608,30 @@ def test_model_e2e_text_runners_use_family_owned_debug_runners() -> None:
         if not runner_path.is_file():
             violations.append((runner_path, 0, "missing model-owned text runner"))
             continue
+        text = runner_path.read_text(encoding="utf-8")
+        if _uses_native_cpp_logits_trace(family):
+            if family_debug_runner.exists():
+                violations.append(
+                    (family_debug_runner, 0, "native C++ trace family retains debug runner")
+                )
+            expected_import = f"from tensorrt_model_connect.families.{family}.debug_runner import"
+            if expected_import in text or "family_runner_from_bundle(" in text:
+                violations.append(
+                    (runner_path, 0, "native C++ trace runner retains debug fallback")
+                )
+            for required in (
+                "_run_native_trace_logits",
+                "text_trace.step_trace_path=",
+                '"logits_path"',
+            ):
+                if required not in text:
+                    violations.append(
+                        (runner_path, 0, f"native C++ trace runner missing {required}")
+                    )
+            continue
         if not family_debug_runner.is_file():
             violations.append((family_debug_runner, 0, "missing family-owned debug runner"))
             continue
-        text = runner_path.read_text(encoding="utf-8")
         expected_import = f"from tensorrt_model_connect.families.{family}.debug_runner import"
         if expected_import not in text:
             violations.append(

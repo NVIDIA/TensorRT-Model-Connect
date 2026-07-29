@@ -1,12 +1,10 @@
 {
   "name": "glm-4-9b-l0",
-  "hf_id": "THUDM/glm-4-9b-hf",
+  "hf_id": "zai-org/glm-4-9b-chat-hf",
   "bundle": "glm-4-9b-l0.trtfb",
   "family": "glm",
   "runtime_strategy": "glm_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
-  "precision": "fp16",
-  "max_cache_length": 256,
   "trust_remote_code": false,
   "testcases": [
     {
@@ -15,10 +13,10 @@
       "ci_tier": "l0_only",
       "reference_family": "causal_base_continuation",
       "user_contract": "continuation_parity",
-      "reference_precision": "fp32",
+      "reference_precision": "bf16",
       "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
       "max_new_tokens": 8,
-      "notes": "PR L0 repro for GLM-4-9B. Uses the same checkpoint, glm_decoder_kv_cache runtime, runner, comparator, continuation artifact contract, and full cache budget with shorter decode budget."
+      "notes": "Uses family defaults: BF16, split prefill/decode engines, and the checkpoint's complete 131072-token KV capacity."
     }
   ]
 }

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GLM-4 family plugin — handles fused gate_up_proj splitting."""
+"""GLM family plugin with a fail-closed TensorRT native KV path."""
 
 from __future__ import annotations
 
@@ -20,12 +20,13 @@ from .checkpoint_mapper import (
     _transpose_2d,
     _target_np_dtype,
 )
-from ...parallel_config import (
-    normalize_parallel_config,
-    require_tensorrt_11_for_tensor_parallel,
+from .build_routing import (
+    native_kv_architecture_capability,
+    native_kv_build_capability,
 )
-from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
-from .standard_decoder_builder import build_standard_decoder_engine
+from .native_kv_contract import validate_native_kv_weights
+from .native_decoder_builder import build_native_decoder_engine
+from ...parallel_config import normalize_parallel_config
 
 
 class GlmPlugin:
@@ -35,6 +36,21 @@ class GlmPlugin:
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "glm"
+
+    @staticmethod
+    def _require_native_architecture(config: ModelConfig) -> None:
+        capability = native_kv_architecture_capability(config)
+        if not capability.eligible:
+            raise ValueError("GLM native KV architecture is unsupported: " + capability.reason)
+
+    def default_build_precision(self, config: ModelConfig) -> str:
+        self._require_native_architecture(config)
+        return "bf16"
+
+    def default_max_cache_length(self, config: ModelConfig) -> int:
+        """Build the model's complete advertised context by default."""
+        self._require_native_architecture(config)
+        return int(config.max_position_embeddings)
 
     def load_weights(
         self, model_dir: str, config: ModelConfig, *, precision: str = "fp32",
@@ -178,40 +194,57 @@ class GlmPlugin:
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
-        # GLM-4 uses partial RoPE (default 0.5) with interleaved layout.
-        partial_rotary_factor = config.raw.get("partial_rotary_factor", 0.5)
         parallel = normalize_parallel_config(parallel_config)
+        capability = native_kv_build_capability(
+            config,
+            precision=precision,
+            max_cache_length=max_cache_length,
+            parallel_enabled=parallel.enabled,
+            quantized=quant_ctx is not None,
+            debug_layer_outputs=debug_layer_outputs,
+        )
+        if not capability.eligible:
+            config.raw.pop("_native_kv_cache_metadata", None)
+            raise ValueError("GLM native KV build is unsupported: " + capability.reason)
 
-        if parallel.enabled:
-            require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="GLM tensor-parallel builds")
-            if quant_ctx is not None:
-                raise ValueError(
-                    "GLM tensor-parallel builds do not support quantization")
-            if debug_layer_outputs:
-                raise ValueError(
-                    "GLM tensor-parallel builds do not support debug_layer_outputs")
-            return build_dual_profile_tp_decoder_engine(
-                config, weights, max_cache_length,
-                precision=precision, quant_ctx=quant_ctx,
-                partial_rotary_factor=partial_rotary_factor,
-                interleaved_rope=True,
-                verbose=verbose,
-                parallel_config=parallel)
-
-        return build_standard_decoder_engine(
-            config, weights, max_cache_length,
-            precision=precision, quant_ctx=quant_ctx,
-            partial_rotary_factor=partial_rotary_factor,
-            interleaved_rope=True,
+        validate_native_kv_weights(config, weights)
+        config.raw["_decoder_engine_layout_supported"] = True
+        config.raw["_native_kv_cache_metadata"] = {
+            "native_kv_contract_version": 1,
+            "native_kv_cache": True,
+        }
+        role = str(config.raw.get("_decoder_engine_role", ""))
+        if role not in ("prefill", "decode"):
+            raise ValueError(
+                "native GLM requires explicit split engine role "
+                f"'prefill' or 'decode', got {role!r}"
+            )
+        return build_native_decoder_engine(
+            config,
+            weights,
+            max_cache_length,
             verbose=verbose,
-            debug_layer_outputs=debug_layer_outputs)
+            profile_mode=role,
+        )
+
+    def get_bundle_config_overrides(
+        self,
+        config: ModelConfig,
+    ) -> dict | None:
+        """Mark bundles that use the native KV runtime contract."""
+        metadata = config.raw.get("_native_kv_cache_metadata")
+        return dict(metadata) if isinstance(metadata, dict) else None
 
 
 plugin = GlmPlugin()

@@ -55,8 +55,8 @@ def _write_model(path: Path) -> None:
     save_file(tensors, str(path / "model.safetensors"))
 
 
-def test_glm_loader_honors_fp16_precision(tmp_path: Path) -> None:
-    """GLM uses the standard decoder builder, so load storage can be fp16."""
+def test_glm_weight_loader_can_materialize_fp16_storage(tmp_path: Path) -> None:
+    """The mapper conversion stays testable independently of build eligibility."""
     _write_model(tmp_path)
     cfg = ModelConfig.from_dir(tmp_path)
 

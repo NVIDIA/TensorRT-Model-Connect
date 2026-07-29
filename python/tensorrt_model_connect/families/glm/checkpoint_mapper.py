@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""1:1 port of standard_checkpoint_mapper.cpp + tensor_math.cpp to Python.
+"""Family-owned GLM checkpoint mapper.
 
 Loads HF safetensors and maps keys to the flat weight dict expected by
-standard_decoder_builder.py. All projections are transposed from HF
+native_decoder_builder.py. All projections are transposed from HF
 [out, in] layout to [in, out] for TRT matmul.
 """
 
@@ -41,7 +41,7 @@ def _transpose_2d(arr: np.ndarray, name: str, precision: str = "fp32") -> np.nda
 class WeightDict(dict):
     """A dict mapping logical weight names to flat float32 arrays.
 
-    Keys follow the convention used by standard_decoder_builder.py:
+    Keys follow the convention used by native_decoder_builder.py:
       - embedding: [vocab, hidden]
       - layer.{i}.input_norm: [hidden]
       - layer.{i}.w_q: [hidden, attention_size]

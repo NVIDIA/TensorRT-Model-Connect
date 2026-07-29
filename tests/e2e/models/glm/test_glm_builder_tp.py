@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Family-owned decoder tensor-parallel tests for glm."""
+"""Family-owned tensor-parallel rejection tests for native-KV GLM."""
 
 from __future__ import annotations
 
@@ -28,8 +28,12 @@ FAMILY = 'glm'
 PLUGIN_CLASS = 'GlmPlugin'
 MODEL_TYPE = 'glm'
 TP_SIZE = 2
-RAW = {'partial_rotary_factor': 0.5}
-EXPECTED_KWARGS = {'interleaved_rope': True, 'partial_rotary_factor': 0.5}
+RAW = {
+    "attention_bias": True,
+    "partial_rotary_factor": 0.5,
+    "_decoder_engine_layout": "split",
+    "_decoder_engine_role": "decode",
+}
 
 
 def _config(model_type: str, tp_size: int, raw: dict[str, object]) -> ModelConfig:
@@ -44,68 +48,53 @@ def _config(model_type: str, tp_size: int, raw: dict[str, object]) -> ModelConfi
         num_key_value_heads=kv_heads,
         max_position_embeddings=64,
         rms_norm_eps=1e-5,
+        rope_theta=10000.0,
+        hidden_act="silu",
+        architectures=["GlmForCausalLM"],
+        _head_dim=128,
         raw=raw,
     )
 
 
-def test_glm_plugin_routes_tp_build(monkeypatch) -> None:
+def test_glm_plugin_rejects_tp_without_fallback(monkeypatch) -> None:
     plugin_mod = importlib.import_module(
         f"tensorrt_model_connect.families.{FAMILY}.plugin")
-    captured: dict[str, object] = {}
+    called = False
 
-    def fake_build(config, weights, max_cache_length, **kwargs):
-        captured["config"] = config
-        captured["weights"] = weights
-        captured["max_cache_length"] = max_cache_length
-        captured["kwargs"] = kwargs
-        return b"tp-plan"
+    def fake_build(*args, **kwargs):
+        nonlocal called
+        called = True
+        return b"unexpected"
 
     monkeypatch.setattr(
         plugin_mod,
-        "require_tensorrt_11_for_tensor_parallel",
-        lambda parallel, *, feature: None,
-    )
-    monkeypatch.setattr(
-        plugin_mod,
-        "build_dual_profile_tp_decoder_engine",
+        "build_native_decoder_engine",
         fake_build,
     )
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=TP_SIZE, rank=1)
-    plan = getattr(plugin_mod, PLUGIN_CLASS)().build_engine(
-        _config(MODEL_TYPE, TP_SIZE, RAW),
-        WeightDict(),
-        max_cache_length=17,
-        precision="fp16",
-        verbose=True,
-        parallel_config=parallel,
-    )
-
-    assert plan == b"tp-plan"
-    assert captured["max_cache_length"] == 17
-    kwargs = captured["kwargs"]
-    assert kwargs["precision"] == "fp16"
-    assert kwargs["quant_ctx"] is None
-    assert kwargs["verbose"] is True
-    assert kwargs["parallel_config"] == parallel
-    for key, expected in EXPECTED_KWARGS.items():
-        assert kwargs[key] == expected
+    with pytest.raises(ValueError, match="tensor parallel"):
+        getattr(plugin_mod, PLUGIN_CLASS)().build_engine(
+            _config(MODEL_TYPE, TP_SIZE, RAW),
+            WeightDict(),
+            max_cache_length=64,
+            precision="bf16",
+            verbose=True,
+            parallel_config=parallel,
+        )
+    assert not called
 
 
 def test_glm_plugin_rejects_quantized_tp(monkeypatch) -> None:
     plugin_mod = importlib.import_module(
         f"tensorrt_model_connect.families.{FAMILY}.plugin")
-    monkeypatch.setattr(
-        plugin_mod,
-        "require_tensorrt_11_for_tensor_parallel",
-        lambda parallel, *, feature: None,
-    )
 
-    with pytest.raises(ValueError, match="do not support quantization"):
+    with pytest.raises(ValueError, match="tensor parallel|quantized"):
         getattr(plugin_mod, PLUGIN_CLASS)().build_engine(
             _config(MODEL_TYPE, TP_SIZE, RAW),
             WeightDict(),
-            max_cache_length=17,
+            max_cache_length=64,
+            precision="bf16",
             quant_ctx=object(),
             parallel_config=ParallelConfig(
                 mode="tensor_parallel", tp_size=TP_SIZE, rank=0),

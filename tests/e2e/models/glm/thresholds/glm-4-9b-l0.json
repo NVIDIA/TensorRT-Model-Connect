@@ -1,5 +1,6 @@
 {
   "threshold_overrides": {
+    "contract_token_agreement_rate": 1.0,
     "layer_atol": 0.05,
     "logit_atol": 0.001,
     "logit_cosine_p5": 0.99,
