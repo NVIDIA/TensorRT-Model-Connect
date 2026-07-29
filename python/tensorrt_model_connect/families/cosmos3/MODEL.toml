@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "cosmos3"
+plugin = "cosmos3"
+module = "plugin"
+aliases = [
+  "cosmos3",
+  "cosmos3_nano",
+  "cosmos3-nano",
+]
+prefixes = [
+  "cosmos3",
+]
+diffusion_pipeline_classes = [
+  "Cosmos3OmniDiffusersPipeline",
+  "Cosmos3OmniPipeline",
+  "Cosmos3OmniModularPipeline",
+]
+hf_allow_patterns = [
+  "model_index.json",
+  "modular_model_index.json",
+  "config.json",
+  "scheduler/**",
+  "transformer/**",
+  "vae/**",
+  "text_tokenizer/**",
+  "tokenizer/**",
+  "assets/example_t2v_prompt.json",
+  "assets/negative_prompt.json",
+  "*/config.json",
+  "*/model.safetensors",
+  "*/model-*.safetensors",
+  "*/model.safetensors.index.json",
+  "*/diffusion_pytorch_model.safetensors",
+  "*/diffusion_pytorch_model-*.safetensors",
+  "*/diffusion_pytorch_model.safetensors.index.json",
+]
