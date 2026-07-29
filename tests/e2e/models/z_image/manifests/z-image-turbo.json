@@ -22,7 +22,7 @@
       "name": "z-image-turbo",
       "trace_id": "IT-E2E-ZIMG-01",
       "model_type": "z_image",
-      "reference_precision": "bf16",
+      "reference_precision": "fp16",
       "reference_family": "diffusers_image_gen",
       "user_contract": "diffusion_image",
       "ci_tier": "nightly_only",
@@ -37,7 +37,7 @@
       "num_inference_steps": 9,
       "guidance_scale": 0.0,
       "skip_text_comparison": true,
-      "notes": "Z-Image-Turbo uses an FP16 Qwen3 text encoder and DiT except for the VAE (selector 2), both noise refiners (3-4), and main DiT blocks 0-1 (7-8), which remain FP32. The context refiners, main blocks 2-29, and final layer remain FP16. Removing either noise refiner or main block 0/1 produces non-finite latents; an FP16 VAE produces a solid-white frame. The mixed bundle passes the unchanged 9-step Diffusers image contract.",
+      "notes": "Z-Image-Turbo uses an FP16 Qwen3 text encoder and DiT except for the VAE (selector 2), both noise refiners (3-4), and main DiT blocks 0-1 (7-8), which remain FP32. The HF reference mirrors those component precisions and casts back to FP16 at each selected block boundary. The context refiners, main blocks 2-29, and final layer remain FP16. Removing either noise refiner or main block 0/1 produces non-finite latents; an FP16 VAE produces a solid-white frame.",
       "metadata": {
         "contract_config": {
           "use_diffusers": true

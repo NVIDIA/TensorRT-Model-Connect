@@ -73,6 +73,23 @@ class HfDiffusersReference:
         image_height = case.inputs.get("image_height", 1024)
         image_width = case.inputs.get("image_width", image_height)
         guidance_scale = float(case.inputs.get("guidance_scale", 0.0))
+        task_config = case.metadata.get("task_eval", {})
+        task_reference_precision = (
+            task_config.get("reference_precision")
+            if isinstance(task_config, dict)
+            else None
+        )
+        reference_precision = str(
+            case.metadata.get(
+                "reference_precision",
+                task_reference_precision or "fp16",
+            )
+        ).lower()
+        reference_torch_dtype = {
+            "fp16": "torch.float16",
+            "bf16": "torch.bfloat16",
+            "fp32": "torch.float32",
+        }.get(reference_precision, "torch.float16")
         python = ctx.reference_python_path() or sys.executable
         initial_latents = ensure_initial_latents(case, ctx)
 
@@ -92,7 +109,41 @@ from diffusers import DiffusionPipeline
 transformers.logging.set_verbosity_error()
 
 pipe = DiffusionPipeline.from_pretrained(
-    {model_ref!r}, torch_dtype=torch.bfloat16, low_cpu_mem_usage=False)
+    {model_ref!r}, torch_dtype={reference_torch_dtype}, low_cpu_mem_usage=False)
+
+# Mirror the TRTMC mixed-precision bundle exactly: the VAE, both noise
+# refiners, and main transformer blocks 0-1 run in FP32; every component
+# boundary casts back to the FP16 base precision.
+base_dtype = {reference_torch_dtype}
+mixed_fp32_modules = [
+    *pipe.transformer.noise_refiner,
+    *pipe.transformer.layers[:2],
+]
+pipe.vae.to(dtype=torch.float32)
+
+def _cast_floating(value, dtype):
+    if isinstance(value, torch.Tensor):
+        return value.to(dtype=dtype) if value.is_floating_point() else value
+    if isinstance(value, tuple):
+        return tuple(_cast_floating(item, dtype) for item in value)
+    if isinstance(value, list):
+        return [_cast_floating(item, dtype) for item in value]
+    if isinstance(value, dict):
+        return {{key: _cast_floating(item, dtype) for key, item in value.items()}}
+    return value
+
+def _fp32_inputs(_module, args, kwargs):
+    return _cast_floating(args, torch.float32), _cast_floating(
+        kwargs, torch.float32)
+
+def _base_output(_module, _args, output):
+    return _cast_floating(output, base_dtype)
+
+for module in mixed_fp32_modules:
+    module.to(dtype=torch.float32)
+    module.register_forward_pre_hook(_fp32_inputs, with_kwargs=True)
+    module.register_forward_hook(_base_output)
+
 pipe.to("cuda")
 raw_latents = np.fromfile({str(initial_latents.path)!r}, dtype=np.float32)
 expected_shape = {initial_latents.shape!r}
@@ -103,7 +154,7 @@ if raw_latents.size != expected_size:
         f"expected {{expected_shape}} = {{expected_size}}"
     )
 initial_latents = torch.from_numpy(raw_latents.reshape(expected_shape)).to(
-    device="cuda", dtype=torch.bfloat16)
+    device="cuda", dtype=base_dtype)
 output = pipe(
     prompt={prompt!r},
     num_inference_steps={num_steps},
