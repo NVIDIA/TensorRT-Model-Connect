@@ -283,8 +283,6 @@ resolve_phi4_hd_resize_geometry(const runtime::adapters::io::DecodedImage& image
     const int crop_cols = (image.width + crop - 1) / crop;
     const int crop_rows = (image.height + crop - 1) / crop;
     if (crop_cols != 2 || crop_rows != 1) {
-        std::cerr << "[trtmc] Phi-4 canonical vision engine requires a 2x1 crop topology"
-                  << std::endl;
         return {};
     }
 
@@ -301,11 +299,50 @@ resolve_phi4_hd_resize_geometry(const runtime::adapters::io::DecodedImage& image
     const int padding_width = canvas_width - new_width;
     const int padding_height = crop - new_height;
     if (padding_height >= 14 || padding_width / 14 != 10) {
-        std::cerr << "[trtmc] Phi-4 canonical vision engine requires 22 valid patch columns "
-                  << "in its second crop" << std::endl;
         return {};
     }
     return {new_width, new_height, true};
+}
+
+static runtime::adapters::io::DecodedImage
+canonicalize_phi4_hd_input(const runtime::adapters::io::DecodedImage& image, int crop) {
+    runtime::adapters::io::DecodedImage canonical;
+    if (image.empty()) {
+        return canonical;
+    }
+
+    // The static vision engine consumes 54 valid patch columns followed by ten
+    // padded columns: 32 columns in the left crop and 22 in the right crop.
+    const int content_width = crop + 22 * 14;
+    const int content_height = crop;
+    const float scale =
+        std::min(static_cast<float>(content_width) / static_cast<float>(image.width),
+                 static_cast<float>(content_height) / static_cast<float>(image.height));
+    const int resized_width =
+        std::max(1, std::min(content_width, static_cast<int>(std::lround(image.width * scale))));
+    const int resized_height =
+        std::max(1, std::min(content_height, static_cast<int>(std::lround(image.height * scale))));
+    std::vector<unsigned char> resized(static_cast<std::size_t>(resized_width) * resized_height *
+                                       3);
+    if (stbir_resize(image.pixels.data(), image.width, image.height, image.width * 3,
+                     resized.data(), resized_width, resized_height, resized_width * 3, STBIR_RGB,
+                     STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, STBIR_FILTER_TRIANGLE) == nullptr) {
+        return canonical;
+    }
+
+    canonical.width = content_width;
+    canonical.height = content_height;
+    canonical.channels = 3;
+    canonical.pixels.assign(static_cast<std::size_t>(content_width) * content_height * 3, 255);
+    const int x_offset = (content_width - resized_width) / 2;
+    const int y_offset = (content_height - resized_height) / 2;
+    for (int y = 0; y < resized_height; ++y) {
+        const auto* source = resized.data() + static_cast<std::size_t>(y) * resized_width * 3;
+        auto* destination = canonical.pixels.data() +
+                            (static_cast<std::size_t>(y + y_offset) * content_width + x_offset) * 3;
+        std::memcpy(destination, source, static_cast<std::size_t>(resized_width) * 3);
+    }
+    return canonical;
 }
 
 static bool normalize_phi4_hd_crops(const std::vector<unsigned char>& global,
@@ -340,15 +377,28 @@ static LoadedImage load_phi4_hd_normalize(const runtime::adapters::io::DecodedIm
         return loaded;
     }
 
-    const auto geometry = resolve_phi4_hd_resize_geometry(image, crop);
+    const runtime::adapters::io::DecodedImage* source = &image;
+    auto canonical = runtime::adapters::io::DecodedImage{};
+    auto geometry = resolve_phi4_hd_resize_geometry(*source, crop);
     if (!geometry.ok) {
-        return loaded;
+        canonical = canonicalize_phi4_hd_input(image, crop);
+        geometry = resolve_phi4_hd_resize_geometry(canonical, crop);
+        if (!geometry.ok) {
+            std::cerr << "[trtmc] Failed to canonicalize Phi-4 image to the static "
+                         "2x1 Dynamic-HD profile"
+                      << std::endl;
+            return loaded;
+        }
+        source = &canonical;
+        std::cerr << "[trtmc] Canonicalized Phi-4 image from " << image.width << "x" << image.height
+                  << " to " << canonical.width << "x" << canonical.height
+                  << " for the static 2x1 Dynamic-HD profile" << std::endl;
     }
     const int new_width = geometry.width;
     const int new_height = geometry.height;
 
     std::vector<unsigned char> resized(static_cast<std::size_t>(new_width) * new_height * 3);
-    if (stbir_resize(image.pixels.data(), image.width, image.height, image.width * 3,
+    if (stbir_resize(source->pixels.data(), source->width, source->height, source->width * 3,
                      resized.data(), new_width, new_height, new_width * 3, STBIR_RGB,
                      STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, STBIR_FILTER_TRIANGLE) == nullptr) {
         std::cerr << "[trtmc] Failed to resize Phi-4 Dynamic-HD image" << std::endl;

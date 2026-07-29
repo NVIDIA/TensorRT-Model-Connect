@@ -1040,10 +1040,6 @@ def _preprocess_phi4_hd_chw(
     width, height = image.size
     crop_cols = math.ceil(width / fixed_image_size)
     crop_rows = math.ceil(height / fixed_image_size)
-    if (crop_cols, crop_rows) != (2, 1):
-        raise ValueError(
-            "Phi-4 canonical vision engine supports a 2x1 Dynamic-HD crop "
-            f"topology, got {crop_cols}x{crop_rows} for {width}x{height}")
 
     target_width = crop_cols * fixed_image_size
     target_height = crop_rows * fixed_image_size
@@ -1058,10 +1054,28 @@ def _preprocess_phi4_hd_chw(
     padding_width = target_width - new_width
     padding_height = target_height - new_height
     invalid_patch_cols = math.floor(padding_width / 14)
-    if padding_height >= 14 or invalid_patch_cols != 10:
-        raise ValueError(
-            "Phi-4 canonical vision engine requires 22 valid patch columns "
-            f"in the second crop, got padding={padding_width}x{padding_height}")
+    if (
+        (crop_cols, crop_rows) != (2, 1)
+        or padding_height >= 14
+        or invalid_patch_cols != 10
+    ):
+        content_size = (fixed_image_size + 22 * 14, fixed_image_size)
+        image.thumbnail(content_size, Image.Resampling.BILINEAR)
+        canonical = Image.new("RGB", content_size, (255, 255, 255))
+        canonical.paste(
+            image,
+            (
+                (content_size[0] - image.width) // 2,
+                (content_size[1] - image.height) // 2,
+            ),
+        )
+        image = canonical
+        width, height = image.size
+        target_width = 2 * fixed_image_size
+        target_height = fixed_image_size
+        new_width, new_height = width, height
+        padding_width = target_width - new_width
+        padding_height = target_height - new_height
 
     image = image.resize((new_width, new_height), Image.BILINEAR)
     padded = Image.new("RGB", (target_width, target_height), (255, 255, 255))

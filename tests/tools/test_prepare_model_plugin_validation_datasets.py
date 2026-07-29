@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from PIL import Image
+
 from tools import prepare_model_plugin_validation_datasets as prepare
 
 
@@ -34,7 +36,11 @@ def _write_sources(tmp_path: Path) -> tuple[Path, Path, Path]:
     for index in range(5):
         image = mmmu.parent / "images" / f"sample-{index}.jpg"
         image.parent.mkdir(exist_ok=True)
-        image.write_bytes(f"image-{index}".encode())
+        Image.new(
+            "RGB",
+            (320 + index, 640 - index),
+            (index * 20, 100, 200),
+        ).save(image)
         rows.append(
             {
                 "id": f"sample-{index}",
@@ -110,3 +116,6 @@ def test_prepare_all_writes_eight_self_contained_datasets_and_hashes(
     manifest = json.loads((root / "dataset_manifest.json").read_text(encoding="utf-8"))
     assert manifest["file_count"] == len(manifest["files"])
     assert all(prepare.sha256(root / item["path"]) == item["sha256"] for item in manifest["files"])
+    phi4_images = sorted((root / "phi4-multimodal/images").glob("*.png"))
+    assert len(phi4_images) == 5
+    assert {Image.open(path).size for path in phi4_images} == {(756, 448)}

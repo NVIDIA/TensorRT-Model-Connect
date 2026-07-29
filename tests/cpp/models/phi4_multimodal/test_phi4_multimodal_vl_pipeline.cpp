@@ -57,6 +57,25 @@ static void check(bool c, const char* n) {
 
 static trtmc::TrtLogger g_logger;
 
+static void test_phi4_hd_canonicalizes_square_image() {
+    trtmc::runtime::adapters::io::DecodedImage image;
+    image.width = 224;
+    image.height = 224;
+    image.channels = 3;
+    image.pixels.assign(224 * 224 * 3, 127);
+
+    trtmc::Phi4MultimodalPreprocessConfig config;
+    config.preprocessor_type = "phi4_hd_chw";
+    config.fixed_image_size = 448;
+    config.in_channels = 3;
+    auto result = trtmc::phi4_multimodal_preprocess_decoded_image(image, config);
+
+    check(result.ok, "phi4 hd: square image canonicalizes");
+    check(result.channels == 9, "phi4 hd: canonical crop channels");
+    check(result.pixel_values.size() == static_cast<std::size_t>(9 * 448 * 448),
+          "phi4 hd: canonical tensor size");
+}
+
 struct CountingTextStats {
     int32_t calls{0};
     std::unordered_map<std::string, std::vector<int64_t>> shapes;
@@ -798,6 +817,7 @@ static void test_vl_generate_with_tokenizer() {
 }
 
 int main() {
+    test_phi4_hd_canonicalizes_square_image();
     test_vl_text_only();
     test_vl_text_only_max_tokens();
     test_vl_validates_decoder();

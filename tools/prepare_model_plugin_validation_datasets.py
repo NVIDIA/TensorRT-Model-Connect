@@ -45,6 +45,27 @@ def copy_asset(source: Path, destination: Path) -> Path:
     return destination
 
 
+def canonicalize_phi4_image(source: Path, destination: Path) -> Path:
+    """Letterbox one image to Phi-4's static 2x1 Dynamic-HD content region."""
+    from PIL import Image
+
+    content_size = (756, 448)
+    with Image.open(source) as raw:
+        image = raw.convert("RGB")
+        image.thumbnail(content_size, Image.Resampling.BILINEAR)
+        canonical = Image.new("RGB", content_size, (255, 255, 255))
+        canonical.paste(
+            image,
+            (
+                (content_size[0] - image.width) // 2,
+                (content_size[1] - image.height) // 2,
+            ),
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    canonical.save(destination, format="PNG")
+    return destination
+
+
 def dataset_payload(
     *,
     name: str,
@@ -270,8 +291,8 @@ def prepare_phi4(mmmu_source: Path, root: Path, *, limit: int = 5) -> Path:
             continue
         image_value, prompt = _mmmu_image_and_prompt(row)
         source_image = _resolve_mmmu_image(mmmu_source, image_value)
-        image_relative = Path("images") / f"{source_index:06d}_{source_image.name}"
-        copy_asset(source_image, directory / image_relative)
+        image_relative = Path("images") / f"{source_index:06d}_{source_image.stem}.png"
+        canonicalize_phi4_image(source_image, directory / image_relative)
         requests.append(
             {
                 "sample_id": f"phi4_mmmu_{source_index:06d}",
@@ -296,7 +317,11 @@ def prepare_phi4(mmmu_source: Path, root: Path, *, limit: int = 5) -> Path:
         dataset_payload(
             name="Phi-4 Multimodal MMMU-Pro Vision fixed parity slice",
             source=f"{MMMU_SOURCE}; sha256={sha256(mmmu_source)}",
-            sampling=f"first row from each of the first {limit} distinct subjects",
+            sampling=(
+                f"first row from each of the first {limit} distinct subjects; "
+                "images are content-preserving letterboxed to the model's "
+                "756x448 static Dynamic-HD profile"
+            ),
             requests=requests,
         ),
     )
