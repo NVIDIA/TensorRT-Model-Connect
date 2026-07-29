@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import ModelConfig
+from .config import ModelConfig, resolve_attention_contract
 from .weights import (
     WeightDict,
     _open_safetensors,
@@ -179,17 +179,10 @@ class ModernbertPlugin:
         else:
             raise ValueError(f"Unsupported ModernBERT precision: {precision}")
 
-        # Per-layer RoPE theta from layer_types
-        layer_types = config.raw.get("layer_types", [])
-        rope_params = config.raw.get("rope_parameters", {})
-        # Default theta values
-        full_theta = 160000.0
-        sliding_theta = 10000.0
-        if rope_params:
-            if "full_attention" in rope_params and rope_params["full_attention"]:
-                full_theta = rope_params["full_attention"].get("rope_theta", 160000.0)
-            if "sliding_attention" in rope_params and rope_params["sliding_attention"]:
-                sliding_theta = rope_params["sliding_attention"].get("rope_theta", 10000.0)
+        attention_contract = resolve_attention_contract(config)
+        layer_types = attention_contract.layer_types
+        full_theta = attention_contract.full_rope_theta
+        sliding_theta = attention_contract.sliding_rope_theta
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
@@ -253,14 +246,11 @@ class ModernbertPlugin:
             prefix = f"layer.{layer_idx}"
 
             # Determine RoPE theta for this layer
-            if layer_idx < len(layer_types):
-                lt = layer_types[layer_idx]
-                if lt in ("full_attention", "global_attention"):
-                    theta = full_theta
-                else:
-                    theta = sliding_theta
-            else:
+            lt = layer_types[layer_idx]
+            if lt in ("full_attention", "global_attention"):
                 theta = full_theta
+            else:
+                theta = sliding_theta
             cos_table, sin_table = rope_tables[theta]
 
             # Pre-norm attention

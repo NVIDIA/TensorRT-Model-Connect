@@ -32,7 +32,7 @@
       "reference_family": "encoder_base_features",
       "user_contract": "representation_parity",
       "ci_tier": "multi_device",
-      "prompt": "The capital of France is Paris.",
+      "prompt": "A man is slicing open a fish.",
       "max_new_tokens": 1,
       "preflight_requirements": [
         {

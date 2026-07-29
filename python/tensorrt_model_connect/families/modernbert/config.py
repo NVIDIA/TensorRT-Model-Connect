@@ -10,6 +10,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+@dataclass(frozen=True)
+class AttentionContract:
+    """Resolved per-layer attention and RoPE settings."""
+
+    layer_types: tuple[str, ...]
+    full_rope_theta: float
+    sliding_rope_theta: float
+
+
 @dataclass
 class ModelConfig:
     """Parsed model architecture from HF config.json."""
@@ -237,3 +246,82 @@ class ModelConfig:
         if config_path.exists():
             return ModelConfig.from_json(config_path.read_text())
         return ModelConfig.from_json(config_path.read_text())
+
+
+def resolve_attention_contract(config: ModelConfig) -> AttentionContract:
+    """Resolve both current and legacy ModernBERT attention config layouts.
+
+    Newer Transformers configs materialize ``layer_types`` and
+    ``rope_parameters``.  Released ModernBERT checkpoints instead store the
+    equivalent contract as ``global_attn_every_n_layers`` plus separate global
+    and local RoPE theta values.  Model Connect reads the checkpoint JSON
+    directly, so it must perform the same normalization explicitly.
+    """
+
+    raw = config.raw
+    raw_layer_types = raw.get("layer_types")
+    if isinstance(raw_layer_types, list) and raw_layer_types:
+        if len(raw_layer_types) != config.num_hidden_layers:
+            raise ValueError(
+                "ModernBERT layer_types must contain one entry per hidden layer "
+                f"({len(raw_layer_types)} vs {config.num_hidden_layers})"
+            )
+        layer_types = tuple(str(layer_type) for layer_type in raw_layer_types)
+    else:
+        global_interval = raw.get("global_attn_every_n_layers")
+        if global_interval is None:
+            layer_types = ("full_attention",) * config.num_hidden_layers
+        else:
+            global_interval = int(global_interval)
+            if global_interval <= 0:
+                raise ValueError(
+                    "ModernBERT global_attn_every_n_layers must be positive"
+                )
+            layer_types = tuple(
+                "full_attention"
+                if layer_idx % global_interval == 0
+                else "sliding_attention"
+                for layer_idx in range(config.num_hidden_layers)
+            )
+
+    rope_parameters = raw.get("rope_parameters")
+    rope_parameters = (
+        rope_parameters if isinstance(rope_parameters, dict) else {}
+    )
+    full_parameters = rope_parameters.get("full_attention")
+    sliding_parameters = rope_parameters.get("sliding_attention")
+    full_parameters = (
+        full_parameters if isinstance(full_parameters, dict) else {}
+    )
+    sliding_parameters = (
+        sliding_parameters if isinstance(sliding_parameters, dict) else {}
+    )
+    full_rope_theta = float(
+        full_parameters.get(
+            "rope_theta", raw.get("global_rope_theta", 160000.0)
+        )
+    )
+    sliding_rope_theta = float(
+        sliding_parameters.get(
+            "rope_theta", raw.get("local_rope_theta", 10000.0)
+        )
+    )
+
+    valid_layer_types = {
+        "full_attention",
+        "global_attention",
+        "sliding_attention",
+        "local_attention",
+    }
+    invalid_layer_types = sorted(set(layer_types) - valid_layer_types)
+    if invalid_layer_types:
+        raise ValueError(
+            "Unsupported ModernBERT layer_types: "
+            + ", ".join(invalid_layer_types)
+        )
+
+    return AttentionContract(
+        layer_types=layer_types,
+        full_rope_theta=full_rope_theta,
+        sliding_rope_theta=sliding_rope_theta,
+    )

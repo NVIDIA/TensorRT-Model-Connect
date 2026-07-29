@@ -12,7 +12,7 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from . import model as graph_ops
-from ..config import ModelConfig
+from ..config import ModelConfig, resolve_attention_contract
 from ....parallel_config import add_all_reduce_sum, normalize_parallel_config
 
 trt = trt_compat.get_trt()
@@ -129,15 +129,10 @@ def build_tp_modernbert_engine(
     eps = config.raw.get("norm_eps", config.rms_norm_eps)
     max_seq = max_seq_length
 
-    layer_types = config.raw.get("layer_types", [])
-    rope_params = config.raw.get("rope_parameters", {})
-    full_theta = 160000.0
-    sliding_theta = 10000.0
-    if rope_params:
-        if "full_attention" in rope_params and rope_params["full_attention"]:
-            full_theta = rope_params["full_attention"].get("rope_theta", 160000.0)
-        if "sliding_attention" in rope_params and rope_params["sliding_attention"]:
-            sliding_theta = rope_params["sliding_attention"].get("rope_theta", 10000.0)
+    attention_contract = resolve_attention_contract(config)
+    layer_types = attention_contract.layer_types
+    full_theta = attention_contract.full_rope_theta
+    sliding_theta = attention_contract.sliding_rope_theta
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -188,11 +183,12 @@ def build_tp_modernbert_engine(
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"
 
-        if layer_idx < len(layer_types):
-            lt = layer_types[layer_idx]
-            theta = full_theta if lt in ("full_attention", "global_attention") else sliding_theta
-        else:
-            theta = full_theta
+        lt = layer_types[layer_idx]
+        theta = (
+            full_theta
+            if lt in ("full_attention", "global_attention")
+            else sliding_theta
+        )
         cos_table, sin_table = rope_tables[theta]
 
         if f"{prefix}.attn_norm" in weights:
