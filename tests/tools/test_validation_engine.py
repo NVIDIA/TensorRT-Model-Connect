@@ -7873,6 +7873,85 @@ def test_diffusion_text_hf_parity_uses_token_agreement_only() -> None:
     assert "text_ned" not in result["samples"][0]
 
 
+def test_gpt2_generation_metrics_pin_the_offline_scorer_revision(
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeTokenizer:
+        @classmethod
+        def from_pretrained(cls, model_id, **kwargs):
+            calls.append((f"tokenizer:{model_id}", kwargs))
+            return cls()
+
+    class FakeModel:
+        config = SimpleNamespace(n_positions=1024)
+
+        @classmethod
+        def from_pretrained(cls, model_id, **kwargs):
+            calls.append((f"model:{model_id}", kwargs))
+            return cls()
+
+        def to(self, _device):
+            return self
+
+        def eval(self):
+            return None
+
+    class NoGrad:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(
+            cuda=SimpleNamespace(is_available=lambda: False),
+            float16="float16",
+            float32="float32",
+            no_grad=NoGrad,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(
+            AutoModelForCausalLM=FakeModel,
+            AutoTokenizer=FakeTokenizer,
+        ),
+    )
+
+    result = task_eval.compute_gpt2_generation_metrics(
+        [],
+        model_id="openai-community/gpt2-large",
+        model_revision="32b71b12589c2f8d625668d2335a01cac3249519",
+        device="cpu",
+        local_files_only=True,
+    )
+
+    assert result["generation_ppl"] == float("inf")
+    assert calls == [
+        (
+            "tokenizer:openai-community/gpt2-large",
+            {
+                "revision": "32b71b12589c2f8d625668d2335a01cac3249519",
+                "local_files_only": True,
+            },
+        ),
+        (
+            "model:openai-community/gpt2-large",
+            {
+                "revision": "32b71b12589c2f8d625668d2335a01cac3249519",
+                "torch_dtype": "float32",
+                "local_files_only": True,
+            },
+        ),
+    ]
+
+
 def test_diffusion_text_shared_inputs_match_through_reference_cache_symlink(
     tmp_path: Path,
 ) -> None:

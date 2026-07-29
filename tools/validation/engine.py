@@ -4873,6 +4873,7 @@ def compute_gpt2_generation_metrics(
     texts: list[str],
     *,
     model_id: str,
+    model_revision: str | None = None,
     device: str = "cuda",
     local_files_only: bool = False,
 ) -> dict[str, float]:
@@ -4883,9 +4884,14 @@ def compute_gpt2_generation_metrics(
         raise RuntimeError("GPT-2 generation perplexity requires torch and transformers") from exc
     resolved_device = device if device != "cuda" or torch.cuda.is_available() else "cpu"
     dtype = torch.float16 if resolved_device.startswith("cuda") else torch.float32
-    tokenizer = AutoTokenizer.from_pretrained(model_id, local_files_only=local_files_only)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_id,
+        revision=model_revision,
+        local_files_only=local_files_only,
+    )
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
+        revision=model_revision,
         torch_dtype=dtype,
         local_files_only=local_files_only,
     ).to(resolved_device)
@@ -11428,6 +11434,10 @@ def eval_one_model(
                 metrics = compute_gpt2_generation_metrics(
                     texts,
                     model_id=perplexity_model,
+                    model_revision=str(
+                        scoring.get("perplexity_model_revision", "") or ""
+                    )
+                    or None,
                     device=str(scoring.get("perplexity_device", "cuda") or "cuda"),
                     local_files_only=args.local_files_only,
                 )
@@ -11471,6 +11481,10 @@ def eval_one_model(
                 generation_metrics = compute_gpt2_generation_metrics(
                     [str(row.get("output_text", "")) for row in bundle_data.get("responses", [])],
                     model_id=perplexity_model,
+                    model_revision=str(
+                        scoring.get("perplexity_model_revision", "") or ""
+                    )
+                    or None,
                     device=str(scoring.get("perplexity_device", "cuda") or "cuda"),
                     local_files_only=args.local_files_only,
                 )

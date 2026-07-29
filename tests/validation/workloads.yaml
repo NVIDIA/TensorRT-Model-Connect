@@ -1624,7 +1624,8 @@ suites:
     scoring:
       scorer: diffusion_text_parity
       task_metric: unconditional_text_quality
-      perplexity_model: gpt2-large
+      perplexity_model: openai-community/gpt2-large
+      perplexity_model_revision: 32b71b12589c2f8d625668d2335a01cac3249519
       perplexity_device: cuda
     gates:
       # The official PyTorch port allows <1 PPL sampling/numeric drift.
