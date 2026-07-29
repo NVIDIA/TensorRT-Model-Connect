@@ -2529,6 +2529,143 @@ def test_run_metadata_preserves_campaign_start_when_results_exist(
     assert metadata["duration_seconds"] is None
 
 
+def _build_identity_arguments(
+    tmp_path: Path,
+    *,
+    include_worker: bool = True,
+) -> argparse.Namespace:
+    build = tmp_path / "build"
+    models = build / "models"
+    models.mkdir(parents=True)
+    for name in (
+        "trtmc",
+        "trtmc_dataset_benchmark",
+        "libtrtmc_backend_trt.so",
+    ):
+        path = build / name
+        path.write_bytes(name.encode())
+        path.chmod(0o755)
+    if include_worker:
+        worker = build / "trtmc_benchmark_worker"
+        worker.write_bytes(b"worker")
+        worker.chmod(0o755)
+    return trtmc_validate.build_parser().parse_args(
+        [
+            "model-a",
+            "--trtmc-binary",
+            str(build / "trtmc"),
+            "--benchmark-binary",
+            str(build / "trtmc_dataset_benchmark"),
+            "--backend-dir",
+            str(build),
+            "--model-plugin-dir",
+            str(models),
+        ]
+    )
+
+
+def test_build_identity_preflight_accepts_exact_native_build(
+    monkeypatch,
+    tmp_path,
+):
+    arguments = _build_identity_arguments(tmp_path)
+    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: "tested-revision")
+    monkeypatch.setattr(
+        trtmc_validate,
+        "worker_metadata",
+        lambda _worker: {
+            "schema_version": "trtmc.benchmark-worker-metadata/v1",
+            "build": {
+                "configuration": "Release",
+                "source_revision": "tested-revision",
+            },
+        },
+    )
+
+    identity = trtmc_validate._validate_build_identity(arguments)
+
+    assert identity["source_revision"] == "tested-revision"
+    assert identity["embedded_source_revision"] == "tested-revision"
+    assert identity["build_configuration"] == "Release"
+    assert set(identity["artifacts"]) == {
+        "trtmc binary",
+        "dataset benchmark",
+        "benchmark worker",
+        "TensorRT backend",
+    }
+    assert all(
+        len(artifact["sha256"]) == 64
+        for artifact in identity["artifacts"].values()
+    )
+
+
+def test_build_identity_preflight_rejects_stale_native_build(
+    monkeypatch,
+    tmp_path,
+):
+    arguments = _build_identity_arguments(tmp_path)
+    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: "current-revision")
+    monkeypatch.setattr(
+        trtmc_validate,
+        "worker_metadata",
+        lambda _worker: {
+            "schema_version": "trtmc.benchmark-worker-metadata/v1",
+            "build": {
+                "configuration": "Release",
+                "source_revision": "stale-revision",
+            },
+        },
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="embedded stale-revision, expected current-revision",
+    ):
+        trtmc_validate._validate_build_identity(arguments)
+
+
+def test_build_identity_preflight_rejects_missing_worker(monkeypatch, tmp_path):
+    arguments = _build_identity_arguments(tmp_path, include_worker=False)
+    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: "tested-revision")
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="benchmark worker is missing",
+    ):
+        trtmc_validate._validate_build_identity(arguments)
+
+
+def test_build_identity_preflight_rejects_mixed_plugin_directory(
+    monkeypatch,
+    tmp_path,
+):
+    arguments = _build_identity_arguments(tmp_path)
+    mixed_plugins = tmp_path / "stale-build" / "models"
+    mixed_plugins.mkdir(parents=True)
+    arguments.model_plugin_dir = mixed_plugins
+    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: "tested-revision")
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="model plugin directory resolves .* outside",
+    ):
+        trtmc_validate._validate_build_identity(arguments)
+
+
+def test_build_identity_preflight_rejects_missing_source_revision(
+    monkeypatch,
+    tmp_path,
+):
+    arguments = _build_identity_arguments(tmp_path)
+    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: "")
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="cannot determine the validation source revision",
+    ):
+        trtmc_validate._validate_build_identity(arguments)
+
+
 def test_finalize_run_metadata_records_completion(monkeypatch, tmp_path):
     started_at = datetime(2026, 7, 25, 1, 2, 3, tzinfo=timezone.utc)
     finished_at = datetime(2026, 7, 25, 4, 4, 6, 500000, tzinfo=timezone.utc)

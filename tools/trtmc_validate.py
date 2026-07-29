@@ -12,6 +12,7 @@ import copy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import cache
+import hashlib
 import html
 import json
 import os
@@ -45,6 +46,7 @@ from tensorrt_model_connect.benchmark.task_adapters import (  # noqa: E402
     adapter_for_task_strategy,
 )
 from tensorrt_model_connect.benchmark.types import BenchmarkError  # noqa: E402
+from tensorrt_model_connect.benchmark.worker import worker_metadata  # noqa: E402
 from tools.reporting_html import (  # noqa: E402
     COMMON_REPORT_STYLES,
     TASK_TYPE_BY_USER_CONTRACT,
@@ -1491,6 +1493,130 @@ def _source_revision() -> str:
         text=True,
     )
     return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validate_build_identity(arguments: argparse.Namespace) -> dict[str, Any]:
+    """Fail before GPU work when source and native build provenance differ."""
+    expected_revision = _source_revision()
+    if not expected_revision:
+        raise ValidationError(
+            "cannot determine the validation source revision for build identity preflight"
+        )
+
+    benchmark_binary = arguments.benchmark_binary.expanduser().resolve()
+    build_root = benchmark_binary.parent
+    trtmc_binary = arguments.trtmc_binary.expanduser().resolve()
+    backend_dir = (
+        arguments.backend_dir.expanduser().resolve()
+        if arguments.backend_dir
+        else build_root
+    )
+    model_plugin_dir = (
+        arguments.model_plugin_dir.expanduser().resolve()
+        if arguments.model_plugin_dir
+        else build_root / "models"
+    )
+    worker = build_root / "trtmc_benchmark_worker"
+
+    expected_paths = {
+        "trtmc binary": build_root / "trtmc",
+        "dataset benchmark": build_root / "trtmc_dataset_benchmark",
+        "backend directory": build_root,
+        "model plugin directory": build_root / "models",
+    }
+    actual_paths = {
+        "trtmc binary": trtmc_binary,
+        "dataset benchmark": benchmark_binary,
+        "backend directory": backend_dir,
+        "model plugin directory": model_plugin_dir,
+    }
+    for label, expected in expected_paths.items():
+        actual = actual_paths[label]
+        if actual != expected.resolve():
+            raise ValidationError(
+                f"{label} resolves to {actual}, outside the benchmark worker "
+                f"build root {build_root}"
+            )
+
+    required_files = {
+        "trtmc binary": trtmc_binary,
+        "dataset benchmark": benchmark_binary,
+        "benchmark worker": worker,
+        "TensorRT backend": build_root / "libtrtmc_backend_trt.so",
+    }
+    for label, path in required_files.items():
+        if not path.is_file():
+            raise ValidationError(
+                f"{label} is missing for build identity preflight: {path}"
+            )
+    if not model_plugin_dir.is_dir():
+        raise ValidationError(
+            "model plugin directory is missing for build identity preflight: "
+            f"{model_plugin_dir}"
+        )
+
+    try:
+        metadata = worker_metadata(worker)
+    except BenchmarkError as exc:
+        raise ValidationError(
+            f"cannot verify benchmark worker build identity: {exc}"
+        ) from exc
+    build = metadata.get("build", {})
+    embedded_revision = str(build.get("source_revision", "") or "").strip()
+    configuration = str(build.get("configuration", "") or "").strip()
+    if not embedded_revision or embedded_revision == "unknown":
+        raise ValidationError(
+            "benchmark worker metadata is missing an embedded source revision"
+        )
+    if embedded_revision != expected_revision:
+        raise ValidationError(
+            "benchmark worker source revision mismatch: "
+            f"embedded {embedded_revision}, expected {expected_revision}"
+        )
+    if not configuration or configuration == "unknown":
+        raise ValidationError(
+            "benchmark worker metadata is missing its build configuration"
+        )
+
+    artifacts = {
+        label: {
+            "path": str(path),
+            "sha256": _sha256(path),
+        }
+        for label, path in required_files.items()
+    }
+    return {
+        "schema_version": "trtmc.validation-build-identity/v1",
+        "source_revision": expected_revision,
+        "embedded_source_revision": embedded_revision,
+        "build_configuration": configuration,
+        "build_root": str(build_root),
+        "backend_dir": str(backend_dir),
+        "model_plugin_dir": str(model_plugin_dir),
+        "artifacts": artifacts,
+    }
+
+
+def _write_build_identity(
+    output: Path,
+    identity: Mapping[str, Any],
+) -> Path:
+    """Persist the validated native-build receipt before model execution."""
+    output.mkdir(parents=True, exist_ok=True)
+    path = output / "build-identity.json"
+    path.write_text(
+        json.dumps(identity, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path
 
 
 def _utc_now() -> datetime:
@@ -3108,6 +3234,8 @@ def _main(arguments: argparse.Namespace) -> int:
         )
         return 0
     if not arguments.model_worker:
+        build_identity = _validate_build_identity(arguments)
+        _write_build_identity(arguments.output, build_identity)
         return _run_all_bindings(
             bindings,
             arguments=arguments,

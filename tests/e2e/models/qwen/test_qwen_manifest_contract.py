@@ -57,6 +57,7 @@ def test_qwen3_fp8_manifest_declares_hf_text_generation_contract(
 
 def test_fp8_and_topp_use_deterministic_mmlu_validation_contract() -> None:
     manifest_dir = Path(__file__).with_name("manifests")
+    fp8_e2e = load_manifest(manifest_dir / "qwen3-0.6b-fp8.json")
     topp_e2e = load_manifest(manifest_dir / "qwen3-0.6b-topp.json")
     models = {
         name: validation_catalog.manifest_record(manifest_dir / f"{name}.json")
@@ -75,7 +76,21 @@ def test_fp8_and_topp_use_deterministic_mmlu_validation_contract() -> None:
             True,
             "selected",
         )
-    assert models["qwen3-0.6b-fp8"]["task_eval"]["reference_precision"] == "bf16"
+    fp8 = models["qwen3-0.6b-fp8"]
+    assert fp8["precision"] == "fp16"
+    assert fp8["bundle"] == "qwen3-0.6b-fp8-fp16base.bundle"
+    assert fp8["task_eval"]["reference_precision"] == "fp16"
+    assert fp8["max_cache_length"] == 405
+    assert fp8_e2e.inputs["prompt"].startswith(
+        "The following are multiple choice questions (with answers) "
+        "about abstract algebra."
+    )
+    assert fp8_e2e.metadata["expected_answers"] == ["B"]
+    assert fp8_e2e.inputs["max_new_tokens"] == 1
+    assert fp8_e2e.metadata["contract_config"] == {
+        "use_chat_template": False,
+        "enable_thinking": False,
+    }
     assert set(models) < set(suite["default_model_names"])
     assert topp_e2e.reference_backend == "invariant_only"
     assert topp_e2e.reference_family == "sampling_top_p"

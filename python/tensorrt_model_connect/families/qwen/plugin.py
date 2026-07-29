@@ -173,9 +173,11 @@ class QwenPlugin:
         ]
         if format_name == "fp8":
             patterns.extend([
+                "layer.*.w_q",
+                "layer.*.w_k",
+                "layer.*.w_v",
                 "layer.*.w_o",
                 "layer.*.w_gate",
-                "layer.*.w_up",
                 "layer.*.w_down",
             ])
         return patterns

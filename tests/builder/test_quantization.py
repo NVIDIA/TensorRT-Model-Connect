@@ -9,9 +9,12 @@ Preconditions: Quantization formats (FP8, INT8, INT4, NVFP4, W4A8) are registere
 Postconditions: All formats are discoverable, scale maps survive JSON serialization, and formats expose wrap_matmul
 """
 import json
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
+from tensorrt_model_connect import trt_compat
 from tensorrt_model_connect.quantization import get_format, list_formats, QuantScaleMap, LayerScales
 from tensorrt_model_connect.quantization.plan import QuantPlan, canonicalize_quant_format
 from tensorrt_model_connect.quantization.formats import QuantFormat
@@ -99,6 +102,87 @@ class TestQuantFormatProtocol:
         for name in list_formats():
             fmt = get_format(name)
             assert hasattr(fmt, "wrap_conv2d"), f"{name} missing wrap_conv2d"
+
+
+class TestFP8MatmulPrecision:
+    def test_fp16_base_casts_scales_and_accumulates_in_fp32(self, monkeypatch):
+        class FakeTensor:
+            def __init__(self, dtype):
+                self.dtype = dtype
+
+        class FakeLayer:
+            def __init__(self, output):
+                self.output = output
+
+            def get_output(self, index):
+                assert index == 0
+                return self.output
+
+        trt = SimpleNamespace(
+            float16="fp16",
+            float32="fp32",
+            fp8="fp8",
+            MatrixOperation=SimpleNamespace(NONE="none"),
+        )
+        quantize_dtypes = []
+        dequantize_dtypes = []
+        matmul_dtypes = []
+        cast_dtypes = []
+
+        class FakeNetwork:
+            def add_quantize(self, tensor, scale, dtype):
+                assert dtype == trt.fp8
+                quantize_dtypes.append((tensor.dtype, scale.dtype, dtype))
+                return FakeLayer(FakeTensor(dtype))
+
+            def add_dequantize(self, tensor, scale, dtype):
+                dequantize_dtypes.append((tensor.dtype, scale.dtype, dtype))
+                return FakeLayer(FakeTensor(dtype))
+
+            def add_matrix_multiply(self, lhs, lhs_op, rhs, rhs_op):
+                assert lhs_op == rhs_op == trt.MatrixOperation.NONE
+                matmul_dtypes.append((lhs.dtype, rhs.dtype))
+                return FakeLayer(FakeTensor(lhs.dtype))
+
+            def add_cast(self, tensor, dtype):
+                cast_dtypes.append((tensor.dtype, dtype))
+                return FakeLayer(FakeTensor(dtype))
+
+        class FakeGraphOps:
+            @staticmethod
+            def add_constant(network, shape, values, *, dtype):
+                del network, shape, values
+                return FakeTensor(
+                    trt.float16 if dtype == np.float16 else trt.float32
+                )
+
+        monkeypatch.setattr(trt_compat, "get_trt", lambda: trt)
+        result = get_format("fp8").wrap_matmul(
+            FakeNetwork(),
+            FakeTensor(trt.float16),
+            np.ones((2, 3), dtype=np.float16),
+            LayerScales(input_scale=0.25, weight_scale=0.5),
+            lhs_width=2,
+            rhs_width=3,
+            dtype=np.float16,
+            graph_ops=FakeGraphOps,
+        )
+
+        assert quantize_dtypes == [
+            (trt.float16, trt.float16, trt.fp8),
+            (trt.float16, trt.float16, trt.fp8),
+        ]
+        assert dequantize_dtypes == [
+            (trt.fp8, trt.float32, trt.float32),
+            (trt.fp8, trt.float32, trt.float32),
+        ]
+        assert matmul_dtypes == [(trt.float32, trt.float32)]
+        assert cast_dtypes == [
+            (trt.float32, trt.float16),
+            (trt.float32, trt.float16),
+            (trt.float32, trt.float16),
+        ]
+        assert result.dtype == trt.float16
 
 
 class TestQuantContextGraphOpsOwnership:
