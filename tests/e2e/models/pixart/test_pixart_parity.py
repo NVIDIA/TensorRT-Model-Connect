@@ -101,6 +101,10 @@ def test_hf_reference_consumes_and_reports_shared_initial_latent(
     script = captured["cmd"][2]
     assert "latents=initial_latents" in script
     assert "partiprompts_000001.seed-44.1024x1024.f32" in script
+    assert "T5EncoderModel.from_pretrained" in script
+    assert "text_encoder=text_encoder" in script
+    assert "torch_dtype=torch.float16" in script
+    assert 'device="cuda", dtype=torch.float16' in script
     assert output.data["initial_latents_sha256"]
 
 

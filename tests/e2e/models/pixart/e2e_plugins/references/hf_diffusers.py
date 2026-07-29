@@ -158,7 +158,7 @@ if raw_latents.size != expected_size:
         f"expected {{expected_shape}} = {{expected_size}}"
     )
 initial_latents = torch.from_numpy(raw_latents.reshape(expected_shape)).to(
-    device="cuda", dtype=torch.float32)
+    device="cuda", dtype=torch.float16)
 """
             generation_input = "latents=initial_latents,"
         else:
@@ -179,10 +179,20 @@ import numpy as np
 from PIL import Image
 import os
 import transformers
+from transformers import T5EncoderModel
 from diffusers import PixArtSigmaPipeline
 
 transformers.logging.set_verbosity_error()
-pipe = PixArtSigmaPipeline.from_pretrained({model_ref!r}, torch_dtype=torch.float32)
+text_encoder = T5EncoderModel.from_pretrained(
+    {model_ref!r},
+    subfolder="text_encoder",
+    torch_dtype=torch.float32,
+)
+pipe = PixArtSigmaPipeline.from_pretrained(
+    {model_ref!r},
+    text_encoder=text_encoder,
+    torch_dtype=torch.float16,
+)
 pipe.to("cuda")
 {latent_setup}
 output = pipe(
