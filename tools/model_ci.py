@@ -165,6 +165,7 @@ UNIT_TEST_ONLY_EXACT = frozenset(
 FULL_UNIT_TEST_ONLY_EXACT = frozenset(
     {
         "tools/elf_hf_reference.py",
+        "tools/model_ci.py",
         "tools/prepare_elf_task_eval_datasets.py",
         "tools/prepare_media_task_eval_datasets.py",
         "tools/task_eval.py",
@@ -276,6 +277,15 @@ class DiffEntry:
     status: str
     old_path: str | None
     new_path: str | None
+
+
+@dataclass(frozen=True)
+class ModelOwnedImpactRule:
+    owner: str
+    name: str
+    path: str
+    allowed_tokens: tuple[str, ...]
+    changed_lines_sha256: str
 
 
 def _run_git(repo_root: Path, args: Sequence[str], *, text: bool = False):
@@ -618,6 +628,166 @@ def _owner_for_path(path: str, catalog: OwnershipCatalog) -> tuple[str | None, b
     return (unique[0] if unique else None), under_model_root
 
 
+def _normalize_diff_line(line: str) -> str:
+    return re.sub(r"[-\s]+", "_", line.lower())
+
+
+def _significant_diff_lines(diff_text: str) -> tuple[str, ...]:
+    lines: list[str] = []
+    for raw_line in diff_text.splitlines():
+        if raw_line.startswith(("diff --git", "index ", "@@", "---", "+++")):
+            continue
+        if not raw_line.startswith(("+", "-")):
+            continue
+        content = raw_line[1:]
+        if not content.strip():
+            continue
+        lines.append(content)
+    return tuple(lines)
+
+
+def _model_owned_impact_rules(
+    repo_root: Path,
+    catalog: OwnershipCatalog,
+) -> tuple[ModelOwnedImpactRule, ...]:
+    rules: list[ModelOwnedImpactRule] = []
+    catalog_paths = {entry.path for entry in catalog.entries}
+    suffix = "/impact_diff_rules.json"
+    prefix = "tests/e2e/models/"
+    for entry in catalog.entries:
+        if not entry.path.startswith(prefix) or not entry.path.endswith(suffix):
+            continue
+        owner, under_model_root = _owner_for_path(entry.path, catalog)
+        if owner is None or not under_model_root:
+            raise ModelCIError(
+                f"impact rule file has no model owner: {entry.path}"
+            )
+        try:
+            payload = json.loads(_read_blob(repo_root, entry.object_id))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ModelCIError(f"invalid model impact rules: {entry.path}") from exc
+        if not isinstance(payload, list):
+            raise ModelCIError(
+                f"model impact rules must be a JSON list: {entry.path}"
+            )
+        for index, raw_rule in enumerate(payload, start=1):
+            if not isinstance(raw_rule, dict):
+                raise ModelCIError(
+                    f"model impact rule must be an object: {entry.path}:{index}"
+                )
+            name = raw_rule.get("name")
+            path = raw_rule.get("path")
+            allowed_tokens = raw_rule.get("allowed_tokens")
+            scope = raw_rule.get("scope")
+            if not (
+                isinstance(name, str)
+                and name
+                and isinstance(path, str)
+                and path
+                and isinstance(allowed_tokens, list)
+                and allowed_tokens
+                and isinstance(scope, dict)
+            ):
+                raise ModelCIError(
+                    "model impact rule requires non-empty name, path, "
+                    f"allowed_tokens, and object scope: {entry.path}:{index}"
+                )
+            if not all(
+                isinstance(token, str) and _normalize_diff_line(token)
+                for token in allowed_tokens
+            ):
+                raise ModelCIError(
+                    "model impact rule allowed_tokens must be non-empty strings: "
+                    f"{entry.path}:{index}"
+                )
+            _validate_git_path(path)
+            if scope != {"owner_family": True}:
+                continue
+            changed_lines_sha256 = raw_rule.get(
+                "model_ci_changed_lines_sha256"
+            )
+            if not isinstance(changed_lines_sha256, str) or re.fullmatch(
+                r"[0-9a-f]{64}",
+                changed_lines_sha256,
+            ) is None:
+                continue
+            target_owner, under_model_root = _owner_for_path(path, catalog)
+            if target_owner is not None or under_model_root:
+                raise ModelCIError(
+                    "model impact rule target must be a shared path: "
+                    f"{entry.path}:{index}: {path}"
+                )
+            if path not in catalog_paths:
+                raise ModelCIError(
+                    "model impact rule target is absent from the revision: "
+                    f"{entry.path}:{index}: {path}"
+                )
+            rules.append(
+                ModelOwnedImpactRule(
+                    owner=owner,
+                    name=name,
+                    path=path,
+                    allowed_tokens=tuple(
+                        _normalize_diff_line(token) for token in allowed_tokens
+                    ),
+                    changed_lines_sha256=changed_lines_sha256,
+                )
+            )
+    return tuple(rules)
+
+
+def _refined_impact_rule(
+    repo_root: Path,
+    base: str,
+    head: str,
+    change: DiffEntry,
+    rules: Sequence[ModelOwnedImpactRule],
+) -> ModelOwnedImpactRule | None:
+    if (
+        change.status != "M"
+        or change.old_path is None
+        or change.new_path != change.old_path
+    ):
+        return None
+    path = change.new_path
+    matching_path_rules = [rule for rule in rules if rule.path == path]
+    if not matching_path_rules:
+        return None
+    diff_text = str(
+        _run_git(
+            repo_root,
+            [
+                "diff",
+                "--no-ext-diff",
+                "--no-color",
+                "--unified=0",
+                base,
+                head,
+                "--",
+                path,
+            ],
+            text=True,
+        )
+    )
+    lines = _significant_diff_lines(diff_text)
+    if not lines:
+        return None
+    normalized_lines = tuple(_normalize_diff_line(line) for line in lines)
+    digest = hashlib.sha256(
+        "\n".join(lines).encode("utf-8")
+    ).hexdigest()
+    matches = [
+        rule
+        for rule in matching_path_rules
+        if rule.changed_lines_sha256 == digest
+        and all(
+            any(token in line for token in rule.allowed_tokens)
+            for line in normalized_lines
+        )
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
 def _is_legal_or_docs(path: str) -> bool:
     return (
         path in LEGAL_OR_DOC_EXACT
@@ -957,6 +1127,7 @@ def calculate_impact(
         allow_legacy_device_tier=True,
     )
     head_catalog = discover_catalog(repo_root, head, allow_legacy_shared_runtime=True)
+    impact_rules = _model_owned_impact_rules(repo_root, head_catalog)
     affected: set[str] = set()
     fallback_selected: set[str] = set()
     broad_change = False
@@ -968,6 +1139,13 @@ def calculate_impact(
     )
     serialized_changes: list[dict[str, object]] = []
     for change in _diff_entries(repo_root, comparison_base, head_sha):
+        refined_rule = _refined_impact_rule(
+            repo_root,
+            comparison_base,
+            head_sha,
+            change,
+            impact_rules,
+        )
         classifications: list[dict[str, str]] = []
         path_catalogs = (
             (change.old_path, base_catalog),
@@ -981,9 +1159,18 @@ def calculate_impact(
             kind, owner = _classify_path(path, catalog)
             if path == "pyproject.toml" and pyproject_task_eval_only:
                 kind = "unit_tests"
+            if (
+                refined_rule is not None
+                and owner is None
+                and kind in {"platform", "ci_tooling", "unknown"}
+            ):
+                kind = "model"
+                owner = refined_rule.owner
             item = {"path": path, "kind": kind}
             if owner is not None:
                 item["model"] = owner
+                if refined_rule is not None and owner == refined_rule.owner:
+                    item["impact_rule"] = refined_rule.name
                 affected.add(owner)
                 unit_scope = _merge_unit_scope(unit_scope, "builder")
             elif kind == "unit_builder":

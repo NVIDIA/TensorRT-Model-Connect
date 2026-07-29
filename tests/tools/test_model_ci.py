@@ -39,6 +39,10 @@ def _commit(repo: Path, message: str) -> str:
     return _git(repo, "rev-parse", "HEAD")
 
 
+def _changed_lines_digest(*lines: str) -> str:
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
 def _add_model(
     repo: Path,
     logical_id: str,
@@ -163,6 +167,11 @@ def _make_repo(
         "tools/reference/transformers_vlm.py",
     ):
         _write(repo, reference_runner, "# task-eval reference runner\n")
+    _write(
+        repo,
+        "tools/reference/transformers_encoder.py",
+        'requested_dtype = "auto"\n',
+    )
     _write(repo, "tools/test_impact.py", "# shared impact analyzer\n")
     _write(repo, "tools/task_eval.py", "# task-eval runner\n")
     _write(repo, "tools/trtmc_reference.py", "# task-eval reference runner\n")
@@ -708,7 +717,6 @@ def test_runtime_cli_changes_run_model_fallback(tmp_path: Path, path: str) -> No
         "CMakeLists.txt",
         ".github/workflows/trtmc-ci.yml",
         "src/runtime/providers/optimized_runtime_host.cpp",
-        "tools/model_ci.py",
         "new_platform/implementation.py",
     ),
 )
@@ -750,6 +758,342 @@ def test_mixed_model_and_broad_change_keeps_direct_model_plus_fallback(
     }
     assert result["run_unit_tests"] is True
     assert result["unit_scope"] == "all"
+
+
+def test_model_ci_changes_run_full_units_without_gpu_fallback(
+    tmp_path: Path,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(repo, "tools/model_ci.py", "# changed selective impact analyzer\n")
+    head = _commit(repo, "model CI change")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "unit"
+    assert result["affected_models"] == []
+    assert result["fallback_models"] == []
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "all"
+
+
+def test_model_owned_digest_rule_narrows_exact_shared_diff(
+    tmp_path: Path,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    changed_lines = (
+        'requested_dtype = "auto"',
+        'requested_dtype = "float16"',
+        'model_type = "xlnet"',
+        "model.to(dtype=requested_dtype)",
+    )
+    _write(
+        repo,
+        "tools/reference/transformers_encoder.py",
+        "\n".join(changed_lines[1:]) + "\n",
+    )
+    _write(
+        repo,
+        "tests/e2e/models/model_b/impact_diff_rules.json",
+        json.dumps(
+            [
+                {
+                    "name": "model_b_reference_dtype",
+                    "path": "tools/reference/transformers_encoder.py",
+                    "scope": {"owner_family": True},
+                    "allowed_tokens": [
+                        "requested_dtype",
+                        "model_type",
+                        "model.to",
+                    ],
+                    "model_ci_changed_lines_sha256": _changed_lines_digest(
+                        *changed_lines
+                    ),
+                }
+            ]
+        )
+        + "\n",
+    )
+    head = _commit(repo, "model-owned shared reference change")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "models"
+    assert result["affected_models"] == ["model_b"]
+    assert result["direct_models"] == ["model_b"]
+    assert result["fallback_models"] == []
+    assert result["unit_scope"] == "builder"
+    assert any(
+        classification.get("impact_rule") == "model_b_reference_dtype"
+        for change in result["changes"]
+        for classification in change["classifications"]
+    )
+
+
+def test_model_owned_digest_rule_falls_back_on_extra_shared_change(
+    tmp_path: Path,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    declared_lines = (
+        'requested_dtype = "auto"',
+        'requested_dtype = "float16"',
+        'model_type = "xlnet"',
+        "model.to(dtype=requested_dtype)",
+    )
+    _write(
+        repo,
+        "tools/reference/transformers_encoder.py",
+        "\n".join((*declared_lines[1:], "unrelated_runtime_change = True"))
+        + "\n",
+    )
+    _write(
+        repo,
+        "tests/e2e/models/model_b/impact_diff_rules.json",
+        json.dumps(
+            [
+                {
+                    "name": "model_b_reference_dtype",
+                    "path": "tools/reference/transformers_encoder.py",
+                    "scope": {"owner_family": True},
+                    "allowed_tokens": [
+                        "requested_dtype",
+                        "model_type",
+                        "model.to",
+                    ],
+                    "model_ci_changed_lines_sha256": _changed_lines_digest(
+                        *declared_lines
+                    ),
+                }
+            ]
+        )
+        + "\n",
+    )
+    head = _commit(repo, "mixed shared reference change")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "fallback"
+    assert result["affected_models"] == ["model_a", "model_b"]
+    assert result["direct_models"] == ["model_b"]
+    assert result["fallback_models"] == ["model_a"]
+    assert not any(
+        classification.get("impact_rule") == "model_b_reference_dtype"
+        for change in result["changes"]
+        for classification in change["classifications"]
+    )
+
+
+def test_model_owned_digest_rule_falls_back_when_rule_is_missing(
+    tmp_path: Path,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(
+        repo,
+        "tools/reference/transformers_encoder.py",
+        'requested_dtype = "float16"\n'
+        'model_type = "xlnet"\n'
+        "model.to(dtype=requested_dtype)\n",
+    )
+    head = _commit(repo, "undeclared shared reference change")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "fallback"
+    assert result["direct_models"] == []
+    assert result["fallback_models"] == ["model_a"]
+
+
+def test_model_owned_digest_rule_preserves_case_and_string_payload(
+    tmp_path: Path,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    declared_lines = (
+        'requested_dtype = "auto"',
+        'requested_dtype = "float16"',
+        'model_type = "xlnet"',
+        "model.to(dtype=requested_dtype)",
+    )
+    _write(
+        repo,
+        "tools/reference/transformers_encoder.py",
+        'requested_dtype = "float16"\n'
+        'MODEL_TYPE = "XLNET"\n'
+        "model.to(dtype=requested_dtype)\n",
+    )
+    _write(
+        repo,
+        "tests/e2e/models/model_b/impact_diff_rules.json",
+        json.dumps(
+            [
+                {
+                    "name": "model_b_reference_dtype",
+                    "path": "tools/reference/transformers_encoder.py",
+                    "scope": {"owner_family": True},
+                    "allowed_tokens": [
+                        "requested_dtype",
+                        "model_type",
+                        "model.to",
+                    ],
+                    "model_ci_changed_lines_sha256": _changed_lines_digest(
+                        *declared_lines
+                    ),
+                }
+            ]
+        )
+        + "\n",
+    )
+    head = _commit(repo, "case-drifted shared reference change")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "fallback"
+    assert result["direct_models"] == ["model_b"]
+    assert result["fallback_models"] == ["model_a"]
+
+
+def test_model_owned_digest_rule_preserves_leading_indentation(
+    tmp_path: Path,
+) -> None:
+    repo, _ = _make_repo(tmp_path)
+    _write(
+        repo,
+        "tools/reference/transformers_encoder.py",
+        "def load():\n"
+        '    requested_dtype = "auto"\n',
+    )
+    base = _commit(repo, "add indented reference baseline")
+    declared_lines = (
+        '    requested_dtype = "auto"',
+        '    requested_dtype = "float16"',
+        '    model_type = "xlnet"',
+        "    model.to(dtype=requested_dtype)",
+    )
+    _write(
+        repo,
+        "tools/reference/transformers_encoder.py",
+        "def load():\n"
+        '    requested_dtype = "float16"\n'
+        '    model_type = "xlnet"\n'
+        "model.to(dtype=requested_dtype)\n",
+    )
+    _write(
+        repo,
+        "tests/e2e/models/model_b/impact_diff_rules.json",
+        json.dumps(
+            [
+                {
+                    "name": "model_b_reference_dtype",
+                    "path": "tools/reference/transformers_encoder.py",
+                    "scope": {"owner_family": True},
+                    "allowed_tokens": [
+                        "requested_dtype",
+                        "model_type",
+                        "model.to",
+                    ],
+                    "model_ci_changed_lines_sha256": _changed_lines_digest(
+                        *declared_lines
+                    ),
+                }
+            ]
+        )
+        + "\n",
+    )
+    head = _commit(repo, "outdented shared reference change")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "fallback"
+    assert result["direct_models"] == ["model_b"]
+    assert result["fallback_models"] == ["model_a"]
+
+
+def test_model_owned_digest_rule_counts_punctuation_only_changes(
+    tmp_path: Path,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    declared_lines = (
+        'requested_dtype = "auto"',
+        'requested_dtype = "float16"',
+        'model_type = "xlnet"',
+        "model.to(dtype=requested_dtype)",
+    )
+    _write(
+        repo,
+        "tools/reference/transformers_encoder.py",
+        "\n".join((*declared_lines[1:], ")")) + "\n",
+    )
+    _write(
+        repo,
+        "tests/e2e/models/model_b/impact_diff_rules.json",
+        json.dumps(
+            [
+                {
+                    "name": "model_b_reference_dtype",
+                    "path": "tools/reference/transformers_encoder.py",
+                    "scope": {"owner_family": True},
+                    "allowed_tokens": [
+                        "requested_dtype",
+                        "model_type",
+                        "model.to",
+                    ],
+                    "model_ci_changed_lines_sha256": _changed_lines_digest(
+                        *declared_lines
+                    ),
+                }
+            ]
+        )
+        + "\n",
+    )
+    head = _commit(repo, "punctuation shared reference change")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "fallback"
+    assert result["direct_models"] == ["model_b"]
+    assert result["fallback_models"] == ["model_a"]
+
+
+def test_duplicate_model_owned_digest_rules_fail_back_to_broad_impact(
+    tmp_path: Path,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    changed_lines = (
+        'requested_dtype = "auto"',
+        'requested_dtype = "float16"',
+        'model_type = "xlnet"',
+        "model.to(dtype=requested_dtype)",
+    )
+    rule = {
+        "name": "model_b_reference_dtype",
+        "path": "tools/reference/transformers_encoder.py",
+        "scope": {"owner_family": True},
+        "allowed_tokens": [
+            "requested_dtype",
+            "model_type",
+            "model.to",
+        ],
+        "model_ci_changed_lines_sha256": _changed_lines_digest(
+            *changed_lines
+        ),
+    }
+    duplicate = dict(rule)
+    duplicate["name"] = "duplicate_reference_dtype"
+    _write(
+        repo,
+        "tools/reference/transformers_encoder.py",
+        "\n".join(changed_lines[1:]) + "\n",
+    )
+    _write(
+        repo,
+        "tests/e2e/models/model_b/impact_diff_rules.json",
+        json.dumps([rule, duplicate]) + "\n",
+    )
+    head = _commit(repo, "ambiguous shared reference rules")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "fallback"
+    assert result["direct_models"] == ["model_b"]
+    assert result["fallback_models"] == ["model_a"]
 
 
 def test_task_eval_only_pr_runs_units_without_model_proofs(tmp_path: Path) -> None:

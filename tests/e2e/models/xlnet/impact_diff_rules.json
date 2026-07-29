@@ -1,0 +1,20 @@
+[
+  {
+    "name": "xlnet_reference_parameter_dtype",
+    "path": "tools/reference/transformers_encoder.py",
+    "scope": {
+      "owner_family": true
+    },
+    "allowed_tokens": [
+      "requested_dtype",
+      "model_type",
+      "xlnet",
+      "transformers",
+      "parameters",
+      "reduced_dtype",
+      "hidden_states",
+      "model.to"
+    ],
+    "model_ci_changed_lines_sha256": "955ff4dacf1cfa609787510f786d5e88991baecd738a2573dc796af18f424b2f"
+  }
+]
