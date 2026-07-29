@@ -206,6 +206,14 @@ def _load_runtime(
     if arguments.model_revision:
         model_kwargs["revision"] = arguments.model_revision
     model = model_class.from_pretrained(arguments.model, **model_kwargs).eval()
+    requested_dtype = _model_dtype(torch_module, arguments.dtype)
+    model_type = str(getattr(getattr(model, "config", None), "model_type", ""))
+    if model_type == "xlnet" and requested_dtype != "auto":
+        # Transformers leaves XLNet's directly registered relative-attention
+        # parameters (q/k/v/r and biases) in FP32 even when from_pretrained()
+        # receives a reduced dtype.  Cast the complete model explicitly so
+        # those tensors match the FP16/BF16 hidden states used by einsum.
+        model.to(dtype=requested_dtype)
     if arguments.device_map:
         device = model.device
     else:
