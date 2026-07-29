@@ -1520,6 +1520,7 @@ def add_attention_from_rows(
     scale: float | None = None,
     logit_softcap: float | None = None,
     fp32_accumulation: bool = False,
+    force_decomposed_attention: bool = False,
     tag: str | None = None,
 ) -> trt.ITensor:
     """Native IAttention for row-major [S, H * D] Q/K/V tensors.
@@ -1542,7 +1543,8 @@ def add_attention_from_rows(
     if scale is None:
         scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
     use_decomposed_attention = (
-        logit_softcap is not None and float(logit_softcap) > 0.0)
+        force_decomposed_attention
+        or (logit_softcap is not None and float(logit_softcap) > 0.0))
     if use_decomposed_attention:
         if causal:
             raise NotImplementedError(

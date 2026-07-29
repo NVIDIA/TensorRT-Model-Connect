@@ -38,6 +38,21 @@ if TYPE_CHECKING:
     from ...quantization.context import QuantContext
 
 
+def _decode_attention_backend(config: ModelConfig) -> str:
+    family_options = config.raw.get("_family_build_options", {})
+    if not isinstance(family_options, dict):
+        return "native"
+    decoder_options = family_options.get("qwen_vl_decoder", {})
+    if not isinstance(decoder_options, dict):
+        raise ValueError("qwen_vl_decoder build options must be an object")
+    backend = str(decoder_options.get("decode_attention", "native"))
+    if backend not in {"native", "decomposed"}:
+        raise ValueError(
+            "qwen_vl_decoder.decode_attention must be 'native' or "
+            f"'decomposed', got {backend!r}")
+    return backend
+
+
 def _mark_debug_output(
     network: trt.INetworkDefinition,
     tensor: trt.ITensor,
@@ -137,6 +152,13 @@ def build_standard_decoder_engine(
     active_split = bool(config.raw.get("_active_split_decoder_build", False))
     split_decode = (
         embed_input and active_split and decoder_engine_role == "decode")
+    decode_attention = _decode_attention_backend(config)
+    if (decode_attention == "decomposed"
+            and decoder_engine_role != "prefill"
+            and not split_decode):
+        raise ValueError(
+            "qwen_vl_decoder.decode_attention=decomposed requires "
+            "--decoder-engine-layout split")
     # Preserve the historical dual-profile fallback when the generic builder
     # rejects a requested split layout. During an active Qwen-VL split build,
     # compile a decode-only profile instead.
@@ -161,6 +183,8 @@ def build_standard_decoder_engine(
             scale_attn_weights=scale_attn_weights,
             embed_input=embed_input,
             verbose=verbose,
+            force_decomposed_attention=(
+                split_decode and decode_attention == "decomposed"),
             profile_mode=(
                 "prefill" if decoder_engine_role == "prefill"
                 else "decode" if split_decode

@@ -116,6 +116,9 @@ def test_qwen25_vl_split_decode_uses_decode_profile(monkeypatch) -> None:
     config = _config(qwen3=False)
     config.raw["_decoder_engine_role"] = "decode"
     config.raw["_active_split_decoder_build"] = True
+    config.raw["_family_build_options"] = {
+        "qwen_vl_decoder": {"decode_attention": "decomposed"},
+    }
     assert plugin.supports_split_embed_input is True
     assert plugin.supports_split_decoder_roles(config) is True
     result = module.build_standard_decoder_engine(
@@ -123,6 +126,7 @@ def test_qwen25_vl_split_decode_uses_decode_profile(monkeypatch) -> None:
 
     assert result == b"qwen-vl-dual-profile-plan"
     assert calls["build"][3]["embed_input"] is True
+    assert calls["build"][3]["force_decomposed_attention"] is True
     assert calls["build"][3]["profile_mode"] == "decode"
 
 

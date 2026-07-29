@@ -13,6 +13,19 @@ from tensorrt_model_connect.runtime_config import ConfigField, Layer, Schema, re
 _BUILD = frozenset({Layer.BUILD_TIME, Layer.BUNDLE_DEFAULT, Layer.SESSION_REQUEST})
 
 
+DECODER_SCHEMA = Schema(
+    namespace="qwen_vl_decoder",
+    fields=(
+        ConfigField(
+            name="decode_attention",
+            type_tag="string",
+            default="native",
+            allowed_layers=_BUILD,
+            validator=lambda value: value in {"native", "decomposed"},
+        ),
+    ),
+)
+
 LORA_SCHEMA = Schema(
     namespace="qwen_vl_lora",
     fields=(
@@ -86,5 +99,6 @@ VISION_SCHEMA = Schema(
 )
 
 
+register_schema(DECODER_SCHEMA)
 register_schema(LORA_SCHEMA)
 register_schema(VISION_SCHEMA)

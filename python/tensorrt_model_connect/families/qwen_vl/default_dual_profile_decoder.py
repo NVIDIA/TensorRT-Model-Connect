@@ -165,6 +165,7 @@ def build_dual_profile_decoder_engine(
     embed_input: bool = False,
     verbose: bool = False,
     dynamic_kv_profile_rows: list[int] | None = None,
+    force_decomposed_attention: bool = False,
     profile_mode: str = "dual_profile",
 ) -> bytes:
     """Build a prefill/decode-capable dynamic-Sq decoder engine.
@@ -177,6 +178,9 @@ def build_dual_profile_decoder_engine(
     ``quant_ctx`` (optional) routes every projection matmul through
     ``QuantContext.maybe_quantized_matmul`` for fp8 / int8 Q/DQ insertion;
     when ``None`` the matmuls are plain fp16 / bf16 / fp32.
+
+    ``force_decomposed_attention`` replaces native ``IAttention`` with an
+    explicit FP32-score QK/softmax/V graph.
 
     ``profile_mode`` controls which optimization profiles are emitted:
 
@@ -594,7 +598,9 @@ def build_dual_profile_decoder_engine(
             num_heads=num_heads, head_dim=head_dim,
             num_kv_heads=num_kv_heads,
             q_seq=None, kv_seq=None, causal=False, mask=mask_4d,
-            scale=attn_scale, tag=f"{prefix}.attn")
+            scale=attn_scale,
+            force_decomposed_attention=force_decomposed_attention,
+            tag=f"{prefix}.attn")
 
         attn_out = matmul(context, attention_size, hidden,
                           weights[f"{prefix}.w_o"], f"{prefix}.w_o")
