@@ -825,7 +825,7 @@ def main() -> None:
         type=int,
         choices=[1, 2, 4, 8],
         default=1,
-        help="Build a FLUX.1 Ulysses context-parallel bundle with this CP size")
+        help="Build a context-parallel bundle with this CP size")
     build_p.add_argument(
         "--dynamic-kv-profile-rows",
         type=_parse_profile_rows,
