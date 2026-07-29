@@ -104,6 +104,15 @@ jobs:
             echo "::error::Merge snapshot head does not match the pull-request head"
             exit 1
           }
+          current_base_sha="$(
+            gh api --method GET \
+              "/repos/$GITHUB_REPOSITORY/commits/main" \
+              --jq '.sha'
+          )"
+          test "$base_sha" = "$current_base_sha" || {
+            echo "::error::GitHub has not refreshed the pull-request merge snapshot against current main"
+            exit 1
+          }
 
           {
             echo "pr_number=$PR_NUMBER"
