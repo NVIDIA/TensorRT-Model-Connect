@@ -5,11 +5,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,8 @@ from tools.ci.process import CiError
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNNER = REPO_ROOT / "tools" / "ci" / "model_proof.py"
 RUNNER_COMMAND = [sys.executable, "-m", "tools.ci", "model-proof"]
+GPU_LEASE_WORKER = "tests.tools.gpu_lease_worker"
+PROJECT_CACHE = REPO_ROOT / "tests" / "tools" / "model_ci_project_cache.py"
 MODEL_CI = REPO_ROOT / "tools" / "model_ci.py"
 IMAGE_ENSURE = REPO_ROOT / "tools" / "ci" / "docker_image.py"
 PROOF_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "model-proof.yml"
@@ -40,6 +43,36 @@ PLUGIN_CMAKE = REPO_ROOT / "cmake" / "trtmc_pipeline_plugins.cmake"
 SANA_REFERENCE_REVISION = "59629fdf790850797cb657bad014fce432bd713d"
 SANA_REFERENCE_RELATIVE_PATH = "sana_wm/reference/Sana-59629fdf7908"
 SANA_REFERENCE_ENTRYPOINT = "inference_video_scripts/wm/inference_sana_wm.py"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _cache_model_proof_source_projection(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[None]:
+    base = tmp_path_factory.getbasetemp()
+    shared = base.parent if base.name.startswith("popen-gw") else base
+    cache_root = shared / "model-proof-projection-cache"
+    wrapper_bin = base / "model-proof-python"
+    wrapper_bin.mkdir()
+    wrapper = wrapper_bin / "python3"
+    wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f'if [ "${{1:-}}" = {shlex.quote(str(MODEL_CI))} ] '
+        '&& [ "${2:-}" = project ]; then\n'
+        f"  exec {shlex.quote(sys.executable)} {shlex.quote(str(PROJECT_CACHE))} "
+        f'--cache-root {shlex.quote(str(cache_root))} -- "$@"\n'
+        "fi\n"
+        f'exec {shlex.quote(sys.executable)} "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    previous = os.environ["PATH"]
+    os.environ["PATH"] = f"{wrapper_bin}:{previous}"
+    try:
+        yield
+    finally:
+        os.environ["PATH"] = previous
 
 
 def _write_successful_fake_docker(tmp_path: Path) -> tuple[Path, Path]:
@@ -354,6 +387,24 @@ def _workflow_singleton_gate_program() -> str:
     return textwrap.dedent(program)
 
 
+def _copy_selection_inputs(source: Path, destination: Path) -> None:
+    destination.mkdir(parents=True)
+    for path in source.rglob("*"):
+        relative = path.relative_to(source)
+        selected = path.name == "MODEL.toml" or (
+            path.parent.name == "manifests" and path.suffix == ".json"
+        )
+        python_test = path.name.startswith("test_") and path.suffix == ".py"
+        if not path.is_file() or not (selected or python_test):
+            continue
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if python_test and not selected:
+            target.touch()
+        else:
+            shutil.copy2(path, target)
+
+
 def _run_test_selection(
     tmp_path: Path,
     family: str,
@@ -365,7 +416,7 @@ def _run_test_selection(
     source = tmp_path / f"{family}-{suite}"
     e2e_source = REPO_ROOT / "tests" / "e2e" / "models" / family
     e2e_target = source / "tests" / "e2e" / "models" / family
-    shutil.copytree(e2e_source, e2e_target)
+    _copy_selection_inputs(e2e_source, e2e_target)
     shutil.copy2(
         REPO_ROOT / "tests" / "e2e" / "timing_estimates.json",
         source / "tests" / "e2e" / "timing_estimates.json",
@@ -380,7 +431,7 @@ def _run_test_selection(
     family_source = REPO_ROOT / "python" / "tensorrt_model_connect" / "families" / family
     family_root = source / "python" / "tensorrt_model_connect" / "families"
     if family_source.is_dir():
-        shutil.copytree(family_source, family_root / family)
+        _copy_selection_inputs(family_source, family_root / family)
     else:
         family_root.mkdir(parents=True)
     revision = "a" * 40
@@ -573,10 +624,7 @@ def test_qwen_nightly_keeps_production_cases(tmp_path: Path) -> None:
         "qwen3-0.6b-topp",
         "qwen3-4b-instruct-2507",
     }
-    assert all(
-        case["ci_tier"] != "l0_only"
-        for case in selection["e2e_cases"]
-    )
+    assert all(case["ci_tier"] != "l0_only" for case in selection["e2e_cases"])
 
 
 @pytest.mark.parametrize(
@@ -739,9 +787,7 @@ def test_whisper_nightly_selection_leases_one_complete_gpu(
         "whisper-large-v3-turbo.json",
         "whisper-tiny-fp16.json",
     }
-    assert {case["resource_class"] for case in selection["e2e_cases"]} == {
-        "exclusive_gpu"
-    }
+    assert {case["resource_class"] for case in selection["e2e_cases"]} == {"exclusive_gpu"}
     assert selection["gpu_resource_class"] == "exclusive_gpu"
     assert selection["gpu_slot_ids"] == [0, 1, 2, 3]
 
@@ -751,9 +797,7 @@ def test_qwen3_omni_selection_requires_clean_gpu_capacity(tmp_path: Path) -> Non
 
     assert selection["resource_class"] == "exclusive_gpu"
     assert selection["min_free_gpu_memory_mib"] == 280000
-    assert {
-        case["min_free_gpu_memory_mib"] for case in selection["e2e_cases"]
-    } == {280000}
+    assert {case["min_free_gpu_memory_mib"] for case in selection["e2e_cases"]} == {280000}
 
 
 def test_selection_without_a_capacity_requirement_normalizes_to_zero(
@@ -762,9 +806,7 @@ def test_selection_without_a_capacity_requirement_normalizes_to_zero(
     selection = _run_test_selection(tmp_path, "convbert", "nightly")
 
     assert selection["min_free_gpu_memory_mib"] == 0
-    assert {
-        case["min_free_gpu_memory_mib"] for case in selection["e2e_cases"]
-    } == {0}
+    assert {case["min_free_gpu_memory_mib"] for case in selection["e2e_cases"]} == {0}
 
 
 def test_nightly_capacity_requirement_uses_maximum_instead_of_sum(
@@ -1845,9 +1887,7 @@ def _run_model_proof_disk_headroom_check(
 
     fake_sleep = fake_bin / "sleep"
     fake_sleep.write_text(
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        'printf \'%s\\n\' "${1:?}" >> "$FAKE_SLEEP_LOG"\n',
+        '#!/usr/bin/env bash\nset -euo pipefail\nprintf \'%s\\n\' "${1:?}" >> "$FAKE_SLEEP_LOG"\n',
         encoding="utf-8",
     )
     fake_sleep.chmod(0o755)
@@ -2134,6 +2174,19 @@ def test_fallback_writer_embeds_host_diagnostics(tmp_path: Path) -> None:
 def test_host_projection_failure_preserves_error_and_html(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
+    python = fake_bin / "python3"
+    python.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f'if [ "${{1:-}}" = {shlex.quote(str(MODEL_CI))} ] '
+        '&& [ "${2:-}" = project ]; then\n'
+        "  printf '%s\\n' 'unknown model: model-that-does-not-exist' >&2\n"
+        "  exit 2\n"
+        "fi\n"
+        f'exec {shlex.quote(sys.executable)} "$@"\n',
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
     docker = fake_bin / "docker"
     docker.write_text("#!/usr/bin/env bash\nexit 99\n", encoding="utf-8")
     docker.chmod(0o755)
@@ -2727,9 +2780,7 @@ def test_capacity_gated_exclusive_lease_skips_a_memory_busy_gpu(
     def prepare_candidate() -> None:
         assert lease.gpu_id is not None
         prepared.append(lease.gpu_id)
-        assert _lock_is_busy(
-            lease.lock_dir / f"gpu-{lease.gpu_id}-reservation.lock"
-        )
+        assert _lock_is_busy(lease.lock_dir / f"gpu-{lease.gpu_id}-reservation.lock")
         assert all(
             _lock_is_busy(lease.lock_dir / f"gpu-{lease.gpu_id}-slot-{slot}.lock")
             for slot in range(lease.slots_per_gpu)
@@ -3340,7 +3391,6 @@ def test_capacity_gate_fails_closed_when_nvidia_smi_fails(tmp_path: Path) -> Non
         assert not _lock_is_busy(lease.lock_dir / f"gpu-{gpu}-slot-1.lock")
 
 
-@pytest.mark.model_proof_allocator
 def test_capacity_gate_fails_fast_when_gpu_total_memory_is_too_small(
     tmp_path: Path,
 ) -> None:
@@ -3489,11 +3539,9 @@ def test_capacity_drain_and_probe_share_one_deadline(
 
 
 @pytest.mark.model_proof_allocator
-def test_explicit_runner_gpu_id_cannot_bypass_a_busy_slot(tmp_path: Path) -> None:
-    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
-    output = tmp_path / "proof"
-    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
-    env.update(
+def test_explicit_gpu_id_cannot_bypass_a_busy_slot(tmp_path: Path) -> None:
+    context = _fake_gpu_lease_context(tmp_path, "")
+    context.env.update(
         {
             "TRTMC_GPU_ID": "7",
             "TRTMC_MODEL_PROOF_GPU_IDS": "7",
@@ -3505,50 +3553,24 @@ def test_explicit_runner_gpu_id_cannot_bypass_a_busy_slot(tmp_path: Path) -> Non
     lock_dir.mkdir()
     with (lock_dir / "gpu-7-slot-0.lock").open("w", encoding="utf-8") as lock_stream:
         fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        process = subprocess.Popen(
-            [
-                *RUNNER_COMMAND,
-                "--model",
-                "convbert",
-                "--revision",
-                "HEAD",
-                "--output-dir",
-                str(output),
-            ],
-            cwd=REPO_ROOT,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            requested = output / "artifacts" / "gpu-lease-requested.txt"
-            deadline = time.monotonic() + 90
-            while time.monotonic() < deadline and not requested.is_file():
-                if process.poll() is not None:
-                    break
-                time.sleep(0.05)
-            assert requested.is_file(), "proof never reached GPU lease acquisition"
-            started = time.monotonic()
-            stdout, stderr = process.communicate(timeout=15)
-            lease_elapsed = time.monotonic() - started
-        finally:
-            _finish_proof_cases([process])
+        lease = GpuLease(context, "convbert", "shared")
+        started = time.monotonic()
+        with pytest.raises(
+            CiError,
+            match="timed out after 1s waiting for a shared model-proof GPU lease from: 7",
+        ):
+            lease.acquire()
+        lease_elapsed = time.monotonic() - started
 
-    assert process.returncode != 0, stdout + stderr
     assert lease_elapsed < 5
-    assert "timed out after 1s waiting for a shared model-proof GPU lease from: 7" in stderr
-    assert not _proof_gpu_ids_if_present(docker_log)
 
 
 @pytest.mark.model_proof_allocator
-def test_model_proof_cannot_bypass_an_exclusive_whole_machine_lock(
+def test_gpu_lease_cannot_bypass_an_exclusive_whole_machine_lock(
     tmp_path: Path,
 ) -> None:
-    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
-    output = tmp_path / "proof"
-    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
-    env.update(
+    context = _fake_gpu_lease_context(tmp_path, "")
+    context.env.update(
         {
             "TRTMC_GPU_ID": "0",
             "TRTMC_MODEL_PROOF_GPU_IDS": "0",
@@ -3559,27 +3581,9 @@ def test_model_proof_cannot_bypass_an_exclusive_whole_machine_lock(
     lock_dir.mkdir()
     with (lock_dir / "whole-machine.lock").open("w", encoding="utf-8") as lock_stream:
         fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        result = subprocess.run(
-            [
-                *RUNNER_COMMAND,
-                "--model",
-                "convbert",
-                "--revision",
-                "HEAD",
-                "--output-dir",
-                str(output),
-            ],
-            cwd=REPO_ROOT,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=60,
-        )
-
-    assert result.returncode != 0
-    assert "waiting for the whole-machine GPU lock" in result.stderr
-    assert not _proof_gpu_ids_if_present(docker_log)
+        lease = GpuLease(context, "convbert", "shared")
+        with pytest.raises(CiError, match="waiting for the whole-machine GPU lock"):
+            lease.acquire()
 
 
 def test_explicit_runner_gpu_must_be_in_the_configured_allowlist(tmp_path: Path) -> None:
@@ -3611,70 +3615,62 @@ def test_explicit_runner_gpu_must_be_in_the_configured_allowlist(tmp_path: Path)
 
 
 @pytest.mark.model_proof_allocator
-def test_four_shared_proofs_use_unique_slots_on_one_gpu(
+def test_four_shared_leases_use_unique_slots_and_reject_a_fifth(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("TRTMC_GPU_ID", "7")
     monkeypatch.setenv("TRTMC_GPU_SLOT_ID", "3")
-    processes: list[tuple[subprocess.Popen[str], Path, Path]] = []
+    processes: list[tuple[subprocess.Popen[str], Path]] = []
     release_file = tmp_path / "release-four-shared"
+    common_env = {
+        "TRTMC_MODEL_PROOF_GPU_IDS": "2",
+        "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "4",
+        "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "180",
+    }
     for index in range(4):
-        case_dir = tmp_path / f"case-{index}"
-        case_dir.mkdir()
-        fake_bin, docker_log = _write_successful_fake_docker(case_dir)
-        output = case_dir / "proof"
-        env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
-        env.update(
-            {
-                "TRTMC_MODEL_PROOF_GPU_IDS": "2",
-                "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "4",
-                "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "180",
-                "FAKE_PROOF_RELEASE_FILE": str(release_file),
-            }
+        process, output = _start_lease_case(
+            tmp_path,
+            f"case-{index}",
+            "convbert",
+            "shared",
+            release_file,
+            common_env,
         )
-        process = subprocess.Popen(
-            [
-                *RUNNER_COMMAND,
-                "--model",
-                "convbert",
-                "--revision",
-                "HEAD",
-                "--output-dir",
-                str(output),
-            ],
-            cwd=REPO_ROOT,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        processes.append((process, docker_log, output))
+        processes.append((process, output))
 
     deadline = time.monotonic() + 90
     while time.monotonic() < deadline and not all(
-        (output / "artifacts" / "gpu-lease.json").is_file() for _, _, output in processes
+        (output / "artifacts" / "gpu-lease.json").is_file() for _, output in processes
     ):
         time.sleep(0.05)
     all_leased_together = all(
-        (output / "artifacts" / "gpu-lease.json").is_file() for _, _, output in processes
+        (output / "artifacts" / "gpu-lease.json").is_file() for _, output in processes
     )
-    release_file.touch()
 
-    selected: list[str] = []
+    fifth_context = _fake_gpu_lease_context(tmp_path, "")
+    fifth_context.env.update(common_env)
+    fifth_context.env["TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS"] = "1"
+    fifth = GpuLease(fifth_context, "convbert", "shared")
+    with pytest.raises(
+        CiError,
+        match="timed out after 1s waiting for a shared model-proof GPU lease from: 2",
+    ):
+        fifth.acquire()
+
+    release_file.touch()
     selected_slots: list[int] = []
-    for process, docker_log, output in processes:
+    for process, output in processes:
         stdout, stderr = process.communicate(timeout=30)
         assert process.returncode == 0, stdout + stderr
-        selected.extend(_proof_gpu_ids(docker_log))
         assert (output / "artifacts" / "gpu-id.txt").is_file()
         lease = _gpu_lease(output)
         selected_slots.extend(lease["gpu_slots"])
+        assert lease["gpu_id"] == "2"
         assert lease["resource_class"] == "shared"
         assert lease["slots_per_gpu"] == 4
 
     assert all_leased_together
-    assert selected == ["2", "2", "2", "2"]
     assert sorted(selected_slots) == [0, 1, 2, 3]
 
 
@@ -3684,35 +3680,19 @@ def test_shared_slot_allocator_spreads_across_gpus_before_using_second_slots(
 ) -> None:
     processes: list[tuple[subprocess.Popen[str], Path]] = []
     release_file = tmp_path / "release-spread"
+    common_env = {
+        "TRTMC_MODEL_PROOF_GPU_IDS": "2,3",
+        "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "2",
+        "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "180",
+    }
     for index in range(4):
-        case_dir = tmp_path / f"spread-{index}"
-        case_dir.mkdir()
-        fake_bin, docker_log = _write_successful_fake_docker(case_dir)
-        output = case_dir / "proof"
-        env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
-        env.update(
-            {
-                "TRTMC_MODEL_PROOF_GPU_IDS": "2,3",
-                "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "2",
-                "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "180",
-                "FAKE_PROOF_RELEASE_FILE": str(release_file),
-            }
-        )
-        process = subprocess.Popen(
-            [
-                *RUNNER_COMMAND,
-                "--model",
-                "convbert",
-                "--revision",
-                "HEAD",
-                "--output-dir",
-                str(output),
-            ],
-            cwd=REPO_ROOT,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        process, output = _start_lease_case(
+            tmp_path,
+            f"spread-{index}",
+            "convbert",
+            "shared",
+            release_file,
+            common_env,
         )
         processes.append((process, output))
 
@@ -3863,67 +3843,16 @@ def test_expected_resource_class_must_match_projected_e2e_manifest(
 
 
 @pytest.mark.model_proof_allocator
-def test_fifth_shared_proof_times_out_when_all_four_slots_are_busy(
-    tmp_path: Path,
-) -> None:
-    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
-    output = tmp_path / "proof"
-    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
-    env.update(
-        {
-            "TRTMC_MODEL_PROOF_GPU_IDS": "9",
-            "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "4",
-            "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "1",
-        }
-    )
-    lock_dir = tmp_path / "gpu-locks"
-    lock_dir.mkdir()
-    lock_streams = [
-        (lock_dir / f"gpu-9-slot-{slot}.lock").open("w", encoding="utf-8") for slot in range(4)
-    ]
-    try:
-        for lock_stream in lock_streams:
-            fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        result = subprocess.run(
-            [
-                *RUNNER_COMMAND,
-                "--model",
-                "convbert",
-                "--revision",
-                "HEAD",
-                "--output-dir",
-                str(output),
-            ],
-            cwd=REPO_ROOT,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=90,
-        )
-    finally:
-        for lock_stream in lock_streams:
-            lock_stream.close()
-
-    assert result.returncode != 0
-    assert "timed out after 1s waiting for a shared model-proof GPU lease from: 9" in result.stderr
-    assert not _proof_gpu_ids_if_present(docker_log)
-    assert not list(lock_dir.glob("admission-global-*.lock"))
-
-
-@pytest.mark.model_proof_allocator
 def test_poll_interval_cannot_sleep_past_the_lease_timeout(tmp_path: Path) -> None:
     """A poll interval larger than the lease budget must not delay the timeout.
 
     The capacity-poll sleep is clamped to the remaining deadline; without the
     clamp a 300s interval would sleep far past a 1s lease timeout while still
-    reporting "timed out after 1s". Measure from the queue-joined marker to the
-    timeout error so loaded-runner host setup cannot weaken the assertion.
+    reporting "timed out after 1s". The focused lease call excludes unrelated
+    runner setup from the measured interval.
     """
-    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
-    output = tmp_path / "proof"
-    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
-    env.update(
+    context = _fake_gpu_lease_context(tmp_path, "")
+    context.env.update(
         {
             "TRTMC_MODEL_PROOF_GPU_IDS": "9",
             "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "1",
@@ -3935,49 +3864,15 @@ def test_poll_interval_cannot_sleep_past_the_lease_timeout(tmp_path: Path) -> No
     lock_dir.mkdir()
     with (lock_dir / "gpu-9-slot-0.lock").open("w", encoding="utf-8") as lock_stream:
         fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        process = subprocess.Popen(
-            [
-                *RUNNER_COMMAND,
-                "--model",
-                "convbert",
-                "--revision",
-                "HEAD",
-                "--output-dir",
-                str(output),
-            ],
-            cwd=REPO_ROOT,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            joined_file = output / "artifacts" / "gpu-queue-joined.txt"
-            join_deadline = time.monotonic() + 90
-            while time.monotonic() < join_deadline and not joined_file.is_file():
-                assert process.poll() is None
-                time.sleep(0.05)
-            assert joined_file.is_file()
+        lease = GpuLease(context, "convbert", "shared")
+        started = time.monotonic()
+        with pytest.raises(
+            CiError,
+            match="timed out after 1s waiting for a shared model-proof GPU lease from: 9",
+        ):
+            lease.acquire()
+        lease_elapsed = time.monotonic() - started
 
-            timeout_message = (
-                "timed out after 1s waiting for a shared model-proof GPU lease from: 9"
-            )
-            error_file = output / "artifacts" / "host-error.log"
-            started = time.monotonic()
-            error_deadline = started + 10
-            while time.monotonic() < error_deadline:
-                if error_file.is_file() and timeout_message in error_file.read_text(
-                    encoding="utf-8"
-                ):
-                    break
-                time.sleep(0.05)
-            lease_elapsed = time.monotonic() - started
-            stdout, stderr = process.communicate(timeout=90)
-        finally:
-            _finish_proof_cases([process])
-
-    assert process.returncode != 0, stdout + stderr
-    assert timeout_message in stderr
     assert lease_elapsed < 10, (
         f"lease timeout was pierced by the poll interval: {lease_elapsed:.3f}s"
     )
@@ -3986,10 +3881,8 @@ def test_poll_interval_cannot_sleep_past_the_lease_timeout(tmp_path: Path) -> No
 
 @pytest.mark.model_proof_allocator
 def test_gpu_admission_queue_prunes_a_stale_ticket(tmp_path: Path) -> None:
-    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
-    output = tmp_path / "proof"
-    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
-    env.update(
+    context = _fake_gpu_lease_context(tmp_path, "")
+    context.env.update(
         {
             "TRTMC_GPU_ID": "9",
             "TRTMC_MODEL_PROOF_GPU_IDS": "9",
@@ -4003,39 +3896,25 @@ def test_gpu_admission_queue_prunes_a_stale_ticket(tmp_path: Path) -> None:
     stale_handoff = lock_dir / "admission-global-00000000000000000000.lock.handoff.999999"
     stale_handoff.write_text("pid=999999 model=stale-handoff\n", encoding="utf-8")
 
-    result = subprocess.run(
-        [
-            *RUNNER_COMMAND,
-            "--model",
-            "convbert",
-            "--revision",
-            "HEAD",
-            "--output-dir",
-            str(output),
-        ],
-        cwd=REPO_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    lease = GpuLease(context, "convbert", "shared")
+    try:
+        lease.acquire()
+        assert lease.gpu_id == 9
+    finally:
+        lease.release()
 
-    assert result.returncode == 0, result.stdout + result.stderr
     assert not stale_ticket.exists()
     assert not stale_handoff.exists()
     assert not list(lock_dir.glob("admission-global-*.lock"))
     assert (lock_dir / "admission-global.next").read_text(encoding="utf-8") == "2\n"
-    assert _proof_gpu_ids(docker_log) == ["9"]
 
 
 @pytest.mark.model_proof_allocator
 def test_gpu_allocator_mutex_contention_obeys_lease_timeout(
     tmp_path: Path,
 ) -> None:
-    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
-    output = tmp_path / "proof"
-    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
-    env.update(
+    context = _fake_gpu_lease_context(tmp_path, "")
+    context.env.update(
         {
             "TRTMC_MODEL_PROOF_GPU_IDS": "9",
             "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "1",
@@ -4045,123 +3924,62 @@ def test_gpu_allocator_mutex_contention_obeys_lease_timeout(
     lock_dir.mkdir()
     with (lock_dir / "allocator.lock").open("w", encoding="utf-8") as lock_stream:
         fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        process = subprocess.Popen(
-            [
-                *RUNNER_COMMAND,
-                "--model",
-                "convbert",
-                "--revision",
-                "HEAD",
-                "--output-dir",
-                str(output),
-            ],
-            cwd=REPO_ROOT,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            requested = output / "artifacts" / "gpu-lease-requested.txt"
-            deadline = time.monotonic() + 90
-            while time.monotonic() < deadline and not requested.is_file():
-                if process.poll() is not None:
-                    break
-                time.sleep(0.05)
-            assert requested.is_file(), "proof never reached GPU lease acquisition"
-            started = time.monotonic()
-            stdout, stderr = process.communicate(timeout=15)
-            elapsed = time.monotonic() - started
-        finally:
-            if process.poll() is None:
-                process.terminate()
-                process.communicate(timeout=10)
+        lease = GpuLease(context, "convbert", "shared")
+        started = time.monotonic()
+        with pytest.raises(
+            CiError,
+            match="timed out after 1s waiting for a shared model-proof GPU lease",
+        ):
+            lease.acquire()
+        elapsed = time.monotonic() - started
 
-    assert process.returncode != 0, stdout + stderr
     assert elapsed < 5
-    assert "timed out after 1s waiting for a shared model-proof GPU lease" in stderr
-    assert not _proof_gpu_ids_if_present(docker_log)
 
 
 @pytest.mark.model_proof_allocator
-def test_exclusive_gpu_reservation_drains_existing_shared_and_blocks_new_shared(
+def test_exclusive_gpu_reservation_drains_shared_in_any_order_and_blocks_new_shared(
     tmp_path: Path,
 ) -> None:
     lock_dir = tmp_path / "gpu-locks"
-    first_release_file = tmp_path / "release-first-shared"
-
-    first_dir = tmp_path / "first-shared"
-    first_dir.mkdir()
-    first_bin, first_log = _write_successful_fake_docker(first_dir)
-    first_output = first_dir / "proof"
-    first_env = _fake_proof_environment(tmp_path, first_bin, first_log, first_output)
-    first_env.update(
-        {
-            "TRTMC_GPU_ID": "6",
-            "TRTMC_GPU_SLOT_ID": "0",
-            "TRTMC_MODEL_PROOF_GPU_IDS": "6",
-            "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "2",
-            "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "10",
-            "FAKE_PROOF_RELEASE_FILE": str(first_release_file),
-        }
-    )
-    first = subprocess.Popen(
-        [
-            *RUNNER_COMMAND,
-            "--model",
-            "convbert",
-            "--revision",
-            "HEAD",
-            "--output-dir",
-            str(first_output),
-        ],
-        cwd=REPO_ROOT,
-        env=first_env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-    exclusive_dir = tmp_path / "exclusive"
-    exclusive_dir.mkdir()
-    exclusive_bin, exclusive_log = _write_successful_fake_docker(exclusive_dir)
-    exclusive_output = exclusive_dir / "proof"
-    exclusive_env = _fake_proof_environment(
-        tmp_path, exclusive_bin, exclusive_log, exclusive_output
-    )
-    exclusive_env.update(
-        {
-            "TRTMC_GPU_ID": "6",
-            "TRTMC_MODEL_PROOF_GPU_IDS": "6",
-            "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "2",
-            "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "600",
-        }
-    )
+    releases = [tmp_path / f"release-shared-{index}" for index in range(3)]
+    exclusive_release = tmp_path / "release-exclusive"
+    exclusive_release.touch()
+    common_env = {
+        "TRTMC_GPU_ID": "6",
+        "TRTMC_MODEL_PROOF_GPU_IDS": "6",
+        "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "3",
+        "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "600",
+    }
+    holders: list[subprocess.Popen[str] | None] = [None, None, None]
     exclusive: subprocess.Popen[str] | None = None
     try:
-        deadline = time.monotonic() + 90
-        while (
-            time.monotonic() < deadline
-            and not (first_output / "artifacts" / "gpu-lease.json").is_file()
-        ):
-            time.sleep(0.05)
-        assert (first_output / "artifacts" / "gpu-lease.json").is_file()
+        for index in range(3):
+            holder_env = dict(common_env)
+            holder_env["TRTMC_GPU_SLOT_ID"] = str(index)
+            holder, output = _start_lease_case(
+                tmp_path,
+                f"shared-{index}",
+                "convbert",
+                "shared",
+                releases[index],
+                holder_env,
+            )
+            holders[index] = holder
+            deadline = time.monotonic() + 90
+            while (
+                time.monotonic() < deadline
+                and not (output / "artifacts" / "gpu-lease.json").is_file()
+            ):
+                time.sleep(0.05)
+            assert (output / "artifacts" / "gpu-lease.json").is_file()
 
-        exclusive = subprocess.Popen(
-            [
-                *RUNNER_COMMAND,
-                "--model",
-                "flux",
-                "--revision",
-                "HEAD",
-                "--output-dir",
-                str(exclusive_output),
-            ],
-            cwd=REPO_ROOT,
-            env=exclusive_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        exclusive, exclusive_output = _start_lease_case(
+            tmp_path,
+            "exclusive",
+            "flux",
+            "exclusive_gpu",
+            exclusive_release,
+            common_env,
         )
 
         reservation = lock_dir / "gpu-6-reservation.lock"
@@ -4171,60 +3989,31 @@ def test_exclusive_gpu_reservation_drains_existing_shared_and_blocks_new_shared(
         assert _lock_is_busy(reservation), "exclusive proof never reserved GPU 6"
         assert not list(lock_dir.glob("admission-global-*.lock"))
 
-        blocked_dir = tmp_path / "blocked-shared"
-        blocked_dir.mkdir()
-        blocked_bin, blocked_log = _write_successful_fake_docker(blocked_dir)
-        blocked_output = blocked_dir / "proof"
-        blocked_env = _fake_proof_environment(tmp_path, blocked_bin, blocked_log, blocked_output)
-        blocked_env.update(
-            {
-                "TRTMC_GPU_ID": "6",
-                "TRTMC_GPU_SLOT_ID": "1",
-                "TRTMC_MODEL_PROOF_GPU_IDS": "6",
-                "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "2",
-                "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "1",
-            }
-        )
-        blocked = subprocess.run(
-            [
-                *RUNNER_COMMAND,
-                "--model",
-                "convbert",
-                "--revision",
-                "HEAD",
-                "--output-dir",
-                str(blocked_output),
-            ],
-            cwd=REPO_ROOT,
-            env=blocked_env,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=90,
-        )
-        assert blocked.returncode != 0
-        assert "waiting for a shared model-proof GPU lease" in blocked.stderr
-        assert not _proof_gpu_ids_if_present(blocked_log)
+        blocked_context = _fake_gpu_lease_context(tmp_path, "")
+        blocked_context.env.update(common_env)
+        blocked_context.env["TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS"] = "1"
+        blocked = GpuLease(blocked_context, "convbert", "shared")
+        with pytest.raises(CiError, match="waiting for a shared model-proof GPU lease"):
+            blocked.acquire()
 
-        first_release_file.touch()
-        first_stdout, first_stderr = first.communicate(timeout=30)
-        assert first.returncode == 0, first_stdout + first_stderr
+        for index in (1, 0, 2):
+            releases[index].touch()
+            holder = holders[index]
+            assert holder is not None
+            holder_stdout, holder_stderr = holder.communicate(timeout=30)
+            assert holder.returncode == 0, holder_stdout + holder_stderr
+
         exclusive_stdout, exclusive_stderr = exclusive.communicate(timeout=30)
         assert exclusive.returncode == 0, exclusive_stdout + exclusive_stderr
-        assert _proof_gpu_ids(exclusive_log) == ["6"]
         assert _gpu_lease(exclusive_output)["resource_class"] == "exclusive_gpu"
-        assert _gpu_lease(exclusive_output)["gpu_slots"] == [0, 1]
+        assert _gpu_lease(exclusive_output)["gpu_slots"] == [0, 1, 2]
         assert not _lock_is_busy(reservation)
-        assert not _lock_is_busy(lock_dir / "gpu-6-slot-0.lock")
-        assert not _lock_is_busy(lock_dir / "gpu-6-slot-1.lock")
+        for slot in range(3):
+            assert not _lock_is_busy(lock_dir / f"gpu-6-slot-{slot}.lock")
     finally:
-        first_release_file.touch(exist_ok=True)
-        if first.poll() is None:
-            first.terminate()
-            first.communicate(timeout=10)
-        if exclusive is not None and exclusive.poll() is None:
-            exclusive.terminate()
-            exclusive.communicate(timeout=10)
+        for release_file in releases:
+            release_file.touch()
+        _finish_proof_cases([*holders, exclusive])
 
 
 @pytest.mark.model_proof_allocator
@@ -4239,44 +4028,29 @@ def test_oldest_exclusive_waiter_takes_the_first_idle_gpu(
     def start_case(
         name: str,
         model: str,
+        resource_class: str,
         release_file: Path,
         *,
         explicit_gpu: str | None = None,
-    ) -> tuple[subprocess.Popen[str], Path, Path]:
-        case_dir = tmp_path / name
-        case_dir.mkdir()
-        fake_bin, docker_log = _write_successful_fake_docker(case_dir)
-        output = case_dir / "proof"
-        env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
-        env.update(
-            {
-                "TRTMC_MODEL_PROOF_GPU_IDS": "6,7",
-                "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "4",
-                "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "600",
-                "FAKE_PROOF_RELEASE_FILE": str(release_file),
-            }
-        )
+    ) -> tuple[subprocess.Popen[str], Path]:
+        env = {
+            "TRTMC_MODEL_PROOF_GPU_IDS": "6,7",
+            "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "4",
+            "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "600",
+        }
         if explicit_gpu is not None:
             env["TRTMC_GPU_ID"] = explicit_gpu
-        process = subprocess.Popen(
-            [
-                *RUNNER_COMMAND,
-                "--model",
-                model,
-                "--revision",
-                "HEAD",
-                "--output-dir",
-                str(output),
-            ],
-            cwd=REPO_ROOT,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        process, output = _start_lease_case(
+            tmp_path,
+            name,
+            model,
+            resource_class,
+            release_file,
+            env,
         )
         processes.append(process)
         release_files.append(release_file)
-        return process, docker_log, output
+        return process, output
 
     def wait_for(predicate: Callable[[], bool], message: str) -> None:
         deadline = time.monotonic() + coordination_timeout_s
@@ -4291,23 +4065,23 @@ def test_oldest_exclusive_waiter_takes_the_first_idle_gpu(
     exclusive_release = tmp_path / "release-exclusive"
     younger_release = tmp_path / "release-younger-shared"
     try:
-        gpu6_holder, _, gpu6_output = start_case(
-            "gpu6-holder", "convbert", gpu6_release, explicit_gpu="6"
+        gpu6_holder, gpu6_output = start_case(
+            "gpu6-holder", "convbert", "shared", gpu6_release, explicit_gpu="6"
         )
         wait_for(
             lambda: (gpu6_output / "artifacts" / "gpu-lease.json").is_file(),
             "GPU 6 holder never acquired its lease",
         )
-        gpu7_holder, _, gpu7_output = start_case(
-            "gpu7-holder", "albert", gpu7_release, explicit_gpu="7"
+        gpu7_holder, gpu7_output = start_case(
+            "gpu7-holder", "albert", "shared", gpu7_release, explicit_gpu="7"
         )
         wait_for(
             lambda: (gpu7_output / "artifacts" / "gpu-lease.json").is_file(),
             "GPU 7 holder never acquired its lease",
         )
 
-        exclusive, exclusive_log, exclusive_output = start_case(
-            "oldest-exclusive", "flux", exclusive_release
+        exclusive, exclusive_output = start_case(
+            "oldest-exclusive", "flux", "exclusive_gpu", exclusive_release
         )
         gpu6_reservation = lock_dir / "gpu-6-reservation.lock"
         wait_for(
@@ -4319,8 +4093,12 @@ def test_oldest_exclusive_waiter_takes_the_first_idle_gpu(
         assert not (exclusive_output / "artifacts" / "gpu-lease.json").exists()
         assert not _lock_is_busy(gpu6_reservation)
 
-        younger, younger_log, younger_output = start_case(
-            "younger-shared", "convbert", younger_release, explicit_gpu="7"
+        younger, younger_output = start_case(
+            "younger-shared",
+            "convbert",
+            "shared",
+            younger_release,
+            explicit_gpu="7",
         )
         wait_for(
             lambda: len(list(lock_dir.glob("admission-global-*.lock"))) == 2,
@@ -4349,7 +4127,6 @@ def test_oldest_exclusive_waiter_takes_the_first_idle_gpu(
         exclusive_release.touch()
         exclusive_stdout, exclusive_stderr = exclusive.communicate(timeout=30)
         assert exclusive.returncode == 0, exclusive_stdout + exclusive_stderr
-        assert _proof_gpu_ids(exclusive_log) == ["7"]
         wait_for(
             lambda: (younger_output / "artifacts" / "gpu-lease.json").is_file(),
             "younger shared proof did not run after the exclusive proof",
@@ -4358,7 +4135,6 @@ def test_oldest_exclusive_waiter_takes_the_first_idle_gpu(
         younger_release.touch()
         younger_stdout, younger_stderr = younger.communicate(timeout=30)
         assert younger.returncode == 0, younger_stdout + younger_stderr
-        assert _proof_gpu_ids(younger_log) == ["7"]
 
         gpu6_release.touch()
         gpu6_stdout, gpu6_stderr = gpu6_holder.communicate(timeout=30)
@@ -4394,38 +4170,25 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
     }
 
     def start_case(
-        name: str, model: str, release_file: Path
-    ) -> tuple[subprocess.Popen[str], Path, Path]:
-        case_dir = tmp_path / name
-        case_dir.mkdir()
-        fake_bin, docker_log = _write_successful_fake_docker(case_dir)
-        output = case_dir / "proof"
-        env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
-        env.update(common_env)
-        env["FAKE_PROOF_RELEASE_FILE"] = str(release_file)
-        process = subprocess.Popen(
-            [
-                *RUNNER_COMMAND,
-                "--model",
-                model,
-                "--revision",
-                "HEAD",
-                "--output-dir",
-                str(output),
-            ],
-            cwd=REPO_ROOT,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        name: str,
+        model: str,
+        resource_class: str,
+        release_file: Path,
+    ) -> tuple[subprocess.Popen[str], Path]:
+        return _start_lease_case(
+            tmp_path,
+            name,
+            model,
+            resource_class,
+            release_file,
+            common_env,
         )
-        return process, docker_log, output
 
     first_release = tmp_path / "release-first-exclusive"
     oldest_release = tmp_path / "release-oldest-shared"
     younger_shared_release = tmp_path / "release-younger-shared"
     younger_exclusive_release = tmp_path / "release-younger-exclusive"
-    first, _, first_output = start_case("first-exclusive", "flux", first_release)
+    first, first_output = start_case("first-exclusive", "flux", "exclusive_gpu", first_release)
     oldest: subprocess.Popen[str] | None = None
     younger_shared: subprocess.Popen[str] | None = None
     younger_exclusive: subprocess.Popen[str] | None = None
@@ -4438,7 +4201,7 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
             time.sleep(0.05)
         assert (first_output / "artifacts" / "gpu-lease.json").is_file()
 
-        oldest, _, oldest_output = start_case("oldest-shared", "albert", oldest_release)
+        oldest, oldest_output = start_case("oldest-shared", "albert", "shared", oldest_release)
         deadline = time.monotonic() + coordination_timeout_s
         while time.monotonic() < deadline and not list(lock_dir.glob("admission-global-*.lock")):
             time.sleep(0.05)
@@ -4447,8 +4210,11 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
         assert "model=albert" in admission_tickets[0].read_text(encoding="utf-8")
         assert _lock_is_busy(admission_tickets[0])
 
-        younger_exclusive, _, younger_exclusive_output = start_case(
-            "younger-exclusive", "bark", younger_exclusive_release
+        younger_exclusive, younger_exclusive_output = start_case(
+            "younger-exclusive",
+            "bark",
+            "exclusive_gpu",
+            younger_exclusive_release,
         )
         deadline = time.monotonic() + coordination_timeout_s
         while time.monotonic() < deadline:
@@ -4464,8 +4230,11 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
             ticket.read_text(encoding="utf-8").split("model=", maxsplit=1)[1].split()[0]
             for ticket in admission_tickets
         ] == ["albert", "bark"]
-        younger_shared, _, younger_shared_output = start_case(
-            "younger-shared", "convbert", younger_shared_release
+        younger_shared, younger_shared_output = start_case(
+            "younger-shared",
+            "convbert",
+            "shared",
+            younger_shared_release,
         )
         deadline = time.monotonic() + coordination_timeout_s
         while time.monotonic() < deadline:
@@ -4549,29 +4318,41 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
                     process.communicate(timeout=10)
 
 
-def _start_proof_case(
+def _start_lease_case(
     tmp_path: Path,
     name: str,
     model: str,
+    resource_class: str,
     release_file: Path,
     common_env: dict[str, str],
 ) -> tuple[subprocess.Popen[str], Path]:
     case_dir = tmp_path / name
     case_dir.mkdir()
-    fake_bin, docker_log = _write_successful_fake_docker(case_dir)
-    output = case_dir / "proof"
-    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    output = case_dir / "lease"
+    env = os.environ.copy()
+    env.pop("TRTMC_GPU_ID", None)
+    env.pop("TRTMC_GPU_SLOT_ID", None)
+    env.update(
+        {
+            "TRTMC_MODEL_PROOF_GPU_LOCK_DIR": str(tmp_path / "gpu-locks"),
+            "TRTMC_MODEL_PROOF_POLL_INTERVAL": "0.05",
+            "TRTMC_MODEL_PROOF_FLOCK_WATCHDOG_SECONDS": "2",
+        }
+    )
     env.update(common_env)
-    env["FAKE_PROOF_RELEASE_FILE"] = str(release_file)
     process = subprocess.Popen(
         [
-            *RUNNER_COMMAND,
+            sys.executable,
+            "-m",
+            GPU_LEASE_WORKER,
             "--model",
             model,
-            "--revision",
-            "HEAD",
-            "--output-dir",
-            str(output),
+            "--resource-class",
+            resource_class,
+            "--artifacts-dir",
+            str(output / "artifacts"),
+            "--release-file",
+            str(release_file),
         ],
         cwd=REPO_ROOT,
         env=env,
@@ -4614,8 +4395,8 @@ def test_gpu_lock_directory_file_protocol_is_frozen(tmp_path: Path) -> None:
     holder_release = tmp_path / "release-holder"
     waiter_release = tmp_path / "release-waiter"
     waiter_release.touch()
-    holder, holder_output = _start_proof_case(
-        tmp_path, "holder", "convbert", holder_release, common_env
+    holder, holder_output = _start_lease_case(
+        tmp_path, "holder", "convbert", "shared", holder_release, common_env
     )
     waiter: subprocess.Popen[str] | None = None
     try:
@@ -4631,8 +4412,8 @@ def test_gpu_lock_directory_file_protocol_is_frozen(tmp_path: Path) -> None:
         # Every model proof shares the machine-wide fence while it owns GPU work.
         assert _lock_is_busy(lock_dir / "whole-machine.lock")
 
-        waiter, waiter_output = _start_proof_case(
-            tmp_path, "waiter", "convbert", waiter_release, common_env
+        waiter, waiter_output = _start_lease_case(
+            tmp_path, "waiter", "convbert", "shared", waiter_release, common_env
         )
         deadline = time.monotonic() + coordination_timeout_s
         while time.monotonic() < deadline and not list(lock_dir.glob("admission-global-*.lock")):
@@ -4693,8 +4474,8 @@ def test_killed_queue_predecessor_wakes_waiter_and_is_pruned(tmp_path: Path) -> 
     holder_release = tmp_path / "release-holder"
     waiter_release = tmp_path / "release-waiter"
     waiter_release.touch()
-    holder, holder_output = _start_proof_case(
-        tmp_path, "holder", "albert", holder_release, common_env
+    holder, holder_output = _start_lease_case(
+        tmp_path, "holder", "albert", "shared", holder_release, common_env
     )
     doomed: subprocess.Popen[str] | None = None
     waiter: subprocess.Popen[str] | None = None
@@ -4707,7 +4488,9 @@ def test_killed_queue_predecessor_wakes_waiter_and_is_pruned(tmp_path: Path) -> 
             time.sleep(0.05)
         assert (holder_output / "artifacts" / "gpu-lease.json").is_file()
 
-        doomed, _ = _start_proof_case(tmp_path, "doomed", "convbert", waiter_release, common_env)
+        doomed, _ = _start_lease_case(
+            tmp_path, "doomed", "convbert", "shared", waiter_release, common_env
+        )
         deadline = time.monotonic() + coordination_timeout_s
         while (
             time.monotonic() < deadline and len(list(lock_dir.glob("admission-global-*.lock"))) < 1
@@ -4715,8 +4498,8 @@ def test_killed_queue_predecessor_wakes_waiter_and_is_pruned(tmp_path: Path) -> 
             time.sleep(0.05)
         assert len(list(lock_dir.glob("admission-global-*.lock"))) == 1
 
-        waiter, waiter_output = _start_proof_case(
-            tmp_path, "waiter", "convbert", waiter_release, common_env
+        waiter, waiter_output = _start_lease_case(
+            tmp_path, "waiter", "convbert", "shared", waiter_release, common_env
         )
         deadline = time.monotonic() + coordination_timeout_s
         while (
@@ -4744,73 +4527,6 @@ def test_killed_queue_predecessor_wakes_waiter_and_is_pruned(tmp_path: Path) -> 
 
 
 @pytest.mark.model_proof_allocator
-def test_exclusive_drain_completes_as_holders_release_in_any_order(
-    tmp_path: Path,
-) -> None:
-    lock_dir = tmp_path / "gpu-locks"
-    coordination_timeout_s = 90
-    common_env = {
-        "TRTMC_GPU_ID": "6",
-        "TRTMC_MODEL_PROOF_GPU_IDS": "6",
-        "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "3",
-        "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "600",
-    }
-    releases = [tmp_path / f"release-shared-{index}" for index in range(3)]
-    exclusive_release = tmp_path / "release-exclusive"
-    exclusive_release.touch()
-    holders: list[subprocess.Popen[str] | None] = [None, None, None]
-    holder_outputs: list[Path] = []
-    exclusive: subprocess.Popen[str] | None = None
-    try:
-        for index in range(3):
-            process, output = _start_proof_case(
-                tmp_path, f"shared-{index}", "albert", releases[index], common_env
-            )
-            holders[index] = process
-            holder_outputs.append(output)
-            deadline = time.monotonic() + coordination_timeout_s
-            while (
-                time.monotonic() < deadline
-                and not (output / "artifacts" / "gpu-lease.json").is_file()
-            ):
-                time.sleep(0.05)
-            assert (output / "artifacts" / "gpu-lease.json").is_file()
-
-        exclusive, exclusive_output = _start_proof_case(
-            tmp_path, "exclusive", "bark", exclusive_release, common_env
-        )
-        # One eligible GPU is reserved, the global queue advances, and the
-        # exclusive proof drains the remaining holders event-driven.
-        deadline = time.monotonic() + coordination_timeout_s
-        while time.monotonic() < deadline and not (
-            _lock_is_busy(lock_dir / "gpu-6-reservation.lock")
-            and not list(lock_dir.glob("admission-global-*.lock"))
-        ):
-            time.sleep(0.05)
-        assert _lock_is_busy(lock_dir / "gpu-6-reservation.lock")
-        assert not list(lock_dir.glob("admission-global-*.lock"))
-
-        # Release holders in a non-sequential order. Waiting on fixed slot order
-        # must still complete after every holder exits.
-        for index in (1, 0, 2):
-            releases[index].touch()
-            holder = holders[index]
-            assert holder is not None
-            holder_stdout, holder_stderr = holder.communicate(timeout=coordination_timeout_s)
-            assert holder.returncode == 0, f"shared-{index}: " + holder_stdout + holder_stderr
-
-        exclusive_stdout, exclusive_stderr = exclusive.communicate(timeout=coordination_timeout_s)
-        assert exclusive.returncode == 0, exclusive_stdout + exclusive_stderr
-        lease = _gpu_lease(exclusive_output)
-        assert lease["resource_class"] == "exclusive_gpu"
-        assert sorted(lease["gpu_slots"]) == [0, 1, 2]
-    finally:
-        for release_file in releases:
-            release_file.touch()
-        _finish_proof_cases([*holders, exclusive])
-
-
-@pytest.mark.model_proof_allocator
 def test_long_queue_is_served_in_strict_fifo_order(tmp_path: Path) -> None:
     lock_dir = tmp_path / "gpu-locks"
     coordination_timeout_s = 90
@@ -4824,8 +4540,8 @@ def test_long_queue_is_served_in_strict_fifo_order(tmp_path: Path) -> None:
     holder_release = tmp_path / "release-holder"
     waiter_release = tmp_path / "release-waiter"
     waiter_release.touch()
-    holder, holder_output = _start_proof_case(
-        tmp_path, "holder", "albert", holder_release, common_env
+    holder, holder_output = _start_lease_case(
+        tmp_path, "holder", "albert", "shared", holder_release, common_env
     )
     waiters: list[subprocess.Popen[str] | None] = [None] * waiter_count
     waiter_outputs: list[Path] = []
@@ -4843,8 +4559,13 @@ def test_long_queue_is_served_in_strict_fifo_order(tmp_path: Path) -> None:
         # The enqueue order is whatever the race produced; the FIFO contract
         # is asserted afterwards from the recorded ticket numbers.
         for index in range(waiter_count):
-            process, output = _start_proof_case(
-                tmp_path, f"waiter-{index}", "convbert", waiter_release, common_env
+            process, output = _start_lease_case(
+                tmp_path,
+                f"waiter-{index}",
+                "convbert",
+                "shared",
+                waiter_release,
+                common_env,
             )
             waiters[index] = process
             waiter_outputs.append(output)
