@@ -26,6 +26,7 @@ from tests.e2e_harness.contracts import (
     ThresholdProfile,
 )
 from tests.e2e_harness.orchestrator import _auto_register_artifacts
+from tools import task_eval
 
 
 def _output(class_map: np.ndarray) -> StageOutput:
@@ -94,6 +95,65 @@ def test_single_gpu_thresholds_reject_the_reproduced_regression() -> None:
     assert thresholds["mIoU"] == 0.94
     assert thresholds["pixel_accuracy"] == 0.99
     assert thresholds["min_pixel_agreement"] == 0.99
+
+
+def test_task_eval_compares_equivalent_postprocessed_class_maps(
+    tmp_path: Path,
+) -> None:
+    """Keep the QA gate on HF/TRT maps produced after the same post-process."""
+    ground = np.array([[0, 0], [1, 1]], dtype=np.uint8)
+    hf_postprocessed = ground.copy()
+    trtmc_postprocessed = ground.copy()
+    hf_raw = np.array([[0]], dtype=np.uint8)
+    paths = {}
+    for name, values in (
+        ("ground", ground),
+        ("hf_postprocessed", hf_postprocessed),
+        ("trtmc_postprocessed", trtmc_postprocessed),
+        ("hf_raw", hf_raw),
+    ):
+        path = tmp_path / f"{name}.npy"
+        np.save(path, values)
+        paths[name] = path
+
+    summary = task_eval.compare_semantic_segmentation_prediction_sets(
+        {
+            "responses": [
+                {
+                    "sample_id": "segformer-boundary",
+                    "class_map_path": str(paths["hf_postprocessed"]),
+                    "raw_class_map_path": str(paths["hf_raw"]),
+                }
+            ]
+        },
+        {
+            "responses": [
+                {
+                    "sample_id": "segformer-boundary",
+                    "class_map_path": str(paths["trtmc_postprocessed"]),
+                }
+            ]
+        },
+        {
+            "requests": [
+                {
+                    "sample_id": "segformer-boundary",
+                    "mask": str(paths["ground"]),
+                }
+            ]
+        },
+        gates={
+            "min_backend_pixel_agreement": 1.0,
+            "min_backend_mean_iou": 1.0,
+            "max_mean_iou_drop_from_hf": 0.0,
+        },
+        num_classes=2,
+        ignore_index=255,
+    )
+
+    assert summary["status"] == "passed"
+    assert summary["backend_pixel_agreement"] == 1.0
+    assert summary["backend_mean_iou"] == 1.0
 
 
 def test_trt_visualization_matches_hf_palette_and_input_size(

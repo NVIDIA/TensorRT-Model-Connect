@@ -15,6 +15,18 @@ from tensorrt_model_connect import trt_compat
 trt = trt_compat.get_trt()
 
 
+def resolve_numerical_contract(config) -> tuple[float, str]:
+    """Return the normalization and activation contract from HF config."""
+    layer_norm_eps = float(config.rms_norm_eps)
+    hidden_act = config.hidden_act or "gelu"
+    if layer_norm_eps <= 0.0:
+        raise ValueError(
+            f"SegFormer layer_norm_eps must be positive, got {layer_norm_eps}")
+    if hidden_act not in ("gelu", "gelu_new", "gelu_fast", "gelu_pytorch_tanh"):
+        raise ValueError(f"Unsupported SegFormer activation: {hidden_act}")
+    return layer_norm_eps, hidden_act
+
+
 def _cast_back_to_trt_dtype(
     network: trt.INetworkDefinition,
     tensor: trt.ITensor,
@@ -188,6 +200,54 @@ def add_gelu_new(
         half_x.get_output(0), one_plus_tanh.get_output(0),
         trt.ElementWiseOperation.PROD)
     return result.get_output(0)
+
+
+def add_gelu_erf(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    dtype: np.dtype = np.float32,
+) -> trt.ITensor:
+    """GELU (exact, erf-based): 0.5*x*(1+erf(x/sqrt(2)))."""
+    target_dtype = inp.dtype
+    const_shape = (1,) * max(1, len(tuple(inp.shape)))
+
+    def _const(value):
+        constant = add_constant(
+            network,
+            const_shape,
+            np.array([value], dtype=np.float32),
+            dtype=dtype,
+        )
+        return _cast_back_to_trt_dtype(network, constant, target_dtype)
+
+    scaled = network.add_elementwise(
+        inp, _const(1.0 / np.sqrt(2.0)), trt.ElementWiseOperation.PROD)
+    erf = network.add_unary(
+        scaled.get_output(0), trt.UnaryOperation.ERF)
+    one_plus_erf = network.add_elementwise(
+        _const(1.0), erf.get_output(0), trt.ElementWiseOperation.SUM)
+    half_x = network.add_elementwise(
+        _const(0.5), inp, trt.ElementWiseOperation.PROD)
+    result = network.add_elementwise(
+        half_x.get_output(0),
+        one_plus_erf.get_output(0),
+        trt.ElementWiseOperation.PROD,
+    )
+    return result.get_output(0)
+
+
+def add_activation(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    activation_type: str,
+    dtype: np.dtype = np.float32,
+) -> trt.ITensor:
+    """Add the activation declared by the SegFormer checkpoint."""
+    if activation_type == "gelu":
+        return add_gelu_erf(network, inp, dtype=dtype)
+    if activation_type in ("gelu_new", "gelu_fast", "gelu_pytorch_tanh"):
+        return add_gelu_new(network, inp, dtype=dtype)
+    raise ValueError(f"Unsupported SegFormer activation: {activation_type}")
 
 
 # Alias: add_gelu_tanh is the same as add_gelu_new (tanh approximation)

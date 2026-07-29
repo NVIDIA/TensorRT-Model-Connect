@@ -100,6 +100,7 @@ def build_segformer_tp_engine(
     strides = raw.get("strides", [4, 2, 2, 2])
     num_classes = raw.get("num_labels", 150)
     decoder_hidden_size = raw.get("decoder_hidden_size", 256)
+    layer_norm_eps, hidden_act = graph_ops.resolve_numerical_contract(config)
 
     image_size = raw.get("_resolved_image_size", 512)
     H_in, W_in = image_size, image_size
@@ -149,7 +150,8 @@ def build_segformer_tp_engine(
 
         pe_ln_w = weights[f"stage{stage_idx}.patch_embed.norm.weight"]
         pe_ln_b = weights[f"stage{stage_idx}.patch_embed.norm.bias"]
-        eps_t = graph_ops.add_constant(network, (1, 1), np.array([1e-5], dtype=np.float32))
+        eps_t = graph_ops.add_constant(
+            network, (1, 1), np.array([layer_norm_eps], dtype=np.float32))
         hidden_state = graph_ops.add_layer_norm(
             network, reshape_to_seq.get_output(0), hidden, pe_ln_w, pe_ln_b, eps_t)
 
@@ -268,7 +270,8 @@ def build_segformer_tp_engine(
             dw_back.first_transpose = trt.Permutation([0, 2, 3, 1])
             dw_back.reshape_dims = (seq_len, local_ffn_hidden)
 
-            gelu_out = graph_ops.add_gelu_new(network, dw_back.get_output(0))
+            gelu_out = graph_ops.add_activation(
+                network, dw_back.get_output(0), hidden_act)
 
             fc2_w = _slice_mlp_rows(
                 weights[f"{w_prefix}.mlp.fc2.weight"], ffn_hidden, parallel)

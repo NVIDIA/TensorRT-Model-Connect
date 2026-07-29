@@ -253,6 +253,7 @@ class SegformerPlugin:
         strides = raw.get("strides", [4, 2, 2, 2])
         num_classes = raw.get("num_labels", 150)
         decoder_hidden_size = raw.get("decoder_hidden_size", 256)
+        layer_norm_eps, hidden_act = graph_ops.resolve_numerical_contract(config)
         if precision == "fp16":
             work_np_dtype, work_trt_dtype = np.float16, trt.float16
         elif precision == "fp32":
@@ -330,7 +331,7 @@ class SegformerPlugin:
             pe_ln_w = weights[f"stage{stage_idx}.patch_embed.norm.weight"]
             pe_ln_b = weights[f"stage{stage_idx}.patch_embed.norm.bias"]
             eps_t = graph_ops.add_constant(
-                network, (1, 1), np.array([1e-5], dtype=work_np_dtype),
+                network, (1, 1), np.array([layer_norm_eps], dtype=work_np_dtype),
                 dtype=work_np_dtype)
             hidden_state = graph_ops.add_layer_norm(
                 network, reshape_to_seq.get_output(0), hidden,
@@ -486,8 +487,9 @@ class SegformerPlugin:
                 dw_back.reshape_dims = (seq_len, ffn_hidden)
 
                 # GELU activation
-                gelu_out = graph_ops.add_gelu_new(
-                    network, dw_back.get_output(0), dtype=work_np_dtype)
+                gelu_out = graph_ops.add_activation(
+                    network, dw_back.get_output(0), hidden_act,
+                    dtype=work_np_dtype)
 
                 # FC2: [seq, ffn_hidden] -> [seq, hidden]
                 fc2 = graph_ops.add_matmul_rhs_constant(

@@ -985,7 +985,7 @@ def test_semantic_segmentation_parity_reports_dataset_miou(tmp_path: Path) -> No
     assert summary["backend_pixel_agreement"] == 1.0
 
 
-def test_semantic_segmentation_uses_raw_hf_map_for_backend_parity(
+def test_semantic_segmentation_uses_postprocessed_hf_map_for_backend_parity(
     tmp_path: Path,
 ) -> None:
     import numpy as np
@@ -993,13 +993,13 @@ def test_semantic_segmentation_uses_raw_hf_map_for_backend_parity(
     ground = np.array([[0, 0], [1, 1]], dtype=np.uint8)
     hf_postprocessed = ground.copy()
     hf_raw = np.array([[0]], dtype=np.uint8)
-    bundle_raw = hf_raw.copy()
+    bundle_postprocessed = hf_postprocessed.copy()
     paths = {}
     for name, values in (
         ("ground", ground),
         ("hf", hf_postprocessed),
         ("hf_raw", hf_raw),
-        ("bundle", bundle_raw),
+        ("bundle", bundle_postprocessed),
     ):
         path = tmp_path / f"{name}.npy"
         np.save(path, values)

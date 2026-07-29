@@ -101,7 +101,8 @@ class SegformerPluginTester(FamilyPluginTester):
             "strides": _STRIDES,
             "num_labels": _NUM_CLASSES,
             "decoder_hidden_size": _DECODER_HIDDEN,
-            "layer_norm_eps": 1e-5,
+            "layer_norm_eps": 1e-6,
+            "hidden_act": "gelu",
         }
 
     def write_model_dir(self, tmp_path):

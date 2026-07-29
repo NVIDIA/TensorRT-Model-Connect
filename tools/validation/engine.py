@@ -10236,12 +10236,15 @@ def compare_semantic_segmentation_prediction_sets(
             continue
         ground_truth = _load_segmentation_array(str(request["mask"]))
         hf_map = _load_segmentation_array(str(hf_by_id[sample_id]["class_map_path"]))
-        hf_backend_map = _load_segmentation_array(
-            str(
-                hf_by_id[sample_id].get("raw_class_map_path")
-                or hf_by_id[sample_id]["class_map_path"]
-            )
-        )
+        # The TRTMC segmentation runtime returns the user-facing class map:
+        # logits are bilinearly resized to the input image size before
+        # argmax.  Compare it with the equivalent HF post-processed map.
+        #
+        # The optional HF raw map is argmax(logits) at the model's lower
+        # output resolution.  Nearest-neighbor resizing that label map is
+        # not equivalent to resizing logits before argmax and creates false
+        # boundary disagreements even when both backends agree.
+        hf_backend_map = hf_map
         bundle_map = _load_segmentation_array(
             str(bundle_by_id[sample_id]["class_map_path"])
         )
