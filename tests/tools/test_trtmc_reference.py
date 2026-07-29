@@ -377,6 +377,25 @@ def test_reference_cache_key_changes_with_inference_setting(
     assert len([path for path in cache_dir.iterdir() if not path.name.startswith(".")]) == 2
 
 
+def test_reference_cache_key_changes_with_experts_implementation(
+    tmp_path: Path,
+) -> None:
+    cache_dir = tmp_path / "cache"
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _prepare_work(first)
+    _prepare_work(second)
+
+    first_key, _ = trtmc_reference.reference_key(
+        _args(first, cache_dir, "--experts-implementation", "batched_mm")
+    )
+    second_key, _ = trtmc_reference.reference_key(
+        _args(second, cache_dir, "--experts-implementation", "eager")
+    )
+
+    assert first_key != second_key
+
+
 def test_reference_cache_key_changes_with_model_revision(
     tmp_path: Path,
     monkeypatch,
@@ -453,6 +472,8 @@ def test_causal_reference_uses_native_transformers_entrypoint(
         cache_dir,
         "--model-revision",
         "0123456789abcdef",
+        "--experts-implementation",
+        "batched_mm",
     )
     arguments.reference_family = "causal_base_continuation"
     manifest_path = work_dir / "manifest.json"
@@ -501,6 +522,7 @@ def test_causal_reference_uses_native_transformers_entrypoint(
     command = captured["command"]
     assert command[1].endswith("tools/reference/transformers_text.py")
     assert command[command.index("--model-revision") + 1] == "0123456789abcdef"
+    assert command[command.index("--experts-implementation") + 1] == "batched_mm"
     assert "task_eval.py" not in " ".join(command)
     assert (work_dir / "hf_native_run.log").is_symlink()
     assert (work_dir / "hf_native_repro.json").is_symlink()
@@ -526,6 +548,8 @@ def test_transformers_reference_metadata_is_direct_and_sample_selectable(
             str(tmp_path / "raw.jsonl"),
             "--repro-metadata",
             str(metadata),
+            "--experts-implementation",
+            "batched_mm",
             "--local-files-only",
         ]
     )
@@ -537,7 +561,60 @@ def test_transformers_reference_metadata_is_direct_and_sample_selectable(
     assert command[1].endswith("tools/reference/transformers_text.py")
     assert command[command.index("--sample-id") + 1] == "{sample_id}"
     assert command[command.index("--prompts") + 1] == "{work_dir}/prompts.jsonl"
+    assert command[command.index("--experts-implementation") + 1] == "batched_mm"
     assert "task_eval.py" not in " ".join(command)
+
+
+def test_transformers_text_forwards_experts_implementation(monkeypatch) -> None:
+    arguments = transformers_text.build_parser().parse_args(
+        [
+            "--model",
+            "org/model",
+            "--prompts",
+            "/tmp/prompts.jsonl",
+            "--answers",
+            "/tmp/answers.json",
+            "--manifest",
+            "/tmp/manifest.json",
+            "--predictions",
+            "/tmp/predictions.json",
+            "--raw-output",
+            "/tmp/raw.jsonl",
+            "--dtype",
+            "float16",
+            "--experts-implementation",
+            "batched_mm",
+        ]
+    )
+    captured: dict[str, object] = {}
+    tokenizer = SimpleNamespace(pad_token_id=0)
+    model = SimpleNamespace(device="cuda", to=lambda _device: None)
+    transformers_module = SimpleNamespace(
+        logging=SimpleNamespace(set_verbosity_error=lambda: None),
+        AutoTokenizer=SimpleNamespace(
+            from_pretrained=lambda _model_id, **_kwargs: tokenizer
+        ),
+    )
+
+    def fake_load_model(
+        _transformers_module,
+        _model_id,
+        *,
+        model_kwargs,
+        **_kwargs,
+    ):
+        captured.update(model_kwargs)
+        return model, False
+
+    monkeypatch.setattr(transformers_text, "_load_model", fake_load_model)
+
+    transformers_text._load_runtime(
+        arguments,
+        SimpleNamespace(float16=object(), device=lambda name: name),
+        transformers_module,
+    )
+
+    assert captured["experts_implementation"] == "batched_mm"
 
 
 def test_transformers_text_reference_accepts_float32_dtype() -> None:
