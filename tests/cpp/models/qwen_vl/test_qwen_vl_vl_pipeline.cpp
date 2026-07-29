@@ -115,7 +115,8 @@ class CountingTextModule final : public trtmc::ITrtModule {
     bool has_input(const std::string& name) const override {
         return name == "token_id" || name == "position_id" || name == "attention_mask" ||
                name == "input_embed" || name == "use_input_embed" || name == "deepstack_active" ||
-               name == "deepstack_embed_0" || name == "cache_k_0" || name == "cache_v_0";
+               name == "deepstack_embed_0" || name == "mrope_position_ids" || name == "cache_k_0" ||
+               name == "cache_v_0";
     }
     bool has_output(const std::string& name) const override {
         return name == "logits" || name == "present_k_0" || name == "present_v_0";
@@ -806,7 +807,7 @@ static void test_vl_sequence_prefill_uses_one_text_launch() {
 
     trtmc::QwenVlConfig cfg;
     cfg.vocab_size = 4;
-    cfg.id_eos = 2;
+    cfg.id_eos = 99;
     cfg.image_token_id = 1;
     cfg.vision_output_dim = 4;
     cfg.num_layers = 1;
@@ -824,15 +825,20 @@ static void test_vl_sequence_prefill_uses_one_text_launch() {
     float pixels[2 * 2 * 3] = {0.5F, 0.5F, 0.5F, 0.4F, 0.4F, 0.4F,
                                0.3F, 0.3F, 0.3F, 0.2F, 0.2F, 0.2F};
     trtmc::GenerateConfig gen_cfg;
-    gen_cfg.max_new_tokens = 1;
-    gen_cfg.eos_token_id = 2;
+    gen_cfg.max_new_tokens = 2;
+    gen_cfg.eos_token_id = 99;
     auto result = pipeline.generate("test", pixels, 2, 2, gen_cfg);
 
-    check(result.token_ids == std::vector<int32_t>{2}, "sequence prefill: output remains correct");
+    check(result.token_ids == std::vector<int32_t>({2, 2}),
+          "sequence prefill: output remains correct");
     check(prefill_stats->calls == 1, "sequence prefill: one prefill launch");
-    check(decode_stats->calls == 0, "sequence prefill: no prompt-linear decode launches");
+    check(decode_stats->calls == 2, "sequence prefill: two decode launches");
     check(prefill_stats->shapes["token_id"] == std::vector<int64_t>{3},
           "sequence prefill: token shape");
+    check(prefill_stats->shapes["mrope_position_ids"] == std::vector<int64_t>({3, 3}),
+          "sequence prefill: mRoPE shape");
+    check(decode_stats->shapes["mrope_position_ids"] == std::vector<int64_t>({3, 1}),
+          "sequence decode: mRoPE shape");
     check(prefill_stats->shapes["input_embed"] == std::vector<int64_t>({3, 4}),
           "sequence prefill: input embed shape");
     check(prefill_stats->shapes["use_input_embed"] == std::vector<int64_t>({3, 1}),

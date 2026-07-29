@@ -42,6 +42,8 @@
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <iostream>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 static int failures = 0;
@@ -432,6 +434,39 @@ static void test_profile_idx_default() {
     cudaStreamDestroy(stream);
 }
 
+static void test_rejected_dynamic_shape_throws() {
+    auto engine = build_dynamic_identity_engine();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto* ctx = engine->createExecutionContext();
+    trtmc::TrtModuleImpl module(engine.get(), ctx, stream);
+    check(module.ok(), "dynamic shape: module is ok");
+
+    float input_data[4] = {1.0F, 2.0F, 3.0F, 4.0F};
+    trtmc::Tensor input_tensor;
+    input_tensor.data = input_data;
+    input_tensor.shape = {4};
+    input_tensor.dtype = trtmc::DType::kFloat32;
+
+    bool threw = false;
+    try {
+        module.forward_async({{"x", input_tensor}});
+    } catch (const std::runtime_error& error) {
+        threw = true;
+        const std::string message = error.what();
+        check(message.find("'x'") != std::string::npos, "dynamic shape: error identifies input");
+        check(message.find("[4]") != std::string::npos,
+              "dynamic shape: error includes rejected shape");
+    }
+    check(threw, "dynamic shape: rejected rank throws");
+
+    cudaStreamDestroy(stream);
+}
+
 static void test_profile_idx_invalid() {
     // Verify that an invalid profile index (engine has only 1 profile) fails gracefully
     auto engine = build_identity_engine();
@@ -493,6 +528,7 @@ int main() {
     test_forward_device();
     test_forward_device_with_input();
     test_profile_idx_default();
+    test_rejected_dynamic_shape_throws();
     test_profile_idx_invalid();
 
     if (failures > 0) {

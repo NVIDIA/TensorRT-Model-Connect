@@ -502,6 +502,12 @@ int32_t merged_grid_extent(int32_t configured_extent, int32_t fallback_extent, i
     return extent / (patch_size * merge_size);
 }
 
+std::vector<int64_t> single_mrope_shape(const TrtModule& module) {
+    if (module.input_rank("mrope_position_ids") == 2)
+        return {3, 1};
+    return {3};
+}
+
 bool add_mrope_prefill_input(TrtModule& prefill, const std::vector<int32_t>& input_ids,
                              const QwenVlMropePositions* mrope, int32_t sequence_length,
                              std::vector<int32_t>& positions, TensorMap& inputs) {
@@ -777,8 +783,8 @@ void QwenVlPipeline::run_text_step_with_embed(int32_t token_id, const float* inp
     state_->prepare_step(inputs);
 
     if (mrope_position != nullptr && text_decoder_->has_input("mrope_position_ids")) {
-        inputs["mrope_position_ids"] =
-            Tensor{const_cast<int32_t*>(mrope_position->data()), {3}, DType::kInt32};
+        inputs["mrope_position_ids"] = Tensor{const_cast<int32_t*>(mrope_position->data()),
+                                              single_mrope_shape(*text_decoder_), DType::kInt32};
     }
 
     std::vector<float> zero_embed;

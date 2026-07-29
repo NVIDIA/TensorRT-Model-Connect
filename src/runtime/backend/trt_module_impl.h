@@ -113,6 +113,7 @@ class TrtModuleImpl final : public ITrtModule {
     void allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io);
     void set_dynamic_input_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io,
                                   nvinfer1::OptProfileSelector selector);
+    void set_input_shape_or_throw(const std::string& name, const nvinfer1::Dims& dims);
     void update_dynamic_shape(const std::string& name, BufferEntry& entry,
                               const std::vector<int64_t>& new_shape);
     void execute_enqueue();

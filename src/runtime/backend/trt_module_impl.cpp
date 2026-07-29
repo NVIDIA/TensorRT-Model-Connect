@@ -90,7 +90,14 @@ TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecution
         }
         cudaStreamSynchronize(stream_);
     }
-    allocate_buffers(engine);
+    try {
+        allocate_buffers(engine);
+    } catch (const std::exception& error) {
+        std::cerr << "[trt_module] Failed to allocate buffers: " << error.what() << '\n';
+        free_buffers();
+        delete ctx_;
+        ctx_ = nullptr;
+    }
 }
 
 void TrtModuleImpl::validate_initial_external_bindings(
@@ -218,6 +225,21 @@ std::vector<int64_t> TrtModuleImpl::dims_to_shape(const nvinfer1::Dims& dims) {
     return shape;
 }
 
+void TrtModuleImpl::set_input_shape_or_throw(const std::string& name, const nvinfer1::Dims& dims) {
+    if (ctx_ != nullptr && ctx_->setInputShape(name.c_str(), dims))
+        return;
+
+    std::ostringstream message;
+    message << "[trt_module] TensorRT rejected input shape for '" << name << "': [";
+    for (int32_t index = 0; index < dims.nbDims; ++index) {
+        if (index != 0)
+            message << ", ";
+        message << dims.d[index];
+    }
+    message << ']';
+    throw std::runtime_error(message.str());
+}
+
 void TrtModuleImpl::update_dynamic_shape(const std::string& name, BufferEntry& entry,
                                          const std::vector<int64_t>& new_shape) {
     // Skip static inputs: TRT rejects setInputShape on them even when the
@@ -232,7 +254,7 @@ void TrtModuleImpl::update_dynamic_shape(const std::string& name, BufferEntry& e
     dims.nbDims = static_cast<int32_t>(new_shape.size());
     for (int32_t d = 0; d < dims.nbDims; ++d)
         dims.d[d] = new_shape[d];
-    ctx_->setInputShape(name.c_str(), dims);
+    set_input_shape_or_throw(name, dims);
     entry.shape = new_shape;
 }
 
@@ -273,7 +295,7 @@ void TrtModuleImpl::set_dynamic_input_shapes(nvinfer1::ICudaEngine* engine, int3
             continue;
         if (dims_are_dynamic(engine->getTensorShape(name.c_str()))) {
             auto dims = engine->getProfileShape(name.c_str(), profile_idx_, selector);
-            ctx_->setInputShape(name.c_str(), dims);
+            set_input_shape_or_throw(name, dims);
         }
     }
 }
@@ -305,6 +327,9 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const s
     entry.is_dynamic = is_dynamic;
     entry.shape = is_dynamic ? dims_to_shape(init_dims) : shape;
 
+    if (is_dynamic)
+        set_input_shape_or_throw(name, init_dims);
+
     const auto external = initial_external_bindings_.find(name);
     if (external != initial_external_bindings_.end()) {
         entry.d_ptr = external->second;
@@ -319,9 +344,6 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const s
 
     if (entry.d_ptr)
         bind_tensor_address(name, entry);
-
-    if (is_dynamic)
-        ctx_->setInputShape(name.c_str(), init_dims);
 
     buffers_[name] = std::move(entry);
 }
