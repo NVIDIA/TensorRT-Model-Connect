@@ -13,12 +13,16 @@
       "name": "nllb-200-distilled-600m",
       "reference_family": "seq2seq_translation",
       "user_contract": "translation",
-      "reference_precision": "fp32",
+      "reference_precision": "fp16",
       "prompt": "The house is wonderful.",
       "max_new_tokens": 20,
       "metadata": {
         "contract_config": {
-          "auto_class": "AutoModelForSeq2SeqLM"
+          "auto_class": "AutoModelForSeq2SeqLM",
+          "source_language": "eng_Latn",
+          "source_language_token_id": 256047,
+          "target_language": "fra_Latn",
+          "forced_bos_token_id": 256057
         }
       }
     }

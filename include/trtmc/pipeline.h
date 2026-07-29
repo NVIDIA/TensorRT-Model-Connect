@@ -180,6 +180,11 @@ struct TextEmbedding {
 
 struct GenerateConfig {
     int32_t max_new_tokens{128};
+    // Multilingual encoder-decoder controls. A non-negative source token is
+    // placed after the encoder EOS token. A non-negative forced BOS token is
+    // emitted as the first decoder token after decoder_start_token_id.
+    int32_t source_language_token_id{-1};
+    int32_t forced_bos_token_id{-1};
     int32_t num_samples{1}; // non-AR generators: number of independent samples to emit
     float temperature{1.0f};
     int32_t top_k{1};  // 1 = greedy unless top_p is active; <=0 = no top-k limit

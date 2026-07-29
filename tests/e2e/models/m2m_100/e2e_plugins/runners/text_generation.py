@@ -555,6 +555,16 @@ class TextGenerationCausalRunner:
 
         if case is not None:
             contract_config = case.metadata.get("contract_config", {})
+            if "source_language_token_id" in contract_config:
+                cmd.extend([
+                    "--source-language-token-id",
+                    str(contract_config["source_language_token_id"]),
+                ])
+            if "forced_bos_token_id" in contract_config:
+                cmd.extend([
+                    "--forced-bos-token-id",
+                    str(contract_config["forced_bos_token_id"]),
+                ])
             if contract_config.get("use_chat_template"):
                 cmd.append("--chat-template")
             if contract_config.get("enable_thinking") is False:

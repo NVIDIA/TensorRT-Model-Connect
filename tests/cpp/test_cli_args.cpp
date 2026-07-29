@@ -91,6 +91,10 @@ void test_run_parses_common_flags() {
                        "hello",
                        "--max-new-tokens",
                        "8",
+                       "--source-language-token-id",
+                       "256047",
+                       "--forced-bos-token-id",
+                       "256057",
                        "--generation-mode",
                        "diffusion",
                        "--block-length",
@@ -128,6 +132,8 @@ void test_run_parses_common_flags() {
     check(args.prompt_provided, "run prompt provided");
     check(args.prompt == "hello", "run prompt");
     check(args.max_new_tokens == 8, "run max tokens");
+    check(args.source_language_token_id == 256047, "run source language token");
+    check(args.forced_bos_token_id == 256057, "run forced BOS token");
     check(args.generation_mode == "diffusion", "run generation mode");
     check(args.block_length == 32, "run block length");
     check(args.conf_threshold > 0.89F && args.conf_threshold < 0.91F, "run threshold");
@@ -329,6 +335,20 @@ void test_invalid_generation_sampling_values_fail() {
     check_message_contains(malformed_tokens.error_message,
                            "--max-new-tokens expects an integer > 0",
                            "malformed max tokens message");
+
+    auto negative_source_language = parse(
+        {"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--source-language-token-id", "-1"});
+    check(negative_source_language.parse_error, "negative source language token parse error");
+    check_message_contains(negative_source_language.error_message,
+                           "--source-language-token-id expects an integer >= 0",
+                           "negative source language token message");
+
+    auto malformed_forced_bos = parse(
+        {"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--forced-bos-token-id", "abc"});
+    check(malformed_forced_bos.parse_error, "malformed forced BOS token parse error");
+    check_message_contains(malformed_forced_bos.error_message,
+                           "--forced-bos-token-id expects an integer >= 0",
+                           "malformed forced BOS token message");
 
     auto negative_temperature =
         parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--temperature", "-1"});

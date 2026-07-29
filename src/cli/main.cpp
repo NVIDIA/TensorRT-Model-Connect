@@ -417,6 +417,8 @@ int cmd_run(const CliArgs& args) {
     trtmc::GenerateConfig cfg;
     cfg.max_new_tokens =
         args.max_new_tokens > 0 ? args.max_new_tokens : pipeline->default_max_new_tokens();
+    cfg.source_language_token_id = args.source_language_token_id;
+    cfg.forced_bos_token_id = args.forced_bos_token_id;
     cfg.num_samples = args.num_samples;
     cfg.block_length = args.block_length;
     cfg.confidence_threshold = args.conf_threshold;

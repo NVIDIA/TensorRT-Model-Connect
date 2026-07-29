@@ -9,6 +9,7 @@
 #include "plugin_helpers.h"
 #include "runtime/models/m2m_100/decode_runtime.h"
 #include "runtime/models/m2m_100/kv_cache.h"
+#include "runtime/models/m2m_100/request_tokens.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_plugin.h"
 #include "trtmc/runtime/pipeline_registry.h"
@@ -103,7 +104,7 @@ class M2M100Pipeline final : public IPipeline {
     }
 
     TextResult generate(const std::string& prompt, const GenerateConfig& cfg) override {
-        auto [padded, copy_len] = prepare_encoder_input(prompt);
+        auto [padded, copy_len] = prepare_encoder_input(prompt, cfg.source_language_token_id);
         if (copy_len == 0)
             return TextResult{"[empty input]", {}};
 
@@ -111,7 +112,7 @@ class M2M100Pipeline final : public IPipeline {
         setup_cross_attention();
 
         int32_t max_tokens = cfg.max_new_tokens > 0 ? cfg.max_new_tokens : 128;
-        auto output_ids = run_decoder(max_tokens);
+        auto output_ids = run_decoder(max_tokens, cfg.forced_bos_token_id);
 
         TextResult out;
         out.token_ids = std::move(output_ids);
@@ -124,18 +125,27 @@ class M2M100Pipeline final : public IPipeline {
     const char* pipeline_type() const override { return "M2M100Pipeline"; }
 
   private:
-    std::pair<std::vector<int32_t>, int32_t> prepare_encoder_input(const std::string& prompt) {
+    std::pair<std::vector<int32_t>, int32_t>
+    prepare_encoder_input(const std::string& prompt, int32_t source_language_token_id) {
         std::vector<int32_t> ids;
         if (tokenizer_)
             ids = tokenizer_->encode(prompt);
         if (ids.empty())
             return {{}, 0};
 
-        // Add BOS/EOS if the native tokenizer didn't
-        if (bos_token_id_ >= 0 && (ids.empty() || ids.front() != bos_token_id_))
-            ids.insert(ids.begin(), bos_token_id_);
-        if (eos_token_id_ >= 0 && (ids.empty() || ids.back() != eos_token_id_))
-            ids.push_back(eos_token_id_);
+        if (source_language_token_id >= 0) {
+            // NLLB tokenizers frame source input as: text, EOS, language.
+            // Replace an unset/unknown language suffix instead of adding a
+            // second special-token frame.
+            m2m_100_apply_source_language_token(ids, eos_token_id_, source_language_token_id);
+        } else {
+            // Preserve the legacy M2M-100 framing when no request-level
+            // language contract is supplied.
+            if (bos_token_id_ >= 0 && (ids.empty() || ids.front() != bos_token_id_))
+                ids.insert(ids.begin(), bos_token_id_);
+            if (eos_token_id_ >= 0 && (ids.empty() || ids.back() != eos_token_id_))
+                ids.push_back(eos_token_id_);
+        }
 
         int32_t copy_len = std::min(static_cast<int32_t>(ids.size()), max_source_length_);
         std::vector<int32_t> padded(static_cast<std::size_t>(max_source_length_), pad_token_id_);
@@ -187,7 +197,7 @@ class M2M100Pipeline final : public IPipeline {
         }
     }
 
-    std::vector<int32_t> run_decoder(int32_t max_new_tokens) {
+    std::vector<int32_t> run_decoder(int32_t max_new_tokens, int32_t forced_bos_token_id) {
         state_->reset();
         state_->bind_to(*decoder_);
         std::vector<int32_t> output_ids;
@@ -195,7 +205,8 @@ class M2M100Pipeline final : public IPipeline {
         int32_t current_token = decoder_start_token_id_;
         for (int32_t step = 0; step < max_new_tokens; ++step) {
             run_decoder_step(current_token, logits);
-            int32_t next = m2m_100_select_argmax_token(logits);
+            int32_t next = m2m_100_apply_forced_bos_token(m2m_100_select_argmax_token(logits), step,
+                                                          forced_bos_token_id);
             if (next == eos_token_id_)
                 break;
             output_ids.push_back(next);

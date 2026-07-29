@@ -191,6 +191,7 @@ void print_usage() {
            "  trtmc graph           <inspect|list|recipes|select> [args...]\n"
            "  trtmc run             <bundle.trtfb> --prompt \"text\" [--image PATH] "
            "[--max-new-tokens N] [--temperature F] [--top-p F] [--min-p F] "
+           "[--source-language-token-id N] [--forced-bos-token-id N] "
            "[--top-k N] [--seed N] [--benchmark N] [--warmup N] [--hf-python PATH] "
            "[--lora-adapter DIR] [--lora-adapter-id ID] "
            "[--kv-cache-size SIZE] [--chat-template] [--no-thinking] "
@@ -359,6 +360,26 @@ CliArgs parse_args(int argc, char** argv) {
                 return args;
             }
             args.max_new_tokens = *value;
+            continue;
+        }
+        if (arg == "--source-language-token-id" && need_value(arg)) {
+            auto value = parse_int_value(arg, "an integer >= 0");
+            if (!value || *value < 0) {
+                args.parse_error = true;
+                args.error_message = arg + " expects an integer >= 0";
+                return args;
+            }
+            args.source_language_token_id = *value;
+            continue;
+        }
+        if (arg == "--forced-bos-token-id" && need_value(arg)) {
+            auto value = parse_int_value(arg, "an integer >= 0");
+            if (!value || *value < 0) {
+                args.parse_error = true;
+                args.error_message = arg + " expects an integer >= 0";
+                return args;
+            }
+            args.forced_bos_token_id = *value;
             continue;
         }
         if (arg == "--block-length" && need_value(arg)) {

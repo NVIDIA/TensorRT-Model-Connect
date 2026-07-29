@@ -42,6 +42,8 @@ struct CliArgs {
     float point_y{0.5F};
     bool is_foreground{true};
     int max_new_tokens{0};
+    int source_language_token_id{-1};
+    int forced_bos_token_id{-1};
     int block_length{0};
     int num_samples{1};
     int benchmark{0}; // >0: run N timed iterations after warmup

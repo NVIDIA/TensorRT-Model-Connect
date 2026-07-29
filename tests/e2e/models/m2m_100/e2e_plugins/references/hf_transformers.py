@@ -333,6 +333,10 @@ class HfTransformersReference:
         contract_config = case.metadata.get("contract_config", {})
         use_chat_template = contract_config.get("use_chat_template", False)
         enable_thinking = contract_config.get("enable_thinking", True)
+        source_language = contract_config.get("source_language")
+        source_language_token_id = contract_config.get("source_language_token_id")
+        target_language = contract_config.get("target_language")
+        forced_bos_token_id = contract_config.get("forced_bos_token_id")
 
         script = textwrap.dedent(f"""\
             import sys, numpy as np, torch
@@ -347,12 +351,32 @@ class HfTransformersReference:
             text_path = {text_path!r}
             use_chat_template = {use_chat_template!r}
             enable_thinking = {enable_thinking!r}
+            source_language = {source_language!r}
+            source_language_token_id = {source_language_token_id!r}
+            target_language = {target_language!r}
+            forced_bos_token_id = {forced_bos_token_id!r}
 
             def _np(t):
                 return t.detach().float().cpu().numpy()
 
             tokenizer = AutoTokenizer.from_pretrained(
                 model_ref, trust_remote_code=trust_remote_code)
+            if source_language is not None and source_language_token_id is not None:
+                resolved_source_token_id = tokenizer.convert_tokens_to_ids(
+                    source_language)
+                if resolved_source_token_id != source_language_token_id:
+                    raise ValueError(
+                        f"source language {{source_language!r}} resolved to "
+                        f"{{resolved_source_token_id}}, expected "
+                        f"{{source_language_token_id}}")
+            if target_language is not None and forced_bos_token_id is not None:
+                resolved_target_token_id = tokenizer.convert_tokens_to_ids(
+                    target_language)
+                if resolved_target_token_id != forced_bos_token_id:
+                    raise ValueError(
+                        f"target language {{target_language!r}} resolved to "
+                        f"{{resolved_target_token_id}}, expected "
+                        f"{{forced_bos_token_id}}")
             if use_chat_template:
                 messages = [{{"role": "user", "content": prompt}}]
                 try:
@@ -367,6 +391,15 @@ class HfTransformersReference:
                     input_ids = tokenizer.encode(prompt)
             else:
                 input_ids = tokenizer.encode(prompt)
+
+            if source_language_token_id is not None:
+                eos_token_id = tokenizer.eos_token_id
+                if len(input_ids) >= 2 and input_ids[-2] == eos_token_id:
+                    input_ids[-1] = source_language_token_id
+                else:
+                    if not input_ids or input_ids[-1] != eos_token_id:
+                        input_ids.append(eos_token_id)
+                    input_ids.append(source_language_token_id)
 
             load_kwargs = {{
                 "trust_remote_code": trust_remote_code,
@@ -389,9 +422,14 @@ class HfTransformersReference:
             with torch.no_grad():
                 if is_seq2seq:
                     # Encoder-decoder: use model.generate() for greedy decoding
-                    output_ids = model.generate(
-                        ids_tensor, max_new_tokens=max_new_tokens,
-                        do_sample=False, num_beams=1)
+                    generation_kwargs = {{
+                        "max_new_tokens": max_new_tokens,
+                        "do_sample": False,
+                        "num_beams": 1,
+                    }}
+                    if forced_bos_token_id is not None:
+                        generation_kwargs["forced_bos_token_id"] = forced_bos_token_id
+                    output_ids = model.generate(ids_tensor, **generation_kwargs)
                     generated_token_ids = output_ids[0].tolist()
                     # Re-run to get logits for each decoder step
                     decoder_ids = torch.tensor([generated_token_ids], dtype=torch.long)
