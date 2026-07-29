@@ -116,7 +116,7 @@ def _decode_vl_generated_text(
     return ""
 
 
-def _resolve_cached_model_ref(hf_id: str) -> str:
+def _resolve_cached_model_ref(hf_id: str, revision: str = "") -> str:
     """Prefer a locally cached HF snapshot to avoid Hub API rate limits."""
     if not hf_id:
         return hf_id
@@ -127,7 +127,10 @@ def _resolve_cached_model_ref(hf_id: str) -> str:
     try:
         from huggingface_hub import snapshot_download
 
-        return snapshot_download(hf_id, local_files_only=True)
+        kwargs: dict[str, Any] = {"local_files_only": True}
+        if revision:
+            kwargs["revision"] = revision
+        return snapshot_download(hf_id, **kwargs)
     except Exception:
         return hf_id
 
@@ -327,7 +330,7 @@ class HfTransformersReference:
         max_new_tokens = case.inputs.get("max_new_tokens", 30)
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
-        model_ref = _resolve_cached_model_ref(hf_id)
+        model_ref = _resolve_cached_model_ref(hf_id, case.hf_revision)
         torch_dtype_expr = _torch_dtype_for_case(case)
 
         contract_config = case.metadata.get("contract_config", {})
