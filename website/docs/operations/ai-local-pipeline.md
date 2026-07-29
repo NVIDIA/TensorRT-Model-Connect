@@ -1,114 +1,100 @@
 # Local AI Workflow Playbook
 
-This is the human-operated startup path for the AI staging workflow. The goal is
-to open persistent agent CLI windows in one tmux session, then start one loop
-prompt in each window.
+This playbook covers local preparation for the current GitHub PR flow. It does
+not activate the retired `ai-staging` CI design.
 
-GitHub remains the durable queue for issues, PRs, labels, checks, and branch
-state. The local `.ai-workflow/` directory is only used for implementation and
-promotion-repair worktrees.
-
-## Agent CLI
-
-Use any agent CLI that can run in the repository checkout and accept a prompt.
-Codex is the default example because it understands the repo-local
-`AGENTS.md` and installed skills:
+## 1. Confirm the checkout
 
 ```bash
-export TRTMC_AGENT_BIN="${TRTMC_AGENT_BIN:-codex}"
-export TRTMC_AGENT_ARGS="${TRTMC_AGENT_ARGS:-exec -s danger-full-access -a never -C {workspace} {prompt}}"
+git status --short
+git remote -v
+
+DOC_REMOTE="github"
+if ! git remote get-url "$DOC_REMOTE" >/dev/null 2>&1; then
+  DOC_REMOTE="origin"
+fi
+DOC_REMOTE_URL=$(git remote get-url "$DOC_REMOTE")
+case "$DOC_REMOTE_URL" in
+  https://github.com/NVIDIA/TensorRT-Model-Connect|\
+  https://github.com/NVIDIA/TensorRT-Model-Connect.git|\
+  git@github.com:NVIDIA/TensorRT-Model-Connect.git|\
+  ssh://git@github.com/NVIDIA/TensorRT-Model-Connect.git) ;;
+  *)
+    echo "Refusing non-canonical remote: $DOC_REMOTE_URL" >&2
+    exit 1
+    ;;
+esac
+
+git fetch "$DOC_REMOTE" main
+git rev-parse HEAD
+git rev-parse "$DOC_REMOTE/main"
 ```
 
-For a different CLI, override both variables before opening the tmux session.
-For example:
+Preserve unrelated local work. Prefer the repository-standard `github` remote;
+the fallback supports ordinary clones where the same canonical repository is
+named `origin`. Start new work from `$DOC_REMOTE/main` on a short-lived branch;
+do not push directly to `main`.
+
+## 2. Inspect available operator tooling
 
 ```bash
-export TRTMC_AGENT_BIN=claude
-export TRTMC_AGENT_ARGS='--print -p {prompt}'
+python3 tools/ai_agent_system.py --help
+python3 tools/ai_staging.py --help
+python3 scripts/autopilot/autorun.py --help
 ```
 
-The placeholders are:
+The first two tools default to a remote named `github`. Pass the resolved
+`$DOC_REMOTE` so the same commands also work in a canonical clone whose remote
+is named `origin`.
 
-- `{workspace}`: the repository checkout for that window.
-- `{prompt}`: the loop command or task prompt to run.
+## 3. Run read-only preflight
 
-## Start
-
-From the repo root:
+The queue helper's `preflight` and `dashboard` operations read GitHub state.
+`--dry-run` prevents supported write paths from mutating it. In the current
+repository, `preflight` is expected to return nonzero and report the missing
+`ai-staging` branch/labels; run it only to inspect the inactive design:
 
 ```bash
-git fetch github main ai-staging
-export REPO_ROOT="$PWD"
-python3 tools/ai_agent_system.py --project NVIDIA/TensorRT-Model-Connect --target ai-staging preflight
+python3 tools/ai_agent_system.py \
+  --remote "$DOC_REMOTE" \
+  --project NVIDIA/TensorRT-Model-Connect \
+  --dry-run \
+  preflight
+
+python3 tools/ai_agent_system.py \
+  --remote "$DOC_REMOTE" \
+  --project NVIDIA/TensorRT-Model-Connect \
+  --dry-run \
+  dashboard
 ```
 
-Open five agent windows in tmux. The commands below show Codex explicitly; if
-you use another CLI, replace the command after `&&` with your agent invocation.
+These commands require GitHub credentials and network access even in dry-run
+mode because they inspect repository state.
+
+## 4. Implement and verify
+
+Follow the owning model's three descriptors and run the smallest meaningful
+tests before broader gates:
 
 ```bash
-tmux new-session -d -s ai-workflow -n discovery \
-  "cd '$REPO_ROOT' && codex exec -s danger-full-access -a never -C '$REPO_ROOT' '/loop 30m /discovery'"
+PYTHONPATH=python:. python3 tools/test_impact.py \
+  --base "$DOC_REMOTE/main" \
+  --head HEAD
 
-tmux new-window -t ai-workflow -n implement \
-  "cd '$REPO_ROOT' && codex exec -s danger-full-access -a never -C '$REPO_ROOT' '/loop 10m /implement'"
-
-tmux new-window -t ai-workflow -n merge \
-  "cd '$REPO_ROOT' && codex exec -s danger-full-access -a never -C '$REPO_ROOT' '/loop 5m /merge'"
-
-tmux new-window -t ai-workflow -n staging \
-  "cd '$REPO_ROOT' && codex exec -s danger-full-access -a never -C '$REPO_ROOT' '/loop 240m /staging'"
-
-tmux new-window -t ai-workflow -n promotion \
-  "cd '$REPO_ROOT' && codex exec -s danger-full-access -a never -C '$REPO_ROOT' '/loop 20m /promotion'"
-
-tmux attach -t ai-workflow
+PYTHONPATH=python:. python3 -m pytest \
+  tests/tools/test_model_plugin_encapsulation_static.py -q
 ```
 
-Do not skip repository permission checks unless the repository instructions
-explicitly allow it for the environment you are using.
+Use the affected model's `tests/e2e/models/<family>/` command only when the
+required model, TensorRT runtime, GPU, binary, and plugin directory are
+available.
 
-## What Each Window Does
+## 5. Publish for review
 
-```text
-discovery
-  creates small ai:ready GitHub issues
+Open a pull request targeting `main`. The repository's supported premerge gate
+starts only when an authorized maintainer applies `run-ci`; the workflow
+consumes that label and tests an immutable PR merge snapshot.
 
-implement
-  claims one ai:ready or ai:needs-rework issue from GitHub
-  sends failed/canceled generated PRs back to ai:needs-rework
-  creates an isolated per-issue worktree
-  starts an implementation agent
-  submits one ai-task-* PR targeting ai-staging, or repairs the existing PR for rework
-
-merge
-  merges green approved AI PRs into ai-staging
-  sends rebase conflicts back to ai:needs-rework
-
-staging
-  snapshots ai-staging to a timestamped promotion branch
-  resets ai-staging to main for future AI PRs
-  opens a human-review PR from the snapshot branch to main
-
-promotion
-  watches ai-staging-promotion-* PRs targeting main
-  keeps promotion source branches rebased onto main
-  fixes failed full-check issues on the promotion source branch
-  leaves final review and merge to the human
-```
-
-## Monitor
-
-From any shell in the repo:
-
-```bash
-python3 tools/ai_agent_system.py --project NVIDIA/TensorRT-Model-Connect --target ai-staging dashboard
-```
-
-## Stop
-
-Stop individual agent sessions with the CLI's normal exit command, or stop the
-full tmux session:
-
-```bash
-tmux kill-session -t ai-workflow
-```
+The retained `ai-staging` utilities can mutate branches and pull requests, but
+they are not part of the current supported flow because no Actions workflow
+validates that target.

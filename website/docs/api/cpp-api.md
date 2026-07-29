@@ -1,5 +1,5 @@
 ---
-title: C++ and C ABI
+title: C++ API and C-Linkage Subset
 ---
 
 The public C++ API is centered on `include/trtmc/pipeline.h`.
@@ -27,23 +27,123 @@ trtmc::LoadOptions options;
 options.hf_python = "/opt/venv/bin/python";
 options.runtime_cache_path = "/tmp/trtmc-rtx.cache";
 options.cuda_graphs = true;
-options.kv_cache_size_bytes = 512ULL * 1000ULL * 1000ULL;
+options.config_path = "/etc/trtmc/runtime.json";
 options.backend_search_paths = {"/opt/trtmc/backends"};
-options.set_tokens = {"runtime.max_batch_size=1"};
+options.model_plugin_search_paths = {"/opt/trtmc/models"};
+options.set_tokens = {"runtime.prefer_gpu_greedy=true"};
 
 auto pipe = trtmc::load("/tmp/model.trtfb", options);
 ```
+
+`load()` supports both bundle shapes. A native bundle uses
+`runtime_strategy`, the model-plugin index, and a backend DSO. A bundle with
+`optimized_runtime.json` instead loads its exact embedded implementation DSO;
+`model_plugin_search_paths` and `backend_search_paths` do not select that
+implementation.
+
+`kv_cache_size_bytes` is a route-specific override, not a safe generic default.
+Set it only for a decoder bundle built with runtime-resizable KV support, for
+example:
+
+```cpp
+options.kv_cache_size_bytes = 512ULL * 1000ULL * 1000ULL;
+```
+
+Leave it at zero for full-context native-KV Qwen3/Llama bundles. Those bundles
+own one fixed physical capacity and reject every nonzero override.
+
+`config_path` is the library equivalent of runtime `--config` and accepts a
+schema-driven JSON file on the C++ path. `set_tokens` supplies repeatable
+`namespace.field=value` session overrides; those values win over the file.
+The current Qwen Edge-LLM optimized implementation rejects both runtime config
+surfaces instead of silently ignoring them.
+
+## Concurrent requests
+
+Do not call request methods concurrently on one `IPipeline`. Pipeline
+instances own mutable execution-context, stream, cache/state, and
+adapter-binding data; the public interface does not promise per-instance
+thread safety.
+
+For native bundles, use independent instances or `PipelinePool`:
+
+```cpp
+#include <trtmc/runtime/pipeline_factory.h>
+#include <trtmc/runtime/pipeline_pool.h>
+
+auto pool = trtmc::PipelineFactory::from_bundle_pool(
+    "/tmp/native-model.trtfb", 4);
+
+// Each worker acquires one exclusive, move-only lane for one in-flight request.
+auto lease = pool->acquire();
+auto result = lease->generate("Hello");
+```
+
+`acquire()` waits for an available lane; `try_acquire()` reports exhaustion
+without waiting. Destroying or moving over a lease releases its lane.
+`PipelinePool` keeps mutable execution state isolated per lane and coordinates
+adapter maintenance across lanes. `size()` returns the fixed lane count and
+`available()` returns the currently unleased count.
+
+`from_bundle_pool()` does not support optimized-runtime bundles and throws
+before loading their implementation DSO. The delegated runtime owns its own
+batching and scheduling, so load those bundles with `trtmc::load()` or
+`PipelineFactory::from_bundle()` and follow that provider's concurrency
+contract.
 
 ## Result types
 
 | Type | Returned by |
 | --- | --- |
 | `TextResult` | `generate()`, `transcribe()`, `transcribe_streaming()` |
+| `TranscriptionStreamResult` | `ITranscriptionStream::accept_audio()` and `finish()` |
 | `ImageResult` | `generate_image()` |
 | `AudioResult` | `generate_audio()`, `speak()` |
 | `EmbeddingResult` | `embed()`, `encode()`, `solve()` |
 | `SegmentResult` | `segment()` |
+| `PromptedSegmentationResult` | `segment_prompted()`, `segment_prompted_text()` |
+| `ClassificationResult` | `classify()` |
 | `TextEmbedding` | `encode_text()` for diffusion text encoders |
+
+`rerank()` returns a `float`, and `detect()` returns serialized detection JSON
+as `std::string`. `generate_image_batch()` returns
+`std::vector<ImageResult>`.
+
+The public result fields are:
+
+| Type | Fields and shape |
+| --- | --- |
+| `TranscriptionSegment` | `start_seconds`, `end_seconds`, `text`, and segment `token_ids`. |
+| `TextResult` | `text`, output `token_ids`, provider-populated `setup_ms`, `prefill_ms`, and `decode_ms`, plus timestamped `segments` when requested and supported. |
+| `TranscriptionStreamResult` | Current `text` and `token_ids`, `is_final`, the current accepted-chunk counter in `chunk_index`, cumulative `accepted_samples`, and the configured input rate reported in `sample_rate`. |
+| `ImageResult` | `pixels`, `height`, `width`, `channels`, and `num_frames`; the unresolved layout caveat is below. |
+| `AudioResult` | Mono float32 `samples` in `[-1, 1]`, `num_samples`, and `sample_rate`. |
+| `EmbeddingResult` | Flat `data` and embedding `dim`. |
+| `SegmentResult` | Class-index `mask` in `[H, W]`, `height`, and `width`. |
+| `PromptedSegmentationResult` | Logit `masks` in `[num_masks, H, W]`, `iou_scores`, absolute-pixel `boxes` in `[num_masks, 4]`, `num_masks`, `height`, and `width`. |
+| `ClassificationResult` | Class `logits`, `top_class`, and `top_score`. |
+| `TextEmbedding` | Flat `data` and its explicit `shape`. |
+
+Additional `IPipeline` capability and metadata methods are:
+
+| Method | Contract |
+| --- | --- |
+| `default_max_new_tokens()` | Runtime-owned default used when a caller does not supply a positive request limit. |
+| `supports_image_generation()` | Reports whether image-generation entry points are implemented. |
+| `generate_audio_streaming()` | Streams generated PCM chunks through an `AudioChunkCallback`. |
+| `model_id()` | Returns the loaded model identifier. |
+| `pipeline_type()` | Returns the concrete runtime pipeline type used in capability errors and diagnostics. |
+
+`ImageResult::pixels` always has
+`num_frames * height * width * channels` float32 values in `[0, 1]`, and a
+single image has `num_frames == 1`. The indexing contract is currently
+inconsistent in the codebase: the public header comments describe channel-first
+`[C, H, W]` data (and the C-linkage buffer as flattened `C*H*W`), while the
+current Flux, Wan, and SANA-WM producers write interleaved `[H, W, C]` or
+`[T, H, W, C]` data. Until a code change selects and enforces one public
+layout, portable callers must not infer strides from the header or this manual;
+verify the selected pipeline's implementation/evidence and normalize the buffer
+at the application boundary.
 
 ## GenerateConfig
 
@@ -63,6 +163,71 @@ cfg.use_chat_template = true;
 cfg.enable_thinking = false;
 ```
 
+The complete field inventory is:
+
+| Fields | Contract |
+| --- | --- |
+| `max_new_tokens`, `num_samples` | Output limit and non-autoregressive sample count. |
+| `temperature`, `top_k`, `top_p`, `min_p`, `seed`, `eos_token_id` | Token sampling and termination controls. |
+| `guidance_scale`, `cfg_scale`, `num_steps`, `sde_gamma` | Diffusion, flow-matching, and conditional-guidance controls; negative sentinel values select model defaults where supported. |
+| `initial_latents`, `condition_latents`, `condition_mask`, `sampling_steps`, `sde_noises` | Optional packed raw-state inputs. Shapes remain model-owned and must match the selected bundle contract. |
+| `negative_prompt`, `height`, `width` | Text-to-image negative prompt and output-size overrides. Empty or non-positive values select bundle defaults. |
+| `text_generation_mode`, `block_length`, `confidence_threshold` | Text-diffusion or speculative mode, block length, and confidence threshold. |
+| `tail_frames` | Additional speech-to-speech frames after the input. |
+| `use_chat_template`, `enable_thinking` | Tokenizer chat-template and reasoning-mode selection. |
+| `stop_on_boxed_answer`, `stop_check_interval` | Optional boxed-answer stopping behavior and polling interval. |
+| `lora_adapter_id` | Loaded dynamic adapter ID. Empty selects the base model. |
+
+## Dynamic LoRA lifecycle
+
+Check `supports_lora_adapters()` before maintenance. A LoRA-capable
+`IPipeline` exposes `load_lora_adapter(adapter_id, adapter_path)`,
+`unload_lora_adapter(adapter_id)`, and `loaded_lora_adapters()`.
+`GenerateConfig::lora_adapter_id` selects one registered adapter for a request;
+an empty value clears adapter bindings and uses the base model.
+
+```cpp
+if (!pipe->supports_lora_adapters()) {
+    throw std::runtime_error("bundle was not built for dynamic LoRA");
+}
+
+pipe->load_lora_adapter("product-style", "/tmp/my-peft-adapter");
+trtmc::GenerateConfig cfg;
+cfg.lora_adapter_id = "product-style";
+auto result = pipe->generate("Describe the image.", image, height, width, cfg);
+pipe->unload_lora_adapter("product-style");
+```
+
+Qwen-VL accepts a standard PEFT directory containing `adapter_config.json`
+and `adapter_model.safetensors`. Loading fails when the engine has no dynamic
+LoRA inputs, the ID is empty, the directory or files are invalid, the PEFT
+mode is unsupported, tensors do not match the engine targets/shapes/dtypes, or
+the adapter rank exceeds the engine capacity. Selecting or unloading an
+unknown ID throws. Loading the same ID replaces its cached weights; unloading
+an active ID first clears the current binding. A request that already acquired
+adapter weights keeps shared ownership until it finishes, while subsequent
+selection of an unloaded ID fails.
+
+One `IPipeline` still must not execute concurrent requests. For multiple
+lanes, perform adapter maintenance through `PipelinePool`:
+
+```cpp
+if (!pool->supports_lora_adapters()) {
+    throw std::runtime_error("one or more lanes do not support dynamic LoRA");
+}
+pool->load_lora_adapter("product-style", "/tmp/my-peft-adapter");
+auto ids = pool->loaded_lora_adapters();
+pool->unload_lora_adapter("product-style");
+```
+
+Pool maintenance blocks new `acquire()` calls and waits for all outstanding
+leases to return before touching adapters. Loading applies the ID to every
+lane, skips lanes that already contain it, and rolls back newly loaded lanes
+if a later lane fails. `supports_lora_adapters()` is true only when every lane
+supports the feature. Unloading removes the ID from every lane and throws when
+none contains it. `loaded_lora_adapters()` also waits for the maintenance
+barrier and returns the shared registry view.
+
 ## Streaming transcription
 
 ```cpp
@@ -76,6 +241,24 @@ auto stream = pipe->create_transcription_stream(cfg);
 auto partial = stream->accept_audio(samples, num_samples, false);
 auto final = stream->finish();
 ```
+
+`TranscriptionStreamConfig` fields are:
+
+| Field | Contract |
+| --- | --- |
+| `input_sample_rate` | Source PCM sample rate; the stream validates/converts it for the selected model. |
+| `max_new_tokens` | Per-stream decoding limit. |
+| `att_context_left`, `att_context_right` | Cache-aware encoder context measured in 80 ms frames. Common right-context values 0, 1, 6, and 13 correspond to 80, 160, 560, and 1120 ms chunks. |
+| `use_cache` | Reuse encoder attention/convolution caches between chunks. |
+| `use_feature_cache` | Reuse mel/pre-encoder overlap between chunks. |
+| `emit_partial_results` | Permit non-final text results from `accept_audio()`. |
+| `online_normalization` | Request online feature normalization when the selected checkpoint supports it. |
+| `pad_and_drop_preencoded` | Select the padded/drop-preencoded first-chunk path instead of requiring a separate first-step encoder plan. |
+| `language` | Prompt-dictionary tag such as `en-US`, `es-ES`, or `auto`; empty selects prompt index 0, and bundles without a prompt kernel ignore it. |
+
+The current Nemotron streaming RNNT path requires both caches. It rejects
+`online_normalization`, requires a matching right-context encoder section, and,
+when `pad_and_drop_preencoded` is false, requires a first-step encoder section.
 
 ## Offline transcription
 
@@ -107,19 +290,56 @@ returns results in request order. Canary overrides it with native batches of up
 to 16 encoder inputs and a 32-lane decoder, including batched beam search. The
 legacy max-token/sample-rate overload is still supported.
 
-## C ABI
+## C-linkage C++ subset
 
-The C ABI is for FFI and backward-compatible integrations:
+The current C-linkage subset is a starting point for C++ shims and FFI
+experiments:
 
 ```cpp
 TrtmcPipelineOptions opts{};
-opts.max_new_tokens = 50;
 opts.hf_python = "/opt/venv/bin/python";
 
 trtmc::IPipeline* pipe = trtmc_create_pipeline_ex("/tmp/model.trtfb", &opts);
-const char* err = trtmc_last_error();
+if (pipe == nullptr) {
+    const char* err = trtmc_last_error();
+    // Report err and stop.
+}
 const char* version = trtmc_version();
 int has_trt = trtmc_has_trt();
 ```
 
-The C ABI currently exposes creation and query entry points. The returned pointer is produced by the C++ runtime; FFI users should wrap it in a C++ ownership shim or add a matching destroy function before exposing it across a pure-C or foreign-language boundary.
+The C-linkage surface currently exposes pipeline creation, error/version
+queries, batched image generation through `trtmc_generate_batch()`, and
+per-image cleanup through `trtmc_image_result_free()`. The caller owns the
+output array, and must free each successful result's pixel buffer.
+
+`trtmc_create_pipeline(bundle_path, flags)` is the legacy convenience entry
+point. The current implementation ignores `flags`, constructs default
+`TrtmcPipelineOptions`, and delegates to `trtmc_create_pipeline_ex()`.
+`trtmc_pipeline_t` is only an alias for `trtmc::IPipeline*`; despite its name it
+is not a separately opaque C handle.
+
+`trtmc_image_result_t` contains the allocated `pixels` pointer, `height`,
+`width`, `channels`, `num_frames`, and `num_pixels`. The last field is the total
+number of floats across all frames and dimensions; it is the safe allocation
+length even while the public indexing order remains unresolved.
+
+For `num_prompts > 0`, a non-null `out_results` must point to a writable array
+of at least `num_prompts` entries. Release any pixel buffers from an earlier
+call before reusing that array. On success, release each returned buffer with
+`trtmc_image_result_free()`. The function does not promise to initialize the
+array on every error path, so callers should initialize their array before the
+call and treat entries as owned results only after a successful return.
+`trtmc_image_result_free()` sets a released `pixels` pointer back to null.
+
+There is no exported pipeline-destroy function. Creation returns an
+`IPipeline*`, and the public header uses C++ types such as `std::uint64_t` even
+for its C-linkage declarations. This is not a C-compatible header or a
+complete stable C ABI. Do not expose that handle as a pure-C or
+foreign-language ownership contract; wrap it in C++ or first design an opaque
+C handle with a matching destroy entry point.
+
+`TrtmcPipelineOptions::hf_python`, `runtime_cache`, and `cuda_graphs` are
+consumed during creation. The current implementation does not consume the
+legacy `max_new_tokens` or `image_path` fields; generation settings belong on
+the request API.

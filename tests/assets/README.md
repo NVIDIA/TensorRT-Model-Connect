@@ -1,1 +1,2 @@
-Small images used by tools/* examples and manual testing.
+Small images used by documentation/tutorial commands, E2E impact validation,
+and manual testing.

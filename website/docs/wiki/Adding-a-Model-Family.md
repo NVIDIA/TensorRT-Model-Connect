@@ -1,277 +1,112 @@
-# Adding a New Model Family
+# Adding a Model Family
 
-## Autopilot (Recommended For Batch Onboarding)
+This page describes the current ownership contract. The maintained contributor
+guide is [Add a Model Family](../extend/add-model-family.md).
 
-The autopilot system discovers unsupported HuggingFace model families and
-dispatches coding-agent CLI sessions across isolated workspaces. Codex is the
-default launcher, but the same workflow can run through another non-interactive
-agent CLI. Each agent follows `AGENTS.md`, uses the repo-local skill
-instructions in `plugins/trtmc-agent-skills/`, and drives one model through
-plugin scaffolding, build, validation, E2E manifest creation, and GitHub PR
-submission.
+## Required ownership roots
+
+Native support links three ownership directories:
+
+```text
+python/tensorrt_model_connect/families/<builder-family>/
+src/runtime/models/<runtime-owner>/
+tests/e2e/models/<e2e-family>/
+```
+
+Each directory requires a `MODEL.toml`, and each descriptor's `id` matches its
+own directory. The names normally match, but the exact `runtime_strategy`
+links the Python and E2E owners to the C++ owner. Existing compatibility
+mappings include `magpie_tts` → `magpie` and `wan_t2v` → `wan`; the
+builder/E2E names are on the left and the runtime owner is on the right. Do not
+create a flat `families/<builder-family>.py` module and do not edit a central
+CMake plugin list.
+
+## Python side
+
+At minimum, provide:
+
+- `MODEL.toml` with `id`, aliases/prefixes, and capabilities needed for
+  discovery; `module` may remain as specialization/tooling metadata but does
+  not select the runtime discovery import
+- `plugin.py` with matching logic, checkpoint/config handling, the exact
+  family-owned `runtime_strategy`, and the build entry point
+- `__init__.py` exporting that package's `plugin`
+- family-local config, checkpoint mapping, graph construction, and debug
+  support required by that model
+
+Python discovery indexes `families/*/MODEL.toml` and then follows one of three
+flows:
+
+1. A full config tries bounded `architecture_patterns` candidates before the
+   compatibility fallback imports all non-private family modules/packages with
+   `pkgutil` and runs their predicates.
+2. A string or `model_type` tries a direct descriptor ID, then alias/prefix
+   candidates, then the same all-package fallback.
+3. A Diffusers pipeline class uses descriptor
+   `diffusion_pipeline_classes` only and has no `pkgutil` fallback.
+
+Descriptor routes import the family package and read the package-level `plugin`
+exported by `__init__.py`; `module` is specialization/tooling metadata, not an
+arbitrary runtime import selector. A flat module can therefore be observed by
+the two compatibility flows, but it still does not satisfy the three-descriptor
+support contract. Use an existing family with the same task and state shape as
+a structural example, but do not import model-semantic helpers from an
+unrelated family.
+
+## Runtime side
+
+`src/runtime/models/<runtime-owner>/MODEL.toml` declares:
+
+- `id`
+- `runtime_library`
+- `runtime_plugins` as `source.cpp|registration_symbol`
+- `runtime_strategies`
+- optional runtime config schemas and C++ tests
+
+CMake scans these descriptors. The DSO registration function registers every
+declared strategy with `PipelineRegistry`. Strategy names must be unique and
+normally family-qualified, such as `gpt2_decoder_kv_cache`.
+
+## E2E side
+
+`tests/e2e/models/<e2e-family>/MODEL.toml` lists the JSON manifests and supplies
+task defaults. Each buildable manifest needs the exact `runtime_strategy`, a
+`task_strategy` (or a matrix mapping), and a non-empty `testcases` array.
+
+Each testcase should state the user contract, CI tier, request, reference
+oracle, thresholds, and a unique `trace_id` when it participates in formal
+traceability.
+
+## Validation
+
+Replace placeholders before running the E2E command:
 
 ```bash
-# One command: discover gaps, implement, validate, report
-python3 scripts/autopilot/autorun.py --auto
+PYTHONPATH=python:. python3 tools/model_ci.py validate
+PYTHONPATH=python:. python3 tools/test_impact.py --validate
+PYTHONPATH=python:. python3 tools/check_runtime_strategy_matrix.py
 
-# Interactive mode: show candidates, ask before dispatching
-python3 scripts/autopilot/autorun.py
+PYTHONPATH=python:. python3 -m pytest \
+  tests/builder/test_manifest_validation.py \
+  tests/tools/test_runtime_strategy_matrix_checker.py \
+  tests/tools/test_model_plugin_encapsulation_static.py -q
 
-# Limit scope
-python3 scripts/autopilot/autorun.py --auto --limit 4 --min-downloads 5000000
+PYTHONPATH=python:. python3 -m pytest \
+  tests/e2e/models/<e2e-family> \
+  --e2e-model <manifest-name> \
+  --engine-dir /path/to/engines \
+  --trtmc-binary ./build/trtmc \
+  --model-plugin-dir ./build/models \
+  -v
 ```
 
-The autopilot dispatches parallel agent sessions across isolated workspaces.
-Each agent:
-1. Reads `AGENTS.md` and relevant repo-local skills such as `$transform-model`,
-   `$debug-trt-mismatch`, `$native-trt-builder-guidelines`, and
-   `$submit-github-pr`.
-2. Scaffolds a plugin via `scripts/new_family.py`.
-3. Builds the TensorRT bundle.
-4. Validates correctness through C++ smoke tests, `validate_family.sh`, and E2E
-   harness compatibility.
-5. Creates a C++ runtime plugin when no existing runtime strategy handles the
-   model.
-6. Creates the E2E manifest without `skip`.
-7. Pushes a short-lived branch to the `github` remote and opens a PR targeting
-   `main`.
-
-Prerequisites:
-- Agent workspaces bootstrapped with
-  `./scripts/bootstrap_workspace.sh --id agent-N --branch main --detach`.
-- An agent CLI in PATH on the host running the dispatcher. Codex is the default.
-- Matching containers running as `trtmc-dev-gb300-agent-N`.
-- GitHub CLI authentication if the worker should open PRs.
-
-Configure the launcher with environment variables:
-
-```bash
-# Default behavior, shown explicitly
-export TRTMC_AGENT_BIN=codex
-export TRTMC_AGENT_ARGS='exec -s danger-full-access -a never -C {workspace} {prompt}'
-
-# Example: use another non-interactive agent CLI
-export TRTMC_AGENT_BIN=claude
-export TRTMC_AGENT_ARGS='--print -p {prompt}'
-```
-
-`{workspace}` is replaced with the agent workspace path, and `{prompt}` is
-replaced with the generated worker prompt. If `{prompt}` is omitted, the prompt
-is appended as the final argument. The dispatcher also sets the process working
-directory to the agent workspace.
-
-Use `scripts/autopilot/autorun.py --dry-run` or
-`scripts/autopilot/dispatch.py <tasks.json> --mode dry-run` to inspect prompts
-before launching agents.
-
----
-
-## Manual Path
-
-Adding support for a new HuggingFace model family manually is a Python task in `python/tensorrt_model_connect/` **when the model reuses an existing runtime strategy** already handled by a C++ model runtime folder in `src/runtime/models/`. C++ edits are needed only when introducing a new `runtime_strategy` that no existing model folder handles.
-
-## Prerequisites
-
-The standard decoder builder is parameterized and handles most decoder-only architectures:
-
-**Norm types**: RMSNorm (LLaMA, Qwen, etc.) or LayerNorm (GPT-2, Falcon, StableLM, etc.)
-**MLP types**: SwiGLU (LLaMA, Qwen, etc.) or GELU FC (GPT-2, Falcon, StarCoder2, etc.)
-**Position types**: RoPE (most modern models) or learned absolute (GPT-2, OPT)
-**Activations**: silu, gelu_new, gelu, relu
-
-Pass these as keyword arguments to `build_standard_decoder_engine()`:
-```python
-build_standard_decoder_engine(config, weights, max_cache_length,
-                              norm_type="layernorm", mlp_type="gelu_fc",
-                              position_type="learned", activation="gelu_new")
-```
-
-If your model uses one of these combinations, you only need a plugin file with weight mapping.
-
-If your model diverges further (MoE routing, SSM/Mamba, parallel attention), you will need a custom `build_engine()` — see [Advanced: Custom Build Engine](#advanced-custom-build-engine) below. For existing strategies such as `decoder_moe`, `mamba_ssm_recurrent`, and `vision_language`, this is still Python-only unless the family needs new runtime state semantics.
-
-## Quick Path: Scaffolding Script
-
-The fastest way to add a new family:
-
-```bash
-# 1. Generate a plugin from a HuggingFace model's config.json
-python3 scripts/new_family.py \
-  --model-type phi3 \
-  --hf-repo microsoft/Phi-3-mini-4k-instruct \
-  --family-name phi
-
-# 2. Review the generated plugin (customize if needed)
-$EDITOR python/tensorrt_model_connect/families/phi/plugin.py
-
-# 3. Validate end-to-end (build + diff_logits + diff_layers + runner parity)
-./scripts/validate_family.sh microsoft/Phi-3-mini-4k-instruct
-```
-
-The scaffolding script:
-- Downloads `config.json` from the HF repo
-- Detects architecture features (GQA, tied embeddings, explicit head_dim, MoE, etc.)
-- Generates a plugin `.py` with correct `matches()`, standard `load_weights()` and `build_engine()`
-- Adds comments noting detected features that may need attention
-
-## Manual Path: Step-by-Step
-
-### Step 1: Create the plugin file
-
-Create `python/tensorrt_model_connect/families/<family>.py`. The file must:
-- Define a class implementing the `FamilyPlugin` protocol (see `base.py`)
-- Expose a module-level `plugin` attribute (instance of the class)
-
-```python
-"""Yi family plugin."""
-
-from __future__ import annotations
-
-from ...config import ModelConfig
-from ...checkpoint_mapper import WeightDict, load_standard_weights
-from .standard_decoder_builder import build_standard_decoder_engine
-
-
-class YiPlugin:
-    name = "yi"
-
-    def matches(self, model_type: str) -> bool:
-        return model_type.lower().startswith("yi")
-
-    def load_weights(
-        self, model_dir: str, config: ModelConfig,
-    ) -> WeightDict:
-        return load_standard_weights(model_dir, config)
-
-    def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
-    ) -> bytes:
-        return build_standard_decoder_engine(
-            config, weights, max_cache_length, verbose=verbose)
-
-
-plugin = YiPlugin()
-```
-
-That's it — the plugin is auto-discovered. `families/__init__.py` uses `pkgutil.iter_modules()` to find any `.py` file with a `plugin` attribute. No registration code needed.
-
-### Step 2: Customize weight loading (if needed)
-
-Most models use standard HF tensor naming (same as LLaMA):
-```
-model.embed_tokens.weight
-model.layers.N.input_layernorm.weight
-model.layers.N.self_attn.{q,k,v,o}_proj.weight
-model.layers.N.post_attention_layernorm.weight
-model.layers.N.mlp.{gate,up,down}_proj.weight
-model.norm.weight
-lm_head.weight
-```
-
-If your model uses standard naming, `load_standard_weights()` handles everything — including transposing, GQA expansion, tied embeddings, and optional q/k norms.
-
-For non-standard models, customize `load_weights()`. Example from Gemma (adds +1.0 to RMSNorm gamma, scales embedding):
-
-```python
-def load_weights(self, model_dir: str, config: ModelConfig) -> WeightDict:
-    weights = load_standard_weights(model_dir, config)
-
-    # Gemma: (1 + gamma) * normalized
-    for i in range(config.num_hidden_layers):
-        weights[f"layer.{i}.input_norm"] += 1.0
-        weights[f"layer.{i}.post_attn_norm"] += 1.0
-    weights["final_norm"] += 1.0
-
-    # Gemma: scale embedding by sqrt(hidden_size)
-    weights["embedding"] *= math.sqrt(config.hidden_size)
-    return weights
-```
-
-Some models use fused projections (e.g., Phi-3 ships a single `qkv_proj` instead of separate Q/K/V, and a single `gate_up_proj` instead of separate gate/up). In these cases, split the fused tensor during weight loading. See `python/tensorrt_model_connect/families/phi/plugin.py` for an example.
-
-### Step 3: Validate
-
-Run the one-command validation gate:
-
-```bash
-./scripts/validate_family.sh <hf-repo-or-local-path>
-```
-
-This runs:
-1. `./build/trtmc build` — builds a `.trtfb` bundle
-2. `diff_logits.py --battery` — E2E logit comparison (4 prompts)
-3. `diff_layers.py` — per-layer hidden state comparison
-4. `test_runner_parity.py` — Python-vs-C++ cross-validation
-
-Or run each step individually:
-
-```bash
-# Build bundle
-./build/trtmc build <model> -o /tmp/test.trtfb --max-cache-length 256
-
-# E2E logit comparison (per-step, all tokens)
-python3 tools/diff_logits.py --model <model> --atol 1e-3 --battery
-
-# Per-layer hidden state comparison
-python3 tools/diff_layers.py --model <model> --atol 0.05
-
-# Python-vs-C++ runner parity
-python3 tools/test_runner_parity.py \
-  --bundle /tmp/test.trtfb --binary ./build/trtmc \
-  --hf-python .venv/bin/python --max-new-tokens 20
-```
-
-For models that require custom tokenizer code (e.g., Phi-3), add `--trust-remote-code` to diff_logits.py, diff_layers.py, and validate_family.sh.
-
-**Memory note**: Large models (3B+ parameters) can require significant RAM during TRT engine compilation. Phi-3-mini (3.8B) peaks at ~44GB. On 64GB machines, 16GB swap is recommended.
-
-## Checklist
-
-| Step | Files | Lines |
-|------|-------|-------|
-| Plugin file | `families/<family>.py` | ~30 (standard decoder), ~60 (extended decoder), ~300+ (custom graph) |
-| **Total** | **1 new file, 0 existing files edited** | **~30-300** |
-
-## FamilyPlugin Protocol
-
-From `python/tensorrt_model_connect/families/base.py`:
-
-```python
-class FamilyPlugin(Protocol):
-    name: str
-
-    def matches(self, model_type: str) -> bool: ...
-    def load_weights(self, model_dir: str, config: ModelConfig) -> WeightDict: ...
-    def build_engine(self, config: ModelConfig, weights: WeightDict,
-                     max_cache_length: int, *, verbose: bool = False) -> bytes: ...
-```
-
-## Advanced: Custom Build Engine
-
-If your model has an architecture not covered by the parameterized standard builder, override `build_engine()` to use custom graph construction. The shared TRT graph ops in `python/tensorrt_model_connect/graph_ops.py` (RMSNorm, LayerNorm, RoPE, matmul, attention, SwiGLU, GELU, etc.) are reusable building blocks -- compose them differently for your architecture.
-
-### Already implemented custom architectures
-
-- **MoE (Phi-MoE)**: SparseMixer routing + per-expert SwiGLU MLPs. See `families/phi_moe.py`. Uses `runtime_strategy="decoder_moe"` (same KV-cache C++ backend).
-- **Mamba/SSM**: Selective state space model with conv1d + selective scan. See `families/mamba.py`. Uses `runtime_strategy="mamba_ssm_recurrent"` and the Mamba-owned recurrent runtime files under `src/runtime/models/mamba/`.
-- **Vision-Language (Qwen-VL)**: Vision encoder (ViT + 3D RoPE + spatial merge) + text decoder with embed_input. See `families/qwen_vl.py`. Uses `runtime_strategy="vision_language"`. Requires `build_vision_engine()` and `get_vl_config()` methods.
-
-### Adding a Vision-Language Family
-
-VL plugins require two additional methods beyond the standard `FamilyPlugin` protocol:
-
-1. **`build_vision_engine()`**: Build a TRT engine for the vision encoder. Return serialized engine bytes or `None`.
-2. **`get_vl_config()`**: Return a dict with VL configuration to inject into the bundle's config.json:
-   - `preprocessor_type`: Image preprocessing strategy (`"qwen_merge_group"`, `"simple_chw"`, `"center_crop_chw"`, or `"aspect_preserve_chw"`)
-   - `interpolation`: Resize interpolation mode (`"bicubic"` (default), `"bilinear"`, or `"nearest"`)
-   - `image_token_id`, `num_image_pad_tokens`, `vision_output_dim`
-   - `vl_prompt_template`, `image_token_str`
-
-The C++ runtime handles 4 image preprocessing strategies out of the box. No C++ changes needed for standard VL models.
-
-### Architectures needing custom `build_engine()`
-
-- **MLA (Multi-head Latent Attention)**: Compressed KV cache (DeepSeek-V2/V3). Needs Python graph builder + C++ cache shape changes.
-- **Parallel attention**: Attention and MLP computed in parallel (GPT-J style).
-- **Hybrid SSM+Attention (Jamba)**: Mix of attention and Mamba layers.
+The last command requires the checkpoint, TensorRT/CUDA, a suitable GPU, the
+compiled CLI, and the owning model DSO.
+
+## Scaffolding status
+
+`scripts/new_family.py --help` exists, but its current output does not create
+the three required descriptors or all files imported by its generated plugin.
+Until that script is upgraded and covered by an end-to-end scaffold test,
+create the model-owned directories from a current working family instead of
+treating the script as a complete onboarding path.
