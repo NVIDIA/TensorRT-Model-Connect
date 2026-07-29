@@ -62,8 +62,10 @@ class EncoderPlugin final : public IPipelinePlugin {
 
         const std::string mode =
             (ctx.config.runtime_strategy == "eagle_vlm_reranking") ? "reranking" : "embedding";
+        const auto reranking_pooling = extract_json_string(ctx.config_json, "pooling", "last");
         return std::make_unique<EncoderPipeline>(std::move(loaded.module), mode,
-                                                 std::move(tokenizer), ctx.bundle.info.model_id);
+                                                 std::move(tokenizer), ctx.bundle.info.model_id,
+                                                 reranking_pooling);
     }
 };
 

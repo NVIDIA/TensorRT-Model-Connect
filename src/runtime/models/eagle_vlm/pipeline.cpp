@@ -73,9 +73,10 @@ std::size_t checked_element_count(const std::vector<int64_t>& shape) {
 // ─── EncoderPipeline ───
 
 EncoderPipeline::EncoderPipeline(std::unique_ptr<TrtModule> encoder, std::string mode,
-                                 std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
+                                 std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
+                                 std::string reranking_pooling)
     : encoder_(std::move(encoder)), mode_(std::move(mode)), tokenizer_(std::move(tokenizer)),
-      model_id_(std::move(model_id_str)) {
+      model_id_(std::move(model_id_str)), reranking_pooling_(std::move(reranking_pooling)) {
     if (!encoder_ || !encoder_->ok())
         throw std::runtime_error("EncoderPipeline: invalid encoder module");
 }
@@ -122,9 +123,10 @@ EmbeddingResult EncoderPipeline::encode(const std::string& text) {
 float EncoderPipeline::rerank(const std::string& query, const std::string& document) {
     if (!tokenizer_)
         throw std::runtime_error("EncoderPipeline: no tokenizer configured");
-    // Match the text-only reranking template documented by the supported
-    // Nemotron rerank cross-encoder model card.
-    std::string combined = "question:" + query + "   passage:" + document;
+    // Match LlamaNemotronVLRerankProcessor.prompt_template_question_passage()
+    // from the pinned checkpoint. The whitespace is part of the trained input
+    // contract and changes the token sequence.
+    std::string combined = "question:" + query + " \n \n passage:" + document;
     auto ids = tokenizer_->encode(combined);
     if (ids.empty())
         throw std::runtime_error("EncoderPipeline: reranking input produced no tokens");
@@ -142,8 +144,8 @@ float EncoderPipeline::rerank(const std::string& query, const std::string& docum
         return output.result.data.front();
 
     // Eagle's score head emits one scalar per sequence position as
-    // [..., sequence, 1]. Match HF SequenceClassification, which selects the
-    // last non-padding token, instead of returning the first position.
+    // [..., sequence, 1]. Apply the pooling contract recorded by the pinned
+    // checkpoint to the valid input positions.
     if (output.shape.size() < 2 || output.shape.back() != 1)
         throw std::runtime_error(
             "EncoderPipeline: reranking score output must have one value per position");
@@ -153,10 +155,20 @@ float EncoderPipeline::rerank(const std::string& query, const std::string& docum
         throw std::runtime_error(
             "EncoderPipeline: reranking score output is shorter than the token sequence");
 
-    const auto score_index = ids.size() - 1;
-    if (score_index >= output.result.data.size())
-        throw std::runtime_error("EncoderPipeline: reranking score index is out of bounds");
-    return output.result.data[score_index];
+    if (reranking_pooling_ == "avg") {
+        double sum = 0.0;
+        for (std::size_t i = 0; i < ids.size(); ++i)
+            sum += output.result.data[i];
+        return static_cast<float>(sum / static_cast<double>(ids.size()));
+    }
+    if (reranking_pooling_ == "last") {
+        const auto score_index = ids.size() - 1;
+        if (score_index >= output.result.data.size())
+            throw std::runtime_error("EncoderPipeline: reranking score index is out of bounds");
+        return output.result.data[score_index];
+    }
+    throw std::runtime_error("EncoderPipeline: unsupported reranking pooling mode: " +
+                             reranking_pooling_);
 }
 
 EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_ids) {

@@ -15,7 +15,7 @@
 // Preconditions:  TRT headers and CUDA available
 // Postconditions: Pipelines construct with mock engines and expose correct interfaces;
 //                 embed/encode/rerank methods return non-empty results;
-//                 rerank selects the last valid token's per-position score;
+//                 rerank uses the checkpoint prompt template and pooling contract;
 //                 invalid inputs and score shapes are rejected with std::exception;
 //                 score output name, 4D logits shape, and size==1 output branch covered
 // =============================================================================
@@ -31,6 +31,7 @@
 #include "trtmc/tokenizer.h"
 
 #include <NvInfer.h>
+#include <cmath>
 #include <cstdint>
 #include <cuda_runtime_api.h>
 #include <iostream>
@@ -54,10 +55,15 @@ static trtmc::TrtLogger g_logger;
 // ---------------------------------------------------------------------------
 class FixedTokenizer : public trtmc::ITokenizer {
   public:
-    std::vector<int32_t> encode(const std::string&) const override { return {1, 2, 3, 4}; }
+    std::vector<int32_t> encode(const std::string& text) const override {
+        last_encoded_text = text;
+        return {1, 2, 3, 4};
+    }
     std::string decode(const std::vector<int32_t>&) const override { return "test"; }
     int32_t id_for_token(std::string_view) const override { return 0; }
     std::string token_for_id(int32_t) const override { return ""; }
+
+    mutable std::string last_encoded_text;
 };
 
 class FakeScoreModule final : public trtmc::ITrtModule {
@@ -300,12 +306,29 @@ static void test_encoder_rerank() {
     auto tokenizer = std::make_shared<FixedTokenizer>();
     auto module = std::make_unique<FakeScoreModule>(std::vector<float>{0.1f, 0.2f, 0.3f, 0.9f},
                                                     std::vector<int64_t>{4, 1});
-    trtmc::EncoderPipeline pipeline(std::move(module), "reranking", tokenizer);
+    trtmc::EncoderPipeline pipeline(std::move(module), "reranking", tokenizer, "", "avg");
 
-    // FixedTokenizer produces four real tokens. The engine deliberately emits
-    // distinct scores per position so this catches selecting data[0].
+    // The pinned Nemotron reranker uses average pooling over valid positions.
     float score = pipeline.rerank("query", "doc");
-    check(score == 0.9f, "rerank: selects the last valid token score");
+    check(std::abs(score - 0.375f) < 1e-6f, "rerank: averages valid token scores");
+    check(tokenizer->last_encoded_text == "question:query \n \n passage:doc",
+          "rerank: uses the checkpoint prompt template");
+}
+
+static void test_encoder_rerank_preserves_last_and_scalar_outputs() {
+    auto tokenizer = std::make_shared<FixedTokenizer>();
+    auto last_module = std::make_unique<FakeScoreModule>(std::vector<float>{0.1f, 0.2f, 0.3f, 0.9f},
+                                                         std::vector<int64_t>{4, 1});
+    trtmc::EncoderPipeline last_pipeline(std::move(last_module), "reranking", tokenizer, "",
+                                         "last");
+    check(last_pipeline.rerank("query", "doc") == 0.9f, "rerank: preserves last-token pooling");
+
+    auto scalar_module =
+        std::make_unique<FakeScoreModule>(std::vector<float>{0.7f}, std::vector<int64_t>{1});
+    trtmc::EncoderPipeline scalar_pipeline(std::move(scalar_module), "reranking", tokenizer, "",
+                                           "avg");
+    check(scalar_pipeline.rerank("query", "doc") == 0.7f,
+          "rerank: preserves an engine-reduced scalar");
 }
 
 static void test_encoder_rerank_rejects_invalid_score_shape() {
@@ -321,6 +344,30 @@ static void test_encoder_rerank_rejects_invalid_score_shape() {
         threw = true;
     }
     check(threw, "rerank: invalid score shape throws");
+
+    auto short_module = std::make_unique<FakeScoreModule>(std::vector<float>{0.1f, 0.2f, 0.3f},
+                                                          std::vector<int64_t>{3, 1});
+    trtmc::EncoderPipeline short_pipeline(std::move(short_module), "reranking", tokenizer, "",
+                                          "avg");
+    threw = false;
+    try {
+        short_pipeline.rerank("query", "doc");
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    check(threw, "rerank: score output shorter than the token sequence throws");
+
+    auto unsupported_module = std::make_unique<FakeScoreModule>(
+        std::vector<float>{0.1f, 0.2f, 0.3f, 0.4f}, std::vector<int64_t>{4, 1});
+    trtmc::EncoderPipeline unsupported_pipeline(std::move(unsupported_module), "reranking",
+                                                tokenizer, "", "median");
+    threw = false;
+    try {
+        unsupported_pipeline.rerank("query", "doc");
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    check(threw, "rerank: unsupported pooling mode throws");
 }
 
 static void test_encoder_int32_mask() {
@@ -463,6 +510,7 @@ int main() {
     test_encoder_embed_mode();
     test_encoder_encode_mode();
     test_encoder_rerank();
+    test_encoder_rerank_preserves_last_and_scalar_outputs();
     test_encoder_rerank_rejects_invalid_score_shape();
     test_encoder_int32_mask();
     test_encoder_validates();
