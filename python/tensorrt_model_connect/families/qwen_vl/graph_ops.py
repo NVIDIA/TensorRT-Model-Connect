@@ -309,12 +309,18 @@ def add_gelu_new(
     fp16, runtime trt_dtype is bfloat16) or any other non-matching combo.
     """
     target_dtype = inp.dtype
+    fp32_compute = target_dtype == trt.bfloat16
+    if fp32_compute:
+        inp = network.add_cast(inp, trt.float32).get_output(0)
+    compute_dtype = inp.dtype
+    constant_np_dtype = np.float32 if fp32_compute else dtype
     const_shape = (1,) * max(1, len(tuple(inp.shape)))
 
     def _const(name, value):
         c = add_constant(
-            network, const_shape, np.array([value], dtype=np.float32), dtype=dtype)
-        return _cast_back_to_trt_dtype(network, c, target_dtype)
+            network, const_shape, np.array([value], dtype=np.float32),
+            dtype=constant_np_dtype)
+        return _cast_back_to_trt_dtype(network, c, compute_dtype)
 
     # x^3
     x_sq = network.add_elementwise(inp, inp, trt.ElementWiseOperation.PROD)
@@ -347,7 +353,8 @@ def add_gelu_new(
     result = network.add_elementwise(
         half_x.get_output(0), one_plus_tanh.get_output(0),
         trt.ElementWiseOperation.PROD)
-    return result.get_output(0)
+    return _cast_back_to_trt_dtype(
+        network, result.get_output(0), target_dtype)
 
 
 def add_activation(
@@ -369,12 +376,31 @@ def add_activation(
             trt.ElementWiseOperation.PROD)
         return sq.get_output(0)
     elif activation_type == "silu":
-        sigmoid = network.add_activation(inp, trt.ActivationType.SIGMOID)
-        swish = network.add_elementwise(
-            inp, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
-        return swish.get_output(0)
+        return add_silu(network, inp)
     else:
         raise ValueError(f"Unsupported activation: {activation_type}")
+
+
+def add_silu(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+) -> trt.ITensor:
+    """Apply SiLU with the same BF16 precision boundary as PyTorch.
+
+    PyTorch evaluates the sigmoid/product in FP32 for a BF16 input, then
+    publishes the activation back in BF16 before any following operation.
+    """
+    target_dtype = inp.dtype
+    activation_input = inp
+    if target_dtype == trt.bfloat16:
+        activation_input = network.add_cast(
+            inp, trt.float32).get_output(0)
+    sigmoid = network.add_activation(
+        activation_input, trt.ActivationType.SIGMOID)
+    swish = network.add_elementwise(
+        activation_input, sigmoid.get_output(0),
+        trt.ElementWiseOperation.PROD).get_output(0)
+    return _cast_back_to_trt_dtype(network, swish, target_dtype)
 
 
 def compute_alibi_slopes(num_heads: int) -> np.ndarray:
@@ -776,20 +802,48 @@ def add_patch_embed_3d(
         # [T, C, H, W] -> [1, T*C, H, W]
         reshape_in.reshape_dims = (1, temporal_patch_size * in_channels, -1, 0)
 
-    # Conv2D with kernel [embed_dim, T*C, patch_size, patch_size]
-    # weight shape from HF: [embed_dim, T*C, patch_size, patch_size]
-    conv_w = trt.Weights(np.ascontiguousarray(weight, dtype=dtype))
-    conv_b = trt.Weights()
-    if bias is not None:
-        conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=dtype))
-
-    conv = network.add_convolution_nd(
-        reshape_in.get_output(0),
-        num_output_maps=embed_dim,
-        kernel_shape=(patch_size, patch_size),
-        kernel=conv_w,
-        bias=conv_b,
+    # Conv2D with kernel [embed_dim, T*C, patch_size, patch_size].
+    # Static convolution weights cannot express BF16 through NumPy. For a
+    # BF16 input, bind FP16-backed constants as tensor inputs and cast them to
+    # BF16 first, preserving the same runtime rounding boundary as HF.
+    conv_input = reshape_in.get_output(0)
+    conv_weight = np.asarray(weight).reshape(
+        embed_dim,
+        temporal_patch_size * in_channels,
+        patch_size,
+        patch_size,
     )
+    if conv_input.dtype == trt.bfloat16:
+        weight_t = add_constant(
+            network, tuple(conv_weight.shape), conv_weight, dtype=dtype)
+        weight_t = network.add_cast(
+            weight_t, trt.bfloat16).get_output(0)
+        conv = network.add_convolution_nd(
+            conv_input,
+            num_output_maps=embed_dim,
+            kernel_shape=(patch_size, patch_size),
+            kernel=trt.Weights(),
+            bias=trt.Weights(),
+        )
+        conv.set_input(1, weight_t)
+        if bias is not None:
+            bias_t = add_constant(
+                network, (embed_dim,), bias, dtype=dtype)
+            bias_t = network.add_cast(
+                bias_t, trt.bfloat16).get_output(0)
+            conv.set_input(2, bias_t)
+    else:
+        conv_w = trt.Weights(np.ascontiguousarray(conv_weight, dtype=dtype))
+        conv_b = trt.Weights()
+        if bias is not None:
+            conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=dtype))
+        conv = network.add_convolution_nd(
+            conv_input,
+            num_output_maps=embed_dim,
+            kernel_shape=(patch_size, patch_size),
+            kernel=conv_w,
+            bias=conv_b,
+        )
     conv.stride_nd = (patch_size, patch_size)
 
     # Output shape: [1, embed_dim, H', W'] -> flatten to [num_patches, embed_dim]
@@ -1188,6 +1242,19 @@ def add_apply_rope_native_sequence(
 ) -> trt.ITensor:
     """Apply native RoPE with per-position caches [1, Sq, rotary_dim / 2]."""
     rotary_embedding_dim = validate_native_rope_dim(rotary_embedding_dim)
+    output_dtype = inp.dtype
+    # HF Qwen-VL explicitly promotes Q/K and the rotary tables to FP32 for
+    # the multiply/add sequence, then publishes BF16 Q/K to attention.
+    # TensorRT's BF16 rotary intrinsic otherwise rounds each internal op at a
+    # different boundary and can flip close vision-language logits.
+    compute_dtype = (
+        trt.float32 if output_dtype == trt.bfloat16 else output_dtype)
+    if inp.dtype != compute_dtype:
+        inp = network.add_cast(inp, compute_dtype).get_output(0)
+    cos_cache_3d = _cast_back_to_trt_dtype(
+        network, cos_cache_3d, compute_dtype)
+    sin_cache_3d = _cast_back_to_trt_dtype(
+        network, sin_cache_3d, compute_dtype)
     attention_size = num_heads * head_dim
     inp_4d = reshape_rows_to_heads_4d(
         network, inp, num_heads, head_dim, sequence_length)
@@ -1198,8 +1265,9 @@ def add_apply_rope_native_sequence(
         interleaved,
         rotary_embedding_dim,
     )
-    return reshape_heads_4d_to_rows(
+    output = reshape_heads_4d_to_rows(
         network, rope.get_output(0), attention_size, sequence_length)
+    return _cast_back_to_trt_dtype(network, output, output_dtype)
 
 
 def add_apply_mrope_native(

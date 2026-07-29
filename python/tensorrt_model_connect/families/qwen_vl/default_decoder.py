@@ -26,7 +26,7 @@ from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
 from . import graph_blocks
-from .config import ModelConfig
+from .config import ModelConfig, get_rope_scaling
 from .default_dual_profile_decoder import build_dual_profile_decoder_engine
 from .lora import DynamicLoraConfig
 from .utils import const_in_work_dtype, create_builder_context
@@ -232,7 +232,7 @@ def build_standard_decoder_engine(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     attention_window = max_cache_length + 1
     dynamic_kv_cache = bool(config.raw.get("dynamic_kv_cache", False))
-    rope_scaling = config.raw.get("rope_scaling") or {}
+    rope_scaling = get_rope_scaling(config.raw)
     raw_mrope_section = (
         rope_scaling.get("mrope_section")
         if isinstance(rope_scaling, dict) else None)

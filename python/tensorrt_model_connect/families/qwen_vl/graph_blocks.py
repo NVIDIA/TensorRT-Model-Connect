@@ -388,11 +388,9 @@ def add_swiglu_mlp(
     up = matmul(inp, hidden_size, mlp_size,
                 weights[f"{prefix}.w_up"], f"{_lp}.w_up")
 
-    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(
-        gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+    swish_output = graph_ops.add_silu(network, gate)
     gated = network.add_elementwise(
-        swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+        swish_output, up, trt.ElementWiseOperation.PROD)
 
     mlp_out = matmul(gated.get_output(0), mlp_size, hidden_size,
                      weights[f"{prefix}.w_down"], f"{_lp}.w_down")

@@ -50,6 +50,7 @@ from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
 from . import graph_blocks
+from .config import get_rope_scaling
 from .lora import DynamicLoraConfig
 from .utils import (
     const_in_work_dtype as _const_in_work_dtype,
@@ -240,7 +241,7 @@ def build_dual_profile_decoder_engine(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     rotary_embedding_dim = int(head_dim * partial_rotary_factor)
     lora_config = DynamicLoraConfig.from_model_config(config)
-    rope_scaling = config.raw.get("rope_scaling") or {}
+    rope_scaling = get_rope_scaling(config.raw)
     raw_mrope_section = (
         rope_scaling.get("mrope_section")
         if isinstance(rope_scaling, dict) else None)

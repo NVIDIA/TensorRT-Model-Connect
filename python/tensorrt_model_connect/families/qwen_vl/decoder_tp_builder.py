@@ -6,7 +6,7 @@
 This mirrors the single-device Qwen-VL decoder paths while adding only tensor
 parallel projection sharding and distributed ALL_REDUCE joins. It keeps the VL
 ``input_embed`` override used by Qwen2.5-VL and optionally injects Qwen3-VL
-DeepStack features after attention residuals.
+DeepStack features after complete decoder layers.
 """
 
 from __future__ import annotations
@@ -387,20 +387,6 @@ def _add_tp_decoder_layer(
     else:
         residual1 = network.add_elementwise(
             hidden, attn_out, trt.ElementWiseOperation.SUM).get_output(0)
-        if deepstack_embed is not None and deepstack_active is not None:
-            ds_active_broadcast = network.add_shuffle(deepstack_active)
-            ds_active_broadcast.reshape_dims = (1, 1)
-            active = ds_active_broadcast.get_output(0)
-            deepstack_for_math = deepstack_embed
-            if deepstack_for_math.dtype != residual1.dtype:
-                deepstack_for_math = network.add_cast(
-                    deepstack_for_math, residual1.dtype).get_output(0)
-            if active.dtype != deepstack_for_math.dtype:
-                active = network.add_cast(active, deepstack_for_math.dtype).get_output(0)
-            ds_scaled = network.add_elementwise(
-                deepstack_for_math, active, trt.ElementWiseOperation.PROD).get_output(0)
-            residual1 = network.add_elementwise(
-                residual1, ds_scaled, trt.ElementWiseOperation.SUM).get_output(0)
         norm2 = _apply_norm(
             network, residual1, hidden_size,
             weights[f"{prefix}.post_attn_norm"],
@@ -423,6 +409,23 @@ def _add_tp_decoder_layer(
         residual2 = network.add_elementwise(
             residual1, mlp_out, trt.ElementWiseOperation.SUM).get_output(0)
         post_attn_tensor = residual1
+
+    if deepstack_embed is not None and deepstack_active is not None:
+        ds_active_broadcast = network.add_shuffle(deepstack_active)
+        ds_active_broadcast.reshape_dims = (1, 1)
+        active = ds_active_broadcast.get_output(0)
+        deepstack_for_math = deepstack_embed
+        if deepstack_for_math.dtype != residual2.dtype:
+            deepstack_for_math = network.add_cast(
+                deepstack_for_math, residual2.dtype).get_output(0)
+        if active.dtype != deepstack_for_math.dtype:
+            active = network.add_cast(
+                active, deepstack_for_math.dtype).get_output(0)
+        ds_scaled = network.add_elementwise(
+            deepstack_for_math, active,
+            trt.ElementWiseOperation.PROD).get_output(0)
+        residual2 = network.add_elementwise(
+            residual2, ds_scaled, trt.ElementWiseOperation.SUM).get_output(0)
 
     return {
         "hidden": residual2,

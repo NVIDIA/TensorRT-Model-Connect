@@ -37,6 +37,32 @@ if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
 
 
+def _round_float32_to_bf16(values: np.ndarray) -> np.ndarray:
+    """Round FP32 values to BF16 while retaining NumPy FP32 storage."""
+    values = np.ascontiguousarray(values, dtype=np.float32)
+    bits = values.view(np.uint32)
+    rounded = bits + np.uint32(0x7FFF) + ((bits >> 16) & 1)
+    return (rounded & np.uint32(0xFFFF0000)).view(np.float32)
+
+
+def _interpolate_qwen3_position_bf16(
+    position_embeddings: np.ndarray,
+    positions: tuple[int, int, int, int],
+    blend_weights: tuple[float, float, float, float],
+) -> np.ndarray:
+    """Match HF's four BF16 multiplies and left-to-right BF16 additions."""
+    rounded_weights = _round_float32_to_bf16(
+        np.asarray(blend_weights, dtype=np.float32))
+    terms = [
+        _round_float32_to_bf16(
+            _round_float32_to_bf16(position_embeddings[position]) * weight)
+        for position, weight in zip(positions, rounded_weights)
+    ]
+    interpolated = _round_float32_to_bf16(terms[0] + terms[1])
+    interpolated = _round_float32_to_bf16(interpolated + terms[2])
+    return _round_float32_to_bf16(interpolated + terms[3])
+
+
 # ---------------------------------------------------------------------------
 # Vision RoPE + window index (exact port of HF Qwen2.5-VL)
 # ---------------------------------------------------------------------------
@@ -845,11 +871,16 @@ def build_qwen3_vl_vision_engine(
     requested_fp32_layers = {int(index) for index in (fp32_layers or set())}
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "bf16":
+        # NumPy has no native BF16. Store checkpoint constants in FP16 and
+        # explicitly cast them to TensorRT BF16 at graph boundaries.
+        work_np_dtype, work_trt_dtype = np.float16, trt.bfloat16
     elif precision == "fp32":
         work_np_dtype, work_trt_dtype = np.float32, trt.float32
     else:
         raise ValueError(
-            f"Unsupported Qwen3-VL precision {precision!r}; expected fp32 or fp16")
+            f"Unsupported Qwen3-VL precision {precision!r}; "
+            "expected fp32, fp16 or bf16")
 
     grid_h = fixed_image_size // patch_size
     grid_w = fixed_image_size // patch_size
@@ -942,13 +973,29 @@ def build_qwen3_vl_vision_engine(
                     i01 = h_floor[hi] * num_grid_per_side + w_ceil[wi]
                     i10 = h_ceil[hi] * num_grid_per_side + w_floor[wi]
                     i11 = h_ceil[hi] * num_grid_per_side + w_ceil[wi]
-                    pos_embed_interp[idx] = (w00 * pos_embed_w[i00] + w01 * pos_embed_w[i01]
-                                             + w10 * pos_embed_w[i10] + w11 * pos_embed_w[i11])
+                    if precision == "bf16":
+                        pos_embed_interp[idx] = (
+                            _interpolate_qwen3_position_bf16(
+                                pos_embed_w,
+                                (i00, i01, i10, i11),
+                                (w00, w01, w10, w11),
+                            )
+                        )
+                    else:
+                        pos_embed_interp[idx] = (
+                            w00 * pos_embed_w[i00]
+                            + w01 * pos_embed_w[i01]
+                            + w10 * pos_embed_w[i10]
+                            + w11 * pos_embed_w[i11]
+                        )
                     idx += 1
 
     pos_const = graph_ops.add_constant(
         network, (num_patches, embed_dim), pos_embed_interp,
-        dtype=work_np_dtype)
+        dtype=np.float32 if precision == "bf16" else work_np_dtype)
+    if pos_const.dtype != work_trt_dtype:
+        pos_const = network.add_cast(
+            pos_const, work_trt_dtype).get_output(0)
     pos_add = network.add_elementwise(
         hidden, pos_const, trt.ElementWiseOperation.SUM)
     hidden = pos_add.get_output(0)
@@ -1019,7 +1066,7 @@ def build_qwen3_vl_vision_engine(
         prefix = f"visual.blocks.{layer_idx}"
         layer_np_dtype = (
             np.float32
-            if work_np_dtype == np.float16 and layer_idx in requested_fp32_layers
+            if precision == "fp16" and layer_idx in requested_fp32_layers
             else work_np_dtype)
         layer_trt_dtype = (
             trt.float32 if layer_np_dtype == np.float32 else work_trt_dtype)

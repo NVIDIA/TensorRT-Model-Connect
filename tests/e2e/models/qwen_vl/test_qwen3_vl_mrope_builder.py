@@ -21,10 +21,12 @@ pytest.importorskip(
 def _tiny_qwen3_vl_config() -> SimpleNamespace:
     return SimpleNamespace(
         raw={
-            "rope_scaling": {
-                "mrope_section": [2, 1, 1],
-                "mrope_interleaved": True,
-                "rope_type": "default",
+            "text_config": {
+                "rope_scaling": {
+                    "mrope_section": [2, 1, 1],
+                    "mrope_interleaved": True,
+                    "rope_type": "default",
+                },
             },
             "_decoder_engine_role": "dual_profile",
         },

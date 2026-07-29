@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from .config import ModelConfig
+from .config import ModelConfig, get_rope_scaling
 from .checkpoint_mapper import (
     WeightDict,
     load_standard_weights,
@@ -236,11 +236,9 @@ class QwenVLPlugin:
             for index in selected_fp32
             if index >= _VISION_LAYER_OFFSET
         }
-        # The vision tower is a separate, unquantized engine at a fixed
-        # precision and does not follow the decoder's bf16 work dtype (it has no
-        # bf16 path). Keep it at fp32 for a bf16 decoder — matching the deployed
-        # baseline, where the ViT is not affected by --precision.
-        if precision == "bf16":
+        # Qwen2.5-VL's vision tower has no BF16 path; Qwen3-VL does and must
+        # follow the decoder BF16 precision contract.
+        if precision == "bf16" and not _is_qwen3_vl(config):
             vision_precision = "fp32"
         elif precision == "fp16" and _VISION_COMPONENT in selected_fp32:
             vision_precision = "fp32"
@@ -552,8 +550,9 @@ def _build_qwen3_vl_decoder(
     """Build Qwen3-VL text decoder with DeepStack injection.
 
     Uses graph_blocks composition instead of standard_decoder_builder so
-    that DeepStack embeddings can be injected between attention and MLP
-    at the first N layers (where N = deepstack_num_levels).
+    that DeepStack embeddings can be injected after each of the first N
+    complete decoder layers (where N = deepstack_num_levels), matching the
+    Hugging Face Qwen3-VL text-model forward order.
 
     Extra engine inputs (when deepstack_num_levels > 0):
       - deepstack_embed_0..N: [Sq, hidden] per-level embeddings
@@ -597,7 +596,7 @@ def _build_qwen3_vl_decoder(
     head_dim = attention_size // num_heads
     kv_attention_size = graph_blocks.infer_kv_attention_size(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
-    rope_scaling = config.raw.get("rope_scaling") or {}
+    rope_scaling = get_rope_scaling(config.raw)
     raw_mrope_section = (
         rope_scaling.get("mrope_section")
         if isinstance(rope_scaling, dict) else None)
@@ -838,20 +837,6 @@ def _build_qwen3_vl_decoder(
             layer_hidden, attn_out, trt.ElementWiseOperation.SUM)
         post_attn = residual1.get_output(0)
 
-        # DeepStack injection: add visual features after attention residual
-        if layer_idx < deepstack_num_levels and ds_active_tensor is not None:
-            layer_ds_active = (
-                fp32_ds_active_tensor if layer_is_fp32 else ds_active_tensor)
-            layer_ds_embed = (
-                fp32_ds_embed_inputs[layer_idx]
-                if layer_is_fp32 else ds_embed_inputs[layer_idx])
-            assert layer_ds_active is not None
-            ds_gated = _add_nan_safe_deepstack_gate(
-                network, layer_ds_embed, layer_ds_active)
-            post_attn_ds = network.add_elementwise(
-                post_attn, ds_gated, trt.ElementWiseOperation.SUM)
-            post_attn = post_attn_ds.get_output(0)
-
         # Post-attention norm
         norm2 = graph_blocks.apply_norm(
             network, post_attn, hidden,
@@ -870,6 +855,22 @@ def _build_qwen3_vl_decoder(
             post_attn, mlp_out, trt.ElementWiseOperation.SUM)
         hidden_state = graph_blocks.cast_to_dtype(
             network, residual2.get_output(0), work_trt_dtype)
+
+        # Hugging Face applies DeepStack after the complete decoder layer,
+        # including the MLP residual, before passing state to the next layer.
+        if layer_idx < deepstack_num_levels and ds_active_tensor is not None:
+            layer_ds_active = (
+                fp32_ds_active_tensor if layer_is_fp32 else ds_active_tensor)
+            layer_ds_embed = (
+                fp32_ds_embed_inputs[layer_idx]
+                if layer_is_fp32 else ds_embed_inputs[layer_idx])
+            assert layer_ds_active is not None
+            ds_gated = _add_nan_safe_deepstack_gate(
+                network, layer_ds_embed, layer_ds_active)
+            deepstack_sum = network.add_elementwise(
+                hidden_state, ds_gated, trt.ElementWiseOperation.SUM)
+            hidden_state = graph_blocks.cast_to_dtype(
+                network, deepstack_sum.get_output(0), work_trt_dtype)
 
         if debug_layer_outputs:
             _mark_debug_output(network, residual1.get_output(0),

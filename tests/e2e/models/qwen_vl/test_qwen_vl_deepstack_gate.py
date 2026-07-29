@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 from dataclasses import dataclass
 
 
@@ -79,3 +80,15 @@ def test_deepstack_gate_uses_hard_zero_select(monkeypatch) -> None:
         for operation in network.operations
         if operation[0] == "elementwise"
     )
+
+
+def test_qwen3_deepstack_is_after_complete_decoder_layer() -> None:
+    source = inspect.getsource(plugin._build_qwen3_vl_decoder)
+
+    final_residual = source.index(
+        "residual2 = network.add_elementwise(")
+    deepstack_sum = source.index(
+        "deepstack_sum = network.add_elementwise(")
+
+    assert final_residual < deepstack_sum
+    assert "post_attn_ds" not in source

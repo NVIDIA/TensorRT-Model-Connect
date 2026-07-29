@@ -219,6 +219,32 @@ def test_qwen3_vl_vision_component_can_stay_fp32(monkeypatch) -> None:
     assert calls["build"][2]["fp32_layers"] == {5}
 
 
+def test_qwen3_vl_vision_preserves_bf16_precision(monkeypatch) -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.qwen_vl.plugin")
+    vision_module = importlib.import_module(
+        "tensorrt_model_connect.families.qwen_vl.qwen_vl_vision_builder")
+    calls: dict[str, object] = {}
+
+    def fake_load(_model_dir, _config):
+        return {"vision": "weights"}
+
+    def fake_build(vision_config, weights, **kwargs):
+        calls["build"] = (vision_config, weights, kwargs)
+        return b"qwen3-vl-bf16-vision-plan"
+
+    monkeypatch.setattr(module, "_load_vision_weights", fake_load)
+    monkeypatch.setattr(
+        vision_module, "build_qwen3_vl_vision_engine", fake_build)
+
+    config = _config(qwen3=True)
+    result = module.QwenVLPlugin().build_vision_engine(
+        "/tmp/model", config, {}, precision="bf16")
+
+    assert result == b"qwen3-vl-bf16-vision-plan"
+    assert calls["build"][2]["precision"] == "bf16"
+
+
 def test_qwen3_vl_text_decoder_component_can_stay_fp32(monkeypatch) -> None:
     module = importlib.import_module(
         "tensorrt_model_connect.families.qwen_vl.plugin")
