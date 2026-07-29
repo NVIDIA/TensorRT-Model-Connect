@@ -206,6 +206,7 @@ def _fake_proof_environment(
     (tmp_path / "hf-cache" / "modules").mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env.pop("TRTMC_GPU_ID", None)
+    env.pop("TRTMC_GPU_SLOT_ID", None)
     env.update(
         {
             "PATH": f"{fake_bin}:{env['PATH']}",
@@ -3612,7 +3613,10 @@ def test_explicit_runner_gpu_must_be_in_the_configured_allowlist(tmp_path: Path)
 @pytest.mark.model_proof_allocator
 def test_four_shared_proofs_use_unique_slots_on_one_gpu(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("TRTMC_GPU_ID", "7")
+    monkeypatch.setenv("TRTMC_GPU_SLOT_ID", "3")
     processes: list[tuple[subprocess.Popen[str], Path, Path]] = []
     release_file = tmp_path / "release-four-shared"
     for index in range(4):
