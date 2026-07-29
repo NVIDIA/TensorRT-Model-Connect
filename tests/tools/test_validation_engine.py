@@ -5942,6 +5942,23 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_trtfb(
     assert result["hf_cache_key"] == "abc123"
     assert result["bundle_built"] is True
     assert result["trtfb_accuracy"] == 0.5
+    assert result["prediction_agreement_rate"] == 0.5
+    assert result["status"] == "failed"
+    assert result["error_type"] == "BenchmarkGateError"
+    assert result["gate_failures"] == [
+        {
+            "gate": "max_accuracy_drop_from_hf",
+            "metric": "accuracy_drop_from_hf",
+            "actual": 0.5,
+            "required": 0.01,
+        },
+        {
+            "gate": "min_prediction_agreement",
+            "metric": "prediction_agreement_rate",
+            "actual": 0.5,
+            "required": 0.98,
+        }
+    ]
     assert (work_dir / "summary.json").is_file()
 
 
@@ -6044,6 +6061,33 @@ def test_eval_one_model_uses_vlm_prepare_outputs_for_vlm_suite(tmp_path: Path, m
     assert calls == ["hf", "build", "trtfb"]
     assert result["trtfb_accuracy"] == 1.0
     assert result["prediction_agreement_rate"] == 1.0
+    assert result["status"] == "passed"
+    assert result["gate_failures"] == []
+
+
+def test_prediction_agreement_gate_reports_accuracy_drop() -> None:
+    result = validation_engine.prediction_agreement_gate_result(
+        {
+            "hf": {"overall_accuracy": 0.8},
+            "trtfb": {"overall_accuracy": 0.6},
+            "prediction_agreement_rate": 1.0,
+        },
+        {
+            "max_accuracy_drop_from_hf": 0.02,
+            "min_prediction_agreement": 0.95,
+        },
+    )
+
+    assert result["status"] == "failed"
+    assert result["error_type"] == "BenchmarkGateError"
+    assert result["gate_failures"] == [
+        {
+            "gate": "max_accuracy_drop_from_hf",
+            "metric": "accuracy_drop_from_hf",
+            "actual": pytest.approx(0.2),
+            "required": 0.02,
+        }
+    ]
 
 
 def test_eval_one_model_skips_prompt_length_check_for_asr_suite(

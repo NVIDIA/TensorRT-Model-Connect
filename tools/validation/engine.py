@@ -5126,6 +5126,60 @@ def compare_prediction_sets(
     return summary
 
 
+def prediction_agreement_gate_result(
+    summary: Mapping[str, Any],
+    gates: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Evaluate task-accuracy and direct prediction-agreement gates."""
+    max_accuracy_drop = float(
+        gates.get("max_accuracy_drop_from_hf", 0.05)
+    )
+    min_agreement = float(
+        gates.get("min_prediction_agreement", 0.90)
+    )
+    accuracy_drop = (
+        float(summary["hf"]["overall_accuracy"])
+        - float(summary["trtfb"]["overall_accuracy"])
+    )
+    prediction_agreement = float(summary["prediction_agreement_rate"])
+    failures: list[dict[str, Any]] = []
+    if accuracy_drop > max_accuracy_drop:
+        failures.append(
+            {
+                "gate": "max_accuracy_drop_from_hf",
+                "metric": "accuracy_drop_from_hf",
+                "actual": accuracy_drop,
+                "required": max_accuracy_drop,
+            }
+        )
+    if prediction_agreement < min_agreement:
+        failures.append(
+            {
+                "gate": "min_prediction_agreement",
+                "metric": "prediction_agreement_rate",
+                "actual": prediction_agreement,
+                "required": min_agreement,
+            }
+        )
+    result: dict[str, Any] = {
+        "status": "failed" if failures else "passed",
+        "accuracy_drop_from_hf": accuracy_drop,
+        "gates": {
+            "max_accuracy_drop_from_hf": max_accuracy_drop,
+            "min_prediction_agreement": min_agreement,
+        },
+        "gate_failures": failures,
+    }
+    if failures:
+        result["error_type"] = "BenchmarkGateError"
+        result["error"] = "; ".join(
+            f"{failure['gate']} actual={failure['actual']} "
+            f"required={failure['required']}"
+            for failure in failures
+        )
+    return result
+
+
 def tts_intelligibility_gate_result(
     summary: Mapping[str, Any],
     gates: Mapping[str, Any],
@@ -10946,37 +11000,24 @@ def eval_one_model(
             "hf_valid_prediction_rate": summary["hf"].get("valid_prediction_rate"),
             "trtfb_valid_prediction_rate": summary["trtfb"].get("valid_prediction_rate"),
         }
-        if scorer == "asr_transcript":
-            gates = suite.get("gates", {})
-            max_accuracy_drop = float(
-                gates.get("max_accuracy_drop_from_hf", 0.05)
-            )
-            min_agreement = float(gates.get("min_prediction_agreement", 0.90))
-            accuracy_drop = (
-                summary["hf"]["overall_accuracy"]
-                - summary["trtfb"]["overall_accuracy"]
-            )
+        if scorer in {"mcq", "asr_transcript"}:
             result.update(
-                {
-                    "status": (
-                        "passed"
-                        if accuracy_drop <= max_accuracy_drop
-                        and summary["prediction_agreement_rate"] >= min_agreement
-                        else "failed"
-                    ),
-                    "accuracy_drop_from_hf": accuracy_drop,
+                prediction_agreement_gate_result(
+                    summary,
+                    suite.get("gates", {}),
+                )
+            )
+            if scorer == "asr_transcript":
+                result.update(
+                    {
                     "normalized_transcript_exact_agreement_rate": summary[
                         "normalized_transcript_exact_agreement_rate"
                     ],
                     "correctness_agreement_rate": summary[
                         "correctness_agreement_rate"
                     ],
-                    "gates": {
-                        "max_accuracy_drop_from_hf": max_accuracy_drop,
-                        "min_prediction_agreement": min_agreement,
-                    },
-                }
-            )
+                    }
+                )
         elif scorer == "tts_intelligibility":
             result.update(
                 tts_intelligibility_gate_result(
