@@ -1,12 +1,13 @@
 {
   "name": "stablelm2-1.6b",
   "hf_id": "stabilityai/stablelm-2-1_6b",
+  "hf_revision": "f499ead74c53749bd93cebc6ce8bc0d7bdf1eaef",
   "bundle": "stablelm2-1.6b.bundle",
   "family": "stablelm",
   "runtime_strategy": "stablelm_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "precision": "fp16",
-  "max_cache_length": 256,
+  "max_cache_length": 384,
   "trust_remote_code": false,
   "testcases": [
     {
@@ -14,9 +15,10 @@
       "trace_id": "IT-E2E-SLM2-01",
       "reference_family": "causal_base_continuation",
       "user_contract": "continuation_parity",
-      "reference_precision": "fp32",
-      "prompt": "The capital of France is",
-      "max_new_tokens": 20
+      "reference_precision": "fp16",
+      "prompt": "The following are multiple choice questions (with answers) about abstract algebra.\n\nFind all c in Z_3 such that Z_3[x]/(x^2 + c) is a field.\nA. 0\nB. 1\nC. 2\nD. 3\nAnswer: B\n\nStatement 1 | If aH is an element of a factor group, then |aH| divides |a|. Statement 2 | If H and K are subgroups of G then HK is a subgroup of G.\nA. True, True\nB. False, False\nC. True, False\nD. False, True\nAnswer: B\n\nStatement 1 | Every element of a group generates a cyclic subgroup of the group. Statement 2 | The symmetric group S_10 has 10 elements.\nA. True, True\nB. False, False\nC. True, False\nD. False, True\nAnswer: C\n\nStatement 1| Every function from a finite set onto itself must be one to one. Statement 2 | Every subgroup of an abelian group is abelian.\nA. True, True\nB. False, False\nC. True, False\nD. False, True\nAnswer: A\n\nFind the characteristic of the ring 2Z.\nA. 0\nB. 3\nC. 12\nD. 30\nAnswer: A\n\nFind all zeros in the indicated finite field of the given polynomial with coefficients in that field. x^5 + 3x^3 + x^2 + 2x in Z_5\nA. 0\nB. 1\nC. 0,1\nD. 0,4\nAnswer:",
+      "max_new_tokens": 20,
+      "notes": "Exact StableLM regression sentinel for QA MMLU sample mmlu_000002. It replaces the former short prompt and reaches the published first divergence at generated-token index 18 without adding another model build or case."
     }
   ]
 }
