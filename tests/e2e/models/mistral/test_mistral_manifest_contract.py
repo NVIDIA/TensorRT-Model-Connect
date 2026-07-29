@@ -18,7 +18,7 @@ def test_native_l0_manifest_uses_family_build_defaults() -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     case = load_manifest(manifest_path)
 
-    assert manifest["hf_id"] == "mistralai/Mistral-7B-Instruct-v0.3"
+    assert manifest["hf_id"] == "mistralai/Mistral-7B-Instruct-v0.1"
     assert "precision" not in manifest
     assert "max_cache_length" not in manifest
     assert "precision" not in case.metadata

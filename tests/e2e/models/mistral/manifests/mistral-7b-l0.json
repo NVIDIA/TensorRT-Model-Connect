@@ -1,6 +1,6 @@
 {
   "name": "mistral-7b-l0",
-  "hf_id": "mistralai/Mistral-7B-Instruct-v0.3",
+  "hf_id": "mistralai/Mistral-7B-Instruct-v0.1",
   "bundle": "mistral-7b-l0.trtfb",
   "family": "mistral",
   "runtime_strategy": "mistral_decoder_kv_cache",
@@ -16,7 +16,7 @@
       "reference_precision": "fp32",
       "prompt": "What is the capital of Japan? Answer in one word.",
       "max_new_tokens": 5,
-      "notes": "Native TensorRT KV qualification for Mistral-7B v0.3. Build precision and the complete 32768-token cache capacity come from the family defaults.",
+      "notes": "Native TensorRT KV qualification for Mistral-7B v0.1. Build precision and the complete 32768-token cache capacity come from the family defaults.",
       "metadata": {
         "contract_config": {
           "use_chat_template": true,
