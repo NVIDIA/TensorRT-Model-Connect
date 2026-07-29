@@ -129,7 +129,7 @@ void test_configurable_request_validation() {
     request.source_language = "de";
     check(rejects(request), "Canary rejects language absent from bundle metadata");
     request.source_language = "en";
-    request.beam_size = 17;
+    request.beam_size = 33;
     check(rejects(request), "Canary rejects beam size above supported bound");
     request.beam_size = 1;
     request.max_output_tokens = 65;
@@ -137,6 +137,21 @@ void test_configurable_request_validation() {
     request.max_output_tokens = 20;
     request.segment_duration_seconds = -1.0F;
     check(rejects(request), "Canary rejects negative segment duration");
+    request.segment_duration_seconds = 30.0F;
+    request.segment_min_duration_seconds = 20.0F;
+    request.segment_overlap_seconds = 2.0F;
+    request.lcs_merge = true;
+    request.beam_size = 4;
+    request.beam_fallback_max_size = 32;
+    check(!rejects(request), "Canary accepts customer dynamic segmentation controls");
+    request.length_penalty = -1.0F;
+    check(rejects(request), "Canary rejects negative beam length penalty");
+    request.length_penalty = 0.0F;
+    request.beam_fallback_max_size = 2;
+    check(rejects(request), "Canary rejects fallback below the initial beam size");
+    request.beam_fallback_max_size = 32;
+    request.segment_overlap_seconds = 0.0F;
+    check(rejects(request), "Canary rejects LCS merge without overlapping segments");
 }
 
 void test_mel_padding_and_truncation_are_row_major() {

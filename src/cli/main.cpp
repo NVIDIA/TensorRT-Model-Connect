@@ -1340,9 +1340,11 @@ int cmd_transcribe(const CliArgs& args) {
             return EXIT_FAILURE;
         }
         const bool has_offline_only_controls =
-            args.beam_size != 1 || args.transcription_task != "transcribe" || !args.punctuation ||
-            args.timestamps || args.max_input_seconds > 0.0F ||
-            args.segment_length_seconds > 0.0F ||
+            args.beam_size != 1 || args.length_penalty != 1.0F ||
+            args.beam_fallback_max_size != 0 || args.transcription_task != "transcribe" ||
+            !args.punctuation || args.timestamps || args.max_input_seconds > 0.0F ||
+            args.segment_length_seconds > 0.0F || args.segment_min_seconds > 0.0F ||
+            args.segment_overlap_seconds > 0.0F || args.lcs_merge ||
             (args.language.empty() &&
              (args.source_language != "en" || args.target_language != "en"));
         if (has_offline_only_controls) {
@@ -1390,6 +1392,8 @@ int cmd_transcribe(const CliArgs& args) {
         request.config.max_output_tokens = max_tokens;
         request.config.input_sample_rate = audio.sample_rate;
         request.config.beam_size = args.beam_size;
+        request.config.length_penalty = args.length_penalty;
+        request.config.beam_fallback_max_size = args.beam_fallback_max_size;
         request.config.source_language = args.source_language;
         request.config.target_language = args.target_language;
         request.config.task = args.transcription_task == "translate"
@@ -1399,6 +1403,9 @@ int cmd_transcribe(const CliArgs& args) {
         request.config.timestamps = args.timestamps;
         request.config.max_input_duration_seconds = args.max_input_seconds;
         request.config.segment_duration_seconds = args.segment_length_seconds;
+        request.config.segment_min_duration_seconds = args.segment_min_seconds;
+        request.config.segment_overlap_seconds = args.segment_overlap_seconds;
+        request.config.lcs_merge = args.lcs_merge;
         requests.push_back(std::move(request));
     }
 

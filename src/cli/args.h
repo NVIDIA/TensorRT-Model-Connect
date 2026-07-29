@@ -72,6 +72,8 @@ struct CliArgs {
     int att_context_right{13};
     std::string language;
     int beam_size{1};
+    float length_penalty{1.0F};
+    int beam_fallback_max_size{0};
     std::string source_language{"en"};
     std::string target_language{"en"};
     std::string transcription_task{"transcribe"};
@@ -79,6 +81,9 @@ struct CliArgs {
     bool timestamps{false};
     float max_input_seconds{0.0F};
     float segment_length_seconds{0.0F};
+    float segment_min_seconds{0.0F};
+    float segment_overlap_seconds{0.0F};
+    bool lcs_merge{false};
     std::string runtime_cache;
     std::vector<std::string> backend_search_paths;
     std::vector<std::string> model_plugin_search_paths;
