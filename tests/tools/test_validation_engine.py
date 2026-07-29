@@ -4575,6 +4575,29 @@ def test_non_continuation_reserves_generation_headroom_by_default() -> None:
     )
 
 
+def test_nemotron_nano_mcq_reserves_generation_cache_headroom() -> None:
+    suite = task_eval.suite_by_id(
+        task_eval.load_suites(), "mmlu_five_shot_mcq"
+    )
+    model = next(
+        model
+        for model in task_eval.load_manifest_records()
+        if model["name"] == "nemotron-nano-4b"
+    )
+
+    assert (
+        task_eval.generation_cache_headroom(
+            scorer="mcq",
+            task_eval_config=task_eval.effective_task_eval_config(
+                suite, model
+            ),
+            generation=suite["generation"],
+            max_new_tokens=None,
+        )
+        == 1
+    )
+
+
 def test_eval_continuation_builds_for_prompt_and_generated_tokens(
     tmp_path: Path, monkeypatch
 ) -> None:

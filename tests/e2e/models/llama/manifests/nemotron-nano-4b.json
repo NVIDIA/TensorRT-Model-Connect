@@ -8,6 +8,9 @@
   "precision": "fp16",
   "max_cache_length": 256,
   "trust_remote_code": false,
+  "task_eval": {
+    "build_generation_headroom": true
+  },
   "testcases": [
     {
       "name": "nemotron-nano-4b",
