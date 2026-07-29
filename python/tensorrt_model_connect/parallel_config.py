@@ -16,38 +16,69 @@ if TYPE_CHECKING:
     from .config import ModelConfig
 
 
+_TP_MODES = frozenset({"tensor_parallel"})
+_SP_MODES = frozenset({"sp_ulysses", "sp_ring", "sp_allgather_kv"})
+_ALL_MODES = frozenset({"single"}) | _TP_MODES | _SP_MODES
+
+
 @dataclass(frozen=True)
 class ParallelConfig:
     mode: str = "single"
     tp_size: int = 1
+    cp_size: int = 1
     rank: int = -1
     require_mpirun: bool = True
 
     @property
     def enabled(self) -> bool:
-        return self.mode == "tensor_parallel" and self.tp_size > 1
+        if self.tp_size > 1 and self.mode in _TP_MODES:
+            return True
+        if self.cp_size > 1 and self.mode in _SP_MODES:
+            return True
+        return False
+
+    @property
+    def world_size(self) -> int:
+        """Total ranks needed for this parallel layout (tp * cp)."""
+        return max(1, int(self.tp_size)) * max(1, int(self.cp_size))
 
     def for_rank(self, rank: int) -> "ParallelConfig":
         return replace(self, rank=rank)
 
     def validate(self) -> None:
-        if self.mode not in {"single", "tensor_parallel"}:
+        if self.mode not in _ALL_MODES:
             raise ValueError(f"Unsupported parallel.mode={self.mode!r}")
         if self.tp_size not in {1, 2, 4, 8}:
             raise ValueError("parallel.tp_size must be one of 1, 2, 4, 8")
+        if self.cp_size <= 0 or self.cp_size > 8:
+            raise ValueError(
+                "parallel.cp_size must be a positive integer <= 8")
+        if self.cp_size not in {1, 2, 4, 8}:
+            raise ValueError("parallel.cp_size must be one of 1, 2, 4, 8")
+        if self.cp_size > 1 and self.mode not in _SP_MODES:
+            raise ValueError(
+                f"parallel.cp_size={self.cp_size} requires a sequence-parallel mode "
+                f"(one of {sorted(_SP_MODES)}); got mode={self.mode!r}")
         if self.rank < -1:
             raise ValueError("parallel.rank must be -1 or a non-negative rank")
-        if self.rank >= self.tp_size:
+        world = self.world_size
+        if self.rank >= world:
             raise ValueError(
-                f"parallel.rank={self.rank} must be smaller than tp_size={self.tp_size}")
+                f"parallel.rank={self.rank} must be smaller than world_size={world}")
         if self.mode == "single" and self.tp_size != 1:
             raise ValueError("parallel.mode=single requires parallel.tp_size=1")
+        if self.mode == "single" and self.cp_size != 1:
+            raise ValueError("parallel.mode=single requires parallel.cp_size=1")
+        if self.mode in _SP_MODES and self.cp_size == 1:
+            raise ValueError(
+                f"parallel.mode={self.mode!r} requires parallel.cp_size > 1")
 
     def to_config_dict(self) -> dict[str, object]:
         self.validate()
         return {
             "mode": self.mode,
             "tp_size": self.tp_size,
+            "cp_size": self.cp_size,
             "rank": self.rank,
             "require_mpirun": self.require_mpirun,
         }
@@ -203,20 +234,51 @@ def shard_standard_decoder_weights(
     return out
 
 
-def add_all_reduce_sum(network, tensor, tp_size: int):
-    """Insert a TRT 11.0+ all-reduce SUM collective for tensor-parallel joins."""
+_TRT11_REQUIRED_MSG = (
+    "Distributed collectives require TensorRT 11.0+ Python bindings "
+    "with INetworkDefinition.add_dist_collective"
+)
+
+
+def _resolve_collective_api(network):
+    """Return (trt_proxy, add_collective) or raise if TRT 11+ API is missing."""
     from tensorrt_model_connect import trt_compat
 
-    tp_size = int(tp_size)
+    add_collective = getattr(network, "add_dist_collective", None)
+    if add_collective is None:
+        raise RuntimeError(_TRT11_REQUIRED_MSG + " (requires TRT 11+)")
+    return trt_compat.get_trt(), add_collective
+
+
+def _finalize_collective_layer(layer, op_name: str, ranks: int):
+    if layer is None:
+        raise RuntimeError(
+            f"TensorRT failed to add {op_name} distributed collective"
+            " (requires TRT 11+)")
+    if not hasattr(layer, "num_ranks"):
+        raise RuntimeError(
+            f"{op_name} requires TensorRT 11.0+ Python bindings "
+            f"with IDistCollectiveLayer.num_ranks (requires TRT 11+)")
+    layer.num_ranks = int(ranks)
+    return layer.get_output(0)
+
+
+def _check_parallel_size(parallel_size: int, op_name: str) -> int:
+    parallel_size = int(parallel_size)
+    if parallel_size < 0:
+        raise RuntimeError(
+            f"{op_name}: parallel_size must be >= 0, got {parallel_size}"
+            " (requires TRT 11+)")
+    return parallel_size
+
+
+def add_all_reduce_sum(network, tensor, tp_size: int):
+    """Insert a TRT 11.0+ all-reduce SUM collective for tensor-parallel joins."""
+    tp_size = _check_parallel_size(tp_size, "add_all_reduce_sum")
     if tp_size <= 1:
         return tensor
 
-    trt = trt_compat.get_trt()
-    add_collective = getattr(network, "add_dist_collective", None)
-    if add_collective is None:
-        raise RuntimeError(
-            "Tensor-parallel builds require TensorRT 11.0+ Python bindings "
-            "with INetworkDefinition.add_dist_collective")
+    trt, add_collective = _resolve_collective_api(network)
     layer = add_collective(
         tensor,
         trt.CollectiveOperation.ALL_REDUCE,
@@ -224,11 +286,106 @@ def add_all_reduce_sum(network, tensor, tp_size: int):
         -1,
         [],
     )
-    if layer is None:
-        raise RuntimeError("TensorRT failed to add ALL_REDUCE distributed collective")
-    if not hasattr(layer, "num_ranks"):
+    return _finalize_collective_layer(layer, "ALL_REDUCE", tp_size)
+
+
+def add_all_gather(network, tensor, cp_size: int, gather_axis: int = -1):
+    """All-gather across ``cp_size`` ranks along ``gather_axis``.
+
+    Output shape matches the input except the gather axis grows by ``cp_size``
+    (each rank contributes its local shard). A pass-through is returned when
+    ``cp_size <= 1``.
+    """
+    cp_size = _check_parallel_size(cp_size, "add_all_gather")
+    if cp_size <= 1:
+        return tensor
+
+    trt, add_collective = _resolve_collective_api(network)
+    gather_axis = int(gather_axis)
+    layer = add_collective(
+        tensor,
+        trt.CollectiveOperation.ALL_GATHER,
+        trt.ReduceOperation.NONE,
+        gather_axis,
+        [],
+    )
+    return _finalize_collective_layer(layer, "ALL_GATHER", cp_size)
+
+
+def add_all_to_all(
+    network,
+    tensor,
+    cp_size: int,
+    scatter_axis: int,
+    gather_axis: int,
+):
+    """All-to-all redistribution across ``cp_size`` ranks.
+
+    Input tensor is sharded along ``gather_axis`` (each rank holds 1/cp_size of
+    that axis) and the output is sharded along ``scatter_axis`` instead. The
+    declared output shape grows ``scatter_axis`` by ``cp_size`` and shrinks
+    ``gather_axis`` by ``cp_size``.
+
+    The underlying TRT 11 API expects the ``axis`` argument to encode both
+    scatter and gather axes; we pass them as a 2-element list. If the runtime
+    only accepts a scalar we fall back to passing the scatter axis and rely on
+    the ``sizes`` argument to encode the gather axis.
+    """
+    cp_size = _check_parallel_size(cp_size, "add_all_to_all")
+    if cp_size <= 1:
+        return tensor
+
+    trt, add_collective = _resolve_collective_api(network)
+    scatter_axis = int(scatter_axis)
+    gather_axis = int(gather_axis)
+    if scatter_axis == gather_axis:
         raise RuntimeError(
-            "Tensor-parallel builds require TensorRT 11.0+ Python bindings "
-            "with IDistCollectiveLayer.num_ranks")
-    layer.num_ranks = tp_size
-    return layer.get_output(0)
+            "add_all_to_all: scatter_axis and gather_axis must differ "
+            f"(both = {scatter_axis}) (requires TRT 11+)")
+
+    # Try the documented 2-axis form first; fall back to scalar+sizes if the
+    # binding rejects the list form.
+    layer = None
+    try:
+        layer = add_collective(
+            tensor,
+            trt.CollectiveOperation.ALL_TO_ALL,
+            trt.ReduceOperation.NONE,
+            [scatter_axis, gather_axis],
+            [],
+        )
+    except TypeError:
+        layer = None
+    if layer is None:
+        layer = add_collective(
+            tensor,
+            trt.CollectiveOperation.ALL_TO_ALL,
+            trt.ReduceOperation.NONE,
+            scatter_axis,
+            [gather_axis],
+        )
+    return _finalize_collective_layer(layer, "ALL_TO_ALL", cp_size)
+
+
+def add_reduce_scatter_sum(network, tensor, cp_size: int, scatter_axis: int = -1):
+    """Reduce-scatter SUM across ``cp_size`` ranks along ``scatter_axis``.
+
+    Output declares ``scatter_axis`` shrunk by ``cp_size`` after a SUM reduction
+    across all ranks. Pass-through when ``cp_size <= 1``.
+    """
+    cp_size = _check_parallel_size(cp_size, "add_reduce_scatter_sum")
+    if cp_size <= 1:
+        return tensor
+
+    trt, add_collective = _resolve_collective_api(network)
+    scatter_axis = int(scatter_axis)
+    layer = add_collective(
+        tensor,
+        trt.CollectiveOperation.REDUCE_SCATTER,
+        trt.ReduceOperation.SUM,
+        scatter_axis,
+        [],
+    )
+    return _finalize_collective_layer(layer, "REDUCE_SCATTER", cp_size)
+
+
