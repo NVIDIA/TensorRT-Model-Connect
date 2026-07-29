@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 import importlib
 from pathlib import Path
@@ -140,6 +141,36 @@ def test_native_graph_has_no_concat_or_decomposable_fallback():
     assert "add_attention_v2" in graph_ops
     assert "attention.decomposable = False" in graph_ops
     assert "add_concatenation([cache_" not in builder
+
+
+def test_native_graph_keeps_the_residual_stream_in_fp32():
+    family_dir = Path(__file__).resolve().parents[4] / (
+        "python/tensorrt_model_connect/families/gpt_neox"
+    )
+    builder = (family_dir / "native_decoder_builder.py").read_text()
+    tree = ast.parse(builder)
+    matmul = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "matmul"
+    )
+    matmul_source = ast.unparse(matmul)
+    norm_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "norm_multi"
+    ]
+
+    assert "hidden_state = network.add_cast(" in builder
+    assert "attn_out = network.add_cast(" in builder
+    assert "mlp_out = network.add_cast(" in builder
+    assert "physical KV cache remain FP16" in builder
+    assert "if lhs.dtype != work_trt_dtype" in matmul_source
+    assert "network.add_cast(lhs, work_trt_dtype)" in matmul_source
+    assert len(norm_calls) == 4
+    assert all(ast.unparse(call.args[-1]) == "np.float32" for call in norm_calls)
 
 
 @pytest.mark.parametrize(

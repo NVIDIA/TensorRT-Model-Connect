@@ -218,6 +218,11 @@ def build_native_decoder_engine(
         rhs_weights: np.ndarray,
         _weight_name: str,
     ) -> trt.ITensor:
+        if lhs.dtype != work_trt_dtype:
+            lhs = network.add_cast(
+                lhs,
+                work_trt_dtype,
+            ).get_output(0)
         return graph_ops.add_matmul_rhs_constant(
             network,
             lhs,
@@ -237,6 +242,14 @@ def build_native_decoder_engine(
             hidden_state,
             work_trt_dtype,
         ).get_output(0)
+    # Preserve the residual stream in FP32 so the multi-token prefill and
+    # single-token decode tactics do not compound different FP16 rounding at
+    # every layer.  Linear projections, fused native attention, and the
+    # physical KV cache remain FP16.
+    hidden_state = network.add_cast(
+        hidden_state,
+        trt.float32,
+    ).get_output(0)
 
     present_k_outs: list[trt.ITensor] = []
     present_v_outs: list[trt.ITensor] = []
@@ -255,7 +268,7 @@ def build_native_decoder_engine(
             weights[f"{prefix}.input_norm_beta"],
             eps_tensor,
             "layernorm",
-            work_np_dtype,
+            np.float32,
         )
         q = matmul(
             normed,
@@ -360,6 +373,10 @@ def build_native_decoder_engine(
             weights[f"{prefix}.o_bias"],
             dtype=work_np_dtype,
         )
+        attn_out = network.add_cast(
+            attn_out,
+            trt.float32,
+        ).get_output(0)
 
         if parallel_residual:
             norm2 = norm_multi(
@@ -370,7 +387,7 @@ def build_native_decoder_engine(
                 weights[f"{prefix}.post_attn_norm_beta"],
                 eps_tensor,
                 "layernorm",
-                work_np_dtype,
+                np.float32,
             )
         else:
             residual1 = network.add_elementwise(
@@ -386,7 +403,7 @@ def build_native_decoder_engine(
                 weights[f"{prefix}.post_attn_norm_beta"],
                 eps_tensor,
                 "layernorm",
-                work_np_dtype,
+                np.float32,
             )
 
         mlp_out = _gelu_fc_mlp(
@@ -400,6 +417,10 @@ def build_native_decoder_engine(
             activation=activation,
             work_np_dtype=work_np_dtype,
         )
+        mlp_out = network.add_cast(
+            mlp_out,
+            trt.float32,
+        ).get_output(0)
         if parallel_residual:
             hidden_plus_attention = network.add_elementwise(
                 hidden_state,
@@ -426,7 +447,7 @@ def build_native_decoder_engine(
         weights["final_norm_beta"],
         eps_tensor,
         "layernorm",
-        work_np_dtype,
+        np.float32,
     )
 
     shape_t = network.add_shape(hidden_state).get_output(0)
@@ -460,9 +481,13 @@ def build_native_decoder_engine(
     lm_weights = np.asarray(weights["w_out"], dtype=np.float32)
     reference_weight = lm_weights[:, :1]
     centered_weights = lm_weights - reference_weight
+    last_hidden_fp16 = network.add_cast(
+        last_hidden,
+        work_trt_dtype,
+    ).get_output(0)
     centered_logits = graph_ops.add_matmul_rhs_constant(
         network,
-        last_hidden,
+        last_hidden_fp16,
         hidden,
         vocab,
         centered_weights,
@@ -472,13 +497,9 @@ def build_native_decoder_engine(
         centered_logits,
         trt.float32,
     ).get_output(0)
-    last_hidden_fp32 = network.add_cast(
-        last_hidden,
-        trt.float32,
-    ).get_output(0)
     reference_logit = graph_ops.add_matmul_rhs_constant(
         network,
-        last_hidden_fp32,
+        last_hidden,
         hidden,
         1,
         reference_weight,
