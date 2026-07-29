@@ -81,6 +81,7 @@ from . import graph_blocks
 
 trt = trt_compat.get_trt()
 
+
 def _parse_layer_types(raw_types: list[str]) -> list[str]:
     """Normalize layer type strings to 'deltanet' or 'attention'."""
     mapping = {
@@ -90,6 +91,42 @@ def _parse_layer_types(raw_types: list[str]) -> list[str]:
         "full_attention": "attention",
     }
     return [mapping.get(t.lower(), t.lower()) for t in raw_types]
+
+
+def _prepare_runtime_inputs(
+    network,
+    work_trt_dtype,
+    attention_mask,
+    conv_state_inputs,
+    ssm_state_inputs,
+    cache_k_inputs,
+    cache_v_inputs,
+):
+    """Cast storage tensors while preserving DeltaNet recurrence in FP32."""
+    if work_trt_dtype == trt.float32:
+        return (
+            attention_mask,
+            conv_state_inputs,
+            ssm_state_inputs,
+            cache_k_inputs,
+            cache_v_inputs,
+        )
+
+    def cast_all(tensors):
+        return [
+            network.add_cast(tensor, work_trt_dtype).get_output(0)
+            for tensor in tensors
+        ]
+
+    return (
+        network.add_cast(attention_mask, work_trt_dtype).get_output(0),
+        cast_all(conv_state_inputs),
+        # HF keeps the DeltaNet recurrent state in FP32. Never quantize this
+        # persistent input before the per-token recurrence.
+        ssm_state_inputs,
+        cast_all(cache_k_inputs),
+        cast_all(cache_v_inputs),
+    )
 
 
 class Qwen35Plugin:
@@ -460,21 +497,21 @@ class Qwen35Plugin:
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
 
-        if work_trt_dtype != trt.float32:
-            attention_mask = network.add_cast(
-                attention_mask, work_trt_dtype).get_output(0)
-            conv_state_inputs = [
-                network.add_cast(x, work_trt_dtype).get_output(0)
-                for x in conv_state_inputs
-            ]
-            cache_k_inputs = [
-                network.add_cast(x, work_trt_dtype).get_output(0)
-                for x in cache_k_inputs
-            ]
-            cache_v_inputs = [
-                network.add_cast(x, work_trt_dtype).get_output(0)
-                for x in cache_v_inputs
-            ]
+        (
+            attention_mask,
+            conv_state_inputs,
+            ssm_state_inputs,
+            cache_k_inputs,
+            cache_v_inputs,
+        ) = _prepare_runtime_inputs(
+            network,
+            work_trt_dtype,
+            attention_mask,
+            conv_state_inputs,
+            ssm_state_inputs,
+            cache_k_inputs,
+            cache_v_inputs,
+        )
 
         # --- Shared constants ---
         embedding_table = graph_ops.add_constant(
