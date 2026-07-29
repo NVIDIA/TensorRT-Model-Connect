@@ -107,16 +107,19 @@ class WanT2VPlugin:
         from .standard_dit_tp_builder import (
             build_standard_dit_engine as build_standard_dit_tp_engine,
         )
+        from .standard_dit_cp_builder import (
+            build_standard_dit_engine as build_standard_dit_cp_engine,
+        )
         from .causal_vae_3d_builder import build_causal_vae_3d_engine, load_vae_weights
         from ...parallel_config import (
             normalize_parallel_config,
-            require_tensorrt_11_for_tensor_parallel,
+            require_tensorrt_11_for_distributed,
             validate_dit_tp,
         )
 
         build_timing = _kwargs.get("build_timing")
         parallel = normalize_parallel_config(parallel_config)
-        require_tensorrt_11_for_tensor_parallel(parallel, feature="Wan tensor-parallel builds")
+        require_tensorrt_11_for_distributed(parallel, feature="Wan distributed builds")
         if parallel.enabled:
             validate_dit_tp(
                 dim=self._DIT_DIM,
@@ -201,7 +204,25 @@ class WanT2VPlugin:
         dit_plan = None
         dit_rank_plans = None
         with timed_trt_compile(build_timing, "dit"):
-            if parallel.enabled:
+            if parallel.cp_enabled:
+                print(
+                    f"[wan-t2v] Building shared DiT CP{parallel.cp_size} plan ...",
+                    file=sys.stderr,
+                )
+                dit_plan = build_standard_dit_cp_engine(
+                    dit_weights,
+                    dim=self._DIT_DIM,
+                    num_heads=self._DIT_NUM_HEADS,
+                    num_layers=self._DIT_NUM_LAYERS,
+                    ffn_dim=self._DIT_FFN_DIM,
+                    context_dim=self._DIT_DIM,
+                    num_patches=num_patches,
+                    text_seq_len=self._T5_MAX_SEQ_LEN,
+                    precision=precision,
+                    verbose=verbose,
+                    parallel_config=parallel,
+                )
+            elif parallel.enabled:
                 dit_rank_plans = {}
                 for rank in range(parallel.tp_size):
                     print(
@@ -291,13 +312,19 @@ class WanT2VPlugin:
     def diffusion_bundle_sections(
         self, components: dict, *, parallel_config=None
     ) -> list[tuple[str, bytes]]:
-        from ...parallel_config import normalize_parallel_config, rank_denoiser_section
+        from ...parallel_config import (
+            context_denoiser_section,
+            normalize_parallel_config,
+            rank_denoiser_section,
+        )
 
         parallel = normalize_parallel_config(parallel_config)
         sections: list[tuple[str, bytes]] = []
         for index, (_name, plan) in enumerate(components["text_encoders"]):
             sections.append((f"text_encoder_{index}_plan", plan))
-        if parallel.enabled:
+        if parallel.cp_enabled:
+            sections.append((context_denoiser_section(), components["denoiser"]))
+        elif parallel.enabled:
             denoiser_rank_plans = components["denoiser_ranks"]
             for rank in range(parallel.tp_size):
                 plan = denoiser_rank_plans.get(rank)

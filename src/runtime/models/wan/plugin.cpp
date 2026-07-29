@@ -20,20 +20,30 @@ namespace trtmc {
 
 namespace {
 
-struct TensorParallelRuntimeConfig {
+struct DistributedRuntimeConfig {
     bool enabled{false};
-    int32_t tp_size{1};
+    bool context_parallel{false};
+    int32_t world_size{1};
 };
 
-TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::string& config_json) {
-    TensorParallelRuntimeConfig cfg;
-    cfg.tp_size = extract_json_int(config_json, "tensor_parallel_size", 1);
-    const auto mode = extract_json_string(config_json, "tensor_parallel_mode", "single");
-    cfg.enabled = (mode == "tensor_parallel" && cfg.tp_size > 1);
+DistributedRuntimeConfig parse_distributed_runtime_config(const std::string& config_json) {
+    DistributedRuntimeConfig cfg;
+    auto mode = extract_json_string(config_json, "parallel_mode", "single");
+    if (mode == "single")
+        mode = extract_json_string(config_json, "tensor_parallel_mode", "single");
+    if (mode == "single")
+        mode = extract_json_string(config_json, "context_parallel_mode", "single");
+    cfg.context_parallel = (mode == "context_parallel");
+    cfg.world_size = cfg.context_parallel
+                         ? extract_json_int(config_json, "context_parallel_size", 1)
+                         : extract_json_int(config_json, "tensor_parallel_size", 1);
+    cfg.enabled = ((mode == "tensor_parallel" || cfg.context_parallel) && cfg.world_size > 1);
     return cfg;
 }
 
-std::string tp_denoiser_section_name(int32_t rank) {
+std::string distributed_denoiser_section_name(int32_t rank, bool context_parallel) {
+    if (context_parallel)
+        return "denoiser_plan_cp";
     return "denoiser_plan_tp_rank" + std::to_string(rank);
 }
 
@@ -46,16 +56,17 @@ class WanPlugin final : public IPipelinePlugin {
         opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
         opts.cuda_graphs = ctx.cuda_graphs;
 
-        const auto tp_config = parse_tensor_parallel_runtime_config(ctx.config_json);
-        DistributedRuntimeGroup tp_group;
+        const auto distributed_config = parse_distributed_runtime_config(ctx.config_json);
+        DistributedRuntimeGroup distributed_group;
         std::string denoiser_section_name = "denoiser_plan";
         ModuleCreateOptions denoiser_opts = opts;
         const ModuleCreateOptions* denoiser_options = nullptr;
-        if (tp_config.enabled) {
-            tp_group = initialize_tensor_parallel_group(tp_config.tp_size);
-            denoiser_section_name = tp_denoiser_section_name(tp_group.rank);
-            denoiser_opts.distributed_communicator = tp_group.communicator;
-            denoiser_opts.distributed_owner = tp_group.owner;
+        if (distributed_config.enabled) {
+            distributed_group = initialize_tensor_parallel_group(distributed_config.world_size);
+            denoiser_section_name = distributed_denoiser_section_name(
+                distributed_group.rank, distributed_config.context_parallel);
+            denoiser_opts.distributed_communicator = distributed_group.communicator;
+            denoiser_opts.distributed_owner = distributed_group.owner;
             denoiser_options = &denoiser_opts;
         }
 
@@ -79,8 +90,8 @@ class WanPlugin final : public IPipelinePlugin {
         return std::make_unique<WanPipeline>(
             std::move(te_module), std::move(parts.denoiser.module), std::move(parts.vae.module),
             std::move(parts.config), std::move(parts.weights), std::move(parts.tokenizer),
-            ctx.bundle.info.model_id, tp_group.owner, tp_group.rank, tp_group.tp_size,
-            std::move(parts.vae_first_frame.module));
+            ctx.bundle.info.model_id, distributed_group.owner, distributed_group.rank,
+            distributed_group.world_size, std::move(parts.vae_first_frame.module));
     }
 };
 

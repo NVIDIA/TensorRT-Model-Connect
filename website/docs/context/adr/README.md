@@ -6,6 +6,7 @@ decisions.
 
 | Number | Title | Status | Date |
 |--------|-------|--------|------|
+| [0001](0001-wan-context-parallel-bundles.md) | Add padded-head Ulysses context-parallel Wan bundles | Proposed | 2026-07-29 |
 
 ## Current decision sources
 

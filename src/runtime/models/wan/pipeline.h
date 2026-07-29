@@ -29,7 +29,7 @@ class WanPipeline final : public IPipeline {
                 std::unique_ptr<TrtModule> vae, WanDiffusionConfig config,
                 WanPreprocessorWeights weights, std::shared_ptr<ITokenizer> tokenizer,
                 std::string model_id_str, std::shared_ptr<void> distributed_owner = {},
-                int32_t tensor_parallel_rank = 0, int32_t tensor_parallel_size = 1,
+                int32_t distributed_rank = 0, int32_t distributed_world_size = 1,
                 std::unique_ptr<TrtModule> vae_first_frame = nullptr);
 
     ~WanPipeline() override;
@@ -82,10 +82,10 @@ class WanPipeline final : public IPipeline {
     ImageResult finish_wan_generation(int32_t z_dim, int32_t t_lat, int32_t h_lat, int32_t w_lat,
                                       std::vector<float>& latents, WanVideoResult& result);
 
-    // Keep TP communicator ownership until after TRT modules are destroyed.
+    // Keep distributed communicator ownership until after TRT modules are destroyed.
     std::shared_ptr<void> distributed_owner_;
-    int32_t tensor_parallel_rank_{0};
-    int32_t tensor_parallel_size_{1};
+    int32_t distributed_rank_{0};
+    int32_t distributed_world_size_{1};
     std::unique_ptr<TrtModule> text_encoder_;
     std::unique_ptr<TrtModule> denoiser_;
     std::unique_ptr<TrtModule> vae_;

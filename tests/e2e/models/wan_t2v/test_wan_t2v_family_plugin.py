@@ -415,6 +415,29 @@ def test_build_components_tensor_parallel_builds_rank_denoisers(
     assert calls["dit_ranks"] == [0, 1, 2, 3]
 
 
+def test_context_parallel_bundle_packages_one_shared_denoiser() -> None:
+    """Wan CP ranks load one rank-dynamic denoiser plan and shared auxiliaries."""
+    from tensorrt_model_connect.parallel_config import ParallelConfig
+
+    sections = dict(wan_mod.plugin.diffusion_bundle_sections(
+        {
+            "text_encoders": [("t5", b"t5-plan")],
+            "denoiser": b"dit-cp-plan",
+            "vae_decoder": b"vae-plan",
+            "vae_decoder_first_frame": b"vae-first-frame-plan",
+            "preprocessor_weights": b"wan-preproc",
+        },
+        parallel_config=ParallelConfig(
+            mode="context_parallel", cp_size=4),
+    ))
+
+    assert sections["denoiser_plan_cp"] == b"dit-cp-plan"
+    assert "denoiser_plan" not in sections
+    assert not any(name.startswith("denoiser_plan_tp_rank") for name in sections)
+    assert sections["text_encoder_0_plan"] == b"t5-plan"
+    assert sections["vae_decoder_plan"] == b"vae-plan"
+
+
 def test_get_diffusion_config_uses_count_vae_caches(monkeypatch: pytest.MonkeyPatch) -> None:
     """Intent: verify diffusion config wiring and imported cache-count helper call.
 

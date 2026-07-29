@@ -557,10 +557,10 @@ WanPipeline::WanPipeline(std::unique_ptr<TrtModule> text_encoder,
                          std::unique_ptr<TrtModule> denoiser, std::unique_ptr<TrtModule> vae,
                          WanDiffusionConfig config, WanPreprocessorWeights weights,
                          std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
-                         std::shared_ptr<void> distributed_owner, int32_t tensor_parallel_rank,
-                         int32_t tensor_parallel_size, std::unique_ptr<TrtModule> vae_first_frame)
-    : distributed_owner_(std::move(distributed_owner)), tensor_parallel_rank_(tensor_parallel_rank),
-      tensor_parallel_size_(tensor_parallel_size), text_encoder_(std::move(text_encoder)),
+                         std::shared_ptr<void> distributed_owner, int32_t distributed_rank,
+                         int32_t distributed_world_size, std::unique_ptr<TrtModule> vae_first_frame)
+    : distributed_owner_(std::move(distributed_owner)), distributed_rank_(distributed_rank),
+      distributed_world_size_(distributed_world_size), text_encoder_(std::move(text_encoder)),
       denoiser_(std::move(denoiser)), vae_(std::move(vae)),
       vae_first_frame_(std::move(vae_first_frame)), config_(std::move(config)),
       weights_(std::move(weights)), tokenizer_(std::move(tokenizer)),
@@ -1194,8 +1194,8 @@ ImageResult WanPipeline::finish_wan_generation(int32_t z_dim, int32_t t_lat, int
                                                WanVideoResult& result) {
     denormalize_wan_latents(config_, z_dim, t_lat, h_lat, w_lat, latents);
 
-    if (tensor_parallel_size_ > 1 && tensor_parallel_rank_ != 0) {
-        std::cerr << "[wan-t2v] TP rank " << tensor_parallel_rank_
+    if (distributed_world_size_ > 1 && distributed_rank_ != 0) {
+        std::cerr << "[wan-t2v] Distributed rank " << distributed_rank_
                   << " skips VAE decode; rank 0 writes video artifacts\n";
         ImageResult empty;
         empty.num_frames = 0;
