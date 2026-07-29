@@ -9,6 +9,8 @@ import stat
 import sys
 from types import ModuleType, SimpleNamespace
 
+import pytest
+
 from tools.reference import (
     elf_prepared,
     plugin_reference,
@@ -147,6 +149,21 @@ def _args(work_dir: Path, cache_dir: Path, *extra: str):
     )
 
 
+def test_prepared_dataset_without_native_runner_fails_closed(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "unsupported"
+    _prepare_work(work_dir)
+
+    with pytest.raises(
+        trtmc_reference.ReferenceError,
+        match="dataset kind 'mmlu_json'",
+    ):
+        trtmc_reference._run_reference_inference(
+            _args(work_dir, tmp_path / "cache")
+        )
+
+
 def test_reference_cache_reuses_same_settings_across_work_directories(
     tmp_path: Path,
     monkeypatch,
@@ -181,8 +198,8 @@ def test_reference_cache_reuses_same_settings_across_work_directories(
         (work_dir / "hf_raw.jsonl").write_text("{}\n", encoding="utf-8")
 
     monkeypatch.setattr(
-        trtmc_reference.task_eval,
-        "run_hf_reference",
+        trtmc_reference,
+        "_run_reference_inference",
         fake_reference,
     )
 
@@ -227,8 +244,8 @@ def test_reference_cache_identity_shares_equivalent_trtmc_variants(
         )
 
     monkeypatch.setattr(
-        trtmc_reference.task_eval,
-        "run_hf_reference",
+        trtmc_reference,
+        "_run_reference_inference",
         fake_reference,
     )
 
@@ -365,8 +382,8 @@ def test_reference_cache_key_changes_with_inference_setting(
         )
 
     monkeypatch.setattr(
-        trtmc_reference.task_eval,
-        "run_hf_reference",
+        trtmc_reference,
+        "_run_reference_inference",
         fake_reference,
     )
 
@@ -418,8 +435,8 @@ def test_reference_cache_key_changes_with_model_revision(
         )
 
     monkeypatch.setattr(
-        trtmc_reference.task_eval,
-        "run_hf_reference",
+        trtmc_reference,
+        "_run_reference_inference",
         fake_reference,
     )
 
@@ -447,8 +464,8 @@ def test_reference_cache_can_adopt_an_existing_result(
     )
 
     monkeypatch.setattr(
-        trtmc_reference.task_eval,
-        "run_hf_reference",
+        trtmc_reference,
+        "_run_reference_inference",
         lambda _args: (_ for _ in ()).throw(AssertionError("must not infer")),
     )
 
@@ -510,11 +527,6 @@ def test_causal_reference_uses_native_transformers_entrypoint(
         )
         return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr(
-        trtmc_reference.task_eval,
-        "run_hf_reference",
-        lambda _args: (_ for _ in ()).throw(AssertionError("wrapper was used")),
-    )
     monkeypatch.setattr(trtmc_reference.subprocess, "run", fake_run)
 
     assert trtmc_reference.run_reference(arguments) == "generated"

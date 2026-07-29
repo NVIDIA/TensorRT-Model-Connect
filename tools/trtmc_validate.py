@@ -39,7 +39,8 @@ from tensorrt_model_connect.python_profiles import (  # noqa: E402
     profile_env_var,
     resolve_profile_python,
 )
-from tools import task_eval, trtmc_disagreements  # noqa: E402
+from tools.validation import catalog as validation_catalog  # noqa: E402
+from tools import trtmc_disagreements  # noqa: E402
 
 
 DEFAULT_CATALOG = REPO_ROOT / "tests" / "validation" / "model_workloads.yaml"
@@ -222,7 +223,7 @@ def _suite_task_metadata(suite: Mapping[str, Any]) -> tuple[str, str]:
 def _default_suite_task_metadata() -> dict[str, tuple[str, str]]:
     return {
         str(suite["id"]): _suite_task_metadata(suite)
-        for suite in task_eval.load_suites(DEFAULT_SUITES)
+        for suite in validation_catalog.load_suites(DEFAULT_SUITES)
     }
 
 
@@ -236,7 +237,7 @@ def _result_task_metadata(result: Mapping[str, Any]) -> tuple[str, str]:
 
 
 def ready_model_names(models_root: Path = DEFAULT_MODELS) -> tuple[str, ...]:
-    models = task_eval.load_manifest_records(models_root)
+    models = validation_catalog.load_manifest_records(models_root)
     return tuple(
         sorted(
             str(model["name"])
@@ -306,7 +307,7 @@ def audit_workload_compatibility(
     reference_cache_contracts: dict[str, set[tuple[str, ...]]] = {}
     for model_name, spec in catalog["models"].items():
         for workload in spec.get("workloads", []):
-            matched, reason = task_eval.suite_match_reason(
+            matched, reason = validation_catalog.suite_match_reason(
                 suites[workload],
                 task_models[model_name],
             )
@@ -391,7 +392,10 @@ def resolve_sample_limit(
 
 
 def _task_eval_models(models_root: Path) -> dict[str, dict[str, Any]]:
-    return {str(model["name"]): model for model in task_eval.load_manifest_records(models_root)}
+    return {
+        str(model["name"]): model
+        for model in validation_catalog.load_manifest_records(models_root)
+    }
 
 
 def _declared_profile(
@@ -2305,7 +2309,7 @@ def _load_validation_inputs(
     dict[str, dict[str, Any]],
 ]:
     catalog = load_catalog(arguments.catalog)
-    suites_list = task_eval.load_suites(arguments.suites)
+    suites_list = validation_catalog.load_suites(arguments.suites)
     suites = {suite["id"]: suite for suite in suites_list}
     ready = ready_model_names(arguments.models_dir)
     task_models = _task_eval_models(arguments.models_dir)

@@ -25,7 +25,9 @@ for import_root in (REPO_ROOT, PYTHON_ROOT):
     if str(import_root) not in sys.path:
         sys.path.insert(0, str(import_root))
 
-from tools import task_eval  # noqa: E402
+from tools.validation.artifacts import (  # noqa: E402
+    predictions_file_valid,
+)
 
 
 CACHE_SCHEMA = "trtmc.reference-cache/v1"
@@ -373,7 +375,7 @@ def _write_work_metadata(
 def _run_without_cache(args: argparse.Namespace, key: str) -> str:
     _run_reference_inference(args)
     work_dir = Path(args.work_dir).resolve()
-    if not task_eval.predictions_file_valid(
+    if not predictions_file_valid(
         work_dir / "hf_predictions.json",
         work_dir / "answers.json",
     ):
@@ -456,8 +458,18 @@ def _native_reference_command(
 def _run_reference_inference(args: argparse.Namespace) -> None:
     runner = _native_reference_runner(args)
     if runner is None:
-        task_eval.run_hf_reference(args)
-        return
+        manifest_path = Path(args.work_dir).resolve() / "manifest.json"
+        dataset_kind = ""
+        if manifest_path.is_file():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                dataset_kind = str(manifest.get("dataset_kind", "") or "")
+            except (OSError, json.JSONDecodeError):
+                pass
+        raise ReferenceError(
+            "no native reference runner for prepared validation dataset kind "
+            f"{dataset_kind or '<missing>'!r}"
+        )
     work_dir = Path(args.work_dir).resolve()
     command = _native_reference_command(args, runner)
     log_path = work_dir / _NATIVE_RUN_LOG
@@ -498,14 +510,14 @@ def run_reference(args: argparse.Namespace) -> str:
     if entry.exists():
         shutil.rmtree(entry)
 
-    adopt = args.adopt_existing and task_eval.predictions_file_valid(
+    adopt = args.adopt_existing and predictions_file_valid(
         work_dir / "hf_predictions.json",
         work_dir / "answers.json",
     )
     if not adopt:
         _clear_reference_outputs(work_dir)
         _run_reference_inference(args)
-    if not task_eval.predictions_file_valid(
+    if not predictions_file_valid(
         work_dir / "hf_predictions.json",
         work_dir / "answers.json",
     ):

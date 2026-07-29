@@ -11,16 +11,25 @@ import shlex
 
 import pytest
 
-from tools import task_eval
+from tools.validation import catalog as validation_catalog
 from tools import trtmc_compare
 from tools import trtmc_disagreements
 from tools import trtmc_reference
 from tools import trtmc_validate
 
 
+def test_validation_entrypoints_do_not_import_legacy_task_eval():
+    for entrypoint in ("trtmc_validate.py", "trtmc_reference.py"):
+        source = (trtmc_validate.REPO_ROOT / "tools" / entrypoint).read_text(
+            encoding="utf-8"
+        )
+        assert "import task_eval" not in source
+        assert "from tools import task_eval" not in source
+
+
 def test_model_workload_catalog_covers_every_ready_model():
     catalog = trtmc_validate.load_catalog()
-    suites = task_eval.load_suites()
+    suites = validation_catalog.load_suites()
     task_models = trtmc_validate._task_eval_models(trtmc_validate.DEFAULT_MODELS)
     ready_models = trtmc_validate.ready_model_names()
 
@@ -59,7 +68,9 @@ def test_model_workload_catalog_covers_every_ready_model():
 
 
 def test_validation_ready_models_exclude_l0_only_profiles():
-    records = task_eval.load_manifest_records(trtmc_validate.DEFAULT_MODELS)
+    records = validation_catalog.load_manifest_records(
+        trtmc_validate.DEFAULT_MODELS
+    )
     eligible = {
         str(record["name"])
         for record in records
@@ -96,7 +107,7 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
 def test_standard_validation_suites_have_report_task_types():
     missing = [
         suite["id"]
-        for suite in task_eval.load_suites()
+        for suite in validation_catalog.load_suites()
         if not trtmc_validate._suite_task_metadata(suite)[0]
     ]
 
@@ -105,7 +116,9 @@ def test_standard_validation_suites_have_report_task_types():
 
 def test_every_dataset_backed_validation_binding_has_native_reference_runner():
     catalog = trtmc_validate.load_catalog()
-    suites = {suite["id"]: suite for suite in task_eval.load_suites()}
+    suites = {
+        suite["id"]: suite for suite in validation_catalog.load_suites()
+    }
     bindings = [
         (model_name, workload)
         for model_name, spec in catalog["models"].items()
@@ -230,7 +243,7 @@ def test_catalog_rejects_cache_identity_across_different_reference_contracts(
         },
     }
     monkeypatch.setattr(
-        trtmc_validate.task_eval,
+        trtmc_validate.validation_catalog,
         "suite_match_reason",
         lambda _suite, _model: (True, ""),
     )
