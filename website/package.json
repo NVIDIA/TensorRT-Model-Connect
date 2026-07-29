@@ -6,7 +6,8 @@
     "build": "docusaurus build",
     "clear": "docusaurus clear",
     "serve": "docusaurus serve",
-    "start": "docusaurus start --host 0.0.0.0"
+    "start": "docusaurus start --host 0.0.0.0",
+    "test:model-support": "node --test plugins/model-support-inventory/index.test.js"
   },
   "dependencies": {
     "@docusaurus/core": "3.8.1",

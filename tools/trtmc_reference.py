@@ -165,6 +165,7 @@ def _settings(args: argparse.Namespace) -> dict[str, Any]:
         "device": args.device,
         "device_map": args.device_map,
         "attn_impl": args.attn_impl,
+        "experts_implementation": args.experts_implementation,
         "trust_remote_code": args.trust_remote_code,
         "local_files_only": args.local_files_only,
         "do_sample": args.do_sample,
@@ -423,6 +424,13 @@ def _native_reference_command(
         command.extend(["--elf-reference-repo", str(args.elf_reference_repo)])
     if runner == _SPEECH_REFERENCE_RUNNER and args.family:
         command.extend(["--family", str(args.family)])
+    if runner == _TRANSFORMERS_TEXT_RUNNER and args.experts_implementation:
+        command.extend(
+            [
+                "--experts-implementation",
+                str(args.experts_implementation),
+            ]
+        )
     for flag, value in (
         ("--device-map", args.device_map),
         ("--attn-impl", args.attn_impl),
@@ -559,6 +567,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--device-map", default="")
     parser.add_argument("--attn-impl", default="")
+    parser.add_argument("--experts-implementation", default="")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--do-sample", action="store_true")

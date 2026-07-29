@@ -3780,6 +3780,16 @@ def test_max_prompt_token_length_uses_pinned_model_revision(
 def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch) -> None:
     work_dir = tmp_path / "work"
     work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "task_eval": {
+                    "hf_experts_implementation": "batched_mm",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     captured: dict[str, list[str]] = {}
 
     class Result:
@@ -3829,6 +3839,9 @@ def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch)
     assert captured["cmd"][
         captured["cmd"].index("--reference-cache-identity") + 1
     ] == "org/model/reference-contract-v1"
+    assert captured["cmd"][
+        captured["cmd"].index("--experts-implementation") + 1
+    ] == "batched_mm"
 
 
 @pytest.mark.parametrize(

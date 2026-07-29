@@ -203,12 +203,47 @@ struct TextLaneModules {
     std::vector<std::unique_ptr<ITrtModule>> prefill;
 };
 
+TextLaneModules load_split_text_lane_modules(const PipelineContext& ctx, TextModuleRuntime& runtime,
+                                             const LaneResources& lanes,
+                                             const std::vector<char>& prefill_plan) {
+    const std::size_t count = lanes.streams.size();
+    TextLaneModules modules;
+    modules.decode.resize(count);
+    modules.prefill.resize(count);
+    std::vector<ModuleCreateOptions> decode_options = lanes.options;
+    std::vector<ModuleCreateOptions> prefill_options = lanes.options;
+    for (auto& options : decode_options)
+        options.optimization_profile = 0;
+    for (auto& options : prefill_options)
+        options.optimization_profile = 0;
+    auto decode =
+        load_context_modules(ctx.backend, find_section(ctx.bundle, runtime.engine_section),
+                             runtime.engine_section.c_str(), decode_options);
+    auto prefill =
+        load_context_modules(ctx.backend, &prefill_plan, "prefill_engine_plan", prefill_options);
+    for (std::size_t index = 0; index < count; ++index) {
+        modules.decode[index] = std::move(decode.modules[index]);
+        modules.prefill[index] = std::move(prefill.modules[index]);
+        modules.decode[index]->keep_alive(lanes.streams[index]);
+        modules.prefill[index]->keep_alive(lanes.streams[index]);
+        if (runtime.tp_group.owner) {
+            modules.decode[index]->keep_alive(runtime.tp_group.owner);
+            modules.prefill[index]->keep_alive(runtime.tp_group.owner);
+        }
+    }
+    return modules;
+}
+
 TextLaneModules load_text_lane_modules(const PipelineContext& ctx, TextModuleRuntime& runtime,
                                        const LaneResources& lanes) {
     const std::size_t count = lanes.streams.size();
     TextLaneModules modules;
     modules.decode.resize(count);
     modules.prefill.resize(count);
+    const auto* separate_prefill = find_section(ctx.bundle, "prefill_engine_plan");
+    if (separate_prefill != nullptr && !separate_prefill->empty()) {
+        return load_split_text_lane_modules(ctx, runtime, lanes, *separate_prefill);
+    }
     if (count == 1) {
         auto loaded = load_text_modules(ctx, runtime, lanes.streams.front());
         modules.decode.front() = std::move(loaded.decode);

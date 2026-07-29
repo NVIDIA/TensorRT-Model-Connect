@@ -48,6 +48,14 @@ def _torch_dtype_for_case(case: E2ECase) -> str:
     return _PRECISION_TO_TORCH_DTYPE.get(precision, "torch.float32")
 
 
+def _experts_implementation_for_case(case: E2ECase) -> str:
+    """Return the model-owned Transformers MoE backend, when declared."""
+    task_eval = case.metadata.get("task_eval", {})
+    if not isinstance(task_eval, Mapping):
+        return ""
+    return str(task_eval.get("hf_experts_implementation", "") or "").strip()
+
+
 def _vl_prompt_has_image_placeholder(text: str) -> bool:
     """Return true when a rendered VL prompt still carries an image placeholder."""
     return any(marker in text for marker in (
@@ -332,6 +340,7 @@ class HfTransformersReference:
         hf_id = case.hf_id
         model_ref = _resolve_cached_model_ref(hf_id, case.hf_revision)
         torch_dtype_expr = _torch_dtype_for_case(case)
+        experts_implementation = _experts_implementation_for_case(case)
 
         contract_config = case.metadata.get("contract_config", {})
         use_chat_template = contract_config.get("use_chat_template", False)
@@ -346,6 +355,7 @@ class HfTransformersReference:
             prompt = {prompt!r}
             max_new_tokens = {max_new_tokens}
             trust_remote_code = {trust_remote_code!r}
+            experts_implementation = {experts_implementation!r}
             logits_path = {logits_path!r}
             text_path = {text_path!r}
             use_chat_template = {use_chat_template!r}
@@ -375,6 +385,8 @@ class HfTransformersReference:
                 "trust_remote_code": trust_remote_code,
                 "torch_dtype": {torch_dtype_expr},
             }}
+            if experts_implementation:
+                load_kwargs["experts_implementation"] = experts_implementation
             # Detect encoder-decoder models by checking config
             from transformers import AutoConfig
             _cfg = AutoConfig.from_pretrained(model_ref, trust_remote_code=trust_remote_code)
@@ -451,7 +463,10 @@ class HfTransformersReference:
             logits_reader=(
                 lambda: logits_path if Path(logits_path).is_file() else None
             ),
-            metadata={"trust_remote_code": trust_remote_code},
+            metadata={
+                "trust_remote_code": trust_remote_code,
+                "experts_implementation": experts_implementation,
+            },
             include_stdio_metadata=True,
             failure_label="HF reference",
         )

@@ -34,6 +34,8 @@ _TIMING_CACHE_DIR_ENV = "TRTMC_TRT_TIMING_CACHE_DIR"
 _BUILDER_OPT_LEVEL_ENV = "TRTMC_BUILDER_OPTIMIZATION_LEVEL"
 _MAX_NUM_TACTICS_ENV = "TRTMC_MAX_NUM_TACTICS"
 _AVG_TIMING_ITERATIONS_ENV = "TRTMC_AVG_TIMING_ITERATIONS"
+_NATIVE_BIN_DIR_ENV = "_TRTMC_INTERNAL_NATIVE_BIN_DIR"
+_native_backend_handle: Any | None = None
 
 
 def configure_backend(*, rtx: bool = False) -> None:
@@ -179,6 +181,30 @@ def network_creation_flags(
 def get_trt() -> "TensorRTModuleProxy":
     """Return a proxy bound to the currently selected/imported TRT module."""
     return TensorRTModuleProxy(load_module())
+
+
+def load_native_backend_plugins() -> None:
+    """Load the packaged TensorRT backend so its plugin creators register."""
+
+    global _native_backend_handle
+    if _native_backend_handle is not None:
+        return
+
+    import ctypes
+
+    roots = [Path(__file__).resolve().parent / "bin"]
+    native_bin = os.environ.get(_NATIVE_BIN_DIR_ENV)
+    if native_bin:
+        roots.insert(0, Path(native_bin))
+    for root in roots:
+        library = root / "libtrtmc_backend_trt.so"
+        if library.is_file():
+            _native_backend_handle = ctypes.CDLL(
+                str(library),
+                mode=ctypes.RTLD_GLOBAL,
+            )
+            return
+    raise RuntimeError("Cannot find the packaged TensorRT backend plugin library")
 
 
 def add_matrix_multiply(

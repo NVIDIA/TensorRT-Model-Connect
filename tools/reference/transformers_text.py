@@ -148,6 +148,7 @@ def _reproduction_command(arguments: argparse.Namespace) -> list[str]:
         ("--model-revision", arguments.model_revision),
         ("--device-map", arguments.device_map),
         ("--attn-impl", arguments.attn_impl),
+        ("--experts-implementation", arguments.experts_implementation),
         ("--max-new-tokens", arguments.max_new_tokens),
         ("--temperature", arguments.temperature),
         ("--top-k", arguments.top_k),
@@ -260,6 +261,8 @@ def _load_runtime(
         model_kwargs["device_map"] = arguments.device_map
     if arguments.attn_impl:
         model_kwargs["attn_implementation"] = arguments.attn_impl
+    if arguments.experts_implementation:
+        model_kwargs["experts_implementation"] = arguments.experts_implementation
     if arguments.model_revision:
         model_kwargs["revision"] = arguments.model_revision
     model, is_encoder_decoder = _load_model(
@@ -442,6 +445,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--device-map", default="")
     parser.add_argument("--attn-impl", default="")
+    parser.add_argument("--experts-implementation", default="")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--do-sample", action="store_true")

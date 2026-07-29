@@ -1,222 +1,85 @@
 # Runtime Target Architecture
 
-| Field | Value |
-|-------|-------|
-| **Document ID** | ARCH-RT-001 |
-| **Status** | IMPLEMENTED |
-| **Applies to** | C++ runtime (`src/`) |
-| **Author** | Safety Architecture Team (TensorRT-Model-Connect Team) |
-| **Reviewer** | Independent Review Required (TBD — assign before merge) |
-| **Review Status** | Pending independent review |
-| **Last updated** | 2026-03-30 |
-| **ISO 26262 relevance** | ASIL-QM (non-safety, design improvement) |
+Status: implemented native target architecture. Optimized-runtime bundles use
+the separate embedded implementation-DSO path described below.
 
----
+## Native-path invariants
 
-> **STATUS: IMPLEMENTED**
->
-> The plugin-registry architecture described in this document has been
-> fully implemented. The `PipelineRegistry` singleton, `IPipelinePlugin`
-> interface, manifest registration, and `BaseConfig` parsing
-> are all in the codebase. `PipelineFactory::from_bundle()` is now a thin
-> ~124 LOC wrapper that delegates to registry-resolved plugins.
-> See [Pipeline Deep Dive](Pipeline-Deep-Dive.md) for implementation details.
+- A new runtime family lives below `src/runtime/models/<family>/`.
+- Its `MODEL.toml` declares the model DSO, registration symbols, runtime
+  strategies, config schemas, and C++ tests.
+- Every strategy is unique and normally family-qualified.
+- CMake discovers all runtime descriptors and creates one model target per
+  descriptor.
+- For native bundles, `PipelineFactory` resolves strategy to DSO at runtime and
+  does not link every model implementation into the core.
+- Model-specific pipeline/state behavior remains in the model folder.
+- C++ callers use the public C++ headers and do not depend on model-private
+  classes. The current C-linkage subset still exposes C++ types and lacks a
+  pipeline-destroy operation, so it is not a C-compatible public header or a
+  stable, complete C ABI. C-facing consumers need a C++ shim.
 
----
+## Exact-qualified optimized-path invariants
 
-## 1. Motivation
+- Optimized selection is bounded to an existing Python family and requires an
+  exact implementation/profile match for the model, revision, target, and
+  build options.
+- The family-owned adapter runs in isolation and packages
+  `optimized_runtime.json`, provider-produced artifacts, and the exact embedded
+  `libtrtmc_impl_*.so`.
+- This path does not require a synthetic native `runtime_strategy`,
+  `src/runtime/models/<family>/MODEL.toml`, model DSO, or backend DSO.
+- Zero qualified claims continue to the native builder. Multiple claims are an
+  error, and failure after one adapter is selected is terminal.
 
-The original C++ runtime used a centralized dispatch model with a
-`StrategyFamily` enum, a `resolve_family()` switch, and a monolithic
-`FastPathModelConfig` struct. This had scaling limitations: adding a new
-strategy required editing shared files, the config struct grew with every
-modality, and factory logic could not be tested in isolation.
+## Runtime directory roles
 
-The plugin-registry architecture described below was designed to address
-these limitations, and has since been fully implemented.
+| Path | Responsibility |
+| --- | --- |
+| `include/trtmc/runtime/` | Public factory, registry, plugin, tensor, tokenizer, and backend contracts |
+| `src/runtime/registry/` | Bundle materialization, DSO loading, registry, factory |
+| `src/runtime/config/` | Schema registration and layered configuration |
+| `src/runtime/core/` | Model-independent runtime primitives |
+| `src/runtime/domains/` | Small cross-model modality helpers |
+| `src/runtime/models/<family>/` | Concrete model DSO and pipeline behavior |
+| `src/runtime/providers/` | Generic optimized-runtime descriptor/artifact validation and private factory host |
 
-## 2. Implementation (Current State)
+Generic strings such as `decoder_kv_cache`, `decoder_moe`,
+`vision_language`, or `encoder_only` are not the current strategy inventory.
+Use `src/runtime/models/*/MODEL.toml` for the live keys.
 
-```text
-trtmc_create_pipeline_ex(bundle_path)
-  -> ReadBundleFile()
-  -> extract_json_string("runtime_strategy")
-  -> normalize_legacy_strategy()
-  -> PipelineRegistry::instance().lookup(strategy)  // returns IPipelinePlugin*
-  -> parse_base_config()                             // ~10 universal fields
-  -> plugin->create(PipelineContext{...})             // plugin-specific assembly
-  -> IPipeline*
-```
+## Native build-time discovery
 
-Key files:
+`cmake/trtmc_pipeline_plugins.cmake` scans
+`src/runtime/models/*/MODEL.toml`, validates each descriptor, builds the
+declared plugin sources, and generates runtime-manifest metadata. A contributor
+adds a runtime by adding its model-owned descriptor and sources, not by
+editing a registration table in the factory.
 
-| File | Role |
-|------|------|
-| `include/trtmc/runtime/pipeline_factory.h` | `PipelineFactory::from_bundle()` declaration |
-| `src/runtime/registry/pipeline_factory.cpp` | Thin dispatch: read strategy, lookup plugin, delegate (~124 LOC) |
-| `include/trtmc/runtime/pipeline_registry.h` | `PipelineRegistry` singleton, manifest registration macro |
-| `src/runtime/registry/pipeline_registry.cpp` | Registry implementation |
-| `include/trtmc/runtime/pipeline_plugin.h` | `IPipelinePlugin`, `BaseConfig`, `PipelineContext` |
-| `src/runtime/registry/pipeline_plugin.cpp` | `parse_base_config()` |
-| `src/runtime/models/*/plugin.cpp` | Manifest-registered model plugin files |
-| `src/runtime/models/*/pipeline.h/*.cpp` | Concrete model-owned `IPipeline` implementations |
-| `src/runtime/models/*/MODEL.toml` | Runtime strategy ownership manifests |
-| `src/runtime/models/<model>/plugin_helpers.*` | Model-local runtime helper copies used by that model plugin |
-| `cmake/trtmc_pipeline_plugins.cmake` | Plugin source/anchor manifest |
-| `src/cabi/api/trtmc_c.cpp` | C ABI entry point, calls `PipelineFactory::from_bundle()` |
+## Optimized build-time selection
 
-## 3. Design Details (Implemented)
+The Python builder first resolves the owning family. A matching model-owned
+`default_build_route` selects the native family immediately; eligible dense
+Qwen3 and Llama currently skip provider probing this way. Other requests probe
+only that family's `IMPLEMENTATION.toml` and exact profile TOMLs. A selected
+adapter must also have current producer qualification. This delegated path is
+family-owned but is separate from the native CMake descriptor inventory.
 
-### 3.1 IPipelinePlugin
+## Runtime resolution
 
-```cpp
-// include/trtmc/runtime/pipeline_plugin.h
-class IPipelinePlugin {
-public:
-    virtual ~IPipelinePlugin() = default;
-    virtual std::unique_ptr<IPipeline> create(const PipelineContext& ctx) = 0;
-};
-```
+A native bundle must identify the runtime strategy. The loader resolves the
+owning library, loads it, and looks up the strategy in `PipelineRegistry`.
+Failure to load the DSO or find the strategy is an error; the runtime does not
+silently select an unrelated generic pipeline.
 
-Each plugin receives a `PipelineContext` with the `BundleFile`, `BaseConfig`,
-raw JSON text, `hf_python` path, and `bundle_path`. The plugin parses its own
-strategy-specific config directly from the raw JSON.
+An optimized bundle identifies itself with `optimized_runtime.json` and
+embeds its exact `libtrtmc_impl_*.so` plus artifact tree. The optimized host
+validates and materializes that tree and calls the implementation's private
+factory ABI. It bypasses the native strategy index, model DSO, and backend
+DSO, and any failure is terminal rather than a native fallback.
 
-### 3.2 PipelineRegistry
-
-```cpp
-// include/trtmc/runtime/pipeline_registry.h
-class PipelineRegistry {
-public:
-    static PipelineRegistry& instance();
-    void register_plugin(const std::string& strategy, IPipelinePlugin* plugin);
-    IPipelinePlugin* lookup(const std::string& strategy) const;
-    std::vector<std::string> registered_strategies() const;
-};
-```
-
-### 3.3 BaseConfig (Universal Fields)
-
-Instead of a monolithic `FastPathModelConfig`, the factory parses only the ~10
-universal fields into `BaseConfig`. Each plugin reads its own strategy-specific
-fields from the raw JSON:
-
-```cpp
-// include/trtmc/runtime/pipeline_plugin.h
-struct BaseConfig {
-    int32_t vocab_size{0};
-    int32_t hidden_size{0};
-    int32_t num_layers{1};
-    int32_t num_heads{1};
-    int32_t num_kv_heads{1};
-    int32_t head_dim{0};
-    int32_t attention_size{0};
-    int32_t max_cache_length{32};
-    int32_t id_bos{-1};
-    int32_t id_eos{-1};
-    std::string runtime_strategy{"decoder_kv_cache"};
-    std::string precision{"fp32"};
-    bool tokenizer_add_special_tokens{false};
-    bool tokenizer_add_special_tokens_present{false};
-};
-```
-
-### 3.4 Self-Contained Model Runtime Folders
-
-Each model runtime folder in `src/runtime/models/` owns its plugin source,
-pipeline source when needed, and `MODEL.toml` strategy manifest. The plugin:
-
-- Exposes a manifest-listed registrar function
-- Parses strategy-specific config from raw JSON in `create()`
-- Extracts bundle sections via `find_section()`
-- Loads TRT engines, creates tokenizers and caches
-- Returns a fully constructed `IPipeline`
-
-```text
-src/runtime/models/
-  <family>/                   # <family>_decoder_kv_cache, <family>_decoder_moe
-  <recurrent-family>/         # family-owned recurrent and hybrid strategies
-  encoder/                    # encoder_only, embedding, reranking, neural_operator, object_detection
-  vision_language/            # vision_language
-  segmentation/               # segmentation, prompted_segmentation
-  whisper/                    # speech_to_text
-  bark/                       # text_to_audio_bark
-  magpie/                     # text_to_audio_magpie
-  speech/                     # speech_to_speech
-  omni/                       # omni_multimodal
-  t5/                         # t5_text_to_text
-  marian/                     # marian_translation
-  bart/                       # bart_seq2seq_encoder_decoder
-  m2m_100/                    # m2m_100_seq2seq_encoder_decoder
-  flux/                       # diffusion_flux
-  wan/                        # diffusion_wan, diffusion_pixart
-  z_image/                    # diffusion_zimage
-src/runtime/models/<model>/   # plugin.cpp, pipeline.*, MODEL.toml, local helper copies
-```
-
-## 4. Migration History
-
-All phases have been **completed**.
-
-### Phase 1: Introduce IPipelinePlugin + PipelineRegistry -- DONE
-
-- Defined `IPipelinePlugin` interface in `include/trtmc/runtime/pipeline_plugin.h`.
-- Implemented `PipelineRegistry` singleton in `include/trtmc/runtime/pipeline_registry.h`.
-- Added `PipelineRegistry` and initial registration macros.
-
-### Phase 2: Decompose FastPathModelConfig -- DONE
-
-- Replaced the monolithic config struct with `BaseConfig` (~10 universal fields).
-- Each plugin now parses its strategy-specific config directly from raw JSON.
-- `parse_base_config()` in `src/runtime/registry/pipeline_plugin.cpp`.
-
-### Phase 3: Migrate strategies to plugins -- DONE
-
-- All 25 strategies migrated to manifest-registered model folders in `src/runtime/models/`.
-- Helper code is duplicated into the owning `src/runtime/models/<model>/` folders.
-
-### Phase 4: Simplify pipeline_factory.cpp -- DONE
-
-- `PipelineFactory::from_bundle()` is now ~124 LOC: read strategy, normalize legacy strings, lookup plugin, delegate.
-- No `resolve_family()` enum, no `StrategyFamily`, no `create_*_pipeline()` functions.
-
-### Phase 5: Plugin manifest registration -- DONE
-
-- Each plugin exposes a registrar function via `REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST`.
-- `cmake/trtmc_pipeline_plugins.cmake` drives source inclusion and generated registrar calls.
-- External out-of-tree plugins are now architecturally possible.
-
-## 5. C ABI Stability Constraint
-
-The public C ABI defined in `include/trtmc/pipeline.h` **must remain stable throughout the entire migration**:
-
-- `trtmc_create_pipeline()` and `trtmc_create_pipeline_ex()` continue to take a bundle path and return an `IPipeline*`.
-- `TrtmcPipelineOptions` struct is not changed.
-- The `IPipeline` virtual interface (generate, embed, segment, transcribe, etc.) is not changed.
-- All changes are internal to the factory and strategy assembly layer.
-
-Callers of the C ABI will not need any changes at any phase of the migration.
-
-## 6. Testing Strategy for Migration
-
-Each migration phase must maintain the existing test gates:
-
-| Gate | What it validates |
-|------|-------------------|
-| C++ unit tests (`ctest`) | Bundle parsing, tokenizers, CUDA wrappers, KV cache |
-| Python builder tests (`pytest tests/builder/`) | Config parsing, weight mapping, graph ops |
-| CCN gate (`tools/check_cyclomatic_complexity.py`) | No function exceeds CCN 10 |
-| E2E suite (`pytest tests/test_e2e.py`) | Full pipeline correctness for all 84 model manifests |
-
-Additionally, each new plugin should have:
-
-- **Config parsing unit tests** -- verify that the plugin's `parse_config()` extracts the correct fields and rejects invalid configs.
-- **Bundle validation unit tests** -- verify that `validate_bundle()` catches missing sections.
-- **Construction unit tests** -- verify that `create_pipeline()` produces a working pipeline (may require TRT harness tests).
-
-## 7. What This Document Is NOT
-
-- This is **not** the current architecture. See [Architecture Overview](Architecture-Overview.md).
-- This is **not** an approved migration plan with a schedule. It is a design target.
-- This does **not** describe PipelineRouter, PipelineServices, StrategyBuilder, or service-composed runtime patterns. Those concepts do not exist in the codebase and are not part of this target.
-- This document now describes the **implemented** plugin-registry architecture. The migration is complete. `PipelineFactory::from_bundle()` is a thin wrapper that delegates to 20 manifest-registered plugins handling 25 strategies across 84 model manifests.
+Embedding the implementation DSO does not make an optimized bundle a complete
+runtime image. The host supplies the compatible NVIDIA driver, CUDA runtime,
+TensorRT, dynamic loader, and system libraries. Native bundles likewise rely
+on host runtime dependencies and load their model/backend DSOs from the
+installation rather than from the bundle.

@@ -18,6 +18,7 @@ const config = {
   markdown: {
     mermaid: true
   },
+  plugins: [require.resolve('./plugins/model-support-inventory')],
   themes: ['@docusaurus/theme-mermaid'],
   presets: [
     [

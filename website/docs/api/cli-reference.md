@@ -7,7 +7,7 @@ title: CLI Reference
 `trtmc build` builds `.trtfb` bundles through the Python builder package.
 
 ```bash
-trtmc build <hf-repo-or-local-dir> -o <output.trtfb> [options]
+trtmc build <hf-repo-or-local-dir> [-o <output.trtfb>] [options]
 ```
 
 The C++ bridge runs `python -m tensorrt_model_connect build ...`. When
@@ -21,35 +21,76 @@ Source builds use the same subcommands through `./build/trtmc`.
 Direct module execution is still available for debugging:
 
 ```bash
-python -m tensorrt_model_connect build <hf-repo-or-local-dir> -o <output.trtfb>
+python -m tensorrt_model_connect build <hf-repo-or-local-dir> [-o <output.trtfb>]
 ```
+
+When `-o`/`--output` is omitted, the CLI derives
+`<model-name>.trtfb` from the Hugging Face ID or local-directory basename and
+replaces unsafe filename characters with `-`.
 
 ### Build options
 
 | Option | Purpose |
 | --- | --- |
-| `--max-cache-length N` | KV cache length, default `256`. |
+| `-o`, `--output PATH` | Output bundle path. Defaults to the sanitized model basename plus `.trtfb`. |
+| `--kernel FILE.yaml` | Replace a family-owned kernel slot with the trusted TVM-FFI DSO declared by this YAML manifest. Requires the native TensorRT backend. |
+| `--model-revision REV` | Build a Hugging Face commit, tag, or branch instead of its default revision. |
+| `--trust-remote-code` | Accepted for E2E-command compatibility. The current build dispatcher does not forward this flag as a universal remote-code gate; family/model loaders own their loading behavior. Review the checkpoint and family implementation, and do not assume omitting this flag prevents every remote-code path. |
+| `--decoder-engine-layout split|dual_profile` | Select separate prefill/decode engines or one multi-profile decoder engine. |
 | `--dynamic-kv-cache` | Enable runtime-resizable KV cache support. |
+| `--tensor-parallel-size N`, `--tp-size N` | Build a supported decoder for TP size `1`, `2`, `4`, or `8`. |
 | `--dynamic-kv-profile-rows A,B,C` | Override dynamic-KV optimization profiles. |
 | `--image-height`, `--image-width` | Diffusion image shape overrides. |
 | `--video-height`, `--video-width`, `--video-num-frames` | Diffusion video shape overrides. |
 | `--num-inference-steps N` | Diffusion denoising step override. |
+| `--max-batch-size N` | Build supported diffusion engines for a maximum per-call batch. |
 | `--precision fp32|fp16|bf16` | Override the family-selected build precision. Wan2.2 defaults to BF16. |
+| `--fp32-layers I,J` | Keep selected model-local layer indices in FP32. |
 | `--quantize fp8|int8|int8_sq|int4|int4_awq|nvfp4|w4a8` | Quantization format. |
 | `--quant-scales PATH` | Load precomputed quantization scales. |
 | `--quant-calibration-samples N` | PTQ calibration sample count. |
 | `--fp8` | Enable FP8 using family-provided scales when available, otherwise auto-calibrate. |
-| `--fp8-scales PATH` | Load precomputed FP8 scales. |
+| `--fp8-scales PATH` | Load precomputed FP8 scales from a readable UTF-8 JSON object. Missing, unreadable, malformed, or non-object input fails before the native build starts. |
 | `--save-fp8-scales PATH` | Save calibrated FP8 scales. |
 | `--rtx` | Build for TensorRT-RTX backend. |
-| `--config FILE` | Load schema-driven config profile. |
+| `--config FILE` | Load a schema-driven JSON or YAML profile. YAML requires PyYAML. |
 | `--set NS.FIELD=VALUE` | Override a config field; repeatable. |
 | `--build-timing-json PATH` | Write structured build timing. |
+| `--verbose` | Enable verbose TensorRT builder output. |
 
 TriAttention options are also exposed for experimental KV compaction: `--triattention-stats`, `--triattention-kv-budget`, `--triattention-divide-length`, `--triattention-recent-window`, score aggregation, prompt-token accounting, prefill protection, and MLR/trig disable flags.
 
+The compatibility option `--max-cache-length N` remains accepted but is hidden
+from `build --help`. Omitting it lets the selected family choose the capacity:
+eligible dense Qwen3 and Llama builds use the checkpoint's full
+`max_position_embeddings`; other native or legacy paths normally use 256.
+For those Qwen3/Llama models, an explicit value preserves native KV only when it
+equals the full model context and the other native-KV constraints are also met.
+
+Eligible dense Qwen3 and Llama checkpoints declare a model-owned native default
+route. A model-only build skips the optimized-provider probe and selects BF16,
+full-context fixed KV, and split prefill/decode engines. Other families probe
+their exact qualified optimized profiles before falling back to their native
+builder.
+
 TensorRT is the build backend; there is no public build-method selector. Older
 `--method trt` and `--method auto` spellings remain accepted for compatibility.
+
+## `trtmc kernel slots`
+
+List the external-kernel contracts and exact instance IDs published for a
+model without downloading its weights:
+
+```bash
+trtmc kernel slots <hf-repo-or-local-dir> [--model-revision REV]
+```
+
+Supplying `--kernel` validates one strict YAML manifest, the referenced trusted
+DSO, its SHA-256 digest, and the selected slot instances. It bypasses
+optimized-provider selection and uses the owning family's native TensorRT build
+path; it cannot be combined with `--rtx`. See
+[Bring Your Own Kernel](../tutorials/beginner/bring-your-own-kernel.md) for the
+end-to-end workflow.
 
 ## Runtime commands
 
@@ -59,6 +100,9 @@ TensorRT is the build backend; there is no public build-method selector. Older
 trtmc run <bundle.trtfb> --prompt "text" [--image PATH] [--greedy]
 trtmc encode <bundle.trtfb> --prompt "text"
 trtmc segment <bundle.trtfb> --image PATH --output PATH
+trtmc segment-prompted <bundle.trtfb> --image PATH --output DIR [--point-x F --point-y F]
+trtmc segment-prompted <bundle.trtfb> --image PATH --output DIR --prompt "object"
+trtmc classify <bundle.trtfb> --image PATH [--benchmark N --warmup N]
 trtmc detect <bundle.trtfb> --image PATH [--output-json PATH]
 trtmc generate-audio <bundle.trtfb> --prompt "text" --output PATH
 trtmc serve-audio <bundle.trtfb>
@@ -74,11 +118,101 @@ trtmc inspect <bundle.trtfb> --list-engines
 trtmc version
 ```
 
-Common options include `--hf-python`, `--backend-dir`, `--runtime-cache`, `--cuda-graphs`, `--benchmark`, `--warmup`, `--config`, and repeatable `--set`.
+Regular `trtmc inspect` prints bundle-header fields and section names. The
+presence of `optimized_runtime.json` identifies an optimized bundle, but
+inspection does not decode that descriptor or print its implementation/profile
+identity. `trtmc inspect --list-engines` recognizes only the native
+`engine_plan` and `*_plan` section naming convention. Optimized artifacts use
+capsule-owned names such as `optimized_runtime_artifacts/.../llm.engine`, so
+`--list-engines` can legitimately report `No engine sections found.` and exit
+nonzero for an otherwise valid optimized bundle.
+
+Depending on the command, shared load/run options include `--hf-python`,
+`--backend-dir`, repeatable `--model-plugin-dir`, `--runtime-cache`,
+`--cuda-graphs`, `--benchmark`, `--warmup`, `--config`, and repeatable
+`--set`. `trtmc --help` prints one combined synopsis for all commands; it is
+not separate per-command help. Read the relevant command section in that
+combined output and this reference for the accepted options.
+
+These shared options have route-specific contracts:
+
+- On native TensorRT-RTX bundles, `--runtime-cache` names a JIT kernel cache
+  file. On an optimized-runtime bundle, it names the root directory where the
+  host materializes the integrity-bound artifact cache.
+- For Python builds, `--config` accepts `.json`, `.yaml`, and `.yml` profiles;
+  YAML requires PyYAML. The C++ load/run `--config` surface accepts `.json`
+  only and rejects YAML with a conversion error. The current Qwen
+  optimized-runtime route rejects runtime `--config` and `--set` altogether.
 
 Text-generation options include `--max-new-tokens`, `--greedy`, `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--seed`, `--chat-template`, and `--no-thinking`.
 
-Object detection is available through `trtmc detect` for pipelines that implement `IPipeline::detect`.
+### Complete native long-option index
+
+The native parser accepts the following canonical long options. An option is
+valid only on the command whose synopsis or section describes it; this table is
+an inventory, not a claim that every option is accepted by every command.
+
+| Area | Canonical options |
+| --- | --- |
+| Help and version | `--help`, `--version` |
+| Primary inputs | `--prompt`, `--prompts-file`, `--image`, `--audio`, `--audio-in`, `--document`, `--field-input`, `--branch-input`, `--trunk-input` |
+| Output selection | `--output`, `--output-json`, `--audio-out`, `--list-engines` |
+| Runtime loading and config | `--hf-python`, `--backend-dir`, `--model-plugin-dir`, `--runtime-cache`, `--kv-cache-size`, `--cuda-graphs`, `--config`, `--set` |
+| Text generation | `--max-new-tokens`, `--greedy`, `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--seed`, `--chat-template`, `--no-thinking`, `--generation-mode`, `--block-length`, `--threshold`, `--num-samples`, `--tail-frames` |
+| Diffusion and raw-state generation | `--num-steps`, `--num-inference-steps`, `--guidance-scale`, `--cfg-scale`, `--sde-gamma`, `--initial-latents-raw`, `--condition-latents-raw`, `--condition-mask-raw`, `--sampling-steps-raw`, `--sde-noise-raw`, `--negative-prompt`, `--height`, `--width`, `--num-images` |
+| Dynamic adapters | `--lora-adapter`, `--lora-adapter-id` |
+| Transcription | `--beam-size`, `--language`, `--source-language`, `--target-language`, `--task`, `--punctuation`, `--no-punctuation`, `--timestamps`, `--no-timestamps`, `--max-input-seconds`, `--segment-length-seconds`, `--stream`, `--chunk-ms`, `--att-context-size`, `--pad-and-drop-preencoded` |
+| Audio streaming | `--chunk-frames` |
+| Segmentation and detection | `--point-x`, `--point-y`, `--background`, `--score-threshold` |
+| Measurement | `--benchmark`, `--warmup` |
+
+`--threshold` supplies the generation confidence threshold, while
+`--score-threshold` supplies object-detection confidence. `--background`
+marks a prompted-segmentation point as background instead of foreground.
+`--chunk-frames` controls generated-audio stream chunks;
+`--chunk-ms` controls transcription input chunks. The legacy
+`--kv_cache_size` spelling remains accepted for compatibility, but new scripts
+must use `--kv-cache-size`.
+
+### Qwen-VL dynamic LoRA
+
+Dynamic LoRA must be enabled when building the base engine. It currently
+supports Qwen2.5-VL only and is incompatible with tensor-parallel Qwen-VL
+builds. `qwen_vl_lora.max_rank` must be between 1 and 256 when enabled:
+
+```bash
+trtmc build Qwen/Qwen2.5-VL-3B-Instruct \
+  -o /tmp/qwen-vl-lora.trtfb \
+  --set qwen_vl_lora.enabled=true \
+  --set qwen_vl_lora.max_rank=64 \
+  --set qwen_vl_lora.target_modules=q_proj,k_proj,v_proj,o_proj
+```
+
+Load one standard PEFT adapter directory and select it for the request:
+
+```bash
+trtmc run /tmp/qwen-vl-lora.trtfb \
+  --prompt "Describe the image." \
+  --image /tmp/example.png \
+  --lora-adapter /tmp/my-peft-adapter \
+  --lora-adapter-id product-style
+```
+
+The directory must contain `adapter_config.json` and
+`adapter_model.safetensors`. The runtime rejects non-LoRA PEFT modes, DoRA,
+rsLoRA, QALoRA, adapted bias, `modules_to_save`, per-module rank/alpha
+patterns, unsupported target modules, incomplete A/B tensor pairs, and ranks
+or shapes that exceed the engine contract. `--lora-adapter-id` must not be
+empty; when omitted while `--lora-adapter` is present, the CLI uses
+`default`. Supplying an adapter to an engine built without dynamic LoRA inputs
+fails during loading. The one-shot CLI loads the adapter before generation,
+sets `GenerateConfig::lora_adapter_id`, and exits after that request; use the
+C++ lifecycle API for a long-lived adapter registry.
+
+Object detection is exposed through `trtmc detect` for a pipeline that
+implements `IPipeline::detect`. The current model manifests and E2E catalog do
+not provide an object-detection model, so command availability alone is not
+support evidence.
 
 ### Canary transcription options
 

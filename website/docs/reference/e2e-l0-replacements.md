@@ -25,7 +25,8 @@ manifest or model-specific E2E data.
 
 | Nightly-only model | PR L0 replacement | L0 change |
 | --- | --- | --- |
-| `bark-large` | `bark-small` | Smaller Bark checkpoint. |
+| `bark-large` | `bark-small-fp32-l0` | Smaller full-precision Bark checkpoint. |
+| `bark-large-tp4` | `bark-small-tp4` | Smaller Bark checkpoint while retaining the tensor-parallel path. |
 | `deepseek-ocr` | `deepseek-ocr-l0` | Same checkpoint; shorter OCR decode. |
 | `deepseek-v2-lite` | `deepseek-v2-tiny` | Tiny DeepSeek-V2 checkpoint. |
 | `flux-2-dev` | `flux-2-dev-l0` | Same checkpoint; 384px, 20-step image run. |
@@ -34,11 +35,22 @@ manifest or model-specific E2E data.
 | `glm-4-9b` | `glm-4-9b-l0` | Same checkpoint; shorter decode. |
 | `gpt-oss-20b` | `gpt-oss-20b-l0` | Same checkpoint; shorter decode. |
 | `internvl3-8b` | `internvl3-2b` | Smaller InternVL3 checkpoint. |
+| `internvl3-8b-tp4` | `internvl3-2b-tp2` | Smaller InternVL3 checkpoint while retaining a tensor-parallel VL path supported by its KV-head count. |
 | `minitron-4b-width` | `minitron-4b-width-l0` | Same checkpoint; shorter decode. |
 | `mistral-7b` | `mistral-7b-l0` | Same checkpoint; shorter decode. |
+| `nemotron-labs-diffusion-8b` | `nemotron-labs-diffusion-8b-l0` | Same checkpoint and runtime; reduced generation-mode coverage for PR L0. |
 | `personaplex-7b` | `personaplex-7b-l0` | Same checkpoint; shorter speech generation. |
 | `phi-moe` | `phi-moe-l0` | Same checkpoint; shorter decode. |
 | `pixart-sigma-1024` | `pixart-sigma-1024-l0` | Same checkpoint; 512px image run. |
+| `qwen-image` | `qwen-image-l0` | Same checkpoint and paired image contract at reduced spatial scale. |
+| `qwen-image-2512` | `qwen-image-l0` | Shared Qwen-Image build/runtime path at reduced spatial scale. |
+| `qwen-image-edit-2511` | `qwen-image-l0` | Shared Qwen-Image build/runtime path with the minimum paired-image proof. |
 | `qwen3-moe-30b-a3b` | `qwen3-moe-tiny-random` | Tiny Qwen3-MoE checkpoint; comparison skipped. |
 | `wan21-t2v-1.3b` | `wan21-t2v-1.3b-l0` | Same checkpoint; 384x672, 5-frame, 15-step video run. |
+| `wan22-ti2v-5b` | `wan22-ti2v-5b-l0` | Same native video path; reduced resolution, frame count, and denoising steps. |
 | `z-image-turbo` | `z-image-turbo-l0` | Same checkpoint; 512px image run. |
+
+This table is a checked snapshot of non-self replacements declared by
+`testcases[*].l0_replacement`. The manifests remain authoritative; run
+`PYTHONPATH=python:. python3 tools/test_impact.py --validate` after changing a
+replacement.

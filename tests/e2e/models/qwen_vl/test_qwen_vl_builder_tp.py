@@ -100,9 +100,12 @@ def test_qwen25_vl_plugin_forwards_precision_to_standard_builder(monkeypatch) ->
     assert kwargs["verbose"] is True
 
 
-def test_qwen25_vl_embed_input_dispatches_to_dual_profile_builder(monkeypatch) -> None:
+def test_qwen25_vl_split_decode_uses_decode_profile(monkeypatch) -> None:
     module = importlib.import_module(
         "tensorrt_model_connect.families.qwen_vl.default_decoder")
+    plugin_module = importlib.import_module(
+        "tensorrt_model_connect.families.qwen_vl.plugin")
+    plugin = plugin_module.QwenVLPlugin()
     calls: dict[str, object] = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
@@ -112,11 +115,15 @@ def test_qwen25_vl_embed_input_dispatches_to_dual_profile_builder(monkeypatch) -
     monkeypatch.setattr(module, "build_dual_profile_decoder_engine", fake_build)
     config = _config(qwen3=False)
     config.raw["_decoder_engine_role"] = "decode"
+    config.raw["_active_split_decoder_build"] = True
+    assert plugin.supports_split_embed_input is True
+    assert plugin.supports_split_decoder_roles(config) is True
     result = module.build_standard_decoder_engine(
         config, {}, 31, precision="fp16", embed_input=True)
 
     assert result == b"qwen-vl-dual-profile-plan"
     assert calls["build"][3]["embed_input"] is True
+    assert calls["build"][3]["profile_mode"] == "decode"
 
 
 def test_qwen25_vl_lora_keeps_dual_profile_prefill(monkeypatch) -> None:

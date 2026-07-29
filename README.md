@@ -1,13 +1,17 @@
 # TensorRT-Model-Connect
 
-![TensorRT-Model-Connect overview](website/static/img/trtmc-landing.png)
+![TensorRT-Model-Connect build and runtime map](website/static/img/diagrams/trtmc-system-map.svg)
 
 [Documentation site](https://sturdy-broccoli-y7zg5w9.pages.github.io/) |
 [Quick Start](https://sturdy-broccoli-y7zg5w9.pages.github.io/getting-started/quick-start) |
 [GitHub Actions](https://github.com/NVIDIA/TensorRT-Model-Connect/actions) |
 [Docs source](website/docs/intro.md)
 
-TensorRT-Model-Connect turns HuggingFace-style checkpoints into deployable `.trtfb` TensorRT bundles and runs them from a native C++ runtime.
+TensorRT-Model-Connect turns HuggingFace-style checkpoints into deployable
+`.trtfb` TensorRT bundles and runs them from a native C++ runtime. Native
+bundles dispatch through `runtime_strategy` to a model DSO and backend DSO;
+exact qualified optimized bundles carry `optimized_runtime.json` and an
+embedded implementation DSO instead.
 
 ## Start Here
 
@@ -28,9 +32,11 @@ trtmc run Qwen3-0.6B.trtfb \
   --greedy
 ```
 
-The wheel installs the native `trtmc` executable into the environment, the
-Python builder dependencies including TensorRT, and the TensorRT backend DSO.
-CUDA driver/runtime libraries still come from the host system.
+The wheel installs the native `trtmc` executable, Python builder dependencies
+including TensorRT, and the TensorRT backend DSO. Neither the wheel nor a
+bundle is a hermetic operating-system or GPU-runtime image: the execution
+environment must still resolve a compatible NVIDIA driver, CUDA/TensorRT
+cohort, dynamic loader, and system libraries.
 
 To build and run native Wan2.2 TI2V-5B at 720p, follow the
 [two-command Jetson Thor guide](website/docs/getting-started/quick-start.md#jetson-thor-wan22-720p-in-two-commands).

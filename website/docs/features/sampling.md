@@ -8,9 +8,10 @@ min-p filtering.
 ## Algorithm
 
 Current implementation status: top-p/top-k/min-p filtering is host-side. The
-sampler requests CPU logits (`LogitsLocation::HOST`), so text generation copies
-the logits to CPU before applying nucleus filtering and sampling. This PR does
-not add an on-device top-p sampling kernel; the only on-device sampler path is
+model-owned samplers request CPU logits (`LogitsLocation::HOST`), so text
+generation copies the logits to CPU before applying nucleus filtering and
+sampling. The current implementation does not have an on-device top-p sampling
+kernel; the on-device sampler path is
 greedy argmax, and the optional torch-multinomial path still builds the filtered
 distribution on host before invoking its CUDA multinomial helper.
 
@@ -33,8 +34,7 @@ to disabled top-p behavior.
 ### CLI
 ```bash
 ./build/trtmc run bundle.trtfb --prompt "Once upon a time" \
-  --temperature 0.7 --top-p 0.9 --min-p 0.05 --top-k 50 --seed 42 \
-  --hf-python /opt/venv/bin/python
+  --temperature 0.7 --top-p 0.9 --min-p 0.05 --top-k 50 --seed 42
 ```
 
 ### Defaults

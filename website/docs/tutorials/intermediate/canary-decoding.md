@@ -105,6 +105,10 @@ model. Segment decoding has no overlap or cross-segment decoder context.
 | `--max-input-seconds` | Seconds; finite and greater than 0 | Rejects an input whose total duration exceeds the value. |
 | `--segment-length-seconds` | Seconds; finite, greater than 0, and no greater than the bundle audio window | Splits long input into ordered independent requests. |
 
+Those bounds describe explicit CLI values. In the C++ API, the corresponding
+`TranscriptionConfig` fields default to `0`, which is the valid “unset”
+sentinel; negative values are rejected.
+
 Without `--segment-length-seconds`, an input longer than the bundle's audio
 window is rejected instead of being silently truncated.
 

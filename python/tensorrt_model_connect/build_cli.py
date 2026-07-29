@@ -34,6 +34,7 @@ __version__ = _get_version()
 _OPTIMIZED_ROUTING_INTERNAL_FIELDS = frozenset({
     "active_python_profile",
     "command",
+    "kernel",
     "model",
     "model_revision",
     "output",
@@ -118,6 +119,12 @@ def _cmd_build(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
+    kernel_path = getattr(args, "kernel", None)
+    if kernel_path and getattr(args, "rtx", False):
+        print("Error: --kernel requires the native TensorRT backend",
+              file=sys.stderr)
+        return 1
+
     # Optimized dispatch resolves the model family internally and scans only
     # that family's Builder folder. The current platform remains implicit; no
     # public API or CLI option is added for runtime selection.
@@ -128,12 +135,14 @@ def _cmd_build(args: argparse.Namespace) -> int:
         revision_kwargs = (
             {"model_revision": model_revision} if model_revision else {}
         )
-        optimized = _try_build_optimized_runtime(
-            args.model,
-            args.output,
-            _optimized_cli_public_options(args),
-            **revision_kwargs,
-        )
+        optimized = None
+        if kernel_path is None:
+            optimized = _try_build_optimized_runtime(
+                args.model,
+                args.output,
+                _optimized_cli_public_options(args),
+                **revision_kwargs,
+            )
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         if getattr(args, "verbose", False):
@@ -161,6 +170,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
                 traceback.print_exc()
             return 1
 
+    build_family = ""
     if not getattr(args, "_skip_profile_resolution", False):
         try:
             build_model_ref, build_family = _resolve_build_model_metadata(
@@ -183,6 +193,13 @@ def _cmd_build(args: argparse.Namespace) -> int:
         )
         if reexec_rc is not None:
             return reexec_rc
+
+    if kernel_path and not build_family:
+        _, build_family = _resolve_build_model_metadata(
+            build_model_ref,
+            method_name,
+            **revision_kwargs,
+        )
 
     from .parallel_config import ParallelConfig
 
@@ -243,6 +260,30 @@ def _cmd_build(args: argparse.Namespace) -> int:
             print(f"Error resolving config: {exc}", file=sys.stderr)
             return 1
         family_build_options = _resolved_config_values(resolved_bundle)
+
+    if kernel_path:
+        from .kernel_slots import (
+            activate_kernel_slot,
+            load_family_kernel_slots,
+            load_kernel_spec,
+        )
+
+        try:
+            spec = load_kernel_spec(kernel_path)
+            slots = {slot.id: slot for slot in load_family_kernel_slots(build_family)}
+            slot = slots.get(spec.slot)
+            if slot is None:
+                available = ", ".join(sorted(slots)) or "none"
+                raise ValueError(
+                    f"Model family {build_family!r} does not publish slot "
+                    f"{spec.slot!r}; available: {available}"
+                )
+            if slot.validate_build is not None:
+                slot.validate_build(args)
+            build = activate_kernel_slot(spec, slot)(build)
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
 
     try:
         build(
@@ -615,6 +656,12 @@ def cmd_version(args: argparse.Namespace) -> int:
     return _cmd_version(args)
 
 
+def _cmd_kernel(args: argparse.Namespace) -> int:
+    from .kernel_cli import run
+
+    return run(args)
+
+
 def main() -> None:
     # RTX selection MUST happen before ANY tensorrt_model_connect module touches TRT.
     # We do an early argv scan before argparse touches anything.
@@ -638,6 +685,11 @@ def main() -> None:
     build_p = subparsers.add_parser("build", help="Build a .trtfb bundle")
     build_p.add_argument("model",
                          help="HF repo ID (for example, org/model-name) or local directory")
+    build_p.add_argument(
+        "--kernel",
+        metavar="YAML",
+        help="Replace a family-owned kernel slot using this YAML manifest",
+    )
     build_p.add_argument(
         "--model-revision",
         default=None,
@@ -793,13 +845,20 @@ def main() -> None:
     inspect_p.add_argument("--list-engines", action="store_true",
                            help="List only TRT engine plan sections with roles")
 
+    kernel_p = subparsers.add_parser(
+        "kernel",
+        help="Discover family-owned external-kernel slots",
+    )
+    from .kernel_cli import configure_parser as configure_kernel_parser
+    configure_kernel_parser(kernel_p)
+
     # python -m tensorrt_model_connect version
     subparsers.add_parser("version", help="Show version info")
 
     # Keep direct module compatibility: `python -m tensorrt_model_connect
     # <model-dir> -o out.trtfb` still means build. The public native CLI uses
     # explicit `trtmc build`.
-    command_names = {"build", "inspect", "version"}
+    command_names = {"build", "inspect", "kernel", "version"}
     cli_argv = sys.argv[1:]
     if cli_argv and cli_argv[0] not in command_names and cli_argv[0] not in ("--help", "-h"):
         cli_argv = ["build"] + cli_argv
@@ -812,6 +871,7 @@ def main() -> None:
     dispatch = {
         "build": _cmd_build,
         "inspect": _cmd_inspect,
+        "kernel": _cmd_kernel,
         "version": _cmd_version,
     }
 

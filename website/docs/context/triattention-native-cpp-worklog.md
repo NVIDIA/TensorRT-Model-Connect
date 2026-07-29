@@ -2,6 +2,15 @@
 
 Date: 2026-04-16
 
+:::info Point-in-time implementation record
+
+Commands, temporary artifact paths, benchmark numbers, and hypotheses on this
+page are evidence from the dated TriAttention bring-up. They are not current
+setup instructions and are not automatically revalidated on later revisions.
+Use current Qwen descriptors, tests, and CLI help for the live contract.
+
+:::
+
 ## Purpose
 
 This worklog records how TriAttention was brought from an upstream research

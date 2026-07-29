@@ -3,9 +3,6 @@ title: Learning Path
 description: A course-style path for learning TensorRT-Model-Connect from inference fundamentals to extension work.
 ---
 
-import useBaseUrl from '@docusaurus/useBaseUrl';
-
-
 Use this page like a course handout. Each stage tells you what to read, what to do, what evidence to record, and what you should be able to explain before moving on.
 
 <div className="trtmc-handout-meta">
@@ -27,12 +24,14 @@ Use this page like a course handout. Each stage tells you what to read, what to 
   </div>
 </div>
 
-<figure className="trtmc-diagram trtmc-diagram--wide">
-  <div className="trtmc-diagram__media">
-    <img src={useBaseUrl('/img/diagrams/trtmc-course-map.svg')} alt="Course-style learning map for TensorRT-Model-Connect" />
-  </div>
-  <figcaption>Each stage has a reading target, required task, and proof point so readers can check understanding as they go.</figcaption>
-</figure>
+```mermaid
+flowchart LR
+  F1["F1: vocabulary"] --> F2["F2: build, inspect, run"]
+  F2 --> E1["E1: loader and runtime"]
+  E1 --> E2["E2: source ownership"]
+  E2 --> D1["D1: compare modalities"]
+  D1 --> C1["C1: extend and validate"]
+```
 
 ## Information Boxes
 
@@ -78,8 +77,9 @@ After completing the path, you should be able to:
 - Describe why TensorRT engines are build artifacts, not raw checkpoints.
 - Build and inspect a `.trtfb` bundle.
 - Trace a request from `trtmc::load()` to a concrete `IPipeline`.
-- Explain the difference between Python family plugins and C++ runtime strategies.
-- Decide where to add a model family, runtime plugin, pipeline, config schema, or test.
+- Explain the difference between a Python family, a model-owned C++ runtime
+  strategy, and an E2E task strategy.
+- Plan the complete Python/runtime/E2E slice for a new supported model.
 
 ## Stage F1: Learn the Vocabulary
 
@@ -95,7 +95,7 @@ Write a one-paragraph explanation of model checkpoints, tensors, tokens, logits,
 :::
 
 :::tip Progress check
-You are ready to move on when you can draw the path from prompt text to `TextResult` and explain why a `.trtfb` bundle is not the same thing as a HuggingFace checkpoint.
+You are ready to move on when you can draw the path from prompt text to `TextResult` and explain why a `.trtfb` bundle is not the same thing as a Hugging Face checkpoint.
 :::
 
 <details>
@@ -118,7 +118,11 @@ You are ready to move on when you can draw the path from prompt text to `TextRes
 :::
 
 :::danger Required task
-Build one text-generation bundle, inspect it, and run deterministic generation. Record the exact `family`, `runtime_strategy`, engine section names, tokenizer assets, precision, and TensorRT metadata.
+Build one native text-generation bundle, inspect it, and run deterministic
+generation. Record the exact `family`, `runtime_strategy`, engine section
+names, tokenizer assets, precision, and TensorRT metadata. Then inspect the
+optimized-runtime bundle contract in [Bundle Format](architecture/bundle-format.md)
+and record why `optimized_runtime.json` replaces native strategy dispatch.
 :::
 
 :::tip Progress check
@@ -126,7 +130,11 @@ You are ready to move on when you can explain which part of the output came from
 :::
 
 :::warning Common trap
-Do not treat a successful text response as the whole validation. You also need to inspect the bundle and confirm the runtime strategy that produced the response.
+Do not treat a successful text response as the whole validation. You also need
+to inspect the bundle and confirm the native runtime strategy or the presence
+of optimized descriptor/artifact sections. The current inspector does not
+decode optimized implementation/profile values; use the family-owned
+qualification evidence and runtime load result to validate that exact identity.
 :::
 
 ## Stage E1: Understand the System
@@ -140,11 +148,19 @@ Do not treat a successful text response as the whole validation. You also need t
 :::
 
 :::danger Required task
-Trace `trtmc::load()` through `PipelineFactory`, `PipelineRegistry`, `IPipelinePlugin`, `IBackend`, and the concrete `IPipeline`. Add the source paths you inspected to your learning log.
+Trace both branches of `trtmc::load()`. For a native bundle, follow
+`PipelineFactory`, `PipelineRegistry`, `IPipelinePlugin`, `IBackend`, and the
+concrete `IPipeline`. For an optimized bundle, follow
+`optimized_runtime_host.cpp`, embedded artifact materialization, the private
+factory, and the returned `IPipeline`. Add the source paths you inspected to
+your learning log.
 :::
 
 :::tip Progress check
-You are ready to move on when you can say why the runtime dispatches through `runtime_strategy` instead of a central switch on model names.
+You are ready to move on when you can explain why native bundles dispatch
+through `runtime_strategy`, why optimized bundles dispatch through
+`optimized_runtime.json`, and why neither path uses a central switch on model
+names.
 :::
 
 ## Stage E2: Learn the Source Units
@@ -178,7 +194,10 @@ You are ready to move on when you can distinguish model knowledge, artifact evid
 :::
 
 :::danger Required task
-For text, audio, image, diffusion, time-series, segmentation, and detection, name the preprocessing, engine components, postprocessing, and public `IPipeline` method.
+For each task represented by a current E2E manifest, name the preprocessing,
+engine components, postprocessing, and public `IPipeline` method. Treat
+`detect()` as an API surface, not supported-model evidence, until a
+model-owned object-detection descriptor and E2E manifest exist.
 :::
 
 :::tip Progress check
@@ -197,16 +216,16 @@ You are ready to move on when you can explain which differences are task differe
 :::
 
 :::danger Required task
-Fill out the extension decision tree for your change. Name the builder tests, C++ tests, E2E manifest, and documentation page that should prove the behavior.
+For a hypothetical new model, name its Python family descriptor/package,
+unique runtime strategy and DSO owner, C++ tests, E2E descriptor/manifest, and
+documentation evidence. For an existing model change, identify which part of
+that vertical slice owns the behavior.
 :::
 
 :::tip Progress check
 You finish the course when you can explain the implementation plan before opening an editor, and the plan names the owning abstraction for every change.
 :::
 
-<figure className="trtmc-diagram trtmc-diagram--wide">
-  <div className="trtmc-diagram__media">
-    <img src={useBaseUrl('/img/diagrams/trtmc-extension-decision.svg')} alt="Extension decision tree" />
-  </div>
-  <figcaption>Pick the smallest ownership boundary that can support the behavior, then prove it with the matching tests.</figcaption>
-</figure>
+The extension is ready for review only when its descriptors agree, its
+model-owned DSO loads the emitted strategy, and the exact-model E2E evidence
+uses the intended oracle and thresholds.
