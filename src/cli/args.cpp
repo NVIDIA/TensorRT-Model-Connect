@@ -187,6 +187,7 @@ void print_usage() {
     std::cerr
         << "Usage:\n"
            "  trtmc build           <hf-model-or-dir> -o <bundle.trtfb> [builder args...]\n"
+           "  trtmc kernel slots    <hf-model-or-dir> [--model-revision REV]\n"
            "  trtmc run             <bundle.trtfb> --prompt \"text\" [--image PATH] "
            "[--max-new-tokens N] [--temperature F] [--top-p F] [--min-p F] "
            "[--top-k N] [--seed N] [--benchmark N] [--warmup N] [--hf-python PATH] "
@@ -262,7 +263,7 @@ CliArgs parse_args(int argc, char** argv) {
         return args;
     }
 
-    if (args.command == "build") {
+    if (args.command == "build" || args.command == "kernel") {
         for (int i = 2; i < argc; ++i)
             args.build_args.emplace_back(argv[i]);
         return args;

@@ -260,6 +260,11 @@ int run_python_module(const std::vector<std::string>& argv) {
         const std::string pythonpath = build_pythonpath();
         if (!pythonpath.empty())
             setenv("PYTHONPATH", pythonpath.c_str(), 1);
+        const auto executable = current_executable_path();
+        if (!executable.empty()) {
+            const std::string native_bin_dir = executable.parent_path().string();
+            setenv("_TRTMC_INTERNAL_NATIVE_BIN_DIR", native_bin_dir.c_str(), 1);
+        }
         execvp(exec_argv[0], exec_argv.data());
         std::cerr << "Error: failed to execute " << argv[0] << ": " << std::strerror(errno) << '\n';
         _exit(127);
@@ -283,12 +288,12 @@ int run_python_module(const std::vector<std::string>& argv) {
     return EXIT_FAILURE;
 }
 
-int cmd_build(const CliArgs& args) {
+int cmd_python(const CliArgs& args) {
     std::vector<std::string> command = {
         build_python_executable(),
         "-m",
         "tensorrt_model_connect",
-        "build",
+        args.command,
     };
     command.insert(command.end(), args.build_args.begin(), args.build_args.end());
     return run_python_module(command);
@@ -1602,8 +1607,8 @@ int main(int argc, char** argv) {
     try {
         if (args.command == "version")
             return cmd_version();
-        if (args.command == "build")
-            return cmd_build(args);
+        if (args.command == "build" || args.command == "kernel")
+            return cmd_python(args);
         if (args.command == "run")
             return cmd_run(args);
         if (args.command == "encode")

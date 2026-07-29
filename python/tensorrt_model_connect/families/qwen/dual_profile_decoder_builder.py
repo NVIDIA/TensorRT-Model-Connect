@@ -729,7 +729,12 @@ def build_dual_profile_decoder_engine(
                 num_heads=num_heads, head_dim=head_dim,
                 num_kv_heads=num_kv_heads,
                 q_seq=None,
-                scale=attn_scale, tag=f"{prefix}.attn")
+                scale=attn_scale, tag=f"{prefix}.attn",
+                kernel_slot_instance=(
+                    f"decoder.layers.{layer_idx}.decode_attention"
+                    if profile_mode == "decode"
+                    else None
+                ))
             context = native_attention["context"]
             present_k_outs.append(native_attention["present_k"])
             present_v_outs.append(native_attention["present_v"])

@@ -26,6 +26,7 @@ const sidebars = {
       items: [
         'tutorials/beginner/inspect-bundles',
         'tutorials/beginner/text-generation',
+        'tutorials/beginner/bring-your-own-kernel',
         'tutorials/intermediate/multimodal-and-speech',
         'tutorials/intermediate/canary-decoding',
         'tutorials/intermediate/diffusion-and-time-series',

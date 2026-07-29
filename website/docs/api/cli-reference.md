@@ -28,6 +28,7 @@ python -m tensorrt_model_connect build <hf-repo-or-local-dir> -o <output.trtfb>
 
 | Option | Purpose |
 | --- | --- |
+| `--kernel FILE.yaml` | Replace a model-family kernel slot with a trusted TVM-FFI DSO. |
 | `--max-cache-length N` | KV cache length, default `256`. |
 | `--dynamic-kv-cache` | Enable runtime-resizable KV cache support. |
 | `--dynamic-kv-profile-rows A,B,C` | Override dynamic-KV optimization profiles. |
@@ -50,6 +51,15 @@ TriAttention options are also exposed for experimental KV compaction: `--triatte
 
 TensorRT is the build backend; there is no public build-method selector. Older
 `--method trt` and `--method auto` spellings remain accepted for compatibility.
+
+## `trtmc kernel slots`
+
+List the external-kernel contracts and exact instance IDs published for a
+model without downloading its weights:
+
+```bash
+trtmc kernel slots <hf-repo-or-local-dir> [--model-revision REV]
+```
 
 ## Runtime commands
 
