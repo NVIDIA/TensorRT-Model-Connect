@@ -34,6 +34,7 @@
 #include "runtime/core/trt_common.h"
 
 #include <NvInfer.h>
+#include <array>
 #include <cstdint>
 #include <cuda_runtime_api.h>
 #include <iostream>
@@ -135,7 +136,7 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_state_decoder() {
         runtime->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
-static void test_recurrent_state_updates_in_place() {
+static void test_recurrent_state_uses_distinct_io_buffers() {
     auto engine = build_mock_state_decoder();
     if (!engine) {
         std::cerr << "SKIP: can't build recurrent state engine\n";
@@ -152,16 +153,24 @@ static void test_recurrent_state_updates_in_place() {
 
     void* state_buffer = module.device_ptr("state_0");
     void* present_buffer = module.device_ptr("present_state_0");
-    check(state_buffer == present_buffer,
-          "recurrent state keeps input and output at one device address");
+    check(state_buffer != present_buffer,
+          "recurrent state keeps input and output at distinct device addresses");
+
+    const std::array<float, 4> expected = {1.0F, 2.0F, 3.0F, 4.0F};
+    std::array<float, 4> actual = {};
+    cudaMemcpyAsync(present_buffer, expected.data(), sizeof(expected), cudaMemcpyHostToDevice,
+                    stream);
     state.advance();
+    cudaMemcpyAsync(actual.data(), state_buffer, sizeof(actual), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
 
     check(module.device_ptr("state_0") == state_buffer,
           "recurrent state input address remains stable");
-    check(module.device_ptr("present_state_0") == state_buffer,
+    check(module.device_ptr("present_state_0") == present_buffer,
           "recurrent state output address remains stable");
-    check(state.device_memory_bytes() == 4 * sizeof(float),
-          "in-place recurrent state allocates one device buffer");
+    check(actual == expected, "recurrent state advances present output into the next input");
+    check(state.device_memory_bytes() == 8 * sizeof(float),
+          "recurrent state allocates distinct input and output buffers");
     cudaStreamDestroy(stream);
 }
 
@@ -367,7 +376,7 @@ static void test_argmax_recurrent() {
 
 int main() {
     test_argmax_recurrent();
-    test_recurrent_state_updates_in_place();
+    test_recurrent_state_uses_distinct_io_buffers();
     test_mamba_pipeline();
     test_rwkv_pipeline();
     test_hybrid_pipeline();

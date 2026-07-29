@@ -42,6 +42,7 @@ class NemotronHRecurrentState final : public NemotronHInferenceState {
   private:
     std::vector<TensorSpec> specs_;
     std::vector<std::vector<DeviceTensor>> state_;
+    std::vector<std::vector<DeviceTensor>> present_;
     int32_t num_layers_{0};
     int32_t position_{0};
     cudaStream_t stream_{nullptr};
