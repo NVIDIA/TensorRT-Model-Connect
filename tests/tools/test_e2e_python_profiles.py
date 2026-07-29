@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -174,12 +175,43 @@ def test_profile_source_builds_use_a_safe_default_job_limit(monkeypatch, tmp_pat
 
     install = next(call for call in commands if call[1].startswith("install "))
     assert install[3]["env"]["MAX_JOBS"] == "4"
+    assert install[2] == 7200
 
 
 def test_profile_source_builds_respect_an_explicit_job_limit(monkeypatch):
     monkeypatch.setenv("MAX_JOBS", "2")
 
     assert shared_profiles._profile_install_environment()["MAX_JOBS"] == "2"
+
+
+def test_profile_command_timeout_terminates_descendants(tmp_path):
+    sentinel = tmp_path / "orphan-finished"
+    child = (
+        "import pathlib, time; "
+        "time.sleep(0.3); "
+        f"pathlib.Path({str(sentinel)!r}).write_text('orphaned')"
+    )
+    parent = (
+        "import subprocess, sys, time; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}], "
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+        "time.sleep(60)"
+    )
+
+    error = None
+    try:
+        shared_profiles._run_profile_command(
+            [sys.executable, "-c", parent],
+            description="run descendant timeout regression",
+            timeout=0.05,
+        )
+    except Exception as caught:  # noqa: BLE001 - assert the public failure below.
+        error = caught
+
+    time.sleep(0.5)
+    assert isinstance(error, RuntimeError)
+    assert "timed out" in str(error)
+    assert not sentinel.exists()
 
 
 def test_family_profile_registry_is_fully_exact_pinned():
