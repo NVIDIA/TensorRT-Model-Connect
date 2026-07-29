@@ -2205,6 +2205,32 @@ def _duration_html(seconds: float) -> str:
     return f"{int(hours)}h {int(minutes)}m {remaining:.0f}s"
 
 
+def _wall_time_seconds(record: Mapping[str, Any]) -> float | None:
+    started = record.get("started_at")
+    finished = record.get("finished_at")
+    if not isinstance(started, str) or not isinstance(finished, str):
+        return None
+    try:
+        seconds = (
+            datetime.fromisoformat(finished) - datetime.fromisoformat(started)
+        ).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(seconds) or seconds < 0.0:
+        return None
+    return seconds
+
+
+def _wall_time_html(record: Mapping[str, Any]) -> str:
+    seconds = _wall_time_seconds(record)
+    if seconds is None:
+        return "—"
+    return (
+        f"{_duration_html(seconds)}"
+        f"<div class='timing-meta'>{seconds:,.3f} s</div>"
+    )
+
+
 def _bundle_preparation_records(row: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     candidate = row.get("candidate")
     if not isinstance(candidate, Mapping):
@@ -2325,6 +2351,7 @@ def _report_html(results: Mapping[str, Any]) -> str:
         commands = _raw_commands_html(row, default_cwd)
         candidate_timing = _timing_value_html(row.get("candidate"))
         baseline_timing = _timing_value_html(row.get("baseline"))
+        model_wall_time = _wall_time_html(row)
         bundle_preparation = _bundle_preparation_html(row)
         timing_scope = _timing_scope_html(row)
         body.append(
@@ -2332,6 +2359,7 @@ def _report_html(results: Mapping[str, Any]) -> str:
             f"<td>{html.escape(str(row['family']))}</td>"
             f"<td>{html.escape(str(row['operation']))}</td>"
             f"<td><code>{html.escape(str(row['model']))}</code></td>"
+            f"<td class='timing-value'>{model_wall_time}</td>"
             f"<td>{html.escape(_baseline_label(row))}</td>"
             f"<td class='timing-value'>{candidate_timing}</td>"
             f"<td class='timing-value'>{baseline_timing}</td>"
@@ -2343,6 +2371,15 @@ def _report_html(results: Mapping[str, Any]) -> str:
             "</tr>"
         )
     generated = html.escape(str(results.get("finished_at", results.get("started_at", ""))))
+    campaign_seconds = _wall_time_seconds(results)
+    campaign_duration = (
+        _duration_html(campaign_seconds) if campaign_seconds is not None else "—"
+    )
+    campaign_seconds_label = (
+        f"{campaign_seconds:,.3f} s" if campaign_seconds is not None else "unavailable"
+    )
+    campaign_started = html.escape(str(results.get("started_at", "—")))
+    campaign_finished = html.escape(str(results.get("finished_at", "—")))
     summary = f"🟢 {counts['green']} &nbsp; 🟡 {counts['yellow']} &nbsp; 🔴 {counts['red']} &nbsp; ⚪ {len(rows) - sum(counts.values())}"
     repeated_note = (
         " " + html.escape("; ".join(repeated_families)) + " contribute multiple rows."
@@ -2372,7 +2409,8 @@ def _report_html(results: Mapping[str, Any]) -> str:
 <title>TRTMC performance matrix</title>
 <style>
 body{{font-family:Arial,sans-serif;margin:28px;color:#1f2937}} h1{{margin-bottom:4px}}
-.meta{{color:#4b5563;margin:4px 0 18px}} .table-wrap{{overflow-x:auto}} table{{border-collapse:collapse;width:100%;min-width:1500px}}
+.meta{{color:#4b5563;margin:4px 0 18px}} .campaign-duration{{font-size:18px;margin:12px 0 18px}}
+.table-wrap{{overflow-x:auto}} table{{border-collapse:collapse;width:100%;min-width:1650px}}
 th,td{{border:1px solid #9ca3af;padding:7px;text-align:left;vertical-align:top}}
 th{{background:#e5e7eb}} tr:nth-child(even){{background:#f9fafb}} code{{font-size:12px}}
 .command-label{{font-weight:600;margin-top:8px}} pre{{margin:4px 0 10px;max-width:720px;white-space:pre-wrap;overflow-wrap:anywhere}}
@@ -2382,12 +2420,14 @@ th{{background:#e5e7eb}} tr:nth-child(even){{background:#f9fafb}} code{{font-siz
 </style></head><body>
 <h1>TRTMC performance matrix</h1>
 <p class="meta">Generated {generated}. {family_count} families across {len(rows)} model-profile comparisons.{repeated_note}</p>
+<p class="campaign-duration"><strong>Total campaign wall time:</strong> {campaign_duration} <span class="timing-meta">({campaign_seconds_label}; {campaign_started} → {campaign_finished})</span></p>
 <p class="meta">Release matrix coverage: {release_profiles} single-process profiles. {explicit_exclusion_label} and {excluded_l0_profiles} duplicate L0 profiles are excluded from the {ready_profiles} ready catalog profiles. {distributed_profiles} distributed profiles require a separate multi-process run and are outside this report. {other_profiles} other or unsupported profiles.</p>
 <p class="meta">Timing contracts were validated before execution for {preflight_count} comparisons. A row is classified only when its recorded TRTMC and reference policies match that contract.</p>
 <p class="meta">Times are the p50 wall time from the recorded timed samples. Measured scope states the exact recorded boundary and the work included and excluded on each side.</p>
+<p class="meta">Model-profile wall time spans the complete case from start to finish, including bundle preparation, GPU headroom waits, TRTMC and baseline commands, and orchestration overhead. It is reported for observability and is not used for traffic-light classification.</p>
 <p class="meta">{bundle_preparation_summary}</p>
 <p><strong>{summary}</strong></p>
-<div class="table-wrap"><table><thead><tr><th>Family</th><th>Operation</th><th>Model profile</th><th>Baseline</th><th>TRTMC infer p50 (ms)</th><th>Baseline infer p50 (ms)</th><th>TRTMC bundle preparation</th><th>Measured scope</th><th>Light</th><th>Note</th><th>Commands</th></tr></thead>
+<div class="table-wrap"><table><thead><tr><th>Family</th><th>Operation</th><th>Model profile</th><th>Model-profile wall time</th><th>Baseline</th><th>TRTMC infer p50 (ms)</th><th>Baseline infer p50 (ms)</th><th>TRTMC bundle preparation</th><th>Measured scope</th><th>Light</th><th>Note</th><th>Commands</th></tr></thead>
 <tbody>{"".join(body)}</tbody></table></div>
 <p class="meta">Green: TRTMC is more than the configured margin faster. Yellow: within the margin. Red: TRTMC is more than the margin slower. White: not run, partial, or invalid comparison. Commands are the original recorded argv and must be run from the displayed working directory with the same model cache and dependencies.</p>
 </body></html>"""

@@ -888,6 +888,57 @@ def test_worker_preflight_rejects_stale_source_revision() -> None:
         perf_matrix._validate_worker_metadata(metadata, "current-revision")
 
 
+def test_report_displays_campaign_and_model_profile_wall_times() -> None:
+    results = {
+        "started_at": "2026-07-29T07:16:00+00:00",
+        "finished_at": "2026-07-29T08:18:03+00:00",
+        "repository_root": "/workspace/repository",
+        "cases": [
+            {
+                "id": "example.generate",
+                "family": "example",
+                "operation": "generate",
+                "model": "example-model",
+                "status": "green",
+                "started_at": "2026-07-29T07:20:00+00:00",
+                "finished_at": "2026-07-29T07:21:30+00:00",
+                "baseline_contract": {},
+            }
+        ],
+    }
+
+    report = perf_matrix._report_html(results)
+
+    assert "Total campaign wall time:</strong> 1h 2m 3s" in report
+    assert "3,723.000 s" in report
+    assert "<th>Model-profile wall time</th>" in report
+    assert "1m 30.0s" in report
+    assert "90.000 s" in report
+    assert "including bundle preparation, GPU headroom waits" in report
+    assert "not used for traffic-light classification" in report
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {},
+        {
+            "started_at": "invalid",
+            "finished_at": "2026-07-29T08:18:03+00:00",
+        },
+        {
+            "started_at": "2026-07-29T08:18:03+00:00",
+            "finished_at": "2026-07-29T07:16:00+00:00",
+        },
+    ],
+)
+def test_wall_time_rejects_incomplete_or_invalid_timestamps(
+    record: dict[str, str],
+) -> None:
+    assert perf_matrix._wall_time_seconds(record) is None
+    assert perf_matrix._wall_time_html(record) == "—"
+
+
 def test_run_consolidates_results_and_records_replayable_commands(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1000,6 +1051,9 @@ def test_run_consolidates_results_and_records_replayable_commands(
         f"{expected_catalog_coverage['other_profiles']} other or unsupported profiles"
     ) in report
     assert "<th>Model profile</th>" in report
+    assert "Total campaign wall time:" in report
+    assert "<th>Model-profile wall time</th>" in report
+    assert "not used for traffic-light classification" in report
     assert "TRTMC infer p50 (ms)" in report
     assert "Baseline infer p50 (ms)" in report
     assert "TRTMC bundle preparation" in report

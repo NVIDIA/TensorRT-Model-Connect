@@ -211,9 +211,12 @@ report.html
 
 `results.json` contains resolved configuration, raw samples, timing policies,
 commands, bundle-preparation status and build time, and bounded diagnostic
-output. `report.html` shows the family matrix, both infer-time p50 values,
-TRTMC bundle preparation, measured scopes, and traffic lights. Bundle build time
-is reported for run observability but is excluded from the infer-time comparison.
+output. `report.html` shows the total campaign wall-clock span, each
+model-profile case's wall time, the family matrix, both infer-time p50 values,
+TRTMC bundle preparation, measured scopes, and traffic lights. Per-case wall
+time includes bundle preparation, GPU headroom waits, both commands, and
+orchestration overhead. It and bundle build time are reported for run
+observability but are excluded from the infer-time comparison.
 
 Each report row shows the exact leaf commands that were executed:
 
