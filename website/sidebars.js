@@ -28,6 +28,7 @@ const sidebars = {
         'tutorials/beginner/text-generation',
         'tutorials/beginner/bring-your-own-kernel',
         'tutorials/intermediate/multimodal-and-speech',
+        'tutorials/intermediate/qwen-vl-lora',
         'tutorials/intermediate/canary-decoding',
         'tutorials/intermediate/diffusion-and-time-series',
         'tutorials/advanced/quantization-and-runtime-knobs',
