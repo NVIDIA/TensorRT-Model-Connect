@@ -1,6 +1,6 @@
 {
   "name": "glm-4-9b-l0",
-  "hf_id": "zai-org/glm-4-9b-chat-hf",
+  "hf_id": "THUDM/glm-4-9b-hf",
   "bundle": "glm-4-9b-l0.trtfb",
   "family": "glm",
   "runtime_strategy": "glm_decoder_kv_cache",
@@ -16,7 +16,7 @@
       "reference_precision": "bf16",
       "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
       "max_new_tokens": 8,
-      "notes": "Uses family defaults: BF16, split prefill/decode engines, and the checkpoint's complete 131072-token KV capacity."
+      "notes": "Uses family defaults: BF16, split prefill/decode engines, and the checkpoint's complete 8192-token KV capacity."
     }
   ]
 }

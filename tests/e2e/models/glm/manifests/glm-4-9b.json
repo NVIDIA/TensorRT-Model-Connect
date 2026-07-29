@@ -1,0 +1,24 @@
+{
+  "name": "glm-4-9b",
+  "hf_id": "THUDM/glm-4-9b-hf",
+  "bundle": "glm-4-9b.trtfb",
+  "family": "glm",
+  "runtime_strategy": "glm_decoder_kv_cache",
+  "task_strategy": "text_generation_causal",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "glm-4-9b",
+      "trace_id": "IT-E2E-GLM4-01",
+      "reference_family": "causal_base_continuation",
+      "user_contract": "continuation_parity",
+      "reference_precision": "bf16",
+      "ci_tier": "nightly_only",
+      "l0_replacement": "glm-4-9b-l0",
+      "l0_replacement_reason": "GLM-4-9B scale stays nightly; glm-4-9b-l0 keeps the same native decoder path with a shorter decode budget.",
+      "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
+      "max_new_tokens": 20,
+      "notes": "Uses the native split-engine path and the checkpoint's complete 8192-token KV capacity."
+    }
+  ]
+}

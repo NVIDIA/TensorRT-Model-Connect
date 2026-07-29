@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GLM-owned manifest contract tests for the native 128K path."""
+"""GLM-owned manifest contract tests for the native KV path."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def test_native_manifest_uses_official_model_and_family_build_defaults() -> None
         (repository / "src/runtime/models/glm/MODEL.toml").read_text(encoding="utf-8")
     )
 
-    assert raw["hf_id"] == "zai-org/glm-4-9b-chat-hf"
+    assert raw["hf_id"] == "THUDM/glm-4-9b-hf"
     assert raw["runtime_strategy"] == "glm_decoder_kv_cache"
     assert "precision" not in raw
     assert "max_cache_length" not in raw
@@ -41,7 +41,10 @@ def test_native_manifest_uses_official_model_and_family_build_defaults() -> None
     assert "precision" not in case.metadata
     assert "max_cache_length" not in case.inputs
     assert case.threshold_overrides["contract_token_agreement_rate"] == 1.0
-    assert model_manifest["test_manifests"] == ["manifests/glm-4-9b-l0.json"]
+    assert model_manifest["test_manifests"] == [
+        "manifests/glm-4-9b-l0.json",
+        "manifests/glm-4-9b.json",
+    ]
     assert builder_manifest["default_build_route"] == "build_routing.py|prefer_native_default"
     assert any(
         test.startswith("test_glm_native_kv_cache|") for test in runtime_manifest["runtime_tests"]
@@ -51,7 +54,7 @@ def test_native_manifest_uses_official_model_and_family_build_defaults() -> None
 def _contract_case() -> E2ECase:
     return E2ECase(
         name="glm-4-9b-l0",
-        hf_id="zai-org/glm-4-9b-chat-hf",
+        hf_id="THUDM/glm-4-9b-hf",
         family="glm",
         runtime_strategy="glm_decoder_kv_cache",
         task_strategy="text_generation_causal",
