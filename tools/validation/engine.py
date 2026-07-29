@@ -11201,6 +11201,12 @@ def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
             f"min_pairwise={result['min_pairwise_ordering_agreement']:.4f} "
             f"status={result.get('status', '')} {common}"
         )
+    if result.get("mode") == "model_plugin_parity":
+        return (
+            f"model={model['name']} sample_pass_rate={result['sample_pass_rate']:.4f} "
+            f"passed={result['passed_count']}/{result['valid_count']} "
+            f"status={result.get('status', '')} {common}"
+        )
     if result.get("mode") == "time_series_parity":
         return (
             f"model={model['name']} agreement={result['sample_agreement_rate']:.4f} "
@@ -11902,6 +11908,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
         "asr_chat_json",
         "diffusion_prompt_tsv",
         "diffusion_prompt_json",
+        "model_plugin_json",
         "conditional_text_jsonl",
         "unconditional_text_json",
         "seedtts_json",
