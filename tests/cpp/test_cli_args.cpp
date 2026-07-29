@@ -73,6 +73,10 @@ void test_build_forwards_args_verbatim() {
     check(args.build_args.size() == 5, "build forwards arg count");
     check(args.build_args[0] == "Example/Decoder-0.6B", "build forwards model");
     check(args.build_args[4] == "fp16", "build forwards final value");
+
+    auto kernel = parse({"trtmc", "kernel", "slots", "Example/Decoder-0.6B"});
+    check(kernel.command == "kernel" && kernel.build_args.size() == 2,
+          "kernel command forwards to Python");
 }
 
 void test_run_parses_common_flags() {

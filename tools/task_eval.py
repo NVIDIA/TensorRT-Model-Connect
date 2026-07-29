@@ -8711,6 +8711,12 @@ def selected_models_for_suite(
 def _namespace_for_run_hf(
     args: argparse.Namespace, model: dict[str, Any], work_dir: Path
 ) -> argparse.Namespace:
+    task_config = model.get("task_eval", {})
+    task_config = task_config if isinstance(task_config, dict) else {}
+    if (work_dir / "manifest.json").is_file():
+        work_config = work_manifest(work_dir).get("task_eval", {})
+        if isinstance(work_config, dict):
+            task_config = work_config
     return argparse.Namespace(
         model=model["hf_id"],
         model_revision=str(model.get("hf_revision", "") or ""),
@@ -8723,6 +8729,9 @@ def _namespace_for_run_hf(
         device=args.hf_device,
         device_map=args.hf_device_map,
         attn_impl=args.hf_attn_impl,
+        experts_implementation=str(
+            task_config.get("hf_experts_implementation", "") or ""
+        ),
         trust_remote_code=args.trust_remote_code or bool(model.get("trust_remote_code", False)),
         local_files_only=args.local_files_only,
         do_sample=args.do_sample,
@@ -9179,6 +9188,13 @@ def run_hf_reference_subprocess(
         cmd.extend(["--device-map", str(hf_args.device_map)])
     if hf_args.attn_impl:
         cmd.extend(["--attn-impl", str(hf_args.attn_impl)])
+    if hf_args.experts_implementation:
+        cmd.extend(
+            [
+                "--experts-implementation",
+                str(hf_args.experts_implementation),
+            ]
+        )
     if hf_args.trust_remote_code:
         cmd.append("--trust-remote-code")
     if hf_args.local_files_only:

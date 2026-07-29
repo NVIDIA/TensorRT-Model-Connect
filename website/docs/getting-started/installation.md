@@ -10,20 +10,33 @@ TensorRT-Model-Connect has three install paths:
 
 ## Requirements
 
-- Linux aarch64 with an NVIDIA GPU.
+- Linux x86_64 or aarch64 with a compatible NVIDIA GPU for the selected build
+  or qualified profile.
 - Python 3.10 or Python 3.12.
 - NVIDIA driver and CUDA runtime libraries.
-- glibc 2.39 or newer for the published `manylinux_2_39_aarch64` wheels.
+- glibc 2.39 or newer for a `manylinux_2_39_*` wheel.
+
+The artifact and TensorRT cohort are architecture-specific:
+
+| Path | Current boundary |
+| --- | --- |
+| Published/nightly wheel examples below | Linux aarch64, `manylinux_2_39_aarch64`, TensorRT 11.2.0.113. |
+| Qualified Qwen x Edge-LLM profiles | Linux x86_64, A100 PCIe 80 GB (SM80), FP16, TensorRT 11.1.0.106, and exact pinned model revisions/options. The qualification runner builds its own `manylinux_2_39_x86_64` wheel from the tested source. |
+| Python-only editable install | Installs no native CLI or backend DSO; its Python dependencies still select TensorRT 11.2 on aarch64 and TensorRT 11.1 on x86_64. |
 
 Building from source also needs the repository dev container or an equivalent
 CUDA/TensorRT build environment with CMake, Ninja, Conan, CUDA headers and
 libraries, TensorRT headers and libraries, `patchelf`, and `auditwheel`.
 
-## 1. Simple pip install
+Do not treat a profile marked `qualified` as a promise that a matching public
+wheel or private optimized-runtime dependency is downloadable. Artifact
+availability and exact-profile qualification are separate evidence.
+
+## 1. Simple pip install for the published aarch64 wheel
 
 Install the TensorRT 11.2 Python wheel from the TensorRT 11.2.0.113 SDK, then
-install the published TensorRT-Model-Connect wheel that matches your Python
-version:
+install the published aarch64 TensorRT-Model-Connect wheel that matches your
+Python version:
 
 ```bash
 python3.12 -m venv .venv-trtmc
@@ -57,17 +70,32 @@ TensorRT-Model-Connect wheel installs:
 Quick smoke test:
 
 ```bash
-trtmc build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
-trtmc run /tmp/qwen3.trtfb \
+trtmc build Qwen/Qwen3-0.6B
+trtmc run Qwen3-0.6B.trtfb \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
   --greedy
 ```
 
-## 2. Build wheel from source
+### x86_64 optimized qualification path
+
+The three current Qwen x Edge-LLM profiles are not a general x86_64 install
+promise. Their family-owned profile TOMLs require exact Qwen revisions, A100
+SM80, FP16, cache/batch options, and the pinned private Edge-LLM dependency.
+The model-owned
+`tests/e2e/models/qwen/edge_llm_adapter/run_a100_ci.sh` qualification runner
+builds and audits a `manylinux_2_39_x86_64` wheel with TensorRT 11.1.0.106,
+installs it in a clean environment, and runs the matching profile proof.
+
+Use the optimized-runtime proof workflow and its retained artifacts for that
+path. Do not substitute the aarch64 wheels above or infer support for another
+x86_64 GPU, model revision, precision, or engine configuration.
+
+## 2. Build the aarch64 wheel from source
 
 Use this path when you need the same pip-installable artifact that CI and
-nightly releases produce.
+nightly releases produce. The commands below are the current GB300/aarch64
+release path; the controlled x86_64 qualification path is described above.
 
 ```bash
 git clone https://github.com/NVIDIA/TensorRT-Model-Connect.git
@@ -118,7 +146,9 @@ package subdirectory.
 
 Use this only for local development of the Python builder. It does not run
 Conan, does not run CMake, and does not install the native `trtmc` executable or
-backend DSOs.
+backend DSOs. The container commands below use the current GB300/aarch64
+development environment; an x86_64 environment must provide its matching
+TensorRT/CUDA cohort.
 
 ```bash
 git clone https://github.com/NVIDIA/TensorRT-Model-Connect.git

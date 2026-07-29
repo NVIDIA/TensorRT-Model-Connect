@@ -12,25 +12,26 @@ TensorRT-Model-Connect has two large responsibilities:
 
 The boundary between those responsibilities is the `.trtfb` bundle.
 
-## If You Only Remember Five Things
+## If You Only Remember Six Things
 
 1. Python owns model-format diversity: configs, weights, tokenizers, processors, and graph construction.
 2. The `.trtfb` bundle is the contract between build time and run time.
-3. C++ does not dispatch by HuggingFace model name. It dispatches by `runtime_strategy`.
-4. Runtime plugins own task behavior such as text generation, speech transcription, diffusion, segmentation, or time-series solve.
-5. TensorRT ABI-sensitive execution is isolated behind backend DSOs so the public runtime can stay focused on bundle loading and task APIs.
-
-<figure className="trtmc-diagram trtmc-diagram--wide">
-  <div className="trtmc-diagram__media">
-    <img src={useBaseUrl('/img/diagrams/trtmc-system-map.svg')} alt="TensorRT-Model-Connect build and runtime system map" />
-  </div>
-  <figcaption>Architecture starts at the artifact boundary: Python produces a bundle, and C++ consumes it through registries and plugins.</figcaption>
-</figure>
+3. `trtmc build` resolves the family first. A declared model-owned native
+   default can take the request directly; otherwise an exact
+   model/revision/target/options tuple is offered to that family's optimized
+   adapters before the native fallback.
+4. Native bundles dispatch by `runtime_strategy`, not by Hugging Face model
+   name. A model-owned runtime DSO registers each native strategy.
+5. Optimized-runtime bundles instead carry `optimized_runtime.json` plus an
+   embedded implementation DSO and artifact tree. They bypass native strategy,
+   model-plugin, and backend-DSO dispatch.
+6. TensorRT ABI-sensitive native execution is isolated behind backend DSOs so
+   the public runtime can stay focused on bundle loading and task APIs.
 
 ```mermaid
 flowchart LR
   subgraph Source["Source model"]
-    HF["HuggingFace or local checkpoint"]
+    HF["Hugging Face or local checkpoint"]
     HFConfig["config.json"]
     HFWeights["weights"]
     HFTokenizer["tokenizer or processor assets"]
@@ -38,10 +39,14 @@ flowchart LR
 
   subgraph Builder["Python build phase"]
     MC["ModelConfig"]
-    Family["FamilyPlugin"]
+    NativeDefault{"Family declares a matching<br/>native default route?"}
+    Route{"Qualified optimized<br/>profile matches?"}
+    Adapter["family-owned provider adapter"]
+    Family["native FamilyPlugin"]
     Graph["TensorRT graph"]
     Plans["engine plan bytes"]
     Writer["bundle_writer"]
+    ProviderWriter["optimized bundle packager"]
   end
 
   subgraph Artifact["Deployable artifact"]
@@ -50,6 +55,11 @@ flowchart LR
 
   subgraph Runtime["C++ run phase"]
     Factory["PipelineFactory"]
+    Kind{"optimized_runtime.json?"}
+    ProviderHost["OptimizedRuntimeHost"]
+    ProviderDSO["embedded libtrtmc_impl_*.so"]
+    Loader["PipelinePluginLoader"]
+    DSO["owning model DSO"]
     Registry["PipelineRegistry"]
     Plugin["IPipelinePlugin"]
     Backend["IBackend DSO"]
@@ -58,17 +68,30 @@ flowchart LR
 
   HF --> MC
   HFConfig --> MC
+  MC --> NativeDefault
+  HFWeights --> Adapter
   HFWeights --> Family
   HFTokenizer --> Writer
-  MC --> Family
+  NativeDefault -->|yes| Family
+  NativeDefault -->|no| Route
+  Route -->|yes| Adapter
+  Route -->|no| Family
+  Adapter --> ProviderWriter
+  ProviderWriter --> Bundle
   Family --> Graph
   Graph --> Plans
   Plans --> Writer
   Writer --> Bundle
   Bundle --> Factory
-  Factory --> Registry
+  Factory --> Kind
+  Kind -->|yes| ProviderHost
+  ProviderHost --> ProviderDSO
+  ProviderDSO --> Pipeline
+  Kind -->|no| Loader
+  Loader --> DSO
+  DSO --> Registry
   Registry --> Plugin
-  Factory --> Backend
+  Kind -->|no| Backend
   Plugin --> Pipeline
   Backend --> Pipeline
 ```
@@ -79,8 +102,8 @@ The split is not just a language preference. It separates two very different job
 
 | Job | Best environment | Reason |
 | --- | --- | --- |
-| Understand a new HuggingFace checkpoint | Python | Model repos, tokenizers, diffusers, Transformers, calibration flows, and checkpoint format utilities are Python-first. |
-| Build optimized engine plans | Python builder with TensorRT APIs | Build logic needs flexible graph construction, weight transforms, calibration, and model-family adapters. |
+| Understand a new Hugging Face checkpoint | Python | Model repos, tokenizers, diffusers, Transformers, calibration flows, and checkpoint format utilities are Python-first. |
+| Build optimized artifacts | Python native builder or family-owned provider adapter | Build logic needs flexible graph construction, weight transforms, calibration, and exact model/revision/target qualification. |
 | Run user requests | C++ | Deployment systems need stable native APIs, explicit memory ownership, predictable latency, and minimal Python in the request path. |
 | Isolate TensorRT ABI | Backend DSO | TensorRT runtime versions can differ; the core runtime should not leak one `libnvinfer` ABI into every build. |
 
@@ -93,31 +116,54 @@ sequenceDiagram
   participant Bundle as .trtfb bundle
   participant App as C++ application
   participant Runtime as TensorRT-Model-Connect runtime
-  participant TRT as TensorRT backend
+  participant TRT as Native backend or delegated runtime
 
   User->>Build: build model_id -o model.trtfb
-  Build->>Build: read config, load weights, build engines
+  Build->>Build: resolve model, revision, target, and family
+  alt model-owned native default route claims the architecture
+    Build->>Build: load native FamilyPlugin
+    Build->>TRT: build native engine plans
+  else qualified optimized-runtime profile claims the tuple
+    Build->>TRT: invoke selected family-owned adapter
+    TRT-->>Build: implementation DSO and artifact tree
+  else no optimized profile claims the tuple
+    Build->>Build: load native FamilyPlugin
+    Build->>TRT: build native engine plans
+  end
   Build-->>Bundle: write bundle sections and metadata
   User->>App: deploy bundle
   App->>Runtime: trtmc::load(bundle)
-  Runtime->>Runtime: read config and choose runtime_strategy
-  Runtime->>TRT: load backend DSO and deserialize engines
+  alt optimized_runtime.json is present
+    Runtime->>TRT: materialize artifacts and load embedded implementation DSO
+  else native bundle
+    Runtime->>Runtime: read config and choose runtime_strategy
+    Runtime->>TRT: load backend DSO and deserialize engines
+  end
   App->>Runtime: call generate/transcribe/solve/etc.
   Runtime->>TRT: enqueue engine work on GPU
   Runtime-->>App: typed result
 ```
 
-## The three identities of a model
+## Build and runtime identities
 
-The same model has three identities as it moves through the stack:
+The same model has a source identity, a builder family, and one of two runtime
+identity shapes as it moves through the stack:
 
 | Identity | Example | Source of truth | Used by |
 | --- | --- | --- | --- |
-| HuggingFace model type | `qwen3`, `whisper`, `flux` | `config.json` from the model repo | Python `ModelConfig` and family matching. |
-| Builder family | `qwen`, `whisper`, `flux`, `pixart` | `python/tensorrt_model_connect/families/*.py` | Weight loading and engine construction. |
-| Runtime strategy | `decoder_kv_cache`, `speech_to_text`, `diffusion_flux` | Bundle metadata and C++ plugin manifest | C++ dispatch and pipeline construction. |
+| Hugging Face model type | `qwen3`, `whisper`, `flux` | `config.json` from the model repo | Python `ModelConfig` and family matching. |
+| Builder family | `qwen`, `whisper`, `flux`, `pixart` | `python/tensorrt_model_connect/families/<family>/MODEL.toml` and its package | Weight loading and engine construction. |
+| Native runtime strategy | `qwen_decoder_kv_cache`, `whisper_speech_to_text`, `diffusion_flux` | Native bundle config and `src/runtime/models/<owner>/MODEL.toml` | Native model DSO selection, plugin lookup, and pipeline construction. |
+| Optimized implementation/profile | `qwen.tensorrt-edge-llm` plus a qualified Qwen/A100 profile | Family-owned `IMPLEMENTATION.toml` and profile TOMLs, serialized as `optimized_runtime.json` | Embedded implementation DSO selection and delegated pipeline construction. |
 
-This matters because adding a new model does not always mean adding a new runtime. A new decoder-only family can often reuse `decoder_kv_cache`; a new task shape may need a new runtime strategy.
+Native runtime strategies are model-owned in the current architecture. Two families
+can implement the same task shape without sharing a strategy or DSO: Qwen and
+LLaMA use `qwen_decoder_kv_cache` and `llama_decoder_kv_cache`, while their E2E
+manifests share the `text_generation_causal` task strategy. Shared orchestration
+uses capabilities and task contracts; model implementation remains local.
+Optimized-runtime identity is a separate contract: the exact implementation,
+profile, model revision, and target are bound into the bundle instead of being
+represented by a native `runtime_strategy`.
 
 ```mermaid
 flowchart TB
@@ -126,14 +172,24 @@ flowchart TB
   end
 
   subgraph BundleTime["Bundle metadata"]
-    Family --> Strategy["runtime_strategy"]
-    Family --> Sections["engine and asset sections"]
+    Family --> BuildPath{"Selected build path"}
+    BuildPath -->|native| Strategy["runtime_strategy"]
+    Strategy --> Sections["engine and asset sections"]
+    BuildPath -->|qualified optimized profile| Descriptor["optimized_runtime.json<br/>implementation/profile identity"]
+    Descriptor --> ProviderLibrary["embedded libtrtmc_impl_*.so"]
+    Descriptor --> ProviderArtifacts["provider artifact tree"]
   end
 
   subgraph RunTime["Runtime identity"]
-    Strategy --> CppPlugin["C++ IPipelinePlugin"]
+    Strategy --> DSO["Owning libtrtmc_model_*.so"]
+    DSO --> CppPlugin["C++ IPipelinePlugin"]
     Sections --> CppPlugin
+    Descriptor --> ProviderDSO["Exact embedded implementation DSO"]
+    ProviderLibrary --> ProviderDSO
+    ProviderArtifacts --> ProviderDSO
+    ProviderDSO --> Delegated["Delegated IPipeline"]
     CppPlugin --> Pipeline["Concrete IPipeline"]
+    Delegated --> Pipeline
   end
 ```
 
@@ -141,13 +197,27 @@ flowchart TB
 
 The Python builder is responsible for the messy part of model diversity.
 
-It starts in `python/tensorrt_model_connect/build_cli.py`, then calls into `engine_builder.py`. The builder resolves a model directory, parses `ModelConfig`, selects a `FamilyPlugin`, asks that plugin to load weights and build engines, then writes a bundle through `bundle_writer.py`.
+It starts in `python/tensorrt_model_connect/build_cli.py`, then calls into
+`engine_builder.py`. After resolving the checkpoint to one family, it first
+honors a model-owned `default_build_route`; eligible dense Qwen3 and Llama
+architectures go directly to the native family plugin. Other requests probe
+only that family's optimized-runtime implementations. A profile can claim the
+request only when the model ID, pinned revision, active target, and public build
+options match its qualification. The selected adapter produces an embedded
+implementation DSO and artifact tree for the generic optimized bundle packager.
+If no profile claims the request, the builder continues through the native
+`FamilyPlugin`, TensorRT graph build, and `bundle_writer.py` path.
 
 ```mermaid
 flowchart TD
   CLI["build_cli.py<br/>parse trtmc build args"] --> Resolve["resolve model path and config"]
   Resolve --> ModelConfig["ModelConfig.from_dir"]
-  ModelConfig --> Match["families/__init__.py<br/>select FamilyPlugin"]
+  ModelConfig --> NativeDefault{"model-owned native<br/>default route?"}
+  NativeDefault -->|yes| Match["families/__init__.py<br/>select native FamilyPlugin"]
+  NativeDefault -->|no| Provider{"qualified family provider<br/>profile matches?"}
+  Provider -->|yes| Adapter["runtime_provider orchestrator<br/>run provider adapter"]
+  Adapter --> ProviderBundle["write optimized-runtime bundle"]
+  Provider -->|no| Match
   Match --> LoadWeights["FamilyPlugin.load_weights"]
   LoadWeights --> BuildEngine["FamilyPlugin.build_engine<br/>or build_components/build_vision_engine"]
   BuildEngine --> BundleInfo["BundleInfo metadata"]
@@ -161,11 +231,12 @@ The important builder abstractions are:
 
 | Abstraction | Source | Responsibility |
 | --- | --- | --- |
-| `ModelConfig` | `python/tensorrt_model_connect/config.py` | Normalizes HuggingFace config fields into one typed view. |
+| `ModelConfig` | `python/tensorrt_model_connect/config.py` | Normalizes Hugging Face config fields into one typed view. |
 | `FamilyPlugin` | `python/tensorrt_model_connect/families/base.py` | Per-family matching, weight loading, engine building, optional quantization hooks, and optional modality-specific build methods. |
-| Graph builders | `graph_ops.py`, `graph_blocks.py`, `standard_decoder_builder.py`, dedicated builder files | Convert model structure and weights into TensorRT networks or compiled components. |
+| Family-owned graph builders | `python/tensorrt_model_connect/families/<family>/graph_ops.py`, `graph_blocks.py`, and dedicated builders when present | Convert that family's model structure and weights into TensorRT networks or compiled components. There are no repository-root `graph_ops.py` or `graph_blocks.py` modules. |
 | Quantization units | `python/tensorrt_model_connect/quantization/` | Plan quantization, calibration, scale loading, and family-specific exclusions. |
 | `BundleInfo` and `BundleSection` | `python/tensorrt_model_connect/bundle_writer.py` | Serialize build metadata and binary sections into `.trtfb`. |
+| Optimized-runtime orchestrator and packager | `python/tensorrt_model_connect/runtime_provider/` | Discover only the selected family's implementations, require one exact qualified profile, run its isolated adapter, and package opaque artifacts plus the implementation DSO. |
 
 Primary source locations:
 
@@ -176,17 +247,37 @@ Primary source locations:
 
 ## Runtime phase
 
-The C++ runtime starts with `trtmc::load()` or `PipelineFactory::from_bundle()`. It reads the bundle, finds `config.json`, normalizes old strategy names if needed, loads a backend DSO, resolves layered runtime config, looks up a runtime plugin, and lets that plugin construct the concrete pipeline.
+The C++ runtime starts with `trtmc::load()` or
+`PipelineFactory::from_bundle()`. It reads the bundle header and chooses one of
+two mutually exclusive paths. Presence of `optimized_runtime.json` claims the
+optimized path: the host validates the descriptor, materializes and
+integrity-checks the embedded artifact tree, loads its exact
+`libtrtmc_impl_*.so`, validates the private factory ABI and identities, and asks
+that DSO to create an `IPipeline`. Any failure is terminal; it does not fall
+back to native dispatch.
+
+Without that section, the factory follows the native path: it extracts
+`config.json`, normalizes old strategy names if needed, loads the owning model
+DSO and a compatible backend DSO, resolves layered runtime config, and lets the
+registered plugin construct the concrete pipeline.
 
 ```mermaid
 flowchart TD
   Load["trtmc::load or PipelineFactory::from_bundle"] --> Read["ReadBundleFile"]
-  Read --> Config["extract config.json"]
+  Read --> Kind{"optimized_runtime.json?"}
+  Kind -->|yes| Descriptor["validate descriptor and artifact hash"]
+  Descriptor --> Materialize["materialize embedded artifacts"]
+  Materialize --> ProviderDSO["dlopen exact embedded libtrtmc_impl_*.so"]
+  ProviderDSO --> ProviderFactory["validate factory ABI and identity"]
+  ProviderFactory --> ProviderPipeline["provider creates IPipeline"]
+  Kind -->|no| Config["extract config.json"]
   Config --> Strategy["runtime_strategy<br/>with legacy normalization"]
+  Strategy --> Owner["generated strategy-to-model index"]
+  Owner --> ModelDSO["dlopen owning libtrtmc_model_*.so"]
+  ModelDSO --> Lookup["PipelineRegistry::lookup"]
   Config --> RuntimeConfig["resolve ConfigBundle<br/>schema defaults + bundle defaults + session overrides"]
   Config --> BackendName["engine_backend / TRT ABI metadata"]
   BackendName --> Backend["load IBackend DSO"]
-  Strategy --> Lookup["PipelineRegistry::lookup"]
   Lookup --> Plugin["IPipelinePlugin::create(ctx)"]
   RuntimeConfig --> Context["PipelineContext"]
   Backend --> Context
@@ -202,20 +293,23 @@ The important runtime abstractions are:
 | `IPipeline` | `include/trtmc/pipeline.h` | User-facing task interface. Methods unsupported by a concrete pipeline throw with the pipeline type. |
 | `LoadOptions` | `include/trtmc/pipeline.h` | Runtime load knobs: HF Python helper path, runtime cache path, CUDA graphs, KV cache budget, config file, `--set` overrides, backend search paths. |
 | `PipelineFactory` | `include/trtmc/runtime/pipeline_factory.h`, `src/runtime/registry/pipeline_factory.cpp` | Single creation path from bundle file to pipeline instance. |
-| `PipelineRegistry` | `include/trtmc/runtime/pipeline_registry.h` | Maps `runtime_strategy` strings to registered `IPipelinePlugin` implementations. |
+| Optimized-runtime host/factory contract | `src/runtime/providers/optimized_runtime_host.cpp`, `src/runtime/providers/optimized_runtime_factory.h` | Recognize optimized bundles before native materialization, verify the integrity-bound implementation DSO/provider artifacts and factory identity, and create the delegated pipeline. Host driver, CUDA, TensorRT, loader, and system-library dependencies remain external. |
+| Model plugin index/loader | `include/trtmc/runtime/pipeline_plugin_loader.h`, `src/runtime/registry/pipeline_plugin_loader.cpp` | Maps a strategy to its manifest owner, loads that model DSO, and verifies the DSO registers only its declared strategies. |
+| `PipelineRegistry` | `include/trtmc/runtime/pipeline_registry.h` | Maps loaded `runtime_strategy` strings to registered `IPipelinePlugin` implementations. |
 | `IPipelinePlugin` | `include/trtmc/runtime/pipeline_plugin.h` | Strategy-specific constructor that reads bundle sections and returns a concrete `IPipeline`. |
 | `IBackend` | `include/trtmc/runtime/trt_backend.h` | Backend DSO interface for deserializing engines and creating `ITrtModule` execution wrappers. |
 | `ITrtModule` | `include/trtmc/runtime/trt_module.h` | Engine execution interface used by pipelines without including TensorRT headers. |
-| `IInferenceState` | `src/runtime/models/<family>/inference_state.h` | Unified request state abstraction for KV cache, recurrent state, and hybrid state. |
-| `ISampler` | `src/runtime/models/<family>/sampler.h` | Token selection abstraction for greedy, top-k, top-p, min-p, and GPU-side sampling paths. |
+| Model-owned inference state | `src/runtime/models/<family>/inference_state.h` when that family needs it | Family-local KV, recurrent, or hybrid request state. The old shared state implementation has been retired. |
+| Model-owned sampler | `src/runtime/models/<family>/sampler.h` when that family needs it | Family-local token selection for greedy, top-k, top-p, min-p, and optional GPU paths. |
 
 Primary source locations:
 
 - `include/trtmc/pipeline.h`
 - `src/runtime/registry/pipeline_factory.cpp`
+- `src/runtime/registry/pipeline_plugin_loader.cpp`
 - `src/runtime/registry/pipeline_registry.cpp`
+- `src/runtime/providers/optimized_runtime_host.cpp`
 - `include/trtmc/runtime/pipeline_plugin.h`
-- `src/runtime/models/`
 - `src/runtime/models/`
 
 ## Request-time flow
@@ -232,11 +326,11 @@ After a pipeline is constructed, each user request is task-specific. Text genera
 ```mermaid
 sequenceDiagram
   participant App as User application
-  participant Pipe as TextGenerationPipeline
+  participant Pipe as QwenTextGenerationPipeline
   participant Tok as Tokenizer
-  participant State as IInferenceState
+  participant State as QwenInferenceState
   participant Mod as ITrtModule
-  participant Samp as ISampler
+  participant Samp as QwenISampler
 
   App->>Pipe: generate(prompt, GenerateConfig)
   Pipe->>Tok: encode prompt to token IDs
@@ -270,11 +364,12 @@ Other modalities reuse the same architectural pattern:
 
 | Constraint | Consequence |
 | --- | --- |
-| Python builds, C++ runs | Checkpoint parsing and graph construction stay in Python; request-time inference stays native. |
+| Python builds, C++ runs | Checkpoint resolution and artifact construction stay in Python; request-time inference is exposed through native `IPipeline`, whether the implementation is the native model-plugin path or an embedded delegated runtime. |
 | Bundle is the boundary | The runtime does not rediscover the original model repository to decide pipeline shape. |
-| Family and strategy are separate | Build-time model support can grow without central runtime `switch` statements. |
+| Native family and strategy are separate but model-owned | A Python package builds the native family, while a concrete strategy selects its native runtime DSO. Shared task behavior is expressed through capabilities and E2E `task_strategy`, not a generic runtime plugin. |
+| Optimized selection is exact and artifact-bound | A family-owned provider profile must match model, revision, target, and options at build time. At load time `optimized_runtime.json` selects the embedded implementation DSO without consulting the native strategy index. |
 | Strategy is resolved at load | A request uses a concrete pipeline instance; no per-request strategy redispatch is needed. |
-| Runtime plugins are manifest registered | Adding a strategy changes a plugin file and manifest, not the factory core. |
+| Runtime plugins are manifest discovered | Adding a strategy changes the owning `src/runtime/models/<owner>/MODEL.toml` and local source; CMake generates the DSO registrar and strategy index without a factory edit. |
 | Backend DSOs isolate TensorRT ABI | The public runtime can load the backend matching the bundle's TensorRT metadata. |
 | Task methods are explicit | A user calls `generate`, `transcribe`, `generate_image`, `segment`, `solve`, or `detect` instead of manipulating engine tensors directly. |
 

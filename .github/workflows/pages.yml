@@ -9,6 +9,9 @@ on:
       - main
     paths:
       - "website/**"
+      - "python/tensorrt_model_connect/families/*/MODEL.toml"
+      - "src/runtime/models/*/MODEL.toml"
+      - "tests/e2e/models/*/MODEL.toml"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -47,6 +50,9 @@ jobs:
       - name: Configure GitHub Pages
         id: pages
         uses: actions/configure-pages@v5
+
+      - name: Test generated model support inventory
+        run: npm run test:model-support
 
       - name: Build site
         env:

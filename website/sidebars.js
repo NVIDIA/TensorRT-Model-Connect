@@ -26,6 +26,7 @@ const sidebars = {
       items: [
         'tutorials/beginner/inspect-bundles',
         'tutorials/beginner/text-generation',
+        'tutorials/beginner/bring-your-own-kernel',
         'tutorials/intermediate/multimodal-and-speech',
         'tutorials/intermediate/canary-decoding',
         'tutorials/intermediate/diffusion-and-time-series',
@@ -104,7 +105,9 @@ const sidebars = {
       items: [
         'context/triattention-native-cpp-worklog',
         'context/config-registry-status',
-        'context/architecture-decision-records'
+        'context/model-plugin-encapsulation-plan',
+        'context/optimized-runtime-family-adapter-plan',
+        'context/adr/README'
       ]
     },
     {

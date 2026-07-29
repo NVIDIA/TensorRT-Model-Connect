@@ -134,13 +134,18 @@ def build_standard_decoder_engine(
         raise NotImplementedError(
             "split prefill engine is not supported for this standard decoder "
             "configuration")
-    # Qwen-VL is not packaged as a split decoder bundle. The engine builder
-    # therefore reaches this family with role="decode" when its global split
-    # default falls back to one engine. Keep VL's one engine dual-profile so
-    # the runtime still receives a sequence-prefill context.
-    vl_single_engine_fallback = embed_input and decoder_engine_role == "decode"
+    active_split = bool(config.raw.get("_active_split_decoder_build", False))
+    split_decode = (
+        embed_input and active_split and decoder_engine_role == "decode")
+    # Preserve the historical dual-profile fallback when the generic builder
+    # rejects a requested split layout. During an active Qwen-VL split build,
+    # compile a decode-only profile instead.
+    vl_single_engine_fallback = (
+        embed_input and not active_split and decoder_engine_role == "decode")
     if not _dual_profile_disabled_for and (
-        decoder_engine_role in ("dual_profile", "prefill") or vl_single_engine_fallback
+        decoder_engine_role in ("dual_profile", "prefill")
+        or split_decode
+        or vl_single_engine_fallback
     ):
         return build_dual_profile_decoder_engine(
             config, weights, max_cache_length,
@@ -156,7 +161,11 @@ def build_standard_decoder_engine(
             scale_attn_weights=scale_attn_weights,
             embed_input=embed_input,
             verbose=verbose,
-            profile_mode=("prefill" if decoder_engine_role == "prefill" else "dual_profile"),
+            profile_mode=(
+                "prefill" if decoder_engine_role == "prefill"
+                else "decode" if split_decode
+                else "dual_profile"
+            ),
         )
 
     attention_size: int = weights.get("_attention_size", config.attention_size)

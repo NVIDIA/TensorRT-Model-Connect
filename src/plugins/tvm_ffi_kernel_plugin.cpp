@@ -17,6 +17,7 @@
 #include <iostream>
 #include <string>
 #include <tvm/ffi/c_api.h>
+#include <tvm/ffi/extra/c_env_api.h>
 #include <utility>
 #include <vector>
 
@@ -271,7 +272,8 @@ bool TvmFfiKernelPlugin::supportsFormatCombination(int32_t pos,
     return inOut[pos].format == nvinfer1::TensorFormat::kLINEAR &&
            (inOut[pos].type == nvinfer1::DataType::kBF16 ||
             inOut[pos].type == nvinfer1::DataType::kFLOAT ||
-            inOut[pos].type == nvinfer1::DataType::kHALF);
+            inOut[pos].type == nvinfer1::DataType::kHALF ||
+            inOut[pos].type == nvinfer1::DataType::kINT32);
 }
 
 void TvmFfiKernelPlugin::configurePlugin(nvinfer1::DynamicPluginTensorDesc const*, int32_t,
@@ -302,30 +304,50 @@ void report_tvm_ffi_error(const std::string& kernel_name) {
     }
 }
 
-// Fill a DLTensor from a TRT tensor descriptor.
-void fill_dl_tensor(DLTensor& t, void* data, const nvinfer1::PluginTensorDesc& desc,
-                    int device_id) {
+constexpr int32_t kMaxTensorRank = 8;
+
+// Keep explicit DLPack shape and contiguous-stride storage alive for the FFI
+// call. CuTe's TVM-FFI wrapper reads both arrays.
+bool fill_dl_tensor(DLTensor& t, int64_t* shape, int64_t* strides, void* data,
+                    const nvinfer1::PluginTensorDesc& desc, int device_id) {
+    if (desc.dims.nbDims < 0 || desc.dims.nbDims > kMaxTensorRank)
+        return false;
+    int64_t stride = 1;
+    for (int32_t dim = desc.dims.nbDims - 1; dim >= 0; --dim) {
+        if (desc.dims.d[dim] < 0)
+            return false;
+        shape[dim] = desc.dims.d[dim];
+        strides[dim] = stride;
+        stride *= shape[dim];
+    }
     t.data = data;
     t.device = {kDLCUDA, device_id};
     t.ndim = desc.dims.nbDims;
-    t.shape = const_cast<int64_t*>(reinterpret_cast<const int64_t*>(desc.dims.d));
-    t.strides = nullptr;
+    t.shape = shape;
+    t.strides = strides;
     t.byte_offset = 0;
     if (desc.type == nvinfer1::DataType::kFLOAT)
         t.dtype = DLDataType{kDLFloat, 32, 1};
     else if (desc.type == nvinfer1::DataType::kBF16)
         t.dtype = DLDataType{kDLBfloat, 16, 1};
+    else if (desc.type == nvinfer1::DataType::kINT32)
+        t.dtype = DLDataType{kDLInt, 32, 1};
     else
         t.dtype = DLDataType{kDLFloat, 16, 1};
+    return true;
 }
 
 // Bind tensor descriptors to DLTensor + TVMFFIAny argument arrays.
 // Returns the next argument index after all bound tensors.
-int32_t bind_tensors(DLTensor* dl_tensors, TVMFFIAny* args, nvinfer1::PluginTensorDesc const* descs,
-                     void const* const* buffers, int32_t count, int32_t arg_idx, int device_id) {
+int32_t bind_tensors(DLTensor* dl_tensors, int64_t* shapes, int64_t* strides, TVMFFIAny* args,
+                     nvinfer1::PluginTensorDesc const* descs, void const* const* buffers,
+                     int32_t count, int32_t arg_idx, int device_id) {
     for (int32_t i = 0; i < count; ++i, ++arg_idx) {
         auto tidx = static_cast<std::size_t>(arg_idx);
-        fill_dl_tensor(dl_tensors[tidx], const_cast<void*>(buffers[i]), descs[i], device_id);
+        if (!fill_dl_tensor(dl_tensors[tidx], shapes + tidx * kMaxTensorRank,
+                            strides + tidx * kMaxTensorRank, const_cast<void*>(buffers[i]),
+                            descs[i], device_id))
+            return -1;
         args[arg_idx].type_index = kTVMFFIDLTensorPtr;
         args[arg_idx].v_ptr = &dl_tensors[tidx];
     }
@@ -334,14 +356,15 @@ int32_t bind_tensors(DLTensor* dl_tensors, TVMFFIAny* args, nvinfer1::PluginTens
 
 // Bind the workspace tensor if present. Returns the next argument index.
 int32_t bind_workspace_tensor(DLTensor* dl_tensors, TVMFFIAny* args, void* workspace,
-                              int64_t* workspace_shape, int32_t arg_idx, int device_id) {
+                              int64_t* workspace_shape, int64_t* workspace_strides, int32_t arg_idx,
+                              int device_id) {
     auto tidx = static_cast<std::size_t>(arg_idx);
     DLTensor& wt = dl_tensors[tidx];
     wt.data = workspace;
     wt.device = {kDLCUDA, device_id};
     wt.ndim = 1;
     wt.shape = workspace_shape;
-    wt.strides = nullptr;
+    wt.strides = workspace_strides;
     wt.byte_offset = 0;
     wt.dtype = {kDLUInt, 8, 1};
     args[arg_idx].type_index = kTVMFFIDLTensorPtr;
@@ -365,57 +388,85 @@ void append_extra_args(TVMFFIAny* args, int32_t base_idx,
     }
 }
 
+bool resolve_tvm_ffi_function(const std::string& kernel_name, void** function) {
+    if (*function != nullptr)
+        return true;
+    TVMFFIByteArray name{kernel_name.data(), kernel_name.size()};
+    if (TVMFFIFunctionGetGlobal(&name, function) == 0 && *function != nullptr)
+        return true;
+    std::cerr << "[TvmFfiKernelPlugin] Failed to resolve kernel: " << kernel_name << '\n';
+    return false;
+}
+
+int32_t invoke_tvm_ffi_function(void* function, TVMFFIAny* args, int32_t num_args, int device_id,
+                                cudaStream_t stream, const std::string& kernel_name) {
+    TVMFFIStreamHandle previous_stream = nullptr;
+    if (TVMFFIEnvSetStream(kDLCUDA, device_id, reinterpret_cast<TVMFFIStreamHandle>(stream),
+                           &previous_stream) != 0) {
+        report_tvm_ffi_error(kernel_name);
+        return -1;
+    }
+
+    TVMFFIAny result{};
+    result.type_index = kTVMFFINone;
+    const int call_status = TVMFFIFunctionCall(function, args, num_args, &result);
+    if (call_status != 0)
+        report_tvm_ffi_error(kernel_name);
+    const int restore_status = TVMFFIEnvSetStream(kDLCUDA, device_id, previous_stream, nullptr);
+    if (restore_status != 0)
+        report_tvm_ffi_error(kernel_name);
+    if (result.type_index >= kTVMFFIStaticObjectBegin && result.v_obj != nullptr)
+        TVMFFIObjectDecRef(result.v_obj);
+    return call_status == 0 && restore_status == 0 ? 0 : -1;
+}
+
 } // namespace
 
 int32_t TvmFfiKernelPlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDesc,
                                     nvinfer1::PluginTensorDesc const* outputDesc,
                                     void const* const* inputs, void* const* outputs,
                                     void* workspace, cudaStream_t stream) noexcept {
-    // 1. Lazy-resolve the TVM-FFI function handle
-    if (cached_fn_ == nullptr) {
-        TVMFFIByteArray name_arr;
-        name_arr.data = kernel_name_.c_str();
-        name_arr.size = static_cast<int64_t>(kernel_name_.size());
-        if (TVMFFIFunctionGetGlobal(&name_arr, &cached_fn_) != 0 || cached_fn_ == nullptr) {
-            std::cerr << "[TvmFfiKernelPlugin] Failed to resolve kernel: " << kernel_name_ << '\n';
-            return -1;
-        }
-    }
+    if (!resolve_tvm_ffi_function(kernel_name_, &cached_fn_))
+        return -1;
 
     // 2. Build argument array: [inputs..., workspace_tmp, outputs..., extra_args...]
-    const bool has_workspace = (workspace_bytes_ > 0 && workspace != nullptr);
+    const bool has_workspace = workspace_bytes_ > 0;
+    if (has_workspace && workspace == nullptr) {
+        std::cerr << "[TvmFfiKernelPlugin] TensorRT did not provide configured workspace\n";
+        return -1;
+    }
     const int32_t total_tensors = num_inputs_ + (has_workspace ? 1 : 0) + num_outputs_;
     const int32_t total_args = total_tensors + static_cast<int32_t>(extra_args_.size());
     std::vector<DLTensor> dl_tensors(static_cast<std::size_t>(total_tensors));
+    std::vector<int64_t> shapes(static_cast<std::size_t>(total_tensors) * kMaxTensorRank);
+    std::vector<int64_t> strides(static_cast<std::size_t>(total_tensors) * kMaxTensorRank);
     std::vector<TVMFFIAny> args(static_cast<std::size_t>(total_args));
 
     int device_id = 0;
-    cudaGetDevice(&device_id);
+    if (cudaGetDevice(&device_id) != cudaSuccess)
+        return -1;
 
     // Bind inputs, optional workspace, outputs, and extra args
-    int32_t arg_idx =
-        bind_tensors(dl_tensors.data(), args.data(), inputDesc, inputs, num_inputs_, 0, device_id);
+    int32_t arg_idx = bind_tensors(dl_tensors.data(), shapes.data(), strides.data(), args.data(),
+                                   inputDesc, inputs, num_inputs_, 0, device_id);
+    if (arg_idx < 0)
+        return -1;
 
     int64_t workspace_shape[1] = {workspace_bytes_};
+    int64_t workspace_strides[1] = {1};
     if (has_workspace)
         arg_idx = bind_workspace_tensor(dl_tensors.data(), args.data(), workspace, workspace_shape,
-                                        arg_idx, device_id);
+                                        workspace_strides, arg_idx, device_id);
 
     auto* out_bufs = reinterpret_cast<void const* const*>(outputs);
-    arg_idx = bind_tensors(dl_tensors.data(), args.data(), outputDesc, out_bufs, num_outputs_,
-                           arg_idx, device_id);
+    arg_idx = bind_tensors(dl_tensors.data(), shapes.data(), strides.data(), args.data(),
+                           outputDesc, out_bufs, num_outputs_, arg_idx, device_id);
+    if (arg_idx < 0)
+        return -1;
 
     append_extra_args(args.data(), arg_idx, extra_args_);
-
-    // 3. Call the TVM-FFI function
-    TVMFFIAny result;
-    result.type_index = kTVMFFINone;
-    int ret = TVMFFIFunctionCall(cached_fn_, args.data(), total_args, &result);
-    if (ret != 0) {
-        report_tvm_ffi_error(kernel_name_);
-        return -1;
-    }
-    return 0;
+    return invoke_tvm_ffi_function(cached_fn_, args.data(), total_args, device_id, stream,
+                                   kernel_name_);
 }
 
 } // namespace trtmc

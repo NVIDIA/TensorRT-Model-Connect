@@ -2,31 +2,84 @@
 title: Source Layout
 ---
 
+This page is a map of the current repository. Native model support is
+deliberately split across three linked, model-owned descriptors:
+
+| Path | Authority |
+| --- | --- |
+| `python/tensorrt_model_connect/families/<builder-family>/MODEL.toml` | Python family discovery, aliases, capabilities, and adapters |
+| `src/runtime/models/<runtime-owner>/MODEL.toml` | Runtime DSO name, plugin entry points, strategy keys, config schemas, and C++ tests |
+| `tests/e2e/models/<e2e-family>/MODEL.toml` | E2E manifests, model-local plugins, defaults, and test ownership |
+
+Each directory name must agree with the `id` in its own descriptor. The three
+physical names usually match, but their link is the exact
+`runtime_strategy`, not filename equality: current builder/E2E owners
+`magpie_tts` and `wan_t2v` map to runtime owners `magpie` and `wan`,
+respectively. At this revision, all three trees contain 78 descriptors. The E2E
+descriptors declare 204 JSON manifests; runtime descriptors declare 79 unique
+strategy keys because one runtime owner exposes two strategies. Treat these
+numbers as a checked snapshot, not a constant: the descriptor files are the
+source of truth.
+
+## Top-level directories
+
 | Path | Purpose |
 | --- | --- |
-| `pyproject.toml` | Canonical Python packaging metadata and build backend declaration. |
-| `_pyproject_backend.py` | Local PEP 517/660 wrapper that delegates wheel builds to `conan-py-build` and supports py-only editable installs. |
-| `conanfile.py` | Native wheel package recipe used by `conan-py-build`. |
-| `CMakeLists.txt` | Native C++/CUDA build entry point. |
-| `cmake/` | CMake manifests and generated registration templates. |
-| `include/trtmc/` | Public C++ API headers. |
-| `src/bundle/` | `.trtfb` bundle reading. |
-| `src/cabi/api/` | C ABI entrypoints. |
-| `src/runtime/backend/` | Backend DSO loading and backend implementations. |
-| `src/runtime/config/` | Schema-driven runtime config. |
-| `src/runtime/core/` | Device tensors, caches, samplers, CUDA helpers, schedulers. |
-| `src/runtime/domains/` | Modality-specific helpers and generation plans. |
-| `src/runtime/models/` | Model runtime folders containing strategy plugins and concrete `IPipeline` implementations. |
-| `src/runtime/models/` | Shared runtime plugin helpers. |
-| `src/runtime/registry/` | Pipeline factory, registry, and base config parsing. |
-| `src/tokenizer/` | Native tokenizers. |
-| `python/tensorrt_model_connect/` | Python builder package. |
-| `python/tensorrt_model_connect/families/` | Raw TRT family plugins. |
-| `tests/builder/` | Python builder tests. |
-| `tests/cpp/` | C++ unit tests. |
-| `tests/e2e/` | E2E tests and model manifests. |
-| `tests/e2e_harness/` | E2E orchestration, runners, references, comparators, thresholds. |
-| `tests/tools/` | Tooling tests. |
-| `tools/` | Diff, profiling, performance, coverage, and report tools. |
-| `scripts/` | Build, cache warmup, E2E scheduling, and scaffolding scripts. |
-| `website/` | Docusaurus user documentation site. |
+| `include/trtmc/` | Public C++ headers, including the current C-linkage C++ subset in `pipeline.h`; this is not a C-compatible header or complete stable C ABI |
+| `src/bundle/` | `.trtfb` bundle parsing |
+| `src/cabi/api/` | Implementation of the C-linkage C++ subset; it uses C++ types and currently has no pipeline-destroy entry point |
+| `src/runtime/backend/` | Backend loading and implementations |
+| `src/runtime/config/` | Runtime config schemas and layered resolution |
+| `src/runtime/core/` | Model-independent device/runtime primitives |
+| `src/runtime/domains/` | Small modality helpers shared across model DSOs |
+| `src/runtime/models/` | Family-owned runtime implementations and descriptors |
+| `src/runtime/registry/` | DSO discovery, registry, and pipeline factory |
+| `src/runtime/providers/` | Generic optimized-runtime descriptor, artifact, and private factory host |
+| `src/tokenizer/` | Tokenizer implementations |
+| `python/tensorrt_model_connect/` | Python build package |
+| `python/tensorrt_model_connect/runtime_provider/` | Family-scoped optimized implementation discovery, isolated build, and generic bundle packaging |
+| `tests/builder/` | Python builder tests |
+| `tests/cpp/` | C++ runtime tests |
+| `tests/e2e/` | E2E entry points and model-owned cases |
+| `tests/e2e_harness/` | Manifest loading, orchestration, runners, and comparators |
+| `tests/tools/` | Tests for repository tools |
+| `tools/` | CI, comparison, profiling, and repository checks |
+| `scripts/` | Scaffolding and operator utilities |
+| `website/` | Docusaurus source |
+
+## Runtime selection
+
+For a native bundle, CMake scans `src/runtime/models/*/MODEL.toml`;
+contributors do not maintain a central list of model plugins. At runtime,
+`PipelineFactory` reads `runtime_strategy`, resolves the owning model DSO from
+generated manifest data, loads that DSO, and asks `PipelineRegistry` for the
+registered plugin.
+
+For an optimized bundle, `PipelineFactory` first recognizes
+`optimized_runtime.json`. `src/runtime/providers/optimized_runtime_host.cpp`
+validates and materializes its embedded artifact tree, loads the exact
+`libtrtmc_impl_*.so`, and asks its private factory to return an `IPipeline`.
+The native strategy index, model DSO, and backend DSO are not part of that
+path. Build-side implementation manifests and exact qualification profiles
+live under the owning Python family; the current example is
+`python/tensorrt_model_connect/families/qwen/edge_llm_adapter/`.
+
+The generic task shape belongs in `task_strategy` (for example,
+`text_generation_causal`). The `runtime_strategy` is the concrete runtime
+contract and is normally family-qualified (for example,
+`qwen_decoder_kv_cache`).
+
+## Verify the layout
+
+Run the repository-owned consistency checks:
+
+```bash
+PYTHONPATH=python:. python3 tools/check_runtime_strategy_matrix.py
+PYTHONPATH=python:. python3 -m pytest \
+  tests/tools/test_model_plugin_encapsulation_static.py \
+  tests/builder/test_manifest_validation.py \
+  tests/tools/test_runtime_strategy_matrix_checker.py -q
+```
+
+Use `tools/test_impact.py` for change selection. Do not infer ownership from an
+old document count or from a removed shared runtime directory.

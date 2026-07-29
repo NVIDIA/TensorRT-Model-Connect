@@ -1,158 +1,72 @@
-# AI Agent System
+# AI Agent Operations
 
-This system turns low-risk AI reliability work into an autonomous integration
-flow while keeping `main` human-controlled.
+AI-authored changes follow the same repository rules as human-authored
+changes. `main` is the only current premerge CI target, and no agent may weaken
+tests, bypass review, or push directly to `main`.
 
-## Goal
-
-Human review should happen at one aggregate boundary:
-
-```text
-task issue -> AI implementation PR -> sanity checks -> ai-staging -> snapshot branch -> promotion PR -> full checks -> main
-```
-
-`main` is ground truth. `ai-staging` is an integration branch for AI-generated
-changes. Individual AI PRs are disposable and must stay easy to rework or close.
-
-## Agents
-
-| Lane | Owns | Must not do |
-|---|---|---|
-| Task discovery | Create atomic, verifiable GitHub issues labeled `ai:task` and `ai:ready` | Implement code |
-| Implementation | Claim one issue, create a per-issue worktree, use repo-local skills where applicable, open one PR targeting `ai-staging`, and repair generated PRs marked `ai:needs-rework` | Merge |
-| Staging merge | Merge green AI PRs into `ai-staging` one at a time | Diagnose unrelated failed checks |
-| Staging rotation | Snapshot `ai-staging`, reset `ai-staging` to `main`, and open the human-review promotion PR | Push or merge to `main` |
-| Promotion repair | Keep promotion PR full checks green by modifying only timestamped promotion source branches | Merge, approve, push `main`, or modify `ai-staging` |
-
-The lanes can be run by Codex or any other agent CLI. The operator docs use
-Codex as the default example and describe how to substitute another CLI.
-
-## Shared State
-
-GitHub issues and pull requests are the queue. Do not use a repository file as
-the queue.
-
-Standard labels are managed by:
-
-```bash
-python3 tools/ai_agent_system.py --project NVIDIA/TensorRT-Model-Connect ensure-labels
-```
-
-Core labels:
+## Current lifecycle
 
 ```text
-ai:task
-ai:ready
-ai:claimed
-ai:implementing
-ai-generated
-ai:staging-pr
-ai:sanity-pending
-ai:sanity-failed
-ai:sanity-green
-ai:autopilot
-ai:staged
-ai:staging-failed
-ai:needs-rework
-ai:dropped
-ai:needs-human
-ai:promotion
+scoped issue or request
+  -> short-lived branch from the current GitHub main
+  -> implementation and local verification
+  -> pull request targeting main
+  -> one-shot run-ci label
+  -> pinned merge-snapshot CI
+  -> human review and repository-ruleset merge
 ```
 
-## State Machine
+The source of truth is:
 
-```text
-ai:task + ai:ready
-  -> implementation agent claims issue
-  -> ai-task-* branch and PR targeting ai-staging with ai-generated + ai:staging-pr labels
-  -> PR head checks pass, or implementation rework repairs the existing PR
-  -> staging merge lane lands PR into ai-staging
-  -> staging rotation snapshots ai-staging to ai-staging-promotion-<timestamp>
-  -> staging rotation resets ai-staging to main for the next batch
-  -> promotion PR from snapshot branch to main
-  -> promotion repair lane keeps full checks green
-  -> human review and merge
-```
+- `AGENTS.md` for repository and branch policy
+- `.github/workflows/trtmc-ci.yml` for premerge behavior
+- `.github/workflows/model-proof.yml` for isolated model proof
+- `.github/workflows/nightly.yml` for scheduled broad qualification
+- `tools/test_impact.py` for affected-model selection
 
-Failure path:
+## Queue helper
 
-```text
-unclear task -> ai:needs-human
-invalid or stale task -> ai:dropped
-PR sanity check failure with no active fix run -> ai:needs-rework
-merge/rebase conflict needing implementation and no active fix run -> ai:needs-rework
-promotion PR full-check failure -> promotion repair fixes the promotion source branch, or reports human blocker
-```
-
-## Invariants
-
-- `main` is never pushed by agents.
-- Normal PRs targeting `main` keep existing CI behavior.
-- AI implementation PRs target `ai-staging`.
-- AI implementation PRs carry `ai-generated` and `ai:staging-pr` labels for filtering.
-- AI implementation PRs run only sanity checks.
-- Promotion PRs from timestamped staging snapshot branches to `main` run full checks.
-- Promotion repair may push only `ai-staging-promotion-*` source branches.
-- GitHub native auto-merge is not used for AI PRs unless the repository rules require it.
-
-## Operator Commands
-
-See [Local AI Workflow Playbook](ai-local-pipeline.md) for the human-run
-startup sequence. It opens persistent agent CLI windows in tmux and starts loop
-prompts for discovery, implementation, merge, staging, and promotion lanes.
-
-Preflight:
+`tools/ai_agent_system.py` retains issue-label and queue-management helpers.
+Inspect its exact interface before use:
 
 ```bash
-python3 tools/ai_agent_system.py --project NVIDIA/TensorRT-Model-Connect --target ai-staging preflight
+DOC_REMOTE="github"
+if ! git remote get-url "$DOC_REMOTE" >/dev/null 2>&1; then
+  DOC_REMOTE="origin"
+fi
+
+python3 tools/ai_agent_system.py --help
+python3 tools/ai_agent_system.py --remote "$DOC_REMOTE" --dry-run dashboard
+python3 tools/ai_agent_system.py --remote "$DOC_REMOTE" --dry-run preflight
 ```
 
-Dashboard:
+The tool defaults to a remote named `github`; the fallback supports canonical
+clones where that same repository is named `origin`. Verify that the resolved
+URL is `NVIDIA/TensorRT-Model-Connect` as shown in the
+[local workflow playbook](ai-local-pipeline.md) before any write. Commands
+without `--dry-run` may create labels or mutate issues, so they require
+explicit operator intent. The current `preflight` returns nonzero because the
+remote `ai-staging` branch and its label set are absent; that result confirms
+the lane is inactive rather than indicating a supported setup.
 
-```bash
-python3 tools/ai_agent_system.py --project NVIDIA/TensorRT-Model-Connect --target ai-staging dashboard
-```
+## Inactive staging design
 
-Mark a PR and its linked issue for implementation rework:
+The labels and branch-management code for an `ai-staging` integration lane
+remain in `tools/ai_agent_system.py` and `tools/ai_staging.py`. They are
+retained implementation, not evidence that the lane is operational. The
+current Actions workflows contain no protected minimal-CI gate for
+`ai-staging`; see [AI Staging Branch](ai-staging.md).
 
-```bash
-python3 tools/ai_agent_system.py --project NVIDIA/TensorRT-Model-Connect mark-rework \
-  --pr 123 \
-  --skip-if-active-checks \
-  --reason "rebase conflict against ai-staging"
-```
+## Evidence required from an agent
 
-Create a dry-run task:
+Every pull request should state:
 
-```bash
-python3 tools/ai_agent_system.py --project NVIDIA/TensorRT-Model-Connect --dry-run create-task \
-  --title "tests: cover AI task contract validation" \
-  --scope "tests/tools/test_ai_agent_system.py and tools/ai_agent_system.py only" \
-  --change "Add coverage that validate-task rejects issue bodies missing required sections so implementation issues stay actionable." \
-  --acceptance "A task body missing Verification or Acceptance Criteria fails validation and names the missing heading." \
-  --verification "python3 -m pytest tests/tools/test_ai_agent_system.py -q" \
-  --non-goal "Do not change GitHub API behavior or task labels."
-```
+- the exact scope and non-goals
+- the tested commit
+- commands that were actually executed
+- model, hardware, and artifact details for GPU/model claims
+- remaining risks or unverified paths
 
-Promotion PR:
-
-```bash
-python3 tools/ai_staging.py --project NVIDIA/TensorRT-Model-Connect --branch ai-staging rotate-promotion --target-branch main
-```
-
-Promotion PRs are generated from the actual `github/main..github/<snapshot>`
-tree diff. Their descriptions include branch SHAs, the ai-staging reset SHA,
-staged commit subjects, net file changes, changed paths, diffstat, and a review
-checklist. Implementation agents must write complete individual PR descriptions
-with the task link, scope, concrete changes, verification, risk, rollback, and
-non-goals so the aggregate promotion remains reviewable.
-
-Promotion repair:
-
-```bash
-python3 tools/ai_staging.py --project NVIDIA/TensorRT-Model-Connect --branch ai-staging babysit-promotion --target-branch main --max-rebases 1
-```
-
-The promotion repair lane may clean-rebase and modify timestamped promotion
-source branches until the full PR checks are green. It never merges or approves
-the promotion PR.
+Compilation, CI success, parity, performance, and release qualification are
+separate evidence tiers. A lower tier must not be presented as proof of a
+higher one.

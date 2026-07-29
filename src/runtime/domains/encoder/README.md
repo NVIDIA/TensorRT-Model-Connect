@@ -1,13 +1,15 @@
 # Encoder and Ranking Backends
 
-Non-autoregressive encoder-style runtime paths.
+No behavior-bearing shared encoder backend remains in this directory.
+Encoder-only, embedding, and reranking behavior is model-owned under
+`src/runtime/models/<family>/`.
 
-Key files:
-- `encoder_backend.*`: encoder-only hidden-state inference.
-- `embedding_backend.*`: embedding extraction (text/image and pooling).
-- `reranking_backend.*`: reranker score inference.
+Use each model's `MODEL.toml` as the discovery source, then read its
+`plugin.cpp` and `pipeline.*`. For example:
 
-How to understand:
-1. Start with the backend entry method (`encode`, `embed`, `rerank`).
-2. Follow tensor binding/execution in each backend.
-3. Cross-reference multimodal preprocessing when image-aware embedding is enabled.
+- `src/runtime/models/bert/` owns the `bert_encoder_only` strategy.
+- `src/runtime/models/eagle_vlm/` owns the `eagle_vlm_embedding` and
+  `eagle_vlm_reranking` strategies.
+
+Keep pooling, preprocessing, tensor binding, and output semantics with the
+owning model rather than adding a generic backend here.

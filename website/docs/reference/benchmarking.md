@@ -11,6 +11,73 @@ command:
 trtmc-bench run --model distilgpt2
 ```
 
+## Release performance matrix
+
+`trtmc-bench` measures one resolved workload. The release performance matrix
+adds a repository-owned comparison layer around it: `tools/perf_matrix.py`
+runs TRTMC through `trtmc-bench`, runs the reference backend declared by each
+suite row in a separate Python process, and checks that both sides used the
+same workload and timing boundary.
+
+The checked-in suite at `benchmarks/performance/release.yaml` currently covers
+105 release-relevant, ready, single-process model-profile comparisons across
+76 families and 77 `(family, operation)` contracts. Short `l0` smoke duplicates
+are excluded by rule; any other omission must appear in `excluded_profiles`
+with a reason. Validate coverage and all machine prerequisites without
+measuring a model:
+
+```bash
+python3 tools/perf_matrix.py check \
+  benchmarks/performance/release.yaml \
+  --environment benchmarks/performance/environments/gb300.yaml
+```
+
+The checked-in GB300 environment requires these repository variables to point
+at the installed worker, caches, bundles, and runtime libraries:
+
+```text
+TRTMC_PERF_WORKER
+TRTMC_PERF_BUNDLE_CACHE
+TRTMC_PERF_BUNDLE_ROOTS
+TRTMC_PERF_RUNTIME_DIRS
+```
+
+Both `check` and `run` perform the same preflight: suite coverage, expanded
+environment, free storage, required executables, candidate Release-build
+revision, selected `trtmc-bench` testcases, and candidate/reference timing
+contracts. Reference-specific upstream checkout paths and prebuilt Python
+profiles described in `benchmarks/performance/README.md` are additional
+operator prerequisites; dependency installation is outside the measured
+campaign.
+
+Run the complete matrix, one exact row, or resume an interrupted run:
+
+```bash
+python3 tools/perf_matrix.py run \
+  benchmarks/performance/release.yaml \
+  --environment benchmarks/performance/environments/gb300.yaml
+python3 tools/perf_matrix.py run \
+  benchmarks/performance/release.yaml \
+  --environment benchmarks/performance/environments/gb300.yaml \
+  --entry gpt2.generate
+python3 tools/perf_matrix.py resume artifacts/perf/<run-id>
+```
+
+Every new run writes `results.json` and `report.html` below the configured
+results root. The JSON records resolved configuration, provenance, raw
+samples, exact leaf commands, timing policies, and bundle preparation; the
+HTML shows candidate/reference p50 values and the traffic light. Green,
+yellow, and red are completed comparison results and therefore return zero.
+Configuration errors, command failures, incomplete measurements, and timing or
+output-contract mismatches return nonzero and do not receive a performance
+light.
+
+`.github/workflows/performance.yml` exposes the same matrix as a manual or
+reusable workflow and retains the unique run directory as an artifact. A
+green documentation build or host-only matrix `check` is not target-hardware
+performance evidence: a release claim requires the retained GB300 run,
+reference result, exact revision, and report.
+
 List the model profiles currently supported by the installed benchmark catalog:
 
 ```bash
@@ -145,6 +212,17 @@ Use `--no-build` for a strict CI run that must fail when no bundle exists, or
 resolves the planned cache path without downloading a model or building an
 engine.
 
+Additional resolver and execution controls are:
+
+| Option | Contract |
+| --- | --- |
+| `--bundle-cache PATH` | Override the managed bundle-cache root used for compatible automatic builds. |
+| `--manifest-root PATH` | Resolve `MODEL.toml` and E2E benchmark profiles from an alternate catalog root. It applies to both `run` and `list models`. |
+| `--case NAME` | Select a literal named case; repeat to select several. Named cases remain independent and never form a Cartesian product. |
+| `--runtime-dir PATH` | Repeatable directory added to both backend and model-plugin runtime search paths. |
+| `--worker PATH` | Use one explicit `trtmc_benchmark_worker` executable instead of packaged, source-build, or `PATH` discovery. |
+| `--telemetry auto|off` | Enable best-effort low-frequency GPU telemetry or disable it. Sampling surrounds the worker process and is outside the timed public-pipeline calls. |
+
 ## Architecture
 
 ```mermaid
@@ -158,9 +236,12 @@ flowchart LR
   Build --> Cache[Platform-aware bundle cache]
   Cache --> Service
   Service --> Worker[C++ measurement worker]
-  Worker --> Runner[Native operation runner]
-  Runner --> API[TRTMC public IPipeline]
-  API --> Plugin[Model and backend plugins]
+  Worker --> Load["trtmc::load"]
+  Load -->|native bundle| Native["runtime_strategy<br/>model DSO + backend DSO"]
+  Load -->|optimized_runtime.json| Optimized["embedded implementation DSO<br/>and artifacts"]
+  Native --> API[TRTMC public IPipeline]
+  Optimized --> API
+  API --> Runner[Public operation runner]
   Worker --> Raw[Raw observations]
   Raw --> Metrics[Task-aware metrics]
   Metrics --> Report[JSON + HTML]
@@ -169,22 +250,27 @@ flowchart LR
 
 Python owns configuration, matrix expansion, orchestration, metrics, and
 reporting. The native worker owns the timed loop and calls the same public C++
-pipeline API as an application. Model family, task semantics, and public
-operation are separate extension points:
+pipeline API as an application. It loads the bundle with `trtmc::load`, which
+either follows native `runtime_strategy` dispatch through model and backend
+DSOs or recognizes `optimized_runtime.json` and loads the exact embedded
+implementation path. Both paths return `IPipeline`, so the task operation and
+measurement boundary stay the same. Model family, task semantics, runtime
+implementation, and public operation are separate extension points:
 
 | Change | Benchmark work |
 | --- | --- |
 | New weight/profile in a known family and task | Add the normal manifest and `MODEL.toml.test_manifests` entry; no benchmark code |
-| New family using a known `task_strategy` | Add its normal runtime plugin and manifest; no benchmark code |
+| New native family using a known `task_strategy` | Add its normal runtime model plugin and manifest; no benchmark code |
+| New optimized implementation/profile for a known model and operation | Add the family-owned `IMPLEMENTATION.toml`, exact profile, qualification evidence, and normal E2E/catalog ownership; no benchmark code |
 | New task using an existing public `IPipeline` operation | Add one task adapter that translates its testcase contract |
 | New public pipeline capability | Add an operation metric contract and one native runner, then map task adapters to it |
 
 The benchmark never registers individual families or `runtime_strategy`
 values. For example, a new Wan video family using
 `diffusion_media_generation` and `generate_image` is discovered automatically,
-and a new decoder provider behind `generate` remains invisible to the
-benchmark layer. This is the same rule for source checkouts and the catalog
-snapshot packaged in a wheel.
+and a new native or optimized decoder implementation behind `generate` remains
+invisible to the benchmark layer. This is the same rule for source checkouts
+and the catalog snapshot packaged in a wheel.
 
 ## Run several models
 

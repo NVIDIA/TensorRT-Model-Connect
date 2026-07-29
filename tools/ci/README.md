@@ -29,9 +29,9 @@ flowchart LR
     G --> H
 ```
 
-Each model box is a separate matrix job. Jobs share the machine's four GPUs
-through file-backed leases, but each proof sees only its selected model source,
-private cache view, build directory, and artifacts.
+Each model box is a separate matrix job. Jobs share the runner host's configured
+GPU pool and lease slots through file-backed leases, but each proof sees only
+its selected model source, private cache view, build directory, and artifacts.
 
 ## Try the interface
 
@@ -150,8 +150,10 @@ attempted, while publication remains gated on complete success.
 
 ### 5. Compose one report
 
-After every selected model passes, the Combined HTML Report job downloads all
-per-model artifacts and generates one report. Certification checks require:
+After the selected model jobs finish, the always-run Combined HTML Report job
+downloads available per-model artifacts and generates one report, including a
+fallback report when upstream work failed. Certification succeeds only when
+all of these checks pass:
 
 - exactly the expected model set;
 - the pinned source revision and requested suite;
@@ -163,13 +165,14 @@ documentation.
 
 ## What nightly adds
 
-`.github/workflows/nightly.yml` uses the same image, container, pipeline, model
-proof, scheduling, and reporting classes. It broadens selection to the full
-model inventory and adds package, coverage, full-E2E, semantic media assessment,
-and eligible task-evaluation work.
+`.github/workflows/nightly.yml` reuses the image, container, unit, model-proof,
+and reporting control plane. Its isolated model-proof matrix broadens selection
+to the full model inventory; separate jobs add package, coverage, semantic
+media assessment, diffusion/VLM gating, and eligible task evaluation. It does
+not invoke the retired monolithic `stage full-e2e` lane.
 
-Pre-merge and nightly therefore exercise the same implementation; only their
-selection and breadth differ.
+Pre-merge and nightly therefore share the model-proof implementation while
+using different selections and additional nightly-only jobs.
 
 ## Module map
 
@@ -196,6 +199,7 @@ selection and breadth differ.
 | `model_proof_selection.py` | Resolve and validate one model's proof contract | Projected source |
 | `model_proof.py` | Prepare caches, projection, lease, and proof container | Trusted host |
 | `model_proof_inner.py` | Build, test, compare, and report one model | Hermetic container |
+| `model_reference_cache.py` | Warm and verify pinned external model-reference checkouts | Trusted host |
 | `task_eval.py` | Prepare and run eligible nightly ETTh1 parity | Host and container |
 
 `scripts/schedule_e2e.py` is a compatibility entry point. The implementation is
@@ -224,7 +228,7 @@ the producing class remains the source of truth for optional evidence fields.
 
 - **Functionality / units:** `CiCommand` defines the public command tree and
   creates exactly one owning class for `image`, `container`, `stage`,
-  `pipeline`, `e2e`, `coverage`, or `model-proof`.
+  `pipeline`, `e2e`, `coverage`, `model-proof`, or `model-reference-cache`.
 - **Inputs:** `sys.argv` strings plus `os.environ`. A model-proof request, for
   example, is `{model: str, suite: "premerge"|"nightly", revision: str,
   output_dir: Path|None, inner: bool}`.

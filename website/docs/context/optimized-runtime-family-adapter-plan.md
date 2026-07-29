@@ -1,13 +1,39 @@
-# Family-Owned Optimized Runtime Adapter Implementation Plan
+# Family-Owned Optimized Runtime Adapter Design Record
 
-Status: In progress
+Status: Implemented for the exact qualified Qwen x Edge-LLM profiles; broader
+support remains profile- and hardware-bounded.
+
+:::note Current implementation and support boundary
+
+This document began as an implementation plan and now preserves the design
+rationale. The current tree contains one Qwen x TensorRT Edge-LLM
+implementation descriptor and three exact Qwen3/A100 SM80/FP16 profiles marked
+`qualified`. That is current support for those pinned
+model/revision/target/options tuples, not blanket support for Qwen, Edge-LLM,
+x86_64, or A100 configurations.
+
+Current selection truth comes from the family-owned `IMPLEMENTATION.toml`,
+profile TOMLs, their semantic-source digests, and the matching qualification
+producer/tests. See [Model Support](../getting-started/model-support.md).
+The private dependencies and target hardware named below are still required;
+prose retained from the planning phase is not a substitute for those
+descriptors or exact-revision evidence.
+
+The current builder also evaluates a family-owned `default_build_route` before
+provider probing. Eligible dense Qwen3 and Llama checkpoints now take that
+native route, so the Qwen provider-selection and concrete-default discussion
+retained below describes the original adapter design, not the current
+model-ID-only Qwen3 route.
+
+:::
 
 Goal reference:
 `website/docs/context/optimized-runtime-family-adapter-plan.md`
 
 ## Goal
 
-Keep the TensorRT Model Connect (MC) CLI, Python, C++, and C APIs unchanged,
+Keep the TensorRT-Model-Connect (MC) CLI, Python, C++, and C-linkage subset
+unchanged,
 while allowing a qualified model deployment to use a third-party optimized
 runtime such as TensorRT Edge-LLM.
 
@@ -244,25 +270,28 @@ model ID + resolved revision + deployment options + target capability
   loaded on an incompatible GPU, runtime loading fails before generation; it
   does not reinterpret that bundle as native.
 
-### Existing Default-Tuple Ambiguity
+### Historical Default-Tuple Ambiguity
 
-The unchanged public build API supplies concrete deployment defaults even when
-the caller writes only a model ID:
+At the time this adapter design was implemented, the public build API supplied
+concrete deployment defaults even when the caller wrote only a model ID:
 
 ```text
 precision=fp32, max_cache_length=256, max_batch_size=1
 ```
 
-It therefore cannot distinguish an omitted tuple from a caller who explicitly
-provided those same values. To preserve the required model-ID-only experience,
-the Qwen Edge-LLM adapter treats that complete default tuple as default intent
-and maps it to the qualified Edge-LLM engine tuple:
+The provider probe therefore could not distinguish an omitted tuple from a
+caller who explicitly provided those same values. To preserve the required
+model-ID-only experience at that time, the Qwen Edge-LLM adapter treated that
+complete default tuple as default intent and mapped it to the qualified
+Edge-LLM engine tuple:
 
 ```text
 precision=fp16, max_cache_length=4096, max_batch_size=4
 ```
 
-The adapter also accepts that complete qualified tuple when stated explicitly.
+The adapter also accepted that complete qualified tuple when stated explicitly.
+Current architecture-compatible dense Qwen3 model-only builds do not reach this
+probe; the family selects its BF16 full-context native default first.
 It rejects partial or mixed tuples instead of guessing. This rule is private to
 the Qwen x Edge-LLM adapter, is covered by contract tests, and does not change
 public API signatures. If the product later needs to distinguish omitted from
@@ -351,10 +380,11 @@ API validation must reflect the APIs that exist today:
   consecutive `generate()` calls on that same long-lived instance. The A100
   test also compiles a temporary installed-SDK client that calls the unchanged
   `trtmc::load()` and `generate()` API; no model-specific runner is shipped;
-- C ABI: create/load the pipeline, proving bundle validation, materialization,
-  and DSO loading only. The current C ABI exposes neither text generation nor
-  pipeline destruction; `trtmc_generate_batch` is image generation and is not
-  an Edge-LLM text test. A validation probe therefore terminates after a
+- C-linkage C++ subset: create/load the pipeline, proving bundle validation,
+  materialization, and DSO loading only. The current subset exposes neither
+  text generation nor pipeline destruction and is not a complete pure-C
+  ownership API; `trtmc_generate_batch` is image generation and is not an
+  Edge-LLM text test. A validation probe therefore terminates after a
   successful create instead of inventing a new public API.
 
 ## Private Toolchain Compatibility
@@ -378,7 +408,10 @@ process-global compatibility registry.
 
 ## Implementation Work
 
-Deliver one focused replacement feature PR from `github/main`:
+The historical plan called for one focused replacement feature PR based on the
+GitHub `main` branch. Remote names are checkout-local, so automation must
+resolve and validate whichever remote points to the canonical GitHub
+repository. The planned work was:
 
 1. **Minimal generic discovery change**
    - Discover adapter roots only inside the already-resolved model family.
@@ -477,8 +510,11 @@ Qwen3-1.7B, and Qwen3-4B:
    environment and verify it resolves TensorRT 11.1.0.106; do not use
    `--no-deps` or manually substitute another TensorRT/CUDA cohort.
 2. Build from the unchanged MC CLI using the model ID and current target.
-3. Inspect the bundle and verify the shared implementation ID/DSO plus the
-   profile-specific ID, revision, and engine tree.
+3. Use the normal inspector to verify the optimized descriptor and artifact
+   section names. In the E2E test, read `optimized_runtime.json` with the
+   test-owned bundle-section helper and verify the shared implementation ID/DSO
+   plus the profile-specific ID, revision, and engine tree; the current public
+   inspector does not print descriptor values.
 4. Run one CLI request and one Python request.
 5. Run the existing `trtmc run --benchmark 2 --warmup 1` path, which loads one
    C++ pipeline and calls `generate()` repeatedly, proving long-lived reuse
@@ -486,8 +522,9 @@ Qwen3-1.7B, and Qwen3-4B:
 6. Compile a temporary client against the installed C++ headers/library, call
    `trtmc::load()` and `generate()`, and keep two different Qwen profile
    pipelines alive in the same process while generating with both.
-7. Use a small C ABI probe to create the pipeline and then exit, proving load
-   and materialization without claiming C text generation or a destroy API.
+7. Use a small C-linkage C++ probe to create the pipeline and then exit,
+   proving load and materialization without claiming C text generation or a
+   destroy API.
 8. Run Edge-LLM's official `llm_inference` executable directly against the
    same materialized `engine.dir`, prompt, and greedy generation settings;
    compare deterministic functional output with the MC delegated path.
@@ -540,59 +577,38 @@ and gates; all family/runtime artifact formats and test logic stay in the model
 Test directory. Profile-only changes run only the matching profile shard.
 Adapter, runtime, or shared changes run the full target qualification.
 
-## Exit Criteria
+## Current implementation evidence
 
-- [ ] Public CLI, Python, C++, and C API signatures are unchanged.
-- [ ] PR #477 remains the only generic delegation foundation.
-- [ ] Adapter identity is model family + optimized runtime; profile identity is
-      the exact qualified deployment.
-- [ ] Qwen x Edge-LLM owns one Builder adapter, one Runtime DSO, and one
-      parameterized Test harness.
-- [ ] Qwen3-0.6B, Qwen3-1.7B, and Qwen3-4B are three declarative profiles using
-      that same adapter and DSO.
-- [ ] Only `qualification_state = "qualified"` profiles dispatch by default.
-- [ ] A qualified profile dispatches only while its pinned semantic source
-      digest matches; any adapter, dependency, profile, or runtime-source change
-      requires requalification and a new pin.
-- [ ] Wrong revision or unsupported build target produces no delegation and
-      preserves native fallback behavior.
-- [ ] A selected delegated build failure and an incompatible delegated bundle
-      load fail without silent native fallback.
-- [ ] Model-ID-only build behavior, including the complete-default-tuple
-      interpretation, is explicit and tested.
-- [ ] `max_batch_size` is tested as engine capacity without claiming a CLI or C
-      text-batch API.
-- [ ] Edge-LLM is acquired/built only after profile selection and is absent
-      from native-only dependency paths.
-- [ ] x86 wheel metadata, dependency lock, bundle metadata, adapter/plugin ELF
-      dependencies, and observed runtime agree on TensorRT 11.1.0.106 and CUDA
-      13.4; no bundle-local TensorRT/CUDA copy is packaged.
-- [ ] The same installed x86 wheel builds and executes one native Qwen bundle,
-      explicitly validating the process-wide TensorRT cohort outside Edge-LLM.
-- [ ] Bundle load materializes `engine.dir` and initializes one long-lived
-      Edge-LLM runtime before generation.
-- [ ] C++ proves consecutive text requests; C proves only its supported
-      create/load/materialization behavior.
-- [ ] Direct parity uses Edge-LLM's official `llm_inference` path and the same
-      engine and request settings.
-- [ ] Ordinary premerge CI runs integration contracts only and does not invoke
-      optimized-runtime hardware qualification.
-- [ ] Installed-wheel A100 E2E proves the private C++ toolchain/ABI constraint.
-- [ ] All three profiles pass real A100 build, bundle, load, and generation.
-- [ ] Adding a fourth Qwen profile requires only profile and test-data changes.
-- [ ] Qwen x another runtime and another family x Edge-LLM can be added in
-      sibling family-owned directories without modifying this adapter.
-- [ ] Adding another family-runtime qualification requires only its model-owned
-      descriptor and runner; no new top-level workflow or premerge job is
-      required.
-- [ ] Profile-only CI selects only that qualified target profile, while
-      adapter/runtime changes select all qualified profiles for the descriptor's
-      exact target and never profiles for a different GPU.
-- [ ] CI is green at the smallest correct ownership scope; validation output is
-      stored only as CI artifacts and no `evidence/` directory is committed.
-- [ ] Superseded per-profile adapters and duplicated infrastructure are removed.
+The repository currently records:
 
-The integration CI change is complete when the current source passes its
-smallest correct unit/model scope without dispatching target-hardware E2E.
-Hardware promotion remains a separate, deferred gate until a managed A100
-runner pool exists and the current source satisfies the A100 criteria above.
+- one family-owned implementation identity,
+  `qwen.tensorrt-edge-llm`, and one private implementation DSO identity;
+- three declarative profiles for Qwen3-0.6B, Qwen3-1.7B, and
+  Qwen3-4B-Instruct-2507, all targeting Linux x86_64, A100 PCIe 80 GB, SM80,
+  FP16, TensorRT 11.1, and exact immutable model revisions;
+- `qualification_state = "qualified"` plus a pinned semantic-source digest on
+  each profile;
+- selection rules that decline delegation for a wrong revision, target, or
+  options tuple, while treating failure after an exact profile is selected as
+  terminal rather than silently switching runtimes;
+- a model-owned `QUALIFICATION.a100.toml` producer descriptor, contract tests,
+  and a reusable optimized-runtime proof workflow.
+
+The qualification state and digest are repository assertions about an exact
+source snapshot. Target-hardware pass logs and performance measurements remain
+workflow artifacts rather than checked-in documentation.
+
+## Remaining operational boundaries
+
+- These profiles require their pinned private Edge-LLM dependency, compatible
+  x86_64 toolchain/runtime cohort, and the named A100 target.
+- Ordinary premerge source and contract tests are not substitutes for an
+  exact-profile target-hardware qualification run.
+- Any relevant adapter, dependency, profile, runtime, or shared-host change
+  invalidates the old semantic binding and requires fresh qualification before
+  promotion.
+- Another model, revision, GPU, precision, batch/cache setting, family, or
+  optimized runtime needs its own matching profile or sibling family-owned
+  implementation; it must not inherit support from these three tuples.
+- Qualification logs, comparison output, benchmark results, and generated
+  engines remain external artifacts and must not be committed as proof.
