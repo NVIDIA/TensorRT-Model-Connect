@@ -1,6 +1,7 @@
 {
   "name": "sam3",
   "hf_id": "facebook/sam3",
+  "hf_revision": "3c879f39826c281e95690f02c7821c4de09afae7",
   "bundle": "sam3.bundle",
   "family": "sam3",
   "runtime_strategy": "sam3_prompted_segmentation",

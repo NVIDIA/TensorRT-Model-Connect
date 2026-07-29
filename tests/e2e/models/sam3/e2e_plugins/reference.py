@@ -42,7 +42,8 @@ class Sam3HfTransformersReference(HfTransformersReference):
         image_url = case.inputs.get("image_url", "")
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
-        model_ref = _resolve_cached_model_ref(hf_id)
+        model_revision = case.hf_revision
+        model_ref = _resolve_cached_model_ref(hf_id, model_revision)
         prompt = (
             case.inputs.get("text_prompt")
             or case.inputs.get("prompt")
@@ -59,6 +60,7 @@ class Sam3HfTransformersReference(HfTransformersReference):
 
             hf_id = {hf_id!r}
             model_ref = {model_ref!r}
+            model_revision = {model_revision!r}
             image_path = {image_path!r}
             image_url = {image_url!r}
             trust_remote_code = {trust_remote_code!r}
@@ -67,10 +69,14 @@ class Sam3HfTransformersReference(HfTransformersReference):
             segmented_image_path = {segmented_image_path!r}
             prompt = {prompt!r}
 
-            def _load_sam3_processor(model_ref, trust_remote_code):
+            load_kwargs = {{"trust_remote_code": trust_remote_code}}
+            if model_revision and not os.path.isdir(model_ref):
+                load_kwargs["revision"] = model_revision
+
+            def _load_sam3_processor(model_ref):
                 try:
                     return Sam3Processor.from_pretrained(
-                        model_ref, trust_remote_code=trust_remote_code)
+                        model_ref, **load_kwargs)
                 except Exception as processor_error:
                     if not os.path.isdir(model_ref):
                         raise processor_error
@@ -102,7 +108,7 @@ class Sam3HfTransformersReference(HfTransformersReference):
                     image_processor_kwargs.pop("processor_class", None)
                     image_processor = Sam3ImageProcessorFast(**image_processor_kwargs)
                     tokenizer = AutoTokenizer.from_pretrained(
-                        model_ref, trust_remote_code=trust_remote_code)
+                        model_ref, **load_kwargs)
                     return Sam3Processor(
                         image_processor,
                         tokenizer,
@@ -110,10 +116,10 @@ class Sam3HfTransformersReference(HfTransformersReference):
                     )
 
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            processor = _load_sam3_processor(model_ref, trust_remote_code)
+            processor = _load_sam3_processor(model_ref)
             model = Sam3Model.from_pretrained(
                 model_ref, torch_dtype={torch_dtype_expr},
-                trust_remote_code=trust_remote_code).to(device)
+                **load_kwargs).to(device)
             model.eval()
 
             if image_url:

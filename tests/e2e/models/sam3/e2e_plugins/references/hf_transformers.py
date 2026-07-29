@@ -116,7 +116,7 @@ def _decode_vl_generated_text(
     return ""
 
 
-def _resolve_cached_model_ref(hf_id: str) -> str:
+def _resolve_cached_model_ref(hf_id: str, revision: str = "") -> str:
     """Prefer a locally cached HF snapshot to avoid Hub API rate limits."""
     if not hf_id:
         return hf_id
@@ -127,8 +127,58 @@ def _resolve_cached_model_ref(hf_id: str) -> str:
     try:
         from huggingface_hub import snapshot_download
 
-        return snapshot_download(hf_id, local_files_only=True)
-    except Exception:
+        download_kwargs: dict[str, Any] = {"local_files_only": True}
+        if revision:
+            download_kwargs["revision"] = revision
+        return snapshot_download(hf_id, **download_kwargs)
+    except Exception as error:
+        if revision:
+            try:
+                from huggingface_hub import try_to_load_from_cache
+
+                config_path = try_to_load_from_cache(
+                    hf_id,
+                    "config.json",
+                    revision=revision,
+                )
+                if isinstance(config_path, str):
+                    snapshot = Path(config_path).parent
+                    required_files = (
+                        "config.json",
+                        "processor_config.json",
+                        "tokenizer_config.json",
+                    )
+                    has_tokenizer = (snapshot / "tokenizer.json").is_file() or (
+                        (snapshot / "vocab.json").is_file()
+                        and (snapshot / "merges.txt").is_file()
+                    )
+                    has_weights = any(
+                        (snapshot / name).is_file()
+                        for name in (
+                            "model.safetensors",
+                            "model.safetensors.index.json",
+                            "pytorch_model.bin",
+                            "pytorch_model.bin.index.json",
+                        )
+                    )
+                    exact_revision = (
+                        len(revision) != 40 or snapshot.name == revision
+                    )
+                    if (
+                        exact_revision
+                        and all(
+                            (snapshot / name).is_file()
+                            for name in required_files
+                        )
+                        and has_tokenizer
+                        and has_weights
+                    ):
+                        return str(snapshot)
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"pinned HF snapshot is unavailable offline: {hf_id}@{revision}"
+            ) from error
         return hf_id
 
 
