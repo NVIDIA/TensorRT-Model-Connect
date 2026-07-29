@@ -1213,19 +1213,18 @@ def add_apply_mrope_native(
     mrope_section: tuple[int, int, int],
     rotary_embedding_dim: int,
     interleaved: bool = False,
+    mrope_interleaved: bool = False,
 ) -> trt.ITensor:
     """Apply Qwen2.5-VL temporal/height/width RoPE to one token."""
     rotary_embedding_dim = validate_native_rope_dim(rotary_embedding_dim)
-    sections = tuple(int(value) for value in mrope_section)
-    if len(sections) != 3 or any(value <= 0 for value in sections):
-        raise ValueError("mrope_section must contain three positive integers")
-    if sum(sections) != rotary_embedding_dim // 2:
-        raise ValueError(
-            "mrope_section must sum to half the rotary embedding dimension; "
-            f"got {sections} for rotary dimension {rotary_embedding_dim}")
+    sections = _validate_mrope_sections(
+        mrope_section, rotary_embedding_dim, mrope_interleaved)
 
     def build_cache(cache: trt.ITensor) -> trt.ITensor:
         selected = network.add_gather(cache, position_ids, 0).get_output(0)
+        if mrope_interleaved:
+            return _select_interleaved_mrope_columns(
+                network, selected, sections, rotary_embedding_dim)
         offset = 0
         parts = []
         for axis, width in enumerate(sections):
@@ -1256,20 +1255,24 @@ def add_apply_mrope_native_sequence(
     mrope_section: tuple[int, int, int],
     rotary_embedding_dim: int,
     interleaved: bool = False,
+    mrope_interleaved: bool = False,
 ) -> trt.ITensor:
-    """Apply Qwen2.5-VL mRoPE to a runtime-dynamic token sequence."""
+    """Apply Qwen-VL mRoPE to a runtime-dynamic token sequence.
+
+    ``interleaved`` controls the native RoPE pair layout.  Qwen models use
+    rotate-half, so it normally remains false.  ``mrope_interleaved`` is a
+    separate Qwen3-VL contract: it interleaves the temporal/height/width
+    *frequency columns* while still applying rotate-half RoPE.
+    """
     rotary_embedding_dim = validate_native_rope_dim(rotary_embedding_dim)
-    sections = tuple(int(value) for value in mrope_section)
-    if len(sections) != 3 or any(value <= 0 for value in sections):
-        raise ValueError("mrope_section must contain three positive integers")
-    half_dim = rotary_embedding_dim // 2
-    if sum(sections) != half_dim:
-        raise ValueError(
-            "mrope_section must sum to half the rotary embedding dimension; "
-            f"got {sections} for rotary dimension {rotary_embedding_dim}")
+    sections = _validate_mrope_sections(
+        mrope_section, rotary_embedding_dim, mrope_interleaved)
 
     def build_cache(cache: trt.ITensor) -> trt.ITensor:
         selected = network.add_gather(cache, position_ids, 0).get_output(0)
+        if mrope_interleaved:
+            return _select_interleaved_mrope_columns(
+                network, selected, sections, rotary_embedding_dim)
         offset = 0
         parts = []
         for axis, width in enumerate(sections):
@@ -1290,6 +1293,90 @@ def add_apply_mrope_native_sequence(
         network, inp, num_heads, head_dim,
         build_cache(cos_cache_2d), build_cache(sin_cache_2d),
         rotary_embedding_dim, interleaved, sequence_length=None)
+
+
+def mrope_frequency_axis_map(
+    mrope_section: tuple[int, int, int],
+    rotary_embedding_dim: int,
+    *,
+    interleaved: bool,
+) -> np.ndarray:
+    """Return the T/H/W source axis for every half-dimension frequency.
+
+    Qwen2.5-VL uses contiguous ``[T... H... W...]`` sections.  Qwen3-VL's
+    ``mrope_interleaved`` flag instead uses ``[T H W T H W ... T-tail]``.
+    This is intentionally independent from TensorRT's native ``interleaved``
+    RoPE flag, which selects adjacent-pair rather than rotate-half RoPE.
+    """
+    rotary_embedding_dim = validate_native_rope_dim(rotary_embedding_dim)
+    sections = tuple(int(value) for value in mrope_section)
+    if len(sections) != 3 or any(value <= 0 for value in sections):
+        raise ValueError("mrope_section must contain three positive integers")
+    half_dim = rotary_embedding_dim // 2
+    if sum(sections) != half_dim:
+        raise ValueError(
+            "mrope_section must sum to half the rotary embedding dimension; "
+            f"got {sections} for rotary dimension {rotary_embedding_dim}")
+    if not interleaved:
+        return np.repeat(np.arange(3, dtype=np.int32), sections)
+
+    axes = np.zeros(half_dim, dtype=np.int32)
+    for axis in (1, 2):
+        columns = np.arange(axis, sections[axis] * 3, 3, dtype=np.int32)
+        if len(columns) != sections[axis] or (
+                len(columns) > 0 and int(columns[-1]) >= half_dim):
+            raise ValueError(
+                "interleaved mrope_section cannot be represented within half "
+                f"the rotary dimension; got {sections} for rotary dimension "
+                f"{rotary_embedding_dim}")
+        axes[columns] = axis
+    if int(np.count_nonzero(axes == 0)) != sections[0]:
+        raise ValueError(
+            "interleaved mrope_section leaves the wrong temporal tail width; "
+            f"got {sections} for rotary dimension {rotary_embedding_dim}")
+    return axes
+
+
+def _validate_mrope_sections(
+    mrope_section: tuple[int, int, int],
+    rotary_embedding_dim: int,
+    interleaved: bool,
+) -> tuple[int, int, int]:
+    sections = tuple(int(value) for value in mrope_section)
+    # Build the axis map here as the single validation source for both cache
+    # layouts.  In particular, this validates Qwen3-VL's temporal tail.
+    mrope_frequency_axis_map(
+        sections, rotary_embedding_dim, interleaved=interleaved)
+    return sections
+
+
+def _select_interleaved_mrope_columns(
+    network: trt.INetworkDefinition,
+    selected: trt.ITensor,
+    sections: tuple[int, int, int],
+    rotary_embedding_dim: int,
+) -> trt.ITensor:
+    """Select Qwen3-VL T/H/W columns from ``selected`` shaped [3, Sq, D/2]."""
+    axes = mrope_frequency_axis_map(
+        sections, rotary_embedding_dim, interleaved=True)
+    axis_values = []
+    for axis in range(3):
+        axis_index = add_constant(
+            network, (1,), np.array([axis], dtype=np.int32), dtype=np.int32)
+        axis_values.append(
+            network.add_gather(selected, axis_index, 0).get_output(0))
+
+    result = axis_values[0]
+    for axis in (1, 2):
+        mask = add_constant(
+            network,
+            (1, 1, len(axes)),
+            np.asarray(axes == axis, dtype=np.bool_),
+            dtype=np.bool_,
+        )
+        result = network.add_select(
+            mask, axis_values[axis], result).get_output(0)
+    return result
 
 
 def add_attention_core(

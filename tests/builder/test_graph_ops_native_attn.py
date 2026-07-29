@@ -637,6 +637,40 @@ class TestAddAttentionCore:
 class TestAddApplyMropeNative:
     """Qwen2.5-VL M-RoPE selects T/H/W frequency sections."""
 
+    def test_qwen3_interleaved_axis_map_preserves_temporal_tail(self):
+        axes = qwen_vl_graph_ops.mrope_frequency_axis_map(
+            (24, 20, 20), 128, interleaved=True)
+
+        np.testing.assert_array_equal(
+            axes[:60], np.tile(np.array([0, 1, 2], dtype=np.int32), 20))
+        np.testing.assert_array_equal(
+            axes[60:], np.zeros(4, dtype=np.int32))
+        assert [int(np.count_nonzero(axes == axis)) for axis in range(3)] == [
+            24, 20, 20]
+
+    def test_chunked_and_interleaved_layouts_are_distinct(self):
+        chunked = qwen_vl_graph_ops.mrope_frequency_axis_map(
+            (2, 1, 1), 8, interleaved=False)
+        interleaved = qwen_vl_graph_ops.mrope_frequency_axis_map(
+            (2, 1, 1), 8, interleaved=True)
+
+        np.testing.assert_array_equal(chunked, [0, 0, 1, 2])
+        np.testing.assert_array_equal(interleaved, [0, 1, 2, 0])
+
+    @pytest.mark.parametrize(
+        ("sections", "rotary_dim", "error"),
+        [
+            ((24, 20, 19), 128, "must sum"),
+            ((1, 2, 1), 8, "cannot be represented"),
+        ],
+    )
+    def test_interleaved_axis_map_rejects_invalid_sections(
+        self, sections, rotary_dim, error
+    ):
+        with pytest.raises(ValueError, match=error):
+            qwen_vl_graph_ops.mrope_frequency_axis_map(
+                sections, rotary_dim, interleaved=True)
+
     @requires_trt
     def test_matches_numpy_reference(self):
         num_heads, head_dim = 2, 16
@@ -678,3 +712,89 @@ class TestAddApplyMropeNative:
             [first * cos_m - second * sin_m,
              second * cos_m + first * sin_m], axis=-1).reshape(1, -1)
         np.testing.assert_allclose(out, ref, atol=1e-4)
+
+    @requires_trt
+    def test_qwen3_dynamic_sequence_matches_interleaved_rotate_half(self):
+        num_heads, head_dim, sq = 2, 16, 3
+        sections = (4, 2, 2)
+        positions = np.array(
+            [
+                [2, 3, 4],
+                [5, 6, 7],
+                [8, 9, 10],
+            ],
+            dtype=np.int32,
+        )
+        rng = np.random.default_rng(20260729)
+        x = rng.standard_normal(
+            (sq, num_heads * head_dim)).astype(np.float32)
+        cos = qwen_vl_graph_ops.make_rope_table_half_dim(
+            16, head_dim, 10000.0, True)
+        sin = qwen_vl_graph_ops.make_rope_table_half_dim(
+            16, head_dim, 10000.0, False)
+
+        def build(network, trt_inputs):
+            cos_t = qwen_vl_graph_ops.add_constant(
+                network, cos.shape, cos, dtype=np.float32)
+            sin_t = qwen_vl_graph_ops.add_constant(
+                network, sin.shape, sin, dtype=np.float32)
+            return {
+                "out": qwen_vl_graph_ops.add_apply_mrope_native_sequence(
+                    network,
+                    trt_inputs["x"],
+                    num_heads,
+                    head_dim,
+                    cos_t,
+                    sin_t,
+                    trt_inputs["positions"],
+                    sections,
+                    head_dim,
+                    interleaved=False,
+                    mrope_interleaved=True,
+                )
+            }
+
+        out = _run_strongly_typed(
+            build, {"x": x, "positions": positions})["out"]
+
+        axes = qwen_vl_graph_ops.mrope_frequency_axis_map(
+            sections, head_dim, interleaved=True)
+        columns = np.arange(head_dim // 2)
+        rows = []
+        ordinary_rows = []
+        adjacent_rows = []
+        for row in range(sq):
+            cos_m = cos[positions[axes, row], columns]
+            sin_m = sin[positions[axes, row], columns]
+            cos_full = np.concatenate([cos_m, cos_m])
+            sin_full = np.concatenate([sin_m, sin_m])
+            rows.append(_ref_rope(
+                x[row:row + 1], cos_full, sin_full,
+                num_heads, head_dim))
+
+            temporal_cos = cos[positions[0, row]]
+            temporal_sin = sin[positions[0, row]]
+            ordinary_rows.append(_ref_rope(
+                x[row:row + 1],
+                np.concatenate([temporal_cos, temporal_cos]),
+                np.concatenate([temporal_sin, temporal_sin]),
+                num_heads,
+                head_dim,
+            ))
+
+            heads = x[row].reshape(num_heads, head_dim)
+            pairs = heads.reshape(num_heads, head_dim // 2, 2)
+            adjacent = np.empty_like(pairs)
+            adjacent[..., 0] = (
+                pairs[..., 0] * cos_m - pairs[..., 1] * sin_m)
+            adjacent[..., 1] = (
+                pairs[..., 1] * cos_m + pairs[..., 0] * sin_m)
+            adjacent_rows.append(adjacent.reshape(1, -1))
+
+        ref = np.concatenate(rows, axis=0)
+        ordinary_1d = np.concatenate(ordinary_rows, axis=0)
+        wrong_adjacent_pair = np.concatenate(adjacent_rows, axis=0)
+
+        np.testing.assert_allclose(out, ref, atol=1e-4)
+        assert float(np.max(np.abs(ref - ordinary_1d))) > 0.1
+        assert float(np.max(np.abs(ref - wrong_adjacent_pair))) > 0.1

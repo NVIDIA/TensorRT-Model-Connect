@@ -131,7 +131,10 @@ void QwenVlKvCache::write_position_input(TensorMap& inputs, int32_t seq_len) {
         mrope_pos_buf_.fill(position_);
         Tensor mrope_t;
         mrope_t.data = mrope_pos_buf_.data();
-        mrope_t.shape = {3};
+        mrope_t.shape =
+            bound_module_ != nullptr && bound_module_->input_rank("mrope_position_ids") == 2
+                ? std::vector<int64_t>{3, 1}
+                : std::vector<int64_t>{3};
         mrope_t.dtype = DType::kInt32;
         inputs["mrope_position_ids"] = mrope_t;
     }

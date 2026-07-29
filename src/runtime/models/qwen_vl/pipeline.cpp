@@ -404,6 +404,11 @@ std::vector<int64_t> selector_shape(const TrtModule& decoder, const std::string&
     return decoder.input_rank(name) == 2 ? std::vector<int64_t>{1, 1} : std::vector<int64_t>{1};
 }
 
+std::vector<int64_t> mrope_position_shape(const TrtModule& decoder) {
+    return decoder.input_rank("mrope_position_ids") == 2 ? std::vector<int64_t>{3, 1}
+                                                         : std::vector<int64_t>{3};
+}
+
 void add_text_step_deepstack_inputs(TrtModule& decoder, TensorMap& inputs, int32_t embed_dim,
                                     const std::vector<const float*>& deepstack_embeds,
                                     float& deepstack_active, std::vector<float>& zero_deepstack) {
@@ -833,8 +838,9 @@ void QwenVlPipeline::run_text_step_with_embed(int32_t token_id, const float* inp
     state_->prepare_step(inputs);
 
     if (mrope_position != nullptr && text_decoder_->has_input("mrope_position_ids")) {
-        inputs["mrope_position_ids"] =
-            Tensor{const_cast<int32_t*>(mrope_position->data()), {3}, DType::kInt32};
+        inputs["mrope_position_ids"] = Tensor{const_cast<int32_t*>(mrope_position->data()),
+                                              mrope_position_shape(*text_decoder_),
+                                              DType::kInt32};
     }
 
     std::vector<float> zero_embed;

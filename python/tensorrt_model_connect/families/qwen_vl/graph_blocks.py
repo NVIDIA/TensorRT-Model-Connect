@@ -174,6 +174,7 @@ def add_attention_block(
     interleaved_rope: bool = False,
     mrope_position_ids: trt.ITensor | None = None,
     mrope_section: tuple[int, int, int] | None = None,
+    mrope_interleaved: bool = False,
     ffi_attention_kernel: str | None = None,
     dynamic_kv_cache: bool = False,
     sequence_length: int | None = 1,
@@ -252,17 +253,21 @@ def add_attention_block(
         rope_dim = rotary_embedding_dim or head_dim
         rope_dim = graph_ops.validate_native_rope_dim(rope_dim)
         if mrope_position_ids is not None and mrope_section is not None:
-            if sequence_length != 1:
-                raise NotImplementedError(
-                    "graph_blocks mRoPE currently supports single-token execution")
-            q = graph_ops.add_apply_mrope_native(
+            apply_mrope = (
+                graph_ops.add_apply_mrope_native
+                if sequence_length == 1
+                else graph_ops.add_apply_mrope_native_sequence
+            )
+            q = apply_mrope(
                 network, q, num_heads, head_dim,
                 cos_half_tensor, sin_half_tensor, mrope_position_ids,
-                mrope_section, rope_dim, interleaved_rope)
-            k = graph_ops.add_apply_mrope_native(
+                mrope_section, rope_dim, interleaved_rope,
+                mrope_interleaved)
+            k = apply_mrope(
                 network, k, num_kv_heads, head_dim,
                 cos_half_tensor, sin_half_tensor, mrope_position_ids,
-                mrope_section, rope_dim, interleaved_rope)
+                mrope_section, rope_dim, interleaved_rope,
+                mrope_interleaved)
         else:
             q = graph_ops.add_apply_rope_native(
                 network, q, num_heads, head_dim,

@@ -583,6 +583,19 @@ def _build_qwen3_vl_decoder(
     head_dim = attention_size // num_heads
     kv_attention_size = graph_blocks.infer_kv_attention_size(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
+    rope_scaling = config.raw.get("rope_scaling") or {}
+    raw_mrope_section = (
+        rope_scaling.get("mrope_section")
+        if isinstance(rope_scaling, dict) else None)
+    mrope_section = (
+        tuple(int(value) for value in raw_mrope_section)
+        if raw_mrope_section is not None else None)
+    mrope_interleaved = bool(
+        rope_scaling.get("mrope_interleaved", False)
+        if isinstance(rope_scaling, dict) else False)
+    if mrope_section is not None:
+        graph_ops.mrope_frequency_axis_map(
+            mrope_section, head_dim, interleaved=mrope_interleaved)
     attention_window = max_cache_length + 1
     opt_prefill_length = min(64, max_cache_length)
 
@@ -595,6 +608,9 @@ def _build_qwen3_vl_decoder(
     # --- Inputs ---
     token_id = network.add_input("token_id", trt.int32, (-1,))
     position_id = network.add_input("position_id", trt.int32, (-1,))
+    mrope_position_ids = (
+        network.add_input("mrope_position_ids", trt.int32, (3, -1))
+        if mrope_section is not None else None)
     attention_mask = network.add_input(
         "attention_mask", trt.float32, (-1, -1))
 
@@ -634,6 +650,10 @@ def _build_qwen3_vl_decoder(
         min_sq = opt_sq if fixed else 1
         profile.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
         profile.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
+        if mrope_position_ids is not None:
+            profile.set_shape(
+                "mrope_position_ids",
+                (3, min_sq), (3, opt_sq), (3, max_sq))
         profile.set_shape(
             "attention_mask",
             (min_sq, max_cache_length + min_sq),
@@ -790,6 +810,9 @@ def _build_qwen3_vl_decoder(
             dtype=layer_np_dtype,
             quant_ctx=quant_ctx,
             sequence_length=None,
+            mrope_position_ids=mrope_position_ids,
+            mrope_section=mrope_section,
+            mrope_interleaved=mrope_interleaved,
         )
 
         attn_out = attn["attn_out"]

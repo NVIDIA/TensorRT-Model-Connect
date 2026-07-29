@@ -83,9 +83,9 @@ struct CountingTextStats {
 class CountingTextModule final : public trtmc::ITrtModule {
   public:
     CountingTextModule(std::shared_ptr<CountingTextStats> stats, bool prefill, cudaStream_t stream,
-                       bool has_mrope_input = false)
+                       int32_t mrope_rank = 0)
         : stats_(std::move(stats)), prefill_(prefill), stream_(stream),
-          has_mrope_input_(has_mrope_input),
+          mrope_rank_(mrope_rank),
           present_k_(prefill ? trtmc::DeviceTensor::zeros({8, 4}, trtmc::DType::kFloat32, stream)
                              : trtmc::DeviceTensor{}),
           present_v_(prefill ? trtmc::DeviceTensor::zeros({8, 4}, trtmc::DType::kFloat32, stream)
@@ -124,7 +124,7 @@ class CountingTextModule final : public trtmc::ITrtModule {
         return name == "token_id" || name == "position_id" || name == "attention_mask" ||
                name == "input_embed" || name == "use_input_embed" || name == "deepstack_active" ||
                name == "deepstack_embed_0" || name == "cache_k_0" || name == "cache_v_0" ||
-               (name == "mrope_position_ids" && has_mrope_input_);
+               (name == "mrope_position_ids" && mrope_rank_ > 0);
     }
     bool has_output(const std::string& name) const override {
         return name == "logits" || name == "present_k_0" || name == "present_v_0";
@@ -149,6 +149,8 @@ class CountingTextModule final : public trtmc::ITrtModule {
     }
     void bind_external(const std::string&, void*) override {}
     int32_t input_rank(const std::string& name) const override {
+        if (name == "mrope_position_ids")
+            return mrope_rank_;
         return name == "token_id" || name == "position_id" ? 1 : 2;
     }
     bool input_is_dynamic(const std::string&) const override { return prefill_; }
@@ -159,7 +161,7 @@ class CountingTextModule final : public trtmc::ITrtModule {
     std::shared_ptr<CountingTextStats> stats_;
     bool prefill_{false};
     cudaStream_t stream_{nullptr};
-    bool has_mrope_input_{false};
+    int32_t mrope_rank_{0};
     mutable trtmc::DeviceTensor present_k_;
     mutable trtmc::DeviceTensor present_v_;
     std::vector<float> logits_{0.1F, 0.2F, 0.9F, 0.3F};
@@ -892,8 +894,8 @@ static void test_vl_dynamic_resolution_uses_actual_grid_for_mrope() {
 
     auto decode_stats = std::make_shared<CountingTextStats>();
     auto prefill_stats = std::make_shared<CountingTextStats>();
-    auto decoder = std::make_unique<CountingTextModule>(decode_stats, false, stream, true);
-    auto prefill = std::make_unique<CountingTextModule>(prefill_stats, true, stream, true);
+    auto decoder = std::make_unique<CountingTextModule>(decode_stats, false, stream, 2);
+    auto prefill = std::make_unique<CountingTextModule>(prefill_stats, true, stream, 2);
     auto vision = std::make_unique<FakeSequenceVisionModule>(6);
     auto cache = std::make_unique<trtmc::QwenVlKvCache>(1, 16, 4, stream);
 
@@ -932,6 +934,44 @@ static void test_vl_dynamic_resolution_uses_actual_grid_for_mrope() {
               std::vector<int32_t>(
                   {0, 1, 1, 1, 1, 1, 1, 4, 0, 1, 1, 1, 2, 2, 2, 4, 0, 1, 2, 3, 1, 2, 3, 4}),
           "dynamic mrope: pipeline uses actual 2x3 merged image grid");
+
+    cudaStreamDestroy(stream);
+}
+
+static void test_vl_decode_uses_rank_two_mrope_position_shape() {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto decode_stats = std::make_shared<CountingTextStats>();
+    auto decoder = std::make_unique<CountingTextModule>(decode_stats, false, stream, 2);
+    auto vision = std::make_unique<FakeSequenceVisionModule>();
+    auto cache = std::make_unique<trtmc::QwenVlKvCache>(1, 8, 4, stream);
+
+    trtmc::QwenVlConfig cfg;
+    cfg.vocab_size = 4;
+    cfg.id_eos = 99;
+    cfg.image_token_id = 1;
+    cfg.vision_output_dim = 4;
+    cfg.num_layers = 1;
+
+    trtmc::QwenVlPreprocessConfig vl_pp;
+    vl_pp.preprocessor_type = "simple_chw";
+    vl_pp.fixed_image_size = 4;
+    vl_pp.in_channels = 3;
+
+    auto tokenizer = std::make_shared<VLFixedTokenizer>();
+    trtmc::QwenVlPipeline pipeline(std::move(decoder), std::move(vision), std::move(cache), cfg,
+                                   vl_pp, stream, tokenizer);
+
+    float pixels[2 * 2 * 3] = {0.5F, 0.5F, 0.5F, 0.4F, 0.4F, 0.4F,
+                               0.3F, 0.3F, 0.3F, 0.2F, 0.2F, 0.2F};
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 2;
+    gen_cfg.eos_token_id = 99;
+    (void)pipeline.generate("test", pixels, 2, 2, gen_cfg);
+
+    check(decode_stats->shapes["mrope_position_ids"] == std::vector<int64_t>({3, 1}),
+          "mrope decode: rank-two engine receives [3, 1]");
 
     cudaStreamDestroy(stream);
 }
@@ -1167,6 +1207,7 @@ int main() {
     test_vl_generate_with_embed_decoder();
     test_vl_sequence_prefill_uses_one_text_launch();
     test_vl_dynamic_resolution_uses_actual_grid_for_mrope();
+    test_vl_decode_uses_rank_two_mrope_position_shape();
     test_vl_generate_with_tokenizer();
     test_vl_dynamic_lora_adapter_switching();
     test_vl_pool_isolates_concurrent_lora_selection();
