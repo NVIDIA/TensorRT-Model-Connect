@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Engine tests for the InternLM2 family plugin.
+"""Engine tests for the native-KV InternLM2 family plugin.
 
 InternLM2 uses non-standard HF key names and a group-interleaved fused QKV
 projection (attention.wqkv.weight). The tester overrides make_hf_tensors()
@@ -10,17 +10,65 @@ to produce the correct synthetic weight layout.
 Trace: ARCH-FAM-001, UD-FAM-INTERNLM-01
 Intent: Validate the InternLM2 family plugin weight loading including group-interleaved fused QKV splitting and non-standard HF key names (tok_embeddings, attention.wqkv, output.weight).
 Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
-Postconditions: Fused QKV is correctly split from group-interleaved layout, non-standard keys are mapped to canonical names, and all weight shapes match expected dimensions.
+Postconditions: Fused QKV is split correctly and the engine exposes the native KV alias contract.
 """
-import numpy as np
+import importlib
 
-from tests.builder.family_plugin_tester import FamilyPluginTester
+import numpy as np
+import pytest
+
+from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
 
 class InternLMPluginTester(FamilyPluginTester):
     plugin_module = "tensorrt_model_connect.families.internlm"
     model_type = "internlm2"
+    spec = TinyModelSpec(
+        vocab_size=32,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        head_dim=128,
+        rope_theta=1_000_000.0,
+        max_position_embeddings=128,
+        max_cache_length=128,
+    )
+
+    def get_plugin(self):
+        try:
+            module = importlib.import_module(f"{self.plugin_module}.plugin")
+        except (ImportError, ModuleNotFoundError) as exc:
+            pytest.skip(f"Cannot import {self.plugin_module}: {exc}")
+        return module.plugin
+
+    def get_config_dict(self) -> dict:
+        config = super().get_config_dict()
+        config.update(
+            {
+                "architectures": ["InternLM2ForCausalLM"],
+                "hidden_act": "silu",
+                "bias": False,
+                "rope_scaling": {"type": "dynamic", "factor": 1.0},
+                "_decoder_engine_layout": "split",
+                "_decoder_engine_role": "decode",
+            }
+        )
+        return config
+
+    def expected_engine_input_names(self) -> set[str]:
+        names = {
+            "token_id",
+            "position_id",
+            "cache_write_indices",
+            "key_value_lengths",
+        }
+        for layer in range(self.spec.num_hidden_layers):
+            names.add(f"cache_k_{layer}")
+            names.add(f"cache_v_{layer}")
+        return names
 
     def make_hf_tensors(self) -> dict[str, np.ndarray]:
         """Create synthetic InternLM2 weight layout with fused group-interleaved QKV.
@@ -81,3 +129,49 @@ class InternLMPluginTester(FamilyPluginTester):
 
 class TestInternLMEngine(FamilyPluginTestMixin):
     tester_class = InternLMPluginTester
+
+    @pytest.mark.parametrize("role", ["prefill", "decode"])
+    @pytest.mark.gpu
+    @pytest.mark.trt
+    def test_native_split_role_builds_and_deserializes(
+        self, tester, tmp_path, role,
+    ):
+        trt = pytest.importorskip("tensorrt")
+        config, weights, _ = tester.prepare_config_and_weights(tmp_path)
+        config.raw["_decoder_engine_role"] = role
+
+        plan = tester.get_plugin().build_engine(
+            config,
+            weights,
+            tester.spec.max_position_embeddings,
+        )
+
+        runtime = trt.Runtime(trt.Logger(trt.Logger.WARNING))
+        engine = runtime.deserialize_cuda_engine(plan)
+        assert engine is not None
+        assert engine.num_optimization_profiles == 1
+        token_profile = tuple(
+            tuple(shape)
+            for shape in engine.get_tensor_profile_shape("token_id", 0)
+        )
+        position_profile = tuple(
+            tuple(shape)
+            for shape in engine.get_tensor_profile_shape("position_id", 0)
+        )
+        expected_profile = (
+            ((1,), (64,), (tester.spec.max_position_embeddings,))
+            if role == "prefill"
+            else ((1,), (1,), (1,))
+        )
+        assert token_profile == expected_profile
+        assert position_profile == expected_profile
+        assert tuple(engine.get_tensor_shape("cache_k_0")) == (
+            1,
+            tester.spec.num_key_value_heads,
+            tester.spec.max_position_embeddings,
+            tester.spec.head_dim,
+        )
+        assert tuple(engine.get_tensor_shape("present_k_0")) == tuple(
+            engine.get_tensor_shape("cache_k_0"))
+        assert tuple(engine.get_tensor_shape("logits")) == (
+            1, tester.spec.vocab_size)

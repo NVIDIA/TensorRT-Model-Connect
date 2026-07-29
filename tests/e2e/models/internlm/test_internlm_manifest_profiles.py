@@ -69,7 +69,7 @@ def test_load_manifest_preserves_internlm_execution_profile_overrides(tmp_path) 
 
 
 def test_internlm_builds_reserve_an_exclusive_gpu() -> None:
-    for manifest_name in ("internlm2-1.8b.json", "internlm2-1.8b-tp4.json"):
+    for manifest_name in ("internlm2-1.8b.json",):
         manifest = json.loads(
             (_MANIFEST_DIR / manifest_name).read_text(encoding="utf-8"))
 

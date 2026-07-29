@@ -29,14 +29,16 @@ from .checkpoint_mapper import (
     _open_safetensors,
     _load_tensor,
     _has_tensor,
+    _target_np_dtype,
     _transpose_2d,
 )
-from ...parallel_config import (
-    normalize_parallel_config,
-    require_tensorrt_11_for_tensor_parallel,
+from ...parallel_config import normalize_parallel_config
+from .build_routing import (
+    native_kv_architecture_capability,
+    native_kv_build_capability,
 )
-from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
-from .standard_decoder_builder import build_standard_decoder_engine
+from .native_decoder_builder import build_native_decoder_engine
+from .native_kv_contract import validate_native_kv_weights
 
 
 class InternLMPlugin:
@@ -46,6 +48,18 @@ class InternLMPlugin:
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower().startswith("internlm")
+
+    def default_build_precision(self, config: ModelConfig) -> str:
+        del config
+        return "bf16"
+
+    def default_max_cache_length(self, config: ModelConfig) -> int:
+        """Use the checkpoint's official context without a build flag."""
+        return int(config.max_position_embeddings)
+
+    def supports_split_decoder_roles(self, config: ModelConfig) -> bool:
+        del config
+        return True
 
     def ensure_tokenizer_json(
         self,
@@ -59,8 +73,15 @@ class InternLMPlugin:
 
     def load_weights(
         self, model_dir: str, config: ModelConfig,
+        *, precision: str = "fp32",
     ) -> WeightDict:
         """Load InternLM2 weights, splitting fused wqkv and mapping key names."""
+        capability = native_kv_architecture_capability(config)
+        if not capability.eligible:
+            raise ValueError(
+                "InternLM2 native KV weight load rejected: "
+                + capability.reason)
+
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
 
@@ -73,6 +94,7 @@ class InternLMPlugin:
 
         q_dim = num_heads * head_dim
         kv_dim = num_kv_heads * head_dim
+        target_dtype = _target_np_dtype(precision)
 
         weights = WeightDict()
 
@@ -80,7 +102,7 @@ class InternLMPlugin:
         embedding = _load_tensor(readers, "model.tok_embeddings.weight")
         assert embedding.shape == (vocab, hidden), (
             f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
-        weights["embedding"] = embedding.astype(np.float32)
+        weights["embedding"] = embedding.astype(target_dtype)
 
         mlp_size = 0
         attention_size = 0
@@ -129,9 +151,9 @@ class InternLMPlugin:
                 attention_size = q_dim
 
             # Transpose [out, in] -> [in, out]
-            q_t = _transpose_2d(q_raw, "q_proj")
-            k_t = _transpose_2d(k_raw, "k_proj")
-            v_t = _transpose_2d(v_raw, "v_proj")
+            q_t = _transpose_2d(q_raw, "q_proj", precision=precision)
+            k_t = _transpose_2d(k_raw, "k_proj", precision=precision)
+            v_t = _transpose_2d(v_raw, "v_proj", precision=precision)
             del q_raw, k_raw, v_raw
 
             weights[f"{prefix}.w_q"] = q_t
@@ -141,7 +163,8 @@ class InternLMPlugin:
             # Output projection — "attention.wo.weight"
             o_raw = _load_tensor(
                 readers, f"{hf_prefix}.attention.wo.weight")
-            weights[f"{prefix}.w_o"] = _transpose_2d(o_raw, "o_proj")
+            weights[f"{prefix}.w_o"] = _transpose_2d(
+                o_raw, "o_proj", precision=precision)
             del o_raw
 
             # ---- MLP projections ----
@@ -156,9 +179,12 @@ class InternLMPlugin:
             if mlp_size == 0:
                 mlp_size = gate_raw.shape[0]
 
-            weights[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate_proj")
-            weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up_proj")
-            weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down_proj")
+            weights[f"{prefix}.w_gate"] = _transpose_2d(
+                gate_raw, "gate_proj", precision=precision)
+            weights[f"{prefix}.w_up"] = _transpose_2d(
+                up_raw, "up_proj", precision=precision)
+            weights[f"{prefix}.w_down"] = _transpose_2d(
+                down_raw, "down_proj", precision=precision)
             del gate_raw, up_raw, down_raw
 
         # Final norm
@@ -173,10 +199,12 @@ class InternLMPlugin:
         lm_head_key = "output.weight"
         if _has_tensor(readers, lm_head_key):
             weights["w_out"] = _transpose_2d(
-                _load_tensor(readers, lm_head_key), "lm_head")
+                _load_tensor(readers, lm_head_key), "lm_head",
+                precision=precision)
         else:
             # Tied embeddings
-            weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied")
+            weights["w_out"] = _transpose_2d(
+                embedding.copy(), "embedding_tied", precision=precision)
 
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
         weights["_kv_attention_size"] = kv_dim  # type: ignore[assignment]
@@ -186,30 +214,52 @@ class InternLMPlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
+        max_cache_length: int, *, precision: str = "bf16",
         quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
-        if parallel.enabled:
-            require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="InternLM tensor-parallel builds")
-            if quant_ctx is not None:
-                raise ValueError(
-                    "InternLM tensor-parallel builds do not support quantization")
-            if debug_layer_outputs:
-                raise ValueError(
-                    "InternLM tensor-parallel builds do not support debug_layer_outputs")
-            return build_dual_profile_tp_decoder_engine(
-                config, weights, max_cache_length, precision=precision,
-                quant_ctx=quant_ctx, verbose=verbose,
-                parallel_config=parallel)
+        capability = native_kv_build_capability(
+            config,
+            precision=precision,
+            max_cache_length=max_cache_length,
+            parallel_enabled=parallel.enabled,
+            quantized=quant_ctx is not None,
+            debug_layer_outputs=debug_layer_outputs,
+        )
+        if not capability.eligible:
+            config.raw.pop("_native_kv_cache_metadata", None)
+            raise ValueError(
+                "InternLM2 native KV build rejected: " + capability.reason)
 
-        return build_standard_decoder_engine(
-            config, weights, max_cache_length, precision=precision,
-            quant_ctx=quant_ctx, verbose=verbose,
-            debug_layer_outputs=debug_layer_outputs)
+        validate_native_kv_weights(config, weights)
+        config.raw["_decoder_engine_layout_supported"] = True
+        config.raw["_native_kv_cache_metadata"] = {
+            "native_kv_contract_version": 1,
+            "native_kv_cache": True,
+        }
+        role = str(config.raw.get("_decoder_engine_role", ""))
+        if role not in ("prefill", "decode"):
+            raise ValueError(
+                "native InternLM2 requires explicit split engine role "
+                f"'prefill' or 'decode', got {role!r}"
+            )
+        return build_native_decoder_engine(
+            config,
+            weights,
+            max_cache_length,
+            precision="bf16",
+            verbose=verbose,
+            profile_mode=role,
+        )
+
+    def get_bundle_config_overrides(
+        self, config: ModelConfig,
+    ) -> dict | None:
+        """Mark bundles that satisfy the native runtime contract."""
+        metadata = config.raw.get("_native_kv_cache_metadata")
+        return dict(metadata) if isinstance(metadata, dict) else None
 
 
 plugin = InternLMPlugin()

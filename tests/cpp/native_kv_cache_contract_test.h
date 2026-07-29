@@ -8,6 +8,7 @@
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/trt_module.h"
 
+#include <array>
 #include <cstdint>
 #include <cuda_runtime_api.h>
 #include <iostream>
@@ -67,6 +68,16 @@ class NativeKvModuleStub final : public ITrtModule {
         entry.dtype = dtype;
     }
 
+    void set_profile_shape(const std::string& name, std::vector<int64_t> min,
+                           std::vector<int64_t> opt, std::vector<int64_t> max) {
+        profiles_[name] = {std::move(min), std::move(opt), std::move(max)};
+    }
+
+    void set_profile_metadata(int32_t profile_idx, int32_t profile_count) {
+        profile_idx_ = profile_idx;
+        profile_count_ = profile_count;
+    }
+
     TensorMap forward(const TensorMap& inputs) override {
         if (!trace_)
             return {};
@@ -89,7 +100,7 @@ class NativeKvModuleStub final : public ITrtModule {
     cudaStream_t stream() const override { return stream_; }
     void enable_cuda_graph() override {}
     bool cuda_graph_active() const override { return false; }
-    int32_t profile_idx() const override { return 0; }
+    int32_t profile_idx() const override { return profile_idx_; }
     std::vector<TensorInfo> input_info() const override { return {}; }
     std::vector<TensorInfo> output_info() const override { return {}; }
     bool has_input(const std::string& name) const override { return has(name, true); }
@@ -100,10 +111,17 @@ class NativeKvModuleStub final : public ITrtModule {
         return it == tensors_.end() ? std::vector<int64_t>{} : it->second.shape;
     }
     std::vector<int64_t> input_profile_shape(const std::string& name, int32_t,
-                                             ProfileShapeSelector) const override {
+                                             ProfileShapeSelector selector) const override {
+        const auto profile = profiles_.find(name);
+        if (profile != profiles_.end()) {
+            const auto index = selector == ProfileShapeSelector::kMin
+                                   ? 0U
+                                   : (selector == ProfileShapeSelector::kOpt ? 1U : 2U);
+            return profile->second[index];
+        }
         return tensor_shape(name);
     }
-    int32_t optimization_profile_count() const override { return 1; }
+    int32_t optimization_profile_count() const override { return profile_count_; }
     void* device_ptr(const std::string& name) const override {
         const auto it = bindings_.find(name);
         return it == bindings_.end() ? nullptr : it->second;
@@ -152,18 +170,21 @@ class NativeKvModuleStub final : public ITrtModule {
     int32_t vocab_size_;
     std::vector<float> logits_;
     std::unordered_map<std::string, Entry> tensors_;
+    std::unordered_map<std::string, std::array<std::vector<int64_t>, 3>> profiles_;
     std::unordered_map<std::string, void*> bindings_;
     std::vector<std::shared_ptr<void>> keep_alive_;
+    int32_t profile_idx_{0};
+    int32_t profile_count_{1};
 };
 
 inline int32_t scalar(const TensorMap& inputs, const std::string& name) {
     return *static_cast<const int32_t*>(inputs.at(name).data);
 }
 
-template <typename Cache, typename Mutate>
+template <typename Cache, DType CacheDType, typename Mutate>
 bool rejects_native_contract(cudaStream_t stream, Mutate mutate) {
-    Cache cache(1, 11, 2, stream, DType::kFloat16);
-    NativeKvModuleStub module(stream, 1, 11, 1, 2, DType::kFloat16);
+    Cache cache(1, 11, 2, stream, CacheDType);
+    NativeKvModuleStub module(stream, 1, 11, 1, 2, CacheDType);
     mutate(module);
     try {
         cache.bind_cache_inputs(module);
@@ -173,7 +194,8 @@ bool rejects_native_contract(cudaStream_t stream, Mutate mutate) {
     return false;
 }
 
-template <typename Pipeline, typename Cache, typename Config>
+template <typename Pipeline, typename Cache, typename Config, DType CacheDType = DType::kFloat16,
+          bool LegacyCacheSupported = true, bool PipelineCarriesCacheGeometry = true>
 int run_native_kv_contract_tests(const char* model) {
     int failures = 0;
     const auto check = [&](bool condition, const std::string& message) {
@@ -186,31 +208,31 @@ int run_native_kv_contract_tests(const char* model) {
     if (cudaStreamCreate(&stream) != cudaSuccess)
         return 1;
 
-    check(rejects_native_contract<Cache>(
+    check(rejects_native_contract<Cache, CacheDType>(
               stream,
               [](auto& module) { module.set_tensor("key_value_lengths", {2}, DType::kInt32); }),
           "rejects a non-scalar key_value_lengths input");
-    check(rejects_native_contract<Cache>(
+    check(rejects_native_contract<Cache, CacheDType>(
               stream,
               [](auto& module) { module.set_tensor("cache_write_indices", {1}, DType::kFloat32); }),
           "rejects a non-int32 cache_write_indices input");
-    check(rejects_native_contract<Cache>(
+    check(rejects_native_contract<Cache, CacheDType>(
               stream,
-              [](auto& module) { module.set_tensor("cache_k_0", {1, 1, 10, 2}, DType::kFloat16); }),
+              [](auto& module) { module.set_tensor("cache_k_0", {1, 1, 10, 2}, CacheDType); }),
           "rejects a cache with the wrong capacity");
-    check(rejects_native_contract<Cache>(
+    check(rejects_native_contract<Cache, CacheDType>(
               stream,
               [](auto& module) { module.set_tensor("cache_k_0", {1, 1, 11, 2}, DType::kFloat32); }),
           "rejects a cache with the wrong dtype");
 
     {
-        Cache cache(1, 11, 2, stream, DType::kFloat16);
-        NativeKvModuleStub prefill(stream, 1, 11, 1, 2, DType::kFloat16);
-        NativeKvModuleStub decode(stream, 1, 11, 1, 2, DType::kFloat16);
+        Cache cache(1, 11, 2, stream, CacheDType);
+        NativeKvModuleStub prefill(stream, 1, 11, 1, 2, CacheDType);
+        NativeKvModuleStub decode(stream, 1, 11, 1, 2, CacheDType);
         cache.bind_cache_inputs(prefill);
         cache.bind_to(decode);
-        check(cache.ok() && cache.device_memory_bytes() == 88,
-              "allocates one state-owned FP16 K/V cache");
+        check(cache.ok() && cache.device_memory_bytes() == 44 * dtype_size(CacheDType),
+              "allocates one state-owned native K/V cache");
         check(prefill.device_ptr("cache_k_0") == cache.cache_k(0).data() &&
                   prefill.device_ptr("present_k_0") == cache.cache_k(0).data(),
               "prefill cache and present K share state storage");
@@ -224,7 +246,8 @@ int run_native_kv_contract_tests(const char* model) {
                   scalar(inputs, "key_value_lengths") == 4,
               "native metadata describes the current write without a dense mask");
 
-        cache.set_position(10);
+        for (int32_t position = 0; position < 10; ++position)
+            cache.advance();
         inputs.clear();
         cache.prepare_step(inputs);
         check(scalar(inputs, "cache_write_indices") == 10 &&
@@ -242,15 +265,26 @@ int run_native_kv_contract_tests(const char* model) {
     }
 
     {
-        Cache cache(1, 11, 2, stream, DType::kFloat16);
-        NativeKvModuleStub legacy(stream, 1, 11, 1, 2, DType::kFloat16, false);
-        cache.bind_to(legacy);
-        TensorMap inputs;
-        cache.prepare_step(inputs);
-        cache.advance();
-        check(cache.needs_attention_mask() && inputs.count("attention_mask") == 1 &&
-                  inputs.count("cache_write_indices") == 0 && cache.position() == 1,
-              "legacy attention-mask cache path still advances normally");
+        Cache cache(1, 11, 2, stream, CacheDType);
+        NativeKvModuleStub legacy(stream, 1, 11, 1, 2, CacheDType, false);
+        if constexpr (LegacyCacheSupported) {
+            cache.bind_to(legacy);
+            TensorMap inputs;
+            cache.prepare_step(inputs);
+            cache.advance();
+            check(cache.needs_attention_mask() && inputs.count("attention_mask") == 1 &&
+                      inputs.count("cache_write_indices") == 0 && cache.position() == 1,
+                  "legacy attention-mask cache path still advances normally");
+        } else {
+            bool rejected = false;
+            try {
+                cache.bind_to(legacy);
+            } catch (const std::runtime_error&) {
+                rejected = true;
+            }
+            check(rejected && cache.position() == 0,
+                  "the removed attention-mask cache contract is rejected");
+        }
     }
 
     const auto make_config = [] {
@@ -259,8 +293,10 @@ int run_native_kv_contract_tests(const char* model) {
         config.id_eos = 9;
         config.disable_cuda_graph = true;
         config.prefill_max_length = 4;
-        config.num_layers = 1;
-        config.kv_dim = 2;
+        if constexpr (PipelineCarriesCacheGeometry) {
+            config.num_layers = 1;
+            config.kv_dim = 2;
+        }
         return config;
     };
     const auto make_request = [](int32_t max_new_tokens) {
@@ -276,14 +312,17 @@ int run_native_kv_contract_tests(const char* model) {
     {
         auto prefill_trace = std::make_shared<NativeKvTrace>();
         auto decode_trace = std::make_shared<NativeKvTrace>();
-        auto prefill = std::make_unique<NativeKvModuleStub>(stream, 1, 11, 1, 2, DType::kFloat16,
-                                                            true, prefill_trace);
-        auto decoder = std::make_unique<NativeKvModuleStub>(stream, 1, 11, 1, 2, DType::kFloat16,
-                                                            true, decode_trace);
-        auto cache = std::make_unique<Cache>(1, 11, 2, stream, DType::kFloat16);
+        auto prefill = std::make_unique<NativeKvModuleStub>(stream, 1, 11, 1, 2, CacheDType, true,
+                                                            prefill_trace);
+        auto decoder = std::make_unique<NativeKvModuleStub>(stream, 1, 11, 1, 2, CacheDType, true,
+                                                            decode_trace);
+        auto cache = std::make_unique<Cache>(1, 11, 2, stream, CacheDType);
         Cache* cache_ptr = cache.get();
         std::vector<typename Pipeline::DecoderContext> decoders;
-        decoders.push_back(typename Pipeline::DecoderContext{11, std::move(decoder)});
+        if constexpr (PipelineCarriesCacheGeometry)
+            decoders.push_back(typename Pipeline::DecoderContext{11, std::move(decoder)});
+        else
+            decoders.push_back(typename Pipeline::DecoderContext{std::move(decoder)});
         Pipeline pipeline(std::move(decoders), std::move(cache), make_config(), stream, nullptr, "",
                           nullptr, std::move(prefill));
         const auto result = pipeline.generate_ids(prompt, make_request(1));
@@ -311,14 +350,17 @@ int run_native_kv_contract_tests(const char* model) {
     {
         auto prefill_trace = std::make_shared<NativeKvTrace>();
         auto decode_trace = std::make_shared<NativeKvTrace>();
-        auto prefill = std::make_unique<NativeKvModuleStub>(stream, 1, 11, 1, 2, DType::kFloat16,
-                                                            true, prefill_trace);
-        auto decoder = std::make_unique<NativeKvModuleStub>(stream, 1, 11, 1, 2, DType::kFloat16,
-                                                            true, decode_trace);
-        auto cache = std::make_unique<Cache>(1, 11, 2, stream, DType::kFloat16);
+        auto prefill = std::make_unique<NativeKvModuleStub>(stream, 1, 11, 1, 2, CacheDType, true,
+                                                            prefill_trace);
+        auto decoder = std::make_unique<NativeKvModuleStub>(stream, 1, 11, 1, 2, CacheDType, true,
+                                                            decode_trace);
+        auto cache = std::make_unique<Cache>(1, 11, 2, stream, CacheDType);
         Cache* cache_ptr = cache.get();
         std::vector<typename Pipeline::DecoderContext> decoders;
-        decoders.push_back(typename Pipeline::DecoderContext{11, std::move(decoder)});
+        if constexpr (PipelineCarriesCacheGeometry)
+            decoders.push_back(typename Pipeline::DecoderContext{11, std::move(decoder)});
+        else
+            decoders.push_back(typename Pipeline::DecoderContext{std::move(decoder)});
         Pipeline pipeline(std::move(decoders), std::move(cache), make_config(), stream, nullptr, "",
                           nullptr, std::move(prefill));
         bool overflow = false;

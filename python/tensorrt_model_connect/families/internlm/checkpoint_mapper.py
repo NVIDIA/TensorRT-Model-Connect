@@ -4,7 +4,7 @@
 """1:1 port of standard_checkpoint_mapper.cpp + tensor_math.cpp to Python.
 
 Loads HF safetensors and maps keys to the flat weight dict expected by
-standard_decoder_builder.py. All projections are transposed from HF
+the family-owned decoder builder. All projections are transposed from HF
 [out, in] layout to [in, out] for TRT matmul.
 """
 
@@ -41,7 +41,7 @@ def _transpose_2d(arr: np.ndarray, name: str, precision: str = "fp32") -> np.nda
 class WeightDict(dict):
     """A dict mapping logical weight names to flat float32 arrays.
 
-    Keys follow the convention used by standard_decoder_builder.py:
+    Keys follow the family-owned decoder builder convention:
       - embedding: [vocab, hidden]
       - layer.{i}.input_norm: [hidden]
       - layer.{i}.w_q: [hidden, attention_size]

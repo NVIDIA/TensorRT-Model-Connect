@@ -52,9 +52,9 @@ def _write_safetensors(model_dir: Path, tensors: dict[str, np.ndarray],
 
 @requires_trt
 class TestInternLMBuildEngine:
-    VOCAB, HIDDEN, LAYERS, HEADS, KV_HEADS = 32, 16, 1, 4, 4
+    VOCAB, HIDDEN, LAYERS, HEADS, KV_HEADS = 32, 128, 1, 1, 1
     HEAD_DIM = HIDDEN // HEADS
-    MLP = 32
+    MLP = 256
 
     @staticmethod
     def _make(vocab, hidden, layers, heads, kv_heads, mlp):
@@ -80,13 +80,33 @@ class TestInternLMBuildEngine:
         from tensorrt_model_connect.families.internlm import plugin
         config = {
             "model_type": "internlm2",
-            "vocab_size": self.VOCAB, "hidden_size": self.HIDDEN,
-            "num_hidden_layers": self.LAYERS, "num_attention_heads": self.HEADS,
+            "architectures": ["InternLM2ForCausalLM"],
+            "vocab_size": self.VOCAB,
+            "hidden_size": self.HIDDEN,
+            "intermediate_size": self.MLP,
+            "num_hidden_layers": self.LAYERS,
+            "num_attention_heads": self.HEADS,
             "num_key_value_heads": self.KV_HEADS,
+            "rms_norm_eps": 1e-5,
+            "rope_theta": 1_000_000.0,
+            "max_position_embeddings": 32,
+            "hidden_act": "silu",
+            "bias": False,
+            "_decoder_engine_layout": "split",
+            "_decoder_engine_role": "decode",
         }
         _write_config(tmp_path, config)
-        _write_safetensors(tmp_path, self._make(
-            self.VOCAB, self.HIDDEN, self.LAYERS, self.HEADS, self.KV_HEADS, self.MLP))
+        _write_safetensors(
+            tmp_path,
+            self._make(
+                self.VOCAB,
+                self.HIDDEN,
+                self.LAYERS,
+                self.HEADS,
+                self.KV_HEADS,
+                self.MLP,
+            ),
+        )
         cfg = ModelConfig.from_dir(tmp_path)
         weights = plugin.load_weights(str(tmp_path), cfg)
         engine = plugin.build_engine(cfg, weights, max_cache_length=32, verbose=False)

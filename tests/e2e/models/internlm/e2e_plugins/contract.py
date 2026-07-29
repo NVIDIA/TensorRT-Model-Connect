@@ -2,11 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """internlm-owned E2E contract plugins."""
+
 from __future__ import annotations
 
 from tests.e2e_harness.contracts import (
     MetricResult,
 )
+
+
 # Model-owned contract helpers. Keep behavior here so contract semantics do not
 # drift across model families through shared harness code.
 def contract_config(case):
@@ -101,8 +104,27 @@ def levenshtein_ned(a: str, b: str) -> float:
     return prev[-1] / max_len
 
 
+def generated_token_ids(output) -> list[int] | None:
+    raw_tokens = (output.data or {}).get("token_ids")
+    if not isinstance(raw_tokens, list):
+        return None
+    try:
+        return [int(token) for token in raw_tokens]
+    except (TypeError, ValueError):
+        return None
+
+
+def positional_token_agreement(lhs: list[int], rhs: list[int]) -> float:
+    total = max(len(lhs), len(rhs))
+    if total == 0:
+        return 1.0
+    matches = sum(lhs[index] == rhs[index] for index in range(min(len(lhs), len(rhs))))
+    return matches / total
+
+
 def make_pass(stage_name: str, metrics, rule: str = ""):
     from tests.e2e_harness.contracts import CompareResult
+
     return CompareResult(
         stage_name=stage_name,
         status="passed",
@@ -114,6 +136,7 @@ def make_pass(stage_name: str, metrics, rule: str = ""):
 
 def make_fail(stage_name: str, metrics, rule: str = "", message: str = ""):
     from tests.e2e_harness.contracts import CompareResult
+
     return CompareResult(
         stage_name=stage_name,
         status="failed",
@@ -125,6 +148,7 @@ def make_fail(stage_name: str, metrics, rule: str = "", message: str = ""):
 
 def make_skip(stage_name: str, metrics, rule: str = "", message: str = ""):
     from tests.e2e_harness.contracts import CompareResult
+
     return CompareResult(
         stage_name=stage_name,
         status="skipped",
@@ -136,11 +160,13 @@ def make_skip(stage_name: str, metrics, rule: str = "", message: str = ""):
 
 def make_error(stage_name: str, error: str):
     from tests.e2e_harness.contracts import CompareResult
+
     return CompareResult(
         stage_name=stage_name,
         status="error",
         message=f"Contract verification error: {error}",
     )
+
 
 class InternlmChatInstructPlugin:
     reference_families = ["chat_instruct_template"]
@@ -150,6 +176,25 @@ class InternlmChatInstructPlugin:
         return contract_config(case)
 
     def verify(self, trt_output, ref_output, case, threshold):
+        cpp_rc = (trt_output.data or {}).get("cpp_returncode")
+        if cpp_rc not in (None, 0):
+            detail = (trt_output.data or {}).get("cpp_runtime_error")
+            suffix = f": {detail}" if detail else ""
+            return make_fail(
+                "full_generation",
+                {
+                    "cpp_returncode_ok": MetricResult(
+                        value=0.0,
+                        threshold=1.0,
+                        operator="==",
+                        passed=False,
+                        note=f"cpp_returncode={cpp_rc}",
+                    )
+                },
+                "successful native runtime required",
+                f"TRT C++ run failed (cpp_returncode={cpp_rc}){suffix}",
+            )
+
         prompt = case.inputs.get("prompt", "")
         config = contract_config(case)
         if config.get("enable_thinking") is False:
@@ -193,15 +238,69 @@ class InternlmChatInstructPlugin:
             ),
         }
 
-        passed = exact_match or ned <= ned_threshold
-        rule = "exact_match OR ned <= threshold"
+        token_gate_ok = True
+        token_threshold = threshold.metrics.get("contract_token_agreement_rate")
+        if token_threshold is not None:
+            trt_tokens = generated_token_ids(trt_output)
+            ref_tokens = generated_token_ids(ref_output)
+            if trt_tokens is None or ref_tokens is None:
+                missing = []
+                if trt_tokens is None:
+                    missing.append("TRT")
+                if ref_tokens is None:
+                    missing.append("HF reference")
+                metrics["generated_token_ids_available"] = MetricResult(
+                    value=0.0,
+                    threshold=1.0,
+                    operator="==",
+                    passed=False,
+                    note=(f"missing generated token IDs from {' and '.join(missing)}"),
+                )
+                return make_fail(
+                    "full_generation",
+                    metrics,
+                    "generated token IDs required for configured token parity",
+                    metrics["generated_token_ids_available"].note,
+                )
+
+            token_threshold = float(token_threshold)
+            token_agreement = positional_token_agreement(trt_tokens, ref_tokens)
+            token_exact = trt_tokens == ref_tokens
+            exact_tokens_required = token_threshold >= 1.0
+            metrics["generated_token_agreement_rate"] = MetricResult(
+                value=token_agreement,
+                threshold=token_threshold,
+                operator=">=",
+                passed=token_agreement >= token_threshold,
+                note=(f"TRT tokens={len(trt_tokens)}, HF reference tokens={len(ref_tokens)}"),
+            )
+            metrics["generated_token_exact"] = MetricResult(
+                value=1.0 if token_exact else 0.0,
+                threshold=1.0 if exact_tokens_required else None,
+                operator="==" if exact_tokens_required else "",
+                passed=token_exact if exact_tokens_required else True,
+            )
+            token_gate_ok = token_agreement >= token_threshold and (
+                token_exact or not exact_tokens_required
+            )
+
+        if token_threshold is not None:
+            passed = exact_match and token_gate_ok
+            rule = "exact normalized generated text AND configured generated-token parity"
+        else:
+            passed = exact_match or ned <= ned_threshold
+            rule = "exact_match OR ned <= threshold"
         if passed:
             return make_pass("full_generation", metrics, rule)
         return make_fail(
             "full_generation",
             metrics,
             rule,
-            f"Chat response diverged: NED={ned:.3f}",
+            (
+                f"Chat response diverged: exact_match={exact_match}, "
+                f"NED={ned:.3f}, token_gate_ok={token_gate_ok}"
+            ),
         )
+
 
 plugin = InternlmChatInstructPlugin()

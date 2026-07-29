@@ -4,7 +4,7 @@
 id = "internlm"
 plugin = "internlm"
 module = "plugin"
-capabilities = ["split_decoder_roles", "debug_layer_outputs"]
+capabilities = ["native_cpp_logits_trace", "native_kv_cache", "split_decoder_roles"]
 python_profile_specs = [
   "internlm|families/internlm/python_profile_requirements/internlm.lock.txt|families/internlm/python_profile_verify.py|true",
 ]
@@ -20,7 +20,4 @@ aliases = [
 prefixes = [
   "internlm",
 ]
-debug_runner = "debug_runner.py|runner_from_bundle"
-debug_runtime_strategies = [
-  "internlm_decoder_kv_cache",
-]
+default_build_route = "build_routing.py|prefer_native_default"

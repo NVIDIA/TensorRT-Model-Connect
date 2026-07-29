@@ -14,3 +14,6 @@ def test_reference_retries_chat_template_without_thinking_kwarg() -> None:
     )
     assert "except TypeError:" in source
     assert 'chat_kwargs.pop("enable_thinking", None)' in source
+    assert "hf_generated_tokens.json" in source
+    assert 'json.dump({{"token_ids": generated_token_ids}}, f)' in source
+    assert "_json_output_reader(token_path)" in source

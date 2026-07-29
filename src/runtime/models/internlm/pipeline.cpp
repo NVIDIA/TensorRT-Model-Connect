@@ -12,10 +12,9 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
-#include <cmath>
-#include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <numeric>
@@ -45,6 +44,10 @@ StepTraceConfig& mutable_step_trace_config() {
 
 const StepTraceConfig& step_trace_config() {
     return mutable_step_trace_config();
+}
+
+bool step_trace_enabled() {
+    return step_trace_config().enabled;
 }
 
 } // namespace
@@ -83,11 +86,12 @@ std::vector<int32_t> top_logit_indices(const std::vector<float>& logits, int32_t
     return order;
 }
 
-void write_step_trace_line(std::ostream& out, int32_t position_before, int32_t token_id,
-                           int32_t decoder_idx, int32_t rows_before, int32_t rows_after,
-                           const std::vector<float>& logits, const std::vector<int32_t>& order,
-                           int32_t top_n) {
-    out << "{\"position_before\":" << position_before << ",\"token_id\":" << token_id
+void write_step_trace_line(std::ostream& out, const char* phase, int32_t position_before,
+                           int32_t token_id, int32_t decoder_idx, int32_t rows_before,
+                           int32_t rows_after, const std::vector<float>& logits,
+                           const std::vector<int32_t>& order, int32_t top_n) {
+    out << std::setprecision(std::numeric_limits<float>::max_digits10) << "{\"phase\":\"" << phase
+        << "\",\"position_before\":" << position_before << ",\"token_id\":" << token_id
         << ",\"decoder_idx\":" << decoder_idx << ",\"rows_before\":" << rows_before
         << ",\"rows_after\":" << rows_after << ",\"argmax_token\":" << order.front()
         << ",\"argmax_logit\":" << logits[static_cast<std::size_t>(order.front())]
@@ -106,8 +110,8 @@ void write_step_trace_line(std::ostream& out, int32_t position_before, int32_t t
     out << "]}\n";
 }
 
-void maybe_append_step_trace(int32_t position_before, int32_t token_id, int32_t decoder_idx,
-                             int32_t rows_before, int32_t rows_after,
+void maybe_append_step_trace(const char* phase, int32_t position_before, int32_t token_id,
+                             int32_t decoder_idx, int32_t rows_before, int32_t rows_after,
                              const std::vector<float>& logits) {
     const auto& cfg = step_trace_config();
     if (!cfg.enabled || position_before < cfg.start_position || position_before > cfg.end_position)
@@ -119,8 +123,8 @@ void maybe_append_step_trace(int32_t position_before, int32_t token_id, int32_t 
     std::ofstream out(cfg.path, std::ios::app);
     if (!out)
         return;
-    write_step_trace_line(out, position_before, token_id, decoder_idx, rows_before, rows_after,
-                          logits, order, top_n);
+    write_step_trace_line(out, phase, position_before, token_id, decoder_idx, rows_before,
+                          rows_after, logits, order, top_n);
 }
 
 bool contains_boxed_answer(const std::string& text) {
@@ -143,13 +147,6 @@ bool contains_final_answer(const std::string& text) {
     return false;
 }
 
-std::vector<InternlmTextGenerationPipeline::DecoderContext>
-single_decoder_context(std::unique_ptr<TrtModule> decoder) {
-    std::vector<InternlmTextGenerationPipeline::DecoderContext> decoders;
-    decoders.push_back(InternlmTextGenerationPipeline::DecoderContext{0, std::move(decoder)});
-    return decoders;
-}
-
 std::string normalize_generation_mode(std::string mode) {
     std::transform(mode.begin(), mode.end(), mode.begin(),
                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
@@ -157,151 +154,23 @@ std::string normalize_generation_mode(std::string mode) {
     return mode;
 }
 
-bool greedy_text_diffusion_params(const InternlmSamplingParams& params) {
-    return params.seed < 0 &&
-           (params.temperature <= 1e-6F ||
-            (params.top_k <= 1 && params.top_p >= 1.0F - 1e-6F && params.min_p <= 1e-6F));
-}
-
-struct TokenConfidence {
-    int32_t pos{0};
-    int32_t token_id{0};
-    float confidence{0.0F};
-};
-
-TokenConfidence argmax_with_confidence(const float* logits, int32_t vocab, int32_t pos) {
-    TokenConfidence out;
-    out.pos = pos;
-    if (logits == nullptr || vocab <= 0)
-        return out;
-    int32_t best = 0;
-    float max_logit = logits[0];
-    for (int32_t i = 1; i < vocab; ++i) {
-        if (logits[i] > max_logit) {
-            max_logit = logits[i];
-            best = i;
-        }
-    }
-    double denom = 0.0;
-    for (int32_t i = 0; i < vocab; ++i)
-        denom += std::exp(static_cast<double>(logits[i] - max_logit));
-    out.token_id = best;
-    out.confidence = denom > 0.0 ? static_cast<float>(1.0 / denom) : 0.0F;
-    return out;
-}
-
-std::vector<int32_t> transfer_quota_schedule(int32_t masked, int32_t steps) {
-    steps = std::max(steps, 1);
-    std::vector<int32_t> quota(static_cast<std::size_t>(steps), 0);
-    const int32_t base = masked / steps;
-    const int32_t rem = masked % steps;
-    for (int32_t i = 0; i < steps; ++i)
-        quota[static_cast<std::size_t>(i)] = base + (i < rem ? 1 : 0);
-    return quota;
-}
-
-std::vector<TokenConfidence> masked_predictions(const std::vector<float>& logits,
-                                                const std::vector<int32_t>& block,
-                                                int32_t mask_token_id, int32_t vocab_size) {
-    std::vector<TokenConfidence> preds;
-    if (vocab_size <= 0)
-        return preds;
-    const auto rows = static_cast<int32_t>(logits.size() / static_cast<std::size_t>(vocab_size));
-    const int32_t usable = std::min<int32_t>(rows, static_cast<int32_t>(block.size()));
-    preds.reserve(static_cast<std::size_t>(usable));
-    for (int32_t i = 0; i < usable; ++i) {
-        if (block[static_cast<std::size_t>(i)] != mask_token_id)
-            continue;
-        preds.push_back(argmax_with_confidence(
-            logits.data() + static_cast<std::size_t>(i) * static_cast<std::size_t>(vocab_size),
-            vocab_size, i));
-    }
-    std::sort(preds.begin(), preds.end(),
-              [](const TokenConfidence& lhs, const TokenConfidence& rhs) {
-                  if (lhs.confidence != rhs.confidence)
-                      return lhs.confidence > rhs.confidence;
-                  return lhs.pos < rhs.pos;
-              });
-    return preds;
-}
-
-void apply_diffusion_transfer(std::vector<int32_t>& block,
-                              const std::vector<TokenConfidence>& preds, int32_t quota,
-                              bool use_threshold, float threshold) {
-    if (preds.empty())
-        return;
-    if (use_threshold) {
-        block[static_cast<std::size_t>(preds.front().pos)] = preds.front().token_id;
-        for (std::size_t i = 1; i < preds.size(); ++i) {
-            if (preds[i].confidence >= threshold)
-                block[static_cast<std::size_t>(preds[i].pos)] = preds[i].token_id;
-        }
-        return;
-    }
-    quota = std::max(0, std::min<int32_t>(quota, static_cast<int32_t>(preds.size())));
-    for (int32_t i = 0; i < quota; ++i)
-        block[static_cast<std::size_t>(preds[static_cast<std::size_t>(i)].pos)] =
-            preds[static_cast<std::size_t>(i)].token_id;
-}
-
-void apply_linear_spec_transfer(std::vector<int32_t>& block,
-                                const std::vector<TokenConfidence>& preds, bool threshold_enabled,
-                                float threshold) {
-    if (preds.empty())
-        return;
-    if (!threshold_enabled) {
-        for (const auto& pred : preds)
-            block[static_cast<std::size_t>(pred.pos)] = pred.token_id;
-        return;
-    }
-
-    bool changed = false;
-    for (const auto& pred : preds) {
-        if (pred.confidence >= threshold) {
-            block[static_cast<std::size_t>(pred.pos)] = pred.token_id;
-            changed = true;
-        }
-    }
-    if (!changed)
-        block[static_cast<std::size_t>(preds.front().pos)] = preds.front().token_id;
-}
-
-bool has_mask_token(const std::vector<int32_t>& block, int32_t mask_token_id) {
-    return std::find(block.begin(), block.end(), mask_token_id) != block.end();
-}
-
 } // namespace
 
 InternlmTextGenerationPipeline::InternlmTextGenerationPipeline(
-    std::unique_ptr<TrtModule> decoder, std::unique_ptr<InternlmInferenceState> state,
+    std::vector<DecoderContext> decoders, std::unique_ptr<InternlmKvCache> state,
     InternlmTextGenConfig config, cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
     std::string model_id_str, std::unique_ptr<InternlmISampler> sampler,
-    std::shared_ptr<void> distributed_owner)
-    : InternlmTextGenerationPipeline(single_decoder_context(std::move(decoder)), std::move(state),
-                                     std::move(config), stream, std::move(tokenizer),
-                                     std::move(model_id_str), std::move(sampler),
-                                     /*prefill=*/nullptr, /*linear_spec_lora_prefill=*/nullptr,
-                                     std::move(distributed_owner)) {}
-
-InternlmTextGenerationPipeline::InternlmTextGenerationPipeline(
-    std::vector<DecoderContext> decoders, std::unique_ptr<InternlmInferenceState> state,
-    InternlmTextGenConfig config, cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
-    std::string model_id_str, std::unique_ptr<InternlmISampler> sampler,
-    std::unique_ptr<TrtModule> prefill, std::unique_ptr<TrtModule> linear_spec_lora_prefill,
-    std::shared_ptr<void> distributed_owner)
-    : distributed_owner_(std::move(distributed_owner)), decoders_(std::move(decoders)),
-      prefill_(std::move(prefill)), linear_spec_lora_prefill_(std::move(linear_spec_lora_prefill)),
-      state_(std::move(state)), config_(std::move(config)), stream_(stream),
-      tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
-      sampler_(std::move(sampler)), logits_output_name_(config_.logits_output_name) {
-    if (decoders_.empty()) {
-        throw std::runtime_error("InternlmTextGenerationPipeline: no decoder modules");
-    }
-    for (const auto& decoder_ctx : decoders_) {
-        if (!decoder_ctx.module || !decoder_ctx.module->ok()) {
-            throw std::runtime_error("InternlmTextGenerationPipeline: invalid decoder module");
-        }
-    }
+    std::unique_ptr<TrtModule> prefill)
+    : decoders_(std::move(decoders)), prefill_(std::move(prefill)), state_(std::move(state)),
+      config_(std::move(config)), stream_(stream), tokenizer_(std::move(tokenizer)),
+      model_id_(std::move(model_id_str)), sampler_(std::move(sampler)),
+      logits_output_name_(config_.logits_output_name) {
+    if (decoders_.size() != 1 || !decoders_.front().module || !decoders_.front().module->ok())
+        throw std::runtime_error(
+            "InternlmTextGenerationPipeline requires exactly one native decode module");
+    if (!prefill_ || !prefill_->ok())
+        throw std::runtime_error(
+            "InternlmTextGenerationPipeline requires a native split prefill module");
     if (!state_ || !state_->ok()) {
         throw std::runtime_error("InternlmTextGenerationPipeline: invalid inference state");
     }
@@ -382,90 +251,103 @@ InternlmTextGenerationPipeline::make_step_sampler(const InternlmSamplingParams& 
     const bool greedy_params =
         (params.temperature < 1e-6F) ||
         (params.top_k <= 1 && params.top_p >= 1.0F && params.min_p <= 0.0F && params.seed < 0);
-    if (prefer_gpu_greedy_ && greedy_params) {
+    if (!step_trace_enabled() && prefer_gpu_greedy_ && greedy_params) {
         if (auto gpu = create_internlm_gpu_greedy_sampler(stream_))
             return gpu;
     }
     return create_internlm_sampler(params);
 }
 
-// Helper: gather per-layer present_k/present_v device pointers from the
-// prefill TrtModule. Returns false if any layer's tensor is missing — in
-// that case the caller falls back to the per-token decode loop.
 namespace {
-bool gather_prefill_kv_pointers(TrtModule& prefill, const InternlmTextGenConfig& cfg,
-                                std::vector<const void*>& pk, std::vector<const void*>& pv) {
-    pk.resize(static_cast<std::size_t>(cfg.num_layers));
-    pv.resize(static_cast<std::size_t>(cfg.num_layers));
-    for (int32_t i = 0; i < cfg.num_layers; ++i) {
-        const auto li = static_cast<std::size_t>(i);
-        pk[li] = prefill.device_ptr(internlm_expand_layer_name(cfg.present_k_pattern, i));
-        pv[li] = prefill.device_ptr(internlm_expand_layer_name(cfg.present_v_pattern, i));
-        if (pk[li] == nullptr || pv[li] == nullptr)
-            return false;
+void validate_generation_capacity(const std::vector<int32_t>& input_ids, int32_t max_new_tokens,
+                                  const InternlmKvCache* state) {
+    const auto capacity = static_cast<std::size_t>(state->max_length());
+    if (input_ids.size() > capacity ||
+        (max_new_tokens > 0 &&
+         static_cast<std::size_t>(max_new_tokens) > capacity - input_ids.size())) {
+        throw std::runtime_error(
+            "Internlm requested prompt and generation exceed the model's fixed KV cache capacity");
     }
-    return true;
-}
-
-bool batched_prefill_supported(const TrtModule* prefill, const InternlmTextGenConfig& cfg,
-                               int32_t sq, InternlmInferenceState* state) {
-    if (prefill == nullptr || sq <= 0)
-        return false;
-    if (cfg.prefill_max_length > 0 && sq > cfg.prefill_max_length)
-        return false;
-    if (cfg.num_layers <= 0 || cfg.vocab_size <= 0)
-        return false;
-    return dynamic_cast<InternlmKvCache*>(state) != nullptr;
 }
 } // namespace
 
-bool InternlmTextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>& input_ids,
-                                                         std::vector<float>& logits) {
-    const auto sq = static_cast<int32_t>(input_ids.size());
-    if (!batched_prefill_supported(prefill_.get(), config_, sq, state_.get()))
-        return false;
-    auto* kv = static_cast<InternlmKvCache*>(state_.get());
-
-    // The prefill module shares the same external KV cache buffers as the
-    // decode module(s), so we rebind the cache_k/cache_v inputs onto the
-    // prefill execution context before running.
-    kv->bind_cache_inputs(*prefill_);
-
+void InternlmTextGenerationPipeline::run_prefill_chunk(const int32_t* token_ids, int32_t chunk_size,
+                                                       std::vector<float>& logits,
+                                                       bool retain_device_logits) {
     TensorMap inputs;
-    Tensor tok_t;
-    tok_t.data = const_cast<int32_t*>(input_ids.data());
-    tok_t.shape = {static_cast<int64_t>(sq)};
-    tok_t.dtype = DType::kInt32;
-    inputs[config_.token_id_name] = tok_t;
-    state_->prepare_step(inputs, sq);
+    Tensor token_tensor;
+    token_tensor.data = const_cast<int32_t*>(token_ids);
+    token_tensor.shape = {static_cast<int64_t>(chunk_size)};
+    token_tensor.dtype = DType::kInt32;
+    inputs[config_.token_id_name] = token_tensor;
+    state_->prepare_step(inputs, chunk_size);
 
     TensorMap outputs = prefill_->forward(inputs);
     auto logits_it = outputs.find(config_.logits_output_name);
-    if (logits_it == outputs.end())
-        return false;
+    if (logits_it == outputs.end()) {
+        throw std::runtime_error(
+            "InternlmTextGenerationPipeline: prefill module has no logits output");
+    }
 
     const auto vocab = static_cast<std::size_t>(config_.vocab_size);
-    const auto& lt = logits_it->second;
-    if (static_cast<std::size_t>(lt.numel()) < vocab)
-        return false;
-    logits.resize(vocab);
-    const auto offset = static_cast<std::size_t>(lt.numel()) - vocab;
-    std::memcpy(logits.data(), static_cast<const float*>(lt.data) + offset, vocab * sizeof(float));
-
-    std::vector<const void*> pk, pv;
-    if (!gather_prefill_kv_pointers(*prefill_, config_, pk, pv))
-        return false;
-    kv->write_prefill_kv(pk, pv, sq);
-    if (config_.log_runtime_stats) {
-        std::cerr << "[trtmc] Batched prefill (";
-        if (!config_.prefill_log_label.empty()) {
-            std::cerr << config_.prefill_log_label;
-        } else {
-            std::cerr << "profile " << config_.prefill_profile_index;
-        }
-        std::cerr << "): " << sq << " tokens in one call\n";
+    const auto& logits_tensor = logits_it->second;
+    if (static_cast<std::size_t>(logits_tensor.numel()) < vocab) {
+        throw std::runtime_error(
+            "InternlmTextGenerationPipeline: prefill logits are smaller than vocabulary");
     }
-    return true;
+    logits.resize(vocab);
+    const auto logits_offset = static_cast<std::size_t>(logits_tensor.numel()) - vocab;
+    std::memcpy(logits.data(), static_cast<const float*>(logits_tensor.data) + logits_offset,
+                vocab * sizeof(float));
+
+    if (retain_device_logits) {
+        const auto* device_logits =
+            static_cast<const float*>(prefill_->device_ptr(config_.logits_output_name));
+        if (device_logits == nullptr) {
+            throw std::runtime_error(
+                "InternlmTextGenerationPipeline: prefill logits have no device buffer");
+        }
+        d_logits_ptr_ = device_logits + logits_offset;
+    }
+    state_->advance(chunk_size);
+}
+
+void InternlmTextGenerationPipeline::log_batched_prefill(int32_t token_count, int32_t chunk_count,
+                                                         int32_t chunk_limit) const {
+    if (!config_.log_runtime_stats)
+        return;
+
+    std::cerr << "[trtmc] Batched prefill (";
+    std::cerr << (config_.prefill_log_label.empty() ? "prefill engine" : config_.prefill_log_label);
+    std::cerr << "): " << token_count << " tokens in " << chunk_count << " call";
+    if (chunk_count != 1)
+        std::cerr << 's';
+    std::cerr << " (max chunk=" << chunk_limit << ")\n";
+}
+
+void InternlmTextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>& input_ids,
+                                                         std::vector<float>& logits,
+                                                         bool retain_device_logits) {
+    const auto sq = static_cast<int32_t>(input_ids.size());
+    if (sq <= 0)
+        throw std::invalid_argument("Internlm native prefill requires at least one token");
+    if (config_.prefill_max_length <= 0)
+        throw std::runtime_error("Internlm native prefill engine has no valid profile capacity");
+
+    state_->bind_cache_inputs(*prefill_);
+    if (sq > state_->max_length()) {
+        throw std::runtime_error("Internlm sequence exceeds the model's fixed KV cache capacity");
+    }
+
+    int32_t chunk_count = 0;
+    for (int32_t start = 0; start < sq;) {
+        const int32_t chunk_size = std::min(config_.prefill_max_length, sq - start);
+        run_prefill_chunk(input_ids.data() + start, chunk_size, logits, retain_device_logits);
+        ++chunk_count;
+        start += chunk_size;
+    }
+
+    log_batched_prefill(sq, chunk_count, config_.prefill_max_length);
 }
 
 void InternlmTextGenerationPipeline::prime_decoder_after_batched_prefill(
@@ -492,112 +374,29 @@ void InternlmTextGenerationPipeline::prime_decoder_after_batched_prefill(
 
 void InternlmTextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
                                                  std::vector<float>& logits, bool gpu_sampling) {
-    // Fast path: batched prefill engine writes K/V for the whole prompt in
-    // one forward and returns last-token logits on host.
-    if (!gpu_sampling && run_prefill_batched(input_ids, logits)) {
-        prime_decoder_after_batched_prefill(input_ids);
-        state_->mark_prefill_complete();
+    if (step_trace_enabled()) {
+        if (gpu_sampling) {
+            throw std::runtime_error(
+                "Internlm text trace requires host logits and cannot use GPU-only sampling");
+        }
+        for (const int32_t token_id : input_ids)
+            run_step(token_id, logits, "prefill");
         return;
     }
-    for (std::size_t i = 0; i + 1 < input_ids.size(); ++i) {
-        if (gpu_sampling)
-            run_step_device(input_ids[i]);
-        else
-            run_step(input_ids[i], logits);
-    }
-    const int32_t last_token = input_ids.back();
-    if (gpu_sampling)
-        run_step_device(last_token);
-    else
-        run_step(last_token, logits);
-    state_->mark_prefill_complete();
-}
 
-TrtModule& InternlmTextGenerationPipeline::require_block_prefill(int32_t sq,
-                                                                 TrtModule* prefill_override) {
-    TrtModule* prefill = prefill_override != nullptr ? prefill_override : prefill_.get();
-    if (prefill == nullptr)
-        throw std::runtime_error(
-            "InternlmTextGenerationPipeline: block generation requires prefill module");
-    if (sq <= 0)
-        throw std::runtime_error("InternlmTextGenerationPipeline: empty block");
-    if (config_.prefill_max_length > 0 && sq > config_.prefill_max_length) {
-        throw std::runtime_error(
-            "InternlmTextGenerationPipeline: block length exceeds prefill profile");
-    }
-    return *prefill;
-}
-
-InternlmKvCache& InternlmTextGenerationPipeline::require_block_kv_cache() {
-    auto* kv = dynamic_cast<InternlmKvCache*>(state_.get());
-    if (kv == nullptr)
-        throw std::runtime_error(
-            "InternlmTextGenerationPipeline: block generation requires InternlmKvCache");
-    return *kv;
-}
-
-void InternlmTextGenerationPipeline::copy_block_logits(const TensorMap& outputs,
-                                                       std::vector<float>& logits) const {
-    auto logits_it = outputs.find(config_.logits_output_name);
-    if (logits_it == outputs.end())
-        throw std::runtime_error("InternlmTextGenerationPipeline: prefill module has no '" +
-                                 config_.logits_output_name + "' output");
-
-    const auto& lt = logits_it->second;
-    const auto num_logits = static_cast<std::size_t>(lt.numel());
-    logits.resize(num_logits);
-    std::memcpy(logits.data(), lt.data, num_logits * sizeof(float));
-}
-
-void InternlmTextGenerationPipeline::append_prefill_kv(InternlmKvCache& kv, TrtModule& prefill,
-                                                       int32_t sq) {
-    std::vector<const void*> pk, pv;
-    if (!gather_prefill_kv_pointers(prefill, config_, pk, pv)) {
-        throw std::runtime_error("InternlmTextGenerationPipeline: prefill module is missing "
-                                 "present_k/present_v outputs");
-    }
-    kv.append_prefill_kv(pk, pv, sq);
-}
-
-void InternlmTextGenerationPipeline::run_prefill_block(const std::vector<int32_t>& input_ids,
-                                                       bool bidirectional, bool append_kv,
-                                                       std::vector<float>& logits,
-                                                       TrtModule* prefill_override) {
-    const auto sq = static_cast<int32_t>(input_ids.size());
-    TrtModule& prefill = require_block_prefill(sq, prefill_override);
-    InternlmKvCache& kv = require_block_kv_cache();
-
-    kv.bind_cache_inputs(prefill);
-
-    TensorMap inputs;
-    Tensor tok_t;
-    tok_t.data = const_cast<int32_t*>(input_ids.data());
-    tok_t.shape = {static_cast<int64_t>(sq)};
-    tok_t.dtype = DType::kInt32;
-    inputs[config_.token_id_name] = tok_t;
-    if (bidirectional)
-        kv.prepare_bidirectional_step(inputs, sq);
-    else
-        kv.prepare_step(inputs, sq);
-
-    copy_block_logits(prefill.forward(inputs), logits);
-    if (append_kv)
-        append_prefill_kv(kv, prefill, sq);
+    run_prefill_batched(input_ids, logits, gpu_sampling);
+    prime_decoder_after_batched_prefill(input_ids);
 }
 
 std::string
 InternlmTextGenerationPipeline::resolve_generation_mode(const GenerateConfig& cfg) const {
     std::string mode = normalize_generation_mode(cfg.text_generation_mode);
-    if (mode.empty())
-        mode = "auto";
-    if (mode == "auto" && config_.supports_text_diffusion)
-        mode = "diffusion";
-    if (mode == "autoregressive")
-        mode = "ar";
-    if (mode == "linear_speculation")
-        mode = "linear_spec";
-    if (mode == "linear_speculation_lora" || mode == "linear_spec_adapter")
-        mode = "linear_spec_lora";
+    if (mode.empty() || mode == "autoregressive")
+        mode = mode.empty() ? "auto" : "ar";
+    if (mode != "auto" && mode != "ar") {
+        throw std::runtime_error(
+            "InternLM native KV runtime supports autoregressive generation only");
+    }
     return mode;
 }
 
@@ -605,170 +404,23 @@ void InternlmTextGenerationPipeline::reset_generation_context() {
     using Clock = std::chrono::steady_clock;
     const auto start = Clock::now();
     state_->reset();
+    d_logits_ptr_ = nullptr;
     state_bound_ = false;
     for (auto& decoder_ctx : decoders_)
         decoder_ctx.module->reset_execution_context();
     if (prefill_)
         prefill_->reset_execution_context();
-    if (linear_spec_lora_prefill_)
-        linear_spec_lora_prefill_->reset_execution_context();
     last_setup_ms_ = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
-}
-
-int32_t InternlmTextGenerationPipeline::resolve_text_diffusion_block_length(
-    const GenerateConfig& cfg, int32_t max_new_tokens, bool require_divisible) const {
-    if (!config_.supports_text_diffusion || config_.mask_token_id < 0)
-        throw std::runtime_error(
-            "InternlmTextGenerationPipeline: bundle does not support text diffusion");
-    const int32_t block_len =
-        cfg.block_length > 0 ? cfg.block_length : std::max(config_.diffusion_block_length, 1);
-    if (require_divisible && max_new_tokens % block_len != 0) {
-        throw std::runtime_error("InternlmTextGenerationPipeline: diffusion mode requires "
-                                 "max_new_tokens % block_length == 0");
-    }
-    return block_len;
-}
-
-int32_t InternlmTextGenerationPipeline::seed_next_token_from_prefill(
-    const std::vector<int32_t>& input_ids, std::vector<float>& logits, int32_t vocab) {
-    run_prefill_block(input_ids, /*bidirectional=*/false, /*append_kv=*/true, logits);
-    if (static_cast<int32_t>(logits.size()) < vocab)
-        throw std::runtime_error("InternlmTextGenerationPipeline: missing prefill logits");
-    return argmax_with_confidence(logits.data() + logits.size() - static_cast<std::size_t>(vocab),
-                                  vocab, 0)
-        .token_id;
-}
-
-void InternlmTextGenerationPipeline::fill_diffusion_block(std::vector<int32_t>& block,
-                                                          std::vector<float>& logits,
-                                                          int32_t block_len, int32_t vocab,
-                                                          bool use_threshold, float threshold) {
-    const int32_t initial_masked = block_len - 1;
-    const auto quotas = transfer_quota_schedule(initial_masked, block_len);
-    for (int32_t step = 0; step < block_len && has_mask_token(block, config_.mask_token_id);
-         ++step) {
-        run_prefill_block(block, /*bidirectional=*/true, /*append_kv=*/false, logits);
-        if (static_cast<int32_t>(logits.size()) < block_len * vocab) {
-            throw std::runtime_error(
-                "InternlmTextGenerationPipeline: diffusion engine must output full block logits");
-        }
-        const auto preds = masked_predictions(logits, block, config_.mask_token_id, vocab);
-        apply_diffusion_transfer(block, preds, quotas[static_cast<std::size_t>(step)],
-                                 use_threshold, threshold);
-    }
-}
-
-int32_t InternlmTextGenerationPipeline::verify_diffusion_block(const std::vector<int32_t>& block,
-                                                               std::vector<float>& logits,
-                                                               int32_t block_len, int32_t vocab) {
-    run_prefill_block(block, /*bidirectional=*/false, /*append_kv=*/true, logits);
-    if (static_cast<int32_t>(logits.size()) < block_len * vocab) {
-        throw std::runtime_error(
-            "InternlmTextGenerationPipeline: diffusion engine must output full verify logits");
-    }
-    return argmax_with_confidence(logits.data() + (static_cast<std::size_t>(block_len - 1) *
-                                                   static_cast<std::size_t>(vocab)),
-                                  vocab, block_len - 1)
-        .token_id;
-}
-
-bool InternlmTextGenerationPipeline::append_tokens_until_eos(
-    const std::vector<int32_t>& tokens, std::vector<int32_t>& output,
-    const InternlmSamplingParams& params) const {
-    for (int32_t token : tokens) {
-        output.push_back(token);
-        if (params.eos_token_id >= 0 && token == params.eos_token_id)
-            return true;
-    }
-    return false;
-}
-
-void InternlmTextGenerationPipeline::fill_linear_spec_block(std::vector<int32_t>& block,
-                                                            std::vector<float>& logits,
-                                                            int32_t block_len, int32_t vocab,
-                                                            bool threshold_enabled, float threshold,
-                                                            bool use_lora_draft) {
-    while (has_mask_token(block, config_.mask_token_id)) {
-        TrtModule* draft_prefill = use_lora_draft ? linear_spec_lora_prefill_.get() : nullptr;
-        run_prefill_block(block, /*bidirectional=*/true, /*append_kv=*/false, logits,
-                          draft_prefill);
-        if (static_cast<int32_t>(logits.size()) < block_len * vocab) {
-            throw std::runtime_error(
-                "InternlmTextGenerationPipeline: linear_spec engine must output full block logits");
-        }
-        const auto preds = masked_predictions(logits, block, config_.mask_token_id, vocab);
-        apply_linear_spec_transfer(block, preds, threshold_enabled, threshold);
-    }
-}
-
-std::vector<int32_t>
-InternlmTextGenerationPipeline::verify_linear_spec_block(const std::vector<int32_t>& block,
-                                                         std::vector<float>& logits,
-                                                         int32_t block_len, int32_t vocab) {
-    run_prefill_block(block, /*bidirectional=*/false, /*append_kv=*/true, logits);
-    if (static_cast<int32_t>(logits.size()) < block_len * vocab) {
-        throw std::runtime_error(
-            "InternlmTextGenerationPipeline: linear_spec engine must output full verify logits");
-    }
-
-    std::vector<int32_t> ar_tokens;
-    ar_tokens.reserve(static_cast<std::size_t>(block_len));
-    for (int32_t i = 0; i < block_len; ++i) {
-        ar_tokens.push_back(
-            argmax_with_confidence(
-                logits.data() + (static_cast<std::size_t>(i) * static_cast<std::size_t>(vocab)),
-                vocab, i)
-                .token_id);
-    }
-    return ar_tokens;
-}
-
-int32_t
-InternlmTextGenerationPipeline::count_linear_spec_accepts(const std::vector<int32_t>& ar_tokens,
-                                                          const std::vector<int32_t>& block) {
-    if (ar_tokens.empty())
-        return 0;
-    if (block.size() < 2)
-        return 1;
-    int32_t accepted = 0;
-    const auto limit = static_cast<int32_t>(std::min(ar_tokens.size(), block.size() - 1));
-    for (int32_t i = 0; i < limit; ++i) {
-        if (ar_tokens[static_cast<std::size_t>(i)] != block[static_cast<std::size_t>(i + 1)])
-            break;
-        ++accepted;
-    }
-    return accepted + 1;
-}
-
-bool InternlmTextGenerationPipeline::append_linear_spec_tokens(
-    const std::vector<int32_t>& ar_tokens, int32_t emit_count, std::vector<int32_t>& output,
-    int32_t& generated, const InternlmSamplingParams& params) const {
-    for (int32_t i = 0; i < emit_count; ++i) {
-        const int32_t token = ar_tokens[static_cast<std::size_t>(i)];
-        output.push_back(token);
-        ++generated;
-        if (params.eos_token_id >= 0 && token == params.eos_token_id)
-            return true;
-    }
-    return false;
 }
 
 InternlmTextGenerationPipeline::TimedGenResult InternlmTextGenerationPipeline::generate_from_ids(
     const std::vector<int32_t>& input_ids, int32_t max_new_tokens,
     const InternlmSamplingParams& params, const GenerateConfig& cfg) {
     using Clock = std::chrono::steady_clock;
+    resolve_generation_mode(cfg);
     if (max_new_tokens == 0 || input_ids.empty())
         return TimedGenResult{input_ids, 0.0, 0.0};
-
-    const std::string mode = resolve_generation_mode(cfg);
-    if (mode == "diffusion" || mode == "dlm")
-        return generate_diffusion_from_ids(input_ids, max_new_tokens, params, cfg);
-    if (mode == "linear_spec" || mode == "linear_spec_lora")
-        return generate_linear_spec_from_ids(input_ids, max_new_tokens, params, cfg,
-                                             mode == "linear_spec_lora");
-    if (mode != "auto" && mode != "ar")
-        throw std::runtime_error("InternlmTextGenerationPipeline: unsupported generation mode '" +
-                                 mode + "'");
+    validate_generation_capacity(input_ids, max_new_tokens, state_.get());
 
     InternlmISampler* active_sampler = sampler_.get();
     std::unique_ptr<InternlmISampler> local_sampler;
@@ -779,7 +431,6 @@ InternlmTextGenerationPipeline::TimedGenResult InternlmTextGenerationPipeline::g
     active_sampler->reset();
 
     reset_generation_context();
-    state_->set_prompt_length(static_cast<int32_t>(input_ids.size()));
 
     std::vector<float> logits;
     const bool gpu_sampling = (active_sampler->logits_location() == InternlmLogitsLocation::DEVICE);
@@ -795,125 +446,6 @@ InternlmTextGenerationPipeline::TimedGenResult InternlmTextGenerationPipeline::g
     const double prefill_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     const double decode_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
     return TimedGenResult{std::move(output), prefill_ms, decode_ms};
-}
-
-InternlmTextGenerationPipeline::TimedGenResult
-InternlmTextGenerationPipeline::generate_diffusion_from_ids(const std::vector<int32_t>& input_ids,
-                                                            int32_t max_new_tokens,
-                                                            const InternlmSamplingParams& params,
-                                                            const GenerateConfig& cfg) {
-    using Clock = std::chrono::steady_clock;
-    if (!greedy_text_diffusion_params(params)) {
-        throw std::runtime_error("InternlmTextGenerationPipeline: diffusion mode currently "
-                                 "supports greedy temperature=0 "
-                                 "generation");
-    }
-    const int32_t block_len =
-        resolve_text_diffusion_block_length(cfg, max_new_tokens, /*require_divisible=*/true);
-    const bool use_threshold = cfg.confidence_threshold >= 0.0F;
-    const float threshold = cfg.confidence_threshold;
-    const int32_t vocab = config_.vocab_size;
-
-    reset_generation_context();
-    state_->set_prompt_length(static_cast<int32_t>(input_ids.size()));
-
-    std::vector<float> logits;
-    const auto t0 = Clock::now();
-    int32_t next_token = seed_next_token_from_prefill(input_ids, logits, vocab);
-    const auto t1 = Clock::now();
-
-    std::vector<int32_t> output = input_ids;
-    const int32_t num_blocks = max_new_tokens / block_len;
-    const auto decode_start = Clock::now();
-    for (int32_t block_idx = 0; block_idx < num_blocks; ++block_idx) {
-        std::vector<int32_t> block(static_cast<std::size_t>(block_len), config_.mask_token_id);
-        block[0] = next_token;
-        fill_diffusion_block(block, logits, block_len, vocab, use_threshold, threshold);
-        next_token = verify_diffusion_block(block, logits, block_len, vocab);
-
-        if (append_tokens_until_eos(block, output, params)) {
-            const auto t2 = Clock::now();
-            return TimedGenResult{
-                std::move(output), std::chrono::duration<double, std::milli>(t1 - t0).count(),
-                std::chrono::duration<double, std::milli>(t2 - decode_start).count()};
-        }
-    }
-
-    const auto t2 = Clock::now();
-    return TimedGenResult{std::move(output),
-                          std::chrono::duration<double, std::milli>(t1 - t0).count(),
-                          std::chrono::duration<double, std::milli>(t2 - decode_start).count()};
-}
-
-InternlmTextGenerationPipeline::TimedGenResult
-InternlmTextGenerationPipeline::generate_linear_spec_from_ids(const std::vector<int32_t>& input_ids,
-                                                              int32_t max_new_tokens,
-                                                              const InternlmSamplingParams& params,
-                                                              const GenerateConfig& cfg,
-                                                              bool use_lora_draft) {
-    using Clock = std::chrono::steady_clock;
-    if (!greedy_text_diffusion_params(params)) {
-        throw std::runtime_error("InternlmTextGenerationPipeline: linear_spec mode currently "
-                                 "supports greedy temperature=0 "
-                                 "generation");
-    }
-    if (use_lora_draft && linear_spec_lora_prefill_ == nullptr) {
-        throw std::runtime_error("InternlmTextGenerationPipeline: linear_spec_lora mode requires a "
-                                 "linear-spec LoRA engine");
-    }
-    const int32_t block_len =
-        resolve_text_diffusion_block_length(cfg, max_new_tokens, /*require_divisible=*/false);
-    const bool threshold_enabled = cfg.confidence_threshold > 0.0F;
-    const float threshold = cfg.confidence_threshold;
-    const int32_t vocab = config_.vocab_size;
-
-    reset_generation_context();
-    state_->set_prompt_length(static_cast<int32_t>(input_ids.size()));
-
-    std::vector<float> logits;
-    const auto t0 = Clock::now();
-    int32_t next_token = seed_next_token_from_prefill(input_ids, logits, vocab);
-    const auto t1 = Clock::now();
-
-    std::vector<int32_t> output = input_ids;
-    output.push_back(next_token);
-    if (params.eos_token_id >= 0 && next_token == params.eos_token_id) {
-        return TimedGenResult{std::move(output),
-                              std::chrono::duration<double, std::milli>(t1 - t0).count(), 0.0};
-    }
-
-    auto* kv = dynamic_cast<InternlmKvCache*>(state_.get());
-    if (kv == nullptr)
-        throw std::runtime_error(
-            "InternlmTextGenerationPipeline: linear_spec requires InternlmKvCache");
-
-    int32_t generated = 1;
-    const auto decode_start = Clock::now();
-    while (generated < max_new_tokens) {
-        const int32_t cache_len = kv->position();
-        std::vector<int32_t> block(static_cast<std::size_t>(block_len), config_.mask_token_id);
-        block[0] = next_token;
-
-        fill_linear_spec_block(block, logits, block_len, vocab, threshold_enabled, threshold,
-                               use_lora_draft);
-        const auto ar_tokens = verify_linear_spec_block(block, logits, block_len, vocab);
-        const int32_t accepted = count_linear_spec_accepts(ar_tokens, block);
-        const int32_t emit_count = std::min(accepted, max_new_tokens - generated);
-        kv->set_position(cache_len + emit_count);
-        next_token = ar_tokens[static_cast<std::size_t>(emit_count - 1)];
-
-        if (append_linear_spec_tokens(ar_tokens, emit_count, output, generated, params)) {
-            const auto t2 = Clock::now();
-            return TimedGenResult{
-                std::move(output), std::chrono::duration<double, std::milli>(t1 - t0).count(),
-                std::chrono::duration<double, std::milli>(t2 - decode_start).count()};
-        }
-    }
-
-    const auto t2 = Clock::now();
-    return TimedGenResult{std::move(output),
-                          std::chrono::duration<double, std::milli>(t1 - t0).count(),
-                          std::chrono::duration<double, std::milli>(t2 - decode_start).count()};
 }
 
 bool InternlmTextGenerationPipeline::should_stop_on_answer(const std::vector<int32_t>& output,
@@ -934,9 +466,7 @@ void InternlmTextGenerationPipeline::log_decode_summary(int32_t steps, double ms
     if (steps <= 0 || !config_.log_runtime_stats)
         return;
     const double tps = steps * 1000.0 / ms;
-    const bool cuda_graph_on =
-        active_decoder_index_ >= 0 &&
-        decoders_[static_cast<std::size_t>(active_decoder_index_)].module->cuda_graph_active();
+    const bool cuda_graph_on = decoders_.front().module->cuda_graph_active();
     std::cerr << "[trtmc] Decode: " << steps << " tokens, " << ms << " ms, " << tps << " tok/s"
               << (cuda_graph_on ? " [CUDA Graph ON]" : "") << '\n';
 }
@@ -955,15 +485,17 @@ int32_t InternlmTextGenerationPipeline::run_decode_loop(
         const InternlmSampleResult result = sampler->sample(sample_ptr, vocab_size, params);
         output.push_back(result.token_id);
         ++steps;
-        if (should_stop_on_answer(output, prompt_token_count, cfg, steps, stop_interval,
-                                  result.is_eos))
-            break;
-        if (result.is_eos)
-            break;
+        if (!step_trace_enabled()) {
+            if (should_stop_on_answer(output, prompt_token_count, cfg, steps, stop_interval,
+                                      result.is_eos))
+                break;
+            if (result.is_eos)
+                break;
+        }
         if (gpu_sampling)
             run_step_device(result.token_id);
         else
-            run_step(result.token_id, logits);
+            run_step(result.token_id, logits, "decode");
     }
     const auto decode_end = std::chrono::steady_clock::now();
     const double ms = std::chrono::duration<double, std::milli>(decode_end - decode_start).count();
@@ -971,39 +503,19 @@ int32_t InternlmTextGenerationPipeline::run_decode_loop(
     return steps;
 }
 
-int32_t InternlmTextGenerationPipeline::select_decoder_index(int32_t desired_rows) const {
-    if (decoders_.size() == 1)
-        return 0;
-
-    int32_t fallback_idx = 0;
-    int32_t fallback_rows = std::numeric_limits<int32_t>::max();
-    for (std::size_t i = 0; i < decoders_.size(); ++i) {
-        const int32_t kv_rows = decoders_[i].kv_rows;
-        if (kv_rows == desired_rows)
-            return static_cast<int32_t>(i);
-        if (kv_rows > 0 && kv_rows >= desired_rows && kv_rows < fallback_rows) {
-            fallback_rows = kv_rows;
-            fallback_idx = static_cast<int32_t>(i);
-        }
-    }
-    return fallback_idx;
-}
-
 TrtModule& InternlmTextGenerationPipeline::bind_decoder_for_step() {
-    const int32_t desired_rows = std::max(state_->preferred_cache_rows(), 1);
-    const int32_t next_idx = select_decoder_index(desired_rows);
-    if (!state_bound_ || next_idx != active_decoder_index_) {
-        active_decoder_index_ = next_idx;
-        state_->bind_to(*decoders_[static_cast<std::size_t>(active_decoder_index_)].module);
+    if (!state_bound_) {
+        state_->bind_to(*decoders_.front().module);
         state_bound_ = true;
     }
-    return *decoders_[static_cast<std::size_t>(active_decoder_index_)].module;
+    return *decoders_.front().module;
 }
 
-void InternlmTextGenerationPipeline::run_step(int32_t token_id, std::vector<float>& logits) {
+void InternlmTextGenerationPipeline::run_step(int32_t token_id, std::vector<float>& logits,
+                                              const char* phase) {
     TensorMap inputs;
     const int32_t position_before = state_->position();
-    const int32_t rows_before = std::max(state_->preferred_cache_rows(), 1);
+    const int32_t cache_capacity = state_->max_length();
 
     Tensor token_tensor;
     token_tensor.data = &token_id;
@@ -1028,8 +540,8 @@ void InternlmTextGenerationPipeline::run_step(int32_t token_id, std::vector<floa
     std::memcpy(logits.data(), logits_tensor.data, num_logits * sizeof(float));
 
     state_->advance();
-    maybe_append_step_trace(position_before, token_id, active_decoder_index_, rows_before,
-                            std::max(state_->preferred_cache_rows(), 1), logits);
+    maybe_append_step_trace(phase, position_before, token_id, 0, cache_capacity, cache_capacity,
+                            logits);
 }
 
 void InternlmTextGenerationPipeline::run_step_device(int32_t token_id) {

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Family-owned decoder tensor-parallel tests for internlm."""
+"""InternLM2 native KV rejects the removed tensor-parallel build route."""
 
 from __future__ import annotations
 
@@ -11,102 +11,43 @@ import pytest
 
 pytest.importorskip("tensorrt", reason="TensorRT is required for family builder tests")
 
-
-pytest.importorskip(
-    "tensorrt_model_connect.config",
-    reason="tensorrt_model_connect requires tensorrt",
-)
-
 from tensorrt_model_connect.checkpoint_mapper import WeightDict
 from tensorrt_model_connect.config import ModelConfig
-from tensorrt_model_connect.parallel_config import (
-    ParallelConfig,
-)
+from tensorrt_model_connect.parallel_config import ParallelConfig
 
 
-FAMILY = 'internlm'
-PLUGIN_CLASS = 'InternLMPlugin'
-MODEL_TYPE = 'internlm2'
-TP_SIZE = 4
-RAW = {}
-EXPECTED_KWARGS = {}
-
-
-def _config(model_type: str, tp_size: int, raw: dict[str, object]) -> ModelConfig:
-    kv_heads = 2 if tp_size == 2 else 4
+def _config() -> ModelConfig:
     return ModelConfig(
-        model_type=model_type,
+        model_type="internlm2",
+        architectures=["InternLM2ForCausalLM"],
         vocab_size=64,
-        hidden_size=16,
-        intermediate_size=32,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=kv_heads,
-        max_position_embeddings=64,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        max_position_embeddings=128,
         rms_norm_eps=1e-5,
-        raw=raw,
+        rope_theta=1_000_000.0,
+        hidden_act="silu",
+        raw={
+            "bias": False,
+            "_decoder_engine_layout": "split",
+            "_decoder_engine_role": "decode",
+        },
     )
 
 
-def test_internlm_plugin_routes_tp_build(monkeypatch) -> None:
-    plugin_mod = importlib.import_module(
-        f"tensorrt_model_connect.families.{FAMILY}.plugin")
-    captured: dict[str, object] = {}
+def test_internlm_native_kv_fails_closed_for_tensor_parallel() -> None:
+    plugin_module = importlib.import_module(
+        "tensorrt_model_connect.families.internlm.plugin")
 
-    def fake_build(config, weights, max_cache_length, **kwargs):
-        captured["config"] = config
-        captured["weights"] = weights
-        captured["max_cache_length"] = max_cache_length
-        captured["kwargs"] = kwargs
-        return b"tp-plan"
-
-    monkeypatch.setattr(
-        plugin_mod,
-        "require_tensorrt_11_for_tensor_parallel",
-        lambda parallel, *, feature: None,
-    )
-    monkeypatch.setattr(
-        plugin_mod,
-        "build_dual_profile_tp_decoder_engine",
-        fake_build,
-    )
-
-    parallel = ParallelConfig(mode="tensor_parallel", tp_size=TP_SIZE, rank=1)
-    plan = getattr(plugin_mod, PLUGIN_CLASS)().build_engine(
-        _config(MODEL_TYPE, TP_SIZE, RAW),
-        WeightDict(),
-        max_cache_length=17,
-        precision="fp16",
-        verbose=True,
-        parallel_config=parallel,
-    )
-
-    assert plan == b"tp-plan"
-    assert captured["max_cache_length"] == 17
-    kwargs = captured["kwargs"]
-    assert kwargs["precision"] == "fp16"
-    assert kwargs["quant_ctx"] is None
-    assert kwargs["verbose"] is True
-    assert kwargs["parallel_config"] == parallel
-    for key, expected in EXPECTED_KWARGS.items():
-        assert kwargs[key] == expected
-
-
-def test_internlm_plugin_rejects_quantized_tp(monkeypatch) -> None:
-    plugin_mod = importlib.import_module(
-        f"tensorrt_model_connect.families.{FAMILY}.plugin")
-    monkeypatch.setattr(
-        plugin_mod,
-        "require_tensorrt_11_for_tensor_parallel",
-        lambda parallel, *, feature: None,
-    )
-
-    with pytest.raises(ValueError, match="do not support quantization"):
-        getattr(plugin_mod, PLUGIN_CLASS)().build_engine(
-            _config(MODEL_TYPE, TP_SIZE, RAW),
+    with pytest.raises(ValueError, match="tensor parallel"):
+        plugin_module.plugin.build_engine(
+            _config(),
             WeightDict(),
-            max_cache_length=17,
-            quant_ctx=object(),
+            max_cache_length=128,
+            precision="bf16",
             parallel_config=ParallelConfig(
-                mode="tensor_parallel", tp_size=TP_SIZE, rank=0),
+                mode="tensor_parallel", tp_size=4, rank=0),
         )

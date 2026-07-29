@@ -4,7 +4,6 @@
 id = "internlm"
 plugin = "internlm"
 test_manifests = [
-  "manifests/internlm2-1.8b-tp4.json",
   "manifests/internlm2-1.8b.json",
 ]
 

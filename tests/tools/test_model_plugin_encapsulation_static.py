@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import tomllib
 from pathlib import Path
 
 
@@ -130,6 +131,23 @@ RUNTIME_STRATEGY_DEFAULT_FILES = (
     REPO_ROOT / "src" / "runtime" / "registry" / "pipeline_factory.cpp",
     REPO_ROOT / "src" / "runtime" / "registry" / "pipeline_plugin.cpp",
 )
+
+
+def _family_capabilities(family: str) -> frozenset[str]:
+    manifest = FAMILIES / family / "MODEL.toml"
+    if not manifest.is_file():
+        return frozenset()
+    metadata = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    capabilities = metadata.get("capabilities", ())
+    if not isinstance(capabilities, list):
+        return frozenset()
+    return frozenset(value for value in capabilities if isinstance(value, str))
+
+
+def _uses_native_cpp_logits_trace(family: str) -> bool:
+    return "native_cpp_logits_trace" in _family_capabilities(family)
+
+
 E2E_CONTRACTS = REPO_ROOT / "tests" / "e2e_harness" / "contracts.py"
 E2E_MANIFEST_LOADER = REPO_ROOT / "tests" / "e2e_harness" / "manifest_loader.py"
 E2E_ORCHESTRATOR = REPO_ROOT / "tests" / "e2e_harness" / "orchestrator.py"
@@ -1630,7 +1648,14 @@ def test_model_cache_state_is_model_owned() -> None:
         if not uses_cache_state:
             continue
 
-        for path in (state_header, cache_header, cache_source):
+        uses_native_cache = "native_kv_cache" in _family_capabilities(family)
+        required_cache_files = (cache_header, cache_source)
+        owned_cache_files = (
+            required_cache_files
+            if uses_native_cache
+            else (state_header,) + required_cache_files
+        )
+        for path in owned_cache_files:
             if not path.is_file():
                 violations.append((path, 0, f"missing {family}-owned cache/state file"))
                 continue
@@ -1645,19 +1670,24 @@ def test_model_cache_state_is_model_owned() -> None:
                         (path, 0, f"uses unowned cache/state symbol {pattern.pattern}")
                     )
 
-        if state_header.is_file():
+        if not uses_native_cache and state_header.is_file():
             text = state_header.read_text(encoding="utf-8", errors="ignore")
             if f"class {prefix}InferenceState" not in text:
                 violations.append((state_header, 0, f"missing {prefix}InferenceState"))
 
         if cache_header.is_file():
             text = cache_header.read_text(encoding="utf-8", errors="ignore")
-            expected_include = f"runtime/models/{family}/inference_state.h"
-            for needle in (
-                f"struct {prefix}KvCacheNames",
-                f"class {prefix}KvCache : public {prefix}InferenceState",
-                expected_include,
-            ):
+            needles = [f"struct {prefix}KvCacheNames"]
+            if uses_native_cache:
+                needles.append(f"class {prefix}KvCache")
+            else:
+                needles.extend(
+                    (
+                        f"class {prefix}KvCache : public {prefix}InferenceState",
+                        f"runtime/models/{family}/inference_state.h",
+                    )
+                )
+            for needle in needles:
                 if needle not in text:
                     violations.append((cache_header, 0, f"missing {needle}"))
 
@@ -1742,6 +1772,8 @@ def test_text_decoder_triattention_cache_is_model_owned() -> None:
         violations.append((CMAKE_ROOT, 0, "trtmc_core links shared TriAttention kernel"))
 
     for family in required_families:
+        if "native_kv_cache" in _family_capabilities(family):
+            continue
         prefix = _model_prefix(family)
         model_dir = RUNTIME_MODELS / family
         header = model_dir / "triattention_kv_cache.h"
@@ -6073,6 +6105,17 @@ def test_shared_debug_runner_has_no_model_owned_runners() -> None:
         manifest = family_dir / "MODEL.toml"
         debug_runner = family_dir / "debug_runner.py"
         manifest_text = manifest.read_text(encoding="utf-8")
+        family = family_dir.name
+        if _uses_native_cpp_logits_trace(family):
+            if "debug_runner" in manifest_text:
+                violations.append(
+                    (manifest, 0, "native C++ trace family registers a Python debug runner")
+                )
+            if debug_runner.exists():
+                violations.append(
+                    (debug_runner, 0, "native C++ trace family retains a Python debug runner")
+                )
+            continue
         if 'debug_runner = "debug_runner.py|runner_from_bundle"' not in manifest_text:
             violations.append(
                 (manifest, 0, "decoder family missing model-owned debug_runner metadata")
@@ -7589,6 +7632,31 @@ def test_model_e2e_text_runners_use_family_owned_debug_runners() -> None:
         if not runner_path.is_file():
             violations.append((runner_path, 0, "missing model-owned text runner"))
             continue
+        if _uses_native_cpp_logits_trace(family):
+            text = runner_path.read_text(encoding="utf-8")
+            if family_debug_runner.exists():
+                violations.append(
+                    (family_debug_runner, 0, "native C++ trace family retains debug_runner.py")
+                )
+            for needle in (
+                "_run_native_trace_logits",
+                "text_trace.step_trace_path=",
+                '"top_ids"',
+                '"top_logits"',
+                "np.save",
+            ):
+                if needle not in text:
+                    violations.append(
+                        (runner_path, 0, f"native C++ trace runner is missing {needle}")
+                    )
+            if (
+                "tensorrt_model_connect.debug_runner" in text
+                or f"tensorrt_model_connect.families.{family}.debug_runner" in text
+            ):
+                violations.append(
+                    (runner_path, 0, "native C++ trace runner imports a Python debug runner")
+                )
+            continue
         if not family_debug_runner.is_file():
             violations.append((family_debug_runner, 0, "missing family-owned debug runner"))
             continue
@@ -7602,6 +7670,32 @@ def test_model_e2e_text_runners_use_family_owned_debug_runners() -> None:
             violations.append(
                 (runner_path, 0, "active text runner missing family runner factory call")
             )
+
+    assert not violations, _format_violations(violations)
+
+
+def test_native_cpp_trace_families_have_no_python_debug_runtime() -> None:
+    """Converted native-KV families keep full-logit parity in their C++ runtime."""
+    violations = []
+    native_trace_families = sorted(
+        path.name
+        for path in FAMILIES.iterdir()
+        if path.is_dir() and _uses_native_cpp_logits_trace(path.name)
+    )
+    for family in native_trace_families:
+        family_dir = FAMILIES / family
+        manifest = family_dir / "MODEL.toml"
+        runner = E2E_MODELS / family / "e2e_plugins" / "runners" / "text_generation.py"
+        manifest_text = manifest.read_text(encoding="utf-8")
+        runner_text = runner.read_text(encoding="utf-8")
+        if "default_build_route" not in manifest_text:
+            violations.append((manifest, 0, "native C++ trace family is not fail-closed routed"))
+        if "debug_runner" in manifest_text or (family_dir / "debug_runner.py").exists():
+            violations.append((family_dir, 0, "native C++ trace family retains debug runtime"))
+        if '"phase"' not in runner_text or "phase_counts" not in runner_text:
+            violations.append((runner, 0, "native C++ trace parity does not preserve phases"))
+        if "np.stack" not in runner_text or "np.save" not in runner_text:
+            violations.append((runner, 0, "native C++ trace parity does not emit full logits"))
 
     assert not violations, _format_violations(violations)
 
