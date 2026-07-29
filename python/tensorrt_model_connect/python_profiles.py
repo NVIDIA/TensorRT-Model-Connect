@@ -30,6 +30,7 @@ PREBUILT_ONLY_ENV = "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY"
 DEFAULT_PROFILE_ROOT = "/tmp/trtmc-python-profiles"
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _PROFILE_LAYOUT_VERSION = "overlay-v3-exact-pins"
+_DEFAULT_PROFILE_BUILD_JOBS = "4"
 _EXACT_REQUIREMENT_RE = re.compile(
     r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[A-Za-z0-9,._-]+\])?==([^\s;]+)$"
 )
@@ -274,12 +275,14 @@ def _run_profile_command(
     *,
     description: str,
     timeout: int = 1800,
+    env: Mapping[str, str] | None = None,
 ) -> None:
     result = subprocess.run(
         cmd,
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=dict(env) if env is not None else None,
     )
     if result.returncode != 0:
         stderr = (result.stderr or result.stdout or "").strip()
@@ -287,6 +290,13 @@ def _run_profile_command(
             f"Failed to {description}: "
             f"{stderr or f'command exited with rc={result.returncode}'}"
         )
+
+
+def _profile_install_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    if not environment.get("MAX_JOBS", "").strip():
+        environment["MAX_JOBS"] = _DEFAULT_PROFILE_BUILD_JOBS
+    return environment
 
 
 def _python_site_packages(python: str) -> list[str]:
@@ -429,6 +439,7 @@ def _materialize_venv_profile(
                         str(requirements_file),
                     ],
                     description=f"install Python profile {profile_name!r}",
+                    env=_profile_install_environment(),
                 )
 
             _verify_exact_requirements(

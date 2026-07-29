@@ -141,6 +141,47 @@ def test_resolve_profile_python_materializes_declared_venv(monkeypatch, tmp_path
     assert created == ["custom"]
 
 
+def test_profile_source_builds_use_a_safe_default_job_limit(monkeypatch, tmp_path):
+    requirements = tmp_path / "requirements.lock.txt"
+    requirements.write_text("demo-package==1.0\n", encoding="utf-8")
+    monkeypatch.delenv("MAX_JOBS", raising=False)
+    monkeypatch.setenv(shared_profiles.PROFILE_ROOT_ENV, str(tmp_path / "profiles"))
+    monkeypatch.setattr(
+        shared_profiles,
+        "_verify_exact_requirements",
+        lambda *_args, **_kwargs: None,
+    )
+
+    commands = []
+
+    def run_command(cmd, *, description, timeout=1800, **kwargs):
+        commands.append((cmd, description, timeout, kwargs))
+        if description.startswith("create Python profile"):
+            python = Path(cmd[-1]) / "bin" / "python"
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(shared_profiles, "_run_profile_command", run_command)
+
+    shared_profiles._materialize_venv_profile(
+        "custom",
+        {
+            "requirements": str(requirements),
+            "system_site_packages": False,
+        },
+        sys.executable,
+    )
+
+    install = next(call for call in commands if call[1].startswith("install "))
+    assert install[3]["env"]["MAX_JOBS"] == "4"
+
+
+def test_profile_source_builds_respect_an_explicit_job_limit(monkeypatch):
+    monkeypatch.setenv("MAX_JOBS", "2")
+
+    assert shared_profiles._profile_install_environment()["MAX_JOBS"] == "2"
+
+
 def test_family_profile_registry_is_fully_exact_pinned():
     expected = {
         "chronos",
