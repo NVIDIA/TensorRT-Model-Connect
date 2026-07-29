@@ -196,8 +196,9 @@ def _load_runtime(
         arguments.model,
         **tokenizer_kwargs,
     )
+    model_dtype = _model_dtype(torch_module, arguments.dtype)
     model_kwargs = {
-        "torch_dtype": _model_dtype(torch_module, arguments.dtype),
+        "torch_dtype": model_dtype,
         "trust_remote_code": arguments.trust_remote_code,
         "local_files_only": arguments.local_files_only,
     }
@@ -210,7 +211,10 @@ def _load_runtime(
         device = model.device
     else:
         device = torch_module.device(arguments.device)
-        model.to(device)
+        if model_dtype == "auto":
+            model.to(device)
+        else:
+            model.to(device=device, dtype=model_dtype)
     return tokenizer, model, device
 
 

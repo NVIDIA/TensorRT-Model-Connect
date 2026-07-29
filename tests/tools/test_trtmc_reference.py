@@ -736,6 +736,74 @@ def test_encoder_reference_metadata_is_direct_and_sample_selectable(
     assert "validation/engine.py" not in " ".join(command)
 
 
+def test_encoder_reference_moves_all_model_parameters_to_requested_dtype() -> None:
+    captured: dict[str, object] = {}
+    tokenizer = object()
+
+    class FakeTokenizer:
+        @staticmethod
+        def from_pretrained(_model: str, **_kwargs: object) -> object:
+            return tokenizer
+
+    class FakeModel:
+        def eval(self) -> "FakeModel":
+            return self
+
+        def to(self, *args: object, **kwargs: object) -> None:
+            captured["to_args"] = args
+            captured["to_kwargs"] = kwargs
+
+    model = FakeModel()
+
+    class FakeAutoModel:
+        @staticmethod
+        def from_pretrained(_model: str, **kwargs: object) -> FakeModel:
+            captured["model_kwargs"] = kwargs
+            return model
+
+    transformers = SimpleNamespace(
+        AutoModel=FakeAutoModel,
+        AutoTokenizer=FakeTokenizer,
+        logging=SimpleNamespace(set_verbosity_error=lambda: None),
+    )
+    torch = SimpleNamespace(
+        float16="fp16",
+        bfloat16="bf16",
+        float32="fp32",
+        device=lambda name: f"device:{name}",
+    )
+    arguments = SimpleNamespace(
+        reference_family="encoder_base_features",
+        trust_remote_code=False,
+        local_files_only=True,
+        model_revision="",
+        model="microsoft/deberta-base",
+        dtype="float16",
+        device_map="",
+        device="cuda",
+    )
+
+    loaded_tokenizer, loaded_model, device = transformers_encoder._load_runtime(
+        arguments,
+        torch,
+        transformers,
+    )
+
+    assert loaded_tokenizer is tokenizer
+    assert loaded_model is model
+    assert device == "device:cuda"
+    assert captured["model_kwargs"] == {
+        "torch_dtype": "fp16",
+        "trust_remote_code": False,
+        "local_files_only": True,
+    }
+    assert captured["to_args"] == ()
+    assert captured["to_kwargs"] == {
+        "device": "device:cuda",
+        "dtype": "fp16",
+    }
+
+
 def test_native_reference_runner_uses_prepared_dataset_kind(tmp_path: Path) -> None:
     work_dir = tmp_path / "work"
     _prepare_work(work_dir)

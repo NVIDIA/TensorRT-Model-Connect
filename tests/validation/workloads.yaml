@@ -60,6 +60,10 @@ suites:
           prompt_renderer: gpt_oss_harmony_mcq
           answer_parser: gpt_oss_harmony_final_mcq
           require_valid_prediction: true
+          # The MXFP4 checkpoint's official Transformers path dequantizes
+          # experts to BF16 while TRTMC builds the dequantized engine in FP16.
+          reference_precision: bf16
+          allow_reference_precision_mismatch: true
           build_generation_headroom: true
           generation:
             max_new_tokens: 8
@@ -585,6 +589,14 @@ suites:
       apply_chat_template: true
       enable_thinking: false
       do_sample: false
+    model_overrides:
+      by_model:
+        deepseek-ocr:
+          # DeepSeek-OCR's upstream model.infer path is explicitly BF16. TRTMC
+          # uses its reviewed FP16/FP32 mixed policy, so record the difference
+          # instead of coercing the upstream reference into an invalid dtype.
+          reference_precision: bf16
+          allow_reference_precision_mismatch: true
     scoring:
       scorer: ocrbench_v2
     build:
@@ -1314,6 +1326,13 @@ suites:
     scoring:
       scorer: encoder_embedding_parity
       task_metric: sts_spearman
+    model_overrides:
+      by_model:
+        fnet-base:
+          # PyTorch cuFFT cannot execute FNet's 768-wide 2D transform in FP16.
+          # Keep the numerical comparison aligned by building TRTMC and
+          # running the reference in FP32.
+          comparison_precision: fp32
     gates:
       min_vector_cosine: 0.999
       min_vector_pass_rate: 1.0
@@ -1635,7 +1654,8 @@ suites:
     description: >
       Phi-4 Multimodal image-question consistency on five fixed,
       distinct-subject MMMU-Pro Vision samples. The prepared dataset copies
-      only the selected images and aligns prompt/image inputs exactly.
+      only the selected images, letterboxes them to the model's static
+      Dynamic-HD profile, and aligns prompt/image inputs exactly.
     user_contract: vl_answer
     default_model_names: [phi4-multimodal]
     dataset:

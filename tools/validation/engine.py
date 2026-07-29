@@ -7224,6 +7224,11 @@ def run_diffusion_hf_reference(args: argparse.Namespace) -> None:
 
     work_dir = Path(args.work_dir)
     template, reference, _runner = _load_diffusion_validation_plugins(work_dir)
+    requested_precision = _REFERENCE_DTYPE_TO_PRECISION.get(
+        str(getattr(args, "dtype", "auto"))
+    )
+    if requested_precision:
+        template.metadata["reference_precision"] = requested_precision
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
     generation = generation_defaults(work_dir)
     artifacts_dir = work_dir / "hf_artifacts"
@@ -8839,6 +8844,29 @@ def _configured_reference_precision(
     )
 
 
+def _allows_declared_reference_precision_mismatch(
+    model: Mapping[str, Any],
+    work_dir: Path,
+) -> bool:
+    task_config = model.get("task_eval", {})
+    allowed = (
+        bool(task_config.get("allow_reference_precision_mismatch", False))
+        if isinstance(task_config, Mapping)
+        else False
+    )
+    manifest_path = work_dir / "manifest.json"
+    if manifest_path.is_file():
+        work_config = work_manifest(work_dir).get("task_eval", {})
+        if isinstance(work_config, Mapping):
+            allowed = bool(
+                work_config.get(
+                    "allow_reference_precision_mismatch",
+                    allowed,
+                )
+            )
+    return allowed
+
+
 def resolve_reference_precision_contract(
     args: argparse.Namespace,
     model: Mapping[str, Any],
@@ -8882,7 +8910,16 @@ def resolve_reference_precision_contract(
             else "auto"
         )
 
-    if not quantization and reference_precision not in {"auto", base_precision}:
+    dataset_kind = _work_dataset_kind(work_dir)
+    declared_mismatch_allowed = bool(configured) and (
+        _allows_declared_reference_precision_mismatch(model, work_dir)
+    )
+    if (
+        not quantization
+        and dataset_kind in _NATIVE_PRECISION_DATASET_KINDS
+        and reference_precision not in {"auto", base_precision}
+        and not declared_mismatch_allowed
+    ):
         raise ValueError(
             f"reference precision {reference_precision} does not match "
             f"TRTMC base precision {base_precision}"
@@ -10107,6 +10144,7 @@ def compare_model_plugin_prediction_sets(
     valid_count = 0
     passed_count = 0
     skipped_count = 0
+    execution_errors: list[dict[str, Any]] = []
 
     for index, (request, hf_row, trt_row) in enumerate(
         zip(requests, hf_rows, trt_rows, strict=True)
@@ -10161,6 +10199,50 @@ def compare_model_plugin_prediction_sets(
             raise ValueError(
                 f"model-plugin predictions for {sample_id} have no stage_output"
             )
+        hf_output = deserialize_stage_output(hf_payload)
+        trt_output = deserialize_stage_output(trt_payload)
+        backend_failures = []
+        for backend, output in (("hf", hf_output), ("trtmc", trt_output)):
+            metadata = output.metadata if isinstance(output.metadata, Mapping) else {}
+            data = output.data if isinstance(output.data, Mapping) else {}
+            returncode = int(metadata.get("returncode", data.get("returncode", 0)) or 0)
+            if returncode:
+                backend_failures.append(
+                    {
+                        "backend": backend,
+                        "returncode": returncode,
+                        "stderr": str(
+                            metadata.get("stderr", data.get("stderr", ""))
+                        )[-1000:],
+                    }
+                )
+        if backend_failures:
+            execution_errors.append(
+                {
+                    "sample_id": sample_id,
+                    "testcase": expected_case,
+                    "stage": stage.name,
+                    "failures": backend_failures,
+                }
+            )
+            skipped_count += 1
+            cases.append(
+                {
+                    "sample_id": sample_id,
+                    "testcase": expected_case,
+                    "stage": stage.name,
+                    "passed": False,
+                    "status": StageStatus.ERROR.value,
+                    "message": "; ".join(
+                        f"{failure['backend']} exited with "
+                        f"returncode {failure['returncode']}"
+                        for failure in backend_failures
+                    ),
+                    "composite_rule": "",
+                    "metrics": {},
+                }
+            )
+            continue
         threshold = ThresholdProfile(
             task_strategy=case.task_strategy,
             profile_name=case.comparison_profile,
@@ -10173,8 +10255,8 @@ def compare_model_plugin_prediction_sets(
             },
         )
         comparison = comparator.compare(
-            deserialize_stage_output(trt_payload),
-            deserialize_stage_output(hf_payload),
+            trt_output,
+            hf_output,
             threshold,
             stage,
         )
@@ -10238,6 +10320,7 @@ def compare_model_plugin_prediction_sets(
         "metrics": metrics_summary,
         "gates": {"min_sample_pass_rate": min_sample_pass_rate},
         "cases": cases,
+        "execution_errors": execution_errors,
     }
 
 
@@ -10466,6 +10549,13 @@ def eval_one_model(
             "sample_pass_rate": summary["sample_pass_rate"],
             "metrics": summary["metrics"],
         }
+        if summary["execution_errors"]:
+            result["error_type"] = "ModelPluginExecutionError"
+            result["error"] = (
+                f"{len(summary['execution_errors'])} model-plugin sample(s) "
+                "failed during native backend execution"
+            )
+            result["execution_errors"] = summary["execution_errors"]
     elif scorer == "time_series_parity":
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
         trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))

@@ -1917,6 +1917,110 @@ def test_compare_model_plugin_prediction_sets_uses_model_comparator(
     assert summary["cases"][0]["passed"] is True
 
 
+def test_compare_model_plugin_marks_native_returncode_as_execution_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from tests.e2e_harness.contracts import StageOutput, StageSpec
+    from tools.validation.model_plugin_contract import serialize_stage_output
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset_kind": "model_plugin_json",
+                "task_eval": {"model_manifest": "model.json"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    case = SimpleNamespace(
+        task_strategy="custom_strategy",
+        family="custom_family",
+        comparison_profile="default",
+        threshold_overrides={},
+        metadata={
+            "model_test_dir": "tests/e2e/models/custom",
+            "validation_manifest_case_name": "custom-case",
+        },
+    )
+    monkeypatch.setattr(
+        validation_engine,
+        "select_case",
+        lambda *_args, **_kwargs: (
+            case,
+            StageSpec(name="full_generation", required=True),
+        ),
+    )
+    monkeypatch.setattr(
+        validation_engine,
+        "activate_model_plugins",
+        lambda _path: None,
+    )
+    monkeypatch.setattr(
+        validation_engine,
+        "get_comparator",
+        lambda _strategy: SimpleNamespace(
+            compare=lambda *_args, **_kwargs: pytest.fail(
+                "comparator must not run after backend failure"
+            )
+        ),
+    )
+
+    hf_output = serialize_stage_output(
+        StageOutput(stage_name="full_generation", text="A"),
+        artifact_dir=tmp_path / "hf",
+        sample_id="sample-1",
+    )
+    trt_output = serialize_stage_output(
+        StageOutput(
+            stage_name="full_generation",
+            metadata={"returncode": 1, "stderr": "preprocessing failed"},
+        ),
+        artifact_dir=tmp_path / "trt",
+        sample_id="sample-1",
+    )
+    request = {
+        "sample_id": "sample-1",
+        "testcase": "custom-case",
+        "stage": "full_generation",
+        "inputs": {},
+    }
+
+    summary = validation_engine.compare_model_plugin_prediction_sets(
+        {
+            "responses": [
+                {
+                    **request,
+                    "stage_output": hf_output,
+                }
+            ]
+        },
+        {
+            "responses": [
+                {
+                    **request,
+                    "stage_output": trt_output,
+                }
+            ]
+        },
+        {"requests": [request]},
+        work_dir=work_dir,
+        gates={"min_sample_pass_rate": 1.0},
+    )
+
+    assert summary["status"] == "failed"
+    assert summary["valid_count"] == 0
+    assert summary["skipped_count"] == 1
+    assert summary["cases"][0]["status"] == "error"
+    assert summary["execution_errors"][0]["failures"][0] == {
+        "backend": "trtmc",
+        "returncode": 1,
+        "stderr": "preprocessing failed",
+    }
+
+
 def test_prepare_mmlu_applies_gpt_oss_family_override(tmp_path: Path) -> None:
     dataset = tmp_path / "mmlu.json"
     _write_mmlu(dataset)
@@ -4109,6 +4213,39 @@ def test_explicit_reference_dtype_must_match_engine_precision(tmp_path: Path) ->
         )
 
 
+def test_declared_native_reference_dtype_exception_is_recorded(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset_kind": "mmlu_five_shot_json",
+                "task_eval": {
+                    "reference_precision": "bf16",
+                    "allow_reference_precision_mismatch": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    contract = validation_engine.resolve_reference_precision_contract(
+        argparse.Namespace(hf_dtype="auto"),
+        {"precision": "fp16"},
+        work_dir,
+    )
+
+    assert contract == {
+        "trtmc_base_precision": "fp16",
+        "trtmc_quantization": "none",
+        "reference_precision": "bf16",
+        "reference_dtype": "bfloat16",
+        "comparison": "reference_defined",
+    }
+
+
 def test_comparison_precision_overrides_both_candidate_and_reference(
     tmp_path: Path,
 ) -> None:
@@ -4139,6 +4276,61 @@ def test_comparison_precision_overrides_both_candidate_and_reference(
     assert contract["trtmc_base_precision"] == "fp32"
     assert contract["reference_precision"] == "fp32"
     assert contract["comparison"] == "aligned"
+
+
+def test_fnet_validation_compares_candidate_and_reference_in_fp32() -> None:
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(),
+        "stsbenchmark_encoder_embedding_parity",
+    )
+    model = next(
+        model
+        for model in validation_engine.load_manifest_records()
+        if model["name"] == "fnet-base"
+    )
+
+    validation_config = validation_engine.effective_validation_config(
+        suite,
+        model,
+    )
+    resolved_model = validation_engine.apply_comparison_precision(
+        model,
+        validation_config,
+    )
+
+    assert validation_config["comparison_precision"] == "fp32"
+    assert model["precision"] == "fp16"
+    assert resolved_model["precision"] == "fp32"
+
+
+@pytest.mark.parametrize(
+    ("suite_id", "model_name"),
+    [
+        ("mmlu_five_shot_mcq", "gpt-oss-20b"),
+        ("ocrbench_v2_unified", "deepseek-ocr"),
+    ],
+)
+def test_official_bf16_reference_exceptions_are_explicit(
+    suite_id: str,
+    model_name: str,
+) -> None:
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(),
+        suite_id,
+    )
+    model = next(
+        model
+        for model in validation_engine.load_manifest_records()
+        if model["name"] == model_name
+    )
+
+    validation_config = validation_engine.effective_validation_config(
+        suite,
+        model,
+    )
+
+    assert validation_config["reference_precision"] == "bf16"
+    assert validation_config["allow_reference_precision_mismatch"] is True
 
 
 def test_comparison_precision_rejects_quantized_models() -> None:
@@ -4269,6 +4461,36 @@ def test_non_transformers_reference_keeps_auto_dtype(tmp_path: Path) -> None:
     )
 
     assert dtype == "auto"
+
+
+def test_non_transformers_reference_can_declare_pipeline_dtype(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset_kind": "diffusion_prompt_json",
+                "task_eval": {"reference_precision": "bf16"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    contract = validation_engine.resolve_reference_precision_contract(
+        argparse.Namespace(hf_dtype="auto"),
+        {"precision": "fp16"},
+        work_dir,
+    )
+
+    assert contract == {
+        "trtmc_base_precision": "fp16",
+        "trtmc_quantization": "none",
+        "reference_precision": "bf16",
+        "reference_dtype": "bfloat16",
+        "comparison": "reference_defined",
+    }
 
 
 def test_text_input_contract_reports_first_token_mismatch(
@@ -4604,10 +4826,12 @@ def test_run_diffusion_hf_reference_writes_image_artifact_predictions(
         work_dir=str(work_dir),
         predictions="hf_predictions.json",
         raw_output="hf_raw.jsonl",
+        dtype="float16",
     ))
 
     predictions = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
     assert seen == [("a red cube", 42, 384), ("a blue sphere", 43, 384)]
+    assert template.metadata["reference_precision"] == "fp16"
     assert predictions["responses"][0]["sample_id"] == "partiprompts_000000"
     assert predictions["responses"][0]["num_frames"] == 1
     assert predictions["responses"][0]["source"] == "hf"

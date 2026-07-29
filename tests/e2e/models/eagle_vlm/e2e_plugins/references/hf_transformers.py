@@ -129,6 +129,39 @@ def _resolve_cached_model_ref(hf_id: str) -> str:
 
         return snapshot_download(hf_id, local_files_only=True)
     except Exception:
+        # ``snapshot_download(local_files_only=True)`` rejects a snapshot when
+        # any repository file is absent, including non-runtime files such as
+        # LICENSE or model-card assets. Transformers may still have every file
+        # required for inference. Bind the reference command to that exact
+        # cached commit instead of falling back to a Hub ID that could perform
+        # network I/O when the command is reproduced outside the harness.
+        try:
+            from huggingface_hub.constants import HF_HUB_CACHE
+
+            repo_cache = (
+                Path(HF_HUB_CACHE)
+                / f"models--{hf_id.replace('/', '--')}"
+            )
+            snapshots_dir = repo_cache / "snapshots"
+            candidates: list[Path] = []
+            main_ref = repo_cache / "refs" / "main"
+            if main_ref.is_file():
+                commit = main_ref.read_text(encoding="utf-8").strip()
+                if commit and Path(commit).name == commit:
+                    candidates.append(snapshots_dir / commit)
+            if snapshots_dir.is_dir():
+                candidates.extend(
+                    sorted(
+                        (path for path in snapshots_dir.iterdir() if path.is_dir()),
+                        key=lambda path: path.stat().st_mtime_ns,
+                        reverse=True,
+                    )
+                )
+            for candidate in candidates:
+                if candidate.is_dir():
+                    return str(candidate)
+        except Exception:
+            pass
         return hf_id
 
 
