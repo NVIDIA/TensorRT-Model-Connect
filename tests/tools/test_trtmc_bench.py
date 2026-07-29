@@ -677,6 +677,21 @@ def test_build_environment_asset_contents_participate_in_bundle_cache_identity(
     assert first.cache_key != second.cache_key
 
 
+def test_builder_source_digest_participates_in_bundle_cache_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = ManifestCatalog().resolve("distilgpt2")
+    case = resolve_case(model, tmp_path / "pending.trtfb")
+    builder = BundleBuilder(tmp_path / "cache")
+
+    monkeypatch.setattr(benchmark_builder, "_builder_source_digest", lambda _family: "first")
+    first = builder._plan(model, (case,))
+    monkeypatch.setattr(benchmark_builder, "_builder_source_digest", lambda _family: "second")
+    second = builder._plan(model, (case,))
+
+    assert first.cache_key != second.cache_key
+
+
 def test_image_rate_and_seconds_per_image_account_for_batch_size() -> None:
     metrics = reduce_metrics(
         "generate_image",
@@ -1288,6 +1303,99 @@ def test_cli_auto_builds_missing_bundle_then_reuses_cache(
     cached = second_result["preparation"]["bundles"][0]
     assert cached["status"] == "cache_hit"
     assert cached["builder_tensorrt_version"]
+
+
+def test_cli_rebuilds_stale_managed_bundle_found_by_bundle_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker = _worker(tmp_path)
+    cache = tmp_path / "cache"
+    stale_bundle = cache / "distilgpt2" / "stale-cache-key" / "distilgpt2.trtfb"
+    stale_bundle.parent.mkdir(parents=True)
+    stale_bundle.write_bytes(b"stale bundle")
+    commands: list[list[str]] = []
+
+    def fake_build(
+        command: list[str], _environment: dict[str, str], _timeout_s: int
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(list(command))
+        output = Path(command[command.index("-o") + 1])
+        output.write_bytes(b"current bundle")
+        return subprocess.CompletedProcess(command, 0, "builder stdout\n", "")
+
+    monkeypatch.setenv("TRTMC_BENCH_BUILD_PLATFORM", "test-sm80")
+    monkeypatch.setattr(BundleBuilder, "_execute", staticmethod(fake_build))
+
+    output = tmp_path / "result"
+    assert (
+        main(
+            [
+                "run",
+                "--model",
+                "distilgpt2",
+                "--bundle-cache",
+                str(cache),
+                "--bundle-root",
+                str(cache),
+                "--iterations",
+                "1",
+                "--warmup",
+                "0",
+                "--telemetry",
+                "off",
+                "--worker",
+                str(worker),
+                "-o",
+                str(output),
+            ]
+        )
+        == 0
+    )
+
+    assert len(commands) == 1
+    result = json.loads((output / "result.json").read_text(encoding="utf-8"))
+    preparation = result["preparation"]["bundles"][0]
+    assert preparation["status"] == "built"
+    assert Path(preparation["bundle"]) != stale_bundle
+    assert stale_bundle.read_bytes() == b"stale bundle"
+
+
+def test_builder_source_digest_tracks_generic_and_family_build_inputs(tmp_path: Path) -> None:
+    package_root = tmp_path / "tensorrt_model_connect"
+    family_root = package_root / "families" / "distilbert"
+    family_root.mkdir(parents=True)
+    generic_builder = package_root / "engine_builder.py"
+    family_builder = family_root / "plugin.py"
+    ignored_test = family_root / "tests" / "test_family.py"
+    ignored_test.parent.mkdir()
+    generic_builder.write_text("GENERIC = 1\n", encoding="utf-8")
+    family_builder.write_text("FAMILY = 1\n", encoding="utf-8")
+    ignored_test.write_text("TEST_ONLY = 1\n", encoding="utf-8")
+
+    initial = benchmark_builder._builder_source_digest(
+        "distilbert", package_root=package_root
+    )
+    ignored_test.write_text("TEST_ONLY = 2\n", encoding="utf-8")
+    assert (
+        benchmark_builder._builder_source_digest(
+            "distilbert", package_root=package_root
+        )
+        == initial
+    )
+
+    family_builder.write_text("FAMILY = 2\n", encoding="utf-8")
+    family_changed = benchmark_builder._builder_source_digest(
+        "distilbert", package_root=package_root
+    )
+    assert family_changed != initial
+
+    generic_builder.write_text("GENERIC = 2\n", encoding="utf-8")
+    assert (
+        benchmark_builder._builder_source_digest(
+            "distilbert", package_root=package_root
+        )
+        != family_changed
+    )
 
 
 def test_cli_no_build_fails_closed_when_bundle_is_missing(

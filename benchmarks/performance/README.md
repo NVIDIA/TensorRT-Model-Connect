@@ -153,6 +153,13 @@ TRTMC_PERF_BUNDLE_ROOTS
 TRTMC_PERF_RUNTIME_DIRS
 ```
 
+Bundles below the managed cache are reusable only when their cache key matches
+the current model manifest, build options and assets, TensorRT platform, and
+generic plus family-owned builder sources. A stale managed bundle discovered
+through a bundle root is preserved but ignored while the current bundle is
+built. Bundles outside the managed cache are explicit prebuilt inputs and are
+therefore trusted as supplied.
+
 The script expands these values before preflight and records the resolved
 environment, source path, and configuration SHA-256 in `results.json`. Missing
 required values fail before any model runs. Another machine can use a separate
