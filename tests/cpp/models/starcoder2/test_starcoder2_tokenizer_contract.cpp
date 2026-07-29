@@ -56,8 +56,7 @@ int main() {
       }
     })";
 
-    auto tokenizer =
-        trtmc::CreateBpeTokenizer(tokenizer_json.data(), tokenizer_json.size(), false);
+    auto tokenizer = trtmc::CreateBpeTokenizer(tokenizer_json.data(), tokenizer_json.size(), false);
     if (!tokenizer) {
         std::cerr << "FAIL: native StarCoder2 tokenizer was not created\n";
         return 1;
