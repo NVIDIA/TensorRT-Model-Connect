@@ -225,12 +225,12 @@ class FluxPlugin:
         Detects FLUX.1 vs FLUX.2 from the transformer config and dispatches
         to the appropriate builders.
         """
-        # TP + batch>1 is out of scope for the diffusion-batch series.
+        # Distributed denoisers + batch>1 are out of scope for this release.
         if max_batch_size > 1 and parallel_config is not None and getattr(
-                parallel_config, "enabled", False):
+                parallel_config, "distributed", False):
             raise NotImplementedError(
-                "FLUX tensor-parallel + max_batch_size > 1 is not supported "
-                "in this release; build with either TP=1 or max_batch_size=1."
+                "FLUX distributed + max_batch_size > 1 is not supported "
+                "in this release; build with either one rank or max_batch_size=1."
             )
 
         weights["_transformer_dir"]
@@ -241,6 +241,10 @@ class FluxPlugin:
 
         # Detect FLUX.2 via transformer config
         if _is_flux2(tc):
+            if parallel_config is not None and getattr(
+                    parallel_config, "cp_enabled", False):
+                raise NotImplementedError(
+                    "Ulysses context parallelism is currently supported for FLUX.1 only")
             return self._build_flux2_components(
                 model_dir, config, weights, tc=tc, verbose=verbose,
                 fp8_scales=fp8_scales, precision=precision,
@@ -267,16 +271,18 @@ class FluxPlugin:
         from .flux_dit_builder import build_flux_dit_engine, load_flux_dit_weights
         from .flux_dit_tp_builder import (
             build_flux_dit_engine as build_flux_dit_tp_engine)
+        from .flux_dit_cp_builder import (
+            build_flux_dit_engine as build_flux_dit_cp_engine)
         from ...parallel_config import (
             normalize_parallel_config,
-            require_tensorrt_11_for_tensor_parallel,
+            require_tensorrt_11_for_distributed,
         )
         import json
         from pathlib import Path
 
         parallel = normalize_parallel_config(parallel_config)
-        require_tensorrt_11_for_tensor_parallel(
-            parallel, feature="Flux tensor-parallel builds")
+        require_tensorrt_11_for_distributed(
+            parallel, feature="Flux distributed builds")
 
         # Per-component batch policy (design Decision C / E):
         # - DiT honours max_batch_size with opt = min(N, 4).
@@ -436,7 +442,23 @@ class FluxPlugin:
         dit_plan = None
         dit_rank_plans = None
         with timed_trt_compile(build_timing, "flux_dit"):
-            if parallel.enabled:
+            if parallel.cp_enabled:
+                print(
+                    f"[flux] Building shared FLUX DiT Ulysses CP{parallel.cp_size} plan ...",
+                    file=sys.stderr,
+                )
+                dit_plan = build_flux_dit_cp_engine(
+                    dit_weights,
+                    dim=dit_dim,
+                    num_heads=num_heads,
+                    num_layers=num_layers,
+                    num_single_layers=num_single_layers,
+                    num_img_tokens=num_img_tokens,
+                    text_seq_len=self._T5_MAX_SEQ_LEN,
+                    verbose=verbose,
+                    parallel_config=parallel,
+                )
+            elif parallel.enabled:
                 dit_rank_plans = {}
                 for rank in range(parallel.tp_size):
                     print(f"[flux] Building FLUX DiT TP rank {rank}/{parallel.tp_size} ...",
@@ -826,20 +848,27 @@ class FluxPlugin:
         return out
 
     def diffusion_bundle_sections(self, components: dict, *, parallel_config=None) -> list[tuple[str, bytes]]:
-        from ...parallel_config import normalize_parallel_config, rank_denoiser_section
+        from ...parallel_config import (
+            context_denoiser_section,
+            normalize_parallel_config,
+            rank_denoiser_section,
+        )
 
         parallel = normalize_parallel_config(parallel_config)
         sections: list[tuple[str, bytes]] = []
         for index, (_name, plan) in enumerate(components["text_encoders"]):
             sections.append((f"text_encoder_{index}_plan", plan))
-        if parallel.enabled:
+        if parallel.cp_enabled:
+            sections.append((context_denoiser_section(), components["denoiser"]))
+        elif parallel.enabled:
             denoiser_rank_plans = components["denoiser_ranks"]
             for rank in range(parallel.tp_size):
                 plan = denoiser_rank_plans.get(rank)
                 if plan is None:
                     plan = denoiser_rank_plans.get(str(rank))
                 if plan is None:
-                    raise ValueError(f"Missing FLUX tensor-parallel denoiser rank {rank}")
+                    raise ValueError(
+                        f"Missing FLUX {parallel.mode} denoiser rank {rank}")
                 sections.append((rank_denoiser_section(rank), plan))
         else:
             sections.append(("denoiser_plan", components["denoiser"]))

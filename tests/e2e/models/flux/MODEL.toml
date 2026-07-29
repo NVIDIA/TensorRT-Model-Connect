@@ -11,6 +11,7 @@ test_manifests = [
   "manifests/flux-2-dev-l0.json",
   "manifests/flux-2-dev.json",
   "manifests/flux-schnell-l0-tp4.json",
+  "manifests/flux-schnell-l0-cp4.json",
   "manifests/flux-schnell-l0-batch2.json",
   "manifests/flux-schnell-l0.json",
   "manifests/flux-schnell.json",

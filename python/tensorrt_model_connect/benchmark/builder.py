@@ -390,6 +390,10 @@ def _base_build_options(model: ModelDescriptor, build_args: Mapping[str, Any]) -
 def _append_parallel_option(options: dict[str, Any], build_args: Mapping[str, Any]) -> None:
     parallel = build_args.get("parallel", {})
     if isinstance(parallel, Mapping):
+        cp_size = parallel.get("cp_size", parallel.get("context_parallel_size"))
+        if cp_size is not None and int(cp_size) > 1:
+            options["context_parallel_size"] = int(cp_size)
+            return
         tp_size = parallel.get("tp_size", parallel.get("tensor_parallel_size"))
         if tp_size is not None and int(tp_size) > 1:
             options["tensor_parallel_size"] = int(tp_size)
@@ -558,6 +562,7 @@ def _build_command(
         "quant_scales": "--quant-scales",
         "quantize": "--quantize",
         "tensor_parallel_size": "--tensor-parallel-size",
+        "context_parallel_size": "--context-parallel-size",
     }
     for name, flag in value_flags.items():
         if name in options:

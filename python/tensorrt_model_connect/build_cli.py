@@ -256,11 +256,18 @@ def _cmd_build(args: argparse.Namespace) -> int:
     from .parallel_config import ParallelConfig
 
     tp_size = int(getattr(args, "tensor_parallel_size", 1) or 1)
-    parallel_config = (
-        ParallelConfig(mode="tensor_parallel", tp_size=tp_size)
-        if tp_size > 1
-        else None
-    )
+    cp_size = int(getattr(args, "context_parallel_size", 1) or 1)
+    if tp_size > 1 and cp_size > 1:
+        raise ValueError(
+            "--tensor-parallel-size and --context-parallel-size are mutually exclusive")
+    if cp_size > 1:
+        parallel_config = ParallelConfig(
+            mode="context_parallel", cp_size=cp_size)
+    elif tp_size > 1:
+        parallel_config = ParallelConfig(
+            mode="tensor_parallel", tp_size=tp_size)
+    else:
+        parallel_config = None
 
     # RTX selection MUST happen before any TensorRT API is touched.
     if getattr(args, 'rtx', False):
@@ -802,7 +809,7 @@ def main() -> None:
     )
     build_p.add_argument("--dynamic-kv-cache", action="store_true",
                          help="Build decoder bundles with runtime-resizable KV cache support")
-    # TP is a narrow build-only path, not a generic runtime-config namespace.
+    # Distributed modes are narrow build-only paths, not generic runtime config.
     build_p.add_argument(
         "--tensor-parallel-size",
         "--tp-size",
@@ -811,6 +818,14 @@ def main() -> None:
         choices=[1, 2, 4, 8],
         default=1,
         help="Build a tensor-parallel decoder bundle with this TP size")
+    build_p.add_argument(
+        "--context-parallel-size",
+        "--cp-size",
+        dest="context_parallel_size",
+        type=int,
+        choices=[1, 2, 4, 8],
+        default=1,
+        help="Build a FLUX.1 Ulysses context-parallel bundle with this CP size")
     build_p.add_argument(
         "--dynamic-kv-profile-rows",
         type=_parse_profile_rows,

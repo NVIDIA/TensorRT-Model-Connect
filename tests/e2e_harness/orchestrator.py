@@ -950,10 +950,34 @@ def _manifest_tensor_parallel_size(build_args: dict[str, Any]) -> int | None:
     return None
 
 
+def _manifest_context_parallel_size(build_args: dict[str, Any]) -> int | None:
+    if not isinstance(build_args, dict):
+        return None
+    parallel = build_args.get("parallel", {})
+    if isinstance(parallel, dict):
+        value = parallel.get("cp_size", parallel.get("context_parallel_size"))
+        mode = str(parallel.get("mode", "") or "").lower()
+    else:
+        value = build_args.get("cp_size", build_args.get("context_parallel_size"))
+        mode = str(build_args.get("parallel_mode", "") or "").lower()
+    if value is None:
+        return None
+    try:
+        cp_size = int(value)
+    except (TypeError, ValueError):
+        return None
+    if cp_size > 1 or mode == "context_parallel":
+        return cp_size
+    return None
+
+
 def _append_manifest_build_args(cmd: list[str], build_args: dict[str, Any]) -> None:
     tp_size = _manifest_tensor_parallel_size(build_args)
     if tp_size is not None and tp_size > 1:
         cmd.extend(["--tp-size", str(tp_size)])
+    cp_size = _manifest_context_parallel_size(build_args)
+    if cp_size is not None and cp_size > 1:
+        cmd.extend(["--cp-size", str(cp_size)])
 
 
 def _append_declared_build_cli_args(cmd: list[str], case: E2ECase) -> None:

@@ -966,6 +966,7 @@ def _validate_manifest(raw: dict, path: str) -> None:
         raise TypeError(f"Manifest {path!r}: distributed_runtime must be an object")
     for field, value in (
         ("build_args.parallel.tp_size", parallel.get("tp_size")),
+        ("build_args.parallel.cp_size", parallel.get("cp_size")),
         ("distributed_runtime.world_size", distributed.get("world_size")),
     ):
         if value is None:

@@ -73,3 +73,16 @@ def test_flux_batch2_manifest_declares_real_batch_contract() -> None:
     assert {spec["flag"] for spec in case.metadata["build_cli_args"]} >= {
         "--max-batch-size",
     }
+
+
+def test_flux_cp4_manifest_declares_ulysses_world_size() -> None:
+    manifest_path = Path(__file__).with_name("manifests") / "flux-schnell-l0-cp4.json"
+    case = load_manifest(manifest_path)
+
+    assert case.name == "flux-schnell-l0-cp4"
+    assert case.metadata["build_args"]["parallel"] == {
+        "mode": "context_parallel",
+        "cp_size": 4,
+    }
+    assert case.metadata["distributed_runtime"]["world_size"] == 4
+    assert case.reference_family == "diffusers_image_gen"

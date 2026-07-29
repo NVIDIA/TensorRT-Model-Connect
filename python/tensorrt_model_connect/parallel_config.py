@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tensor-parallel build metadata and weight sharding helpers."""
+"""Distributed build metadata and tensor-parallel weight sharding helpers."""
 
 from __future__ import annotations
 
@@ -22,45 +22,85 @@ class ParallelConfig:
     tp_size: int = 1
     rank: int = -1
     require_mpirun: bool = True
+    cp_size: int = 1
 
     @property
     def enabled(self) -> bool:
+        """Whether tensor parallelism is enabled.
+
+        Keep this property TP-specific so existing decoder builders do not
+        accidentally accept context-parallel configurations.
+        """
         return self.mode == "tensor_parallel" and self.tp_size > 1
+
+    @property
+    def cp_enabled(self) -> bool:
+        return self.mode == "context_parallel" and self.cp_size > 1
+
+    @property
+    def distributed(self) -> bool:
+        return self.enabled or self.cp_enabled
+
+    @property
+    def world_size(self) -> int:
+        if self.cp_enabled:
+            return self.cp_size
+        return self.tp_size
 
     def for_rank(self, rank: int) -> "ParallelConfig":
         return replace(self, rank=rank)
 
     def validate(self) -> None:
-        if self.mode not in {"single", "tensor_parallel"}:
+        if self.mode not in {"single", "tensor_parallel", "context_parallel"}:
             raise ValueError(f"Unsupported parallel.mode={self.mode!r}")
         if self.tp_size not in {1, 2, 4, 8}:
             raise ValueError("parallel.tp_size must be one of 1, 2, 4, 8")
+        if self.cp_size not in {1, 2, 4, 8}:
+            raise ValueError("parallel.cp_size must be one of 1, 2, 4, 8")
         if self.rank < -1:
             raise ValueError("parallel.rank must be -1 or a non-negative rank")
-        if self.rank >= self.tp_size:
+        if self.rank >= self.world_size:
             raise ValueError(
-                f"parallel.rank={self.rank} must be smaller than tp_size={self.tp_size}")
-        if self.mode == "single" and self.tp_size != 1:
-            raise ValueError("parallel.mode=single requires parallel.tp_size=1")
+                f"parallel.rank={self.rank} must be smaller than "
+                f"world_size={self.world_size}")
+        if self.mode == "single" and (self.tp_size != 1 or self.cp_size != 1):
+            raise ValueError(
+                "parallel.mode=single requires parallel.tp_size=1 and parallel.cp_size=1")
+        if self.mode == "tensor_parallel" and self.cp_size != 1:
+            raise ValueError("parallel.mode=tensor_parallel requires parallel.cp_size=1")
+        if self.mode == "context_parallel" and self.tp_size != 1:
+            raise ValueError("parallel.mode=context_parallel requires parallel.tp_size=1")
 
     def to_config_dict(self) -> dict[str, object]:
         self.validate()
         return {
             "mode": self.mode,
             "tp_size": self.tp_size,
+            "cp_size": self.cp_size,
             "rank": self.rank,
             "require_mpirun": self.require_mpirun,
         }
 
     def to_bundle_config_fields(self) -> dict[str, object]:
-        if not self.enabled:
+        if not self.distributed:
             return {}
-        return {
+        fields: dict[str, object] = {
             "parallelism": self.to_config_dict(),
-            "tensor_parallel_mode": self.mode,
-            "tensor_parallel_size": self.tp_size,
-            "tensor_parallel_require_mpirun": int(self.require_mpirun),
+            "parallel_mode": self.mode,
         }
+        if self.enabled:
+            fields.update({
+                "tensor_parallel_mode": self.mode,
+                "tensor_parallel_size": self.tp_size,
+                "tensor_parallel_require_mpirun": int(self.require_mpirun),
+            })
+        else:
+            fields.update({
+                "context_parallel_mode": self.mode,
+                "context_parallel_size": self.cp_size,
+                "context_parallel_require_mpirun": int(self.require_mpirun),
+            })
+        return fields
 
 
 def normalize_parallel_config(value: ParallelConfig | None) -> ParallelConfig:
@@ -77,14 +117,18 @@ def rank_denoiser_section(rank: int) -> str:
     return f"denoiser_plan_tp_rank{int(rank)}"
 
 
-def require_tensorrt_11_for_tensor_parallel(
+def context_denoiser_section() -> str:
+    return "denoiser_plan_cp"
+
+
+def require_tensorrt_11_for_distributed(
     parallel: ParallelConfig,
     *,
-    feature: str = "Tensor-parallel builds",
+    feature: str = "Distributed builds",
 ) -> None:
-    """Raise unless an enabled tensor-parallel request is running on TRT 11.0+."""
+    """Raise unless an enabled distributed request is running on TRT 11.0+."""
     parallel.validate()
-    if not parallel.enabled:
+    if not parallel.distributed:
         return
 
     from . import trt_compat
@@ -95,6 +139,18 @@ def require_tensorrt_11_for_tensor_parallel(
     if major < 11:
         found = version or "unavailable"
         raise RuntimeError(f"{feature} requires TensorRT 11.0+; found {found}")
+
+
+def require_tensorrt_11_for_tensor_parallel(
+    parallel: ParallelConfig,
+    *,
+    feature: str = "Tensor-parallel builds",
+) -> None:
+    """Raise unless an enabled tensor-parallel request is running on TRT 11.0+."""
+    if not parallel.enabled:
+        parallel.validate()
+        return
+    require_tensorrt_11_for_distributed(parallel, feature=feature)
 
 
 def validate_standard_decoder_tp(

@@ -46,6 +46,7 @@ from .parallel_config import (
     ParallelConfig,
     normalize_parallel_config,
     rank_engine_section,
+    require_tensorrt_11_for_distributed,
     require_tensorrt_11_for_tensor_parallel,
 )
 
@@ -952,6 +953,10 @@ def build_bundle(
             max_batch_size=max_batch_size)
         return
 
+    if parallel.cp_enabled:
+        raise NotImplementedError(
+            "Context parallelism is currently supported for FLUX.1 diffusion only")
+
     # 1. Parse config
     config = ModelConfig.from_dir(model_dir_path)
     config.raw["_model_dir"] = str(model_dir_path)
@@ -1628,9 +1633,9 @@ def _build_diffusion_bundle(
             f"Supported: {supported}")
 
     model_type = getattr(plugin, 'name', pipeline_class.lower())
-    if parallel.enabled:
-        require_tensorrt_11_for_tensor_parallel(
-            parallel, feature="Diffusion tensor-parallel builds")
+    if parallel.distributed:
+        require_tensorrt_11_for_distributed(
+            parallel, feature="Diffusion distributed builds")
     config = ModelConfig(model_type=model_type, raw=dict(pipeline_config))
     config.raw["max_cache_length"] = max_cache_length
     config.raw["_fp32_layers"] = sorted(set(fp32_layers or ()))
@@ -1731,9 +1736,10 @@ def _build_diffusion_bundle(
             build_components_kwargs["build_timing"] = build_timing
         if _call_supports_kwarg(build_components, "parallel_config"):
             build_components_kwargs["parallel_config"] = parallel
-        elif parallel.enabled:
+        elif parallel.distributed:
             raise NotImplementedError(
-                f"Plugin {plugin.name} does not accept parallel_config for diffusion TP")
+                f"Plugin {plugin.name} does not accept parallel_config for "
+                f"diffusion {parallel.mode}")
         # Only forward max_batch_size to plugins that opted in. Plugins that
         # don't accept it (older or non-batchified ones) silently stay on B=1.
         if _call_supports_kwarg(build_components, "max_batch_size"):
