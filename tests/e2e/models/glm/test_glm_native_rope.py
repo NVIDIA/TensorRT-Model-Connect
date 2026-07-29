@@ -8,11 +8,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from tests.builder.conftest import requires_trt
+from tests.builder.conftest import requires_trt, run_trt_graph
 
 trt = pytest.importorskip("tensorrt")
 
-from tests.builder.test_graph_ops_native_attn import _run_strongly_typed  # noqa: E402
 from tensorrt_model_connect.families.glm import graph_ops  # noqa: E402
 
 
@@ -70,7 +69,7 @@ def test_partial_interleaved_active_rope_matches_hf_glm_at_128k() -> None:
         )
         return {"output": output, "cos": cos_active, "sin": sin_active}
 
-    result = _run_strongly_typed(
+    result = run_trt_graph(
         build,
         {"x": x, "position_id": positions},
     )
