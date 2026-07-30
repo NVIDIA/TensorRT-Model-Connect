@@ -1,10 +1,13 @@
 ---
-title: "Bring Your Own Kernel"
+title: "Bring Your Own Kernel with TVM FFI"
 ---
 
 This tutorial starts by replacing part of a Qwen3-8B TensorRT graph with a
 TVM-FFI kernel, then manually replaces a DistilBERT region with a CuTe DSL
 kernel. You do not write TensorRT C++.
+
+For a compact description of the supported integration modes, contracts, and
+runtime lifecycle, see [TVM FFI Kernel Bridge](../../features/tvm-ffi.md).
 
 Start with the simplest graph workflow and move to the escape hatch only when
 you need it:

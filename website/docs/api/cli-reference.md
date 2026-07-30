@@ -91,8 +91,9 @@ Supplying `--kernel` validates one strict YAML manifest, the referenced trusted
 DSO, its SHA-256 digest, and the selected slot instances. It bypasses
 optimized-provider selection and uses the owning family's native TensorRT build
 path; it cannot be combined with `--rtx`. See
-[Bring Your Own Kernel](../tutorials/beginner/bring-your-own-kernel.md) for the
-end-to-end workflow.
+[TVM FFI Kernel Bridge](../features/tvm-ffi.md) for the integration contract
+and [Bring Your Own Kernel with TVM FFI](../tutorials/beginner/bring-your-own-kernel.md)
+for the end-to-end workflow.
 
 ## `trtmc graph`
 
@@ -148,8 +149,10 @@ type is `none`, `int`, `float`, or `ptr`. A dynamic output additionally requires
 Build the same model revision and options with `--graph-patch region.json` to
 produce a slot-ready native bundle. The selection must describe one connected,
 convex region and must still match the live graph fingerprint. See
-[Bring Your Own Kernel](../tutorials/beginner/bring-your-own-kernel.md) for the
-load-time binding workflow and current limitations.
+[TVM FFI Kernel Bridge](../features/tvm-ffi.md) for the load-time contract and
+current limits, then follow
+[Bring Your Own Kernel with TVM FFI](../tutorials/beginner/bring-your-own-kernel.md)
+for the end-to-end workflow.
 
 ## Runtime commands
 
