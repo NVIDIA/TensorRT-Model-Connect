@@ -14,6 +14,7 @@
       "name": "cosmos3-nano-l0",
       "trace_id": "IT-E2E-COSMOS3-NANO-L0-01",
       "model_type": "cosmos3",
+      "ci_tier": "l0_only",
       "runtime_timeout_s": 3600,
       "reference_backend": "invariant_only",
       "oracle_level": "L4_invariants",
