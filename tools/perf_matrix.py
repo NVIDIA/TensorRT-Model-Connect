@@ -2339,6 +2339,16 @@ def _bundle_preparation_summary(
     )
 
 
+def _bundle_preparation_filter(
+    results: Mapping[str, Any], row: Mapping[str, Any]
+) -> str:
+    statuses = {
+        str(record.get("status", "unknown"))
+        for record in _effective_bundle_preparation_records(results, row)
+    }
+    return " ".join(sorted(statuses)) if statuses else "unrecorded"
+
+
 def _raw_commands_html(row: Mapping[str, Any], default_cwd: str) -> str:
     commands = row.get("commands", {})
     if not isinstance(commands, Mapping):
@@ -2397,6 +2407,12 @@ def _report_html(results: Mapping[str, Any]) -> str:
     default_cwd = str(results.get("repository_root", ""))
     for row in rows:
         status = str(row.get("status", "pending"))
+        light_filter = status if status in {"green", "yellow", "red"} else "white"
+        search_filter = " ".join(
+            str(row.get(key, ""))
+            for key in ("family", "operation", "model", "id")
+        ).lower()
+        preparation_filter = _bundle_preparation_filter(results, row)
         reason = html.escape(_report_note(row))
         commands = _raw_commands_html(row, default_cwd)
         candidate_timing = _timing_value_html(row.get("candidate"))
@@ -2405,7 +2421,9 @@ def _report_html(results: Mapping[str, Any]) -> str:
         bundle_preparation = _bundle_preparation_html(results, row)
         timing_scope = _timing_scope_html(row)
         body.append(
-            "<tr>"
+            f"<tr data-filter-search='{html.escape(search_filter)}' "
+            f"data-filter-light='{html.escape(light_filter)}' "
+            f"data-filter-preparation='{html.escape(preparation_filter)}'>"
             f"<td>{html.escape(str(row['family']))}</td>"
             f"<td>{html.escape(str(row['operation']))}</td>"
             f"<td><code>{html.escape(str(row['model']))}</code></td>"
@@ -2469,6 +2487,10 @@ th{{background:#e5e7eb}} tr:nth-child(even){{background:#f9fafb}} code{{font-siz
 .light{{font-size:20px;text-align:center}} .timing-value{{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}}
 .timing-meta{{color:#6b7280;font-size:11px;margin-top:2px}} .scope-side{{font-size:11px;margin-bottom:7px;min-width:270px}}
 .scope-title{{font-size:12px;font-weight:700;margin-bottom:2px}}
+.filters{{display:flex;flex-wrap:wrap;gap:12px;align-items:end;margin:16px 0;padding:12px;background:#f3f4f6;border:1px solid #d1d5db}}
+.filters label{{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600}}
+.filters input,.filters select,.filters button{{box-sizing:border-box;min-height:34px;padding:6px 9px;border:1px solid #9ca3af;background:#fff;color:#1f2937}}
+.filters input{{min-width:260px}} .filters button{{cursor:pointer}} .filter-count{{margin-left:auto;font-size:13px;color:#4b5563}}
 </style></head><body>
 <h1>TRTMC performance matrix</h1>
 <p class="meta">Generated {generated}. {family_count} families across {len(rows)} model-profile comparisons.{repeated_note}</p>
@@ -2479,9 +2501,57 @@ th{{background:#e5e7eb}} tr:nth-child(even){{background:#f9fafb}} code{{font-siz
 <p class="meta">Model-profile wall time spans the complete case from start to finish, including bundle preparation, GPU headroom waits, TRTMC and baseline commands, and orchestration overhead. It is reported for observability and is not used for traffic-light classification.</p>
 <p class="meta">{bundle_preparation_summary}</p>
 <p><strong>{summary}</strong></p>
+<div class="filters" aria-label="Report filters">
+<label>Search
+<input id="report-filter-search" type="search" placeholder="Family, operation, or model">
+</label>
+<label>Light
+<select id="report-filter-light"><option value="">All</option><option value="green">Green</option><option value="yellow">Yellow</option><option value="red">Red</option><option value="white">White</option></select>
+</label>
+<label>Bundle preparation
+<select id="report-filter-preparation"><option value="">All</option><option value="built">Built</option><option value="cache_hit">Cache hit</option><option value="reused">Existing bundle</option><option value="would_build">Would build</option><option value="unrecorded">Not recorded</option></select>
+</label>
+<button id="report-filter-reset" type="button">Reset</button>
+<span class="filter-count" id="report-filter-count">Showing {len(rows)} of {len(rows)} rows</span>
+</div>
 <div class="table-wrap"><table><thead><tr><th>Family</th><th>Operation</th><th>Model profile</th><th>Model-profile wall time</th><th>Baseline</th><th>TRTMC infer p50 (ms)</th><th>Baseline infer p50 (ms)</th><th>TRTMC bundle preparation</th><th>Measured scope</th><th>Light</th><th>Note</th><th>Commands</th></tr></thead>
 <tbody>{"".join(body)}</tbody></table></div>
 <p class="meta">Green: TRTMC is more than the configured margin faster. Yellow: within the margin. Red: TRTMC is more than the margin slower. White: not run, partial, or invalid comparison. Commands are the original recorded argv and must be run from the displayed working directory with the same model cache and dependencies.</p>
+<script>
+(() => {{
+  const search = document.getElementById("report-filter-search");
+  const light = document.getElementById("report-filter-light");
+  const preparation = document.getElementById("report-filter-preparation");
+  const reset = document.getElementById("report-filter-reset");
+  const count = document.getElementById("report-filter-count");
+  const rows = Array.from(document.querySelectorAll("tbody tr[data-filter-search]"));
+  const applyFilters = () => {{
+    const searchValue = search.value.trim().toLowerCase();
+    const lightValue = light.value;
+    const preparationValue = preparation.value;
+    let visible = 0;
+    for (const row of rows) {{
+      const matchesSearch = !searchValue || row.dataset.filterSearch.includes(searchValue);
+      const matchesLight = !lightValue || row.dataset.filterLight === lightValue;
+      const matchesPreparation = !preparationValue ||
+        row.dataset.filterPreparation.split(" ").includes(preparationValue);
+      row.hidden = !(matchesSearch && matchesLight && matchesPreparation);
+      if (!row.hidden) visible += 1;
+    }}
+    count.textContent = "Showing " + visible + " of " + rows.length + " rows";
+  }};
+  search.addEventListener("input", applyFilters);
+  light.addEventListener("change", applyFilters);
+  preparation.addEventListener("change", applyFilters);
+  reset.addEventListener("click", () => {{
+    search.value = "";
+    light.value = "";
+    preparation.value = "";
+    applyFilters();
+    search.focus();
+  }});
+}})();
+</script>
 </body></html>"""
 
 

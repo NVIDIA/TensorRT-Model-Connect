@@ -967,8 +967,71 @@ def test_report_prefers_test_task_bundle_preparation_receipt() -> None:
     report = perf_matrix._report_html(results)
 
     assert "Built · 1m 23.1s" in report
-    assert "Existing bundle" not in report
+    assert "data-filter-preparation='reused'" not in report
     assert "1 built in this test task (1m 23.1s total)" in report
+
+
+def test_report_includes_client_side_row_filters() -> None:
+    results = {
+        "cases": [
+            {
+                "id": "example.generate",
+                "family": "example",
+                "operation": "generate",
+                "model": "example-model",
+                "status": "green",
+                "baseline_contract": {},
+                "candidate": {
+                    "preparation": {
+                        "bundles": [
+                            {
+                                "model": "example-model",
+                                "bundle": "/shared/example.trtfb",
+                                "status": "built",
+                                "build_time_s": 1.0,
+                            }
+                        ]
+                    }
+                },
+            },
+            {
+                "id": "other.generate",
+                "family": "other",
+                "operation": "generate",
+                "model": "other-model",
+                "status": "red",
+                "baseline_contract": {},
+                "candidate": {
+                    "preparation": {
+                        "bundles": [
+                            {
+                                "model": "other-model",
+                                "bundle": "/shared/other.trtfb",
+                                "status": "reused",
+                            }
+                        ]
+                    }
+                },
+            },
+        ],
+    }
+
+    report = perf_matrix._report_html(results)
+
+    assert 'id="report-filter-search"' in report
+    assert 'id="report-filter-light"' in report
+    assert 'id="report-filter-preparation"' in report
+    assert 'id="report-filter-reset"' in report
+    assert 'id="report-filter-count">Showing 2 of 2 rows<' in report
+    assert (
+        "data-filter-search='example generate example-model example.generate'"
+        in report
+    )
+    assert "data-filter-light='green'" in report
+    assert "data-filter-preparation='built'" in report
+    assert "data-filter-light='red'" in report
+    assert "data-filter-preparation='reused'" in report
+    assert "row.hidden = !(matchesSearch && matchesLight && matchesPreparation);" in report
 
 
 def test_apply_bundle_preparation_receipt_rejects_unmatched_bundle() -> None:

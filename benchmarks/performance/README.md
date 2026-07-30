@@ -233,10 +233,12 @@ report.html
 commands, bundle-preparation status and build time, and bounded diagnostic
 output. `report.html` shows the total campaign wall-clock span, each
 model-profile case's wall time, the family matrix, both infer-time p50 values,
-TRTMC bundle preparation, measured scopes, and traffic lights. Per-case wall
-time includes bundle preparation, GPU headroom waits, both commands, and
-orchestration overhead. It and bundle build time are reported for run
-observability but are excluded from the infer-time comparison.
+TRTMC bundle preparation, measured scopes, and traffic lights. Its self-contained
+filters search family, operation, model, or entry ID and select traffic-light or
+bundle-preparation status without a server dependency. Per-case wall time
+includes bundle preparation, GPU headroom waits, both commands, and orchestration
+overhead. It and bundle build time are reported for run observability but are
+excluded from the infer-time comparison.
 
 The preparation receipt uses schema `trtmc.perf-bundle-preparation/v1`, scope
 `test_task`, and the performance run's exact `git_commit`. Each entry under
