@@ -20,7 +20,7 @@
 
 namespace trtmc {
 
-constexpr int32_t CanaryMaxBeamSize = 16;
+constexpr int32_t CanaryMaxBeamSize = 32;
 
 inline int32_t canary_token_id(const ITokenizer* tokenizer, std::string_view token,
                                int32_t configured_id) {
@@ -57,11 +57,24 @@ inline void validate_canary_output_limits(const CanaryConfig& model,
     }
 }
 
-inline void validate_canary_request_options(const TranscriptionConfig& request) {
+inline void validate_canary_beam_options(const TranscriptionConfig& request) {
     if (request.beam_size < 1 || request.beam_size > CanaryMaxBeamSize) {
         throw std::invalid_argument("Canary beam_size must be in [1, " +
                                     std::to_string(CanaryMaxBeamSize) + "]");
     }
+    if (!std::isfinite(request.length_penalty) || request.length_penalty < 0.0F) {
+        throw std::invalid_argument("Canary length_penalty must be a finite value >= 0");
+    }
+    if (request.beam_fallback_max_size < 0 || request.beam_fallback_max_size > CanaryMaxBeamSize ||
+        (request.beam_fallback_max_size > 0 &&
+         request.beam_fallback_max_size < request.beam_size)) {
+        throw std::invalid_argument("Canary beam_fallback_max_size must be 0 or in [beam_size, " +
+                                    std::to_string(CanaryMaxBeamSize) + "]");
+    }
+}
+
+inline void validate_canary_request_options(const TranscriptionConfig& request) {
+    validate_canary_beam_options(request);
     if (request.input_sample_rate < 0) {
         throw std::invalid_argument("Canary input_sample_rate must be 0 or a positive Hz value");
     }
@@ -101,16 +114,50 @@ inline void validate_canary_language_pair(const CanaryConfig& model,
     }
 }
 
-inline void validate_canary_durations(const TranscriptionConfig& request) {
-    if (!std::isfinite(request.max_input_duration_seconds) ||
-        request.max_input_duration_seconds < 0.0F) {
+inline void validate_canary_nonnegative_duration(float value, const char* option_name) {
+    if (!std::isfinite(value) || value < 0.0F) {
+        throw std::invalid_argument(std::string("Canary ") + option_name +
+                                    " must be a finite value >= 0");
+    }
+}
+
+inline void validate_canary_dynamic_segment_bounds(const TranscriptionConfig& request) {
+    if (request.segment_min_duration_seconds > 0.0F && request.segment_duration_seconds <= 0.0F) {
         throw std::invalid_argument(
-            "Canary max_input_duration_seconds must be a finite value >= 0");
+            "Canary dynamic segmentation requires segment_duration_seconds > 0");
     }
-    if (!std::isfinite(request.segment_duration_seconds) ||
-        request.segment_duration_seconds < 0.0F) {
-        throw std::invalid_argument("Canary segment_duration_seconds must be a finite value >= 0");
+    if (request.segment_min_duration_seconds > request.segment_duration_seconds &&
+        request.segment_duration_seconds > 0.0F) {
+        throw std::invalid_argument(
+            "Canary segment_min_duration_seconds must not exceed segment_duration_seconds");
     }
+}
+
+inline void validate_canary_segment_overlap(const TranscriptionConfig& request) {
+    const float overlap_limit = request.segment_min_duration_seconds > 0.0F
+                                    ? request.segment_min_duration_seconds
+                                    : request.segment_duration_seconds;
+    if (request.segment_overlap_seconds > 0.0F &&
+        (overlap_limit <= 0.0F || request.segment_overlap_seconds >= overlap_limit)) {
+        throw std::invalid_argument(
+            "Canary segment_overlap_seconds must be less than the active segment duration");
+    }
+    if (request.lcs_merge && request.segment_overlap_seconds <= 0.0F) {
+        throw std::invalid_argument("Canary lcs_merge requires segment_overlap_seconds > 0");
+    }
+}
+
+inline void validate_canary_durations(const TranscriptionConfig& request) {
+    validate_canary_nonnegative_duration(request.max_input_duration_seconds,
+                                         "max_input_duration_seconds");
+    validate_canary_nonnegative_duration(request.segment_duration_seconds,
+                                         "segment_duration_seconds");
+    validate_canary_nonnegative_duration(request.segment_min_duration_seconds,
+                                         "segment_min_duration_seconds");
+    validate_canary_nonnegative_duration(request.segment_overlap_seconds,
+                                         "segment_overlap_seconds");
+    validate_canary_dynamic_segment_bounds(request);
+    validate_canary_segment_overlap(request);
 }
 
 inline void validate_canary_request(const CanaryConfig& model, const TranscriptionConfig& request,

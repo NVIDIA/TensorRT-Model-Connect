@@ -24,6 +24,8 @@
 namespace trtmc {
 
 struct MelFilterbank;
+struct CanaryBatchSegment;
+struct CanaryBatchWorkGroup;
 
 class CanaryPipeline final : public IPipeline {
   public:
@@ -51,7 +53,15 @@ class CanaryPipeline final : public IPipeline {
     TextResult transcribe_segment(const float* audio_data, int32_t num_samples,
                                   int32_t input_sample_rate,
                                   const std::vector<int32_t>& initial_tokens,
-                                  int32_t max_output_tokens, int32_t beam_size);
+                                  int32_t max_output_tokens, int32_t beam_size,
+                                  float length_penalty, int32_t beam_fallback_max_size);
+    void transcribe_batch_group(const CanaryBatchWorkGroup& group,
+                                const std::vector<CanaryBatchSegment>& work,
+                                const std::vector<TranscriptionRequest>& requests,
+                                std::vector<TextResult>& segment_results);
+    void retry_batch_fallback_segments(const std::vector<CanaryBatchSegment>& work,
+                                       const std::vector<TranscriptionRequest>& requests,
+                                       std::vector<TextResult>& segment_results);
     void run_encoder(const float* mel_data, int32_t mel_bins, int32_t mel_length,
                      int32_t valid_mel_frames);
     void run_encoder_batch(const std::vector<std::vector<float>>& mel_data, int32_t mel_bins,
@@ -60,20 +70,26 @@ class CanaryPipeline final : public IPipeline {
     void setup_cross_attention(const std::vector<int32_t>& actual_enc_seq_lens,
                                const std::vector<int32_t>& lane_to_sample);
     std::vector<int32_t> run_decoder(const std::vector<int32_t>& initial_tokens,
-                                     int32_t max_new_tokens, int32_t beam_size);
+                                     int32_t max_new_tokens, int32_t beam_size,
+                                     float length_penalty);
+    std::vector<int32_t> run_decoder_with_fallback(const std::vector<int32_t>& initial_tokens,
+                                                   int32_t max_new_tokens, int32_t beam_size,
+                                                   float length_penalty,
+                                                   int32_t beam_fallback_max_size);
     std::vector<std::vector<int32_t>>
     run_decoder_batch(const std::vector<std::vector<int32_t>>& initial_tokens,
                       const std::vector<int32_t>& max_new_tokens, int32_t beam_size,
-                      const std::vector<int32_t>& actual_enc_seq_lens);
+                      float length_penalty, const std::vector<int32_t>& actual_enc_seq_lens);
     std::vector<std::vector<int32_t>>
     run_greedy_decoder_batch(const std::vector<std::vector<int32_t>>& initial_tokens,
                              const std::vector<int32_t>& max_new_tokens);
     std::vector<std::vector<int32_t>>
     run_beam_decoder_batch(const std::vector<std::vector<int32_t>>& initial_tokens,
                            const std::vector<int32_t>& max_new_tokens, int32_t beam_size,
-                           const std::vector<int32_t>& actual_enc_seq_lens);
+                           float length_penalty, const std::vector<int32_t>& actual_enc_seq_lens);
     std::vector<int32_t> run_beam_decoder(const std::vector<int32_t>& initial_tokens,
-                                          int32_t max_new_tokens, int32_t beam_size);
+                                          int32_t max_new_tokens, int32_t beam_size,
+                                          float length_penalty);
     void run_decoder_step(int32_t token_id, std::vector<float>& logits);
     void run_decoder_step_batch(const std::vector<int32_t>& token_ids, std::vector<float>& logits);
     void ensure_beam_state_capacity(int32_t beam_size);

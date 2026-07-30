@@ -15,6 +15,7 @@
 // =============================================================================
 
 #include "runtime/models/canary/canary_decode_policy.h"
+#include "runtime/models/canary/canary_segment_utils.h"
 
 #include <cstdint>
 #include <iostream>
@@ -216,6 +217,82 @@ void test_beam_search_applies_default_length_normalization() {
           "Canary length-normalized beam score can retain the longer sequence");
 }
 
+void test_beam_output_budget_stops_before_cache_exhaustion() {
+    check(trtmc::canary_beam_output_budget(256, 256, 6) == 251,
+          "Canary beam budget accounts for prompt rows in a fixed cache");
+    check(trtmc::canary_beam_output_budget(240, 256, 6) == 240,
+          "Canary beam budget preserves requests that fit the cache");
+    check(trtmc::canary_beam_output_budget(1, 4, 4) == 1,
+          "Canary beam budget includes the token selected from final prompt logits");
+    check(trtmc::canary_beam_output_budget(1, 4, 5) == 0,
+          "Canary beam budget rejects prompts larger than the cache");
+}
+
+void test_beam_fallback_sizes_double_through_configured_limit() {
+    check(trtmc::canary_beam_fallback_sizes(4, 32) == std::vector<int32_t>({8, 16, 32}),
+          "Canary fallback doubles beam size through 32");
+    check(trtmc::canary_beam_fallback_sizes(4, 24) == std::vector<int32_t>({8, 16, 24}),
+          "Canary fallback stops at a non-power-of-two limit");
+    check(trtmc::canary_beam_fallback_sizes(4, 4).empty(),
+          "Canary fallback is empty when the initial beam is already at the limit");
+}
+
+void test_dynamic_segments_cover_long_audio_with_balanced_overlap() {
+    const auto spans = trtmc::plan_canary_segments(120 * 16000, 16000, 30.0F, 20.0F, 2.0F);
+    check(spans.size() == 5, "Canary dynamic planner uses five windows for 120 seconds");
+    check(spans.front().offset == 0 && spans.back().offset + spans.back().count == 120 * 16000,
+          "Canary dynamic planner covers both input boundaries");
+    for (const auto& span : spans) {
+        check(span.count >= 20 * 16000 && span.count <= 30 * 16000,
+              "Canary dynamic planner keeps every window inside configured bounds");
+    }
+    for (std::size_t i = 1; i < spans.size(); ++i) {
+        check(spans[i].offset < spans[i - 1].offset + spans[i - 1].count,
+              "Canary dynamic planner overlaps adjacent windows");
+    }
+}
+
+void test_fixed_segments_preserve_short_tail_behavior() {
+    const auto spans = trtmc::plan_canary_segments(65 * 16000, 16000, 30.0F, 0.0F, 0.0F);
+    check(spans.size() == 3, "Canary fixed planner keeps three windows for 65 seconds");
+    check(spans[0].count == 30 * 16000 && spans[1].count == 30 * 16000 &&
+              spans[2].count == 5 * 16000,
+          "Canary fixed planner preserves the short tail window");
+}
+
+void test_lcs_merge_removes_overlapping_token_prefix() {
+    const std::vector<int32_t> left = {10, 11, 12, 13, 99};
+    const std::vector<int32_t> right = {12, 77, 13, 14, 15, 99};
+    const auto merged = trtmc::merge_canary_token_segments(left, right, 99);
+    check(merged == std::vector<int32_t>({10, 11, 12, 13, 14, 15, 99}),
+          "Canary LCS merge tolerates one disagreement inside the overlap");
+
+    const auto no_overlap = trtmc::merge_canary_token_segments({1, 2, 99}, {3, 4, 99}, 99);
+    check(no_overlap == std::vector<int32_t>({1, 2, 3, 4, 99}),
+          "Canary LCS merge concatenates when the boundary has no reliable match");
+
+    const std::vector<int32_t> sparse_left = {10, 1, 1,  1, 20, 2, 2, 2, 30, 3,
+                                              3,  3, 40, 4, 4,  4, 4, 4, 4,  50};
+    const std::vector<int32_t> sparse_right = {10, 5, 5,  5, 20, 6, 6, 6, 30, 7,
+                                               7,  7, 40, 8, 8,  8, 8, 8, 8,  50};
+    check(trtmc::merge_canary_lcs_boundary(sparse_left, sparse_right).empty(),
+          "Canary LCS merge rejects sparse matches across unrelated boundary text");
+
+    check(trtmc::merge_canary_text_segments("princípio da dialeticidade previsto.",
+                                            "de eletricidade previsto no artigo 1010.") ==
+              "princípio da dialeticidade previsto. no artigo 1010.",
+          "Canary text LCS keeps the better side of an imperfect word overlap");
+
+    const std::string repeated_left =
+        "42 processo 063 85 26 13 2021 806 000 50 mil embargo de declaracao civil recurso "
+        "conhecido e nao provido outro item comeca aqui";
+    const std::string repeated_right =
+        "50 mil embargo de declaracao civil recurso conhecido e nao provido 43 processo 53 22";
+    check(trtmc::merge_canary_text_segments(repeated_left, repeated_right) ==
+              repeated_left + " " + repeated_right,
+          "Canary text LCS rejects ambiguous repeated boilerplate");
+}
+
 } // namespace
 
 int main() {
@@ -227,6 +304,11 @@ int main() {
     test_beam_search_reports_prefill_failure();
     test_beam_search_reports_branch_advance_failure();
     test_beam_search_applies_default_length_normalization();
+    test_beam_output_budget_stops_before_cache_exhaustion();
+    test_beam_fallback_sizes_double_through_configured_limit();
+    test_dynamic_segments_cover_long_audio_with_balanced_overlap();
+    test_fixed_segments_preserve_short_tail_behavior();
+    test_lcs_merge_removes_overlapping_token_prefix();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " canary decode policy test(s) failed\n";

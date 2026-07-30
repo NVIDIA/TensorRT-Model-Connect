@@ -67,6 +67,12 @@ struct TranscriptionConfig {
     int32_t input_sample_rate{0};
     // 1 preserves greedy decoding. Values greater than 1 select beam search.
     int32_t beam_size{1};
+    // Beam-search length normalization exponent. 0 ranks hypotheses by their
+    // accumulated log probability; 1 ranks by mean log probability.
+    float length_penalty{1.0F};
+    // 0 disables automatic fallback. Otherwise, an unterminated decode is
+    // retried with doubled beam sizes up to this value.
+    int32_t beam_fallback_max_size{0};
     std::string source_language{"en"};
     std::string target_language{"en"};
     TranscriptionTask task{TranscriptionTask::kTranscribe};
@@ -76,8 +82,20 @@ struct TranscriptionConfig {
     // hard input limit in seconds; longer inputs are rejected.
     float max_input_duration_seconds{0.0F};
     // 0 processes one model-sized segment. A positive value splits the input
-    // into independent segments of this many seconds and joins their text.
+    // into segments no longer than this many seconds and joins their text.
     float segment_duration_seconds{0.0F};
+    // 0 keeps fixed-size segmentation. A positive value enables dynamic
+    // segmentation: long inputs are covered by approximately equal windows
+    // between this minimum and segment_duration_seconds, minimizing short
+    // padded tail windows.
+    float segment_min_duration_seconds{0.0F};
+    // Requested overlap between adjacent segments. Dynamic segmentation can
+    // increase the overlap when needed to keep every window at least
+    // segment_min_duration_seconds long.
+    float segment_overlap_seconds{0.0F};
+    // Merge overlapping segment token sequences with a boundary-constrained
+    // longest common subsequence instead of concatenating their text.
+    bool lcs_merge{false};
 };
 
 struct TranscriptionRequest {

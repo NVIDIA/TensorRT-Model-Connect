@@ -223,9 +223,11 @@ void print_usage() {
            "  trtmc solve           <bundle.trtfb> --field-input CSV\n"
            "  trtmc solve           <bundle.trtfb> --branch-input CSV [--trunk-input CSV]\n"
            "  trtmc transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] "
-           "[--beam-size N] [--language TAG] [--source-language TAG] [--target-language TAG] "
+           "[--beam-size N] [--beam-fallback-max-size N] [--length-penalty F] [--language TAG] "
+           "[--source-language TAG] [--target-language TAG] "
            "[--task transcribe|translate] [--punctuation|--no-punctuation] [--timestamps] "
-           "[--max-input-seconds F] [--segment-length-seconds F] "
+           "[--max-input-seconds F] [--segment-length-seconds F] [--segment-min-seconds F] "
+           "[--segment-overlap-seconds F] [--lcs-merge] "
            "[--stream] [--chunk-ms N] [--att-context-size L,R] "
            "[--pad-and-drop-preencoded] [--hf-python PATH]\n"
            "  trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav\n"
@@ -609,13 +611,33 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if (arg == "--beam-size" && need_value(arg)) {
-            auto value = parse_int_value(arg, "an integer in [1, 16]");
-            if (!value || *value < 1 || *value > 16) {
+            auto value = parse_int_value(arg, "an integer in [1, 32]");
+            if (!value || *value < 1 || *value > 32) {
                 args.parse_error = true;
-                args.error_message = arg + " expects an integer in [1, 16]";
+                args.error_message = arg + " expects an integer in [1, 32]";
                 return args;
             }
             args.beam_size = *value;
+            continue;
+        }
+        if (arg == "--length-penalty" && need_value(arg)) {
+            auto value = parse_float_value(arg, "a finite number >= 0");
+            if (!value || *value < 0.0F) {
+                args.parse_error = true;
+                args.error_message = arg + " expects a finite number >= 0";
+                return args;
+            }
+            args.length_penalty = *value;
+            continue;
+        }
+        if (arg == "--beam-fallback-max-size" && need_value(arg)) {
+            auto value = parse_int_value(arg, "an integer in [1, 32]");
+            if (!value || *value < 1 || *value > 32) {
+                args.parse_error = true;
+                args.error_message = arg + " expects an integer in [1, 32]";
+                return args;
+            }
+            args.beam_fallback_max_size = *value;
             continue;
         }
         if (arg == "--source-language" && need_value(arg)) {
@@ -669,6 +691,30 @@ CliArgs parse_args(int argc, char** argv) {
                 return args;
             }
             args.segment_length_seconds = *value;
+            continue;
+        }
+        if (arg == "--segment-min-seconds" && need_value(arg)) {
+            auto value = parse_float_value(arg, "a finite number > 0");
+            if (!value || *value <= 0.0F) {
+                args.parse_error = true;
+                args.error_message = arg + " expects a finite number > 0";
+                return args;
+            }
+            args.segment_min_seconds = *value;
+            continue;
+        }
+        if (arg == "--segment-overlap-seconds" && need_value(arg)) {
+            auto value = parse_float_value(arg, "a finite number >= 0");
+            if (!value || *value < 0.0F) {
+                args.parse_error = true;
+                args.error_message = arg + " expects a finite number >= 0";
+                return args;
+            }
+            args.segment_overlap_seconds = *value;
+            continue;
+        }
+        if (arg == "--lcs-merge") {
+            args.lcs_merge = true;
             continue;
         }
         if (arg == "--point-x" && need_value(arg)) {

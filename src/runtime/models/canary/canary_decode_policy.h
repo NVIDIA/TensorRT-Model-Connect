@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -15,6 +16,30 @@
 namespace trtmc {
 
 inline constexpr float CanaryDefaultBeamLengthPenalty = 1.0F;
+
+inline int32_t canary_beam_output_budget(int32_t requested_tokens, int32_t cache_length,
+                                         std::size_t prompt_tokens) {
+    if (requested_tokens <= 0 || cache_length <= 0 ||
+        prompt_tokens > static_cast<std::size_t>(cache_length)) {
+        return 0;
+    }
+    // Prompt execution fills prompt_tokens cache rows. The final generated
+    // token is selected from existing logits and does not need another cache
+    // row, hence the inclusive +1.
+    const int32_t cache_budget = cache_length - static_cast<int32_t>(prompt_tokens) + 1;
+    return std::min(requested_tokens, cache_budget);
+}
+
+inline std::vector<int32_t> canary_beam_fallback_sizes(int32_t initial_beam_size,
+                                                       int32_t maximum_beam_size) {
+    std::vector<int32_t> sizes;
+    for (int32_t beam_size = initial_beam_size; beam_size > 0 && beam_size < maximum_beam_size;) {
+        beam_size = static_cast<int32_t>(
+            std::min<int64_t>(static_cast<int64_t>(beam_size) * 2, maximum_beam_size));
+        sizes.push_back(beam_size);
+    }
+    return sizes;
+}
 
 struct CanaryDecodeLoopResult {
     std::vector<int32_t> output_ids;

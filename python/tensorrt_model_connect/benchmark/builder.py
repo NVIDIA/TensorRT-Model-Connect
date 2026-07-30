@@ -140,9 +140,10 @@ class BundleBuilder:
     ) -> tuple[Path | None, BundlePreparation]:
         model = cases[0].model
         requested_bundle = requested_bundle.expanduser().resolve()
-        if requested_bundle.is_file() and not rebuild:
+        requested_is_managed = _is_relative_to(requested_bundle, self.cache_root)
+        if requested_bundle.is_file() and not requested_is_managed and not rebuild:
             return None, BundlePreparation(model.name, "reused", requested_bundle)
-        if requested_bundle.is_file() and not _is_relative_to(requested_bundle, self.cache_root):
+        if requested_bundle.is_file() and not requested_is_managed:
             raise BenchmarkError(
                 f"--rebuild cannot overwrite explicit/external bundle {requested_bundle}; "
                 "omit --bundle to rebuild the managed cache"
@@ -176,11 +177,12 @@ class BundleBuilder:
         if "fp8_scales" in identity_options:
             identity_options["fp8_scales"] = model.build_settings["fp8_scales"]
         identity = {
-            "schema_version": "trtmc.benchmark-bundle-cache/v1",
+            "schema_version": "trtmc.benchmark-bundle-cache/v2",
             "model": model.identity(),
             "manifest_sha256": _sha256_file(model.manifest_path),
             "options": identity_options,
             "build_environment_assets": _build_environment_asset_identity(model, environment),
+            "builder_sources_sha256": _builder_source_digest(model.family),
             "platform": _platform_identity(runtime),
         }
         encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -684,6 +686,40 @@ def _subprocess_text(value: str | bytes | None) -> str:
 
 def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _builder_source_digest(family: str, *, package_root: Path | None = None) -> str:
+    root = (package_root or Path(__file__).resolve().parents[1]).resolve()
+    family_name = family.replace("-", "_")
+    source_roots = (
+        root,
+        root / "engine_defs",
+        root / "families",
+        root / "families" / family_name,
+        root / "kernels",
+        root / "quantization",
+        root / "runtime_config",
+    )
+    candidates: set[Path] = set()
+    for source_root in source_roots:
+        if not source_root.is_dir():
+            continue
+        if source_root in {root, root / "families"}:
+            candidates.update(path for path in source_root.iterdir() if path.is_file())
+            continue
+        candidates.update(path for path in source_root.rglob("*") if path.is_file())
+
+    digest = hashlib.sha256()
+    for path in sorted(candidates):
+        relative = path.relative_to(root)
+        if any(part in {"__pycache__", "tests"} for part in relative.parts):
+            continue
+        if path.suffix in {".pyc", ".pyo"}:
+            continue
+        digest.update(relative.as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:

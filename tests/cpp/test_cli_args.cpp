@@ -203,7 +203,11 @@ void test_canary_transcription_flags_and_batch() {
                        "--audio",
                        "two.wav",
                        "--beam-size",
-                       "4",
+                       "32",
+                       "--beam-fallback-max-size",
+                       "32",
+                       "--length-penalty",
+                       "0",
                        "--source-language",
                        "en",
                        "--target-language",
@@ -215,11 +219,18 @@ void test_canary_transcription_flags_and_batch() {
                        "--max-input-seconds",
                        "45.5",
                        "--segment-length-seconds",
-                       "20"});
+                       "30",
+                       "--segment-min-seconds",
+                       "20",
+                       "--segment-overlap-seconds",
+                       "2",
+                       "--lcs-merge"});
     check(!args.parse_error, "Canary transcription controls parse");
     check(args.audio_inputs == std::vector<std::string>({"one.wav", "two.wav"}),
           "Canary repeated audio inputs form batch");
-    check(args.beam_size == 4, "Canary beam size");
+    check(args.beam_size == 32, "Canary beam size");
+    check(args.beam_fallback_max_size == 32, "Canary beam fallback limit");
+    check(args.length_penalty == 0.0F, "Canary beam length penalty");
     check(args.source_language == "en" && args.target_language == "fr",
           "Canary source and target languages");
     check(args.transcription_task == "translate", "Canary translation task");
@@ -227,11 +238,24 @@ void test_canary_transcription_flags_and_batch() {
     check(args.timestamps, "Canary timestamp toggle");
     check(args.max_input_seconds > 45.49F && args.max_input_seconds < 45.51F,
           "Canary maximum input seconds");
-    check(args.segment_length_seconds == 20.0F, "Canary segment length seconds");
+    check(args.segment_length_seconds == 30.0F, "Canary segment length seconds");
+    check(args.segment_min_seconds == 20.0F, "Canary dynamic segment minimum");
+    check(args.segment_overlap_seconds == 2.0F, "Canary segment overlap");
+    check(args.lcs_merge, "Canary LCS merge");
 
     check(parse({"trtmc", "transcribe", "b.trtfb", "--audio", "a.wav", "--beam-size", "0"})
               .parse_error,
           "Canary rejects zero beam size");
+    check(parse({"trtmc", "transcribe", "b.trtfb", "--audio", "a.wav", "--beam-size", "33"})
+              .parse_error,
+          "Canary rejects beam size above 32");
+    check(parse({"trtmc", "transcribe", "b.trtfb", "--audio", "a.wav", "--beam-fallback-max-size",
+                 "33"})
+              .parse_error,
+          "Canary rejects beam fallback above 32");
+    check(parse({"trtmc", "transcribe", "b.trtfb", "--audio", "a.wav", "--length-penalty", "-1"})
+              .parse_error,
+          "Canary rejects negative length penalty");
     check(parse({"trtmc", "transcribe", "b.trtfb", "--audio", "a.wav", "--task", "other"})
               .parse_error,
           "Canary rejects unknown task");
