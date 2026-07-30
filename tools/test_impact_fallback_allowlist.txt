@@ -17,6 +17,7 @@ catch_all benchmarks/performance/release.yaml # release matrix workloads and com
 catch_all conanfile.py # release wheel native packaging recipe; catch-all stays conservative
 catch_all conftest.py # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all docker-compose.yml # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all examples/byok/export_cutedsl_residual_add.py # standalone GPU tutorial exporter has no precise impact rule yet; catch-all stays conservative
 catch_all examples/trtmc_dataset_benchmark.cpp # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all hf_links_wave1.txt # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all NOTICE # top-level legal attribution metadata; conservative full-suite fallback is intentionally retained
