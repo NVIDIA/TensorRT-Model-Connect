@@ -188,6 +188,50 @@ def test_profile_source_builds_use_a_safe_default_job_limit(monkeypatch, tmp_pat
     assert install[2] == 7200
 
 
+def test_profile_build_requirements_are_installed_before_runtime_requirements(
+    monkeypatch, tmp_path
+):
+    build_requirements = tmp_path / "build.lock.txt"
+    build_requirements.write_text("maturin==1.7.4\n", encoding="utf-8")
+    requirements = tmp_path / "requirements.lock.txt"
+    requirements.write_text("sphn==0.1.4\n", encoding="utf-8")
+    monkeypatch.setenv(shared_profiles.PROFILE_ROOT_ENV, str(tmp_path / "profiles"))
+    monkeypatch.setattr(
+        shared_profiles,
+        "_verify_exact_requirements",
+        lambda *_args, **_kwargs: None,
+    )
+
+    commands = []
+
+    def run_command(cmd, *, description, timeout=1800, **kwargs):
+        commands.append((cmd, description, timeout, kwargs))
+        if description.startswith("create Python profile"):
+            python = Path(cmd[-1]) / "bin" / "python"
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(shared_profiles, "_run_profile_command", run_command)
+
+    shared_profiles._materialize_venv_profile(
+        "custom",
+        {
+            "build_requirements": str(build_requirements),
+            "requirements": str(requirements),
+            "system_site_packages": False,
+        },
+        sys.executable,
+    )
+
+    installs = [call for call in commands if call[1].startswith("install ")]
+    assert [call[1] for call in installs] == [
+        "install build requirements for Python profile 'custom'",
+        "install Python profile 'custom'",
+    ]
+    assert "build-requirements.lock.txt" in installs[0][0][-1]
+    assert "requirements.lock.txt" in installs[1][0][-1]
+
+
 def test_profile_source_builds_respect_an_explicit_job_limit(monkeypatch):
     monkeypatch.setenv("MAX_JOBS", "2")
 
@@ -234,6 +278,7 @@ def test_family_profile_registry_is_fully_exact_pinned():
         "lance_reference",
         "magpie_tts_reference",
         "nemotron_h_reference",
+        "personaplex_reference",
         "phi4_multimodal",
         "sana_wm_reference",
         "reference_common",
@@ -247,6 +292,14 @@ def test_family_profile_registry_is_fully_exact_pinned():
         )
         pins = shared_profiles._exact_pinned_requirements(requirements)
         assert pins, name
+
+    personaplex = profiles["personaplex_reference"]
+    build_requirements = shared_profiles._read_requirements_text(
+        personaplex["build_requirements"]
+    )
+    assert shared_profiles._exact_pinned_requirements(build_requirements) == {
+        "maturin": "1.7.4"
+    }
 
 
 def test_profile_lock_rejects_non_exact_or_duplicate_requirements():

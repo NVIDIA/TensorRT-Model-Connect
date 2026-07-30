@@ -473,23 +473,30 @@ def family_default_execution_profiles(family: object) -> dict[str, str]:
 def family_python_profile_specs() -> dict[str, dict[str, object]]:
     """Return Python profile specs declared by family-owned MODEL.toml files.
 
-    Entries use ``name|requirements|verification_script|system_site_packages``.
+    Entries use
+    ``name|requirements|verification_script|system_site_packages|build_requirements``.
+    The final two fields are optional.
     Paths are package-relative so profile assets stay under the owning family.
     """
     profiles: dict[str, dict[str, object]] = {}
     for meta in _load_family_metadata():
         for spec in meta.python_profile_specs:
             parts = [part.strip() for part in spec.split("|")]
-            if len(parts) not in {3, 4} or any(not part for part in parts[:3]):
+            if (
+                len(parts) not in {3, 4, 5}
+                or any(not part for part in parts[:3])
+                or (len(parts) == 5 and not parts[4])
+            ):
                 raise ValueError(
                     f"Invalid python_profile_specs entry {spec!r} for family "
                     f"{meta.id}; expected "
-                    "'name|requirements|verification_script|system_site_packages'"
+                    "'name|requirements|verification_script|"
+                    "system_site_packages|build_requirements'"
                 )
             name, requirements, verification_script_file = parts[:3]
             system_site_packages = (
                 _metadata_bool(parts[3], "python_profile_specs")
-                if len(parts) == 4 else True
+                if len(parts) >= 4 else True
             )
             if name in profiles:
                 raise ValueError(
@@ -501,6 +508,8 @@ def family_python_profile_specs() -> dict[str, dict[str, object]]:
                 "verification_script_file": verification_script_file,
                 "system_site_packages": system_site_packages,
             }
+            if len(parts) == 5:
+                profiles[name]["build_requirements"] = parts[4]
     return profiles
 
 
