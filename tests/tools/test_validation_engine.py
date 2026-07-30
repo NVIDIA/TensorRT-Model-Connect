@@ -1106,6 +1106,22 @@ def test_default_suites_include_encoder_embedding_parity() -> None:
     )["gates"]["max_pair_cosine_abs_delta"] == 0.1
 
 
+def test_phi4_multimodal_workload_reserves_dynamic_hd_cache() -> None:
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(),
+        "phi4_multimodal_mmmu_model_parity",
+    )
+    model = next(
+        model
+        for model in validation_engine.load_manifest_records()
+        if model["name"] == "phi4-multimodal"
+    )
+
+    assert model["max_cache_length"] == 768
+    assert suite["build"]["min_max_cache_length"] == 1024
+    assert validation_engine.requested_build_max_cache_length(suite, model) == 1024
+
+
 def test_prepare_stsbenchmark_expands_each_pair_to_shared_sentence_inputs(
     tmp_path: Path,
 ) -> None:

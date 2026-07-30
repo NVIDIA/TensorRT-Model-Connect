@@ -1677,6 +1677,11 @@ suites:
       model_names: [phi4-multimodal]
     scoring:
       scorer: model_plugin_parity
+    build:
+      # Dynamic-HD contributes 576 vision tokens before the MMMU question.
+      # The longest fixed request exceeds the model manifest's 768-token
+      # smoke profile once chat framing and generation are included.
+      min_max_cache_length: 1024
     gates:
       min_sample_pass_rate: 1.0
     ci:
