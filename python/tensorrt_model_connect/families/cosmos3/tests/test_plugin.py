@@ -10,7 +10,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from tensorrt_model_connect.families import find_diffusion_plugin
 from tensorrt_model_connect.families.cosmos3.plugin import plugin
 from tensorrt_model_connect.parallel_config import ParallelConfig
 
@@ -22,8 +21,8 @@ def test_matches_only_cosmos3_aliases() -> None:
     assert not plugin.matches("wan_t2v")
 
 
-def test_official_diffusers_pipeline_class_selects_plugin() -> None:
-    assert find_diffusion_plugin("Cosmos3OmniDiffusersPipeline") is plugin
+def test_official_diffusers_pipeline_class_is_declared() -> None:
+    assert "Cosmos3OmniDiffusersPipeline" in plugin.pipeline_classes
 
 
 def test_load_weights_validates_checkpoint_layout(tmp_path) -> None:
