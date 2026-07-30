@@ -34,6 +34,7 @@ def test_single_device_model_proof_has_no_distributed_configuration() -> None:
 
     assert "distributed_runtime" not in manifest
     assert "parallel" not in manifest.get("build_args", {})
+    assert manifest["testcases"][0]["ci_tier"] == "l0_only"
 
 
 def test_cp4_build_and_runtime_world_sizes_match() -> None:
