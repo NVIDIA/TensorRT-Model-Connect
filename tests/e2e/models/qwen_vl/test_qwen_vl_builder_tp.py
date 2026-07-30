@@ -130,6 +130,38 @@ def test_qwen25_vl_split_decode_uses_decode_profile(monkeypatch) -> None:
     assert calls["build"][3]["profile_mode"] == "decode"
 
 
+def test_qwen25_vl_split_prefill_forwards_build_options(monkeypatch) -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.qwen_vl.default_decoder")
+    calls: dict[str, object] = {}
+
+    def fake_build(config, weights, max_cache_length, **kwargs):
+        calls["build"] = (config, weights, max_cache_length, kwargs)
+        return b"qwen-vl-prefill-plan"
+
+    monkeypatch.setattr(module, "build_dual_profile_decoder_engine", fake_build)
+    config = _config(qwen3=False)
+    config.raw["_decoder_engine_role"] = "prefill"
+    config.raw["_active_split_decoder_build"] = True
+    config.raw["_family_build_options"] = {
+        "qwen_vl_decoder": {
+            "max_prefill_length": 24,
+            "opt_prefill_length": 12,
+            "builder_workspace_gib": 6,
+        },
+    }
+
+    result = module.build_standard_decoder_engine(
+        config, {}, 31, precision="fp16", embed_input=True)
+
+    assert result == b"qwen-vl-prefill-plan"
+    kwargs = calls["build"][3]
+    assert kwargs["profile_mode"] == "prefill"
+    assert kwargs["max_prefill_length"] == 24
+    assert kwargs["opt_prefill_length"] == 12
+    assert kwargs["builder_workspace_bytes"] == 6 << 30
+
+
 def test_qwen25_vl_lora_keeps_dual_profile_prefill(monkeypatch) -> None:
     module = importlib.import_module(
         "tensorrt_model_connect.families.qwen_vl.default_decoder")

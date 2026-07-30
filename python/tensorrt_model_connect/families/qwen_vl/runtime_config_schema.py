@@ -23,6 +23,27 @@ DECODER_SCHEMA = Schema(
             allowed_layers=_BUILD,
             validator=lambda value: value in {"native", "decomposed"},
         ),
+        ConfigField(
+            name="max_prefill_length",
+            type_tag="int32",
+            default=0,
+            allowed_layers=_BUILD,
+            validator=lambda value: isinstance(value, int) and value >= 0,
+        ),
+        ConfigField(
+            name="opt_prefill_length",
+            type_tag="int32",
+            default=64,
+            allowed_layers=_BUILD,
+            validator=lambda value: isinstance(value, int) and value > 0,
+        ),
+        ConfigField(
+            name="builder_workspace_gib",
+            type_tag="int32",
+            default=1,
+            allowed_layers=_BUILD,
+            validator=lambda value: isinstance(value, int) and value > 0,
+        ),
     ),
 )
 

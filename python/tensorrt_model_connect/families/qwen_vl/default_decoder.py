@@ -38,19 +38,42 @@ if TYPE_CHECKING:
     from ...quantization.context import QuantContext
 
 
-def _decode_attention_backend(config: ModelConfig) -> str:
+def _decoder_build_options(config: ModelConfig) -> dict:
     family_options = config.raw.get("_family_build_options", {})
     if not isinstance(family_options, dict):
-        return "native"
+        return {}
     decoder_options = family_options.get("qwen_vl_decoder", {})
     if not isinstance(decoder_options, dict):
         raise ValueError("qwen_vl_decoder build options must be an object")
+    return decoder_options
+
+
+def _decode_attention_backend(config: ModelConfig) -> str:
+    decoder_options = _decoder_build_options(config)
     backend = str(decoder_options.get("decode_attention", "native"))
     if backend not in {"native", "decomposed"}:
         raise ValueError(
             "qwen_vl_decoder.decode_attention must be 'native' or "
             f"'decomposed', got {backend!r}")
     return backend
+
+
+def _decoder_profile_options(config: ModelConfig) -> tuple[int, int | None, int]:
+    decoder_options = _decoder_build_options(config)
+    max_prefill_length = int(decoder_options.get("max_prefill_length", 0))
+    opt_prefill_length = int(decoder_options.get("opt_prefill_length", 64))
+    builder_workspace_gib = int(decoder_options.get("builder_workspace_gib", 1))
+    if max_prefill_length < 0:
+        raise ValueError("qwen_vl_decoder.max_prefill_length must be >= 0")
+    if opt_prefill_length <= 0:
+        raise ValueError("qwen_vl_decoder.opt_prefill_length must be > 0")
+    if builder_workspace_gib <= 0:
+        raise ValueError("qwen_vl_decoder.builder_workspace_gib must be > 0")
+    return (
+        opt_prefill_length,
+        max_prefill_length or None,
+        builder_workspace_gib << 30,
+    )
 
 
 def _mark_debug_output(
@@ -153,6 +176,8 @@ def build_standard_decoder_engine(
     split_decode = (
         embed_input and active_split and decoder_engine_role == "decode")
     decode_attention = _decode_attention_backend(config)
+    opt_prefill_length, max_prefill_length, builder_workspace_bytes = (
+        _decoder_profile_options(config))
     if (decode_attention == "decomposed"
             and decoder_engine_role != "prefill"
             and not split_decode):
@@ -183,6 +208,9 @@ def build_standard_decoder_engine(
             scale_attn_weights=scale_attn_weights,
             embed_input=embed_input,
             verbose=verbose,
+            opt_prefill_length=opt_prefill_length,
+            max_prefill_length=max_prefill_length,
+            builder_workspace_bytes=builder_workspace_bytes,
             force_decomposed_attention=(
                 split_decode and decode_attention == "decomposed"),
             profile_mode=(
@@ -226,7 +254,7 @@ def build_standard_decoder_engine(
 
     builder_context = create_builder_context(
         verbose=verbose,
-        workspace_bytes=1 << 30,
+        workspace_bytes=builder_workspace_bytes,
     )
     builder = builder_context.builder
     network = builder_context.network

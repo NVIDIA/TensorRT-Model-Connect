@@ -153,6 +153,7 @@ def build_dual_profile_decoder_engine(
     precision: str = "fp16",
     opt_prefill_length: int = 64,
     max_prefill_length: int | None = None,
+    builder_workspace_bytes: int = 1 << 30,
     quant_ctx: "QuantContext | None" = None,
     norm_type: str = "rmsnorm",
     mlp_type: str = "swiglu",
@@ -181,6 +182,10 @@ def build_dual_profile_decoder_engine(
 
     ``force_decomposed_attention`` replaces native ``IAttention`` with an
     explicit FP32-score QK/softmax/V graph.
+
+    ``opt_prefill_length`` and ``max_prefill_length`` bound the prefill
+    optimization profile independently from the KV cache capacity.
+    ``builder_workspace_bytes`` controls TensorRT tactic workspace.
 
     ``profile_mode`` controls which optimization profiles are emitted:
 
@@ -255,7 +260,7 @@ def build_dual_profile_decoder_engine(
 
     builder_context = create_builder_context(
         verbose=verbose,
-        workspace_bytes=1 << 30,
+        workspace_bytes=builder_workspace_bytes,
     )
     builder = builder_context.builder
     network = builder_context.network
