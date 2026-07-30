@@ -5183,6 +5183,117 @@ def test_diffusion_response_preserves_initial_latent_identity() -> None:
     assert response["initial_latents_sha256"] == "abc123"
 
 
+def test_diffusion_response_preserves_model_owned_native_acceptance() -> None:
+    from tests.e2e_harness.contracts import StageOutput
+
+    policy = {
+        "kind": "native_visual_semantic_acceptance",
+        "reference_role": "diagnostic",
+    }
+    response = validation_engine._diffusion_response(
+        "sample-1",
+        "hf",
+        StageOutput(
+            stage_name="end_to_end",
+            data={
+                "returncode": 0,
+                "num_frames": 1,
+                "frames_dir": "/frames",
+                "native_acceptance": policy,
+            },
+        ),
+    )
+
+    assert response["native_acceptance"] == policy
+    assert response["native_acceptance"] is not policy
+
+
+def test_diffusion_comparison_restores_frame_paths_and_native_acceptance(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from tests.e2e_harness.contracts import (
+        CompareResult,
+        MetricResult,
+        StageStatus,
+    )
+
+    hf_frames = tmp_path / "hf"
+    trt_frames = tmp_path / "trt"
+    hf_frames.mkdir()
+    trt_frames.mkdir()
+    for root in (hf_frames, trt_frames):
+        (root / "frame_0000.png").write_bytes(b"png")
+        (root / "frame_0001.png").write_bytes(b"png")
+    policy = {"kind": "native_visual_semantic_acceptance"}
+
+    class Comparator:
+        def compare(self, trt, ref, _threshold, _stage):
+            assert trt.data["frame_paths"] == [
+                str(trt_frames / "frame_0000.png"),
+                str(trt_frames / "frame_0001.png"),
+            ]
+            assert ref.data["frame_paths"] == [
+                str(hf_frames / "frame_0000.png"),
+                str(hf_frames / "frame_0001.png"),
+            ]
+            assert ref.data["native_acceptance"] == policy
+            return CompareResult(
+                stage_name="end_to_end",
+                status=StageStatus.PASSED.value,
+                metrics={
+                    "prompt_clipscore_delta": MetricResult(
+                        value=0.0, threshold=None, operator="info", passed=True
+                    ),
+                    "trt_prompt_clipscore": MetricResult(
+                        value=30.0, threshold=None, operator="info", passed=True
+                    ),
+                    "hf_prompt_clipscore": MetricResult(
+                        value=30.0, threshold=None, operator="info", passed=True
+                    ),
+                    "trt_hf_image_clip_cosine": MetricResult(
+                        value=1.0, threshold=None, operator=">=", passed=True
+                    ),
+                },
+            )
+
+    monkeypatch.setattr(
+        validation_engine,
+        "_load_diffusion_validation_comparator",
+        lambda _work_dir: Comparator(),
+    )
+    monkeypatch.setattr(
+        validation_engine,
+        "_model_owned_diffusion_native_acceptance",
+        lambda _work_dir: policy,
+    )
+    base = {
+        "sample_id": "wan22_000000",
+        "returncode": 0,
+        "num_frames": 2,
+        "frame_stats": {"mean": 0.5, "std": 0.2},
+        "prompt": "cats boxing",
+        "seed": 42,
+    }
+
+    summary = validation_engine.compare_diffusion_image_predictions(
+        {
+            "responses": [
+                {
+                    **base,
+                    "frames_dir": str(hf_frames),
+                }
+            ]
+        },
+        {"responses": [{**base, "frames_dir": str(trt_frames)}]},
+        {"requests": [{"sample_id": "wan22_000000", "prompt": "cats boxing"}]},
+        work_dir=tmp_path,
+        gates={},
+    )
+
+    assert summary["overall_pass_rate"] == 1.0
+
+
 def test_diffusion_sample_inputs_and_response_record_shared_conditions(
     tmp_path: Path,
 ) -> None:

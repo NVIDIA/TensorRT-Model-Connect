@@ -5221,6 +5221,23 @@ def _load_diffusion_validation_comparator(work_dir: Path) -> Any:
     return comparator
 
 
+def _model_owned_diffusion_native_acceptance(work_dir: Path) -> Any:
+    manifest_path = work_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    validation_config = work_manifest(work_dir).get("task_eval", {})
+    if not isinstance(validation_config, dict):
+        return None
+    model_manifest = str(validation_config.get("model_manifest", "") or "")
+    if not model_manifest:
+        return None
+    owner_path = Path(model_manifest)
+    if not owner_path.is_absolute():
+        owner_path = REPO_ROOT / owner_path
+    case = load_manifest(owner_path)
+    return copy.deepcopy(case.metadata.get("native_acceptance"))
+
+
 def _compute_validation_clip_metrics(
     trt_frames_dir: str, hf_frames_dir: str, prompt: str
 ) -> Any:
@@ -5240,6 +5257,13 @@ def _first_generated_image(frames_dir: str) -> Path | None:
         if images:
             return images[0]
     return None
+
+
+def _generated_frame_paths(frames_dir: object) -> list[str]:
+    root = Path(str(frames_dir or ""))
+    if not root.is_dir():
+        return []
+    return [str(path) for path in sorted(root.glob("frame_*.png")) if path.is_file()]
 
 
 def write_diffusion_visual_review(
@@ -5341,6 +5365,7 @@ def compare_diffusion_image_predictions(
             f"the same length: {len(hf_rows)}, {len(trt_rows)}, {len(requests)}"
         )
     comparator = _load_diffusion_validation_comparator(work_dir)
+    model_native_acceptance = _model_owned_diffusion_native_acceptance(work_dir)
     threshold = ThresholdProfile(
         task_strategy="diffusion_media_generation",
         profile_name="task_eval",
@@ -5430,24 +5455,32 @@ def compare_diffusion_image_predictions(
             })
             continue
 
+        trt_frames_dir = trt_row.get("frames_dir", "")
+        hf_frames_dir = hf_row.get("frames_dir", "")
         trt_output = StageOutput(
             stage_name="end_to_end",
             data={
                 "returncode": trt_row.get("returncode", 0),
                 "num_frames": trt_row.get("num_frames", 0),
-                "frames_dir": trt_row.get("frames_dir", ""),
+                "frames_dir": trt_frames_dir,
+                "frame_paths": _generated_frame_paths(trt_frames_dir),
                 "frame_stats": trt_row.get("frame_stats", {}),
                 "prompt": trt_row.get("prompt", request.get("prompt", "")),
             },
         )
+        native_acceptance = hf_row.get("native_acceptance")
+        if native_acceptance is None:
+            native_acceptance = model_native_acceptance
         hf_output = StageOutput(
             stage_name="end_to_end",
             data={
                 "returncode": hf_row.get("returncode", 0),
                 "num_frames": hf_row.get("num_frames", 0),
-                "frames_dir": hf_row.get("frames_dir", ""),
+                "frames_dir": hf_frames_dir,
+                "frame_paths": _generated_frame_paths(hf_frames_dir),
                 "frame_stats": hf_row.get("frame_stats", {}),
                 "prompt": hf_row.get("prompt", request.get("prompt", "")),
+                "native_acceptance": native_acceptance,
             },
         )
         result = comparator.compare(trt_output, hf_output, threshold, stage)
@@ -7260,6 +7293,8 @@ def _diffusion_response(
         "initial_latents_sha256": str(data.get("initial_latents_sha256", "")),
         "wall_ms": float(output.timing_s) * 1000.0,
     }
+    if data.get("native_acceptance") is not None:
+        response["native_acceptance"] = copy.deepcopy(data["native_acceptance"])
     if case is not None:
         response["seed"] = int(case.inputs.get("seed", case.determinism.get("seed", 42)))
         response["action"] = str(case.inputs.get("action", ""))
