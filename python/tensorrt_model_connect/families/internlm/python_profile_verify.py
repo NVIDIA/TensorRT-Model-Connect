@@ -2,9 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import einops
+import sentencepiece
 import transformers
 from transformers.cache_utils import DynamicCache
 
+assert sentencepiece.__version__ == "0.2.0"
 assert hasattr(DynamicCache, "from_legacy_cache")
 assert hasattr(DynamicCache, "get_max_cache_shape")
-print(f"einops={einops.__version__} transformers={transformers.__version__}")
+print(
+    f"einops={einops.__version__} "
+    f"sentencepiece={sentencepiece.__version__} "
+    f"transformers={transformers.__version__}"
+)
