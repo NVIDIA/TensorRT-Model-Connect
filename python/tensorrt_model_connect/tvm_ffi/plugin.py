@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from . import trt_compat
+from .. import trt_compat
 
 
 def add_tvm_ffi_kernel(

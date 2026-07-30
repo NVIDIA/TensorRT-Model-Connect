@@ -8,12 +8,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from tensorrt_model_connect import graph_cli
-from tensorrt_model_connect.graph_patch import (
+from tensorrt_model_connect.tvm_ffi import graph_cli
+from tensorrt_model_connect.tvm_ffi.graph_patch import (
     GraphSnapshot,
     Node,
     Tensor,
     load_selection,
+    select_region,
 )
 
 
@@ -184,11 +185,23 @@ def test_select_forwards_only_the_requested_replacement_contract(monkeypatch, ca
     ]
 
 
-def test_recipe_is_sugar_for_the_same_selection(monkeypatch, capsys, tmp_path):
-    snapshot = GraphSnapshot(
+def _recipe_snapshot() -> GraphSnapshot:
+    return GraphSnapshot(
         nodes=(
-            Node("node:0", "known_region", "IDENTITY", ("tensor:input",), ("tensor:middle",)),
-            Node("node:1", "consumer", "IDENTITY", ("tensor:middle",), ("tensor:output",)),
+            Node(
+                "node:0",
+                "known_region",
+                "IDENTITY",
+                ("tensor:input",),
+                ("tensor:middle",),
+            ),
+            Node(
+                "node:1",
+                "consumer",
+                "IDENTITY",
+                ("tensor:middle",),
+                ("tensor:output",),
+            ),
         ),
         tensors=(
             Tensor(
@@ -239,31 +252,67 @@ def test_recipe_is_sugar_for_the_same_selection(monkeypatch, capsys, tmp_path):
         },
         fingerprint="sha256:graph",
     )
+
+
+def test_recipe_is_sugar_for_the_same_selection(monkeypatch, capsys):
+    snapshot = _recipe_snapshot()
     monkeypatch.setattr(graph_cli, "load_snapshot", lambda path: snapshot)
 
-    assert graph_cli.run(_parse("recipe", "list", "graph.json")) == 0
+    assert graph_cli.run(_parse("recipes", "graph.json")) == 0
     assert "family.known_region@1\tdecoder.layer.0\tnode:0" in (
         capsys.readouterr().out
     )
 
-    output = tmp_path / "recipe.json"
-    assert graph_cli.run(
-        _parse(
-            "recipe",
-            "apply",
-            "graph.json",
+    recipe_selection = graph_cli.select_recipe(
+        snapshot,
+        "family.known_region@1",
+        "decoder.layer.0",
+    )
+    assert recipe_selection == select_region(
+        snapshot,
+        ["node:0"],
+        binding_id="family.known_region@1",
+    )
+
+
+def test_recipe_build_orchestrates_existing_graph_paths(monkeypatch, tmp_path):
+    snapshot = _recipe_snapshot()
+    monkeypatch.setattr(graph_cli, "load_snapshot", lambda path: snapshot)
+    calls = []
+
+    def build(arguments):
+        calls.append(arguments)
+        if arguments.graph_patch:
+            assert load_selection(arguments.graph_patch) == graph_cli.select_recipe(
+                snapshot,
+                "family.known_region@1",
+                "decoder.layer.0",
+            )
+        return 0
+
+    output = tmp_path / "model.trtfb"
+    arguments = SimpleNamespace(
+        recipe=("family.known_region@1", "decoder.layer.0"),
+        output=str(output),
+        graph_snapshot=None,
+        graph_patch=None,
+        decoder_engine_layout="dual_profile",
+        graph_role="decode",
+    )
+
+    assert graph_cli.build_from_recipe(arguments, build) == 0
+    assert len(calls) == 2
+    assert calls[0].graph_snapshot
+    assert calls[0].output == graph_cli.os.devnull
+    assert calls[0].graph_role == "dual_profile"
+    assert calls[1].graph_patch
+    assert load_selection(tmp_path / "model.selection.json") == (
+        graph_cli.select_recipe(
+            snapshot,
             "family.known_region@1",
-            "--instance",
             "decoder.layer.0",
-            "-o",
-            str(output),
         )
-    ) == 0
-    recipe_selection = load_selection(output)
-    assert recipe_selection.binding_id == "family.known_region@1"
-    assert recipe_selection.node_ids == ("node:0",)
-    assert recipe_selection.input_tensor_ids == ("tensor:input",)
-    assert recipe_selection.output_tensor_ids == ("tensor:middle",)
+    )
 
 
 def test_select_rejects_negative_workspace():

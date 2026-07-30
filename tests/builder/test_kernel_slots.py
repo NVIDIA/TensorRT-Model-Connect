@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tensorrt_model_connect.kernel_slots import (
+from tensorrt_model_connect.tvm_ffi.kernel_slots import (
     KernelSlotError,
     activate_kernel_slot,
     load_family_kernel_slots,

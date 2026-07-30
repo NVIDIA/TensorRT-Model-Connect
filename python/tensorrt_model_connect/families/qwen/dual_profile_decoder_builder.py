@@ -850,7 +850,7 @@ def build_dual_profile_decoder_engine(
         zero_bias = np.zeros(out_vocab, dtype=work_np_dtype)
         recipe = nullcontext()
         if profile_mode == "decode":
-            from ...graph_build import graph_recipe_region
+            from ...tvm_ffi.graph_build import graph_recipe_region
 
             recipe = graph_recipe_region(
                 network,

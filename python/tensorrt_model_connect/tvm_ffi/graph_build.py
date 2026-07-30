@@ -134,7 +134,7 @@ def graph_recipe_region(
     if type(instance_id) is not str or not instance_id:
         raise GraphPatchError("graph recipe instance ID must be a non-empty string")
 
-    from .trt_compat import unwrap
+    from ..trt_compat import unwrap
 
     raw_network = unwrap(network)
     records = session.recipes.setdefault(id(raw_network), [])
@@ -226,7 +226,7 @@ def process_network(network: Any) -> None:
     specs = _output_specs(snapshot, selection)
 
     def replacement(live_network: Any, inputs: tuple[Any, ...], _: RegionSelection):
-        from .tvm_ffi_plugin import add_tvm_ffi_kernel
+        from .plugin import add_tvm_ffi_kernel
 
         return add_tvm_ffi_kernel(
             live_network,

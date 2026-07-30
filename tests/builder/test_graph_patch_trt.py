@@ -7,7 +7,7 @@ import pytest
 
 trt = pytest.importorskip("tensorrt")
 
-from tensorrt_model_connect.graph_patch import (  # noqa: E402
+from tensorrt_model_connect.tvm_ffi.graph_patch import (  # noqa: E402
     apply_region,
     select_region,
     snapshot_network,

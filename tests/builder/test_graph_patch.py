@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from tensorrt_model_connect.graph_patch import (
+from tensorrt_model_connect.tvm_ffi.graph_patch import (
     GraphPatchError,
     apply_region,
     load_selection,
@@ -17,7 +17,7 @@ from tensorrt_model_connect.graph_patch import (
     write_selection,
     write_snapshot,
 )
-from tensorrt_model_connect import graph_build
+from tensorrt_model_connect.tvm_ffi import graph_build
 
 
 class FakeTensor:
@@ -227,7 +227,7 @@ def test_build_session_captures_then_applies_one_runtime_slot(monkeypatch, tmp_p
         return [replacement_output]
 
     monkeypatch.setattr(
-        "tensorrt_model_connect.tvm_ffi_plugin.add_tvm_ffi_kernel",
+        "tensorrt_model_connect.tvm_ffi.plugin.add_tvm_ffi_kernel",
         add_kernel,
     )
     network, layers = _network()

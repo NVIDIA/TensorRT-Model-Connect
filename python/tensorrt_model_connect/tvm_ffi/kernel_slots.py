@@ -193,7 +193,8 @@ def load_family_kernel_slots(family: str) -> tuple[KernelSlot, ...]:
     family = _string(family, "family").replace("-", "_")
     if not family.isidentifier():
         raise KernelSlotError(f"Invalid model family {family!r}")
-    module_name = f"{__package__}.families.{family}.kernel_slots"
+    root_package = __package__.rsplit(".", 1)[0]
+    module_name = f"{root_package}.families.{family}.kernel_slots"
     try:
         module = importlib.import_module(module_name)
     except ModuleNotFoundError as exc:

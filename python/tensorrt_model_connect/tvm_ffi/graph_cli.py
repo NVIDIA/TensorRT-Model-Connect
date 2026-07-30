@@ -1,17 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Offline CLI for selecting recipe or explicit TensorRT graph regions."""
+"""CLI for selecting recipe or explicit TensorRT graph regions."""
 
 from __future__ import annotations
 
 import argparse
+from copy import copy
 import fnmatch
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
-from typing import Any
+from tempfile import TemporaryDirectory
+from typing import Any, Callable
 
 from .graph_patch import load_snapshot, select_region, write_selection
 
@@ -69,36 +72,11 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         help="Show only IDs, ops, or names matching this glob (default: *)",
     )
 
-    recipe_parser = commands.add_parser(
-        "recipe",
-        help="Use a family-owned shortcut for an exact graph region",
-    )
-    recipe_commands = recipe_parser.add_subparsers(
-        dest="recipe_command",
-        required=True,
-    )
-    recipe_list = recipe_commands.add_parser(
-        "list",
+    recipes_parser = commands.add_parser(
+        "recipes",
         help="List recipes recorded in a graph snapshot",
     )
-    recipe_list.add_argument("snapshot", help="Graph snapshot JSON")
-    recipe_apply = recipe_commands.add_parser(
-        "apply",
-        help="Turn one recipe instance into a normal selection JSON",
-    )
-    recipe_apply.add_argument("snapshot", help="Graph snapshot JSON")
-    recipe_apply.add_argument("recipe", help="Exact versioned recipe ID")
-    recipe_apply.add_argument(
-        "--instance",
-        required=True,
-        help="Exact recipe instance shown by 'graph recipe list'",
-    )
-    recipe_apply.add_argument(
-        "-o",
-        "--output",
-        required=True,
-        help="Output selection JSON",
-    )
+    recipes_parser.add_argument("snapshot", help="Graph snapshot JSON")
 
     select_parser = commands.add_parser(
         "select",
@@ -214,6 +192,30 @@ def _print_recipes(snapshot: object) -> None:
         )
 
 
+def select_recipe(snapshot: object, recipe_id: str, instance_id: str) -> object:
+    """Resolve one family shortcut through the ordinary region validator."""
+
+    matches = [
+        recipe
+        for recipe in _recipes(snapshot)
+        if recipe["id"] == recipe_id and recipe["instance"] == instance_id
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"expected one graph recipe {recipe_id!r} instance "
+            f"{instance_id!r}, found {len(matches)}"
+        )
+    recipe = matches[0]
+    return select_region(
+        snapshot,
+        recipe["node_ids"],
+        binding_id=recipe["id"],
+        workspace_bytes=recipe["workspace_bytes"],
+        extra_args=recipe["extra_args"],
+        output_shape_input=recipe["output_shape_input"],
+    )
+
+
 def _write_and_print_selection(snapshot: object, selection: object, output: str) -> None:
     write_selection(selection, output)
     print(f"Wrote selection to {output}")
@@ -229,6 +231,52 @@ def _write_and_print_selection(snapshot: object, selection: object, output: str)
                 f"dtype={tensor.dtype} shape={list(tensor.shape)}"
             )
     print(f"abi_sha256: {selection.abi_sha256}")
+
+
+def build_from_recipe(
+    arguments: argparse.Namespace,
+    build_command: Callable[[argparse.Namespace], int],
+) -> int:
+    """Run the existing inspect, select, and graph-patch paths as one command."""
+
+    recipe_id, instance_id = arguments.recipe
+    try:
+        with TemporaryDirectory(prefix="trtmc-tvm-ffi-") as temporary:
+            temporary_path = Path(temporary)
+            snapshot_path = temporary_path / "graph.json"
+            selection_path = temporary_path / "selection.json"
+
+            capture = copy(arguments)
+            capture.recipe = None
+            capture.output = os.devnull
+            capture.graph_snapshot = str(snapshot_path)
+            capture.graph_patch = None
+            if getattr(arguments, "decoder_engine_layout", "split") == "dual_profile":
+                capture.graph_role = "dual_profile"
+            capture._skip_profile_resolution = True
+            result = build_command(capture)
+            if result != 0:
+                return result
+
+            snapshot = load_snapshot(snapshot_path)
+            selection = select_recipe(snapshot, recipe_id, instance_id)
+            write_selection(selection, selection_path)
+
+            patched = copy(arguments)
+            patched.recipe = None
+            patched.graph_snapshot = None
+            patched.graph_patch = str(selection_path)
+            patched._skip_profile_resolution = True
+            result = build_command(patched)
+            if result != 0:
+                return result
+
+            receipt = Path(arguments.output).with_suffix(".selection.json")
+            _write_and_print_selection(snapshot, selection, str(receipt))
+            return 0
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
 
 def run(arguments: argparse.Namespace) -> int:
@@ -258,31 +306,8 @@ def run(arguments: argparse.Namespace) -> int:
         if arguments.graph_command == "list":
             _print_snapshot(snapshot, arguments.match)
             return 0
-        if arguments.graph_command == "recipe":
-            if arguments.recipe_command == "list":
-                _print_recipes(snapshot)
-                return 0
-            matches = [
-                recipe
-                for recipe in _recipes(snapshot)
-                if recipe["id"] == arguments.recipe
-                and recipe["instance"] == arguments.instance
-            ]
-            if len(matches) != 1:
-                raise ValueError(
-                    f"expected one graph recipe {arguments.recipe!r} instance "
-                    f"{arguments.instance!r}, found {len(matches)}"
-                )
-            recipe = matches[0]
-            selection = select_region(
-                snapshot,
-                recipe["node_ids"],
-                binding_id=recipe["id"],
-                workspace_bytes=recipe["workspace_bytes"],
-                extra_args=recipe["extra_args"],
-                output_shape_input=recipe["output_shape_input"],
-            )
-            _write_and_print_selection(snapshot, selection, arguments.output)
+        if arguments.graph_command == "recipes":
+            _print_recipes(snapshot)
             return 0
         if arguments.graph_command != "select":
             return 1

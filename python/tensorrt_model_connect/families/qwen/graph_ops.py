@@ -1219,7 +1219,7 @@ def add_native_kv_cache_attention_from_rows(
 
     kernel_spec = None
     if kernel_slot_instance is not None:
-        from ...kernel_slots import select_kernel_slot
+        from ...tvm_ffi.kernel_slots import select_kernel_slot
 
         kernel_spec = select_kernel_slot(
             "qwen.decode_attention@1",
@@ -1283,7 +1283,7 @@ def add_native_kv_cache_attention_from_rows(
         raise ValueError("Qwen native KV attention requires BF16 queries")
     recipe = nullcontext()
     if kernel_slot_instance is not None:
-        from ...graph_build import graph_recipe_region
+        from ...tvm_ffi.graph_build import graph_recipe_region
 
         recipe = graph_recipe_region(
             network,

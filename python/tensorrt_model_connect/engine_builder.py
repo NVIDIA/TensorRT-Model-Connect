@@ -1153,7 +1153,7 @@ def build_bundle(
         )
 
     def _build_plugin_engine_with_role(role: str) -> bytes:
-        from .graph_build import engine_role
+        from .tvm_ffi.graph_build import engine_role
 
         previous_role = config.raw.get("_decoder_engine_role")
         config.raw["_decoder_engine_role"] = role
@@ -1172,7 +1172,7 @@ def build_bundle(
         with trt_compat.scoped_timing_cache(_split_timing_cache_scope(role)):
             return _build_plugin_engine_with_role(role)
 
-    from .graph_build import inspection_role
+    from .tvm_ffi.graph_build import inspection_role
 
     target_inspection_role = inspection_role()
     if target_inspection_role is not None:
@@ -1399,7 +1399,7 @@ def build_bundle(
     if vision_plan is not None:
         sections.append(BundleSection("vision_engine_plan", vision_plan))
 
-    from .graph_build import kernel_slots_section
+    from .tvm_ffi.graph_build import kernel_slots_section
 
     slot_section = kernel_slots_section()
     if slot_section is not None:
@@ -1528,13 +1528,13 @@ def build_bundle(
         sections.append(BundleSection("config.json", make_runtime_config_json(None)))
 
     # Fail before writing if the family did not wire every selected instance.
-    from .kernel_slots import finish_active_kernel_slot
+    from .tvm_ffi.kernel_slots import finish_active_kernel_slot
 
     finish_active_kernel_slot()
 
     # Package explicit artifacts plus the active CLI slot, if any.
     artifacts: list[tuple[str, ...]] = list(kernel_artifacts or [])
-    from .kernel_slots import active_kernel_artifact
+    from .tvm_ffi.kernel_slots import active_kernel_artifact
 
     active_artifact = active_kernel_artifact()
     if active_artifact is not None:

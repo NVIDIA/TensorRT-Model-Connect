@@ -34,6 +34,7 @@ replaces unsafe filename characters with `-`.
 | --- | --- |
 | `-o`, `--output PATH` | Output bundle path. Defaults to the sanitized model basename plus `.trtfb`. |
 | `--kernel FILE.yaml` | Replace a family-owned kernel slot with the trusted TVM-FFI DSO declared by this YAML manifest. Requires the native TensorRT backend. |
+| `--recipe RECIPE_ID INSTANCE_ID` | Build a load-time TVM-FFI slot from one exact family-owned graph Recipe. Internally uses the ordinary graph capture, selection, and patch paths and writes `<output-basename>.selection.json`. |
 | `--graph-patch REGION.json` | Replace one explicitly selected TensorRT region with a load-time TVM-FFI slot. Requires the native TensorRT backend. |
 | `--model-revision REV` | Build a Hugging Face commit, tag, or branch instead of its default revision. |
 | `--trust-remote-code` | Accepted for E2E-command compatibility. The current build dispatcher does not forward this flag as a universal remote-code gate; family/model loaders own their loading behavior. Review the checkpoint and family implementation, and do not assume omitting this flag prevents every remote-code path. |
@@ -105,11 +106,7 @@ trtmc graph inspect \
 
 trtmc graph list graph.json [--match GLOB]
 
-trtmc graph recipe list graph.json
-
-trtmc graph recipe apply graph.json RECIPE_ID \
-  --instance INSTANCE_ID \
-  -o region.json
+trtmc graph recipes graph.json
 
 trtmc graph select graph.json \
   --nodes NODE_ID [NODE_ID ...] \
@@ -125,17 +122,25 @@ bundle. Put its own `--snapshot` and `--engine-role` options before the model.
 `list` prints node IDs, operation and layer names, and tensor edges; `--match`
 only filters displayed IDs, operations, or names.
 
-`recipe list` shows exact, versioned region instances recorded by the owning
-model family while it constructed this graph. `recipe apply` resolves one
-exact recipe and instance, then calls the same region validator used by manual
-selection. Its output is an ordinary selection JSON; recipes add no runtime
-schema or weaker validation. Zero matches, duplicate matches, and invalid
-regions fail.
+`recipes` shows exact, versioned region instances recorded by the owning model
+family while it constructed this graph. The recommended shortcut is:
 
-`select` is the advanced path and accepts only explicit node IDs. Both apply
-paths print the ordered boundary tensor IDs, names, dtypes, shapes, and ABI
-hash. Each manual `--extra-arg` is one strict JSON object whose type is `none`,
-`int`, `float`, or `ptr`. A dynamic output additionally requires
+```bash
+trtmc build MODEL [build options...] \
+  --recipe RECIPE_ID INSTANCE_ID \
+  -o model-slot.trtfb
+```
+
+That one command orchestrates the existing graph capture, exact Recipe
+resolution, `select_region()` validation, and ordinary `--graph-patch` build.
+It writes `model-slot.selection.json` as the ABI receipt. Recipes add no
+runtime schema or weaker validation. Zero matches, duplicate matches, and
+invalid regions fail.
+
+`select` is the advanced path and accepts only explicit node IDs. Recipe and
+manual selection both print the ordered boundary tensor IDs, names, dtypes,
+shapes, and ABI hash. Each manual `--extra-arg` is one strict JSON object whose
+type is `none`, `int`, `float`, or `ptr`. A dynamic output additionally requires
 `--output-shape-like-input`; fixed outputs reject that option. Manual
 `--binding-id` accepts only ASCII letters, digits, `_`, `.`, `@`, and `-`.
 `--workspace-bytes` accepts values from 0 through 2147483647.

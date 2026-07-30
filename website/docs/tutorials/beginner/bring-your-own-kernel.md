@@ -13,18 +13,21 @@ you need it:
 | Recommended | The model family publishes a versioned recipe and you choose one exact instance. | Most kernel authors. |
 | Advanced | You inspect the raw TensorRT graph and type every node ID yourself. | Authors whose region has no recipe. |
 
-A recipe is only a saved, family-owned manual selection. It records exact TRT
-node IDs, workspace, scalar arguments, and output-shape rule while the family
-constructs the graph. `graph recipe apply` passes those values to the same
-`select_region()` validator used by the advanced path and writes the same
-selection JSON. It adds no semantic graph, matching language, plugin schema, or
-runtime behavior.
+A recipe is only a family-owned shortcut for a known manual selection. It
+records exact TRT node IDs, workspace, scalar arguments, and output-shape rule
+while the family constructs the graph. `build --recipe` automatically captures
+the graph, passes those values to the same `select_region()` validator used by
+the advanced path, and then runs the ordinary graph-patch build. It adds no
+semantic graph, matching language, plugin schema, or runtime behavior.
 
-Both levels converge here:
+The two levels use the same backend:
 
 ```text
-selection JSON -> build --graph-patch -> slot-ready bundle
-               -> kernel-bindings.json -> load a new pipeline
+Recipe: build --recipe -----------------------> slot-ready bundle + selection receipt
+Manual: graph inspect -> select -> graph-patch -> slot-ready bundle + selection receipt
+                                                  |
+                                                  v
+                                      kernel-bindings.json -> new pipeline
 ```
 
 The DSO is not stored in a graph-slot bundle. You may bind another
@@ -67,9 +70,9 @@ BUILD_ARGS=(
 )
 ```
 
-Use the identical `BUILD_ARGS` for graph inspection, the patched build, and
-the native comparison. Changing the revision, precision, cache length, engine
-layout, or graph-producing code invalidates a saved selection.
+Use the identical `BUILD_ARGS` for the Recipe build, any manual graph
+inspection, and the native comparison. Changing the revision, precision, cache
+length, engine layout, or graph-producing code invalidates a saved selection.
 
 :::warning Trusted native code only
 A DSO executes native code when loaded. SHA-256 checks identity, not safety.
@@ -78,25 +81,45 @@ Use only a library that you trust.
 
 ## Level 1: use a family recipe
 
-### 1. Capture the TensorRT graph
+### 1. Build a slot-ready bundle in one command
 
-Capture the decode graph immediately before TensorRT serialization:
+This tutorial already tells you the versioned Recipe ID and its exact instance.
+Build the slot-ready bundle directly:
+
+```bash
+export BINDING_ID=qwen.decode_logits_copy@1
+
+trtmc build "${BUILD_ARGS[@]}" \
+  --recipe "$BINDING_ID" decoder.logits_zero_bias \
+  -o "$WORK/qwen3-slot-ready.trtfb"
+```
+
+The command internally performs the existing capture, Recipe resolution,
+`select_region()`, and `--graph-patch` steps. It writes two files:
+
+```text
+qwen3-slot-ready.trtfb
+qwen3-slot-ready.selection.json
+```
+
+The selection receipt contains the exact boundary tensor IDs, graph
+fingerprint, binding ID, ABI SHA-256, workspace, scalar arguments, and
+output-shape rule. Keep it next to your kernel integration records.
+
+The Recipe does not bypass validation. The selected region must still be
+connected and convex, expose exactly one output, use supported device tensors,
+and satisfy the same output-shape rules as a manual selection.
+
+If a family tutorial does not give you the Recipe and instance names, inspect
+them without compiling an engine:
 
 ```bash
 trtmc graph inspect \
   --engine-role decode \
   --snapshot "$WORK/decode.graph.json" \
   "${BUILD_ARGS[@]}"
-```
 
-Inspection stops before engine compilation. The snapshot contains ordered TRT
-layers and tensors, build metadata, a graph fingerprint, and any exact recipes
-recorded by the model family.
-
-### 2. See the available recipes
-
-```bash
-trtmc graph recipe list "$WORK/decode.graph.json" \
+trtmc graph recipes "$WORK/decode.graph.json" \
   | tee "$WORK/decode.recipes.txt"
 ```
 
@@ -114,33 +137,7 @@ Recipe IDs are versioned. Instances are explicit because a model may contain
 many copies of the same pattern. The command never silently chooses the first
 match or every match.
 
-### 3. Apply one recipe instance
-
-Turn the known logits region into an ordinary selection:
-
-```bash
-export BINDING_ID=qwen.decode_logits_copy@1
-
-trtmc graph recipe apply "$WORK/decode.graph.json" \
-  "$BINDING_ID" \
-  --instance decoder.logits_zero_bias \
-  -o "$WORK/logits-copy.selection.json"
-```
-
-The command prints one BF16 `[1, 151936]` input, one BF16 `[1, 151936]`
-output, and `abi_sha256`. It then writes a selection containing:
-
-- the exact node and boundary tensor IDs;
-- the graph fingerprint and engine role;
-- the binding ID and ABI SHA-256;
-- workspace, extra arguments, and the output-shape rule.
-
-The recipe supplies these choices, but it does not bypass validation. The
-region must still be connected and convex, expose exactly one output, use
-supported device tensors, and satisfy the same output-shape rules as a manual
-selection.
-
-### 4. Build the example TVM-FFI DSO
+### 2. Build the example TVM-FFI DSO
 
 Build the supplied DSO from the configured native tree:
 
@@ -159,8 +156,8 @@ run(TensorView input, TensorView output)
 It performs an asynchronous device-to-device copy on TensorRT's current CUDA
 stream, which is equivalent to adding Qwen's zero LM-head bias.
 
-For another recipe, implement the exact call order defined by the printed
-boundary tensors and the selection JSON:
+For another Recipe, implement the exact call order printed by `build --recipe`
+and stored in the selection receipt:
 
 1. boundary input DLTensors in `input_tensor_ids` order;
 2. a CUDA `uint8` workspace DLTensor when `workspace_bytes` is nonzero;
@@ -171,19 +168,7 @@ TVM-FFI does not expose a signature that Model Connect can compare with this
 contract at load time. The kernel author must implement that ABI
 exactly.
 
-### 5. Build a slot-ready bundle
-
-```bash
-trtmc build "${BUILD_ARGS[@]}" \
-  --graph-patch "$WORK/logits-copy.selection.json" \
-  -o "$WORK/qwen3-slot-ready.trtfb"
-```
-
-Build reconstructs the graph, verifies its fingerprint, revalidates the
-selection, replaces the region with a `TvmFfiKernel` layer, and stores the
-binding ID and ABI hash in `kernel_slots.json`. The DSO is not embedded.
-
-### 6. Bind the DSO when a pipeline loads
+### 3. Bind the DSO when a pipeline loads
 
 Copy the DSO under an immutable, content-addressed name and write the strict
 runtime manifest:
@@ -195,7 +180,7 @@ cp "$SOURCE_DSO" "$DSO"
 
 export ABI_SHA256="$(
   python -c 'import json,sys; print(json.load(open(sys.argv[1]))["abi_sha256"])' \
-    "$WORK/logits-copy.selection.json"
+    "$WORK/qwen3-slot-ready.selection.json"
 )"
 
 cat > "$WORK/kernel-bindings.json" <<EOF
@@ -232,7 +217,7 @@ To switch kernels, create another manifest naming a different immutable DSO
 with the same binding ID and ABI hash, destroy the old pipeline, and construct
 a new one. Editing a manifest does not affect an existing pipeline.
 
-### 7. Check correctness and no regression
+### 4. Check correctness and no regression
 
 Build the native comparison with the same arguments:
 
@@ -306,19 +291,19 @@ PY
 The 2% margin covers ordinary measurement noise; it is not permission to
 accept a known regression. Repeat an edge result on an idle GPU.
 
-### 8. Apply the same Recipe flow to attention
+### 5. Apply the same Recipe flow to attention
 
 Qwen also records one raw decode-attention recipe per layer:
 
 ```bash
-trtmc graph recipe apply "$WORK/decode.graph.json" \
-  qwen.decode_attention_region@1 \
-  --instance decoder.layers.0.decode_attention \
-  -o "$WORK/attention.selection.json"
+trtmc build "${BUILD_ARGS[@]}" \
+  --recipe qwen.decode_attention_region@1 \
+           decoder.layers.0.decode_attention \
+  -o "$WORK/qwen3-attention-slot.trtfb"
 ```
 
 For Qwen3-8B layer 0, the printed boundary plus `extra_args` in the selection
-JSON define this ordered contract:
+receipt `qwen3-attention-slot.selection.json` define this ordered contract:
 
 ```text
 input[0]  query              BF16  [1, 32, -1, 128]
@@ -380,7 +365,7 @@ trtmc run "$FI_WORK/qwen3-flashinfer.trtfb" \
 
 That shortcut replaces all 36 instances, but it is a reference for exporting
 and running FlashInfer rather than a raw graph Recipe: `--kernel` embeds the DSO
-in the bundle, so changing it requires another bundle build. Repeat step 7
+in the bundle, so changing it requires another bundle build. Repeat step 4
 against the native bundle before accepting it. Do not describe it as a
 load-time-swappable raw graph Recipe.
 
@@ -389,11 +374,16 @@ load-time-swappable raw graph Recipe.
 Use this path when no family Recipe matches the boundary your kernel needs.
 The build and runtime mechanisms stay identical; only selection changes.
 
-### 9. Inspect and circle raw TRT nodes
+### 6. Inspect and circle raw TRT nodes
 
-List the end of the same snapshot:
+Capture the raw decode graph, then list its final layers:
 
 ```bash
+trtmc graph inspect \
+  --engine-role decode \
+  --snapshot "$WORK/decode.graph.json" \
+  "${BUILD_ARGS[@]}"
+
 trtmc graph list "$WORK/decode.graph.json" \
   | tee "$WORK/decode.nodes.txt" \
   | tail -n 10
@@ -449,11 +439,19 @@ For fixed scalar or null arguments, repeat strict JSON arguments in call order:
 ```
 
 Allowed types are `none`, signed 32-bit `int`, finite `float`, and null `ptr`.
-For this same logits boundary, reuse the identity-copy DSO and continue at
-step 5 with `--graph-patch "$WORK/manual.selection.json"`. For any other
+Build the slot-ready bundle through the existing advanced path:
+
+```bash
+trtmc build "${BUILD_ARGS[@]}" \
+  --graph-patch "$WORK/manual.selection.json" \
+  -o "$WORK/qwen3-manual-slot-ready.trtfb"
+```
+
+For this same logits boundary, reuse the identity-copy DSO. For any other
 boundary, first implement the exact ABI in its selection JSON using the rules
-in step 4, then continue at step 5. A matching operation name alone never makes
-an existing DSO compatible.
+in step 2. Then repeat the load-time binding and verification in steps 3 and
+4, reading `abi_sha256` from `manual.selection.json`. A matching operation name
+alone never makes an existing DSO compatible.
 
 ## Current graph-slot limits
 

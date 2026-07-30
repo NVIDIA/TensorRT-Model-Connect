@@ -42,6 +42,7 @@ _OPTIMIZED_ROUTING_INTERNAL_FIELDS = frozenset({
     "model",
     "model_revision",
     "output",
+    "recipe",
 })
 
 _PROFILE_REEXEC_BOOTSTRAP = (
@@ -141,8 +142,16 @@ def _cmd_build(args: argparse.Namespace) -> int:
         )
 
     kernel_path = getattr(args, "kernel", None)
+    recipe = getattr(args, "recipe", None)
     graph_snapshot = getattr(args, "graph_snapshot", None)
     graph_patch = getattr(args, "graph_patch", None)
+    if recipe and (kernel_path or graph_snapshot or graph_patch):
+        print(
+            "Error: --recipe cannot be combined with --kernel, "
+            "--graph-snapshot, or --graph-patch",
+            file=sys.stderr,
+        )
+        return 1
     if kernel_path and (graph_snapshot or graph_patch):
         print("Error: --kernel cannot be combined with explicit graph slots", file=sys.stderr)
         return 1
@@ -152,7 +161,11 @@ def _cmd_build(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    graph_mode = graph_snapshot is not None or graph_patch is not None
+    graph_mode = (
+        recipe is not None
+        or graph_snapshot is not None
+        or graph_patch is not None
+    )
     if kernel_path and getattr(args, "rtx", False):
         print("Error: --kernel requires the native TensorRT backend",
               file=sys.stderr)
@@ -243,6 +256,11 @@ def _cmd_build(args: argparse.Namespace) -> int:
         if reexec_rc is not None:
             return reexec_rc
 
+    if recipe:
+        from .tvm_ffi.graph_cli import build_from_recipe
+
+        return build_from_recipe(args, _cmd_build)
+
     if kernel_path and not build_family:
         _, build_family = _resolve_build_model_metadata(
             build_model_ref,
@@ -311,7 +329,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
         family_build_options = _resolved_config_values(resolved_bundle)
 
     if kernel_path:
-        from .kernel_slots import (
+        from .tvm_ffi.kernel_slots import (
             activate_kernel_slot,
             load_family_kernel_slots,
             load_kernel_spec,
@@ -336,7 +354,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
 
     graph_context = nullcontext()
     if graph_snapshot:
-        from .graph_build import inspect_graph
+        from .tvm_ffi.graph_build import inspect_graph
 
         graph_context = inspect_graph(
             graph_snapshot,
@@ -344,7 +362,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             metadata=_graph_metadata(args),
         )
     elif graph_patch:
-        from .graph_build import apply_graph_slot
+        from .tvm_ffi.graph_build import apply_graph_slot
 
         graph_context = apply_graph_slot(
             graph_patch,
@@ -415,7 +433,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
                 },
             )
     except Exception as e:
-        from .graph_build import GraphInspectionComplete
+        from .tvm_ffi.graph_build import GraphInspectionComplete
 
         if isinstance(e, GraphInspectionComplete):
             print(f"[trtmc graph] Snapshot saved: {e}", file=sys.stderr)
@@ -745,13 +763,13 @@ def cmd_version(args: argparse.Namespace) -> int:
 
 
 def _cmd_kernel(args: argparse.Namespace) -> int:
-    from .kernel_cli import run
+    from .tvm_ffi.kernel_cli import run
 
     return run(args)
 
 
 def _cmd_graph(args: argparse.Namespace) -> int:
-    from .graph_cli import run
+    from .tvm_ffi.graph_cli import run
 
     return run(args)
 
@@ -783,6 +801,15 @@ def main() -> None:
         "--kernel",
         metavar="YAML",
         help="Replace a family-owned kernel slot using this YAML manifest",
+    )
+    build_p.add_argument(
+        "--recipe",
+        nargs=2,
+        metavar=("RECIPE_ID", "INSTANCE_ID"),
+        help=(
+            "Build a runtime FFI slot from one family-owned graph recipe "
+            "and exact instance"
+        ),
     )
     build_p.add_argument(
         "--graph-patch",
@@ -931,9 +958,9 @@ def main() -> None:
     build_p.add_argument(
         "--active-python-profile", default="", help=argparse.SUPPRESS)
 
-    # Generic two-flag config surface. New features register a namespaced
-    # schema and are consumed through these flags without growing the CLI.
-    # Adding a new feature MUST NOT add a new flag here.
+    # Generic two-flag surface for tunable configuration. New tunables register
+    # a namespaced schema instead of growing the CLI; workflow selectors such
+    # as --kernel, --recipe, and --graph-patch remain explicit.
     build_p.add_argument(
         "--config", default=None, metavar="FILE",
         help="Config profile file (.json/.yaml). Contributes to the session "
@@ -955,14 +982,14 @@ def main() -> None:
         "kernel",
         help="Discover family-owned external-kernel slots",
     )
-    from .kernel_cli import configure_parser as configure_kernel_parser
+    from .tvm_ffi.kernel_cli import configure_parser as configure_kernel_parser
     configure_kernel_parser(kernel_p)
 
     graph_p = subparsers.add_parser(
         "graph",
         help="Inspect and select raw TensorRT graph regions",
     )
-    from .graph_cli import configure_parser as configure_graph_parser
+    from .tvm_ffi.graph_cli import configure_parser as configure_graph_parser
     configure_graph_parser(graph_p)
 
     # python -m tensorrt_model_connect version

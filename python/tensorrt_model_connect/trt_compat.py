@@ -438,7 +438,7 @@ class _BuilderProxy(_HandleProxy):
 
     def build_serialized_network(self, network: Any, config: Any) -> Any:
         raw_network = unwrap(network)
-        from .graph_build import process_network
+        from .tvm_ffi.graph_build import process_network
 
         process_network(raw_network)
         raw_config = unwrap(config)
@@ -459,7 +459,7 @@ class _NetworkProxy(_HandleProxy):
             *[unwrap(arg) for arg in args],
             **{key: unwrap(value) for key, value in kwargs.items()},
         )
-        from .graph_build import record_attention
+        from .tvm_ffi.graph_build import record_attention
 
         record_attention(self._raw, attention)
         return attention

@@ -57,8 +57,8 @@ def _print_slot(slot: KernelSlot, config: object) -> None:
 
 
 def _resolve_model_config(model: str, revision: str | None) -> tuple[object, str]:
-    from .config import ModelConfig
-    from .families import resolve_family_id
+    from ..config import ModelConfig
+    from ..families import resolve_family_id
 
     model_path = Path(model)
     if model_path.is_dir():

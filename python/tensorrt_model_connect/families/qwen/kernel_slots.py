@@ -3,7 +3,7 @@
 
 """Direct external-kernel slots owned by the Qwen family."""
 
-from ...kernel_slots import ArgumentSpec, KernelSlot, TensorSpec
+from ...tvm_ffi.kernel_slots import ArgumentSpec, KernelSlot, TensorSpec
 
 
 def _decode_attention_instances(config: object) -> tuple[str, ...]:
