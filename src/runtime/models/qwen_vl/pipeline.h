@@ -113,7 +113,8 @@ class QwenVlPipeline final : public IPipeline {
     std::vector<int32_t> generate_vl_from_ids(
         const std::vector<int32_t>& input_ids, const std::vector<float>& image_features,
         const std::vector<std::vector<float>>& deepstack_features, int32_t num_features,
-        int32_t feature_dim, int32_t max_new_tokens, const QwenVlSamplingParams& params);
+        int32_t feature_dim, int32_t merged_grid_height, int32_t merged_grid_width,
+        int32_t max_new_tokens, const QwenVlSamplingParams& params);
 
     std::pair<int32_t, int32_t> resolve_gen_limits(const GenerateConfig& cfg) const;
 

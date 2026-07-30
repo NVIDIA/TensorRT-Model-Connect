@@ -540,6 +540,20 @@ int32_t merged_grid_extent(int32_t configured_extent, int32_t fallback_extent, i
     return extent / (patch_size * merge_size);
 }
 
+std::pair<int32_t, int32_t> resolve_merged_grid(const QwenVlPreprocessedImage& preprocessed,
+                                                const QwenVlPreprocessConfig& config) {
+    if (preprocessed.image_grid_hws.size() >= 2 && config.merge_size > 0) {
+        return {preprocessed.image_grid_hws[0] / config.merge_size,
+                preprocessed.image_grid_hws[1] / config.merge_size};
+    }
+    return {
+        merged_grid_extent(config.fixed_image_height, config.fixed_image_size, config.patch_size,
+                           config.merge_size),
+        merged_grid_extent(config.fixed_image_width, config.fixed_image_size, config.patch_size,
+                           config.merge_size),
+    };
+}
+
 bool add_mrope_prefill_input(TrtModule& prefill, const std::vector<int32_t>& input_ids,
                              const QwenVlMropePositions* mrope, int32_t sequence_length,
                              std::vector<int32_t>& positions, TensorMap& inputs) {
@@ -609,8 +623,10 @@ TextResult QwenVlPipeline::generate(const std::string& prompt, const float* imag
     auto input_ids = tokenizer_->encode(qwen_vl_format_prompt(prompt, vl_preprocess_, nf));
     auto [max_new, eos] = resolve_gen_limits(cfg);
     auto sp_vl = qwen_vl_sampling_params_from_config(cfg, eos);
-    auto out =
-        generate_vl_from_ids(input_ids, features, deepstack_features, nf, dim, max_new, sp_vl);
+    const auto [merged_grid_height, merged_grid_width] =
+        resolve_merged_grid(preprocessed, vl_preprocess_);
+    auto out = generate_vl_from_ids(input_ids, features, deepstack_features, nf, dim,
+                                    merged_grid_height, merged_grid_width, max_new, sp_vl);
 
     std::vector<int32_t> new_tokens(out.begin() + static_cast<std::ptrdiff_t>(input_ids.size()),
                                     out.end());
@@ -675,7 +691,8 @@ std::vector<int32_t> QwenVlPipeline::generate_from_ids(const std::vector<int32_t
 std::vector<int32_t> QwenVlPipeline::generate_vl_from_ids(
     const std::vector<int32_t>& input_ids, const std::vector<float>& image_features,
     const std::vector<std::vector<float>>& deepstack_features, int32_t num_features,
-    int32_t feature_dim, int32_t max_new_tokens, const QwenVlSamplingParams& params) {
+    int32_t feature_dim, int32_t merged_grid_height, int32_t merged_grid_width,
+    int32_t max_new_tokens, const QwenVlSamplingParams& params) {
     if (max_new_tokens == 0 || input_ids.empty())
         return input_ids;
 
@@ -685,16 +702,11 @@ std::vector<int32_t> QwenVlPipeline::generate_vl_from_ids(
     reset_generation_context(static_cast<int32_t>(input_ids.size()));
 
     std::vector<float> logits;
-    const int32_t grid_h =
-        merged_grid_extent(vl_preprocess_.fixed_image_height, vl_preprocess_.fixed_image_size,
-                           vl_preprocess_.patch_size, vl_preprocess_.merge_size);
-    const int32_t grid_w =
-        merged_grid_extent(vl_preprocess_.fixed_image_width, vl_preprocess_.fixed_image_size,
-                           vl_preprocess_.patch_size, vl_preprocess_.merge_size);
     const bool use_mrope = text_decoder_->has_input("mrope_position_ids");
-    const auto mrope = use_mrope ? qwen_vl_build_mrope_positions(input_ids, config_.image_token_id,
-                                                                 num_features, grid_h, grid_w)
-                                 : QwenVlMropePositions{};
+    const auto mrope =
+        use_mrope ? qwen_vl_build_mrope_positions(input_ids, config_.image_token_id, num_features,
+                                                  merged_grid_height, merged_grid_width)
+                  : QwenVlMropePositions{};
     if (!run_vl_prefill_batched(input_ids, image_features, deepstack_features, num_features,
                                 feature_dim, use_mrope ? &mrope : nullptr, logits)) {
         int32_t feature_index = 0;
