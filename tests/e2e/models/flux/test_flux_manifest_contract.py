@@ -14,7 +14,11 @@ def test_flux2_fp8_manifest_uses_end_to_end_image_contract() -> None:
     """FLUX.2 FP8 should not inherit unrelated optional debug substages."""
     manifests_dir = Path(__file__).with_name("manifests")
 
-    for manifest_name in ("flux-2-dev.json", "flux-2-dev-fp8.json"):
+    for manifest_name in (
+        "flux-2-dev.json",
+        "flux-2-dev-fp8.json",
+        "flux-2-dev-l0.json",
+    ):
         case = load_manifest(manifests_dir / manifest_name)
 
         assert case.metadata["task_eval"]["reference_precision"] == "bf16"
@@ -25,7 +29,9 @@ def test_flux2_fp8_manifest_uses_end_to_end_image_contract() -> None:
 
     fp8_case = load_manifest(manifests_dir / "flux-2-dev-fp8.json")
     flux2_case = load_manifest(manifests_dir / "flux-2-dev.json")
+    flux2_l0_case = load_manifest(manifests_dir / "flux-2-dev-l0.json")
     assert flux2_case.metadata["precision"] == "bf16"
+    assert flux2_l0_case.metadata["precision"] == "bf16"
     assert "Wan-specific" in fp8_case.metadata["notes"]
 
 
