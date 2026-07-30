@@ -9,8 +9,8 @@ import json
 from pathlib import Path
 
 _MANIFEST_ROOT = Path(__file__).parent / "manifests"
-_SD_MANIFEST = _MANIFEST_ROOT / "cosmos3-nano.json"
-_CP4_MANIFEST = _MANIFEST_ROOT / "cosmos3-nano-cp4.json"
+_SD_MANIFEST = _MANIFEST_ROOT / "cosmos3-nano-l0.json"
+_CP4_MANIFEST = _MANIFEST_ROOT / "cosmos3-nano-l0-cp4.json"
 
 
 def _load_manifest(path: Path) -> dict:
