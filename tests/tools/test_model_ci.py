@@ -151,9 +151,20 @@ def _make_repo(
     _write(repo, "tools/diff_logits.py", "# shared logits diff\n")
     _write(repo, "tools/diff_vl.py", "# shared vision-language diff\n")
     _write(repo, "tools/diffusion_helpers.py", "# shared diffusion helpers\n")
+    _write(repo, "tools/elf_hf_reference.py", "# ELF reference helper\n")
     _write(repo, "tools/model_plugin_isolation.py", "# proof verifier\n")
+    for reference_runner in (
+        "tools/reference/elf_prepared.py",
+        "tools/reference/plugin_reference.py",
+        "tools/reference/speech.py",
+        "tools/reference/transformers_encoder.py",
+        "tools/reference/transformers_text.py",
+        "tools/reference/transformers_vlm.py",
+    ):
+        _write(repo, reference_runner, "# task-eval reference runner\n")
     _write(repo, "tools/test_impact.py", "# shared impact analyzer\n")
     _write(repo, "tools/task_eval.py", "# task-eval runner\n")
+    _write(repo, "tools/trtmc_reference.py", "# task-eval reference runner\n")
     _write(repo, "tests/task_eval/validation_suites.yaml", "suites: []\n")
     _write(repo, "tests/tools/test_task_eval.py", "# task-eval unit tests\n")
     _write(repo, "tools/tool_helpers.py", "# shared tool helpers\n")
@@ -1083,10 +1094,18 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
         "tools/diff_logits.py",
         "tools/diff_vl.py",
         "tools/diffusion_helpers.py",
+        "tools/elf_hf_reference.py",
         "tools/model_plugin_isolation.py",
+        "tools/reference/elf_prepared.py",
+        "tools/reference/plugin_reference.py",
+        "tools/reference/speech.py",
+        "tools/reference/transformers_encoder.py",
+        "tools/reference/transformers_text.py",
+        "tools/reference/transformers_vlm.py",
         "tools/task_eval.py",
         "tools/test_impact.py",
         "tools/tool_helpers.py",
+        "tools/trtmc_reference.py",
         "tools/ci/__init__.py",
         "tools/ci/__main__.py",
         "tools/ci/model_proof.py",
