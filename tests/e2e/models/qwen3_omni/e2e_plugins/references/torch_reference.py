@@ -1,22 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pinned official-HF audio evidence for Qwen3-Omni's L4 validation lane."""
+"""Live official-HF reference for Qwen3-Omni text-to-audio."""
 
 from __future__ import annotations
 
-import base64
-import binascii
-import gzip
-import hashlib
 import json
+import subprocess
+import sys
 import tempfile
 import time
 import wave
 from pathlib import Path
-from typing import Any
 
-from .. import _case_artifact_dir
+from .. import _case_artifact_dir, save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 
@@ -24,162 +21,25 @@ REFERENCE_SAMPLE_RATE = 24_000
 DEFAULT_SPEAKER = "Ethan"
 DEFAULT_SEED = 42
 DEFAULT_TALKER_MAX_NEW_TOKENS = 32
-SNAPSHOT_SCHEMA_VERSION = 1
-MAX_COMPRESSED_BYTES = 2 * 1024 * 1024
-MAX_WAV_BYTES = 8 * 1024 * 1024
-QWEN_AUDIO_SYSTEM_PROMPT = (
-    "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, "
-    "capable of perceiving auditory and visual inputs, as well as generating "
-    "text and speech."
-)
-
-
-def _require_mapping(value: Any, label: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise RuntimeError(f"Qwen3-Omni HF snapshot {label} must be an object")
-    return value
-
-
-def _load_snapshot(path: Path) -> dict[str, Any]:
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Qwen3-Omni HF snapshot could not be read at {path}: {exc}") from exc
-    return _require_mapping(raw, "root")
-
-
-def _validate_provenance(case: E2ECase, snapshot: dict[str, Any]) -> None:
-    expected = {
-        "schema_version": SNAPSHOT_SCHEMA_VERSION,
-        "source": "official_hugging_face_qwen3_omni",
-        "reference_role": "automated_waveform_oracle",
-        "comparison_mode": "waveform_cosine_and_invariants",
-        "model_id": case.hf_id,
-        "system_prompt": QWEN_AUDIO_SYSTEM_PROMPT,
-        "prompt": str(case.inputs.get("prompt", "") or "").strip(),
-        "speaker": str(case.metadata.get("reference_speaker", DEFAULT_SPEAKER)),
-        "seed": int(case.inputs.get("seed", case.determinism.get("seed", DEFAULT_SEED))),
-        "thinker_max_new_tokens": int(case.inputs.get("max_new_tokens", 16)),
-        "talker_max_new_tokens": int(
-            case.metadata.get(
-                "reference_talker_max_new_tokens",
-                DEFAULT_TALKER_MAX_NEW_TOKENS,
-            )
-        ),
-        "thinker_do_sample": False,
-        "talker_do_sample": False,
-    }
-    for field, expected_value in expected.items():
-        actual = snapshot.get(field)
-        if actual != expected_value:
-            raise RuntimeError(
-                "Qwen3-Omni HF snapshot provenance mismatch for "
-                f"{field}: expected {expected_value!r}, got {actual!r}"
-            )
-
-    revision = snapshot.get("resolved_revision")
-    if (
-        not isinstance(revision, str)
-        or len(revision) != 40
-        or any(ch not in "0123456789abcdef" for ch in revision)
-    ):
-        raise RuntimeError(
-            "Qwen3-Omni HF snapshot resolved_revision must be a pinned "
-            "40-character lowercase Git commit"
-        )
-
-
-def _decode_audio(snapshot: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
-    audio = _require_mapping(snapshot.get("audio"), "audio")
-    if audio.get("encoding") != "gzip+base64" or audio.get("format") != "wav":
-        raise RuntimeError("Qwen3-Omni HF snapshot audio must use gzip+base64 WAV encoding")
-    chunks = audio.get("gzip_base64_chunks")
-    if (
-        not isinstance(chunks, list)
-        or not chunks
-        or any(not isinstance(chunk, str) or not chunk for chunk in chunks)
-    ):
-        raise RuntimeError("Qwen3-Omni HF snapshot audio chunks must be non-empty strings")
-
-    try:
-        compressed = base64.b64decode("".join(chunks), validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise RuntimeError(f"Qwen3-Omni HF snapshot audio is not valid base64: {exc}") from exc
-    if not compressed or len(compressed) > MAX_COMPRESSED_BYTES:
-        raise RuntimeError(
-            "Qwen3-Omni HF snapshot compressed audio size is outside the "
-            f"allowed range: {len(compressed)} bytes"
-        )
-    if len(compressed) != audio.get("gzip_bytes"):
-        raise RuntimeError("Qwen3-Omni HF snapshot compressed audio size does not match provenance")
-    compressed_sha = hashlib.sha256(compressed).hexdigest()
-    if compressed_sha != audio.get("gzip_sha256"):
-        raise RuntimeError(
-            "Qwen3-Omni HF snapshot compressed audio SHA-256 does not match provenance"
-        )
-
-    try:
-        wav_bytes = gzip.decompress(compressed)
-    except (OSError, EOFError) as exc:
-        raise RuntimeError(f"Qwen3-Omni HF snapshot audio is not valid gzip data: {exc}") from exc
-    if not wav_bytes or len(wav_bytes) > MAX_WAV_BYTES:
-        raise RuntimeError(
-            f"Qwen3-Omni HF snapshot WAV size is outside the allowed range: {len(wav_bytes)} bytes"
-        )
-    if len(wav_bytes) != audio.get("raw_bytes"):
-        raise RuntimeError("Qwen3-Omni HF snapshot WAV size does not match provenance")
-    wav_sha = hashlib.sha256(wav_bytes).hexdigest()
-    if wav_sha != audio.get("raw_sha256"):
-        raise RuntimeError("Qwen3-Omni HF snapshot WAV SHA-256 does not match provenance")
-    return wav_bytes, audio
-
-
-def _validate_wav(path: Path, audio: dict[str, Any]) -> tuple[int, int]:
-    try:
-        with wave.open(str(path), "rb") as wav:
-            channels = wav.getnchannels()
-            sample_width = wav.getsampwidth()
-            sample_rate = wav.getframerate()
-            num_samples = wav.getnframes()
-    except (OSError, EOFError, wave.Error) as exc:
-        raise RuntimeError(
-            f"Qwen3-Omni HF snapshot did not produce a valid WAV at {path}: {exc}"
-        ) from exc
-
-    actual = {
-        "channels": channels,
-        "sample_width_bytes": sample_width,
-        "sample_rate_hz": sample_rate,
-        "num_samples": num_samples,
-    }
-    for field, value in actual.items():
-        if value != audio.get(field):
-            raise RuntimeError(
-                "Qwen3-Omni HF snapshot WAV provenance mismatch for "
-                f"{field}: expected {audio.get(field)!r}, got {value!r}"
-            )
-    if channels != 1 or sample_width != 2 or sample_rate != REFERENCE_SAMPLE_RATE:
-        raise RuntimeError(
-            "Qwen3-Omni HF reference WAV has an invalid format: "
-            f"channels={channels}, sample_width={sample_width}, "
-            f"sample_rate={sample_rate}"
-        )
-    if num_samples <= 0:
-        raise RuntimeError("Qwen3-Omni HF reference WAV contains no samples")
-    return sample_rate, num_samples
 
 
 class TorchReference:
-    """Materialize pinned official HF audio for the waveform-regression gate."""
+    """Run Qwen3-Omni through its official Transformers API."""
 
     @property
     def backend_name(self) -> str:
-        # Keep the existing backend contract; the implementation is now a
-        # provenance-checked snapshot rather than a per-CI 30B model load.
         return "torch_reference"
 
-    def run_stage(self, case: E2ECase, stage: StageSpec, ctx: RunContext) -> StageOutput:
-        if case.task_strategy != "omni_multimodal" or stage.name != "talker_decode":
+    def run_stage(
+        self,
+        case: E2ECase,
+        stage: StageSpec,
+        ctx: RunContext,
+    ) -> StageOutput:
+        if (
+            case.task_strategy != "omni_multimodal"
+            or stage.name != "talker_decode"
+        ):
             return StageOutput(
                 stage_name=stage.name,
                 data={
@@ -188,43 +48,101 @@ class TorchReference:
                 },
             )
 
-        snapshot_value = case.metadata.get("golden_snapshot_path", "")
-        if not snapshot_value:
-            raise RuntimeError("Qwen3-Omni HF audio reference requires golden_snapshot_path")
-        snapshot_path = Path(str(snapshot_value))
-        if not snapshot_path.is_absolute():
-            snapshot_path = Path(__file__).resolve().parents[2] / snapshot_path
-
+        prompt = str(case.inputs.get("prompt", "") or "").strip()
+        if not prompt:
+            raise RuntimeError("Qwen3-Omni reference requires a prompt")
+        artifact_dir = Path(
+            _case_artifact_dir(
+                ctx.artifacts_dir or tempfile.gettempdir(),
+                case.name,
+            )
+        )
+        audio_path = artifact_dir / "hf_reference.wav"
+        metadata_path = artifact_dir / "hf_reference.json"
+        model_dir = Path(__file__).resolve().parents[2]
+        command = [
+            ctx.reference_python_path() or sys.executable,
+            str(model_dir / "official_hf_audio.py"),
+            "--model",
+            case.hf_id,
+            "--prompt",
+            prompt,
+            "--speaker",
+            str(case.metadata.get("reference_speaker", DEFAULT_SPEAKER)),
+            "--seed",
+            str(
+                case.inputs.get(
+                    "seed",
+                    case.determinism.get("seed", DEFAULT_SEED),
+                )
+            ),
+            "--thinker-max-new-tokens",
+            str(case.inputs.get("max_new_tokens", 16)),
+            "--talker-max-new-tokens",
+            str(
+                case.metadata.get(
+                    "reference_talker_max_new_tokens",
+                    DEFAULT_TALKER_MAX_NEW_TOKENS,
+                )
+            ),
+            "--audio-output",
+            str(audio_path),
+            "--metadata-output",
+            str(metadata_path),
+            "--local-files-only",
+        ]
+        if case.hf_revision:
+            prompt_index = command.index("--prompt")
+            command[prompt_index:prompt_index] = [
+                "--revision",
+                case.hf_revision,
+            ]
         started = time.monotonic()
-        snapshot = _load_snapshot(snapshot_path)
-        _validate_provenance(case, snapshot)
-        wav_bytes, audio = _decode_audio(snapshot)
-
-        model_dir = Path(_case_artifact_dir(ctx.artifacts_dir or tempfile.gettempdir(), case.name))
-        wav_path = model_dir / "hf_reference.wav"
-        wav_path.write_bytes(wav_bytes)
-        sample_rate, num_samples = _validate_wav(wav_path, audio)
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=3600,
+        )
         elapsed = time.monotonic() - started
-
+        stderr, stderr_log = save_full_stderr(
+            result.stderr or "",
+            ctx.artifacts_dir or tempfile.gettempdir(),
+            "qwen3_omni_official_hf_reference",
+            case.name,
+        )
+        if result.returncode != 0:
+            detail = stderr.strip() or (result.stdout or "").strip()
+            raise RuntimeError(
+                "Qwen3-Omni official HF reference failed "
+                f"(rc={result.returncode}): {detail or 'no subprocess output'}"
+            )
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        with wave.open(str(audio_path), "rb") as wav:
+            channels = wav.getnchannels()
+            sample_width = wav.getsampwidth()
+            sample_rate = wav.getframerate()
+            num_samples = wav.getnframes()
+        if (
+            channels != 1
+            or sample_width != 2
+            or sample_rate != REFERENCE_SAMPLE_RATE
+            or num_samples < 1
+        ):
+            raise RuntimeError(
+                "Qwen3-Omni HF reference emitted invalid audio: "
+                f"channels={channels}, sample_width={sample_width}, "
+                f"sample_rate={sample_rate}, num_samples={num_samples}"
+            )
         data = {
             "_invariant_only": True,
-            "wav_path": str(wav_path),
+            "wav_path": str(audio_path),
             "wav_exists": True,
             "sample_rate": sample_rate,
             "num_samples": num_samples,
             "duration_s": num_samples / sample_rate,
-            "decoded_text": str(snapshot.get("decoded_text", "") or ""),
-            "reference_role": "automated_waveform_oracle",
-            "system_prompt": QWEN_AUDIO_SYSTEM_PROMPT,
-            "prompt": str(snapshot["prompt"]),
-            "speaker": str(snapshot["speaker"]),
-            "seed": int(snapshot["seed"]),
-            "thinker_max_new_tokens": int(snapshot["thinker_max_new_tokens"]),
-            "talker_max_new_tokens": int(snapshot["talker_max_new_tokens"]),
-            "model_id": str(snapshot["model_id"]),
-            "resolved_revision": str(snapshot["resolved_revision"]),
-            "transformers_version": str(snapshot.get("transformers_version", "")),
-            "raw_sha256": str(audio["raw_sha256"]),
+            "decoded_text": str(metadata.get("decoded_text", "") or ""),
+            **metadata,
         }
         return StageOutput(
             stage_name=stage.name,
@@ -232,16 +150,14 @@ class TorchReference:
             text=data["decoded_text"],
             timing_s=elapsed,
             metadata={
-                "backend": "torch_reference",
-                "source": "official_hf_pinned_waveform_oracle",
+                "backend": self.backend_name,
+                "source": "official_hf_live_reference",
                 "comparison_mode": "waveform_cosine_and_invariants",
-                "snapshot_path": str(snapshot_path),
-                "resolved_revision": data["resolved_revision"],
-                "raw_sha256": data["raw_sha256"],
-                "note": (
-                    "Pinned official HF WAV gates aligned waveform cosine plus "
-                    "the L4 TRT audio invariants."
-                ),
+                "command": command,
+                "returncode": result.returncode,
+                "stderr": stderr,
+                "stderr_log": stderr_log,
+                **metadata,
             },
         )
 

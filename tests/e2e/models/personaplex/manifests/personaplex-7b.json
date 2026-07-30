@@ -1,6 +1,7 @@
 {
   "name": "personaplex-7b",
   "hf_id": "nvidia/personaplex-7b-v1",
+  "hf_revision": "fdaf4090a61cb315c138a1faee287ffd6c716309",
   "bundle": "personaplex-7b.trtfb",
   "family": "personaplex",
   "runtime_strategy": "personaplex_speech_to_speech",
@@ -17,6 +18,8 @@
     {
       "name": "personaplex-7b",
       "trace_id": "IT-E2E-PPLX-01",
+      "reference_backend": "personaplex_official",
+      "oracle_level": "L1_external_reference",
       "reference_precision": "bf16",
       "reference_family": "s2s_personaplex",
       "user_contract": "speech_response",

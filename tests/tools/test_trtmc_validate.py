@@ -104,10 +104,8 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
         for workload, limit in catalog["sample_limits"].items()
         if limit == 1
     } == {
-        "lance_x2t_image_model_parity",
-        "personaplex_recording_model_parity",
-        "qwen3_omni_talker_model_parity",
-        "wan22_official_ti2v_model_parity",
+        "seedtts_en_omni_audio_parity",
+        "vbench_ti2v_official_profile_parity",
     }
     assert max(catalog["sample_limits"].values()) == 100
     assert catalog["sample_limits"]["mmlu_five_shot_mcq"] == 20
@@ -966,9 +964,20 @@ def test_reference_sources_select_model_specific_inputs(
             "entrypoint": "wan/textimage2video.py",
         },
     )
+    lance = trtmc_validate.ensure_reference_sources(
+        "lance",
+        tmp_path,
+        {
+            "repository": "https://example.invalid/Lance.git",
+            "revision": "4baeee086648996f6ab12e673cbe461b0b149997",
+            "relative_path": "lance/reference/Lance-4baeee086648",
+            "entrypoint": "inference_lance.py",
+            "environment_variable": "TRTMC_LANCE_REFERENCE_REPO",
+        },
+    )
     common = trtmc_validate.ensure_reference_sources("bert", tmp_path)
 
-    assert prepared == ["ELF", "sana_wm", "wan2_2_ti2v"]
+    assert prepared == ["ELF", "sana_wm", "wan2_2_ti2v", "lance"]
     assert (
         elf.elf_reference_repo
         == tmp_path / trtmc_validate.ELF_SOURCE.relative_checkout
@@ -982,6 +991,12 @@ def test_reference_sources_select_model_specific_inputs(
     assert common.elf_reference_repo is None
     assert common.environment == {"TRTMC_STORAGE_ROOT": str(tmp_path)}
     assert wan22.environment == {"TRTMC_STORAGE_ROOT": str(tmp_path)}
+    assert lance.environment == {
+        "TRTMC_STORAGE_ROOT": str(tmp_path),
+        "TRTMC_LANCE_REFERENCE_REPO": str(
+            tmp_path / "lance/reference/Lance-4baeee086648"
+        ),
+    }
 
 
 def test_reference_sources_reject_incomplete_model_contract(

@@ -19,24 +19,23 @@ sample_limits:
   imagenette_image_classification: 100
   librispeech_clean_asr: 10
   librispeech_clean_asr_streaming: 5
-  lance_x2t_image_model_parity: 1
+  flores200_en_fr_seq2seq_parity: 10
+  full_duplex_bench_speech_parity: 5
   mmlu_continuation_parity: 10
   mmlu_five_shot_mcq: 20
-  nemotron_labs_generation_modes_model_parity: 4
+  mmlu_generation_mode_parity: 8
+  mmmu_pro_vision_plugin_parity: 5
   newstest2019_en_ru_marian_translation_parity: 10
-  nllb_flores_en_fr_model_parity: 10
   ocrbench_v2_unified: 5
   openwebtext_elf_diffusion_text: 5
-  personaplex_recording_model_parity: 1
-  phi4_multimodal_mmmu_model_parity: 5
-  qwen3_omni_talker_model_parity: 1
+  seedtts_en_omni_audio_parity: 1
   sana_wm_benchmark_diffusion_video: 2
   seedtts_en_tts_intelligibility: 3
   stsbenchmark_encoder_embedding_parity: 50
   vlm_mmmu_pro_vision_fixed_mcq: 5
   vlm_mmmu_pro_vision_mcq: 5
-  wan21_vbench_model_parity: 2
-  wan22_official_ti2v_model_parity: 1
+  vbench_t2v_diffusion_video: 2
+  vbench_ti2v_official_profile_parity: 1
   wikitext103_distilgpt2_continuation_parity: 20
   wmt14_de_en_elf_diffusion_text: 5
   wmt14_en_de_t5_translation_parity: 10
@@ -168,8 +167,8 @@ models:
     default: vlm_mmmu_pro_vision_fixed_mcq
     workloads: [vlm_mmmu_pro_vision_fixed_mcq, vlm_mmmu_pro_vision_mcq]
   lance-3b-x2t-image:
-    default: lance_x2t_image_model_parity
-    workloads: [lance_x2t_image_model_parity]
+    default: mmmu_pro_vision_plugin_parity
+    workloads: [mmmu_pro_vision_plugin_parity]
   magpie-tts-357m:
     default: seedtts_en_tts_intelligibility
     workloads: [seedtts_en_tts_intelligibility]
@@ -207,8 +206,8 @@ models:
     default: mmlu_continuation_parity
     workloads: [mmlu_continuation_parity]
   nemotron-labs-diffusion-8b:
-    default: nemotron_labs_generation_modes_model_parity
-    workloads: [nemotron_labs_generation_modes_model_parity]
+    default: mmlu_generation_mode_parity
+    workloads: [mmlu_generation_mode_parity]
   nemotron-mini-4b:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]
@@ -222,8 +221,8 @@ models:
     default: librispeech_clean_asr_streaming
     workloads: [librispeech_clean_asr_streaming]
   nllb-200-distilled-600m:
-    default: nllb_flores_en_fr_model_parity
-    workloads: [nllb_flores_en_fr_model_parity]
+    default: flores200_en_fr_seq2seq_parity
+    workloads: [flores200_en_fr_seq2seq_parity]
   olmo-1b:
     default: mmlu_continuation_parity
     workloads: [mmlu_continuation_parity]
@@ -246,8 +245,8 @@ models:
     default: etth1_time_series_parity
     workloads: [etth1_time_series_parity]
   personaplex-7b:
-    default: personaplex_recording_model_parity
-    workloads: [personaplex_recording_model_parity]
+    default: full_duplex_bench_speech_parity
+    workloads: [full_duplex_bench_speech_parity]
   phi-moe:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]
@@ -255,8 +254,8 @@ models:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]
   phi4-multimodal:
-    default: phi4_multimodal_mmmu_model_parity
-    workloads: [phi4_multimodal_mmmu_model_parity]
+    default: mmmu_pro_vision_plugin_parity
+    workloads: [mmmu_pro_vision_plugin_parity]
   pixart-sigma-1024:
     default: dpg_bench_diffusion_image
     workloads: [dpg_bench_diffusion_image]
@@ -294,8 +293,8 @@ models:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]
   qwen3-omni-30b-a3b-instruct:
-    default: qwen3_omni_talker_model_parity
-    workloads: [qwen3_omni_talker_model_parity]
+    default: seedtts_en_omni_audio_parity
+    workloads: [seedtts_en_omni_audio_parity]
   qwen3-vl-2b:
     default: vlm_mmmu_pro_vision_fixed_mcq
     workloads: [vlm_mmmu_pro_vision_fixed_mcq, vlm_mmmu_pro_vision_mcq]
@@ -345,11 +344,11 @@ models:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]
   wan21-t2v-1.3b:
-    default: wan21_vbench_model_parity
-    workloads: [wan21_vbench_model_parity]
+    default: vbench_t2v_diffusion_video
+    workloads: [vbench_t2v_diffusion_video]
   wan22-ti2v-5b:
-    default: wan22_official_ti2v_model_parity
-    workloads: [wan22_official_ti2v_model_parity]
+    default: vbench_ti2v_official_profile_parity
+    workloads: [vbench_ti2v_official_profile_parity]
   whisper-large-v3-turbo:
     default: librispeech_clean_asr
     workloads: [librispeech_clean_asr]

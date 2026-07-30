@@ -1,15 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Focused tests for Qwen3-Omni pinned official-HF audio evidence."""
+"""Focused tests for the live Qwen3-Omni official-HF reference."""
 
 from __future__ import annotations
 
-import hashlib
 import json
+import subprocess
+import wave
 from pathlib import Path
-
-import pytest
 
 from tests.e2e.models.qwen3_omni.e2e_plugins.references import torch_reference
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageSpec
@@ -17,16 +16,10 @@ from tests.e2e_harness.manifest_loader import get_case_by_name
 
 
 MODEL_DIR = Path(__file__).resolve().parent
-SNAPSHOT_PATH = MODEL_DIR / "data" / "qwen3_omni_hf_reference.json"
 OFFICIAL_PROMPT = "Please say hello from Qwen3 Omni in one short sentence."
-EXPECTED_WAV_SHA256 = "2648af9d3de015de2e7c73f829e374b95f287a9c5e1c548569a33068e8aa99ef"
 
 
-def _case(
-    *,
-    snapshot_path: Path = SNAPSHOT_PATH,
-    prompt: str = OFFICIAL_PROMPT,
-) -> E2ECase:
+def _case(*, prompt: str = OFFICIAL_PROMPT) -> E2ECase:
     return E2ECase(
         name="qwen3-omni-reference-test",
         hf_id="Qwen/Qwen3-Omni-30B-A3B-Instruct",
@@ -34,139 +27,104 @@ def _case(
         runtime_strategy="qwen3_omni_multimodal",
         task_strategy="omni_multimodal",
         reference_backend="torch_reference",
-        oracle_level="L3_snapshot_regression",
+        oracle_level="L1_external_reference",
         inputs={"prompt": prompt, "max_new_tokens": 16, "seed": 42},
         determinism={"seed": 42, "reruns": 0},
         metadata={
             "reference_speaker": "Ethan",
             "reference_talker_max_new_tokens": 32,
-            "golden_snapshot_path": str(snapshot_path),
         },
     )
 
 
-def test_manifest_uses_pinned_hf_waveform_as_l4_oracle() -> None:
+def _write_pcm16(path: Path, *, frames: int = 2400) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(24_000)
+        output.writeframes(b"\0\0" * frames)
+
+
+def test_manifest_uses_live_official_hf_reference() -> None:
     case = get_case_by_name("qwen3-omni-30b-a3b-instruct", MODEL_DIR)
 
     assert case is not None
     assert case.reference_backend == "torch_reference"
-    assert case.oracle_level == "L3_snapshot_regression"
+    assert case.oracle_level == "L1_external_reference"
     assert case.inputs["prompt"] == OFFICIAL_PROMPT
     assert case.inputs["seed"] == 42
     assert case.metadata["reference_speaker"] == "Ethan"
     assert case.metadata["reference_talker_max_new_tokens"] == 32
-    assert Path(case.metadata["golden_snapshot_path"]) == SNAPSHOT_PATH
-    assert case.threshold_overrides == {
-        "audio_artifact_bytes_min": 44.0,
-        "audio_duration_s_min": 0.5,
-        "audio_reference_duration_ratio_min": 0.5,
-        "audio_rms_min": 0.005,
-        "audio_peak_min": 0.02,
-        "audio_reference_waveform_cosine_min": 0.25,
-    }
-    assert any(
-        requirement.kind == "asset_exists"
-        and Path(requirement.args["path"]) == SNAPSHOT_PATH
-        and requirement.gating
-        for requirement in case.preflight
-    )
+    assert "golden_snapshot_path" not in case.metadata
     assert not any(
-        requirement.kind == "python_module_available"
-        and requirement.args.get("phase") == "reference"
+        requirement.kind == "asset_exists"
+        and "qwen3_omni_hf_reference" in str(requirement.args.get("path", ""))
         for requirement in case.preflight
     )
 
 
-def test_pinned_reference_materializes_case_local_playable_hf_audio(
+def test_reference_runs_direct_official_hf_command_and_materializes_audio(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    captured: list[str] = []
+
+    def run(command, **_kwargs):
+        captured.extend(command)
+        audio_path = Path(command[command.index("--audio-output") + 1])
+        metadata_path = Path(command[command.index("--metadata-output") + 1])
+        _write_pcm16(audio_path)
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "model_id": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+                    "resolved_revision": "a" * 40,
+                    "decoded_text": "Hello from Qwen-Omni!",
+                    "sample_rate": 24_000,
+                    "num_samples": 2400,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(torch_reference.subprocess, "run", run)
     case = _case()
     output = torch_reference.TorchReference().run_stage(
         case,
         StageSpec(name="talker_decode"),
-        RunContext(case=case, artifacts_dir=str(tmp_path / "artifacts")),
+        RunContext(
+            case=case,
+            artifacts_dir=str(tmp_path / "artifacts"),
+            reference_python="/profiles/qwen/bin/python",
+        ),
     )
 
-    expected_wav = tmp_path / "artifacts" / case.name / "hf_reference.wav"
+    assert captured[0] == "/profiles/qwen/bin/python"
+    assert captured[1].endswith("/qwen3_omni/official_hf_audio.py")
+    assert captured[captured.index("--prompt") + 1] == OFFICIAL_PROMPT
+    assert captured[captured.index("--speaker") + 1] == "Ethan"
+    assert captured[captured.index("--thinker-max-new-tokens") + 1] == "16"
+    assert captured[captured.index("--talker-max-new-tokens") + 1] == "32"
     assert output.data["_invariant_only"] is True
-    assert output.data["reference_role"] == "automated_waveform_oracle"
-    assert output.data["wav_path"] == str(expected_wav)
     assert output.data["sample_rate"] == 24_000
-    assert output.data["num_samples"] == 37_845
-    assert output.data["duration_s"] == pytest.approx(1.576875)
+    assert output.data["num_samples"] == 2400
     assert output.data["decoded_text"] == "Hello from Qwen-Omni!"
-    assert output.data["resolved_revision"] == ("26291f793822fb6be9555850f06dfe95f2d7e695")
-    assert output.data["raw_sha256"] == EXPECTED_WAV_SHA256
+    assert Path(output.data["wav_path"]).is_file()
     assert output.text == "Hello from Qwen-Omni!"
-    assert output.metadata["source"] == "official_hf_pinned_waveform_oracle"
-    assert output.metadata["comparison_mode"] == "waveform_cosine_and_invariants"
-    assert hashlib.sha256(expected_wav.read_bytes()).hexdigest() == EXPECTED_WAV_SHA256
-    assert output.timing_s >= 0.0
+    assert output.metadata["source"] == "official_hf_live_reference"
+    assert output.metadata["command"] == captured
 
 
-def test_pinned_reference_has_no_model_load_or_subprocess_dependency() -> None:
-    source = Path(torch_reference.__file__).read_text(encoding="utf-8")
+def test_official_runner_uses_transformers_generation_api() -> None:
+    source = (MODEL_DIR / "official_hf_audio.py").read_text(encoding="utf-8")
 
-    assert "import torch" not in source
-    assert "import transformers" not in source
-    assert "import subprocess" not in source
-    assert "from_pretrained" not in source
-
-
-def test_snapshot_records_complete_generation_provenance() -> None:
-    snapshot = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
-
-    assert snapshot["source"] == "official_hugging_face_qwen3_omni"
-    assert snapshot["model_id"] == "Qwen/Qwen3-Omni-30B-A3B-Instruct"
-    assert snapshot["prompt"] == OFFICIAL_PROMPT
-    assert snapshot["system_prompt"] == torch_reference.QWEN_AUDIO_SYSTEM_PROMPT
-    assert snapshot["speaker"] == "Ethan"
-    assert snapshot["seed"] == 42
-    assert snapshot["thinker_max_new_tokens"] == 16
-    assert snapshot["talker_max_new_tokens"] == 32
-    assert snapshot["thinker_do_sample"] is False
-    assert snapshot["talker_do_sample"] is False
-    assert snapshot["audio"]["raw_sha256"] == EXPECTED_WAV_SHA256
-
-
-def test_reference_rejects_prompt_drift(tmp_path: Path) -> None:
-    case = _case(prompt="A different prompt")
-
-    with pytest.raises(
-        RuntimeError, match=(r"provenance mismatch for prompt: expected 'A different prompt', got ")
-    ):
-        torch_reference.TorchReference().run_stage(
-            case,
-            StageSpec(name="talker_decode"),
-            RunContext(case=case, artifacts_dir=str(tmp_path / "artifacts")),
-        )
-
-
-def test_reference_rejects_corrupt_snapshot_hash(tmp_path: Path) -> None:
-    snapshot = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
-    snapshot["audio"]["gzip_sha256"] = "0" * 64
-    corrupt_path = tmp_path / "corrupt.json"
-    corrupt_path.write_text(json.dumps(snapshot), encoding="utf-8")
-    case = _case(snapshot_path=corrupt_path)
-
-    with pytest.raises(RuntimeError, match=r"compressed audio SHA-256"):
-        torch_reference.TorchReference().run_stage(
-            case,
-            StageSpec(name="talker_decode"),
-            RunContext(case=case, artifacts_dir=str(tmp_path / "artifacts")),
-        )
-
-
-def test_reference_rejects_missing_snapshot(tmp_path: Path) -> None:
-    missing = tmp_path / "missing.json"
-    case = _case(snapshot_path=missing)
-
-    with pytest.raises(RuntimeError, match=r"could not be read"):
-        torch_reference.TorchReference().run_stage(
-            case,
-            StageSpec(name="talker_decode"),
-            RunContext(case=case, artifacts_dir=str(tmp_path / "artifacts")),
-        )
+    assert "Qwen3OmniMoeForConditionalGeneration" in source
+    assert "Qwen3OmniMoeProcessor" in source
+    assert "thinker_do_sample=False" in source
+    assert "talker_do_sample=False" in source
+    assert "speaker=arguments.speaker" in source
 
 
 def test_reference_declines_non_talker_stage(tmp_path: Path) -> None:

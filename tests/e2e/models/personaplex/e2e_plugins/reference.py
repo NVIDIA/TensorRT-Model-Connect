@@ -5,10 +5,19 @@
 
 from __future__ import annotations
 
+from .references.official_personaplex import OfficialPersonaPlexReference
 from .references.torch_reference import TorchReference
 
 
 class PersonaplexTorchReferenceReference(TorchReference):
     """personaplex local reference for torch_reference."""
 
-reference = PersonaplexTorchReferenceReference()
+
+class PersonaplexOfficialReference(OfficialPersonaPlexReference):
+    """Pinned official PersonaPlex greedy reference."""
+
+
+reference = [
+    PersonaplexTorchReferenceReference(),
+    PersonaplexOfficialReference(),
+]

@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -551,6 +552,16 @@ def ensure_reference_sources(
             entrypoint=Path(str(model_reference_cache["entrypoint"])),
         )
         checkout = _ensure_reference_source(declared_source, cache_root)
+        environment_variable = str(
+            model_reference_cache.get("environment_variable", "") or ""
+        ).strip()
+        if environment_variable:
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", environment_variable) is None:
+                raise ValidationError(
+                    f"{family} model reference environment_variable is invalid: "
+                    f"{environment_variable!r}"
+                )
+            environment[environment_variable] = str(checkout)
 
     if family == "elf_flow":
         checkout = _ensure_reference_source(ELF_SOURCE, cache_root)

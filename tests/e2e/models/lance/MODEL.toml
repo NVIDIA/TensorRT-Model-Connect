@@ -7,6 +7,13 @@ test_manifests = [
   "manifests/lance-3b-x2t-image.json",
 ]
 
+[model_reference_cache]
+repository = "https://github.com/bytedance/Lance.git"
+revision = "4baeee086648996f6ab12e673cbe461b0b149997"
+relative_path = "lance/reference/Lance-4baeee086648"
+entrypoint = "inference_lance.py"
+environment_variable = "TRTMC_LANCE_REFERENCE_REPO"
+
 [e2e_defaults.vision_language_generation]
 reference_backend = "hf_transformers"
 oracle_level = "L1_external_reference"

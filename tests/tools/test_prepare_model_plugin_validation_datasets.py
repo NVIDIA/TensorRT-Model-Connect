@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import wave
 from pathlib import Path
 
 from PIL import Image
@@ -11,7 +12,18 @@ from PIL import Image
 from tools import prepare_model_plugin_validation_datasets as prepare
 
 
-def _write_sources(tmp_path: Path) -> tuple[Path, Path, Path]:
+def _write_wav(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(16_000)
+        output.writeframes(b"\0\0" * 160)
+
+
+def _write_sources(
+    tmp_path: Path,
+) -> tuple[Path, Path, Path, Path, Path]:
     flores = tmp_path / "flores.json"
     flores.write_text(
         json.dumps(
@@ -25,6 +37,21 @@ def _write_sources(tmp_path: Path) -> tuple[Path, Path, Path]:
                         "answer": f"phrase {index}",
                     }
                     for index in range(10)
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    mmlu = tmp_path / "mmlu.json"
+    mmlu.write_text(
+        json.dumps(
+            {
+                "requests": [
+                    {
+                        "prompt": f"five-shot MMLU question {index}",
+                        "answer": "A",
+                    }
+                    for index in range(2)
                 ]
             }
         ),
@@ -64,58 +91,101 @@ def _write_sources(tmp_path: Path) -> tuple[Path, Path, Path]:
             }
         )
     mmmu.write_text(json.dumps({"requests": rows}), encoding="utf-8")
-    vbench = tmp_path / "vbench.json"
-    vbench.write_text(
+    full_duplex = tmp_path / "full-duplex"
+    for category, count in (
+        ("synthetic_user_interruption", 3),
+        ("synthetic_pause_handling", 2),
+    ):
+        for index in range(count):
+            _write_wav(full_duplex / category / f"case-{index}" / "input.wav")
+    seedtts = tmp_path / "seedtts.json"
+    seedtts.write_text(
         json.dumps(
             {
                 "requests": [
                     {
-                        "sample_id": f"vbench-{index}",
-                        "prompt": f"video prompt {index}",
-                        "category": f"dimension-{index}",
+                        "id": "seedtts-000",
+                        "reference": "A public English speech evaluation sentence.",
                     }
-                    for index in range(2)
                 ]
             }
         ),
         encoding="utf-8",
     )
-    return flores, mmmu, vbench
+    return flores, full_duplex, mmlu, mmmu, seedtts
 
 
-def test_prepare_all_writes_eight_self_contained_datasets_and_hashes(
+def test_prepare_all_writes_task_owned_public_datasets_and_hashes(
     tmp_path: Path,
 ) -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    flores, mmmu, vbench = _write_sources(tmp_path)
+    flores, full_duplex, mmlu, mmmu, seedtts = _write_sources(tmp_path)
 
     outputs = prepare.prepare_all(
-        repo_root=repo_root,
         output_root=tmp_path / "output",
         flores_source=flores,
+        full_duplex_source=full_duplex,
+        mmlu_source=mmlu,
         mmmu_source=mmmu,
-        vbench_source=vbench,
+        seedtts_source=seedtts,
     )
 
-    assert len(outputs) == 9
+    assert len(outputs) == 6
     root = tmp_path / "output" / prepare.DATASET_ROOT_NAME
     counts = {
-        path.parent.name: json.loads(path.read_text(encoding="utf-8"))["request_count"]
+        path.parent.name: json.loads(path.read_text(encoding="utf-8"))[
+            "request_count"
+        ]
         for path in root.glob("*/dataset.json")
     }
     assert counts == {
-        "lance-3b-x2t-image": 1,
-        "nemotron-labs-diffusion-8b": 4,
-        "nllb-200-distilled-600m": 10,
-        "personaplex-7b": 1,
-        "phi4-multimodal": 5,
-        "qwen3-omni-30b-a3b-instruct": 1,
-        "wan21-t2v-1.3b": 2,
-        "wan22-ti2v-5b": 1,
+        "flores200-en-fr": 10,
+        "full-duplex-bench": 5,
+        "mmlu-generation-modes": 8,
+        "mmmu-pro-vision": 5,
+        "seedtts-en-omni-audio": 1,
     }
-    manifest = json.loads((root / "dataset_manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads(
+        (root / "dataset_manifest.json").read_text(encoding="utf-8")
+    )
     assert manifest["file_count"] == len(manifest["files"])
-    assert all(prepare.sha256(root / item["path"]) == item["sha256"] for item in manifest["files"])
-    phi4_images = sorted((root / "phi4-multimodal/images").glob("*.png"))
-    assert len(phi4_images) == 5
-    assert {Image.open(path).size for path in phi4_images} == {(756, 448)}
+    assert all(
+        prepare.sha256(root / item["path"]) == item["sha256"]
+        for item in manifest["files"]
+    )
+    vision_images = sorted((root / "mmmu-pro-vision/images").glob("*.png"))
+    assert len(vision_images) == 5
+    assert {Image.open(path).size for path in vision_images} == {(756, 448)}
+    speech = json.loads(
+        (root / "full-duplex-bench/dataset.json").read_text(encoding="utf-8")
+    )
+    assert {
+        row["category"] for row in speech["requests"]
+    } == {
+        "synthetic_pause_handling",
+        "synthetic_user_interruption",
+    }
+    assert all(
+        "speech_reference_tokens" not in row["inputs"]
+        for row in speech["requests"]
+    )
+    assert all(
+        row["inputs"]["speech_test_max_frames"] == 400
+        for row in speech["requests"]
+    )
+    assert [
+        Path(row["inputs"]["audio"]).name
+        for row in speech["requests"]
+    ] == [
+        "000000_case-0.wav",
+        "000001_case-1.wav",
+        "000002_case-2.wav",
+        "000003_case-0.wav",
+        "000004_case-1.wav",
+    ]
+    assert all(
+        dataset["license"] and dataset["license_url"]
+        for dataset in (
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in root.glob("*/dataset.json")
+        )
+    )

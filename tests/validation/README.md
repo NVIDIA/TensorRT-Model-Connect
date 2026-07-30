@@ -92,28 +92,32 @@ Every model/workload binding must resolve to an independent reference
 runner selected by the prepared dataset kind. A catalog-wide test rejects new
 bindings that have no independent native reference runner.
 
-Models whose task cannot be expressed by a shared text/image/audio dataset
-adapter use `model_plugin_json`. Each row selects one manifest testcase and
-stage, supplies deterministic input overrides, and then invokes the
-model-owned reference, TRTMC runner, and comparator directly. It does not call
-the E2E orchestrator. Array-valued stage outputs are persisted as artifacts so
-cached references can be compared in later runs.
+Tasks whose outputs require a model-specific comparator use
+`model_plugin_json`. The workload and prepared dataset remain task-owned; a
+row selects the matching model manifest testcase only at execution time. The
+reference, TRTMC runner, and comparator are invoked directly without calling
+the E2E orchestrator. Array-valued outputs are persisted as artifacts so a
+cached reference can be compared in later runs.
 
-Prepare the fixed datasets for the model-owned workloads from the already
-staged FLORES, MMMU-Pro Vision, and VBench sources:
+Prepare the fixed task datasets from public benchmark sources already staged
+on the validation machine:
 
 ```bash
 python tools/prepare_model_plugin_validation_datasets.py \
   --output-root /mnt/data \
   --flores-source /mnt/data/FLORES200_en_fr/flores200_en_fr_task_eval.json \
+  --full-duplex-source /mnt/data/FullDuplexBench-v1.0-public \
+  --mmlu-source /mnt/data/MMLU_Pro/mmlu_pro_dataset.json \
   --mmmu-source /mnt/data/MMMU_Pro_vision/mmmu_pro_vision_dataset.json \
-  --vbench-source /mnt/data/VBench/vbench_t2v_task_eval.json
+  --seedtts-source /mnt/data/SeedTTS_en_meta/seedtts_en_meta.json
 ```
 
-This writes `/mnt/data/TRTMCValidation`, including only the selected inputs
-and `dataset_manifest.json` with each file's byte size and SHA256. Dev/QA
-machines and NAS mirrors should copy that directory without changing its
-relative layout and verify the manifest after transfer.
+This writes `/mnt/data/TRTMCValidation` with MMMU-Pro Vision, MMLU-Pro,
+FLORES-200, Full-Duplex-Bench, and Seed-TTS-Eval slices, plus
+`dataset_manifest.json` containing each file's byte size and SHA256. Wan
+workloads read the existing public VBench asset directly. Dev/QA machines and
+NAS mirrors should copy the directory without changing its relative layout
+and verify the manifest after transfer.
 
 Every agreement or disagreement therefore means that both backends consumed
 the aligned prepared inputs and produced outputs that were evaluated by the

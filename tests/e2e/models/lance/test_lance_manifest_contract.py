@@ -10,7 +10,7 @@ from pathlib import Path
 from tests.e2e_harness.manifest_loader import load_manifest
 
 
-def test_lance_x2t_manifest_declares_hf_any_to_any_contract() -> None:
+def test_lance_x2t_manifest_declares_official_any_to_any_contract() -> None:
     manifest_path = Path(__file__).with_name("manifests") / "lance-3b-x2t-image.json"
     case = load_manifest(manifest_path)
 
@@ -18,6 +18,10 @@ def test_lance_x2t_manifest_declares_hf_any_to_any_contract() -> None:
     assert case.task_strategy == "vision_language_generation"
     assert case.user_contract == "any-to-any"
     assert "skip_reason" not in case.metadata
-    assert case.reference_backend == "golden_snapshot"
-    expected_snapshot = manifest_path.parent.parent / "data/lance_3b_x2t_golden.json"
-    assert Path(case.metadata["golden_snapshot_path"]) == expected_snapshot
+    assert case.reference_backend == "lance_official"
+    assert case.oracle_level == "L1_external_reference"
+    assert "golden_snapshot_path" not in case.metadata
+    assert case.metadata["contract_config"] == {
+        "use_chat_template": False,
+        "enable_thinking": False,
+    }

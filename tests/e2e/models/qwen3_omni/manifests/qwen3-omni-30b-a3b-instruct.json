@@ -1,6 +1,7 @@
 {
   "name": "qwen3-omni-30b-a3b-instruct",
   "hf_id": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+  "hf_revision": "26291f793822fb6be9555850f06dfe95f2d7e695",
   "bundle": "qwen3-omni-30b-a3b-instruct.trtfb",
   "family": "qwen3_omni",
   "runtime_strategy": "qwen3_omni_multimodal",
@@ -16,8 +17,7 @@
       "name": "qwen3-omni-30b-a3b-instruct",
       "trace_id": "IT-E2E-QWEN3-OMNI-01",
       "reference_backend": "torch_reference",
-      "oracle_level": "L3_snapshot_regression",
-      "golden_snapshot_path": "data/qwen3_omni_hf_reference.json",
+      "oracle_level": "L1_external_reference",
       "user_contract": "tts_audio",
       "prompt": "Please say hello from Qwen3 Omni in one short sentence.",
       "inputs": {

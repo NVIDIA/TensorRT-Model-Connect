@@ -1633,9 +1633,28 @@ def test_plugin_reference_records_actual_command_during_inference(
     assert "plugin_reference.py" not in " ".join(command)
 
 
-def test_model_plugin_reference_runs_manifest_owned_golden_snapshot(
+def test_model_plugin_reference_runs_manifest_owned_official_reference(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    from tests.e2e.models.lance.e2e_plugins.references import lance_official
+    from tests.e2e_harness.contracts import StageOutput
+
+    monkeypatch.setattr(
+        lance_official.LanceOfficialReference,
+        "run_stage",
+        lambda _self, _case, stage, _ctx: StageOutput(
+            stage_name=stage.name,
+            data={"text": "White"},
+            text="White",
+            metadata={
+                "command": [
+                    "/profiles/lance/bin/python",
+                    "/references/Lance/inference_lance.py",
+                ]
+            },
+        ),
+    )
     manifest_path = (
         trtmc_reference.REPO_ROOT
         / "tests/e2e/models/lance/manifests/lance-3b-x2t-image.json"
@@ -1647,7 +1666,10 @@ def test_model_plugin_reference_runs_manifest_owned_golden_snapshot(
                 "sample_id": "lance-sample",
                 "testcase": "lance-3b-x2t-image",
                 "stage": "full_generation",
-                "inputs": {},
+                "inputs": {
+                    "prompt": "What color is the vehicle?",
+                    "image": str(tmp_path / "vehicle.png"),
+                },
             }
         )
         + "\n",

@@ -8,7 +8,7 @@ from tensorrt_model_connect.python_profiles import (
 )
 
 
-def test_personaplex_reference_uses_the_dependency_free_base_profile() -> None:
+def test_personaplex_reference_uses_the_isolated_official_profile() -> None:
     profiles = default_execution_profiles(
         family="personaplex",
         runtime_strategy="personaplex_speech_to_speech",
@@ -18,5 +18,5 @@ def test_personaplex_reference_uses_the_dependency_free_base_profile() -> None:
     assert profiles == {
         "build": "base",
         "runtime": "base",
-        "reference": "base",
+        "reference": "personaplex_reference",
     }

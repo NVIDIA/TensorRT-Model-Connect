@@ -540,6 +540,7 @@ def test_default_suites_include_media_generation_gap_models() -> None:
     assert video["default_model_names"] == [
         "ltx-video-l0",
         "wan21-t2v-1.3b-l0",
+        "wan21-t2v-1.3b",
     ]
     assert video["dataset"]["default_path"] == (
         "/mnt/data/VBench/vbench_t2v_task_eval.json"
@@ -1109,7 +1110,7 @@ def test_default_suites_include_encoder_embedding_parity() -> None:
 def test_phi4_multimodal_workload_reserves_dynamic_hd_cache() -> None:
     suite = validation_engine.suite_by_id(
         validation_engine.load_suites(),
-        "phi4_multimodal_mmmu_model_parity",
+        "mmmu_pro_vision_plugin_parity",
     )
     model = next(
         model
@@ -6649,7 +6650,7 @@ def test_eval_accepts_reranking_dataset_kind(tmp_path: Path, monkeypatch) -> Non
 
 def test_eval_accepts_model_plugin_dataset_kind(tmp_path: Path, monkeypatch) -> None:
     suite = {
-        "id": "lance_x2t_image_model_parity",
+        "id": "mmmu_pro_vision_plugin_parity",
         "dataset": {"kind": "model_plugin_json"},
     }
     model = {
