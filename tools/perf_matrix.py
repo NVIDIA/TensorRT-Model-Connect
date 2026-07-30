@@ -50,6 +50,7 @@ from tensorrt_model_connect.python_profiles import (  # noqa: E402
 
 
 RESULT_SCHEMA = "trtmc.perf-matrix/v1"
+PREPARATION_SCHEMA = "trtmc.perf-bundle-preparation/v1"
 SUITE_SCHEMA = "trtmc.perf-suite/v2"
 ENVIRONMENT_SCHEMA = "trtmc.perf-environment/v1"
 L0_PROFILE_PATTERN = re.compile(r"(?:^|-)l0(?:-|$)", re.IGNORECASE)
@@ -131,6 +132,16 @@ def build_parser() -> argparse.ArgumentParser:
         )
     resume = commands.add_parser("resume", help="continue an incomplete run")
     resume.add_argument("run_directory", type=Path)
+    report = commands.add_parser(
+        "report",
+        help="render an existing run with optional test-task preparation evidence",
+    )
+    report.add_argument("run_directory", type=Path)
+    report.add_argument(
+        "--preparation-receipt",
+        type=Path,
+        help="JSON receipt for bundles prepared before the matrix campaign",
+    )
     return parser
 
 
@@ -2244,8 +2255,39 @@ def _bundle_preparation_records(row: Mapping[str, Any]) -> list[Mapping[str, Any
     return [bundle for bundle in bundles if isinstance(bundle, Mapping)]
 
 
-def _bundle_preparation_html(row: Mapping[str, Any]) -> str:
-    bundles = _bundle_preparation_records(row)
+def _test_task_bundle_preparation(
+    results: Mapping[str, Any],
+) -> dict[tuple[str, str], Mapping[str, Any]]:
+    preparation = results.get("bundle_preparation")
+    if not isinstance(preparation, Mapping):
+        return {}
+    bundles = preparation.get("bundles")
+    if not isinstance(bundles, list):
+        return {}
+    return {
+        (str(bundle.get("model", "")), str(bundle.get("bundle", ""))): bundle
+        for bundle in bundles
+        if isinstance(bundle, Mapping)
+    }
+
+
+def _effective_bundle_preparation_records(
+    results: Mapping[str, Any], row: Mapping[str, Any]
+) -> list[Mapping[str, Any]]:
+    task_records = _test_task_bundle_preparation(results)
+    return [
+        task_records.get(
+            (str(bundle.get("model", "")), str(bundle.get("bundle", ""))),
+            bundle,
+        )
+        for bundle in _bundle_preparation_records(row)
+    ]
+
+
+def _bundle_preparation_html(
+    results: Mapping[str, Any], row: Mapping[str, Any]
+) -> str:
+    bundles = _effective_bundle_preparation_records(results, row)
     if not bundles:
         return "—<div class='timing-meta'>Not recorded</div>"
     labels = {
@@ -2270,8 +2312,14 @@ def _bundle_preparation_html(row: Mapping[str, Any]) -> str:
     return "<br>".join(parts)
 
 
-def _bundle_preparation_summary(rows: list[Mapping[str, Any]]) -> str:
-    records = [record for row in rows for record in _bundle_preparation_records(row)]
+def _bundle_preparation_summary(
+    results: Mapping[str, Any], rows: list[Mapping[str, Any]]
+) -> str:
+    records = [
+        record
+        for row in rows
+        for record in _effective_bundle_preparation_records(results, row)
+    ]
     built = [record for record in records if record.get("status") == "built"]
     build_seconds = sum(
         float(record["build_time_s"])
@@ -2280,9 +2328,11 @@ def _bundle_preparation_summary(rows: list[Mapping[str, Any]]) -> str:
         and math.isfinite(float(record["build_time_s"]))
     )
     prebuilt = sum(record.get("status") in {"cache_hit", "reused"} for record in records)
-    unrecorded = sum(not _bundle_preparation_records(row) for row in rows)
+    unrecorded = sum(
+        not _effective_bundle_preparation_records(results, row) for row in rows
+    )
     return (
-        f"Bundle preparation: {len(built)} built in this run "
+        f"Bundle preparation: {len(built)} built in this test task "
         f"({_duration_html(build_seconds)} total), {prebuilt} cache hits or existing "
         f"bundles, and {unrecorded} rows not recorded. Preparation is reported for "
         "run observability and is excluded from the infer-time traffic-light comparison."
@@ -2352,7 +2402,7 @@ def _report_html(results: Mapping[str, Any]) -> str:
         candidate_timing = _timing_value_html(row.get("candidate"))
         baseline_timing = _timing_value_html(row.get("baseline"))
         model_wall_time = _wall_time_html(row)
-        bundle_preparation = _bundle_preparation_html(row)
+        bundle_preparation = _bundle_preparation_html(results, row)
         timing_scope = _timing_scope_html(row)
         body.append(
             "<tr>"
@@ -2403,7 +2453,9 @@ def _report_html(results: Mapping[str, Any]) -> str:
         f"{explicitly_excluded_profiles} explicitly excluded profile"
         + ("s" if explicitly_excluded_profiles != 1 else "")
     )
-    bundle_preparation_summary = html.escape(_bundle_preparation_summary(rows))
+    bundle_preparation_summary = html.escape(
+        _bundle_preparation_summary(results, rows)
+    )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TRTMC performance matrix</title>
@@ -2439,6 +2491,121 @@ def _write_artifacts(output: Path, results: Mapping[str, Any]) -> None:
     legacy_replay = output / "reproduce.py"
     if legacy_replay.is_file():
         legacy_replay.unlink()
+
+
+def _apply_bundle_preparation_receipt(
+    results: MutableMapping[str, Any], receipt: Mapping[str, Any]
+) -> None:
+    if receipt.get("schema_version") != PREPARATION_SCHEMA:
+        raise PerfMatrixError(
+            f"preparation receipt schema_version must be {PREPARATION_SCHEMA!r}"
+        )
+    if receipt.get("scope") != "test_task":
+        raise PerfMatrixError("preparation receipt scope must be 'test_task'")
+    if receipt.get("git_commit") != results.get("git_commit"):
+        raise PerfMatrixError(
+            "preparation receipt repository revision does not match the performance run"
+        )
+    if receipt.get("included_in_performance_metrics") is not False:
+        raise PerfMatrixError(
+            "preparation receipt must exclude bundle preparation from performance metrics"
+        )
+    bundles = receipt.get("bundles")
+    if not isinstance(bundles, list) or not bundles:
+        raise PerfMatrixError("preparation receipt must contain at least one bundle")
+
+    run_bundles = {
+        (str(bundle.get("model", "")), str(bundle.get("bundle", "")))
+        for row in results.get("cases", [])
+        if isinstance(row, Mapping)
+        for bundle in _bundle_preparation_records(row)
+    }
+    seen: set[tuple[str, str]] = set()
+    allowed_statuses = {"built", "cache_hit", "reused"}
+    validated: list[dict[str, Any]] = []
+    for index, bundle in enumerate(bundles):
+        if not isinstance(bundle, Mapping):
+            raise PerfMatrixError(
+                f"preparation receipt bundle {index} must be a JSON object"
+            )
+        model = bundle.get("model")
+        path = bundle.get("bundle")
+        status = bundle.get("status")
+        if not isinstance(model, str) or not model:
+            raise PerfMatrixError(
+                f"preparation receipt bundle {index} has no model"
+            )
+        if not isinstance(path, str) or not path:
+            raise PerfMatrixError(
+                f"preparation receipt bundle {index} has no bundle path"
+            )
+        if status not in allowed_statuses:
+            raise PerfMatrixError(
+                f"preparation receipt bundle {index} has invalid status {status!r}"
+            )
+        if bundle.get("included_in_performance_metrics") is not False:
+            raise PerfMatrixError(
+                f"preparation receipt bundle {index} must be excluded from "
+                "performance metrics"
+            )
+        build_time = bundle.get("build_time_s")
+        if status == "built" and (
+            not isinstance(build_time, (int, float))
+            or isinstance(build_time, bool)
+            or not math.isfinite(float(build_time))
+            or float(build_time) < 0.0
+        ):
+            raise PerfMatrixError(
+                f"preparation receipt bundle {index} has invalid build_time_s"
+            )
+        key = (model, path)
+        if key in seen:
+            raise PerfMatrixError(
+                f"preparation receipt repeats bundle {path!r} for model {model!r}"
+            )
+        seen.add(key)
+        if key not in run_bundles:
+            raise PerfMatrixError(
+                f"preparation receipt bundle {path!r} for model {model!r} "
+                "does not match a bundle used by the performance run"
+            )
+        validated.append(deepcopy(dict(bundle)))
+
+    results["bundle_preparation"] = {
+        "schema_version": PREPARATION_SCHEMA,
+        "scope": "test_task",
+        "git_commit": receipt["git_commit"],
+        "included_in_performance_metrics": False,
+        "bundles": validated,
+    }
+
+
+def _read_json_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PerfMatrixError(f"cannot read {label} {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise PerfMatrixError(f"{label} must contain a JSON object")
+    return value
+
+
+def _report_existing(arguments: argparse.Namespace) -> int:
+    output = arguments.run_directory.resolve()
+    results = _read_json_object(output / "results.json", "performance results")
+    if results.get("schema_version") != RESULT_SCHEMA:
+        raise PerfMatrixError(f"cannot report non-{RESULT_SCHEMA} results")
+    if not isinstance(results.get("cases"), list):
+        raise PerfMatrixError("cannot report results without matrix entries")
+    if arguments.preparation_receipt is not None:
+        receipt = _read_json_object(
+            arguments.preparation_receipt.resolve(), "preparation receipt"
+        )
+        _apply_bundle_preparation_receipt(results, receipt)
+    _write_artifacts(output, results)
+    print(f"Results: {output / 'results.json'}")
+    print(f"Report: {output / 'report.html'}")
+    return 0
 
 
 def _existing_ancestor(path: Path) -> Path:
@@ -2720,6 +2887,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_new(arguments)
         if arguments.command == "resume":
             return _resume(arguments)
+        if arguments.command == "report":
+            return _report_existing(arguments)
         raise PerfMatrixError(f"unsupported command: {arguments.command}")
     except PerfMatrixError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

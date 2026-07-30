@@ -918,6 +918,102 @@ def test_report_displays_campaign_and_model_profile_wall_times() -> None:
     assert "not used for traffic-light classification" in report
 
 
+def test_report_prefers_test_task_bundle_preparation_receipt() -> None:
+    bundle = "/shared/engines/example/cache-key/example.trtfb"
+    results = {
+        "git_commit": "tested-commit",
+        "cases": [
+            {
+                "id": "example.generate",
+                "family": "example",
+                "operation": "generate",
+                "model": "example-model",
+                "status": "green",
+                "baseline_contract": {},
+                "candidate": {
+                    "preparation": {
+                        "included_in_performance_metrics": False,
+                        "bundles": [
+                            {
+                                "model": "example-model",
+                                "bundle": bundle,
+                                "status": "reused",
+                                "build_time_s": None,
+                                "included_in_performance_metrics": False,
+                            }
+                        ],
+                    }
+                },
+            }
+        ],
+    }
+    receipt = {
+        "schema_version": "trtmc.perf-bundle-preparation/v1",
+        "scope": "test_task",
+        "git_commit": "tested-commit",
+        "included_in_performance_metrics": False,
+        "bundles": [
+            {
+                "model": "example-model",
+                "bundle": bundle,
+                "status": "built",
+                "build_time_s": 83.125,
+                "included_in_performance_metrics": False,
+            }
+        ],
+    }
+
+    perf_matrix._apply_bundle_preparation_receipt(results, receipt)
+    report = perf_matrix._report_html(results)
+
+    assert "Built · 1m 23.1s" in report
+    assert "Existing bundle" not in report
+    assert "1 built in this test task (1m 23.1s total)" in report
+
+
+def test_apply_bundle_preparation_receipt_rejects_unmatched_bundle() -> None:
+    results = {
+        "git_commit": "tested-commit",
+        "cases": [
+            {
+                "id": "example.generate",
+                "model": "example-model",
+                "candidate": {
+                    "preparation": {
+                        "bundles": [
+                            {
+                                "model": "example-model",
+                                "bundle": "/shared/engines/example.trtfb",
+                            }
+                        ]
+                    }
+                },
+            }
+        ],
+    }
+    receipt = {
+        "schema_version": "trtmc.perf-bundle-preparation/v1",
+        "scope": "test_task",
+        "git_commit": "tested-commit",
+        "included_in_performance_metrics": False,
+        "bundles": [
+            {
+                "model": "example-model",
+                "bundle": "/different/example.trtfb",
+                "status": "built",
+                "build_time_s": 1.0,
+                "included_in_performance_metrics": False,
+            }
+        ],
+    }
+
+    with pytest.raises(
+        perf_matrix.PerfMatrixError,
+        match="does not match a bundle used by the performance run",
+    ):
+        perf_matrix._apply_bundle_preparation_receipt(results, receipt)
+
+
 @pytest.mark.parametrize(
     "record",
     [
@@ -1059,7 +1155,7 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert "TRTMC bundle preparation" in report
     assert "Built · 1m 23.1s" in report
     assert "83.125 s" in report
-    assert "1 built in this run (1m 23.1s total)" in report
+    assert "1 built in this test task (1m 23.1s total)" in report
     assert "excluded from the infer-time traffic-light comparison" in report
     assert ">10.450<" in report
     assert ">20.450<" in report
