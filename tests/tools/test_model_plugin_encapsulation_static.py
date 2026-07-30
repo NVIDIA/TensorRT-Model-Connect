@@ -6755,6 +6755,7 @@ def test_non_diffusion_model_plugins_do_not_carry_diffusion_behavior() -> None:
     Postconditions: unused diffusion sidecars in other model folders are inert placeholders.
     """
     diffusion_families = {
+        "cosmos3",
         "flux",
         "z_image",
         "pixart",
@@ -9057,6 +9058,7 @@ def test_generated_e2e_task_sidecars_are_task_owned() -> None:
         "xlnet",
     }
     diffusion_owners = {
+        "cosmos3",
         "flux",
         "ltx_video",
         "pixart",

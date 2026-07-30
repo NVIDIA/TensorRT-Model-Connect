@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "cosmos3"
+plugin = "cosmos3"
+test_manifests = [
+  "manifests/cosmos3-nano-cp4.json",
+]
+
+[e2e_defaults.diffusion_media_generation]
+reference_backend = "invariant_only"
+oracle_level = "L4_invariants"
+stages = [
+  { name = "end_to_end", required = true },
+]
+input_fields = [
+  { input = "video_num_frames", manifest = "video_num_frames" },
+  { input = "video_height", manifest = "video_height" },
+  { input = "video_width", manifest = "video_width" },
+  { input = "num_inference_steps", manifest = "num_inference_steps" },
+  { input = "guidance_scale", manifest = "guidance_scale" },
+  { input = "seed", manifest = "seed" },
+]
