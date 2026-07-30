@@ -213,6 +213,16 @@ def test_reference_uses_official_wan_configuration_and_writes_hf_frames(
     assert "t5_cpu=False" in script
     assert "init_on_cpu=True" in script
     assert "convert_model_dtype=False" in script
+    assert wan22_official.UMT5_SPECIAL_TOKENS == {
+        "pad_token": ("<pad>", 0),
+        "eos_token": ("</s>", 1),
+        "bos_token": ("<s>", 2),
+        "unk_token": ("<unk>", 3),
+    }
+    assert "tokenizer = pipeline.text_encoder.tokenizer.tokenizer" in script
+    assert "if existing is None:" in script
+    assert "setattr(tokenizer, role, token)" in script
+    assert "vocabulary_id = tokenizer.convert_tokens_to_ids(token)" in script
     assert "size=(32, 16)" in script
     assert "max_area=32 * 16" in script
     assert "frame_num=5" in script

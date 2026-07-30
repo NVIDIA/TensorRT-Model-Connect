@@ -23,6 +23,12 @@ OFFICIAL_REPOSITORY = "https://github.com/Wan-Video/Wan2.2.git"
 OFFICIAL_REVISION = "42bf4cfaa384bc21833865abc2f9e6c0e67233dc"
 OFFICIAL_RELATIVE_PATH = "wan2_2_ti2v/reference/Wan2.2-42bf4cfaa384"
 OFFICIAL_ENTRYPOINT = "wan/textimage2video.py"
+UMT5_SPECIAL_TOKENS = {
+    "pad_token": ("<pad>", 0),
+    "eos_token": ("</s>", 1),
+    "bos_token": ("<s>", 2),
+    "unk_token": ("<unk>", 3),
+}
 DEFAULT_NEGATIVE_PROMPT = (
     "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，"
     "静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，"
@@ -272,6 +278,29 @@ pipeline = WanTI2V(
     init_on_cpu=True,
     convert_model_dtype=False,
 )
+
+# The selective checkpoint snapshot intentionally carries only tokenizer.json.
+# Transformers 5 loads it as a generic TokenizersBackend and no longer assigns
+# the four special-token roles that are embedded in that file. Restore those
+# exact existing tokens before the pristine official code requests padding.
+tokenizer = pipeline.text_encoder.tokenizer.tokenizer
+expected_special_tokens = {UMT5_SPECIAL_TOKENS!r}
+for role, (token, token_id) in expected_special_tokens.items():
+    existing = getattr(tokenizer, role)
+    if existing is None:
+        setattr(tokenizer, role, token)
+    elif existing != token:
+        raise RuntimeError(
+            f"Official Wan tokenizer {{role}}={{existing!r}}; expected {{token!r}}"
+        )
+    resolved_id = getattr(tokenizer, f"{{role}}_id")
+    vocabulary_id = tokenizer.convert_tokens_to_ids(token)
+    if resolved_id != token_id or vocabulary_id != token_id:
+        raise RuntimeError(
+            f"Official Wan tokenizer {{role}} ID mismatch: "
+            f"role={{resolved_id}}, vocabulary={{vocabulary_id}}, expected={{token_id}}"
+        )
+
 video = pipeline.generate(
     {prompt!r},
     img=None,
