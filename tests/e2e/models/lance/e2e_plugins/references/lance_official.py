@@ -21,6 +21,21 @@ _REFERENCE_REPO_ENV = "TRTMC_LANCE_REFERENCE_REPO"
 _REFERENCE_ENTRYPOINT = "inference_lance.py"
 _MODEL_DIRECTORY = "Lance_3B"
 _VIT_DIRECTORY = "Qwen2.5-VL-ViT"
+_IMAGE_REFERENCE_COMPAT = Path(__file__).with_name("lance_image_compat")
+
+
+def _image_reference_environment(
+    base: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Expose only the optional imports needed by upstream's image path."""
+    environment = dict(os.environ if base is None else base)
+    existing = environment.get("PYTHONPATH", "").strip()
+    environment["PYTHONPATH"] = os.pathsep.join(
+        value
+        for value in (str(_IMAGE_REFERENCE_COMPAT), existing)
+        if value
+    )
+    return environment
 
 
 def _cached_model_root(model_id: str) -> Path:
@@ -140,7 +155,10 @@ class LanceOfficialReference:
             + "\n",
             encoding="utf-8",
         )
+        environment = _image_reference_environment()
         command = [
+            "env",
+            f"PYTHONPATH={environment['PYTHONPATH']}",
             ctx.reference_python_path() or sys.executable,
             str(source / _REFERENCE_ENTRYPOINT),
             "--model_path",
