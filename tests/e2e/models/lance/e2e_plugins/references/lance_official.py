@@ -233,7 +233,7 @@ class LanceOfficialReference:
             "--val_dataset_config_file",
             str(request_path),
             "--text_template",
-            "false",
+            "true",
             "--use_KVcache",
             "true",
             "--enhance_prompt",
