@@ -35,6 +35,9 @@ __version__ = _get_version()
 _OPTIMIZED_ROUTING_INTERNAL_FIELDS = frozenset({
     "active_python_profile",
     "command",
+    "graph_patch",
+    "graph_role",
+    "graph_snapshot",
     "kernel",
     "model",
     "model_revision",
