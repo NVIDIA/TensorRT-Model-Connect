@@ -146,8 +146,8 @@ and asset. Nightly job dependencies also wait for upstream work to finish
 without requiring it to succeed, so an earlier validation failure, including a
 legal-check failure, does not suppress later runnable stages. Hard-dependent
 phases may remain not-run when their required input could not be produced.
-The combined report and scheduled failure-issue reconciliation are still
-attempted, while publication remains gated on complete success.
+The combined report and final verdict are still attempted, while the result
+remains fail-closed on complete success.
 
 ### 5. Compose one report
 
