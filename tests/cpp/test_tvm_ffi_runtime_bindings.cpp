@@ -25,9 +25,7 @@ TVM_FFI_DLL_EXPORT_TYPED_FUNC(run_b, run_b_impl);
 #else
 
 #include "plugins/tvm_ffi_runtime_bindings.h"
-#include "utils/sha256.h"
 
-#include <array>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -71,18 +69,6 @@ class TemporaryDirectory {
     fs::path path_;
 };
 
-std::string sha256_file(const fs::path& path) {
-    std::ifstream input(path, std::ios::binary);
-    trtmc::internal::Sha256 digest;
-    std::array<char, 4096> buffer{};
-    while (input) {
-        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-        if (input.gcount() > 0)
-            digest.update(buffer.data(), static_cast<std::size_t>(input.gcount()));
-    }
-    return digest.hex_digest();
-}
-
 void write_text(const fs::path& path, std::string_view contents) {
     std::ofstream output(path, std::ios::binary);
     output.write(contents.data(), static_cast<std::streamsize>(contents.size()));
@@ -97,10 +83,10 @@ std::string descriptor_json(std::string_view abi, bool unknown_field = false) {
 }
 
 std::string binding_entry(std::string_view id, std::string_view abi, std::string_view library,
-                          std::string_view digest, std::string_view function) {
+                          std::string_view function) {
     return std::string("{\"id\":\"") + std::string(id) + "\",\"abi_sha256\":\"" + std::string(abi) +
-           "\",\"library\":\"" + std::string(library) + "\",\"sha256\":\"" + std::string(digest) +
-           "\",\"function\":\"" + std::string(function) + "\"}";
+           "\",\"library\":\"" + std::string(library) + "\",\"function\":\"" +
+           std::string(function) + "\"}";
 }
 
 fs::path write_manifest(const fs::path& directory, std::string_view name,
@@ -140,16 +126,13 @@ void test_bindings() {
     const fs::path kernel_b = temporary.path() / "kernel_b.so";
     fs::copy_file(TRTMC_TEST_TVM_FFI_BINDINGS_DSO, kernel_a);
     fs::copy_file(TRTMC_TEST_TVM_FFI_BINDINGS_DSO, kernel_b);
-    const std::string digest = sha256_file(kernel_a);
     const std::string abi(64, 'a');
     const std::string descriptor = descriptor_json(abi);
 
-    const fs::path manifest_a =
-        write_manifest(temporary.path(), "a.json",
-                       binding_entry("test.slot@1", abi, "kernel_a.so", digest, "run_a"));
-    const fs::path manifest_b =
-        write_manifest(temporary.path(), "b.json",
-                       binding_entry("test.slot@1", abi, "kernel_b.so", digest, "run_b"));
+    const fs::path manifest_a = write_manifest(
+        temporary.path(), "a.json", binding_entry("test.slot@1", abi, "kernel_a.so", "run_a"));
+    const fs::path manifest_b = write_manifest(
+        temporary.path(), "b.json", binding_entry("test.slot@1", abi, "kernel_b.so", "run_b"));
 
     auto bindings_a = trtmc::TvmFfiBindingSet::Load(descriptor, manifest_a.string());
     check(bindings_a->size() == 1, "one binding in manifest A");
@@ -186,23 +169,17 @@ void test_bindings() {
 
     const fs::path extra =
         write_manifest(temporary.path(), "extra.json",
-                       binding_entry("test.slot@1", abi, "kernel_a.so", digest, "run_a") + "," +
-                           binding_entry("extra.slot@1", abi, "kernel_a.so", digest, "run_a"));
+                       binding_entry("test.slot@1", abi, "kernel_a.so", "run_a") + "," +
+                           binding_entry("extra.slot@1", abi, "kernel_a.so", "run_a"));
     expect_failure([&] { trtmc::TvmFfiBindingSet::Load(descriptor, extra.string()); },
                    "bind every slot exactly once", "extra binding fails");
 
     const std::string wrong_abi(64, 'b');
     const fs::path incompatible =
         write_manifest(temporary.path(), "incompatible.json",
-                       binding_entry("test.slot@1", wrong_abi, "kernel_a.so", digest, "run_a"));
+                       binding_entry("test.slot@1", wrong_abi, "kernel_a.so", "run_a"));
     expect_failure([&] { trtmc::TvmFfiBindingSet::Load(descriptor, incompatible.string()); },
                    "Kernel ABI SHA-256 mismatch", "incompatible ABI fails");
-
-    const fs::path changed = write_manifest(
-        temporary.path(), "changed.json",
-        binding_entry("test.slot@1", abi, "kernel_a.so", std::string(64, '0'), "run_a"));
-    expect_failure([&] { trtmc::TvmFfiBindingSet::Load(descriptor, changed.string()); },
-                   "Kernel library SHA-256 mismatch", "changed DSO fails");
 
     expect_failure(
         [&] { trtmc::TvmFfiBindingSet::Load(descriptor_json(abi, true), manifest_a.string()); },

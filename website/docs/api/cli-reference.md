@@ -202,7 +202,7 @@ These shared options have route-specific contracts:
 - `--kernel-bindings` is required for a native bundle containing
   `kernel_slots.json` and rejected for bundles without slots. Its strict JSON
   manifest binds every slot exactly once to a relative TVM-FFI DSO path,
-  exported function, matching ABI SHA-256, and matching DSO SHA-256.
+  exported function, and matching ABI SHA-256.
 - For Python builds, `--config` accepts `.json`, `.yaml`, and `.yml` profiles;
   YAML requires PyYAML. The C++ load/run `--config` surface accepts `.json`
   only and rejects YAML with a conversion error. The current Qwen

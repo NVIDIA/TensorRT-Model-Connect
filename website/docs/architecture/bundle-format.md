@@ -175,9 +175,9 @@ The external kernel DSO is not stored in the bundle.
 At pipeline load time, the CLI `--kernel-bindings` option or the additive C++
 `trtmc::load(bundle, options, bindings_path)` overload supplies a strict JSON
 manifest. The bundle slot must appear exactly once with the same ID and ABI
-SHA-256, a relative DSO path, the DSO's lowercase SHA-256, and the exported
-TVM-FFI module function. Unknown or missing fields, extra or missing bindings,
-hash mismatches, and unresolved functions fail the load.
+SHA-256, a relative DSO path, and the exported TVM-FFI module function. Unknown
+or missing fields, extra or missing bindings, ABI mismatches, and unresolved
+functions fail the load.
 
 The engine ABI does not change when a DSO is selected. The same bundle can
 create a new pipeline with a different ABI-compatible DSO. A pipeline keeps
@@ -198,7 +198,7 @@ Bundles are deployable artifacts, but they are not universally portable binaries
 | GPU and shape profile | Native engines and optimized provider artifacts are built for target/profile constraints selected at build time. |
 | Tokenizer/preprocessor assets | A bundle must include the assets the runtime plugin expects. |
 | Native runtime strategy support | For a native bundle, the runtime installation must provide the owning model DSO and a generated index entry for the bundle strategy. |
-| Load-time TVM-FFI slot | The runtime needs TVM-FFI support, every slot needs one strict external binding, and the binding ABI and DSO hashes must match. |
+| Load-time TVM-FFI slot | The runtime needs TVM-FFI support, every slot needs one strict external binding, and the binding ABI hash must match. |
 | Optimized implementation identity | For an optimized bundle, the descriptor, embedded implementation DSO, factory ABI/toolchain identity, downstream runtime identity, and artifact-tree hash must all agree. |
 | Config schema | New schema-controlled runtime knobs should have defaults so older bundles can still load when possible. |
 

@@ -75,8 +75,7 @@ inspection, and the native comparison. Changing the revision, precision, cache
 length, engine layout, or graph-producing code invalidates a saved selection.
 
 :::warning Trusted native code only
-A DSO executes native code when loaded. SHA-256 checks identity, not safety.
-Use only a library that you trust.
+A DSO executes native code when loaded. Use only a library that you trust.
 :::
 
 ## Level 1: use a family recipe
@@ -170,12 +169,10 @@ exactly.
 
 ### 3. Bind the DSO when a pipeline loads
 
-Copy the DSO under an immutable, content-addressed name and write the strict
-runtime manifest:
+Copy the DSO next to the runtime manifest:
 
 ```bash
-export DSO_SHA256="$(sha256sum "$SOURCE_DSO" | awk '{print $1}')"
-export DSO="$WORK/kernel.$DSO_SHA256.so"
+export DSO="$WORK/kernel.so"
 cp "$SOURCE_DSO" "$DSO"
 
 export ABI_SHA256="$(
@@ -190,8 +187,7 @@ cat > "$WORK/kernel-bindings.json" <<EOF
     {
       "id": "$BINDING_ID",
       "abi_sha256": "$ABI_SHA256",
-      "library": "./kernel.$DSO_SHA256.so",
-      "sha256": "$DSO_SHA256",
+      "library": "./kernel.so",
       "function": "run"
     }
   ]
@@ -200,8 +196,7 @@ EOF
 ```
 
 Missing or unknown fields fail. The library path is relative to the manifest,
-the DSO digest must match, and every slot in the bundle must be bound exactly
-once.
+and every slot in the bundle must be bound exactly once.
 
 Load and run:
 
@@ -213,9 +208,9 @@ trtmc run "$WORK/qwen3-slot-ready.trtfb" \
   --greedy
 ```
 
-To switch kernels, create another manifest naming a different immutable DSO
-with the same binding ID and ABI hash, destroy the old pipeline, and construct
-a new one. Editing a manifest does not affect an existing pipeline.
+To switch kernels, create another manifest naming a different DSO with the same
+binding ID and ABI hash, destroy the old pipeline, and construct a new one.
+Editing a manifest does not affect an existing pipeline.
 
 ### 4. Check correctness and no regression
 

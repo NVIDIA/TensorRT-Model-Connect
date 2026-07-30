@@ -7,9 +7,6 @@
 
 #include "plugins/tvm_ffi_runtime_bindings.h"
 
-#include "utils/sha256.h"
-
-#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -218,24 +215,6 @@ std::string read_small_file(const fs::path& path, const std::string& where) {
     return contents;
 }
 
-std::string sha256_file(const fs::path& path) {
-    std::ifstream input(path, std::ios::binary);
-    if (!input)
-        throw std::runtime_error("Cannot open kernel library '" + path.string() + "'");
-
-    internal::Sha256 digest;
-    std::array<char, 1024U * 1024U> buffer{};
-    while (input) {
-        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-        const auto count = input.gcount();
-        if (count > 0)
-            digest.update(buffer.data(), static_cast<std::size_t>(count));
-    }
-    if (!input.eof())
-        throw std::runtime_error("Cannot read kernel library '" + path.string() + "'");
-    return digest.hex_digest();
-}
-
 struct ExpectedSlot {
     std::string id;
     std::string kernel_name;
@@ -246,7 +225,6 @@ struct ExternalBinding {
     std::string id;
     std::string abi_sha256;
     fs::path library;
-    std::string sha256;
     std::string function;
 };
 
@@ -292,14 +270,13 @@ parse_external_bindings(const fs::path& manifest_path) {
         const auto& entry = root.at("bindings").at(index);
         const std::string where =
             "kernel bindings manifest.bindings[" + std::to_string(index) + "]";
-        require_exact_fields(entry, {"id", "abi_sha256", "library", "sha256", "function"}, where);
-        ExternalBinding binding{
-            require_string(entry, "id", where), require_string(entry, "abi_sha256", where),
-            fs::path(require_string(entry, "library", where)),
-            require_string(entry, "sha256", where), require_string(entry, "function", where)};
+        require_exact_fields(entry, {"id", "abi_sha256", "library", "function"}, where);
+        ExternalBinding binding{require_string(entry, "id", where),
+                                require_string(entry, "abi_sha256", where),
+                                fs::path(require_string(entry, "library", where)),
+                                require_string(entry, "function", where)};
         require_slot_id(binding.id, where + ".id");
         require_sha256(binding.abi_sha256, where + ".abi_sha256");
-        require_sha256(binding.sha256, where + ".sha256");
         if (binding.library.is_absolute())
             throw std::runtime_error(where + ".library must be relative to the manifest");
         if (!bindings.emplace(binding.id, std::move(binding)).second) {
@@ -329,8 +306,6 @@ validate_external_binding(const ExpectedSlot& expected,
     }
     if (!fs::is_regular_file(library, error) || error)
         throw std::runtime_error("Kernel library is not a regular file: " + library.string());
-    if (sha256_file(library) != binding->second.sha256)
-        throw std::runtime_error("Kernel library SHA-256 mismatch for slot '" + expected.id + "'");
     return ValidatedBinding{expected, library, binding->second.function};
 }
 
@@ -368,7 +343,7 @@ TvmFfiBindingSet::Load(std::string_view slot_descriptor_json, const std::string&
         throw std::runtime_error("Kernel bindings manifest must bind every slot exactly once");
     }
 
-    // Validate the entire manifest, including every DSO digest, before loading a module.
+    // Validate the entire manifest before loading a module.
     std::vector<ValidatedBinding> validated;
     validated.reserve(expected_slots.size());
     for (const auto& expected : expected_slots)
