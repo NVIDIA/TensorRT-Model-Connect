@@ -226,6 +226,8 @@ class LanceOfficialReference:
             "0",
             "--validation_data_seed",
             str(case.determinism.get("seed", 42)),
+            "--resolution",
+            "image_512res",
             "--task",
             "x2t_image",
             "--save_path_gen",

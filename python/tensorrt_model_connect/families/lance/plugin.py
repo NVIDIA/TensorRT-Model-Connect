@@ -125,18 +125,22 @@ class LancePlugin:
         num_merged = num_patches // (merge_size * merge_size)
 
         return {
-            "image_token_id": config.raw.get("image_token_id", 151655),
+            # Lance's pinned x2t_image reference intentionally routes image
+            # features through Qwen2.5-VL's video placeholder.
+            "image_token_id": config.raw.get("video_token_id", 151656),
             "fixed_image_size": fixed,
             "num_image_pad_tokens": num_merged,
             "vision_output_dim": config.hidden_size,
             "preprocessor_type": "merge_group_chw",
             "vl_prompt_template": (
+                "<|im_start|>system\n"
+                "<|im_end|>\n"
                 "<|im_start|>user\n"
-                "<|vision_start|>{image_pads}<|vision_end|>\n"
+                "<|vision_start|>{image_pads}<|vision_end|>"
                 "{prompt}<|im_end|>\n"
                 "<|im_start|>assistant\n"
             ),
-            "image_token_str": "<|image_pad|>",
+            "image_token_str": "<|video_pad|>",
         }
 
 

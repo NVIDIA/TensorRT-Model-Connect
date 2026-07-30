@@ -101,6 +101,8 @@ def test_lance_image_reference_keeps_upstream_visual_generation_contract(
     assert command[visual_gen + 1] == "true"
     text_template = command.index("--text_template")
     assert command[text_template + 1] == "true"
+    resolution = command.index("--resolution")
+    assert command[resolution + 1] == "image_512res"
     chdir_argument = next(
         value
         for value in command
