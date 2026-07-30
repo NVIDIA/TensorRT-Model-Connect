@@ -37,6 +37,10 @@ class FamilyPlugin(Protocol):
         supports_split_decoder_roles: Optional callable or attribute. If true,
             the family build_engine() honors the internal prefill/decode role
             passed through config.raw["_decoder_engine_role"].
+        tokenizer_json_bundle_override: Optional callable. If present, the
+            shared builder packages its bytes instead of the checkpoint's
+            tokenizer.json so a family can preserve the tokenizer behavior
+            exposed by the HF runtime wrapper without mutating the HF cache.
     """
 
     name: str
@@ -83,6 +87,10 @@ class FamilyPlugin(Protocol):
     def supports_split_decoder_roles(self, config: ModelConfig) -> bool:
         """Return True if build_engine() can build role-specific decoder plans."""
         return False
+
+    def tokenizer_json_bundle_override(self, model_dir: str) -> bytes | None:
+        """Return family-owned tokenizer JSON bytes for bundle packaging."""
+        return None
 
     # ------------------------------------------------------------------
     # Optional: Vision-Language support

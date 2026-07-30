@@ -36,6 +36,7 @@ try:
         _HF_ALLOW_PATTERNS,
         _diffusion_tokenizer_add_special_tokens_from_plugin,
         _ensure_tokenizer_json,
+        _tokenizer_json_bundle_override_from_plugin,
         build_bundle,
     )
     from tensorrt_model_connect.families import family_hf_allow_patterns
@@ -575,6 +576,23 @@ class TestEnsureTokenizerJson:
         assert captured["model_dir"] == tmp_path
         assert "slow tokenizer conversion failed" in captured["previous_error"]
         assert (tmp_path / "tokenizer.json").exists()
+
+
+def test_tokenizer_json_bundle_override_is_family_owned(tmp_path):
+    captured = {}
+
+    class FakePlugin:
+        name = "fake"
+
+        def tokenizer_json_bundle_override(self, model_dir):
+            captured["model_dir"] = Path(model_dir)
+            return b'{"pre_tokenizer": "hf"}'
+
+    assert _tokenizer_json_bundle_override_from_plugin(
+        FakePlugin(),
+        tmp_path,
+    ) == b'{"pre_tokenizer": "hf"}'
+    assert captured["model_dir"] == tmp_path
 
 
 class TestBuildBundleErrors:

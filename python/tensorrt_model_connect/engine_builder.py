@@ -391,6 +391,24 @@ def _diffusion_tokenizer_bundle_sections_from_plugin(
     )
 
 
+def _tokenizer_json_bundle_override_from_plugin(
+    plugin,
+    model_dir_path: Path,
+) -> bytes | None:
+    provider = getattr(plugin, "tokenizer_json_bundle_override", None)
+    if not callable(provider):
+        return None
+    payload = provider(model_dir_path)
+    if payload is None:
+        return None
+    if not isinstance(payload, bytes):
+        raise TypeError(
+            f"Plugin {plugin.name}.tokenizer_json_bundle_override() must "
+            "return bytes or None"
+        )
+    return payload
+
+
 def _quant_format_name(quant_ctx) -> str | None:
     quant_format = getattr(getattr(quant_ctx, "profile", None), "format", None)
     return getattr(quant_format, "name", None)
@@ -1523,13 +1541,22 @@ def build_bundle(
     # non-HF config adapter, synthesize config.json for the C++ runtime from
     # the parsed ModelConfig.
     embedded_config_json = False
+    tokenizer_json_override = _tokenizer_json_bundle_override_from_plugin(
+        plugin,
+        model_dir_path,
+    )
     for filename in ("config.json", "tokenizer.json", "tokenizer_config.json",
                      "chat_template.jinja", "vocab.json", "merges.txt",
                      "special_tokens_map.json", "tokenizer.model",
                      "preprocessor_config.json", "processor_config.json"):
         file_path = model_dir_path / filename
-        if file_path.exists():
-            data = file_path.read_bytes()
+        if file_path.exists() or (
+            filename == "tokenizer.json" and tokenizer_json_override is not None
+        ):
+            if filename == "tokenizer.json" and tokenizer_json_override is not None:
+                data = tokenizer_json_override
+            else:
+                data = file_path.read_bytes()
             # Inject runtime_strategy and VL fields into config.json.
             if filename == "config.json":
                 data = make_runtime_config_json(data)

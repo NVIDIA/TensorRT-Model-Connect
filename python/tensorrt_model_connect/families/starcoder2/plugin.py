@@ -40,6 +40,11 @@ class StarCoder2Plugin:
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "starcoder2"
 
+    def tokenizer_json_bundle_override(self, model_dir: str | Path) -> bytes:
+        from .tokenizer_json import tokenizer_json_bundle_override
+
+        return tokenizer_json_bundle_override(model_dir)
+
     def load_weights(
         self, model_dir: str, config: ModelConfig,
     ) -> WeightDict:
