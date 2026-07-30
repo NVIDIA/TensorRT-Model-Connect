@@ -649,16 +649,26 @@ class HfTransformersReference:
             trust_remote_code = {trust_remote_code!r}
             output_path = {output_path!r}
             raw_output_path = {raw_output_path!r}
+            reference_dtype = {torch_dtype_expr}
+            device = torch.device("cuda")
 
             processor = AutoImageProcessor.from_pretrained(
                 hf_id, trust_remote_code=trust_remote_code)
             model = AutoModelForSemanticSegmentation.from_pretrained(
                 hf_id, trust_remote_code=trust_remote_code,
-                torch_dtype={torch_dtype_expr})
-            model.eval()
+                torch_dtype=reference_dtype)
+            model.eval().to(device)
 
             image = Image.open(image_path).convert("RGB")
             inputs = processor(images=image, return_tensors="pt")
+            inputs = {{
+                name: (
+                    value.to(device=device, dtype=reference_dtype)
+                    if value.is_floating_point()
+                    else value.to(device=device)
+                )
+                for name, value in inputs.items()
+            }}
             with torch.no_grad():
                 outputs = model(**inputs)
             raw_class_map = outputs.logits[0].argmax(dim=0)
