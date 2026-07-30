@@ -4,6 +4,7 @@
 id = "cosmos3"
 plugin = "cosmos3"
 test_manifests = [
+  "manifests/cosmos3-nano.json",
   "manifests/cosmos3-nano-cp4.json",
 ]
 
