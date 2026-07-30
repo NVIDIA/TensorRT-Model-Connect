@@ -65,11 +65,14 @@ def read(path: str) -> tuple[np.ndarray, int]:
 
 
 def resample(
-    _audio: np.ndarray,
-    _source_sample_rate: int,
-    _target_sample_rate: int,
+    audio: np.ndarray,
+    *,
+    src_sample_rate: int,
+    dst_sample_rate: int,
 ) -> np.ndarray:
-    """Fail closed if a workload violates the owned 24 kHz input contract."""
+    """Keep native-rate audio unchanged and reject actual resampling."""
+    if src_sample_rate == dst_sample_rate == 24_000:
+        return np.ascontiguousarray(audio, dtype=np.float32)
     raise RuntimeError(
         "PersonaPlex sphn compatibility supports only a 24 kHz validation input; "
         "prepare the dataset at the model sample rate"
