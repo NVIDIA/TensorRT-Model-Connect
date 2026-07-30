@@ -190,7 +190,7 @@ class LanceOfficialReference:
             "--visual_und",
             "true",
             "--visual_gen",
-            "false",
+            "true",
             "--vae_model_type",
             "wan",
             "--apply_qwen_2_5_vl_pos_emb",
