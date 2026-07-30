@@ -38,6 +38,29 @@ def _image_reference_environment(
     return environment
 
 
+def _image_reference_workspace(
+    artifact_dir: Path,
+    model_root: Path,
+) -> Path:
+    """Recreate upstream's expected ``downloads/`` checkpoint layout."""
+    workspace = artifact_dir / "official_workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    downloads = workspace / "downloads"
+    if downloads.is_symlink():
+        if downloads.resolve() != model_root.resolve():
+            raise RuntimeError(
+                f"Lance reference workspace points at {downloads.resolve()}, "
+                f"expected {model_root.resolve()}"
+            )
+    elif downloads.exists():
+        raise RuntimeError(
+            f"Lance reference workspace path is not a symlink: {downloads}"
+        )
+    else:
+        downloads.symlink_to(model_root.resolve(), target_is_directory=True)
+    return workspace
+
+
 def _cached_model_root(model_id: str) -> Path:
     path = Path(model_id)
     if path.is_dir():
@@ -137,6 +160,7 @@ class LanceOfficialReference:
         )
         request_path = artifact_dir / "lance_x2t_request.json"
         result_dir = artifact_dir / "official_output"
+        workspace = _image_reference_workspace(artifact_dir, model_root)
         request_path.write_text(
             json.dumps(
                 {
@@ -158,6 +182,7 @@ class LanceOfficialReference:
         environment = _image_reference_environment()
         command = [
             "env",
+            f"--chdir={workspace}",
             f"PYTHONPATH={environment['PYTHONPATH']}",
             ctx.reference_python_path() or sys.executable,
             str(source / _REFERENCE_ENTRYPOINT),
@@ -217,7 +242,6 @@ class LanceOfficialReference:
         started = time.monotonic()
         result = subprocess.run(
             command,
-            cwd=source,
             capture_output=True,
             text=True,
             timeout=3600,

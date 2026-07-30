@@ -99,3 +99,10 @@ def test_lance_image_reference_keeps_upstream_visual_generation_contract(
     command = captured["command"]
     visual_gen = command.index("--visual_gen")
     assert command[visual_gen + 1] == "true"
+    chdir_argument = next(
+        value
+        for value in command
+        if value.startswith("--chdir=")
+    )
+    workspace = Path(chdir_argument.removeprefix("--chdir="))
+    assert (workspace / "downloads").resolve() == model_root.resolve()
