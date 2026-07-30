@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import Any
 import warnings
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
+    import tomli as tomllib
+
 from tests.e2e_harness.manifest_loader import iter_manifest_paths, load_manifest
 
 
@@ -69,6 +74,19 @@ def infer_reference_family(raw: dict[str, Any]) -> str:
 def infer_user_contract(raw: dict[str, Any], reference_family: str) -> str:
     del reference_family
     return str(raw.get("user_contract", "") or "")
+
+
+def _model_reference_cache(path: Path) -> dict[str, Any]:
+    owner_path = (
+        path.parent.parent / "MODEL.toml"
+        if path.parent.name == "manifests"
+        else path.parent / "MODEL.toml"
+    )
+    if not owner_path.is_file():
+        return {}
+    owner = tomllib.loads(owner_path.read_text(encoding="utf-8"))
+    contract = owner.get("model_reference_cache", {})
+    return copy.deepcopy(contract) if isinstance(contract, dict) else {}
 
 
 def manifest_record(path: Path) -> dict[str, Any]:
@@ -155,6 +173,7 @@ def manifest_record(path: Path) -> dict[str, Any]:
             raw.get("runtime_config", {}) if isinstance(raw.get("runtime_config", {}), dict) else {}
         ),
         "max_new_tokens": raw.get("max_new_tokens"),
+        "model_reference_cache": _model_reference_cache(path),
     }
 
 

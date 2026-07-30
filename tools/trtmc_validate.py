@@ -529,8 +529,29 @@ def _ensure_reference_source(source: ReferenceSource, cache_root: Path) -> Path:
 def ensure_reference_sources(
     family: str,
     cache_root: Path,
+    model_reference_cache: Mapping[str, Any] | None = None,
 ) -> ReferenceSourceSelection:
     environment = {"TRTMC_STORAGE_ROOT": str(cache_root)}
+    declared_source = None
+    if model_reference_cache:
+        required = ("repository", "revision", "relative_path", "entrypoint")
+        missing = [
+            field for field in required if not model_reference_cache.get(field)
+        ]
+        if missing:
+            raise ValidationError(
+                f"{family} model reference source is missing: "
+                + ", ".join(missing)
+            )
+        declared_source = ReferenceSource(
+            name=family,
+            repository=str(model_reference_cache["repository"]),
+            revision=str(model_reference_cache["revision"]),
+            relative_checkout=Path(str(model_reference_cache["relative_path"])),
+            entrypoint=Path(str(model_reference_cache["entrypoint"])),
+        )
+        checkout = _ensure_reference_source(declared_source, cache_root)
+
     if family == "elf_flow":
         checkout = _ensure_reference_source(ELF_SOURCE, cache_root)
         return ReferenceSourceSelection(
@@ -538,9 +559,11 @@ def ensure_reference_sources(
             elf_reference_repo=checkout,
         )
     if family == "sana_wm":
-        checkout = _ensure_reference_source(SANA_WM_SOURCE, cache_root)
+        if declared_source is None:
+            declared_source = SANA_WM_SOURCE
+            checkout = _ensure_reference_source(declared_source, cache_root)
         environment["SANA_WM_SCRIPT"] = str(
-            checkout / SANA_WM_SOURCE.entrypoint
+            checkout / declared_source.entrypoint
         )
     return ReferenceSourceSelection(environment=environment)
 
@@ -1337,6 +1360,7 @@ def run_binding(
     reference_sources = ensure_reference_sources(
         str(task_models[binding.model].get("family", "") or ""),
         Path(arguments.reference_cache_dir),
+        task_models[binding.model].get("model_reference_cache"),
     )
     process_env = _source_environment()
     process_env.update(environment.overrides)

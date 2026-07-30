@@ -1345,7 +1345,18 @@ def test_load_manifest_records_discovers_model_owned_manifests(tmp_path: Path) -
     manifest_dir = family_dir / "manifests"
     manifest_dir.mkdir(parents=True)
     (family_dir / "MODEL.toml").write_text(
-        'test_manifests = ["manifests/example-decoder.json"]\n',
+        "\n".join(
+            (
+                'test_manifests = ["manifests/example-decoder.json"]',
+                "",
+                "[model_reference_cache]",
+                'repository = "https://example.invalid/reference.git"',
+                'revision = "0123456789abcdef0123456789abcdef01234567"',
+                'relative_path = "example_decoder/reference/source-0123456789ab"',
+                'entrypoint = "reference.py"',
+                "",
+            )
+        ),
         encoding="utf-8",
     )
     (manifest_dir / "example-decoder.json").write_text(
@@ -1375,6 +1386,12 @@ def test_load_manifest_records_discovers_model_owned_manifests(tmp_path: Path) -
     assert records[0]["hf_revision"] == "0123456789abcdef"
     assert records[0]["task_eval"] == {
         "vlm_fallback_prompt_template": "<image>{prompt}",
+    }
+    assert records[0]["model_reference_cache"] == {
+        "repository": "https://example.invalid/reference.git",
+        "revision": "0123456789abcdef0123456789abcdef01234567",
+        "relative_path": "example_decoder/reference/source-0123456789ab",
+        "entrypoint": "reference.py",
     }
 
 

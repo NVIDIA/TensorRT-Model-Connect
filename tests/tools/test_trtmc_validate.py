@@ -944,10 +944,31 @@ def test_reference_sources_select_model_specific_inputs(
     monkeypatch.setattr(trtmc_validate, "_ensure_reference_source", prepare)
 
     elf = trtmc_validate.ensure_reference_sources("elf_flow", tmp_path)
-    sana = trtmc_validate.ensure_reference_sources("sana_wm", tmp_path)
+    sana = trtmc_validate.ensure_reference_sources(
+        "sana_wm",
+        tmp_path,
+        {
+            "repository": trtmc_validate.SANA_WM_SOURCE.repository,
+            "revision": trtmc_validate.SANA_WM_SOURCE.revision,
+            "relative_path": str(
+                trtmc_validate.SANA_WM_SOURCE.relative_checkout
+            ),
+            "entrypoint": str(trtmc_validate.SANA_WM_SOURCE.entrypoint),
+        },
+    )
+    wan22 = trtmc_validate.ensure_reference_sources(
+        "wan2_2_ti2v",
+        tmp_path,
+        {
+            "repository": "https://example.invalid/Wan2.2.git",
+            "revision": "42bf4cfaa384bc21833865abc2f9e6c0e67233dc",
+            "relative_path": "wan2_2_ti2v/reference/Wan2.2-42bf4cfaa384",
+            "entrypoint": "wan/textimage2video.py",
+        },
+    )
     common = trtmc_validate.ensure_reference_sources("bert", tmp_path)
 
-    assert prepared == ["ELF", "SANA-WM"]
+    assert prepared == ["ELF", "sana_wm", "wan2_2_ti2v"]
     assert (
         elf.elf_reference_repo
         == tmp_path / trtmc_validate.ELF_SOURCE.relative_checkout
@@ -960,6 +981,25 @@ def test_reference_sources_select_model_specific_inputs(
     )
     assert common.elf_reference_repo is None
     assert common.environment == {"TRTMC_STORAGE_ROOT": str(tmp_path)}
+    assert wan22.environment == {"TRTMC_STORAGE_ROOT": str(tmp_path)}
+
+
+def test_reference_sources_reject_incomplete_model_contract(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="wan2_2_ti2v model reference source is missing: entrypoint",
+    ):
+        trtmc_validate.ensure_reference_sources(
+            "wan2_2_ti2v",
+            tmp_path,
+            {
+                "repository": "https://example.invalid/Wan2.2.git",
+                "revision": "42bf4cfaa384bc21833865abc2f9e6c0e67233dc",
+                "relative_path": "wan2_2_ti2v/reference/Wan2.2-42bf4cfaa384",
+            },
+        )
 
 
 def test_print_result_only_exposes_raw_commands_and_result_locations(tmp_path, capsys):
@@ -2211,7 +2251,7 @@ def test_run_binding_wires_reference_source_command_and_environment(
     monkeypatch.setattr(
         trtmc_validate,
         "ensure_reference_sources",
-        lambda _family, _cache: selection,
+        lambda _family, _cache, _contract=None: selection,
     )
 
     def run(command, _log_path, environment):
