@@ -1431,14 +1431,31 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _campaign_started_at(output: Path, fallback: str) -> str:
+    path = output / "run.json"
+    if not path.is_file() or next(output.glob("*/*/comparison.json"), None) is None:
+        return fallback
+    try:
+        started_at = json.loads(path.read_text(encoding="utf-8")).get(
+            "started_at"
+        )
+        if not isinstance(started_at, str) or not started_at:
+            return fallback
+        datetime.fromisoformat(started_at)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return fallback
+    return started_at
+
+
 def write_run_metadata(output: Path) -> Path:
+    started_at = _campaign_started_at(output, _utc_now().isoformat())
     metadata = {
         "schema_version": "trtmc.validation-run/v1",
         "source_revision": _source_revision(),
         "hostname": platform.node(),
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
         "command": shlex.join(sys.argv),
-        "started_at": _utc_now().isoformat(),
+        "started_at": started_at,
         "finished_at": None,
         "duration_seconds": None,
     }

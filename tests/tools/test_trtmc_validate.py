@@ -2132,6 +2132,38 @@ def test_run_metadata_records_source_and_exact_command(monkeypatch, tmp_path):
     assert metadata["duration_seconds"] is None
 
 
+def test_run_metadata_preserves_campaign_start_when_results_exist(
+    monkeypatch,
+    tmp_path,
+):
+    original_start = "2026-07-25T01:02:03+00:00"
+    (tmp_path / "run.json").write_text(
+        json.dumps(
+            {
+                "started_at": original_start,
+                "finished_at": "2026-07-25T01:12:03+00:00",
+                "duration_seconds": 600.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    case_dir = tmp_path / "model-a" / "workload-a"
+    case_dir.mkdir(parents=True)
+    (case_dir / "comparison.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_utc_now",
+        lambda: datetime(2026, 7, 25, 2, 0, 0, tzinfo=timezone.utc),
+    )
+
+    path = trtmc_validate.write_run_metadata(tmp_path)
+    metadata = json.loads(path.read_text(encoding="utf-8"))
+
+    assert metadata["started_at"] == original_start
+    assert metadata["finished_at"] is None
+    assert metadata["duration_seconds"] is None
+
+
 def test_finalize_run_metadata_records_completion(monkeypatch, tmp_path):
     started_at = datetime(2026, 7, 25, 1, 2, 3, tzinfo=timezone.utc)
     finished_at = datetime(2026, 7, 25, 4, 4, 6, 500000, tzinfo=timezone.utc)
