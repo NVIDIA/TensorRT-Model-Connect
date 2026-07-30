@@ -53,11 +53,15 @@ def copy_asset(source: Path, destination: Path) -> Path:
     return destination
 
 
-def canonicalize_vision_image(source: Path, destination: Path) -> Path:
-    """Letterbox an MMMU image to the shared static VLM input canvas."""
+def canonicalize_vision_image(
+    source: Path,
+    destination: Path,
+    *,
+    content_size: tuple[int, int] = (756, 448),
+) -> Path:
+    """Letterbox an MMMU image to a static VLM input canvas."""
     from PIL import Image
 
-    content_size = (756, 448)
     with Image.open(source) as raw:
         image = raw.convert("RGB")
         image.thumbnail(content_size, Image.Resampling.BILINEAR)
@@ -162,12 +166,14 @@ def prepare_mmmu_vision(
     root: Path,
     *,
     limit: int = 5,
+    directory_name: str = "mmmu-pro-vision",
+    content_size: tuple[int, int] = (756, 448),
 ) -> Path:
     data = json.loads(mmmu_source.read_text(encoding="utf-8"))
     rows = data.get("requests", [])
     if not isinstance(rows, list):
         raise ValueError(f"{mmmu_source}: expected requests list")
-    directory = root / "mmmu-pro-vision"
+    directory = root / directory_name
     requests = []
     subjects: set[str] = set()
     for source_index, row in enumerate(rows):
@@ -181,7 +187,11 @@ def prepare_mmmu_vision(
         image_relative = (
             Path("images") / f"{source_index:06d}_{source_image.stem}.png"
         )
-        canonicalize_vision_image(source_image, directory / image_relative)
+        canonicalize_vision_image(
+            source_image,
+            directory / image_relative,
+            content_size=content_size,
+        )
         requests.append(
             {
                 "sample_id": f"mmmu_pro_vision_{source_index:06d}",
@@ -213,7 +223,8 @@ def prepare_mmmu_vision(
             ),
             sampling=(
                 f"first row from each of the first {limit} distinct subjects; "
-                "images are content-preserving letterboxed to 756x448"
+                "images are content-preserving letterboxed to "
+                f"{content_size[0]}x{content_size[1]}"
             ),
             requests=requests,
         ),
@@ -563,6 +574,12 @@ def prepare_all(
     root = output_root / DATASET_ROOT_NAME
     outputs = [
         prepare_mmmu_vision(mmmu_source, root),
+        prepare_mmmu_vision(
+            mmmu_source,
+            root,
+            directory_name="mmmu-pro-vision-square-448",
+            content_size=(448, 448),
+        ),
         prepare_mmlu_generation_modes(mmlu_source, root),
         prepare_flores_translation(flores_source, root),
         prepare_full_duplex_bench(full_duplex_source, root),

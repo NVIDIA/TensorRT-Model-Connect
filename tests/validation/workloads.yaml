@@ -1580,16 +1580,42 @@ suites:
   - id: mmmu_pro_vision_plugin_parity
     description: >
       Image-question output consistency on five distinct-subject MMMU-Pro
-      Vision samples. Each selected model runs its own official reference and
-      TRTMC implementation against the same canonical image and question.
+      Vision samples letterboxed to the static Phi-4 Dynamic-HD canvas. The
+      official reference and TRTMC implementation receive the same canonical
+      image and question.
     user_contract: vl_answer
-    default_model_names: [lance-3b-x2t-image, phi4-multimodal]
+    default_model_names: [phi4-multimodal]
     dataset:
       kind: model_plugin_json
       default_path: /mnt/data/TRTMCValidation/mmmu-pro-vision/dataset.json
       input_asset_fields: [image]
     selectors:
-      model_names: [lance-3b-x2t-image, phi4-multimodal]
+      model_names: [phi4-multimodal]
+    scoring:
+      scorer: model_plugin_parity
+    build:
+      min_max_cache_length: 1024
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: GB300-only native-reference consistency.
+
+  - id: mmmu_pro_vision_square_plugin_parity
+    description: >
+      Image-question output consistency on the same five distinct-subject
+      MMMU-Pro Vision samples letterboxed to a 448x448 canvas. This profile
+      keeps the official reference and fixed-shape TRTMC vision engine on the
+      same image geometry and vision-token count.
+    user_contract: vl_answer
+    default_model_names: [lance-3b-x2t-image]
+    dataset:
+      kind: model_plugin_json
+      default_path: /mnt/data/TRTMCValidation/mmmu-pro-vision-square-448/dataset.json
+      input_asset_fields: [image]
+    selectors:
+      model_names: [lance-3b-x2t-image]
     scoring:
       scorer: model_plugin_parity
     build:

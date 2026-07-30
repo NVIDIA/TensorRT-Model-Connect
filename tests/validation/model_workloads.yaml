@@ -25,6 +25,7 @@ sample_limits:
   mmlu_five_shot_mcq: 20
   mmlu_generation_mode_parity: 8
   mmmu_pro_vision_plugin_parity: 5
+  mmmu_pro_vision_square_plugin_parity: 5
   newstest2019_en_ru_marian_translation_parity: 10
   ocrbench_v2_unified: 5
   openwebtext_elf_diffusion_text: 5
@@ -167,8 +168,8 @@ models:
     default: vlm_mmmu_pro_vision_fixed_mcq
     workloads: [vlm_mmmu_pro_vision_fixed_mcq, vlm_mmmu_pro_vision_mcq]
   lance-3b-x2t-image:
-    default: mmmu_pro_vision_plugin_parity
-    workloads: [mmmu_pro_vision_plugin_parity]
+    default: mmmu_pro_vision_square_plugin_parity
+    workloads: [mmmu_pro_vision_square_plugin_parity]
   magpie-tts-357m:
     default: seedtts_en_tts_intelligibility
     workloads: [seedtts_en_tts_intelligibility]

@@ -144,7 +144,7 @@ def test_prepare_all_writes_task_owned_public_datasets_and_hashes(
         seedtts_source=seedtts,
     )
 
-    assert len(outputs) == 6
+    assert len(outputs) == 7
     root = tmp_path / "output" / prepare.DATASET_ROOT_NAME
     counts = {
         path.parent.name: json.loads(path.read_text(encoding="utf-8"))[
@@ -157,6 +157,7 @@ def test_prepare_all_writes_task_owned_public_datasets_and_hashes(
         "full-duplex-bench": 5,
         "mmlu-generation-modes": 8,
         "mmmu-pro-vision": 5,
+        "mmmu-pro-vision-square-448": 5,
         "seedtts-en-omni-audio": 1,
     }
     manifest = json.loads(
@@ -170,6 +171,13 @@ def test_prepare_all_writes_task_owned_public_datasets_and_hashes(
     vision_images = sorted((root / "mmmu-pro-vision/images").glob("*.png"))
     assert len(vision_images) == 5
     assert {Image.open(path).size for path in vision_images} == {(756, 448)}
+    square_vision_images = sorted(
+        (root / "mmmu-pro-vision-square-448/images").glob("*.png")
+    )
+    assert len(square_vision_images) == 5
+    assert {
+        Image.open(path).size for path in square_vision_images
+    } == {(448, 448)}
     speech = json.loads(
         (root / "full-duplex-bench/dataset.json").read_text(encoding="utf-8")
     )
