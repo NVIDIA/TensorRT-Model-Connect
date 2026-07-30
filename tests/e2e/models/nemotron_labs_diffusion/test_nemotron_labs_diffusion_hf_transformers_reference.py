@@ -116,6 +116,7 @@ def test_reference_uses_custom_auto_model_path(monkeypatch, tmp_path) -> None:
     assert "def _call_supported(fn, input_ids, **kwargs):" in script
     assert "return fn(input_ids, **filtered_kwargs)" in script
     assert "generation_model.linear_spec_generate" in script
+    assert "generated_ids = generated_ids[:max_new_tokens]" in script
     assert "ids_tensor," in script
     assert 'subfolder="linear_spec_lora"' in script
     assert "generation_mode = 'linear_spec_lora'" in script

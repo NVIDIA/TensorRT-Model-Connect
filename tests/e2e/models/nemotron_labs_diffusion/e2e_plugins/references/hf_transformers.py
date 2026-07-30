@@ -674,6 +674,11 @@ class HfTransformersReference:
                 generated_ids = output_ids[len(input_ids):]
             else:
                 generated_ids = output_ids
+            # Upstream linear_spec_generate may accept a final speculative
+            # block that crosses max_new_tokens. TRTMC correctly exposes at
+            # most the requested number of output tokens, so normalize the
+            # official reference to that same public generation contract.
+            generated_ids = generated_ids[:max_new_tokens]
             text = tokenizer.decode(
                 generated_ids, skip_special_tokens=True).strip()
             with open(text_path, "w", encoding="utf-8") as f:
