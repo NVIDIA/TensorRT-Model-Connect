@@ -371,7 +371,7 @@ def test_public_builder_routes_wan_to_component_bundle(
     monkeypatch.setattr(engine_builder, "find_diffusion_plugin", lambda _class_name: plugin)
     monkeypatch.setattr(engine_builder, "_setup_trt_import", lambda _rtx: None)
     monkeypatch.setattr(engine_builder.trt_compat, "resolved_summary", lambda: "TensorRT test")
-    monkeypatch.setattr(engine_builder, "_get_trt_version", lambda: "11.2.0")
+    monkeypatch.setattr(engine_builder, "_get_trt_version", lambda: "11.1.0")
     monkeypatch.setattr(engine_builder, "_get_gpu_name", lambda: "NVIDIA GB300")
     monkeypatch.setattr(engine_builder.build_bundle, "_fp8_scales", None, raising=False)
     captured = {}

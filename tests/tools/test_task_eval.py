@@ -529,7 +529,7 @@ def test_default_suites_include_one_dpg_bench_diffusion_image_suite() -> None:
     assert suite["ci"] == {
         "eligible": False,
         "lane": "local_only",
-        "notes": "P2021-only until the DPG-Bench scorecard is visually calibrated.\n",
+        "notes": "Local-only until the DPG-Bench scorecard is visually calibrated.\n",
     }
 
 
@@ -3489,7 +3489,7 @@ def test_ensure_bundle_replaces_incompatible_tensorrt_abi(
         return Result()
 
     monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
-    monkeypatch.setattr(task_eval, "runtime_tensorrt_abi", lambda: "11.2")
+    monkeypatch.setattr(task_eval, "runtime_tensorrt_abi", lambda: "11.1")
 
     _, built = task_eval.ensure_bundle(
         {
@@ -3520,7 +3520,7 @@ def test_ensure_bundle_replaces_mismatched_precision(
     class Result:
         returncode = 0
         stdout = (
-            "TRT ABI:            11.2\n"
+            "TRT ABI:            11.1\n"
             "Max cache length:   256\n"
             "Precision:          fp16\n"
         )
@@ -3534,7 +3534,7 @@ def test_ensure_bundle_replaces_mismatched_precision(
         return Result()
 
     monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
-    monkeypatch.setattr(task_eval, "runtime_tensorrt_abi", lambda: "11.2")
+    monkeypatch.setattr(task_eval, "runtime_tensorrt_abi", lambda: "11.1")
 
     _, built = task_eval.ensure_bundle(
         {
@@ -3554,11 +3554,11 @@ def test_ensure_bundle_replaces_mismatched_precision(
 
 
 def test_bundle_reuse_rejects_unrecognized_precision(monkeypatch) -> None:
-    monkeypatch.setattr(task_eval, "runtime_tensorrt_abi", lambda: "11.2")
+    monkeypatch.setattr(task_eval, "runtime_tensorrt_abi", lambda: "11.1")
 
     assert not task_eval._bundle_can_be_reused(
         {
-            "TRT ABI": "11.2",
+            "TRT ABI": "11.1",
             "Max cache length": "256",
             "Precision": "unknown",
         },

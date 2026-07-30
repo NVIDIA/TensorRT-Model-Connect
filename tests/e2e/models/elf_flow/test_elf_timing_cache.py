@@ -16,7 +16,7 @@ from tensorrt_model_connect.families.elf_flow import timing_cache
 def _write_contract(
     tmp_path: Path,
     *,
-    tensorrt_version: str = "11.2.0.113",
+    tensorrt_version: str = "11.1.0.106",
 ) -> tuple[Path, Path]:
     cache_path = tmp_path / "elf.bin"
     metadata_path = tmp_path / "elf.json"
@@ -52,7 +52,7 @@ def _configure_env(
     monkeypatch.setenv("TRTMC_BUILDER_OPTIMIZATION_LEVEL", "1")
     monkeypatch.delenv("TRTMC_TRT_TIMING_CACHE_PATH", raising=False)
     monkeypatch.delenv("TRTMC_TRT_TIMING_CACHE_DIR", raising=False)
-    monkeypatch.setattr(timing_cache.trt_compat, "tensorrt_version", lambda: "11.2.0.113")
+    monkeypatch.setattr(timing_cache.trt_compat, "tensorrt_version", lambda: "11.1.0.106")
     monkeypatch.setattr(
         timing_cache,
         "_runtime_gpu_metadata",
@@ -141,6 +141,6 @@ def test_model_timing_cache_generation_writes_binary_and_metadata(
     assert calls == [("create", b""), ("set", config.cache, False)]
     assert cache_path.read_bytes() == b"generated-cache"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    assert metadata["tensorrt_version"] == "11.2.0.113"
+    assert metadata["tensorrt_version"] == "11.1.0.106"
     assert metadata["compute_capability"] == "10.3"
     assert metadata["sha256"] == hashlib.sha256(b"generated-cache").hexdigest()

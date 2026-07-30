@@ -996,6 +996,16 @@ def _append_declared_build_cli_args(cmd: list[str], case: E2ECase) -> None:
         cmd.extend([flag, str(value)])
 
 
+_REQUIRED_BUILD_ENVIRONMENT_INPUTS = frozenset(
+    {
+        "TRTMC_BARK_TIMING_CACHE_PATH",
+        "TRTMC_BARK_TIMING_CACHE_SHA256",
+        "TRTMC_ELF_TIMING_CACHE_PATH",
+        "TRTMC_ELF_TIMING_CACHE_METADATA_PATH",
+    }
+)
+
+
 def _apply_manifest_build_env(env: dict[str, str], case: E2ECase) -> None:
     """Apply generic build-time environment entries declared by the manifest."""
     build_env = case.metadata.get("build_env")
@@ -1010,15 +1020,49 @@ def _apply_manifest_build_env(env: dict[str, str], case: E2ECase) -> None:
         value: object = spec
         path_like = False
         relative_to = "repo"
+        required_from_env = False
         if isinstance(spec, dict):
-            value = spec.get("path", spec.get("value", ""))
-            path_like = "path" in spec or bool(spec.get("path_like", False))
-            relative_to = str(spec.get("relative_to", relative_to) or relative_to)
+            if "required_from_env" in spec:
+                required_from_env = True
+                if spec.get("required_from_env") is not True:
+                    raise ValueError(
+                        f"build_env {name} required_from_env must be true"
+                    )
+                unknown = set(spec) - {"required_from_env", "path_like"}
+                if unknown:
+                    raise ValueError(
+                        f"build_env {name} required_from_env has unsupported fields: "
+                        f"{sorted(unknown)}"
+                    )
+                if type(spec.get("path_like", False)) is not bool:
+                    raise ValueError(
+                        f"build_env {name} required_from_env path_like must be Boolean"
+                    )
+                if name not in _REQUIRED_BUILD_ENVIRONMENT_INPUTS:
+                    raise ValueError(
+                        f"build_env {name} is not an allowed required environment input"
+                    )
+                value = env.get(name)
+                if not isinstance(value, str) or not value or value != value.strip():
+                    raise RuntimeError(
+                        f"required build environment variable {name} is missing"
+                    )
+                path_like = bool(spec.get("path_like", False))
+            else:
+                value = spec.get("path", spec.get("value", ""))
+                path_like = "path" in spec or bool(spec.get("path_like", False))
+                relative_to = str(spec.get("relative_to", relative_to) or relative_to)
         if value is None:
             continue
         text = str(value)
         if path_like:
             path = Path(text)
+            if required_from_env and (
+                not path.is_absolute() or path.is_symlink() or not path.is_file()
+            ):
+                raise RuntimeError(
+                    f"required build environment file {name} is unavailable"
+                )
             if not path.is_absolute():
                 base = model_test_dir if relative_to == "model" else project_root
                 path = base / path

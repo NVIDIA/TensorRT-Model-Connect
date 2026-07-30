@@ -15,12 +15,12 @@
     "TRTMC_TRT_TIMING_CACHE_DIR": "",
     "TRTMC_ELF_TIMING_CACHE_GENERATE": "0",
     "TRTMC_ELF_TIMING_CACHE_PATH": {
-      "path": "data/elf-b-owt-replay/tensorrt-11.2.0.113-gb300-opt1.bin",
-      "relative_to": "model"
+      "required_from_env": true,
+      "path_like": true
     },
     "TRTMC_ELF_TIMING_CACHE_METADATA_PATH": {
-      "path": "data/elf-b-owt-replay/tensorrt-11.2.0.113-gb300-opt1.json",
-      "relative_to": "model"
+      "required_from_env": true,
+      "path_like": true
     }
   },
   "max_cache_length": 1024,

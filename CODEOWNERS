@@ -1,30 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# CODEOWNERS — ISO 26262 organizational independence enforcement
-# See website/docs/wiki/ISO-26262-Compliance.md §5 for rationale.
-#
-# Rules:
-# 1. Architecture docs require independent review (not the code author)
-# 2. Source code changes require at least one reviewer
-# 3. Test files should be reviewed by someone other than the implementation author
-# 4. Safety-critical docs require two reviewers
-
-# Architecture and safety documentation — require independent review
-website/docs/wiki/                          @tensorrt-model-connect/architecture-reviewers
-website/docs/wiki/ISO-26262-Compliance.md   @tensorrt-model-connect/safety-manager
-website/docs/wiki/Traceability-Matrix.md    @tensorrt-model-connect/safety-manager
-
-# C++ runtime — require code review
-src/                                @tensorrt-model-connect/runtime-reviewers
-include/                            @tensorrt-model-connect/runtime-reviewers
-
-# Python builder — require builder team review
-tensorrt_model_connect/                         @tensorrt-model-connect/builder-reviewers
-
-# Tests — should be reviewed by someone other than implementation author
-tests/                              @tensorrt-model-connect/test-reviewers
-
-# CI configuration — require infrastructure review
-.github/                            @tensorrt-model-connect/infrastructure
-CODEOWNERS                          @tensorrt-model-connect/safety-manager
+# Default owner for the public repository. Replace this entry with project
+# teams once those teams are created in the NVIDIA GitHub organization.
+* @yifeif-nv

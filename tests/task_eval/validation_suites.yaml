@@ -184,7 +184,7 @@ suites:
       eligible: false
       lane: local_only
       notes: >
-        Intended for local/p2021 validation before a sampled CI variant is
+        Intended for manual local validation before a sampled CI variant is
         enabled.
 
   - id: humaneval_code_continuation_parity
@@ -593,9 +593,9 @@ suites:
       eligible: false
       lane: local_only
       notes: >
-        Intended for local/p2021 validation first. Pass --dataset for
+        Intended for manual local validation first. Pass --dataset for
         machine-specific data roots such as
-        /localhome/.../trtmc/data/OCRBench_v2_repaired.
+        /path/to/OCRBench_v2_repaired.
 
   - id: librispeech_clean_asr
     description: >
@@ -648,9 +648,9 @@ suites:
       eligible: false
       lane: local_only
       notes: >
-        Intended for local/p2021 validation first. Pass --dataset for
+        Intended for manual local validation first. Pass --dataset for
         machine-specific data roots such as
-        /localhome/local-chaofengw/trtmc/data/updated_datasets.
+        /path/to/updated_datasets.
 
   - id: librispeech_clean_asr_streaming
     description: >
@@ -705,7 +705,7 @@ suites:
       eligible: false
       lane: local_only
       notes: >
-        Intended for local/p2021 validation first. This suite is kept separate
+        Intended for manual local validation first. This suite is kept separate
         from librispeech_clean_asr because RNNT streaming baselines can differ
         from encoder-decoder ASR baselines.
 
@@ -850,7 +850,7 @@ suites:
       eligible: false
       lane: local_only
       notes: >
-        P2021-only until the DPG-Bench scorecard is visually calibrated.
+        Local-only until the DPG-Bench scorecard is visually calibrated.
 
   - id: vbench_t2v_diffusion_video
     description: >
@@ -1440,7 +1440,7 @@ suites:
       notes: >
         GPU bundle builds and the complete 19-model matrix are validated
         outside premerge CI; small --limit slices are smoke tests only.
-        P2021-only until the full WMT14 test baseline is reproduced and
+        Local-only until the full WMT14 test baseline is reproduced and
         calibrated against the official ELF evaluator.
 
   - id: xsum_elf_diffusion_text
@@ -1493,7 +1493,7 @@ suites:
       eligible: false
       lane: local_only
       notes: >
-        P2021-only until the full XSum test baseline is reproduced and
+        Local-only until the full XSum test baseline is reproduced and
         calibrated against the official ELF evaluator.
 
   - id: openwebtext_elf_diffusion_text
@@ -1542,5 +1542,5 @@ suites:
       eligible: false
       lane: local_only
       notes: >
-        P2021-only; use the full 1,000-request dataset for paper-comparable
+        Local-only; use the full 1,000-request dataset for paper-comparable
         perplexity and entropy. Small --limit slices are smoke tests only.

@@ -2,8 +2,8 @@
 
 ![TensorRT-Model-Connect build and runtime map](website/static/img/diagrams/trtmc-system-map.svg)
 
-[Documentation site](https://sturdy-broccoli-y7zg5w9.pages.github.io/) |
-[Quick Start](https://sturdy-broccoli-y7zg5w9.pages.github.io/getting-started/quick-start) |
+[Documentation](website/docs/intro.md) |
+[Quick Start](website/docs/getting-started/quick-start.md) |
 [GitHub Actions](https://github.com/NVIDIA/TensorRT-Model-Connect/actions) |
 [Docs source](website/docs/intro.md)
 
@@ -15,26 +15,11 @@ embedded implementation DSO instead.
 
 ## Start Here
 
-Nightly GitHub Releases publish Linux aarch64 wheels for Python 3.10 and
-Python 3.12. On a compatible NVIDIA GPU host, download the wheel that matches
-your Python version and run:
-
-```bash
-python3.12 -m venv .venv-trtmc
-. .venv-trtmc/bin/activate
-pip install ./tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl
-
-trtmc version
-trtmc build Qwen/Qwen3-0.6B
-trtmc run Qwen3-0.6B.trtfb \
-  --prompt "The capital of France is" \
-  --max-new-tokens 20 \
-  --greedy
-```
-
-The wheel installs the native `trtmc` executable, Python builder dependencies
-including TensorRT, and the TensorRT backend DSO. Neither the wheel nor a
-bundle is a hermetic operating-system or GPU-runtime image: the execution
+The current public path builds from source in the repository container, which
+is pinned to NVIDIA's official TensorRT 11.1.0.106 distribution. Release
+wheels, when published, install the native `trtmc` executable, Python builder
+dependencies including TensorRT, and the TensorRT backend DSO. Neither a wheel
+nor a bundle is a hermetic operating-system or GPU-runtime image: the execution
 environment must still resolve a compatible NVIDIA driver, CUDA/TensorRT
 cohort, dynamic loader, and system libraries.
 
@@ -80,14 +65,11 @@ CI validation use built wheels instead.
 
 If CMake says the TensorRT backend was skipped, follow the [Installation](website/docs/getting-started/installation.md) TensorRT path instructions before running a model.
 
-Nightly wheels are tagged `py310-none-manylinux_2_39_aarch64` and
+Source-built release wheels use `py310-none-manylinux_2_39_aarch64` and
 `py312-none-manylinux_2_39_aarch64`; use the tag matching your Python
 interpreter. The `manylinux_2_39_aarch64` platform tag matches the TensorRT
-11 CUDA 13 aarch64 stack and requires a glibc 2.39 or newer Linux host.
-CI package jobs build and test wheels in the repository Dockerfile image
-(`TRTMC_CI_IMAGE`, derived from repository variable `TRTMC_MANYLINUX_CI_IMAGE`
-or default `trtmc-dev-gb300:manylinux_2_39`) so the compiled
-native executable is actually checked against that platform floor.
+11 CUDA 13 aarch64 stack and requires a glibc 2.39 or newer Linux host. CI
+builds and tests the wheel in the repository Dockerfile image before release.
 
 ## Useful Docs
 

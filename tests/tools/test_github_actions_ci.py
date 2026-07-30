@@ -15,6 +15,7 @@ import sys
 import time
 from pathlib import Path
 
+from tools.ci.container import CiContainer
 from tools.ci.quality import UnitTestRunner
 
 
@@ -282,18 +283,30 @@ def test_source_quality_pipeline_keeps_the_full_static_gate() -> None:
     assert '"no:cacheprovider"' in architecture_contract
 
 
-def test_source_tensorrt_install_contract_remains_self_contained() -> None:
+def test_source_tensorrt_install_contract_uses_the_official_public_release() -> None:
     dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
-    assert "ENV TRT_ROOT=" not in dockerfile
-    assert "ENV PIP_FIND_LINKS=" not in dockerfile
     assert (
-        "ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs"
+        "ARG TENSORRT_IMAGE=nvcr.io/nvidia/tensorrt:26.07-py3"
+        "@sha256:f794a79e8b996d16dbc2e5884e19d8e2269a51c960106c9b49b0061a6926c541"
         in dockerfile
     )
+    assert "FROM ${TENSORRT_IMAGE} AS ci-base" in dockerfile
+    assert "ARG TENSORRT_VERSION=11.1.0.106" in dockerfile
+    assert "#define TRT_MAJOR_ENTERPRISE 11" in dockerfile
+    assert "#define TRT_MINOR_ENTERPRISE 1" in dockerfile
+    assert "#define TRT_PATCH_ENTERPRISE 0" in dockerfile
+    assert "#define TRT_BUILD_ENTERPRISE 106" in dockerfile
+    assert "ENV TRT_ROOT=" not in dockerfile
+    assert "ENV PIP_FIND_LINKS=" not in dockerfile
+    assert "ENV TRT_LIB_DIR=/usr/lib/aarch64-linux-gnu" in dockerfile
     assert "ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu" in dockerfile
+    assert "ghcr.io" not in dockerfile
+    assert "TENSORRT_SDK_IMAGE" not in dockerfile
+    assert "/opt/tensorrt/python" not in dockerfile
 
     package = _ci_source("package.py")
-    assert package.count("_install_tensorrt_sdk") >= 2
+    assert "_install_tensorrt_sdk" not in package
+    assert "Requires-Dist: tensorrt==11.1.0.106" in package
 
 
 def test_hardened_unit_container_is_unprivileged_offline_and_cpu_only() -> None:
@@ -362,10 +375,49 @@ def test_github_stage_wrapper_mounts_and_exports_hf_cache_env() -> None:
     ):
         assert name in start_text
         assert name in stage_text
-    assert 'Path("/workspace/users/yifeif")' in start_text
-    assert 'f"{shared_users}:{shared_users}"' in start_text
+    assert 'self.env.get("TRTMC_CI_HOST_MOUNTS", "")' in start_text
+    assert 'f"{host_path}:{host_path}"' in start_text
     assert '"docker"' in stage_text
     assert '"exec"' in stage_text
+
+
+def test_trusted_container_mounts_only_explicit_cache_roots(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    storage = tmp_path / "storage"
+    engine_dir = storage / "engines"
+    hf_home = storage / "hf"
+    extra = tmp_path / "extra"
+    for path in (workspace, engine_dir, hf_home, extra):
+        path.mkdir(parents=True)
+
+    container = CiContainer(
+        {
+            "TRTMC_CI_WORKSPACE": str(workspace),
+            "TRTMC_CI_IMAGE": "example.invalid/trtmc:test",
+            "TRTMC_STORAGE_ROOT": str(storage),
+            "ENGINE_DIR": str(engine_dir),
+            "HF_HOME": str(hf_home),
+            "TRTMC_CI_HOST_MOUNTS": os.pathsep.join(
+                (
+                    str(extra),
+                    str(storage),
+                    str(tmp_path),
+                    "/",
+                    "relative-path-is-ignored",
+                )
+            ),
+        }
+    )
+
+    options, mounts = container._runtime_boundary()
+
+    assert options == []
+    assert mounts == [
+        "-v",
+        f"{extra}:{extra}",
+        "-v",
+        f"{storage}:{storage}",
+    ]
 
 
 def test_github_stage_wrapper_removes_exact_container_on_cancellation(

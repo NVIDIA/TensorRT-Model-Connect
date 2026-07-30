@@ -180,8 +180,8 @@ class WheelArchiveValidator:
             ),
             (bool(backends), "packaged native TensorRT backend DSO is missing"),
             (
-                "Requires-Dist: tensorrt==11.2.0.113" in metadata,
-                "pinned TensorRT 11.2.0.113 dependency metadata is missing",
+                "Requires-Dist: tensorrt==11.1.0.106" in metadata,
+                "pinned official TensorRT 11.1.0.106 dependency metadata is missing",
             ),
             (
                 "Requires-Dist: apache-tvm-ffi==0.1.12" in metadata,
@@ -512,23 +512,6 @@ class WheelPackageManager:
         self.context.run(
             [python, "-m", "pip", "install", "--disable-pip-version-check", "--upgrade", "pip"]
         )
-        self._install_tensorrt_sdk(python)
-        self.context.run([python, "-m", "pip", "install", "--disable-pip-version-check", wheel])
-
-    def _install_tensorrt_sdk(self, python: Path) -> None:
-        version = self.context.output(
-            ["python", "-c", "import tensorrt; print(tensorrt.__version__)"]
-        )
-        tag = self.context.output(
-            [
-                python,
-                "-c",
-                'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")',
-            ]
-        )
-        wheel = Path(f"/opt/tensorrt/python/tensorrt-{version}-{tag}-none-linux_aarch64.whl")
-        if not wheel.is_file():
-            raise CiError(f"TensorRT SDK wheel not found: {wheel}")
         self.context.run([python, "-m", "pip", "install", "--disable-pip-version-check", wheel])
 
     def _validate_build_platform(self, platform: str) -> None:

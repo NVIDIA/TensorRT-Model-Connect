@@ -1238,8 +1238,8 @@ def add_attention_from_rows(
         tag=None if tag is None else tag + ".v")
     if scale is None:
         scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
-    # TensorRT 11.2 can segfault while compiling masked IAttention with
-    # head_dim=128 and dynamic or multi-row queries. Decompose that shape.
+    # Decompose masked IAttention with head_dim=128 and dynamic or multi-row
+    # queries to avoid compiler instability in this native attention shape.
     decompose_masked_attention = (
         (q_seq != 1 or kv_seq is None)
         and mask is not None

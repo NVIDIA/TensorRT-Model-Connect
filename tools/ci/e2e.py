@@ -244,7 +244,16 @@ class E2ERunner:
 
     def _configure_timing_cache(self) -> None:
         root = self.context.env.get("TRTMC_STORAGE_ROOT", self.context.env.get("ENGINE_DIR", "."))
-        suffix = f"opt{self.context.env.get('TRTMC_BUILDER_OPTIMIZATION_LEVEL', 'default')}"
+        tensorrt_version = self.context.output(
+            ["python", "-c", "import tensorrt; print(tensorrt.__version__)"]
+        )
+        version = re.sub(r"[^0-9A-Za-z_.-]+", "-", tensorrt_version).strip("-")
+        if not version:
+            raise CiError("TensorRT reported an empty version for timing-cache isolation")
+        suffix = (
+            f"trt{version}-"
+            f"opt{self.context.env.get('TRTMC_BUILDER_OPTIMIZATION_LEVEL', 'default')}"
+        )
         if self.context.env.get("TRTMC_MAX_NUM_TACTICS"):
             suffix += f"-tactics{self.context.env['TRTMC_MAX_NUM_TACTICS']}"
         if self.context.env.get("TRTMC_AVG_TIMING_ITERATIONS"):

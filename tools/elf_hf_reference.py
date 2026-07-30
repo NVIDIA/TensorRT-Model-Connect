@@ -130,8 +130,8 @@ def main() -> int:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         # cuDNN SDPA can request an impractically large workspace for ELF's
-        # 1,088-token XSum sequence on P2021. Prefer PyTorch's bounded-memory
-        # SDPA implementations for a reference run.
+        # 1,088-token XSum sequence on constrained-memory CUDA hosts. Prefer
+        # PyTorch's bounded-memory SDPA implementations for a reference run.
         torch.backends.cuda.enable_cudnn_sdp(False)
         torch.backends.cuda.enable_flash_sdp(False)
         torch.backends.cuda.enable_mem_efficient_sdp(True)

@@ -272,7 +272,7 @@ while IFS= read -r -d '' manifest; do
 done < <(find "${PROJECT_DIR}/tests/e2e/models" -maxdepth 3 -type f -name "*.json" -print0 | sort -z)
 
 if [[ -n "$E2E_MODEL" ]] && [[ -x "$BINARY" ]]; then
-    ENGINE_DIR="${ENGINE_DIR:-/workspace/users/yifeif/tensorrt-model-connect/engines}"
+    ENGINE_DIR="${ENGINE_DIR:-${PROJECT_DIR}/engines}"
     E2E_NODE="${PROJECT_DIR}/tests/e2e/models/${E2E_FAMILY}/test_${E2E_FAMILY}_e2e.py::test_model_e2e[${E2E_MODEL}]"
     E2E_ARGS=(
         "$E2E_NODE"

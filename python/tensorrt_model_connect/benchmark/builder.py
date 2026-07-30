@@ -572,6 +572,16 @@ def _build_command(
     return tuple(command)
 
 
+_REQUIRED_BUILD_ENVIRONMENT_INPUTS = frozenset(
+    {
+        "TRTMC_BARK_TIMING_CACHE_PATH",
+        "TRTMC_BARK_TIMING_CACHE_SHA256",
+        "TRTMC_ELF_TIMING_CACHE_PATH",
+        "TRTMC_ELF_TIMING_CACHE_METADATA_PATH",
+    }
+)
+
+
 def _build_environment(model: ModelDescriptor, runtime: _BuilderRuntime) -> dict[str, str]:
     environment = os.environ.copy()
     if runtime.python_root is not None:
@@ -589,13 +599,50 @@ def _build_environment(model: ModelDescriptor, runtime: _BuilderRuntime) -> dict
         value: object = spec
         path_like = False
         relative_to = "repo"
+        required_from_env = False
         if isinstance(spec, Mapping):
-            value = spec.get("path", spec.get("value", ""))
-            path_like = "path" in spec or bool(spec.get("path_like", False))
-            relative_to = str(spec.get("relative_to", "repo") or "repo")
+            if "required_from_env" in spec:
+                required_from_env = True
+                if spec.get("required_from_env") is not True:
+                    raise BenchmarkError(
+                        f"build_env {name} for {model.name} required_from_env must be true"
+                    )
+                unknown = set(spec) - {"required_from_env", "path_like"}
+                if unknown:
+                    raise BenchmarkError(
+                        f"build_env {name} for {model.name} has unsupported fields: "
+                        f"{sorted(unknown)}"
+                    )
+                if type(spec.get("path_like", False)) is not bool:
+                    raise BenchmarkError(
+                        f"build_env {name} for {model.name} path_like must be Boolean"
+                    )
+                if name not in _REQUIRED_BUILD_ENVIRONMENT_INPUTS:
+                    raise BenchmarkError(
+                        f"build_env {name} for {model.name} is not an allowed "
+                        "required environment input"
+                    )
+                value = environment.get(name)
+                if not isinstance(value, str) or not value or value != value.strip():
+                    raise BenchmarkError(
+                        f"required build environment variable {name} for "
+                        f"{model.name} is missing"
+                    )
+                path_like = bool(spec.get("path_like", False))
+            else:
+                value = spec.get("path", spec.get("value", ""))
+                path_like = "path" in spec or bool(spec.get("path_like", False))
+                relative_to = str(spec.get("relative_to", "repo") or "repo")
         text = str(value)
         if path_like:
             path = Path(text)
+            if required_from_env and (
+                not path.is_absolute() or path.is_symlink() or not path.is_file()
+            ):
+                raise BenchmarkError(
+                    f"required build environment file {name} for "
+                    f"{model.name} is unavailable"
+                )
             if not path.is_absolute():
                 path = (model_root if relative_to == "model" else repository) / path
             text = str(path.resolve())
@@ -614,11 +661,26 @@ def _build_environment_asset_identity(
         if not isinstance(name, str) or not name or not isinstance(spec, Mapping):
             continue
         path_like = "path" in spec or bool(spec.get("path_like", False))
+        if "required_from_env" in spec:
+            value = environment[name]
+            if path_like:
+                assets[name] = {
+                    "source": "required_from_env",
+                    "sha256": _sha256_file(Path(value)),
+                }
+            else:
+                assets[name] = {
+                    "source": "required_from_env",
+                    "sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(),
+                }
+            continue
         if not path_like:
             continue
         value = spec.get("path", spec.get("value", ""))
         if not isinstance(value, str) or not value:
-            raise BenchmarkError(f"build_env path {name} for {model.name} must be non-empty")
+            raise BenchmarkError(
+                f"build_env path {name} for {model.name} must be non-empty"
+            )
         resolved = Path(environment[name])
         if not resolved.is_file():
             raise BenchmarkError(f"build_env path {name} for {model.name} is missing: {resolved}")

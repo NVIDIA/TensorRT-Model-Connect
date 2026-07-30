@@ -200,7 +200,6 @@ path-scoped Pages builds are independent.
 | `e2e_scheduler.py` | Launch workers, enforce timeouts, and merge results | Container |
 | `isolation.py` | Queue projected model groups for isolated validation | Container |
 | `gpu_lease.py` | Allocate FIFO shared slots or exclusive GPUs | Host processes |
-| `optimized_runtime_qualifications.py` | Select model-owned optimized-runtime hardware proofs | Trusted host |
 | `model_proof_selection.py` | Resolve and validate one model's proof contract | Projected source |
 | `model_proof.py` | Prepare caches, projection, lease, and proof container | Trusted host |
 | `model_proof_inner.py` | Build, test, compare, and report one model | Hermetic container |
@@ -508,27 +507,6 @@ the producing class remains the source of truth for optional evidence fields.
 
 - **Boundary:** It allocates capacity and proves ownership only. It never starts
   a container, builds an engine, or runs a model.
-
-### `optimized_runtime_qualifications.py`
-
-- **Functionality / units:** Discovers model-owned `QUALIFICATION.*.toml`
-  producer descriptors, validates their generic fields and profile ownership,
-  and selects hardware proofs from an exact source diff.
-- **Inputs:** A repository plus base/head Git revisions, explicit changed paths,
-  or `--all` for manual dispatch. Each producer declares profile selection,
-  triggers, a model-owned entrypoint, a digest-pinned image, and runner labels.
-- **Outputs:** One deterministic `producers` GitHub matrix. Entries contain the
-  selected profile basenames. Profile-only changes select that exact qualified
-  profile, family changes select that family's complete target suite, and shared
-  changes select one producer representative per optimized runtime.
-- **Boundary:** It contains no model or optimized-runtime identities and never
-  builds or executes a bundle. The private Internal CI manual/reusable workflow
-  invokes each selected model-owned entrypoint, keeps its qualification
-  artifacts private, and performs entrypoint-owned cleanup. Ordinary premerge
-  CI does not call the hardware workflow while no managed target-hardware
-  runner pool exists; integration behavior is covered there by source-only unit
-  and contract tests. Artifact format and qualification logic remain
-  model-owned.
 
 ### `model_reference_cache.py`
 

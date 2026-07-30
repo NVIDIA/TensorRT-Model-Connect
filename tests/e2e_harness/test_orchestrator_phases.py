@@ -151,6 +151,48 @@ def test_manifest_build_env_resolves_model_relative_paths(tmp_path: Path) -> Non
     assert env["UNIT_LITERAL"] == "enabled"
 
 
+def test_manifest_build_env_requires_injected_values(
+    tmp_path: Path,
+) -> None:
+    asset = tmp_path / "private.cache"
+    asset.write_bytes(b"cache")
+    case = E2ECase(
+        name="unit",
+        hf_id="unit/model",
+        family="unit",
+        runtime_strategy="unit_runtime",
+        metadata={
+            "build_env": {
+                "TRTMC_BARK_TIMING_CACHE_PATH": {
+                    "required_from_env": True,
+                    "path_like": True,
+                },
+                "TRTMC_BARK_TIMING_CACHE_SHA256": {
+                    "required_from_env": True,
+                },
+            },
+        },
+    )
+
+    env = {
+        "TRTMC_BARK_TIMING_CACHE_PATH": str(asset),
+        "TRTMC_BARK_TIMING_CACHE_SHA256": "opaque-digest",
+    }
+    orchestrator._apply_manifest_build_env(env, case)
+
+    assert env["TRTMC_BARK_TIMING_CACHE_PATH"] == str(asset)
+    assert env["TRTMC_BARK_TIMING_CACHE_SHA256"] == "opaque-digest"
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "required build environment variable "
+            "TRTMC_BARK_TIMING_CACHE_PATH is missing"
+        ),
+    ):
+        orchestrator._apply_manifest_build_env({}, case)
+
+
 def _make_case(
     name: str,
     *,

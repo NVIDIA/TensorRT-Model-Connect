@@ -677,6 +677,57 @@ def test_build_environment_asset_contents_participate_in_bundle_cache_identity(
     assert first.cache_key != second.cache_key
 
 
+def test_required_build_environment_asset_participates_in_bundle_cache_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    family = tmp_path / "catalog/qwen_image"
+    manifest = family / "manifests/qwen-image-edit-2511.json"
+    manifest.parent.mkdir(parents=True)
+    source = REPOSITORY_ROOT / "tests/e2e/models/qwen_image/manifests/qwen-image-edit-2511.json"
+    raw = json.loads(source.read_text(encoding="utf-8"))
+    raw["build_env"]["TRTMC_BARK_TIMING_CACHE_PATH"] = {
+        "required_from_env": True,
+        "path_like": True,
+    }
+    raw["build_env"]["TRTMC_BARK_TIMING_CACHE_SHA256"] = {
+        "required_from_env": True,
+    }
+    manifest.write_text(json.dumps(raw), encoding="utf-8")
+
+    condition_image = family / "data/test_img.jpeg"
+    condition_image.parent.mkdir()
+    condition_image.write_bytes(b"condition-image")
+    image = tmp_path / "injected-private-asset"
+    image.write_bytes(b"first-image")
+    monkeypatch.setenv("TRTMC_BARK_TIMING_CACHE_PATH", str(image))
+    monkeypatch.setenv("TRTMC_BARK_TIMING_CACHE_SHA256", "first-digest")
+
+    catalog = ManifestCatalog(tmp_path / "catalog")
+    model = catalog.resolve("qwen-image-edit-2511")
+    case = resolve_case(model, tmp_path / "pending.trtfb")
+    first = BundleBuilder(tmp_path / "cache")._plan(model, (case,))
+
+    image.write_bytes(b"second-image")
+    second = BundleBuilder(tmp_path / "cache")._plan(model, (case,))
+    monkeypatch.setenv("TRTMC_BARK_TIMING_CACHE_SHA256", "second-digest")
+    third = BundleBuilder(tmp_path / "cache")._plan(model, (case,))
+
+    assert first.environment["TRTMC_BARK_TIMING_CACHE_PATH"] == str(image)
+    assert first.cache_key != second.cache_key
+    assert second.cache_key != third.cache_key
+
+    monkeypatch.delenv("TRTMC_BARK_TIMING_CACHE_PATH")
+    with pytest.raises(
+        BenchmarkError,
+        match=(
+            "required build environment variable "
+            "TRTMC_BARK_TIMING_CACHE_PATH"
+        ),
+    ):
+        BundleBuilder(tmp_path / "cache")._plan(model, (case,))
+
+
 def test_builder_source_digest_participates_in_bundle_cache_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

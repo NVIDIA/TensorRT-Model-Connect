@@ -77,7 +77,10 @@ MAX_CACHE = 256
 TMP_SIZE = 32 * 1024 * 1024  # 32MB FlashInfer workspace
 
 bundle_path = "/tmp/qwen3_flashinfer.trtfb"
-baseline_bundle = "/workspace/users/yifeif/tensorrt-model-connect/engines/qwen3-0.6b.trtfb"
+baseline_bundle = os.environ.get(
+    "TRTMC_QWEN3_BASELINE_BUNDLE",
+    str(REPO_ROOT / "engines" / "qwen3-0.6b.trtfb"),
+)
 
 if os.path.exists(bundle_path) and "--rebuild" not in sys.argv:
     print(f"\nUsing existing bundle: {bundle_path}")

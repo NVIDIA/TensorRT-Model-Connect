@@ -231,6 +231,67 @@ class TestManifestValidation:
         }
         _validate_manifest(data, "test.json")  # Should not raise
 
+    @pytest.mark.parametrize(
+        ("name", "spec", "error"),
+        (
+            (
+                "HF_TOKEN",
+                {"required_from_env": True},
+                "not an allowed required environment input",
+            ),
+            (
+                "TRTMC_BARK_TIMING_CACHE_PATH",
+                {"required_from_env": False},
+                "required_from_env must be true",
+            ),
+            (
+                "TRTMC_BARK_TIMING_CACHE_PATH",
+                {"required_from_env": True, "path": "/private/cache"},
+                "unsupported fields",
+            ),
+            (
+                "TRTMC_BARK_TIMING_CACHE_PATH",
+                {"required_from_env": True, "path_like": "true"},
+                "path_like must be Boolean",
+            ),
+        ),
+    )
+    def test_required_build_environment_schema_fails_closed(
+        self,
+        name,
+        spec,
+        error,
+    ):
+        data = {
+            "name": "example-test",
+            "hf_id": EXAMPLE_MODEL_ID,
+            "family": EXAMPLE_FAMILY,
+            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+            "build_env": {name: spec},
+        }
+
+        with pytest.raises((TypeError, ValueError), match=error):
+            _validate_manifest(data, "test.json")
+
+    def test_required_build_environment_schema_accepts_timing_cache_inputs(self):
+        data = {
+            "name": "example-test",
+            "hf_id": EXAMPLE_MODEL_ID,
+            "family": EXAMPLE_FAMILY,
+            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+            "build_env": {
+                "TRTMC_BARK_TIMING_CACHE_PATH": {
+                    "required_from_env": True,
+                    "path_like": True,
+                },
+                "TRTMC_BARK_TIMING_CACHE_SHA256": {
+                    "required_from_env": True,
+                },
+            },
+        }
+
+        _validate_manifest(data, "test.json")
+
     def test_multi_gpu_case_must_use_the_multi_device_tier(self):
         data = {
             "name": "tp4-test",
