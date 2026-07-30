@@ -41,7 +41,7 @@ def _single_default_model_config(filename: str) -> tuple[Path, dict]:
     return defaults[0]
 
 
-def test_internal_ci_bridge_only_dispatches_an_exact_trusted_snapshot() -> None:
+def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     workflow = (
         REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml"
     ).read_text(encoding="utf-8")
@@ -85,12 +85,18 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_snapshot() -> None:
     assert 'test "$base_repo" = "$GITHUB_REPOSITORY"' in authorize
     assert 'test "$base_ref" = "main"' in authorize
     assert 'if [ "$EVENT_NAME" = "pull_request_target" ]; then' in authorize
-    assert 'test "$base_sha" = "$EVENT_BASE_SHA"' in authorize
     assert 'test "$head_sha" = "$EVENT_HEAD_SHA"' in authorize
-    for name in ("base_sha", "head_sha", "merge_sha"):
-        assert f'[[ "${name}" =~ ^[0-9a-f]{{40}}$ ]]' in authorize
-        assert f'echo "{name}=${name}"' in authorize
+    assert '[[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]' in authorize
+    assert 'echo "head_sha=$head_sha"' in authorize
     assert "pr_number=$PR_NUMBER" in authorize
+    for legacy in (
+        "base_sha",
+        "merge_sha",
+        "BASE_SHA",
+        "MERGE_SHA",
+        "EVENT_BASE_SHA",
+    ):
+        assert legacy not in workflow
     assert (
         "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/run-internal-ci"
     ) in authorize
@@ -129,10 +135,6 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_snapshot() -> None:
     assert (
         dispatch.count("HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}") == 3
     )
-    assert "HEAD_SHA: ${{ needs.authorize.outputs.merge_sha }}" not in dispatch
-    assert (
-        dispatch.count("MERGE_SHA: ${{ needs.authorize.outputs.merge_sha }}") == 1
-    )
     assert "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" in dispatch
     assert "/repos/$GITHUB_REPOSITORY/statuses/$MERGE_SHA" not in dispatch
     assert "-f state=pending" in dispatch
@@ -150,7 +152,7 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_snapshot() -> None:
     )
 
     assert 'ref: "main"' in dispatch
-    for name in ("pr_number", "base_sha", "head_sha", "merge_sha"):
+    for name in ("pr_number", "head_sha"):
         assert f"{name}: ${name}" in dispatch
     assert "umask 077" in dispatch
     assert 'trap \'rm -f "$payload"\' EXIT' in dispatch

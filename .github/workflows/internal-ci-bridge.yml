@@ -44,21 +44,18 @@ jobs:
       pull-requests: write
     outputs:
       pr_number: ${{ steps.snapshot.outputs.pr_number }}
-      base_sha: ${{ steps.snapshot.outputs.base_sha }}
       head_sha: ${{ steps.snapshot.outputs.head_sha }}
-      merge_sha: ${{ steps.snapshot.outputs.merge_sha }}
 
     steps:
       # This trusted workflow reads PR metadata only. It never checks out or
-      # executes the pull-request head or merge commit.
-      - name: Capture the exact pull-request snapshot
+      # executes the pull-request head.
+      - name: Capture the exact pull-request head
         id: snapshot
         env:
           GH_TOKEN: ${{ github.token }}
           ACTOR: ${{ github.actor }}
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
           EVENT_NAME: ${{ github.event_name }}
-          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
@@ -81,27 +78,19 @@ jobs:
           state="$(jq -er '.state' <<<"$pull")"
           base_repo="$(jq -er '.base.repo.full_name' <<<"$pull")"
           base_ref="$(jq -er '.base.ref' <<<"$pull")"
-          base_sha="$(jq -er '.base.sha' <<<"$pull")"
           head_sha="$(jq -er '.head.sha' <<<"$pull")"
-          merge_sha="$(jq -r '.merge_commit_sha // ""' <<<"$pull")"
 
           test "$state" = "open"
           test "$base_repo" = "$GITHUB_REPOSITORY"
           test "$base_ref" = "main"
-          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
           [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]]
           if [ "$EVENT_NAME" = "pull_request_target" ]; then
-            [[ "$EVENT_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
             [[ "$EVENT_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
-            test "$base_sha" = "$EVENT_BASE_SHA"
             test "$head_sha" = "$EVENT_HEAD_SHA"
           fi
           {
             echo "pr_number=$PR_NUMBER"
-            echo "base_sha=$base_sha"
             echo "head_sha=$head_sha"
-            echo "merge_sha=$merge_sha"
           } >> "$GITHUB_OUTPUT"
 
       - name: Consume the trusted trigger label
@@ -124,7 +113,7 @@ jobs:
       statuses: write
 
     steps:
-      - name: Mark the exact source snapshot pending
+      - name: Mark the exact source head pending
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
@@ -146,9 +135,7 @@ jobs:
           PRIVATE_CI_OWNER: ${{ secrets.TRTMC_PRIVATE_CI_OWNER }}
           PRIVATE_CI_REPOSITORY: ${{ secrets.TRTMC_PRIVATE_CI_REPOSITORY }}
           PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
-          BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
           HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
-          MERGE_SHA: ${{ needs.authorize.outputs.merge_sha }}
         run: |
           set -euo pipefail
           [[ "$PRIVATE_CI_OWNER" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$ ]]
@@ -159,16 +146,12 @@ jobs:
           trap 'rm -f "$payload"' EXIT
           jq -n \
             --arg pr_number "$PR_NUMBER" \
-            --arg base_sha "$BASE_SHA" \
             --arg head_sha "$HEAD_SHA" \
-            --arg merge_sha "$MERGE_SHA" \
             '{
               ref: "main",
               inputs: {
                 pr_number: $pr_number,
-                base_sha: $base_sha,
-                head_sha: $head_sha,
-                merge_sha: $merge_sha
+                head_sha: $head_sha
               }
             }' > "$payload"
           gh api --silent --method POST \
