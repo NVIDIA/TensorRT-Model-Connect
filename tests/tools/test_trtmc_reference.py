@@ -600,7 +600,7 @@ def test_transformers_text_forwards_experts_implementation(monkeypatch) -> None:
     )
     captured: dict[str, object] = {}
     tokenizer = SimpleNamespace(pad_token_id=0)
-    model = SimpleNamespace(device="cuda", to=lambda _device: None)
+    model = SimpleNamespace(device="cuda", to=lambda *args, **kwargs: None)
     transformers_module = SimpleNamespace(
         logging=SimpleNamespace(set_verbosity_error=lambda: None),
         AutoTokenizer=SimpleNamespace(
@@ -627,6 +627,144 @@ def test_transformers_text_forwards_experts_implementation(monkeypatch) -> None:
     )
 
     assert captured["experts_implementation"] == "batched_mm"
+
+
+def test_transformers_text_moves_all_model_state_to_requested_dtype(
+    monkeypatch,
+) -> None:
+    arguments = transformers_text.build_parser().parse_args(
+        [
+            "--model",
+            "org/model",
+            "--prompts",
+            "/tmp/prompts.jsonl",
+            "--answers",
+            "/tmp/answers.json",
+            "--manifest",
+            "/tmp/manifest.json",
+            "--predictions",
+            "/tmp/predictions.json",
+            "--raw-output",
+            "/tmp/raw.jsonl",
+            "--dtype",
+            "bfloat16",
+        ]
+    )
+    captured: dict[str, object] = {}
+    tokenizer = SimpleNamespace(pad_token_id=0)
+
+    class FakeModel:
+        def to(self, *args: object, **kwargs: object) -> None:
+            captured["to_args"] = args
+            captured["to_kwargs"] = kwargs
+
+    model = FakeModel()
+    transformers_module = SimpleNamespace(
+        logging=SimpleNamespace(set_verbosity_error=lambda: None),
+        AutoTokenizer=SimpleNamespace(
+            from_pretrained=lambda _model_id, **_kwargs: tokenizer
+        ),
+    )
+
+    def fake_load_model(
+        _transformers_module,
+        _model_id,
+        *,
+        model_kwargs,
+        **_kwargs,
+    ):
+        captured["model_kwargs"] = model_kwargs
+        return model, False
+
+    monkeypatch.setattr(transformers_text, "_load_model", fake_load_model)
+    torch_module = SimpleNamespace(
+        bfloat16="bf16",
+        device=lambda name: f"device:{name}",
+    )
+
+    transformers_text._load_runtime(
+        arguments,
+        torch_module,
+        transformers_module,
+    )
+
+    assert captured["model_kwargs"]["torch_dtype"] == "bf16"
+    assert captured["to_args"] == ()
+    assert captured["to_kwargs"] == {
+        "device": "device:cuda",
+        "dtype": "bf16",
+    }
+
+
+def test_transformers_vlm_moves_all_model_state_to_requested_dtype(
+    monkeypatch,
+) -> None:
+    arguments = transformers_vlm.build_parser().parse_args(
+        [
+            "--model",
+            "org/model",
+            "--prompts",
+            "/tmp/prompts.jsonl",
+            "--answers",
+            "/tmp/answers.json",
+            "--manifest",
+            "/tmp/manifest.json",
+            "--predictions",
+            "/tmp/predictions.json",
+            "--raw-output",
+            "/tmp/raw.jsonl",
+            "--dtype",
+            "bfloat16",
+        ]
+    )
+    captured: dict[str, object] = {}
+    processor = object()
+
+    class FakeProcessor:
+        @staticmethod
+        def from_pretrained(_model: str, **_kwargs: object) -> object:
+            return processor
+
+    class FakeModel:
+        def to(self, *args: object, **kwargs: object) -> None:
+            captured["to_args"] = args
+            captured["to_kwargs"] = kwargs
+
+    model = FakeModel()
+    transformers_module = SimpleNamespace(
+        logging=SimpleNamespace(set_verbosity_error=lambda: None),
+    )
+
+    def fake_load_model(
+        _transformers_module,
+        _model_id,
+        model_kwargs,
+    ):
+        captured["model_kwargs"] = model_kwargs
+        return model
+
+    monkeypatch.setattr(transformers_vlm, "_load_model", fake_load_model)
+    torch_module = SimpleNamespace(
+        bfloat16="bf16",
+        device=lambda name: f"device:{name}",
+    )
+
+    loaded_processor, loaded_model, device = transformers_vlm._load_runtime(
+        arguments,
+        torch_module,
+        transformers_module,
+        FakeProcessor,
+    )
+
+    assert loaded_processor is processor
+    assert loaded_model is model
+    assert device == "device:cuda"
+    assert captured["model_kwargs"]["torch_dtype"] == "bf16"
+    assert captured["to_args"] == ()
+    assert captured["to_kwargs"] == {
+        "device": "device:cuda",
+        "dtype": "bf16",
+    }
 
 
 def test_transformers_text_reference_accepts_float32_dtype() -> None:
