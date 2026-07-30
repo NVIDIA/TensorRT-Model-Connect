@@ -395,6 +395,11 @@ std::vector<int64_t> selector_shape(const TrtModule& decoder, const std::string&
     return decoder.input_rank(name) == 2 ? std::vector<int64_t>{1, 1} : std::vector<int64_t>{1};
 }
 
+std::vector<int64_t> mrope_position_shape(const TrtModule& decoder) {
+    return decoder.input_rank("mrope_position_ids") == 2 ? std::vector<int64_t>{3, 1}
+                                                         : std::vector<int64_t>{3};
+}
+
 void add_text_step_deepstack_inputs(TrtModule& decoder, TensorMap& inputs, int32_t embed_dim,
                                     const std::vector<const float*>& deepstack_embeds,
                                     float& deepstack_active, std::vector<float>& zero_deepstack) {
@@ -609,8 +614,18 @@ TextResult QwenVlPipeline::generate(const std::string& prompt, const float* imag
     auto input_ids = tokenizer_->encode(qwen_vl_format_prompt(prompt, vl_preprocess_, nf));
     auto [max_new, eos] = resolve_gen_limits(cfg);
     auto sp_vl = qwen_vl_sampling_params_from_config(cfg, eos);
-    auto out =
-        generate_vl_from_ids(input_ids, features, deepstack_features, nf, dim, max_new, sp_vl);
+    int32_t merged_grid_height =
+        merged_grid_extent(vl_preprocess_.fixed_image_height, vl_preprocess_.fixed_image_size,
+                           vl_preprocess_.patch_size, vl_preprocess_.merge_size);
+    int32_t merged_grid_width =
+        merged_grid_extent(vl_preprocess_.fixed_image_width, vl_preprocess_.fixed_image_size,
+                           vl_preprocess_.patch_size, vl_preprocess_.merge_size);
+    if (preprocessed.image_grid_hws.size() >= 2 && vl_preprocess_.merge_size > 0) {
+        merged_grid_height = preprocessed.image_grid_hws[0] / vl_preprocess_.merge_size;
+        merged_grid_width = preprocessed.image_grid_hws[1] / vl_preprocess_.merge_size;
+    }
+    auto out = generate_vl_from_ids(input_ids, features, deepstack_features, nf, dim,
+                                    merged_grid_height, merged_grid_width, max_new, sp_vl);
 
     std::vector<int32_t> new_tokens(out.begin() + static_cast<std::ptrdiff_t>(input_ids.size()),
                                     out.end());
@@ -675,7 +690,8 @@ std::vector<int32_t> QwenVlPipeline::generate_from_ids(const std::vector<int32_t
 std::vector<int32_t> QwenVlPipeline::generate_vl_from_ids(
     const std::vector<int32_t>& input_ids, const std::vector<float>& image_features,
     const std::vector<std::vector<float>>& deepstack_features, int32_t num_features,
-    int32_t feature_dim, int32_t max_new_tokens, const QwenVlSamplingParams& params) {
+    int32_t feature_dim, int32_t merged_grid_height, int32_t merged_grid_width,
+    int32_t max_new_tokens, const QwenVlSamplingParams& params) {
     if (max_new_tokens == 0 || input_ids.empty())
         return input_ids;
 
@@ -685,15 +701,10 @@ std::vector<int32_t> QwenVlPipeline::generate_vl_from_ids(
     reset_generation_context(static_cast<int32_t>(input_ids.size()));
 
     std::vector<float> logits;
-    const int32_t grid_h =
-        merged_grid_extent(vl_preprocess_.fixed_image_height, vl_preprocess_.fixed_image_size,
-                           vl_preprocess_.patch_size, vl_preprocess_.merge_size);
-    const int32_t grid_w =
-        merged_grid_extent(vl_preprocess_.fixed_image_width, vl_preprocess_.fixed_image_size,
-                           vl_preprocess_.patch_size, vl_preprocess_.merge_size);
     const bool use_mrope = text_decoder_->has_input("mrope_position_ids");
     const auto mrope = use_mrope ? qwen_vl_build_mrope_positions(input_ids, config_.image_token_id,
-                                                                 num_features, grid_h, grid_w)
+                                                                 num_features, merged_grid_height,
+                                                                 merged_grid_width)
                                  : QwenVlMropePositions{};
     if (!run_vl_prefill_batched(input_ids, image_features, deepstack_features, num_features,
                                 feature_dim, use_mrope ? &mrope : nullptr, logits)) {
@@ -815,8 +826,9 @@ void QwenVlPipeline::run_text_step_with_embed(int32_t token_id, const float* inp
     state_->prepare_step(inputs);
 
     if (mrope_position != nullptr && text_decoder_->has_input("mrope_position_ids")) {
-        inputs["mrope_position_ids"] =
-            Tensor{const_cast<int32_t*>(mrope_position->data()), {3}, DType::kInt32};
+        inputs["mrope_position_ids"] = Tensor{const_cast<int32_t*>(mrope_position->data()),
+                                              mrope_position_shape(*text_decoder_),
+                                              DType::kInt32};
     }
 
     std::vector<float> zero_embed;
