@@ -3,12 +3,6 @@
 
 id = "personaplex"
 plugin = "personaplex"
-python_profile_specs = [
-  "personaplex_reference|families/personaplex/python_profile_requirements/personaplex_reference.lock.txt|families/personaplex/python_profile_verify.py|true|families/personaplex/python_profile_requirements/personaplex_reference_build.lock.txt",
-]
-default_execution_profiles = [
-  "reference|personaplex_reference",
-]
 module = "plugin"
 aliases = [
   "moshi",

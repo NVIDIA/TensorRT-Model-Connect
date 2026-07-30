@@ -20,6 +20,21 @@ from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 REFERENCE_SOURCE_REVISION = "3428dfd95309a7f3c84fd93259ded0f810d1ff91"
 REFERENCE_SAMPLE_RATE = 24_000
+_AUDIO_COMPAT = Path(__file__).with_name("personaplex_audio_compat")
+
+
+def _reference_environment(
+    base: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Expose the narrow sphn-compatible WAV reader to official Moshi."""
+    environment = dict(os.environ if base is None else base)
+    existing = environment.get("PYTHONPATH", "").strip()
+    environment["PYTHONPATH"] = os.pathsep.join(
+        value
+        for value in (str(_AUDIO_COMPAT), existing)
+        if value
+    )
+    return environment
 
 
 def _reference_source() -> Path:
@@ -89,7 +104,10 @@ class OfficialPersonaPlexReference:
                 case.metadata.get("speech_test_max_frames", 50),
             )
         )
+        environment = _reference_environment()
         command = [
+            "env",
+            f"PYTHONPATH={environment['PYTHONPATH']}",
             ctx.reference_python_path() or sys.executable,
             str(model_dir / "official_reference.py"),
             "--official-repo",

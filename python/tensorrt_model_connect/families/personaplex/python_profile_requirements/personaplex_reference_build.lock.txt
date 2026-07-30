@@ -1,6 +1,0 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-# sphn publishes no Linux aarch64 wheel. Its PEP 517 backend must be present
-# before pip can build the pinned source distribution with --no-build-isolation.
-maturin==1.7.4
