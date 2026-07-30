@@ -240,6 +240,30 @@ _NEMOTRON_MODES = (
 )
 
 
+def _mmlu_zero_shot_prompt(row: Mapping[str, Any]) -> str:
+    """Recover the final unanswered question from an MMLU-Pro few-shot row."""
+    prompt = _message_text(row)
+    completed_answers = list(
+        re.finditer(r"(?m)^Answer:\s*[A-J]\s*$", prompt)
+    )
+    if not completed_answers:
+        raise ValueError(
+            "MMLU-Pro prompt does not contain a completed demonstration answer"
+        )
+    question = prompt[completed_answers[-1].end() :].strip()
+    if not question or re.search(r"(?m)^Answer:\s*$", question) is None:
+        raise ValueError(
+            "MMLU-Pro prompt does not end with an unanswered target question"
+        )
+    subject = str(row.get("subject", "")).strip()
+    if not subject:
+        raise ValueError("MMLU-Pro request is missing its subject")
+    return (
+        "The following is a multiple choice question about "
+        f"{subject}.\n\n{question}"
+    )
+
+
 def prepare_mmlu_generation_modes(
     mmlu_source: Path,
     root: Path,
@@ -269,7 +293,12 @@ def prepare_mmlu_generation_modes(
                     "category": mode,
                     "answer": str(row.get("answer", "")),
                     "inputs": {
-                        "prompt": _message_text(row),
+                        # The source benchmark row is five-shot and can exceed
+                        # this model's 640-token prefill profile. Keep the
+                        # public target question but remove demonstrations so
+                        # every generation mode receives an identical,
+                        # in-profile prompt.
+                        "prompt": _mmlu_zero_shot_prompt(row),
                         "generation_mode": mode,
                         "temperature": 0.0,
                         "max_new_tokens": 32,
@@ -290,8 +319,10 @@ def prepare_mmlu_generation_modes(
                 "https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro"
             ),
             sampling=(
-                f"first {samples_per_mode} fixed MMLU-Pro rows repeated across "
-                "AR, diffusion, linear-spec, and linear-spec-LoRA modes"
+                f"final target question from the first {samples_per_mode} "
+                "fixed MMLU-Pro five-shot rows, with demonstrations removed, "
+                "repeated across AR, diffusion, linear-spec, and "
+                "linear-spec-LoRA modes"
             ),
             requests=requests,
         ),

@@ -48,8 +48,23 @@ def _write_sources(
             {
                 "requests": [
                     {
-                        "prompt": f"five-shot MMLU question {index}",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": (
+                                    "The following are multiple choice questions "
+                                    "about science.\n\n"
+                                    "Demonstration question?\n"
+                                    "A. first\nB. second\n"
+                                    "Answer: A\n\n"
+                                    f"Target question {index}?\n"
+                                    "A. yes\nB. no\n"
+                                    "Answer:"
+                                ),
+                            }
+                        ],
                         "answer": "A",
+                        "subject": "science",
                     }
                     for index in range(2)
                 ]
@@ -171,6 +186,25 @@ def test_prepare_all_writes_task_owned_public_datasets_and_hashes(
     assert all(
         row["inputs"]["speech_test_max_frames"] == 400
         for row in speech["requests"]
+    )
+    generation_modes = json.loads(
+        (root / "mmlu-generation-modes/dataset.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert all(
+        row["inputs"]["prompt"].startswith(
+            "The following is a multiple choice question about science."
+        )
+        for row in generation_modes["requests"]
+    )
+    assert all(
+        "Demonstration question" not in row["inputs"]["prompt"]
+        for row in generation_modes["requests"]
+    )
+    assert all(
+        row["inputs"]["prompt"].endswith("A. yes\nB. no\nAnswer:")
+        for row in generation_modes["requests"]
     )
     assert [
         Path(row["inputs"]["audio"]).name
