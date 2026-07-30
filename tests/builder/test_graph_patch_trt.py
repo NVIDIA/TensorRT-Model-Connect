@@ -9,10 +9,45 @@ trt = pytest.importorskip("tensorrt")
 
 from tensorrt_model_connect.tvm_ffi.graph_patch import (  # noqa: E402
     apply_region,
+    load_snapshot,
     select_region,
     snapshot_network,
 )
-from tensorrt_model_connect.trt_compat import network_creation_flags  # noqa: E402
+from tensorrt_model_connect.tvm_ffi import graph_build  # noqa: E402
+from tensorrt_model_connect.trt_compat import (  # noqa: E402
+    get_trt,
+    network_creation_flags,
+    unwrap,
+)
+
+
+@pytest.mark.gpu
+@pytest.mark.trt
+def test_capture_exposes_elementwise_operation_subtype(tmp_path) -> None:
+    compat_trt = get_trt()
+    logger = compat_trt.Logger(compat_trt.Logger.ERROR)
+    builder = compat_trt.Builder(logger)
+    path = tmp_path / "graph.json"
+
+    with pytest.raises(graph_build.GraphInspectionComplete):
+        with graph_build.inspect_graph(path, engine_role="decode", metadata={}):
+            network = builder.create_network(network_creation_flags())
+            with graph_build.engine_role("decode"):
+                lhs = network.add_input("lhs", compat_trt.float16, (1, 8))
+                rhs = network.add_input("rhs", compat_trt.float16, (1, 8))
+                selected = network.add_elementwise(
+                    lhs,
+                    rhs,
+                    compat_trt.ElementWiseOperation.SUM,
+                )
+                selected.op = compat_trt.ElementWiseOperation.PROD
+                consumer = network.add_identity(selected.get_output(0))
+                network.mark_output(consumer.get_output(0))
+                graph_build.process_network(unwrap(network))
+
+    assert load_snapshot(path).nodes[0].op == (
+        "LayerType.ELEMENTWISE/ElementWiseOperation.PROD"
+    )
 
 
 @pytest.mark.gpu

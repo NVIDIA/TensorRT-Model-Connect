@@ -454,6 +454,22 @@ class _BuilderProxy(_HandleProxy):
 
 
 class _NetworkProxy(_HandleProxy):
+    def __getattr__(self, name: str) -> Any:
+        attr = super().__getattr__(name)
+        if not name.startswith("add_") or not callable(attr):
+            return attr
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            before = int(self._raw.num_layers)
+            result = attr(*args, **kwargs)
+            if int(self._raw.num_layers) == before + 1:
+                from .tvm_ffi.graph_build import record_layer_operation
+
+                record_layer_operation(self._raw, before, result)
+            return result
+
+        return call
+
     def _add_attention(self, method: str, *args: Any, **kwargs: Any) -> Any:
         attention = getattr(self._raw, method)(
             *[unwrap(arg) for arg in args],

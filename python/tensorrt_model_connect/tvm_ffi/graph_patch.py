@@ -339,6 +339,18 @@ def _shape(tensor: Any) -> tuple[int | str, ...]:
     return tuple(result)
 
 
+def _layer_operation(layer: Any, derived_layer: Any | None = None) -> str:
+    operation = str(getattr(layer, "type", type(layer).__name__))
+    source = derived_layer if derived_layer is not None else layer
+    try:
+        subtype = source.op
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return operation
+    if subtype is None:
+        return operation
+    return f"{operation}/{subtype}"
+
+
 _ATTENTION_INPUT_PROPERTIES = (
     "mask",
     "normalization_quantize_scale",
@@ -386,6 +398,7 @@ def _capture(
     network: Any,
     metadata: Mapping[str, Any] | None,
     attentions: Sequence[Any] = (),
+    operation_layers: Mapping[int, Any] | None = None,
 ) -> _Captured:
     metadata_copy = _json_object(dict(metadata or {}), "metadata")
     if not isinstance(metadata_copy.get("engine_role"), str) or not metadata_copy["engine_role"]:
@@ -456,7 +469,10 @@ def _capture(
             Node(
                 node_id,
                 str(getattr(layer, "name", "") or ""),
-                str(getattr(layer, "type", type(layer).__name__)),
+                _layer_operation(
+                    layer,
+                    operation_layers.get(index) if operation_layers else None,
+                ),
                 tuple(inputs),
                 layer_outputs[index],
             )
@@ -518,9 +534,10 @@ def snapshot_network(
     *,
     metadata: Mapping[str, Any] | None = None,
     attentions: Sequence[Any] = (),
+    operation_layers: Mapping[int, Any] | None = None,
 ) -> GraphSnapshot:
     """Capture a raw TensorRT network in deterministic build order."""
-    return _capture(network, metadata, attentions).snapshot
+    return _capture(network, metadata, attentions, operation_layers).snapshot
 
 
 def _boundary(
@@ -720,9 +737,10 @@ def apply_region(
     *,
     metadata: Mapping[str, Any] | None = None,
     attentions: Sequence[Any] = (),
+    operation_layers: Mapping[int, Any] | None = None,
 ) -> RewireResult:
     """Validate and replace one selected region before TRT serialization."""
-    captured = _capture(network, metadata, attentions)
+    captured = _capture(network, metadata, attentions, operation_layers)
     _validate_selection(captured.snapshot, selection)
     selected = set(selection.node_ids)
     output_indexes = {

@@ -180,6 +180,19 @@ def test_snapshot_round_trip_preserves_duplicate_input_slots(tmp_path) -> None:
     assert snapshot.tensors[0].consumers == ("node:0", "node:0")
 
 
+def test_snapshot_exposes_tensorrt_operation_subtype() -> None:
+    value = FakeTensor("value")
+    layer = FakeLayer("sum", [value, value], op="LayerType.ELEMENTWISE")
+    layer.op = "ElementWiseOperation.SUM"
+    consumer = FakeLayer("consumer", [layer.get_output(0)])
+
+    snapshot = _snapshot(FakeNetwork([value], [layer, consumer], [consumer.get_output(0)]))
+
+    assert snapshot.nodes[0].op == (
+        "LayerType.ELEMENTWISE/ElementWiseOperation.SUM"
+    )
+
+
 def test_apply_rewires_every_external_consumer() -> None:
     network, layers = _network()
     selection = select_region(_snapshot(network), ["node:1"], binding_id="attention")

@@ -36,6 +36,7 @@ class _Session:
     completed: bool = False
     slot: dict[str, str] | None = None
     attentions: dict[int, list[Any]] = field(default_factory=dict)
+    operation_layers: dict[int, dict[int, Any]] = field(default_factory=dict)
     recipes: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
 
 
@@ -111,6 +112,14 @@ def record_attention(network: Any, attention: Any) -> None:
     session = _ACTIVE.get()
     if session is not None and attention is not None:
         session.attentions.setdefault(id(network), []).append(attention)
+
+
+def record_layer_operation(network: Any, index: int, layer: Any) -> None:
+    """Record a raw TensorRT operation subtype while its derived view exists."""
+
+    session = _ACTIVE.get()
+    if session is not None:
+        session.operation_layers.setdefault(id(network), {})[index] = layer
 
 
 @contextmanager
@@ -211,10 +220,16 @@ def process_network(network: Any) -> None:
         raise GraphPatchError(f"engine role {role!r} was built more than once")
     metadata = _metadata(session)
     attentions = session.attentions.get(id(network), ())
+    operation_layers = session.operation_layers.get(id(network), {})
     recipes = session.recipes.get(id(network), ())
     if recipes:
         metadata["graph_recipes"] = list(recipes)
-    snapshot = snapshot_network(network, metadata=metadata, attentions=attentions)
+    snapshot = snapshot_network(
+        network,
+        metadata=metadata,
+        attentions=attentions,
+        operation_layers=operation_layers,
+    )
     if session.mode == "inspect":
         assert session.path is not None
         write_snapshot(snapshot, session.path)
@@ -243,6 +258,7 @@ def process_network(network: Any) -> None:
         replacement,
         metadata=metadata,
         attentions=attentions,
+        operation_layers=operation_layers,
     )
     session.slot = {
         "id": selection.binding_id,

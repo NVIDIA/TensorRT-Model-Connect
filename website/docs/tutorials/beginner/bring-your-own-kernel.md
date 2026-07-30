@@ -49,15 +49,23 @@ prebuilt `logits + zero` recipe. The operation is intentionally simple: it
 lets a first-time user test recipe selection, graph replacement, load-time
 binding, correctness, and performance before adapting a real kernel.
 
+This tutorial builds its example DSO from the source tree, so use the native
+CLI from that same configured build.
+
 ```bash
 export MODEL=Qwen/Qwen3-8B
 export REVISION=b968826d9c46dd6066d109eabc6255188de91218
 export WORK="$PWD/artifacts/qwen3-graph-slot"
-export BUILD_DIR="${BUILD_DIR:-$PWD/build-runtime-trt}"
+export BUILD_DIR="${BUILD_DIR:-$PWD/build}"
+export TRTMC="${TRTMC:-$BUILD_DIR/trtmc}"
 mkdir -p "$WORK"
 
 test -f "$BUILD_DIR/CMakeCache.txt" || {
   echo "BUILD_DIR must name an already configured native TVM-FFI build"
+  exit 1
+}
+test -x "$TRTMC" || {
+  echo "TRTMC must name the native CLI from BUILD_DIR"
   exit 1
 }
 
@@ -88,7 +96,7 @@ Build the slot-ready bundle directly:
 ```bash
 export BINDING_ID=qwen.decode_logits_copy@1
 
-trtmc build "${BUILD_ARGS[@]}" \
+"$TRTMC" build "${BUILD_ARGS[@]}" \
   --recipe "$BINDING_ID" decoder.logits_zero_bias \
   -o "$WORK/qwen3-slot-ready.trtfb"
 ```
@@ -113,12 +121,12 @@ If a family tutorial does not give you the Recipe and instance names, inspect
 them without compiling an engine:
 
 ```bash
-trtmc graph inspect \
+"$TRTMC" graph inspect \
   --engine-role decode \
   --snapshot "$WORK/decode.graph.json" \
   "${BUILD_ARGS[@]}"
 
-trtmc graph recipes "$WORK/decode.graph.json" \
+"$TRTMC" graph recipes "$WORK/decode.graph.json" \
   | tee "$WORK/decode.recipes.txt"
 ```
 
@@ -201,7 +209,7 @@ and every slot in the bundle must be bound exactly once.
 Load and run:
 
 ```bash
-trtmc run "$WORK/qwen3-slot-ready.trtfb" \
+"$TRTMC" run "$WORK/qwen3-slot-ready.trtfb" \
   --kernel-bindings "$WORK/kernel-bindings.json" \
   --prompt "Explain grouped-query attention in one sentence." \
   --max-new-tokens 32 \
@@ -217,7 +225,7 @@ Editing a manifest does not affect an existing pipeline.
 Build the native comparison with the same arguments:
 
 ```bash
-trtmc build "${BUILD_ARGS[@]}" -o "$WORK/qwen3-native.trtfb"
+"$TRTMC" build "${BUILD_ARGS[@]}" -o "$WORK/qwen3-native.trtfb"
 ```
 
 Compare deterministic output:
@@ -226,12 +234,12 @@ Compare deterministic output:
 TEST_PROMPT='Explain grouped-query attention, KV caching, and decode latency.'
 MAX_NEW_TOKENS=64
 
-trtmc run "$WORK/qwen3-native.trtfb" \
+"$TRTMC" run "$WORK/qwen3-native.trtfb" \
   --prompt "$TEST_PROMPT" \
   --max-new-tokens "$MAX_NEW_TOKENS" --greedy \
   --output "$WORK/native.jsonl"
 
-trtmc run "$WORK/qwen3-slot-ready.trtfb" \
+"$TRTMC" run "$WORK/qwen3-slot-ready.trtfb" \
   --kernel-bindings "$WORK/kernel-bindings.json" \
   --prompt "$TEST_PROMPT" \
   --max-new-tokens "$MAX_NEW_TOKENS" --greedy \
@@ -246,11 +254,11 @@ complete numerical qualification.
 Benchmark both bundles on the same idle GPU:
 
 ```bash
-trtmc run "$WORK/qwen3-native.trtfb" \
+"$TRTMC" run "$WORK/qwen3-native.trtfb" \
   --prompt "$TEST_PROMPT" --max-new-tokens "$MAX_NEW_TOKENS" --greedy \
   --warmup 3 --benchmark 10 > "$WORK/native.perf.log" 2>&1
 
-trtmc run "$WORK/qwen3-slot-ready.trtfb" \
+"$TRTMC" run "$WORK/qwen3-slot-ready.trtfb" \
   --kernel-bindings "$WORK/kernel-bindings.json" \
   --prompt "$TEST_PROMPT" --max-new-tokens "$MAX_NEW_TOKENS" --greedy \
   --warmup 3 --benchmark 10 > "$WORK/external.perf.log" 2>&1
@@ -291,7 +299,7 @@ accept a known regression. Repeat an edge result on an idle GPU.
 Qwen also records one raw decode-attention recipe per layer:
 
 ```bash
-trtmc build "${BUILD_ARGS[@]}" \
+"$TRTMC" build "${BUILD_ARGS[@]}" \
   --recipe qwen.decode_attention_region@1 \
            decoder.layers.0.decode_attention \
   -o "$WORK/qwen3-attention-slot.trtfb"
@@ -327,7 +335,7 @@ If you want to run that shipped FlashInfer kernel on an SM 10.3 GPU, use its
 published Direct Slot flow:
 
 ```bash
-trtmc kernel slots "$MODEL" --model-revision "$REVISION"
+"$TRTMC" kernel slots "$MODEL" --model-revision "$REVISION"
 
 python -m pip install \
   "flashinfer-python==0.6.15" \
@@ -348,11 +356,11 @@ sed "s/@SHA256@/$(sha256sum "$FI_WORK/flashinfer-qwen3.so" | awk '{print $1}')/"
   python/tensorrt_model_connect/families/qwen/examples/byok_flashinfer/qwen3-flashinfer.yaml.in \
   > "$FI_WORK/qwen3-flashinfer.yaml"
 
-trtmc build "${BUILD_ARGS[@]}" \
+"$TRTMC" build "${BUILD_ARGS[@]}" \
   --kernel "$FI_WORK/qwen3-flashinfer.yaml" \
   -o "$FI_WORK/qwen3-flashinfer.trtfb"
 
-trtmc run "$FI_WORK/qwen3-flashinfer.trtfb" \
+"$TRTMC" run "$FI_WORK/qwen3-flashinfer.trtfb" \
   --prompt "Explain grouped-query attention in one sentence." \
   --max-new-tokens 32 \
   --greedy
@@ -374,12 +382,12 @@ The build and runtime mechanisms stay identical; only selection changes.
 Capture the raw decode graph, then list its final layers:
 
 ```bash
-trtmc graph inspect \
+"$TRTMC" graph inspect \
   --engine-role decode \
   --snapshot "$WORK/decode.graph.json" \
   "${BUILD_ARGS[@]}"
 
-trtmc graph list "$WORK/decode.graph.json" \
+"$TRTMC" graph list "$WORK/decode.graph.json" \
   | tee "$WORK/decode.nodes.txt" \
   | tail -n 10
 ```
@@ -400,7 +408,7 @@ and leave the final FP32 logits cast in the graph:
 export BINDING_ID=qwen3.decode.logits_copy.manual@1
 NODES=(node:3598 node:3599 node:3600)
 
-trtmc graph select "$WORK/decode.graph.json" \
+"$TRTMC" graph select "$WORK/decode.graph.json" \
   --nodes "${NODES[@]}" \
   --binding-id "$BINDING_ID" \
   --workspace-bytes 0 \
@@ -410,7 +418,9 @@ trtmc graph select "$WORK/decode.graph.json" \
 Node IDs above are a receipt for the pinned build, not a stable API. Always
 copy IDs from your own snapshot. Use `--match GLOB` to filter the displayed
 node ID, operation, or name, then follow tensor edges. `--match` only changes
-the display; it never selects nodes.
+the display; it never selects nodes. For programmatic TensorRT layers, the
+`OP` column appends the current `.op` subtype when available, for example
+`LayerType.ELEMENTWISE/ElementWiseOperation.SUM`.
 
 Start with the smallest boundary that matches the kernel. The requested nodes
 must form one connected, convex region: no path may leave the region and later
@@ -437,7 +447,7 @@ Allowed types are `none`, signed 32-bit `int`, finite `float`, and null `ptr`.
 Build the slot-ready bundle through the existing advanced path:
 
 ```bash
-trtmc build "${BUILD_ARGS[@]}" \
+"$TRTMC" build "${BUILD_ARGS[@]}" \
   --graph-patch "$WORK/manual.selection.json" \
   -o "$WORK/qwen3-manual-slot-ready.trtfb"
 ```
@@ -460,6 +470,10 @@ alone never makes an existing DSO compatible.
   or INT32.
 - The selection is tied to its graph fingerprint and build metadata. Reuse the
   exact build arguments and recapture after graph-producing code changes.
+- Parser-created or otherwise raw TRT layers may expose only their base
+  `LayerType` in a snapshot. Treat the `OP` and `NAME` columns as inspection
+  aids, not a semantic kernel contract; the selected tensor boundary and your
+  DSO implementation remain authoritative.
 - Binding occurs only while a new pipeline loads. There is no in-place rebind
   API for a running pipeline.
 - v1 rejects a selected engine whose deserialization is deferred until first
