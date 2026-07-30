@@ -126,7 +126,15 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_snapshot() -> None:
     assert 'echo "$PRIVATE_CI_' not in dispatch
     assert "GITHUB_STEP_SUMMARY" not in dispatch
 
-    assert "/repos/$GITHUB_REPOSITORY/statuses/$MERGE_SHA" in dispatch
+    assert (
+        dispatch.count("HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}") == 3
+    )
+    assert "HEAD_SHA: ${{ needs.authorize.outputs.merge_sha }}" not in dispatch
+    assert (
+        dispatch.count("MERGE_SHA: ${{ needs.authorize.outputs.merge_sha }}") == 1
+    )
+    assert "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" in dispatch
+    assert "/repos/$GITHUB_REPOSITORY/statuses/$MERGE_SHA" not in dispatch
     assert "-f state=pending" in dispatch
     assert "-f state=failure" in dispatch
     assert dispatch.count("-f context=trtmc/premerge/required") == 2
@@ -135,9 +143,9 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_snapshot() -> None:
         '-f description="FAIL: TensorRT-Model-Connect premerge dispatch"'
     ) in dispatch
     assert dispatch.count(
-        '-f target_url="https://github.com/$GITHUB_REPOSITORY/tree/$MERGE_SHA/tests"'
+        '-f target_url="https://github.com/$GITHUB_REPOSITORY/tree/$HEAD_SHA/tests"'
     ) == 2
-    assert dispatch.index("/statuses/$MERGE_SHA") < dispatch.index(
+    assert dispatch.index("/statuses/$HEAD_SHA") < dispatch.index(
         "actions/workflows/premerge.yml/dispatches"
     )
 

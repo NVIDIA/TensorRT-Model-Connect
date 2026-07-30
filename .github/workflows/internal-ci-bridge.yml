@@ -127,16 +127,16 @@ jobs:
       - name: Mark the exact source snapshot pending
         env:
           GH_TOKEN: ${{ github.token }}
-          MERGE_SHA: ${{ needs.authorize.outputs.merge_sha }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
         run: |
           set -euo pipefail
-          [[ "$MERGE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
           gh api --silent --method POST \
-            "/repos/$GITHUB_REPOSITORY/statuses/$MERGE_SHA" \
+            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
             -f state=pending \
             -f context=trtmc/premerge/required \
             -f description="PENDING: TensorRT-Model-Connect premerge" \
-            -f target_url="https://github.com/$GITHUB_REPOSITORY/tree/$MERGE_SHA/tests"
+            -f target_url="https://github.com/$GITHUB_REPOSITORY/tree/$HEAD_SHA/tests"
 
       - name: Dispatch internal premerge CI
         env:
@@ -179,13 +179,13 @@ jobs:
         if: ${{ failure() }}
         env:
           GH_TOKEN: ${{ github.token }}
-          MERGE_SHA: ${{ needs.authorize.outputs.merge_sha }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
         run: |
           set -euo pipefail
-          [[ "$MERGE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
           gh api --silent --method POST \
-            "/repos/$GITHUB_REPOSITORY/statuses/$MERGE_SHA" \
+            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
             -f state=failure \
             -f context=trtmc/premerge/required \
             -f description="FAIL: TensorRT-Model-Connect premerge dispatch" \
-            -f target_url="https://github.com/$GITHUB_REPOSITORY/tree/$MERGE_SHA/tests"
+            -f target_url="https://github.com/$GITHUB_REPOSITORY/tree/$HEAD_SHA/tests"
