@@ -182,4 +182,5 @@ def test_official_reference_runs_same_audio_and_frame_budget(
     assert output.data["reference_tokens"].shape == (5, 8)
     assert output.data["num_frames"] == 5
     assert output.data["sample_rate"] == 24_000
+    assert output.data["rms"] == 0.0
     assert output.metadata["command"] == captured

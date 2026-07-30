@@ -133,9 +133,24 @@ class SpeechToSpeechComparator:
         rms = trt.data.get("rms", 0.0)
         if rms > 0 or trt.data.get("wav_exists", False):
             rms_thresh = thresholds.get("speech_min_rms", 0.001)
-            rms_ok = rms >= rms_thresh
+            ref_rms = ref.data.get("rms")
+            reference_is_below_floor = (
+                ref_rms is not None and float(ref_rms) < rms_thresh
+            )
+            rms_ok = rms >= rms_thresh or reference_is_below_floor
+            note = ""
+            if reference_is_below_floor:
+                note = (
+                    f"reference is also below the floor "
+                    f"(reference_rms={float(ref_rms):.8g})"
+                )
             metrics["rms_floor"] = MetricResult(
-                value=rms, threshold=rms_thresh, operator=">=", passed=rms_ok)
+                value=rms,
+                threshold=rms_thresh,
+                operator=">=",
+                passed=rms_ok,
+                note=note,
+            )
             if not rms_ok:
                 all_pass = False
 

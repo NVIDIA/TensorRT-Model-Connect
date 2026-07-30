@@ -161,6 +161,16 @@ class OfficialPersonaPlexReference:
         with wave.open(str(audio_path), "rb") as wav:
             sample_rate = wav.getframerate()
             num_samples = wav.getnframes()
+            channels = wav.getnchannels()
+            sample_width = wav.getsampwidth()
+            pcm = wav.readframes(num_samples)
+        if channels != 1 or sample_width != 2:
+            raise RuntimeError(
+                "PersonaPlex official reference WAV must be mono PCM16"
+            )
+        samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
+        samples *= 1.0 / 32768.0
+        rms = float(np.sqrt(np.mean(samples * samples)))
         if (
             tokens.ndim != 2
             or tokens.shape[0] < 1
@@ -184,6 +194,7 @@ class OfficialPersonaPlexReference:
                 "sample_rate": sample_rate,
                 "num_samples": num_samples,
                 "duration_s": num_samples / sample_rate,
+                "rms": rms,
             },
             timing_s=elapsed,
             metadata={
