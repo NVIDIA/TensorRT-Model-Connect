@@ -36,6 +36,7 @@ class _Session:
     completed: bool = False
     slot: dict[str, str] | None = None
     attentions: dict[int, list[Any]] = field(default_factory=dict)
+    recipes: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
 
 
 _ACTIVE: ContextVar[_Session | None] = ContextVar("trtmc_graph_build", default=None)
@@ -112,6 +113,57 @@ def record_attention(network: Any, attention: Any) -> None:
         session.attentions.setdefault(id(network), []).append(attention)
 
 
+@contextmanager
+def graph_recipe_region(
+    network: Any,
+    recipe_id: str,
+    instance_id: str,
+    *,
+    workspace_bytes: int = 0,
+    extra_args: tuple[dict[str, Any], ...] = (),
+    output_shape_input: int | None = None,
+) -> Iterator[None]:
+    """Record one family-owned, exact TRT layer interval during graph capture."""
+
+    session = _ACTIVE.get()
+    if session is None or _ROLE.get() != session.role:
+        yield
+        return
+    if type(recipe_id) is not str or not recipe_id:
+        raise GraphPatchError("graph recipe ID must be a non-empty string")
+    if type(instance_id) is not str or not instance_id:
+        raise GraphPatchError("graph recipe instance ID must be a non-empty string")
+
+    from .trt_compat import unwrap
+
+    raw_network = unwrap(network)
+    records = session.recipes.setdefault(id(raw_network), [])
+    if any(
+        record["id"] == recipe_id and record["instance"] == instance_id
+        for record in records
+    ):
+        raise GraphPatchError(
+            f"graph recipe {recipe_id!r} instance {instance_id!r} was recorded twice"
+        )
+    start = int(raw_network.num_layers)
+    yield
+    end = int(raw_network.num_layers)
+    if end <= start:
+        raise GraphPatchError(
+            f"graph recipe {recipe_id!r} instance {instance_id!r} contains no layers"
+        )
+    records.append(
+        {
+            "id": recipe_id,
+            "instance": instance_id,
+            "node_ids": [f"node:{index}" for index in range(start, end)],
+            "workspace_bytes": workspace_bytes,
+            "extra_args": list(extra_args),
+            "output_shape_input": output_shape_input,
+        }
+    )
+
+
 def _metadata(session: _Session) -> dict[str, Any]:
     return {**session.metadata, "engine_role": _ROLE.get()}
 
@@ -159,6 +211,9 @@ def process_network(network: Any) -> None:
         raise GraphPatchError(f"engine role {role!r} was built more than once")
     metadata = _metadata(session)
     attentions = session.attentions.get(id(network), ())
+    recipes = session.recipes.get(id(network), ())
+    if recipes:
+        metadata["graph_recipes"] = list(recipes)
     snapshot = snapshot_network(network, metadata=metadata, attentions=attentions)
     if session.mode == "inspect":
         assert session.path is not None

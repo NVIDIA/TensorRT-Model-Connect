@@ -8,6 +8,7 @@ Tensor names and shapes must stay compatible with the C++ bundle runtime.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
@@ -1280,37 +1281,49 @@ def add_native_kv_cache_attention_from_rows(
 
     if q_4d.dtype != trt.bfloat16:
         raise ValueError("Qwen native KV attention requires BF16 queries")
-    # Keep the exact score scale until the Q product, matching HF SDPA.  If
-    # the constant is rounded to BF16 first, near-tied logits can diverge at
-    # long context even though IAttention itself remains on the fused path.
-    q_scale_input = network.add_cast(q_4d, trt.float32).get_output(0)
-    scale_t = add_constant(
-        network,
-        (1, 1, 1, 1),
-        np.array([[[[scale]]]]),
-        dtype=np.float32,
-    )
-    q_scaled = network.add_elementwise(
-        q_scale_input, scale_t, trt.ElementWiseOperation.PROD
-    ).get_output(0)
-    q_scaled = network.add_cast(q_scaled, trt.bfloat16).get_output(0)
+    recipe = nullcontext()
+    if kernel_slot_instance is not None:
+        from ...graph_build import graph_recipe_region
 
-    attention = network.add_attention_v2(
-        q_scaled,
-        updated_k,
-        updated_v,
-        trt.AttentionNormalizationOp.SOFTMAX,
-        trt.CausalMaskKind.LOWER_RIGHT,
-    )
-    if attention is None:
-        raise RuntimeError("TensorRT failed to create Qwen native attention")
-    # The prototype deliberately requires TensorRT's fused attention tactic.
-    # Unsupported dtype/head geometries fail at build time instead of silently
-    # falling back to a primitive graph with materially lower decode speed.
-    attention.decomposable = False
-    attention.key_value_lengths = key_value_lengths
-    if tag:
-        attention.name = tag
+        recipe = graph_recipe_region(
+            network,
+            "qwen.decode_attention_region@1",
+            kernel_slot_instance,
+            extra_args=({"type": "float", "value": float(scale)},),
+            output_shape_input=0,
+        )
+    with recipe:
+        # Keep the exact score scale until the Q product, matching HF SDPA.  If
+        # the constant is rounded to BF16 first, near-tied logits can diverge at
+        # long context even though IAttention itself remains on the fused path.
+        q_scale_input = network.add_cast(q_4d, trt.float32).get_output(0)
+        scale_t = add_constant(
+            network,
+            (1, 1, 1, 1),
+            np.array([[[[scale]]]]),
+            dtype=np.float32,
+        )
+        q_scaled = network.add_elementwise(
+            q_scale_input, scale_t, trt.ElementWiseOperation.PROD
+        ).get_output(0)
+        q_scaled = network.add_cast(q_scaled, trt.bfloat16).get_output(0)
+
+        attention = network.add_attention_v2(
+            q_scaled,
+            updated_k,
+            updated_v,
+            trt.AttentionNormalizationOp.SOFTMAX,
+            trt.CausalMaskKind.LOWER_RIGHT,
+        )
+        if attention is None:
+            raise RuntimeError("TensorRT failed to create Qwen native attention")
+        # The prototype deliberately requires TensorRT's fused attention tactic.
+        # Unsupported dtype/head geometries fail at build time instead of silently
+        # falling back to a primitive graph with materially lower decode speed.
+        attention.decomposable = False
+        attention.key_value_lengths = key_value_lengths
+        if tag:
+            attention.name = tag
 
     context = reshape_heads_4d_to_rows(
         network,

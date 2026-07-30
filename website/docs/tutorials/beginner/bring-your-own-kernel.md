@@ -2,45 +2,61 @@
 title: "Bring Your Own Kernel"
 ---
 
-This tutorial replaces one explicitly selected region of a native TensorRT
-graph with a load-time TVM-FFI kernel slot.
+This tutorial replaces part of a Qwen3-8B TensorRT graph with a TVM-FFI
+kernel. You do not write TensorRT C++.
 
-The workflow is:
+Start with the simplest graph workflow and move to the escape hatch only when
+you need it:
+
+| Level | How the region is chosen | Who should use it |
+| --- | --- | --- |
+| Recommended | The model family publishes a versioned recipe and you choose one exact instance. | Most kernel authors. |
+| Advanced | You inspect the raw TensorRT graph and type every node ID yourself. | Authors whose region has no recipe. |
+
+A recipe is only a saved, family-owned manual selection. It records exact TRT
+node IDs, workspace, scalar arguments, and output-shape rule while the family
+constructs the graph. `graph recipe apply` passes those values to the same
+`select_region()` validator used by the advanced path and writes the same
+selection JSON. It adds no semantic graph, matching language, plugin schema, or
+runtime behavior.
+
+Both levels converge here:
 
 ```text
-graph inspect -> graph list -> graph select -> build --graph-patch
-              -> kernel-bindings.json -> load a pipeline
+selection JSON -> build --graph-patch -> slot-ready bundle
+               -> kernel-bindings.json -> load a new pipeline
 ```
 
-There is no semantic lowering map. You inspect the TensorRT graph that Model
-Connect is about to compile, copy the exact node IDs that you want to replace,
-and bring a compatible TVM-FFI DSO. The model family does not need a new slot
-or a code change.
-
-This is a raw TensorRT graph workflow. Layer names and operations help you
-navigate, but they are not a stable model-level semantic API.
+The DSO is not stored in a graph-slot bundle. You may bind another
+ABI-compatible DSO when constructing another pipeline without rebuilding the
+bundle. A running pipeline is never rebound in place.
 
 ## Before you start
 
-You need:
+Complete [Installation](../../getting-started/installation.md), clone this
+repository, and run the commands below from its root. You need:
 
-- a native TensorRT build of Model Connect with TVM-FFI enabled;
-- a trusted TVM-FFI DSO for the target GPU;
-- enough resources to build the selected model;
+- a native TensorRT build with TVM-FFI enabled;
+- enough memory and disk to build Qwen3-8B;
+- a trusted TVM-FFI DSO for the region you select;
 - one pinned model revision and one fixed set of build options.
 
-Run the commands from the repository root. This example uses Qwen3-8B and the
-small identity-copy TVM-FFI kernel shipped in `examples/byok/`. It first
-replaces a Qwen `logits + zero bias` region. That deliberately simple region
-makes the complete mechanism testable before you adapt the same steps to a real
-attention kernel. It is a load-and-correctness example, not a promised speedup.
+This first pass uses the identity-copy kernel in `examples/byok/` and Qwen's
+prebuilt `logits + zero` recipe. The operation is intentionally simple: it
+lets a first-time user test recipe selection, graph replacement, load-time
+binding, correctness, and performance before adapting a real kernel.
 
 ```bash
 export MODEL=Qwen/Qwen3-8B
 export REVISION=b968826d9c46dd6066d109eabc6255188de91218
 export WORK="$PWD/artifacts/qwen3-graph-slot"
-export BUILD_DIR="$PWD/build-runtime-trt"
+export BUILD_DIR="${BUILD_DIR:-$PWD/build-runtime-trt}"
 mkdir -p "$WORK"
+
+test -f "$BUILD_DIR/CMakeCache.txt" || {
+  echo "BUILD_DIR must name an already configured native TVM-FFI build"
+  exit 1
+}
 
 BUILD_ARGS=(
   "$MODEL"
@@ -51,11 +67,18 @@ BUILD_ARGS=(
 )
 ```
 
-Use the same `BUILD_ARGS` for inspection, the patched build, and the native
-comparison build. A different revision, precision, cache length, layout, or
-graph-producing implementation invalidates the selection.
+Use the identical `BUILD_ARGS` for graph inspection, the patched build, and
+the native comparison. Changing the revision, precision, cache length, engine
+layout, or graph-producing code invalidates a saved selection.
 
-## 1. Capture the TensorRT graph
+:::warning Trusted native code only
+A DSO executes native code when loaded. SHA-256 checks identity, not safety.
+Use only a library that you trust.
+:::
+
+## Level 1: use a family recipe
+
+### 1. Capture the TensorRT graph
 
 Capture the decode graph immediately before TensorRT serialization:
 
@@ -66,105 +89,60 @@ trtmc graph inspect \
   "${BUILD_ARGS[@]}"
 ```
 
-Inspection stops before engine compilation. The snapshot contains the ordered
-TensorRT layers, tensors, engine role, build metadata, and a graph fingerprint.
-For a split decoder, use `--engine-role prefill` instead to inspect the prefill
-engine. `dual_profile` is also available for a dual-profile decoder build.
+Inspection stops before engine compilation. The snapshot contains ordered TRT
+layers and tensors, build metadata, a graph fingerprint, and any exact recipes
+recorded by the model family.
 
-## 2. List nodes and choose a region
-
-The POC region is at the end of the decode graph, so list its last layers:
+### 2. See the available recipes
 
 ```bash
-trtmc graph list "$WORK/decode.graph.json" \
-  | tee "$WORK/decode.nodes.txt" \
-  | tail -n 10
+trtmc graph recipe list "$WORK/decode.graph.json" \
+  | tee "$WORK/decode.recipes.txt"
 ```
 
-The columns are:
+For the pinned Qwen3-8B revision, the output includes:
 
 ```text
-ID        OP        NAME        INPUTS        OUTPUTS
-node:...  ...       ...         tensor:...    tensor:...
+RECIPE                               INSTANCE                           NODES
+qwen.decode_attention_region@1       decoder.layers.0.decode_attention  node:79,...,node:84
+...
+qwen.decode_attention_region@1       decoder.layers.35.decode_attention node:3544,...,node:3549
+qwen.decode_logits_copy@1            decoder.logits_zero_bias           node:3598,node:3599,node:3600
 ```
 
-For the pinned revision above, the tail includes this chain:
+Recipe IDs are versioned. Instances are explicit because a model may contain
+many copies of the same pattern. The command never silently chooses the first
+match or every match.
 
-```text
-node:3598  CONSTANT
-node:3599  CAST
-node:3600  ELEMENTWISE
-node:3601  CAST          -> logits
-```
+### 3. Apply one recipe instance
 
-Qwen has no LM-head bias in this checkpoint, so Model Connect emits a zero
-constant, casts it to BF16, and adds it to the BF16 matrix-multiply result.
-Select the first three nodes and leave the final FP32 logits cast in the graph.
-If your IDs differ, use the chain shown by your own snapshot instead of copying
-these numbers.
-
-For another kernel, use `--match GLOB` to filter by node ID, operation, or layer
-name, then follow the tensor edges and copy the exact IDs. Start with the
-smallest region that matches the kernel. The selected nodes must form one
-connected, convex region: a graph path cannot leave the region and later
-re-enter it.
-
-`--match` only filters what `list` displays; it does not select anything. Node
-IDs are explicit on purpose. `graph select` does not accept a model semantic
-name, wildcard, regular expression, or lowering map.
-
-## 3. Lock the selection and ABI
-
-Use the IDs verified in the previous step:
+Turn the known logits region into an ordinary selection:
 
 ```bash
-export BINDING_ID=qwen3.decode.logits_copy@1
-NODES=(node:3598 node:3599 node:3600)
+export BINDING_ID=qwen.decode_logits_copy@1
 
-trtmc graph select "$WORK/decode.graph.json" \
-  --nodes "${NODES[@]}" \
-  --binding-id "$BINDING_ID" \
-  --workspace-bytes 0 \
+trtmc graph recipe apply "$WORK/decode.graph.json" \
+  "$BINDING_ID" \
+  --instance decoder.logits_zero_bias \
   -o "$WORK/logits-copy.selection.json"
 ```
 
-`graph select` prints each ordered input and output tensor ID, TensorRT name,
-dtype, and shape, followed by `abi_sha256`. It also writes a selection JSON
-containing:
+The command prints one BF16 `[1, 151936]` input, one BF16 `[1, 151936]`
+output, and `abi_sha256`. It then writes a selection containing:
 
+- the exact node and boundary tensor IDs;
 - the graph fingerprint and engine role;
-- `abi_sha256`, derived from the ordered tensor contracts, workspace, and
-  extra arguments;
-- the exact selected node and boundary tensor IDs.
+- the binding ID and ABI SHA-256;
+- workspace, extra arguments, and the output-shape rule.
 
-This POC prints one BF16 `[1, 151936]` input and one BF16 `[1, 151936]`
-output. Both shapes are fixed, so it does not use
-`--output-shape-like-input`. A dynamic output requires that option with a
-boundary input of the same dtype and declared shape. A `-1` means your DSO must
-handle every runtime shape allowed by the built engine profile; Model Connect
-never guesses a relationship from matching `-1` placeholders.
+The recipe supplies these choices, but it does not bypass validation. The
+region must still be connected and convex, expose exactly one output, use
+supported device tensors, and satisfy the same output-shape rules as a manual
+selection.
 
-If the kernel needs fixed scalar or null arguments, add one strict JSON object
-per argument, in call order. Add lines like these immediately before `-o` in
-the `graph select` command that already succeeded above; keep or omit
-`--output-shape-like-input` according to that region's output:
+### 4. Build the example TVM-FFI DSO
 
-```text
-Before:
-  -o "$WORK/logits-copy.selection.json"
-
-After:
-  --extra-arg '{"type":"int","value":32}' \
-  --extra-arg '{"type":"float","value":0.5}' \
-  -o "$WORK/logits-copy.selection.json"
-```
-
-Allowed types are `none`, signed 32-bit `int`, finite `float`, and null `ptr`.
-`none` and `ptr` have no `value` field.
-
-## 4. Implement the TVM-FFI function
-
-Build the supplied POC DSO from the same configured native build tree:
+Build the supplied DSO from the configured native tree:
 
 ```bash
 cmake --build "$BUILD_DIR" --target trtmc_byok_identity_copy -j
@@ -179,26 +157,21 @@ run(TensorView input, TensorView output)
 ```
 
 It performs an asynchronous device-to-device copy on TensorRT's current CUDA
-stream. That is equivalent to the selected Qwen `logits + zero` region.
+stream, which is equivalent to adding Qwen's zero LM-head bias.
 
-For your own region, use the boundary records printed by `graph select` to
-export a TVM-FFI module function, such as `run`, with this fixed call order:
+For another recipe, implement the exact call order defined by the printed
+boundary tensors and the selection JSON:
 
 1. boundary input DLTensors in `input_tensor_ids` order;
-2. when `workspace_bytes` is nonzero, one CUDA `uint8` workspace DLTensor;
+2. a CUDA `uint8` workspace DLTensor when `workspace_bytes` is nonzero;
 3. boundary output DLTensors in `output_tensor_ids` order;
-4. extra arguments in their declared order.
+4. fixed scalar or null arguments in `extra_args` order.
 
-The function must write the declared outputs. A raw third-party kernel is not
-automatically compatible; wrap or export it through TVM-FFI with this exact
-contract. Changing a boundary dtype, shape, argument order, workspace size, or
-extra argument changes the engine ABI and requires a new selection and build.
-The identity-copy DSO is only compatible with a one-input, one-output
-same-size contiguous boundary; it is not an attention implementation.
+TVM-FFI does not expose a signature that Model Connect can compare with this
+contract at load time. The kernel author must implement that ABI
+exactly.
 
-## 5. Build a slot-ready bundle
-
-Build with the same model revision and options used for inspection:
+### 5. Build a slot-ready bundle
 
 ```bash
 trtmc build "${BUILD_ARGS[@]}" \
@@ -206,28 +179,23 @@ trtmc build "${BUILD_ARGS[@]}" \
   -o "$WORK/qwen3-slot-ready.trtfb"
 ```
 
-Build reconstructs the graph, verifies its fingerprint, rewires the selected
-region to a `TvmFfiKernel` layer, and stores `kernel_slots.json` in the bundle.
-That section contains the binding ID and ABI SHA-256. The plugin name is
-derived as `trtmc.slot.<binding-id>` instead of being repeated in the schema.
+Build reconstructs the graph, verifies its fingerprint, revalidates the
+selection, replaces the region with a `TvmFfiKernel` layer, and stores the
+binding ID and ABI hash in `kernel_slots.json`. The DSO is not embedded.
 
-The DSO is not embedded in this bundle. The TensorRT engine and its slot ABI
-are now fixed; the compatible DSO is chosen when a pipeline is loaded.
+### 6. Bind the DSO when a pipeline loads
 
-## 6. Write the strict runtime binding manifest
-
-Copy your trusted DSO beside the manifest under an immutable, content-addressed
-name:
+Copy the DSO under an immutable, content-addressed name and write the strict
+runtime manifest:
 
 ```bash
 export DSO_SHA256="$(sha256sum "$SOURCE_DSO" | awk '{print $1}')"
 export DSO="$WORK/kernel.$DSO_SHA256.so"
 cp "$SOURCE_DSO" "$DSO"
-export SELECTION="$WORK/logits-copy.selection.json"
 
 export ABI_SHA256="$(
   python -c 'import json,sys; print(json.load(open(sys.argv[1]))["abi_sha256"])' \
-    "$SELECTION"
+    "$WORK/logits-copy.selection.json"
 )"
 
 cat > "$WORK/kernel-bindings.json" <<EOF
@@ -246,14 +214,11 @@ cat > "$WORK/kernel-bindings.json" <<EOF
 EOF
 ```
 
-The schema is exact: missing or unknown fields fail. The library path must be
-relative to the manifest, each DSO digest must match, and every slot in the
-bundle must be bound exactly once. A digest verifies identity, not safety; load
-only trusted native code.
+Missing or unknown fields fail. The library path is relative to the manifest,
+the DSO digest must match, and every slot in the bundle must be bound exactly
+once.
 
-## 7. Load and run
-
-A slot-ready bundle requires `--kernel-bindings`:
+Load and run:
 
 ```bash
 trtmc run "$WORK/qwen3-slot-ready.trtfb" \
@@ -263,29 +228,21 @@ trtmc run "$WORK/qwen3-slot-ready.trtfb" \
   --greedy
 ```
 
-The runtime checks that the manifest-declared ABI hash matches the bundle, then
-validates the DSO hash and loads the named module function while it constructs
-the pipeline. TVM-FFI does not expose a function signature for the runtime to
-compare with the tensor contract, so the kernel author must implement the ABI
-printed by `graph select`. A slot-ready load fails if that model defers
-TensorRT engine deserialization until first inference; v1 binds only during
-pipeline loading.
+To switch kernels, create another manifest naming a different immutable DSO
+with the same binding ID and ABI hash, destroy the old pipeline, and construct
+a new one. Editing a manifest does not affect an existing pipeline.
 
-You can load the same bundle into a new pipeline with another DSO when that DSO
-uses the same binding ID and ABI hash. Existing pipelines keep the function
-they loaded: editing the manifest or loading another pipeline does not rebind a
-running pipeline. Use a distinct immutable filename for each DSO version;
-overwriting a loaded `.so` path is not a supported swap mechanism. Destroy and
-load a new pipeline to switch kernels.
+### 7. Check correctness and no regression
 
-## 8. Check correctness and performance
-
-Build a native baseline with the same `BUILD_ARGS`, compare deterministic
-outputs, and benchmark both bundles on the same idle GPU:
+Build the native comparison with the same arguments:
 
 ```bash
 trtmc build "${BUILD_ARGS[@]}" -o "$WORK/qwen3-native.trtfb"
+```
 
+Compare deterministic output:
+
+```bash
 TEST_PROMPT='Explain grouped-query attention, KV caching, and decode latency.'
 MAX_NEW_TOKENS=64
 
@@ -303,9 +260,10 @@ trtmc run "$WORK/qwen3-slot-ready.trtfb" \
 diff -u "$WORK/native.jsonl" "$WORK/external.jsonl"
 ```
 
-The JSONL includes both decoded text and exact token IDs. An empty diff is a
-useful smoke test, not a complete numerical qualification. Use the same prompt
-and idle GPU for a simple no-regression gate:
+An empty diff proves exact token equality for this smoke input. It is not a
+complete numerical qualification.
+
+Benchmark both bundles on the same idle GPU:
 
 ```bash
 trtmc run "$WORK/qwen3-native.trtfb" \
@@ -327,21 +285,15 @@ def result(path):
         r"generated_tokens_mean=([0-9.]+).*tokens_per_sec=([0-9.]+)", text
     )
     if not matches:
-        raise SystemExit(f"{path}: benchmark token count and throughput were not reported")
+        raise SystemExit(f"{path}: benchmark result was not reported")
     generated_tokens, throughput = matches[-1]
     return float(generated_tokens), float(throughput)
 
 native_tokens, native_throughput = result(sys.argv[1])
 external_tokens, external_throughput = result(sys.argv[2])
-print(
-    f"native={native_throughput:.2f} external={external_throughput:.2f} tokens/s; "
-    f"mean generated tokens={native_tokens:.2f}"
-)
+print(f"native={native_throughput:.2f} external={external_throughput:.2f} tokens/s")
 if external_tokens != native_tokens:
-    raise SystemExit(
-        "FAIL: generated-token means differ "
-        f"(native={native_tokens:.2f}, external={external_tokens:.2f})"
-    )
+    raise SystemExit("FAIL: generated-token means differ")
 if native_throughput <= 0 or external_throughput <= 0:
     raise SystemExit("FAIL: throughput must be positive")
 ratio = external_throughput / native_throughput
@@ -351,60 +303,173 @@ print(f"PASS: external/native throughput is {ratio:.4f}")
 PY
 ```
 
-The `0.98` threshold allows a 2% shortfall for normal measurement noise; it is
-not a license for a known regression. Re-run on an idle GPU if the result is
-close to the boundary. Accept the kernel only if it meets your numerical
-tolerance and this gate. This tutorial makes no performance claim for a
-particular external DSO.
+The 2% margin covers ordinary measurement noise; it is not permission to
+accept a known regression. Repeat an edge result on an idle GPU.
 
-## 9. Replace attention with your kernel
+### 8. Apply the same Recipe flow to attention
 
-After the POC passes, repeat the same workflow for attention:
+Qwen also records one raw decode-attention recipe per layer:
 
 ```bash
-trtmc graph list "$WORK/decode.graph.json" --match '*attention*'
+trtmc graph recipe apply "$WORK/decode.graph.json" \
+  qwen.decode_attention_region@1 \
+  --instance decoder.layers.0.decode_attention \
+  -o "$WORK/attention.selection.json"
 ```
 
-TensorRT 11 displays one `IAttention` as adjacent `ATTENTION_INPUT` and
-`ATTENTION_OUTPUT` nodes. Select both for the complete attention operation, and
-include surrounding scale or layout nodes only when that matches your kernel's
-contract. Model Connect includes typed attention ports such as
-`key_value_lengths` in the ordered boundary even though TensorRT does not
-expose those ports through ordinary `get_input()` calls.
+For Qwen3-8B layer 0, the printed boundary plus `extra_args` in the selection
+JSON define this ordered contract:
 
-Run `graph select` with those IDs, implement the exact printed TVM-FFI argument
-order, and rebuild the slot-ready bundle. A FlashInfer or CUDA-DSL export with a
-different rank, page-table argument, scale argument, or output layout needs a
-small TVM-FFI wrapper; a DSO built for a family-owned Direct Slot is not
-automatically compatible with a raw graph region. Keep the new kernel only
-after the same correctness and no-regression checks pass.
+```text
+input[0]  query              BF16  [1, 32, -1, 128]
+input[1]  key cache          BF16  [1, 8, 40960, 128]
+input[2]  value cache        BF16  [1, 8, 40960, 128]
+input[3]  key/value lengths  INT32 [1]
+output[0] context            BF16  [1, 32, -1, 128]
+extra[0]  softmax scale      float
+```
 
-## Current limits
+Export any CUDA DSL, FlashInfer, or custom CUDA kernel through TVM-FFI with
+that exact ABI and then reuse the slot-ready build and load-time binding steps.
+No Model Connect change is required for another DSO with this contract.
 
-- Only native TensorRT bundles with TVM-FFI enabled are supported. Explicit
-  graph slots currently reject TensorRT-RTX, optimized-runtime, quantized, and
-  tensor-parallel builds.
-- One build can replace one connected, convex region with exactly one output
-  boundary in one engine role.
-- A region cannot include a network output, shape or host tensor, control-flow
+The repository does not yet ship a verified FlashInfer wrapper for this raw
+boundary. The FlashInfer exporter already shipped under
+`python/tensorrt_model_connect/families/qwen/examples/byok_flashinfer/` targets
+the older, richer `qwen.decode_attention@1` Direct Slot. It uses 2-D
+query/output tensors plus page offsets and a page table created by Qwen family
+glue. Those tensors do not exist at the raw TRT attention boundary, so that DSO
+is **not** compatible with `qwen.decode_attention_region@1`.
+
+#### Working FlashInfer reference: Direct Slot
+
+If you want to run that shipped FlashInfer kernel on an SM 10.3 GPU, use its
+published Direct Slot flow:
+
+```bash
+trtmc kernel slots "$MODEL" --model-revision "$REVISION"
+
+python -m pip install \
+  "flashinfer-python==0.6.15" \
+  "nvidia-cutlass-dsl==4.5.0" \
+  "apache-tvm-ffi==0.1.12"
+
+export FI_WORK="$PWD/artifacts/qwen3-flashinfer"
+mkdir -p "$FI_WORK"
+test ! -e "$FI_WORK/flashinfer-qwen3.so" || {
+  echo "Choose a fresh FI_WORK; the exporter will not overwrite a DSO"
+  exit 1
+}
+
+python python/tensorrt_model_connect/families/qwen/examples/byok_flashinfer/export_flashinfer_kernel.py \
+  --output "$FI_WORK/flashinfer-qwen3.so"
+
+sed "s/@SHA256@/$(sha256sum "$FI_WORK/flashinfer-qwen3.so" | awk '{print $1}')/" \
+  python/tensorrt_model_connect/families/qwen/examples/byok_flashinfer/qwen3-flashinfer.yaml.in \
+  > "$FI_WORK/qwen3-flashinfer.yaml"
+
+trtmc build "${BUILD_ARGS[@]}" \
+  --kernel "$FI_WORK/qwen3-flashinfer.yaml" \
+  -o "$FI_WORK/qwen3-flashinfer.trtfb"
+
+trtmc run "$FI_WORK/qwen3-flashinfer.trtfb" \
+  --prompt "Explain grouped-query attention in one sentence." \
+  --max-new-tokens 32 \
+  --greedy
+```
+
+That shortcut replaces all 36 instances, but it is a reference for exporting
+and running FlashInfer rather than a raw graph Recipe: `--kernel` embeds the DSO
+in the bundle, so changing it requires another bundle build. Repeat step 7
+against the native bundle before accepting it. Do not describe it as a
+load-time-swappable raw graph Recipe.
+
+## Level 2: choose an arbitrary region yourself
+
+Use this path when no family Recipe matches the boundary your kernel needs.
+The build and runtime mechanisms stay identical; only selection changes.
+
+### 9. Inspect and circle raw TRT nodes
+
+List the end of the same snapshot:
+
+```bash
+trtmc graph list "$WORK/decode.graph.json" \
+  | tee "$WORK/decode.nodes.txt" \
+  | tail -n 10
+```
+
+For the pinned revision, the tail includes:
+
+```text
+node:3598  CONSTANT
+node:3599  CAST
+node:3600  ELEMENTWISE
+node:3601  CAST          -> logits
+```
+
+The first three nodes are the region used by the Recipe. Select them manually
+and leave the final FP32 logits cast in the graph:
+
+```bash
+export BINDING_ID=qwen3.decode.logits_copy.manual@1
+NODES=(node:3598 node:3599 node:3600)
+
+trtmc graph select "$WORK/decode.graph.json" \
+  --nodes "${NODES[@]}" \
+  --binding-id "$BINDING_ID" \
+  --workspace-bytes 0 \
+  -o "$WORK/manual.selection.json"
+```
+
+Node IDs above are a receipt for the pinned build, not a stable API. Always
+copy IDs from your own snapshot. Use `--match GLOB` to filter the displayed
+node ID, operation, or name, then follow tensor edges. `--match` only changes
+the display; it never selects nodes.
+
+Start with the smallest boundary that matches the kernel. The requested nodes
+must form one connected, convex region: no path may leave the region and later
+re-enter it.
+
+For a dynamic output, add:
+
+```text
+--output-shape-like-input INPUT_INDEX
+```
+
+The chosen boundary input must have the same dtype and declared shape as the
+output. A `-1` means the DSO must handle every runtime shape allowed by the
+engine profile; Model Connect does not infer shape relationships.
+
+For fixed scalar or null arguments, repeat strict JSON arguments in call order:
+
+```text
+--extra-arg '{"type":"int","value":32}'
+--extra-arg '{"type":"float","value":0.5}'
+```
+
+Allowed types are `none`, signed 32-bit `int`, finite `float`, and null `ptr`.
+For this same logits boundary, reuse the identity-copy DSO and continue at
+step 5 with `--graph-patch "$WORK/manual.selection.json"`. For any other
+boundary, first implement the exact ABI in its selection JSON using the rules
+in step 4, then continue at step 5. A matching operation name alone never makes
+an existing DSO compatible.
+
+## Current graph-slot limits
+
+- Only native TensorRT bundles with TVM-FFI enabled are supported. Graph slots
+  reject TensorRT-RTX, optimized-runtime, quantized, and tensor-parallel builds.
+- One build replaces one connected, convex region with exactly one output in
+  one engine role. A recipe instance does not bypass this one-region limit.
+- A region cannot contain a network output, shape or host tensor, control-flow
   or collective layer, or an existing plugin layer.
-- A selected output must have fixed positive dimensions or the same dtype and
-  shape as a boundary input.
 - Boundary tensors must be linear, rank 8 or lower, and use BF16, FP16, FP32,
   or INT32.
-- The selection is tied to the captured graph fingerprint and recorded build
-  metadata. Reuse identical `BUILD_ARGS`.
-- Kernel binding happens only while a new pipeline is loaded; there is no
-  in-place rebind API for a running pipeline.
-- v1 rejects a model that defers its selected engine's TensorRT deserialization
-  until inference instead of completing it during pipeline load.
-- Slot-ready bundles load through the CLI or the C++ binding overload; the
-  current C-linkage API has no kernel-binding argument.
-
-## Existing family-owned Direct Slots
-
-The earlier Direct Slot workflow remains supported. When a model family
-already publishes the boundary you need, use `trtmc kernel slots` and
-`trtmc build --kernel <manifest.yaml>`. That YAML flow is simpler and keeps the
-semantic call site family-owned. Use explicit graph selection only when you
-need a raw TensorRT region that the family does not publish.
+- The selection is tied to its graph fingerprint and build metadata. Reuse the
+  exact build arguments and recapture after graph-producing code changes.
+- Binding occurs only while a new pipeline loads. There is no in-place rebind
+  API for a running pipeline.
+- v1 rejects a selected engine whose deserialization is deferred until first
+  inference instead of completing during pipeline load.
+- Slot-ready bundles load through the CLI or C++ binding overload. The current
+  C-linkage API has no kernel-binding argument.

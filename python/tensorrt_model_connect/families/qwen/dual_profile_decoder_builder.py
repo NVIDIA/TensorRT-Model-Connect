@@ -47,6 +47,7 @@ types handled by this family.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import sys
 from typing import TYPE_CHECKING
 
@@ -847,8 +848,18 @@ def build_dual_profile_decoder_engine(
             network, logits, out_vocab, lm_bias, dtype=work_np_dtype)
     else:
         zero_bias = np.zeros(out_vocab, dtype=work_np_dtype)
-        logits = graph_ops.add_bias_sum(
-            network, logits, out_vocab, zero_bias, dtype=work_np_dtype)
+        recipe = nullcontext()
+        if profile_mode == "decode":
+            from ...graph_build import graph_recipe_region
+
+            recipe = graph_recipe_region(
+                network,
+                "qwen.decode_logits_copy@1",
+                "decoder.logits_zero_bias",
+            )
+        with recipe:
+            logits = graph_ops.add_bias_sum(
+                network, logits, out_vocab, zero_bias, dtype=work_np_dtype)
 
     if work_trt_dtype != trt.float32:
         logits = network.add_cast(logits, trt.float32).get_output(0)

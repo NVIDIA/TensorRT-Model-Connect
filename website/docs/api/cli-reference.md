@@ -105,6 +105,12 @@ trtmc graph inspect \
 
 trtmc graph list graph.json [--match GLOB]
 
+trtmc graph recipe list graph.json
+
+trtmc graph recipe apply graph.json RECIPE_ID \
+  --instance INSTANCE_ID \
+  -o region.json
+
 trtmc graph select graph.json \
   --nodes NODE_ID [NODE_ID ...] \
   --binding-id ID \
@@ -117,12 +123,21 @@ trtmc graph select graph.json \
 captures immediately before TensorRT serialization, and does not compile a
 bundle. Put its own `--snapshot` and `--engine-role` options before the model.
 `list` prints node IDs, operation and layer names, and tensor edges; `--match`
-only filters displayed IDs, operations, or names. `select` still accepts only
-explicit node IDs and prints the ordered boundary tensor IDs, names, dtypes,
-shapes, and ABI hash. Each `--extra-arg` is one strict JSON object whose type is
-`none`, `int`, `float`, or `ptr`. A dynamic output additionally requires
-`--output-shape-like-input`; fixed outputs reject that option. `--binding-id`
-accepts only ASCII letters, digits, `_`, `.`, `@`, and `-`.
+only filters displayed IDs, operations, or names.
+
+`recipe list` shows exact, versioned region instances recorded by the owning
+model family while it constructed this graph. `recipe apply` resolves one
+exact recipe and instance, then calls the same region validator used by manual
+selection. Its output is an ordinary selection JSON; recipes add no runtime
+schema or weaker validation. Zero matches, duplicate matches, and invalid
+regions fail.
+
+`select` is the advanced path and accepts only explicit node IDs. Both apply
+paths print the ordered boundary tensor IDs, names, dtypes, shapes, and ABI
+hash. Each manual `--extra-arg` is one strict JSON object whose type is `none`,
+`int`, `float`, or `ptr`. A dynamic output additionally requires
+`--output-shape-like-input`; fixed outputs reject that option. Manual
+`--binding-id` accepts only ASCII letters, digits, `_`, `.`, `@`, and `-`.
 `--workspace-bytes` accepts values from 0 through 2147483647.
 
 Build the same model revision and options with `--graph-patch region.json` to

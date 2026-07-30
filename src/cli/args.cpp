@@ -188,7 +188,7 @@ void print_usage() {
         << "Usage:\n"
            "  trtmc build           <hf-model-or-dir> -o <bundle.trtfb> [builder args...]\n"
            "  trtmc kernel slots    <hf-model-or-dir> [--model-revision REV]\n"
-           "  trtmc graph           <inspect|list|select> [args...]\n"
+           "  trtmc graph           <inspect|list|recipe|select> [args...]\n"
            "  trtmc run             <bundle.trtfb> --prompt \"text\" [--image PATH] "
            "[--max-new-tokens N] [--temperature F] [--top-p F] [--min-p F] "
            "[--top-k N] [--seed N] [--benchmark N] [--warmup N] [--hf-python PATH] "

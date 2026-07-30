@@ -957,7 +957,7 @@ def main() -> None:
 
     graph_p = subparsers.add_parser(
         "graph",
-        help="Inspect and explicitly select raw TensorRT graph nodes",
+        help="Inspect and select raw TensorRT graph regions",
     )
     from .graph_cli import configure_parser as configure_graph_parser
     configure_graph_parser(graph_p)

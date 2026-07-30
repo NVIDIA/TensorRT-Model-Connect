@@ -184,6 +184,88 @@ def test_select_forwards_only_the_requested_replacement_contract(monkeypatch, ca
     ]
 
 
+def test_recipe_is_sugar_for_the_same_selection(monkeypatch, capsys, tmp_path):
+    snapshot = GraphSnapshot(
+        nodes=(
+            Node("node:0", "known_region", "IDENTITY", ("tensor:input",), ("tensor:middle",)),
+            Node("node:1", "consumer", "IDENTITY", ("tensor:middle",), ("tensor:output",)),
+        ),
+        tensors=(
+            Tensor(
+                "tensor:input",
+                "input",
+                "HALF",
+                (1, 8),
+                None,
+                ("node:0",),
+                False,
+                "DEVICE",
+            ),
+            Tensor(
+                "tensor:middle",
+                "middle",
+                "HALF",
+                (1, 8),
+                "node:0",
+                ("node:1",),
+                False,
+                "DEVICE",
+            ),
+            Tensor(
+                "tensor:output",
+                "output",
+                "HALF",
+                (1, 8),
+                "node:1",
+                (),
+                False,
+                "DEVICE",
+            ),
+        ),
+        inputs=("tensor:input",),
+        outputs=("tensor:output",),
+        metadata={
+            "engine_role": "decode",
+            "graph_recipes": [
+                {
+                    "id": "family.known_region@1",
+                    "instance": "decoder.layer.0",
+                    "node_ids": ["node:0"],
+                    "workspace_bytes": 0,
+                    "extra_args": [],
+                    "output_shape_input": None,
+                }
+            ],
+        },
+        fingerprint="sha256:graph",
+    )
+    monkeypatch.setattr(graph_cli, "load_snapshot", lambda path: snapshot)
+
+    assert graph_cli.run(_parse("recipe", "list", "graph.json")) == 0
+    assert "family.known_region@1\tdecoder.layer.0\tnode:0" in (
+        capsys.readouterr().out
+    )
+
+    output = tmp_path / "recipe.json"
+    assert graph_cli.run(
+        _parse(
+            "recipe",
+            "apply",
+            "graph.json",
+            "family.known_region@1",
+            "--instance",
+            "decoder.layer.0",
+            "-o",
+            str(output),
+        )
+    ) == 0
+    recipe_selection = load_selection(output)
+    assert recipe_selection.binding_id == "family.known_region@1"
+    assert recipe_selection.node_ids == ("node:0",)
+    assert recipe_selection.input_tensor_ids == ("tensor:input",)
+    assert recipe_selection.output_tensor_ids == ("tensor:middle",)
+
+
 def test_select_rejects_negative_workspace():
     with pytest.raises(SystemExit):
         _parse(

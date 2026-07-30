@@ -249,6 +249,43 @@ def test_build_session_captures_then_applies_one_runtime_slot(monkeypatch, tmp_p
     }
 
 
+def test_family_recipe_records_an_exact_layer_interval(tmp_path) -> None:
+    value = FakeTensor("value")
+    network = FakeNetwork([value], [], [])
+    snapshot_path = tmp_path / "graph.json"
+
+    with pytest.raises(graph_build.GraphInspectionComplete):
+        with graph_build.inspect_graph(
+            snapshot_path,
+            engine_role="decode",
+            metadata={"precision": "fp16"},
+        ):
+            with graph_build.engine_role("decode"):
+                with graph_build.graph_recipe_region(
+                    network,
+                    "family.activation@1",
+                    "decoder.layer.0",
+                ):
+                    selected = FakeLayer("selected", [value], op="ACTIVATION")
+                    network.layers.append(selected)
+                consumer = FakeLayer("consumer", [selected.get_output(0)])
+                network.layers.append(consumer)
+                network.outputs.append(consumer.get_output(0))
+                graph_build.process_network(network)
+
+    snapshot = load_snapshot(snapshot_path)
+    assert snapshot.metadata["graph_recipes"] == [
+        {
+            "id": "family.activation@1",
+            "instance": "decoder.layer.0",
+            "node_ids": ["node:0"],
+            "workspace_bytes": 0,
+            "extra_args": [],
+            "output_shape_input": None,
+        }
+    ]
+
+
 def test_apply_rejects_stale_graph_before_callback() -> None:
     network, layers = _network()
     selection = select_region(_snapshot(network), ["node:1"], binding_id="attention")
