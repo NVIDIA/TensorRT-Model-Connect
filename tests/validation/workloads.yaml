@@ -1340,6 +1340,10 @@ suites:
           # Keep the numerical comparison aligned by building TRTMC and
           # running the reference in FP32.
           comparison_precision: fp32
+        xlnet-base:
+          # Upstream XLNet retains FP32 relative-attention parameters that
+          # cannot participate in its FP16 einsum. Compare both sides in FP32.
+          comparison_precision: fp32
     gates:
       min_vector_cosine: 0.999
       min_vector_pass_rate: 1.0

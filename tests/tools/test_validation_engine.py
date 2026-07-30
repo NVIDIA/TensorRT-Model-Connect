@@ -4295,7 +4295,10 @@ def test_comparison_precision_overrides_both_candidate_and_reference(
     assert contract["comparison"] == "aligned"
 
 
-def test_fnet_validation_compares_candidate_and_reference_in_fp32() -> None:
+@pytest.mark.parametrize("model_name", ["fnet-base", "xlnet-base"])
+def test_encoder_validation_compares_candidate_and_reference_in_fp32(
+    model_name: str,
+) -> None:
     suite = validation_engine.suite_by_id(
         validation_engine.load_suites(),
         "stsbenchmark_encoder_embedding_parity",
@@ -4303,7 +4306,7 @@ def test_fnet_validation_compares_candidate_and_reference_in_fp32() -> None:
     model = next(
         model
         for model in validation_engine.load_manifest_records()
-        if model["name"] == "fnet-base"
+        if model["name"] == model_name
     )
 
     validation_config = validation_engine.effective_validation_config(
