@@ -8594,8 +8594,11 @@ def generation_cache_headroom(
     generation: dict[str, Any],
     max_new_tokens: int | None,
 ) -> int:
+    # A prompt that exactly fills the measured cache still needs room for the
+    # first generated token. Reserve the declared generation budget unless a
+    # non-continuation workload explicitly proves that it does not generate.
     reserve_headroom = scorer == "continuation" or bool(
-        validation_config.get("build_generation_headroom", False)
+        validation_config.get("build_generation_headroom", True)
     )
     if not reserve_headroom:
         return 0

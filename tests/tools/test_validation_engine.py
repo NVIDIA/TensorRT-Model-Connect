@@ -3923,7 +3923,7 @@ def test_continuation_reserves_generation_cache_headroom() -> None:
     )
 
 
-def test_non_continuation_only_reserves_explicit_generation_headroom() -> None:
+def test_non_continuation_reserves_generation_headroom_by_default() -> None:
     generation = {"max_new_tokens": 8}
 
     assert (
@@ -3933,16 +3933,16 @@ def test_non_continuation_only_reserves_explicit_generation_headroom() -> None:
             generation=generation,
             max_new_tokens=None,
         )
-        == 0
+        == 8
     )
     assert (
         validation_engine.generation_cache_headroom(
             scorer="mcq",
-            validation_config={"build_generation_headroom": True},
+            validation_config={"build_generation_headroom": False},
             generation=generation,
             max_new_tokens=None,
         )
-        == 8
+        == 0
     )
 
 
@@ -6039,7 +6039,7 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_trtfb(
 
     def fake_ensure_bundle(*_args, **kwargs):
         calls.append("build")
-        assert kwargs["max_cache_length"] == 405
+        assert kwargs["max_cache_length"] == 406
         bundle = kwargs["bundle_path"]
         bundle.parent.mkdir(parents=True, exist_ok=True)
         bundle.write_bytes(b"bundle")
@@ -6108,6 +6108,9 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_trtfb(
     assert result["hf_reused"] is True
     assert result["hf_cache_key"] == "abc123"
     assert result["bundle_built"] is True
+    assert result["max_prompt_tokens"] == 405
+    assert result["generation_cache_headroom"] == 1
+    assert result["build_max_cache_length"] == 406
     assert result["trtfb_accuracy"] == 0.5
     assert result["prediction_agreement_rate"] == 0.5
     assert result["status"] == "failed"
