@@ -141,19 +141,15 @@ def _cmd_build(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
-    kernel_path = getattr(args, "kernel", None)
     recipe = getattr(args, "recipe", None)
     graph_snapshot = getattr(args, "graph_snapshot", None)
     graph_patch = getattr(args, "graph_patch", None)
-    if recipe and (kernel_path or graph_snapshot or graph_patch):
+    if recipe and (graph_snapshot or graph_patch):
         print(
-            "Error: --recipe cannot be combined with --kernel, "
-            "--graph-snapshot, or --graph-patch",
+            "Error: --recipe cannot be combined with "
+            "--graph-snapshot or --graph-patch",
             file=sys.stderr,
         )
-        return 1
-    if kernel_path and (graph_snapshot or graph_patch):
-        print("Error: --kernel cannot be combined with explicit graph slots", file=sys.stderr)
         return 1
     if graph_snapshot and graph_patch:
         print(
@@ -166,10 +162,6 @@ def _cmd_build(args: argparse.Namespace) -> int:
         or graph_snapshot is not None
         or graph_patch is not None
     )
-    if kernel_path and getattr(args, "rtx", False):
-        print("Error: --kernel requires the native TensorRT backend",
-              file=sys.stderr)
-        return 1
     if graph_mode and getattr(args, "rtx", False):
         print("Error: explicit graph slots require the native TensorRT backend",
               file=sys.stderr)
@@ -198,7 +190,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             {"model_revision": model_revision} if model_revision else {}
         )
         optimized = None
-        if kernel_path is None and not graph_mode:
+        if not graph_mode:
             optimized = _try_build_optimized_runtime(
                 args.model,
                 args.output,
@@ -261,13 +253,6 @@ def _cmd_build(args: argparse.Namespace) -> int:
 
         return build_from_recipe(args, _cmd_build)
 
-    if kernel_path and not build_family:
-        _, build_family = _resolve_build_model_metadata(
-            build_model_ref,
-            method_name,
-            **revision_kwargs,
-        )
-
     from .parallel_config import ParallelConfig
 
     tp_size = int(getattr(args, "tensor_parallel_size", 1) or 1)
@@ -327,30 +312,6 @@ def _cmd_build(args: argparse.Namespace) -> int:
             print(f"Error resolving config: {exc}", file=sys.stderr)
             return 1
         family_build_options = _resolved_config_values(resolved_bundle)
-
-    if kernel_path:
-        from .tvm_ffi.kernel_slots import (
-            activate_kernel_slot,
-            load_family_kernel_slots,
-            load_kernel_spec,
-        )
-
-        try:
-            spec = load_kernel_spec(kernel_path)
-            slots = {slot.id: slot for slot in load_family_kernel_slots(build_family)}
-            slot = slots.get(spec.slot)
-            if slot is None:
-                available = ", ".join(sorted(slots)) or "none"
-                raise ValueError(
-                    f"Model family {build_family!r} does not publish slot "
-                    f"{spec.slot!r}; available: {available}"
-                )
-            if slot.validate_build is not None:
-                slot.validate_build(args)
-            build = activate_kernel_slot(spec, slot)(build)
-        except Exception as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            return 1
 
     graph_context = nullcontext()
     if graph_snapshot:
@@ -762,12 +723,6 @@ def cmd_version(args: argparse.Namespace) -> int:
     return _cmd_version(args)
 
 
-def _cmd_kernel(args: argparse.Namespace) -> int:
-    from .tvm_ffi.kernel_cli import run
-
-    return run(args)
-
-
 def _cmd_graph(args: argparse.Namespace) -> int:
     from .tvm_ffi.graph_cli import run
 
@@ -797,11 +752,6 @@ def main() -> None:
     build_p = subparsers.add_parser("build", help="Build a .trtfb bundle")
     build_p.add_argument("model",
                          help="HF repo ID (for example, org/model-name) or local directory")
-    build_p.add_argument(
-        "--kernel",
-        metavar="YAML",
-        help="Replace a family-owned kernel slot using this YAML manifest",
-    )
     build_p.add_argument(
         "--recipe",
         nargs=2,
@@ -960,7 +910,7 @@ def main() -> None:
 
     # Generic two-flag surface for tunable configuration. New tunables register
     # a namespaced schema instead of growing the CLI; workflow selectors such
-    # as --kernel, --recipe, and --graph-patch remain explicit.
+    # as --recipe and --graph-patch remain explicit.
     build_p.add_argument(
         "--config", default=None, metavar="FILE",
         help="Config profile file (.json/.yaml). Contributes to the session "
@@ -978,13 +928,6 @@ def main() -> None:
     inspect_p.add_argument("--list-engines", action="store_true",
                            help="List only TRT engine plan sections with roles")
 
-    kernel_p = subparsers.add_parser(
-        "kernel",
-        help="Discover family-owned external-kernel slots",
-    )
-    from .tvm_ffi.kernel_cli import configure_parser as configure_kernel_parser
-    configure_kernel_parser(kernel_p)
-
     graph_p = subparsers.add_parser(
         "graph",
         help="Inspect and select raw TensorRT graph regions",
@@ -998,7 +941,7 @@ def main() -> None:
     # Keep direct module compatibility: `python -m tensorrt_model_connect
     # <model-dir> -o out.trtfb` still means build. The public native CLI uses
     # explicit `trtmc build`.
-    command_names = {"build", "graph", "inspect", "kernel", "version"}
+    command_names = {"build", "graph", "inspect", "version"}
     cli_argv = sys.argv[1:]
     if cli_argv and cli_argv[0] not in command_names and cli_argv[0] not in ("--help", "-h"):
         cli_argv = ["build"] + cli_argv
@@ -1011,7 +954,6 @@ def main() -> None:
     dispatch = {
         "build": _cmd_build,
         "inspect": _cmd_inspect,
-        "kernel": _cmd_kernel,
         "graph": _cmd_graph,
         "version": _cmd_version,
     }

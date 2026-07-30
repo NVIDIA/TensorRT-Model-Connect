@@ -1,10 +1,13 @@
 ---
-title: "Bring Your Own Kernel"
+title: "Bring Your Own Kernel with TVM FFI"
 ---
 
 This tutorial starts by replacing part of a Qwen3-8B TensorRT graph with a
 TVM-FFI kernel, then manually replaces a DistilBERT region with a CuTe DSL
 kernel. You do not write TensorRT C++.
+
+For the API contract, lifecycle, and supported limits, see the
+[TVM FFI feature reference](../../features/tvm-ffi.md).
 
 Start with the simplest graph workflow and move to the escape hatch only when
 you need it:
@@ -135,9 +138,9 @@ For the pinned Qwen3-8B revision, the output includes:
 
 ```text
 RECIPE                               INSTANCE                           NODES
-qwen.decode_attention_region@1       decoder.layers.0.decode_attention  node:79,...,node:84
+qwen.decode_attention_region@2       decoder.layers.0.decode_attention  node:83,node:84
 ...
-qwen.decode_attention_region@1       decoder.layers.35.decode_attention node:3544,...,node:3549
+qwen.decode_attention_region@2       decoder.layers.35.decode_attention node:3548,node:3549
 qwen.decode_logits_copy@1            decoder.logits_zero_bias           node:3598,node:3599,node:3600
 ```
 
@@ -297,81 +300,101 @@ accept a known regression. Repeat an edge result on an idle GPU.
 
 ### 5. Apply the same Recipe flow to attention
 
-Qwen also records one raw decode-attention recipe per layer:
+Qwen also records one decode-attention Recipe per layer:
 
 ```bash
 "$TRTMC" build "${BUILD_ARGS[@]}" \
-  --recipe qwen.decode_attention_region@1 \
+  --recipe qwen.decode_attention_region@2 \
            decoder.layers.0.decode_attention \
   -o "$WORK/qwen3-attention-slot.trtfb"
 ```
 
-For Qwen3-8B layer 0, the printed boundary plus `extra_args` in the selection
-receipt `qwen3-attention-slot.selection.json` define this ordered contract:
+For Qwen3-8B layer 0, the printed boundary in
+`qwen3-attention-slot.selection.json` defines this ordered contract:
 
 ```text
-input[0]  query              BF16  [1, 32, -1, 128]
+input[0]  scaled query       BF16  [1, 32, -1, 128]
 input[1]  key cache          BF16  [1, 8, 40960, 128]
 input[2]  value cache        BF16  [1, 8, 40960, 128]
 input[3]  key/value lengths  INT32 [1]
 output[0] context            BF16  [1, 32, -1, 128]
-extra[0]  softmax scale      float
 ```
+
+The Qwen builder applies the model's query scale and BF16 rounding before the
+selected region. The external kernel therefore consumes the already-scaled
+query and uses a softmax scale of `1.0`.
 
 Export any CUDA DSL, FlashInfer, or custom CUDA kernel through TVM-FFI with
 that exact ABI and then reuse the slot-ready build and load-time binding steps.
 No Model Connect change is required for another DSO with this contract.
 
-The repository does not yet ship a verified FlashInfer wrapper for this raw
-boundary. The FlashInfer exporter already shipped under
-`python/tensorrt_model_connect/families/qwen/examples/byok_flashinfer/` targets
-the older, richer `qwen.decode_attention@1` Direct Slot. It uses 2-D
-query/output tensors plus page offsets and a page table created by Qwen family
-glue. Those tensors do not exist at the raw TRT attention boundary, so that DSO
-is **not** compatible with `qwen.decode_attention_region@1`.
+The Qwen family contains a small FlashInfer linear-KV POC for this exact
+Recipe boundary. Building the DSO is kernel-integrator work; an ordinary model
+user can receive the resulting `.so` and start at the binding command below.
 
-#### Working FlashInfer reference: Direct Slot
-
-If you want to run that shipped FlashInfer kernel on an SM 10.3 GPU, use its
-published Direct Slot flow:
+FlashInfer 0.6.15 currently needs a small optional device-length patch because
+Model Connect keeps a fixed-capacity KV tensor and passes its active length as
+an `int32[1]` CUDA tensor:
 
 ```bash
-"$TRTMC" kernel slots "$MODEL" --model-revision "$REVISION"
-
 python -m pip install \
-  "flashinfer-python==0.6.15" \
   "nvidia-cutlass-dsl==4.5.0" \
-  "apache-tvm-ffi==0.1.12"
+  "apache-tvm-ffi==0.1.12" \
+  "flashinfer-python==0.6.15"
 
-export FI_WORK="$PWD/artifacts/qwen3-flashinfer"
-mkdir -p "$FI_WORK"
-test ! -e "$FI_WORK/flashinfer-qwen3.so" || {
-  echo "Choose a fresh FI_WORK; the exporter will not overwrite a DSO"
-  exit 1
+git clone --branch v0.6.15 --depth 1 \
+  https://github.com/flashinfer-ai/flashinfer.git \
+  "$WORK/flashinfer-v0.6.15"
+
+git -C "$WORK/flashinfer-v0.6.15" apply \
+  "$PWD/python/tensorrt_model_connect/families/qwen/kernels/flashinfer_device_kv_length.patch"
+
+PYTHONPATH="$WORK/flashinfer-v0.6.15:$PWD/python" \
+  python python/tensorrt_model_connect/families/qwen/kernels/export_flashinfer_decode_attention.py \
+  --output "$WORK/qwen3-flashinfer-linear.so"
+```
+
+Bind that DSO to the attention Recipe when constructing a pipeline:
+
+```bash
+export ATTENTION_BINDING_ID=qwen.decode_attention_region@2
+export ATTENTION_ABI_SHA256="$(
+  python -c 'import json,sys; print(json.load(open(sys.argv[1]))["abi_sha256"])' \
+    "$WORK/qwen3-attention-slot.selection.json"
+)"
+
+cat > "$WORK/attention-kernel-bindings.json" <<EOF
+{
+  "schema_version": 1,
+  "bindings": [
+    {
+      "id": "$ATTENTION_BINDING_ID",
+      "abi_sha256": "$ATTENTION_ABI_SHA256",
+      "library": "./qwen3-flashinfer-linear.so",
+      "function": "run"
+    }
+  ]
 }
+EOF
 
-python python/tensorrt_model_connect/families/qwen/examples/byok_flashinfer/export_flashinfer_kernel.py \
-  --output "$FI_WORK/flashinfer-qwen3.so"
-
-sed "s/@SHA256@/$(sha256sum "$FI_WORK/flashinfer-qwen3.so" | awk '{print $1}')/" \
-  python/tensorrt_model_connect/families/qwen/examples/byok_flashinfer/qwen3-flashinfer.yaml.in \
-  > "$FI_WORK/qwen3-flashinfer.yaml"
-
-"$TRTMC" build "${BUILD_ARGS[@]}" \
-  --kernel "$FI_WORK/qwen3-flashinfer.yaml" \
-  -o "$FI_WORK/qwen3-flashinfer.trtfb"
-
-"$TRTMC" run "$FI_WORK/qwen3-flashinfer.trtfb" \
+"$TRTMC" run "$WORK/qwen3-attention-slot.trtfb" \
+  --kernel-bindings "$WORK/attention-kernel-bindings.json" \
   --prompt "Explain grouped-query attention in one sentence." \
   --max-new-tokens 32 \
   --greedy
 ```
 
-That shortcut replaces all 36 instances, but it is a reference for exporting
-and running FlashInfer rather than a raw graph Recipe: `--kernel` embeds the DSO
-in the bundle, so changing it requires another bundle build. Repeat step 4
-against the native bundle before accepting it. Do not describe it as a
-load-time-swappable raw graph Recipe.
+The DSO is external to the bundle. To try another implementation of the same
+ABI, point a new binding manifest at it and construct a new pipeline; the
+slot-ready bundle does not change.
+
+This FlashInfer exporter is an integration POC for the documented boundary,
+not a generally qualified built-in kernel. Before shipping a kernel, run the
+same deterministic output and native-versus-external performance checks shown
+above on every model shape and GPU you support. Successfully loading a DSO
+proves only that the binding manifest matched and its named function resolved;
+it does not prove that the function implements the ABI, model accuracy, or a
+performance improvement.
 
 ## Level 2: choose an arbitrary region yourself
 

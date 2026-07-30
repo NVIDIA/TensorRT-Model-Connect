@@ -731,7 +731,7 @@ def build_dual_profile_decoder_engine(
                 num_kv_heads=num_kv_heads,
                 q_seq=None,
                 scale=attn_scale, tag=f"{prefix}.attn",
-                kernel_slot_instance=(
+                recipe_instance=(
                     f"decoder.layers.{layer_idx}.decode_attention"
                     if profile_mode == "decode"
                     else None

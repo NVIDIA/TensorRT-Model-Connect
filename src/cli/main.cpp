@@ -1626,7 +1626,7 @@ int main(int argc, char** argv) {
     try {
         if (args.command == "version")
             return cmd_version();
-        if (args.command == "build" || args.command == "graph" || args.command == "kernel")
+        if (args.command == "build" || args.command == "graph")
             return cmd_python(args);
         if (args.command == "run")
             return cmd_run(args);

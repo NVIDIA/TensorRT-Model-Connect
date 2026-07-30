@@ -1147,7 +1147,7 @@ def add_native_kv_cache_attention_from_rows(
     q_seq: int | None,
     scale: float | None = None,
     tag: str | None = None,
-    kernel_slot_instance: str | None = None,
+    recipe_instance: str | None = None,
 ) -> dict[str, trt.ITensor]:
     """Update a user-owned KV cache and attend over its active prefix.
 
@@ -1217,97 +1217,34 @@ def add_native_kv_cache_attention_from_rows(
     if scale is None:
         scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
 
-    kernel_spec = None
-    if kernel_slot_instance is not None:
-        from ...tvm_ffi.kernel_slots import select_kernel_slot
-
-        kernel_spec = select_kernel_slot(
-            "qwen.decode_attention@1",
-            kernel_slot_instance,
-        )
-    if kernel_spec is not None:
-        if q.dtype != trt.bfloat16:
-            raise ValueError("qwen.decode_attention@1 requires BF16 tensors")
-        capacity = int(updated_k.shape[2])
-        page_size = 64
-        if capacity % page_size:
-            raise ValueError(
-                "qwen.decode_attention@1 requires KV capacity divisible by 64"
-            )
-        query_heads_layer = network.add_shuffle(q)
-        query_heads_layer.reshape_dims = (num_heads, head_dim)
-        if tag:
-            query_heads_layer.name = tag + ".slot_query"
-
-        from .kernel_slots import DECODE_ATTENTION
-
-        kernel_context = add_tvm_ffi_kernel(
-            network,
-            kernel_name=kernel_spec.global_name,
-            inputs=[
-                query_heads_layer.get_output(0),
-                updated_k,
-                updated_v,
-                key_value_lengths,
-                add_constant(
-                    network,
-                    (1,),
-                    np.zeros((1,), dtype=np.int32),
-                    dtype=np.int32,
-                ),
-                add_constant(
-                    network,
-                    (capacity // page_size,),
-                    np.arange(capacity // page_size, dtype=np.int32),
-                    dtype=np.int32,
-                ),
-            ],
-            output_specs=[
-                {"dims": output.shape, "dtype": output.dtype}
-                for output in DECODE_ATTENTION.outputs
-            ],
-            workspace_bytes=DECODE_ATTENTION.workspace_bytes,
-            extra_args=[{"type": "float", "value": float(scale)}],
-        )[0]
-        context_rows = network.add_shuffle(kernel_context)
-        context_rows.reshape_dims = (1, num_heads * head_dim)
-        if tag:
-            context_rows.name = tag + ".slot_context"
-        return {
-            "context": context_rows.get_output(0),
-            "present_k": updated_k,
-            "present_v": updated_v,
-        }
-
     if q_4d.dtype != trt.bfloat16:
         raise ValueError("Qwen native KV attention requires BF16 queries")
+
+    # Match the native fused-attention contract exactly: TensorRT consumes a
+    # BF16 query after the FP32 scale has already been applied and rounded.
+    q_scale_input = network.add_cast(q_4d, trt.float32).get_output(0)
+    scale_t = add_constant(
+        network,
+        (1, 1, 1, 1),
+        np.array([[[[scale]]]]),
+        dtype=np.float32,
+    )
+    q_scaled = network.add_elementwise(
+        q_scale_input, scale_t, trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    q_scaled = network.add_cast(q_scaled, trt.bfloat16).get_output(0)
+
     recipe = nullcontext()
-    if kernel_slot_instance is not None:
+    if recipe_instance is not None:
         from ...tvm_ffi.graph_build import graph_recipe_region
 
         recipe = graph_recipe_region(
             network,
-            "qwen.decode_attention_region@1",
-            kernel_slot_instance,
-            extra_args=({"type": "float", "value": float(scale)},),
+            "qwen.decode_attention_region@2",
+            recipe_instance,
             output_shape_input=0,
         )
     with recipe:
-        # Keep the exact score scale until the Q product, matching HF SDPA.  If
-        # the constant is rounded to BF16 first, near-tied logits can diverge at
-        # long context even though IAttention itself remains on the fused path.
-        q_scale_input = network.add_cast(q_4d, trt.float32).get_output(0)
-        scale_t = add_constant(
-            network,
-            (1, 1, 1, 1),
-            np.array([[[[scale]]]]),
-            dtype=np.float32,
-        )
-        q_scaled = network.add_elementwise(
-            q_scale_input, scale_t, trt.ElementWiseOperation.PROD
-        ).get_output(0)
-        q_scaled = network.add_cast(q_scaled, trt.bfloat16).get_output(0)
-
         attention = network.add_attention_v2(
             q_scaled,
             updated_k,

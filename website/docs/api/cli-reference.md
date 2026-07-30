@@ -33,7 +33,6 @@ replaces unsafe filename characters with `-`.
 | Option | Purpose |
 | --- | --- |
 | `-o`, `--output PATH` | Output bundle path. Defaults to the sanitized model basename plus `.trtfb`. |
-| `--kernel FILE.yaml` | Replace a family-owned kernel slot with the trusted TVM-FFI DSO declared by this YAML manifest. Requires the native TensorRT backend. |
 | `--recipe RECIPE_ID INSTANCE_ID` | Build a load-time TVM-FFI slot from one exact family-owned graph Recipe. Internally uses the ordinary graph capture, selection, and patch paths and writes `<output-basename>.selection.json`. |
 | `--graph-patch REGION.json` | Replace one explicitly selected TensorRT region with a load-time TVM-FFI slot. Requires the native TensorRT backend. |
 | `--model-revision REV` | Build a Hugging Face commit, tag, or branch instead of its default revision. |
@@ -77,22 +76,6 @@ builder.
 
 TensorRT is the build backend; there is no public build-method selector. Older
 `--method trt` and `--method auto` spellings remain accepted for compatibility.
-
-## `trtmc kernel slots`
-
-List the external-kernel contracts and exact instance IDs published for a
-model without downloading its weights:
-
-```bash
-trtmc kernel slots <hf-repo-or-local-dir> [--model-revision REV]
-```
-
-Supplying `--kernel` validates one strict YAML manifest, the referenced trusted
-DSO, its SHA-256 digest, and the selected slot instances. It bypasses
-optimized-provider selection and uses the owning family's native TensorRT build
-path; it cannot be combined with `--rtx`. See
-[Bring Your Own Kernel](../tutorials/beginner/bring-your-own-kernel.md) for the
-end-to-end workflow.
 
 ## `trtmc graph`
 
@@ -149,7 +132,8 @@ Build the same model revision and options with `--graph-patch region.json` to
 produce a slot-ready native bundle. The selection must describe one connected,
 convex region and must still match the live graph fingerprint. See
 [Bring Your Own Kernel](../tutorials/beginner/bring-your-own-kernel.md) for the
-load-time binding workflow and current limitations.
+end-to-end workflow and [TVM FFI](../features/tvm-ffi.md) for the feature
+contract and current limitations.
 
 ## Runtime commands
 

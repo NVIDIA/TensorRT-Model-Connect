@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib
 import inspect
 import json
@@ -1538,37 +1537,16 @@ def build_bundle(
     if not embedded_config_json:
         sections.append(BundleSection("config.json", make_runtime_config_json(None)))
 
-    # Fail before writing if the family did not wire every selected instance.
-    from .tvm_ffi.kernel_slots import finish_active_kernel_slot
-
-    finish_active_kernel_slot()
-
-    # Package explicit artifacts plus the active CLI slot, if any.
-    artifacts: list[tuple[str, ...]] = list(kernel_artifacts or [])
-    from .tvm_ffi.kernel_slots import active_kernel_artifact
-
-    active_artifact = active_kernel_artifact()
-    if active_artifact is not None:
-        artifacts.append(active_artifact)
-    if artifacts:
+    # Package explicitly supplied FFI kernel .so files into the bundle.
+    if kernel_artifacts:
         manifest_entries = []
-        for artifact in artifacts:
-            if len(artifact) not in (2, 4):
-                raise ValueError("Kernel artifact must contain 2 or 4 fields")
-            global_name, so_path = artifact[:2]
-            function_name = artifact[2] if len(artifact) == 4 else "run"
-            expected_digest = artifact[3] if len(artifact) == 4 else None
+        for global_name, so_path in kernel_artifacts:
             section_name = f"kernel_{global_name.replace('.', '_')}.so"
             so_data = Path(so_path).read_bytes()
-            if (
-                expected_digest is not None
-                and hashlib.sha256(so_data).hexdigest() != expected_digest
-            ):
-                raise ValueError(f"Kernel library changed after validation: {so_path}")
             sections.append(BundleSection(section_name, so_data))
             manifest_entries.append({
                 "global_name": global_name,
-                "func_name": function_name,
+                "func_name": "run",
                 "section": section_name,
             })
         manifest_json = json.dumps({"kernels": manifest_entries}).encode("utf-8")

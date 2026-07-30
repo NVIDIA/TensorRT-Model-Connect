@@ -71,6 +71,7 @@ const sidebars = {
       items: [
         'features/model-families',
         'features/runtime-strategies',
+        'features/tvm-ffi',
         'features/quantization',
         'features/sampling',
         'features/config-and-backends'

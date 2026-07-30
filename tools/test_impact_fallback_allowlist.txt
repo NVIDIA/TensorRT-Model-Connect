@@ -162,8 +162,6 @@ shared_builder_module python/tensorrt_model_connect/hf_snapshot.py # shared HF s
 shared_builder_module python/tensorrt_model_connect/engine_defs/__init__.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/engine_defs/base.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/fp8_calibrate.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module python/tensorrt_model_connect/tvm_ffi/kernel_cli.py # shared family-dispatch kernel-slot CLI; broad builder impact is intentional
-shared_builder_module python/tensorrt_model_connect/tvm_ffi/kernel_slots.py # shared direct-slot manifest and activation contract; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/kernels/__init__.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/kernels/flashinfer_decode.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/runtime_provider/__init__.py # shared delegated-build dispatcher surface; conservative all-model impact is intentional while model-owned adapter edits remain family-only
