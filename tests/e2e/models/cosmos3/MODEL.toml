@@ -4,8 +4,8 @@
 id = "cosmos3"
 plugin = "cosmos3"
 test_manifests = [
-  "manifests/cosmos3-nano.json",
-  "manifests/cosmos3-nano-cp4.json",
+  "manifests/cosmos3-nano-l0.json",
+  "manifests/cosmos3-nano-l0-cp4.json",
 ]
 
 [e2e_defaults.diffusion_media_generation]
