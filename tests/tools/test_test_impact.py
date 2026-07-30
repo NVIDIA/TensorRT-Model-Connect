@@ -1445,19 +1445,11 @@ class TestNoImpact:
         assert match.rule == "no_impact"
         assert match.models == []
 
-    def test_model_plugin_evidence_report(self, imap):
-        """Generated model-plugin evidence JSON is report-only."""
-        match = test_impact.classify_file(
-            "reports/model-plugin-encapsulation/e2e-parity-evidence-agent4.json",
-            imap,
-        )
-        assert match.rule == "model_plugin_evidence_report"
-        assert match.models == []
-        assert match.unit_tiers == []
-
     def test_github_ci_config_triggers_tools_tier(self, imap):
         """.github workflows should validate CI tooling without selecting E2E."""
-        match = test_impact.classify_file(".github/workflows/trtmc-ci.yml", imap)
+        match = test_impact.classify_file(
+            ".github/workflows/internal-ci-bridge.yml", imap
+        )
         assert match.rule == "github_ci_config"
         assert match.models == []
         assert match.unit_tiers == ["tools"]
@@ -1883,15 +1875,6 @@ class TestUnitTiers:
         match = test_impact.classify_file("tools/select_latest_attempt_artifact.py", imap)
 
         assert match.rule == "nightly_artifact_selector_tool"
-        assert match.models == []
-        assert match.unit_tiers == ["tools"]
-        assert match.rebuild_cpp is False
-
-    def test_nightly_issue_tracker_tool(self, imap):
-        """Nightly issue tracking runs its tooling contracts, not model E2E."""
-        match = test_impact.classify_file("tools/nightly_issue_tracker.py", imap)
-
-        assert match.rule == "nightly_issue_tracker_tool"
         assert match.models == []
         assert match.unit_tiers == ["tools"]
         assert match.rebuild_cpp is False
@@ -3578,22 +3561,6 @@ class TestCoverageMapIntegration:
         assert result.fallback_tiers == []
 
     @pytest.mark.parametrize("coverage_map", [None, {}])
-    def test_nightly_issue_tracker_selects_focused_tools_tests(self, imap, coverage_map):
-        result = test_impact.analyze_impact(
-            ["tools/nightly_issue_tracker.py"],
-            imap,
-            coverage_map=coverage_map,
-        )
-
-        assert result.e2e_models == []
-        assert result.unit_tiers == ["tools"]
-        assert result.tools_tests == [
-            "tests/tools/test_github_actions_ci.py",
-            "tests/tools/test_nightly_issue_tracker.py",
-        ]
-        assert result.fallback_tiers == []
-
-    @pytest.mark.parametrize("coverage_map", [None, {}])
     @pytest.mark.parametrize(
         "path",
         [
@@ -3638,7 +3605,7 @@ class TestCoverageMapIntegration:
     def test_github_ci_config_selects_tools_tier(self, imap):
         """CI config edits must not be classified as unit-test no-impact."""
         result = test_impact.analyze_impact(
-            [".github/workflows/trtmc-ci.yml"],
+            [".github/workflows/internal-ci-bridge.yml"],
             imap,
             coverage_map={},
         )

@@ -565,9 +565,9 @@ Ordinary premerge CI must run the source-only integration and model-owned
 contract tests selected by the ownership rules. It must not dispatch an A100
 job or attempt Edge-LLM E2E on the GB300 runner pool. The manual/reusable
 hardware workflow remains dormant until a managed A100 runner pool exists.
-When hardware qualification is enabled, upload command logs, comparison output,
-and benchmark summaries as workflow artifacts. Do not add proof data to the
-source tree or PR diff.
+When hardware qualification is enabled, the private Internal CI workflow
+uploads command logs, comparison output, and benchmark summaries as private
+workflow artifacts. Do not add proof data to the source tree or PR diff.
 
 The model-owned runner must fail before building when the runner GPU does not
 match the descriptor target, build and install a normal release wheel from the
@@ -592,7 +592,8 @@ The repository currently records:
   options tuple, while treating failure after an exact profile is selected as
   terminal rather than silently switching runtimes;
 - a model-owned `QUALIFICATION.a100.toml` producer descriptor, contract tests,
-  and a reusable optimized-runtime proof workflow.
+  and selection tooling consumed by the private Internal CI
+  optimized-runtime proof workflow.
 
 The qualification state and digest are repository assertions about an exact
 source snapshot. Target-hardware pass logs and performance measurements remain

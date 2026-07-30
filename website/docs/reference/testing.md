@@ -2,15 +2,21 @@
 title: Testing Reference
 ---
 
-## Documentation validation on this snapshot
+## CI and evidence boundary
 
-At GitHub `main` commit
-`7e5ac705ad6f70f6f91e69d73e4d10fc048afad3`, the repository does **not**
-contain .github/workflows/docs-validation.yml, tools/check_doc_commands.py,
-tools/check_doc_public_surfaces.py, or tools/doc_public_surfaces.json. Do not
-describe those mixed-branch files as a required main-branch gate. The Pages
-workflow builds the site before deployment, but it is not a replacement for a
-pull-request documentation gate.
+Source contains the test implementation and three GitHub workflows: the
+Internal CI Bridge, reusable/manual Legal Compliance, and the path-scoped Pages
+deployment. Premerge and nightly orchestration run in private Internal CI.
+
+An authorized collaborator with write, maintain, or admin access applies
+`run-internal-ci` to dispatch the exact current PR head. Source receives only
+the sanitized
+`trtmc/premerge/required` status for that head. Raw logs, artifacts, runner
+details, internal packages, and the complete report remain private. Neither the
+Source bridge nor Internal premerge triggers on a push to `main`, so merging a
+passing PR does not rerun the same premerge suite.
+
+## Local documentation validation
 
 Use the checks that are present on this snapshot. The following is a
 recommended local set, not one pre-existing required workflow:
@@ -43,32 +49,19 @@ runtime-strategy checker compares native descriptors, source, tests, and runner
 commands. A successful Docusaurus build proves that this site is buildable; it
 does not by itself prove every documented behavior or command.
 
-The runtime-strategy checker is a useful drift diagnostic, but it is not green
-on this snapshot:
-
-```bash
-PYTHONPATH=python:. python3 tools/check_runtime_strategy_matrix.py
-```
-
-At commit `7e5ac705ad6f70f6f91e69d73e4d10fc048afad3`, it exits nonzero because
-`diffusion_sana_wm` is absent from `tests/runtime_strategy_matrix.yaml` and five
-speech/omni task entries have no discoverable runner class. Treat those as
-codebase validation gaps; a documentation-only change must not claim that this
-checker passes.
-
 ## Active workflow inventory
 
-This snapshot contains exactly these seven workflow files:
+Source contains exactly these three workflow files:
 
 | Workflow | Trigger and evidence boundary |
 | --- | --- |
-| `.github/workflows/legal.yml` | Reusable, `main`, or manual exact-revision legal-document and source-header certification. |
-| `.github/workflows/trtmc-ci.yml` | One-shot `run-ci` label on a pull request; validates the pinned GitHub merge snapshot and dispatches premerge proof. |
-| `.github/workflows/model-proof.yml` | Reusable isolated model-owned premerge/nightly proof on configured self-hosted hardware. |
-| `.github/workflows/nightly.yml` | Scheduled or manual all-model inventory, isolated proofs, packaging, and aggregate nightly evidence. |
-| `.github/workflows/optimized-runtime-proof.yml` | Reusable or manual exact-profile optimized-runtime qualification; selection alone is not hardware proof. |
-| `.github/workflows/performance.yml` | Reusable or manual release performance matrix on configured self-hosted hardware. |
+| `.github/workflows/internal-ci-bridge.yml` | One-shot `run-internal-ci` label or manual request; authorizes the actor, captures the exact PR head, posts a pending sanitized status, and dispatches private premerge. |
+| `.github/workflows/legal.yml` | Reusable or manual exact-revision legal-document and source-header certification; it does not run on `main` pushes. |
 | `.github/workflows/pages.yml` | Pushes affecting `website/**` on `main`, or manual runs; builds and deploys only the documentation site to GitHub Pages. |
+
+Internal scheduled nightly, model proof, optimized-runtime qualification, and
+performance execution are not Source workflows. Their raw evidence is not
+published through Source Actions or Pages.
 
 ## CPU and repository checks
 

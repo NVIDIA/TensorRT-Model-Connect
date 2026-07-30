@@ -706,7 +706,7 @@ def test_runtime_cli_changes_run_model_fallback(tmp_path: Path, path: str) -> No
     "path",
     (
         "CMakeLists.txt",
-        ".github/workflows/trtmc-ci.yml",
+        ".github/workflows/internal-ci-bridge.yml",
         "src/runtime/providers/optimized_runtime_host.cpp",
         "tools/model_ci.py",
         "new_platform/implementation.py",

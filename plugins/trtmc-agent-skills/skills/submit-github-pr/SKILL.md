@@ -63,7 +63,7 @@ Create an ADR when the diff introduces or substantially changes any of these:
 |--------|-----------|
 | New runtime strategy | New plugin/strategy registration or runtime pipeline path |
 | New family plugin | New family module under `python/tensorrt_model_connect/families/` |
-| New pipeline class | New `.cpp` or `.h` under `src/runtime/pipelines/` or equivalent runtime path |
+| New pipeline class | New `.cpp` or `.h` under `src/runtime/domains/` or an equivalent runtime path |
 | Config schema change | New persisted config field or parser behavior |
 | New E2E task strategy | New harness runner or comparator family |
 | New comparator/reference | New comparator/reference mechanism used by tests |
@@ -136,6 +136,18 @@ After drafting, write the body to a temporary file and pass it with
 gh pr view --repo NVIDIA/TensorRT-Model-Connect --web
 gh pr checks --repo NVIDIA/TensorRT-Model-Connect <pr-number>
 ```
+
+## Start Exact-Head Premerge
+
+Creating or pushing the PR does not start premerge. After verifying that
+`headRefOid` equals the pushed SHA, and when CI execution is authorized, have an
+actor with `write`, `maintain`, or `admin` permission add
+`run-internal-ci`.
+
+Check the current head's `trtmc/premerge/required` status first. Do not add the
+label when that head is already pending or has passed. Reapply it once only
+after an intentional head change, and never after the PR has merged. Hand
+monitoring and merge gating to `$pr-babysitter`.
 
 Do not merge from this skill, even if the task includes merge authority. Use
 `$pr-babysitter` for monitoring and merging. It has the required hard CI gate

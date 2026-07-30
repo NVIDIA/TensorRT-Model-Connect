@@ -13,17 +13,18 @@ gate unless maintainers add and protect an `ai-staging` CI workflow again.
 
 ## Current supported PR flow
 
-The active premerge workflow is `.github/workflows/trtmc-ci.yml`:
+The supported premerge path uses `.github/workflows/internal-ci-bridge.yml`:
 
-1. Open a pull request targeting `main` from a branch in
-   `NVIDIA/TensorRT-Model-Connect`.
-2. Apply the one-shot `run-ci` label when the revision is ready to test.
-3. GitHub consumes that label and validates the pinned PR merge snapshot.
-4. Review the `Premerge CI` result and its exact tested base/head evidence.
-5. Merge only after the repository ruleset and human review requirements pass.
+1. Open a pull request targeting `main`.
+2. Have an actor with `write`, `maintain`, or `admin` permission apply the
+   one-shot `run-internal-ci` label when the current head is ready.
+3. The Source bridge consumes that label and dispatches the exact PR head to
+   private Internal CI.
+4. Require `trtmc/premerge/required` to pass on that same head.
+5. Merge only after human review and the repository rules permit it.
 
-Fork pull requests cannot use the one-shot label because the workflow needs a
-repository write token to consume it.
+The complete logs and artifacts remain private. A passing PR is not retested by
+the same premerge suite after merge.
 
 ## Retained staging utility
 

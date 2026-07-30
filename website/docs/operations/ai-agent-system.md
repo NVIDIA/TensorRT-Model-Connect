@@ -11,18 +11,23 @@ scoped issue or request
   -> short-lived branch from the current GitHub main
   -> implementation and local verification
   -> pull request targeting main
-  -> one-shot run-ci label
-  -> pinned merge-snapshot CI
+  -> one-shot run-internal-ci label
+  -> private exact-head CI
+  -> sanitized trtmc/premerge/required status
   -> human review and repository-ruleset merge
 ```
 
 The source of truth is:
 
 - `AGENTS.md` for repository and branch policy
-- `.github/workflows/trtmc-ci.yml` for premerge behavior
-- `.github/workflows/model-proof.yml` for isolated model proof
-- `.github/workflows/nightly.yml` for scheduled broad qualification
+- `.github/workflows/internal-ci-bridge.yml` for trusted exact-head dispatch
+- `plugins/trtmc-agent-skills/skills/pr-babysitter/SKILL.md` for trigger and merge-gate behavior
 - `tools/test_impact.py` for affected-model selection
+
+Private Internal CI owns premerge, isolated model proof, and scheduled broad
+qualification. Do not copy its raw logs, artifacts, runner details, package
+coordinates, or private URLs into the Source PR. Merging a passing PR does not
+trigger the same premerge suite again.
 
 ## Queue helper
 

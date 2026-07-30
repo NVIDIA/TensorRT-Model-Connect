@@ -14,9 +14,6 @@ on:
       tested_sha:
         description: "Immutable commit SHA checked and certified by the legal workflow"
         value: ${{ jobs.legal-compliance.outputs.tested_sha }}
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       revision:

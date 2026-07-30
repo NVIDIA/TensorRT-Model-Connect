@@ -324,7 +324,6 @@ deleted (hard removal with no shims), tests updated.
 
 - Branch: `triattention`
 - Baseline commit before this work: `89b9e629`
-- Container: `trtmc-dev-gb300-agent-2`
 
 ## Tick log
 

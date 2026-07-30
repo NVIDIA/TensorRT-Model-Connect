@@ -92,8 +92,14 @@ available.
 ## 5. Publish for review
 
 Open a pull request targeting `main`. The repository's supported premerge gate
-starts only when an authorized maintainer applies `run-ci`; the workflow
-consumes that label and tests an immutable PR merge snapshot.
+starts only when an actor with `write`, `maintain`, or `admin` permission
+applies `run-internal-ci`. The Source bridge consumes that label and dispatches
+the exact current PR head to private Internal CI. Require the sanitized
+`trtmc/premerge/required` status to pass on the same head before merge.
+
+Do not trigger the same premerge again after merge. Neither the Source bridge
+nor Internal premerge runs on a push to `main`; scheduled nightly and
+path-scoped Pages builds are separate.
 
 The retained `ai-staging` utilities can mutate branches and pull requests, but
 they are not part of the current supported flow because no Actions workflow

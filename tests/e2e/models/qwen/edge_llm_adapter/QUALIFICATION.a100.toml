@@ -16,8 +16,6 @@ trigger_globs = [
   "tests/e2e/models/qwen/edge_llm_adapter/**",
 ]
 representative_trigger_globs = [
-  ".github/workflows/optimized-runtime-proof.yml",
-  ".github/workflows/trtmc-ci.yml",
   "CMakeLists.txt",
   "_pyproject_backend.py",
   "cmake/**",

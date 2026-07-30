@@ -32,6 +32,57 @@ branch, and push updated commits. Work sequentially and report every PR state.
 - If a fix needs unavailable hardware, product judgment, or broad scope, stop
   and report the blocker.
 
+## Current CI Contract
+
+Read `.github/workflows/internal-ci-bridge.yml` from current `github/main`.
+Source keeps only Internal CI Bridge, Legal Compliance, and Pages workflows.
+Premerge and nightly execution stay in private Internal CI.
+
+Before triggering premerge, record the PR's current `headRefOid`. Only an actor
+whose repository permission is `write`, `maintain`, or `admin` may add the
+one-shot trigger:
+
+```bash
+HEAD_SHA=$(gh pr view <number> \
+  --repo NVIDIA/TensorRT-Model-Connect \
+  --json headRefOid --jq .headRefOid)
+
+gh api \
+  "repos/NVIDIA/TensorRT-Model-Connect/commits/$HEAD_SHA/status" \
+  --jq '[.statuses[] |
+    select(.context == "trtmc/premerge/required")][0]'
+
+gh pr edit <number> \
+  --repo NVIDIA/TensorRT-Model-Connect \
+  --add-label run-internal-ci
+```
+
+Never use the legacy `run-ci` label. The bridge consumes `run-internal-ci`,
+verifies the open PR targets `main`, captures its exact current head, and
+dispatches only `pr_number` and `head_sha`.
+
+Internal CI runs legal compliance and premerge tests against that exact head.
+It may use the merge base only to select impacted tests; do not describe the
+merge base or a synthetic merge commit as the tested revision.
+
+The Source-visible premerge result is only the sanitized
+`trtmc/premerge/required` status on that exact head: `PENDING`, then `PASS` or
+`FAIL`, with a target URL under the Source commit's `/tests` tree. A successful
+bridge dispatch is not a successful premerge result.
+
+Raw logs, artifacts, internal packages, runner details, and nightly execution
+stay private. Never copy them into Source Actions, Source artifacts, status
+target URLs, or PR comments.
+
+- If the current exact head is already `PENDING` or `PASS`, do not add the
+  trigger again.
+- If the head changes, treat the old result as stale and trigger the new head
+  once.
+- Retry a failed unchanged head only with explicit rerun authorization.
+- Never trigger premerge after the PR has merged. A merge does not rerun the
+  same premerge suite; Pages and scheduled Internal nightly follow independent
+  paths.
+
 ## Lock Guard
 
 Use a short-lived lock for long monitoring cycles:
@@ -113,6 +164,9 @@ Before merging, verify all of the following against the latest PR head:
   or failing as a merge blocker.
 - The same completed successful check set belongs to the current `headRefOid`.
   If a new commit lands after checks pass, restart the wait.
+- The current head has a successful `trtmc/premerge/required` commit status.
+  A green bridge run, a result on an older head, or a ruleset without required
+  status checks does not satisfy this gate.
 
 If `gh pr checks` exits nonzero, including exit code 8 for pending checks, do
 not merge. If any check is pending or queued, wait and poll. If any check fails,
@@ -159,26 +213,39 @@ git push github HEAD:<branch> --force-with-lease
 
 ## Diagnose Failed Checks
 
-List recent runs:
+Use Source Actions logs only for the retained Source workflows: Internal CI
+Bridge, Legal Compliance, and Pages. List recent Source bridge runs:
 
 ```bash
-gh run list --repo NVIDIA/TensorRT-Model-Connect --branch <branch> --limit 10
+gh run list \
+  --repo NVIDIA/TensorRT-Model-Connect \
+  --workflow internal-ci-bridge.yml \
+  --limit 20
 ```
 
-Inspect failed logs:
+Inspect failed retained-Source logs:
 
 ```bash
 gh run view <run-id> --repo NVIDIA/TensorRT-Model-Connect --log-failed
 ```
 
-Download artifacts when a job points to structured outputs:
+For a failed `trtmc/premerge/required` status, inspect Internal CI only when
+authorized. If private evidence is unavailable, report the exact head,
+sanitized status, and a human blocker; do not guess or disclose private URLs.
+
+Download Internal artifacts only when authorized and when a private job points
+to structured outputs:
 
 ```bash
 mkdir -p .ci_artifacts/pr<number>
-gh run download <run-id> --repo NVIDIA/TensorRT-Model-Connect --dir .ci_artifacts/pr<number>
+gh run download <run-id> \
+  --repo <internal-owner>/<internal-ci-repository> \
+  --dir .ci_artifacts/pr<number>
 ```
 
-When E2E artifacts exist, inspect `result.json` fields such as `status`,
+Keep downloaded Internal evidence local and private. Never attach it to the
+Source PR or a Source workflow. When E2E artifacts exist, inspect `result.json`
+fields such as `status`,
 `failure_type`, stage statuses, stage messages, metric values, and thresholds.
 
 Classify failures:

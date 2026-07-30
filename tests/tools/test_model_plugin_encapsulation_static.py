@@ -707,7 +707,6 @@ SHARED_REPORT_AND_IMPACT_TEST_FILES = (
     REPO_ROOT / "tests" / "test_e2e.py",
     REPO_ROOT / "tests" / "test_e2e_selection.py",
     REPO_ROOT / "tests" / "tools" / "test_generate_report.py",
-    REPO_ROOT / "tests" / "tools" / "test_generate_ci_summary.py",
     REPO_ROOT / "tests" / "tools" / "test_layer_profiler.py",
     REPO_ROOT / "tests" / "tools" / "test_e2e_detailed_timing.py",
     REPO_ROOT / "tests" / "tools" / "test_test_impact.py",
@@ -734,8 +733,6 @@ SHARED_DEBUG_DIFFUSION_PIPELINE_TOOL = REPO_ROOT / "tools" / "debug_diffusion_pi
 SHARED_VALIDATE_T5_TOOL = REPO_ROOT / "tools" / "validate_t5.py"
 SHARED_VALIDATE_DIT_TOOL = REPO_ROOT / "tools" / "validate_dit.py"
 SHARED_GITHUB_CI_FILES = (
-    REPO_ROOT / ".github" / "workflows" / "nightly.yml",
-    REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml",
     REPO_ROOT / "tools" / "ci" / "stage.py",
     REPO_ROOT / "tools" / "ci" / "container.py",
     REPO_ROOT / "tools" / "ci" / "pipeline.py",

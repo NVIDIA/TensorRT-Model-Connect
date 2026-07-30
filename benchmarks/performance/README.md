@@ -147,9 +147,9 @@ An individual baseline can set `local_files_only: true` when that reference must
 use an already-provisioned model snapshot even if the rest of the matrix may
 access its configured model source.
 
-The checked-in `environments/gb300.yaml` is the CI configuration. Repository files
-use repository-relative paths. Stable runner paths are supplied through the same
-GitHub repository variables already exported by the performance workflow:
+The checked-in `environments/gb300.yaml` is the CI configuration. Repository
+files use repository-relative paths. Private Internal CI supplies stable runner
+paths to its performance workflow through these repository variables:
 
 ```text
 TRTMC_PERF_WORKER
@@ -244,11 +244,10 @@ the script.
 
 ## CI
 
-`.github/workflows/performance.yml` is manually dispatchable and callable from
-another workflow. A manual dispatch may provide one `entry`; without it the job
-runs the complete matrix. A nightly workflow can call the same job without adding
-another script mode. The workflow uploads the unique run directory under
-`artifacts/perf/` with 30-day retention.
+Controlled Internal CI can run one `entry` or the complete matrix without
+adding another script mode. The unique run directory under `artifacts/perf/`
+remains a private artifact; Source Actions and Pages do not publish the raw
+performance report.
 
 ## Adding an entry
 

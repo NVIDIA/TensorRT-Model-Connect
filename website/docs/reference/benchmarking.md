@@ -72,11 +72,11 @@ Configuration errors, command failures, incomplete measurements, and timing or
 output-contract mismatches return nonzero and do not receive a performance
 light.
 
-`.github/workflows/performance.yml` exposes the same matrix as a manual or
-reusable workflow and retains the unique run directory as an artifact. A
-green documentation build or host-only matrix `check` is not target-hardware
-performance evidence: a release claim requires the retained GB300 run,
-reference result, exact revision, and report.
+Controlled Internal CI can run the same matrix and retain the unique run
+directory as a private artifact. A green documentation build, sanitized
+premerge status, or host-only matrix `check` is not target-hardware performance
+evidence: a release claim requires the retained target-hardware run, reference
+result, exact revision, and report.
 
 List the model profiles currently supported by the installed benchmark catalog:
 

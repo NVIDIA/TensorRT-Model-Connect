@@ -96,8 +96,8 @@ Checks:
 
 - Parse frontmatter: `number`, `title`, `status`, `date`, `source_commits`,
   and `superseded_by`.
-- Verify backtick-quoted file paths such as `src/...`,
-  `tensorrt_model_connect/...`, `tests/...`, and `include/...` exist. For moved
+- Verify backtick-quoted file paths under `src/`,
+  `python/tensorrt_model_connect/`, `tests/`, and `include/` exist. For moved
   paths, use `git log --follow --diff-filter=R -- <old_path>`.
 - Verify backtick-quoted class, function, and strategy names exist.
 - Update numeric claims, including runtime strategy count, family plugin count,
@@ -113,7 +113,7 @@ Checks:
 Ground truth commands:
 
 ```bash
-rg -n "PluginRegistrar" src/runtime/plugins --glob "*.cpp"
+rg -n "PluginRegistrar" src/plugins --glob "*.cpp"
 find python/tensorrt_model_connect/families/ -name "*.py" \
   -not -name "__init__.py" -not -name "base.py" | sort
 find tests/e2e/models/ -name "*.json" | sort
@@ -129,11 +129,11 @@ Scan all markdown files in `website/docs/wiki/`.
 Collect reusable ground truth first:
 
 ```bash
-rg -n "PluginRegistrar" src/runtime/plugins --glob "*.cpp"
+rg -n "PluginRegistrar" src/plugins --glob "*.cpp"
 find python/tensorrt_model_connect/families/ -name "*.py" \
   -not -name "__init__.py" -not -name "base.py" | sort
 find tests/e2e/models/ -name "*.json" | sort
-find src/runtime/pipelines/ -name "*.h" -o -name "*.cpp" | sort
+find src/runtime/domains/ -name "*.h" -o -name "*.cpp" | sort
 find tests/builder/ tests/tools/ -name "test_*.py" | sort
 find tests/cpp/ -name "test_*.cpp" | sort
 find src/ include/ -type f \( -name "*.cpp" -o -name "*.h" \) | sort

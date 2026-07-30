@@ -1737,13 +1737,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestHarness.test_waives_diff_can_be_refined",),
         ),
         ClassificationRule(
-            priority=416,
-            name="model_plugin_evidence_report",
-            matcher=_regex_rule(r"reports/model-plugin-encapsulation/.+\.json$"),
-            resolver=_match_result("model_plugin_evidence_report", _no_models, [], False),
-            covered_by=("TestNoImpact.test_model_plugin_evidence_report",),
-        ),
-        ClassificationRule(
             priority=420,
             name="unit_builder",
             matcher=_path_startswith("tests/builder/"),
@@ -1883,15 +1876,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestE2EDataFiles.test_data_file_maps_to_manifest_users",),
         ),
         ClassificationRule(
-            priority=483,
-            name="nightly_issue_tracker_tool",
-            matcher=_path_equals("tools/nightly_issue_tracker.py"),
-            resolver=_match_result(
-                "nightly_issue_tracker_tool", _no_models, ["tools"], False,
-            ),
-            covered_by=("TestUnitTiers.test_nightly_issue_tracker_tool",),
-        ),
-        ClassificationRule(
             priority=484,
             name="nightly_artifact_selector_tool",
             matcher=_path_equals("tools/select_latest_attempt_artifact.py"),
@@ -2022,10 +2006,6 @@ def _direct_python_test_targets(changed_files: List[str]) -> tuple[List[str], Li
 
 
 _EXPLICIT_TOOLS_TEST_TARGETS = {
-    "tools/nightly_issue_tracker.py": (
-        "tests/tools/test_github_actions_ci.py",
-        "tests/tools/test_nightly_issue_tracker.py",
-    ),
     "tools/select_latest_attempt_artifact.py": (
         "tests/tools/test_github_actions_ci.py",
         "tests/tools/test_select_latest_attempt_artifact.py",

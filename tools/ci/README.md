@@ -1,12 +1,13 @@
 # CI orchestration tutorial
 
-This directory contains the Python control plane for TensorRT Model Connect CI.
-Its job is to make the workflow readable: GitHub Actions chooses **when** a job
-runs, while these classes define **what** that job does.
+This directory contains the source-controlled Python implementation used by
+TensorRT Model Connect CI. The Source bridge chooses **when** a trusted
+premerge request is dispatched, private Internal workflows define the job
+graph, and these classes define **what** each test stage does.
 
 The shortest useful reading order is:
 
-1. `.github/workflows/trtmc-ci.yml` — the pre-merge job graph.
+1. `.github/workflows/internal-ci-bridge.yml` — the exact-head dispatch boundary.
 2. `tools/ci/__main__.py` — the public command-line interface.
 3. `tools/ci/pipeline.py` — the named non-model stages and their ordered steps.
 4. `tools/ci/model_proof.py` and `model_proof_inner.py` — one isolated model proof.
@@ -15,23 +16,23 @@ The shortest useful reading order is:
 
 ```mermaid
 flowchart LR
-    A[Add run-ci label] --> B[Legal compliance]
-    B --> C[Ownership and impact]
-    B --> D[Source quality]
-    C --> E[C++ and Python units]
+    A[Trusted actor adds run-internal-ci] --> B[Source bridge captures exact PR head]
+    B --> C[Private Internal premerge]
+    C --> D[Legal, ownership, and impact]
+    D --> E[Source quality and units]
     E --> F1[Model A proof]
     E --> F2[Model B proof]
     E --> FN[Model N proof]
-    F1 --> G[Combined HTML report]
+    F1 --> G[Private report and artifacts]
     F2 --> G
     FN --> G
-    D --> H[Required Premerge CI check]
-    G --> H
+    G --> H[Sanitized exact-head status]
 ```
 
-Each model box is a separate matrix job. Jobs share the runner host's configured
-GPU pool and lease slots through file-backed leases, but each proof sees only
-its selected model source, private cache view, build directory, and artifacts.
+Each model box is a separate isolated job. Source contains the test
+implementation, but raw logs, artifacts, package coordinates, runner details,
+and the complete report remain in Internal CI. Source receives only
+`trtmc/premerge/required` on the tested PR head.
 
 ## Try the interface
 
@@ -53,20 +54,20 @@ that enters the run-owned container and invokes `pipeline` there.
 
 ### 1. Pin and authorize the PR
 
-Adding the `run-ci` label starts `.github/workflows/trtmc-ci.yml`. The Legal job
-captures one merge commit SHA, removes the one-shot label, checks out that exact
-snapshot, requires it to have exactly two parents, and verifies that its second
-parent is the captured PR head. Its first parent is therefore the exact base for
-all diff-based checks. Every later job uses those snapshot-derived SHAs; the
-label event's potentially stale `pull_request.base.sha` is never used.
+An actor with `write`, `maintain`, or `admin` permission adds the one-shot
+`run-internal-ci` label. The Source bridge removes the label, verifies that the
+open pull request targets `main`, captures its exact current head, and
+dispatches only the PR number and head SHA.
 
-Commits pushed after the label was consumed do not alter the active run. Add the
-label again to test the newer snapshot.
+Internal CI checks out that exact head. It does not create a synthetic merge or
+overlay newer `main` commits. A merge base may select impacted tests, but it
+does not change the tested tree. If the PR head changes, trigger the new head
+once.
 
 ### 2. Select the work
 
-The Ownership and Impact job runs `tools/model_ci.py impact` against the pinned
-base and tested revisions. It emits:
+The Internal Ownership and Impact job runs `tools/model_ci.py impact` against
+the merge base and exact tested head. It emits:
 
 - directly affected models;
 - representative fallback models for shared-platform changes;
@@ -101,8 +102,8 @@ starts a clean, hardened, GPU-free container with a read-only source mount.
 `ContainerStageRunner` enters that container, and `CiPipeline` delegates the
 actual unit work to `UnitTestRunner` and `CoverageRunner`.
 
-The unit gate admits the model matrix. Source Quality joins the final required
-`Premerge CI` check, so it cannot be bypassed even though it runs in parallel.
+The unit gate admits the model matrix. Internal finalization includes Source
+Quality before publishing the sanitized `trtmc/premerge/required` status.
 
 ### 4. Prove each affected model in isolation
 
@@ -160,19 +161,23 @@ all of these checks pass:
 - a passing proof for every model;
 - no missing report sections or evidence.
 
-The report is an Actions artifact. GitHub Pages remains reserved for project
-documentation.
+The complete report is a private Internal Actions artifact. GitHub Pages
+remains reserved for project documentation. Source receives only the sanitized
+PASS or FAIL status for the exact PR head.
 
 ## What nightly adds
 
-`.github/workflows/nightly.yml` reuses the image, container, unit, model-proof,
-and reporting control plane. Its isolated model-proof matrix broadens selection
-to the full model inventory; separate jobs add package, coverage, semantic
-media assessment, diffusion/VLM gating, and eligible task evaluation. It does
-not invoke the retired monolithic `stage full-e2e` lane.
+The scheduled Internal nightly workflow reuses the image, container, unit,
+model-proof, and reporting control plane. Its isolated model-proof matrix
+broadens selection to the full model inventory; separate jobs add package,
+coverage, semantic media assessment, diffusion/VLM gating, and eligible task
+evaluation. It does not invoke the retired monolithic `stage full-e2e` lane.
 
 Pre-merge and nightly therefore share the model-proof implementation while
-using different selections and additional nightly-only jobs.
+using different selections and additional nightly-only jobs. Neither the
+Source bridge nor Internal premerge triggers on a push to `main`, so merging a
+passing PR does not repeat the same premerge suite. Scheduled nightly and
+path-scoped Pages builds are independent.
 
 ## Module map
 
@@ -517,12 +522,13 @@ the producing class remains the source of truth for optional evidence fields.
   profile, family changes select that family's complete target suite, and shared
   changes select one producer representative per optimized runtime.
 - **Boundary:** It contains no model or optimized-runtime identities and never
-  builds or executes a bundle. The standalone manual/reusable workflow invokes
-  each selected model-owned entrypoint, uploads its qualification artifacts,
-  and performs entrypoint-owned cleanup. Ordinary premerge CI does not call the
-  hardware workflow while no managed target-hardware runner pool exists;
-  integration behavior is covered there by source-only unit and contract tests.
-  Artifact format and qualification logic remain model-owned.
+  builds or executes a bundle. The private Internal CI manual/reusable workflow
+  invokes each selected model-owned entrypoint, keeps its qualification
+  artifacts private, and performs entrypoint-owned cleanup. Ordinary premerge
+  CI does not call the hardware workflow while no managed target-hardware
+  runner pool exists; integration behavior is covered there by source-only unit
+  and contract tests. Artifact format and qualification logic remain
+  model-owned.
 
 ### `model_reference_cache.py`
 

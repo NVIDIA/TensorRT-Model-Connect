@@ -14,7 +14,7 @@ model and current E2E contract.
 | Repository tools | `tests/tools/` | CI selection, isolation, comparison, packaging, reports |
 | E2E harness | `tests/e2e_harness/` | Manifest loading, orchestration, runner/comparator contracts |
 | Model E2E | `tests/e2e/models/<family>/` | Exact checkpoint/task integration and artifacts |
-| Nightly | `.github/workflows/nightly.yml` | Broad scheduled model and packaging evidence |
+| Nightly | Private Internal CI | Broad scheduled model and packaging evidence; Source receives no raw nightly logs or artifacts |
 
 Counts change as models land. At this revision, all three ownership trees have
 78 descriptors and the E2E tree declares 204 JSON manifests. Derive future
