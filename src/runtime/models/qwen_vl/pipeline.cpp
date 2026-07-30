@@ -839,8 +839,7 @@ void QwenVlPipeline::run_text_step_with_embed(int32_t token_id, const float* inp
 
     if (mrope_position != nullptr && text_decoder_->has_input("mrope_position_ids")) {
         inputs["mrope_position_ids"] = Tensor{const_cast<int32_t*>(mrope_position->data()),
-                                              mrope_position_shape(*text_decoder_),
-                                              DType::kInt32};
+                                              mrope_position_shape(*text_decoder_), DType::kInt32};
     }
 
     std::vector<float> zero_embed;

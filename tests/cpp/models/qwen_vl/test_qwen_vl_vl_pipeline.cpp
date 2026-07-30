@@ -84,8 +84,7 @@ class CountingTextModule final : public trtmc::ITrtModule {
   public:
     CountingTextModule(std::shared_ptr<CountingTextStats> stats, bool prefill, cudaStream_t stream,
                        int32_t mrope_rank = 0)
-        : stats_(std::move(stats)), prefill_(prefill), stream_(stream),
-          mrope_rank_(mrope_rank),
+        : stats_(std::move(stats)), prefill_(prefill), stream_(stream), mrope_rank_(mrope_rank),
           present_k_(prefill ? trtmc::DeviceTensor::zeros({8, 4}, trtmc::DType::kFloat32, stream)
                              : trtmc::DeviceTensor{}),
           present_v_(prefill ? trtmc::DeviceTensor::zeros({8, 4}, trtmc::DType::kFloat32, stream)
