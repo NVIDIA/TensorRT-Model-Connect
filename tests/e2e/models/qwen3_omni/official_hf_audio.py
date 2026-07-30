@@ -33,6 +33,28 @@ TEXT_CHAT_TEMPLATE = """{%- for message in messages %}
 {%- if add_generation_prompt %}{{- '<|im_start|>assistant\n' }}{%- endif %}"""
 
 
+def _decode_generated_text(
+    processor,
+    text_ids,
+    *,
+    input_token_count: int,
+) -> str:
+    """Decode only Thinker tokens generated after the chat prompt."""
+    shape = getattr(text_ids, "shape", ())
+    if len(shape) != 2 or input_token_count < 0 or input_token_count > shape[1]:
+        raise RuntimeError(
+            "Qwen3-Omni Thinker output does not contain the expected prompt prefix"
+        )
+    generated_ids = text_ids[:, input_token_count:]
+    decoded = processor.batch_decode(
+        generated_ids,
+        skip_special_tokens=True,
+    )[0].strip()
+    if not decoded:
+        raise RuntimeError("Qwen3-Omni produced no generated Thinker text")
+    return decoded
+
+
 def _write_wav(path: Path, audio, sample_rate: int) -> int:
     import numpy as np
 
@@ -111,6 +133,7 @@ def run(arguments: argparse.Namespace) -> None:
         return_tensors="pt",
         padding=True,
     ).to(model.device)
+    input_token_count = int(inputs["input_ids"].shape[-1])
     with torch.inference_mode():
         text_ids, audio = model.generate(
             **inputs,
@@ -120,10 +143,11 @@ def run(arguments: argparse.Namespace) -> None:
             talker_do_sample=False,
             speaker=arguments.speaker,
         )
-    decoded_text = processor.batch_decode(
+    decoded_text = _decode_generated_text(
+        processor,
         text_ids,
-        skip_special_tokens=True,
-    )[0]
+        input_token_count=input_token_count,
+    )
     sample_rate = 24_000
     num_samples = _write_wav(arguments.audio_output, audio, sample_rate)
     resolved_revision = str(

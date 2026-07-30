@@ -10,6 +10,9 @@ import subprocess
 import wave
 from pathlib import Path
 
+import numpy as np
+
+from tests.e2e.models.qwen3_omni import official_hf_audio
 from tests.e2e.models.qwen3_omni.e2e_plugins.references import torch_reference
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageSpec
 from tests.e2e_harness.manifest_loader import get_case_by_name
@@ -125,6 +128,28 @@ def test_official_runner_uses_transformers_generation_api() -> None:
     assert "thinker_do_sample=False" in source
     assert "talker_do_sample=False" in source
     assert "speaker=arguments.speaker" in source
+
+
+def test_official_runner_decodes_only_generated_thinker_tokens() -> None:
+    class Processor:
+        decoded_ids = None
+
+        def batch_decode(self, token_ids, *, skip_special_tokens):
+            assert skip_special_tokens is True
+            self.decoded_ids = token_ids.tolist()
+            return ["assistant response"]
+
+    processor = Processor()
+    text_ids = np.asarray([[10, 11, 12, 101, 102]], dtype=np.int64)
+
+    decoded = official_hf_audio._decode_generated_text(
+        processor,
+        text_ids,
+        input_token_count=3,
+    )
+
+    assert decoded == "assistant response"
+    assert processor.decoded_ids == [[101, 102]]
 
 
 def test_reference_declines_non_talker_stage(tmp_path: Path) -> None:
