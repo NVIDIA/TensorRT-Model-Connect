@@ -691,6 +691,9 @@ def test_elf_l0_manifests_use_upstream_replay_contract() -> None:
         assert "skip_reason" not in case.metadata
         assert Path(case.inputs["elf_replay_artifact"]).is_file()
         assert any(stage.artifact_type == "text_samples" for stage in case.stages)
+        if name == "elf-b-de-en-l0":
+            assert case.metadata["precision"] == "fp32"
+            assert "fp32_layers" not in case.metadata
         if name == "elf-b-owt-l0":
             assert case.metadata["e2e_parallel_resource"] == "exclusive_gpu"
             build_env = case.metadata["build_env"]

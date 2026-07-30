@@ -5,16 +5,7 @@
   "family": "elf_flow",
   "runtime_strategy": "elf_flow",
   "task_strategy": "diffusion_text_generation",
-  "precision": "fp16",
-  "fp32_layers": [
-    5,
-    6,
-    7,
-    8,
-    9,
-    10,
-    11
-  ],
+  "precision": "fp32",
   "max_cache_length": 128,
   "testcases": [
     {
@@ -69,7 +60,7 @@
         "github_reference": "https://github.com/lillian039/ELF",
         "upstream_entrypoint": "src/eval.py --config configs/training_configs/train_de-en_ELF-B.yml",
         "expected_report": "Conditional ELF evaluation reports generated translations and BLEU/ROUGE-style task metrics when online evaluation is enabled.",
-        "notes": "Replays the tensors exported from the official ELF JAX evaluator for the checked-in source sentence and requires exact normalized text plus token-id parity. Decoder blocks 0-4 and the final boundary run in FP16 with FP32 GEMM accumulation. Blocks 5-11 remain FP32 because casting the growing flow activations back to FP16 overflows before block 6."
+        "notes": "Replays the tensors exported from the official ELF JAX evaluator for the checked-in source sentence and requires exact normalized text plus token-id parity. The exact replay contract uses FP32 because the former mixed FP16/FP32 build crosses a discrete token boundary on Auto Thor."
       }
     }
   ]
