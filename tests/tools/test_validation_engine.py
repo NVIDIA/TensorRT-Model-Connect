@@ -4320,6 +4320,26 @@ def test_fnet_validation_compares_candidate_and_reference_in_fp32() -> None:
     assert resolved_model["precision"] == "fp32"
 
 
+def test_segformer_validation_compares_candidate_and_reference_in_fp16() -> None:
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(),
+        "ade20k_semantic_segmentation",
+    )
+    model = next(
+        model
+        for model in validation_engine.load_manifest_records()
+        if model["name"] == "segformer-b0-ade"
+    )
+
+    validation_config = validation_engine.effective_validation_config(
+        suite,
+        model,
+    )
+
+    assert model["precision"] == "fp16"
+    assert validation_config["reference_precision"] == "fp16"
+
+
 @pytest.mark.parametrize(
     ("suite_id", "model_name"),
     [

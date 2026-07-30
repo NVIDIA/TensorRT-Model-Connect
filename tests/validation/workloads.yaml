@@ -1091,6 +1091,13 @@ suites:
     scoring:
       scorer: semantic_segmentation_parity
       task_metric: mean_iou
+    model_overrides:
+      by_model:
+        segformer-b0-ade:
+          # The E2E acceptance manifest intentionally keeps a stable FP32
+          # oracle. Validation instead compares the FP16 bundle with an FP16
+          # HF reference so backend consistency is measured at equal precision.
+          reference_precision: fp16
     gates:
       min_backend_pixel_agreement: 0.98
       min_backend_mean_iou: 0.95
