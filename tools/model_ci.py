@@ -85,10 +85,18 @@ PLATFORM_PROJECTION_EXACT = frozenset(
         "tools/diff_logits.py",
         "tools/diff_vl.py",
         "tools/diffusion_helpers.py",
+        "tools/elf_hf_reference.py",
         "tools/model_plugin_isolation.py",
+        "tools/reference/elf_prepared.py",
+        "tools/reference/plugin_reference.py",
+        "tools/reference/speech.py",
+        "tools/reference/transformers_encoder.py",
+        "tools/reference/transformers_text.py",
+        "tools/reference/transformers_vlm.py",
         "tools/task_eval.py",
         "tools/test_impact.py",
         "tools/tool_helpers.py",
+        "tools/trtmc_reference.py",
         *MODEL_ROOT_PLATFORM_FILES,
     }
 )
