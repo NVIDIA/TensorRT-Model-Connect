@@ -21,6 +21,7 @@ from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 REFERENCE_SOURCE_REVISION = "3428dfd95309a7f3c84fd93259ded0f810d1ff91"
 REFERENCE_SAMPLE_RATE = 24_000
 _AUDIO_COMPAT = Path(__file__).with_name("personaplex_audio_compat")
+_REFERENCE_PRECISIONS = {"fp16", "bf16", "fp32"}
 
 
 def _reference_environment(
@@ -61,6 +62,19 @@ def _audio_input(case: E2ECase) -> Path:
     if not path.is_file():
         raise RuntimeError(f"PersonaPlex reference audio does not exist: {path}")
     return path
+
+
+def _reference_precision(case: E2ECase) -> str:
+    precision = str(
+        case.metadata.get("reference_precision", "bf16") or "bf16"
+    ).strip().lower()
+    if precision not in _REFERENCE_PRECISIONS:
+        supported = ", ".join(sorted(_REFERENCE_PRECISIONS))
+        raise RuntimeError(
+            f"Unsupported PersonaPlex reference precision {precision!r}; "
+            f"expected one of {supported}"
+        )
+    return precision
 
 
 class OfficialPersonaPlexReference:
@@ -120,6 +134,8 @@ class OfficialPersonaPlexReference:
             str(_audio_input(case)),
             "--max-frames",
             str(max_frames),
+            "--precision",
+            _reference_precision(case),
             "--tokens-output",
             str(tokens_path),
             "--audio-output",

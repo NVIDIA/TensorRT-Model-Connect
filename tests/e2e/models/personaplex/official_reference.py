@@ -49,6 +49,11 @@ def run(arguments: argparse.Namespace) -> None:
     from moshi.models.lm import _iterate_audio, encode_from_sphn, load_audio
     from moshi.offline import warmup
 
+    dtype = {
+        "fp16": torch.float16,
+        "bf16": torch.bfloat16,
+        "fp32": torch.float32,
+    }[arguments.precision]
     download_options = {"local_files_only": arguments.local_files_only}
     if arguments.revision:
         download_options["revision"] = arguments.revision
@@ -68,6 +73,7 @@ def run(arguments: argparse.Namespace) -> None:
     language_model = loaders.get_moshi_lm(
         model_weights,
         device=device,
+        dtype=dtype,
     ).eval()
     frame_size = int(mimi.sample_rate / mimi.frame_rate)
     generator = LMGen(
@@ -138,6 +144,7 @@ def run(arguments: argparse.Namespace) -> None:
                 ),
                 "reference_source_revision": arguments.source_revision,
                 "decoding": "greedy",
+                "precision": arguments.precision,
                 "sample_rate": int(mimi.sample_rate),
                 "num_samples": int(audio_array.size),
                 "num_frames": int(tokens_array.shape[0]),
@@ -158,6 +165,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--revision", default="")
     parser.add_argument("--input-wav", type=Path, required=True)
     parser.add_argument("--max-frames", type=int, required=True)
+    parser.add_argument(
+        "--precision",
+        choices=("fp16", "bf16", "fp32"),
+        default="bf16",
+    )
     parser.add_argument("--tokens-output", type=Path, required=True)
     parser.add_argument("--audio-output", type=Path, required=True)
     parser.add_argument("--metadata-output", type=Path, required=True)

@@ -54,6 +54,10 @@ def test_model_workload_catalog_covers_every_ready_model():
         for spec in catalog["models"].values()
     )
     assert (
+        catalog["models"]["personaplex-7b"]["reference_cache_identity"]
+        == "personaplex-official-greedy-fp16-v1"
+    )
+    assert (
         catalog["models"]["flux-2-dev"]["reference_cache_identity"]
         == catalog["models"]["flux-2-dev-fp8"]["reference_cache_identity"]
     )

@@ -162,6 +162,7 @@ def test_official_reference_runs_same_audio_and_frame_budget(
     assert case is not None
     case.inputs["audio"] = str(input_wav)
     case.inputs["speech_test_max_frames"] = 5
+    case.metadata["reference_precision"] = "fp16"
     output = official_personaplex.OfficialPersonaPlexReference().run_stage(
         case,
         StageSpec(name="full_generation"),
@@ -179,6 +180,7 @@ def test_official_reference_runs_same_audio_and_frame_budget(
     assert captured[captured.index("--input-wav") + 1] == str(input_wav)
     assert captured[captured.index("--max-frames") + 1] == "5"
     assert captured[captured.index("--official-repo") + 1] == str(source)
+    assert captured[captured.index("--precision") + 1] == "fp16"
     assert output.data["reference_tokens"].shape == (5, 8)
     assert output.data["num_frames"] == 5
     assert output.data["sample_rate"] == 24_000

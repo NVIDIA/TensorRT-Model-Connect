@@ -248,6 +248,7 @@ models:
   personaplex-7b:
     default: full_duplex_bench_speech_parity
     workloads: [full_duplex_bench_speech_parity]
+    reference_cache_identity: personaplex-official-greedy-fp16-v1
   phi-moe:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]
