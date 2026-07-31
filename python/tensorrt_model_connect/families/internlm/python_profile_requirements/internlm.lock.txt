@@ -1,5 +1,4 @@
 einops==0.8.1
 huggingface-hub==0.26.5
-sentencepiece==0.2.0
 tokenizers==0.20.3
 transformers==4.46.3

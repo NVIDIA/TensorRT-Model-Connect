@@ -340,9 +340,10 @@ class HfTransformersReference:
             from transformers import (
                 AutoModelForCausalLM,
                 AutoModelForSeq2SeqLM,
-                AutoTokenizer,
                 DynamicCache,
+                PreTrainedTokenizerFast,
             )
+            from pathlib import Path
 
             if not hasattr(DynamicCache, "from_legacy_cache"):
                 @classmethod
@@ -365,8 +366,19 @@ class HfTransformersReference:
             def _np(t):
                 return t.detach().float().cpu().numpy()
 
-            tokenizer = AutoTokenizer.from_pretrained(
-                model_ref, trust_remote_code=trust_remote_code, use_fast=False)
+            tokenizer_dir = Path(model_ref)
+            tokenizer_config = json.loads(
+                (tokenizer_dir / "tokenizer_config.json").read_text())
+            tokenizer = PreTrainedTokenizerFast(
+                tokenizer_file=str(tokenizer_dir / "tokenizer.json"),
+                bos_token=tokenizer_config.get("bos_token"),
+                eos_token=tokenizer_config.get("eos_token"),
+                unk_token=tokenizer_config.get("unk_token"),
+                pad_token=tokenizer_config.get("pad_token"),
+                chat_template=tokenizer_config.get("chat_template"),
+                clean_up_tokenization_spaces=tokenizer_config.get(
+                    "clean_up_tokenization_spaces", False),
+            )
             if use_chat_template:
                 messages = [{{"role": "user", "content": prompt}}]
                 try:

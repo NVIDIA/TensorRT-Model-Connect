@@ -83,8 +83,6 @@ def test_reference_profile_supports_current_internlm_dynamic_cache_api() -> None
     verify = (_FAMILY_DIR / "python_profile_verify.py").read_text(encoding="utf-8")
 
     assert "huggingface-hub==0.26.5" in lock
-    assert "sentencepiece==0.2.0" in lock
     assert "tokenizers==0.20.3" in lock
     assert "transformers==4.46.3" in lock
-    assert 'sentencepiece.__version__ == "0.2.0"' in verify
     assert 'hasattr(DynamicCache, "get_max_cache_shape")' in verify
