@@ -24,6 +24,78 @@ from tools.ci.quality import UnitTestRunner
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
+def _write_fake_jq(fake_bin: Path) -> None:
+    fake_jq = fake_bin / "jq"
+    fake_jq.write_text(
+        """#!/usr/bin/env python3
+import json
+import sys
+from urllib.parse import quote
+
+arguments = sys.argv[1:]
+variables = {}
+expression = ""
+null_input = False
+raw_output = False
+exit_status = False
+index = 0
+while index < len(arguments):
+    argument = arguments[index]
+    if argument == "--arg":
+        variables[arguments[index + 1]] = arguments[index + 2]
+        index += 3
+        continue
+    if argument.startswith("-"):
+        null_input = null_input or "n" in argument[1:]
+        raw_output = raw_output or "r" in argument[1:]
+        exit_status = exit_status or "e" in argument[1:]
+    else:
+        expression = argument
+    index += 1
+
+if null_input:
+    if expression != "$value | @uri":
+        raise SystemExit(f"unsupported null-input jq expression: {expression}")
+    result = quote(variables["value"], safe="")
+else:
+    value = json.load(sys.stdin)
+    if expression.startswith("[.[] | select(.body | contains("):
+        marker = variables["marker"]
+        result = next(
+            (
+                item["id"]
+                for item in value
+                if marker in str(item.get("body", ""))
+            ),
+            "",
+        )
+    else:
+        optional_empty = expression.endswith(" // empty")
+        path = expression.removesuffix(" // empty").removeprefix(".").split(".")
+        result = value
+        for part in path:
+            if not isinstance(result, dict) or part not in result:
+                result = None
+                break
+            result = result[part]
+        if optional_empty and result is None:
+            result = ""
+
+if exit_status and result is None:
+    raise SystemExit(1)
+if raw_output:
+    if isinstance(result, bool):
+        print(str(result).lower())
+    elif result is not None:
+        print(result)
+else:
+    print(json.dumps(result))
+""",
+        encoding="utf-8",
+    )
+    fake_jq.chmod(0o755)
+
+
 def _internal_ci_snapshot_script() -> str:
     workflow = yaml.safe_load(
         (REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml").read_text(
@@ -63,6 +135,7 @@ def _run_internal_ci_guard_report(
 ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
+    _write_fake_jq(fake_bin)
     fake_log = tmp_path / "gh-calls.jsonl"
     fake_gh = fake_bin / "gh"
     fake_gh.write_text(
@@ -136,9 +209,11 @@ def _run_internal_ci_snapshot(
     event_name: str = "pull_request_target",
     max_attempts: int = 1,
     branch_available: bool = True,
+    system_path: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
+    _write_fake_jq(fake_bin)
     fake_gh = fake_bin / "gh"
     fake_gh.write_text(
         """#!/usr/bin/env python3
@@ -224,7 +299,7 @@ else:
             "GITHUB_REPOSITORY": "NVIDIA/TensorRT-Model-Connect",
             "HEAD_SYNC_MAX_ATTEMPTS": str(max_attempts),
             "HEAD_SYNC_RETRY_DELAY_SECONDS": "0",
-            "PATH": f"{fake_bin}:{environment['PATH']}",
+            "PATH": f"{fake_bin}:{system_path or environment['PATH']}",
             "PR_NUMBER": "715",
         }
     )
@@ -557,6 +632,25 @@ def test_internal_ci_guard_protects_manual_dispatch_without_event_head(
         pr_head_sha=head_sha,
         branch_head_sha=head_sha,
         event_name="workflow_dispatch",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_internal_ci_guard_tests_do_not_depend_on_host_jq(tmp_path: Path) -> None:
+    head_sha = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
+    tool_bin = tmp_path / "system-bin"
+    tool_bin.mkdir()
+    (tool_bin / "bash").symlink_to("/bin/bash")
+    (tool_bin / "python3").symlink_to(sys.executable)
+    (tool_bin / "sleep").symlink_to("/bin/sleep")
+
+    result = _run_internal_ci_snapshot(
+        tmp_path,
+        event_head_sha=head_sha,
+        pr_head_sha=head_sha,
+        branch_head_sha=head_sha,
+        system_path=str(tool_bin),
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
