@@ -1,118 +1,164 @@
 ---
 name: fp16-trt-network
 description: >-
-  Use when adding, reviewing, or debugging FP16/BF16 precision support in
-  strongly typed TensorRT networks. Covers dtype threading, FP32 precision
-  boundaries, TensorRT strongly typed restrictions, bundle metadata, and common
-  FP16 failure modes.
+  Use when adding, reviewing, or debugging FP16/BF16 precision in a
+  family-owned, strongly typed TensorRT network. Covers dtype threading,
+  explicit FP32 boundaries, typed constants, compact GQA/MQA state, bundle
+  evidence, and low-precision validation.
 ---
 
-# FP16 TensorRT Network Construction
+# FP16/BF16 TensorRT Networks
 
-## Core Rule
+## Contract
 
-In strongly typed TensorRT networks, precision is controlled by tensor dtypes,
-typed constants, and explicit `network.add_cast(...)` boundaries. Do not use
-`BuilderFlag.FP16`, `BuilderFlag.INT8`, `layer.setPrecision()`,
-`layer.setOutputType()`, or direct `tensor.dtype = ...` assignment.
+TensorRT networks in this repository are strongly typed:
 
 ```python
-flags = 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
+from tensorrt_model_connect import trt_compat
+
+flags = trt_compat.network_creation_flags(strongly_typed=True)
 network = builder.create_network(flags)
 ```
 
-## Precision Boundary Map
+Follow an owning family's established direct flag when it is intentionally
+backend-specific. For new backend-agnostic code, use `trt_compat` so TensorRT
+versions without `EXPLICIT_BATCH` and the optional TensorRT-RTX backend share
+one flag boundary. Backend selection, including `--rtx`, must happen before a
+module imports TensorRT; never switch backends after TensorRT is loaded.
 
-Keep these operations in FP32:
+Precision follows tensor dtypes, typed constants, and explicit
+`network.add_cast(...)` boundaries. Do not use `BuilderFlag.FP16`,
+`BuilderFlag.INT8`, `layer.setPrecision()`, `layer.setOutputType()`, or direct
+`tensor.dtype` mutation to override inference in a strongly typed network.
 
-| Operation | Reason |
-|-----------|--------|
-| RMSNorm, LayerNorm, GroupNorm, L2Norm | Reduction and reciprocal/sqrt precision |
-| Softmax | FP16 exp overflow and probability normalization error |
-| BatchNorm | Running mean/variance and affine arithmetic |
-| Final logits output | Accurate token ranking and sampling |
+Keep changes in the owning family under
+`python/tensorrt_model_connect/families/<family>/`. Root graph helper modules
+are intentionally absent. Share a helper only within an ownership boundary
+where shape, dtype, and layout semantics genuinely match.
 
-These operations are usually safe in FP16/BF16 work dtype:
+## Map Precision Before Editing
 
-| Operation | Notes |
-|-----------|-------|
-| MatMul / linear projection | Tensor Cores use FP16 input with higher precision accumulation |
-| Embedding lookup | Table lookup, no arithmetic |
-| SiLU / GELU / ReLU | Elementwise in normal activation ranges |
-| RoPE elementwise application | Cos/sin values fit in FP16 |
-| Residual add and bias add | Safe when values remain in expected range |
+For every input, weight, constant, intermediate, state tensor, and output,
+record:
 
-## Standard Pattern
+- storage dtype used to create the constant;
+- TensorRT runtime dtype;
+- shape and layout;
+- the operation where a cast occurs;
+- the required comparison dtype.
 
-Every sensitive operation should enter FP32, compute in FP32, then cast back to
-the work dtype when needed:
+BF16 needs special care. Some family builders store constants in FP16-compatible
+NumPy storage and explicitly cast them to `trt.bfloat16`. Do not assume a
+NumPy dtype maps directly to the TensorRT dtype. Follow the owning family's
+constant helper and checkpoint mapper.
+
+## FP32 Boundaries
+
+Use the family implementation and reference numerics to decide boundaries.
+Common FP32 candidates include:
+
+- normalization reductions and reciprocal/square-root arithmetic;
+- softmax and probability normalization;
+- batch/group statistics;
+- final logits or comparison-sensitive outputs;
+- unstable scale or calibration arithmetic.
+
+Matrix multiplies, projections, embeddings, activations, RoPE, residuals, and
+biases often use the work dtype, but this is not a universal license. Preserve
+an established family-specific FP32 layer or operation.
+
+The boundary pattern is:
 
 ```python
-def add_rms_norm(network, inp, hidden_size, gamma, eps_tensor, dtype=np.float32):
-    need_cast = dtype != np.float32
-    if need_cast:
-        inp = network.add_cast(inp, trt.float32).get_output(0)
-        eps_tensor = network.add_cast(eps_tensor, trt.float32).get_output(0)
-
-    gamma_t = add_constant(network, (1, hidden_size), gamma, dtype=np.float32)
-    # Compute mean/sqrt/reciprocal/scale in FP32.
-
-    if need_cast:
-        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
-    return result
+fp32_in = network.add_cast(inp, trt.float32).get_output(0)
+fp32_eps = network.add_cast(eps_tensor, trt.float32).get_output(0)
+# Compute the sensitive operation with FP32 inputs and FP32 constants.
+result = network.add_cast(fp32_result, work_trt_dtype).get_output(0)
 ```
 
-Critical details:
+Rules:
 
-- Cast every tensor used inside the FP32 computation, including epsilon tensors.
-- Norm weights (`gamma`, `beta`) stay FP32, even when other weights are FP16.
-- In strongly typed mode, all inputs to an elementwise op must have the same
-  dtype.
-- Constants must be created in their target dtype; TensorRT will not infer a
-  cast for you.
+- all inputs to a strongly typed elementwise operation must agree in dtype;
+- create constants in the intended storage dtype and cast when runtime dtype
+  differs;
+- include epsilon, masks, scale tensors, and affine parameters in the map;
+- cast marked outputs to the comparison contract's dtype;
+- do not replace finite masking with values outside the low-precision range.
 
-## Builder Checklist
+## GQA/MQA State
 
-- Accept a precision parameter, usually `precision: str = "fp32"`.
-- Compute both work dtypes:
-  `work_np_dtype = np.float16 if precision == "fp16" else np.float32` and
-  `work_trt_dtype = trt.float16 if precision == "fp16" else trt.float32`.
-- Set KV cache or recurrent state tensors to `work_trt_dtype`.
-- Keep attention mask inputs FP32, then cast to the work dtype if an elementwise
-  op requires it.
-- Pass `dtype=work_np_dtype` to constants, graph ops, and graph blocks that use
-  work-precision weights.
-- Keep norm constants and norm affine parameters FP32 inside the boundary.
-- Cast logits or final comparison-sensitive outputs to FP32 before
-  `network.mark_output(...)`.
-- Write `"precision": precision` into bundle metadata.
-- Add or update an E2E manifest with `"precision": "fp16"` when adding a
-  persistent FP16 variant.
+TensorRT attention supports grouped- and multi-query attention. Keep K/V
+projection weights, biases, and cache tensors at compact
+`num_key_value_heads * head_dim` width unless a specific non-attention
+operation proves a different layout is required. Do not expand K/V to query
+head width merely to simplify graph construction.
 
-## Weight Loading
+Verify:
 
-| Weight type | FP16 mode dtype |
-|-------------|-----------------|
-| Embeddings, Q/K/V/O projections, MLP, LM head | `np.float16` |
-| RMSNorm/LayerNorm gamma and beta | `np.float32` |
-| Q/K norm gamma and per-head norm weights | `np.float32` |
+- Q, K, and V shapes before attention;
+- cache allocation and update shapes;
+- tensor-parallel partitioning constraints;
+- bundle/runtime metadata describing cache layout;
+- Python debug runner and C++ runtime agreement.
 
-## Common Failures
+## Quantization Interaction
 
-- Repeated tokens or degenerate text: missing FP32 norm boundary.
-- TensorRT build error about mismatched elementwise types: constants or epsilon
-  tensors were created in the wrong dtype.
-- Masked tokens affect output: attention mask was converted to FP16 too early
-  or used values outside FP16 range.
-- Plausible but wrong text: logits or final comparison outputs stayed FP16.
-- FP16 bundle is nearly the same size as FP32: the builder accepted the flag but
-  did not actually thread the work dtype through weights and inputs.
+Low-precision base dtype and quantization are separate effective build options.
+Changing either may select a different optimized implementation instead of the
+native builder. Follow the family quantization hooks and shared quantization
+plan; do not add ad hoc Q/DQ logic to a generic precision helper.
+
+Record whether each compared bundle is native or optimized. A result that
+changes both precision and runtime implementation does not isolate precision.
+Likewise, compare TensorRT and TensorRT-RTX separately: a backend change is not
+evidence for a dtype-only change.
+
+## Implementation Checklist
+
+- Resolve `fp32`, `fp16`, and `bf16` explicitly; fail closed on unsupported
+  values.
+- Thread both storage and TensorRT work dtypes through the complete graph.
+- Preserve strongly typed network creation on every builder path.
+- Preserve the selected TensorRT versus TensorRT-RTX backend and reject a
+  precision/backend combination the owning family does not support.
+- Keep compact K/V shapes for GQA/MQA.
+- Keep family-specific graph logic family-owned.
+- Ensure bundle config records the requested precision and selected runtime
+  path.
+- Add or update a model-owned manifest/profile instead of inventing a
+  standalone example.
+
+## Failure Signatures
+
+| Symptom | Inspect first |
+|---|---|
+| Build-time elementwise dtype error | constant, epsilon, mask, or BF16 cast |
+| Repeated/degenerate tokens | norm, softmax, cache, or logits boundary |
+| First decode step differs | weight storage, prefill dtype, or config |
+| Divergence grows by token/layer | accumulation or missing FP32 boundary |
+| FP16 bundle is not materially smaller | actual section/weight dtypes and runtime path |
+| BF16 passes FP16 but fails BF16 | storage-to-runtime casts and unsupported ops |
 
 ## Validation
 
-- Inspect the bundle with `./build/trtmc inspect <bundle.trtfb>`.
-- Compare FP32 and FP16 bundle sizes; FP16 weight-heavy bundles should be
-  materially smaller.
-- Run the narrow E2E manifest or a targeted diff command before claiming the
-  precision change is correct.
-- Use `$debug-trt-mismatch` if low-precision output diverges unexpectedly.
+Inspect the artifact and selected path:
+
+```bash
+./build/trtmc inspect <bundle.trtfb>
+```
+
+Bundle size is only a signal. Confirm section metadata and weight dtypes; do
+not declare success from an approximate 2x size change.
+
+Run the owning model-first validation or focused E2E case with fixed model
+revision, workload, sampling, and runtime strategy:
+
+```bash
+PYTHONPATH=python:. python3 tools/trtmc_validate.py <model> <workload> \
+  --bundle <bundle.trtfb> \
+  --output <artifact-dir>
+```
+
+Compare FP32 and low-precision artifacts with the same implementation path.
+Use `$debug-trt-mismatch` for the first divergent token, layer, stage, or
+runtime boundary. Report checks that were not run on target hardware.
