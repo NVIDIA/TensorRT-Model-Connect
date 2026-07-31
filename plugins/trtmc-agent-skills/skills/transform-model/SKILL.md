@@ -1,158 +1,194 @@
 ---
 name: transform-model
 description: >-
-  Use when adding or transforming a HuggingFace model into a
-  TensorRT-Model-Connect `.trtfb` bundle. Drives scoped family/strategy work,
-  build-validation loops, comparison output, E2E manifest creation, and PR-ready
-  reporting.
+  Use when onboarding a Hugging Face model into TensorRT-Model-Connect or
+  extending an existing family to produce a `.trtfb` bundle. Drives
+  ownership-first implementation across Python builder, native runtime, and
+  model-owned E2E descriptors, then requires reference-consistency and runtime
+  evidence before support is claimed.
 ---
 
 # Transform Model
 
-## Required Inputs
+## Define The Support Claim
 
-- `hf_model`: HuggingFace model ID or local model path.
-- `branch`: short-lived branch name.
-- `container`: optional Docker container name. Use the repo's current GB300 dev
-  container pattern unless the user specifies another container.
+Record:
 
-## Ground Rules
+- exact Hugging Face model ID and immutable revision;
+- task/modality and requested public operation;
+- target hardware and precision/quantization;
+- closest existing family and architectural differences;
+- whether the expected bundle path is native or an exact optimized profile;
+- requested evidence level: build, parity, E2E, performance, or qualification.
 
-- Confirm the exact model variant before expensive build work.
-- Run GPU/TensorRT commands inside the dev container.
-- Read current docs and source before implementing:
-  `website/docs/features/model-families.md`,
-  `website/docs/features/runtime-strategies.md`, family plugins, strategies, and
-  the relevant runtime code.
-- Keep changes scoped to the model family, strategy, manifest, and tests needed
-  for the requested model.
-- Do not relax thresholds without evidence.
-- Do not push directly to `main`; follow AGENTS.md and open a GitHub PR from a
-  short-lived branch on the `github` remote.
-- Stop after 10 build/fix iterations and report the blocker if comparison output
-  still cannot be produced.
+Do not begin from a generic manifest. Read the model config, reference
+implementation, nearest family descriptors, and owned tests first.
 
-## Phase 0: Confirm Scope
+## Ownership Map
 
-Before implementation, identify and report:
+A fully registered native model normally crosses three descriptors:
 
-- HF model ID.
-- Architecture type: decoder, encoder-only, diffusion, speech/audio,
-  vision-language, embedding/reranking, or other.
-- Existing family plugin or closest reference family.
-- Runtime strategy.
-- Branch name.
+| Layer | Owner |
+|---|---|
+| Python build/family selection | `python/tensorrt_model_connect/families/<family>/MODEL.toml` |
+| Native C++ strategy/plugin | `src/runtime/models/<family>/MODEL.toml` |
+| E2E models, manifests, sidecars | `tests/e2e/models/<family>/MODEL.toml` |
 
-Proceed when the user has confirmed or when the request already provides enough
-specificity for a low-risk assumption.
+The owning directories also contain family-local builders, graph helpers,
+runtime sources, manifests, testcases, thresholds, and performance contracts.
+Keep changes there unless multiple families demonstrably share the contract.
 
-## Phase 1: Setup
+An optimized-runtime path instead requires an exact implementation, profile,
+and qualification chain. Do not create a native strategy merely to mirror an
+optimized implementation, and do not silently fall back after an optimized
+profile has claimed the request.
 
-```bash
-git fetch github main
-git switch -c <branch> github/main
-```
+## Choose Reuse Or A New Family
 
-If working inside a container, ensure the container checkout is on the same
-branch and points at the same commit.
+Extend an existing family when model type, checkpoint mapping, graph dataflow,
+runtime strategy, and validation contract fit that owner. Create a new family
+when those contracts materially differ.
 
-## Phase 2: Implement
-
-Common reference paths:
-
-| Path | Purpose |
-|------|---------|
-| `python/tensorrt_model_connect/families/` | Family plugins and family-local builders |
-| `python/tensorrt_model_connect/build_cli.py` | Build CLI entrypoint |
-| `python/tensorrt_model_connect/engine_builder.py` | Build orchestration |
-| `python/tensorrt_model_connect/families/base.py` | Family plugin protocol |
-| `scripts/new_family.py` | Family scaffold helper |
-| `tests/e2e/models/` | E2E manifests |
-
-Guidance by type:
-
-- Decoder models: prefer the established decoder strategy and standard family
-  plugin patterns.
-- Encoder-only models: use the encoder-only strategy and BERT-style references.
-- Diffusion models: implement component builds in the family plugin and inspect
-  known attention/mask issues before changing thresholds.
-- Multimodal/audio models: read existing family plugins and E2E harness runners
-  before introducing new dataflow.
-
-## Phase 3: Build
+For a standard decoder starting point:
 
 ```bash
-docker exec <container> bash -c "cd <repo> && \
-  /opt/venv/bin/python -m tensorrt_model_connect build <hf_model> \
-  -o engines/<model>.trtfb \
-  --max-cache-length 256 --verbose"
+python3 scripts/new_family.py \
+  --model-type <model-type> \
+  --hf-repo <org/model> \
+  --family-name <family>
 ```
 
-If build fails, read the full error, inspect the relevant family/strategy/source
-code, make the smallest fix, and retry. Log new recurring issues in the PR body.
+The scaffold is only a starting point. It fetches model configuration and emits
+a decoder-oriented Python family. Review every generated match rule, import,
+weight mapping, graph path, and descriptor; do not use it for non-decoder
+architectures without redesigning the generated code.
 
-## Phase 4: Validate
+## Implement The Smallest Owned Change
 
-Text models:
+### Python Builder
+
+- Parse model configuration without inventing defaults that change semantics.
+- Map checkpoint tensors explicitly, including tied weights, fused/split
+  projections, transposes, and expert layouts.
+- Preserve strongly typed TensorRT network creation.
+- Keep graph operations in the family directory; root graph helpers are
+  intentionally absent.
+- For GQA/MQA, keep K/V projections, bias, and cache at compact
+  `num_key_value_heads * head_dim` unless a proven operation needs another
+  layout.
+- Use `$fp16-trt-network` for FP16/BF16 dtype and FP32-boundary work.
+- Use the shared quantization plan and family hooks; do not build a parallel
+  quantization path.
+- Select TensorRT versus TensorRT-RTX before TensorRT imports and keep backend
+  choice separate from model-architecture changes.
+
+### Runtime FFI Graph Slots
+
+Use `--recipe <recipe-id> <instance-id>` or `--graph-patch <json>` only when
+the request is to replace an explicit TensorRT region with a reviewed,
+family-owned TVM-FFI graph implementation. Read
+`website/docs/features/tvm-ffi.md` and the owning recipe/instance contract.
+Do not use a graph slot as a generic model-onboarding shortcut: current slots
+reject TensorRT-RTX, optimized-runtime, quantized, and tensor-parallel builds.
+
+### Runtime
+
+- Reuse an existing runtime strategy only when its public request, cache/state,
+  tokenizer/media, output, and lifecycle contracts match.
+- Add a family-owned C++ model plugin for new native behavior.
+- Keep common host/session behavior in shared runtime only when multiple model
+  owners need the same contract.
+- Ensure bundle metadata and runtime selection describe the actual path.
+
+### Model-Owned Evidence
+
+- Add the manifest under `tests/e2e/models/<family>/manifests/`.
+- Register it in that family's E2E `MODEL.toml`.
+- Use real task strategy, runtime strategy, testcase, inputs, and comparator.
+- Put model-specific tolerances in the established threshold sidecar.
+- Add `perf_validation.json` only when a reviewed performance contract exists.
+- Bind a reference workload in `tests/validation/model_workloads.yaml` when the
+  task has an aligned comparison implementation.
+- Define a new workload in `tests/validation/workloads.yaml` only when the
+  reference runner, TRTMC runner, comparator, gates, and reproduction contract
+  are complete; implementation belongs in `tools/validation/`.
+
+Never reduce a threshold, dataset, sample limit, or oracle merely to obtain a
+pass.
+
+## Build And Family Validation
+
+Use the supported dev container when TensorRT/GPU dependencies are required:
 
 ```bash
-docker exec <container> bash -c "cd <repo> && \
-  ./build/trtmc run engines/<model>.trtfb \
-  --prompt 'The capital of France is' \
-  --max-new-tokens 20 \
-  --hf-python /opt/venv/bin/python"
+./build/trtmc build <model-id-or-path> \
+  --model-revision <immutable-revision> \
+  -o <artifact-dir>/<model>.trtfb
 
-docker exec <container> bash -c "cd <repo> && \
-  /opt/venv/bin/python tools/diff_logits.py \
-  --model <hf_model> --atol 1e-2 --battery --verbose"
+./scripts/validate_family.sh <model-id-or-path> \
+  --binary ./build/trtmc \
+  --bundle-dir <artifact-dir> \
+  --isolate-model-plugin
 ```
 
-Diffusion/media models:
+The script builds the bundle, discovers the native runtime owner, runs
+decoder-only diff tools only for a declared `decoder_debug` profile, and runs a
+matching model-owned E2E case when present. A warning about a missing manifest
+is not a support pass.
 
-- Run at least two semantically distinct prompts.
-- Save outputs with versioned names.
-- Compare against HF or the existing E2E comparator where available.
-
-If output is wrong, use `$debug-trt-mismatch` and iterate.
-
-## Phase 5: E2E Manifest
-
-Create or update `tests/e2e/models/<family>/manifests/<model-name>.json` and list it in `tests/e2e/models/<family>/MODEL.toml`:
-
-```json
-{
-  "name": "<model-name>",
-  "hf_id": "<hf_model>",
-  "bundle": "<model-name>.trtfb",
-  "family": "<family_name>",
-  "runtime_strategy": "<strategy>",
-  "max_cache_length": 256,
-  "prompt": "<test prompt>",
-  "max_new_tokens": 20
-}
-```
-
-Run:
+Also validate repository ownership and selection:
 
 ```bash
-docker exec <container> bash -c "cd <repo> && \
-  /opt/venv/bin/python -m pytest tests/test_e2e.py::test_e2e[<model-name>] -v \
-  --engine-dir engines \
-  --trtmc-binary ./build/trtmc \
-  --hf-python /opt/venv/bin/python \
-  --rebuild-engines"
+PYTHONPATH=python:. python3 tools/model_ci.py validate
+PYTHONPATH=python:. python3 tools/test_impact.py --validate
 ```
 
-## Phase 6: Report
+## Reference Consistency
 
-Before opening a PR, make sure the report includes:
+List and dry-run the owned workload:
 
-- Model name and HF ID.
-- Strategy and family plugin used.
-- Bundle path.
-- Commands run and pass/fail results.
-- Comparison metrics or saved media outputs.
-- E2E manifest and test result.
-- Remaining risks or unavailable hardware.
+```bash
+PYTHONPATH=python:. python3 tools/trtmc_validate.py --list
+PYTHONPATH=python:. python3 tools/trtmc_validate.py \
+  <model> <workload> \
+  --dry-run \
+  --output <plan-dir>
+```
 
-Use `$submit-github-pr` for the final push and PR creation.
+Then execute it on the exact bundle and retain the artifact tree:
+
+```bash
+PYTHONPATH=python:. python3 tools/trtmc_validate.py \
+  <model> <workload> \
+  --bundle <bundle.trtfb> \
+  --output <comparison-dir>
+```
+
+Keep execution, reference, comparison, and validation status separate. Use
+`$debug-trt-mismatch` to localize failures by modality; do not force decoder
+diff tools onto audio, diffusion, or vision-language paths.
+
+## Evidence Gates
+
+| Claim | Minimum evidence |
+|---|---|
+| Builder implemented | focused family tests and successful bundle build |
+| Native runtime connected | descriptor/selection checks and isolated plugin load |
+| Output parity | retained model-first comparison artifact |
+| Model supported | registered model-owned E2E plus target-hardware pass |
+| Performance improved | comparable owned performance run |
+| Optimized path qualified | exact implementation/profile/qualification artifacts |
+
+Compilation, sample output, build success, and dry-run planning are not model
+parity.
+
+## Delivery
+
+Before `$submit-github-pr`, run skill/static checks, relevant unit tests, the
+model-owned E2E and comparison where hardware permits, and `git diff --check`.
+Use `$write-git-messages`.
+
+The PR must identify the exact model revision, all three ownership descriptors,
+runtime/bundle path, build and validation commands, artifact hashes/paths,
+comparison metrics, target hardware, performance evidence if claimed, and
+unrun or blocked gates.
