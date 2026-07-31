@@ -7,11 +7,21 @@ description: Draft, revise, or review Git commit messages, PR titles, PR descrip
 
 ## Workflow
 
-1. Inspect the actual change before writing: use `git diff --stat`, `git diff --name-only`, and focused diffs for changed files. If only a user summary is available, state that the message is based on the provided summary.
-2. Match the requested artifact: commit message, PR title/body, squash merge message, rebase todo wording, or review response.
-3. Follow the repository's existing convention first. If the repo has no clear convention, default to Conventional Commits for commit titles and PR titles.
-4. Keep claims evidence-based. Do not invent issue numbers, benchmark results, tests, generated artifacts, or reviewer decisions.
-5. Prefer ready-to-use text. Return the final message in a fenced `text` or `markdown` block, followed by short notes only if tradeoffs matter.
+1. Identify the artifact and exact comparison: commit, PR, squash/rebase
+   message, or review response; base ref/SHA; head ref/SHA; and intended target.
+2. Inspect the actual change with `git status --short`, `git diff --stat
+   <base>...<head>`, `git diff --name-status <base>...<head>`, and focused
+   diffs. Include staged and untracked scope when drafting a new commit. If only
+   a user summary is available, state that limitation.
+3. Follow the repository's existing convention first. If it has no clear
+   convention, default to Conventional Commits for commit and PR titles.
+4. Separate implemented behavior, static/CPU validation, target-hardware proof,
+   model parity, package evidence, and performance/qualification. Do not promote
+   one tier into another.
+5. Keep claims evidence-based. Do not invent issue numbers, benchmark results,
+   tests, generated artifacts, reviewer decisions, or CI state.
+6. Return ready-to-use text followed by notes only when a limitation or choice
+   matters.
 
 For source rationale, read `references/source-notes.md` only when you need to explain or adjust the standard.
 
@@ -38,6 +48,8 @@ Guidelines:
 - Add a scope only when it helps route ownership or understand impact.
 - Put the "why" and user-visible behavior in the body; do not restate every file changed.
 - Use footers for issue links, co-authors, and breaking changes.
+- Do not add a co-author unless that person or tool actually authored part of
+  the change and the user wants the attribution.
 - Split unrelated work into separate commits when possible. If not possible, choose the dominant type and explain the combined scope in the body.
 - Avoid vague titles such as `update files`, `misc fixes`, `work in progress`, or `fix stuff`.
 - In this repo, never include `Claude` in commit messages because the GitHub ruleset rejects it.
@@ -77,15 +89,31 @@ When reporting validation:
 - Include exact commands and whether they passed, failed, or were not run.
 - Include the result in plain English, not only the command.
 - If validation was not run, say why and describe the residual risk.
+- Tie remote CI claims to the exact head SHA. A check on an older head is not
+  evidence for the current diff.
+- Distinguish a skipped check from a passing check and a dry run from execution.
+- In this repository, say premerge passed only when the current head has
+  `trtmc/premerge/required=PASS`. A successful Internal CI Bridge dispatch or
+  Source workflow is not the premerge result.
+- Do not quote or link private Internal CI logs, artifacts, runner details,
+  package coordinates, or internal URLs in Source PR text. Use the sanitized
+  exact-head status and separately reproducible public evidence.
 
 Guidelines:
 
 - Make the PR title mirror the expected squash or merge commit title.
+- Check the final title and squash/rebase message for the repository's banned
+  terms; in this repo that includes `Claude`.
 - Keep the PR focused on one purpose. If the diff is broad, say why it could not be split.
 - In the body, include purpose, done criteria, change overview, relevant issue links or prior discussions, and any requested feedback.
 - For multi-file or multi-layer changes, tell reviewers where to start and what order to review in the future-reader notes.
 - Call out security, dependency, migration, compatibility, and rollback concerns when present.
 - Omit empty sections rather than leaving placeholders.
+
+When the PR depends on another PR, names a merge order, or changes ownership,
+put that relationship in `Notes For Future Readers`. When a branch was rebased
+or force-pushed, do not claim current CI is green until the checks on the new
+head complete.
 
 ## Review Checklist
 
@@ -98,4 +126,11 @@ Before returning a message, verify:
 - The type and scope match the diff.
 - Test claims match commands actually run or user-provided evidence.
 - Validation includes both commands and pass/fail results.
+- Base/head and changed-file scope match the artifact being described.
+- CI and model-proof claims refer to the current head SHA.
+- Source/Internal CI wording respects the public evidence boundary and does
+  not call a bridge dispatch a test pass.
+- Failures, skips, unrun checks, and residual risks are explicit.
+- The PR title and expected squash/rebase title are aligned and contain no
+  repository-banned terms.
 - Future-reader notes capture any review order, limitation, or maintenance warning that is not obvious from the diff.
