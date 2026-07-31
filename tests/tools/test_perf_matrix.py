@@ -13,6 +13,7 @@ import subprocess
 import sys
 from types import ModuleType, SimpleNamespace
 
+import numpy as np
 import pytest
 import yaml
 
@@ -561,7 +562,10 @@ def test_backend_waits_for_gpu_headroom_before_each_command(
     monkeypatch.setattr(
         perf_matrix,
         "_baseline_argv",
-        lambda _case, _resolved, _output, _options: (["baseline"], "base"),
+        lambda _case, _resolved, _output, _options: (
+            ["baseline", "--precision", "fp16"],
+            "base",
+        ),
     )
     monkeypatch.setattr(
         perf_matrix,
@@ -1538,6 +1542,57 @@ def test_task_reference_can_require_local_model_files_per_case(tmp_path: Path) -
     assert "--local-files-only" in argv
 
 
+def test_task_reference_uses_manifest_reference_precision(tmp_path: Path) -> None:
+    case = {
+        "baseline": {
+            "adapter": "hf-diffusers",
+            "timing_scope": "task-pipeline-call-wall",
+            "input_preparation_included": True,
+            "asset_loading_included": False,
+        },
+        "measurement": {"warmup": 1, "iterations": 2},
+        "workload": {"testcase": "z-image-turbo"},
+    }
+    resolved = {
+        "testcase": "z-image-turbo",
+        "operation": "generate_image",
+        "request": {"prompt": "cat"},
+        "runtime": {},
+        "model": {
+            "family": "z_image",
+            "hf_id": "Tongyi-MAI/Z-Image-Turbo",
+            "manifest_path": str(tmp_path / "manifest.json"),
+            "precision": "fp16",
+            "task_strategy": "diffusion_media_generation",
+        },
+    }
+    manifest = {
+        "testcases": [
+            {
+                "name": "z-image-turbo",
+                "reference_precision": "bf16",
+            }
+        ]
+    }
+    options = Namespace(
+        local_files_only=False,
+        task_reference_runner=tmp_path / "task_reference.py",
+    )
+
+    argv = perf_matrix._task_reference_argv(
+        case=case,
+        resolved=resolved,
+        manifest=manifest,
+        output=tmp_path / "baseline.json",
+        options=options,
+        profile="default",
+        python="python",
+        mode="hf-eager",
+    )
+
+    assert argv[argv.index("--precision") + 1] == "bf16"
+
+
 def test_entry_is_the_only_run_selection() -> None:
     cases = perf_matrix._cases(perf_matrix._read_yaml(SUITE))
 
@@ -2409,6 +2464,63 @@ def test_diffusers_media_count_accepts_array_like_video_frames() -> None:
 
     assert runner["_media_count"](Frames(), "video") == 5
     assert runner["_media_count"](Frames(), "image") == 1
+
+
+def test_diffusers_adapter_requests_numeric_output_before_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = runpy.run_path(
+        str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py")
+    )
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def to(self, _device):
+            return self
+
+        def __call__(self, *, prompt, output_type):
+            captured.update(prompt=prompt, output_type=output_type)
+            return Namespace(images=np.zeros((1, 4, 6, 3), dtype=np.float32))
+
+    globals_ = runner["_load_diffusers"].__globals__
+    globals_["_diffusion_pipeline"] = lambda *_args: FakePipeline()
+    globals_["_resolved_revision"] = lambda *_args: "snapshot"
+    arguments = Namespace(
+        family="z_image",
+        precision="bf16",
+        model="Tongyi-MAI/Z-Image-Turbo",
+        revision=None,
+    )
+
+    session = runner["_load_diffusers"](
+        arguments,
+        {"prompt": "cat", "media_type": "image"},
+        {},
+    )
+
+    assert session.invoke()["finite"] is True
+    assert captured == {"prompt": "cat", "output_type": "np"}
+
+
+def test_diffusers_media_summary_rejects_non_finite_pixels() -> None:
+    runner = runpy.run_path(
+        str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py")
+    )
+    finite = np.zeros((1, 4, 6, 3), dtype=np.float32)
+
+    assert runner["_media_summary"](finite, "image") == {
+        "media_type": "image",
+        "media_count": 1,
+        "height": 4,
+        "width": 6,
+        "channels": 3,
+        "finite": True,
+    }
+
+    invalid = finite.copy()
+    invalid[0, 0, 0, 0] = np.nan
+    with pytest.raises(RuntimeError, match="non-finite"):
+        runner["_media_summary"](invalid, "image")
 
 
 def test_personaplex_loader_adds_vendored_moshi_package_root() -> None:

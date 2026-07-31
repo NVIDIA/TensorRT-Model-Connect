@@ -1215,6 +1215,32 @@ def _manifest_values(resolved: Mapping[str, Any]) -> dict[str, Any]:
     return value
 
 
+def _reference_precision(
+    case: Mapping[str, Any],
+    resolved: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+) -> str:
+    explicit = case["baseline"].get("precision")
+    if explicit is not None:
+        return str(explicit)
+    testcase_name = str(
+        resolved.get("testcase") or case.get("workload", {}).get("testcase") or ""
+    )
+    testcases = manifest.get("testcases", [])
+    if isinstance(testcases, list):
+        for testcase in testcases:
+            if (
+                isinstance(testcase, Mapping)
+                and str(testcase.get("name") or "") == testcase_name
+                and testcase.get("reference_precision") is not None
+            ):
+                return str(testcase["reference_precision"])
+    declared = manifest.get("reference_precision")
+    if declared is not None:
+        return str(declared)
+    return str(resolved["model"]["precision"])
+
+
 def _baseline_task(resolved: Mapping[str, Any]) -> str:
     strategy = str(resolved["model"]["task_strategy"])
     runtime = str(resolved["model"]["runtime_strategy"])
@@ -1249,6 +1275,7 @@ def _baseline_argv(
     profile, python = _reference_python(resolved, baseline)
     model = resolved["model"]
     manifest = _manifest_values(resolved)
+    reference_precision = _reference_precision(case, resolved, manifest)
     mode = str(baseline.get("mode", "torch-compile"))
     if baseline.get("runner") == "task-reference":
         return _task_reference_argv(
@@ -1273,7 +1300,7 @@ def _baseline_argv(
         "--request-json",
         json.dumps(resolved["request"], ensure_ascii=True, separators=(",", ":")),
         "--precision",
-        str(baseline.get("precision", model["precision"])),
+        reference_precision,
         "--max-length",
         str(max_length),
         "--padding",
@@ -1328,6 +1355,7 @@ def _task_reference_argv(
     baseline = case["baseline"]
     model = resolved["model"]
     adapter_options = _resolved_adapter_options(baseline)
+    reference_precision = _reference_precision(case, resolved, manifest)
     argv = [
         python,
         str(options.task_reference_runner.resolve()),
@@ -1361,7 +1389,7 @@ def _task_reference_argv(
             separators=(",", ":"),
         ),
         "--precision",
-        str(baseline.get("precision", model["precision"])),
+        reference_precision,
         "--mode",
         mode,
         "--padding",
@@ -1765,8 +1793,14 @@ def _classify(
     baseline: Mapping[str, Any],
     *,
     request: Mapping[str, Any] | None = None,
+    reference_precision: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    mismatch = _baseline_contract_mismatch(case, candidate, baseline)
+    mismatch = _baseline_contract_mismatch(
+        case,
+        candidate,
+        baseline,
+        reference_precision=reference_precision,
+    )
     if mismatch:
         return "contract-mismatch", {"reason": mismatch}
     outputs_match, reason = _output_contract(
@@ -1792,6 +1826,8 @@ def _baseline_contract_mismatch(
     case: Mapping[str, Any],
     candidate: Mapping[str, Any],
     baseline: Mapping[str, Any],
+    *,
+    reference_precision: str | None = None,
 ) -> str:
     timing_mismatch = _timing_contract_mismatch(case, candidate, baseline)
     if timing_mismatch:
@@ -1799,7 +1835,11 @@ def _baseline_contract_mismatch(
     expected_mode = str(case["baseline"].get("mode", "torch-compile"))
     if baseline.get("mode") != expected_mode:
         return "baseline mode differs from the suite"
-    expected_precision = case["baseline"].get("precision", candidate.get("precision"))
+    expected_precision = (
+        reference_precision
+        if reference_precision is not None
+        else case["baseline"].get("precision", candidate.get("precision"))
+    )
     if baseline.get("precision") != expected_precision:
         return "baseline precision differs from the suite"
     expected_padding = case["baseline"].get("padding", "longest")
@@ -1933,6 +1973,8 @@ def _run_supported_case(
     candidate_argv = [*_candidate_base_argv(case, options), "--output", str(candidate_dir)]
     baseline_argv, profile = _baseline_argv(case, resolved, baseline_path, options)
     row["resolved_settings"]["baseline_python_profile"] = profile
+    reference_precision = baseline_argv[baseline_argv.index("--precision") + 1]
+    row["resolved_settings"]["baseline_precision"] = reference_precision
     commands = {
         "trtmc": {"argv": candidate_argv, "rendered": shlex.join(candidate_argv)},
         "baseline": {"argv": baseline_argv, "rendered": shlex.join(baseline_argv)},
@@ -1961,6 +2003,7 @@ def _run_supported_case(
         candidate,
         baseline,
         request=resolved["request"],
+        reference_precision=reference_precision,
     )
     row["candidate"] = candidate
     row["baseline"] = baseline

@@ -1359,6 +1359,7 @@ def _load_diffusers(
         values["guidance_scale"] = guidance
     if arguments.family == "qwen_image" and cfg_scale >= 0:
         values["true_cfg_scale"] = cfg_scale
+    values["output_type"] = "np"
     image_path = str(request.get("image_path", "") or "")
     if image_path and ("image" in accepted or accepts_extra):
         values["image"] = Image.open(_asset_path(arguments, request, "image_path")).convert("RGB")
@@ -1470,13 +1471,25 @@ def _media_summary(media: Any, media_type: str) -> dict[str, Any]:
                 height, width, channels = shape[-3:]
             elif shape[-3] in {1, 3, 4}:
                 channels, height, width = shape[-3:]
-    return {
+    summary = {
         "media_type": media_type,
         "media_count": count,
         "height": height,
         "width": width,
         "channels": channels,
     }
+    try:
+        import numpy as np
+
+        array = np.asarray(media)
+        if np.issubdtype(array.dtype, np.number):
+            finite = bool(np.isfinite(array).all())
+            if not finite:
+                raise RuntimeError("reference returned non-finite media values")
+            summary["finite"] = True
+    except (TypeError, ValueError):
+        pass
+    return summary
 
 
 def _numeric_values(request: Mapping[str, Any], key: str) -> list[float]:
