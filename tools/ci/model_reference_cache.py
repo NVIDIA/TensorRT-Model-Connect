@@ -36,15 +36,19 @@ class ModelReferenceContract:
     revision: str
     relative_path: str
     entrypoint: str
+    environment_variable: str = ""
 
     def as_payload(self) -> dict[str, str]:
         """Return the exact contract shape embedded in proof selection."""
-        return {
+        payload = {
             "repository": self.repository,
             "revision": self.revision,
             "relative_path": self.relative_path,
             "entrypoint": self.entrypoint,
         }
+        if self.environment_variable:
+            payload["environment_variable"] = self.environment_variable
+        return payload
 
 
 def parse_model_reference_contract(
@@ -115,6 +119,15 @@ def parse_model_reference_contract(
             "model_reference_cache.relative_path must be owned by the selected E2E family"
         )
     entrypoint = relative("entrypoint")
+    environment_variable = raw.get("environment_variable", "")
+    if not isinstance(environment_variable, str) or (
+        environment_variable
+        and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", environment_variable)
+    ):
+        raise CiError(
+            "model_reference_cache.environment_variable must be a valid environment "
+            "variable name"
+        )
     if suites is not None and suite not in suites:
         return None
     return ModelReferenceContract(
@@ -123,6 +136,7 @@ def parse_model_reference_contract(
         revision=revision,
         relative_path=relative_path,
         entrypoint=entrypoint,
+        environment_variable=environment_variable,
     )
 
 

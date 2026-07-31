@@ -416,6 +416,11 @@ class ModelProofInnerPipeline:
         entrypoint = reference / contract["entrypoint"]
         if entrypoint.is_symlink() or not entrypoint.is_file():
             raise CiError("selected model reference entrypoint is not a regular file")
+        environment_variable = contract.get("environment_variable", "")
+        if environment_variable and self.context.env.get(environment_variable) != str(reference):
+            raise CiError(
+                f"{environment_variable} must select the proof-private model reference"
+            )
         if any(path.name == ".git" for path in root.rglob(".git")):
             raise CiError("proof-private model reference must not contain Git metadata")
         self.status.step("model_reference_isolation", "passed", "model-reference-cache.json")

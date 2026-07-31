@@ -545,7 +545,9 @@ the producing class remains the source of truth for optional evidence fields.
   `python3 -m tools.ci model-reference-cache warm --suite nightly`.
 - **Outputs:** One host-local checkout per selected declarative contract. Every
   accepted checkout has the exact declared `remote.origin.url`, `HEAD` commit,
-  and entrypoint; partial or mismatched destinations fail closed.
+  and entrypoint; partial or mismatched destinations fail closed. If the
+  contract declares `environment_variable`, the isolated proof maps that name
+  to its proof-private checkout rather than the trusted host cache.
 - **Boundary:** This is the trusted online cache-warm phase. It does not expose
   the shared checkout to a proof: `model_proof.py` still verifies it, copies the
   pinned commit privately with `git archive`, and runs the proof without a

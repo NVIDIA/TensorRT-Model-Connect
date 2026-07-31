@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tomllib
 
 import pytest
 
@@ -19,6 +20,7 @@ from tools.ci.context import CiContext
 from tools.ci.model_reference_cache import (
     ModelReferenceCacheWarmer,
     ModelReferenceContract,
+    parse_model_reference_contract,
 )
 
 
@@ -65,6 +67,7 @@ def _write_owner(
     revision: str,
     relative_path: str | None = None,
     entrypoint: str = "reference.py",
+    environment_variable: str = "",
     suites: tuple[str, ...] | None = None,
 ) -> Path:
     owner = repository / "tests/e2e/models" / family / "MODEL.toml"
@@ -79,6 +82,8 @@ def _write_owner(
         + json.dumps(relative_path or f"{family}/reference/Source-{revision[:12]}"),
         f"entrypoint = {json.dumps(entrypoint)}",
     ]
+    if environment_variable:
+        lines.append(f"environment_variable = {json.dumps(environment_variable)}")
     if suites is not None:
         lines.append("suites = " + json.dumps(list(suites)))
     owner.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -186,6 +191,33 @@ def test_warm_contract_provisions_only_the_selected_reference(
     assert destination == cache_root / relative_path
     assert _git("-C", destination, "rev-parse", "HEAD^{commit}") == revision
     assert (destination / "reference.py").is_file()
+
+
+def test_reference_contract_preserves_runner_environment_variable(
+    tmp_path: Path,
+) -> None:
+    _source, remote, revision = _pinned_remote(tmp_path)
+    repository = tmp_path / "repository"
+    owner = _write_owner(
+        repository,
+        "fixture",
+        remote=remote.as_uri(),
+        revision=revision,
+        environment_variable="TRTMC_FIXTURE_REFERENCE_REPO",
+    )
+    data = tomllib.loads(owner.read_text(encoding="utf-8"))
+
+    contract = parse_model_reference_contract(
+        data,
+        "fixture",
+        owner,
+        "premerge",
+    )
+
+    assert contract is not None
+    assert contract.as_payload()["environment_variable"] == (
+        "TRTMC_FIXTURE_REFERENCE_REPO"
+    )
 
 
 def test_concurrent_warmers_publish_once_under_the_per_path_lock(

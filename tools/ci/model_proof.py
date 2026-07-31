@@ -92,6 +92,7 @@ class ModelReferenceCache:
             revision=contract["revision"],
             relative_path=relative_path,
             entrypoint=contract["entrypoint"],
+            environment_variable=contract.get("environment_variable", ""),
         )
         source = ModelReferenceCacheWarmer(self.context).warm_contract(reference)
         root = Path(configured).resolve(strict=True)
@@ -651,7 +652,7 @@ class ModelProofRunner:
             "/src",
             "--tmpfs",
             "/tmp:rw,exec,nosuid,nodev,size=4g",
-            *self._proof_environment(slots, bool(selection.reference_cache)),
+            *self._proof_environment(slots, selection.reference_cache),
             image,
             "python3",
             "-m",
@@ -671,7 +672,11 @@ class ModelProofRunner:
         if rc:
             raise CiError(f"isolated model proof failed for {self.request.model} (exit {rc})")
 
-    def _proof_environment(self, slots: str, has_reference: bool) -> list[str]:
+    def _proof_environment(
+        self,
+        slots: str,
+        reference: dict[str, str] | None,
+    ) -> list[str]:
         assert self.lease and self.lease.gpu_id is not None
         values = {
             "HOME": "/tmp",
@@ -702,8 +707,13 @@ class ModelProofRunner:
             "HF_MODULES_CACHE": "/work/hf-modules",
             "TRANSFORMERS_CACHE": "/hf-cache/hub",
         }
-        if has_reference:
+        if reference:
             values["TRTMC_STORAGE_ROOT"] = "/work/reference-private"
+            environment_variable = reference.get("environment_variable", "")
+            if environment_variable:
+                values[environment_variable] = (
+                    f"/work/reference-private/{reference['relative_path']}"
+                )
         return [item for name, value in values.items() for item in ("-e", f"{name}={value}")]
 
     def _reclaim_orphans(self) -> None:
