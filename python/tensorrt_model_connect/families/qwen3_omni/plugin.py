@@ -1009,46 +1009,65 @@ class Qwen3OmniPlugin:
 # MoE block for Omni (standard top-k softmax, same as Mixtral pattern)
 # ---------------------------------------------------------------------------
 
-def _add_packed_swiglu_experts(
+def _add_routed_swiglu_experts(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
+    top_indices: trt.ITensor,
+    routing_weights: trt.ITensor,
     hidden_size: int,
+    top_k: int,
     w_gate: np.ndarray,
     w_up: np.ndarray,
     w_down: np.ndarray,
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
-    """Compute every expert with three batched matmuls for a dynamic token count."""
-    num_experts, _, intermediate_size = w_gate.shape
+    """Compute only the top-k routed experts for each token."""
     inp_4d = network.add_shuffle(inp)
     inp_4d.reshape_dims = (-1, 1, 1, hidden_size)
 
     def packed_weight(values: np.ndarray) -> trt.ITensor:
         tensor = graph_ops.add_constant(
-            network, (1, *values.shape), values.reshape(1, *values.shape), dtype=dtype)
+            network, values.shape, values, dtype=dtype)
         if tensor.dtype != inp.dtype:
             tensor = network.add_cast(tensor, inp.dtype).get_output(0)
         return tensor
 
+    gate_weights = packed_weight(w_gate)
+    up_weights = packed_weight(w_up)
+    down_weights = packed_weight(w_down)
+    selected_gate = network.add_gather(gate_weights, top_indices, 0)
+    selected_up = network.add_gather(up_weights, top_indices, 0)
     gate = network.add_matrix_multiply(
         inp_4d.get_output(0), trt.MatrixOperation.NONE,
-        packed_weight(w_gate), trt.MatrixOperation.NONE)
+        selected_gate.get_output(0), trt.MatrixOperation.NONE)
     up = network.add_matrix_multiply(
         inp_4d.get_output(0), trt.MatrixOperation.NONE,
-        packed_weight(w_up), trt.MatrixOperation.NONE)
+        selected_up.get_output(0), trt.MatrixOperation.NONE)
 
-    sigmoid = network.add_activation(gate.get_output(0), trt.ActivationType.SIGMOID)
+    sigmoid = network.add_activation(
+        gate.get_output(0), trt.ActivationType.SIGMOID)
     swish = network.add_elementwise(
-        gate.get_output(0), sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+        gate.get_output(0), sigmoid.get_output(0),
+        trt.ElementWiseOperation.PROD)
     gated = network.add_elementwise(
-        swish.get_output(0), up.get_output(0), trt.ElementWiseOperation.PROD)
+        swish.get_output(0), up.get_output(0),
+        trt.ElementWiseOperation.PROD)
 
+    selected_down = network.add_gather(down_weights, top_indices, 0)
     down = network.add_matrix_multiply(
         gated.get_output(0), trt.MatrixOperation.NONE,
-        packed_weight(w_down), trt.MatrixOperation.NONE)
+        selected_down.get_output(0), trt.MatrixOperation.NONE)
     output = network.add_shuffle(down.get_output(0))
-    output.reshape_dims = (-1, num_experts, hidden_size)
-    return output.get_output(0)
+    output.reshape_dims = (-1, top_k, hidden_size)
+
+    route_weights = network.add_shuffle(routing_weights)
+    route_weights.reshape_dims = (-1, top_k, 1)
+    weighted = network.add_elementwise(
+        output.get_output(0), route_weights.get_output(0),
+        trt.ElementWiseOperation.PROD)
+    return network.add_reduce(
+        weighted.get_output(0), trt.ReduceOperation.SUM, 1 << 1,
+        keep_dims=False).get_output(0)
 
 
 def _add_omni_moe_block(
@@ -1084,48 +1103,14 @@ def _add_omni_moe_block(
         top_values, sum_val.get_output(0),
         trt.ElementWiseOperation.DIV)
 
-    # Compute all expert outputs as [Sq, E, H] with three packed matmuls.
-    stacked_out = _add_packed_swiglu_experts(
-        network, inp, hidden_size,
+    # Gather each token's routed expert weights before the expert matmuls.
+    return _add_routed_swiglu_experts(
+        network, inp, top_indices, norm_weights.get_output(0), hidden_size, top_k,
         weights[f"{prefix}.experts.w_gate"],
         weights[f"{prefix}.experts.w_up"],
         weights[f"{prefix}.experts.w_down"],
         dtype=dtype,
     )
-
-    # Build token-row indices [Sq, K] and pair them with the router's expert
-    # indices. GatherND then selects K experts independently for every token.
-    routing_shape = network.add_shape(top_indices).get_output(0)
-    fill_start = network.add_constant(
-        (), trt.Weights(np.array(0, dtype=np.int32))).get_output(0)
-    fill_delta = network.add_constant(
-        (2,), trt.Weights(np.array([1, 0], dtype=np.int32))).get_output(0)
-    row_indices = network.add_fill(
-        (1, top_k), trt.FillOperation.LINSPACE, trt.int32)
-    row_indices.set_input(0, routing_shape)
-    row_indices.set_input(1, fill_start)
-    row_indices.set_input(2, fill_delta)
-
-    row_3d = network.add_shuffle(row_indices.get_output(0))
-    row_3d.reshape_dims = (-1, top_k, 1)
-    expert_3d = network.add_shuffle(top_indices)
-    expert_3d.reshape_dims = (-1, top_k, 1)
-    gather_indices = network.add_concatenation(
-        [row_3d.get_output(0), expert_3d.get_output(0)])
-    gather_indices.axis = 2
-
-    selected = network.add_gather(
-        stacked_out, gather_indices.get_output(0), 0)
-    selected.mode = trt.GatherMode.ND
-
-    weights_3d = network.add_shuffle(norm_weights.get_output(0))
-    weights_3d.reshape_dims = (-1, top_k, 1)
-    weighted = network.add_elementwise(
-        selected.get_output(0), weights_3d.get_output(0),
-        trt.ElementWiseOperation.PROD)
-    summed = network.add_reduce(
-        weighted.get_output(0), trt.ReduceOperation.SUM, 1 << 1, keep_dims=False)
-    return summed.get_output(0)
 
 
 # ---------------------------------------------------------------------------

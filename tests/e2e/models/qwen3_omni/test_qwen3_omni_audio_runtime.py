@@ -235,3 +235,83 @@ def test_thinker_load_weights_preserves_bf16_storage(monkeypatch, tmp_path) -> N
     assert weights["layer.0.experts.w_down"].shape == (8, 32, 16)
     assert weights["w_out"].dtype.name == "bfloat16"
     assert weights["final_norm"].dtype == np.float32
+
+
+def test_thinker_moe_batches_only_routed_expert_multiplies(monkeypatch) -> None:
+    plugin_module = importlib.import_module(
+        "tensorrt_model_connect.families.qwen3_omni.plugin")
+    constants = []
+    matrix_multiplies = []
+    gathers = []
+
+    class Tensor:
+        def __init__(self, name: str, shape=(), dtype="bf16"):
+            self.name = name
+            self.shape = tuple(shape)
+            self.dtype = dtype
+
+    class Layer:
+        def __init__(self, output: Tensor):
+            self.output = output
+
+        def get_output(self, _index):
+            return self.output
+
+        @property
+        def reshape_dims(self):
+            return self.output.shape
+
+        @reshape_dims.setter
+        def reshape_dims(self, shape):
+            self.output.shape = tuple(shape)
+
+    class Network:
+        def add_shuffle(self, tensor):
+            return Layer(Tensor(f"shuffle({tensor.name})", tensor.shape, tensor.dtype))
+
+        def add_gather(self, data, indices, axis):
+            gathers.append((data.name, indices.name, axis))
+            return Layer(Tensor(f"gather({data.name})", dtype=data.dtype))
+
+        def add_matrix_multiply(self, lhs, _lhs_op, rhs, _rhs_op):
+            matrix_multiplies.append((lhs.name, rhs.name))
+            return Layer(Tensor(f"mm({lhs.name},{rhs.name})", dtype=lhs.dtype))
+
+        def add_activation(self, tensor, _operation):
+            return Layer(Tensor(f"activation({tensor.name})", dtype=tensor.dtype))
+
+        def add_elementwise(self, lhs, rhs, _operation):
+            return Layer(Tensor(f"elementwise({lhs.name},{rhs.name})", dtype=lhs.dtype))
+
+        def add_reduce(self, tensor, _operation, _axes, keep_dims):
+            del keep_dims
+            return Layer(Tensor(f"reduce({tensor.name})", dtype=tensor.dtype))
+
+    def add_constant(_network, shape, values, dtype=np.float32):
+        del values, dtype
+        tensor = Tensor(f"weight{len(constants)}", shape)
+        constants.append(tensor)
+        return tensor
+
+    monkeypatch.setattr(plugin_module.graph_ops, "add_constant", add_constant)
+    network = Network()
+    output = plugin_module._add_routed_swiglu_experts(
+        network,
+        Tensor("input", (-1, 16)),
+        Tensor("top_indices", (-1, 2), "int32"),
+        Tensor("routing_weights", (-1, 2)),
+        hidden_size=16,
+        top_k=2,
+        w_gate=np.ones((8, 16, 32), dtype=np.float32),
+        w_up=np.ones((8, 16, 32), dtype=np.float32),
+        w_down=np.ones((8, 32, 16), dtype=np.float32),
+    )
+
+    assert output.dtype == "bf16"
+    assert len(matrix_multiplies) == 3
+    assert all(rhs.startswith("gather(weight") for _lhs, rhs in matrix_multiplies)
+    assert [entry for entry in gathers if entry[0].startswith("weight")] == [
+        ("weight0", "top_indices", 0),
+        ("weight1", "top_indices", 0),
+        ("weight2", "top_indices", 0),
+    ]
