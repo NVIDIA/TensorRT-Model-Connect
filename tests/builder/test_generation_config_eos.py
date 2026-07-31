@@ -52,6 +52,7 @@ def test_generation_config_eos_overrides_model_config_in_bundle(
     del mock_plugin.get_segmentation_config
     del mock_plugin.get_audio_config
     del mock_plugin.get_bundle_config_overrides
+    del mock_plugin.tokenizer_json_bundle_override
 
     with patch(
         "tensorrt_model_connect.engine_builder.find_plugin",
