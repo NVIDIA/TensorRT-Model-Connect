@@ -2,10 +2,10 @@
 name: doc-sync
 description: >-
   Use for documentation maintenance scans that keep the canonical website
-  journey, API reference, architecture and design, extension guides, feature
-  context, ADRs, and traceability status aligned with the current codebase.
-  Treat Wiki, Operations, Unit Design, and retired architecture pages only as
-  compatibility redirects.
+  journey, repo-local skills, commands, API reference, architecture and
+  design, extension guides, feature context, ADRs, and traceability status
+  aligned with the current GitHub main branch. Covers the Source/Internal CI
+  boundary and model-owned validation without exposing private evidence.
 ---
 
 # Doc Sync
@@ -24,6 +24,14 @@ GitHub PRs. Process these phases in order:
 
 Do not guess based on filenames. Read the implementation, tests, manifests,
 and live command help before changing behavioral prose or command examples.
+
+Keep evidence tiers distinct:
+
+1. a path, symbol, option, or command exists;
+2. static and documentation checks pass;
+3. CPU tests pass;
+4. target-hardware execution passes; and
+5. model parity, performance, or qualification is proven.
 
 ## Canonical Information Architecture
 
@@ -45,55 +53,114 @@ architecture pages are compatibility routes, not maintained content sources.
 
 ## Change Set
 
-Read the last scan SHA:
-
-```bash
-LAST_SHA=""
-if [ -f website/docs/context/.last_scan_sha ]; then
-  LAST_SHA=$(cat website/docs/context/.last_scan_sha)
-fi
-```
-
-For a first scan, bootstrap from the oldest commit in the last 7 days:
-
-```bash
-LAST_SHA=$(git log --since="7 days ago" --format="%H" --reverse | head -1)
-```
-
 Fetch current GitHub main:
 
 ```bash
 git fetch github main
-CURRENT_SHA=$(git rev-parse github/main)
+DOC_SYNC_CURRENT_SHA=$(git rev-parse github/main)
 ```
 
-If there is no change set, update the marker only when that marker update is
-part of the requested maintenance work. Otherwise report nothing to do.
-
-Inspect changes:
+If `website/docs/context/.last_scan_sha` exists, use it only after proving that
+it names a commit and is an ancestor of the current main SHA:
 
 ```bash
-git log --oneline "$LAST_SHA".."$CURRENT_SHA"
-git diff --name-only "$LAST_SHA".."$CURRENT_SHA"
+DOC_SYNC_LAST_SHA=$(cat website/docs/context/.last_scan_sha)
+git cat-file -e "${DOC_SYNC_LAST_SHA}^{commit}"
+git merge-base --is-ancestor \
+  "$DOC_SYNC_LAST_SHA" "$DOC_SYNC_CURRENT_SHA"
+git diff --name-status \
+  "$DOC_SYNC_LAST_SHA".."$DOC_SYNC_CURRENT_SHA"
 ```
+
+When the marker is missing or invalid, choose and report an explicit baseline.
+Do not silently substitute a date heuristic. Update the marker only when that
+state change was requested and the scan completed. If there is no change set,
+report that result instead of inventing documentation churn.
+
+## Route Changed Surfaces
+
+| Source of truth | Documentation consumers |
+| --- | --- |
+| `.github/workflows/internal-ci-bridge.yml`, `tools/ci/README.md` | premerge trigger and public/private evidence boundary |
+| `.github/workflows/legal.yml`, `.github/workflows/pages.yml` | retained Source workflows |
+| Python family `MODEL.toml` and family code | build selection and family behavior |
+| C++ model `MODEL.toml`, registry, and runtime code | native strategies and dispatch |
+| E2E `MODEL.toml`, manifests, and sidecars | model support and validation |
+| `tests/validation/*.yaml`, `tools/validation/` | validation workloads and engine |
+| `benchmarks/performance/*.yaml`, model perf profiles | performance contracts and reports |
+| public headers and executable `--help` | API and CLI references |
+| `plugins/trtmc-agent-skills/skills/` | repo-local automation guidance |
+
+Current model ownership spans:
+
+- `python/tensorrt_model_connect/families/<family>/`;
+- `src/runtime/models/<family>/`; and
+- `tests/e2e/models/<family>/`.
+
+Do not resurrect removed Source workflows, retired task-evaluation commands,
+root graph helpers, or paths copied from another branch.
+
+## CI Documentation Contract
+
+Source contains only the Internal CI Bridge, Legal Compliance, and Pages
+workflows. Premerge and nightly orchestration are private Internal CI.
+
+- `run-internal-ci` is the one-shot trusted trigger; `run-ci` is retired.
+- The bridge verifies event, PR metadata, and source branch heads before
+  dispatching the exact PR head.
+- Source receives only `trtmc/premerge/required` as `PENDING`, `PASS`, or
+  `FAIL` on that exact head.
+- A successful bridge dispatch is not a successful premerge result.
+- Never copy private logs, artifacts, package coordinates, runner details, or
+  internal URLs into Source docs, Actions, Pages, or PR comments.
+
+Read the workflow and `tools/ci/README.md` at the target SHA rather than
+hard-coding private job names or topology.
+
+## Scan Classes
+
+For paths, symbols, counts, and commands:
+
+- verify repository-relative paths on disk;
+- verify symbols, manifest fields, runtime strategies, and CLI options in code
+  or executable help;
+- recompute counts and label snapshot values as such;
+- execute safe `--help`, `--list`, `--dry-run`, and parser checks; and
+- search modified docs and skills for removed names and paths.
+
+```bash
+python3 tools/check_doc_file_references.py --strict <changed-doc-directory>
+```
+
+For model-support claims, cross-check all three ownership descriptors and the
+exact bundle/runtime path. Registration, build success, dry-run planning,
+parity, performance, and qualification are different claims.
+
+The supported Dev/QA entry point is `tools/trtmc_validate.py`. Workloads live
+in `tests/validation/workloads.yaml`, bindings in
+`tests/validation/model_workloads.yaml`, and implementation in
+`tools/validation/`. The persisted `task_eval` artifact key is intentional; do
+not describe it as a live legacy CLI.
 
 ## Branch And PR Flow
 
-Create one branch per phase that produces changes:
+Create one short-lived branch per coherent documentation owner or review
+concern. Split phases when their ownership or validation differs; keep them
+together when one focused review can cover the change:
 
 ```bash
-PHASE_NAME="canonical"  # or "context" or "redirects"
-DATE=$(date +%Y-%m-%d)
-BRANCH="doc-sync/${PHASE_NAME}-${DATE}"
+DOC_SYNC_PHASE_NAME="canonical"  # or "context" or "redirects"
+DOC_SYNC_DATE=$(date +%Y-%m-%d)
+DOC_SYNC_BRANCH="doc-sync/${DOC_SYNC_PHASE_NAME}-${DOC_SYNC_DATE}"
 
 git fetch github main
-git switch -c "$BRANCH" github/main
+git switch -c "$DOC_SYNC_BRANCH" github/main
 ```
 
 Skip a phase if the remote branch already exists:
 
 ```bash
-git ls-remote --heads github "$BRANCH"
+git ls-remote --heads github "$DOC_SYNC_BRANCH"
 ```
 
 Push and open a GitHub PR:
@@ -103,11 +170,13 @@ git push -u github HEAD
 gh pr create \
   --repo NVIDIA/TensorRT-Model-Connect \
   --base main \
-  --head "$BRANCH" \
-  --title "docs(${PHASE_NAME}): automated doc sync $(date +%Y-%m-%d)" \
-  --body-file pr-body.md \
-  --label documentation
+  --head "$DOC_SYNC_BRANCH" \
+  --title "docs(${DOC_SYNC_PHASE_NAME}): automated doc sync $(date +%Y-%m-%d)" \
+  --body-file pr-body.md
 ```
+
+Do not attach labels, update scan markers, create issues, or publish private
+evidence unless the user requested that state change.
 
 Creating or pushing the PR does not start premerge. After confirming that the
 PR's `headRefOid` equals the pushed SHA, follow `$submit-github-pr` and
@@ -241,11 +310,29 @@ Run at minimum:
 ```bash
 git diff --check
 python3 tools/check_doc_file_references.py --strict website/docs
+python3 tools/check_doc_file_references.py \
+  --strict plugins/trtmc-agent-skills/skills/doc-sync
 python3 tools/model_ci.py validate
 python3 tools/test_impact.py --validate
 npm --prefix website ci
 npm --prefix website run test:model-support
 npm --prefix website run build
+```
+
+For a broad documentation contract change, the representative focused Python
+set is:
+
+```bash
+PYTHONPATH=python:. python3 -m pytest \
+  tests/tools/test_check_doc_file_references.py \
+  tests/tools/test_github_actions_ci.py \
+  tests/tools/test_runtime_strategy_matrix_checker.py \
+  tests/tools/test_model_owned_validation_scripts.py \
+  tests/tools/test_validation_engine.py \
+  tests/tools/test_test_impact.py \
+  tests/tools/test_trtmc_validate.py \
+  tests/tools/test_perf_matrix.py::test_release_suite_covers_every_non_l0_ready_model_profile \
+  -q
 ```
 
 Run focused Python or C++ tests for commands, contracts, tests, and tooling
@@ -256,6 +343,8 @@ the production website build.
 A green Docusaurus build proves that the site compiles; it does not prove GPU
 inference, parity, output quality, performance, or model qualification. Record
 what ran, the exact revision, and every environment boundary in the PR body.
+`npm ci` needs network access and changes the local dependency tree; report
+missing dependencies, baseline failures, and unrun evidence tiers explicitly.
 
 ## Summary Report
 
@@ -270,3 +359,7 @@ Redirect compatibility: <changes or no changes> <PR URL or skipped>
 Command evidence: <tests and runtime boundaries>
 Blockers: <none or details>
 ```
+
+State the baseline and target SHA, corrected facts and source paths, exact
+checks and outcomes, unrun evidence tiers, known baseline gaps, and PR URLs.
+“No change” is valid when the current documentation matches current evidence.
