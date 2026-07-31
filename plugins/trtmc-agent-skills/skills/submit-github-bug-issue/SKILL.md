@@ -32,12 +32,26 @@ requests and `$write-git-messages` for commit, PR, squash, or rebase messages.
   numbers, hardware, CI behavior, severity, or suspected code locations.
 - Prefer English issue text for GitHub unless the user explicitly requests
   another language.
-- Never print tokens or passwords. If `gh` is unavailable, use environment
-  tokens or Git credential helpers without echoing secrets.
+- Never read, print, transform, or replay tokens/passwords from Git credential
+  helpers. Use an already authenticated `gh` session.
 
 ## Workflow
 
-### 1. Gather Evidence
+### 1. Authenticate And Resolve The Repository
+
+```bash
+gh auth status
+gh repo view NVIDIA/TensorRT-Model-Connect \
+  --json nameWithOwner,url,defaultBranchRef
+git remote get-url github
+```
+
+If `gh` is unavailable, unauthenticated, or cannot read the repository, stop
+and ask the user to authenticate outside the sandbox. Do not fall back to
+extracting credentials or unauthenticated REST calls for this private
+repository.
+
+### 2. Gather Evidence
 
 Read the source artifact before drafting. For QA reports, extract:
 
@@ -54,7 +68,15 @@ Read the source artifact before drafting. For QA reports, extract:
 If the finding is too vague to create an actionable issue, ask for the missing
 critical detail instead of filing a weak report.
 
-### 2. Check Issue Templates
+For a CI-generated finding, anchor the report to the exact source commit and
+the public, sanitized `trtmc/premerge/required` status. Include a minimal public
+reproduction whenever possible. Internal CI logs, artifacts, package details,
+runner details, and internal URLs are private evidence: do not copy them into a
+Source issue. When authorized internal evidence is needed to establish the root
+cause, summarize only the public, actionable conclusion and preserve the
+Source-versus-Internal publication boundary.
+
+### 3. Check Issue Templates
 
 Check local templates:
 
@@ -67,7 +89,7 @@ find .github -maxdepth 3 -type f \
 When a local template exists, follow it. When no local template exists, use the
 inline fallback bug format in the draft step below.
 
-### 3. Check Labels
+### 4. Check Labels
 
 Verify that the requested label exists before creating the issue:
 
@@ -79,7 +101,7 @@ For bug reports, use `bug` when it exists. If it does not exist, create the
 issue without inventing a replacement label and report that the label was
 missing.
 
-### 4. Search For Duplicates
+### 5. Search For Duplicates
 
 Search open issues using concrete terms from the finding: CLI flags, model
 names, failing command, error string, source path, and root-cause wording.
@@ -91,18 +113,11 @@ gh issue list \
   --search "<symptom terms>"
 ```
 
-If `gh` is unavailable, use:
-
-```bash
-curl -sS -L --get https://api.github.com/search/issues \
-  --data-urlencode "q=repo:NVIDIA/TensorRT-Model-Connect is:issue is:open <symptom terms>"
-```
-
 If a strong duplicate exists, do not file a new issue. Report the existing issue
 URL and explain the match. If the match is weak, file the new issue and mention
 related issues in the body only when relevant.
 
-### 5. Draft The Issue
+### 6. Draft The Issue
 
 Use a concise title that starts with `Bug:` and names the failing behavior, not
 only the component or severity.
@@ -152,43 +167,24 @@ Omit sections that are truly inapplicable, but keep `Summary`, `Steps To
 Reproduce`, `Actual Behavior`, `Expected Behavior`, and `Impact` for normal QA
 bugs.
 
-### 6. Create The Issue
+### 7. Create The Issue
 
-Prefer `gh` when it is installed and authenticated:
+Create only after the user has authorized issue creation. Avoid writing a
+temporary body file unless the user asked for a local artifact; `gh` accepts
+stdin:
 
 ```bash
 gh issue create \
   --repo NVIDIA/TensorRT-Model-Connect \
   --title "Bug: <concise symptom>" \
-  --body-file <issue-body.md> \
+  --body-file - \
   --label bug
 ```
 
-If `gh` is unavailable, use GitHub REST API. Build the JSON payload with `jq`
-from a body file so quoting does not corrupt the issue text:
+Omit `--label bug` when the label check proved it is absent. Do not create a
+label unless the user explicitly requested label administration.
 
-```bash
-cred=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill)
-user=$(printf "%s\n" "$cred" | sed -n "s/^username=//p" | head -n1)
-pass=$(printf "%s\n" "$cred" | sed -n "s/^password=//p" | head -n1)
-
-jq -n \
-  --arg title "Bug: <concise symptom>" \
-  --rawfile body <issue-body.md> \
-  --argjson labels '["bug"]' \
-  '{title:$title, body:$body, labels:$labels}' |
-curl -sS -L -u "$user:$pass" \
-  -X POST \
-  -H "Accept: application/vnd.github+json" \
-  -H "X-GitHub-Api-Version: 2022-11-28" \
-  https://api.github.com/repos/NVIDIA/TensorRT-Model-Connect/issues \
-  -d @-
-```
-
-When network access is restricted, follow the active permission policy and ask
-for the minimum GitHub API access needed.
-
-### 7. Verify And Report
+### 8. Verify And Report
 
 After creation, verify the issue state, URL, title, and labels:
 
@@ -198,20 +194,14 @@ gh issue view <number> \
   --json number,title,state,labels,url
 ```
 
-With REST API:
-
-```bash
-curl -sS -L https://api.github.com/repos/NVIDIA/TensorRT-Model-Connect/issues/<number>
-```
-
 Report back with:
 
 - issue URL and number
 - label status, especially whether `bug` was applied
 - template status
 - duplicate-search result
-- any limitation, such as missing authentication, missing label, or unverified
-  repro
+- exact evidence or repro that was not independently verified
+- any limitation, such as missing label or incomplete environment details
 
 ## Multiple Findings
 
