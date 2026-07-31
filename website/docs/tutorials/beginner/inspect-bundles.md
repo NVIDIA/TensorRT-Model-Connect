@@ -2,6 +2,8 @@
 title: Beginner Tutorial - Inspect Bundles
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 A `.trtfb` bundle is the portable handoff between the Python builder and C++ runtime. Inspecting it is the first debugging step.
 
 Select the CLI before using this page directly:
@@ -34,15 +36,11 @@ inspection itself does not.
   </div>
 </div>
 
-```mermaid
-flowchart TD
-  Bundle["model.trtfb"] --> Header["Header metadata"]
-  Bundle --> Native["native config, engines, and assets"]
-  Bundle --> Optimized["optimized_runtime.json and artifact tree"]
-  Header --> Identity["model, family, native strategy, and ABI metadata"]
-  Native --> NativeExecution["native model/backend dispatch"]
-  Optimized --> OptimizedExecution["optimized implementation dispatch"]
-```
+<Diagram
+  src="/img/diagrams/getting-started/trtfb-bundle-contents.svg"
+  alt="TRTFB bundle contents split between identity metadata, native sections, and optimized runtime artifacts"
+  caption="The section inventory tells you whether the bundle will use native model/backend dispatch or an embedded optimized implementation."
+/>
 
 ## Why inspect first
 
@@ -144,15 +142,11 @@ from section names alone.
 For a native bundle, `runtime_strategy` is the bridge from artifact to C++
 implementation:
 
-```mermaid
-flowchart LR
-  Strategy["runtime_strategy"] --> Index["generated model-plugin index"]
-  Index --> DSO["libtrtmc_model_owner.so"]
-  DSO --> Registry["PipelineRegistry"]
-  Registry --> Plugin["IPipelinePlugin"]
-  Plugin --> Pipeline["IPipeline implementation"]
-  Pipeline --> Method["generate / transcribe / solve / segment / detect"]
-```
+<Diagram
+  src="/img/diagrams/tutorials/beginner/native-runtime-dispatch.svg"
+  alt="Native runtime strategy resolution through the generated plugin index, model DSO, registry, and task API"
+  caption="runtime_strategy connects native bundle metadata to a registered model plugin and its concrete IPipeline implementation."
+/>
 
 Do not confuse it with `family`. `family` explains the Python builder that
 created the native bundle. `runtime_strategy` explains its C++ runtime shape.

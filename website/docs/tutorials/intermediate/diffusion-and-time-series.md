@@ -2,6 +2,8 @@
 title: Intermediate Tutorial - Diffusion, Vision, and Time-Series Pipelines
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 This tutorial covers pipelines that do not return generated text.
 
 These pipelines still use `IPipeline`, but their task methods and internal loops differ.
@@ -20,13 +22,11 @@ TensorRT/CUDA environment with a supported NVIDIA GPU. Model builds download
 checkpoint data unless it is already cached, so they also need network access
 or a populated local cache.
 
-```mermaid
-flowchart LR
-  TextTask["Text generation"] --> TokenLoop["token loop"]
-  DiffTask["Diffusion"] --> DenoiseLoop["denoising loop"]
-  SegmentTask["Segmentation/detection"] --> VisionPost["vision postprocess"]
-  SeriesTask["Time-series forecasting"] --> Forecast["context to quantile forecast"]
-```
+<Diagram
+  src="/img/diagrams/tutorials/intermediate/task-pipeline-patterns.svg"
+  alt="Shared task pipeline showing stable typed input and result boundaries around task-specific TensorRT execution patterns"
+  caption="Text, diffusion, audio, vision, and forecasting use the same public pipeline pattern, but the work inside the model-owned execution stage is task specific."
+/>
 
 ## FLUX image generation
 
@@ -46,18 +46,11 @@ $TRTMC generate-video /tmp/flux2.trtfb \
 
 The command is named `generate-video` because the C++ API returns an `ImageResult` with `num_frames`; single-frame image generation is the same surface as video generation.
 
-```mermaid
-flowchart TD
-  Prompt["Prompt text"] --> TextEnc["Text encoder"]
-  TextEnc --> Conditioning["Conditioning embeddings"]
-  Noise["Initial latent noise"] --> Denoiser["Denoiser engine"]
-  Conditioning --> Denoiser
-  Denoiser --> Scheduler["Scheduler step"]
-  Scheduler --> Denoiser
-  Scheduler --> Latents["Final latents"]
-  Latents --> VAE["VAE decoder"]
-  VAE --> Frames["ImageResult pixels/frames"]
-```
+<Diagram
+  src="/img/diagrams/tutorials/intermediate/flux-denoising-pipeline.svg"
+  alt="FLUX diffusion pipeline combining prompt conditioning and latent noise in a denoiser and scheduler loop before VAE decoding"
+  caption="Diffusion repeatedly updates latent tensors for a configured number of steps, then the VAE decoder converts the final latents into ImageResult pixels or frames."
+/>
 
 Diffusion inference is iterative like text generation, but the loop is over denoising steps rather than generated tokens.
 
@@ -194,13 +187,11 @@ NVIDIA GPU, TensorRT, CUDA, and the model runtime DSO.
 
 Segmentation and detection are covered by feature and E2E docs, but the runtime shape is similar to other vision pipelines:
 
-```mermaid
-flowchart LR
-  Pixels["Image pixels"] --> Preprocess["Resize/normalize/layout"]
-  Preprocess --> Engine["Vision engine"]
-  Engine --> Post["Decode masks or boxes"]
-  Post --> Result["SegmentResult or detection JSON"]
-```
+<Diagram
+  src="/img/diagrams/tutorials/intermediate/segmentation-detection-pipeline.svg"
+  alt="Vision task pipeline from image preprocessing through engine execution and model-owned mask or box decoding"
+  caption="This is the shared API shape. Current checked-in model qualification covers the named segmentation owners below, not a model-owned object-detection strategy."
+/>
 
 Current segmentation owners use qualified strategies: SegFormer emits
 `segformer_segmentation`, while SAM and SAM3 emit

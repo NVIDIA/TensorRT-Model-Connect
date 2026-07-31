@@ -2,8 +2,7 @@
 title: Inference Fundamentals
 ---
 
-import useBaseUrl from '@docusaurus/useBaseUrl';
-
+import Diagram from '@site/src/components/Diagram';
 
 This page explains the vocabulary behind TensorRT-Model-Connect. It assumes no prior deep learning inference background.
 
@@ -13,15 +12,11 @@ Training is the process that creates model weights. Inference is the process tha
 
 A forward pass means running input numbers through the model to produce output numbers. During training, the system also computes a loss value that measures error and then runs a backward pass to update weights. During inference, weights are fixed, so only the forward computation is needed.
 
-```mermaid
-flowchart TB
-  Data["Training data"] --> Train["Training loop<br/>forward + loss + backward"]
-  Train --> Weights["Learned weights"]
-  Weights --> Package["Checkpoint<br/>config.json + tensors + tokenizer"]
-  Package --> Inference["Inference<br/>forward only"]
-  Request["New user input"] --> Inference
-  Inference --> Answer["Prediction or generated output"]
-```
+<Diagram
+  src="/img/diagrams/getting-started/training-vs-inference.svg"
+  alt="Training produces fixed checkpoint weights that inference uses to answer new requests"
+  caption="TensorRT-Model-Connect begins at the trained checkpoint and owns the deployable inference path, not model training."
+/>
 
 TensorRT-Model-Connect does not train models. It starts with a trained model checkpoint and focuses on making inference deployable.
 
@@ -68,23 +63,11 @@ In this codebase:
 - `TensorMap` maps names such as `token_id`, `attention_mask`, or `logits` to tensors.
 - TensorRT engines consume named input tensors and produce named output tensors.
 
-<figure className="trtmc-diagram trtmc-diagram--wide">
-  <div className="trtmc-diagram__media">
-    <img src={useBaseUrl('/img/diagrams/trtmc-inference-loop.svg')} alt="Text generation inference loop" />
-  </div>
-  <figcaption>Text generation is a prefill pass followed by repeated decode steps that reuse the KV cache.</figcaption>
-</figure>
-
-```mermaid
-flowchart LR
-  Text["Text prompt"] --> Tokens["Token IDs<br/>int32 tensor"]
-  Tokens --> Engine["TensorRT engine"]
-  Engine --> Logits["Logits<br/>float tensor over vocabulary"]
-  Logits --> Sampler["Sampler"]
-  Sampler --> Next["Next token ID"]
-  Next --> Decode["Tokenizer decode"]
-  Decode --> Output["Output text"]
-```
+<Diagram
+  src="/img/diagrams/trtmc-inference-loop.svg"
+  alt="Text generation prefill and decode loop showing tokenization, KV cache, logits, sampling, and TextResult"
+  caption="Prefill reads the prompt once; decode then reuses the KV cache while logits and the sampler select each next token."
+/>
 
 ## What are tokens and logits?
 
@@ -107,28 +90,9 @@ Autoregressive text generation has two phases:
 
 The reusable attention state is the KV cache. Without a KV cache, every generated token would have to recompute attention over the whole prompt and all previously generated tokens.
 
-```mermaid
-sequenceDiagram
-  participant User
-  participant Pipeline as QwenTextGenerationPipeline
-  participant State as QwenInferenceState / QwenKvCache
-  participant Engine as TensorRT decoder engine
-  participant Sampler
-
-  User->>Pipeline: prompt + GenerateConfig
-  Pipeline->>Engine: prefill all prompt tokens
-  Engine-->>State: present key/value tensors
-  State->>State: cache prompt state
-  loop one generated token at a time
-    Pipeline->>State: prepare_step(position, mask)
-    Pipeline->>Engine: decode previous token
-    Engine-->>Pipeline: logits
-    Pipeline->>Sampler: choose next token
-    Engine-->>State: present key/value tensors
-    State->>State: advance position
-  end
-  Pipeline-->>User: TextResult
-```
+The diagram above shows this sequence visually: prefill initializes the cache,
+then each decode step produces logits, selects one token, and advances the
+cached state until a stop condition is reached.
 
 These interfaces and implementations are model-owned in the current source
 tree. For example, Qwen uses `QwenInferenceState` and `QwenKvCache` under
@@ -172,13 +136,11 @@ bundle, code revision, and comparison artifact.
 
 The `.trtfb` bundle is the handoff between build and runtime.
 
-```mermaid
-flowchart TD
-  Bundle["model.trtfb"] --> Header["JSON header<br/>model_id, family, runtime_strategy, TRT ABI"]
-  Bundle --> Config["config.json<br/>runtime fields and IO names"]
-  Bundle --> Plans["engine plans<br/>decoder, vision, denoiser, VAE, encoder"]
-  Bundle --> Assets["assets<br/>tokenizer, preprocessor, kernels, scales"]
-```
+<Diagram
+  src="/img/diagrams/getting-started/trtfb-bundle-contents.svg"
+  alt="TRTFB bundle contents including header identity, native plans and assets, and optimized runtime artifacts"
+  caption="Inspect the header and section inventory before deciding which runtime path and implementation the bundle requires."
+/>
 
 A bundle lets a C++ process load a model without rediscovering the original
 Hugging Face structure. A native bundle carries `config.json`, TensorRT plans,
@@ -204,15 +166,11 @@ they deliberately do not share one runtime strategy or DSO. Their E2E manifests 
 `task_strategy="text_generation_causal"` while their bundles carry
 `qwen_decoder_kv_cache` and `llama_decoder_kv_cache`, respectively.
 
-```mermaid
-flowchart LR
-  QwenFamily["qwen Python family"] --> QwenRuntime["qwen_decoder_kv_cache<br/>libtrtmc_model_qwen.so"]
-  LlamaFamily["llama Python family"] --> LlamaRuntime["llama_decoder_kv_cache<br/>libtrtmc_model_llama.so"]
-  QwenRuntime --> TextTask["text_generation_causal task contract"]
-  LlamaRuntime --> TextTask
-  WhisperFamily["whisper Python family"] --> WhisperRuntime["whisper_speech_to_text<br/>libtrtmc_model_whisper.so"]
-  WhisperRuntime --> SpeechTask["speech_to_text task contract"]
-```
+<Diagram
+  src="/img/diagrams/getting-started/family-runtime-task-identity.svg"
+  alt="Examples showing how Python model families map to native runtime strategies and shared task contracts"
+  caption="Family identifies the build owner, runtime strategy selects the native implementation shape, and task strategy names the shared behavior."
+/>
 
 Both paths preserve the same ownership rule: implementation details stay with
 the family, while shared tools reason about capability labels and task

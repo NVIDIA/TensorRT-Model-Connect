@@ -1,0 +1,85 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: Runtime units and ownership
+// @description: The CLI, Python wrapper, C++ API, and limited C-linkage surface enter shared factory and loader units with a bundle, which choose embedded optimized code or installed native model and backend DSOs before returning a concrete task pipeline.
+digraph RuntimeOwnership {
+  graph [
+    bgcolor="#fbfcfe",
+    pad="0.35",
+    nodesep="0.48",
+    ranksep="0.68",
+    rankdir="TB",
+    splines="polyline",
+    fontname="Arial",
+    labelloc="t",
+    label=<<B>Runtime ownership</B><BR/><FONT POINT-SIZE="16">Shared loaders enforce artifact identity; owned DSOs implement task and backend behavior.</FONT>>,
+    fontsize="28",
+    fontcolor="#111827"
+  ];
+  node [
+    shape="rect",
+    style="rounded,filled",
+    fillcolor="#ffffff",
+    color="#64748b",
+    penwidth="2",
+    fontname="Arial",
+    fontsize="17",
+    fontcolor="#111827",
+    margin="0.20,0.15"
+  ];
+  edge [
+    color="#64748b",
+    penwidth="2.4",
+    arrowsize="0.8",
+    fontname="Arial",
+    fontsize="16",
+    fontcolor="#334155"
+  ];
+
+  public [
+    fillcolor="#f5f3ff",
+    color="#7c3aed",
+    label=<<B>User runtime surfaces</B><BR/><FONT POINT-SIZE="16">trtmc run · Python Pipeline wrapper</FONT><BR/><FONT POINT-SIZE="16">C++ IPipeline · limited C-linkage subset</FONT>>
+  ];
+  bundle [
+    fillcolor="#fffbeb",
+    color="#b45309",
+    label=<<B>.trtfb bundle</B><BR/><FONT POINT-SIZE="16">dispatch identity + artifacts</FONT>>
+  ];
+  shared [
+    fillcolor="#f8fafc",
+    color="#64748b",
+    label=<<FONT POINT-SIZE="20"><B>Shared factory and runtime units</B></FONT><BR/><FONT POINT-SIZE="16">PipelineFactory · optimized/native loaders · registry</FONT><BR/><FONT POINT-SIZE="16">BackendLoader · config · device abstractions</FONT>>
+  ];
+  optimized [
+    fillcolor="#f5f3ff",
+    color="#7c3aed",
+    label=<<B>Embedded implementation DSO</B><BR/><FONT POINT-SIZE="16">optimized artifact owns its private factory</FONT>>
+  ];
+  model [
+    fillcolor="#ecfccb",
+    color="#4d7c0f",
+    label=<<B>Installed model DSO</B><BR/><FONT POINT-SIZE="16">IPipelinePlugin + model state</FONT>>
+  ];
+  backend [
+    fillcolor="#eff6ff",
+    color="#2563eb",
+    label=<<B>Installed backend DSO</B><BR/><FONT POINT-SIZE="16">IBackend + ITrtModule</FONT>>
+  ];
+  pipeline [
+    fillcolor="#ecfccb",
+    color="#4d7c0f",
+    label=<<FONT POINT-SIZE="20"><B>Concrete IPipeline</B></FONT><BR/><FONT POINT-SIZE="16">typed task behavior</FONT>>
+  ];
+
+  { rank=same; public; bundle; }
+  public -> shared;
+  bundle -> shared;
+  shared -> optimized [label="optimized"];
+  shared -> model [label="native"];
+  shared -> backend [label="native backend"];
+  { rank=same; optimized; model; backend; }
+  optimized -> pipeline;
+  model -> pipeline;
+  backend -> pipeline [style="dashed", label="execution interface"];
+}

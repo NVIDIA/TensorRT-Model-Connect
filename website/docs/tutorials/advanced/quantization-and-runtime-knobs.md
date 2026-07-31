@@ -2,6 +2,8 @@
 title: Advanced Tutorial - Quantization and Runtime Knobs
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 This tutorial covers build-time precision, post-training quantization, runtime cache sizing, and backend selection.
 
 Select the CLI before running an example:
@@ -22,18 +24,11 @@ The advanced knobs change either:
 - How the runtime loads the bundle.
 - How a request uses runtime state.
 
-```mermaid
-flowchart LR
-  BuildFlags["Build flags<br/>precision, quantization, profiles"] --> NativeDefault{"Family native<br/>default matches?"}
-  NativeDefault -->|yes| Native["Native TensorRT .trtfb"]
-  NativeDefault -->|no| Probe["Probe exact optimized profile"]
-  Probe -->|one profile claims request| Optimized["Optimized .trtfb"]
-  Probe -->|no profile claims request| Native
-  RuntimeFlags["Load flags"] --> Pipeline["IPipeline"]
-  RequestFlags["Request flags<br/>sampling, max tokens, steps"] --> Pipeline
-  Optimized --> Pipeline
-  Native --> Pipeline
-```
+<Diagram
+  src="/img/diagrams/tutorials/advanced/knob-scopes.svg"
+  alt="Three knob boundaries where build-time inputs produce a native or optimized bundle, load options create IPipeline, and request options affect a typed task call"
+  caption="Build-time inputs shape the artifact, although a family native-default gate sees only ModelConfig; load options apply while creating IPipeline, and request options apply to the later task operation."
+/>
 
 Family routing runs before the optimized-runtime probe. Eligible dense Qwen3
 and Llama checkpoints declare a native default and skip that probe. For other
@@ -86,15 +81,11 @@ generic causal-language-model adapter. See
 for the paired-manifest, image-directory, placeholder, and evidence
 boundaries.
 
-```mermaid
-flowchart TD
-  Model["Checkpoint weights"] --> Plan["Quantization plan"]
-  Calibration["Calibration data"] --> Scales["Activation/weight scales"]
-  Plan --> Convert["Quantized graph/weights"]
-  Scales --> Convert
-  Convert --> Engine["TensorRT engine"]
-  Engine --> Bundle[".trtfb"]
-```
+<Diagram
+  src="/img/diagrams/tutorials/advanced/quantization-flow.svg"
+  alt="Quantization flow choosing precomputed scales, a prequantized checkpoint, ModelOpt calibration, or dynamic scales before building a TensorRT engine and bundle"
+  caption="Calibration is only one scale-source path; other formats reuse supplied or checkpoint-owned scales or select dynamic scale policy before the builder emits the engine and required metadata."
+/>
 
 Quantization is not just a compression flag. It is a contract between:
 
@@ -139,7 +130,11 @@ $TRTMC run /tmp/qwen3-dynamic.trtfb \
   --kv-cache-size 512MB
 ```
 
-Dynamic KV cache separates the bundle's compiled profiles from the session's cache budget. The runtime state can choose a preferred cache row count and the module can use the right execution profile when available.
+Dynamic KV cache separates the bundle's compiled profiles from the session's
+cache budget. During plugin construction, model-owned code converts that
+budget into admitted decoder contexts and inference-state capacity. During a
+request, the pipeline reads the state's preferred row count and chooses a
+matching decoder context.
 
 For eligible dense Qwen3 and Llama, `--dynamic-kv-cache` deliberately opts out
 of the native full-context fixed-KV route and uses the compatible legacy
@@ -147,13 +142,11 @@ builder. A native full-context bundle rejects runtime `--kv-cache-size`; its
 physical capacity is fixed to the model context and shared by prefill and
 decode.
 
-```mermaid
-flowchart LR
-  Bundle["Bundle profiles"] --> State["model-owned inference state"]
-  Budget["--kv-cache-size"] --> State
-  State --> Rows["preferred_cache_rows"]
-  Rows --> Module["ITrtModule profile/context"]
-```
+<Diagram
+  src="/img/diagrams/tutorials/advanced/dynamic-kv-cache.svg"
+  alt="Dynamic KV-cache flow where the model plugin applies a session budget to compiled decoder contexts and the pipeline later selects one using preferred cache rows from state"
+  caption="The plugin admits fixed decoder contexts and allocates state within the session budget; at each step the pipeline, not ITrtModule, uses preferred_cache_rows() to choose a matching context."
+/>
 
 ## Native backend DSO search
 
@@ -198,15 +191,11 @@ backend supports it. Optimized implementations own their graph-capture policy;
 do not assume that the native `--cuda-graphs` switch enables, disables, or
 otherwise reproduces an optimized implementation's qualified path.
 
-```mermaid
-flowchart TD
-  Bundle["RTX-targeted bundle"] --> Loader["BackendLoader"]
-  Loader --> RTX["trt_rtx backend DSO"]
-  Cache["runtime cache file"] --> RTX
-  CudaGraphs["--cuda-graphs"] --> RTX
-  RTX --> Module["ITrtModule"]
-  Module --> Pipeline["IPipeline request"]
-```
+<Diagram
+  src="/img/diagrams/tutorials/advanced/rtx-runtime.svg"
+  alt="Native TensorRT-RTX runtime flow from an RTX-targeted bundle through BackendLoader and the RTX backend DSO to ITrtModule and the public pipeline"
+  caption="Runtime cache and CUDA-graph settings affect the native RTX backend; they do not define an optimized implementation's private policy."
+/>
 
 ## Advanced knob checklist
 

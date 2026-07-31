@@ -1,0 +1,54 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: Benchmark measurement and reporting boundary
+// @description: The native worker loads either a native or optimized bundle through trtmc load, invokes the public IPipeline operation, records raw observations, and returns them to task-aware metrics and JSON and HTML reporting.
+digraph BenchmarkMeasurementReporting {
+  graph [
+    bgcolor="#fbfcfe",
+    pad="0.30",
+    nodesep="0.42",
+    ranksep="0.58",
+    rankdir="TB",
+    splines="polyline",
+    fontname="Arial",
+    labelloc="t",
+    label=<<B>Measure through the same public runtime API</B><BR/><FONT POINT-SIZE="16">Native and optimized bundle paths converge before the timed task operation.</FONT>>,
+    fontsize="27",
+    fontcolor="#111827"
+  ];
+  node [
+    shape="rect",
+    style="rounded,filled",
+    color="#64748b",
+    penwidth="1.8",
+    fillcolor="#ffffff",
+    fontname="Arial",
+    fontsize="17",
+    fontcolor="#111827",
+    margin="0.20,0.14"
+  ];
+  edge [color="#64748b", penwidth="2.2", arrowsize="0.8", fontname="Arial", fontsize="16", fontcolor="#334155"];
+
+  worker [fillcolor="#eff6ff", color="#2563eb", label=<<B>C++ measurement worker</B>>];
+  load [fillcolor="#ecfccb", color="#4d7c0f", label=<<FONT POINT-SIZE="19"><B>trtmc::load</B></FONT>>];
+  route [shape="diamond", style="filled", fillcolor="#fffbeb", color="#b45309", label=<<B>Bundle runtime<BR/>metadata</B>>];
+  worker -> load -> route;
+
+  native [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>Native path</B><BR/><FONT POINT-SIZE="16">runtime_strategy<BR/>model + backend DSOs</FONT>>];
+  optimized [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>Optimized path</B><BR/><FONT POINT-SIZE="16">optimized_runtime.json<BR/>embedded implementation DSO</FONT>>];
+  { rank=same; native; optimized; }
+  route -> native [label="native bundle"];
+  route -> optimized [label="optimized bundle"];
+
+  api [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>Public IPipeline</B>>];
+  runner [label=<<B>Public operation runner</B><BR/><FONT POINT-SIZE="16">timed task calls</FONT>>];
+  native -> api;
+  optimized -> api;
+  api -> runner;
+
+  raw [fillcolor="#ecfeff", color="#0e7490", label=<<B>Raw observations</B>>];
+  metrics [fillcolor="#ecfeff", color="#0e7490", label=<<B>Task-aware metrics</B>>];
+  report [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>JSON + HTML report</B>>];
+  { rank=same; raw; metrics; report; }
+  runner -> raw -> metrics -> report;
+}

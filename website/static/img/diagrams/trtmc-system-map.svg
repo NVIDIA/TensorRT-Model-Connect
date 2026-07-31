@@ -1,80 +1,77 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="520" viewBox="0 0 1120 520" role="img" aria-labelledby="title desc">
-  <title id="title">TensorRT-Model-Connect build and runtime system map</title>
-  <desc id="desc">A left to right system map from HuggingFace checkpoints through trtmc build, native or optimized bundles, the C++ runtime, and typed task results. Native bundles use runtime strategy and model and backend DSOs. Optimized bundles use optimized runtime metadata and an embedded implementation DSO. Compatible driver, CUDA, TensorRT, loader, and system libraries remain external.</desc>
-  <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
-      <path d="M0 0 10 5 0 10Z" fill="#64748b"/>
-    </marker>
-    <style>
-      .title{font-family:Inter,Arial,sans-serif;font-size:30px;font-weight:800;fill:#101828}
-      .subtitle{font-family:Inter,Arial,sans-serif;font-size:16px;fill:#475467}
-      .label{font-family:Inter,Arial,sans-serif;font-size:18px;font-weight:800;fill:#101828}
-      .small{font-family:Inter,Arial,sans-serif;font-size:13px;fill:#475467}
-      .pill{font-family:Inter,Arial,sans-serif;font-size:12px;font-weight:700;fill:#344054}
-      .card{fill:#fff;stroke:#d0d7e2;stroke-width:1.5}
-    </style>
-  </defs>
-  <rect x="1" y="1" width="1118" height="518" rx="18" fill="#fbfcfe" stroke="#d0d7e2"/>
-  <text x="48" y="58" class="title">Build -> bundle -> runtime</text>
-  <text x="48" y="88" class="subtitle">trtmc build selects a native family or an exact qualified optimized adapter. C++ serves typed task APIs.</text>
-
-  <g>
-    <rect x="48" y="150" width="184" height="190" rx="16" fill="#eef6ff" stroke="#93c5fd" stroke-width="2"/>
-    <text x="140" y="190" text-anchor="middle" class="label">Checkpoint</text>
-    <text x="140" y="220" text-anchor="middle" class="small">HuggingFace model</text>
-    <text x="140" y="242" text-anchor="middle" class="small">weights and config</text>
-    <rect x="74" y="286" width="132" height="28" rx="14" fill="#dbeafe"/>
-    <text x="140" y="305" text-anchor="middle" class="pill">research format</text>
-  </g>
-
-  <g>
-    <rect x="276" y="150" width="184" height="190" rx="16" class="card"/>
-    <text x="368" y="190" text-anchor="middle" class="label">trtmc build</text>
-    <text x="368" y="220" text-anchor="middle" class="small">native: FamilyPlugin</text>
-    <text x="368" y="242" text-anchor="middle" class="small">optimized: exact profile</text>
-    <text x="368" y="264" text-anchor="middle" class="small">TensorRT artifact build</text>
-    <rect x="300" y="286" width="136" height="28" rx="14" fill="#dcfce7"/>
-    <text x="368" y="305" text-anchor="middle" class="pill">build-time selection</text>
-  </g>
-
-  <g>
-    <rect x="504" y="132" width="184" height="226" rx="18" fill="#fff7ed" stroke="#f59e0b" stroke-width="3"/>
-    <text x="596" y="176" text-anchor="middle" class="label">.trtfb bundle</text>
-    <text x="596" y="208" text-anchor="middle" class="small">native: plans + assets</text>
-    <text x="596" y="230" text-anchor="middle" class="small">runtime_strategy + config</text>
-    <text x="596" y="252" text-anchor="middle" class="small">optimized_runtime.json</text>
-    <text x="596" y="274" text-anchor="middle" class="small">embedded implementation DSO</text>
-    <rect x="534" y="306" width="124" height="28" rx="14" fill="#fef3c7"/>
-    <text x="596" y="325" text-anchor="middle" class="pill">artifact contract</text>
-  </g>
-
-  <g>
-    <rect x="732" y="150" width="184" height="190" rx="16" class="card"/>
-    <text x="824" y="190" text-anchor="middle" class="label">C++ runtime</text>
-    <text x="824" y="220" text-anchor="middle" class="small">PipelineFactory</text>
-    <text x="824" y="242" text-anchor="middle" class="small">native: model + backend DSO</text>
-    <text x="824" y="264" text-anchor="middle" class="small">optimized: implementation DSO</text>
-    <rect x="758" y="286" width="132" height="28" rx="14" fill="#ede9fe"/>
-    <text x="824" y="305" text-anchor="middle" class="pill">task-specific API</text>
-  </g>
-
-  <g>
-    <rect x="960" y="150" width="112" height="190" rx="16" fill="#f0fdf4" stroke="#86efac" stroke-width="2"/>
-    <text x="1016" y="190" text-anchor="middle" class="label">Result</text>
-    <text x="1016" y="220" text-anchor="middle" class="small">Text</text>
-    <text x="1016" y="242" text-anchor="middle" class="small">Image</text>
-    <text x="1016" y="264" text-anchor="middle" class="small">Audio</text>
-    <text x="1016" y="286" text-anchor="middle" class="small">More</text>
-  </g>
-
-  <line x1="232" y1="245" x2="276" y2="245" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
-  <line x1="460" y1="245" x2="504" y2="245" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
-  <line x1="688" y1="245" x2="732" y2="245" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
-  <line x1="916" y1="245" x2="960" y2="245" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
-
-  <rect x="72" y="390" width="976" height="64" rx="14" fill="#f8fafc" stroke="#d0d7e2"/>
-  <text x="98" y="416" class="small">Dispatch:</text>
-  <text x="166" y="416" class="small">native bundles use runtime_strategy; optimized bundles use optimized_runtime.json before native materialization.</text>
-  <text x="98" y="440" class="small">External runtime:</text>
-  <text x="206" y="440" class="small">compatible NVIDIA driver, CUDA/TensorRT cohort, dynamic loader, and system libraries.</text>
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="849" height="286" role="img" aria-labelledby="trtmc-system-map-svg-title trtmc-system-map-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 849.00 286.00" xmlns="http://www.w3.org/2000/svg">
+<title id="trtmc-system-map-svg-title">TensorRT-Model-Connect build and runtime system map</title>
+<desc id="trtmc-system-map-svg-description">A checkpoint is resolved by trtmc build into a native or exact-qualified optimized bundle, then loaded by the C++ runtime and exposed through a typed task API.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(25.2 260.52)">
+<polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-260.52 823.79,-260.52 823.79,25.2 -25.2,25.2"/>
+<text xml:space="preserve" text-anchor="start" x="215.96" y="-205.32" font-family="Arial" font-weight="bold" font-size="30.00" fill="#111827">Build → bundle → runtime</text>
+<text xml:space="preserve" text-anchor="start" x="108.28" y="-187.02" font-family="Arial" font-size="17.00" fill="#111827">One artifact contract connects Python&#45;first model sources to native task APIs.</text>
+<!-- checkpoint -->
+<g id="node1" class="node">
+<title>checkpoint</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2.2" d="M225.13,-180.32C225.13,-180.32 25.78,-180.32 25.78,-180.32 19.78,-180.32 13.78,-174.32 13.78,-168.32 13.78,-168.32 13.78,-120.16 13.78,-120.16 13.78,-114.16 19.78,-108.16 25.78,-108.16 25.78,-108.16 225.13,-108.16 225.13,-108.16 231.13,-108.16 237.13,-114.16 237.13,-120.16 237.13,-120.16 237.13,-168.32 237.13,-168.32 237.13,-174.32 231.13,-180.32 225.13,-180.32"/>
+<text xml:space="preserve" text-anchor="start" x="71.01" y="-153.24" font-family="Arial" font-weight="bold" font-size="20.00" fill="#111827">Checkpoint</text>
+<text xml:space="preserve" text-anchor="start" x="26.74" y="-136.84" font-family="Arial" font-size="16.00" fill="#111827">weights · config · tokenizer</text>
+<text xml:space="preserve" text-anchor="start" x="47.64" y="-120.84" font-family="Arial" font-size="16.00" fill="#111827">Hugging Face or local</text>
+</g>
+<!-- build -->
+<g id="node2" class="node">
+<title>build</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2.2" d="M490.35,-180.32C490.35,-180.32 310.57,-180.32 310.57,-180.32 304.57,-180.32 298.57,-174.32 298.57,-168.32 298.57,-168.32 298.57,-120.16 298.57,-120.16 298.57,-114.16 304.57,-108.16 310.57,-108.16 310.57,-108.16 490.35,-108.16 490.35,-108.16 496.35,-108.16 502.35,-114.16 502.35,-120.16 502.35,-120.16 502.35,-168.32 502.35,-168.32 502.35,-174.32 496.35,-180.32 490.35,-180.32"/>
+<text xml:space="preserve" text-anchor="start" x="348.79" y="-153.24" font-family="Arial" font-weight="bold" font-size="20.00" fill="#111827">trtmc build</text>
+<text xml:space="preserve" text-anchor="start" x="331.09" y="-136.84" font-family="Arial" font-size="16.00" fill="#111827">native FamilyPlugin</text>
+<text xml:space="preserve" text-anchor="start" x="311.53" y="-120.84" font-family="Arial" font-size="16.00" fill="#111827">or exact optimized profile</text>
+</g>
+<!-- checkpoint&#45;&gt;build -->
+<g id="edge1" class="edge">
+<title>checkpoint&#45;&gt;build</title>
+<path fill="none" stroke="#64748b" stroke-width="2.5" d="M238.1,-144C238.1,-144 285.92,-144 285.92,-144"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.5" points="285.92,-146.8 293.92,-144 285.92,-141.2 285.92,-146.8"/>
+</g>
+<!-- result -->
+<g id="node5" class="node">
+<title>result</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2.2" d="M238.91,-72.16C238.91,-72.16 12,-72.16 12,-72.16 6,-72.16 0,-66.16 0,-60.16 0,-60.16 0,-12 0,-12 0,-6 6,0 12,0 12,0 238.91,0 238.91,0 244.91,0 250.91,-6 250.91,-12 250.91,-12 250.91,-60.16 250.91,-60.16 250.91,-66.16 244.91,-72.16 238.91,-72.16"/>
+<text xml:space="preserve" text-anchor="start" x="43.21" y="-45.08" font-family="Arial" font-weight="bold" font-size="20.00" fill="#111827">Typed task result</text>
+<text xml:space="preserve" text-anchor="start" x="53.42" y="-28.68" font-family="Arial" font-size="16.00" fill="#111827">text · image · audio</text>
+<text xml:space="preserve" text-anchor="start" x="12.96" y="-12.68" font-family="Arial" font-size="16.00" fill="#111827">segmentation · forecast · more</text>
+</g>
+<!-- checkpoint&#45;&gt;result -->
+<!-- bundle -->
+<g id="node3" class="node">
+<title>bundle</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="3" d="M786.59,-180.32C786.59,-180.32 538.32,-180.32 538.32,-180.32 532.32,-180.32 526.32,-174.32 526.32,-168.32 526.32,-168.32 526.32,-120.16 526.32,-120.16 526.32,-114.16 532.32,-108.16 538.32,-108.16 538.32,-108.16 786.59,-108.16 786.59,-108.16 792.59,-108.16 798.59,-114.16 798.59,-120.16 798.59,-120.16 798.59,-168.32 798.59,-168.32 798.59,-174.32 792.59,-180.32 786.59,-180.32"/>
+<text xml:space="preserve" text-anchor="start" x="604.14" y="-153.24" font-family="Arial" font-weight="bold" font-size="20.00" fill="#111827">.trtfb bundle</text>
+<text xml:space="preserve" text-anchor="start" x="574.63" y="-136.84" font-family="Arial" font-size="16.00" fill="#111827">plans + runtime_strategy</text>
+<text xml:space="preserve" text-anchor="start" x="539.28" y="-120.84" font-family="Arial" font-size="16.00" fill="#111827">or embedded implementation DSO</text>
+</g>
+<!-- build&#45;&gt;bundle -->
+<g id="edge2" class="edge">
+<title>build&#45;&gt;bundle</title>
+<path fill="none" stroke="#64748b" stroke-width="2.5" d="M503.25,-156C503.25,-156 513.24,-156 513.24,-156"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.5" points="513.24,-158.8 521.24,-156 513.24,-153.2 513.24,-158.8"/>
+</g>
+<!-- runtime -->
+<g id="node4" class="node">
+<title>runtime</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2.2" d="M513.91,-72.16C513.91,-72.16 287,-72.16 287,-72.16 281,-72.16 275,-66.16 275,-60.16 275,-60.16 275,-12 275,-12 275,-6 281,0 287,0 287,0 513.91,0 513.91,0 519.91,0 525.91,-6 525.91,-12 525.91,-12 525.91,-60.16 525.91,-60.16 525.91,-66.16 519.91,-72.16 513.91,-72.16"/>
+<text xml:space="preserve" text-anchor="start" x="342.11" y="-45.08" font-family="Arial" font-weight="bold" font-size="20.00" fill="#111827">C++ runtime</text>
+<text xml:space="preserve" text-anchor="start" x="293.95" y="-28.68" font-family="Arial" font-size="16.00" fill="#111827">native: model + backend DSO</text>
+<text xml:space="preserve" text-anchor="start" x="287.96" y="-12.68" font-family="Arial" font-size="16.00" fill="#111827">optimized: implementation DSO</text>
+</g>
+<!-- build&#45;&gt;runtime -->
+<!-- bundle&#45;&gt;runtime -->
+<g id="edge3" class="edge">
+<title>bundle&#45;&gt;runtime</title>
+<path fill="none" stroke="#64748b" stroke-width="2.5" d="M525.28,-132C518.31,-132 514.13,-132 514.13,-132 514.13,-132 514.13,-84.95 514.13,-84.95"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.5" points="516.93,-84.95 514.13,-76.95 511.33,-84.95 516.93,-84.95"/>
+</g>
+<!-- runtime&#45;&gt;result -->
+<g id="edge4" class="edge">
+<title>runtime&#45;&gt;result</title>
+<path fill="none" stroke="#64748b" stroke-width="2.5" d="M274.22,-36C274.22,-36 263.51,-36 263.51,-36"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.5" points="263.51,-33.2 255.51,-36 263.51,-38.8 263.51,-33.2"/>
+</g>
+</g>
 </svg>

@@ -2,6 +2,8 @@
 title: Advanced Tutorial - Validation and Benchmarking
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 Validation should prove that the runtime under test matches an appropriate oracle. Benchmarking should state exactly what is measured.
 
 Select the CLI before running a standalone bundle command:
@@ -15,17 +17,11 @@ export TRTMC=trtmc
 The repository E2E and unit-test sections later on require a source checkout
 and its configured `./build/trtmc`; they state that path explicitly.
 
-```mermaid
-flowchart TB
-  Bundle["Bundle under test"] --> Runtime["TRTMC runtime"]
-  Input["Canonical input"] --> Runtime
-  Input --> Oracle["Reference oracle"]
-  Runtime --> Output["TRTMC output"]
-  Oracle --> Reference["Reference output"]
-  Output --> Compare["Comparator and thresholds"]
-  Reference --> Compare
-  Compare --> Report["Pass/fail + artifacts"]
-```
+<Diagram
+  src="/img/diagrams/tutorials/advanced/validation-contract.svg"
+  alt="Validation contract sending the same canonical input to a tested bundle and declared reference oracle before task-specific comparison and reporting"
+  caption="The manifest defines the input, oracle, comparator, and thresholds; a passing report must retain exact artifact and revision provenance."
+/>
 
 For release model-profile comparisons, GB300 prerequisites, traffic-light
 semantics, and retained performance evidence, use the
@@ -121,12 +117,11 @@ Report:
 - Prompt length and generated token count.
 - Whether the number is wall-clock CLI latency, per-token decode time, or raw engine enqueue time.
 
-```mermaid
-flowchart LR
-  Wall["Wall-clock CLI time"] --> Includes["argument parsing, load, tokenize, host work, engine, postprocess"]
-  Decode["Per-token decode time"] --> Loop["steady-state token loop"]
-  Enqueue["Raw engine enqueue time"] --> Engine["TensorRT execution only"]
-```
+<Diagram
+  src="/img/diagrams/tutorials/advanced/benchmark-timing-scopes.svg"
+  alt="Comparison of wall-clock command latency, provider-reported per-token decode latency, and raw TensorRT engine enqueue latency"
+  caption="Each metric covers a different boundary, so reports must name the scope and must not compare the three values as equivalents."
+/>
 
 These numbers answer different questions. Do not compare them as if they measure the same thing.
 

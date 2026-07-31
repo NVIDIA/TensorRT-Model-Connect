@@ -3,6 +3,8 @@ title: Bundle Format
 description: The physical and semantic contract carried by a .trtfb artifact.
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 `.trtfb` is the build/run boundary of TensorRT-Model-Connect. It is a
 self-describing container with a JSON header and named binary sections.
 
@@ -15,20 +17,11 @@ Two payload shapes use the same outer format:
 
 ## Physical layout
 
-```mermaid
-flowchart TB
-  subgraph File["model.trtfb"]
-    Magic["bytes 0-7<br/>TRTFB magic"]
-    Length["bytes 8-15<br/>little-endian JSON header length"]
-    Header["UTF-8 JSON header<br/>metadata + section table"]
-    Payloads["contiguous binary section payloads"]
-  end
-
-  Header --> Identity["model, family, precision,<br/>TensorRT and dispatch metadata"]
-  Header --> Table["section name -> offset + size"]
-  Payloads --> Native["native sections:<br/>config, plans, tokenizers, assets"]
-  Payloads --> Optimized["optimized sections:<br/>descriptor, implementation metadata,<br/>embedded artifact tree"]
-```
+<Diagram
+  src="/img/diagrams/architecture/bundle-layout.svg"
+  alt="Physical model.trtfb layout with magic bytes, JSON header length, metadata and section table, then native or optimized binary payloads"
+  caption="The fixed prefix locates the JSON header; its section table addresses named entries inside the contiguous payload area."
+/>
 
 The exact magic bytes and length encoding are shared by:
 

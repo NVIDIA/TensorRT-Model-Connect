@@ -2,8 +2,7 @@
 title: Beginner Tutorial - Text Generation
 ---
 
-import useBaseUrl from '@docusaurus/useBaseUrl';
-
+import Diagram from '@site/src/components/Diagram';
 
 This handout teaches the full path for decoder text generation: build a bundle, inspect the artifact, run the C++ runtime, and explain the request loop. It assumes you can run shell commands, but it does not assume prior deep learning inference knowledge.
 
@@ -34,12 +33,11 @@ export TRTMC=trtmc
   </div>
 </div>
 
-<figure className="trtmc-diagram trtmc-diagram--wide">
-  <div className="trtmc-diagram__media">
-    <img src={useBaseUrl('/img/diagrams/trtmc-inference-loop.svg')} alt="Text generation inference loop" />
-  </div>
-  <figcaption>Use this loop to connect each tutorial command to the runtime work it triggers.</figcaption>
-</figure>
+<Diagram
+  src="/img/diagrams/trtmc-inference-loop.svg"
+  alt="Text generation prefill and decode loop with KV-cache reuse"
+  caption="Use this loop to connect each tutorial command to the runtime work it triggers."
+/>
 
 ## Outcomes
 
@@ -97,23 +95,12 @@ $TRTMC build Qwen/Qwen3-0.6B
 
 What happens:
 
-```mermaid
-sequenceDiagram
-  participant CLI as trtmc build
-  participant Config as ModelConfig
-  participant Family as qwen FamilyPlugin
-  participant Builder as decoder builder
-  participant Bundle as bundle_writer
-
-  CLI->>Config: read config.json
-  Config-->>CLI: normalized architecture fields
-  CLI->>Family: matches(model_type)
-  Family->>Family: load_weights
-  Family->>Builder: build_engine
-  Builder-->>Family: serialized TensorRT plan
-  Family-->>Bundle: BundleInfo + split engine sections
-  Bundle-->>CLI: Qwen3-0.6B.trtfb
-```
+<Diagram
+  src="/img/diagrams/tutorials/beginner/qwen3-bundle-build-sequence.svg"
+  alt="Qwen3 bundle build sequence from CLI configuration through split prefill and decode TensorRT plan construction and bundle writing"
+  caption="The CLI resolves Qwen ownership, the family builds separate prefill and decode plans by default, and the bundle writer records both deployable sections."
+  sequence
+/>
 
 | Omitted option | Effect |
 | --- | --- |
@@ -196,20 +183,11 @@ For Qwen3-0.6B, the runtime should log `Using native BPE tokenizer`; no `--hf-py
 
 Runtime creation follows this path:
 
-```mermaid
-flowchart TD
-  Run["$TRTMC run"] --> Load["trtmc::load"]
-  Load --> Factory["PipelineFactory"]
-  Factory --> Read["ReadBundleFile"]
-  Read --> Strategy["qwen_decoder_kv_cache"]
-  Strategy --> Loader["ModelPluginLoader"]
-  Loader --> DSO["libtrtmc_model_qwen.so"]
-  DSO --> Registry["PipelineRegistry"]
-  Registry --> Plugin["QwenDecoderPlugin"]
-  Plugin --> Backend["IBackend creates ITrtModule"]
-  Plugin --> Pipeline["QwenTextGenerationPipeline"]
-  Pipeline --> Generate["generate(prompt, cfg)"]
-```
+<Diagram
+  src="/img/diagrams/tutorials/beginner/native-runtime-dispatch.svg"
+  alt="Native runtime dispatch from bundle strategy metadata through model plugin loading to a task pipeline"
+  caption="For Qwen, the generic native dispatch layers resolve qwen_decoder_kv_cache and create QwenTextGenerationPipeline."
+/>
 
 Inside `generate`, the pipeline:
 

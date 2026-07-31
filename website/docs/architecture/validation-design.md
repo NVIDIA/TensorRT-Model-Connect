@@ -3,20 +3,19 @@ title: Validation Design
 description: What unit, integration, E2E, qualification, and performance evidence prove.
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 TensorRT-Model-Connect separates evidence by contract. A passing unit test, a
 successful model run, exact reference parity, and a performance result are not
 interchangeable claims.
 
 ## Evidence ladder
 
-```mermaid
-flowchart LR
-  Static["Ownership and static checks"] --> Unit["Builder / C++ / tool units"]
-  Unit --> Integration["Bundle, DSO, and loader integration"]
-  Integration --> E2E["Exact model E2E"]
-  E2E --> Qualification["Target/profile qualification"]
-  Qualification --> Performance["Reproducible performance evidence"]
-```
+<Diagram
+  src="/img/diagrams/architecture/validation-evidence-ladder.svg"
+  alt="Six-layer evidence ladder from ownership and static checks through focused units, integration, exact model E2E, target qualification, and reproducible performance"
+  caption="Evidence accumulates by contract: exact-model execution, target qualification, and performance claims still depend on the focused checks below them."
+/>
 
 Each layer adds confidence; a later layer does not make earlier, focused
 coverage unnecessary.

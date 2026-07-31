@@ -1,0 +1,26 @@
+{
+  "title": "Build the Qwen3 bundle",
+  "description": "The build CLI normalizes the model configuration, resolves Qwen family ownership, loads weights, builds the default split prefill and decode TensorRT plans, and writes both plans with metadata into Qwen3-0.6B.trtfb.",
+  "subtitle": "Configuration and model ownership stay in Python; the output is a deployable bundle.",
+  "participants": [
+    {"id": "cli", "label": "trtmc build", "color": "api"},
+    {"id": "config", "label": "ModelConfig", "color": "neutral"},
+    {"id": "family", "label": "Qwen family", "color": "build"},
+    {"id": "builder", "label": "Decoder builder", "color": "build"},
+    {"id": "bundle", "label": "Bundle writer", "color": "artifact"}
+  ],
+  "messages": [
+    {"kind": "section", "label": "Resolve configuration and ownership"},
+    {"from": "cli", "to": "config", "label": "Read config.json"},
+    {"from": "config", "to": "cli", "label": "Normalize model config", "style": "return"},
+    {"from": "cli", "to": "family", "label": "Claim Qwen3 family"},
+    {"kind": "section", "label": "Build and package split native engines"},
+    {"from": "family", "to": "family", "label": "Load weights"},
+    {"from": "family", "to": "builder", "label": "Build prefill engine"},
+    {"from": "builder", "to": "family", "label": "Return prefill plan", "style": "return"},
+    {"from": "family", "to": "builder", "label": "Build decode engine"},
+    {"from": "builder", "to": "family", "label": "Return decode plan", "style": "return"},
+    {"from": "family", "to": "bundle", "label": "Write both plan sections"},
+    {"from": "bundle", "to": "cli", "label": "Return .trtfb", "style": "return"}
+  ]
+}

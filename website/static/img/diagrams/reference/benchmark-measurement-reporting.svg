@@ -1,0 +1,139 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="859" height="766" role="img" aria-labelledby="reference-benchmark-measurement-reporting-svg-title reference-benchmark-measurement-reporting-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 859.00 766.00" xmlns="http://www.w3.org/2000/svg">
+<title id="reference-benchmark-measurement-reporting-svg-title">Benchmark measurement and reporting boundary</title>
+<desc id="reference-benchmark-measurement-reporting-svg-description">The native worker loads either a native or optimized bundle through trtmc load, invokes the public IPipeline operation, records raw observations, and returns them to task-aware metrics and JSON and HTML reporting.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(21.6 744.08)">
+<polygon fill="#fbfcfe" stroke="none" points="-21.6,21.6 -21.6,-744.08 837.47,-744.08 837.47,21.6 -21.6,21.6"/>
+<text xml:space="preserve" text-anchor="start" x="113.14" y="-695.18" font-family="Arial" font-weight="bold" font-size="27.00" fill="#111827">Measure through the same public runtime API</text>
+<text xml:space="preserve" text-anchor="start" x="135.32" y="-678.08" font-family="Arial" font-size="16.00" fill="#111827">Native and optimized bundle paths converge before the timed task operation.</text>
+<!-- worker -->
+<g id="node1" class="node">
+<title>worker</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="1.8" d="M333.45,-671.48C333.45,-671.48 120.77,-671.48 120.77,-671.48 114.77,-671.48 108.77,-665.48 108.77,-659.48 108.77,-659.48 108.77,-642.92 108.77,-642.92 108.77,-636.92 114.77,-630.92 120.77,-630.92 120.77,-630.92 333.45,-630.92 333.45,-630.92 339.45,-630.92 345.45,-636.92 345.45,-642.92 345.45,-642.92 345.45,-659.48 345.45,-659.48 345.45,-665.48 339.45,-671.48 333.45,-671.48"/>
+<text xml:space="preserve" text-anchor="start" x="123.17" y="-647.1" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">C++ measurement worker</text>
+</g>
+<!-- load -->
+<g id="node2" class="node">
+<title>load</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.8" d="M279.12,-587.92C279.12,-587.92 175.1,-587.92 175.1,-587.92 169.1,-587.92 163.1,-581.92 163.1,-575.92 163.1,-575.92 163.1,-556.96 163.1,-556.96 163.1,-550.96 169.1,-544.96 175.1,-544.96 175.1,-544.96 279.12,-544.96 279.12,-544.96 285.12,-544.96 291.12,-550.96 291.12,-556.96 291.12,-556.96 291.12,-575.92 291.12,-575.92 291.12,-581.92 285.12,-587.92 279.12,-587.92"/>
+<text xml:space="preserve" text-anchor="start" x="177.5" y="-561.74" font-family="Arial" font-weight="bold" font-size="19.00" fill="#111827">trtmc::load</text>
+</g>
+<!-- worker&#45;&gt;load -->
+<g id="edge1" class="edge">
+<title>worker&#45;&gt;load</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M227.11,-630.17C227.11,-621.06 227.11,-610.05 227.11,-599.82"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="229.91,-600.07 227.11,-592.07 224.31,-600.07 229.91,-600.07"/>
+</g>
+<!-- route -->
+<g id="node3" class="node">
+<title>route</title>
+<polygon fill="#fffbeb" stroke="#b45309" stroke-width="1.8" points="227.11,-501.96 73.64,-447.8 227.11,-393.64 380.58,-447.8 227.11,-501.96"/>
+<text xml:space="preserve" text-anchor="start" x="164.78" y="-450.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Bundle runtime</text>
+<text xml:space="preserve" text-anchor="start" x="189.79" y="-433.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">metadata</text>
+</g>
+<!-- load&#45;&gt;route -->
+<g id="edge2" class="edge">
+<title>load&#45;&gt;route</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M227.11,-544.32C227.11,-535.55 227.11,-524.87 227.11,-513.85"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="229.91,-514.12 227.11,-506.12 224.31,-514.12 229.91,-514.12"/>
+</g>
+<!-- native -->
+<g id="node4" class="node">
+<title>native</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.8" d="M186.22,-332.44C186.22,-332.44 12,-332.44 12,-332.44 6,-332.44 0,-326.44 0,-320.44 0,-320.44 0,-275.28 0,-275.28 0,-269.28 6,-263.28 12,-263.28 12,-263.28 186.22,-263.28 186.22,-263.28 192.22,-263.28 198.22,-269.28 198.22,-275.28 198.22,-275.28 198.22,-320.44 198.22,-320.44 198.22,-326.44 192.22,-332.44 186.22,-332.44"/>
+<text xml:space="preserve" text-anchor="start" x="53.29" y="-308.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Native path</text>
+<text xml:space="preserve" text-anchor="start" x="39.53" y="-291.96" font-family="Arial" font-size="16.00" fill="#111827">runtime_strategy</text>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-275.96" font-family="Arial" font-size="16.00" fill="#111827">model + backend DSOs</text>
+</g>
+<!-- route&#45;&gt;native -->
+<g id="edge3" class="edge">
+<title>route&#45;&gt;native</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M191.46,-405.59C174.11,-385.54 153.28,-361.47 135.8,-341.26"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="138.06,-339.6 130.71,-335.38 133.83,-343.26 138.06,-339.6"/>
+<text xml:space="preserve" text-anchor="middle" x="206.87" y="-358.24" font-family="Arial" font-size="16.00" fill="#334155">native bundle</text>
+</g>
+<!-- optimized -->
+<g id="node5" class="node">
+<title>optimized</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.8" d="M472.35,-332.44C472.35,-332.44 239.87,-332.44 239.87,-332.44 233.87,-332.44 227.87,-326.44 227.87,-320.44 227.87,-320.44 227.87,-275.28 227.87,-275.28 227.87,-269.28 233.87,-263.28 239.87,-263.28 239.87,-263.28 472.35,-263.28 472.35,-263.28 478.35,-263.28 484.35,-269.28 484.35,-275.28 484.35,-275.28 484.35,-320.44 484.35,-320.44 484.35,-326.44 478.35,-332.44 472.35,-332.44"/>
+<text xml:space="preserve" text-anchor="start" x="294.72" y="-308.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Optimized path</text>
+<text xml:space="preserve" text-anchor="start" x="273.85" y="-291.96" font-family="Arial" font-size="16.00" fill="#111827">optimized_runtime.json</text>
+<text xml:space="preserve" text-anchor="start" x="242.27" y="-275.96" font-family="Arial" font-size="16.00" fill="#111827">embedded implementation DSO</text>
+</g>
+<!-- route&#45;&gt;optimized -->
+<g id="edge4" class="edge">
+<title>route&#45;&gt;optimized</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M263.04,-405.59C280.53,-385.54 301.52,-361.47 319.14,-341.26"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="321.12,-343.24 324.27,-335.37 316.9,-339.56 321.12,-343.24"/>
+<text xml:space="preserve" text-anchor="middle" x="367.44" y="-358.24" font-family="Arial" font-size="16.00" fill="#334155">optimized bundle</text>
+</g>
+<!-- api -->
+<g id="node6" class="node">
+<title>api</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.8" d="M292.33,-220.28C292.33,-220.28 161.89,-220.28 161.89,-220.28 155.89,-220.28 149.89,-214.28 149.89,-208.28 149.89,-208.28 149.89,-191.72 149.89,-191.72 149.89,-185.72 155.89,-179.72 161.89,-179.72 161.89,-179.72 292.33,-179.72 292.33,-179.72 298.33,-179.72 304.33,-185.72 304.33,-191.72 304.33,-191.72 304.33,-208.28 304.33,-208.28 304.33,-214.28 298.33,-220.28 292.33,-220.28"/>
+<text xml:space="preserve" text-anchor="start" x="164.29" y="-195.9" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Public IPipeline</text>
+</g>
+<!-- native&#45;&gt;api -->
+<g id="edge5" class="edge">
+<title>native&#45;&gt;api</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M144.96,-262.52C160.14,-251.15 176.81,-238.67 191.14,-227.94"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="192.79,-230.2 197.52,-223.16 189.43,-225.72 192.79,-230.2"/>
+</g>
+<!-- optimized&#45;&gt;api -->
+<g id="edge6" class="edge">
+<title>optimized&#45;&gt;api</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M309.9,-262.52C294.46,-251.04 277.48,-238.43 262.95,-227.63"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="265.01,-225.68 256.92,-223.15 261.67,-230.17 265.01,-225.68"/>
+</g>
+<!-- runner -->
+<g id="node7" class="node">
+<title>runner</title>
+<path fill="#ffffff" stroke="#64748b" stroke-width="1.8" d="M325.38,-136.72C325.38,-136.72 128.84,-136.72 128.84,-136.72 122.84,-136.72 116.84,-130.72 116.84,-124.72 116.84,-124.72 116.84,-95.56 116.84,-95.56 116.84,-89.56 122.84,-83.56 128.84,-83.56 128.84,-83.56 325.38,-83.56 325.38,-83.56 331.38,-83.56 337.38,-89.56 337.38,-95.56 337.38,-95.56 337.38,-124.72 337.38,-124.72 337.38,-130.72 331.38,-136.72 325.38,-136.72"/>
+<text xml:space="preserve" text-anchor="start" x="131.24" y="-112.34" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Public operation runner</text>
+<text xml:space="preserve" text-anchor="start" x="172.43" y="-96.24" font-family="Arial" font-size="16.00" fill="#111827">timed task calls</text>
+</g>
+<!-- api&#45;&gt;runner -->
+<g id="edge7" class="edge">
+<title>api&#45;&gt;runner</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M227.11,-179.06C227.11,-169.99 227.11,-158.95 227.11,-148.43"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="229.91,-148.66 227.11,-140.66 224.31,-148.66 229.91,-148.66"/>
+</g>
+<!-- raw -->
+<g id="node8" class="node">
+<title>raw</title>
+<path fill="#ecfeff" stroke="#0e7490" stroke-width="1.8" d="M302.25,-40.56C302.25,-40.56 151.97,-40.56 151.97,-40.56 145.97,-40.56 139.97,-34.56 139.97,-28.56 139.97,-28.56 139.97,-12 139.97,-12 139.97,-6 145.97,0 151.97,0 151.97,0 302.25,0 302.25,0 308.25,0 314.25,-6 314.25,-12 314.25,-12 314.25,-28.56 314.25,-28.56 314.25,-34.56 308.25,-40.56 302.25,-40.56"/>
+<text xml:space="preserve" text-anchor="start" x="154.37" y="-16.18" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Raw observations</text>
+</g>
+<!-- runner&#45;&gt;raw -->
+<g id="edge8" class="edge">
+<title>runner&#45;&gt;raw</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M227.11,-82.78C227.11,-73.19 227.11,-62.26 227.11,-52.3"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="229.91,-52.53 227.11,-44.53 224.31,-52.53 229.91,-52.53"/>
+</g>
+<!-- metrics -->
+<g id="node9" class="node">
+<title>metrics</title>
+<path fill="#ecfeff" stroke="#0e7490" stroke-width="1.8" d="M548.42,-40.56C548.42,-40.56 385.8,-40.56 385.8,-40.56 379.8,-40.56 373.8,-34.56 373.8,-28.56 373.8,-28.56 373.8,-12 373.8,-12 373.8,-6 379.8,0 385.8,0 385.8,0 548.42,0 548.42,0 554.42,0 560.42,-6 560.42,-12 560.42,-12 560.42,-28.56 560.42,-28.56 560.42,-34.56 554.42,-40.56 548.42,-40.56"/>
+<text xml:space="preserve" text-anchor="start" x="388.2" y="-16.18" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Task&#45;aware metrics</text>
+</g>
+<!-- raw&#45;&gt;metrics -->
+<g id="edge9" class="edge">
+<title>raw&#45;&gt;metrics</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M315.07,-20.28C325.95,-20.28 345.95,-20.28 362.12,-20.28"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="361.7,-23.08 369.7,-20.28 361.7,-17.48 361.7,-23.08"/>
+</g>
+<!-- report -->
+<g id="node10" class="node">
+<title>report</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.8" d="M803.87,-40.56C803.87,-40.56 632.35,-40.56 632.35,-40.56 626.35,-40.56 620.35,-34.56 620.35,-28.56 620.35,-28.56 620.35,-12 620.35,-12 620.35,-6 626.35,0 632.35,0 632.35,0 803.87,0 803.87,0 809.87,0 815.87,-6 815.87,-12 815.87,-12 815.87,-28.56 815.87,-28.56 815.87,-34.56 809.87,-40.56 803.87,-40.56"/>
+<text xml:space="preserve" text-anchor="start" x="634.75" y="-16.18" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">JSON + HTML report</text>
+</g>
+<!-- metrics&#45;&gt;report -->
+<g id="edge10" class="edge">
+<title>metrics&#45;&gt;report</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M561.04,-20.28C572.83,-20.28 592.64,-20.28 608.71,-20.28"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="608.25,-23.08 616.25,-20.28 608.25,-17.48 608.25,-23.08"/>
+</g>
+</g>
+</svg>

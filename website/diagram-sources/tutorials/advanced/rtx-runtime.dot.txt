@@ -1,0 +1,73 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: Native TensorRT-RTX runtime path
+// @description: An RTX-targeted native bundle selects the TensorRT-RTX backend DSO, which may consume a runtime cache and CUDA-graph request before exposing an ITrtModule to the model pipeline.
+digraph RtxRuntime {
+  graph [
+    bgcolor="#fbfcfe",
+    pad="0.35",
+    nodesep="0.50",
+    ranksep="0.68",
+    rankdir="TB",
+    splines="polyline",
+    fontname="Arial",
+    labelloc="t",
+    label=<<B>Native TensorRT-RTX load path</B><BR/><FONT POINT-SIZE="16">Runtime cache and CUDA graphs are backend inputs, not portable bundle guarantees.</FONT>>,
+    fontsize="28",
+    fontcolor="#111827"
+  ];
+  node [
+    shape="rect",
+    style="rounded,filled",
+    fillcolor="#ffffff",
+    color="#64748b",
+    penwidth="2",
+    fontname="Arial",
+    fontsize="17",
+    fontcolor="#111827",
+    margin="0.20,0.15"
+  ];
+  edge [color="#64748b", penwidth="2.4", arrowsize="0.8"];
+
+  bundle [
+    fillcolor="#fffbeb",
+    color="#b45309",
+    label=<<B>RTX-targeted native bundle</B>>
+  ];
+  loader [
+    fillcolor="#ffffff",
+    color="#64748b",
+    label=<<B>BackendLoader</B><BR/><FONT POINT-SIZE="16">resolve compatible backend ABI</FONT>>
+  ];
+  cache [
+    fillcolor="#f5f3ff",
+    color="#7c3aed",
+    label=<<B>Runtime cache file</B>>
+  ];
+  graphs [
+    fillcolor="#f5f3ff",
+    color="#7c3aed",
+    label=<<B>--cuda-graphs request</B>>
+  ];
+  rtx [
+    fillcolor="#eff6ff",
+    color="#2563eb",
+    label=<<B>TensorRT-RTX backend DSO</B><BR/><FONT POINT-SIZE="16">JIT cache + optional graph capture</FONT>>
+  ];
+  module [
+    fillcolor="#ecfccb",
+    color="#4d7c0f",
+    label=<<B>ITrtModule</B>>
+  ];
+  pipeline [
+    fillcolor="#ecfccb",
+    color="#4d7c0f",
+    label=<<B>IPipeline request</B>>
+  ];
+
+  { rank=same; bundle; cache; graphs; }
+  bundle -> loader -> rtx;
+  cache -> rtx;
+  graphs -> rtx;
+  rtx -> module -> pipeline;
+}

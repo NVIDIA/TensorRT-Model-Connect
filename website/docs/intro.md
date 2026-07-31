@@ -5,6 +5,7 @@ description: Build deployable TensorRT bundles from Python-first checkpoints and
 ---
 
 import ModelSupportInventory from '@site/src/components/ModelSupportInventory';
+import Diagram from '@site/src/components/Diagram';
 
 TensorRT-Model-Connect turns a Hugging Face or local checkpoint into a
 deployable `.trtfb` bundle, then runs that bundle through a native C++ task API.
@@ -17,14 +18,11 @@ If you are new to the project, your first goal is deliberately small:
 The [Getting Started](getting-started/overview.md) section is the only required
 entry path for that goal.
 
-```mermaid
-flowchart LR
-  Checkpoint["Hugging Face or local checkpoint"] --> Build["trtmc build"]
-  Build --> Bundle["model.trtfb"]
-  Bundle --> Runtime["C++ runtime"]
-  Runtime --> Task["generate, transcribe, segment, solve, ..."]
-  Task --> Result["typed result"]
-```
+<Diagram
+  src="/img/diagrams/trtmc-system-map.svg"
+  alt="TensorRT-Model-Connect system map from a checkpoint through bundle construction and C++ runtime execution"
+  caption="The bundle is the stable handoff between Python model construction and the native task runtime."
+/>
 
 ## Choose your path
 

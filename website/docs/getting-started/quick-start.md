@@ -2,6 +2,8 @@
 title: Your First NLP Inference
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 This is the single first-inference path for the site. It builds one
 text-generation bundle, inspects it, and runs it through the native C++
 runtime.
@@ -101,15 +103,11 @@ Add `--hf-python /opt/venv/bin/python` only when a runtime strategy still needs 
 
 If generation succeeds, you have proven this path:
 
-```mermaid
-flowchart LR
-  Build["trtmc build"] --> Bundle["Qwen3-0.6B.trtfb"]
-  Bundle --> Inspect["inspect metadata"]
-  Bundle --> Load["trtmc::load"]
-  Load --> Strategy["qwen_decoder_kv_cache"]
-  Strategy --> Generate["IPipeline::generate"]
-  Generate --> Text["TextResult"]
-```
+<Diagram
+  src="/img/diagrams/getting-started/qwen3-first-inference.svg"
+  alt="Qwen3 first-inference path from trtmc build through bundle inspection and text generation"
+  caption="A successful first run proves bundle construction, inspection, native strategy dispatch, and deterministic generation."
+/>
 
 If generation fails, classify the failure before changing code:
 

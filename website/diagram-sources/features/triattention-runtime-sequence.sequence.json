@@ -1,0 +1,29 @@
+{
+  "title": "TriAttention cache compaction at runtime",
+  "description": "The native decoder pipeline updates the TriAttention cache, GPU kernels score candidates, host cache logic normalizes and aggregates scores and selects top rows, the default GPU path compacts those rows, and dynamic bindings change on a later step only when the selected row bucket changes.",
+  "subtitle": "GPU scoring and row copies surround host-owned normalization, aggregation, and top-k selection.",
+  "participants": [
+    {"id": "app", "label": "Application", "color": "api"},
+    {"id": "pipeline", "label": "Decoder pipeline", "color": "runtime"},
+    {"id": "engine", "label": "TensorRT engine", "color": "runtime"},
+    {"id": "cache", "label": "TriAttn cache", "color": "artifact"},
+    {"id": "gpu", "label": "GPU kernels", "color": "validation"}
+  ],
+  "messages": [
+    {"number": 1, "from": "app", "to": "pipeline", "label": "generate(prompt, cfg)"},
+    {"kind": "section", "label": "Prefill and decode update the model-owned cache"},
+    {"number": 2, "from": "pipeline", "to": "engine", "label": "prefill and decode"},
+    {"number": 3, "from": "engine", "to": "cache", "label": "present K/V rows", "style": "return"},
+    {"kind": "section", "label": "At each compaction boundary on the default GPU path"},
+    {"number": 4, "from": "cache", "to": "gpu", "label": "score candidate rows"},
+    {"number": 5, "from": "gpu", "to": "cache", "label": "candidate scores", "style": "return"},
+    {"number": 6, "from": "cache", "to": "cache", "label": "normalize + aggregate"},
+    {"number": 7, "from": "cache", "to": "cache", "label": "select top-k rows"},
+    {"number": 8, "from": "cache", "to": "gpu", "label": "compact selected rows"},
+    {"number": 9, "from": "gpu", "to": "cache", "label": "compacted K/V", "style": "return"},
+    {"kind": "section", "label": "Before a decode step, only when the row bucket changes"},
+    {"number": 10, "from": "cache", "to": "engine", "label": "rebind cache tensors", "style": "optional"},
+    {"kind": "section", "label": "Continue decoding until the request stops"},
+    {"number": 11, "from": "pipeline", "to": "app", "label": "TextResult", "style": "return"}
+  ]
+}

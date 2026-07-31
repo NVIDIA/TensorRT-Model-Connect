@@ -3,6 +3,8 @@ title: Build System
 description: Native targets, DSO boundaries, generated registration, and Python packaging.
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 The repository combines:
 
 - CMake for C++/CUDA libraries, executables, model DSOs, backend DSOs, and C++
@@ -35,20 +37,11 @@ optimized bundle.
 
 ## Native link boundary
 
-```mermaid
-flowchart LR
-  App["Application or trtmc CLI"] --> Core["trtmc_core<br/>public API + loaders"]
-  Core --> ModelDSO["libtrtmc_model_<owner>.so<br/>plugin + pipeline"]
-  Core --> BackendLoader["BackendLoader"]
-  BackendLoader --> TrtBackend["libtrtmc_backend_trt.so"]
-  BackendLoader --> RtxBackend["libtrtmc_backend_trt_rtx.so"]
-
-  ModelDSO --> Interfaces["IBackend / ITrtModule interfaces"]
-  TrtBackend --> Interfaces
-  RtxBackend --> Interfaces
-  TrtBackend --> TensorRT["compatible TensorRT runtime"]
-  RtxBackend --> RTX["TensorRT-RTX runtime"]
-```
+<Diagram
+  src="/img/diagrams/architecture/build-system.svg"
+  alt="Runtime library graph from an application through trtmc_core to a model DSO, backend loader, TensorRT backend DSO, stable execution interfaces, and matching runtime"
+  caption="The shared core loads model and backend DSOs independently; their stable IBackend and ITrtModule interfaces prevent a model implementation from owning backend selection."
+/>
 
 `trtmc_core` loads a backend and injects its `IBackend*` into a model plugin's
 `PipelineContext`. Model DSOs program against public interfaces; they do not

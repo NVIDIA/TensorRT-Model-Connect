@@ -1,0 +1,55 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: Benchmark case and bundle orchestration
+// @description: The benchmark CLI resolves catalog metadata and a task adapter into a concrete case, uses an explicitly resolved or managed-cache bundle path when present or builds a managed entry, then starts the Python run service and C++ measurement worker with optional low-rate telemetry.
+digraph BenchmarkOrchestration {
+  graph [
+    bgcolor="#fbfcfe",
+    pad="0.30",
+    nodesep="0.42",
+    ranksep="0.58",
+    rankdir="TB",
+    splines="polyline",
+    fontname="Arial",
+    labelloc="t",
+    label=<<B>Resolve one reproducible benchmark case</B><BR/><FONT POINT-SIZE="16">Python owns catalog lookup, bundle reuse or build, and worker orchestration.</FONT>>,
+    fontsize="27",
+    fontcolor="#111827"
+  ];
+  node [
+    shape="rect",
+    style="rounded,filled",
+    color="#64748b",
+    penwidth="1.8",
+    fillcolor="#ffffff",
+    fontname="Arial",
+    fontsize="17",
+    fontcolor="#111827",
+    margin="0.20,0.14"
+  ];
+  edge [color="#64748b", penwidth="2.2", arrowsize="0.8", fontname="Arial", fontsize="16", fontcolor="#334155"];
+
+  cli [fillcolor="#eff6ff", color="#2563eb", label=<<FONT POINT-SIZE="19"><B>trtmc-bench run</B></FONT>>];
+  catalog [label=<<B>MODEL.toml</B><BR/><FONT POINT-SIZE="16">and E2E manifest</FONT>>];
+  adapter [label=<<B>Task adapter</B>>];
+  request [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>Resolved operation</B><BR/><FONT POINT-SIZE="16">and concrete request</FONT>>];
+  { rank=same; cli; catalog; adapter; }
+  cli -> catalog -> adapter [constraint=false];
+  adapter -> request;
+
+  bundle [shape="diamond", style="filled", fillcolor="#fffbeb", color="#b45309", label=<<B>Existing bundle path<BR/>resolved?</B>>];
+  request -> bundle;
+  build [fillcolor="#eff6ff", color="#2563eb", label=<<B>Existing trtmc build</B>>];
+  cache [fillcolor="#fffbeb", color="#b45309", label=<<B>Platform-aware</B><BR/><FONT POINT-SIZE="16">bundle cache</FONT>>];
+  service [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>Python run service</B>>];
+  { rank=same; build; cache; service; }
+  bundle -> service [label="yes"];
+  bundle -> build [label="no"];
+  build -> cache -> service;
+
+  worker [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>C++ measurement worker</B>>];
+  telemetry [fillcolor="#ecfeff", color="#0e7490", label=<<B>Optional telemetry</B><BR/><FONT POINT-SIZE="16">low-rate nvidia-smi sampling</FONT>>];
+  { rank=same; worker; telemetry; }
+  service -> worker;
+  service -> telemetry [style=dashed, label="outside timed calls"];
+}

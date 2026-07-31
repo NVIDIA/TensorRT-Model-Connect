@@ -3,6 +3,8 @@ title: Units and Ownership
 description: Source-level responsibilities and the authoritative contracts between units.
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 Architecture explains the system flow. Unit ownership answers a different
 question: **where does a behavior belong?**
 
@@ -13,61 +15,17 @@ abstractions, and code that is genuinely model-independent.
 
 ## Ownership block diagram
 
-```mermaid
-flowchart TB
-  subgraph Public["Public surfaces"]
-    CLI["trtmc CLI"]
-    PythonAPI["Python build() / Pipeline wrapper"]
-    CppAPI["C++ IPipeline API"]
-    CLink["C-linkage C++ subset"]
-  end
+<Diagram
+  src="/img/diagrams/architecture/build-ownership.svg"
+  alt="Build-time ownership from public CLI and Python entry points through a model family to native or optimized bundle construction"
+  caption="Build-time model knowledge stays in the owning family; the bundle is the only artifact passed into runtime."
+/>
 
-  subgraph Build["Model-owned build units"]
-    FamilyDescriptor["Python family MODEL.toml"]
-    FamilyPlugin["FamilyPlugin + config + checkpoint mapping"]
-    NativeGraph["Family graph and engine builders"]
-    OptimizedProfile["Optimized implementation + exact profile"]
-  end
-
-  Bundle[".trtfb contract"]
-
-  subgraph SharedRuntime["Shared runtime units"]
-    Factory["PipelineFactory"]
-    OptimizedHost["OptimizedRuntimeHost"]
-    PluginLoader["PipelinePluginLoader"]
-    Registry["PipelineRegistry"]
-    BackendLoader["BackendLoader"]
-    Core["Runtime core and device abstractions"]
-  end
-
-  subgraph ModelRuntime["Model-owned runtime units"]
-    ModelDescriptor["Runtime MODEL.toml"]
-    ModelDSO["Model DSO + IPipelinePlugin"]
-    Pipeline["Concrete IPipeline + state"]
-  end
-
-  BackendDSO["IBackend implementation DSO"]
-  Evidence["E2E MODEL.toml + manifests<br/>unit and qualification evidence"]
-
-  CLI --> PythonAPI
-  PythonAPI --> FamilyDescriptor --> FamilyPlugin
-  FamilyPlugin --> NativeGraph --> Bundle
-  FamilyDescriptor --> OptimizedProfile --> Bundle
-
-  CLI --> CppAPI
-  CLink --> CppAPI
-  CppAPI --> Factory
-  Bundle --> Factory
-  Factory --> OptimizedHost --> Pipeline
-  Factory --> PluginLoader --> ModelDescriptor --> ModelDSO
-  ModelDSO --> Registry
-  Registry --> Pipeline
-  Factory --> BackendLoader --> BackendDSO
-  BackendDSO -. "IBackend / ITrtModule" .-> Pipeline
-  Core --> Pipeline
-  Evidence -. "proves contracts" .-> FamilyPlugin
-  Evidence -. "proves contracts" .-> Pipeline
-```
+<Diagram
+  src="/img/diagrams/architecture/runtime-ownership.svg"
+  alt="Runtime ownership from the trtmc CLI, Python Pipeline wrapper, C++ API, and limited C-linkage surface through shared loaders to an optimized implementation or native model and backend DSOs"
+  caption="All public runtime surfaces enter shared factory and loader units; optimized artifacts own a private implementation, while native model and backend DSOs divide task behavior from engine execution."
+/>
 
 The backend arrow is an interface boundary. A model DSO does not select and
 link a backend directly; `PipelineFactory` loads a compatible backend and

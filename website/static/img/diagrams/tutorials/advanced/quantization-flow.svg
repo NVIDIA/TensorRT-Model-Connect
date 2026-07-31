@@ -1,0 +1,162 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="1105" height="783" role="img" aria-labelledby="tutorials-advanced-quantization-flow-svg-title tutorials-advanced-quantization-flow-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 1105.00 783.00" xmlns="http://www.w3.org/2000/svg">
+<title id="tutorials-advanced-quantization-flow-svg-title">Quantization build flow</title>
+<desc id="tutorials-advanced-quantization-flow-svg-description">Checkpoint weights and a quantization plan select one of precomputed scales, prequantized weights, ModelOpt calibration, or dynamic scales before producing a quantization profile, TensorRT engine, and final bundle.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(25.2 757.6)">
+<polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-757.6 1079.31,-757.6 1079.31,25.2 -25.2,25.2"/>
+<text xml:space="preserve" text-anchor="start" x="318.59" y="-704.2" font-family="Arial" font-weight="bold" font-size="28.00" fill="#111827">Quantization is a build contract</text>
+<text xml:space="preserve" text-anchor="start" x="303.38" y="-687" font-family="Arial" font-size="16.00" fill="#111827">The runtime consumes the result; it does not repeat calibration.</text>
+<!-- weights -->
+<g id="node1" class="node">
+<title>weights</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M480.91,-674.1C480.91,-674.1 315.54,-674.1 315.54,-674.1 309.54,-674.1 303.54,-668.1 303.54,-662.1 303.54,-662.1 303.54,-644.1 303.54,-644.1 303.54,-638.1 309.54,-632.1 315.54,-632.1 315.54,-632.1 480.91,-632.1 480.91,-632.1 486.91,-632.1 492.91,-638.1 492.91,-644.1 492.91,-644.1 492.91,-662.1 492.91,-662.1 492.91,-668.1 486.91,-674.1 480.91,-674.1"/>
+<text xml:space="preserve" text-anchor="start" x="317.94" y="-649" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Checkpoint weights</text>
+</g>
+<!-- source -->
+<g id="node3" class="node">
+<title>source</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M507.7,-573.44C507.7,-573.44 386.66,-538.16 386.66,-538.16 380.9,-536.48 380.9,-533.12 386.66,-531.44 386.66,-531.44 507.7,-496.16 507.7,-496.16 513.46,-494.48 524.98,-494.48 530.74,-496.16 530.74,-496.16 651.79,-531.44 651.79,-531.44 657.55,-533.12 657.55,-536.48 651.79,-538.16 651.79,-538.16 530.74,-573.44 530.74,-573.44 524.98,-575.12 513.46,-575.12 507.7,-573.44"/>
+<text xml:space="preserve" text-anchor="start" x="461.58" y="-530.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Scale source?</text>
+</g>
+<!-- weights&#45;&gt;source -->
+<g id="edge1" class="edge">
+<title>weights&#45;&gt;source</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M419.86,-631.31C435.92,-615.87 458.31,-594.35 477.78,-575.64"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="479.47,-577.9 483.29,-570.33 475.59,-573.86 479.47,-577.9"/>
+</g>
+<!-- plan -->
+<g id="node2" class="node">
+<title>plan</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M742.34,-680.4C742.34,-680.4 540.11,-680.4 540.11,-680.4 534.11,-680.4 528.11,-674.4 528.11,-668.4 528.11,-668.4 528.11,-637.8 528.11,-637.8 528.11,-631.8 534.11,-625.8 540.11,-625.8 540.11,-625.8 742.34,-625.8 742.34,-625.8 748.34,-625.8 754.34,-631.8 754.34,-637.8 754.34,-637.8 754.34,-668.4 754.34,-668.4 754.34,-674.4 748.34,-680.4 742.34,-680.4"/>
+<text xml:space="preserve" text-anchor="start" x="569.92" y="-655.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Quantization plan</text>
+<text xml:space="preserve" text-anchor="start" x="542.51" y="-639.2" font-family="Arial" font-size="16.00" fill="#111827">format + exclusions + policy</text>
+</g>
+<!-- plan&#45;&gt;source -->
+<g id="edge2" class="edge">
+<title>plan&#45;&gt;source</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M612.62,-624.83C597.25,-610.18 578.01,-591.84 560.99,-575.61"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="563.19,-573.85 555.47,-570.35 559.33,-577.9 563.19,-573.85"/>
+</g>
+<!-- precomputed -->
+<g id="node4" class="node">
+<title>precomputed</title>
+<path fill="#ecfeff" stroke="#0e7490" stroke-width="2" d="M176.45,-443.8C176.45,-443.8 12,-443.8 12,-443.8 6,-443.8 0,-437.8 0,-431.8 0,-431.8 0,-401.2 0,-401.2 0,-395.2 6,-389.2 12,-389.2 12,-389.2 176.45,-389.2 176.45,-389.2 182.45,-389.2 188.45,-395.2 188.45,-401.2 188.45,-401.2 188.45,-431.8 188.45,-431.8 188.45,-437.8 182.45,-443.8 176.45,-443.8"/>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-418.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Precomputed JSON</text>
+<text xml:space="preserve" text-anchor="start" x="17.29" y="-402.6" font-family="Arial" font-size="16.00" fill="#111827">reuse supplied scales</text>
+</g>
+<!-- source&#45;&gt;precomputed -->
+<g id="edge3" class="edge">
+<title>source&#45;&gt;precomputed</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M445.2,-513.54C377.53,-495.03 276.69,-467.43 200.44,-446.57"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="201.34,-443.91 192.88,-444.5 199.86,-449.31 201.34,-443.91"/>
+</g>
+<!-- prequantized -->
+<g id="node5" class="node">
+<title>prequantized</title>
+<path fill="#ecfeff" stroke="#0e7490" stroke-width="2" d="M503.21,-443.8C503.21,-443.8 235.23,-443.8 235.23,-443.8 229.23,-443.8 223.23,-437.8 223.23,-431.8 223.23,-431.8 223.23,-401.2 223.23,-401.2 223.23,-395.2 229.23,-389.2 235.23,-389.2 235.23,-389.2 503.21,-389.2 503.21,-389.2 509.21,-389.2 515.21,-395.2 515.21,-401.2 515.21,-401.2 515.21,-431.8 515.21,-431.8 515.21,-437.8 509.21,-443.8 503.21,-443.8"/>
+<text xml:space="preserve" text-anchor="start" x="268.62" y="-418.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Prequantized checkpoint</text>
+<text xml:space="preserve" text-anchor="start" x="237.63" y="-402.6" font-family="Arial" font-size="16.00" fill="#111827">AWQ · GPTQ · compressed tensors</text>
+</g>
+<!-- source&#45;&gt;prequantized -->
+<g id="edge4" class="edge">
+<title>source&#45;&gt;prequantized</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M480.21,-503.55C459.71,-487.66 434.53,-468.13 413.33,-451.69"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="415.12,-449.54 407.08,-446.85 411.68,-453.96 415.12,-449.54"/>
+</g>
+<!-- calibration -->
+<g id="node6" class="node">
+<title>calibration</title>
+<path fill="#ecfeff" stroke="#0e7490" stroke-width="2" d="M777.8,-443.8C777.8,-443.8 562.64,-443.8 562.64,-443.8 556.64,-443.8 550.64,-437.8 550.64,-431.8 550.64,-431.8 550.64,-401.2 550.64,-401.2 550.64,-395.2 556.64,-389.2 562.64,-389.2 562.64,-389.2 777.8,-389.2 777.8,-389.2 783.8,-389.2 789.8,-395.2 789.8,-401.2 789.8,-401.2 789.8,-431.8 789.8,-431.8 789.8,-437.8 783.8,-443.8 777.8,-443.8"/>
+<text xml:space="preserve" text-anchor="start" x="585.69" y="-418.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">ModelOpt calibration</text>
+<text xml:space="preserve" text-anchor="start" x="565.04" y="-402.6" font-family="Arial" font-size="16.00" fill="#111827">family data + optional adapter</text>
+</g>
+<!-- source&#45;&gt;calibration -->
+<g id="edge5" class="edge">
+<title>source&#45;&gt;calibration</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M558.5,-503.55C579.13,-487.66 604.49,-468.13 625.83,-451.69"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="627.5,-453.94 632.13,-446.84 624.08,-449.5 627.5,-453.94"/>
+</g>
+<!-- dynamic -->
+<g id="node7" class="node">
+<title>dynamic</title>
+<path fill="#ecfeff" stroke="#0e7490" stroke-width="2" d="M1042.11,-443.8C1042.11,-443.8 836.34,-443.8 836.34,-443.8 830.34,-443.8 824.34,-437.8 824.34,-431.8 824.34,-431.8 824.34,-401.2 824.34,-401.2 824.34,-395.2 830.34,-389.2 836.34,-389.2 836.34,-389.2 1042.11,-389.2 1042.11,-389.2 1048.11,-389.2 1054.11,-395.2 1054.11,-401.2 1054.11,-401.2 1054.11,-431.8 1054.11,-431.8 1054.11,-437.8 1048.11,-443.8 1042.11,-443.8"/>
+<text xml:space="preserve" text-anchor="start" x="875.43" y="-418.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Dynamic scales</text>
+<text xml:space="preserve" text-anchor="start" x="838.74" y="-402.6" font-family="Arial" font-size="16.00" fill="#111827">format&#45;owned runtime policy</text>
+</g>
+<!-- source&#45;&gt;dynamic -->
+<g id="edge6" class="edge">
+<title>source&#45;&gt;dynamic</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M592.86,-513.41C658.45,-495.25 755.31,-468.43 829.93,-447.76"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="830.31,-450.56 837.27,-445.73 828.82,-445.17 830.31,-450.56"/>
+</g>
+<!-- profile -->
+<g id="node8" class="node">
+<title>profile</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M635.89,-340.2C635.89,-340.2 402.56,-340.2 402.56,-340.2 396.56,-340.2 390.56,-334.2 390.56,-328.2 390.56,-328.2 390.56,-297.6 390.56,-297.6 390.56,-291.6 396.56,-285.6 402.56,-285.6 402.56,-285.6 635.89,-285.6 635.89,-285.6 641.89,-285.6 647.89,-291.6 647.89,-297.6 647.89,-297.6 647.89,-328.2 647.89,-328.2 647.89,-334.2 641.89,-340.2 635.89,-340.2"/>
+<text xml:space="preserve" text-anchor="start" x="439.42" y="-315.1" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Quantization profile</text>
+<text xml:space="preserve" text-anchor="start" x="404.96" y="-299" font-family="Arial" font-size="16.00" fill="#111827">format · scale map · exclusions</text>
+</g>
+<!-- precomputed&#45;&gt;profile -->
+<g id="edge7" class="edge">
+<title>precomputed&#45;&gt;profile</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M189.34,-392.76C249.71,-378.33 328.5,-359.49 393.94,-343.85"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="394.5,-346.6 401.63,-342.01 393.19,-341.15 394.5,-346.6"/>
+</g>
+<!-- prequantized&#45;&gt;profile -->
+<g id="edge8" class="edge">
+<title>prequantized&#45;&gt;profile</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M409.42,-388.27C427.99,-375.7 450.22,-360.64 469.8,-347.38"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="471.12,-349.87 476.17,-343.06 467.98,-345.23 471.12,-349.87"/>
+</g>
+<!-- calibration&#45;&gt;profile -->
+<g id="edge9" class="edge">
+<title>calibration&#45;&gt;profile</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M629.76,-388.27C611.07,-375.7 588.69,-360.64 568.98,-347.38"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="570.75,-345.2 562.55,-343.05 567.63,-349.84 570.75,-345.2"/>
+</g>
+<!-- dynamic&#45;&gt;profile -->
+<g id="edge10" class="edge">
+<title>dynamic&#45;&gt;profile</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M826.4,-388.21C769.79,-374.51 701.09,-357.89 643.03,-343.85"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="643.91,-341.18 635.48,-342.02 642.59,-346.62 643.91,-341.18"/>
+</g>
+<!-- convert -->
+<g id="node9" class="node">
+<title>convert</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M630.01,-236.6C630.01,-236.6 408.44,-236.6 408.44,-236.6 402.44,-236.6 396.44,-230.6 396.44,-224.6 396.44,-224.6 396.44,-206.6 396.44,-206.6 396.44,-200.6 402.44,-194.6 408.44,-194.6 408.44,-194.6 630.01,-194.6 630.01,-194.6 636.01,-194.6 642.01,-200.6 642.01,-206.6 642.01,-206.6 642.01,-224.6 642.01,-224.6 642.01,-230.6 636.01,-236.6 630.01,-236.6"/>
+<text xml:space="preserve" text-anchor="start" x="410.84" y="-211.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Quantized graph + weights</text>
+</g>
+<!-- profile&#45;&gt;convert -->
+<g id="edge11" class="edge">
+<title>profile&#45;&gt;convert</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M519.22,-284.85C519.22,-273.66 519.22,-260.59 519.22,-248.9"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="522.02,-248.99 519.22,-240.99 516.42,-248.99 522.02,-248.99"/>
+</g>
+<!-- engine -->
+<g id="node10" class="node">
+<title>engine</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M591.05,-145.6C591.05,-145.6 447.4,-145.6 447.4,-145.6 441.4,-145.6 435.4,-139.6 435.4,-133.6 435.4,-133.6 435.4,-115.6 435.4,-115.6 435.4,-109.6 441.4,-103.6 447.4,-103.6 447.4,-103.6 591.05,-103.6 591.05,-103.6 597.05,-103.6 603.05,-109.6 603.05,-115.6 603.05,-115.6 603.05,-133.6 603.05,-133.6 603.05,-139.6 597.05,-145.6 591.05,-145.6"/>
+<text xml:space="preserve" text-anchor="start" x="449.8" y="-120.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">TensorRT engine</text>
+</g>
+<!-- convert&#45;&gt;engine -->
+<g id="edge12" class="edge">
+<title>convert&#45;&gt;engine</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M519.22,-193.96C519.22,-183.25 519.22,-169.93 519.22,-157.9"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="522.02,-158.07 519.22,-150.07 516.42,-158.07 522.02,-158.07"/>
+</g>
+<!-- bundle -->
+<g id="node11" class="node">
+<title>bundle</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M644.59,-54.6C644.59,-54.6 393.86,-54.6 393.86,-54.6 387.86,-54.6 381.86,-48.6 381.86,-42.6 381.86,-42.6 381.86,-12 381.86,-12 381.86,-6 387.86,0 393.86,0 393.86,0 644.59,0 644.59,0 650.59,0 656.59,-6 656.59,-12 656.59,-12 656.59,-42.6 656.59,-42.6 656.59,-48.6 650.59,-54.6 644.59,-54.6"/>
+<text xml:space="preserve" text-anchor="start" x="469.65" y="-29.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">.trtfb bundle</text>
+<text xml:space="preserve" text-anchor="start" x="396.26" y="-13.4" font-family="Arial" font-size="16.00" fill="#111827">engine + required metadata/scales</text>
+</g>
+<!-- engine&#45;&gt;bundle -->
+<g id="edge13" class="edge">
+<title>engine&#45;&gt;bundle</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M519.22,-102.92C519.22,-92.38 519.22,-79.22 519.22,-66.9"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="522.02,-67.09 519.22,-59.09 516.42,-67.09 522.02,-67.09"/>
+</g>
+</g>
+</svg>

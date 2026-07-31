@@ -3,6 +3,8 @@ title: System Overview
 description: The build, bundle, and runtime boundaries of TensorRT-Model-Connect.
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 TensorRT-Model-Connect turns a Hugging Face checkpoint or local model directory
 into a deployable `.trtfb` bundle, then loads that bundle behind task-oriented
 C++ APIs.
@@ -18,38 +20,11 @@ checkpoint, engine, bundle, DSO, prefill, or KV cache are new to you.
 
 ## System block diagram
 
-```mermaid
-flowchart LR
-  Source["Hugging Face checkpoint<br/>or local model directory"]
-
-  subgraph Build["Python build time"]
-    Router["trtmc build / build()"]
-    Family["Resolve owning family"]
-    NativeBuilder["Native FamilyPlugin<br/>TensorRT engine build"]
-    OptimizedAdapter["Exact-qualified<br/>optimized adapter"]
-  end
-
-  subgraph Artifact["Deployment boundary"]
-    NativeBundle["Native .trtfb<br/>runtime_strategy + plans + assets"]
-    OptimizedBundle["Optimized .trtfb<br/>optimized_runtime.json + embedded DSO"]
-  end
-
-  subgraph Runtime["C++ run time"]
-    Factory["PipelineFactory"]
-    NativeRuntime["Model DSO + backend DSO"]
-    OptimizedRuntime["OptimizedRuntimeHost<br/>embedded implementation DSO"]
-    Pipeline["Concrete IPipeline"]
-  end
-
-  Result["Typed task result"]
-
-  Source --> Router --> Family
-  Family --> NativeBuilder --> NativeBundle
-  Family --> OptimizedAdapter --> OptimizedBundle
-  NativeBundle --> Factory --> NativeRuntime --> Pipeline
-  OptimizedBundle --> Factory --> OptimizedRuntime --> Pipeline
-  Pipeline --> Result
-```
+<Diagram
+  src="/img/diagrams/trtmc-system-map.svg"
+  alt="System map from a Hugging Face checkpoint through build routing and a native or optimized bundle to the C++ runtime and typed task result"
+  caption="The bundle is the deployment boundary: native artifacts resolve installed model and backend DSOs, while optimized artifacts carry their exact implementation DSO."
+/>
 
 The diagram shows two artifact shapes, not two user-selected public APIs.
 `trtmc build` and the Python `build()` function resolve the model family first.

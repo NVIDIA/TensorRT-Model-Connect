@@ -15,11 +15,7 @@ const config = {
   projectName: repositoryName,
   onBrokenLinks: 'throw',
   onBrokenMarkdownLinks: 'warn',
-  markdown: {
-    mermaid: true
-  },
   plugins: [require.resolve('./plugins/model-support-inventory')],
-  themes: ['@docusaurus/theme-mermaid'],
   presets: [
     [
       'classic',
@@ -88,27 +84,6 @@ const config = {
     },
     prism: {
       additionalLanguages: ['bash', 'cpp', 'python', 'json', 'cmake']
-    },
-    mermaid: {
-      theme: {
-        light: 'neutral',
-        dark: 'dark'
-      },
-      options: {
-        flowchart: {
-          htmlLabels: true,
-          curve: 'basis',
-          useMaxWidth: true
-        },
-        sequence: {
-          mirrorActors: false
-        },
-        securityLevel: 'loose',
-        themeVariables: {
-          fontFamily: 'Inter, Arial, sans-serif',
-          fontSize: '18px'
-        }
-      }
     }
   }
 };

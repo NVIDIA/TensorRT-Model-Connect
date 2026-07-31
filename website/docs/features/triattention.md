@@ -2,6 +2,8 @@
 title: TriAttention
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 TriAttention is an experimental native decoder KV-cache policy. It scores
 older cache rows, keeps a protected and recent subset, and compacts the cache
 when the logical budget is exceeded. TensorRT continues to execute the same
@@ -106,26 +108,12 @@ live config catalog and CLI help before using them.
 
 ## Runtime design
 
-```mermaid
-sequenceDiagram
-  participant App
-  participant Pipeline as Native decoder pipeline
-  participant Engine as TensorRT decoder engine
-  participant Cache as TriAttention KV cache
-  participant GPU as Selection and compaction kernels
-
-  App->>Pipeline: generate(prompt, config)
-  Pipeline->>Engine: prefill and decode
-  Engine-->>Cache: present K/V rows
-  loop cache reaches compaction boundary
-    Cache->>GPU: score candidate rows
-    GPU-->>Cache: keep indices
-    Cache->>GPU: gather retained K/V rows
-    GPU-->>Cache: compacted cache
-    Cache->>Engine: rebind live dynamic-KV rows
-  end
-  Pipeline-->>App: TextResult
-```
+<Diagram
+  src="/img/diagrams/features/triattention-runtime-sequence.svg"
+  alt="TriAttention runtime sequence from GPU candidate scoring through host normalization and top-k selection, GPU compaction, and conditional dynamic cache rebinding"
+  caption="On the default GPU path, kernels score and copy rows while Qwen-owned host logic normalizes, aggregates, and selects keep indices; a later decode step rebinds cache tensors only when its row bucket changes."
+  sequence
+/>
 
 The current Qwen model-owned runtime owns position tracking, cache selection,
 GPU gather, and rebinding. The generic config registry owns validation and

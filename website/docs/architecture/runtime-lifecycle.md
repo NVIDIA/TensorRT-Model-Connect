@@ -3,50 +3,27 @@ title: Runtime Lifecycle
 description: How PipelineFactory loads a bundle, constructs a pipeline, and serves requests.
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 The C++ runtime begins at `trtmc::load()` or
 `PipelineFactory::from_bundle()`. It reads the bundle header before choosing one
 of two mutually exclusive construction paths.
 
-## Authoritative pipeline-load sequence
+## Authoritative pipeline-load sequences
 
-```mermaid
-sequenceDiagram
-  participant Caller
-  participant Factory as PipelineFactory
-  participant Bundle as bundle reader
-  participant Optimized as OptimizedRuntimeHost
-  participant Loader as PipelinePluginLoader
-  participant Registry as PipelineRegistry
-  participant Backend as BackendLoader
-  participant Config as config resolver
-  participant Plugin as IPipelinePlugin
+<Diagram
+  src="/img/diagrams/architecture/native-bundle-load.svg"
+  alt="Native bundle load sequence reading runtime strategy metadata, loading the owning model and compatible backend DSOs, and creating a concrete pipeline"
+  caption="After the header does not claim an optimized descriptor, the native route materializes config.json, resolves strategy ownership and plugin registration, then loads a compatible backend and constructs PipelineContext."
+  sequence
+/>
 
-  Caller->>Factory: from_bundle(path, LoadOptions)
-  Factory->>Bundle: ReadBundleHeader
-
-  alt optimized_runtime.json is present
-    Factory->>Optimized: create from descriptor and options
-    Optimized->>Bundle: read descriptor and implementation metadata
-    Optimized->>Optimized: validate identities, limits, and artifact hash
-    Optimized->>Optimized: materialize artifact tree
-    Optimized->>Optimized: dlopen exact embedded implementation DSO
-    Optimized->>Optimized: validate private factory and create IPipeline
-    Optimized-->>Caller: concrete IPipeline
-  else native bundle
-    Factory->>Bundle: materialize bundle and config.json
-    Factory->>Factory: resolve and normalize runtime_strategy
-    Factory->>Loader: load model DSO for strategy
-    Loader->>Registry: registrar publishes declared plugin
-    Factory->>Registry: lookup runtime_strategy
-    Registry-->>Factory: IPipelinePlugin
-    Factory->>Backend: load compatible backend DSO
-    Backend-->>Factory: IBackend
-    Factory->>Config: resolve bundle defaults and session request
-    Config-->>Factory: ConfigBundle or diagnosed fallback
-    Factory->>Plugin: create(PipelineContext)
-    Plugin-->>Caller: concrete IPipeline
-  end
-```
+<Diagram
+  src="/img/diagrams/architecture/optimized-bundle-load.svg"
+  alt="Optimized bundle load sequence validating the descriptor and embedded artifact tree, loading the exact implementation DSO, and creating a public pipeline"
+  caption="Descriptor presence claims the optimized route; identity, integrity, DSO, or private-factory failures are terminal and never fall back to native."
+  sequence
+/>
 
 The order matters. On the native path, strategy ownership and plugin lookup are
 established before backend loading. On the optimized path, descriptor presence
@@ -118,31 +95,12 @@ helpers, then returns a concrete pipeline.
 Text generation illustrates the common request boundary without implying that
 every modality uses a decoder.
 
-```mermaid
-sequenceDiagram
-  participant App
-  participant Pipe as text-generation IPipeline
-  participant Tokenizer
-  participant State as model-owned state / KV cache
-  participant Module as ITrtModule
-  participant Sampler
-
-  App->>Pipe: generate(prompt, GenerateConfig)
-  Pipe->>Tokenizer: encode prompt
-  Pipe->>State: reset and bind request state
-  Pipe->>Module: prefill prompt tokens
-  Module-->>State: present cache tensors
-  loop until stop condition
-    Pipe->>State: prepare decode step
-    Pipe->>Module: forward next-token inputs
-    Module-->>Pipe: logits
-    Pipe->>Sampler: choose next token
-    Sampler-->>Pipe: token ID
-    Pipe->>State: advance cache and position
-  end
-  Pipe->>Tokenizer: decode output IDs
-  Pipe-->>App: TextResult
-```
+<Diagram
+  src="/img/diagrams/architecture/text-generation-request.svg"
+  alt="Text-generation request sequence covering tokenization, one prefill, sampling, semantic stop checks before the next engine step, token-budget loop control, KV-cache updates, and TextResult construction"
+  caption="Prefill produces the first logits. EOS or an answer-stop skips the next engine step; max_new_tokens is the loop boundary, so the last budgeted non-stop token still runs through the engine and advances the cache before the loop exits."
+  sequence
+/>
 
 Other pipelines implement only the public task methods they support:
 

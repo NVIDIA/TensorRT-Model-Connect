@@ -1,0 +1,31 @@
+{
+  "title": "Load an optimized bundle",
+  "description": "Descriptor presence claims the optimized route, after which the host validates identities and hashes, materializes the embedded artifact tree, loads the exact implementation DSO, and returns its public pipeline without native fallback.",
+  "subtitle": "Any descriptor, artifact, DSO, or private-factory failure is terminal.",
+  "participants": [
+    {"id": "caller", "label": "Caller", "color": "api"},
+    {"id": "factory", "label": "Factory", "color": "neutral"},
+    {"id": "bundle", "label": "Bundle", "color": "artifact"},
+    {"id": "host", "label": "Opt host", "color": "validation"},
+    {"id": "implementation", "label": "Impl DSO", "color": "runtime"}
+  ],
+  "messages": [
+    {"kind": "section", "label": "1 · Descriptor presence claims the route"},
+    {"number": 1, "from": "caller", "to": "factory", "label": "from_bundle(...)"},
+    {"number": 2, "from": "factory", "to": "bundle", "label": "Read header"},
+    {"number": 3, "from": "bundle", "to": "factory", "label": "Descriptor present", "style": "return"},
+    {"number": 4, "from": "factory", "to": "host", "label": "Create from descriptor"},
+    {"kind": "section", "label": "2 · Verify and materialize the exact artifact"},
+    {"number": 5, "from": "host", "to": "bundle", "label": "Read artifacts"},
+    {"number": 6, "from": "bundle", "to": "host", "label": "Bounded content", "style": "return"},
+    {"number": 7, "from": "host", "to": "host", "label": "Verify identity"},
+    {"number": 8, "from": "host", "to": "host", "label": "Materialize tree"},
+    {"number": 9, "from": "host", "to": "implementation", "label": "Open exact DSO"},
+    {"number": 10, "from": "implementation", "to": "host", "label": "Private factory v1", "style": "return"},
+    {"kind": "section", "label": "3 · Create the public pipeline"},
+    {"number": 11, "from": "host", "to": "host", "label": "Verify factory"},
+    {"number": 12, "from": "host", "to": "implementation", "label": "Create IPipeline"},
+    {"number": 13, "from": "implementation", "to": "host", "label": "Concrete pipeline", "style": "return"},
+    {"number": 14, "from": "host", "to": "caller", "label": "Concrete IPipeline", "style": "return"}
+  ]
+}

@@ -3,6 +3,8 @@ title: Build Pipeline
 description: How a checkpoint is resolved, routed, compiled, and packaged.
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 The build pipeline accepts a Hugging Face model ID or local directory and writes
 one `.trtfb` bundle. The public entry points are:
 
@@ -14,42 +16,13 @@ one `.trtfb` bundle. The public entry points are:
 Both entry points resolve the model's owning family before committing to a
 native or optimized implementation.
 
-## Authoritative build sequence
+## Authoritative build routing
 
-```mermaid
-sequenceDiagram
-  participant User
-  participant Router as build CLI / build()
-  participant Families as family descriptor index
-  participant Provider as optimized provider orchestrator
-  participant Native as native FamilyPlugin
-  participant TRT as TensorRT builder
-  participant Writer as bundle writer
-
-  User->>Router: build(model, revision, options)
-  Router->>Families: resolve model config and owning family
-  Families-->>Router: family plugin + route metadata
-
-  alt matching model-owned native default route
-    Router->>Native: load config and weights
-    Native->>TRT: construct network and optimization profiles
-    TRT-->>Native: serialized engine plan(s)
-    Native->>Writer: native config, plans, and assets
-  else no native default route
-    Router->>Provider: probe only this family's exact profiles
-    alt exactly one qualified profile claims the request
-      Provider->>Provider: run isolated family adapter
-      Provider->>Writer: descriptor, implementation DSO, and artifact tree
-    else no qualified profile claims the request
-      Router->>Native: load config and weights
-      Native->>TRT: construct network and optimization profiles
-      TRT-->>Native: serialized engine plan(s)
-      Native->>Writer: native config, plans, and assets
-    end
-  end
-
-  Writer-->>User: model.trtfb
-```
+<Diagram
+  src="/img/diagrams/architecture/build-route-selection.svg"
+  alt="Build-route decision tree resolving a model family, accepting its native default or probing exact optimized profiles, then writing one bundle"
+  caption="A family-owned native default evaluates only the resolved ModelConfig and bypasses optimized-profile probing. Otherwise target and effective public options enter the exact-profile probe; no match uses native and ambiguity fails closed."
+/>
 
 Multiple optimized profiles claiming one request are an error. Once an
 optimized adapter has claimed a request, its build failure is terminal; the
@@ -91,8 +64,11 @@ tooling metadata, not an arbitrary import selector.
 ### Model-owned native default
 
 A family can declare a `default_build_route`. When that route accepts the
-resolved checkpoint and options, it owns the native build immediately. This is
-model-owned policy, not a central model-name switch.
+resolved `ModelConfig`, it owns the native build immediately. The callable does
+not receive public build options; those options still affect the selected
+native builder, but enter optimized profile matching only when the native
+default does not claim the model. This is model-owned policy, not a central
+model-name switch.
 
 ### Exact-qualified optimized implementation
 

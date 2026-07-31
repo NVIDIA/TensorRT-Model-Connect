@@ -1,0 +1,177 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="680" height="989" role="img" aria-labelledby="tutorials-intermediate-vision-language-pipeline-svg-title tutorials-intermediate-vision-language-pipeline-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 680.00 989.00" xmlns="http://www.w3.org/2000/svg">
+<title id="tutorials-intermediate-vision-language-pipeline-svg-title">Vision-language inference pipeline</title>
+<desc id="tutorials-intermediate-vision-language-pipeline-svg-description">Text tokens and image embeddings merge before the runtime follows the decoder layout recorded in the bundle, samples generated tokens, and returns TextResult.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(21.6 967)">
+<polygon fill="#fbfcfe" stroke="none" points="-21.6,21.6 -21.6,-967 658.39,-967 658.39,21.6 -21.6,21.6"/>
+<text xml:space="preserve" text-anchor="start" x="44.59" y="-918.1" font-family="Arial" font-weight="bold" font-size="27.00" fill="#111827">Text and image inputs meet at the decoder</text>
+<text xml:space="preserve" text-anchor="start" x="19.1" y="-901" font-family="Arial" font-size="16.00" fill="#111827">Inspect the bundle instead of assuming one decoder layout for every Qwen&#45;VL build.</text>
+<!-- prompt -->
+<g id="node1" class="node">
+<title>prompt</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="1.8" d="M194.92,-894.4C194.92,-894.4 91.89,-894.4 91.89,-894.4 85.89,-894.4 79.89,-888.4 79.89,-882.4 79.89,-882.4 79.89,-865.84 79.89,-865.84 79.89,-859.84 85.89,-853.84 91.89,-853.84 91.89,-853.84 194.92,-853.84 194.92,-853.84 200.92,-853.84 206.92,-859.84 206.92,-865.84 206.92,-865.84 206.92,-882.4 206.92,-882.4 206.92,-888.4 200.92,-894.4 194.92,-894.4"/>
+<text xml:space="preserve" text-anchor="start" x="94.29" y="-870.02" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Text prompt</text>
+</g>
+<!-- tokenizer -->
+<g id="node2" class="node">
+<title>tokenizer</title>
+<path fill="#ffffff" stroke="#64748b" stroke-width="1.8" d="M194.71,-806.84C194.71,-806.84 92.09,-806.84 92.09,-806.84 86.09,-806.84 80.09,-800.84 80.09,-794.84 80.09,-794.84 80.09,-765.68 80.09,-765.68 80.09,-759.68 86.09,-753.68 92.09,-753.68 92.09,-753.68 194.71,-753.68 194.71,-753.68 200.71,-753.68 206.71,-759.68 206.71,-765.68 206.71,-765.68 206.71,-794.84 206.71,-794.84 206.71,-800.84 200.71,-806.84 194.71,-806.84"/>
+<text xml:space="preserve" text-anchor="start" x="103.73" y="-782.46" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Tokenizer</text>
+<text xml:space="preserve" text-anchor="start" x="94.49" y="-766.36" font-family="Arial" font-size="16.00" fill="#111827">text token IDs</text>
+</g>
+<!-- prompt&#45;&gt;tokenizer -->
+<g id="edge1" class="edge">
+<title>prompt&#45;&gt;tokenizer</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M143.4,-853.19C143.4,-843.03 143.4,-830.34 143.4,-818.47"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="146.2,-818.77 143.4,-810.77 140.6,-818.77 146.2,-818.77"/>
+</g>
+<!-- merge -->
+<g id="node7" class="node">
+<title>merge</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.8" d="M378.36,-619.12C378.36,-619.12 30.45,-619.12 30.45,-619.12 24.45,-619.12 18.45,-613.12 18.45,-607.12 18.45,-607.12 18.45,-575.96 18.45,-575.96 18.45,-569.96 24.45,-563.96 30.45,-563.96 30.45,-563.96 378.36,-563.96 378.36,-563.96 384.36,-563.96 390.36,-569.96 390.36,-575.96 390.36,-575.96 390.36,-607.12 390.36,-607.12 390.36,-613.12 384.36,-619.12 378.36,-619.12"/>
+<text xml:space="preserve" text-anchor="start" x="32.85" y="-592.94" font-family="Arial" font-weight="bold" font-size="19.00" fill="#111827">Merge prompt and image embeddings</text>
+<text xml:space="preserve" text-anchor="start" x="70.1" y="-576.64" font-family="Arial" font-size="16.00" fill="#111827">at model&#45;owned placeholder positions</text>
+</g>
+<!-- tokenizer&#45;&gt;merge -->
+<g id="edge5" class="edge">
+<title>tokenizer&#45;&gt;merge</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M152.01,-752.9C162.43,-721.02 180.05,-667.09 191.95,-630.67"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="194.58,-631.62 194.41,-623.14 189.26,-629.88 194.58,-631.62"/>
+</g>
+<!-- image -->
+<g id="node3" class="node">
+<title>image</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="1.8" d="M399.83,-894.4C399.83,-894.4 292.98,-894.4 292.98,-894.4 286.98,-894.4 280.98,-888.4 280.98,-882.4 280.98,-882.4 280.98,-865.84 280.98,-865.84 280.98,-859.84 286.98,-853.84 292.98,-853.84 292.98,-853.84 399.83,-853.84 399.83,-853.84 405.83,-853.84 411.83,-859.84 411.83,-865.84 411.83,-865.84 411.83,-882.4 411.83,-882.4 411.83,-888.4 405.83,-894.4 399.83,-894.4"/>
+<text xml:space="preserve" text-anchor="start" x="295.38" y="-870.02" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Image pixels</text>
+</g>
+<!-- preprocess -->
+<g id="node4" class="node">
+<title>preprocess</title>
+<path fill="#ffffff" stroke="#64748b" stroke-width="1.8" d="M443.95,-806.84C443.95,-806.84 248.86,-806.84 248.86,-806.84 242.86,-806.84 236.86,-800.84 236.86,-794.84 236.86,-794.84 236.86,-765.68 236.86,-765.68 236.86,-759.68 242.86,-753.68 248.86,-753.68 248.86,-753.68 443.95,-753.68 443.95,-753.68 449.95,-753.68 455.95,-759.68 455.95,-765.68 455.95,-765.68 455.95,-794.84 455.95,-794.84 455.95,-800.84 449.95,-806.84 443.95,-806.84"/>
+<text xml:space="preserve" text-anchor="start" x="265.15" y="-782.46" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Image preprocessor</text>
+<text xml:space="preserve" text-anchor="start" x="251.26" y="-766.36" font-family="Arial" font-size="16.00" fill="#111827">resize · normalize · layout</text>
+</g>
+<!-- image&#45;&gt;preprocess -->
+<g id="edge2" class="edge">
+<title>image&#45;&gt;preprocess</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M346.4,-853.19C346.4,-843.03 346.4,-830.34 346.4,-818.47"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="349.2,-818.77 346.4,-810.77 343.6,-818.77 349.2,-818.77"/>
+</g>
+<!-- vision -->
+<g id="node5" class="node">
+<title>vision</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.8" d="M382.06,-706.68C382.06,-706.68 266.75,-706.68 266.75,-706.68 260.75,-706.68 254.75,-700.68 254.75,-694.68 254.75,-694.68 254.75,-678.12 254.75,-678.12 254.75,-672.12 260.75,-666.12 266.75,-666.12 266.75,-666.12 382.06,-666.12 382.06,-666.12 388.06,-666.12 394.06,-672.12 394.06,-678.12 394.06,-678.12 394.06,-694.68 394.06,-694.68 394.06,-700.68 388.06,-706.68 382.06,-706.68"/>
+<text xml:space="preserve" text-anchor="start" x="269.15" y="-682.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Vision engine</text>
+</g>
+<!-- preprocess&#45;&gt;vision -->
+<g id="edge3" class="edge">
+<title>preprocess&#45;&gt;vision</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M340.16,-753.18C337.55,-742.28 334.5,-729.53 331.78,-718.18"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="334.56,-717.77 329.97,-710.64 329.11,-719.08 334.56,-717.77"/>
+</g>
+<!-- embeddings -->
+<g id="node6" class="node">
+<title>embeddings</title>
+<path fill="#ffffff" stroke="#64748b" stroke-width="1.8" d="M624.79,-706.68C624.79,-706.68 466.01,-706.68 466.01,-706.68 460.01,-706.68 454.01,-700.68 454.01,-694.68 454.01,-694.68 454.01,-678.12 454.01,-678.12 454.01,-672.12 460.01,-666.12 466.01,-666.12 466.01,-666.12 624.79,-666.12 624.79,-666.12 630.79,-666.12 636.79,-672.12 636.79,-678.12 636.79,-678.12 636.79,-694.68 636.79,-694.68 636.79,-700.68 630.79,-706.68 624.79,-706.68"/>
+<text xml:space="preserve" text-anchor="start" x="468.41" y="-682.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Image embeddings</text>
+</g>
+<!-- vision&#45;&gt;embeddings -->
+<g id="edge4" class="edge">
+<title>vision&#45;&gt;embeddings</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M394.91,-686.4C396.92,-686.4 398.07,-686.4 398.07,-686.4 398.07,-686.4 421.53,-686.4 441.97,-686.4"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="441.82,-689.2 449.82,-686.4 441.82,-683.6 441.82,-689.2"/>
+</g>
+<!-- embeddings&#45;&gt;merge -->
+<g id="edge6" class="edge">
+<title>embeddings&#45;&gt;merge</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M471.41,-665.25C425.97,-652.88 366.89,-636.79 315.86,-622.89"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="316.76,-620.24 308.31,-620.83 315.29,-625.64 316.76,-620.24"/>
+</g>
+<!-- layout -->
+<g id="node8" class="node">
+<title>layout</title>
+<polygon fill="#fffbeb" stroke="#b45309" stroke-width="1.8" points="204.4,-516.96 52.79,-462.8 204.4,-408.64 356.01,-462.8 204.4,-516.96"/>
+<text xml:space="preserve" text-anchor="start" x="143" y="-465.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Decoder layout</text>
+<text xml:space="preserve" text-anchor="start" x="149.16" y="-448.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">in this bundle</text>
+</g>
+<!-- merge&#45;&gt;layout -->
+<g id="edge7" class="edge">
+<title>merge&#45;&gt;layout</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M204.4,-563.35C204.4,-553.16 204.4,-541.09 204.4,-528.94"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="207.2,-529.13 204.4,-521.13 201.6,-529.13 207.2,-529.13"/>
+</g>
+<!-- combined -->
+<g id="node9" class="node">
+<title>combined</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.8" d="M186.81,-343.44C186.81,-343.44 12,-343.44 12,-343.44 6,-343.44 0,-337.44 0,-331.44 0,-331.44 0,-302.28 0,-302.28 0,-296.28 6,-290.28 12,-290.28 12,-290.28 186.81,-290.28 186.81,-290.28 192.81,-290.28 198.81,-296.28 198.81,-302.28 198.81,-302.28 198.81,-331.44 198.81,-331.44 198.81,-337.44 192.81,-343.44 186.81,-343.44"/>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-319.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Single or dual&#45;profile</text>
+<text xml:space="preserve" text-anchor="start" x="44.25" y="-302.96" font-family="Arial" font-size="16.00" fill="#111827">decoder engine</text>
+</g>
+<!-- layout&#45;&gt;combined -->
+<g id="edge8" class="edge">
+<title>layout&#45;&gt;combined</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M173.18,-419C157.84,-397.97 139.58,-372.94 125.06,-353.04"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="127.41,-351.51 120.44,-346.69 122.89,-354.81 127.41,-351.51"/>
+<text xml:space="preserve" text-anchor="middle" x="199.45" y="-371.24" font-family="Arial" font-size="16.00" fill="#334155">fallback layout</text>
+</g>
+<!-- prefill -->
+<g id="node10" class="node">
+<title>prefill</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.8" d="M379.97,-343.44C379.97,-343.44 240.84,-343.44 240.84,-343.44 234.84,-343.44 228.84,-337.44 228.84,-331.44 228.84,-331.44 228.84,-302.28 228.84,-302.28 228.84,-296.28 234.84,-290.28 240.84,-290.28 240.84,-290.28 379.97,-290.28 379.97,-290.28 385.97,-290.28 391.97,-296.28 391.97,-302.28 391.97,-302.28 391.97,-331.44 391.97,-331.44 391.97,-337.44 385.97,-343.44 379.97,-343.44"/>
+<text xml:space="preserve" text-anchor="start" x="246.65" y="-319.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Split prefill plan</text>
+<text xml:space="preserve" text-anchor="start" x="243.24" y="-302.96" font-family="Arial" font-size="16.00" fill="#111827">prefill_engine_plan</text>
+</g>
+<!-- layout&#45;&gt;prefill -->
+<g id="edge9" class="edge">
+<title>layout&#45;&gt;prefill</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M235.92,-419C251.41,-397.97 269.85,-372.94 284.5,-353.04"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="286.69,-354.79 289.18,-346.68 282.18,-351.47 286.69,-354.79"/>
+<text xml:space="preserve" text-anchor="middle" x="319.34" y="-371.24" font-family="Arial" font-size="16.00" fill="#334155">qualified split</text>
+</g>
+<!-- sampler -->
+<g id="node12" class="node">
+<title>sampler</title>
+<path fill="#ffffff" stroke="#64748b" stroke-width="1.8" d="M230.96,-143.12C230.96,-143.12 83.85,-143.12 83.85,-143.12 77.85,-143.12 71.85,-137.12 71.85,-131.12 71.85,-131.12 71.85,-101.96 71.85,-101.96 71.85,-95.96 77.85,-89.96 83.85,-89.96 83.85,-89.96 230.96,-89.96 230.96,-89.96 236.96,-89.96 242.96,-95.96 242.96,-101.96 242.96,-101.96 242.96,-131.12 242.96,-131.12 242.96,-137.12 236.96,-143.12 230.96,-143.12"/>
+<text xml:space="preserve" text-anchor="start" x="123.86" y="-118.74" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Sampler</text>
+<text xml:space="preserve" text-anchor="start" x="86.25" y="-102.64" font-family="Arial" font-size="16.00" fill="#111827">next&#45;token selection</text>
+</g>
+<!-- combined&#45;&gt;sampler -->
+<g id="edge11" class="edge">
+<title>combined&#45;&gt;sampler</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M107.11,-289.52C117.22,-254.93 135.05,-193.97 146.54,-154.69"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="149.18,-155.64 148.74,-147.18 143.8,-154.07 149.18,-155.64"/>
+</g>
+<!-- decode -->
+<g id="node11" class="node">
+<title>decode</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.8" d="M363.17,-243.28C363.17,-243.28 217.63,-243.28 217.63,-243.28 211.63,-243.28 205.63,-237.28 205.63,-231.28 205.63,-231.28 205.63,-202.12 205.63,-202.12 205.63,-196.12 211.63,-190.12 217.63,-190.12 217.63,-190.12 363.17,-190.12 363.17,-190.12 369.17,-190.12 375.17,-196.12 375.17,-202.12 375.17,-202.12 375.17,-231.28 375.17,-231.28 375.17,-237.28 369.17,-243.28 363.17,-243.28"/>
+<text xml:space="preserve" text-anchor="start" x="220.03" y="-218.9" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Split decode plan</text>
+<text xml:space="preserve" text-anchor="start" x="246.81" y="-202.8" font-family="Arial" font-size="16.00" fill="#111827">engine_plan</text>
+</g>
+<!-- prefill&#45;&gt;decode -->
+<g id="edge10" class="edge">
+<title>prefill&#45;&gt;decode</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M305.04,-289.55C302.89,-278.99 300.37,-266.62 298.03,-255.15"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="300.78,-254.62 296.44,-247.34 295.3,-255.74 300.78,-254.62"/>
+</g>
+<!-- decode&#45;&gt;sampler -->
+<g id="edge12" class="edge">
+<title>decode&#45;&gt;sampler</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M254.76,-189.39C238.51,-177.4 219.1,-163.08 201.91,-150.39"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="203.92,-148.39 195.82,-145.9 200.6,-152.9 203.92,-148.39"/>
+</g>
+<!-- output -->
+<g id="node13" class="node">
+<title>output</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.8" d="M208.37,-42.96C208.37,-42.96 106.44,-42.96 106.44,-42.96 100.44,-42.96 94.44,-36.96 94.44,-30.96 94.44,-30.96 94.44,-12 94.44,-12 94.44,-6 100.44,0 106.44,0 106.44,0 208.37,0 208.37,0 214.37,0 220.37,-6 220.37,-12 220.37,-12 220.37,-30.96 220.37,-30.96 220.37,-36.96 214.37,-42.96 208.37,-42.96"/>
+<text xml:space="preserve" text-anchor="start" x="108.84" y="-16.78" font-family="Arial" font-weight="bold" font-size="19.00" fill="#111827">TextResult</text>
+</g>
+<!-- sampler&#45;&gt;output -->
+<g id="edge13" class="edge">
+<title>sampler&#45;&gt;output</title>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M157.4,-89.12C157.4,-78.43 157.4,-65.99 157.4,-54.77"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="160.2,-54.98 157.4,-46.98 154.6,-54.98 160.2,-54.98"/>
+</g>
+</g>
+</svg>

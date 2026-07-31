@@ -1,0 +1,102 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: Quantization build flow
+// @description: Checkpoint weights and a quantization plan select one of precomputed scales, prequantized weights, ModelOpt calibration, or dynamic scales before producing a quantization profile, TensorRT engine, and final bundle.
+digraph QuantizationFlow {
+  graph [
+    bgcolor="#fbfcfe",
+    pad="0.35",
+    nodesep="0.48",
+    ranksep="0.68",
+    rankdir="TB",
+    splines="polyline",
+    fontname="Arial",
+    labelloc="t",
+    label=<<B>Quantization is a build contract</B><BR/><FONT POINT-SIZE="16">The runtime consumes the result; it does not repeat calibration.</FONT>>,
+    fontsize="28",
+    fontcolor="#111827"
+  ];
+  node [
+    shape="rect",
+    style="rounded,filled",
+    fillcolor="#ffffff",
+    color="#64748b",
+    penwidth="2",
+    fontname="Arial",
+    fontsize="17",
+    fontcolor="#111827",
+    margin="0.20,0.15"
+  ];
+  edge [color="#64748b", penwidth="2.4", arrowsize="0.8"];
+
+  weights [
+    fillcolor="#eff6ff",
+    color="#2563eb",
+    label=<<B>Checkpoint weights</B>>
+  ];
+  plan [
+    fillcolor="#eff6ff",
+    color="#2563eb",
+    label=<<B>Quantization plan</B><BR/><FONT POINT-SIZE="16">format + exclusions + policy</FONT>>
+  ];
+  source [
+    shape="diamond",
+    fillcolor="#fffbeb",
+    color="#b45309",
+    label=<<B>Scale source?</B>>
+  ];
+  precomputed [
+    fillcolor="#ecfeff",
+    color="#0e7490",
+    label=<<B>Precomputed JSON</B><BR/><FONT POINT-SIZE="16">reuse supplied scales</FONT>>
+  ];
+  prequantized [
+    fillcolor="#ecfeff",
+    color="#0e7490",
+    label=<<B>Prequantized checkpoint</B><BR/><FONT POINT-SIZE="16">AWQ · GPTQ · compressed tensors</FONT>>
+  ];
+  calibration [
+    fillcolor="#ecfeff",
+    color="#0e7490",
+    label=<<B>ModelOpt calibration</B><BR/><FONT POINT-SIZE="16">family data + optional adapter</FONT>>
+  ];
+  dynamic [
+    fillcolor="#ecfeff",
+    color="#0e7490",
+    label=<<B>Dynamic scales</B><BR/><FONT POINT-SIZE="16">format-owned runtime policy</FONT>>
+  ];
+  profile [
+    fillcolor="#f5f3ff",
+    color="#7c3aed",
+    label=<<B>Quantization profile</B><BR/><FONT POINT-SIZE="16">format · scale map · exclusions</FONT>>
+  ];
+  convert [
+    fillcolor="#f5f3ff",
+    color="#7c3aed",
+    label=<<B>Quantized graph + weights</B>>
+  ];
+  engine [
+    fillcolor="#ecfccb",
+    color="#4d7c0f",
+    label=<<B>TensorRT engine</B>>
+  ];
+  bundle [
+    fillcolor="#fffbeb",
+    color="#b45309",
+    label=<<B>.trtfb bundle</B><BR/><FONT POINT-SIZE="16">engine + required metadata/scales</FONT>>
+  ];
+
+  { rank=same; weights; plan; }
+  { rank=same; precomputed; prequantized; calibration; dynamic; }
+  weights -> source;
+  plan -> source;
+  source -> precomputed;
+  source -> prequantized;
+  source -> calibration;
+  source -> dynamic;
+  precomputed -> profile;
+  prequantized -> profile;
+  calibration -> profile;
+  dynamic -> profile;
+  profile -> convert -> engine -> bundle;
+}

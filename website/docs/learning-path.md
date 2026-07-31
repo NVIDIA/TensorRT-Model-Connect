@@ -3,19 +3,18 @@ title: Learning Path
 description: A course-style path for learning TensorRT-Model-Connect from inference fundamentals to extension work.
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 This page is the tutorial index and the recommended order for learning the
 project. Start only after completing [Getting Started](getting-started/overview.md);
 the first stages reuse the Qwen bundle from the Quick Start instead of asking
 you to rebuild it.
 
-```mermaid
-flowchart LR
-  GS["Getting Started<br/>first text inference"] --> F["Foundations<br/>inspect and explain"]
-  F --> T["Text generation<br/>control decoding"]
-  T --> M["More modalities<br/>vision, speech, diffusion, time-series"]
-  M --> A["Advanced use<br/>quantize, validate, benchmark"]
-  A --> C["Optional contributor branch<br/>architecture and extensions"]
-```
+<Diagram
+  src="/img/diagrams/learning/course-map.svg"
+  alt="Seven-stage learning path numbered zero through six from first inference through advanced validation and optional contribution work"
+  caption="Complete the shared text path first, then choose the modality branches that match your workload."
+/>
 
 You do not have to complete every modality. Follow the common path through text
 generation, then choose the branches that match your workload.

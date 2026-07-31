@@ -3,19 +3,19 @@ title: Getting Started
 description: The shortest supported path from a compatible NVIDIA environment to one verified text inference.
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 This section has one goal: get you from a new environment to one successful
 NLP/text-generation request through TensorRT-Model-Connect.
 
 Follow the pages in order. Do not start with an advanced model recipe or an
 internal architecture page.
 
-```mermaid
-flowchart LR
-  Prereq["1. Check prerequisites"] --> Environment["2. Prepare the environment"]
-  Environment --> Install["3. Install or build TRTMC"]
-  Install --> FirstRun["4. Build, inspect, and run Qwen3-0.6B"]
-  FirstRun --> Learn["5. Continue through Learning"]
-```
+<Diagram
+  src="/img/diagrams/learning/course-map.svg"
+  alt="Seven-stage TensorRT-Model-Connect learning path numbered zero through six and beginning with a first Qwen inference"
+  caption="Getting Started completes Stage 0; the remaining stages reuse that environment and bundle."
+/>
 
 ## The path
 

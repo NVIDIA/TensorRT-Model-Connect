@@ -1,0 +1,114 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="885" height="548" role="img" aria-labelledby="architecture-runtime-ownership-svg-title architecture-runtime-ownership-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 885.00 548.00" xmlns="http://www.w3.org/2000/svg">
+<title id="architecture-runtime-ownership-svg-title">Runtime units and ownership</title>
+<desc id="architecture-runtime-ownership-svg-description">The CLI, Python wrapper, C++ API, and limited C-linkage surface enter shared factory and loader units with a bundle, which choose embedded optimized code or installed native model and backend DSOs before returning a concrete task pipeline.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(25.2 523)">
+<polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-523 860.16,-523 860.16,25.2 -25.2,25.2"/>
+<text xml:space="preserve" text-anchor="start" x="287.59" y="-469.6" font-family="Arial" font-weight="bold" font-size="28.00" fill="#111827">Runtime ownership</text>
+<text xml:space="preserve" text-anchor="start" x="89.75" y="-452.4" font-family="Arial" font-size="16.00" fill="#111827">Shared loaders enforce artifact identity; owned DSOs implement task and backend behavior.</text>
+<!-- public -->
+<g id="node1" class="node">
+<title>public</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M463.7,-445.8C463.7,-445.8 175.21,-445.8 175.21,-445.8 169.21,-445.8 163.21,-439.8 163.21,-433.8 163.21,-433.8 163.21,-387.2 163.21,-387.2 163.21,-381.2 169.21,-375.2 175.21,-375.2 175.21,-375.2 463.7,-375.2 463.7,-375.2 469.7,-375.2 475.7,-381.2 475.7,-387.2 475.7,-387.2 475.7,-433.8 475.7,-433.8 475.7,-439.8 469.7,-445.8 463.7,-445.8"/>
+<text xml:space="preserve" text-anchor="start" x="229.69" y="-420.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">User runtime surfaces</text>
+<text xml:space="preserve" text-anchor="start" x="192.29" y="-404.6" font-family="Arial" font-size="16.00" fill="#111827">trtmc run · Python Pipeline wrapper</text>
+<text xml:space="preserve" text-anchor="start" x="177.61" y="-388.6" font-family="Arial" font-size="16.00" fill="#111827">C++ IPipeline · limited C&#45;linkage subset</text>
+</g>
+<!-- shared -->
+<g id="node3" class="node">
+<title>shared</title>
+<path fill="#f8fafc" stroke="#64748b" stroke-width="2" d="M657.27,-324.2C657.27,-324.2 281.64,-324.2 281.64,-324.2 275.64,-324.2 269.64,-318.2 269.64,-312.2 269.64,-312.2 269.64,-262.6 269.64,-262.6 269.64,-256.6 275.64,-250.6 281.64,-250.6 281.64,-250.6 657.27,-250.6 657.27,-250.6 663.27,-250.6 669.27,-256.6 669.27,-262.6 669.27,-262.6 669.27,-312.2 669.27,-312.2 669.27,-318.2 663.27,-324.2 657.27,-324.2"/>
+<text xml:space="preserve" text-anchor="start" x="312.76" y="-296.4" font-family="Arial" font-weight="bold" font-size="20.00" fill="#111827">Shared factory and runtime units</text>
+<text xml:space="preserve" text-anchor="start" x="284.04" y="-280" font-family="Arial" font-size="16.00" fill="#111827">PipelineFactory · optimized/native loaders · registry</text>
+<text xml:space="preserve" text-anchor="start" x="305.8" y="-264" font-family="Arial" font-size="16.00" fill="#111827">BackendLoader · config · device abstractions</text>
+</g>
+<!-- public&#45;&gt;shared -->
+<g id="edge1" class="edge">
+<title>public&#45;&gt;shared</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M362.84,-374.47C379.2,-361.27 398.01,-346.08 415.24,-332.17"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="416.79,-334.52 421.25,-327.32 413.27,-330.16 416.79,-334.52"/>
+</g>
+<!-- bundle -->
+<g id="node2" class="node">
+<title>bundle</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M716.35,-437.8C716.35,-437.8 522.56,-437.8 522.56,-437.8 516.56,-437.8 510.56,-431.8 510.56,-425.8 510.56,-425.8 510.56,-395.2 510.56,-395.2 510.56,-389.2 516.56,-383.2 522.56,-383.2 522.56,-383.2 716.35,-383.2 716.35,-383.2 722.35,-383.2 728.35,-389.2 728.35,-395.2 728.35,-395.2 728.35,-425.8 728.35,-425.8 728.35,-431.8 722.35,-437.8 716.35,-437.8"/>
+<text xml:space="preserve" text-anchor="start" x="569.88" y="-412.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">.trtfb bundle</text>
+<text xml:space="preserve" text-anchor="start" x="524.96" y="-396.6" font-family="Arial" font-size="16.00" fill="#111827">dispatch identity + artifacts</text>
+</g>
+<!-- bundle&#45;&gt;shared -->
+<g id="edge2" class="edge">
+<title>bundle&#45;&gt;shared</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M585.79,-382.32C567.58,-367.62 544.65,-349.11 523.96,-332.41"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="525.76,-330.26 517.78,-327.41 522.24,-334.62 525.76,-330.26"/>
+</g>
+<!-- optimized -->
+<g id="node4" class="node">
+<title>optimized</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M304.91,-181.4C304.91,-181.4 12,-181.4 12,-181.4 6,-181.4 0,-175.4 0,-169.4 0,-169.4 0,-138.8 0,-138.8 0,-132.8 6,-126.8 12,-126.8 12,-126.8 304.91,-126.8 304.91,-126.8 310.91,-126.8 316.91,-132.8 316.91,-138.8 316.91,-138.8 316.91,-169.4 316.91,-169.4 316.91,-175.4 310.91,-181.4 304.91,-181.4"/>
+<text xml:space="preserve" text-anchor="start" x="29.05" y="-156.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Embedded implementation DSO</text>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-140.2" font-family="Arial" font-size="16.00" fill="#111827">optimized artifact owns its private factory</text>
+</g>
+<!-- shared&#45;&gt;optimized -->
+<g id="edge3" class="edge">
+<title>shared&#45;&gt;optimized</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M382.41,-249.65C335.5,-229.84 278.2,-205.65 233.3,-186.7"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="234.56,-184.19 226.1,-183.66 232.38,-189.35 234.56,-184.19"/>
+<text xml:space="preserve" text-anchor="middle" x="357.52" y="-211.2" font-family="Arial" font-size="16.00" fill="#334155">optimized</text>
+</g>
+<!-- model -->
+<g id="node5" class="node">
+<title>model</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M575.25,-181.4C575.25,-181.4 363.66,-181.4 363.66,-181.4 357.66,-181.4 351.66,-175.4 351.66,-169.4 351.66,-169.4 351.66,-138.8 351.66,-138.8 351.66,-132.8 357.66,-126.8 363.66,-126.8 363.66,-126.8 575.25,-126.8 575.25,-126.8 581.25,-126.8 587.25,-132.8 587.25,-138.8 587.25,-138.8 587.25,-169.4 587.25,-169.4 587.25,-175.4 581.25,-181.4 575.25,-181.4"/>
+<text xml:space="preserve" text-anchor="start" x="386.8" y="-156.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Installed model DSO</text>
+<text xml:space="preserve" text-anchor="start" x="366.06" y="-140.2" font-family="Arial" font-size="16.00" fill="#111827">IPipelinePlugin + model state</text>
+</g>
+<!-- shared&#45;&gt;model -->
+<g id="edge4" class="edge">
+<title>shared&#45;&gt;model</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M469.45,-249.83C469.45,-232.36 469.45,-211.44 469.45,-193.72"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="472.25,-193.95 469.45,-185.95 466.65,-193.95 472.25,-193.95"/>
+<text xml:space="preserve" text-anchor="middle" x="490.8" y="-211.2" font-family="Arial" font-size="16.00" fill="#334155">native</text>
+</g>
+<!-- backend -->
+<g id="node6" class="node">
+<title>backend</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M822.96,-181.4C822.96,-181.4 633.95,-181.4 633.95,-181.4 627.95,-181.4 621.95,-175.4 621.95,-169.4 621.95,-169.4 621.95,-138.8 621.95,-138.8 621.95,-132.8 627.95,-126.8 633.95,-126.8 633.95,-126.8 822.96,-126.8 822.96,-126.8 828.96,-126.8 834.96,-132.8 834.96,-138.8 834.96,-138.8 834.96,-169.4 834.96,-169.4 834.96,-175.4 828.96,-181.4 822.96,-181.4"/>
+<text xml:space="preserve" text-anchor="start" x="636.35" y="-156.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Installed backend DSO</text>
+<text xml:space="preserve" text-anchor="start" x="647.75" y="-140.2" font-family="Arial" font-size="16.00" fill="#111827">IBackend + ITrtModule</text>
+</g>
+<!-- shared&#45;&gt;backend -->
+<g id="edge5" class="edge">
+<title>shared&#45;&gt;backend</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M541.95,-249.65C580.52,-230.1 627.53,-206.27 664.7,-187.42"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="665.8,-190 671.67,-183.89 663.26,-185.01 665.8,-190"/>
+<text xml:space="preserve" text-anchor="middle" x="675.97" y="-211.2" font-family="Arial" font-size="16.00" fill="#334155">native backend</text>
+</g>
+<!-- pipeline -->
+<g id="node7" class="node">
+<title>pipeline</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M559.1,-57.6C559.1,-57.6 379.81,-57.6 379.81,-57.6 373.81,-57.6 367.81,-51.6 367.81,-45.6 367.81,-45.6 367.81,-12 367.81,-12 367.81,-6 373.81,0 379.81,0 379.81,0 559.1,0 559.1,0 565.1,0 571.1,-6 571.1,-12 571.1,-12 571.1,-45.6 571.1,-45.6 571.1,-51.6 565.1,-57.6 559.1,-57.6"/>
+<text xml:space="preserve" text-anchor="start" x="382.21" y="-29.8" font-family="Arial" font-weight="bold" font-size="20.00" fill="#111827">Concrete IPipeline</text>
+<text xml:space="preserve" text-anchor="start" x="400.08" y="-13.4" font-family="Arial" font-size="16.00" fill="#111827">typed task behavior</text>
+</g>
+<!-- optimized&#45;&gt;pipeline -->
+<g id="edge6" class="edge">
+<title>optimized&#45;&gt;pipeline</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M227.09,-125.89C274,-107.29 336.44,-82.53 386.2,-62.81"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="387.15,-65.44 393.56,-59.89 385.09,-60.24 387.15,-65.44"/>
+</g>
+<!-- model&#45;&gt;pipeline -->
+<g id="edge7" class="edge">
+<title>model&#45;&gt;pipeline</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M469.45,-126.04C469.45,-109.64 469.45,-88.42 469.45,-70.07"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="472.25,-70.15 469.45,-62.15 466.65,-70.15 472.25,-70.15"/>
+</g>
+<!-- backend&#45;&gt;pipeline -->
+<g id="edge8" class="edge">
+<title>backend&#45;&gt;pipeline</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" stroke-dasharray="5,2" d="M671.3,-125.89C632.57,-107.45 581.13,-82.96 539.88,-63.33"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="541.33,-60.91 532.9,-60 538.92,-65.97 541.33,-60.91"/>
+<text xml:space="preserve" text-anchor="middle" x="681.61" y="-87.4" font-family="Arial" font-size="16.00" fill="#334155">execution interface</text>
+</g>
+</g>
+</svg>

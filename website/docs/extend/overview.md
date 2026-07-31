@@ -3,9 +3,15 @@ title: Contribute & Extend
 description: Choose the correct ownership boundary, implement a focused change, and prove it.
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 Choose the smallest extension point that matches the change.
 
-![Extension decision tree separating native model support, exact-qualified optimized support, shared public changes, and host-supplied runtime dependencies](/img/diagrams/trtmc-extension-decision.svg)
+<Diagram
+  src="/img/diagrams/trtmc-extension-decision.svg"
+  alt="Extension decision tree separating native model support, exact-qualified optimized support, shared public changes, and host-supplied runtime dependencies"
+  caption="Start with the owning extension path; the required source units and validation evidence follow from that choice."
+/>
 
 Model support has two distinct ownership paths. Native support owns a
 `FamilyPlugin`, unique `runtime_strategy`, model DSO, and native E2E JSON

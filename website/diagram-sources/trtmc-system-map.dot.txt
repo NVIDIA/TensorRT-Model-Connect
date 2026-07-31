@@ -1,0 +1,23 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: TensorRT-Model-Connect build and runtime system map
+// @description: A checkpoint is resolved by trtmc build into a native or exact-qualified optimized bundle, then loaded by the C++ runtime and exposed through a typed task API.
+digraph SystemMap {
+  graph [bgcolor="#fbfcfe", pad="0.35", rankdir="TB", nodesep="0.34", ranksep="0.5", splines="ortho", fontname="Arial", labelloc="t", label=<<B>Build → bundle → runtime</B><BR/><FONT POINT-SIZE="17">One artifact contract connects Python-first model sources to native task APIs.</FONT>>, fontsize="30", fontcolor="#111827"];
+  node [shape="rect", style="rounded,filled", color="#64748b", penwidth="2.2", fillcolor="#ffffff", fontname="Arial", fontsize="18", fontcolor="#111827", margin="0.18,0.14"];
+  edge [color="#64748b", penwidth="2.5", arrowsize="0.8"];
+
+  checkpoint [fillcolor="#eff6ff", color="#2563eb", label=<<FONT POINT-SIZE="20"><B>Checkpoint</B></FONT><BR/><FONT POINT-SIZE="16">weights · config · tokenizer</FONT><BR/><FONT POINT-SIZE="16">Hugging Face or local</FONT>>];
+  build [fillcolor="#eff6ff", color="#2563eb", label=<<FONT POINT-SIZE="20"><B>trtmc build</B></FONT><BR/><FONT POINT-SIZE="16">native FamilyPlugin</FONT><BR/><FONT POINT-SIZE="16">or exact optimized profile</FONT>>];
+  bundle [fillcolor="#fffbeb", color="#b45309", penwidth="3", label=<<FONT POINT-SIZE="20"><B>.trtfb bundle</B></FONT><BR/><FONT POINT-SIZE="16">plans + runtime_strategy</FONT><BR/><FONT POINT-SIZE="16">or embedded implementation DSO</FONT>>];
+  runtime [fillcolor="#ecfccb", color="#4d7c0f", label=<<FONT POINT-SIZE="20"><B>C++ runtime</B></FONT><BR/><FONT POINT-SIZE="16">native: model + backend DSO</FONT><BR/><FONT POINT-SIZE="16">optimized: implementation DSO</FONT>>];
+  result [fillcolor="#f5f3ff", color="#7c3aed", label=<<FONT POINT-SIZE="20"><B>Typed task result</B></FONT><BR/><FONT POINT-SIZE="16">text · image · audio</FONT><BR/><FONT POINT-SIZE="16">segmentation · forecast · more</FONT>>];
+
+  {rank=same; checkpoint; build; bundle;}
+  {rank=same; result; runtime;}
+  checkpoint -> build -> bundle [constraint=false];
+  bundle -> runtime;
+  runtime -> result [constraint=false];
+  checkpoint -> result [style=invis, weight=20];
+  build -> runtime [style=invis, weight=20];
+}

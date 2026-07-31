@@ -139,17 +139,28 @@ details summary {
   box-shadow: none;
 }
 
+.trtmc-diagram__media:focus-visible {
+  outline: 3px solid var(--ifm-color-primary);
+  outline-offset: 2px;
+}
+
 .trtmc-diagram img,
 .trtmc-diagram img[src*="/img/diagrams/"] {
   display: block;
-  width: 100%;
+  width: auto;
   max-width: none;
   height: auto;
-  margin: 0;
+  margin-inline: auto;
   border: 0;
   border-radius: 6px;
   background: transparent;
   box-shadow: none;
+}
+
+.trtmc-diagram img.trtmc-diagram__image {
+  width: auto;
+  max-width: none;
+  margin-inline: auto;
 }
 
 .trtmc-diagram figcaption {
@@ -168,10 +179,6 @@ details summary {
     border-radius: 0;
   }
 
-  .trtmc-diagram img,
-  .trtmc-diagram img[src*="/img/diagrams/"] {
-    width: 640px;
-  }
 }
 
 .trtmc-hero {
@@ -262,25 +269,4 @@ details summary {
 
 .trtmc-log-template p:last-child {
   margin-bottom: 0;
-}
-
-.theme-mermaid,
-.docusaurus-mermaid-container {
-  margin: 1.25rem 0 1.75rem;
-  overflow-x: auto;
-  padding: 0.75rem;
-  border: 1px solid var(--trtmc-border);
-  border-radius: 2px;
-  background: var(--trtmc-surface);
-}
-
-[data-theme='dark'] .theme-mermaid,
-[data-theme='dark'] .docusaurus-mermaid-container {
-  background: #111827;
-}
-
-.theme-mermaid svg,
-.docusaurus-mermaid-container svg {
-  width: 100%;
-  max-width: 100%;
 }
