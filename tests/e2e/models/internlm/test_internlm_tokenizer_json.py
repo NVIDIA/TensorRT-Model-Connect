@@ -37,4 +37,5 @@ def test_ensure_tokenizer_json_uses_trusted_fast_tokenizer(monkeypatch, tmp_path
         "path": str(tmp_path),
         "trust_remote_code": True,
         "use_fast": True,
+        "from_slow": True,
     }

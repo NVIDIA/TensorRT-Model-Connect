@@ -366,7 +366,7 @@ class HfTransformersReference:
                 return t.detach().float().cpu().numpy()
 
             tokenizer = AutoTokenizer.from_pretrained(
-                model_ref, trust_remote_code=trust_remote_code)
+                model_ref, trust_remote_code=trust_remote_code, use_fast=False)
             if use_chat_template:
                 messages = [{{"role": "user", "content": prompt}}]
                 try:

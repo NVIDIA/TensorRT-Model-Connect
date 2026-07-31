@@ -25,6 +25,7 @@ def ensure_tokenizer_json(
             str(path),
             trust_remote_code=True,
             use_fast=True,
+            from_slow=True,
         )
         if not getattr(tokenizer, "is_fast", False):
             return False
