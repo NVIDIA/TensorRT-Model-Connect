@@ -762,28 +762,15 @@ TextResult CanaryPipeline::transcribe(const float* audio_data, int32_t num_sampl
                                       const TranscriptionConfig& cfg) {
     validate_canary_audio_input(audio_data, num_samples);
 
-    auto initial_tokens = make_canary_request_tokens(canary_config_, cfg, tokenizer_.get());
-    validate_canary_output_budget(canary_config_, cfg, initial_tokens.size());
+    std::vector<TranscriptionRequest> requests(1);
+    requests.front().audio_samples.assign(audio_data, audio_data + num_samples);
+    requests.front().config = cfg;
 
-    const int32_t sample_rate =
-        cfg.input_sample_rate > 0 ? cfg.input_sample_rate : mel_sampling_rate_;
-    const double duration_seconds = validate_canary_input_duration(num_samples, sample_rate, cfg);
-    const double model_segment_seconds = static_cast<double>(mel_chunk_length_);
-    const double segment_seconds =
-        resolve_canary_segment_duration(duration_seconds, model_segment_seconds, cfg);
-    const auto spans =
-        plan_canary_segments(num_samples, sample_rate, static_cast<float>(segment_seconds),
-                             cfg.segment_min_duration_seconds, cfg.segment_overlap_seconds);
-
-    TextResult combined;
-    for (const auto& span : spans) {
-        auto segment = transcribe_segment(audio_data + span.offset, span.count, sample_rate,
-                                          initial_tokens, cfg.max_output_tokens, cfg.beam_size,
-                                          cfg.length_penalty, cfg.beam_fallback_max_size);
-        append_canary_transcription_segment(combined, std::move(segment), span.offset, span.count,
-                                            sample_rate, cfg, canary_config_.eot_token_id);
-    }
-    return combined;
+    auto results = transcribe_batch(requests);
+    if (results.size() != 1)
+        throw std::runtime_error(
+            "Canary single-request transcription returned an unexpected result count");
+    return std::move(results.front());
 }
 
 std::vector<TextResult>

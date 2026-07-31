@@ -102,6 +102,13 @@ void test_canary_transcribe() {
     check(beam.token_ids == std::vector<int32_t>({2}),
           "canary beam search runs with branchable inference states");
 
+    trtmc::TranscriptionRequest batch_request;
+    batch_request.audio_samples = audio;
+    batch_request.config = request;
+    const auto batch_results = pipeline.transcribe_batch({batch_request});
+    check(batch_results.size() == 1 && batch_results.front().token_ids == beam.token_ids,
+          "canary single-request and batch APIs preserve output parity");
+
     cudaStreamDestroy(stream);
 }
 
