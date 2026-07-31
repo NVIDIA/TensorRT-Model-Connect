@@ -514,13 +514,16 @@ def _multi_head_attention(
         network, q, k, v, num_heads, head_dim, q_seq, kv_seq, scale_t,
         mask=None, dtype=np.float32):
     """Standard multi-head attention."""
+    if mask is not None and mask.dtype != q.dtype:
+        mask = network.add_cast(mask, q.dtype).get_output(0)
     return graph_ops.add_attention_from_rows(
         network, q, k, v,
         num_heads=num_heads, head_dim=head_dim,
         q_seq=q_seq, kv_seq=kv_seq,
         mask=mask,
         scale=scale_t,
-        explicit_attention=(dtype != np.float32))
+        fp32_accumulation=False,
+        explicit_attention=False)
 
 
 def _sandwich_prescale_params(

@@ -73,6 +73,11 @@ class _Network:
     def mark_output(self, tensor):
         self.outputs.append(tensor)
 
+    def add_cast(self, _tensor, dtype):
+        layer = _Layer()
+        layer.get_output(0).dtype = dtype
+        return layer
+
     def __getattr__(self, attr: str):
         if attr.startswith("add_"):
 
@@ -83,7 +88,7 @@ class _Network:
         raise AttributeError(attr)
 
 
-def test_static_fp16_attention_uses_fp32_accumulation(
+def test_static_fp16_attention_uses_native_attention(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[dict] = []
@@ -93,10 +98,15 @@ def test_static_fp16_attention_uses_fp32_accumulation(
         return _Tensor()
 
     monkeypatch.setattr(z_image_dit_builder.graph_ops, "add_attention_from_rows", _attention)
+    network = _Network()
+    q = _Tensor()
+    q.dtype = z_image_dit_builder.trt.float16
+    mask = _Tensor()
+    mask.dtype = z_image_dit_builder.trt.float32
 
     z_image_dit_builder._multi_head_attention(
-        None,
-        _Tensor(),
+        network,
+        q,
         _Tensor(),
         _Tensor(),
         num_heads=2,
@@ -104,10 +114,13 @@ def test_static_fp16_attention_uses_fp32_accumulation(
         q_seq=8,
         kv_seq=8,
         scale_t=0.5,
+        mask=mask,
         dtype=np.float16,
     )
 
-    assert calls[0]["explicit_attention"] is True
+    assert calls[0]["explicit_attention"] is False
+    assert calls[0]["fp32_accumulation"] is False
+    assert calls[0]["mask"].dtype == z_image_dit_builder.trt.float16
     assert calls[0]["scale"] == 0.5
 
 
