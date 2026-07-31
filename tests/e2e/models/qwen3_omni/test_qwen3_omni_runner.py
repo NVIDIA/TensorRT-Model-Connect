@@ -29,7 +29,9 @@ def _make_case(inputs: dict | None = None, **overrides) -> E2ECase:
     return E2ECase(**defaults)
 
 
-def _make_ctx(case: E2ECase, tmp_path) -> RunContext:
+def _make_ctx(
+    case: E2ECase, tmp_path, *, model_plugin_dir: str = ""
+) -> RunContext:
     binary_path = tmp_path / "trtmc"
     binary_path.write_text("", encoding="utf-8")
     return RunContext(
@@ -37,6 +39,7 @@ def _make_ctx(case: E2ECase, tmp_path) -> RunContext:
         artifacts_dir=str(tmp_path),
         binary_path=str(binary_path),
         engine_dir=str(tmp_path),
+        model_plugin_dir=model_plugin_dir,
     )
 
 
@@ -61,6 +64,32 @@ def test_thinker_stage_drops_unsupported_stage_flag(monkeypatch, tmp_path) -> No
     assert captured["timeout"] == 600
     assert out.metadata["cli_stage_supported"] is False
     assert out.metadata["entrypoint"] == "run"
+
+
+def test_omni_runner_forwards_model_plugin_dir(monkeypatch, tmp_path) -> None:
+    case = _make_case(inputs={"prompt": "hello"})
+    model_plugin_dir = tmp_path / "model-plugins"
+    ctx = _make_ctx(
+        case,
+        tmp_path,
+        model_plugin_dir=str(model_plugin_dir),
+    )
+    captured: dict = {}
+
+    def _fake_run(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(omni.subprocess, "run", _fake_run)
+
+    omni.OmniMultimodalRunner().run_stage(
+        case, StageSpec(name="talker_decode"), ctx
+    )
+
+    assert captured["cmd"][-2:] == [
+        "--model-plugin-dir",
+        str(model_plugin_dir),
+    ]
 
 
 def test_vision_stage_maps_to_embed_without_stage_flag(monkeypatch, tmp_path) -> None:
