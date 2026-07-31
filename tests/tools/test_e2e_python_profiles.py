@@ -156,6 +156,7 @@ def test_profile_source_builds_use_a_safe_default_job_limit(monkeypatch, tmp_pat
     requirements = tmp_path / "requirements.lock.txt"
     requirements.write_text("demo-package==1.0\n", encoding="utf-8")
     monkeypatch.delenv("MAX_JOBS", raising=False)
+    monkeypatch.delenv(shared_profiles.PREBUILT_ONLY_ENV, raising=False)
     monkeypatch.setenv(shared_profiles.PROFILE_ROOT_ENV, str(tmp_path / "profiles"))
     monkeypatch.setattr(
         shared_profiles,
