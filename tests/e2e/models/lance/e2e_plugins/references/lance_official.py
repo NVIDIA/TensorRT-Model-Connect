@@ -21,6 +21,10 @@ _REFERENCE_REPO_ENV = "TRTMC_LANCE_REFERENCE_REPO"
 _REFERENCE_ENTRYPOINT = "inference_lance.py"
 _MODEL_DIRECTORY = "Lance_3B"
 _VIT_DIRECTORY = "Qwen2.5-VL-ViT"
+_IMAGE_MODEL_ALLOW_PATTERNS = [
+    f"{_MODEL_DIRECTORY}/**",
+    f"{_VIT_DIRECTORY}/**",
+]
 _IMAGE_REFERENCE_COMPAT = Path(__file__).with_name("lance_image_compat")
 
 
@@ -69,7 +73,11 @@ def _cached_model_root(model_id: str) -> Path:
         from huggingface_hub import snapshot_download
 
         return Path(
-            snapshot_download(model_id, local_files_only=True)
+            snapshot_download(
+                model_id,
+                allow_patterns=_IMAGE_MODEL_ALLOW_PATTERNS,
+                local_files_only=True,
+            )
         ).resolve()
     except Exception as exc:
         raise RuntimeError(

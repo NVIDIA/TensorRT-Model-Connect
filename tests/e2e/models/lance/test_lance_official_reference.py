@@ -14,6 +14,34 @@ from types import SimpleNamespace
 from tests.e2e.models.lance.e2e_plugins.references import lance_official
 
 
+def test_lance_image_reference_checks_only_its_image_checkpoint(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def snapshot_download(model_id: str, **kwargs) -> str:
+        captured["model_id"] = model_id
+        captured.update(kwargs)
+        return str(tmp_path)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(snapshot_download=snapshot_download),
+    )
+
+    assert lance_official._cached_model_root("bytedance-research/Lance") == tmp_path
+    assert captured == {
+        "model_id": "bytedance-research/Lance",
+        "allow_patterns": [
+            "Lance_3B/**",
+            "Qwen2.5-VL-ViT/**",
+        ],
+        "local_files_only": True,
+    }
+
+
 def test_lance_image_reference_provides_decord_import_without_video_support() -> None:
     environment = lance_official._image_reference_environment(
         {**os.environ, "PYTHONPATH": "/existing/python/path"}
