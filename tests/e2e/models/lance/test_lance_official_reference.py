@@ -84,6 +84,12 @@ def test_lance_image_reference_keeps_upstream_visual_generation_contract(
 
     def run(command, **_kwargs):
         captured["command"] = command
+        output_dir = Path(command[command.index("--save_path_gen") + 1])
+        output_dir.mkdir(parents=True)
+        (output_dir / "result.json").write_text(
+            '[{"answer": "reference answer"}]\n',
+            encoding="utf-8",
+        )
         return SimpleNamespace(returncode=0, stderr="", stdout="")
 
     monkeypatch.setattr(lance_official, "_official_source", lambda: source)
@@ -103,13 +109,7 @@ def test_lance_image_reference_keeps_upstream_visual_generation_contract(
         "save_full_stderr",
         lambda *_args: ("", ""),
     )
-    monkeypatch.setattr(
-        lance_official,
-        "_result_text",
-        lambda _path: "reference answer",
-    )
-
-    lance_official.plugin.run_stage(
+    output = lance_official.plugin.run_stage(
         SimpleNamespace(
             task_strategy="vision_language_generation",
             inputs={"image": str(image), "prompt": "Describe the image."},
@@ -138,3 +138,8 @@ def test_lance_image_reference_keeps_upstream_visual_generation_contract(
     )
     workspace = Path(chdir_argument.removeprefix("--chdir="))
     assert (workspace / "downloads").resolve() == model_root.resolve()
+    preserved_result = artifact_dir / "official_output/official_reference_result.json"
+    assert output.text == "reference answer"
+    assert output.data["result_path"] == str(preserved_result)
+    assert preserved_result.is_file()
+    assert not (artifact_dir / "official_output/result.json").exists()

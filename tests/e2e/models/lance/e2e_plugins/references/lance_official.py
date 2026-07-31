@@ -21,6 +21,7 @@ _REFERENCE_REPO_ENV = "TRTMC_LANCE_REFERENCE_REPO"
 _REFERENCE_ENTRYPOINT = "inference_lance.py"
 _MODEL_DIRECTORY = "Lance_3B"
 _VIT_DIRECTORY = "Qwen2.5-VL-ViT"
+_REFERENCE_RESULT_NAME = "official_reference_result.json"
 _IMAGE_MODEL_ALLOW_PATTERNS = [
     f"{_MODEL_DIRECTORY}/**",
     f"{_VIT_DIRECTORY}/**",
@@ -269,10 +270,17 @@ class LanceOfficialReference:
                 "Lance official reference failed "
                 f"(rc={result.returncode}): {detail or 'no subprocess output'}"
             )
-        text = _result_text(result_dir / "result.json")
+        upstream_result = result_dir / "result.json"
+        text = _result_text(upstream_result)
+        preserved_result = result_dir / _REFERENCE_RESULT_NAME
+        if preserved_result.exists():
+            raise RuntimeError(
+                f"Lance reference result already exists: {preserved_result}"
+            )
+        upstream_result.rename(preserved_result)
         return StageOutput(
             stage_name=stage.name,
-            data={"text": text, "result_path": str(result_dir / "result.json")},
+            data={"text": text, "result_path": str(preserved_result)},
             text=text,
             timing_s=elapsed,
             metadata={
