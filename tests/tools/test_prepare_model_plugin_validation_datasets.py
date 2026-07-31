@@ -8,6 +8,7 @@ import wave
 from pathlib import Path
 
 from PIL import Image
+import yaml
 
 from tools import prepare_model_plugin_validation_datasets as prepare
 
@@ -134,9 +135,13 @@ def test_prepare_all_writes_task_owned_public_datasets_and_hashes(
     tmp_path: Path,
 ) -> None:
     flores, full_duplex, mmlu, mmmu, seedtts = _write_sources(tmp_path)
+    output_root = tmp_path / "output"
+    unrelated = output_root / "OtherDataset" / "dataset.json"
+    unrelated.parent.mkdir(parents=True)
+    unrelated.write_text("unmanaged\n", encoding="utf-8")
 
     outputs = prepare.prepare_all(
-        output_root=tmp_path / "output",
+        output_root=output_root,
         flores_source=flores,
         full_duplex_source=full_duplex,
         mmlu_source=mmlu,
@@ -145,12 +150,15 @@ def test_prepare_all_writes_task_owned_public_datasets_and_hashes(
     )
 
     assert len(outputs) == 7
-    root = tmp_path / "output" / prepare.DATASET_ROOT_NAME
+    root = output_root
+    assert not (root / "TRTMCValidation").exists()
     counts = {
-        path.parent.name: json.loads(path.read_text(encoding="utf-8"))[
-            "request_count"
-        ]
-        for path in root.glob("*/dataset.json")
+        directory_name: json.loads(
+            (root / directory_name / "dataset.json").read_text(
+                encoding="utf-8"
+            )
+        )["request_count"]
+        for directory_name in prepare.MANAGED_DATASET_DIRECTORIES
     }
     assert counts == {
         "flores200-en-fr": 10,
@@ -161,9 +169,17 @@ def test_prepare_all_writes_task_owned_public_datasets_and_hashes(
         "seedtts-en-omni-audio": 1,
     }
     manifest = json.loads(
-        (root / "dataset_manifest.json").read_text(encoding="utf-8")
+        (root / prepare.DATASET_MANIFEST_NAME).read_text(encoding="utf-8")
+    )
+    assert manifest["root"] == "."
+    assert manifest["managed_directories"] == list(
+        prepare.MANAGED_DATASET_DIRECTORIES
     )
     assert manifest["file_count"] == len(manifest["files"])
+    assert unrelated.is_file()
+    assert "OtherDataset/dataset.json" not in {
+        item["path"] for item in manifest["files"]
+    }
     assert all(
         prepare.sha256(root / item["path"]) == item["sha256"]
         for item in manifest["files"]
@@ -228,6 +244,42 @@ def test_prepare_all_writes_task_owned_public_datasets_and_hashes(
         dataset["license"] and dataset["license_url"]
         for dataset in (
             json.loads(path.read_text(encoding="utf-8"))
-            for path in root.glob("*/dataset.json")
+            for path in (
+                root / directory_name / "dataset.json"
+                for directory_name in prepare.MANAGED_DATASET_DIRECTORIES
+            )
         )
     )
+
+
+def test_model_plugin_validation_workloads_use_root_level_dataset_paths() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    payload = yaml.safe_load(
+        (repository / "tests/validation/workloads.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    suites = {suite["id"]: suite for suite in payload["suites"]}
+    expected = {
+        "mmmu_pro_vision_plugin_parity": "/mnt/data/mmmu-pro-vision/dataset.json",
+        "mmmu_pro_vision_square_plugin_parity": (
+            "/mnt/data/mmmu-pro-vision-square-448/dataset.json"
+        ),
+        "mmlu_generation_mode_parity": (
+            "/mnt/data/mmlu-generation-modes/dataset.json"
+        ),
+        "flores200_en_fr_seq2seq_parity": (
+            "/mnt/data/flores200-en-fr/dataset.json"
+        ),
+        "full_duplex_bench_speech_parity": (
+            "/mnt/data/full-duplex-bench/dataset.json"
+        ),
+        "seedtts_en_omni_audio_parity": (
+            "/mnt/data/seedtts-en-omni-audio/dataset.json"
+        ),
+    }
+
+    assert {
+        suite_id: suites[suite_id]["dataset"]["default_path"]
+        for suite_id in expected
+    } == expected

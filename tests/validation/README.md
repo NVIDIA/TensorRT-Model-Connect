@@ -112,12 +112,15 @@ python tools/prepare_model_plugin_validation_datasets.py \
   --seedtts-source /mnt/data/SeedTTS_en_meta/seedtts_en_meta.json
 ```
 
-This writes `/mnt/data/TRTMCValidation` with MMMU-Pro Vision, MMLU-Pro,
-FLORES-200, Full-Duplex-Bench, and Seed-TTS-Eval slices, plus
-`dataset_manifest.json` containing each file's byte size and SHA256. Wan
-workloads read the existing public VBench asset directly. Dev/QA machines and
-NAS mirrors should copy the directory without changing its relative layout
-and verify the manifest after transfer.
+This writes the `mmmu-pro-vision`, `mmmu-pro-vision-square-448`,
+`mmlu-generation-modes`, `flores200-en-fr`, `full-duplex-bench`, and
+`seedtts-en-omni-audio` directories directly under `/mnt/data`. It also writes
+`/mnt/data/trtmc_model_plugin_validation_manifest.json`, which lists only
+those six managed directories and records each file's byte size and SHA256.
+There is intentionally no aggregate `TRTMCValidation` directory. Wan workloads
+read the existing root-level public `VBench` asset directly. Dev/QA machines
+and NAS mirrors should copy the six directories without changing their
+relative layouts and verify the manifest after transfer.
 
 Every agreement or disagreement therefore means that both backends consumed
 the aligned prepared inputs and produced outputs that were evaluated by the

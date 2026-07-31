@@ -1587,7 +1587,7 @@ suites:
     default_model_names: [phi4-multimodal]
     dataset:
       kind: model_plugin_json
-      default_path: /mnt/data/TRTMCValidation/mmmu-pro-vision/dataset.json
+      default_path: /mnt/data/mmmu-pro-vision/dataset.json
       input_asset_fields: [image]
     selectors:
       model_names: [phi4-multimodal]
@@ -1612,7 +1612,7 @@ suites:
     default_model_names: [lance-3b-x2t-image]
     dataset:
       kind: model_plugin_json
-      default_path: /mnt/data/TRTMCValidation/mmmu-pro-vision-square-448/dataset.json
+      default_path: /mnt/data/mmmu-pro-vision-square-448/dataset.json
       input_asset_fields: [image]
     selectors:
       model_names: [lance-3b-x2t-image]
@@ -1636,7 +1636,7 @@ suites:
     default_model_names: [nemotron-labs-diffusion-8b]
     dataset:
       kind: model_plugin_json
-      default_path: /mnt/data/TRTMCValidation/mmlu-generation-modes/dataset.json
+      default_path: /mnt/data/mmlu-generation-modes/dataset.json
     selectors:
       model_names: [nemotron-labs-diffusion-8b]
     scoring:
@@ -1656,7 +1656,7 @@ suites:
     default_model_names: [nllb-200-distilled-600m]
     dataset:
       kind: model_plugin_json
-      default_path: /mnt/data/TRTMCValidation/flores200-en-fr/dataset.json
+      default_path: /mnt/data/flores200-en-fr/dataset.json
     selectors:
       model_names: [nllb-200-distilled-600m]
     scoring:
@@ -1677,7 +1677,7 @@ suites:
     default_model_names: [personaplex-7b]
     dataset:
       kind: model_plugin_json
-      default_path: /mnt/data/TRTMCValidation/full-duplex-bench/dataset.json
+      default_path: /mnt/data/full-duplex-bench/dataset.json
       input_asset_fields: [audio]
     selectors:
       model_names: [personaplex-7b]
@@ -1701,7 +1701,7 @@ suites:
     default_model_names: [qwen3-omni-30b-a3b-instruct]
     dataset:
       kind: model_plugin_json
-      default_path: /mnt/data/TRTMCValidation/seedtts-en-omni-audio/dataset.json
+      default_path: /mnt/data/seedtts-en-omni-audio/dataset.json
     selectors:
       model_names: [qwen3-omni-30b-a3b-instruct]
     scoring:

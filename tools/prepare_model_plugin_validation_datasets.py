@@ -15,7 +15,15 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-DATASET_ROOT_NAME = "TRTMCValidation"
+DATASET_MANIFEST_NAME = "trtmc_model_plugin_validation_manifest.json"
+MANAGED_DATASET_DIRECTORIES = (
+    "flores200-en-fr",
+    "full-duplex-bench",
+    "mmlu-generation-modes",
+    "mmmu-pro-vision",
+    "mmmu-pro-vision-square-448",
+    "seedtts-en-omni-audio",
+)
 FLORES_SOURCE = "facebook/flores-200 eng_Latn/fra_Latn devtest"
 FULL_DUPLEX_SOURCE = (
     "DanielLin94144/Full-Duplex-Bench v1.0 synthetic subsets "
@@ -539,23 +547,22 @@ def prepare_seedtts_omni_audio(
 
 def write_dataset_manifest(root: Path) -> Path:
     files = []
-    for path in sorted(
-        item
-        for item in root.rglob("*")
-        if item.is_file() and item.name != "dataset_manifest.json"
-    ):
-        files.append(
-            {
-                "path": path.relative_to(root).as_posix(),
-                "bytes": path.stat().st_size,
-                "sha256": sha256(path),
-            }
-        )
+    for directory_name in MANAGED_DATASET_DIRECTORIES:
+        directory = root / directory_name
+        for path in sorted(item for item in directory.rglob("*") if item.is_file()):
+            files.append(
+                {
+                    "path": path.relative_to(root).as_posix(),
+                    "bytes": path.stat().st_size,
+                    "sha256": sha256(path),
+                }
+            )
     return write_json(
-        root / "dataset_manifest.json",
+        root / DATASET_MANIFEST_NAME,
         {
             "schema_version": "trtmc.validation-dataset-manifest/v1",
-            "root": DATASET_ROOT_NAME,
+            "root": ".",
+            "managed_directories": list(MANAGED_DATASET_DIRECTORIES),
             "file_count": len(files),
             "files": files,
         },
@@ -571,7 +578,7 @@ def prepare_all(
     mmmu_source: Path,
     seedtts_source: Path,
 ) -> list[Path]:
-    root = output_root / DATASET_ROOT_NAME
+    root = output_root
     outputs = [
         prepare_mmmu_vision(mmmu_source, root),
         prepare_mmmu_vision(
