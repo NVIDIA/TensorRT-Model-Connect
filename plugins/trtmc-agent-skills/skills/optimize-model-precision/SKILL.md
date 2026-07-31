@@ -1,166 +1,187 @@
 ---
 name: optimize-model-precision
 description: >-
-  Use when finding the best low-precision or quantized configuration for a
-  TensorRT-Model-Connect model. Covers FP16/BF16/quantization attempts, E2E
-  validation, fake-FP16 detection, progress tracking, and builder fixes when
-  precision is not actually threaded through the graph.
+  Use when evaluating FP16, BF16, or supported quantization formats for a
+  TensorRT-Model-Connect model. Establishes a model-owned correctness baseline,
+  changes one effective build option at a time, detects ineffective precision,
+  and retains comparable parity, memory, bundle, and performance evidence.
 ---
 
 # Optimize Model Precision
 
-## Goal
+## Objective
 
-Given a model ID or local model path, find the best lower-precision
-configuration that improves speed or memory while preserving the required
-accuracy. This applies to text, speech, vision-language, diffusion, segmentation,
-encoder-only, and embedding models.
+Find the lowest-cost configuration that satisfies the model's existing
+correctness contract and improves a named resource or performance metric.
+“Best” must name the objective: bundle size, device memory, setup time, prefill,
+decode, throughput, or another model-owned metric.
 
-## Inputs
+Do not weaken an oracle, threshold, sample set, or pass criterion to make a
+configuration qualify. If a test appears wrong, stop and escalate it to a
+maintainer.
 
-Infer or ask for:
+## Establish The Owned Baseline
 
-- `MODEL_ID`: HuggingFace model ID or local model path.
-- `PROGRESS_FILE`: path for persistent attempt state.
-- `ACCURACY_THRESHOLD`: minimum acceptable accuracy when the user specifies one.
-- `CONTAINER`: dev container name when GPU work must run in Docker.
-- `REPO`: repository path inside the container.
+Resolve the model through all relevant descriptors:
 
-If `PROGRESS_FILE` exists, read it first and resume without repeating completed
-attempts.
+- Python family `MODEL.toml` and plugin;
+- C++ model `MODEL.toml` and runtime strategy;
+- E2E family `MODEL.toml`, manifest, testcases, thresholds, and
+  `perf_validation.json` when present;
+- model-first binding in `tests/validation/model_workloads.yaml`;
+- optimized implementation/profile/qualification descriptors when selected.
 
-## Run Commands Inside The Container
-
-Use this pattern when a container is required:
-
-```bash
-docker exec <container> bash -c "cd <repo> && <command>"
-```
-
-Build examples:
+List and dry-run the reference-consistency workload:
 
 ```bash
-./build/trtmc build <model> -o <output>.trtfb \
-  --precision fp16 \
-  --max-cache-length 256
-
-./build/trtmc build <model> -o <output>.trtfb \
-  --precision fp16 \
-  --quantize fp8 \
-  --quant-scales <scales>.json \
-  --max-cache-length 256
+PYTHONPATH=python:. python3 tools/trtmc_validate.py --list
+PYTHONPATH=python:. python3 tools/trtmc_validate.py \
+  <model> <workload> \
+  --dry-run \
+  --output <baseline-plan-dir>
 ```
 
-Inspect:
+Build and validate the existing configuration before optimizing it. Record:
+repository SHA, exact model revision, target/hardware, runtime path, effective
+build options, bundle hash, workload and sample limit, seed/sampling, artifact
+paths, correctness metrics, and the performance protocol.
+
+## Build Matrix
+
+Try only formats supported by the current CLI and owning family:
+
+```bash
+./build/trtmc build <model> -o <bundle>.trtfb \
+  --precision fp16 \
+  --max-cache-length <N>
+
+./build/trtmc build <model> -o <bundle>.trtfb \
+  --precision fp16 \
+  --quantize <supported-format> \
+  --quant-calibration-samples <N> \
+  --max-cache-length <N>
+```
+
+The current quantization core resolves a `QuantPlan`; family hooks own
+calibration data, adapters, exclusion patterns, and FP8 scales. Use the current
+CLI help and `website/docs/features/quantization.md` for supported options.
+Use `--quant-scales` for a reviewed generic scale artifact and the dedicated
+FP8 scale flags only for their documented compatibility path. Do not bypass
+the plan with ad hoc family Q/DQ code.
+
+Precision and quantization are effective public build options. Changing one can
+switch between native and optimized runtime implementations. Inspect every
+bundle:
 
 ```bash
 ./build/trtmc inspect <bundle>.trtfb
+sha256sum <bundle>.trtfb
 ```
 
-Validate through the E2E harness:
+Compare two configurations only when their implementation path, model revision,
+inputs, and measurement protocol match. Otherwise report the runtime-path
+change as a confounder. Treat `--rtx` as another backend variable and do not
+combine a TensorRT-to-TensorRT-RTX switch with a precision conclusion.
+
+## One Variable Per Attempt
+
+Recommended order:
+
+1. reproduce the current declared baseline;
+2. try FP16 or the family's declared lower-precision default;
+3. try BF16 when supported and motivated;
+4. try one family-supported quantization format at a time;
+5. vary calibration or exclusion policy only after isolating the failing
+   boundary.
+
+Use `$fp16-trt-network` when base precision is not threaded correctly. Use
+`$debug-trt-mismatch` when an attempt executes but fails comparison.
+
+## Detect Ineffective Precision
+
+CLI acceptance and bundle size alone are insufficient. Compare:
+
+- inspected runtime path and precision metadata;
+- bundle sections and weight dtypes;
+- device-memory measurements under the same workload;
+- graph/debug evidence for work and state tensor dtypes;
+- bundle size as a supporting signal.
+
+A similar FP32/FP16 size suggests investigation, not a fixed 10-percent failure
+rule. A smaller bundle does not prove that runtime tensors use the requested
+dtype.
+
+## Correctness Gate
+
+Run the model-first binding with the candidate bundle:
 
 ```bash
-/opt/venv/bin/python -m pytest tests/test_e2e.py::test_e2e[<manifest-name>] -v \
-  --engine-dir <engine-dir> \
-  --trtmc-binary ./build/trtmc \
-  --hf-python /opt/venv/bin/python \
-  --rebuild-engines
+PYTHONPATH=python:. python3 tools/trtmc_validate.py \
+  <model> <workload> \
+  --bundle <candidate.trtfb> \
+  --output <candidate-artifacts>
 ```
 
-The E2E harness is the source of truth. A passing attempt means pytest exits 0;
-a failing attempt means it does not.
+Also run the owning E2E case when it carries additional model/runtime
+contracts. Keep execution, reference, comparison, and final validation status
+separate. A passing smoke test is not parity; a dry run is not execution.
 
-## Detect Fake FP16
+Use the existing manifest/testcase/threshold sidecars. Create a persistent new
+variant only when the configuration is intended to become a supported profile,
+and register it in the owning family `MODEL.toml`.
 
-Many builders may accept `--precision fp16` before they actually thread dtype
-through weights, inputs, and graph helpers.
+## Performance Gate
 
-How to detect:
+For a quick diagnosis, use `$profile-model`. For release or qualification
+evidence, use the model-owned `perf_validation.json` and
+`benchmarks/performance/release.yaml` through `tools/perf_matrix.py`.
 
-1. Build an FP32 baseline bundle.
-2. Build an FP16 bundle with otherwise identical settings.
-3. Inspect both bundles and compare sizes.
-4. If sizes are similar, usually within about 10 percent, FP16 probably did not
-   take effect.
+If bundle preparation occurred outside the matrix campaign, retain its
+`test_task` receipt and attach it with `tools/perf_matrix.py report
+<run-directory> --preparation-receipt <receipt>`. The receipt revision and
+bundle paths must match the run. Internal CI performance reports and raw
+artifacts remain private; do not publish them through Source Actions or Pages.
 
-How to fix:
+Warmups, timed iterations, inputs, synchronization, target, power state, and
+runtime path must match the baseline. Never treat missing/zero provider phase
+timings as latency measurements.
 
-- Use `$fp16-trt-network`.
-- Read the affected builder, not just the CLI surface.
-- Thread `work_np_dtype` and `work_trt_dtype` through inputs, constants, graph
-  ops, graph blocks, and weight loading.
-- Keep norm and softmax boundaries in FP32.
-- Cast logits or final comparison outputs to FP32 before marking outputs.
+## Attempt Record
 
-## E2E Manifests
-
-If the model has an E2E manifest, reuse it. If not, create one in
-`tests/e2e/models/`. For persistent FP16 variants, use a distinct manifest name:
+Persist one entry after every attempt:
 
 ```json
 {
-  "name": "<model-name>-fp16",
-  "hf_id": "<org>/<model>",
-  "bundle": "<model-name>-fp16.trtfb",
-  "family": "<family>",
-  "runtime_strategy": "<strategy>",
-  "precision": "fp16",
-  "max_cache_length": 256,
-  "prompt": "test prompt",
-  "max_new_tokens": 20
-}
-```
-
-Only relax thresholds when repeated evidence shows the lower-precision output is
-valid but not bitwise or token-identical to the FP32/HF reference. Record the
-reason in the PR.
-
-## Progress File
-
-Update progress after every attempt, pass or fail:
-
-```json
-{
-  "model": "MODEL_ID",
-  "started": "ISO-8601 timestamp",
+  "repository_sha": "<sha>",
+  "model_revision": "<revision>",
+  "target": "<hardware>",
+  "objective": "<metric>",
   "attempts": [
     {
-      "id": 1,
       "precision": "fp16",
       "quantize": null,
-      "status": "pass",
-      "bundle_size_mb": 1557,
-      "fp32_bundle_size_mb": 3111,
-      "e2e_result": "PASSED",
-      "bundle": "/path/to/bundle.trtfb",
-      "manifest": "model-fp16",
-      "verified": true,
-      "error": null,
-      "code_changes": ["<file>: threaded precision through build path"]
+      "effective_options": {},
+      "runtime_path": "native-or-optimized-id",
+      "bundle_sha256": "<sha256>",
+      "correctness": {"status": "pass", "artifact": "<comparison.json>"},
+      "performance": {"status": "pass", "artifact": "<result.json>"},
+      "bundle_bytes": 0,
+      "device_memory_bytes": 0,
+      "code_changes": [],
+      "notes": ""
     }
   ],
-  "best_passing": {
-    "precision": "fp16",
-    "quantize": null,
-    "bundle_size_mb": 1557,
-    "bundle": "/path/to/bundle.trtfb",
-    "verified": true
-  }
+  "best_qualified_attempt": 0
 }
 ```
 
-## Invariants
+An attempt is qualified only when the required correctness and objective
+evidence both pass. Plain FP32 can remain the best result when no lower
+precision configuration qualifies; report that honestly instead of redefining
+completion.
 
-- Do not call the task complete until `best_passing.verified` is true and the
-  best passing configuration is not plain FP32.
-- Do not override failing E2E results.
-- Do not claim FP16 works only because the CLI accepted the flag.
-- If the precision change requires code edits, keep them scoped to the builder,
-  manifest, and tests needed for that model path.
-- Record the exact commands and results in the final report or PR body.
+## Final Report
 
-## Search Strategy
-
-Start with FP16 because it is the most common low-risk win. If FP16 passes, try
-available quantization modes only when the repo tools and the model family
-support them. Prefer one change at a time so failures are attributable.
+Provide the full matrix, exact commands, artifact paths and hashes, objective
+comparison, selected configuration, failures and first divergent boundaries,
+code changes, and unrun target-hardware or broad-regression checks.
