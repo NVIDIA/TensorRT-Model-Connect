@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Z-Image HF-to-TRTMC precision parity contract tests."""
+"""Z-Image HF reference precision and output-health contract tests."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from tests.e2e.models.z_image.e2e_plugins.references import hf_diffusers
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageSpec
 
 
-def test_hf_reference_mirrors_mixed_trtmc_precision(
+def test_hf_reference_uses_stable_precision_and_rejects_invalid_output(
     tmp_path, monkeypatch
 ) -> None:
     case = E2ECase(
@@ -24,9 +24,7 @@ def test_hf_reference_mirrors_mixed_trtmc_precision(
             "image_width": 512,
             "seed": 42,
         },
-        metadata={
-            "task_eval": {"reference_precision": "fp16"},
-        },
+        metadata={},
     )
     context = RunContext(
         case=case,
@@ -49,10 +47,11 @@ def test_hf_reference_mirrors_mixed_trtmc_precision(
     )
 
     script = captured["cmd"][2]
-    assert "torch_dtype=torch.float16" in script
-    assert "pipe.vae.to(dtype=torch.float32)" in script
-    assert "*pipe.transformer.noise_refiner" in script
-    assert "*pipe.transformer.layers[:2]" in script
-    assert "register_forward_pre_hook(_fp32_inputs, with_kwargs=True)" in script
-    assert "register_forward_hook(_base_output)" in script
-    assert "device=\"cuda\", dtype=base_dtype" in script
+    assert "torch_dtype=torch.bfloat16" in script
+    assert "pipeline_torch_dtypes" not in script
+    assert "mixed_fp32_modules" not in script
+    assert "torch.isfinite(latents).all()" in script
+    assert "callback_on_step_end=_require_finite_latents" in script
+    assert "np.isfinite(frame_array).all()" in script
+    assert "float(frame_array.std()) == 0.0" in script
+    assert 'device="cuda", dtype=torch.bfloat16' in script

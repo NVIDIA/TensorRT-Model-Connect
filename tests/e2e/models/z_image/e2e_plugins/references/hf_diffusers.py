@@ -82,7 +82,7 @@ class HfDiffusersReference:
         reference_precision = str(
             case.metadata.get(
                 "reference_precision",
-                task_reference_precision or "fp16",
+                task_reference_precision or "bf16",
             )
         ).lower()
         reference_torch_dtype = {
@@ -109,42 +109,20 @@ from diffusers import DiffusionPipeline
 transformers.logging.set_verbosity_error()
 
 pipe = DiffusionPipeline.from_pretrained(
-    {model_ref!r}, torch_dtype={reference_torch_dtype}, low_cpu_mem_usage=False)
-
-# Mirror the TRTMC mixed-precision bundle exactly: the VAE, both noise
-# refiners, and main transformer blocks 0-1 run in FP32; every component
-# boundary casts back to the FP16 base precision.
-base_dtype = {reference_torch_dtype}
-mixed_fp32_modules = [
-    *pipe.transformer.noise_refiner,
-    *pipe.transformer.layers[:2],
-]
-pipe.vae.to(dtype=torch.float32)
-
-def _cast_floating(value, dtype):
-    if isinstance(value, torch.Tensor):
-        return value.to(dtype=dtype) if value.is_floating_point() else value
-    if isinstance(value, tuple):
-        return tuple(_cast_floating(item, dtype) for item in value)
-    if isinstance(value, list):
-        return [_cast_floating(item, dtype) for item in value]
-    if isinstance(value, dict):
-        return {{key: _cast_floating(item, dtype) for key, item in value.items()}}
-    return value
-
-def _fp32_inputs(_module, args, kwargs):
-    return _cast_floating(args, torch.float32), _cast_floating(
-        kwargs, torch.float32)
-
-def _base_output(_module, _args, output):
-    return _cast_floating(output, base_dtype)
-
-for module in mixed_fp32_modules:
-    module.to(dtype=torch.float32)
-    module.register_forward_pre_hook(_fp32_inputs, with_kwargs=True)
-    module.register_forward_hook(_base_output)
-
+    {model_ref!r},
+    torch_dtype={reference_torch_dtype},
+    low_cpu_mem_usage=False,
+)
 pipe.to("cuda")
+
+def _require_finite_latents(_pipe, step, _timestep, callback_kwargs):
+    latents = callback_kwargs["latents"]
+    if not torch.isfinite(latents).all():
+        raise RuntimeError(
+            f"Z-Image HF reference produced non-finite latents at step {{step}}"
+        )
+    return callback_kwargs
+
 raw_latents = np.fromfile({str(initial_latents.path)!r}, dtype=np.float32)
 expected_shape = {initial_latents.shape!r}
 expected_size = int(np.prod(expected_shape))
@@ -154,7 +132,7 @@ if raw_latents.size != expected_size:
         f"expected {{expected_shape}} = {{expected_size}}"
     )
 initial_latents = torch.from_numpy(raw_latents.reshape(expected_shape)).to(
-    device="cuda", dtype=base_dtype)
+    device="cuda", dtype={reference_torch_dtype})
 output = pipe(
     prompt={prompt!r},
     num_inference_steps={num_steps},
@@ -163,10 +141,20 @@ output = pipe(
     guidance_scale={guidance_scale},
     generator=torch.Generator("cuda").manual_seed({int(case.inputs.get("seed", case.determinism.get("seed", 42)))}),
     latents=initial_latents,
+    callback_on_step_end=_require_finite_latents,
 )
 frames = output.images
 frames_dir = {frames_dir!r}
 for i, frame in enumerate(frames):
+    frame_array = np.asarray(frame, dtype=np.float32)
+    if not np.isfinite(frame_array).all():
+        raise RuntimeError(
+            f"Z-Image HF reference frame {{i}} contains non-finite pixels"
+        )
+    if frame_array.size == 0 or float(frame_array.std()) == 0.0:
+        raise RuntimeError(
+            f"Z-Image HF reference frame {{i}} is empty or uniform"
+        )
     if isinstance(frame, Image.Image):
         frame.save(os.path.join(frames_dir, f"frame_{{i:04d}}.png"))
     else:
