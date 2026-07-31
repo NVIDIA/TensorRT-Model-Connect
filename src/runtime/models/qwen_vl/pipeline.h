@@ -93,6 +93,8 @@ class QwenVlPipeline final : public IPipeline {
     std::unique_ptr<TrtModule> vision_encoder_;
     std::unique_ptr<QwenVlInferenceState> state_;
     double last_setup_ms_{0.0};
+    double last_prefill_ms_{0.0};
+    double last_decode_ms_{0.0};
     QwenVlConfig config_;
     QwenVlPreprocessConfig vl_preprocess_;
     cudaStream_t stream_;

@@ -204,6 +204,8 @@ TextResult QwenVlPipeline::generate(const std::string& prompt, const GenerateCon
 
     auto result = TextResult{std::move(text), std::move(new_tokens)};
     result.setup_ms = last_setup_ms_;
+    result.prefill_ms = last_prefill_ms_;
+    result.decode_ms = last_decode_ms_;
     return result;
 }
 
@@ -632,6 +634,8 @@ TextResult QwenVlPipeline::generate(const std::string& prompt, const float* imag
                                     out.end());
     auto result = TextResult{tokenizer_->decode(new_tokens), std::move(new_tokens)};
     result.setup_ms = last_setup_ms_;
+    result.prefill_ms = last_prefill_ms_;
+    result.decode_ms = last_decode_ms_;
     return result;
 }
 
@@ -668,11 +672,15 @@ std::vector<int32_t> QwenVlPipeline::generate_from_ids(const std::vector<int32_t
     reset_generation_context(static_cast<int32_t>(input_ids.size()));
 
     std::vector<float> logits;
+    const auto t_prefill_start = std::chrono::steady_clock::now();
 
     for (std::size_t i = 0; i + 1 < input_ids.size(); ++i)
         run_text_step(input_ids[i], logits);
 
     run_text_step(input_ids.back(), logits);
+    const auto t_decode_start = std::chrono::steady_clock::now();
+    last_prefill_ms_ =
+        std::chrono::duration<double, std::milli>(t_decode_start - t_prefill_start).count();
 
     std::vector<int32_t> output = input_ids;
     const int32_t vocab_size = static_cast<int32_t>(logits.size());
@@ -685,6 +693,9 @@ std::vector<int32_t> QwenVlPipeline::generate_from_ids(const std::vector<int32_t
         run_text_step(result.token_id, logits);
     }
 
+    last_decode_ms_ = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t_decode_start)
+                          .count();
     return output;
 }
 
@@ -702,6 +713,7 @@ std::vector<int32_t> QwenVlPipeline::generate_vl_from_ids(
     reset_generation_context(static_cast<int32_t>(input_ids.size()));
 
     std::vector<float> logits;
+    const auto t_prefill_start = std::chrono::steady_clock::now();
     const bool use_mrope = text_decoder_->has_input("mrope_position_ids");
     const auto mrope =
         use_mrope ? qwen_vl_build_mrope_positions(input_ids, config_.image_token_id, num_features,
@@ -718,10 +730,16 @@ std::vector<int32_t> QwenVlPipeline::generate_vl_from_ids(
         }
     }
     state_->mark_prefill_complete();
+    const auto t_decode_start = std::chrono::steady_clock::now();
+    last_prefill_ms_ =
+        std::chrono::duration<double, std::milli>(t_decode_start - t_prefill_start).count();
 
     std::vector<int32_t> output = input_ids;
     run_vl_decode_loop(active_sampler, params, output, logits, max_new_tokens,
                        use_mrope ? mrope.next_position : -1);
+    last_decode_ms_ = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t_decode_start)
+                          .count();
     return output;
 }
 
