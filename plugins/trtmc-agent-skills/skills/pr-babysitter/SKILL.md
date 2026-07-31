@@ -29,6 +29,8 @@ branch, and push updated commits. Work sequentially and report every PR state.
 - Treat GitHub branch protection and rulesets as insufficient evidence of CI
   safety. The repository may allow a squash or rebase merge while checks are
   still queued, pending, running, or absent; that is still forbidden here.
+- Use `$write-git-messages` for fix commits, PR comments, and squash or rebase
+  text.
 - If a fix needs unavailable hardware, product judgment, or broad scope, stop
   and report the blocker.
 
@@ -224,22 +226,35 @@ linked issue was expected to close, verify the issue state separately.
 
 ## Rebase
 
+Do not overwrite a dirty user checkout. For a resolved same-repository source
+branch, prefer a temporary worktree:
+
 ```bash
 git fetch github main <branch>
-git switch <branch>
-git pull --ff-only github <branch>
+git worktree add <temporary-path> -b <temporary-local-branch> github/<branch>
+```
+
+Inside it, rebase onto the freshly fetched base:
+
+```bash
 git rebase github/main
 ```
 
 For mechanical conflicts, read both sides, resolve, `git add`, and continue.
 For semantic conflicts, stop and report exactly which files and decisions need a
-human.
+human. Run focused validation and verify that the rebased diff still matches
+the PR intent.
 
-Push with lease:
+Before a history rewrite, record the exact remote branch SHA. Push only the
+resolved source branch with an explicit lease:
 
 ```bash
-git push github HEAD:<branch> --force-with-lease
+git push github HEAD:<branch> \
+  --force-with-lease=<branch>:<previous-remote-sha>
 ```
+
+For an additive fix, use a normal push. Re-read `headRefOid` after every push
+and restart CI evaluation.
 
 ## Diagnose Failed Checks
 
@@ -275,8 +290,8 @@ gh run download <run-id> \
 
 Keep downloaded Internal evidence local and private. Never attach it to the
 Source PR or a Source workflow. When E2E artifacts exist, inspect `result.json`
-fields such as `status`,
-`failure_type`, stage statuses, stage messages, metric values, and thresholds.
+fields such as `status`, `failure_type`, stage statuses, stage messages, metric
+values, and thresholds.
 
 Classify failures:
 
@@ -293,7 +308,8 @@ Classify failures:
 - Read the PR diff first with `git diff github/main...HEAD`.
 - Make the smallest code or test change that addresses the failure.
 - Run the most relevant local verification available.
-- Commit with a clear message that does not mention prohibited tool names.
+- Use `$write-git-messages` for a clear commit message that complies with the
+  repository ruleset.
 - Push back to the same PR branch.
 - Add a PR comment only when it communicates root cause, validation, or a
   blocker not already visible from commits.
@@ -310,5 +326,7 @@ PR     Action      Branch                         Details
 #126   BLOCKED     feature-d                      Semantic conflict in src/runtime/...
 ```
 
-Include commands run, important check/run links, files changed, and residual
-risk. If the cycle made changes, say which PR branch was pushed.
+For each PR include its URL, base, source repository/branch, exact head SHA,
+current status/check URLs and states, action, validation, mergeability/review
+state, blockers, residual risk, and whether a branch was pushed or merged. An
+unchanged pending state is normal during monitoring.
