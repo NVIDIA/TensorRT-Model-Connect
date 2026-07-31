@@ -22,14 +22,17 @@ import flashinfer.decode as fd
 # Config
 # ---------------------------------------------------------------------------
 
+REPO_ROOT = Path(__file__).resolve().parents[4]
 MODEL_ID = "Qwen/Qwen3-4B-Instruct-2507"
-BASELINE_BUNDLE = "/workspace/users/yifeif/tensorrt-model-connect/engines/qwen3-4b-instruct-2507.trtfb"
+BASELINE_BUNDLE = os.environ.get(
+    "TRTMC_QWEN3_BASELINE_BUNDLE",
+    str(REPO_ROOT / "engines" / "qwen3-4b-instruct-2507.trtfb"),
+)
 FI_BUNDLE = "/tmp/qwen3_4b_fi.trtfb"
 HEAD_DIM = 128
 MAX_CACHE = 256
 MAX_NEW = 30
 PROMPT = "What is the capital of France? Answer in one sentence."
-REPO_ROOT = Path(__file__).resolve().parents[4]
 
 # ---------------------------------------------------------------------------
 # 1. Register FlashInfer kernel (native CUDA)

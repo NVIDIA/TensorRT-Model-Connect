@@ -746,6 +746,14 @@ _LEGACY_RUNTIME_STRATEGY_ALIASES = frozenset(
     }
 )
 _KNOWN_RUNTIME_STRATEGIES_CACHE: frozenset[str] | None = None
+_REQUIRED_BUILD_ENVIRONMENT_INPUTS = frozenset(
+    {
+        "TRTMC_BARK_TIMING_CACHE_PATH",
+        "TRTMC_BARK_TIMING_CACHE_SHA256",
+        "TRTMC_ELF_TIMING_CACHE_PATH",
+        "TRTMC_ELF_TIMING_CACHE_METADATA_PATH",
+    }
+)
 
 
 def _runtime_model_manifests_dir() -> Path:
@@ -899,6 +907,36 @@ def _validate_manifest(raw: dict, path: str) -> None:
         raise TypeError(
             f"Manifest {path!r}: build_timeout_s must be a positive integer"
         )
+
+    build_env = raw.get("build_env", {})
+    if not isinstance(build_env, dict):
+        raise TypeError(f"Manifest {path!r}: build_env must be an object")
+    for name, spec in build_env.items():
+        if not isinstance(name, str) or not name:
+            raise TypeError(
+                f"Manifest {path!r}: build_env names must be non-empty strings"
+            )
+        if not isinstance(spec, dict) or "required_from_env" not in spec:
+            continue
+        if spec.get("required_from_env") is not True:
+            raise TypeError(
+                f"Manifest {path!r}: build_env {name} required_from_env must be true"
+            )
+        unknown = set(spec) - {"required_from_env", "path_like"}
+        if unknown:
+            raise ValueError(
+                f"Manifest {path!r}: build_env {name} required_from_env has "
+                f"unsupported fields: {sorted(unknown)}"
+            )
+        if type(spec.get("path_like", False)) is not bool:
+            raise TypeError(
+                f"Manifest {path!r}: build_env {name} path_like must be Boolean"
+            )
+        if name not in _REQUIRED_BUILD_ENVIRONMENT_INPUTS:
+            raise ValueError(
+                f"Manifest {path!r}: build_env {name} is not an allowed "
+                "required environment input"
+            )
 
     if "e2e_min_free_gpu_memory_mib" in raw:
         min_free_gpu_memory_mib = raw["e2e_min_free_gpu_memory_mib"]

@@ -50,6 +50,7 @@ from tensorrt_model_connect.python_profiles import (  # noqa: E402
 
 
 RESULT_SCHEMA = "trtmc.perf-matrix/v1"
+PREPARATION_SCHEMA = "trtmc.perf-bundle-preparation/v1"
 SUITE_SCHEMA = "trtmc.perf-suite/v2"
 ENVIRONMENT_SCHEMA = "trtmc.perf-environment/v1"
 L0_PROFILE_PATTERN = re.compile(r"(?:^|-)l0(?:-|$)", re.IGNORECASE)
@@ -131,6 +132,16 @@ def build_parser() -> argparse.ArgumentParser:
         )
     resume = commands.add_parser("resume", help="continue an incomplete run")
     resume.add_argument("run_directory", type=Path)
+    report = commands.add_parser(
+        "report",
+        help="render an existing run with optional test-task preparation evidence",
+    )
+    report.add_argument("run_directory", type=Path)
+    report.add_argument(
+        "--preparation-receipt",
+        type=Path,
+        help="JSON receipt for bundles prepared before the matrix campaign",
+    )
     return parser
 
 
@@ -2244,8 +2255,39 @@ def _bundle_preparation_records(row: Mapping[str, Any]) -> list[Mapping[str, Any
     return [bundle for bundle in bundles if isinstance(bundle, Mapping)]
 
 
-def _bundle_preparation_html(row: Mapping[str, Any]) -> str:
-    bundles = _bundle_preparation_records(row)
+def _test_task_bundle_preparation(
+    results: Mapping[str, Any],
+) -> dict[tuple[str, str], Mapping[str, Any]]:
+    preparation = results.get("bundle_preparation")
+    if not isinstance(preparation, Mapping):
+        return {}
+    bundles = preparation.get("bundles")
+    if not isinstance(bundles, list):
+        return {}
+    return {
+        (str(bundle.get("model", "")), str(bundle.get("bundle", ""))): bundle
+        for bundle in bundles
+        if isinstance(bundle, Mapping)
+    }
+
+
+def _effective_bundle_preparation_records(
+    results: Mapping[str, Any], row: Mapping[str, Any]
+) -> list[Mapping[str, Any]]:
+    task_records = _test_task_bundle_preparation(results)
+    return [
+        task_records.get(
+            (str(bundle.get("model", "")), str(bundle.get("bundle", ""))),
+            bundle,
+        )
+        for bundle in _bundle_preparation_records(row)
+    ]
+
+
+def _bundle_preparation_html(
+    results: Mapping[str, Any], row: Mapping[str, Any]
+) -> str:
+    bundles = _effective_bundle_preparation_records(results, row)
     if not bundles:
         return "—<div class='timing-meta'>Not recorded</div>"
     labels = {
@@ -2270,8 +2312,14 @@ def _bundle_preparation_html(row: Mapping[str, Any]) -> str:
     return "<br>".join(parts)
 
 
-def _bundle_preparation_summary(rows: list[Mapping[str, Any]]) -> str:
-    records = [record for row in rows for record in _bundle_preparation_records(row)]
+def _bundle_preparation_summary(
+    results: Mapping[str, Any], rows: list[Mapping[str, Any]]
+) -> str:
+    records = [
+        record
+        for row in rows
+        for record in _effective_bundle_preparation_records(results, row)
+    ]
     built = [record for record in records if record.get("status") == "built"]
     build_seconds = sum(
         float(record["build_time_s"])
@@ -2280,13 +2328,25 @@ def _bundle_preparation_summary(rows: list[Mapping[str, Any]]) -> str:
         and math.isfinite(float(record["build_time_s"]))
     )
     prebuilt = sum(record.get("status") in {"cache_hit", "reused"} for record in records)
-    unrecorded = sum(not _bundle_preparation_records(row) for row in rows)
+    unrecorded = sum(
+        not _effective_bundle_preparation_records(results, row) for row in rows
+    )
     return (
-        f"Bundle preparation: {len(built)} built in this run "
+        f"Bundle preparation: {len(built)} built in this test task "
         f"({_duration_html(build_seconds)} total), {prebuilt} cache hits or existing "
         f"bundles, and {unrecorded} rows not recorded. Preparation is reported for "
         "run observability and is excluded from the infer-time traffic-light comparison."
     )
+
+
+def _bundle_preparation_filter(
+    results: Mapping[str, Any], row: Mapping[str, Any]
+) -> str:
+    statuses = {
+        str(record.get("status", "unknown"))
+        for record in _effective_bundle_preparation_records(results, row)
+    }
+    return " ".join(sorted(statuses)) if statuses else "unrecorded"
 
 
 def _raw_commands_html(row: Mapping[str, Any], default_cwd: str) -> str:
@@ -2347,15 +2407,23 @@ def _report_html(results: Mapping[str, Any]) -> str:
     default_cwd = str(results.get("repository_root", ""))
     for row in rows:
         status = str(row.get("status", "pending"))
+        light_filter = status if status in {"green", "yellow", "red"} else "white"
+        search_filter = " ".join(
+            str(row.get(key, ""))
+            for key in ("family", "operation", "model", "id")
+        ).lower()
+        preparation_filter = _bundle_preparation_filter(results, row)
         reason = html.escape(_report_note(row))
         commands = _raw_commands_html(row, default_cwd)
         candidate_timing = _timing_value_html(row.get("candidate"))
         baseline_timing = _timing_value_html(row.get("baseline"))
         model_wall_time = _wall_time_html(row)
-        bundle_preparation = _bundle_preparation_html(row)
+        bundle_preparation = _bundle_preparation_html(results, row)
         timing_scope = _timing_scope_html(row)
         body.append(
-            "<tr>"
+            f"<tr data-filter-search='{html.escape(search_filter)}' "
+            f"data-filter-light='{html.escape(light_filter)}' "
+            f"data-filter-preparation='{html.escape(preparation_filter)}'>"
             f"<td>{html.escape(str(row['family']))}</td>"
             f"<td>{html.escape(str(row['operation']))}</td>"
             f"<td><code>{html.escape(str(row['model']))}</code></td>"
@@ -2403,7 +2471,9 @@ def _report_html(results: Mapping[str, Any]) -> str:
         f"{explicitly_excluded_profiles} explicitly excluded profile"
         + ("s" if explicitly_excluded_profiles != 1 else "")
     )
-    bundle_preparation_summary = html.escape(_bundle_preparation_summary(rows))
+    bundle_preparation_summary = html.escape(
+        _bundle_preparation_summary(results, rows)
+    )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TRTMC performance matrix</title>
@@ -2417,6 +2487,10 @@ th{{background:#e5e7eb}} tr:nth-child(even){{background:#f9fafb}} code{{font-siz
 .light{{font-size:20px;text-align:center}} .timing-value{{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}}
 .timing-meta{{color:#6b7280;font-size:11px;margin-top:2px}} .scope-side{{font-size:11px;margin-bottom:7px;min-width:270px}}
 .scope-title{{font-size:12px;font-weight:700;margin-bottom:2px}}
+.filters{{display:flex;flex-wrap:wrap;gap:12px;align-items:end;margin:16px 0;padding:12px;background:#f3f4f6;border:1px solid #d1d5db}}
+.filters label{{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600}}
+.filters input,.filters select,.filters button{{box-sizing:border-box;min-height:34px;padding:6px 9px;border:1px solid #9ca3af;background:#fff;color:#1f2937}}
+.filters input{{min-width:260px}} .filters button{{cursor:pointer}} .filter-count{{margin-left:auto;font-size:13px;color:#4b5563}}
 </style></head><body>
 <h1>TRTMC performance matrix</h1>
 <p class="meta">Generated {generated}. {family_count} families across {len(rows)} model-profile comparisons.{repeated_note}</p>
@@ -2427,9 +2501,57 @@ th{{background:#e5e7eb}} tr:nth-child(even){{background:#f9fafb}} code{{font-siz
 <p class="meta">Model-profile wall time spans the complete case from start to finish, including bundle preparation, GPU headroom waits, TRTMC and baseline commands, and orchestration overhead. It is reported for observability and is not used for traffic-light classification.</p>
 <p class="meta">{bundle_preparation_summary}</p>
 <p><strong>{summary}</strong></p>
+<div class="filters" aria-label="Report filters">
+<label>Search
+<input id="report-filter-search" type="search" placeholder="Family, operation, or model">
+</label>
+<label>Light
+<select id="report-filter-light"><option value="">All</option><option value="green">Green</option><option value="yellow">Yellow</option><option value="red">Red</option><option value="white">White</option></select>
+</label>
+<label>Bundle preparation
+<select id="report-filter-preparation"><option value="">All</option><option value="built">Built</option><option value="cache_hit">Cache hit</option><option value="reused">Existing bundle</option><option value="would_build">Would build</option><option value="unrecorded">Not recorded</option></select>
+</label>
+<button id="report-filter-reset" type="button">Reset</button>
+<span class="filter-count" id="report-filter-count">Showing {len(rows)} of {len(rows)} rows</span>
+</div>
 <div class="table-wrap"><table><thead><tr><th>Family</th><th>Operation</th><th>Model profile</th><th>Model-profile wall time</th><th>Baseline</th><th>TRTMC infer p50 (ms)</th><th>Baseline infer p50 (ms)</th><th>TRTMC bundle preparation</th><th>Measured scope</th><th>Light</th><th>Note</th><th>Commands</th></tr></thead>
 <tbody>{"".join(body)}</tbody></table></div>
 <p class="meta">Green: TRTMC is more than the configured margin faster. Yellow: within the margin. Red: TRTMC is more than the margin slower. White: not run, partial, or invalid comparison. Commands are the original recorded argv and must be run from the displayed working directory with the same model cache and dependencies.</p>
+<script>
+(() => {{
+  const search = document.getElementById("report-filter-search");
+  const light = document.getElementById("report-filter-light");
+  const preparation = document.getElementById("report-filter-preparation");
+  const reset = document.getElementById("report-filter-reset");
+  const count = document.getElementById("report-filter-count");
+  const rows = Array.from(document.querySelectorAll("tbody tr[data-filter-search]"));
+  const applyFilters = () => {{
+    const searchValue = search.value.trim().toLowerCase();
+    const lightValue = light.value;
+    const preparationValue = preparation.value;
+    let visible = 0;
+    for (const row of rows) {{
+      const matchesSearch = !searchValue || row.dataset.filterSearch.includes(searchValue);
+      const matchesLight = !lightValue || row.dataset.filterLight === lightValue;
+      const matchesPreparation = !preparationValue ||
+        row.dataset.filterPreparation.split(" ").includes(preparationValue);
+      row.hidden = !(matchesSearch && matchesLight && matchesPreparation);
+      if (!row.hidden) visible += 1;
+    }}
+    count.textContent = "Showing " + visible + " of " + rows.length + " rows";
+  }};
+  search.addEventListener("input", applyFilters);
+  light.addEventListener("change", applyFilters);
+  preparation.addEventListener("change", applyFilters);
+  reset.addEventListener("click", () => {{
+    search.value = "";
+    light.value = "";
+    preparation.value = "";
+    applyFilters();
+    search.focus();
+  }});
+}})();
+</script>
 </body></html>"""
 
 
@@ -2439,6 +2561,121 @@ def _write_artifacts(output: Path, results: Mapping[str, Any]) -> None:
     legacy_replay = output / "reproduce.py"
     if legacy_replay.is_file():
         legacy_replay.unlink()
+
+
+def _apply_bundle_preparation_receipt(
+    results: MutableMapping[str, Any], receipt: Mapping[str, Any]
+) -> None:
+    if receipt.get("schema_version") != PREPARATION_SCHEMA:
+        raise PerfMatrixError(
+            f"preparation receipt schema_version must be {PREPARATION_SCHEMA!r}"
+        )
+    if receipt.get("scope") != "test_task":
+        raise PerfMatrixError("preparation receipt scope must be 'test_task'")
+    if receipt.get("git_commit") != results.get("git_commit"):
+        raise PerfMatrixError(
+            "preparation receipt repository revision does not match the performance run"
+        )
+    if receipt.get("included_in_performance_metrics") is not False:
+        raise PerfMatrixError(
+            "preparation receipt must exclude bundle preparation from performance metrics"
+        )
+    bundles = receipt.get("bundles")
+    if not isinstance(bundles, list) or not bundles:
+        raise PerfMatrixError("preparation receipt must contain at least one bundle")
+
+    run_bundles = {
+        (str(bundle.get("model", "")), str(bundle.get("bundle", "")))
+        for row in results.get("cases", [])
+        if isinstance(row, Mapping)
+        for bundle in _bundle_preparation_records(row)
+    }
+    seen: set[tuple[str, str]] = set()
+    allowed_statuses = {"built", "cache_hit", "reused"}
+    validated: list[dict[str, Any]] = []
+    for index, bundle in enumerate(bundles):
+        if not isinstance(bundle, Mapping):
+            raise PerfMatrixError(
+                f"preparation receipt bundle {index} must be a JSON object"
+            )
+        model = bundle.get("model")
+        path = bundle.get("bundle")
+        status = bundle.get("status")
+        if not isinstance(model, str) or not model:
+            raise PerfMatrixError(
+                f"preparation receipt bundle {index} has no model"
+            )
+        if not isinstance(path, str) or not path:
+            raise PerfMatrixError(
+                f"preparation receipt bundle {index} has no bundle path"
+            )
+        if status not in allowed_statuses:
+            raise PerfMatrixError(
+                f"preparation receipt bundle {index} has invalid status {status!r}"
+            )
+        if bundle.get("included_in_performance_metrics") is not False:
+            raise PerfMatrixError(
+                f"preparation receipt bundle {index} must be excluded from "
+                "performance metrics"
+            )
+        build_time = bundle.get("build_time_s")
+        if status == "built" and (
+            not isinstance(build_time, (int, float))
+            or isinstance(build_time, bool)
+            or not math.isfinite(float(build_time))
+            or float(build_time) < 0.0
+        ):
+            raise PerfMatrixError(
+                f"preparation receipt bundle {index} has invalid build_time_s"
+            )
+        key = (model, path)
+        if key in seen:
+            raise PerfMatrixError(
+                f"preparation receipt repeats bundle {path!r} for model {model!r}"
+            )
+        seen.add(key)
+        if key not in run_bundles:
+            raise PerfMatrixError(
+                f"preparation receipt bundle {path!r} for model {model!r} "
+                "does not match a bundle used by the performance run"
+            )
+        validated.append(deepcopy(dict(bundle)))
+
+    results["bundle_preparation"] = {
+        "schema_version": PREPARATION_SCHEMA,
+        "scope": "test_task",
+        "git_commit": receipt["git_commit"],
+        "included_in_performance_metrics": False,
+        "bundles": validated,
+    }
+
+
+def _read_json_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PerfMatrixError(f"cannot read {label} {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise PerfMatrixError(f"{label} must contain a JSON object")
+    return value
+
+
+def _report_existing(arguments: argparse.Namespace) -> int:
+    output = arguments.run_directory.resolve()
+    results = _read_json_object(output / "results.json", "performance results")
+    if results.get("schema_version") != RESULT_SCHEMA:
+        raise PerfMatrixError(f"cannot report non-{RESULT_SCHEMA} results")
+    if not isinstance(results.get("cases"), list):
+        raise PerfMatrixError("cannot report results without matrix entries")
+    if arguments.preparation_receipt is not None:
+        receipt = _read_json_object(
+            arguments.preparation_receipt.resolve(), "preparation receipt"
+        )
+        _apply_bundle_preparation_receipt(results, receipt)
+    _write_artifacts(output, results)
+    print(f"Results: {output / 'results.json'}")
+    print(f"Report: {output / 'report.html'}")
+    return 0
 
 
 def _existing_ancestor(path: Path) -> Path:
@@ -2720,6 +2957,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_new(arguments)
         if arguments.command == "resume":
             return _resume(arguments)
+        if arguments.command == "report":
+            return _report_existing(arguments)
         raise PerfMatrixError(f"unsupported command: {arguments.command}")
     except PerfMatrixError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

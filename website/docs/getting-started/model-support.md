@@ -23,9 +23,9 @@ Its build ownership is under a selected family's adapter subtree; an
 implementation DSO, while profile TOMLs bind an exact model ID, immutable
 revision, target, build options, and qualification state. The current
 implementation is Qwen with TensorRT Edge-LLM. Three Qwen3/A100 SM80/FP16
-profiles are marked qualified. These profiles supplement the native inventory;
-they are not additional `runtime_strategy` keys or blanket support for every
-Qwen checkpoint, GPU, or configuration.
+profiles retain exact qualification state and semantic-source bindings. Source
+does not publish their former A100 hardware runner. They are not additional
+`runtime_strategy` keys or blanket support for Qwen, x86_64, or A100.
 
 Run the ownership validator instead of counting filenames manually:
 
@@ -66,8 +66,9 @@ appropriate build and E2E evidence.
 
 The table groups current native E2E manifests by `task_strategy`. Native
 runtime strategies remain model-owned; the examples are dispatch keys, not
-generic aliases. Optimized-runtime qualifications have their own profile and
-producer descriptors and do not add rows to this native strategy inventory.
+generic aliases. Optimized-runtime profiles do not add rows to this native
+strategy inventory. The current Source tree publishes no active
+optimized-runtime producer.
 
 | Task strategy | Example runtime strategies | Manifest families |
 | --- | --- | --- |
@@ -157,6 +158,8 @@ back to the native bundle path.
 
 For the exact checkpoint list, inputs, precision, task strategy, and oracle,
 read the JSON manifests declared by the relevant
-`tests/e2e/models/<family>/MODEL.toml`. For an optimized profile, also inspect
-the family-owned profile TOML and the matching
-`tests/e2e/models/<family>/<adapter>/QUALIFICATION.*.toml`.
+`tests/e2e/models/<family>/MODEL.toml`. For an optimized implementation,
+inspect its family-owned profile TOML. The retained qualified profiles are
+exact product routes; because Source does not publish their former
+target-hardware runner, a Source checkout alone cannot reproduce their
+hardware qualification.

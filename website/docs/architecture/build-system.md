@@ -110,17 +110,14 @@ dependencies.
 
 The Conan package recipe manages `nlohmann_json` for native wheel builds. TensorRT and CUDA are still supplied by the build environment and by pip/host runtime dependencies rather than by Conan recipes.
 Release wheel builds disable the optional libtorch-backed multinomial sampler so the wheel does not link against PyTorch's native DSOs or inherit their platform floor.
-CI jobs build and use `TRTMC_CI_IMAGE` from the repository `Dockerfile` for
-package and test stages. The workflow derives it from repository variable
-`TRTMC_MANYLINUX_CI_IMAGE` or default `trtmc-dev-gb300:manylinux_2_39`.
-That image is Ubuntu 24.04 / glibc 2.39 with the TensorRT 11 CUDA 13 stack so
-`auditwheel` can verify the `manylinux_2_39_aarch64` tag instead of inheriting a
-newer general-purpose CI image floor. Nightly has a dedicated package/coverage
-job that builds the wheel artifact before publication. Ordinary PR unit tests
-and PR/nightly model proofs do not install that wheel: they project the exact
-source revision into isolated containers and configure, build, and test there.
-The x86_64 optimized-runtime qualification path is separate again: it builds,
-audits, and installs its exact wheel before target-hardware proof.
+Release validation builds from the repository `Dockerfile`, which is pinned to
+the official TensorRT 11.1 CUDA 13 cohort on Ubuntu 24.04 / glibc 2.39.
+`auditwheel` verifies the `manylinux_2_39_aarch64` tag instead of inheriting a
+newer general-purpose image floor. Package validation builds and installs the
+wheel before release. Source unit tests and model proofs configure, build, and
+test the exact source revision separately. The x86_64 optimized-runtime
+qualification path is separate again: it builds, audits, and installs its exact
+wheel before target-hardware proof.
 
 To build the release wheel manually, run `python -m build --wheel .` from the repository root with `WHEEL_PYVER`, `WHEEL_ABI`, `WHEEL_ARCH`, and the `TRTMC_TRT_*` / `TRTMC_CUDA_*` paths set. See [Installation](../getting-started/installation.md#2-build-the-aarch64-wheel-from-source) for the full command.
 

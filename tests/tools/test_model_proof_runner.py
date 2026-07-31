@@ -760,6 +760,9 @@ def test_inner_proof_runs_the_exact_model_owned_python_test_selection() -> None:
     assert "self.source / path" in inner
     assert 'glob("test_*.py")' in selector
     assert '"TRTMC_BINARY": str(self.work / "build/trtmc")' in inner
+    assert '"TRTMC_ELF_TIMING_CACHE_PATH": ""' in inner
+    assert '"TRTMC_ELF_TIMING_CACHE_METADATA_PATH": ""' in inner
+    assert '"TRTMC_ELF_TIMING_CACHE_GENERATE": "0"' in inner
 
 
 @pytest.mark.parametrize(

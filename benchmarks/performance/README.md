@@ -68,6 +68,14 @@ Continue an interrupted run and automatically retry incomplete or failed entries
 python3 tools/perf_matrix.py resume artifacts/perf/<run-id>
 ```
 
+If bundle preparation ran before the matrix campaign, attach its receipt and
+regenerate the report:
+
+```bash
+python3 tools/perf_matrix.py report artifacts/perf/<run-id> \
+  --preparation-receipt artifacts/perf/bundle-preparation.json
+```
+
 `--entry` selects an exact matrix entry ID. Base contract rows use
 `family.operation`; additional profiles use `family.operation@model-profile`.
 It is not a model input or testcase name. The default is the complete matrix.
@@ -225,10 +233,21 @@ report.html
 commands, bundle-preparation status and build time, and bounded diagnostic
 output. `report.html` shows the total campaign wall-clock span, each
 model-profile case's wall time, the family matrix, both infer-time p50 values,
-TRTMC bundle preparation, measured scopes, and traffic lights. Per-case wall
-time includes bundle preparation, GPU headroom waits, both commands, and
-orchestration overhead. It and bundle build time are reported for run
-observability but are excluded from the infer-time comparison.
+TRTMC bundle preparation, measured scopes, and traffic lights. Its self-contained
+filters search family, operation, model, or entry ID and select traffic-light or
+bundle-preparation status without a server dependency. Per-case wall time
+includes bundle preparation, GPU headroom waits, both commands, and orchestration
+overhead. It and bundle build time are reported for run observability but are
+excluded from the infer-time comparison.
+
+The preparation receipt uses schema `trtmc.perf-bundle-preparation/v1`, scope
+`test_task`, and the performance run's exact `git_commit`. Each entry under
+`bundles` records `model`, the final `bundle` path used by the campaign,
+`status`, `build_time_s`, and `included_in_performance_metrics: false`. The
+report command rejects a revision mismatch, invalid build time, duplicate
+record, or bundle that the campaign did not use. A matching task-level record
+takes precedence over the candidate command's later cache lookup, so a bundle
+rebuilt during preparation is reported as `Built`, not `Existing bundle`.
 
 Each report row shows the exact leaf commands that were executed:
 

@@ -318,9 +318,9 @@ def _linear_bf16(
 def _native_bf16_barrier(network: Any, x: Any, name: str, trt: Any) -> Any:
     """Preserve a BF16 rounding boundary with TensorRT's native API.
 
-    TensorRT 11.2 documents that ``mark_debug`` prevents fusion across the
-    marked tensor.  Runtime emission remains disabled unless a caller opts in
-    to tensor debugging, so this does not add an engine binding or a copy.
+    TensorRT's native ``mark_debug`` API prevents fusion across the marked
+    tensor. Runtime emission remains disabled unless a caller opts in to tensor
+    debugging, so this does not add an engine binding or a copy.
     """
 
     x = _cast(network, x, trt.bfloat16)

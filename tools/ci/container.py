@@ -72,8 +72,8 @@ class CiContainer:
             ["docker", "rm", "-f", self.config.name], check=False, capture_output=True
         )
 
-        options, mounts = self._runtime_boundary()
         self._prepare_host_paths()
+        options, mounts = self._runtime_boundary()
         command = [
             "docker",
             "run",
@@ -104,9 +104,45 @@ class CiContainer:
         if not self.config.hardened:
             options = shlex.split(self.env.get("TRTMC_CONTAINER_OPTIONS", ""))
             mounts = []
-            shared_users = Path("/workspace/users/yifeif")
-            if shared_users.is_dir():
-                mounts.extend(["-v", f"{shared_users}:{shared_users}"])
+            raw_mounts = [
+                self.env.get(name, "")
+                for name in (
+                    "TRTMC_STORAGE_ROOT",
+                    "ENGINE_DIR",
+                    "HF_HOME",
+                    "HF_HUB_CACHE",
+                    "HUGGINGFACE_HUB_CACHE",
+                    "HF_MODULES_CACHE",
+                )
+            ]
+            configured_mounts = self.env.get("TRTMC_CI_HOST_MOUNTS", "")
+            raw_mounts.extend(configured_mounts.split(os.pathsep))
+            host_paths: list[Path] = []
+            for raw_path in raw_mounts:
+                if not raw_path:
+                    continue
+                candidate = Path(raw_path).expanduser()
+                if not candidate.is_absolute():
+                    continue
+                host_path = candidate.resolve()
+                if not host_path.is_dir():
+                    continue
+                if (
+                    host_path == Path.home().resolve()
+                    or host_path in self.config.workspace.parents
+                ):
+                    continue
+                if any(
+                    host_path == parent or host_path.is_relative_to(parent)
+                    for parent in host_paths
+                ):
+                    continue
+                host_paths = [
+                    child for child in host_paths if not child.is_relative_to(host_path)
+                ]
+                host_paths.append(host_path)
+            for host_path in sorted(host_paths):
+                mounts.extend(["-v", f"{host_path}:{host_path}"])
             return options, mounts
 
         scratch_parent = Path(self.env.get("RUNNER_TEMP", "/tmp")).resolve()

@@ -32,7 +32,9 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Config — edit these to match your setup
 # ---------------------------------------------------------------------------
-WORKSPACE_ROOT = "/workspace/users/yifeif/workspaces"
+WORKSPACE_ROOT = os.environ.get(
+    "TRTMC_WORKSPACE_ROOT", str(Path.home() / "trtmc-workspaces")
+)
 DISCOVER_CONTAINER = "trtmc-dev-gb300-agent-1"
 DEFAULT_AGENT_BIN = "codex"
 DEFAULT_AGENT_ARGS = [
@@ -148,14 +150,14 @@ WORKER_PROMPT = textwrap.dedent("""\
       "
       ```
     - Read existing family plugins for reference at:
-      /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/python/tensorrt_model_connect/families/
+      python/tensorrt_model_connect/families/
     - Read the selected family's model/model.py for graph operations and blocks.
     - Read the HF model's modeling code to understand the EXACT computation.
     - If the model uses a novel attention mechanism (disentangled, sliding
       window, linear, etc.), you MUST implement it correctly in the plugin's
       build_engine() — do not approximate or skip it.
-    - Edit the plugin on the HOST at:
-      /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/python/tensorrt_model_connect/families/{family_name}/
+    - Edit the plugin in the current repository at:
+      python/tensorrt_model_connect/families/{family_name}/
       Keep plugin.py and config.py at the root; put weight loading in weights/
       and graph/build/runtime implementation in model/.
 
@@ -166,7 +168,7 @@ WORKER_PROMPT = textwrap.dedent("""\
 
     How to add a C++ runtime plugin:
     1. Read an existing plugin for reference. Key files at:
-       /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/src/runtime/plugins/
+       src/runtime/plugins/
        - decoder_plugin.cpp (decoder-only text gen)
        - a specialized encoder-decoder plugin
        - encoder_plugin.cpp (encoder-only)
@@ -184,8 +186,8 @@ WORKER_PROMPT = textwrap.dedent("""\
     Do NOT stop at "build passes but validation fails".
 
     ### Done
-    When ALL THREE validation gates pass, create the E2E manifest at (HOST path):
-    /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/tests/e2e/models/{family_name}/manifests/{family_name}.json
+    When ALL THREE validation gates pass, create the E2E manifest at:
+    tests/e2e/models/{family_name}/manifests/{family_name}.json
     Also list it in tests/e2e/models/{family_name}/MODEL.toml.
     The manifest must NOT have a "skip" field.
 
@@ -194,7 +196,7 @@ WORKER_PROMPT = textwrap.dedent("""\
     docker exec trtmc-dev-gb300-{agent_id} /opt/venv/bin/python -m pytest \
         tests/e2e/models/{family_name}/test_{family_name}_e2e.py -v \
         --e2e-model {family_name} \
-        --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+        --engine-dir "${{TRTMC_ENGINE_DIR:-./engines}}" \
         --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python \
         --rebuild-engines
     ```
@@ -206,7 +208,7 @@ WORKER_PROMPT = textwrap.dedent("""\
     ### Submit
     After validation passes, prepare a focused commit and GitHub PR:
     ```
-    cd /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect
+    cd "$(git rev-parse --show-toplevel)"
     git fetch github main
     git switch -C autopilot/{family_name} github/main
     git status --short
@@ -236,9 +238,8 @@ WORKER_PROMPT = textwrap.dedent("""\
       pathlib.Path('<path-inside-container>').write_text('''<content>''')
       "
       ```
-      The container's /workspace/tensorrt-model-connect/ maps to the host workspace.
-      Do NOT try to write directly to /workspace/users/yifeif/workspaces/{agent_id}/
-      — that path is read-only from the sandbox. Always write via docker exec.
+      The container's /workspace/tensorrt-model-connect/ maps to the current
+      host workspace. Use repository-relative paths in commands and reports.
     - **Decoupling**: Create NEW files for your plugin — do NOT modify existing
       plugins (decoder, encoder, or modality-specific plugins, etc.).
       Each family gets its own isolated Python plugin and (if needed) its own

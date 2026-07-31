@@ -59,9 +59,9 @@ Source contains exactly these three workflow files:
 | `.github/workflows/legal.yml` | Reusable or manual exact-revision legal-document and source-header certification; it does not run on `main` pushes. |
 | `.github/workflows/pages.yml` | Pushes affecting `website/**` on `main`, or manual runs; builds and deploys only the documentation site to GitHub Pages. |
 
-Internal scheduled nightly, model proof, optimized-runtime qualification, and
-performance execution are not Source workflows. Their raw evidence is not
-published through Source Actions or Pages.
+Internal scheduled nightly and model proof are not Source workflows. Their raw
+evidence is not published through Source Actions or Pages. Source currently has
+no active optimized-runtime hardware qualification route.
 
 ## CPU and repository checks
 

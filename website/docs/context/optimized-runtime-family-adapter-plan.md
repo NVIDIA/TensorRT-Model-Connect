@@ -1,23 +1,20 @@
 # Family-Owned Optimized Runtime Adapter Design Record
 
-Status: Implemented for the exact qualified Qwen x Edge-LLM profiles; broader
-support remains profile- and hardware-bounded.
+Status: Implemented for exact qualified Qwen x Edge-LLM profiles; the former
+A100 qualification runner is not published.
 
 :::note Current implementation and support boundary
 
 This document began as an implementation plan and now preserves the design
 rationale. The current tree contains one Qwen x TensorRT Edge-LLM
 implementation descriptor and three exact Qwen3/A100 SM80/FP16 profiles marked
-`qualified`. That is current support for those pinned
-model/revision/target/options tuples, not blanket support for Qwen, Edge-LLM,
-x86_64, or A100 configurations.
+`qualified`.
 
 Current selection truth comes from the family-owned `IMPLEMENTATION.toml`,
-profile TOMLs, their semantic-source digests, and the matching qualification
-producer/tests. See [Model Support](../getting-started/model-support.md).
-The private dependencies and target hardware named below are still required;
-prose retained from the planning phase is not a substitute for those
-descriptors or exact-revision evidence.
+profile TOMLs, and their semantic-source digests. Source publishes no A100
+producer descriptor or target-hardware runner. See
+[Model Support](../getting-started/model-support.md). Prose retained from the
+planning phase is not fresh qualification evidence.
 
 The current builder also evaluates a family-owned `default_build_route` before
 provider probing. Eligible dense Qwen3 and Llama checkpoints now take that
@@ -110,19 +107,12 @@ src/runtime/models/qwen/edge_llm_adapter/
 
 # Test
 tests/e2e/models/qwen/edge_llm_adapter/
-├── QUALIFICATION.a100.toml
-├── CMakeLists.txt
-├── performance_harness.py
-├── performance_runner.h and two private runner sources
-├── run_a100_ci.sh
-├── test_performance_contract.py
 ├── test_adapter.py
-├── test_runtime_contract.py
-└── test_a100_e2e.py
+└── test_runtime_contract.py
 ```
 
-There is exactly one Python build adapter, one C++ runtime adapter, one
-exported DSO, and one parameterized test harness for the three profiles.
+There is exactly one Python build adapter, one C++ runtime adapter, and one
+exported DSO. The A100 hardware-qualification route is not published.
 
 ### Generic MC Host Owns
 
@@ -133,18 +123,9 @@ exported DSO, and one parameterized test harness for the three profiles.
 - delegated artifact materialization and reuse;
 - runtime DSO loading, factory creation, lifecycle, and error boundaries.
 
-The standalone generic hardware-qualification dispatcher is also
-runtime-neutral. It discovers
-`QUALIFICATION.*.toml` descriptors in model-owned Test directories, maps an
-exact Git diff to a hardware qualification matrix, and invokes the declared
-model-owned entrypoints. It contains no Qwen, Edge-LLM, model-ID, profile, or
-GPU table. Ordinary premerge CI does not call this workflow while there is no
-managed target-hardware runner pool. A new family-runtime integration adds its
-own descriptor and runner without adding another top-level workflow.
-Qualifications sharing one downstream `runtime_id` elect exactly one representative.
-Family-owned changes select that family only; shared host, bundle, build, or
-dispatcher changes select the representative once per optimized runtime
-instead of fanning out across every family.
+Target-hardware qualification is not a responsibility of the generic runtime
+host. The current Source tree publishes no producer descriptor, selector, or
+hardware matrix.
 
 ### Qwen x Edge-LLM Adapter Owns
 
@@ -328,11 +309,12 @@ The exact Edge-LLM release/commit, TensorRT, CUDA, compiler, and target identify
 the dependency build cache. A native-only MC request neither fetches nor builds
 Edge-LLM.
 
-The x86 release cohort is TensorRT 11.1.0.106 with CUDA 13.4; the existing
-aarch64 release remains on TensorRT 11.2.0.113. The wheel metadata selects the
-TensorRT package by architecture. Model Connect, the Qwen adapter, and Edge-LLM
-must use the same process-wide TensorRT/CUDA ABI. The bundle therefore does not
-carry a second `libnvinfer` or `libcudart`.
+The Edge-LLM x86 release cohort uses TensorRT 11.1.0.106 with CUDA 13.4, as
+specified by its model-owned dependency lock. Model Connect's aarch64 release
+cohort uses the official TensorRT 11.1.0.106 SDK with CUDA 13.3. Wheel metadata
+selects the TensorRT package for the current architecture. Model Connect, the
+Qwen adapter, and Edge-LLM must use the same process-wide TensorRT/CUDA ABI.
+The bundle therefore does not carry a second `libnvinfer` or `libcudart`.
 
 The x86 build and qualification image provides Python 3.12 with its `venv`
 module, CMake 3.20 or newer, Ninja, GCC 13, the CUDA 13.4 toolkit, and the
@@ -377,9 +359,9 @@ API validation must reflect the APIs that exist today:
 - CLI: build, inspect, load, and one text-generation request;
 - Python: load and one text-generation request through the existing wrapper;
 - C++: use the existing C++ CLI benchmark path to load one pipeline and issue
-  consecutive `generate()` calls on that same long-lived instance. The A100
-  test also compiles a temporary installed-SDK client that calls the unchanged
-  `trtmc::load()` and `generate()` API; no model-specific runner is shipped;
+  consecutive `generate()` calls on that same long-lived instance. A future
+  target-hardware qualification may also compile an installed-SDK client that
+  calls the unchanged `trtmc::load()` and `generate()` API;
 - C-linkage C++ subset: create/load the pipeline, proving bundle validation,
   materialization, and DSO loading only. The current subset exposes neither
   text generation nor pipeline destruction and is not a complete pure-C
@@ -442,22 +424,11 @@ repository. The planned work was:
 4. **Route tests by ownership**
    - Premerge: source-only integration, schema, matching, packaging, dispatch,
      and lifecycle contract tests; never Edge-LLM E2E on the GB300 pool.
-   - Profile-only hardware qualification: that profile's schema/match test and
-     target E2E after a managed target-hardware runner is available.
-   - Qwen x Edge-LLM adapter/runtime change: all Qwen Edge-LLM profiles.
-   - Shared Edge-LLM pin change: all adapters using that pin.
-   - Generic discovery/bundle change: generic contracts plus one representative
-     E2E per optimized runtime.
-
-   Keep the generic `optimized-runtime-proof` workflow manual/reusable until a
-   managed target-hardware runner pool exists; it is not a premerge dependency.
-   Each model-owned descriptor declares its profile glob, exact target fields,
-   digest-pinned container image, runner labels, trigger globs, and entrypoint.
-   Once hardware qualification is enabled, a profile-only diff passes only that
-   qualified profile basename to the model-owned runner. An adapter/runtime or
-   shared-pin diff passes an empty profile filter, meaning every qualified
-   profile for that descriptor's exact target. Profiles for another target are
-   never collected by that job.
+   - The A100 producer descriptor, runner, E2E, and performance proof are
+     removed. The retained profile state is a repository snapshot, not a
+     continuously dispatched hardware gate.
+   - Generic discovery and bundle changes continue to use source-only contract
+     tests.
 
 Adding a fourth Qwen x Edge-LLM profile must be demonstrable by adding one TOML
 file and test data only; it must not require editing generic MC code,
@@ -501,10 +472,11 @@ Run parameterized tests for all three profiles and verify:
 - model-family CI impact selection includes nested profile files and runs only
   the correct family scope.
 
-### Real A100 End-to-End
+### Historical Target-Hardware Qualification Requirements
 
-On the x86 A100 80GB PCIe node, parameterize one E2E over Qwen3-0.6B,
-Qwen3-1.7B, and Qwen3-4B:
+The removed A100 route used the following qualification requirements for
+Qwen3-0.6B, Qwen3-1.7B, and Qwen3-4B. They are retained as design history, not
+as commands or tests available in Source:
 
 1. Install the built MC wheel/package normally into the clean validation
    environment and verify it resolves TensorRT 11.1.0.106; do not use
@@ -552,30 +524,20 @@ The promotion measurement uses the same engine, prompt, token limit, sampling
 settings, CUDA synchronization, five warmups, thirty measured requests, and
 three repetitions for both long-lived paths. MC must be within 1.05x of direct
 Edge-LLM median latency, within 1.10x at p95, and retain at least 95% of direct
-throughput. These ratios and the raw measurements are CI artifacts tied to the
-exact tested clean Git revision or deterministic source-archive SHA-256. A
-dirty Git checkout cannot promote a profile. The family-owned performance
-runners are test-only sources: they are compiled by the A100 test, are not
-installed, and are not part of any public API. A profile remains `candidate`
-when any gate fails.
+throughput. These ratios and the raw measurements must be tied to the exact
+tested clean Git revision or deterministic source-archive SHA-256. A dirty Git
+checkout cannot promote a profile. The former test-only performance runners
+are not published. A future promotion route must provide equivalent fresh
+evidence.
 
 ### CI Evidence
 
 Ordinary premerge CI must run the source-only integration and model-owned
 contract tests selected by the ownership rules. It must not dispatch an A100
-job or attempt Edge-LLM E2E on the GB300 runner pool. The manual/reusable
-hardware workflow remains dormant until a managed A100 runner pool exists.
-When hardware qualification is enabled, the private Internal CI workflow
-uploads command logs, comparison output, and benchmark summaries as private
-workflow artifacts. Do not add proof data to the source tree or PR diff.
-
-The model-owned runner must fail before building when the runner GPU does not
-match the descriptor target, build and install a normal release wheel from the
-exact clean revision, and clean root-owned container scratch through its
-digest-pinned container. The generic workflow only selects, invokes, uploads,
-and gates; all family/runtime artifact formats and test logic stay in the model
-Test directory. Profile-only changes run only the matching profile shard.
-Adapter, runtime, or shared changes run the full target qualification.
+job or attempt Edge-LLM E2E on the GB300 runner pool. The Source tree publishes
+no A100 runner, producer descriptor, performance harness, or target-hardware
+proof. A future promotion would require a separately reviewed qualification
+route and fresh exact-revision evidence.
 
 ## Current implementation evidence
 
@@ -590,18 +552,14 @@ The repository currently records:
   each profile;
 - selection rules that decline delegation for a wrong revision, target, or
   options tuple, while treating failure after an exact profile is selected as
-  terminal rather than silently switching runtimes;
-- a model-owned `QUALIFICATION.a100.toml` producer descriptor, contract tests,
-  and selection tooling consumed by the private Internal CI
-  optimized-runtime proof workflow.
+  terminal rather than silently switching runtimes.
 
-The qualification state and digest are repository assertions about an exact
-source snapshot. Target-hardware pass logs and performance measurements remain
-workflow artifacts rather than checked-in documentation.
+The repository publishes no A100 qualification descriptor or runner. The
+profile declarations retain their exact semantic qualification snapshot.
 
 ## Remaining operational boundaries
 
-- These profiles require their pinned private Edge-LLM dependency, compatible
+- These profiles require their pinned Edge-LLM dependency, compatible
   x86_64 toolchain/runtime cohort, and the named A100 target.
 - Ordinary premerge source and contract tests are not substitutes for an
   exact-profile target-hardware qualification run.

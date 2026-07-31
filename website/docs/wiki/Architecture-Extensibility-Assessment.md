@@ -91,17 +91,15 @@ or an `IMPLEMENTATION.toml` alone.
 PYTHONPATH=python:. python3 tools/model_ci.py validate
 PYTHONPATH=python:. python3 tools/test_impact.py --validate
 PYTHONPATH=python:. python3 tools/check_runtime_strategy_matrix.py
-python3 tools/ci/optimized_runtime_qualifications.py --all
 PYTHONPATH=python:. python3 -m pytest \
   tests/tools/test_model_plugin_encapsulation_static.py \
   tests/tools/test_runtime_strategy_matrix_checker.py \
-  tests/tools/test_optimized_runtime_qualifications.py \
   tests/builder/test_manifest_validation.py \
   tests/builder/test_optimized_runtime_orchestrator.py \
   tests/builder/test_optimized_runtime_capsules.py -q
 ```
 
 Native model/GPU claims additionally require the selected E2E manifest on its
-declared environment. Optimized claims require the entrypoint and
-digest-pinned environment declared by the matching `QUALIFICATION.*.toml`;
-host-only contract tests do not replace that producer run.
+declared environment. Optimized claims require a matching model-owned producer
+proof; host-only contract tests do not replace that run. The current Source
+tree publishes no active optimized-runtime producer descriptor.

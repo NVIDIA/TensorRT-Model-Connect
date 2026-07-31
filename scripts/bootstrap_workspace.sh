@@ -5,7 +5,7 @@
 # Bootstrap an isolated workspace: clone repo + start a uniquely-named container.
 #
 # Each workspace gets:
-#   - Its own repo clone at /workspace/users/yifeif/workspaces/<id>/tensorrt-model-connect
+#   - Its own repo clone under TRTMC_WORKSPACE_ROOT
 #   - Its own Docker container named trtmc-dev-gb300-<id>
 #   - Shared HF cache and engine storage (read-mostly, safe to share)
 #   - Isolated build artifacts and git state
@@ -22,11 +22,11 @@ set -euo pipefail
 
 # --- Defaults ----------------------------------------------------------------
 
-WORKSPACE_ROOT="/workspace/users/yifeif/workspaces"
+WORKSPACE_ROOT="${TRTMC_WORKSPACE_ROOT:-${HOME}/trtmc-workspaces}"
 GIT_REMOTE="${TRTMC_GIT_REMOTE:-https://github.com/NVIDIA/TensorRT-Model-Connect.git}"
-DOCKER_IMAGE="trtmc-dev-gb300:latest"
-STORAGE_ROOT="/workspace/users/yifeif/tensorrt-model-connect"
-HF_CACHE="/mnt/storage/tensorrt-model-connect/model-weights"
+DOCKER_IMAGE="${TRTMC_DEV_IMAGE:-trtmc-dev-gb300:latest}"
+STORAGE_ROOT="${TRTMC_STORAGE_ROOT:-${HOME}/.cache/trtmc}"
+HF_CACHE="${TRTMC_HF_CACHE:-${HF_HOME:-${HOME}/.cache/huggingface}/hub}"
 
 WORKSPACE_ID=""
 BRANCH="main"

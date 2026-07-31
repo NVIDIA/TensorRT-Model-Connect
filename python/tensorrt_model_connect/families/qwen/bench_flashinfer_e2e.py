@@ -133,8 +133,10 @@ def main():
     parser.add_argument("--hf-python", default="/opt/venv/bin/python")
     parser.add_argument("--prompt", default="The capital of France is")
     parser.add_argument("--max-new-tokens", type=int, default=20)
-    parser.add_argument("--engine-dir",
-                        default="/workspace/users/yifeif/tensorrt-model-connect/engines")
+    parser.add_argument(
+        "--engine-dir",
+        default=os.environ.get("TRTMC_ENGINE_DIR", "./engines"),
+    )
     parser.add_argument("--skip-trt", action="store_true")
     parser.add_argument("--skip-flashinfer", action="store_true")
     parser.add_argument("--skip-hf-eager", action="store_true")

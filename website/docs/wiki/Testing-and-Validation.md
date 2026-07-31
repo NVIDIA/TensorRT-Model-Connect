@@ -10,7 +10,7 @@ model and current E2E contract.
 | --- | --- | --- |
 | Python builder | `tests/builder/` | Config, mapping, graph/build, bundle, and CLI units |
 | C++ runtime | `tests/cpp/` and model-declared runtime tests | Core and family runtime behavior |
-| Optimized implementation | Family adapter contract tests and `QUALIFICATION.*.toml` | Exact implementation/profile selection, embedded-DSO loading, parity, and performance proof |
+| Optimized implementation | Family adapter contract tests and exact profile data | Exact implementation/profile selection and embedded-DSO loading; target-hardware parity and performance require separate evidence |
 | Repository tools | `tests/tools/` | CI selection, isolation, comparison, packaging, reports |
 | E2E harness | `tests/e2e_harness/` | Manifest loading, orchestration, runner/comparator contracts |
 | Model E2E | `tests/e2e/models/<family>/` | Exact checkpoint/task integration and artifacts |
@@ -62,8 +62,8 @@ Optimized-runtime evidence is not a second native strategy. It consists of:
    runtime identity and private `libtrtmc_impl_*.so`.
 2. An exact qualified `profiles/*.toml` entry binding the model revision,
    target, build options, and semantic hash.
-3. A matching model-owned `QUALIFICATION.*.toml` producer descriptor and
-   retained parity/performance results.
+3. Retained parity/performance results from a matching target-hardware
+   producer. Source currently publishes no A100 producer or runner.
 4. A bundle that is self-contained for the implementation DSO and
    provider-produced artifacts: `optimized_runtime.json`,
    `implementation.json`, the integrity-bound artifact tree, and the exact

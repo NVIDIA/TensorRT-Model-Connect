@@ -111,7 +111,7 @@ if [ "${1:-}" = "run" ]; then
     profiles="$FAKE_DOCKER_REBUILT_PROFILES"
   fi
   cat <<'EOF'
-TENSORRT_VERSION=11.2.0.113
+TENSORRT_VERSION=11.1.0.106
 MODELOPT_VERSION=0.44.0
 NLOHMANN_JSON_HEADER=present
 EOF
@@ -265,7 +265,7 @@ default_execution_profiles = ["reference|demo"]
     (demo_root / "verify.py").write_text("import demo_package\n", encoding="utf-8")
 
     (repo_root / "Dockerfile").write_text(
-        "ARG TENSORRT_VERSION=11.2.0.113\nARG MODELOPT_VERSION=0.44.0\n",
+        "ARG TENSORRT_VERSION=11.1.0.106\nARG MODELOPT_VERSION=0.44.0\n",
         encoding="utf-8",
     )
     return repo_root, manifest, requirements
