@@ -1,172 +1,198 @@
 ---
 name: submit-github-pr
 description: >-
-  Use when pushing a branch to GitHub and opening a pull request for
-  TensorRT-Model-Connect. Enforces the repo's GitHub remote/main flow, prepares
-  reviewer-ready PR text, and adds ADRs for architectural changes when needed.
+  Use when publishing an existing TensorRT-Model-Connect change as a GitHub
+  pull request. Verifies authenticated repository access, branch and diff
+  scope, validation evidence, commit identity, reviewer-facing text, exact
+  pushed head, and the created draft PR without merging it.
 ---
 
 # Submit GitHub PR
 
-## Ground Rules
+## Boundaries
 
-- Treat `https://github.com/NVIDIA/TensorRT-Model-Connect.git` and the local
-  `github` remote as the active repository.
-- Target `main`; never push directly to `main`.
-- Push feature branches to `github`.
-- Use `gh` for GitHub PR operations.
-- Use `$write-git-messages` to draft the PR title/body and any commit or squash
-  message.
-- This skill opens PRs only. Do not merge from this skill. If the user asks to
-  babysit or merge the PR, switch to `$pr-babysitter` and follow its CI gate.
+- Active repository: `NVIDIA/TensorRT-Model-Connect`.
+- Use the local `github` remote and target GitHub `main`.
+- Never push directly to `main`.
+- Publish only the change the user placed in scope.
+- Open a draft PR by default; omit `--draft` only when the user explicitly asks
+  for a ready-for-review PR and the evidence supports that state.
+- Do not add labels, reviewers, milestones, projects, or auto-merge unless the
+  user explicitly requests them. The authorized Internal CI trigger is the
+  exception described below.
+- Do not merge from this skill. Use `$pr-babysitter` for monitoring and merge.
+- Use `$write-git-messages` for commit, PR, squash, and rebase text.
 
-## Quick Flow
+## 1. Authenticate And Verify The Remote
 
 ```bash
+gh auth status
+gh repo view NVIDIA/TensorRT-Model-Connect \
+  --json nameWithOwner,url,defaultBranchRef
+git remote get-url github
 git fetch github main
-git status --short --branch
-git diff --check
-git diff --stat github/main...HEAD
-git push -u github HEAD
 ```
 
-Create the PR:
+The remote URL must resolve to
+`https://github.com/NVIDIA/TensorRT-Model-Connect.git` or its authorized SSH
+equivalent. If `gh` cannot read the private repository, stop for safe
+reauthentication. Do not inspect or replay stored credentials.
+
+## 2. Confirm Branch And Exact Scope
 
 ```bash
-PR_HEAD_BRANCH=$(git branch --show-current)
-PR_TITLE="docs: describe the change"
-PR_BODY_FILE=/tmp/trtmc-pr-body.md
-test -n "$PR_HEAD_BRANCH"
-test -s "$PR_BODY_FILE"
+BRANCH=$(git branch --show-current)
+test -n "$BRANCH"
+test "$BRANCH" != main
+BASE_SHA=$(git rev-parse github/main)
+HEAD_SHA=$(git rev-parse HEAD)
+git status --short --branch
+git merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"
+git diff --stat "$BASE_SHA"...HEAD
+git diff --name-status "$BASE_SHA"...HEAD
+git log --oneline "$BASE_SHA"..HEAD
+```
+
+Review focused diffs, staged changes, and untracked files. Do not publish:
+
+- unrelated user changes;
+- generated artifacts or secrets not intended for review;
+- an empty branch;
+- a branch based on the wrong repository or target;
+- commit messages containing `Claude`.
+
+If the branch is behind or diverged from current `github/main`, rebase only when
+that history rewrite is within the user's request. Revalidate after any rebase.
+
+## 3. Validate The Publishable Head
+
+Run `git diff --check` plus checks appropriate to the changed surface. Record
+the exact command and pass/fail/skip/not-run result. Do not present:
+
+- a dry run as execution;
+- compilation as model parity;
+- static docs checks as target-hardware proof;
+- a check on a prior SHA as evidence for the current head.
+
+Confirm the worktree contains no unsaved in-scope change before committing or
+pushing. If a new commit is needed, use `$write-git-messages` and a GitHub-safe
+author email; do not change global Git identity implicitly.
+
+Create or update an architectural record only when an existing repository
+policy, template, maintainer request, or user instruction requires it. This
+skill does not invent ADR policy or files merely from the size/type of a diff.
+
+## 4. Draft Reviewer Text
+
+Give `$write-git-messages`:
+
+- exact base and head SHA/ref;
+- changed files and behavioral purpose;
+- exit criteria and non-goals;
+- validation commands with outcomes;
+- unrun CI, GPU, model, performance, or qualification gates;
+- dependency and merge order;
+- compatibility, security, migration, rollback, and review-order notes.
+
+The PR title should match the expected squash/rebase title and follow repository
+convention. Keep the body focused on one purpose.
+
+## 5. Push The Named Branch
+
+```bash
+git push -u github "$BRANCH"
+PUSHED_SHA=$(git rev-parse "github/$BRANCH")
+test "$PUSHED_SHA" = "$(git rev-parse HEAD)"
+```
+
+Do not force-push unless the user authorized the history rewrite and the exact
+remote branch was resolved first. When rewriting an existing branch, prefer an
+explicit lease for that branch and its previously observed SHA.
+
+## 6. Create And Verify The PR
+
+Pass the reviewed body on stdin to avoid leaving an unnecessary local file:
+
+```bash
 gh pr create \
   --repo NVIDIA/TensorRT-Model-Connect \
   --base main \
-  --head "$PR_HEAD_BRANCH" \
-  --title "$PR_TITLE" \
-  --body-file "$PR_BODY_FILE"
+  --head "$BRANCH" \
+  --draft \
+  --title "<type(scope): concise summary>" \
+  --body-file -
 ```
 
-If `gh` is not authenticated but a GitHub token is available, prefer a temporary
-environment variable sourced from the user's secret manager, and do not print
-the token:
+Verify the immutable facts:
 
 ```bash
-GH_TOKEN="${GITHUB_TOKEN:?Set GITHUB_TOKEN from your secret manager first}" \
-  gh pr view --repo NVIDIA/TensorRT-Model-Connect
+gh pr view <number-or-url> \
+  --repo NVIDIA/TensorRT-Model-Connect \
+  --json number,url,isDraft,baseRefName,headRefName,headRefOid,title,state
 ```
 
-## ADR Check
-
-Before creating the PR, decide whether the diff warrants an Architecture
-Decision Record. Analyze the diff against `github/main`:
+The base must be `main`, head name must match, and `headRefOid` must equal
+`PUSHED_SHA`. Then inspect initial checks:
 
 ```bash
-git diff --name-only github/main...HEAD
+gh pr checks <number-or-url> \
+  --repo NVIDIA/TensorRT-Model-Connect
 ```
 
-Create an ADR when the diff introduces or substantially changes any of these:
+Queued, missing, skipped, or failed checks are not green.
 
-| Signal | Detection |
-|--------|-----------|
-| New runtime strategy | New plugin/strategy registration or runtime pipeline path |
-| New family plugin | New family module under `python/tensorrt_model_connect/families/` |
-| New pipeline class | New `.cpp` or `.h` under an owning model runtime directory such as `src/runtime/models/qwen/`, or under a shared runtime domain in `src/runtime/domains/` |
-| Config schema change | New persisted config field or parser behavior |
-| New E2E task strategy | New harness runner or comparator family |
-| New comparator/reference | New comparator/reference mechanism used by tests |
-| Architectural refactor | Broad runtime source moves, registry redesign, or cross-module contract change |
+## 7. Start Exact-Head Premerge When Authorized
 
-Do not create ADRs for routine bug fixes, tests without architectural impact,
-dependency bumps, docs-only changes, or new manifests for existing families.
-
-## ADR Creation
-
-Determine the next ADR number:
+Creating or pushing the PR does not start premerge. When CI execution is
+authorized, resolve the PR API head and actual source branch head independently
+before adding the one-shot trigger:
 
 ```bash
-LAST_NUM=$(ls website/docs/context/adr/[0-9]*.md 2>/dev/null | sort -V | tail -1 | grep -oE '[0-9]{4}' || true)
-NEXT_NUM=$(printf "%04d" $((10#${LAST_NUM:-0} + 1)))
+REPOSITORY=NVIDIA/TensorRT-Model-Connect
+PR_NUMBER=<number>
+pull=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")
+PR_HEAD_SHA=$(jq -er '.head.sha' <<<"$pull")
+HEAD_REPOSITORY=$(jq -r '.head.repo.full_name // empty' <<<"$pull")
+HEAD_REF=$(jq -r '.head.ref // empty' <<<"$pull")
+test -n "$HEAD_REPOSITORY"
+test -n "$HEAD_REF"
+HEAD_REF_URI=$(jq -rn --arg value "$HEAD_REF" '$value | @uri')
+BRANCH_HEAD_SHA=$(gh api \
+  "repos/$HEAD_REPOSITORY/branches/$HEAD_REF_URI" \
+  --jq .commit.sha)
+test "$PR_HEAD_SHA" = "$PUSHED_SHA"
+test "$PR_HEAD_SHA" = "$BRANCH_HEAD_SHA"
+
+gh api \
+  "repos/$REPOSITORY/commits/$PR_HEAD_SHA/status" \
+  --jq '[.statuses[] |
+    select(.context == "trtmc/premerge/required")][0]'
 ```
 
-Choose a concrete kebab-case slug and confirm the resulting path:
+Apply the equality check to same-repository and accessible fork PRs. Retry for
+up to six 10-second intervals while GitHub metadata settles. If the source
+repository or branch cannot be read, the source branch is still moving, or the
+SHAs do not converge, do not trigger CI; follow `tools/ci/README.md` and hand
+the stale-head recovery to `$pr-babysitter`.
+
+If the exact head already has `PENDING` or `PASS` for
+`trtmc/premerge/required`, do not trigger it again. Otherwise an actor with
+`maintain` or `admin` permission may run:
 
 ```bash
-ADR_SLUG=concise-decision-title
-ADR_PATH="website/docs/context/adr/${NEXT_NUM}-${ADR_SLUG}.md"
-printf '%s\n' "$ADR_PATH"
+gh pr edit "$PR_NUMBER" \
+  --repo "$REPOSITORY" \
+  --add-label run-internal-ci
 ```
 
-Create the file at `$ADR_PATH` with this template:
+Never use the legacy `run-ci` label. The bridge consumes the trigger, verifies
+the exact head, and dispatches private Internal CI. A successful Source bridge
+run is not a passing premerge result: only `trtmc/premerge/required=PASS` on
+the current head is a pass. Raw Internal CI logs, artifacts, packages, runner
+details, and URLs stay private and must not be copied to the Source PR.
 
-```markdown
----
-number: <NNNN>
-title: <concise decision title>
-status: Proposed
-date: <YYYY-MM-DD>
-source_commits: [<sha1>, <sha2>]
----
+## 8. Report And Hand Off
 
-## Context
-
-<Why the decision was needed.>
-
-## Decision
-
-<What the code now does and the main files/patterns involved.>
-
-## Considered Alternatives
-
-<Alternatives from the discussion, or "Not captured; review and add if known.">
-
-## Consequences
-
-<Capabilities, constraints, maintenance cost, compatibility, and rollback notes.>
-```
-
-Update `website/docs/context/adr/README.md` with the new row. Commit the ADR in
-the same branch before creating the PR.
-
-## PR Title And Body
-
-Use `$write-git-messages` to draft the PR title and body. This skill owns the
-reviewer-facing message style; do not maintain a second PR body template here.
-
-Provide these repo-specific facts to `$write-git-messages`:
-
-- Base branch and head branch.
-- Whether an ADR was created or intentionally skipped.
-- Exact validation commands and pass/fail/not-run results.
-- GitHub-specific notes such as CI state, labels, merge constraints, review
-  order, or source-branch deletion policy.
-- Any risk, rollback, compatibility, security, or dependency concerns found
-  while preparing the PR.
-
-After drafting, write the body to `$PR_BODY_FILE` and pass it with
-`gh pr create --body-file "$PR_BODY_FILE"`.
-
-## After Creation
-
-```bash
-gh pr view --repo NVIDIA/TensorRT-Model-Connect --web
-PR_NUMBER=$(gh pr view --repo NVIDIA/TensorRT-Model-Connect --json number --jq .number)
-test -n "$PR_NUMBER"
-gh pr checks --repo NVIDIA/TensorRT-Model-Connect "$PR_NUMBER"
-```
-
-## Start Exact-Head Premerge
-
-Creating or pushing the PR does not start premerge. After verifying that
-`headRefOid` equals the pushed SHA, and when CI execution is authorized, have an
-actor with `maintain` or `admin` permission add
-`run-internal-ci`.
-
-Check the current head's `trtmc/premerge/required` status first. Do not add the
-label when that head is already pending or has passed. Reapply it once only
-after an intentional head change, and never after the PR has merged. Hand
-monitoring and merge gating to `$pr-babysitter`.
-
-Do not merge from this skill, even if the task includes merge authority. Use
-`$pr-babysitter` for monitoring and merging. It has the required hard CI gate
-and explicitly forbids `gh pr merge --auto` and any merge while checks are
-queued, pending, running, missing, skipped unexpectedly, or failing.
+Report the PR URL and number, draft state, pushed head SHA, validation evidence,
+initial exact-head CI state, and any dependency or unrun gate. Hand monitoring
+and any merge work to `$pr-babysitter`; this skill never merges.
