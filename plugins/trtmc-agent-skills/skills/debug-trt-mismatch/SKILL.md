@@ -1,189 +1,201 @@
 ---
 name: debug-trt-mismatch
 description: >-
-  Use when TensorRT output diverges from HuggingFace output, an E2E comparison
-  fails, a model emits wrong text or media, or a family/plugin change introduces
-  numerical mismatch. Provides an escalation path from logit diffs to layer
-  diffs, vision-language checks, runner parity, and graph-op isolation.
+  Use when TensorRT output diverges from a model reference, model-first
+  validation fails, generated text or media is wrong, or a family change
+  introduces a numerical mismatch. Routes the investigation by model modality
+  and escalates from the first divergent boundary to the smallest responsible
+  family-owned operation.
 ---
 
 # Debug TRT Mismatch
 
-## First Step: Environment
+## Goal
 
-Run the checks before diffing:
+Find the first boundary where TensorRT and the declared reference disagree.
+Preserve the failing workload, sampling settings, model revision, bundle, and
+runtime strategy while narrowing the problem. Do not hide a mismatch by
+loosening validation thresholds.
 
-```bash
-nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null && echo "GPU: OK" || echo "GPU: MISSING"
-python3 -c "import tensorrt as trt; print(f'TRT: {trt.__version__}')" 2>/dev/null || echo "TRT: MISSING"
-python3 -c "import tensorrt_model_connect; print('tensorrt_model_connect: OK')" 2>/dev/null || echo "tensorrt_model_connect: MISSING (run: pip install --no-deps -e . -C py-only=true)"
-python3 -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}')" 2>/dev/null || echo "PyTorch: MISSING"
-```
+## Preflight
 
-For C++ parity checks:
+Record the exact revision and environment:
 
 ```bash
-test -x ./build/trtmc && echo "C++ binary: OK" || echo "C++ binary: MISSING"
+git rev-parse HEAD
+nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
+python3 -c "import tensorrt as trt; print(trt.__version__)"
+PYTHONPATH=python:. python3 -c "import tensorrt_model_connect; print('package: OK')"
+test -x ./build/trtmc
 ```
 
-If GPU, TensorRT, or the package is missing, look for an existing team
-container:
+If the local checkout does not have the required GPU or TensorRT environment,
+use the existing team container rather than changing the investigation:
 
 ```bash
 docker ps -a --filter "name=trtmc-dev-gb300" --format "{{.Names}} {{.Status}}"
+./scripts/bootstrap_workspace.sh --id <team-id> --branch "$(git branch --show-current)" --detach
 ```
 
-Use a running container with `docker exec trtmc-dev-gb300-<team-id> ...`, start
-a stopped container, or bootstrap one:
+Run later commands inside `trtmc-dev-gb300-<team-id>` when needed.
+
+## Reproduce Through The Owned Validation Path
+
+List model-first workloads and dry-run the failing one:
 
 ```bash
-./scripts/bootstrap_workspace.sh --id <team-id> --branch $(git branch --show-current) --detach
+PYTHONPATH=python:. python3 tools/trtmc_validate.py --list
+PYTHONPATH=python:. python3 tools/trtmc_validate.py \
+  <model> <workload> \
+  --dry-run \
+  --output /tmp/trtmc-validation
 ```
 
-Then rerun the checks inside the container. Prefix subsequent commands with
-`docker exec trtmc-dev-gb300-<team-id>` when needed.
+The model binding in `tests/validation/model_workloads.yaml`, workload contract
+in `tests/validation/workloads.yaml`, family manifests, and their sidecars are
+the source of truth for inputs, sampling, and comparison gates. Read
+`tools/validation/README.md` before changing the engine: the persisted
+`task_eval` artifact key remains intentionally stable even though executable
+code moved to `tools/validation/`. Keep reference generation and comparison
+separate in the report; an execution failure is not a numerical mismatch.
 
-## Escalation Path
+## Route By Model Capability
 
-Start at Level 1 and escalate only when the lower level does not isolate the
-cause.
+Inspect the model's Python, C++, and E2E `MODEL.toml` entries before selecting a
+debugger:
 
-| Level | Tool | Question |
-|-------|------|----------|
-| 1 | `tools/diff_logits.py` | Which decode step diverges? |
-| 2 | `tools/diff_layers.py` | Which transformer layer diverges? |
-| 3 | `tools/diff_vl.py` | Is the issue in the vision encoder or text decoder? |
-| 4 | `tools/test_runner_parity.py` | Does Python runner match the C++ binary? |
-| 5 | Graph op tests/manual reproducer | Which operation inside the layer is wrong? |
+| Model path | First focused tool |
+|---|---|
+| Decoder family with `decoder_debug` validation profile | `tools/diff_logits.py` |
+| Decoder layer localization | `tools/diff_layers.py` |
+| Vision-language | `tools/diff_vl.py` |
+| Audio/Bark | `tools/diff_audio.py` |
+| Diffusion | `tools/debug_diffusion_pipeline.py` |
+| Python runner versus C++ | `tools/test_runner_parity.py` |
 
-## Level 1: Token Logits
+`scripts/validate_family.sh <model>` already routes declared family
+capabilities. Do not force decoder-only tools onto audio, diffusion, or another
+family that does not declare that profile.
 
-Quick check:
+## Decoder Escalation
+
+Start with logits:
 
 ```bash
-python tools/diff_logits.py \
+PYTHONPATH=python:. python3 tools/diff_logits.py \
   --model <model> \
   --prompt "The capital of France is" \
   --max-new-tokens 10 \
   --atol 1e-3 \
+  --json /tmp/diff-logits.json \
   --verbose
 ```
 
-Full battery:
+Interpret the first divergent step:
+
+| Pattern | Investigate |
+|---|---|
+| Step 0 diverges | weights, config, prefill graph |
+| Error grows each step | precision boundary or normalization |
+| Sudden step-N jump | RoPE position, mask, or KV cache |
+| Top-1 agrees but max diff is high | close logits; inspect cosine and rank |
+| Output differs with small logits diff | sampling, seed, or tie-breaking |
+
+If logits identify a graph mismatch but not its origin, compare layers:
 
 ```bash
-python tools/diff_logits.py \
-  --model <model> \
-  --atol 1e-3 \
-  --battery \
-  --json /tmp/diff_logits.json
-```
-
-Interpretation:
-
-| Pattern | Likely cause |
-|---------|--------------|
-| Step 0 diverges | Weight mapping, config parsing, or prefill graph bug |
-| Error grows every step | Accumulating precision error, often norms |
-| Sudden divergence at step N | RoPE position, mask, or KV cache issue |
-| Huge max diff plus repeated tokens | Fundamentally wrong weight mapping |
-| Good text with high max diff | Numerical noise or close logits; inspect top-1 and cosine |
-| Wrong text with low max diff | Sampling/tie-breaking issue, not necessarily graph math |
-
-Useful metrics: `cosine_p5`, `top1_match_rate`, `token_agreement`, and per-step
-`max_diff`.
-
-## Level 2: Layer Hidden States
-
-```bash
-python tools/diff_layers.py \
+PYTHONPATH=python:. python3 tools/diff_layers.py \
   --model <model> \
   --prompt "Hello" \
   --atol 0.05 \
   --verbose
 ```
 
-Interpretation:
+Use the testcase's declared tolerance as the authority. `0.01`, `0.05`, and
+`0.1` are investigation starting points, not replacement pass criteria.
 
-| Pattern | Likely cause |
-|---------|--------------|
-| Embedding diverges | Wrong embedding key or table transform |
-| Layer 0 diverges | First attention/MLP weights or graph op |
-| Linear growth across layers | Precision accumulation; inspect FP32 boundaries |
-| One layer jumps | Fused QKV, gate/up split, RoPE, or layer-local config issue |
-| Layers match but logits diverge | Final norm, LM head, or tied embeddings |
+## Modality-Specific Escalation
 
-Default thresholds: use `0.01` for strict FP32, `0.05` for typical FP16/mixed
-precision, and `0.1` only when the model is expected to be looser.
-
-## Level 3: Vision-Language
-
-Vision sanity:
+Vision-language:
 
 ```bash
-python tools/diff_vl.py \
+PYTHONPATH=python:. python3 tools/diff_vl.py \
   --bundle /tmp/model.trtfb \
   --image /path/to/test.jpg \
-  --vision-only
-```
-
-Vision features vs HF:
-
-```bash
-python tools/diff_vl.py \
-  --bundle /tmp/model.trtfb \
-  --image /path/to/test.jpg \
-  --model Qwen/Qwen2.5-VL-3B-Instruct \
-  --atol 0.1
-```
-
-Full VL generation plus C++ parity:
-
-```bash
-python tools/diff_vl.py \
-  --bundle /tmp/model.trtfb \
-  --image /path/to/test.jpg \
-  --model <hf-model> \
+  --model <model> \
   --binary ./build/trtmc \
-  --hf-python /opt/venv/bin/python \
-  --max-new-tokens 30
+  --hf-python <python> \
+  --debug-layers
 ```
 
-If vision features do not match, test preprocessing variants such as
-`--preprocessor-type simple_chw` and then read the model-specific preprocessor
-code.
-
-## Level 4: Python Runner vs C++ Binary
+Audio:
 
 ```bash
-python tools/test_runner_parity.py \
+PYTHONPATH=python:. python3 tools/diff_audio.py \
   --bundle /tmp/model.trtfb \
   --binary ./build/trtmc \
-  --hf-python /opt/venv/bin/python \
+  --model <model> \
+  --hf-python <python> \
+  --stage 1
+```
+
+Escalate audio stages only after the earlier stage passes. Stage 4 checks greedy
+token parity and does not replace waveform or distribution checks.
+
+Diffusion:
+
+```bash
+PYTHONPATH=python:. python3 tools/debug_diffusion_pipeline.py \
+  --bundle /tmp/model.trtfb \
+  --model-id <model> \
+  --num-steps <small-reproducer-steps>
+```
+
+Use deterministic inputs and seeds. Localize preprocessing, encoder, denoiser,
+scheduler, and decoder boundaries before changing a family implementation.
+
+## Runtime Boundary
+
+When Python/reference parity passes but the C++ result differs:
+
+```bash
+PYTHONPATH=python:. python3 tools/test_runner_parity.py \
+  --bundle /tmp/model.trtfb \
+  --binary ./build/trtmc \
+  --hf-python <python> \
   --prompt "The capital of France is" \
   --max-new-tokens 20
 ```
 
-If Python matches HF but C++ differs, focus on `src/runtime/` and tokenizer or
-bundle loading logic. If C++ mask/cache/position logic changes, update the
-Python debug runner and verify parity again.
+Inspect tokenizer inputs, bundle metadata, runtime strategy selection, masks,
+positions, and cache state. Keep the Python debug path aligned with the C++
+runtime contract.
 
-## Level 5: Graph Op Isolation
+## Operation Isolation
 
-Run existing graph tests first:
+After identifying a layer or stage, run the family-owned tests nearest to the
+implementation. Graph helpers belong under the owning family; root graph helper
+modules are intentionally absent and are enforced by
+`tests/tools/test_model_plugin_encapsulation_static.py`.
 
-```bash
-pytest tests/builder/test_graph_ops.py -v -m trt
-pytest tests/builder/test_graph_ops_extended.py -v -m trt
-pytest tests/builder/test_graph_blocks.py -v -m trt
-```
+For a missing focused test, create the smallest deterministic TensorRT graph
+that reproduces the operation and compare it to the reference. Do not broaden a
+model-local fix into shared runtime code without proof that multiple families
+share the same contract.
 
-If tests pass but the model still diverges, create a minimal TensorRT graph for
-the suspected op and compare it to the PyTorch reference. The `trt_runner`
-fixture in `tests/builder/conftest.py` is the preferred starting point.
+## Report
 
-## Reporting
+Include:
 
-Report the first failing level, model, bundle path, exact command, key metrics,
-first divergent step/layer/op, likely root cause, and the smallest proposed
-fix. Include what was ruled out so the next investigator does not repeat work.
+- exact repository SHA, model revision, model/workload, runtime strategy, and
+  bundle path or hash;
+- exact reproduction and focused-debug commands;
+- execution, reference, comparison, and validation status as separate facts;
+- first divergent sample, token, layer, stage, or operation and its metrics;
+- what passed and was ruled out;
+- smallest ownership-aligned fix and the validation that must pass afterward.
+
+When the mismatch came from Internal CI, keep private logs, artifacts, runner
+details, and package coordinates private. Source PRs may cite only the
+sanitized exact-head `trtmc/premerge/required` status and public reproduction
+evidence.
