@@ -20,6 +20,7 @@ from pathlib import Path
 
 from .context import CiContext
 from .gpu_lease import GpuLease
+from .model_reference_cache import ModelReferenceCacheWarmer, ModelReferenceContract
 from .model_proof_selection import ModelProofSelection, ModelProofSelector
 from .process import CiError
 from .validation import ValidationDatasetPreparer
@@ -67,7 +68,7 @@ class ModelProofRequest:
 
 
 class ModelReferenceCache:
-    """Copy only a declared pinned reference checkout into the proof-private view."""
+    """Warm and copy one pinned reference into the proof-private view."""
 
     def __init__(self, context: CiContext, request: ModelProofRequest):
         self.context = context
@@ -84,18 +85,16 @@ class ModelReferenceCache:
         configured = self.context.env.get("TRTMC_MODEL_REFERENCE_CACHE_ROOT", "")
         if not configured:
             raise CiError(f"TRTMC_MODEL_REFERENCE_CACHE_ROOT is required for {self.request.model}")
+        relative_path = contract["relative_path"]
+        reference = ModelReferenceContract(
+            family=relative_path.split("/", maxsplit=1)[0],
+            repository=contract["repository"],
+            revision=contract["revision"],
+            relative_path=relative_path,
+            entrypoint=contract["entrypoint"],
+        )
+        source = ModelReferenceCacheWarmer(self.context).warm_contract(reference)
         root = Path(configured).resolve(strict=True)
-        if not root.is_dir() or root == Path("/") or root == self.context.repository:
-            raise CiError("model reference cache root is invalid")
-        raw_source = root / contract["relative_path"]
-        if raw_source.is_symlink():
-            raise CiError("selected model reference cache must not be a symlink")
-        try:
-            source = raw_source.resolve(strict=True)
-        except OSError as error:
-            raise CiError(
-                f"selected model reference cache is unavailable: {contract['relative_path']}"
-            ) from error
         if not source.is_dir() or not source.is_relative_to(root):
             raise CiError(
                 f"selected model reference cache is unavailable: {contract['relative_path']}"

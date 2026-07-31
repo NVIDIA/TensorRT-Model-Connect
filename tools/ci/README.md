@@ -536,7 +536,9 @@ the producing class remains the source of truth for optional evidence fields.
 - **Functionality / units:** `ModelReferenceCacheWarmer` discovers every
   suite-selected `[model_reference_cache]` in E2E ownership manifests, verifies
   an existing checkout or fetches its exact commit into a temporary directory,
-  and publishes it atomically under a per-path lock.
+  and publishes it atomically under a per-path lock. A model proof uses the
+  same locked warmer for its selected contract, so a newly introduced pinned
+  reference is prepared automatically on first use.
 - **Inputs:** The repository's `tests/e2e/models/*/MODEL.toml` files, the
   `premerge` or `nightly` suite, `TRTMC_MODEL_REFERENCE_CACHE_ROOT`, and Git
   network access for a missing checkout. The CLI is
@@ -547,7 +549,8 @@ the producing class remains the source of truth for optional evidence fields.
 - **Boundary:** This is the trusted online cache-warm phase. It does not expose
   the shared checkout to a proof: `model_proof.py` still verifies it, copies the
   pinned commit privately with `git archive`, and runs the proof without a
-  network.
+  network. Bulk nightly warming and selected premerge first-use warming share
+  the same validation and atomic publication path.
 
 ### `model_proof_selection.py`
 
@@ -585,7 +588,8 @@ the producing class remains the source of truth for optional evidence fields.
 ### `model_proof.py`
 
 - **Functionality / units:** `ModelProofRunner` performs trusted host setup;
-  `ModelReferenceCache` copies only a pinned model-owned reference checkout;
+  `ModelReferenceCache` first ensures the selected pinned checkout is present,
+  then copies only that model-owned reference checkout;
   `ModelProofContainerCleaner` removes containers matching exact run labels.
 - **Inputs:** `ModelProofRequest {model, suite, revision, output_dir}`, full
   repository checkout, CI image, shared HF/reference cache roots, workflow

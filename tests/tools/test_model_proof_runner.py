@@ -23,6 +23,7 @@ import pytest
 
 from tools.ci.context import CiContext
 from tools.ci.gpu_lease import GpuLease
+from tools.ci.model_reference_cache import ModelReferenceCacheWarmer
 from tools.ci.model_proof import ModelProofRequest, ModelReferenceCache
 from tools.ci.model_proof_inner import ModelProofInnerPipeline
 from tools.ci.model_proof_selection import ModelProofSelector
@@ -1848,9 +1849,12 @@ def test_sana_reference_cache_is_copied_to_selected_private_view(
     }
 
 
-def test_sana_reference_cache_missing_checkout_fails_before_docker(
+def test_sana_reference_cache_missing_checkout_is_warmed_before_copy(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
     cache_root = tmp_path / "model-reference-cache"
     cache_root.mkdir()
     config = tmp_path / "model-proof-config.txt"
@@ -1860,12 +1864,34 @@ def test_sana_reference_cache_missing_checkout_fails_before_docker(
     work_dir.mkdir()
     artifacts.mkdir()
     env = os.environ.copy()
-    env["TRTMC_MODEL_REFERENCE_CACHE_ROOT"] = str(cache_root)
+    source = cache_root / SANA_REFERENCE_RELATIVE_PATH
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "TRTMC_MODEL_REFERENCE_CACHE_ROOT": str(cache_root),
+            "FAKE_REFERENCE_SOURCE": str(source),
+            "FAKE_REFERENCE_REVISION": SANA_REFERENCE_REVISION,
+        }
+    )
+    warmed: list[str] = []
 
-    with pytest.raises(CiError, match="selected model reference cache is unavailable"):
-        ModelReferenceCache(CiContext(REPO_ROOT, env), ModelProofRequest("sana_wm")).prepare(
-            _sana_reference_contract(), work_dir, artifacts
-        )
+    def fake_warm_contract(_self, contract):
+        warmed.append(contract.relative_path)
+        _cache_root, prepared = _write_fake_pinned_model_reference(tmp_path, fake_bin)
+        return prepared
+
+    monkeypatch.setattr(
+        ModelReferenceCacheWarmer,
+        "warm_contract",
+        fake_warm_contract,
+    )
+
+    ModelReferenceCache(CiContext(REPO_ROOT, env), ModelProofRequest("sana_wm")).prepare(
+        _sana_reference_contract(), work_dir, artifacts
+    )
+
+    assert warmed == [SANA_REFERENCE_RELATIVE_PATH]
+    assert (work_dir / "reference-private" / SANA_REFERENCE_RELATIVE_PATH).is_dir()
 
 
 def test_sana_reference_cache_wrong_revision_fails_before_docker(
@@ -1894,7 +1920,7 @@ def test_sana_reference_cache_wrong_revision_fails_before_docker(
     with pytest.raises(
         CiError,
         match=(
-            "selected model reference cache revision mismatch: "
+            f"model reference cache revision mismatch for {SANA_REFERENCE_RELATIVE_PATH}: "
             f"expected {SANA_REFERENCE_REVISION}, found {wrong_revision}"
         ),
     ):

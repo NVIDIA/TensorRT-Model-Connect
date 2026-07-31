@@ -144,6 +144,10 @@ class ModelReferenceCacheWarmer:
         )
         return destinations
 
+    def warm_contract(self, contract: ModelReferenceContract) -> Path:
+        """Provision one already-validated proof contract on first use."""
+        return self._warm_one(self._cache_root(), contract)
+
     def _cache_root(self) -> Path:
         configured = self.context.env.get("TRTMC_MODEL_REFERENCE_CACHE_ROOT", "")
         if not configured:
