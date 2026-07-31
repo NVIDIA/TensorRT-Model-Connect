@@ -177,11 +177,15 @@ def test_manifest_build_env_requires_injected_values(
     env = {
         "TRTMC_BARK_TIMING_CACHE_PATH": str(asset),
         "TRTMC_BARK_TIMING_CACHE_SHA256": "opaque-digest",
+        "TRTMC_ELF_TIMING_CACHE_PATH": str(asset),
+        "TRTMC_ELF_TIMING_CACHE_METADATA_PATH": str(asset),
     }
     orchestrator._apply_manifest_build_env(env, case)
 
     assert env["TRTMC_BARK_TIMING_CACHE_PATH"] == str(asset)
     assert env["TRTMC_BARK_TIMING_CACHE_SHA256"] == "opaque-digest"
+    assert "TRTMC_ELF_TIMING_CACHE_PATH" not in env
+    assert "TRTMC_ELF_TIMING_CACHE_METADATA_PATH" not in env
 
     with pytest.raises(
         RuntimeError,

@@ -1008,6 +1008,11 @@ _REQUIRED_BUILD_ENVIRONMENT_INPUTS = frozenset(
 
 def _apply_manifest_build_env(env: dict[str, str], case: E2ECase) -> None:
     """Apply generic build-time environment entries declared by the manifest."""
+    required_inputs = {
+        name: env.pop(name)
+        for name in _REQUIRED_BUILD_ENVIRONMENT_INPUTS
+        if name in env
+    }
     build_env = case.metadata.get("build_env")
     if not isinstance(build_env, dict):
         return
@@ -1042,7 +1047,7 @@ def _apply_manifest_build_env(env: dict[str, str], case: E2ECase) -> None:
                     raise ValueError(
                         f"build_env {name} is not an allowed required environment input"
                     )
-                value = env.get(name)
+                value = required_inputs.get(name)
                 if not isinstance(value, str) or not value or value != value.strip():
                     raise RuntimeError(
                         f"required build environment variable {name} is missing"

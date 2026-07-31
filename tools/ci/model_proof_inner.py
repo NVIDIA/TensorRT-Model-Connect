@@ -630,6 +630,9 @@ class ModelProofInnerPipeline:
                 "PYTHONNOUSERSITE": "1",
                 "PYTHONDONTWRITEBYTECODE": "1",
                 "TRTMC_BINARY": str(self.work / "build/trtmc"),
+                "TRTMC_ELF_TIMING_CACHE_PATH": "",
+                "TRTMC_ELF_TIMING_CACHE_METADATA_PATH": "",
+                "TRTMC_ELF_TIMING_CACHE_GENERATE": "0",
             },
         )
         self.status.step("python_tests", "passed")
