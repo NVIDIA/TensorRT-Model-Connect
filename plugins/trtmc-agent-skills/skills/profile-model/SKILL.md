@@ -1,173 +1,193 @@
 ---
 name: profile-model
 description: >-
-  Use when profiling TensorRT-Model-Connect model performance, comparing TRT
-  against HuggingFace or torch.compile, measuring CPU phase overhead, generating
-  HTML reports, or validating optimization impact.
+  Use when diagnosing one model's runtime cost or producing comparable
+  TensorRT-Model-Connect performance evidence. Routes quick investigation to
+  the unified profiler and release or qualification claims to the checked-in
+  performance matrix and model-owned performance contract.
 ---
 
 # Profile Model
 
-## Preconditions
+## Decide The Evidence Level
 
-- GPU, CUDA, and TensorRT are available, usually inside a dev container.
-- `tensorrt_model_connect` is installed in editable mode:
-  `pip install --no-deps -e . -C py-only=true`.
-- `./build/trtmc` is built when C++ timing or Nsight capture is needed.
-- The model is available as a HuggingFace ID or local path.
+Choose one path before running:
 
-## Environment Check
+| Question | Entry point | Claim boundary |
+|---|---|---|
+| Where is one model spending time? | `tools/trtmc_profile.py` | diagnostic |
+| Does a code change improve one owned workload? | profiler plus matching model testcase | local comparison |
+| Is a model release-ready against its reference? | `tools/perf_matrix.py` | release matrix |
+| Does an optimized implementation qualify? | model-owned qualification producer | exact profile/target |
+
+Profiler output is not automatically release or qualification evidence.
+
+## Preconditions And Provenance
+
+Use the supported GPU/TensorRT environment and record:
 
 ```bash
-nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null && echo "GPU: OK" || echo "GPU: MISSING"
-python3 -c "import tensorrt as trt; print(f'TRT: {trt.__version__}')" 2>/dev/null || echo "TRT: MISSING"
-test -x ./build/trtmc && echo "trtmc: OK" || echo "trtmc: MISSING"
-python3 -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}')" 2>/dev/null || echo "PyTorch: MISSING"
+git rev-parse HEAD
+nvidia-smi --query-gpu=name,uuid,driver_version,pstate,power.draw \
+  --format=csv,noheader
+python3 -c "import tensorrt as trt; print(trt.__version__)"
+test -x ./build/trtmc
+test -x ./build/trtmc-bench
 ```
 
-If required pieces are missing, use an existing `trtmc-dev-gb300-<team-id>`
-container or bootstrap one:
+Record the exact model revision, bundle SHA-256, native or optimized runtime
+path, effective config, target, warmups, timed iterations, inputs, token/sample
+counts, timing boundary, synchronization policy, and reference environment.
+Without those, label results exploratory.
+
+If a team container is required:
 
 ```bash
-./scripts/bootstrap_workspace.sh --id <team-id> --branch $(git branch --show-current) --detach
+./scripts/bootstrap_workspace.sh --id <team-id> \
+  --branch "$(git branch --show-current)" --detach
 ```
 
-Run profiling commands inside the container with `docker exec` when appropriate.
+## Correctness Before Timing
 
-## Select The Path
-
-Infer or ask for:
-
-- Model: HuggingFace repo ID or local path.
-- Bundle: existing `.trtfb` path, or build on demand.
-- Depth: quick (E2E timing only) or full (E2E, per-layer, CPU phases, C++).
-
-Detect `runtime_strategy` from an E2E manifest or bundle:
+Select the owning model-first workload or E2E testcase and prove it passes
+before making performance claims:
 
 ```bash
-rg '"runtime_strategy"' tests/e2e/models/<family>/manifests/<model-name>.json
-./build/trtmc inspect <bundle.trtfb> | grep "Runtime strategy"
+PYTHONPATH=python:. python3 tools/trtmc_validate.py \
+  <model> <workload> \
+  --bundle <bundle.trtfb> \
+  --output <validation-artifacts>
 ```
 
-Use the unified profiler for decoder, recurrent, encoder, embedding, and
-reranking paths. For diffusion, audio, and other multi-stage models, use the E2E
-harness artifacts until dedicated profiler support is available.
+Do not time a candidate with a failed, skipped, or unrun comparison. Preserve
+the same model revision and workload when moving to profiling.
 
-## Build Or Inspect Bundle
-
-```bash
-./build/trtmc build <model> -o /tmp/<model-name>.trtfb --max-cache-length 256 --verbose
-./build/trtmc inspect /tmp/<model-name>.trtfb
-```
-
-Skip the build when the user provides a bundle.
-
-## Unified Profiler
-
-Quick profile:
+## Quick Single-Model Diagnosis
 
 ```bash
-python tools/trtmc_profile.py \
+PYTHONPATH=python:. python3 tools/trtmc_profile.py \
   --model <model> \
-  --bundle /tmp/<model-name>.trtfb \
-  --prompt "The capital of France is" \
-  --max-new-tokens 20 \
-  --warmup 3 --iterations 10 \
-  --dtype float16 \
-  --json --output-dir /tmp/<model-name>_profile
-```
-
-Full profile:
-
-```bash
-python tools/trtmc_profile.py \
-  --model <model> \
-  --bundle /tmp/<model-name>.trtfb \
-  --prompt "The capital of France is" \
-  --max-new-tokens 20 \
-  --warmup 3 --iterations 10 \
+  --bundle <bundle.trtfb> \
+  --prompt "<owned-testcase-prompt>" \
+  --max-new-tokens <N> \
+  --warmup 3 \
+  --iterations 10 \
   --dtype float16 \
   --trtmc-binary ./build/trtmc \
-  --hf-python /opt/venv/bin/python \
-  --cpu-profile \
-  --json --output-dir /tmp/<model-name>_profile
+  --hf-python <python> \
+  --json \
+  --output-dir <profile-dir>
 ```
 
-Useful flags:
+Useful options:
 
-| Flag | Use |
-|------|-----|
-| `--no-compile` | Skip torch.compile when unsupported |
-| `--compile-mode max-autotune` | More thorough torch.compile comparison |
-| `--no-layer-profile` | E2E-only quick check |
-| `--cpu-profile` | Decode overhead investigation |
-| `--nsight` | Kernel-level trace, requires binary and bundle |
-| `--trust-remote-code` | HF custom code models |
+- `--no-layer-profile` for a faster E2E-only run;
+- `--cpu-profile` for host-phase attribution;
+- `--nsight` for a kernel trace with binary and bundle;
+- `--no-compile` when torch.compile is outside the comparison;
+- `--compile-mode` only when the baseline contract names that mode.
 
-## CPU Phase Deep Dive
+Use `--trust-remote-code` only for a reviewed model that requires it.
+
+The profiler is decoder-oriented. For audio, diffusion, vision, and other
+multi-stage models, prefer their owned testcase/performance adapter rather than
+forcing a text prompt through this tool.
+
+## Runtime Configuration
+
+GPU greedy selection and CUDA Graph control are runtime-config fields, not the
+removed process knobs. Pass them through a supported config layer, for example:
+
+```text
+runtime.prefer_gpu_greedy=true
+runtime.disable_cuda_graph=false
+```
+
+Do not use `TRTMC_GPU_ARGMAX` or `TRTMC_DISABLE_CUDA_GRAPH`. Change one runtime
+setting at a time and record the resolved config. Treat TensorRT-RTX selection
+as a separate backend experiment; do not attribute a `--rtx` result to a
+runtime-config or precision change.
+
+## Release Performance Matrix
+
+Validate the selected row and environment before execution:
 
 ```bash
-python tools/cpu_profile.py \
-  --model <model> \
-  --bundle /tmp/<model-name>.trtfb \
-  --prompt "The capital of France is" \
-  --max-new-tokens 10 \
-  --warmup 3 --iterations 20 \
-  --json /tmp/<model-name>_profile/cpu_profile_detailed.json
+python3 tools/perf_matrix.py check \
+  benchmarks/performance/release.yaml \
+  --environment benchmarks/performance/environments/gb300.yaml \
+  --entry <family.operation-or-profile-qualified-id>
 ```
 
-For SSM/Mamba:
+Then run the exact row:
 
 ```bash
-python tools/cpu_profile.py \
-  --model <model> \
-  --bundle /tmp/<model-name>.trtfb \
-  --runner mamba \
-  --max-new-tokens 10 \
-  --json /tmp/<model-name>_profile/cpu_profile_mamba.json
+python3 tools/perf_matrix.py run \
+  benchmarks/performance/release.yaml \
+  --environment benchmarks/performance/environments/gb300.yaml \
+  --entry <family.operation-or-profile-qualified-id>
 ```
 
-## Report Generation
+The entry ID is not a model name. The checked-in suite owns the workload,
+reference, measurement scope, warmups, iterations, and traffic-light margins.
+The environment owns machine-specific executables, caches, and storage.
 
-`tools/trtmc_profile.py --json` generates the HTML report automatically. If
-needed:
+Use:
 
 ```bash
-python tools/profile_report.py \
-  --output-dir /tmp/<model-name>_profile \
-  -o /tmp/<model-name>_profile/report.html
+python3 tools/perf_matrix.py resume <run-directory>
 ```
+
+only for an incomplete run produced by that matrix. Do not combine partial
+results from different source revisions or targets.
+
+When bundle preparation ran separately, attach its exact-revision receipt and
+regenerate the report:
+
+```bash
+python3 tools/perf_matrix.py report <run-directory> \
+  --preparation-receipt <bundle-preparation.json>
+```
+
+The receipt must use the `test_task` scope and match the campaign revision and
+bundle paths. Controlled Internal CI may run the same matrix, but its raw
+performance reports, runner details, and artifacts remain private. Source PRs
+may report only authorized sanitized evidence.
 
 ## Interpretation
 
-| Condition | Classification | Likely next step |
-|-----------|----------------|------------------|
-| `d2h + argmax > 15%` | Sync bottleneck | Evaluate GPU argmax (`TRTMC_GPU_ARGMAX=1`) |
-| `tensor_bind > 10%` | Launch overhead | Evaluate CUDA Graph capture/replay |
-| `execute > 75%` | Compute-bound | Evaluate FP16/BF16 or kernel quality |
-| `execute < 50%`, no dominant phase | Mixed overhead | Combine GPU argmax, CUDA Graphs, and precision work |
+Attribute cost using recorded samples, not universal percentages:
 
-Speedup guide:
+- host-to-device, synchronization, or greedy selection suggests runtime
+  overhead;
+- binding/setup suggests launch or orchestration overhead;
+- execution or a small set of layers suggests graph/kernel work;
+- setup/build cost is separate from infer-time comparison;
+- zero or missing provider phase fields mean unavailable unless the provider
+  contract says otherwise.
 
-| TRT vs HF | Meaning |
-|-----------|---------|
-| `< 2x` | TRT overhead is high relative to model compute |
-| `2x-5x` | Normal for small models |
-| `5x-10x` | Good kernel and runtime benefit |
-| `> 10x` | Excellent; verify HF baseline is fair |
+Large speedups require extra baseline scrutiny: same inputs, warmups,
+synchronization, dtype, compile mode, and measured boundary. Never describe a
+speedup as meaningful when output equivalence failed.
 
-If profiling reveals correctness issues, switch to `$debug-trt-mismatch` before
-making performance claims.
+## Before/After Rule
 
-## Before/After Comparison
+Use the same:
 
-Profile both versions with identical prompts, token counts, warmups, and
-iterations. Compare `perf_compare.json`, CPU phase JSON, and top per-layer
-timings. Report deltas for decode latency, throughput, top CPU phase, and top
-kernel layer.
+- repository base and model revision;
+- bundle/runtime kind;
+- target and runtime config;
+- testcase/request and random seed;
+- caches and preparation policy;
+- warmup, iteration, and synchronization contract;
+- reference backend and compile mode.
 
-## User Report
+If any differ, report the confounder instead of a single causal percentage.
 
-Include model, bundle, commands run, TRT C++/Python throughput, HF and
-torch.compile baselines when available, bottleneck classification, top CPU
-phase, top TRT layer, artifacts, and the next highest-impact recommendation.
+## Report
+
+Lead with the evidence level and correctness result. Include exact commands,
+SHAs/hashes, hardware, resolved runtime config, workload and measurement
+contract, raw artifact paths, p50 and other suite-owned statistics, output
+equivalence, observed bottleneck, comparison limitations, and the next
+evidence-backed experiment.
