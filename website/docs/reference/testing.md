@@ -27,7 +27,7 @@ PYTHONPATH=python:. python3 -m pytest \
   tests/tools/test_github_actions_ci.py \
   tests/tools/test_runtime_strategy_matrix_checker.py \
   tests/tools/test_model_owned_validation_scripts.py \
-  tests/tools/test_task_eval.py \
+  tests/tools/test_validation_engine.py \
   tests/tools/test_test_impact.py \
   tests/tools/test_trtmc_validate.py \
   tests/tools/test_perf_matrix.py::test_release_suite_covers_every_non_l0_ready_model_profile \

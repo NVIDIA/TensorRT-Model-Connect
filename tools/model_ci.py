@@ -94,10 +94,14 @@ PLATFORM_PROJECTION_EXACT = frozenset(
         "tools/reference/transformers_encoder.py",
         "tools/reference/transformers_text.py",
         "tools/reference/transformers_vlm.py",
-        "tools/validation/engine.py",
         "tools/test_impact.py",
         "tools/tool_helpers.py",
         "tools/trtmc_reference.py",
+        "tools/validation/__init__.py",
+        "tools/validation/artifacts.py",
+        "tools/validation/catalog.py",
+        "tools/validation/engine.py",
+        "tools/validation/model_plugin_contract.py",
         *MODEL_ROOT_PLATFORM_FILES,
     }
 )

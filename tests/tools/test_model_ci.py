@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -12,6 +13,8 @@ import sys
 from pathlib import Path
 
 import pytest
+
+from tools import model_ci
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -165,7 +168,14 @@ def _make_repo(
         _write(repo, reference_runner, "# task-eval reference runner\n")
     _write(repo, "tools/test_impact.py", "# shared impact analyzer\n")
     _write(repo, "tools/trtmc_reference.py", "# task-eval reference runner\n")
-    _write(repo, "tools/validation/engine.py", "# validation runner\n")
+    for validation_module in (
+        "tools/validation/__init__.py",
+        "tools/validation/artifacts.py",
+        "tools/validation/catalog.py",
+        "tools/validation/engine.py",
+        "tools/validation/model_plugin_contract.py",
+    ):
+        _write(repo, validation_module, "# validation module\n")
     _write(repo, "tests/validation/workloads.yaml", "suites: []\n")
     _write(repo, "tests/tools/test_validation_engine.py", "# validation unit tests\n")
     _write(repo, "tools/tool_helpers.py", "# shared tool helpers\n")
@@ -1104,10 +1114,14 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
         "tools/reference/transformers_encoder.py",
         "tools/reference/transformers_text.py",
         "tools/reference/transformers_vlm.py",
-        "tools/validation/engine.py",
         "tools/test_impact.py",
         "tools/tool_helpers.py",
         "tools/trtmc_reference.py",
+        "tools/validation/__init__.py",
+        "tools/validation/artifacts.py",
+        "tools/validation/catalog.py",
+        "tools/validation/engine.py",
+        "tools/validation/model_plugin_contract.py",
         "tools/ci/__init__.py",
         "tools/ci/__main__.py",
         "tools/ci/model_proof.py",
@@ -1126,6 +1140,28 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
         item for item in manifest["files"] if item["path"] == copied.relative_to(output).as_posix()
     )
     assert entry["sha256"] == hashlib.sha256(expected).hexdigest()
+
+
+def test_projection_closes_validation_module_imports() -> None:
+    projected = set(model_ci.PLATFORM_PROJECTION_EXACT)
+    dependencies = {"tools/validation/__init__.py"}
+
+    for relative in projected:
+        source = REPO_ROOT / relative
+        if source.suffix != ".py" or not source.is_file():
+            continue
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.ImportFrom) or node.module is None:
+                continue
+            if node.module == "tools.validation":
+                for imported in node.names:
+                    candidate = f"tools/validation/{imported.name}.py"
+                    if (REPO_ROOT / candidate).is_file():
+                        dependencies.add(candidate)
+            elif node.module.startswith("tools.validation."):
+                dependencies.add(node.module.replace(".", "/") + ".py")
+
+    assert dependencies <= projected
 
 
 def test_projection_includes_only_the_selected_family_adapter_subtrees(
