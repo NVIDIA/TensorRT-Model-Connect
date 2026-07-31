@@ -604,6 +604,13 @@ def build_dual_profile_decoder_engine(
             num_kv_heads=num_kv_heads,
             q_seq=None, kv_seq=None, causal=False, mask=mask_4d,
             scale=attn_scale,
+            # TRT 11.2 FP16 IAttention has large errors with the decoder's
+            # sparse prefix-plus-current-token mask at long context. Keep
+            # prefill and the surrounding graph in FP16, but use the existing
+            # FP32 attention boundary in the fixed-Sq=1 split decode engine.
+            # The dynamic prefill shape does not have a dedicated FP32 fused
+            # tactic and triggers a TRT 11.2 Myelin compiler failure.
+            fp32_accumulation=(profile_mode == "decode"),
             force_decomposed_attention=force_decomposed_attention,
             tag=f"{prefix}.attn")
 

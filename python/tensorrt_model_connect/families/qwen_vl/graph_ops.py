@@ -1363,7 +1363,10 @@ def add_attention_core(
     # Allow TRT to decompose into primitive ops when no fused kernel is
     # available (e.g. unsupported head-dim or dtype).  This guarantees
     # correctness on any configuration at the cost of potential performance.
-    attn.decomposable = True
+    # Keep the FP32-accumulation path opaque: TRT 11.2's Myelin compiler can
+    # otherwise merge every decoder layer into one graph and fail SSA
+    # validation during a full Qwen-VL engine build.
+    attn.decomposable = not fp32_accumulation
     if mask is not None and not causal:
         attn.mask = mask
     return _cast_back_to_trt_dtype(network, attn.get_output(0), output_dtype)

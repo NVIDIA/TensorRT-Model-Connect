@@ -578,6 +578,62 @@ class TestAddAttentionCore:
         np.testing.assert_allclose(out, ref, atol=1e-3,
                                    err_msg="masked attention mismatch")
 
+    @requires_trt
+    def test_qwen_vl_long_masked_gqa_fp32_matches_reference(self):
+        """The stable FP32 boundary matches long masked GQA attention."""
+        num_heads, num_kv_heads, head_dim = 16, 2, 128
+        q_seq, kv_seq = 1, 1665
+        rng = np.random.default_rng(20260731)
+        q = rng.standard_normal(
+            (q_seq, num_heads * head_dim)).astype(np.float16)
+        k = rng.standard_normal(
+            (kv_seq, num_kv_heads * head_dim)).astype(np.float16)
+        v = rng.standard_normal(
+            (kv_seq, num_kv_heads * head_dim)).astype(np.float16)
+        mask = np.full((q_seq, kv_seq), -1.0e4, dtype=np.float16)
+        mask[:, :1290] = 0.0
+        mask[:, -1] = 0.0
+
+        def build(network, trt_inputs):
+            mask_4d = qwen_vl_graph_ops.add_2d_mask_to_4d(
+                network, trt_inputs["mask"])
+            return {
+                "out": qwen_vl_graph_ops.add_attention_from_rows(
+                    network,
+                    trt_inputs["q"],
+                    trt_inputs["k"],
+                    trt_inputs["v"],
+                    num_heads=num_heads,
+                    num_kv_heads=num_kv_heads,
+                    head_dim=head_dim,
+                    q_seq=q_seq,
+                    kv_seq=kv_seq,
+                    mask=mask_4d,
+                    scale=1.0 / np.sqrt(head_dim),
+                    fp32_accumulation=True,
+                )
+            }
+
+        out = _run_strongly_typed(
+            build, {"q": q, "k": k, "v": v, "mask": mask})["out"]
+
+        qh = q.reshape(1, q_seq, num_heads, head_dim).transpose(0, 2, 1, 3)
+        kh = k.reshape(1, kv_seq, num_kv_heads, head_dim).transpose(0, 2, 1, 3)
+        vh = v.reshape(1, kv_seq, num_kv_heads, head_dim).transpose(0, 2, 1, 3)
+        repeats = num_heads // num_kv_heads
+        kh = np.repeat(kh, repeats, axis=1)
+        vh = np.repeat(vh, repeats, axis=1)
+        scores = np.einsum("bhqd,bhkd->bhqk", qh.astype(np.float32),
+                           kh.astype(np.float32)) / np.sqrt(head_dim)
+        scores += mask.reshape(1, 1, q_seq, kv_seq).astype(np.float32)
+        scores -= scores.max(axis=-1, keepdims=True)
+        probs = np.exp(scores)
+        probs /= probs.sum(axis=-1, keepdims=True)
+        ref = np.einsum("bhqk,bhkd->bhqd", probs, vh.astype(np.float32))
+        ref = ref.transpose(0, 2, 1, 3).reshape(q_seq, -1)
+
+        np.testing.assert_allclose(out.astype(np.float32), ref, atol=2e-3)
+
 class TestAddApplyMropeNative:
     """Qwen2.5-VL M-RoPE selects T/H/W frequency sections."""
 
