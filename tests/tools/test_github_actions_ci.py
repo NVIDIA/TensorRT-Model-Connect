@@ -15,11 +15,227 @@ import sys
 import time
 from pathlib import Path
 
+import yaml
+
 from tools.ci.container import CiContainer
 from tools.ci.quality import UnitTestRunner
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _internal_ci_snapshot_script() -> str:
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    steps = workflow["jobs"]["authorize"]["steps"]
+    return next(
+        step["run"]
+        for step in steps
+        if step["name"] == "Capture the exact pull-request head"
+    )
+
+
+def _internal_ci_guard_report_script() -> str:
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    steps = workflow["jobs"]["report-guard-failure"]["steps"]
+    return next(
+        step["run"]
+        for step in steps
+        if step["name"] == "Publish stale-head diagnostic"
+    )
+
+
+def _run_internal_ci_guard_report(
+    tmp_path: Path,
+    *,
+    guard_code: str,
+    pr_head_sha: str,
+    branch_head_sha: str,
+    existing_comment_id: int | None = None,
+    status_available: bool = True,
+) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_log = tmp_path / "gh-calls.jsonl"
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import sys
+
+with open(os.environ["FAKE_GH_LOG"], "a", encoding="utf-8") as output:
+    output.write(json.dumps(sys.argv[1:]) + "\\n")
+if any("/statuses/" in argument for argument in sys.argv[1:]):
+    if os.environ["FAKE_STATUS_AVAILABLE"] != "true":
+        raise SystemExit(4)
+if any("/comments?per_page=" in argument for argument in sys.argv[1:]):
+    comment_id = os.environ.get("FAKE_EXISTING_COMMENT_ID", "")
+    if comment_id:
+        print(json.dumps([
+            {
+                "id": int(comment_id),
+                "body": "<!-- trtmc-pr-head-guard -->\\nold diagnostic",
+            }
+        ]))
+    else:
+        print("[]")
+""",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "BRANCH_HEAD_SHA": branch_head_sha,
+            "FAKE_EXISTING_COMMENT_ID": (
+                "" if existing_comment_id is None else str(existing_comment_id)
+            ),
+            "FAKE_GH_LOG": str(fake_log),
+            "FAKE_STATUS_AVAILABLE": "true" if status_available else "false",
+            "GH_TOKEN": "test-token",
+            "GITHUB_REPOSITORY": "NVIDIA/TensorRT-Model-Connect",
+            "GITHUB_RUN_ID": "30612451909",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GUARD_CODE": guard_code,
+            "PATH": f"{fake_bin}:{environment['PATH']}",
+            "PR_HEAD_SHA": pr_head_sha,
+            "PR_NUMBER": "715",
+        }
+    )
+    result = subprocess.run(
+        ["bash", "-c", _internal_ci_guard_report_script()],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    calls = [
+        json.loads(line)
+        for line in fake_log.read_text(encoding="utf-8").splitlines()
+    ]
+    return result, calls
+
+
+def _run_internal_ci_snapshot(
+    tmp_path: Path,
+    *,
+    event_head_sha: str,
+    pr_head_sha: str | tuple[str, ...],
+    branch_head_sha: str | tuple[str, ...],
+    head_repo: str | None = "NVIDIA/TensorRT-Model-Connect",
+    head_ref: str = "refactor/validation-engine",
+    event_name: str = "pull_request_target",
+    max_attempts: int = 1,
+    branch_available: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import sys
+
+arguments = sys.argv[1:]
+endpoint = next(
+    (argument for argument in arguments if argument.startswith("/repos/")),
+    "",
+)
+if "/collaborators/" in endpoint:
+    print("write")
+elif "/pulls/" in endpoint:
+    pulls = json.loads(os.environ["FAKE_PULL_JSONS"])
+    counter_path = os.environ["FAKE_PULL_COUNTER"]
+    try:
+        index = int(open(counter_path, encoding="utf-8").read())
+    except FileNotFoundError:
+        index = 0
+    with open(counter_path, "w", encoding="utf-8") as counter:
+        counter.write(str(index + 1))
+    print(json.dumps(pulls[min(index, len(pulls) - 1)]))
+elif "/branches/" in endpoint:
+    expected = f"/repos/{os.environ['FAKE_EXPECTED_HEAD_REPO']}/branches/"
+    if expected not in endpoint:
+        print(f"wrong head repository endpoint: {endpoint}", file=sys.stderr)
+        raise SystemExit(3)
+    if os.environ["FAKE_BRANCH_AVAILABLE"] != "true":
+        print("branch not found", file=sys.stderr)
+        raise SystemExit(4)
+    sequence = json.loads(os.environ["FAKE_BRANCH_HEAD_SHAS"])
+    counter_path = os.environ["FAKE_BRANCH_COUNTER"]
+    try:
+        index = int(open(counter_path, encoding="utf-8").read())
+    except FileNotFoundError:
+        index = 0
+    with open(counter_path, "w", encoding="utf-8") as counter:
+        counter.write(str(index + 1))
+    print(sequence[min(index, len(sequence) - 1)])
+else:
+    print(f"unexpected gh invocation: {arguments}", file=sys.stderr)
+    raise SystemExit(2)
+""",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+    output = tmp_path / "github-output"
+    pr_head_shas = [pr_head_sha] if isinstance(pr_head_sha, str) else list(pr_head_sha)
+    pulls = [
+        {
+            "state": "open",
+            "base": {
+                "ref": "main",
+                "repo": {"full_name": "NVIDIA/TensorRT-Model-Connect"},
+            },
+            "head": {
+                "sha": sha,
+                "ref": head_ref,
+                "repo": None if head_repo is None else {"full_name": head_repo},
+            },
+        }
+        for sha in pr_head_shas
+    ]
+    environment = os.environ.copy()
+    branch_head_shas = (
+        [branch_head_sha] if isinstance(branch_head_sha, str) else list(branch_head_sha)
+    )
+    environment.update(
+        {
+            "ACTOR": "trusted-maintainer",
+            "EVENT_HEAD_SHA": event_head_sha,
+            "EVENT_NAME": event_name,
+            "FAKE_BRANCH_COUNTER": str(tmp_path / "branch-counter"),
+            "FAKE_BRANCH_AVAILABLE": "true" if branch_available else "false",
+            "FAKE_BRANCH_HEAD_SHAS": json.dumps(branch_head_shas),
+            "FAKE_EXPECTED_HEAD_REPO": head_repo or "",
+            "FAKE_PULL_COUNTER": str(tmp_path / "pull-counter"),
+            "FAKE_PULL_JSONS": json.dumps(pulls),
+            "GH_TOKEN": "test-token",
+            "GITHUB_OUTPUT": str(output),
+            "GITHUB_REPOSITORY": "NVIDIA/TensorRT-Model-Connect",
+            "HEAD_SYNC_MAX_ATTEMPTS": str(max_attempts),
+            "HEAD_SYNC_RETRY_DELAY_SECONDS": "0",
+            "PATH": f"{fake_bin}:{environment['PATH']}",
+            "PR_NUMBER": "715",
+        }
+    )
+    return subprocess.run(
+        ["bash", "-c", _internal_ci_snapshot_script()],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def _ci_source(*filenames: str) -> str:
@@ -79,12 +295,18 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
         REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml"
     ).read_text(encoding="utf-8")
     authorize = workflow.split("\n  authorize:", maxsplit=1)[1].split(
+        "\n  report-guard-failure:", maxsplit=1
+    )[0]
+    report = workflow.split("\n  report-guard-failure:", maxsplit=1)[1].split(
         "\n  dispatch:", maxsplit=1
     )[0]
     dispatch = workflow.split("\n  dispatch:", maxsplit=1)[1]
     authorize_permissions = authorize.split(
         "    permissions:", maxsplit=1
     )[1].split("\n    outputs:", maxsplit=1)[0]
+    report_permissions = report.split("    permissions:", maxsplit=1)[1].split(
+        "\n\n", maxsplit=1
+    )[0]
     dispatch_permissions = dispatch.split("    permissions:", maxsplit=1)[1].split(
         "\n\n", maxsplit=1
     )[0]
@@ -100,7 +322,10 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert "github.event_name == 'pull_request_target'" in workflow
     assert "github.ref == 'refs/heads/main'" in workflow
     assert "permissions: {}" in workflow
-    assert authorize_permissions.strip() == "pull-requests: write"
+    assert authorize_permissions.strip() == "contents: read\n      pull-requests: write"
+    assert report_permissions.strip() == (
+        "issues: write\n      pull-requests: read\n      statuses: write"
+    )
     assert dispatch_permissions.strip() == "statuses: write"
 
     assert "collaborators/$ACTOR/permission" in authorize
@@ -114,7 +339,11 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert 'test "$base_repo" = "$GITHUB_REPOSITORY"' in authorize
     assert 'test "$base_ref" = "main"' in authorize
     assert 'if [ "$EVENT_NAME" = "pull_request_target" ]; then' in authorize
-    assert 'test "$head_sha" = "$EVENT_HEAD_SHA"' in authorize
+    assert '"/repos/$head_repo/branches/$head_ref_uri"' in authorize
+    assert "PR_TRACKING_REF_STALE" in authorize
+    assert "TRIGGER_SUPERSEDED" in authorize
+    assert "HEAD_MOVING_OR_STALE" in authorize
+    assert "HEAD_SOURCE_UNAVAILABLE" in authorize
     assert '[[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]' in authorize
     assert 'echo "head_sha=$head_sha"' in authorize
     assert "pr_number=$PR_NUMBER" in authorize
@@ -130,6 +359,14 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
         "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/run-internal-ci"
     ) in authorize
     assert "gh api --silent --method DELETE" in authorize
+    assert "always() && github.event_name == 'pull_request_target'" in authorize
+
+    assert "needs: authorize" in report
+    assert "needs.authorize.result == 'failure'" in report
+    assert "/statuses/$PR_HEAD_SHA" in report
+    assert "/issues/$PR_NUMBER/comments" in report
+    assert "<!-- trtmc-pr-head-guard -->" in report
+    assert "secrets." not in report
 
     assert "needs: authorize" in dispatch
     assert "environment: ci-dispatch" in dispatch
@@ -185,6 +422,228 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert "umask 077" in dispatch
     assert 'trap \'rm -f "$payload"\' EXIT' in dispatch
     assert 'if: ${{ failure() }}' in dispatch
+
+
+def test_internal_ci_guard_rejects_stale_pr_tracking_head(tmp_path: Path) -> None:
+    old_head = "f7b48712c82318ded4e41c0dd7003379e1790198"
+    branch_head = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
+
+    result = _run_internal_ci_snapshot(
+        tmp_path,
+        event_head_sha=old_head,
+        pr_head_sha=old_head,
+        branch_head_sha=branch_head,
+    )
+
+    assert result.returncode != 0
+    assert "PR_TRACKING_REF_STALE" in result.stdout + result.stderr
+
+
+def test_internal_ci_guard_classifies_a_new_push_after_label(
+    tmp_path: Path,
+) -> None:
+    event_head = "f7b48712c82318ded4e41c0dd7003379e1790198"
+    current_head = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
+
+    result = _run_internal_ci_snapshot(
+        tmp_path,
+        event_head_sha=event_head,
+        pr_head_sha=current_head,
+        branch_head_sha=current_head,
+    )
+
+    assert result.returncode != 0
+    assert "TRIGGER_SUPERSEDED" in result.stdout + result.stderr
+    assert "PR_TRACKING_REF_STALE" not in result.stdout + result.stderr
+
+
+def test_internal_ci_guard_rereads_pr_metadata_while_waiting_for_sync(
+    tmp_path: Path,
+) -> None:
+    event_head = "f7b48712c82318ded4e41c0dd7003379e1790198"
+    current_head = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
+
+    result = _run_internal_ci_snapshot(
+        tmp_path,
+        event_head_sha=event_head,
+        pr_head_sha=(event_head, current_head),
+        branch_head_sha=(current_head, current_head),
+        max_attempts=2,
+    )
+
+    assert result.returncode != 0
+    assert "TRIGGER_SUPERSEDED" in result.stdout + result.stderr
+    assert "PR_TRACKING_REF_STALE" not in result.stdout + result.stderr
+
+
+def test_internal_ci_guard_classifies_three_disagreeing_heads(
+    tmp_path: Path,
+) -> None:
+    event_head = "f7b48712c82318ded4e41c0dd7003379e1790198"
+    pr_head = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
+    branch_head = "e76caa69b5b0a70e6db6096f1952ba6429cb32cc"
+
+    result = _run_internal_ci_snapshot(
+        tmp_path,
+        event_head_sha=event_head,
+        pr_head_sha=pr_head,
+        branch_head_sha=branch_head,
+    )
+
+    assert result.returncode != 0
+    assert "HEAD_MOVING_OR_STALE" in result.stdout + result.stderr
+
+
+def test_internal_ci_guard_reports_an_unavailable_head_repository(
+    tmp_path: Path,
+) -> None:
+    head_sha = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
+
+    result = _run_internal_ci_snapshot(
+        tmp_path,
+        event_head_sha=head_sha,
+        pr_head_sha=head_sha,
+        branch_head_sha=head_sha,
+        head_repo=None,
+    )
+
+    assert result.returncode != 0
+    assert "HEAD_SOURCE_UNAVAILABLE" in result.stdout + result.stderr
+
+
+def test_internal_ci_guard_accepts_an_accessible_fork_branch(
+    tmp_path: Path,
+) -> None:
+    head_sha = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
+
+    result = _run_internal_ci_snapshot(
+        tmp_path,
+        event_head_sha=head_sha,
+        pr_head_sha=head_sha,
+        branch_head_sha=head_sha,
+        head_repo="external-contributor/TensorRT-Model-Connect",
+        head_ref="feature/validation-fix",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_internal_ci_guard_reports_an_inaccessible_fork_branch(
+    tmp_path: Path,
+) -> None:
+    head_sha = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
+
+    result = _run_internal_ci_snapshot(
+        tmp_path,
+        event_head_sha=head_sha,
+        pr_head_sha=head_sha,
+        branch_head_sha=head_sha,
+        head_repo="external-contributor/TensorRT-Model-Connect",
+        branch_available=False,
+    )
+
+    assert result.returncode != 0
+    assert "HEAD_SOURCE_UNAVAILABLE" in result.stdout + result.stderr
+
+
+def test_internal_ci_guard_protects_manual_dispatch_without_event_head(
+    tmp_path: Path,
+) -> None:
+    head_sha = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
+
+    result = _run_internal_ci_snapshot(
+        tmp_path,
+        event_head_sha="",
+        pr_head_sha=head_sha,
+        branch_head_sha=head_sha,
+        event_name="workflow_dispatch",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_internal_ci_trigger_label_is_consumed_after_guard_failure() -> None:
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    step = next(
+        item
+        for item in workflow["jobs"]["authorize"]["steps"]
+        if item["name"] == "Consume the trusted trigger label"
+    )
+
+    assert step["if"] == (
+        "${{ always() && github.event_name == 'pull_request_target' }}"
+    )
+    assert step["env"]["PR_NUMBER"] == "${{ github.event.pull_request.number }}"
+
+
+def test_internal_ci_guard_failure_is_visible_on_the_pull_request(
+    tmp_path: Path,
+) -> None:
+    pr_head = "f7b48712c82318ded4e41c0dd7003379e1790198"
+    branch_head = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
+
+    result, calls = _run_internal_ci_guard_report(
+        tmp_path,
+        guard_code="PR_TRACKING_REF_STALE",
+        pr_head_sha=pr_head,
+        branch_head_sha=branch_head,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    serialized = json.dumps(calls)
+    assert f"/statuses/{pr_head}" in serialized
+    assert "trtmc/premerge/required" in serialized
+    assert "FAIL: stale PR tracking ref" in serialized
+    assert f"PR metadata: `{pr_head}`" in serialized
+    assert f"Source branch: `{branch_head}`" in serialized
+    assert "Refresh the PR base" in serialized
+    assert "/issues/715/comments" in serialized
+    assert "NVIDIA-dev" not in serialized
+
+
+def test_internal_ci_guard_updates_its_existing_diagnostic_comment(
+    tmp_path: Path,
+) -> None:
+    pr_head = "f7b48712c82318ded4e41c0dd7003379e1790198"
+    branch_head = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
+
+    result, calls = _run_internal_ci_guard_report(
+        tmp_path,
+        guard_code="PR_TRACKING_REF_STALE",
+        pr_head_sha=pr_head,
+        branch_head_sha=branch_head,
+        existing_comment_id=123456,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    serialized = json.dumps(calls)
+    assert "/issues/comments/123456" in serialized
+    assert "--method\", \"PATCH" in serialized
+    assert not any(
+        "/issues/715/comments" in " ".join(call) and "POST" in call for call in calls
+    )
+
+
+def test_internal_ci_guard_comments_even_when_failure_status_cannot_be_posted(
+    tmp_path: Path,
+) -> None:
+    pr_head = "f7b48712c82318ded4e41c0dd7003379e1790198"
+    branch_head = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
+
+    result, calls = _run_internal_ci_guard_report(
+        tmp_path,
+        guard_code="PR_TRACKING_REF_STALE",
+        pr_head_sha=pr_head,
+        branch_head_sha=branch_head,
+        status_available=False,
+    )
+
+    assert result.returncode != 0
+    assert "/issues/715/comments" in json.dumps(calls)
 
 
 def test_ci_orchestration_uses_the_class_based_python_entrypoint() -> None:
