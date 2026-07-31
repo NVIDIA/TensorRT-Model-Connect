@@ -68,11 +68,18 @@ class _FakeNetwork:
         self.inputs: list[tuple[str, object, tuple[int, ...]]] = []
         self.outputs: list[_FakeTensor] = []
         self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+        self.layers: list[_FakeLayer] = []
+
+    @property
+    def num_layers(self) -> int:
+        return len(self.layers)
 
     def _record(self, op: str, *args, **kwargs) -> _FakeLayer:
         self.calls.append((op, args, kwargs))
         shape = next((tuple(arg.shape) for arg in args if hasattr(arg, "shape")), (1, 4))
-        return _FakeLayer(shape=shape)
+        layer = _FakeLayer(shape=shape)
+        self.layers.append(layer)
+        return layer
 
     def add_input(self, name: str, dtype: object, shape: tuple[int, ...]) -> _FakeTensor:
         self.inputs.append((name, dtype, shape))
@@ -83,7 +90,9 @@ class _FakeNetwork:
 
     def add_constant(self, shape: tuple[int, ...], weights: object) -> _FakeLayer:
         self.calls.append(("add_constant", (shape, weights), {}))
-        return _FakeLayer(shape=tuple(shape))
+        layer = _FakeLayer(shape=tuple(shape))
+        self.layers.append(layer)
+        return layer
 
     def add_cast(self, tensor, target_dtype, **kwargs) -> _FakeLayer:
         layer = self._record("add_cast", tensor, target_dtype, **kwargs)

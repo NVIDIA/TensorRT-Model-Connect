@@ -91,6 +91,17 @@ def test_trt_compat_proxy_wraps_version_sensitive_builder_calls(monkeypatch):
     class FakeNetwork:
         def __init__(self, flags):
             self.flags = flags
+            self.layers: list[object] = []
+
+        @property
+        def num_layers(self) -> int:
+            return len(self.layers)
+
+        def add_identity(self, value):
+            calls.append(("add_identity", value))
+            layer = object()
+            self.layers.append(layer)
+            return layer
 
         def add_matrix_multiply(self, lhs, lhs_op, rhs, rhs_op):
             calls.append(("add_matrix_multiply", lhs, lhs_op, rhs, rhs_op))
@@ -143,15 +154,18 @@ def test_trt_compat_proxy_wraps_version_sensitive_builder_calls(monkeypatch):
     network = builder.create_network(flags)
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1024)
+    identity = network.add_identity("value")
     layer = network.add_matrix_multiply("lhs", "none", "rhs", "transpose")
     plan = builder.build_serialized_network(network, config)
 
     assert flags == 2
+    assert identity is trt_compat.unwrap(network).layers[0]
     assert layer == "layer"
     assert plan == b"plan"
     assert calls == [
         ("create_network", 2),
         ("set_memory_pool_limit", "workspace", 1024),
+        ("add_identity", "value"),
         ("add_matrix_multiply", "lhs", "none", "rhs", "transpose"),
     ]
 
