@@ -40,6 +40,18 @@ from tensorrt_model_connect.python_profiles import (  # noqa: E402
     profile_env_var,
     resolve_profile_python,
 )
+from tensorrt_model_connect.benchmark.task_adapters import (  # noqa: E402
+    adapter_for_task_strategy,
+)
+from tensorrt_model_connect.benchmark.types import BenchmarkError  # noqa: E402
+from tools.reporting_html import (  # noqa: E402
+    COMMON_REPORT_STYLES,
+    TASK_TYPE_BY_USER_CONTRACT,
+    ReportFilter,
+    render_report_filter_script,
+    render_report_filters,
+    sorted_filter_values,
+)
 from tools.validation import catalog as validation_catalog  # noqa: E402
 from tools import trtmc_disagreements  # noqa: E402
 
@@ -55,31 +67,6 @@ NOT_COMPARED_DIRECTORY = "not-compared"
 LEGACY_E2E_REASON = (
     "E2E execution does not compare aligned reference and TRTMC outputs."
 )
-_TASK_TYPE_BY_USER_CONTRACT = {
-    "multiple_choice_qa": "Text → Choice",
-    "continuation_parity": "Text → Text",
-    "code_completion": "Text → Code",
-    "translation": "Text → Text",
-    "seq2seq_output": "Text → Text",
-    "any-to-any": "Image + Text → Text",
-    "speech_response": "Audio → Audio",
-    "vl_answer": "Image + Text → Text",
-    "ocr_text": "Image → Text",
-    "exact_transcript": "Audio → Text",
-    "tts_audio": "Text → Audio",
-    "diffusion_image": "Text → Image",
-    "diffusion_video": "Text → Video",
-    "image-to-image": "Image + Text → Image",
-    "image_classification": "Image → Class",
-    "segmentation_mask": "Image → Mask",
-    "prompted_mask": "Image + Prompt → Mask",
-    "time_series_prediction_parity": "Time Series → Time Series",
-    "encoder_embedding_parity": "Text → Embedding",
-    "ranking_order": "Query + Documents → Ranking",
-    "diffusion_text_generation": "Text → Text",
-}
-
-
 class ValidationError(RuntimeError):
     """The requested validation cannot be resolved or executed."""
 
@@ -218,7 +205,7 @@ def _suite_task_metadata(suite: Mapping[str, Any]) -> tuple[str, str]:
     user_contract = str(suite.get("user_contract", "") or "")
     task_type = str(suite.get("task_type", "") or "")
     if not task_type:
-        task_type = _TASK_TYPE_BY_USER_CONTRACT.get(user_contract, "")
+        task_type = TASK_TYPE_BY_USER_CONTRACT.get(user_contract, "")
     return task_type, user_contract
 
 
@@ -237,6 +224,45 @@ def _result_task_metadata(result: Mapping[str, Any]) -> tuple[str, str]:
         return task_type, user_contract
     workload = str(result.get("workload", "") or "")
     return _default_suite_task_metadata().get(workload, ("", user_contract))
+
+
+def _operation_for_task_strategy(task_strategy: str) -> str:
+    if not task_strategy:
+        return ""
+    try:
+        return adapter_for_task_strategy(task_strategy).operation
+    except BenchmarkError:
+        return ""
+
+
+@cache
+def _default_model_report_metadata() -> dict[str, tuple[str, str, str]]:
+    metadata = {}
+    for model in validation_catalog.load_manifest_records(DEFAULT_MODELS):
+        task_strategy = str(model.get("task_strategy", "") or "")
+        metadata[str(model["name"])] = (
+            str(model.get("family", "") or ""),
+            _operation_for_task_strategy(task_strategy),
+            task_strategy,
+        )
+    return metadata
+
+
+def _result_model_report_metadata(result: Mapping[str, Any]) -> tuple[str, str, str]:
+    fallback = _default_model_report_metadata().get(
+        str(result.get("model", "")),
+        ("", "", ""),
+    )
+    task_strategy = str(result.get("task_strategy", "") or fallback[2])
+    return (
+        str(result.get("family", "") or fallback[0]),
+        str(
+            result.get("operation", "")
+            or fallback[1]
+            or _operation_for_task_strategy(task_strategy)
+        ),
+        task_strategy,
+    )
 
 
 def ready_model_names(models_root: Path = DEFAULT_MODELS) -> tuple[str, ...]:
@@ -1233,9 +1259,13 @@ def _normalize_result(result: Mapping[str, Any]) -> dict[str, Any]:
         candidate = raw_result.get("precision_contract")
         precision_contract = dict(candidate) if isinstance(candidate, dict) else {}
     task_type, user_contract = _result_task_metadata(normalized)
+    family, operation, task_strategy = _result_model_report_metadata(normalized)
     normalized.update(
         {
             "schema_version": "trtmc.validation-result/v2",
+            "family": family,
+            "operation": operation,
+            "task_strategy": task_strategy,
             "task_type": task_type,
             "user_contract": user_contract,
             "execution": execution,
@@ -1297,6 +1327,9 @@ def _comparison_result(
     reference_environment: EnvironmentSelection,
     dataset_command: str,
     sample_limit: int = 0,
+    family: str = "",
+    operation: str = "",
+    task_strategy: str = "",
     task_type: str = "",
     user_contract: str = "",
 ) -> dict[str, Any]:
@@ -1332,6 +1365,9 @@ def _comparison_result(
         "schema_version": "trtmc.validation-result/v2",
         "model": binding.model,
         "workload": binding.workload,
+        "family": family,
+        "operation": operation,
+        "task_strategy": task_strategy,
         "task_type": task_type,
         "user_contract": user_contract,
         "executor": "trtmc_compare",
@@ -1380,6 +1416,8 @@ def run_binding(
 
     suite = suites[workload]
     task_type, user_contract = _suite_task_metadata(suite)
+    model = task_models[binding.model]
+    task_strategy = str(model.get("task_strategy", "") or "")
     dataset = (
         Path(arguments.dataset)
         if arguments.dataset
@@ -1401,6 +1439,9 @@ def run_binding(
         reference_environment=environment,
         dataset_command=dataset_command,
         sample_limit=int(arguments.limit or 0),
+        family=str(model.get("family", "") or ""),
+        operation=_operation_for_task_strategy(task_strategy),
+        task_strategy=task_strategy,
         task_type=task_type,
         user_contract=user_contract,
     )
@@ -2033,17 +2074,20 @@ def _traffic_light_counts(
 ) -> dict[str, int]:
     counts = {"green": 0, "yellow": 0, "red": 0, "white": 0}
     for result in results:
-        validation_status = str(result["validation"]["status"])
-        comparison_status = str(result["comparison"]["status"])
-        if validation_status == "skipped":
-            counts["yellow"] += 1
-        elif comparison_status == "agreement":
-            counts["green"] += 1
-        elif comparison_status == "disagreement":
-            counts["red"] += 1
-        else:
-            counts["white"] += 1
+        counts[_traffic_light_status(result)] += 1
     return counts
+
+
+def _traffic_light_status(result: Mapping[str, Any]) -> str:
+    validation_status = str(result["validation"]["status"])
+    comparison_status = str(result["comparison"]["status"])
+    if validation_status == "skipped":
+        return "yellow"
+    if comparison_status == "agreement":
+        return "green"
+    if comparison_status == "disagreement":
+        return "red"
+    return "white"
 
 
 def _report_rows(
@@ -2053,6 +2097,20 @@ def _report_rows(
 ) -> str:
     rows = []
     for result, path in zip(results, result_paths, strict=True):
+        family, operation, task_strategy = _result_model_report_metadata(result)
+        task_type, user_contract = _result_task_metadata(result)
+        status = _traffic_light_status(result)
+        search_filter = " ".join(
+            (
+                family,
+                operation,
+                str(result.get("model", "")),
+                task_strategy,
+                task_type,
+                user_contract,
+                str(result.get("workload") or ""),
+            )
+        ).lower()
         relative = path.relative_to(output)
         metadata = result.get("disagreements", {})
         artifact_name = (
@@ -2062,8 +2120,14 @@ def _report_rows(
         )
         artifact_relative = relative.parent / artifact_name
         rows.append(
-            "<tr>"
-            f"<td>{html.escape(str(result.get('model', '')))}</td>"
+            f'<tr data-filter-search="{html.escape(search_filter, quote=True)}" '
+            f'data-filter-model-type="{html.escape(family, quote=True)}" '
+            f'data-filter-operation="{html.escape(operation, quote=True)}" '
+            f'data-filter-task-type="{html.escape(task_type, quote=True)}" '
+            f'data-filter-status="{status}">'
+            f"<td><code>{html.escape(family or '—')}</code></td>"
+            f"<td><code>{html.escape(operation or '—')}</code></td>"
+            f"<td><code>{html.escape(str(result.get('model', '')))}</code></td>"
             f"<td>{_render_task_type(result)}</td>"
             f"<td>{html.escape(str(result.get('workload') or '—'))}</td>"
             f"<td>{_render_samples(result)}</td>"
@@ -2099,23 +2163,61 @@ def _report_document(
     execution_errors: int,
     traffic_light_counts: Mapping[str, int],
 ) -> str:
+    results = list(report.get("results", []))
     provenance = _report_provenance(report.get("run", {}))
     duration = _format_duration(report["summary"].get("duration_seconds"))
     duration_summary = f" · {html.escape(duration)} total duration" if duration else ""
+    filters = render_report_filters(
+        row_count=len(results),
+        search_placeholder="Model type, operation, model, task type, or workload",
+        filters=(
+            ReportFilter(
+                "model-type",
+                "Model type",
+                sorted_filter_values(
+                    _result_model_report_metadata(result)[0] for result in results
+                ),
+            ),
+            ReportFilter(
+                "operation",
+                "Operation",
+                sorted_filter_values(
+                    _result_model_report_metadata(result)[1] for result in results
+                ),
+            ),
+            ReportFilter(
+                "task-type",
+                "Task type",
+                sorted_filter_values(
+                    _result_task_metadata(result)[0] for result in results
+                ),
+            ),
+            ReportFilter(
+                "status",
+                "Status",
+                tuple(
+                    (status, label)
+                    for status, label in (
+                        ("green", "Green"),
+                        ("yellow", "Yellow"),
+                        ("red", "Red"),
+                        ("white", "White"),
+                    )
+                    if any(
+                        _traffic_light_status(result) == status for result in results
+                    )
+                ),
+            ),
+        ),
+    )
+    filter_script = render_report_filter_script()
     return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TRTMC Reference Consistency Report</title>
 <style>
-body {{ font: 14px system-ui, sans-serif; margin: 32px; color: #202124; }}
-h1 {{ margin-bottom: 4px; }}
-.purpose {{ color: #5f6368; margin-bottom: 8px; }}
-.traffic-summary {{ font-size: 20px; font-weight: 650; margin: 14px 0 8px; }}
-.summary {{ color: #5f6368; margin-bottom: 24px; }}
-table {{ border-collapse: collapse; width: 100%; }}
-th, td {{ border: 1px solid #dadce0; padding: 8px 10px; text-align: left; }}
-th {{ background: #f8f9fa; }}
+{COMMON_REPORT_STYLES}
+.table-wrap table {{ min-width: 1900px; }}
 details {{ min-width: 210px; }}
-summary {{ cursor: pointer; color: #185abc; }}
 .commands {{ min-width: min(760px, 70vw); padding: 4px 0; }}
 .commands h4 {{ margin: 12px 0 4px; }}
 .failure-details {{ min-width: min(900px, 75vw); margin-bottom: 10px; }}
@@ -2131,9 +2233,6 @@ summary {{ cursor: pointer; color: #185abc; }}
 .failure-media img, .failure-media video {{ display: block; max-width: 360px;
                                            max-height: 280px; }}
 .failure-media audio {{ width: min(360px, 70vw); }}
-pre {{ margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
-       background: #f8f9fa; border: 1px solid #dadce0; border-radius: 4px; }}
-.unavailable {{ color: #5f6368; }}
 .signal {{ display: inline-flex; align-items: center; gap: 7px; font-weight: 650;
            white-space: nowrap; }}
 .signal-light {{ width: 10px; height: 10px; border-radius: 50%;
@@ -2149,15 +2248,17 @@ pre {{ margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
 .signal-cached {{ color: #185abc; }}
 .signal-cached .signal-light {{ background: #1a73e8; box-shadow: 0 0 0 3px #e8f0fe; }}
 .signal-not_run, .signal-not_compared {{ color: #5f6368; }}
-.detail {{ color: #5f6368; font-size: 12px; margin-top: 4px; }}
 .metric {{ display: flex; justify-content: space-between; gap: 14px;
            font-variant-numeric: tabular-nums; font-size: 12px; }}
 .metric span {{ color: #5f6368; }}
 .metric.primary {{ font-size: 13px; }}
 .metric.primary span, .metric.primary strong {{ color: #202124; }}
 </style></head><body>
+<header class="report-header">
+<p class="report-eyebrow">Validation report</p>
 <h1>TRTMC Reference Consistency Report</h1>
-<div class="purpose">Accuracy and output agreement against the model reference.</div>
+<p class="purpose">Accuracy and output agreement against the model reference.</p>
+</header>
 <div class="traffic-summary" title="Agreement · Skipped · Disagreement · Not compared">
 🟢 {traffic_light_counts["green"]} &nbsp; 🟡 {traffic_light_counts["yellow"]} &nbsp;
 🔴 {traffic_light_counts["red"]} &nbsp; ⚪ {traffic_light_counts["white"]}
@@ -2169,10 +2270,12 @@ pre {{ margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
 {execution_errors} execution errors ·
 {report["summary"]["selected_samples"]} samples{duration_summary}<br>
 {html.escape(provenance)}</div>
-<table><thead><tr><th>Model</th><th>Task type</th><th>Workload</th><th>Samples</th><th>Execution</th>
+{filters}
+<div class="table-wrap"><table><thead><tr><th>Model type</th><th>Operation</th><th>Model</th><th>Task type</th><th>Workload</th><th>Samples</th><th>Execution</th>
 <th>Reference</th><th>Comparison</th><th>Agreement metrics</th>
 <th>Validation</th><th>Vanilla reproduction</th><th>Result</th></tr></thead>
-<tbody>{rows}</tbody></table>
+<tbody>{rows}</tbody></table></div>
+{filter_script}
 </body></html>
 """
 

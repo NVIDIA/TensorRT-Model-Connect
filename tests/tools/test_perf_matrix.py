@@ -888,6 +888,8 @@ def test_report_displays_campaign_and_model_profile_wall_times() -> None:
                 "family": "example",
                 "operation": "generate",
                 "model": "example-model",
+                "task_type": "Text → Text",
+                "task_strategy": "text_generation_causal",
                 "status": "green",
                 "started_at": "2026-07-29T07:20:00+00:00",
                 "finished_at": "2026-07-29T07:21:30+00:00",
@@ -900,7 +902,7 @@ def test_report_displays_campaign_and_model_profile_wall_times() -> None:
 
     assert "Total campaign wall time:</strong> 1h 2m 3s" in report
     assert "3,723.000 s" in report
-    assert "<th>Model-profile wall time</th>" in report
+    assert "<th>Model wall time</th>" in report
     assert "1m 30.0s" in report
     assert "90.000 s" in report
     assert "including bundle preparation, GPU headroom waits" in report
@@ -917,6 +919,8 @@ def test_report_prefers_test_task_bundle_preparation_receipt() -> None:
                 "family": "example",
                 "operation": "generate",
                 "model": "example-model",
+                "task_type": "Text → Text",
+                "task_strategy": "text_generation_causal",
                 "status": "green",
                 "baseline_contract": {},
                 "candidate": {
@@ -968,6 +972,8 @@ def test_report_includes_client_side_row_filters() -> None:
                 "family": "example",
                 "operation": "generate",
                 "model": "example-model",
+                "task_type": "Text → Text",
+                "task_strategy": "text_generation_causal",
                 "status": "green",
                 "baseline_contract": {},
                 "candidate": {
@@ -988,6 +994,8 @@ def test_report_includes_client_side_row_filters() -> None:
                 "family": "other",
                 "operation": "generate",
                 "model": "other-model",
+                "task_type": "Image + Text → Text",
+                "task_strategy": "vision_language_generation",
                 "status": "red",
                 "baseline_contract": {},
                 "candidate": {
@@ -1008,19 +1016,47 @@ def test_report_includes_client_side_row_filters() -> None:
     report = perf_matrix._report_html(results)
 
     assert 'id="report-filter-search"' in report
-    assert 'id="report-filter-light"' in report
+    assert 'id="report-filter-model-type"' in report
+    assert 'id="report-filter-operation"' in report
+    assert 'id="report-filter-task-type"' in report
+    assert 'id="report-filter-status"' in report
     assert 'id="report-filter-preparation"' in report
     assert 'id="report-filter-reset"' in report
     assert 'id="report-filter-count">Showing 2 of 2 rows<' in report
     assert (
         "data-filter-search='example generate example-model example.generate'"
-        in report
+        not in report
     )
-    assert "data-filter-light='green'" in report
+    assert "example generate example-model text → text" in report
+    assert "data-filter-model-type='example'" in report
+    assert "data-filter-operation='generate'" in report
+    assert "data-filter-task-type='Text → Text'" in report
+    assert "data-filter-status='green'" in report
     assert "data-filter-preparation='built'" in report
-    assert "data-filter-light='red'" in report
+    assert "data-filter-status='red'" in report
     assert "data-filter-preparation='reused'" in report
-    assert "row.hidden = !(matchesSearch && matchesLight && matchesPreparation);" in report
+    assert "const matches = controls.every((control)" in report
+    assert "row.hidden = !matches;" in report
+
+
+def test_report_recovers_task_type_from_an_existing_result_manifest() -> None:
+    task_type, user_contract, task_strategy = perf_matrix._report_task_metadata(
+        {
+            "model": "codegen-350m",
+            "operation": "generate",
+            "resolved_settings": {
+                "testcase": "codegen-350m",
+                "model": {
+                    "manifest": "codegen/manifests/codegen-350m.json",
+                    "task_strategy": "text_generation_causal",
+                },
+            },
+        }
+    )
+
+    assert task_type == "Text → Code"
+    assert user_contract == "code_completion"
+    assert task_strategy == "text_generation_causal"
 
 
 def test_apply_bundle_preparation_receipt_rejects_unmatched_bundle() -> None:
@@ -1186,8 +1222,8 @@ def test_run_consolidates_results_and_records_replayable_commands(
     report = (output / "report.html").read_text(encoding="utf-8")
     assert ">gpt2<" in report
     assert "HF eager" in report
-    assert "76 families" in report
-    assert "105 model-profile comparisons" in report
+    assert "76 model types" in report
+    assert "105 model comparisons" in report
     assert "105 single-process profiles" in report
     assert "0 explicitly excluded profiles" in report
     assert (
@@ -1198,9 +1234,10 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert (
         f"{expected_catalog_coverage['other_profiles']} other or unsupported profiles"
     ) in report
-    assert "<th>Model profile</th>" in report
+    assert "<th>Model</th>" in report
+    assert "<th>Task type</th>" in report
     assert "Total campaign wall time:" in report
-    assert "<th>Model-profile wall time</th>" in report
+    assert "<th>Model wall time</th>" in report
     assert "not used for traffic-light classification" in report
     assert "TRTMC infer p50 (ms)" in report
     assert "Baseline infer p50 (ms)" in report
@@ -1211,7 +1248,7 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert "excluded from the infer-time traffic-light comparison" in report
     assert ">10.450<" in report
     assert ">20.450<" in report
-    assert "<th>Status</th>" not in report
+    assert "<th>Status</th>" in report
     assert "<td>green</td>" not in report
     assert "Needs alignment" not in report
     assert "Measured scope" in report

@@ -1089,6 +1089,9 @@ def test_write_report_links_each_comparison(tmp_path):
             {
                 "model": "model-a",
                 "workload": "workload-a",
+                "family": "example",
+                "operation": "generate_audio",
+                "task_strategy": "text_to_audio",
                 "task_type": "Text → Audio",
                 "user_contract": "tts_audio",
                 "status": "passed",
@@ -1138,6 +1141,9 @@ def test_write_report_links_each_comparison(tmp_path):
     assert "🟢 1 &nbsp; 🟡 0 &nbsp;" in document
     assert "🔴 0 &nbsp; ⚪ 0" in document
     assert "Vanilla reproduction" in document
+    assert "<th>Model type</th>" in document
+    assert "<th>Operation</th>" in document
+    assert "<th>Model</th>" in document
     assert "<th>Task type</th>" in document
     assert "Text → Audio" in document
     assert "tts_audio" in document
@@ -1150,6 +1156,15 @@ def test_write_report_links_each_comparison(tmp_path):
     assert "$ python tools/trtmc_validate.py model-a" in document
     assert "$ python hf.py" in document
     assert "$ trtmc run" in document
+    assert 'id="report-filter-search"' in document
+    assert 'id="report-filter-model-type"' in document
+    assert 'id="report-filter-operation"' in document
+    assert 'id="report-filter-task-type"' in document
+    assert 'id="report-filter-status"' in document
+    assert 'data-filter-model-type="example"' in document
+    assert 'data-filter-operation="generate_audio"' in document
+    assert 'data-filter-task-type="Text → Audio"' in document
+    assert 'data-filter-status="green"' in document
 
 
 def test_write_report_surfaces_quantized_reference_precision_contract(
@@ -1217,6 +1232,9 @@ def test_report_infers_task_type_for_legacy_standard_result(tmp_path):
     _, html_path, report = trtmc_validate.write_report(tmp_path)
 
     result = report["results"][0]
+    assert result["family"] == "bark"
+    assert result["operation"] == "generate_audio"
+    assert result["task_strategy"] == "text_to_audio"
     assert result["task_type"] == "Text → Audio"
     assert result["user_contract"] == "tts_audio"
     document = html_path.read_text(encoding="utf-8")

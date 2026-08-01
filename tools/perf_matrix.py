@@ -11,6 +11,7 @@ from collections import Counter
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import cache
 import hashlib
 import html
 import json
@@ -46,6 +47,14 @@ from tensorrt_model_connect.benchmark.worker import (  # noqa: E402
 from tensorrt_model_connect.python_profiles import (  # noqa: E402
     default_execution_profiles,
     resolve_profile_python,
+)
+from tools.reporting_html import (  # noqa: E402
+    COMMON_REPORT_STYLES,
+    ReportFilter,
+    render_report_filter_script,
+    render_report_filters,
+    sorted_filter_values,
+    task_type_label,
 )
 
 
@@ -1927,7 +1936,7 @@ def _comparison_status(ratio: float, margin: float) -> str:
 def _case_row(
     case: Mapping[str, Any], resolved: Mapping[str, Any], workload_digest: str
 ) -> dict[str, Any]:
-    return {
+    row = {
         "id": case["id"],
         "family": case["family"],
         "operation": case["operation"],
@@ -1957,6 +1966,15 @@ def _case_row(
         "commands": {},
         "started_at": _now(),
     }
+    task_type, user_contract, task_strategy = _report_task_metadata(row)
+    row.update(
+        {
+            "task_type": task_type,
+            "user_contract": user_contract,
+            "task_strategy": task_strategy,
+        }
+    )
+    return row
 
 
 def _run_supported_case(
@@ -2435,6 +2453,54 @@ def _raw_commands_html(row: Mapping[str, Any], default_cwd: str) -> str:
     return "".join(parts)
 
 
+@cache
+def _manifest_user_contract(manifest: str, testcase: str) -> str:
+    path = REPOSITORY / "tests" / "e2e" / "models" / manifest
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    testcases = payload.get("testcases", [])
+    if not isinstance(testcases, list):
+        return ""
+    selected = next(
+        (
+            candidate
+            for candidate in testcases
+            if isinstance(candidate, Mapping) and candidate.get("name") == testcase
+        ),
+        None,
+    )
+    if selected is None:
+        selected = next(
+            (candidate for candidate in testcases if isinstance(candidate, Mapping)),
+            {},
+        )
+    return str(selected.get("user_contract", "") or "")
+
+
+def _report_task_metadata(row: Mapping[str, Any]) -> tuple[str, str, str]:
+    resolved = row.get("resolved_settings", {})
+    resolved = resolved if isinstance(resolved, Mapping) else {}
+    model = resolved.get("model", {})
+    model = model if isinstance(model, Mapping) else {}
+    task_strategy = str(row.get("task_strategy", "") or model.get("task_strategy", "") or "")
+    user_contract = str(row.get("user_contract", "") or "")
+    if not user_contract:
+        user_contract = _manifest_user_contract(
+            str(model.get("manifest", "") or ""),
+            str(resolved.get("testcase", row.get("model", "")) or ""),
+        )
+    request = resolved.get("request", {})
+    task_type = str(row.get("task_type", "") or "") or task_type_label(
+        user_contract=user_contract,
+        task_strategy=task_strategy,
+        operation=row.get("operation", ""),
+        request=request,
+    )
+    return task_type, user_contract, task_strategy
+
+
 def _report_html(results: Mapping[str, Any]) -> str:
     rows = list(results["cases"])
     family_counts = Counter(str(row["family"]) for row in rows)
@@ -2450,10 +2516,18 @@ def _report_html(results: Mapping[str, Any]) -> str:
     default_cwd = str(results.get("repository_root", ""))
     for row in rows:
         status = str(row.get("status", "pending"))
-        light_filter = status if status in {"green", "yellow", "red"} else "white"
+        status_filter = status if status in {"green", "yellow", "red"} else "white"
+        task_type, user_contract, task_strategy = _report_task_metadata(row)
         search_filter = " ".join(
-            str(row.get(key, ""))
-            for key in ("family", "operation", "model", "id")
+            (
+                str(row.get("family", "")),
+                str(row.get("operation", "")),
+                str(row.get("model", "")),
+                task_type,
+                user_contract,
+                task_strategy,
+                str(row.get("id", "")),
+            )
         ).lower()
         preparation_filter = _bundle_preparation_filter(results, row)
         reason = html.escape(_report_note(row))
@@ -2463,13 +2537,22 @@ def _report_html(results: Mapping[str, Any]) -> str:
         model_wall_time = _wall_time_html(row)
         bundle_preparation = _bundle_preparation_html(results, row)
         timing_scope = _timing_scope_html(row)
+        task_type_detail = (
+            f"<div class='detail'>{html.escape(user_contract)}</div>"
+            if user_contract
+            else ""
+        )
         body.append(
             f"<tr data-filter-search='{html.escape(search_filter)}' "
-            f"data-filter-light='{html.escape(light_filter)}' "
+            f"data-filter-model-type='{html.escape(str(row['family']))}' "
+            f"data-filter-operation='{html.escape(str(row['operation']))}' "
+            f"data-filter-task-type='{html.escape(task_type)}' "
+            f"data-filter-status='{html.escape(status_filter)}' "
             f"data-filter-preparation='{html.escape(preparation_filter)}'>"
-            f"<td>{html.escape(str(row['family']))}</td>"
-            f"<td>{html.escape(str(row['operation']))}</td>"
+            f"<td><code>{html.escape(str(row['family']))}</code></td>"
+            f"<td><code>{html.escape(str(row['operation']))}</code></td>"
             f"<td><code>{html.escape(str(row['model']))}</code></td>"
+            f"<td><strong>{html.escape(task_type or '—')}</strong>{task_type_detail}</td>"
             f"<td class='timing-value'>{model_wall_time}</td>"
             f"<td>{html.escape(_baseline_label(row))}</td>"
             f"<td class='timing-value'>{candidate_timing}</td>"
@@ -2517,84 +2600,91 @@ def _report_html(results: Mapping[str, Any]) -> str:
     bundle_preparation_summary = html.escape(
         _bundle_preparation_summary(results, rows)
     )
+    report_filters = render_report_filters(
+        row_count=len(rows),
+        search_placeholder="Model type, operation, model, or task type",
+        filters=(
+            ReportFilter(
+                "model-type",
+                "Model type",
+                sorted_filter_values(row.get("family", "") for row in rows),
+            ),
+            ReportFilter(
+                "operation",
+                "Operation",
+                sorted_filter_values(row.get("operation", "") for row in rows),
+            ),
+            ReportFilter(
+                "task-type",
+                "Task type",
+                sorted_filter_values(_report_task_metadata(row)[0] for row in rows),
+            ),
+            ReportFilter(
+                "status",
+                "Status",
+                tuple(
+                    (status, label)
+                    for status, label in (
+                        ("green", "Green"),
+                        ("yellow", "Yellow"),
+                        ("red", "Red"),
+                        ("white", "White"),
+                    )
+                    if any(
+                        (
+                            str(row.get("status", "pending"))
+                            if row.get("status") in {"green", "yellow", "red"}
+                            else "white"
+                        )
+                        == status
+                        for row in rows
+                    )
+                ),
+            ),
+            ReportFilter(
+                "preparation",
+                "Bundle preparation",
+                (
+                    ("built", "Built"),
+                    ("cache_hit", "Cache hit"),
+                    ("reused", "Existing bundle"),
+                    ("would_build", "Would build"),
+                    ("unrecorded", "Not recorded"),
+                ),
+                token_values=True,
+            ),
+        ),
+    )
+    filter_script = render_report_filter_script()
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TRTMC performance matrix</title>
 <style>
-body{{font-family:Arial,sans-serif;margin:28px;color:#1f2937}} h1{{margin-bottom:4px}}
-.meta{{color:#4b5563;margin:4px 0 18px}} .campaign-duration{{font-size:18px;margin:12px 0 18px}}
-.table-wrap{{overflow-x:auto}} table{{border-collapse:collapse;width:100%;min-width:1650px}}
-th,td{{border:1px solid #9ca3af;padding:7px;text-align:left;vertical-align:top}}
-th{{background:#e5e7eb}} tr:nth-child(even){{background:#f9fafb}} code{{font-size:12px}}
-.command-label{{font-weight:600;margin-top:8px}} pre{{margin:4px 0 10px;max-width:720px;white-space:pre-wrap;overflow-wrap:anywhere}}
+{COMMON_REPORT_STYLES}
+.table-wrap table{{min-width:1800px}}
+.command-label{{font-weight:650;margin-top:8px}} pre{{max-width:720px}}
 .light{{font-size:20px;text-align:center}} .timing-value{{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}}
-.timing-meta{{color:#6b7280;font-size:11px;margin-top:2px}} .scope-side{{font-size:11px;margin-bottom:7px;min-width:270px}}
+.scope-side{{font-size:11px;margin-bottom:7px;min-width:270px}}
 .scope-title{{font-size:12px;font-weight:700;margin-bottom:2px}}
-.filters{{display:flex;flex-wrap:wrap;gap:12px;align-items:end;margin:16px 0;padding:12px;background:#f3f4f6;border:1px solid #d1d5db}}
-.filters label{{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600}}
-.filters input,.filters select,.filters button{{box-sizing:border-box;min-height:34px;padding:6px 9px;border:1px solid #9ca3af;background:#fff;color:#1f2937}}
-.filters input{{min-width:260px}} .filters button{{cursor:pointer}} .filter-count{{margin-left:auto;font-size:13px;color:#4b5563}}
 </style></head><body>
+<header class="report-header">
+<p class="report-eyebrow">Performance report</p>
 <h1>TRTMC performance matrix</h1>
-<p class="meta">Generated {generated}. {family_count} families across {len(rows)} model-profile comparisons.{repeated_note}</p>
+<p class="purpose">TRTMC and reference latency at aligned public task boundaries.</p>
+</header>
+<p class="meta">Generated {generated}. {family_count} model types across {len(rows)} model comparisons.{repeated_note}</p>
 <p class="campaign-duration"><strong>Total campaign wall time:</strong> {campaign_duration} <span class="timing-meta">({campaign_seconds_label}; {campaign_started} → {campaign_finished})</span></p>
 <p class="meta">Release matrix coverage: {release_profiles} single-process profiles. {explicit_exclusion_label} and {excluded_l0_profiles} duplicate L0 profiles are excluded from the {ready_profiles} ready catalog profiles. {distributed_profiles} distributed profiles require a separate multi-process run and are outside this report. {other_profiles} other or unsupported profiles.</p>
 <p class="meta">Timing contracts were validated before execution for {preflight_count} comparisons. A row is classified only when its recorded TRTMC and reference policies match that contract.</p>
 <p class="meta">Times are the p50 wall time from the recorded timed samples. Measured scope states the exact recorded boundary and the work included and excluded on each side.</p>
 <p class="meta">Model-profile wall time spans the complete case from start to finish, including bundle preparation, GPU headroom waits, TRTMC and baseline commands, and orchestration overhead. It is reported for observability and is not used for traffic-light classification.</p>
 <p class="meta">{bundle_preparation_summary}</p>
-<p><strong>{summary}</strong></p>
-<div class="filters" aria-label="Report filters">
-<label>Search
-<input id="report-filter-search" type="search" placeholder="Family, operation, or model">
-</label>
-<label>Light
-<select id="report-filter-light"><option value="">All</option><option value="green">Green</option><option value="yellow">Yellow</option><option value="red">Red</option><option value="white">White</option></select>
-</label>
-<label>Bundle preparation
-<select id="report-filter-preparation"><option value="">All</option><option value="built">Built</option><option value="cache_hit">Cache hit</option><option value="reused">Existing bundle</option><option value="would_build">Would build</option><option value="unrecorded">Not recorded</option></select>
-</label>
-<button id="report-filter-reset" type="button">Reset</button>
-<span class="filter-count" id="report-filter-count">Showing {len(rows)} of {len(rows)} rows</span>
-</div>
-<div class="table-wrap"><table><thead><tr><th>Family</th><th>Operation</th><th>Model profile</th><th>Model-profile wall time</th><th>Baseline</th><th>TRTMC infer p50 (ms)</th><th>Baseline infer p50 (ms)</th><th>TRTMC bundle preparation</th><th>Measured scope</th><th>Light</th><th>Note</th><th>Commands</th></tr></thead>
+<div class="traffic-summary">{summary}</div>
+{report_filters}
+<div class="table-wrap"><table><thead><tr><th>Model type</th><th>Operation</th><th>Model</th><th>Task type</th><th>Model wall time</th><th>Baseline</th><th>TRTMC infer p50 (ms)</th><th>Baseline infer p50 (ms)</th><th>TRTMC bundle preparation</th><th>Measured scope</th><th>Status</th><th>Note</th><th>Commands</th></tr></thead>
 <tbody>{"".join(body)}</tbody></table></div>
 <p class="meta">Green: TRTMC is more than the configured margin faster. Yellow: within the margin. Red: TRTMC is more than the margin slower. White: not run, partial, or invalid comparison. Commands are the original recorded argv and must be run from the displayed working directory with the same model cache and dependencies.</p>
-<script>
-(() => {{
-  const search = document.getElementById("report-filter-search");
-  const light = document.getElementById("report-filter-light");
-  const preparation = document.getElementById("report-filter-preparation");
-  const reset = document.getElementById("report-filter-reset");
-  const count = document.getElementById("report-filter-count");
-  const rows = Array.from(document.querySelectorAll("tbody tr[data-filter-search]"));
-  const applyFilters = () => {{
-    const searchValue = search.value.trim().toLowerCase();
-    const lightValue = light.value;
-    const preparationValue = preparation.value;
-    let visible = 0;
-    for (const row of rows) {{
-      const matchesSearch = !searchValue || row.dataset.filterSearch.includes(searchValue);
-      const matchesLight = !lightValue || row.dataset.filterLight === lightValue;
-      const matchesPreparation = !preparationValue ||
-        row.dataset.filterPreparation.split(" ").includes(preparationValue);
-      row.hidden = !(matchesSearch && matchesLight && matchesPreparation);
-      if (!row.hidden) visible += 1;
-    }}
-    count.textContent = "Showing " + visible + " of " + rows.length + " rows";
-  }};
-  search.addEventListener("input", applyFilters);
-  light.addEventListener("change", applyFilters);
-  preparation.addEventListener("change", applyFilters);
-  reset.addEventListener("click", () => {{
-    search.value = "";
-    light.value = "";
-    preparation.value = "";
-    applyFilters();
-    search.focus();
-  }});
-}})();
-</script>
+{filter_script}
 </body></html>"""
 
 
