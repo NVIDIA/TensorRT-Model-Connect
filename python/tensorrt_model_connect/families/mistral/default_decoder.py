@@ -446,6 +446,11 @@ def build_standard_decoder_engine(
             interleaved_rope=interleaved_rope,
             ffi_attention_kernel=ffi_attention_kernel,
             dynamic_kv_cache=dynamic_kv_cache,
+            recipe_instance=(
+                f"decoder.layers.{layer_idx}.decode_attention"
+                if decoder_engine_role == "decode"
+                else None
+            ),
         )
 
         hidden_state = result["hidden"]
@@ -578,6 +583,7 @@ def _add_decoder_layer(
     interleaved_rope: bool = False,
     ffi_attention_kernel: str | None = None,
     dynamic_kv_cache: bool = False,
+    recipe_instance: str | None = None,
     eps: float | None = None,
 ) -> dict[str, trt.ITensor]:
     """Add one standard decoder layer block. Returns hidden, present_k, present_v."""
@@ -604,6 +610,7 @@ def _add_decoder_layer(
         interleaved_rope=interleaved_rope,
         ffi_attention_kernel=ffi_attention_kernel,
         dynamic_kv_cache=dynamic_kv_cache,
+        recipe_instance=recipe_instance,
     )
     attn_out = attn["attn_out"]
     present_k = attn["present_k"]

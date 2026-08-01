@@ -22,6 +22,7 @@ residual, DeepStack injection, MoE routing, etc.).
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -148,6 +149,7 @@ def add_attention_block(
     interleaved_rope: bool = False,
     ffi_attention_kernel: str | None = None,
     dynamic_kv_cache: bool = False,
+    recipe_instance: str | None = None,
 ) -> dict[str, trt.ITensor]:
     """Pre-norm -> QKV -> RoPE -> cache concat -> attention -> output proj.
 
@@ -267,20 +269,30 @@ def add_attention_block(
         else:
             mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
 
-        context = graph_ops.add_attention_from_rows(
-            network,
-            q,
-            all_k.get_output(0),
-            all_v.get_output(0),
-            num_heads=num_heads,
-            head_dim=head_dim,
-            num_kv_heads=num_kv_heads,
-            q_seq=1,
-            kv_seq=kv_seq,
-            causal=False,
-            mask=mask_4d,
-            scale=attention_scale,
-        )
+        recipe = nullcontext()
+        if recipe_instance is not None:
+            from ...tvm_ffi.graph_build import graph_recipe_region
+
+            recipe = graph_recipe_region(
+                network,
+                "mistral.decode_attention_region@1",
+                recipe_instance,
+            )
+        with recipe:
+            context = graph_ops.add_attention_from_rows(
+                network,
+                q,
+                all_k.get_output(0),
+                all_v.get_output(0),
+                num_heads=num_heads,
+                head_dim=head_dim,
+                num_kv_heads=num_kv_heads,
+                q_seq=1,
+                kv_seq=kv_seq,
+                causal=False,
+                mask=mask_4d,
+                scale=attention_scale,
+            )
     elif ffi_attention_kernel is not None:
         if num_kv_heads != num_heads:
             raise ValueError(
