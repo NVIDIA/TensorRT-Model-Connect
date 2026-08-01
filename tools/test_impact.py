@@ -1885,6 +1885,22 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestUnitTiers.test_nightly_artifact_selector_tool",),
         ),
         ClassificationRule(
+            priority=483,
+            name="report_generation_tool",
+            matcher=_path_in(
+                {
+                    "tools/perf_matrix.py",
+                    "tools/reporting_html.py",
+                }
+            ),
+            resolver=_match_result(
+                "report_generation_tool", _no_models, ["tools"], False
+            ),
+            covered_by=(
+                "TestUnitTiers.test_report_generation_tool_triggers_tools_tier",
+            ),
+        ),
+        ClassificationRule(
             priority=485,
             name="model_ci_tool",
             matcher=_path_equals("tools/model_ci.py"),

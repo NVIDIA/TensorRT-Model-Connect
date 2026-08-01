@@ -1709,6 +1709,22 @@ class TestUnitTiers:
     @pytest.mark.parametrize(
         "path",
         [
+            "tools/perf_matrix.py",
+            "tools/reporting_html.py",
+        ],
+    )
+    def test_report_generation_tool_triggers_tools_tier(self, imap, path):
+        """Report generator edits run tools-tier tests without E2E."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "report_generation_tool"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
+    @pytest.mark.parametrize(
+        "path",
+        [
             "tools/validation/README.md",
             "tools/validation/__init__.py",
             "tools/validation/artifacts.py",
