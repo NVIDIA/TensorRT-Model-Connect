@@ -160,3 +160,56 @@ class TestLlamaEngine(FamilyPluginTestMixin):
         assert tuple(profile[2]) == (
             tester.spec.max_cache_length if role == "prefill" else 1,
         )
+
+    @requires_trt
+    def test_native_decode_records_attention_recipe(self, tmp_path):
+        """The Llama family publishes one exact decode-attention instance."""
+        from tensorrt_model_connect.tvm_ffi import graph_build
+        from tensorrt_model_connect.tvm_ffi.graph_cli import select_recipe
+        from tensorrt_model_connect.tvm_ffi.graph_patch import load_snapshot
+
+        tester = NativeLlamaPluginTester()
+        config, weights, _ = tester.prepare_config_and_weights(tmp_path)
+        config.raw["_decoder_engine_role"] = "decode"
+        snapshot_path = tmp_path / "llama-decode.graph.json"
+
+        with pytest.raises(graph_build.GraphInspectionComplete):
+            with graph_build.inspect_graph(
+                snapshot_path,
+                engine_role="decode",
+                metadata={},
+            ):
+                with graph_build.engine_role("decode"):
+                    tester.get_plugin().build_engine(
+                        config,
+                        weights,
+                        tester.spec.max_cache_length,
+                        precision="bf16",
+                        verbose=False,
+                    )
+
+        snapshot = load_snapshot(snapshot_path)
+        recipes = snapshot.metadata["graph_recipes"]
+        assert len(recipes) == 1
+        recipe = recipes[0]
+        assert recipe["id"] == "llama.decode_attention_region@1"
+        assert recipe["instance"] == "decoder.layers.0.decode_attention"
+        selected_ops = [
+            node.op
+            for node in snapshot.nodes
+            if node.id in recipe["node_ids"]
+        ]
+        assert selected_ops
+        assert all("ATTENTION" in operation for operation in selected_ops)
+        assert recipe["workspace_bytes"] == 0
+        assert recipe["extra_args"] == []
+        assert recipe["output_shape_input"] == 0
+        selection = select_recipe(
+            snapshot,
+            "llama.decode_attention_region@1",
+            "decoder.layers.0.decode_attention",
+        )
+        assert selection.binding_id == "llama.decode_attention_region@1"
+        assert len(selection.input_tensor_ids) == 4
+        assert len(selection.output_tensor_ids) == 1
+        assert selection.output_shape_input == 0

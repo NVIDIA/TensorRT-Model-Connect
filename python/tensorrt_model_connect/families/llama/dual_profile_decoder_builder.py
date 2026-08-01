@@ -671,6 +671,11 @@ def build_dual_profile_decoder_engine(
                 q_seq=None,
                 scale=attn_scale,
                 tag=f"{prefix}.attn",
+                recipe_instance=(
+                    f"decoder.layers.{layer_idx}.decode_attention"
+                    if profile_mode == "decode"
+                    else None
+                ),
             )
             context = native_attention["context"]
             present_k_outs.append(native_attention["present_k"])

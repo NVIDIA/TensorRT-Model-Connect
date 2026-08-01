@@ -9,6 +9,7 @@ Tensor names and shapes must stay compatible with the C++ bundle runtime.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import nullcontext
 import math
 from typing import Any
 
@@ -978,6 +979,7 @@ def add_native_kv_cache_attention_from_rows(
     q_seq: int | None,
     scale: float | None = None,
     tag: str | None = None,
+    recipe_instance: str | None = None,
 ) -> dict[str, trt.ITensor]:
     """Update a user-owned KV cache and attend over its active prefix.
 
@@ -1063,19 +1065,30 @@ def add_native_kv_cache_attention_from_rows(
     ).get_output(0)
     q_scaled = network.add_cast(q_scaled, trt.bfloat16).get_output(0)
 
-    attention = network.add_attention_v2(
-        q_scaled,
-        updated_k,
-        updated_v,
-        trt.AttentionNormalizationOp.SOFTMAX,
-        trt.CausalMaskKind.LOWER_RIGHT,
-    )
-    if attention is None:
-        raise RuntimeError("TensorRT failed to create Llama native attention")
-    attention.decomposable = False
-    attention.key_value_lengths = key_value_lengths
-    if tag:
-        attention.name = tag
+    recipe = nullcontext()
+    if recipe_instance is not None:
+        from ...tvm_ffi.graph_build import graph_recipe_region
+
+        recipe = graph_recipe_region(
+            network,
+            "llama.decode_attention_region@1",
+            recipe_instance,
+            output_shape_input=0,
+        )
+    with recipe:
+        attention = network.add_attention_v2(
+            q_scaled,
+            updated_k,
+            updated_v,
+            trt.AttentionNormalizationOp.SOFTMAX,
+            trt.CausalMaskKind.LOWER_RIGHT,
+        )
+        if attention is None:
+            raise RuntimeError("TensorRT failed to create Llama native attention")
+        attention.decomposable = False
+        attention.key_value_lengths = key_value_lengths
+        if tag:
+            attention.name = tag
 
     context = reshape_heads_4d_to_rows(
         network,
