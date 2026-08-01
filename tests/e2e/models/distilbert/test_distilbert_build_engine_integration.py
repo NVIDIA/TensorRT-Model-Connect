@@ -87,7 +87,7 @@ class TestDistilBERTBuildEngine:
             t[f"{p}.output_layer_norm.bias"] = _rand(hidden)
         return t
 
-    def test_build_engine_returns_bytes(self, tmp_path):
+    def _prepare_model(self, tmp_path):
         from tensorrt_model_connect.families.distilbert import plugin
 
         config = {
@@ -103,13 +103,67 @@ class TestDistilBERTBuildEngine:
             "dim": self.HIDDEN,
         }
         tensors = self._make_tensors(
-            self.VOCAB, self.HIDDEN, self.LAYERS, self.HEADS, self.INTERMEDIATE, self.MAX_POS)
+            self.VOCAB,
+            self.HIDDEN,
+            self.LAYERS,
+            self.HEADS,
+            self.INTERMEDIATE,
+            self.MAX_POS,
+        )
         _write_config(tmp_path, config)
         _write_safetensors(tmp_path, tensors)
 
         cfg = ModelConfig.from_dir(tmp_path)
-        weights = plugin.load_weights(str(tmp_path), cfg)
+        return plugin, cfg, plugin.load_weights(str(tmp_path), cfg)
+
+    def test_build_engine_returns_bytes(self, tmp_path):
+        plugin, cfg, weights = self._prepare_model(tmp_path)
         engine = plugin.build_engine(cfg, weights, max_cache_length=32, verbose=False)
 
         assert isinstance(engine, bytes)
         assert len(engine) > 0
+
+    def test_attention_residual_recipe_is_selectable(self, tmp_path):
+        from tensorrt_model_connect.tvm_ffi.graph_build import (
+            GraphInspectionComplete,
+            engine_role,
+            inspect_graph,
+        )
+        from tensorrt_model_connect.tvm_ffi.graph_cli import select_recipe
+        from tensorrt_model_connect.tvm_ffi.graph_patch import load_snapshot
+
+        plugin, cfg, weights = self._prepare_model(tmp_path)
+        snapshot_path = tmp_path / "decode.graph.json"
+
+        with pytest.raises(GraphInspectionComplete):
+            with inspect_graph(
+                snapshot_path,
+                engine_role="decode",
+                metadata={"decoder_engine_layout": "split"},
+            ):
+                with engine_role("decode"):
+                    plugin.build_engine(
+                        cfg, weights, max_cache_length=32, verbose=False)
+
+        snapshot = load_snapshot(snapshot_path)
+        recipes = snapshot.metadata["graph_recipes"]
+        assert len(recipes) == 1
+        recipe = recipes[0]
+        assert recipe["id"] == "distilbert.attention_residual_add@1"
+        assert recipe["instance"] == "encoder.layers.0.attention_residual_add"
+        assert len(recipe["node_ids"]) == 1
+        assert recipe["workspace_bytes"] == 0
+        assert recipe["extra_args"] == []
+        assert recipe["output_shape_input"] is None
+
+        selection = select_recipe(
+            snapshot,
+            "distilbert.attention_residual_add@1",
+            "encoder.layers.0.attention_residual_add",
+        )
+        assert len(selection.input_tensor_ids) == 2
+        assert len(selection.output_tensor_ids) == 1
+        selected = next(
+            node for node in snapshot.nodes if node.id == selection.node_ids[0]
+        )
+        assert selected.op.endswith("ElementWiseOperation.SUM")

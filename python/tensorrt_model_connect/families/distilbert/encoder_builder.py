@@ -356,8 +356,15 @@ def _add_encoder_layer(
         dtype=dtype)
 
     # POST-norm: LayerNorm(hidden + attn_out)
-    residual1 = network.add_elementwise(
-        hidden, attn_out, trt.ElementWiseOperation.SUM)
+    from ...tvm_ffi.graph_build import graph_recipe_region
+
+    with graph_recipe_region(
+        network,
+        "distilbert.attention_residual_add@1",
+        f"encoder.layers.{prefix.removeprefix('layer.')}.attention_residual_add",
+    ):
+        residual1 = network.add_elementwise(
+            hidden, attn_out, trt.ElementWiseOperation.SUM)
     normed1 = _add_seq_layer_norm(
         network, residual1.get_output(0), hidden_size, seq_length,
         weights[f"{prefix}.post_attn_norm"],
