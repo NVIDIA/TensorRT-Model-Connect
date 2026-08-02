@@ -903,12 +903,13 @@ def build_bundle(
             context capacity.
         decoder_engine_layout: ``"split"`` builds separate prefill/decode
             engines for supported decoder LLMs. ``"dual_profile"`` keeps the
-            low-VRAM single-engine/multi-profile layout.
+            low-VRAM single-engine/multi-profile layout. ``"single"`` uses
+            the sequential single-token engine for both prompt and decode.
         verbose: Print detailed logs.
     """
-    if decoder_engine_layout not in ("split", "dual_profile"):
+    if decoder_engine_layout not in ("split", "dual_profile", "single"):
         raise ValueError(
-            "decoder_engine_layout must be 'split' or 'dual_profile', "
+            "decoder_engine_layout must be 'split', 'dual_profile', or 'single', "
             f"got {decoder_engine_layout!r}")
     _setup_trt_import(rtx)
     parallel = normalize_parallel_config(parallel_config)
@@ -1924,7 +1925,7 @@ def _build_native_impl(
         model_revision: Optional Hugging Face revision to resolve for remote model IDs.
         max_cache_length: Explicit KV cache length for the engine. ``None``
             lets the selected family resolve its model-owned default.
-        decoder_engine_layout: ``"split"`` or ``"dual_profile"``.
+        decoder_engine_layout: ``"split"``, ``"dual_profile"``, or ``"single"``.
         verbose: Print detailed TRT builder logs.
         fp8_scales: Per-layer FP8 scales dict, or ``"auto"`` for auto-calibration.
         save_fp8_scales: Path to save calibrated FP8 scales JSON.

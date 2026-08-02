@@ -951,6 +951,9 @@ def _manifest_tensor_parallel_size(build_args: dict[str, Any]) -> int | None:
 
 
 def _append_manifest_build_args(cmd: list[str], build_args: dict[str, Any]) -> None:
+    decoder_engine_layout = build_args.get("decoder_engine_layout")
+    if decoder_engine_layout is not None:
+        cmd.extend(["--decoder-engine-layout", str(decoder_engine_layout)])
     tp_size = _manifest_tensor_parallel_size(build_args)
     if tp_size is not None and tp_size > 1:
         cmd.extend(["--tp-size", str(tp_size)])

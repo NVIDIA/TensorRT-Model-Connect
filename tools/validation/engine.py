@@ -8529,6 +8529,9 @@ def build_bundle_command(
     method = _manifest_build_method(build_args)
     if method:
         cmd.extend(["--method", method])
+    decoder_engine_layout = build_args.get("decoder_engine_layout")
+    if decoder_engine_layout is not None:
+        cmd.extend(["--decoder-engine-layout", str(decoder_engine_layout)])
     tp_size = _manifest_tensor_parallel_size(build_args)
     if tp_size is not None and tp_size > 1:
         cmd.extend(["--tp-size", str(tp_size)])

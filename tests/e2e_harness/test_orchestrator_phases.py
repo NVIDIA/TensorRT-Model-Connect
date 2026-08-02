@@ -31,6 +31,17 @@ from tests.e2e_harness.contracts import (
 from tests.e2e_harness.orchestrator import E2EOrchestrator
 
 
+def test_manifest_build_args_include_decoder_engine_layout() -> None:
+    command = ["trtmc", "build"]
+
+    orchestrator._append_manifest_build_args(
+        command,
+        {"decoder_engine_layout": "single"},
+    )
+
+    assert command[-2:] == ["--decoder-engine-layout", "single"]
+
+
 class _FakeRunner:
     strategy_name = "unit_task"
 

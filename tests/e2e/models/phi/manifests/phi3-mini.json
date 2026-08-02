@@ -6,6 +6,9 @@
   "runtime_strategy": "phi_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "precision": "fp16",
+  "build_args": {
+    "decoder_engine_layout": "single"
+  },
   "max_cache_length": 256,
   "trust_remote_code": false,
   "testcases": [
