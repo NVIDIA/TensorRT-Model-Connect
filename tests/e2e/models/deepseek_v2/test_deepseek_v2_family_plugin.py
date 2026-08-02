@@ -12,7 +12,6 @@ Postconditions: Bundle config overrides compute correct K-cache head_dim and wei
 from __future__ import annotations
 
 import importlib
-
 import numpy as np
 import pytest
 
@@ -286,6 +285,23 @@ def test_deepseek_v3_rejects_non_finite_router_score_bias():
             np.array([0.0, np.nan], dtype=np.float32),
             "model.layers.1.mlp.gate.e_score_correction_bias",
         )
+
+
+@pytest.mark.parametrize(
+    ("dtype", "head_dim", "expected"),
+    [
+        (np.float16, 192, True),
+        (np.float32, 192, False),
+        (np.float16, 4, False),
+    ],
+)
+def test_fp32_mla_attention_requires_supported_head_dimension(
+    dtype: np.dtype,
+    head_dim: int,
+    expected: bool,
+):
+    """FP16 MLA uses FP32 accumulation without breaking tiny CI fixtures."""
+    assert deepseek_v2._use_fp32_mla_attention(dtype, head_dim) is expected
 
 
 @pytest.mark.parametrize(

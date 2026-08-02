@@ -77,6 +77,16 @@ def _validate_router_score_bias(
     return bias
 
 
+def _use_fp32_mla_attention(dtype: np.dtype, head_dim: int) -> bool:
+    """Use FP32 attention only for TensorRT-supported MLA head dimensions.
+
+    The tiny synthetic DeepSeek-V3 contract model uses a four-element head.
+    TensorRT 11.2 cannot build FP32 IAttention for that sub-warp shape, while
+    production DeepSeek MLA heads are at least 16 elements wide.
+    """
+    return dtype == np.float16 and head_dim >= 16
+
+
 class DeepSeekV2Plugin:
     name = "deepseek_v2"
     runtime_strategy = "deepseek_v2_decoder_kv_cache"
@@ -860,7 +870,8 @@ def _add_mla_attention_block(
         q_seq=1,
         kv_seq=attention_window,
         mask=mask_4d,
-        scale=attn_scale)
+        scale=attn_scale,
+        fp32_accumulation=_use_fp32_mla_attention(dtype, k_head_dim))
 
     # Slice out only the v_head_dim portion (remove zero-padding)
     if pad_size > 0:
