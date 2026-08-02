@@ -61,6 +61,10 @@ def test_model_workload_catalog_covers_every_ready_model():
         catalog["models"]["flux-2-dev"]["reference_cache_identity"]
         == catalog["models"]["flux-2-dev-fp8"]["reference_cache_identity"]
     )
+    assert (
+        catalog["models"]["flux-2-dev"]["reference_cache_identity"]
+        == "flux-2-dev-dpg-v2"
+    )
     qwen_identities = {
         catalog["models"][name]["reference_cache_identity"]
         for name in (

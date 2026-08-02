@@ -855,9 +855,19 @@ class FluxPlugin:
     def diffusion_tokenizer_add_special_tokens(
         self, model_dir_path, *, detect_tokenizer_add_special_tokens,
     ) -> bool:
+        import json
         from pathlib import Path
 
         model_dir = Path(model_dir_path)
+        transformer_config = model_dir / "transformer" / "config.json"
+        if transformer_config.exists():
+            try:
+                if _is_flux2(json.loads(transformer_config.read_text())):
+                    # The FLUX.2 chat template already contains its BOS token.
+                    # Applying the tokenizer post-processor adds a second BOS.
+                    return False
+            except (OSError, ValueError, TypeError):
+                pass
         for tok_subdir in ("tokenizer_2", "tokenizer"):
             tok_dir = model_dir / tok_subdir
             if tok_dir.is_dir():

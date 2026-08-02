@@ -128,6 +128,7 @@ class HfDiffusersReference:
             "fp32": "torch.float32",
         }.get(reference_precision, "torch.float32")
         guidance_scale = case.inputs.get("guidance_scale")
+        max_sequence_length = case.inputs.get("max_cache_length")
         python = ctx.reference_python_path() or sys.executable
         initial_latents = ensure_initial_latents(case, ctx)
 
@@ -153,6 +154,7 @@ image_height = {image_height}
 image_width = {image_width}
 model_type = {model_type!r}
 guidance_scale = {guidance_scale!r}
+max_sequence_length = {max_sequence_length!r}
 frames_dir = {frames_dir!r}
 reference_torch_dtype = {reference_torch_dtype}
 initial_latents_path = {str(initial_latents.path)!r}
@@ -199,6 +201,8 @@ else:
     kwargs["latents"] = hf_latents
 if model_type in ("flux.2", "flux2"):
     kwargs["guidance_scale"] = 3.5 if guidance_scale is None else guidance_scale
+    if max_sequence_length is not None:
+        kwargs["max_sequence_length"] = int(max_sequence_length)
 output = pipe(**kwargs)
 frames = output.images
 

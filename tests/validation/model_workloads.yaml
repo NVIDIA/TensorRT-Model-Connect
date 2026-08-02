@@ -132,11 +132,11 @@ models:
   flux-2-dev:
     default: dpg_bench_diffusion_image
     workloads: [dpg_bench_diffusion_image]
-    reference_cache_identity: flux-2-dev-dpg-v1
+    reference_cache_identity: flux-2-dev-dpg-v2
   flux-2-dev-fp8:
     default: dpg_bench_diffusion_image
     workloads: [dpg_bench_diffusion_image]
-    reference_cache_identity: flux-2-dev-dpg-v1
+    reference_cache_identity: flux-2-dev-dpg-v2
   flux-schnell:
     default: dpg_bench_diffusion_image
     workloads: [dpg_bench_diffusion_image]
