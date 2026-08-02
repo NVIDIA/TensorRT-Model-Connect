@@ -2937,6 +2937,48 @@ def test_score_and_compare_mmlu_predictions(tmp_path: Path) -> None:
     assert summary["buckets"]["hf_correct_trtfb_wrong"] == 1
 
 
+def test_mcq_exact_reference_logit_ties_are_equivalent() -> None:
+    answers = {"requests": [{"answer": "B", "subject": "test"}]}
+    hf = {
+        "responses": [
+            {
+                "sample_id": "tie",
+                "output_text": "B",
+                "generated_token_ids": [365],
+                "generated_token_max_score_ids": [[365, 384]],
+            }
+        ]
+    }
+    trtfb = {
+        "responses": [
+            {
+                "sample_id": "tie",
+                "output_text": "D",
+                "generated_token_ids": [384],
+            }
+        ]
+    }
+
+    summary = validation_engine.compare_prediction_sets(
+        hf, trtfb, answers, scorer="mcq"
+    )
+    gate = validation_engine.prediction_agreement_gate_result(
+        summary,
+        {
+            "max_accuracy_drop_from_hf": 0.01,
+            "min_prediction_agreement": 0.98,
+        },
+    )
+
+    assert summary["hf"]["overall_accuracy"] == 1.0
+    assert summary["trtfb"]["overall_accuracy"] == 0.0
+    assert summary["prediction_agreement_rate"] == 1.0
+    assert summary["reference_tie_equivalent_count"] == 1
+    assert summary["tie_adjusted_accuracy_delta_trtfb_minus_hf"] == 0.0
+    assert gate["status"] == "passed"
+    assert gate["accuracy_drop_from_hf"] == 0.0
+
+
 def test_gpt_oss_harmony_parser_rejects_control_only_predictions() -> None:
     parser = "gpt_oss_harmony_final_mcq"
 

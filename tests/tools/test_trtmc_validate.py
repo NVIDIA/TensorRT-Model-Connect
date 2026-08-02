@@ -1329,6 +1329,29 @@ def test_model_plugin_report_uses_sample_pass_rate_and_nested_metrics():
     assert comparison["metrics"]["token_agreement_rate"] == 0.99
 
 
+def test_mcq_report_exposes_reference_tie_equivalence_metrics():
+    comparison = trtmc_validate._comparison_details(
+        {
+            "status": "passed",
+            "mode": "mcq",
+            "prediction_agreement_rate": 1.0,
+            "accuracy_delta_trtfb_minus_hf": -0.05,
+            "tie_adjusted_accuracy_delta_trtfb_minus_hf": 0.0,
+            "raw_accuracy_drop_from_hf": 0.05,
+            "accuracy_drop_from_hf": 0.0,
+            "reference_tie_equivalent_count": 1,
+        },
+        {"status": "completed"},
+    )
+
+    assert comparison["status"] == "agreement"
+    assert comparison["metrics"]["accuracy_delta_trtfb_minus_hf"] == -0.05
+    assert comparison["metrics"]["tie_adjusted_accuracy_delta_trtfb_minus_hf"] == 0.0
+    assert comparison["metrics"]["raw_accuracy_drop_from_hf"] == 0.05
+    assert comparison["metrics"]["accuracy_drop_from_hf"] == 0.0
+    assert comparison["metrics"]["reference_tie_equivalent_count"] == 1
+
+
 def test_legacy_e2e_result_is_not_reported_as_reference_agreement(tmp_path):
     case_dir = tmp_path / "model-a" / "e2e"
     case_dir.mkdir(parents=True)
