@@ -96,6 +96,7 @@ class LancePlugin:
         return build_standard_decoder_engine(
             config, weights, max_cache_length, precision=precision,
             verbose=verbose, quant_ctx=quant_ctx, embed_input=True,
+            round_rope_inv_freq_to_bf16=(precision == "bf16"),
             debug_layer_outputs=debug_layer_outputs,
         )
 

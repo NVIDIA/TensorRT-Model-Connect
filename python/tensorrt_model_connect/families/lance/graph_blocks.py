@@ -146,6 +146,8 @@ def add_attention_block(
     sin_half_tensor: trt.ITensor | None = None,
     rotary_embedding_dim: int = 0,
     interleaved_rope: bool = False,
+    mrope_position_ids: trt.ITensor | None = None,
+    mrope_section: tuple[int, int, int] | None = None,
     ffi_attention_kernel: str | None = None,
     dynamic_kv_cache: bool = False,
     sequence_length: int | None = 1,
@@ -222,14 +224,27 @@ def add_attention_block(
                 "TRT native IRotaryEmbeddingLayer")
         rope_dim = rotary_embedding_dim or head_dim
         rope_dim = graph_ops.validate_native_rope_dim(rope_dim)
-        q = graph_ops.add_apply_rope_native(
-            network, q, num_heads, head_dim,
-            cos_half_tensor, sin_half_tensor, position_id,
-            rope_dim, interleaved_rope, sequence_length=sequence_length)
-        k = graph_ops.add_apply_rope_native(
-            network, k, num_kv_heads, head_dim,
-            cos_half_tensor, sin_half_tensor, position_id,
-            rope_dim, interleaved_rope, sequence_length=sequence_length)
+        if mrope_position_ids is not None and mrope_section is not None:
+            if sequence_length != 1:
+                raise ValueError(
+                    "legacy mRoPE attention requires a single-token profile")
+            q = graph_ops.add_apply_mrope_native(
+                network, q, num_heads, head_dim,
+                cos_half_tensor, sin_half_tensor, mrope_position_ids,
+                mrope_section, rope_dim, interleaved_rope)
+            k = graph_ops.add_apply_mrope_native(
+                network, k, num_kv_heads, head_dim,
+                cos_half_tensor, sin_half_tensor, mrope_position_ids,
+                mrope_section, rope_dim, interleaved_rope)
+        else:
+            q = graph_ops.add_apply_rope_native(
+                network, q, num_heads, head_dim,
+                cos_half_tensor, sin_half_tensor, position_id,
+                rope_dim, interleaved_rope, sequence_length=sequence_length)
+            k = graph_ops.add_apply_rope_native(
+                network, k, num_kv_heads, head_dim,
+                cos_half_tensor, sin_half_tensor, position_id,
+                rope_dim, interleaved_rope, sequence_length=sequence_length)
 
     # Save present K/V (before concatenation, this is the raw projection output)
     present_k = k

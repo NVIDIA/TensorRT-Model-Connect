@@ -14,6 +14,7 @@
 #include "runtime/models/lance/inference_state.h"
 #include "trtmc/runtime/device_tensor.h"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -77,6 +78,11 @@ class LanceKvCache : public LanceInferenceState {
     // to one another while still seeing the valid prefix cache.
     void prepare_bidirectional_step(TensorMap& inputs, int32_t seq_len);
 
+    // Prepare a causal prompt with one bidirectional sub-block. Lance's
+    // official x2t path uses this for the vision_start/image/vision_end span.
+    void prepare_prefill_with_bidirectional_block(TensorMap& inputs, int32_t seq_len,
+                                                  int32_t block_start, int32_t block_end);
+
     // Append batched present K/V at the current position. Used after causal
     // block verification in diffusion-style text decoders.
     void append_prefill_kv(const std::vector<const void*>& prefill_k,
@@ -98,6 +104,8 @@ class LanceKvCache : public LanceInferenceState {
     std::vector<int64_t> mask_shape_for_engine(int32_t mask_width, std::size_t mask_buf_size) const;
     void write_position_input(TensorMap& inputs, int32_t seq_len);
     void write_batched_mask(TensorMap& inputs, int32_t seq_len);
+    void write_segmented_prefill_mask(TensorMap& inputs, int32_t seq_len, int32_t block_start,
+                                      int32_t block_end);
     void write_bidirectional_mask(TensorMap& inputs, int32_t seq_len);
     void write_decode_mask(TensorMap& inputs);
 
@@ -113,7 +121,9 @@ class LanceKvCache : public LanceInferenceState {
     // Buffers owned by this object — Tensor.data in prepare_step() points here.
     std::vector<float> mask_buf_;
     std::vector<int32_t> pos_buf_vec_;
+    std::array<int32_t, 3> mrope_pos_buf_{};
     bool has_position_input_{false};
+    bool has_mrope_position_input_{false};
     bool dynamic_binding_enabled_{false};
     int32_t bound_cache_rows_{0};
     DType cache_dtype_{DType::kFloat32};

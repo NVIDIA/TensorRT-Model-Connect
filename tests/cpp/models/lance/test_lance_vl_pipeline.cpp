@@ -61,12 +61,15 @@ struct CountingTextStats {
     int32_t calls{0};
     std::unordered_map<std::string, std::vector<int64_t>> shapes;
     std::unordered_map<std::string, std::vector<float>> float_values;
+    std::unordered_map<std::string, std::vector<int32_t>> int_values;
 };
 
 class CountingTextModule final : public trtmc::ITrtModule {
   public:
-    CountingTextModule(std::shared_ptr<CountingTextStats> stats, bool prefill, cudaStream_t stream)
+    CountingTextModule(std::shared_ptr<CountingTextStats> stats, bool prefill, cudaStream_t stream,
+                       bool has_mrope_input = false)
         : stats_(std::move(stats)), prefill_(prefill), stream_(stream),
+          has_mrope_input_(has_mrope_input),
           present_k_(prefill ? trtmc::DeviceTensor::zeros({8, 4}, trtmc::DType::kFloat32, stream)
                              : trtmc::DeviceTensor{}),
           present_v_(prefill ? trtmc::DeviceTensor::zeros({8, 4}, trtmc::DType::kFloat32, stream)
@@ -76,12 +79,17 @@ class CountingTextModule final : public trtmc::ITrtModule {
         ++stats_->calls;
         stats_->shapes.clear();
         stats_->float_values.clear();
+        stats_->int_values.clear();
         for (const auto& [name, tensor] : inputs) {
             stats_->shapes[name] = tensor.shape;
             if (tensor.dtype == trtmc::DType::kFloat32) {
                 const auto* begin = static_cast<const float*>(tensor.data);
                 stats_->float_values[name] =
                     std::vector<float>(begin, begin + static_cast<std::ptrdiff_t>(tensor.numel()));
+            } else if (tensor.dtype == trtmc::DType::kInt32) {
+                const auto* begin = static_cast<const int32_t*>(tensor.data);
+                stats_->int_values[name] = std::vector<int32_t>(
+                    begin, begin + static_cast<std::ptrdiff_t>(tensor.numel()));
             }
         }
         return {{"logits", trtmc::Tensor{logits_.data(), {1, 4}, trtmc::DType::kFloat32}}};
@@ -99,7 +107,8 @@ class CountingTextModule final : public trtmc::ITrtModule {
     bool has_input(const std::string& name) const override {
         return name == "token_id" || name == "position_id" || name == "attention_mask" ||
                name == "input_embed" || name == "use_input_embed" || name == "deepstack_active" ||
-               name == "deepstack_embed_0" || name == "cache_k_0" || name == "cache_v_0";
+               name == "deepstack_embed_0" || name == "cache_k_0" || name == "cache_v_0" ||
+               (name == "mrope_position_ids" && has_mrope_input_);
     }
     bool has_output(const std::string& name) const override {
         return name == "logits" || name == "present_k_0" || name == "present_v_0";
@@ -134,6 +143,7 @@ class CountingTextModule final : public trtmc::ITrtModule {
     std::shared_ptr<CountingTextStats> stats_;
     bool prefill_{false};
     cudaStream_t stream_{nullptr};
+    bool has_mrope_input_{false};
     mutable trtmc::DeviceTensor present_k_;
     mutable trtmc::DeviceTensor present_v_;
     std::vector<float> logits_{0.1F, 0.2F, 0.9F, 0.3F};
@@ -141,10 +151,16 @@ class CountingTextModule final : public trtmc::ITrtModule {
 
 class FakeSequenceVisionModule final : public trtmc::ITrtModule {
   public:
+    explicit FakeSequenceVisionModule(int32_t feature_count = 1)
+        : feature_count_(feature_count),
+          features_(static_cast<std::size_t>(feature_count) * 4, 1.0F),
+          deepstack_(static_cast<std::size_t>(feature_count) * 4, 2.0F) {}
+
     trtmc::TensorMap forward(const trtmc::TensorMap&) override {
-        return {{"image_features", trtmc::Tensor{features_.data(), {1, 4}, trtmc::DType::kFloat32}},
+        return {{"image_features",
+                 trtmc::Tensor{features_.data(), {feature_count_, 4}, trtmc::DType::kFloat32}},
                 {"deepstack_features_0",
-                 trtmc::Tensor{deepstack_.data(), {1, 4}, trtmc::DType::kFloat32}}};
+                 trtmc::Tensor{deepstack_.data(), {feature_count_, 4}, trtmc::DType::kFloat32}}};
     }
     trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
     void forward_device_async(const trtmc::DeviceTensorMap&) override {}
@@ -177,8 +193,9 @@ class FakeSequenceVisionModule final : public trtmc::ITrtModule {
     void keep_alive(std::shared_ptr<void>) override {}
 
   private:
-    std::vector<float> features_{10.0F, 11.0F, 12.0F, 13.0F};
-    std::vector<float> deepstack_{20.0F, 21.0F, 22.0F, 23.0F};
+    int32_t feature_count_{1};
+    std::vector<float> features_;
+    std::vector<float> deepstack_;
 };
 
 // ---------------------------------------------------------------------------
@@ -187,6 +204,16 @@ class FakeSequenceVisionModule final : public trtmc::ITrtModule {
 class VLFixedTokenizer : public trtmc::ITokenizer {
   public:
     std::vector<int32_t> encode(const std::string&) const override { return {1, 2, 3}; }
+    std::string decode(const std::vector<int32_t>&) const override { return "out"; }
+    int32_t id_for_token(std::string_view) const override { return 0; }
+    std::string token_for_id(int32_t) const override { return ""; }
+};
+
+class VLBlockTokenizer : public trtmc::ITokenizer {
+  public:
+    std::vector<int32_t> encode(const std::string&) const override {
+        return {9, 8, 1, 1, 1, 1, 7, 6};
+    }
     std::string decode(const std::vector<int32_t>&) const override { return "out"; }
     int32_t id_for_token(std::string_view) const override { return 0; }
     std::string token_for_id(int32_t) const override { return ""; }
@@ -758,6 +785,65 @@ static void test_vl_sequence_prefill_uses_one_text_launch() {
     cudaStreamDestroy(stream);
 }
 
+static void test_vl_sequence_prefill_uses_full_attention_for_vision_block() {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto decode_stats = std::make_shared<CountingTextStats>();
+    auto prefill_stats = std::make_shared<CountingTextStats>();
+    auto decoder = std::make_unique<CountingTextModule>(decode_stats, false, stream, true);
+    auto prefill = std::make_unique<CountingTextModule>(prefill_stats, true, stream, true);
+    auto vision = std::make_unique<FakeSequenceVisionModule>(4);
+    auto cache = std::make_unique<trtmc::LanceKvCache>(1, 8, 4, stream);
+
+    trtmc::LanceConfig cfg;
+    cfg.vocab_size = 4;
+    cfg.id_eos = 2;
+    cfg.image_token_id = 1;
+    cfg.vision_output_dim = 4;
+    cfg.num_layers = 1;
+    cfg.prefill_max_length = 8;
+
+    trtmc::LancePreprocessConfig vl_pp;
+    vl_pp.preprocessor_type = "simple_chw";
+    vl_pp.fixed_image_size = 4;
+    vl_pp.patch_size = 1;
+    vl_pp.merge_size = 2;
+    vl_pp.in_channels = 3;
+
+    auto tokenizer = std::make_shared<VLBlockTokenizer>();
+    trtmc::LancePipeline pipeline(std::move(decoder), std::move(vision), std::move(cache), cfg,
+                                  vl_pp, stream, tokenizer, "", nullptr, std::move(prefill));
+
+    float pixels[2 * 2 * 3] = {0.5F, 0.5F, 0.5F, 0.4F, 0.4F, 0.4F,
+                               0.3F, 0.3F, 0.3F, 0.2F, 0.2F, 0.2F};
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 1;
+    gen_cfg.eos_token_id = 2;
+    pipeline.generate("test", pixels, 2, 2, gen_cfg);
+
+    const auto& mask = prefill_stats->float_values["attention_mask"];
+    constexpr int32_t width = 16;
+    auto value = [&mask](int32_t row, int32_t column) {
+        return mask[static_cast<std::size_t>(row * width + column)];
+    };
+    check(prefill_stats->shapes["attention_mask"] == std::vector<int64_t>({8, width}),
+          "vision block mask: shape");
+    check(value(0, 9) < -1000.0F, "vision block mask: causal prefix remains causal");
+    check(value(1, 14) == 0.0F, "vision block mask: first vision query sees block future");
+    check(value(1, 15) < -1000.0F, "vision block mask: vision query cannot see later text");
+    check(value(6, 9) == 0.0F, "vision block mask: vision end sees block start");
+    check(value(7, 15) == 0.0F, "vision block mask: later text remains causal");
+    check(prefill_stats->shapes["mrope_position_ids"] == std::vector<int64_t>({3, 8}),
+          "vision mrope: shape");
+    check(prefill_stats->int_values["mrope_position_ids"] ==
+              std::vector<int32_t>(
+                  {0, 1, 2, 2, 2, 2, 4, 5, 0, 1, 2, 2, 3, 3, 4, 5, 0, 1, 2, 3, 2, 3, 4, 5}),
+          "vision mrope: temporal height width positions");
+
+    cudaStreamDestroy(stream);
+}
+
 static void test_vl_generate_with_tokenizer() {
     // Covers the string-based generate(const string&, cfg) method
     auto engine = build_mock_decoder();
@@ -807,6 +893,7 @@ int main() {
     test_vl_generate_with_vision_encoder();
     test_vl_generate_with_embed_decoder();
     test_vl_sequence_prefill_uses_one_text_launch();
+    test_vl_sequence_prefill_uses_full_attention_for_vision_block();
     test_vl_generate_with_tokenizer();
     if (failures > 0)
         std::cerr << failures << " FAILED\n";
