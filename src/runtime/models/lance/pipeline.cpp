@@ -215,6 +215,37 @@ std::pair<int32_t, int32_t> find_lance_vision_attention_block(const std::vector<
     return {first_index - 1, last_index + 2};
 }
 
+struct LanceVlMropeContext {
+    bool enabled = false;
+    LanceMropePositions positions;
+
+    const LanceMropePositions* prefill_positions() const { return enabled ? &positions : nullptr; }
+
+    const std::array<int32_t, 3>* token_position(std::size_t index) const {
+        return enabled ? &positions.token_positions[index] : nullptr;
+    }
+
+    int32_t decode_position() const { return enabled ? positions.next_position : -1; }
+};
+
+LanceVlMropeContext make_lance_vl_mrope_context(const TrtModule& text_decoder,
+                                                const std::vector<int32_t>& input_ids,
+                                                int32_t image_token_id, int32_t num_features,
+                                                const LancePreprocessConfig& preprocess) {
+    LanceVlMropeContext context;
+    context.enabled = text_decoder.has_input("mrope_position_ids");
+    if (!context.enabled)
+        return context;
+
+    int32_t merged_grid = 0;
+    if (preprocess.patch_size > 0 && preprocess.merge_size > 0) {
+        merged_grid = preprocess.fixed_image_size / (preprocess.patch_size * preprocess.merge_size);
+    }
+    context.positions = lance_build_mrope_positions(input_ids, image_token_id, num_features,
+                                                    merged_grid, merged_grid);
+    return context;
+}
+
 void add_vl_prefill_base_inputs(TensorMap& inputs, LanceInferenceState& state,
                                 const std::vector<int32_t>& input_ids,
                                 VlSequenceEmbeddingInputs& embedding_inputs, int32_t feature_dim) {
@@ -519,30 +550,22 @@ std::vector<int32_t> LancePipeline::generate_vl_from_ids(
     reset_generation_context(static_cast<int32_t>(input_ids.size()));
 
     std::vector<float> logits;
-    const bool use_mrope = text_decoder_->has_input("mrope_position_ids");
-    const int32_t merged_grid = vl_preprocess_.patch_size > 0 && vl_preprocess_.merge_size > 0
-                                    ? vl_preprocess_.fixed_image_size /
-                                          (vl_preprocess_.patch_size * vl_preprocess_.merge_size)
-                                    : 0;
-    const auto mrope = use_mrope
-                           ? lance_build_mrope_positions(input_ids, config_.image_token_id,
-                                                         num_features, merged_grid, merged_grid)
-                           : LanceMropePositions{};
+    const auto mrope = make_lance_vl_mrope_context(
+        *text_decoder_, input_ids, config_.image_token_id, num_features, vl_preprocess_);
     if (!run_vl_prefill_batched(input_ids, image_features, deepstack_features, num_features,
-                                feature_dim, use_mrope ? &mrope : nullptr, logits)) {
+                                feature_dim, mrope.prefill_positions(), logits)) {
         int32_t feature_index = 0;
         for (std::size_t index = 0; index < input_ids.size(); ++index) {
             const auto tid = input_ids[index];
-            const auto* position = use_mrope ? &mrope.token_positions[index] : nullptr;
             run_vl_prefill_token(tid, image_features, deepstack_features, num_features, feature_dim,
-                                 feature_index, position, logits);
+                                 feature_index, mrope.token_position(index), logits);
         }
     }
     state_->mark_prefill_complete();
 
     std::vector<int32_t> output = input_ids;
     run_vl_decode_loop(active_sampler, params, output, logits, max_new_tokens,
-                       use_mrope ? mrope.next_position : -1);
+                       mrope.decode_position());
     return output;
 }
 
