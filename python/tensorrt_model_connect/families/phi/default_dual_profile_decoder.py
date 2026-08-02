@@ -600,17 +600,24 @@ def build_dual_profile_decoder_engine(
 
     out_vocab = (weights["w_out"].shape[1]
                  if isinstance(weights["w_out"], np.ndarray) else vocab)
+    lm_head_dtype = work_np_dtype
+    # Phi-3 FP16 MMLU decisions can sit one ULP apart. Preserve the fast
+    # batched prefill graph while preventing the final vocab projection from
+    # flipping those narrow greedy choices relative to the FP16 HF reference.
+    if precision == "fp16" and str(config.model_type).lower() == "phi3":
+        last_hidden = network.add_cast(last_hidden, trt.float32).get_output(0)
+        lm_head_dtype = np.float32
     logits = graph_ops.add_matmul_rhs_constant(
         network, last_hidden, hidden, out_vocab, weights["w_out"],
-        dtype=work_np_dtype)
+        dtype=lm_head_dtype)
     lm_bias = weights.get("lm_head_bias")
     if lm_bias is not None:
         logits = graph_ops.add_bias_sum(
-            network, logits, out_vocab, lm_bias, dtype=work_np_dtype)
+            network, logits, out_vocab, lm_bias, dtype=lm_head_dtype)
     else:
-        zero_bias = np.zeros(out_vocab, dtype=work_np_dtype)
+        zero_bias = np.zeros(out_vocab, dtype=lm_head_dtype)
         logits = graph_ops.add_bias_sum(
-            network, logits, out_vocab, zero_bias, dtype=work_np_dtype)
+            network, logits, out_vocab, zero_bias, dtype=lm_head_dtype)
 
     if work_trt_dtype != trt.float32:
         logits = network.add_cast(logits, trt.float32).get_output(0)

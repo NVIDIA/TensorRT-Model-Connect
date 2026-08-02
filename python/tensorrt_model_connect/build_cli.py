@@ -794,12 +794,11 @@ def main() -> None:
     )
     build_p.add_argument(
         "--decoder-engine-layout",
-        choices=["split", "dual_profile", "single"],
+        choices=["split", "dual_profile"],
         default="split",
         help="Decoder engine layout for supported LLMs: split builds separate "
              "prefill/decode engines (default); dual_profile keeps one "
-             "low-VRAM engine with multiple optimization profiles; single "
-             "uses one sequential single-token engine",
+             "low-VRAM engine with multiple optimization profiles",
     )
     build_p.add_argument("--dynamic-kv-cache", action="store_true",
                          help="Build decoder bundles with runtime-resizable KV cache support")

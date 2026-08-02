@@ -14,4 +14,4 @@ def test_phi3_mini_uses_accuracy_preserving_decoder_layout() -> None:
     manifest = Path(__file__).with_name("manifests") / "phi3-mini.json"
     case = load_manifest(manifest)
 
-    assert case.metadata["build_args"]["decoder_engine_layout"] == "single"
+    assert case.metadata["build_args"]["decoder_engine_layout"] == "dual_profile"

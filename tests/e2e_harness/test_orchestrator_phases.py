@@ -36,10 +36,10 @@ def test_manifest_build_args_include_decoder_engine_layout() -> None:
 
     orchestrator._append_manifest_build_args(
         command,
-        {"decoder_engine_layout": "single"},
+        {"decoder_engine_layout": "dual_profile"},
     )
 
-    assert command[-2:] == ["--decoder-engine-layout", "single"]
+    assert command[-2:] == ["--decoder-engine-layout", "dual_profile"]
 
 
 class _FakeRunner:

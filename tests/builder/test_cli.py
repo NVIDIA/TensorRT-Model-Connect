@@ -104,34 +104,6 @@ class TestBuildArgs:
 
 
 class TestMainParser:
-    def test_build_accepts_single_decoder_engine_layout(self, monkeypatch):
-        import tensorrt_model_connect.build_cli as cli
-
-        captured: dict[str, argparse.Namespace] = {}
-
-        def _fake_cmd_build(args):
-            captured["args"] = args
-            return 0
-
-        monkeypatch.setattr(cli, "_cmd_build", _fake_cmd_build)
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            [
-                "trtmc",
-                "build",
-                "example-org/example-model",
-                "--decoder-engine-layout",
-                "single",
-            ],
-        )
-
-        with pytest.raises(SystemExit) as exit_info:
-            cli.main()
-
-        assert exit_info.value.code == 0
-        assert captured["args"].decoder_engine_layout == "single"
-
     def test_build_help_hides_legacy_method_selector(self, monkeypatch, capsys):
         import tensorrt_model_connect.build_cli as cli
 

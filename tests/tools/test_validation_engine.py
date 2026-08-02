@@ -3580,7 +3580,7 @@ def test_build_bundle_command_uses_manifest_build_settings(tmp_path: Path) -> No
         "trust_remote_code": True,
         "build_args": {
             "backend": "trt",
-            "decoder_engine_layout": "single",
+            "decoder_engine_layout": "dual_profile",
             "parallel": {"mode": "tensor_parallel", "tp_size": 2},
         },
         "quantization": {"format": "fp8", "calibration_samples": 4},
@@ -3598,7 +3598,7 @@ def test_build_bundle_command_uses_manifest_build_settings(tmp_path: Path) -> No
     assert "512" in cmd
     assert ["--method", "trt"] == cmd[cmd.index("--method") : cmd.index("--method") + 2]
     assert ["--tp-size", "2"] == cmd[cmd.index("--tp-size") : cmd.index("--tp-size") + 2]
-    assert ["--decoder-engine-layout", "single"] == cmd[
+    assert ["--decoder-engine-layout", "dual_profile"] == cmd[
         cmd.index("--decoder-engine-layout") : cmd.index("--decoder-engine-layout") + 2
     ]
     assert ["--precision", "bf16"] == cmd[cmd.index("--precision") : cmd.index("--precision") + 2]
