@@ -183,12 +183,20 @@ class FluxPlugin:
         if transformer_config_path.exists():
             tc = json.loads(transformer_config_path.read_text())
             weights["_transformer_config"] = tc
+            config.raw["_transformer_config"] = tc
 
         # Read VAE config for latent_channels and patch_size
         vae_config_path = model_path / "vae" / "config.json"
         if vae_config_path.exists():
             vc = json.loads(vae_config_path.read_text())
             weights["_vae_config"] = vc
+            config.raw["_vae_config"] = vc
+
+        scheduler_config_path = model_path / "scheduler" / "scheduler_config.json"
+        if scheduler_config_path.exists():
+            scheduler_config = json.loads(scheduler_config_path.read_text())
+            weights["_scheduler_config"] = scheduler_config
+            config.raw["_scheduler_config"] = scheduler_config
 
         # Read text_encoder config for Mistral detection
         te_config_path = model_path / "text_encoder" / "config.json"
@@ -910,6 +918,7 @@ class FluxPlugin:
     def _get_flux1_diffusion_config(self, config: ModelConfig, tc: dict) -> dict:
         """Diffusion config for FLUX.1 variants."""
         guidance_embeds = tc.get("guidance_embeds", False)
+        scheduler = config.raw.get("_scheduler_config", {})
 
         img_h = config.raw.get("image_height", self._IMAGE_HEIGHT)
         img_w = config.raw.get("image_width", self._IMAGE_WIDTH)
@@ -920,10 +929,16 @@ class FluxPlugin:
             "num_inference_steps": config.raw.get(
                 "num_inference_steps", 28 if guidance_embeds else 4),
             "guidance_scale": 3.5 if guidance_embeds else 0.0,
-            "flow_shift": 3.0,
-            "use_dynamic_shifting": 1,
-            "base_shift": 0.5,
-            "max_shift": 1.15,
+            "flow_shift": float(scheduler.get("shift", 1.0)),
+            "use_dynamic_shifting": int(bool(
+                scheduler.get("use_dynamic_shifting", False))),
+            "base_shift": float(scheduler.get("base_shift", 0.5)),
+            "max_shift": float(scheduler.get("max_shift", 1.15)),
+            "base_image_seq_len": int(
+                scheduler.get("base_image_seq_len", 256)),
+            "max_image_seq_len": int(
+                scheduler.get("max_image_seq_len", 4096)),
+            "shift_terminal": float(scheduler.get("shift_terminal") or 0.0),
             "image_height": img_h,
             "image_width": img_w,
             "video_height": img_h,
@@ -952,6 +967,7 @@ class FluxPlugin:
         """Diffusion config for FLUX.2 variants."""
         img_h = config.raw.get("image_height", self._IMAGE_HEIGHT)
         img_w = config.raw.get("image_width", self._IMAGE_WIDTH)
+        scheduler = config.raw.get("_scheduler_config", {})
 
         vc = config.raw.get("_vae_config", {})
         vae_latent_ch = vc.get("latent_channels", self._FLUX2_VAE_LATENT_CHANNELS)
@@ -966,10 +982,16 @@ class FluxPlugin:
             "scheduler": "flow_match_euler",
             "num_inference_steps": config.raw.get("num_inference_steps", 28),
             "guidance_scale": 3.5,
-            "flow_shift": 3.0,
-            "use_dynamic_shifting": 1,
-            "base_shift": 0.5,
-            "max_shift": 1.15,
+            "flow_shift": float(scheduler.get("shift", 3.0)),
+            "use_dynamic_shifting": int(bool(
+                scheduler.get("use_dynamic_shifting", True))),
+            "base_shift": float(scheduler.get("base_shift", 0.5)),
+            "max_shift": float(scheduler.get("max_shift", 1.15)),
+            "base_image_seq_len": int(
+                scheduler.get("base_image_seq_len", 256)),
+            "max_image_seq_len": int(
+                scheduler.get("max_image_seq_len", 4096)),
+            "shift_terminal": float(scheduler.get("shift_terminal") or 0.0),
             "image_height": img_h,
             "image_width": img_w,
             "video_height": img_h,

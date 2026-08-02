@@ -160,7 +160,7 @@ static const ByteEncoderTables& byte_tables() {
 
 namespace pretok {
 
-enum class Variant { kGpt2, kQwen3, kBloom, kDeepSeek };
+enum class Variant { kGpt2, kQwen3, kBloom, kDeepSeek, kClip };
 
 // ── Character classification ──
 
@@ -243,6 +243,9 @@ inline bool is_newline(char32_t cp) {
 // Qwen3: any char except CR, LF, letter, digit
 // DeepSeek: any whitespace (\s?)
 inline bool is_prefix(char32_t cp, Variant v) {
+    if (v == Variant::kClip) {
+        return false;
+    }
     if (v == Variant::kQwen3) {
         return !is_newline(cp) && !is_letter(cp) && !is_digit(cp);
     }
@@ -460,6 +463,13 @@ inline bool try_whitespace_run(char32_t cp, const char*& p, const char* end, con
     if (!is_whitespace(cp))
         return false;
 
+    // CLIP's Split pre-tokenizer retains regex matches and removes the gaps,
+    // so whitespace never reaches its ByteLevel pre-tokenizer.
+    if (variant == Variant::kClip) {
+        scan_all_whitespace(p, end);
+        return true;
+    }
+
     // Qwen3: \s*[\r\n]+ — newline sequences take priority
     if (variant == Variant::kQwen3 && has_newline_in_ws(cp, p, end)) {
         scan_qwen3_newline_chunk(cp, p, end);
@@ -484,7 +494,7 @@ inline bool try_simple_run(char32_t cp, const char*& p, const char* end, const c
         if (variant == Variant::kQwen3) {
             if (digit_group > 1)
                 scan_digits(p, end, digit_group - 1);
-        } else {
+        } else if (variant != Variant::kClip) {
             scan_digits(p, end);
         }
         result.emplace_back(start, p);
@@ -596,12 +606,13 @@ class BpeTokenizer final : public ITokenizer {
     }
 
     void encode_segment(const std::string& text, std::vector<int32_t>& result) const {
+        const auto normalized = normalize_text(text);
         if (mIsSentencePiece) {
-            encode_sentencepiece(text, result);
+            encode_sentencepiece(normalized, result);
         } else if (mIsMetaspace) {
-            encode_metaspace(text, result);
+            encode_metaspace(normalized, result);
         } else {
-            encode_bytelevel(text, result);
+            encode_bytelevel(normalized, result);
         }
     }
 
@@ -660,6 +671,36 @@ class BpeTokenizer final : public ITokenizer {
     BpeTokenizer() = default;
 
     enum class DecoderType { kByteLevel, kMetaspace, kSequence };
+
+    std::string normalize_text(const std::string& text) const {
+        if (!mNormalizeLowercase && !mNormalizeWhitespace) {
+            return text;
+        }
+
+        std::string normalized;
+        normalized.reserve(text.size());
+        const char* cursor = text.data();
+        const char* end = cursor + text.size();
+        bool previous_was_whitespace = false;
+        while (cursor < end) {
+            const char* char_start = cursor;
+            const char32_t cp = read_utf8(cursor, end);
+            if (mNormalizeWhitespace && pretok::is_whitespace(cp)) {
+                if (!previous_was_whitespace) {
+                    normalized.push_back(' ');
+                }
+                previous_was_whitespace = true;
+                continue;
+            }
+            previous_was_whitespace = false;
+            if (mNormalizeLowercase && cp >= 'A' && cp <= 'Z') {
+                normalized.push_back(static_cast<char>(cp - 'A' + 'a'));
+            } else {
+                normalized.append(char_start, cursor);
+            }
+        }
+        return normalized;
+    }
 
     // ─── Added token segmentation ───
 
@@ -1137,6 +1178,12 @@ class BpeTokenizer final : public ITokenizer {
 
     // Classify a single Split regex string into a pre-tokenizer variant.
     static pretok::Variant classify_split_regex(const std::string& regex, int& digit_group_out) {
+        if ((regex.find("startoftext") != std::string::npos ||
+             regex.find("endoftext") != std::string::npos) &&
+            regex.find("\\p{L}") != std::string::npos &&
+            regex.find("\\p{N}") != std::string::npos) {
+            return pretok::Variant::kClip;
+        }
         if (regex.find("[^\r\n") != std::string::npos ||
             regex.find("[^\\r\\n") != std::string::npos) {
             digit_group_out = parse_digit_group(regex);
@@ -1337,6 +1384,7 @@ class BpeTokenizer final : public ITokenizer {
             return;
         auto& norm = j["normalizer"];
         std::string norm_type = norm.value("type", "");
+        detect_text_normalizers(norm);
         if (normalizer_sequence_prepends(norm, norm_type)) {
             mSentencePiecePrependAlways = true;
         } else if (normalizer_replaces_space_with_sentence_piece(norm, norm_type)) {
@@ -1344,6 +1392,26 @@ class BpeTokenizer final : public ITokenizer {
             // first token. Preserve the old prepend-if-missing behavior for
             // Metaspace-style SentencePiece models.
             mSentencePiecePrependIfMissing = false;
+        }
+    }
+
+    void detect_text_normalizers(const nlohmann::json& normalizer) {
+        const std::string type = normalizer.value("type", "");
+        if (type == "Sequence" && normalizer.contains("normalizers")) {
+            for (const auto& child : normalizer["normalizers"]) {
+                detect_text_normalizers(child);
+            }
+            return;
+        }
+        if (type == "Lowercase") {
+            mNormalizeLowercase = true;
+            return;
+        }
+        if (type == "Replace" && normalizer.contains("pattern") &&
+            normalizer["pattern"].contains("Regex") &&
+            normalizer["pattern"]["Regex"].get<std::string>() == "\\s+" &&
+            normalizer.value("content", "") == " ") {
+            mNormalizeWhitespace = true;
         }
     }
 
@@ -1448,6 +1516,8 @@ class BpeTokenizer final : public ITokenizer {
         false; // true for Normalizer Prepend, false for Metaspace first
     bool mSentencePiecePrependIfMissing = true;
     bool mByteFallback = false;
+    bool mNormalizeLowercase = false;
+    bool mNormalizeWhitespace = false;
     std::string mEndOfWordSuffix;
 
     // Post-processor: BOS/EOS token IDs to add when add_special_tokens=true

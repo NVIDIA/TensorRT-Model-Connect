@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "runtime/models/flux/flux_clip_helpers.h"
 #include "runtime/models/flux/pipeline.h"
 
 #include <iostream>
@@ -43,11 +44,25 @@ void test_flux_with_custom_config() {
           "FluxPipeline custom config pipeline_type");
 }
 
+void test_clip_padding_preserves_eos_when_truncated() {
+    using trtmc::diffusion::flux_clip::pad_and_truncate_ids;
+
+    check(pad_and_truncate_ids({10, 1, 11}, 5, 11, 11) == std::vector<int32_t>({10, 1, 11, 11, 11}),
+          "CLIP short input pads with EOS");
+    check(pad_and_truncate_ids({10, 1, 2, 3, 11}, 5, 11, 11) ==
+              std::vector<int32_t>({10, 1, 2, 3, 11}),
+          "CLIP exact input preserves EOS");
+    check(pad_and_truncate_ids({10, 1, 2, 3, 4, 11}, 5, 11, 11) ==
+              std::vector<int32_t>({10, 1, 2, 3, 11}),
+          "CLIP truncated input restores EOS");
+}
+
 } // namespace
 
 int main() {
     test_flux_construction();
     test_flux_with_custom_config();
+    test_clip_padding_preserves_eos_when_truncated();
     if (failures > 0) {
         std::cerr << failures << " flux pipeline test(s) FAILED\n";
     }

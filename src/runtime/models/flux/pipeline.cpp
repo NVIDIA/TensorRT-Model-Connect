@@ -14,6 +14,7 @@
 #include "runtime/models/flux/pipeline.h"
 
 #include "runtime/models/flux/flux_batch_utils.h"
+#include "runtime/models/flux/flux_clip_helpers.h"
 #include "runtime/models/flux/flux_denoising_step_seam.h"
 #include "runtime/models/flux/flux_generation_plan.h"
 #include "runtime/models/flux/gpu_matmul.h"
@@ -78,15 +79,6 @@ void cpu_silu_inplace(float* data, std::size_t count) {
 // ---------------------------------------------------------------------------
 // CLIP helpers
 // ---------------------------------------------------------------------------
-
-std::vector<int32_t> make_clip_padded_ids(const std::vector<int32_t>& input_ids,
-                                          int32_t pad_token_id) {
-    std::vector<int32_t> padded(static_cast<std::size_t>(kFluxClipSeqLen),
-                                std::max(pad_token_id, 0));
-    const auto copy_len = std::min(static_cast<std::size_t>(kFluxClipSeqLen), input_ids.size());
-    std::copy_n(input_ids.begin(), copy_len, padded.begin());
-    return padded;
-}
 
 int32_t find_first_token(const std::vector<int32_t>& ids, int32_t token_id) {
     for (int32_t i = 0; i < kFluxClipSeqLen; ++i) {
@@ -742,7 +734,8 @@ bool FluxPipeline::run_clip_encoder(const std::vector<int32_t>& input_ids,
     int32_t clip_pad_token_id = 0;
     detect_clip_special_tokens(clip_tokenizer_.get(), clip_eos_token_id, clip_pad_token_id);
 
-    const auto padded = make_clip_padded_ids(input_ids, clip_pad_token_id);
+    const auto padded = diffusion::flux_clip::pad_and_truncate_ids(
+        input_ids, static_cast<std::size_t>(kFluxClipSeqLen), clip_pad_token_id, clip_eos_token_id);
 
     // Build input TensorMap
     TensorMap inputs;
@@ -751,23 +744,24 @@ bool FluxPipeline::run_clip_encoder(const std::vector<int32_t>& input_ids,
 
     auto outputs = clip_module->forward(inputs);
 
-    // Check if pooled_output is directly available from the engine
-    if (outputs.count("pooled_output")) {
-        auto& pooled_tensor = outputs.at("pooled_output");
-        const auto* data = static_cast<const float*>(pooled_tensor.data);
-        pooled_output.assign(data, data + pooled_tensor.numel());
+    // HF CLIP pools the first EOS position. The engine's legacy pooled output
+    // is fixed to the last sequence row, which differs whenever EOS padding is
+    // present. Prefer the full hidden states so runtime can match HF exactly.
+    if (outputs.count("text_embeddings")) {
+        auto& text_emb_tensor = outputs.at("text_embeddings");
+        const auto* clip_hidden = static_cast<const float*>(text_emb_tensor.data);
+        const auto clip_hidden_size =
+            static_cast<std::size_t>(kFluxClipSeqLen) * static_cast<std::size_t>(kFluxClipDim);
+        std::vector<float> clip_hidden_vec(clip_hidden, clip_hidden + clip_hidden_size);
+
+        const int32_t pool_idx = select_clip_pool_index(padded, clip_eos_token_id);
+        copy_clip_pooled_row(clip_hidden_vec, pool_idx, pooled_output);
         return true;
     }
 
-    // Fallback: manually extract pooled row from text_embeddings at EOS position
-    auto& text_emb_tensor = outputs.at("text_embeddings");
-    const auto* clip_hidden = static_cast<const float*>(text_emb_tensor.data);
-    const auto clip_hidden_size =
-        static_cast<std::size_t>(kFluxClipSeqLen) * static_cast<std::size_t>(kFluxClipDim);
-    std::vector<float> clip_hidden_vec(clip_hidden, clip_hidden + clip_hidden_size);
-
-    const int32_t pool_idx = select_clip_pool_index(padded, clip_eos_token_id);
-    copy_clip_pooled_row(clip_hidden_vec, pool_idx, pooled_output);
+    auto& pooled_tensor = outputs.at("pooled_output");
+    const auto* data = static_cast<const float*>(pooled_tensor.data);
+    pooled_output.assign(data, data + pooled_tensor.numel());
     return true;
 }
 
@@ -800,9 +794,10 @@ bool FluxPipeline::run_t5_encoder(int32_t encoder_idx, const std::vector<int32_t
     }
 
     TensorMap inputs;
-    inputs["input_ids"] = Tensor{padded_ids.data(), {static_cast<int64_t>(seq_len)}, DType::kInt32};
+    inputs["input_ids"] =
+        Tensor{padded_ids.data(), {1, static_cast<int64_t>(seq_len)}, DType::kInt32};
     inputs["attention_mask"] =
-        Tensor{mask.data(), {static_cast<int64_t>(seq_len)}, DType::kFloat32};
+        Tensor{mask.data(), {1, static_cast<int64_t>(seq_len)}, DType::kFloat32};
 
     auto outputs = te->forward(inputs);
 
