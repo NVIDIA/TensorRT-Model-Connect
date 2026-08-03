@@ -1876,6 +1876,23 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestE2EDataFiles.test_data_file_maps_to_manifest_users",),
         ),
         ClassificationRule(
+            priority=482,
+            name="repository_automation_tool",
+            matcher=_path_in(
+                {
+                    "plugins/trtmc-agent-skills/skills/trtmc-agent-container/"
+                    "scripts/trtmc_agent_container.py",
+                    "tools/check_legacy_project_references.py",
+                }
+            ),
+            resolver=_match_result(
+                "repository_automation_tool", _no_models, ["tools"], False
+            ),
+            covered_by=(
+                "TestUnitTiers.test_repository_automation_tool_triggers_tools_tier",
+            ),
+        ),
+        ClassificationRule(
             priority=484,
             name="nightly_artifact_selector_tool",
             matcher=_path_equals("tools/select_latest_attempt_artifact.py"),

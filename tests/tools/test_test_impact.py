@@ -1892,6 +1892,23 @@ class TestUnitTiers:
         assert match.unit_tiers == ["tools"]
         assert match.rebuild_cpp is False
 
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "plugins/trtmc-agent-skills/skills/trtmc-agent-container/"
+            "scripts/trtmc_agent_container.py",
+            "tools/check_legacy_project_references.py",
+        ],
+    )
+    def test_repository_automation_tool_triggers_tools_tier(self, imap, path):
+        """Repository automation edits run tools tests without model E2E."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "repository_automation_tool"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
     def test_nightly_artifact_selector_tool(self, imap):
         """Retry artifact selection runs its tooling contracts, not model E2E."""
         match = test_impact.classify_file("tools/select_latest_attempt_artifact.py", imap)
