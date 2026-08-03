@@ -15,7 +15,7 @@
       "trace_id": "IT-E2E-DSV2L-01",
       "reference_family": "causal_base_continuation",
       "user_contract": "continuation_parity",
-      "reference_precision": "fp32",
+      "reference_precision": "fp16",
       "ci_tier": "nightly_only",
       "l0_replacement": "deepseek-v2-tiny",
       "l0_replacement_reason": "DeepSeek-V2 Lite is scale coverage; deepseek-v2-tiny keeps the DeepSeek-V2 decoder path for PR L0.",

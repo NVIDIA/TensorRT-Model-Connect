@@ -35,5 +35,6 @@ def test_deepseek_v2_l0_replacement_preserves_precision() -> None:
 
     assert lite["testcases"][0]["l0_replacement"] == tiny["name"]
     assert lite["precision"] == tiny["precision"] == "fp16"
+    assert lite["testcases"][0]["reference_precision"] == lite["precision"]
     assert tiny["testcases"][0]["reference_precision"] == tiny["precision"]
     assert tiny["task_eval"]["hf_experts_implementation"] == "batched_mm"
