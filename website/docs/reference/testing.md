@@ -39,6 +39,7 @@ PYTHONPATH=python:. python3 -m pytest \
 PYTHONPATH=python:. python3 tools/model_ci.py validate
 PYTHONPATH=python:. python3 tools/test_impact.py --validate
 python3 tools/check_doc_file_references.py --strict website/docs
+python3 tools/check_legacy_project_references.py
 npm --prefix website ci
 npm --prefix website run build
 git diff --check
@@ -48,7 +49,9 @@ Install `numpy`, `Pillow`, `pytest`, and `PyYAML` first if the Python
 environment does not provide them. `npm ci` uses
 `website/package-lock.json` and replaces that workspace's installed dependency
 tree; use Node 20 to match `.github/workflows/pages.yml`. The reference checker
-validates repository-relative paths and selected numeric claims. The
+validates repository-relative paths and selected numeric claims. The repository
+identity checker rejects retired project and development-container terminology
+from every tracked text file. The
 runtime-strategy checker compares native descriptors, source, tests, and runner
 commands. A successful Docusaurus build proves that this site is buildable; it
 does not by itself prove every documented behavior or command.

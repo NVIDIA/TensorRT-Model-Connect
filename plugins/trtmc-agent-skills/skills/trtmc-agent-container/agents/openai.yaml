@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+interface:
+  display_name: "TRTMC Container Runner"
+  short_description: "Run Model Connect builds and tests in the matching container"
+  default_prompt: "Use $trtmc-agent-container to find or create the matching TensorRT-Model-Connect dev container, then run the requested build or test command."

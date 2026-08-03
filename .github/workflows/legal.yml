@@ -80,3 +80,6 @@ jobs:
 
       - name: Check all tracked source headers
         run: python tools/legal_headers.py --check
+
+      - name: Check repository identity terminology
+        run: python tools/check_legacy_project_references.py

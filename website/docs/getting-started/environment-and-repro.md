@@ -80,6 +80,8 @@ cd TensorRT-Model-Connect
 repository mounted at `/workspace/tensorrt-model-connect`, the Hugging Face
 cache mounted from the host, and GPU access requested through Docker. Keep that
 shell open for the source-install and Quick Start commands.
+In parallel agent workspaces, the matching container may be named
+`trtmc-dev-gb300-agent-N` instead of `trtmc-dev-gb300`.
 
 :::warning Host versus container
 Source-build commands in this site assume you are inside that container. A
