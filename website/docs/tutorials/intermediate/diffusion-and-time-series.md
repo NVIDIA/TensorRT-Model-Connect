@@ -61,6 +61,20 @@ Diffusion inference is iterative like text generation, but the loop is over deno
 | Samples from logits. | Decodes final latents into pixels. |
 | Stops at EOS or token budget. | Stops after configured denoising steps. |
 
+### Advanced FLUX context parallelism
+
+The build CLI also exposes `--context-parallel-size` (or `--cp-size`) for
+families that implement context parallelism. The current checked multi-device
+contract is `tests/e2e/models/flux/manifests/flux-schnell-l0-cp4.json`:
+it uses FLUX.1 Schnell, four ranks, `mpirun`, NCCL rendezvous, and four GPUs.
+The FLUX builder stores one shared rank-dynamic Ulysses denoiser plan while
+replicating weights and sharding sequence activations. Tensor-parallel and
+context-parallel build options cannot be combined.
+
+Treat the manifest and its retained E2E result as the runnable qualification
+contract. Parser acceptance or a successful single-rank build does not prove
+the four-rank runtime path.
+
 ## PixArt-Sigma image generation
 
 This recipe mirrors the repository's

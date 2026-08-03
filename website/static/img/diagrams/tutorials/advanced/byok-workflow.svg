@@ -1,0 +1,111 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="823" height="713" role="img" aria-labelledby="tutorials-advanced-byok-workflow-svg-title tutorials-advanced-byok-workflow-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 823.00 713.00" xmlns="http://www.w3.org/2000/svg">
+<title id="tutorials-advanced-byok-workflow-svg-title">Bring Your Own Kernel workflow</title>
+<desc id="tutorials-advanced-byok-workflow-svg-description">A family Recipe or a manual raw-graph selection passes through the same region validator and graph-patch build, producing a slot-ready bundle that combines with a kernel-binding manifest and trusted DSO only when a new pipeline loads.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(25.2 688)">
+<polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-688 798.09,-688 798.09,25.2 -25.2,25.2"/>
+<text xml:space="preserve" text-anchor="start" x="122.72" y="-634.6" font-family="Arial" font-weight="bold" font-size="28.00" fill="#111827">Select once, bind when a pipeline loads</text>
+<text xml:space="preserve" text-anchor="start" x="8" y="-617.4" font-family="Arial" font-size="16.00" fill="#111827">The DSO stays outside the bundle, and both selection paths use the same validator and patch mechanism.</text>
+<!-- recipe -->
+<g id="node1" class="node">
+<title>recipe</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M159.6,-610.8C159.6,-610.8 22.32,-610.8 22.32,-610.8 16.32,-610.8 10.32,-604.8 10.32,-598.8 10.32,-598.8 10.32,-568.2 10.32,-568.2 10.32,-562.2 16.32,-556.2 22.32,-556.2 22.32,-556.2 159.6,-556.2 159.6,-556.2 165.6,-556.2 171.6,-562.2 171.6,-568.2 171.6,-568.2 171.6,-598.8 171.6,-598.8 171.6,-604.8 165.6,-610.8 159.6,-610.8"/>
+<text xml:space="preserve" text-anchor="start" x="33.8" y="-585.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Family Recipe</text>
+<text xml:space="preserve" text-anchor="start" x="24.72" y="-569.6" font-family="Arial" font-size="16.00" fill="#111827">trtmc build &#45;&#45;recipe</text>
+</g>
+<!-- validate -->
+<g id="node3" class="node">
+<title>validate</title>
+<path fill="#ecfeff" stroke="#0e7490" stroke-width="2" d="M400.15,-485C400.15,-485 13.77,-485 13.77,-485 7.77,-485 1.77,-479 1.77,-473 1.77,-473 1.77,-442.4 1.77,-442.4 1.77,-436.4 7.77,-430.4 13.77,-430.4 13.77,-430.4 400.15,-430.4 400.15,-430.4 406.15,-430.4 412.15,-436.4 412.15,-442.4 412.15,-442.4 412.15,-473 412.15,-473 412.15,-479 406.15,-485 400.15,-485"/>
+<text xml:space="preserve" text-anchor="start" x="102.58" y="-459.9" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Validate one graph region</text>
+<text xml:space="preserve" text-anchor="start" x="16.17" y="-443.8" font-family="Arial" font-size="16.00" fill="#111827">connected · convex · one output · supported tensors</text>
+</g>
+<!-- recipe&#45;&gt;validate -->
+<g id="edge1" class="edge">
+<title>recipe&#45;&gt;validate</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M116.42,-555.33C133.27,-537.35 155.53,-513.59 173.77,-494.13"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="175.66,-496.21 179.08,-488.46 171.57,-492.38 175.66,-496.21"/>
+<text xml:space="preserve" text-anchor="middle" x="211.05" y="-515.8" font-family="Arial" font-size="16.00" fill="#334155">known instance</text>
+</g>
+<!-- manual -->
+<g id="node2" class="node">
+<title>manual</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M421.85,-610.8C421.85,-610.8 224.07,-610.8 224.07,-610.8 218.07,-610.8 212.07,-604.8 212.07,-598.8 212.07,-598.8 212.07,-568.2 212.07,-568.2 212.07,-562.2 218.07,-556.2 224.07,-556.2 224.07,-556.2 421.85,-556.2 421.85,-556.2 427.85,-556.2 433.85,-562.2 433.85,-568.2 433.85,-568.2 433.85,-598.8 433.85,-598.8 433.85,-604.8 427.85,-610.8 421.85,-610.8"/>
+<text xml:space="preserve" text-anchor="start" x="254.47" y="-585.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Manual selection</text>
+<text xml:space="preserve" text-anchor="start" x="226.47" y="-569.6" font-family="Arial" font-size="16.00" fill="#111827">graph inspect · list · select</text>
+</g>
+<!-- manual&#45;&gt;validate -->
+<g id="edge2" class="edge">
+<title>manual&#45;&gt;validate</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M305.19,-555.47C291.88,-535.22 275.96,-511 275.96,-511 275.96,-511 264.89,-502.61 251.62,-492.55"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="253.64,-490.56 245.57,-487.96 250.25,-495.03 253.64,-490.56"/>
+<text xml:space="preserve" text-anchor="middle" x="347.26" y="-515.8" font-family="Arial" font-size="16.00" fill="#334155">explicit node IDs</text>
+</g>
+<!-- patch -->
+<g id="node4" class="node">
+<title>patch</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M353.87,-377.4C353.87,-377.4 60.06,-377.4 60.06,-377.4 54.06,-377.4 48.06,-371.4 48.06,-365.4 48.06,-365.4 48.06,-334.8 48.06,-334.8 48.06,-328.8 54.06,-322.8 60.06,-322.8 60.06,-322.8 353.87,-322.8 353.87,-322.8 359.87,-322.8 365.87,-328.8 365.87,-334.8 365.87,-334.8 365.87,-365.4 365.87,-365.4 365.87,-371.4 359.87,-377.4 353.87,-377.4"/>
+<text xml:space="preserve" text-anchor="start" x="133.77" y="-352.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Graph&#45;patch build</text>
+<text xml:space="preserve" text-anchor="start" x="62.46" y="-336.2" font-family="Arial" font-size="16.00" fill="#111827">replace the region with one TVM&#45;FFI slot</text>
+</g>
+<!-- validate&#45;&gt;patch -->
+<g id="edge3" class="edge">
+<title>validate&#45;&gt;patch</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M206.96,-429.51C206.96,-417.31 206.96,-402.71 206.96,-389.44"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="209.76,-389.83 206.96,-381.83 204.16,-389.83 209.76,-389.83"/>
+</g>
+<!-- bundle -->
+<g id="node5" class="node">
+<title>bundle</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M328.53,-269.8C328.53,-269.8 85.39,-269.8 85.39,-269.8 79.39,-269.8 73.39,-263.8 73.39,-257.8 73.39,-257.8 73.39,-227.2 73.39,-227.2 73.39,-221.2 79.39,-215.2 85.39,-215.2 85.39,-215.2 328.53,-215.2 328.53,-215.2 334.53,-215.2 340.53,-221.2 340.53,-227.2 340.53,-227.2 340.53,-257.8 340.53,-257.8 340.53,-263.8 334.53,-269.8 328.53,-269.8"/>
+<text xml:space="preserve" text-anchor="start" x="143.68" y="-244.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Slot&#45;ready .trtfb</text>
+<text xml:space="preserve" text-anchor="start" x="87.79" y="-228.6" font-family="Arial" font-size="16.00" fill="#111827">selection receipt · no kernel DSO</text>
+</g>
+<!-- patch&#45;&gt;bundle -->
+<g id="edge4" class="edge">
+<title>patch&#45;&gt;bundle</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M206.96,-321.91C206.96,-309.71 206.96,-295.11 206.96,-281.84"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="209.76,-282.23 206.96,-274.23 204.16,-282.23 209.76,-282.23"/>
+</g>
+<!-- pipeline -->
+<g id="node7" class="node">
+<title>pipeline</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M549,-162.2C549,-162.2 232.92,-162.2 232.92,-162.2 226.92,-162.2 220.92,-156.2 220.92,-150.2 220.92,-150.2 220.92,-119.6 220.92,-119.6 220.92,-113.6 226.92,-107.6 232.92,-107.6 232.92,-107.6 549,-107.6 549,-107.6 555,-107.6 561,-113.6 561,-119.6 561,-119.6 561,-150.2 561,-150.2 561,-156.2 555,-162.2 549,-162.2"/>
+<text xml:space="preserve" text-anchor="start" x="290.37" y="-137.1" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Construct a new pipeline</text>
+<text xml:space="preserve" text-anchor="start" x="235.32" y="-121" font-family="Arial" font-size="16.00" fill="#111827">match binding ID and ABI · resolve function</text>
+</g>
+<!-- bundle&#45;&gt;pipeline -->
+<g id="edge5" class="edge">
+<title>bundle&#45;&gt;pipeline</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M254.35,-214.31C278.51,-200.44 308.08,-183.47 333.53,-168.86"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="334.72,-171.4 340.27,-164.99 331.94,-166.55 334.72,-171.4"/>
+</g>
+<!-- binding -->
+<g id="node6" class="node">
+<title>binding</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M759.12,-269.8C759.12,-269.8 392.81,-269.8 392.81,-269.8 386.81,-269.8 380.81,-263.8 380.81,-257.8 380.81,-257.8 380.81,-227.2 380.81,-227.2 380.81,-221.2 386.81,-215.2 392.81,-215.2 392.81,-215.2 759.12,-215.2 759.12,-215.2 765.12,-215.2 771.12,-221.2 771.12,-227.2 771.12,-227.2 771.12,-257.8 771.12,-257.8 771.12,-263.8 765.12,-269.8 759.12,-269.8"/>
+<text xml:space="preserve" text-anchor="start" x="502.31" y="-244.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Load&#45;time binding</text>
+<text xml:space="preserve" text-anchor="start" x="395.21" y="-228.6" font-family="Arial" font-size="16.00" fill="#111827">kernel&#45;bindings.json + trusted ABI&#45;compatible DSO</text>
+</g>
+<!-- binding&#45;&gt;pipeline -->
+<g id="edge6" class="edge">
+<title>binding&#45;&gt;pipeline</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M528.32,-214.31C504.03,-200.44 474.3,-183.47 448.71,-168.86"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="450.26,-166.52 441.92,-164.99 447.48,-171.38 450.26,-166.52"/>
+</g>
+<!-- inference -->
+<g id="node8" class="node">
+<title>inference</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M567.21,-54.6C567.21,-54.6 214.71,-54.6 214.71,-54.6 208.71,-54.6 202.71,-48.6 202.71,-42.6 202.71,-42.6 202.71,-12 202.71,-12 202.71,-6 208.71,0 214.71,0 214.71,0 567.21,0 567.21,0 573.21,0 579.21,-6 579.21,-12 579.21,-12 579.21,-42.6 579.21,-42.6 579.21,-48.6 573.21,-54.6 567.21,-54.6"/>
+<text xml:space="preserve" text-anchor="start" x="282.8" y="-29.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Run and validate inference</text>
+<text xml:space="preserve" text-anchor="start" x="217.11" y="-13.4" font-family="Arial" font-size="16.00" fill="#111827">correctness first · then no&#45;regression benchmark</text>
+</g>
+<!-- pipeline&#45;&gt;inference -->
+<g id="edge7" class="edge">
+<title>pipeline&#45;&gt;inference</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M390.96,-106.71C390.96,-94.51 390.96,-79.91 390.96,-66.64"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="393.76,-67.03 390.96,-59.03 388.16,-67.03 393.76,-67.03"/>
+</g>
+</g>
+</svg>

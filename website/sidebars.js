@@ -49,9 +49,10 @@ const sidebars = {
         },
         {
           type: 'category',
-          label: 'Advanced: Optimize and Validate',
+          label: 'Advanced: Optimize, Extend, and Validate',
           items: [
             'tutorials/advanced/quantization-and-runtime-knobs',
+            'tutorials/advanced/bring-your-own-kernel',
             'tutorials/advanced/validation-and-benchmarking'
           ]
         }
@@ -112,8 +113,7 @@ const sidebars = {
         'extend/add-optimized-runtime',
         'extend/add-runtime-strategy',
         'extend/add-config-schema',
-        'extend/model-validation',
-        'tutorials/beginner/bring-your-own-kernel'
+        'extend/model-validation'
       ]
     },
     {

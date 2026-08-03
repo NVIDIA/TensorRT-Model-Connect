@@ -43,6 +43,7 @@ replaces unsafe filename characters with `-`.
 | `--decoder-engine-layout split|dual_profile` | Request separate prefill/decode engines or one multi-profile decoder engine. Unsupported split requests log a fallback; inspect `config.json.decoder_engine_layout` and bundle sections for the actual result. |
 | `--dynamic-kv-cache` | Enable runtime-resizable KV cache support. |
 | `--tensor-parallel-size N`, `--tp-size N` | Build a supported decoder for TP size `1`, `2`, `4`, or `8`. |
+| `--context-parallel-size N`, `--cp-size N` | Build a supported context-parallel bundle for CP size `1`, `2`, `4`, or `8`. TP and CP requests are mutually exclusive. |
 | `--dynamic-kv-profile-rows A,B,C` | Override dynamic-KV optimization profiles. |
 | `--image-height`, `--image-width` | Diffusion image shape overrides. |
 | `--video-height`, `--video-width`, `--video-num-frames` | Diffusion video shape overrides. |
@@ -134,7 +135,7 @@ type is `none`, `int`, `float`, or `ptr`. A dynamic output additionally requires
 Build the same model revision and options with `--graph-patch region.json` to
 produce a slot-ready native bundle. The selection must describe one connected,
 convex region and must still match the live graph fingerprint. See
-[Bring Your Own Kernel](../tutorials/beginner/bring-your-own-kernel.md) for the
+[Bring Your Own Kernel](../tutorials/advanced/bring-your-own-kernel.md) for the
 end-to-end workflow and [TVM FFI](../features/tvm-ffi.md) for the feature
 contract and current limitations.
 

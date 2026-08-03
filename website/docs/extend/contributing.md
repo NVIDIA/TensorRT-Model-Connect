@@ -41,7 +41,7 @@ Choose the narrowest current owner:
 | Native runtime behavior | [Add a Runtime Strategy](add-runtime-strategy.md) |
 | User-facing configuration | [Add a Config Schema](add-config-schema.md) |
 | Model validation | [Validate a Model Contribution](model-validation.md) |
-| External family-owned kernel | [Bring Your Own Kernel](../tutorials/beginner/bring-your-own-kernel.md) |
+| External family-owned kernel | [Bring Your Own Kernel](../tutorials/advanced/bring-your-own-kernel.md) |
 | Public API or shared infrastructure | [Architecture & Design](../architecture/overview.md), then the owning API reference |
 
 Similar model behavior is not automatically shared infrastructure. Family

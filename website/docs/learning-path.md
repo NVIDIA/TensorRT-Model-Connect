@@ -140,11 +140,12 @@ Then choose the extension guide owned by your change:
 - [Add a Runtime Strategy](extend/add-runtime-strategy.md)
 - [Add a Configuration Schema](extend/add-config-schema.md)
 - [Validate a Model Contribution](extend/model-validation.md)
+- [Bring Your Own Kernel](tutorials/advanced/bring-your-own-kernel.md)
 - [Contributing](extend/contributing.md)
 
-[Bring Your Own Kernel](tutorials/beginner/bring-your-own-kernel.md) is an
-extension workflow, not part of the beginner or common user path. Use it only
-when replacing or adding a kernel implementation is the goal.
+Bring Your Own Kernel is an advanced extension workflow, not part of the
+beginner or common user path. Use it only when replacing or adding a kernel
+implementation is the goal.
 
 **Milestone:** before editing, you can name the model-owned Python descriptor,
 runtime strategy and DSO owner, public API boundary, tests, E2E manifest, and
