@@ -75,3 +75,38 @@ def test_flux_reference_honors_nested_validation_precision(monkeypatch, tmp_path
     script = cmd[cmd.index("-c") + 1]
     assert "reference_torch_dtype = torch.float16" in script
     assert "unpacked_latents.to(dtype=reference_torch_dtype)" in script
+
+
+def test_flux2_reference_honors_declared_text_sequence_length(monkeypatch, tmp_path):
+    case = E2ECase(
+        name="flux-2-dev",
+        hf_id="black-forest-labs/FLUX.2-dev",
+        family="flux",
+        runtime_strategy="diffusion_flux",
+        bundle="flux-2-dev.trtfb",
+        inputs={
+            "image_height": 384,
+            "image_width": 384,
+            "max_cache_length": 256,
+        },
+        metadata={"model_type": "flux.2"},
+    )
+    context = RunContext(case=case, artifacts_dir=str(tmp_path))
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout="Generated 1 frames\n", stderr=""
+        )
+
+    monkeypatch.setattr(hf_diffusers.subprocess, "run", fake_run)
+    hf_diffusers.HfDiffusersReference().run_stage(
+        case, StageSpec(name="end_to_end"), context
+    )
+
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    script = cmd[cmd.index("-c") + 1]
+    assert "max_sequence_length = 256" in script
+    assert 'kwargs["max_sequence_length"] = int(max_sequence_length)' in script

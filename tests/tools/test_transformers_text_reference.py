@@ -72,3 +72,17 @@ def test_generation_settings_reject_non_mapping_hf_overrides() -> None:
             {"task_eval": {"hf_generation_overrides": ["not", "a", "mapping"]}},
             {},
         )
+
+
+def test_generated_token_max_score_ids_preserve_exact_ties() -> None:
+    torch = pytest.importorskip("torch")
+    module = _load_reference_module()
+
+    candidates = module._generated_token_max_score_ids(
+        (
+            torch.tensor([[1.0, 3.0, 3.0]]),
+            torch.tensor([[4.0, 2.0, 4.0]]),
+        )
+    )
+
+    assert candidates == [[1, 2], [0, 2]]

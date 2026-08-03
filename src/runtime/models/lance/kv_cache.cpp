@@ -126,6 +126,15 @@ void LanceKvCache::write_position_input(TensorMap& inputs, int32_t seq_len) {
     pos_t.shape = {static_cast<int64_t>(seq_len)};
     pos_t.dtype = DType::kInt32;
     inputs[names_.position_id] = pos_t;
+
+    if (has_mrope_position_input_ && seq_len == 1) {
+        mrope_pos_buf_.fill(position_);
+        Tensor mrope_t;
+        mrope_t.data = mrope_pos_buf_.data();
+        mrope_t.shape = {3};
+        mrope_t.dtype = DType::kInt32;
+        inputs["mrope_position_ids"] = mrope_t;
+    }
 }
 
 void LanceKvCache::write_batched_mask(TensorMap& inputs, int32_t seq_len) {
@@ -145,6 +154,41 @@ void LanceKvCache::write_batched_mask(TensorMap& inputs, int32_t seq_len) {
             mask_buf_[row + static_cast<std::size_t>(max_length_) + static_cast<std::size_t>(j)] =
                 0.0f;
     }
+    Tensor mask_t;
+    mask_t.data = mask_buf_.data();
+    mask_t.shape = {static_cast<int64_t>(seq_len), static_cast<int64_t>(kv_len)};
+    mask_t.dtype = DType::kFloat32;
+    inputs[names_.attention_mask] = mask_t;
+}
+
+void LanceKvCache::write_segmented_prefill_mask(TensorMap& inputs, int32_t seq_len,
+                                                int32_t block_start, int32_t block_end) {
+    block_start = std::max(0, std::min(block_start, seq_len));
+    block_end = std::max(block_start, std::min(block_end, seq_len));
+    if (block_start == block_end) {
+        write_batched_mask(inputs, seq_len);
+        return;
+    }
+
+    // Start from the standard causal prompt mask. Queries inside the visual
+    // block additionally see the entire visual block, matching Lance's
+    // official [causal, full, causal] segment contract.
+    const int32_t valid = std::max(0, std::min(position_, max_length_));
+    const int32_t kv_len = max_length_ + seq_len;
+    const std::size_t total = static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(kv_len);
+    mask_buf_.assign(total, kMaskedScore);
+    for (int32_t i = 0; i < seq_len; ++i) {
+        const std::size_t row = static_cast<std::size_t>(i) * static_cast<std::size_t>(kv_len);
+        for (int32_t j = 0; j < valid; ++j)
+            mask_buf_[row + static_cast<std::size_t>(j)] = 0.0F;
+        for (int32_t j = 0; j <= i; ++j)
+            mask_buf_[row + static_cast<std::size_t>(max_length_ + j)] = 0.0F;
+        if (i >= block_start && i < block_end) {
+            for (int32_t j = block_start; j < block_end; ++j)
+                mask_buf_[row + static_cast<std::size_t>(max_length_ + j)] = 0.0F;
+        }
+    }
+
     Tensor mask_t;
     mask_t.data = mask_buf_.data();
     mask_t.shape = {static_cast<int64_t>(seq_len), static_cast<int64_t>(kv_len)};
@@ -212,9 +256,19 @@ void LanceKvCache::prepare_bidirectional_step(TensorMap& inputs, int32_t seq_len
     write_bidirectional_mask(inputs, seq_len);
 }
 
+void LanceKvCache::prepare_prefill_with_bidirectional_block(TensorMap& inputs, int32_t seq_len,
+                                                            int32_t block_start,
+                                                            int32_t block_end) {
+    if (seq_len <= 0)
+        seq_len = 1;
+    write_position_input(inputs, seq_len);
+    write_segmented_prefill_mask(inputs, seq_len, block_start, block_end);
+}
+
 void LanceKvCache::bind_to(TrtModule& module) {
     bound_module_ = &module;
     has_position_input_ = module.has_input(names_.position_id);
+    has_mrope_position_input_ = module.has_input("mrope_position_ids");
     // Enable dynamic row binding only when cache_k[0] itself is dynamic.
     // Static-shape engines with fixed [max_length, kv_dim] cache reject
     // setInputShape on cache inputs even when other inputs are dynamic.
@@ -242,6 +296,7 @@ void LanceKvCache::bind_to(TrtModule& module) {
 
 void LanceKvCache::bind_cache_inputs(TrtModule& module) {
     has_position_input_ = module.has_input(names_.position_id);
+    has_mrope_position_input_ = module.has_input("mrope_position_ids");
     for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);
         module.bind_external(names_.cache_k[li], cache_k_[li].data());

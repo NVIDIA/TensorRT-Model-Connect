@@ -14,8 +14,11 @@
 #include "runtime/models/flux/pipeline.h"
 
 #include "runtime/models/flux/flux_batch_utils.h"
+#include "runtime/models/flux/flux_clip_helpers.h"
 #include "runtime/models/flux/flux_denoising_step_seam.h"
 #include "runtime/models/flux/flux_generation_plan.h"
+#include "runtime/models/flux/flux_rope_helpers.h"
+#include "runtime/models/flux/flux_text_helpers.h"
 #include "runtime/models/flux/gpu_matmul.h"
 
 #include <algorithm>
@@ -78,15 +81,6 @@ void cpu_silu_inplace(float* data, std::size_t count) {
 // ---------------------------------------------------------------------------
 // CLIP helpers
 // ---------------------------------------------------------------------------
-
-std::vector<int32_t> make_clip_padded_ids(const std::vector<int32_t>& input_ids,
-                                          int32_t pad_token_id) {
-    std::vector<int32_t> padded(static_cast<std::size_t>(kFluxClipSeqLen),
-                                std::max(pad_token_id, 0));
-    const auto copy_len = std::min(static_cast<std::size_t>(kFluxClipSeqLen), input_ids.size());
-    std::copy_n(input_ids.begin(), copy_len, padded.begin());
-    return padded;
-}
 
 int32_t find_first_token(const std::vector<int32_t>& ids, int32_t token_id) {
     for (int32_t i = 0; i < kFluxClipSeqLen; ++i) {
@@ -742,7 +736,8 @@ bool FluxPipeline::run_clip_encoder(const std::vector<int32_t>& input_ids,
     int32_t clip_pad_token_id = 0;
     detect_clip_special_tokens(clip_tokenizer_.get(), clip_eos_token_id, clip_pad_token_id);
 
-    const auto padded = make_clip_padded_ids(input_ids, clip_pad_token_id);
+    const auto padded = diffusion::flux_clip::pad_and_truncate_ids(
+        input_ids, static_cast<std::size_t>(kFluxClipSeqLen), clip_pad_token_id, clip_eos_token_id);
 
     // Build input TensorMap
     TensorMap inputs;
@@ -751,23 +746,24 @@ bool FluxPipeline::run_clip_encoder(const std::vector<int32_t>& input_ids,
 
     auto outputs = clip_module->forward(inputs);
 
-    // Check if pooled_output is directly available from the engine
-    if (outputs.count("pooled_output")) {
-        auto& pooled_tensor = outputs.at("pooled_output");
-        const auto* data = static_cast<const float*>(pooled_tensor.data);
-        pooled_output.assign(data, data + pooled_tensor.numel());
+    // HF CLIP pools the first EOS position. The engine's legacy pooled output
+    // is fixed to the last sequence row, which differs whenever EOS padding is
+    // present. Prefer the full hidden states so runtime can match HF exactly.
+    if (outputs.count("text_embeddings")) {
+        auto& text_emb_tensor = outputs.at("text_embeddings");
+        const auto* clip_hidden = static_cast<const float*>(text_emb_tensor.data);
+        const auto clip_hidden_size =
+            static_cast<std::size_t>(kFluxClipSeqLen) * static_cast<std::size_t>(kFluxClipDim);
+        std::vector<float> clip_hidden_vec(clip_hidden, clip_hidden + clip_hidden_size);
+
+        const int32_t pool_idx = select_clip_pool_index(padded, clip_eos_token_id);
+        copy_clip_pooled_row(clip_hidden_vec, pool_idx, pooled_output);
         return true;
     }
 
-    // Fallback: manually extract pooled row from text_embeddings at EOS position
-    auto& text_emb_tensor = outputs.at("text_embeddings");
-    const auto* clip_hidden = static_cast<const float*>(text_emb_tensor.data);
-    const auto clip_hidden_size =
-        static_cast<std::size_t>(kFluxClipSeqLen) * static_cast<std::size_t>(kFluxClipDim);
-    std::vector<float> clip_hidden_vec(clip_hidden, clip_hidden + clip_hidden_size);
-
-    const int32_t pool_idx = select_clip_pool_index(padded, clip_eos_token_id);
-    copy_clip_pooled_row(clip_hidden_vec, pool_idx, pooled_output);
+    auto& pooled_tensor = outputs.at("pooled_output");
+    const auto* data = static_cast<const float*>(pooled_tensor.data);
+    pooled_output.assign(data, data + pooled_tensor.numel());
     return true;
 }
 
@@ -786,23 +782,16 @@ bool FluxPipeline::run_t5_encoder(int32_t encoder_idx, const std::vector<int32_t
     const int32_t seq_len = config_.text_seq_len;
     const int32_t te_dim = config_.text_encoder_dim;
 
-    // Pad input_ids to seq_len
-    std::vector<int32_t> padded_ids(static_cast<std::size_t>(seq_len), 0);
-    const auto copy_len = std::min(static_cast<std::size_t>(seq_len), input_ids.size());
-    std::copy_n(input_ids.begin(), copy_len, padded_ids.begin());
-
-    // Build attention mask: 0.0 for real tokens, -1e9 for padding
-    std::vector<float> mask(static_cast<std::size_t>(seq_len), -1e9F);
-    for (int32_t i = 0; i < seq_len; ++i) {
-        if (padded_ids[static_cast<std::size_t>(i)] != 0) {
-            mask[static_cast<std::size_t>(i)] = 0.0F;
-        }
-    }
+    const bool is_flux2 = !weights_.vae_bn_mean.empty();
+    const int32_t pad_token_id =
+        diffusion::flux_text::resolve_pad_token_id(tokenizer_.get(), is_flux2);
+    auto prepared = diffusion::flux_text::prepare_inputs(input_ids, seq_len, pad_token_id);
 
     TensorMap inputs;
-    inputs["input_ids"] = Tensor{padded_ids.data(), {static_cast<int64_t>(seq_len)}, DType::kInt32};
+    inputs["input_ids"] =
+        Tensor{prepared.input_ids.data(), {1, static_cast<int64_t>(seq_len)}, DType::kInt32};
     inputs["attention_mask"] =
-        Tensor{mask.data(), {static_cast<int64_t>(seq_len)}, DType::kFloat32};
+        Tensor{prepared.attention_mask.data(), {1, static_cast<int64_t>(seq_len)}, DType::kFloat32};
 
     auto outputs = te->forward(inputs);
 
@@ -811,14 +800,11 @@ bool FluxPipeline::run_t5_encoder(int32_t encoder_idx, const std::vector<int32_t
     const auto* emb_data = static_cast<const float*>(emb_tensor.data);
     text_embeddings.assign(emb_data, emb_data + emb_size);
 
-    // Zero out padding token embeddings
-    for (int32_t i = 0; i < seq_len; ++i) {
-        if (padded_ids[static_cast<std::size_t>(i)] == 0) {
-            float* row = text_embeddings.data() +
-                         static_cast<std::size_t>(i) * static_cast<std::size_t>(te_dim);
-            std::fill_n(row, static_cast<std::size_t>(te_dim), 0.0F);
-        }
-    }
+    // Diffusers feeds FLUX.2's full Mistral output to the denoiser, including
+    // padded query rows. Preserve those rows while retaining FLUX.1's legacy
+    // zero-padding contract.
+    diffusion::flux_text::clear_padding_rows(text_embeddings, {prepared.valid_tokens}, seq_len,
+                                             te_dim, is_flux2);
 
     return true;
 }
@@ -931,22 +917,21 @@ bool FluxPipeline::run_t5_encoder_batch(int32_t encoder_idx,
     const int32_t seq_len = config_.text_seq_len;
     const int32_t te_dim = config_.text_encoder_dim;
 
-    std::vector<int32_t> padded_ids(static_cast<std::size_t>(B) * static_cast<std::size_t>(seq_len),
-                                    0);
-    std::vector<float> mask(static_cast<std::size_t>(B) * static_cast<std::size_t>(seq_len), -1e9F);
+    const bool is_flux2 = !weights_.vae_bn_mean.empty();
+    const int32_t pad_token_id =
+        diffusion::flux_text::resolve_pad_token_id(tokenizer_.get(), is_flux2);
+    std::vector<int32_t> padded_ids;
+    std::vector<float> mask;
+    std::vector<std::size_t> valid_tokens;
+    padded_ids.reserve(static_cast<std::size_t>(B) * static_cast<std::size_t>(seq_len));
+    mask.reserve(static_cast<std::size_t>(B) * static_cast<std::size_t>(seq_len));
+    valid_tokens.reserve(static_cast<std::size_t>(B));
     for (int32_t b = 0; b < B; ++b) {
         const auto& ids = batch_input_ids[static_cast<std::size_t>(b)];
-        const auto copy_len = std::min(static_cast<std::size_t>(seq_len), ids.size());
-        std::copy_n(ids.begin(), copy_len,
-                    padded_ids.begin() +
-                        static_cast<std::size_t>(b) * static_cast<std::size_t>(seq_len));
-        for (int32_t i = 0; i < seq_len; ++i) {
-            const auto idx = static_cast<std::size_t>(b) * static_cast<std::size_t>(seq_len) +
-                             static_cast<std::size_t>(i);
-            if (padded_ids[idx] != 0) {
-                mask[idx] = 0.0F;
-            }
-        }
+        auto prepared = diffusion::flux_text::prepare_inputs(ids, seq_len, pad_token_id);
+        padded_ids.insert(padded_ids.end(), prepared.input_ids.begin(), prepared.input_ids.end());
+        mask.insert(mask.end(), prepared.attention_mask.begin(), prepared.attention_mask.end());
+        valid_tokens.push_back(prepared.valid_tokens);
     }
 
     TensorMap inputs;
@@ -963,20 +948,8 @@ bool FluxPipeline::run_t5_encoder_batch(int32_t encoder_idx,
     const auto* emb_data = static_cast<const float*>(emb_tensor.data);
     text_embeddings_batch.assign(emb_data, emb_data + emb_size);
 
-    // Zero out padding token embeddings sample-by-sample.
-    for (int32_t b = 0; b < B; ++b) {
-        for (int32_t i = 0; i < seq_len; ++i) {
-            const auto pad_idx = static_cast<std::size_t>(b) * static_cast<std::size_t>(seq_len) +
-                                 static_cast<std::size_t>(i);
-            if (padded_ids[pad_idx] == 0) {
-                float* row = text_embeddings_batch.data() +
-                             (static_cast<std::size_t>(b) * static_cast<std::size_t>(seq_len) +
-                              static_cast<std::size_t>(i)) *
-                                 static_cast<std::size_t>(te_dim);
-                std::fill_n(row, static_cast<std::size_t>(te_dim), 0.0F);
-            }
-        }
-    }
+    diffusion::flux_text::clear_padding_rows(text_embeddings_batch, valid_tokens, seq_len, te_dim,
+                                             is_flux2);
     return true;
 }
 
@@ -1189,20 +1162,13 @@ void FluxPipeline::compute_flux_rope(int32_t h_patches, int32_t w_patches, int32
         axes = {16, 56, 56}; // FLUX.1 default
     }
 
-    auto encode_pos = [&](float* cos_row, float* sin_row, int32_t text_pos, int32_t h_pos,
-                          int32_t w_pos) {
+    auto encode_pos = [&](float* cos_row, float* sin_row, int32_t temporal_pos, int32_t h_pos,
+                          int32_t w_pos, int32_t sequence_pos) {
         int32_t offset = 0;
         for (std::size_t ax = 0; ax < axes.size(); ++ax) {
             const int32_t ax_dim = axes[ax];
-            // Determine position value for this axis
-            int32_t pos = 0;
-            if (ax == 0)
-                pos = text_pos;
-            else if (ax == 1)
-                pos = h_pos;
-            else if (ax == 2)
-                pos = w_pos;
-            // axes[3+] default to position 0 (identity rotation for image tokens)
+            const int32_t pos =
+                diffusion::flux_rope::axis_position(ax, temporal_pos, h_pos, w_pos, sequence_pos);
 
             for (int32_t i = 0; i < ax_dim / 2; ++i) {
                 const float freq = 1.0F / std::pow(theta, 2.0F * static_cast<float>(i) /
@@ -1217,12 +1183,13 @@ void FluxPipeline::compute_flux_rope(int32_t h_patches, int32_t w_patches, int32
         }
     };
 
-    // Text tokens: ALL positions are (0, 0, 0) -- identity rotation
+    // FLUX.2 text positions are (T=0, H=0, W=0, L=token index).
+    // FLUX.1 has three axes, so the sequence coordinate is ignored.
     for (int32_t t = 0; t < text_seq_len; ++t) {
         encode_pos(
             cos_out.data() + static_cast<std::size_t>(t) * static_cast<std::size_t>(head_dim),
             sin_out.data() + static_cast<std::size_t>(t) * static_cast<std::size_t>(head_dim), 0, 0,
-            0);
+            0, t);
     }
 
     // Image tokens: position (0, h, w)
@@ -1232,7 +1199,7 @@ void FluxPipeline::compute_flux_rope(int32_t h_patches, int32_t w_patches, int32
             encode_pos(
                 cos_out.data() + static_cast<std::size_t>(idx) * static_cast<std::size_t>(head_dim),
                 sin_out.data() + static_cast<std::size_t>(idx) * static_cast<std::size_t>(head_dim),
-                0, h, w);
+                0, h, w, 0);
         }
     }
 }
@@ -1400,7 +1367,6 @@ bool FluxPipeline::run_denoising(const diffusion::FluxGenerationPlan& plan,
 
     FlowMatchEulerState scheduler = diffusion::make_flux_scheduler_state(plan);
     log_flux_dynamic_shift(scheduler);
-
     if (!run_flux_denoising_loop(scheduler, num_inference_steps, latents, hidden, denoiser_output,
                                  pack_latents_fn, unpack_velocity_fn, compute_temb, embed_hidden,
                                  run_denoiser_fn)) {
@@ -1768,7 +1734,6 @@ bool FluxPipeline::run_flux_denoising_loop_batch(
 
     FlowMatchEulerState scheduler = diffusion::make_flux_scheduler_state(plan);
     log_flux_dynamic_shift(scheduler);
-
     // Per-sample temb for FLUX.1 (depends on pooled_output). For FLUX.2 we
     // just pass the raw scalar timestep; the engine carries the temb MLP.
     const float guidance_scale = plan.guidance_scale;

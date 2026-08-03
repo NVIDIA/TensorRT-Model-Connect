@@ -7,6 +7,7 @@
 
 #include "runtime/models/lance/decoded_image.h"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -43,6 +44,17 @@ struct LancePreprocessedImage {
     int32_t width{0};
     bool ok{false};
 };
+
+struct LanceMropePositions {
+    std::vector<std::array<int32_t, 3>> token_positions;
+    int32_t next_position{0};
+};
+
+// Build the temporal/height/width positions used by Lance's Qwen2.5-VL
+// understanding decoder. grid_height/grid_width are post-merge dimensions.
+LanceMropePositions lance_build_mrope_positions(const std::vector<int32_t>& input_ids,
+                                                int32_t image_token_id, int32_t num_image_features,
+                                                int32_t grid_height, int32_t grid_width);
 
 // Load and preprocess a single image for the vision encoder.
 // Dispatches to the appropriate strategy based on config.preprocessor_type:

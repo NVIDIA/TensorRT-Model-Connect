@@ -197,6 +197,55 @@ bool valid_vl_features(const std::vector<float>& image_features, int32_t num_fea
     return image_features.size() >= required;
 }
 
+std::pair<int32_t, int32_t> find_lance_vision_attention_block(const std::vector<int32_t>& input_ids,
+                                                              int32_t image_token_id) {
+    const auto first = std::find(input_ids.begin(), input_ids.end(), image_token_id);
+    if (first == input_ids.end())
+        return {-1, -1};
+    auto last = first;
+    while (last + 1 != input_ids.end() && *(last + 1) == image_token_id)
+        ++last;
+
+    const auto first_index = static_cast<int32_t>(std::distance(input_ids.begin(), first));
+    const auto last_index = static_cast<int32_t>(std::distance(input_ids.begin(), last));
+    // The official full-attention segment includes vision_start and
+    // vision_end around the contiguous image placeholder run.
+    if (first_index == 0 || last_index + 1 >= static_cast<int32_t>(input_ids.size()))
+        return {-1, -1};
+    return {first_index - 1, last_index + 2};
+}
+
+struct LanceVlMropeContext {
+    bool enabled = false;
+    LanceMropePositions positions;
+
+    const LanceMropePositions* prefill_positions() const { return enabled ? &positions : nullptr; }
+
+    const std::array<int32_t, 3>* token_position(std::size_t index) const {
+        return enabled ? &positions.token_positions[index] : nullptr;
+    }
+
+    int32_t decode_position() const { return enabled ? positions.next_position : -1; }
+};
+
+LanceVlMropeContext make_lance_vl_mrope_context(const TrtModule& text_decoder,
+                                                const std::vector<int32_t>& input_ids,
+                                                int32_t image_token_id, int32_t num_features,
+                                                const LancePreprocessConfig& preprocess) {
+    LanceVlMropeContext context;
+    context.enabled = text_decoder.has_input("mrope_position_ids");
+    if (!context.enabled)
+        return context;
+
+    int32_t merged_grid = 0;
+    if (preprocess.patch_size > 0 && preprocess.merge_size > 0) {
+        merged_grid = preprocess.fixed_image_size / (preprocess.patch_size * preprocess.merge_size);
+    }
+    context.positions = lance_build_mrope_positions(input_ids, image_token_id, num_features,
+                                                    merged_grid, merged_grid);
+    return context;
+}
+
 void add_vl_prefill_base_inputs(TensorMap& inputs, LanceInferenceState& state,
                                 const std::vector<int32_t>& input_ids,
                                 VlSequenceEmbeddingInputs& embedding_inputs, int32_t feature_dim) {
@@ -227,6 +276,25 @@ bool add_vl_prefill_deepstack_inputs(TrtModule& prefill, TensorMap& inputs,
                               {sequence_length, feature_dim},
                               DType::kFloat32};
     }
+    return true;
+}
+
+bool add_lance_mrope_prefill_input(TrtModule& prefill, const std::vector<int32_t>& input_ids,
+                                   const LanceMropePositions* mrope, int32_t sequence_length,
+                                   std::vector<int32_t>& positions, TensorMap& inputs) {
+    if (!prefill.has_input("mrope_position_ids"))
+        return true;
+    if (mrope == nullptr || mrope->token_positions.size() != input_ids.size())
+        return false;
+    positions.resize(static_cast<std::size_t>(3 * sequence_length));
+    for (int32_t token_index = 0; token_index < sequence_length; ++token_index) {
+        for (int32_t axis = 0; axis < 3; ++axis) {
+            positions[static_cast<std::size_t>(axis * sequence_length + token_index)] =
+                mrope->token_positions[static_cast<std::size_t>(token_index)]
+                                      [static_cast<std::size_t>(axis)];
+        }
+    }
+    inputs["mrope_position_ids"] = Tensor{positions.data(), {3, sequence_length}, DType::kInt32};
     return true;
 }
 
@@ -482,24 +550,29 @@ std::vector<int32_t> LancePipeline::generate_vl_from_ids(
     reset_generation_context(static_cast<int32_t>(input_ids.size()));
 
     std::vector<float> logits;
+    const auto mrope = make_lance_vl_mrope_context(
+        *text_decoder_, input_ids, config_.image_token_id, num_features, vl_preprocess_);
     if (!run_vl_prefill_batched(input_ids, image_features, deepstack_features, num_features,
-                                feature_dim, logits)) {
+                                feature_dim, mrope.prefill_positions(), logits)) {
         int32_t feature_index = 0;
-        for (const auto& tid : input_ids)
+        for (std::size_t index = 0; index < input_ids.size(); ++index) {
+            const auto tid = input_ids[index];
             run_vl_prefill_token(tid, image_features, deepstack_features, num_features, feature_dim,
-                                 feature_index, logits);
+                                 feature_index, mrope.token_position(index), logits);
+        }
     }
     state_->mark_prefill_complete();
 
     std::vector<int32_t> output = input_ids;
-    run_vl_decode_loop(active_sampler, params, output, logits, max_new_tokens);
+    run_vl_decode_loop(active_sampler, params, output, logits, max_new_tokens,
+                       mrope.decode_position());
     return output;
 }
 
 bool LancePipeline::run_vl_prefill_batched(
     const std::vector<int32_t>& input_ids, const std::vector<float>& image_features,
     const std::vector<std::vector<float>>& deepstack_features, int32_t num_features,
-    int32_t feature_dim, std::vector<float>& logits) {
+    int32_t feature_dim, const LanceMropePositions* mrope, std::vector<float>& logits) {
     const auto sq = static_cast<int32_t>(input_ids.size());
     auto* kv_cache =
         eligible_vl_prefill_cache(prefill_.get(), state_.get(), config_, sq, feature_dim);
@@ -515,6 +588,13 @@ bool LancePipeline::run_vl_prefill_batched(
 
     TensorMap inputs;
     add_vl_prefill_base_inputs(inputs, *state_, input_ids, embedding_inputs, feature_dim);
+    const auto [vision_start, vision_end] =
+        find_lance_vision_attention_block(input_ids, config_.image_token_id);
+    if (vision_start >= 0)
+        kv_cache->prepare_prefill_with_bidirectional_block(inputs, sq, vision_start, vision_end);
+    std::vector<int32_t> mrope_positions;
+    if (!add_lance_mrope_prefill_input(*prefill_, input_ids, mrope, sq, mrope_positions, inputs))
+        return false;
     if (!add_vl_prefill_deepstack_inputs(*prefill_, inputs, embedding_inputs, sq, feature_dim))
         return false;
 
@@ -533,10 +613,12 @@ bool LancePipeline::run_vl_prefill_batched(
 void LancePipeline::run_vl_prefill_token(int32_t token_id, const std::vector<float>& image_features,
                                          const std::vector<std::vector<float>>& deepstack_features,
                                          int32_t num_features, int32_t feature_dim,
-                                         int32_t& feature_index, std::vector<float>& logits) {
+                                         int32_t& feature_index,
+                                         const std::array<int32_t, 3>* mrope_position,
+                                         std::vector<float>& logits) {
     const bool use_image_embed = token_id == config_.image_token_id && feature_index < num_features;
     if (!use_image_embed) {
-        run_text_step_with_embed(token_id, nullptr, 0.0F, {}, 0.0F, logits);
+        run_text_step_with_embed(token_id, nullptr, 0.0F, {}, 0.0F, mrope_position, logits);
         return;
     }
 
@@ -545,31 +627,42 @@ void LancePipeline::run_vl_prefill_token(int32_t token_id, const std::vector<flo
     const auto deepstack_embeds =
         select_deepstack_feature_pointers(deepstack_features, feature_index, feature_dim);
     run_text_step_with_embed(token_id, embed, 1.0F, deepstack_embeds,
-                             deepstack_embeds.empty() ? 0.0F : 1.0F, logits);
+                             deepstack_embeds.empty() ? 0.0F : 1.0F, mrope_position, logits);
     ++feature_index;
 }
 
 void LancePipeline::run_vl_decode_loop(LanceISampler* sampler, const LanceSamplingParams& params,
                                        std::vector<int32_t>& output, std::vector<float>& logits,
-                                       int32_t max_new_tokens) {
+                                       int32_t max_new_tokens, int32_t mrope_position) {
     const int32_t vocab_size = static_cast<int32_t>(logits.size());
     for (int32_t step = 0; step < max_new_tokens; ++step) {
         LanceSampleResult result = sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
         if (result.is_eos)
             break;
-        run_text_step(result.token_id, logits);
+        run_text_step(result.token_id, logits, mrope_position);
+        if (mrope_position >= 0)
+            ++mrope_position;
     }
 }
 
-void LancePipeline::run_text_step(int32_t token_id, std::vector<float>& logits) {
-    run_text_step_with_embed(token_id, nullptr, 0.0F, {}, 0.0F, logits);
+void LancePipeline::run_text_step(int32_t token_id, std::vector<float>& logits,
+                                  int32_t mrope_position) {
+    if (mrope_position < 0 || !text_decoder_->has_input("mrope_position_ids")) {
+        run_text_step_with_embed(token_id, nullptr, 0.0F, {}, 0.0F, nullptr, logits);
+        return;
+    }
+    std::array<int32_t, 3> position{};
+    position.fill(mrope_position);
+    run_text_step_with_embed(token_id, nullptr, 0.0F, {}, 0.0F, &position, logits);
 }
 
 void LancePipeline::run_text_step_with_embed(int32_t token_id, const float* input_embed,
                                              float use_input_embed,
                                              const std::vector<const float*>& deepstack_embeds,
-                                             float deepstack_active, std::vector<float>& logits) {
+                                             float deepstack_active,
+                                             const std::array<int32_t, 3>* mrope_position,
+                                             std::vector<float>& logits) {
     TensorMap inputs;
 
     Tensor token_t;
@@ -579,6 +672,11 @@ void LancePipeline::run_text_step_with_embed(int32_t token_id, const float* inpu
     inputs["token_id"] = token_t;
 
     state_->prepare_step(inputs);
+
+    if (mrope_position != nullptr && text_decoder_->has_input("mrope_position_ids")) {
+        inputs["mrope_position_ids"] =
+            Tensor{const_cast<int32_t*>(mrope_position->data()), {3}, DType::kInt32};
+    }
 
     std::vector<float> zero_embed;
     std::vector<float> zero_deepstack;

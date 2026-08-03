@@ -130,6 +130,55 @@ static const char* kClipEndOfWordJson = R"({
   }
 })";
 
+static const char* kClipNormalizedJson = R"({
+  "normalizer": {
+    "type": "Sequence",
+    "normalizers": [
+      {"type": "NFC"},
+      {"type": "Replace", "pattern": {"Regex": "\\s+"}, "content": " "},
+      {"type": "Lowercase"}
+    ]
+  },
+  "pre_tokenizer": {
+    "type": "Sequence",
+    "pretokenizers": [
+      {
+        "type": "Split",
+        "pattern": {
+          "Regex": "<\\|startoftext\\|>|<\\|endoftext\\|>|'s|'t|'re|'ve|'m|'ll|'d|[\\p{L}]+|[\\p{N}]|[^\\s\\p{L}\\p{N}]+"
+        },
+        "behavior": "Removed",
+        "invert": true
+      },
+      {"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": true,
+       "use_regex": true}
+    ]
+  },
+  "model": {
+    "type": "BPE",
+    "end_of_word_suffix": "</w>",
+    "vocab": {
+      "e": 0, "a": 1, "r": 2,
+      "ea": 3, "r</w>": 4, "ear</w>": 5,
+      "<|startoftext|>": 10, "<|endoftext|>": 11
+    },
+    "merges": ["e a", "ea r</w>"]
+  },
+  "added_tokens": [
+    {"id": 10, "content": "<|startoftext|>", "special": true},
+    {"id": 11, "content": "<|endoftext|>", "special": true}
+  ],
+  "post_processor": {
+    "type": "RobertaProcessing",
+    "sep": ["<|endoftext|>", 11],
+    "cls": ["<|startoftext|>", 10],
+    "trim_offsets": false,
+    "add_prefix_space": false
+  },
+  "decoder": {"type": "ByteLevel", "add_prefix_space": true,
+              "trim_offsets": true, "use_regex": true}
+})";
+
 // HF BPE tokenizers commonly serialize a present-but-null end_of_word_suffix.
 static const char* kNullEndOfWordSuffixJson = R"({
   "model": {
@@ -451,6 +500,16 @@ int main() {
         check(tok != nullptr, "null_end_of_word_suffix_create");
         auto ids = tok->encode("hello");
         check(!ids.empty(), "null_end_of_word_suffix_encode");
+    }
+
+    // === 7d. CLIP normalizer and whitespace-removing split ===
+    {
+        std::cerr << "\n=== CLIP Normalization and Split ===\n";
+
+        std::string clip_json(kClipNormalizedJson);
+        auto tok = trtmc::CreateBpeTokenizer(clip_json.data(), clip_json.size(), true);
+        auto ids = tok->encode("EAR   ear");
+        check(ids == std::vector<int32_t>({10, 5, 5, 11}), "clip_normalizer_and_split_encode");
     }
 
     // === 8. STRING merge format (StringMerge / SentencePiece style) ===

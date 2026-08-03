@@ -56,6 +56,46 @@ def _decode_blob(blob: bytes) -> tuple[dict[str, dict], bytes]:
     return index, payload
 
 
+def test_mistral_hidden_state_indices_map_to_preceding_decoder_layers() -> None:
+    from tensorrt_model_connect.families.flux.mistral_encoder_builder import (
+        _MISTRAL_ROPE_INTERLEAVED,
+        _decoder_layers_for_hidden_states,
+    )
+
+    assert _decoder_layers_for_hidden_states((10, 20, 30), 40) == (9, 19, 29)
+    assert _MISTRAL_ROPE_INTERLEAVED is False
+    with pytest.raises(ValueError, match="between 1 and num_layers=40"):
+        _decoder_layers_for_hidden_states((0, 20, 30), 40)
+
+
+def test_flux2_chat_template_does_not_add_a_second_bos(tmp_path) -> None:
+    transformer = tmp_path / "transformer"
+    transformer.mkdir()
+    (transformer / "config.json").write_text(
+        json.dumps({"_class_name": "Flux2Transformer2DModel"})
+    )
+
+    assert not flux_mod.plugin.diffusion_tokenizer_add_special_tokens(
+        tmp_path,
+        detect_tokenizer_add_special_tokens=lambda _path: True,
+    )
+
+
+def test_flux1_preserves_detected_tokenizer_special_tokens(tmp_path) -> None:
+    transformer = tmp_path / "transformer"
+    transformer.mkdir()
+    (transformer / "config.json").write_text(
+        json.dumps({"_class_name": "FluxTransformer2DModel"})
+    )
+    tokenizer = tmp_path / "tokenizer"
+    tokenizer.mkdir()
+
+    assert flux_mod.plugin.diffusion_tokenizer_add_special_tokens(
+        tmp_path,
+        detect_tokenizer_add_special_tokens=lambda path: path == tokenizer,
+    )
+
+
 def test_matches_and_build_engine_not_supported() -> None:
     """Intent: verify FLUX model aliases and explicit build_engine rejection.
 
@@ -73,27 +113,38 @@ def test_matches_and_build_engine_not_supported() -> None:
         plugin.build_engine(_cfg(), {}, 16)
 
 
-def test_load_weights_reads_optional_dirs_and_transformer_config(tmp_path) -> None:
-    """Intent: cover load_weights success branch with optional subdirs and config JSON.
+def test_load_weights_reads_component_configs(tmp_path) -> None:
+    """Intent: cover load_weights success branch with component config JSON.
 
-    Preconditions: model_index.json, transformer/config.json, and selected subdirs exist.
-    Postconditions: output WeightDict includes discovered directories and parsed transformer config.
+    Preconditions: model index and component configs exist.
+    Postconditions: weights and runtime config retain checkpoint-owned component settings.
     """
     model_dir = tmp_path / "flux"
     (model_dir / "transformer").mkdir(parents=True)
     (model_dir / "text_encoder").mkdir(parents=True)
     (model_dir / "vae").mkdir(parents=True)
+    (model_dir / "scheduler").mkdir(parents=True)
     (model_dir / "model_index.json").write_text("{}")
     (model_dir / "transformer" / "config.json").write_text(
         json.dumps({"num_attention_heads": 3, "guidance_embeds": True})
     )
+    (model_dir / "vae" / "config.json").write_text(
+        json.dumps({"latent_channels": 16})
+    )
+    (model_dir / "scheduler" / "scheduler_config.json").write_text(
+        json.dumps({"shift": 1.0, "use_dynamic_shifting": False})
+    )
 
-    weights = flux_mod.plugin.load_weights(str(model_dir), _cfg())
+    config = _cfg()
+    weights = flux_mod.plugin.load_weights(str(model_dir), config)
 
     assert weights["_model_format"] == "diffusers"
     assert "_text_encoder_dir" in weights
     assert "_text_encoder_2_dir" not in weights
     assert weights["_transformer_config"]["num_attention_heads"] == 3
+    assert weights["_vae_config"]["latent_channels"] == 16
+    assert weights["_scheduler_config"]["shift"] == 1.0
+    assert config.raw["_scheduler_config"]["use_dynamic_shifting"] is False
     assert weights["_vae_dir"].endswith("vae")
 
 
@@ -1023,6 +1074,31 @@ def test_get_diffusion_config_guidance_toggle() -> None:
     assert fast["num_inference_steps"] == 4
     assert fast["guidance_scale"] == 0.0
     assert fast["guidance_embeds"] == 0
+
+
+def test_get_diffusion_config_uses_checkpoint_scheduler() -> None:
+    """Intent: preserve the checkpoint's FlowMatchEuler trajectory.
+
+    Preconditions: FLUX.1-schnell declares its shipped scheduler settings.
+    Postconditions: the bundle config does not substitute Flux.2 shifting.
+    """
+    config = _cfg(
+        _transformer_config={"guidance_embeds": False},
+        _scheduler_config={
+            "shift": 1.0,
+            "use_dynamic_shifting": False,
+            "base_image_seq_len": 128,
+            "max_image_seq_len": 2048,
+        },
+    )
+
+    diffusion = flux_mod.plugin.get_diffusion_config(config)
+
+    assert diffusion["flow_shift"] == 1.0
+    assert diffusion["use_dynamic_shifting"] == 0
+    assert diffusion["base_image_seq_len"] == 128
+    assert diffusion["max_image_seq_len"] == 2048
+    assert diffusion["shift_terminal"] == 0.0
 
 
 def test_serialize_flux_preprocessor_guidance_key_control() -> None:
