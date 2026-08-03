@@ -180,10 +180,10 @@ suites:
     build:
       min_max_cache_length: 0
     gates:
-      # Validation samples are the pass/fail unit. Allow one divergent sample
-      # in the default 10-sample smoke while retaining token-prefix metrics as
-      # diagnostics for locating and sizing that divergence.
-      min_exact_match_rate: 0.9
+      # Validation samples are the pass/fail unit. Allow one non-tied
+      # divergence in the default 10-sample smoke. Exact HF argmax ties remain
+      # visible in raw divergence diagnostics but are gate-equivalent.
+      min_tie_adjusted_exact_match_rate: 0.9
     ci:
       eligible: false
       lane: local_only

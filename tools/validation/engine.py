@@ -10990,6 +10990,12 @@ def eval_one_model(
             ),
             "comparison_granularity": summary.get("comparison_granularity", ""),
             "exact_match_rate": summary["exact_match_rate"],
+            "tie_adjusted_exact_match_rate": summary[
+                "tie_adjusted_exact_match_rate"
+            ],
+            "reference_tie_equivalent_count": summary[
+                "reference_tie_equivalent_count"
+            ],
             "token_prefix_agreement": summary["token_prefix_agreement"],
             "mean_first_divergence": summary["mean_first_divergence"],
             "divergent_count": summary["divergent_count"],
@@ -11187,6 +11193,7 @@ def compare_continuation_sets(
             return list(s)
 
     exact = 0
+    tie_adjusted_exact = 0
     text_exact = 0
     total_matched = 0
     total_reference = 0
@@ -11195,6 +11202,7 @@ def compare_continuation_sets(
     divergent_prefix_ratios: list[float] = []
     divergent_severities: list[float] = []
     samples: list[dict[str, Any]] = []
+    reference_tie_equivalent_samples: list[dict[str, Any]] = []
     for idx, (hf_row, trt_row) in enumerate(zip(hf_rows, trt_rows, strict=True)):
         hf_text = str(hf_row.get("output_text", ""))
         trt_text = str(trt_row.get("output_text", ""))
@@ -11209,6 +11217,40 @@ def compare_continuation_sets(
         is_exact = hf_tokens == trt_tokens
         exact += int(is_exact)
         divergence = _first_divergence(hf_tokens, trt_tokens)
+        reference_tie_equivalent = False
+        max_score_token_ids: list[int] = []
+        if has_all_token_ids and not is_exact:
+            max_score_steps = hf_row.get("generated_token_max_score_ids", [])
+            if (
+                isinstance(max_score_steps, list)
+                and divergence < len(max_score_steps)
+                and isinstance(max_score_steps[divergence], list)
+                and len(max_score_steps[divergence]) > 1
+                and divergence < len(hf_tokens)
+                and divergence < len(trt_tokens)
+            ):
+                try:
+                    max_score_token_ids = [
+                        int(token_id) for token_id in max_score_steps[divergence]
+                    ]
+                    reference_tie_equivalent = (
+                        int(hf_tokens[divergence]) in max_score_token_ids
+                        and int(trt_tokens[divergence]) in max_score_token_ids
+                    )
+                except (TypeError, ValueError):
+                    max_score_token_ids = []
+        tie_adjusted_exact += int(is_exact or reference_tie_equivalent)
+        if reference_tie_equivalent:
+            reference_tie_equivalent_samples.append(
+                {
+                    "index": idx,
+                    "sample_id": hf_row.get("sample_id", f"sample_{idx}"),
+                    "first_divergence": divergence,
+                    "hf_token_id": int(hf_tokens[divergence]),
+                    "trtfb_token_id": int(trt_tokens[divergence]),
+                    "max_score_token_ids": max_score_token_ids,
+                }
+            )
         reference_len = max(1, len(hf_tokens), len(trt_tokens))
         normalized_divergence = 1.0 if is_exact else divergence / reference_len
         divergence_severity = (
@@ -11237,11 +11279,13 @@ def compare_continuation_sets(
                 "trtfb_len": len(trt_tokens),
                 "hf_token_at_divergence": hf_token_at_divergence,
                 "trtfb_token_at_divergence": trt_token_at_divergence,
+                "reference_tie_equivalent": reference_tie_equivalent,
             }
         )
 
     count = len(hf_rows)
     exact_rate = (exact / count) if count else 0.0
+    tie_adjusted_exact_rate = (tie_adjusted_exact / count) if count else 0.0
     prefix_agreement = (total_matched / total_reference) if total_reference else 0.0
     mean_divergence = (sum(div_positions) / count) if count else 0.0
     divergent_count = len(divergent_positions)
@@ -11250,6 +11294,7 @@ def compare_continuation_sets(
         "divergence_metric_scope": "divergent_samples_only",
         "normalization_denominator": "max_hf_trtfb_generated_length",
         "exact_match_rate": exact_rate,
+        "tie_adjusted_exact_match_rate": tie_adjusted_exact_rate,
         "token_id_exact_match_rate": exact_rate if has_all_token_ids else None,
         "text_exact_match_rate": (text_exact / count) if count else 0.0,
         "token_prefix_agreement": prefix_agreement,
@@ -11275,7 +11320,10 @@ def compare_continuation_sets(
         ),
         "count": count,
         "exact_count": exact,
+        "tie_adjusted_exact_count": tie_adjusted_exact,
         "text_exact_count": text_exact,
+        "reference_tie_equivalent_count": len(reference_tie_equivalent_samples),
+        "reference_tie_equivalent_samples": reference_tie_equivalent_samples,
         "samples": samples,
     }
 
@@ -11373,6 +11421,8 @@ def write_continuation_summary_markdown(summary: dict[str, Any], path: Path) -> 
         "| Metric | Value |",
         "|---|---:|",
         f"| exact_match_rate | {summary['exact_match_rate']:.4f} |",
+        f"| tie_adjusted_exact_match_rate | {summary['tie_adjusted_exact_match_rate']:.4f} |",
+        f"| reference_tie_equivalent_count | {summary['reference_tie_equivalent_count']} |",
         f"| token_id_exact_match_rate | {_format_optional_float(summary.get('token_id_exact_match_rate'))} |",
         f"| text_exact_match_rate | {summary['text_exact_match_rate']:.4f} |",
         f"| token_prefix_agreement | {summary['token_prefix_agreement']:.4f} |",

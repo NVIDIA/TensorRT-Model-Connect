@@ -2637,6 +2637,48 @@ def test_continuation_parity_prefers_generated_token_ids() -> None:
     assert summary["mean_divergent_severity"] == 1 / 3
 
 
+def test_continuation_parity_treats_reference_argmax_ties_as_gate_equivalent() -> None:
+    hf = {
+        "responses": [
+            {
+                "sample_id": "tie",
+                "output_text": "left suffix",
+                "generated_token_ids": [10, 20, 30],
+                "generated_token_max_score_ids": [[10], [20, 21], [30]],
+            }
+        ]
+    }
+    trtfb = {
+        "responses": [
+            {
+                "sample_id": "tie",
+                "output_text": "right suffix",
+                "generated_token_ids": [10, 21, 99],
+            }
+        ]
+    }
+
+    summary = validation_engine.compare_continuation_sets(
+        hf, trtfb, require_token_ids=True
+    )
+
+    assert summary["exact_match_rate"] == 0.0
+    assert summary["tie_adjusted_exact_match_rate"] == 1.0
+    assert summary["reference_tie_equivalent_count"] == 1
+    assert summary["reference_tie_equivalent_samples"] == [
+        {
+            "index": 0,
+            "sample_id": "tie",
+            "first_divergence": 1,
+            "hf_token_id": 20,
+            "trtfb_token_id": 21,
+            "max_score_token_ids": [20, 21],
+        }
+    ]
+    assert summary["divergent_count"] == 1
+    assert summary["samples"][0]["reference_tie_equivalent"] is True
+
+
 def test_continuation_parity_reports_no_divergence_without_empty_means() -> None:
     predictions = {
         "responses": [
@@ -2691,6 +2733,9 @@ def test_continuation_suite_accepts_one_divergent_sample_in_ten() -> None:
     )
     result = {
         "exact_match_rate": summary["exact_match_rate"],
+        "tie_adjusted_exact_match_rate": summary[
+            "tie_adjusted_exact_match_rate"
+        ],
         "token_prefix_agreement": summary["token_prefix_agreement"],
     }
     suite = validation_engine.suite_by_id(
@@ -2714,7 +2759,9 @@ def test_validation_suites_keep_continuation_and_drop_trace_cloze() -> None:
     assert continuation["dataset"]["kind"] == "mmlu_five_shot_json"
     assert continuation["scoring"]["scorer"] == "continuation"
     assert continuation["user_contract"] == "continuation_parity"
-    assert continuation["gates"] == {"min_exact_match_rate": 0.9}
+    assert continuation["gates"] == {
+        "min_tie_adjusted_exact_match_rate": 0.9
+    }
 
 
 def test_compare_continuation_cli_writes_json_summary(tmp_path: Path) -> None:

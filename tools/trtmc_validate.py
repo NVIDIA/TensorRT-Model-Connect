@@ -1027,6 +1027,7 @@ _COMPARISON_METRICS = (
     "trtfb_accuracy",
     "accuracy_delta_trtfb_minus_hf",
     "tie_adjusted_accuracy_delta_trtfb_minus_hf",
+    "tie_adjusted_exact_match_rate",
     "accuracy_drop_from_hf",
     "raw_accuracy_drop_from_hf",
     "reference_tie_equivalent_count",
