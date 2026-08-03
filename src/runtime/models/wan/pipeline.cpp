@@ -101,6 +101,26 @@ struct DDIMState {
     }
 };
 
+std::vector<float> initialize_wan_step_timesteps(const WanDiffusionConfig& config,
+                                                 const diffusion::WanGenerationPlan& plan,
+                                                 DDIMState& ddim_scheduler,
+                                                 UniPCFlowState& unipc_scheduler,
+                                                 FlowMatchEulerState& fm_scheduler) {
+    if (plan.use_ddim) {
+        ddim_scheduler.num_train_timesteps = 1000;
+        ddim_scheduler.set_timesteps(plan.num_inference_steps);
+        return ddim_scheduler.timesteps;
+    }
+
+    if (plan.use_unipc) {
+        unipc_scheduler = diffusion::make_wan_unipc_scheduler(config, plan);
+        return unipc_scheduler.timesteps;
+    }
+
+    fm_scheduler = diffusion::make_wan_flow_match_scheduler(plan);
+    return fm_scheduler.timesteps;
+}
+
 // ---------------------------------------------------------------------------
 // CPU math helpers (standalone — replaces DiffusionBackendBase methods)
 // ---------------------------------------------------------------------------
@@ -1285,18 +1305,8 @@ ImageResult WanPipeline::generate_image(const std::string& prompt, const Generat
     FlowMatchEulerState fm_scheduler;
     UniPCFlowState unipc_scheduler;
     DDIMState ddim_scheduler;
-    std::vector<float> step_timesteps;
-    if (plan.use_ddim) {
-        ddim_scheduler.num_train_timesteps = 1000;
-        ddim_scheduler.set_timesteps(plan.num_inference_steps);
-        step_timesteps = ddim_scheduler.timesteps;
-    } else if (plan.use_unipc) {
-        unipc_scheduler = diffusion::make_wan_unipc_scheduler(config_, plan);
-        step_timesteps = unipc_scheduler.timesteps;
-    } else {
-        fm_scheduler = diffusion::make_wan_flow_match_scheduler(plan);
-        step_timesteps = fm_scheduler.timesteps;
-    }
+    const std::vector<float> step_timesteps =
+        initialize_wan_step_timesteps(config_, plan, ddim_scheduler, unipc_scheduler, fm_scheduler);
 
     // Build lambda closures for the denoising loop
     const auto compute_temb = [this](float timestep, std::vector<float>& temb_6d,
