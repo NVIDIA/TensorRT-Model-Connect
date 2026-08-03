@@ -1,6 +1,7 @@
 {
   "name": "cosmos3-nano-l0-cp4",
   "hf_id": "nvidia/Cosmos3-Nano",
+  "hf_revision": "411f42a8fdfb8c5b2583cb8786e0938f49796eaa",
   "bundle": "cosmos3-nano-l0-cp4.trtfb",
   "family": "cosmos3",
   "runtime_strategy": "diffusion_cosmos3",
