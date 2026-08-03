@@ -38,11 +38,7 @@ _PRECISION_TO_TORCH_DTYPE = {
 
 
 def _torch_dtype_for_case(case: E2ECase) -> str:
-    """Return the explicit reference dtype, falling back to DUT precision.
-
-    FP16 acceptance manifests set reference_precision=fp32 so changing the
-    engine precision does not also change the oracle.
-    """
+    """Return the model-owned reference dtype, falling back to DUT precision."""
     precision = case.metadata.get(
         "reference_precision", case.metadata.get("precision", "fp32"))
     return _PRECISION_TO_TORCH_DTYPE.get(precision, "torch.float32")
