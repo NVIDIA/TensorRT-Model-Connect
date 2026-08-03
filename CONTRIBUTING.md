@@ -5,9 +5,6 @@ against the GitHub repository and follow the repository's development and testin
 guidance. Contributions accepted into this project are licensed under the Apache
 License 2.0 unless explicitly stated otherwise.
 
-For potential security vulnerabilities, follow [SECURITY.md](SECURITY.md)
-instead of opening a public issue, discussion, or pull request.
-
 Preserve all existing copyright, license, and attribution notices. If a
 contribution incorporates or is derived from third-party material, identify its
 source, version, and license in the pull request and include any notices required
