@@ -46,7 +46,7 @@ PYTHONPATH="$PWD/artifacts/flashinfer-v0.6.15:$PWD/python" \
 
 The exporter is intentionally fixed to the tutorial's Qwen3-8B BF16 decode
 shape and SM 10.3. Use the ordinary Recipe build and load-time binding flow in
-the [Bring Your Own Kernel with TVM-FFI tutorial](../../../../../website/docs/tutorials/advanced/bring-your-own-kernel.md).
+the [Bring Your Own Kernel with TVM-FFI tutorial](../../../../../website/docs/tutorials/beginner/bring-your-own-kernel.md).
 
 This is a POC of the integration boundary, not a vendored FlashInfer fork. The
 small optional-length change should live upstream before this becomes a
