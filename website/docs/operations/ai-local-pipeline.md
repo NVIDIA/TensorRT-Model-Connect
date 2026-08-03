@@ -40,10 +40,9 @@ do not push directly to `main`.
 ```bash
 python3 tools/ai_agent_system.py --help
 python3 tools/ai_staging.py --help
-python3 scripts/autopilot/autorun.py --help
 ```
 
-The first two tools default to a remote named `github`. Pass the resolved
+Both tools default to a remote named `github`. Pass the resolved
 `$DOC_REMOTE` so the same commands also work in a canonical clone whose remote
 is named `origin`.
 

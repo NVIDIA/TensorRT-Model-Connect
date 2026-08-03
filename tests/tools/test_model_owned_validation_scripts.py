@@ -30,17 +30,3 @@ def test_validate_family_uses_model_owned_e2e_entrypoint() -> None:
     assert "tests/e2e/models/${E2E_FAMILY}/test_${E2E_FAMILY}_e2e.py" in text
     assert "--model-plugin-dir" in text
     assert "--isolate-model-plugin" in text
-
-
-def test_autopilot_prompt_uses_model_owned_e2e_entrypoint() -> None:
-    """Trace: ARCH-MODPLUG-001
-    Intent: keep generated autopilot instructions on model-local E2E tests.
-    Preconditions: scripts/autopilot/autorun.py exists.
-    Postconditions: the final E2E command points at tests/e2e/models/<family>.
-    """
-    text = (REPO_ROOT / "scripts" / "autopilot" / "autorun.py").read_text(
-        encoding="utf-8"
-    )
-
-    assert "tests/test_e2e.py::test_e2e[{family_name}]" not in text
-    assert "tests/e2e/models/{family_name}/test_{family_name}_e2e.py" in text

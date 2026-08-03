@@ -231,8 +231,6 @@ SHARED_DIFF_AUDIO_TOOL = REPO_ROOT / "tools" / "diff_audio.py"
 SHARED_DIFF_T5_TOOL = REPO_ROOT / "tools" / "diff_t5.py"
 SHARED_QWEN_AIME_BENCHMARK_TOOL = REPO_ROOT / "tools" / "benchmark_qwen3_8b_aime25_vs_hf.py"
 SHARED_QWEN_FLASHINFER_BENCHMARK_TOOL = REPO_ROOT / "tools" / "bench_flashinfer_e2e.py"
-AUTOPILOT_DISCOVER = REPO_ROOT / "scripts" / "autopilot" / "discover.py"
-AUTOPILOT_AUTORUN = REPO_ROOT / "scripts" / "autopilot" / "autorun.py"
 WARM_HF_CACHE = REPO_ROOT / "scripts" / "warm_hf_cache.py"
 SHARED_FAMILY_REGISTRY_TEST = REPO_ROOT / "tests" / "builder" / "test_families.py"
 SHARED_GENERIC_FIXTURE_TEST_FILES = (
@@ -4631,40 +4629,14 @@ def test_engine_builder_uses_declared_family_capabilities() -> None:
     assert not violations, _format_violations(violations)
 
 
-def test_discovery_and_cache_warm_use_family_metadata() -> None:
+def test_cache_warm_uses_family_metadata() -> None:
     """Trace: ARCH-MODPLUG-001
-    Intent: keep shared discovery/cache utilities metadata-driven.
-    Preconditions: family MODEL.toml files own model aliases and extra HF assets.
-    Postconditions: shared scripts import registry helpers instead of naming families.
+    Intent: keep the shared cache utility metadata-driven.
+    Preconditions: family MODEL.toml files own extra Hugging Face assets.
+    Postconditions: the cache script imports registry helpers instead of naming families.
     """
-    discover_text = AUTOPILOT_DISCOVER.read_text(encoding="utf-8")
     warm_text = WARM_HF_CACHE.read_text(encoding="utf-8")
     violations = []
-
-    if "family_probe_model_types" not in discover_text:
-        violations.append(
-            (
-                AUTOPILOT_DISCOVER,
-                0,
-                "autopilot discovery does not use family_probe_model_types",
-            )
-        )
-    for needle in (
-        '"qwen"',
-        '"qwen2"',
-        '"qwen3"',
-        '"magpie_tts"',
-        '"canary"',
-        '"lance"',
-    ):
-        if needle in discover_text:
-            violations.append(
-                (
-                    AUTOPILOT_DISCOVER,
-                    0,
-                    f"autopilot discovery hardcodes model type {needle}",
-                )
-            )
 
     for helper in (
         "family_hf_required_files_by_id",
@@ -4691,26 +4663,6 @@ def test_discovery_and_cache_warm_use_family_metadata() -> None:
                     f"warm cache hardcodes family-owned asset {needle}",
                 )
             )
-
-    assert not violations, _format_violations(violations)
-
-
-def test_shared_autopilot_prompt_has_no_single_family_examples() -> None:
-    """Trace: ARCH-MODPLUG-001
-    Intent: keep generic onboarding automation from naming existing model plugins.
-    Preconditions: family-specific onboarding examples live in model-owned tests/docs.
-    Postconditions: autopilot prompt and filters are family-neutral.
-    """
-    text = AUTOPILOT_AUTORUN.read_text(encoding="utf-8")
-    forbidden = (
-        "sam3_video",
-        "whisper_plugin",
-    )
-    violations = [
-        (AUTOPILOT_AUTORUN, 0, f"autopilot autorun contains family example {needle}")
-        for needle in forbidden
-        if needle in text
-    ]
 
     assert not violations, _format_violations(violations)
 
