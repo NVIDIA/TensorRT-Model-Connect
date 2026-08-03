@@ -17,7 +17,7 @@
       "trace_id": "IT-E2E-PHI3-01",
       "reference_family": "chat_instruct_template",
       "user_contract": "chat_response",
-      "reference_precision": "fp32",
+      "reference_precision": "fp16",
       "prompt": "What is the boiling point of water in Celsius? Answer with just the number.",
       "max_new_tokens": 10,
       "metadata": {
