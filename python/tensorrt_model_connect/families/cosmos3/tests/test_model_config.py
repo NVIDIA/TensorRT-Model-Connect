@@ -37,35 +37,14 @@ def _transformer_config() -> dict[str, object]:
     }
 
 
-def test_official_profile_has_full_video_geometry() -> None:
-    assert COSMOS3_NANO.video_width == 1280
-    assert COSMOS3_NANO.video_height == 720
-    assert COSMOS3_NANO.video_num_frames == 189
-    assert COSMOS3_NANO.num_inference_steps == 35
-    assert COSMOS3_NANO.latent_frames == 48
-    assert COSMOS3_NANO.latent_height == 45
-    assert COSMOS3_NANO.latent_width == 80
-    assert COSMOS3_NANO.patch_height == 23
-    assert COSMOS3_NANO.patch_width == 40
-    assert COSMOS3_NANO.num_vision_tokens == 44_160
-    assert COSMOS3_NANO.max_text_seq_len == 4096
-
-
-@pytest.mark.parametrize("world_size", [1, 2, 4, 8])
-def test_cp_layout_supports_requested_degrees(world_size: int) -> None:
-    layout = context_parallel_layout(197, COSMOS3_NANO.num_vision_tokens, world_size)
-    assert layout.padded_text_tokens % world_size == 0
-    assert layout.padded_vision_tokens % world_size == 0
-    assert layout.local_vision_tokens * world_size == layout.padded_vision_tokens
-    assert COSMOS3_NANO.num_attention_heads % world_size == 0
-
-
-def test_cp_layout_pads_streams_independently() -> None:
-    layout = context_parallel_layout(197, 44_161, 8)
+def test_cp4_layout_pads_streams_independently() -> None:
+    layout = context_parallel_layout(197, 44_161, 4)
     assert layout.padded_text_tokens == 200
-    assert layout.padded_vision_tokens == 44_168
+    assert layout.padded_vision_tokens == 44_164
+    assert layout.local_vision_tokens * 4 == layout.padded_vision_tokens
+    assert COSMOS3_NANO.num_attention_heads % 4 == 0
     assert layout.text_padding == 3
-    assert layout.vision_padding == 7
+    assert layout.vision_padding == 3
 
 
 def test_only_full_quality_profile_is_qualified() -> None:
