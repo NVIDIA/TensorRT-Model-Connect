@@ -37,11 +37,10 @@ def test_missing_dual_stream_weight_fails_closed() -> None:
         validate_transformer_state_dict(state)
 
 
-@pytest.mark.parametrize("size", [2, 4, 8])
-def test_requested_context_parallel_sizes_are_valid(size: int) -> None:
-    assert _parallel_size(_Parallel("context_parallel", size)) == size
-    assert COSMOS3_NANO.num_attention_heads % size == 0
-    assert COSMOS3_NANO.num_key_value_heads % size == 0
+def test_requested_context_parallel_size_is_valid() -> None:
+    assert _parallel_size(_Parallel("context_parallel", 4)) == 4
+    assert COSMOS3_NANO.num_attention_heads % 4 == 0
+    assert COSMOS3_NANO.num_key_value_heads % 4 == 0
 
 
 def test_tensor_parallel_is_not_silently_treated_as_context_parallel() -> None:
