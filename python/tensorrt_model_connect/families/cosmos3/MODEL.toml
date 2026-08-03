@@ -36,3 +36,8 @@ hf_allow_patterns = [
   "*/diffusion_pytorch_model-*.safetensors",
   "*/diffusion_pytorch_model.safetensors.index.json",
 ]
+hf_required_files = [
+  "nvidia/Cosmos3-Nano|assets/negative_prompt.json",
+  "nvidia/Cosmos3-Nano|text_tokenizer/tokenizer.json",
+  "nvidia/Cosmos3-Nano|text_tokenizer/tokenizer_config.json",
+]
