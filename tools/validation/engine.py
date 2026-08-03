@@ -5023,6 +5023,8 @@ def compare_prediction_sets(
     buckets = Counter()
     disagreements: list[dict[str, Any]] = []
     asr_parity_samples: list[dict[str, Any]] = []
+    reference_tie_equivalent_samples: list[dict[str, Any]] = []
+    tie_accuracy_adjustment = 0
     for idx, (hf_row, trt_row, req) in enumerate(
         zip(hf_responses, trt_responses, requests, strict=True)
     ):
@@ -5050,6 +5052,33 @@ def compare_prediction_sets(
             if scorer in {"ocrbench_v2", "tts_intelligibility"}
             else hf_pred == trt_pred
         )
+        if scorer == "mcq" and not agreement_match:
+            max_score_steps = hf_row.get("generated_token_max_score_ids", [])
+            hf_token_ids = hf_row.get("generated_token_ids", [])
+            trt_token_ids = trt_row.get("generated_token_ids", [])
+            if (
+                isinstance(max_score_steps, list)
+                and len(max_score_steps) == 1
+                and isinstance(max_score_steps[0], list)
+                and len(max_score_steps[0]) > 1
+                and isinstance(hf_token_ids, list)
+                and len(hf_token_ids) == 1
+                and int(hf_token_ids[0]) in max_score_steps[0]
+                and isinstance(trt_token_ids, list)
+                and len(trt_token_ids) == 1
+                and int(trt_token_ids[0]) in max_score_steps[0]
+            ):
+                agreement_match = True
+                tie_accuracy_adjustment += int(hf_ok) - int(trt_ok)
+                reference_tie_equivalent_samples.append(
+                    {
+                        "index": idx,
+                        "sample_id": hf_row.get("sample_id", f"sample_{idx}"),
+                        "hf_prediction": hf_pred,
+                        "trtfb_prediction": trt_pred,
+                        "max_score_token_ids": max_score_steps[0],
+                    }
+                )
         prediction_score = float(agreement_match)
         if scorer == "asr_transcript":
             transcript_similarity = max(
@@ -5100,12 +5129,19 @@ def compare_prediction_sets(
             )
 
     total = len(requests)
+    raw_accuracy_delta = (
+        trtfb_score["overall_accuracy"] - hf_score["overall_accuracy"]
+    )
+    tie_adjusted_accuracy_delta = raw_accuracy_delta + (
+        tie_accuracy_adjustment / total if total else 0.0
+    )
+    if abs(tie_adjusted_accuracy_delta) < 1e-12:
+        tie_adjusted_accuracy_delta = 0.0
     summary = {
         "hf": hf_score,
         "trtfb": trtfb_score,
-        "accuracy_delta_trtfb_minus_hf": (
-            trtfb_score["overall_accuracy"] - hf_score["overall_accuracy"]
-        ),
+        "accuracy_delta_trtfb_minus_hf": raw_accuracy_delta,
+        "tie_adjusted_accuracy_delta_trtfb_minus_hf": tie_adjusted_accuracy_delta,
         "prediction_agreement_rate": (agreement_score / total) if total else 0.0,
         "agreement_count": correctness_agreement,
         "correctness_agreement_rate": (
@@ -5114,6 +5150,8 @@ def compare_prediction_sets(
         "total_count": total,
         "buckets": dict(buckets),
         "disagreements": disagreements,
+        "reference_tie_equivalent_count": len(reference_tie_equivalent_samples),
+        "reference_tie_equivalent_samples": reference_tie_equivalent_samples,
     }
     if scorer == "asr_transcript":
         exact_count = sum(
@@ -5137,10 +5175,18 @@ def prediction_agreement_gate_result(
     min_agreement = float(
         gates.get("min_prediction_agreement", 0.90)
     )
-    accuracy_drop = (
+    raw_accuracy_drop = (
         float(summary["hf"]["overall_accuracy"])
         - float(summary["trtfb"]["overall_accuracy"])
     )
+    accuracy_drop = -float(
+        summary.get(
+            "tie_adjusted_accuracy_delta_trtfb_minus_hf",
+            -raw_accuracy_drop,
+        )
+    )
+    if abs(accuracy_drop) < 1e-12:
+        accuracy_drop = 0.0
     prediction_agreement = float(summary["prediction_agreement_rate"])
     failures: list[dict[str, Any]] = []
     if accuracy_drop > max_accuracy_drop:
@@ -5164,6 +5210,7 @@ def prediction_agreement_gate_result(
     result: dict[str, Any] = {
         "status": "failed" if failures else "passed",
         "accuracy_drop_from_hf": accuracy_drop,
+        "raw_accuracy_drop_from_hf": raw_accuracy_drop,
         "gates": {
             "max_accuracy_drop_from_hf": max_accuracy_drop,
             "min_prediction_agreement": min_agreement,
@@ -11037,6 +11084,12 @@ def eval_one_model(
             "hf_accuracy": summary["hf"]["overall_accuracy"],
             "trtfb_accuracy": summary["trtfb"]["overall_accuracy"],
             "accuracy_delta_trtfb_minus_hf": summary["accuracy_delta_trtfb_minus_hf"],
+            "tie_adjusted_accuracy_delta_trtfb_minus_hf": summary[
+                "tie_adjusted_accuracy_delta_trtfb_minus_hf"
+            ],
+            "reference_tie_equivalent_count": summary[
+                "reference_tie_equivalent_count"
+            ],
             "prediction_agreement_rate": summary["prediction_agreement_rate"],
             "hf_valid_prediction_rate": summary["hf"].get("valid_prediction_rate"),
             "trtfb_valid_prediction_rate": summary["trtfb"].get("valid_prediction_rate"),

@@ -681,6 +681,7 @@ def make_rope_table_half_dim(
     cosine: bool,
     partial_rotary_factor: float = 1.0,
     interleaved: bool = False,
+    round_inv_freq_to_bf16: bool = False,
 ) -> np.ndarray:
     """Build a RoPE cos/sin table of shape [max_cache_length, rotary_ndims // 2].
 
@@ -697,6 +698,9 @@ def make_rope_table_half_dim(
         partial_rotary_factor: Fraction of head dims that rotate (default 1.0).
         interleaved:      If True, adjacent-pair frequencies (CodeGen/GPT-J).
                           If False, half-split frequencies (LLaMA/Qwen).
+        round_inv_freq_to_bf16: Match Lance's official BF16 reference, whose
+            ``model.to(torch.bfloat16)`` call converts the registered
+            ``inv_freq`` buffer before positions are applied.
 
     Returns:
         Float32 array [max_cache_length, rotary_ndims // 2].
@@ -708,17 +712,27 @@ def make_rope_table_half_dim(
     if max_cache_length <= 0 or rope_theta <= 0.0:
         return np.full((max(max_cache_length, 1), max(half, 1)),
                        default, dtype=np.float32)
-    table = np.full((max_cache_length, half), default, dtype=np.float32)
-    for pos in range(max_cache_length):
-        for d in range(half):
-            # For both interleaved and rotate-half the frequency index is d
-            # (the distinction only affects which input pair is rotated; the
-            # freq assignment per half-dim is the same).
-            exponent = (2.0 * d) / rotary_ndims
-            inv_freq = rope_theta ** (-exponent)
-            angle = pos * inv_freq
-            table[pos, d] = np.cos(angle) if cosine else np.sin(angle)
-    return table
+    # Match PyTorch's default RoPE initialization in float32.  For both
+    # interleaved and rotate-half layouts the frequency index is ``d``; only
+    # the input pairing differs.
+    exponents = (
+        np.arange(0, rotary_ndims, 2, dtype=np.float32)
+        / np.float32(rotary_ndims)
+    )
+    inv_freq = np.float32(1.0) / np.power(
+        np.float32(rope_theta), exponents, dtype=np.float32)
+    if round_inv_freq_to_bf16:
+        # NumPy has no portable bfloat16 dtype.  Round float32 to BF16 using
+        # round-to-nearest-even, retain it as float32, and then calculate the
+        # phase exactly as the official reference does after model.to(bf16).
+        bits = inv_freq.view(np.uint32)
+        rounding_bias = np.uint32(0x7FFF) + ((bits >> 16) & np.uint32(1))
+        inv_freq = ((bits + rounding_bias) & np.uint32(0xFFFF0000)).view(
+            np.float32)
+    positions = np.arange(max_cache_length, dtype=np.float32)[:, None]
+    angles = positions * inv_freq[None, :]
+    return (np.cos(angles) if cosine else np.sin(angles)).astype(
+        np.float32, copy=False)
 
 
 def reshape_rows_to_heads_4d(
@@ -949,6 +963,96 @@ def add_apply_rope_native_sequence(
     )
     return reshape_heads_4d_to_rows(
         network, rope.get_output(0), attention_size, sequence_length)
+
+
+def add_apply_mrope_native(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    num_heads: int,
+    head_dim: int,
+    cos_cache_2d: trt.ITensor,
+    sin_cache_2d: trt.ITensor,
+    position_ids: trt.ITensor,
+    mrope_section: tuple[int, int, int],
+    rotary_embedding_dim: int,
+    interleaved: bool = False,
+) -> trt.ITensor:
+    """Apply Lance/Qwen2.5-VL temporal/height/width RoPE to one token."""
+    rotary_embedding_dim = validate_native_rope_dim(rotary_embedding_dim)
+    sections = tuple(int(value) for value in mrope_section)
+    if len(sections) != 3 or any(value <= 0 for value in sections):
+        raise ValueError("mrope_section must contain three positive integers")
+    if sum(sections) != rotary_embedding_dim // 2:
+        raise ValueError(
+            "mrope_section must sum to half the rotary embedding dimension; "
+            f"got {sections} for rotary dimension {rotary_embedding_dim}")
+
+    def build_cache(cache: trt.ITensor) -> trt.ITensor:
+        selected = network.add_gather(cache, position_ids, 0).get_output(0)
+        offset = 0
+        parts = []
+        for axis, width in enumerate(sections):
+            part = network.add_slice(
+                selected, start=(axis, offset), shape=(1, width), stride=(1, 1))
+            parts.append(part.get_output(0))
+            offset += width
+        joined = network.add_concatenation(parts)
+        joined.axis = 1
+        shaped = network.add_shuffle(joined.get_output(0))
+        shaped.reshape_dims = (1, 1, rotary_embedding_dim // 2)
+        return shaped.get_output(0)
+
+    return add_apply_rope_native_sequence(
+        network, inp, num_heads, head_dim,
+        build_cache(cos_cache_2d), build_cache(sin_cache_2d),
+        rotary_embedding_dim, interleaved, sequence_length=1)
+
+
+def add_apply_mrope_native_sequence(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    num_heads: int,
+    head_dim: int,
+    cos_cache_2d: trt.ITensor,
+    sin_cache_2d: trt.ITensor,
+    position_ids: trt.ITensor,
+    mrope_section: tuple[int, int, int],
+    rotary_embedding_dim: int,
+    interleaved: bool = False,
+) -> trt.ITensor:
+    """Apply Lance/Qwen2.5-VL mRoPE to a runtime-dynamic sequence."""
+    rotary_embedding_dim = validate_native_rope_dim(rotary_embedding_dim)
+    sections = tuple(int(value) for value in mrope_section)
+    if len(sections) != 3 or any(value <= 0 for value in sections):
+        raise ValueError("mrope_section must contain three positive integers")
+    half_dim = rotary_embedding_dim // 2
+    if sum(sections) != half_dim:
+        raise ValueError(
+            "mrope_section must sum to half the rotary embedding dimension; "
+            f"got {sections} for rotary dimension {rotary_embedding_dim}")
+
+    def build_cache(cache: trt.ITensor) -> trt.ITensor:
+        selected = network.add_gather(cache, position_ids, 0).get_output(0)
+        offset = 0
+        parts = []
+        for axis, width in enumerate(sections):
+            axis_index = add_constant(
+                network, (1,), np.array([axis], dtype=np.int32), dtype=np.int32)
+            axis_values = network.add_gather(selected, axis_index, 0).get_output(0)
+            column_indices = add_constant(
+                network, (width,), np.arange(offset, offset + width, dtype=np.int32),
+                dtype=np.int32)
+            part = network.add_gather(axis_values, column_indices, 2)
+            parts.append(part.get_output(0))
+            offset += width
+        joined = network.add_concatenation(parts)
+        joined.axis = 2
+        return joined.get_output(0)
+
+    return add_apply_rope_native_sequence(
+        network, inp, num_heads, head_dim,
+        build_cache(cos_cache_2d), build_cache(sin_cache_2d),
+        rotary_embedding_dim, interleaved, sequence_length=None)
 
 
 def _add_decomposed_attention_core(

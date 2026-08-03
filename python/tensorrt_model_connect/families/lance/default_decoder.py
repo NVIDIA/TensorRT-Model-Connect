@@ -66,6 +66,7 @@ def build_standard_decoder_engine(
     parallel_residual: bool = False,
     scale_attn_weights: bool = True,
     embed_input: bool = False,
+    round_rope_inv_freq_to_bf16: bool = False,
     verbose: bool = False,
     debug_layer_outputs: bool = False,
     hidden_state_output: bool = False,
@@ -153,6 +154,7 @@ def build_standard_decoder_engine(
             parallel_residual=parallel_residual,
             scale_attn_weights=scale_attn_weights,
             embed_input=embed_input,
+            round_rope_inv_freq_to_bf16=round_rope_inv_freq_to_bf16,
             verbose=verbose,
             profile_mode=("prefill" if decoder_engine_role == "prefill" else "dual_profile"),
         )
@@ -169,6 +171,13 @@ def build_standard_decoder_engine(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     attention_window = max_cache_length + 1
     dynamic_kv_cache = bool(config.raw.get("dynamic_kv_cache", False))
+    rope_scaling = config.raw.get("rope_scaling") or {}
+    raw_mrope_section = (
+        rope_scaling.get("mrope_section")
+        if isinstance(rope_scaling, dict) else None)
+    mrope_section = (
+        tuple(int(value) for value in raw_mrope_section)
+        if raw_mrope_section is not None else None)
     dynamic_kv_opt_rows = int(config.raw.get("_dynamic_kv_opt_length", max_cache_length))
     dynamic_kv_opt_rows = max(1, min(dynamic_kv_opt_rows, max_cache_length))
     raw_profile_rows = config.raw.get("_dynamic_kv_profile_rows")
@@ -209,6 +218,9 @@ def build_standard_decoder_engine(
     # ---------------------------------------------------------------
     token_id = network.add_input("token_id", trt.int32, (1,))
     position_id = network.add_input("position_id", trt.int32, (1,))
+    mrope_position_ids = (
+        network.add_input("mrope_position_ids", trt.int32, (3,))
+        if mrope_section is not None else None)
     attention_mask = network.add_input(
         "attention_mask", trt.float32,
         (1, -1) if dynamic_kv_cache else (1, attention_window))
@@ -303,17 +315,29 @@ def build_standard_decoder_engine(
 
     if position_type == "rope":
         graph_ops.validate_native_rope_dim(rotary_embedding_dim)
+        if mrope_section is not None:
+            if len(mrope_section) != 3 or any(value <= 0 for value in mrope_section):
+                raise ValueError(
+                    "rope_scaling.mrope_section must contain three positive integers")
+            if sum(mrope_section) != rotary_embedding_dim // 2:
+                raise ValueError(
+                    "rope_scaling.mrope_section must sum to half the rotary dimension; "
+                    f"got {mrope_section} for rotary dimension {rotary_embedding_dim}")
         cos_half_np = graph_ops.make_rope_table_half_dim(
             attention_window, head_dim, config.rope_theta, True,
-            partial_rotary_factor, interleaved=interleaved_rope)
+            partial_rotary_factor, interleaved=interleaved_rope,
+            round_inv_freq_to_bf16=round_rope_inv_freq_to_bf16)
         sin_half_np = graph_ops.make_rope_table_half_dim(
             attention_window, head_dim, config.rope_theta, False,
-            partial_rotary_factor, interleaved=interleaved_rope)
+            partial_rotary_factor, interleaved=interleaved_rope,
+            round_inv_freq_to_bf16=round_rope_inv_freq_to_bf16)
+        rope_storage_dtype = (
+            np.float32 if round_rope_inv_freq_to_bf16 else work_np_dtype)
         cos_half_tensor = graph_ops.add_constant(
-            network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
+            network, cos_half_np.shape, cos_half_np, dtype=rope_storage_dtype)
         cos_half_tensor = _cast_work_dtype(cos_half_tensor)
         sin_half_tensor = graph_ops.add_constant(
-            network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
+            network, sin_half_np.shape, sin_half_np, dtype=rope_storage_dtype)
         sin_half_tensor = _cast_work_dtype(sin_half_tensor)
     elif position_type == "learned":
         pos_embed_np = weights["position_embedding"]
@@ -450,6 +474,8 @@ def build_standard_decoder_engine(
             sin_half_tensor=sin_half_tensor,
             rotary_embedding_dim=rotary_embedding_dim,
             interleaved_rope=interleaved_rope,
+            mrope_position_ids=mrope_position_ids,
+            mrope_section=mrope_section,
             ffi_attention_kernel=ffi_attention_kernel,
             dynamic_kv_cache=dynamic_kv_cache,
         )
@@ -582,6 +608,8 @@ def _add_decoder_layer(
     sin_half_tensor: trt.ITensor | None = None,
     rotary_embedding_dim: int = 0,
     interleaved_rope: bool = False,
+    mrope_position_ids: trt.ITensor | None = None,
+    mrope_section: tuple[int, int, int] | None = None,
     ffi_attention_kernel: str | None = None,
     dynamic_kv_cache: bool = False,
     eps: float | None = None,
@@ -608,6 +636,8 @@ def _add_decoder_layer(
         sin_half_tensor=sin_half_tensor,
         rotary_embedding_dim=rotary_embedding_dim,
         interleaved_rope=interleaved_rope,
+        mrope_position_ids=mrope_position_ids,
+        mrope_section=mrope_section,
         ffi_attention_kernel=ffi_attention_kernel,
         dynamic_kv_cache=dynamic_kv_cache,
     )

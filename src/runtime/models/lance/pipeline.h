@@ -97,24 +97,27 @@ class LancePipeline final : public IPipeline {
     void run_vl_prefill_token(int32_t token_id, const std::vector<float>& image_features,
                               const std::vector<std::vector<float>>& deepstack_features,
                               int32_t num_features, int32_t feature_dim, int32_t& feature_index,
+                              const std::array<int32_t, 3>* mrope_position,
                               std::vector<float>& logits);
 
     bool run_vl_prefill_batched(const std::vector<int32_t>& input_ids,
                                 const std::vector<float>& image_features,
                                 const std::vector<std::vector<float>>& deepstack_features,
                                 int32_t num_features, int32_t feature_dim,
-                                std::vector<float>& logits);
+                                const LanceMropePositions* mrope, std::vector<float>& logits);
 
     void run_vl_decode_loop(LanceISampler* sampler, const LanceSamplingParams& params,
                             std::vector<int32_t>& output, std::vector<float>& logits,
-                            int32_t max_new_tokens);
+                            int32_t max_new_tokens, int32_t mrope_position = -1);
 
-    void run_text_step(int32_t token_id, std::vector<float>& logits);
+    void run_text_step(int32_t token_id, std::vector<float>& logits, int32_t mrope_position = -1);
 
     // Run a text step with optional vision embedding override.
     void run_text_step_with_embed(int32_t token_id, const float* input_embed, float use_input_embed,
                                   const std::vector<const float*>& deepstack_embeds,
-                                  float deepstack_active, std::vector<float>& logits);
+                                  float deepstack_active,
+                                  const std::array<int32_t, 3>* mrope_position,
+                                  std::vector<float>& logits);
 
     // Run vision encoder on preprocessed image inputs.
     bool run_vision_encoder(const LancePreprocessedImage& preprocessed,

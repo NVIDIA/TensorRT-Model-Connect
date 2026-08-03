@@ -443,6 +443,56 @@ LancePreprocessedImage lance_load_and_preprocess_image(const std::string& image_
     return lance_preprocess_decoded_image(lance_decode_image_rgb(image_path), config);
 }
 
+LanceMropePositions lance_build_mrope_positions(const std::vector<int32_t>& input_ids,
+                                                int32_t image_token_id, int32_t num_image_features,
+                                                int32_t grid_height, int32_t grid_width) {
+    LanceMropePositions result;
+    result.token_positions.resize(input_ids.size());
+
+    const auto fill_text_positions = [&result, &input_ids]() {
+        for (std::size_t i = 0; i < input_ids.size(); ++i) {
+            const int32_t position = static_cast<int32_t>(i);
+            result.token_positions[i] = {position, position, position};
+        }
+        result.next_position = static_cast<int32_t>(input_ids.size());
+    };
+
+    const auto image_begin = std::find(input_ids.begin(), input_ids.end(), image_token_id);
+    const bool valid_grid =
+        grid_height > 0 && grid_width > 0 && grid_height * grid_width == num_image_features;
+    if (image_begin == input_ids.end() || !valid_grid) {
+        fill_text_positions();
+        return result;
+    }
+
+    const std::size_t image_offset =
+        static_cast<std::size_t>(std::distance(input_ids.begin(), image_begin));
+    const std::size_t image_end = image_offset + static_cast<std::size_t>(num_image_features);
+    if (image_end > input_ids.size()) {
+        fill_text_positions();
+        return result;
+    }
+
+    for (std::size_t i = 0; i < image_offset; ++i) {
+        const int32_t position = static_cast<int32_t>(i);
+        result.token_positions[i] = {position, position, position};
+    }
+
+    const int32_t vision_base = static_cast<int32_t>(image_offset);
+    for (int32_t i = 0; i < num_image_features; ++i) {
+        result.token_positions[image_offset + static_cast<std::size_t>(i)] = {
+            vision_base, vision_base + i / grid_width, vision_base + i % grid_width};
+    }
+
+    int32_t text_position = vision_base + std::max(grid_height, grid_width);
+    for (std::size_t i = image_end; i < input_ids.size(); ++i) {
+        result.token_positions[i] = {text_position, text_position, text_position};
+        ++text_position;
+    }
+    result.next_position = text_position;
+    return result;
+}
+
 std::string lance_format_prompt(const std::string& user_prompt,
                                 const LancePreprocessConfig& config) {
     // Build image_pads string: repeat image_token_str num_image_pad_tokens times

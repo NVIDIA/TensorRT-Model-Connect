@@ -27,6 +27,24 @@ from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
 
+# Transformers Mistral applies ``rotate_half`` (first half paired with the
+# second half), not adjacent-pair GPT-J/CodeGen RoPE.
+_MISTRAL_ROPE_INTERLEAVED = False
+
+
+def _decoder_layers_for_hidden_states(
+    hidden_state_indices: list[int] | tuple[int, ...], num_layers: int
+) -> tuple[int, ...]:
+    """Map Transformers hidden-state indices to decoder-layer indices."""
+    indices = tuple(int(index) for index in hidden_state_indices)
+    if any(index < 1 or index > num_layers for index in indices):
+        raise ValueError(
+            "Mistral hidden-state indices must be between 1 and "
+            f"num_layers={num_layers}, got {indices}"
+        )
+    return tuple(index - 1 for index in indices)
+
+
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
@@ -159,9 +177,8 @@ def build_mistral_encoder_engine(
 ) -> bytes:
     """Build Mistral 3 encoder TRT engine plan.
 
-    Runs all layers as a single forward pass with bidirectional attention
-    (no causal mask).  Extracts hidden states from specified layers and
-    concatenates them along the feature dimension.
+    Runs all layers as a single causal forward pass. Extracts hidden states
+    from specified layers and concatenates them along the feature dimension.
 
     Args:
         weights: Weight dict from load_mistral_encoder_weights.
@@ -173,22 +190,27 @@ def build_mistral_encoder_engine(
         num_layers: Number of transformer layers.
         vocab_size: Vocabulary size.
         max_seq_len: Maximum input sequence length.
-        extract_layers: Layer indices (0-based) whose hidden states are
-            extracted and concatenated for the output.
+        extract_layers: Transformers ``hidden_states`` indices whose tensors
+            are extracted and concatenated. Hidden state 0 is the embedding
+            input, so hidden state N is the output of decoder layer N - 1.
         eps: RMSNorm epsilon.
         verbose: Enable TRT builder verbose logging.
 
     Returns:
         Serialized TRT engine plan bytes.
     """
+    decoder_extract_layers = _decoder_layers_for_hidden_states(
+        extract_layers, num_layers)
     q_size = num_heads * head_dim
     kv_size = num_kv_heads * head_dim
     concat_dim = len(extract_layers) * hidden_size
 
     rope_cos_half_np = graph_ops.make_rope_table_half_dim(
-        max_seq_len, head_dim, rope_theta, True, interleaved=True)
+        max_seq_len, head_dim, rope_theta, True,
+        interleaved=_MISTRAL_ROPE_INTERLEAVED)
     rope_sin_half_np = graph_ops.make_rope_table_half_dim(
-        max_seq_len, head_dim, rope_theta, False, interleaved=True)
+        max_seq_len, head_dim, rope_theta, False,
+        interleaved=_MISTRAL_ROPE_INTERLEAVED)
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -309,11 +331,13 @@ def build_mistral_encoder_engine(
         q = graph_ops.add_apply_rope_native(
             network, q, num_heads, head_dim,
             rope_cos_half, rope_sin_half, rope_position_ids,
-            head_dim, interleaved=True, sequence_length=max_seq_len)
+            head_dim, interleaved=_MISTRAL_ROPE_INTERLEAVED,
+            sequence_length=max_seq_len)
         k = graph_ops.add_apply_rope_native(
             network, k, num_kv_heads, head_dim,
             rope_cos_half, rope_sin_half, rope_position_ids,
-            head_dim, interleaved=True, sequence_length=max_seq_len)
+            head_dim, interleaved=_MISTRAL_ROPE_INTERLEAVED,
+            sequence_length=max_seq_len)
 
         context_flat = graph_ops.add_attention_from_rows(
             network,
@@ -379,7 +403,7 @@ def build_mistral_encoder_engine(
             trt.ElementWiseOperation.SUM).get_output(0)
 
         # Extract hidden state if this layer is in the extraction list
-        if layer_idx in extract_layers:
+        if layer_idx in decoder_extract_layers:
             extracted.append(hidden)
 
     # --- Final RMSNorm ---

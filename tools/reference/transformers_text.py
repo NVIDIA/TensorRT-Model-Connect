@@ -317,6 +317,17 @@ def _generated_sequence(
     return generated, True
 
 
+def _generated_token_max_score_ids(scores: Sequence[Any]) -> list[list[int]]:
+    """Return every token tied at the exact maximum for each decode step."""
+    candidates = []
+    for step_scores in scores:
+        row = step_scores[0]
+        maximum = row.max()
+        token_ids = (row == maximum).nonzero(as_tuple=False).reshape(-1).tolist()
+        candidates.append([int(token_id) for token_id in token_ids])
+    return candidates
+
+
 def _generate_sample(
     *,
     torch_module: Any,
@@ -328,7 +339,7 @@ def _generate_sample(
     prompt_row: Mapping[str, Any],
     source_index: int,
     settings: Mapping[str, Any],
-) -> tuple[str, Any, float]:
+) -> tuple[str, Any, float, list[list[int]]]:
     prompt = str(prompt_row.get("prompt") or _request_prompt(request))
     if settings["apply_chat_template"]:
         prompt = tokenizer.apply_chat_template(
@@ -339,9 +350,12 @@ def _generate_sample(
     encoded = tokenizer(prompt, return_tensors="pt")
     encoded = {name: value.to(device) for name, value in encoded.items()}
     _seed_runtime(torch_module, int(settings["seed"]), source_index)
+    generation_overrides = dict(settings["generation_overrides"])
+    generation_overrides["return_dict_in_generate"] = True
+    generation_overrides["output_scores"] = True
     start = time.perf_counter()
     with torch_module.inference_mode():
-        output_ids = model.generate(
+        generation = model.generate(
             **encoded,
             max_new_tokens=settings["max_new_tokens"],
             do_sample=settings["do_sample"],
@@ -351,11 +365,11 @@ def _generate_sample(
             num_beams=1,
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
-            **settings["generation_overrides"],
+            **generation_overrides,
         )
     wall_ms = (time.perf_counter() - start) * 1000.0
     generated, skip_special_tokens = _generated_sequence(
-        output_ids,
+        generation.sequences,
         input_length=encoded["input_ids"].shape[1],
         model=model,
         is_encoder_decoder=is_encoder_decoder,
@@ -364,6 +378,7 @@ def _generate_sample(
         tokenizer.decode(generated, skip_special_tokens=skip_special_tokens),
         generated,
         wall_ms,
+        _generated_token_max_score_ids(generation.scores),
     )
 
 
@@ -392,7 +407,7 @@ def run(arguments: argparse.Namespace) -> None:
             request = requests[source_index]
             if not isinstance(request, dict):
                 raise ValueError(f"request {source_index} must be a JSON object")
-            output_text, generated, wall_ms = _generate_sample(
+            output_text, generated, wall_ms, max_score_ids = _generate_sample(
                 torch_module=torch,
                 tokenizer=tokenizer,
                 model=model,
@@ -410,6 +425,7 @@ def run(arguments: argparse.Namespace) -> None:
                 "generated_token_ids": [
                     int(token_id) for token_id in generated.tolist()
                 ],
+                "generated_token_max_score_ids": max_score_ids,
                 "wall_ms": wall_ms,
                 "source": "hf",
             }
