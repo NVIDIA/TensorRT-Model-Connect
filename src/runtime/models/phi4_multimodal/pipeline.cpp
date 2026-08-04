@@ -233,6 +233,45 @@ bool copy_last_prefill_logits(const TensorMap& outputs, int32_t vocab_size,
     return true;
 }
 
+void run_native_prefill_chunk(TrtModule& prefill, Phi4MultimodalInferenceState& state,
+                              Phi4MultimodalKvCache& kv_cache, const Phi4MultimodalConfig& config,
+                              const std::vector<int32_t>& chunk_ids,
+                              const std::vector<float>& image_features,
+                              const std::vector<std::vector<float>>& deepstack_features,
+                              int32_t num_features, int32_t feature_dim, int32_t feature_offset,
+                              std::vector<float>& logits) {
+    auto embedding_inputs = build_vl_sequence_embedding_inputs(
+        chunk_ids, config.image_token_id, image_features, deepstack_features, num_features,
+        feature_dim, feature_offset);
+
+    TensorMap inputs;
+    add_vl_prefill_base_inputs(inputs, state, chunk_ids, embedding_inputs, feature_dim);
+    if (!add_vl_prefill_deepstack_inputs(prefill, inputs, embedding_inputs,
+                                         static_cast<int32_t>(chunk_ids.size()), feature_dim)) {
+        throw std::runtime_error(
+            "Phi4MultimodalPipeline: native deepstack prefill inputs are incomplete");
+    }
+
+    auto outputs = prefill.forward(inputs);
+    if (!copy_last_prefill_logits(outputs, config.vocab_size, logits))
+        throw std::runtime_error("Phi4MultimodalPipeline: native prefill logits are invalid");
+
+    std::vector<const void*> present_k;
+    std::vector<const void*> present_v;
+    if (!gather_vl_prefill_kv_pointers(prefill, config, present_k, present_v))
+        throw std::runtime_error("Phi4MultimodalPipeline: native prefill KV outputs are missing");
+    kv_cache.commit_prefill(present_k, present_v, static_cast<int32_t>(chunk_ids.size()));
+}
+
+int32_t advance_feature_offset(const std::vector<int32_t>& input_ids, int32_t image_token_id,
+                               int32_t feature_offset, int32_t num_features) {
+    for (const auto token : input_ids) {
+        if (token == image_token_id && feature_offset < num_features)
+            ++feature_offset;
+    }
+    return feature_offset;
+}
+
 int32_t resolve_input_embed_dim(const TrtModule& decoder, int32_t configured_dim) {
     if (configured_dim > 0)
         return configured_dim;
@@ -498,34 +537,11 @@ void Phi4MultimodalPipeline::run_native_prefill_batched(
         const int32_t chunk_size = std::min(chunk_limit, sq - offset);
         std::vector<int32_t> chunk_ids(input_ids.begin() + offset,
                                        input_ids.begin() + offset + chunk_size);
-        auto embedding_inputs = build_vl_sequence_embedding_inputs(
-            chunk_ids, config_.image_token_id, image_features, deepstack_features, num_features,
-            feature_dim, feature_offset);
-
-        TensorMap inputs;
-        add_vl_prefill_base_inputs(inputs, *state_, chunk_ids, embedding_inputs, feature_dim);
-        if (!add_vl_prefill_deepstack_inputs(*prefill_, inputs, embedding_inputs, chunk_size,
-                                             feature_dim)) {
-            throw std::runtime_error(
-                "Phi4MultimodalPipeline: native deepstack prefill inputs are incomplete");
-        }
-
-        auto outputs = prefill_->forward(inputs);
-        if (!copy_last_prefill_logits(outputs, config_.vocab_size, logits))
-            throw std::runtime_error("Phi4MultimodalPipeline: native prefill logits are invalid");
-
-        std::vector<const void*> present_k;
-        std::vector<const void*> present_v;
-        if (!gather_vl_prefill_kv_pointers(*prefill_, config_, present_k, present_v)) {
-            throw std::runtime_error(
-                "Phi4MultimodalPipeline: native prefill KV outputs are missing");
-        }
-        kv_cache.commit_prefill(present_k, present_v, chunk_size);
-
-        for (const auto token : chunk_ids) {
-            if (token == config_.image_token_id && feature_offset < num_features)
-                ++feature_offset;
-        }
+        run_native_prefill_chunk(*prefill_, *state_, kv_cache, config_, chunk_ids, image_features,
+                                 deepstack_features, num_features, feature_dim, feature_offset,
+                                 logits);
+        feature_offset =
+            advance_feature_offset(chunk_ids, config_.image_token_id, feature_offset, num_features);
         offset += chunk_size;
     }
     state_->bind_to(*text_decoder_);

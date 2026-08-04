@@ -50,6 +50,49 @@ void validate_cache_pair(TrtModule& module, const std::string& cache_name,
     }
 }
 
+void populate_default_cache_names(Phi4MultimodalKvCacheNames& names, int32_t num_layers) {
+    if (!names.cache_k.empty())
+        return;
+
+    const auto count = static_cast<std::size_t>(num_layers);
+    names.cache_k.reserve(count);
+    names.cache_v.reserve(count);
+    names.present_k.reserve(count);
+    names.present_v.reserve(count);
+    for (int32_t layer = 0; layer < num_layers; ++layer) {
+        const std::string suffix = "_" + std::to_string(layer);
+        names.cache_k.push_back("cache_k" + suffix);
+        names.cache_v.push_back("cache_v" + suffix);
+        names.present_k.push_back("present_k" + suffix);
+        names.present_v.push_back("present_v" + suffix);
+    }
+}
+
+void validate_cache_name_count(const Phi4MultimodalKvCacheNames& names, int32_t num_layers) {
+    const auto expected = static_cast<std::size_t>(num_layers);
+    if (names.cache_k.size() != expected || names.cache_v.size() != expected ||
+        names.present_k.size() != expected || names.present_v.size() != expected) {
+        throw std::invalid_argument("Phi4MultimodalKvCache per-layer tensor name count mismatch");
+    }
+}
+
+bool allocate_cache_pairs(std::vector<DeviceTensor>& cache_k, std::vector<DeviceTensor>& cache_v,
+                          int32_t num_layers, int32_t max_length, int32_t kv_dim, DType cache_dtype,
+                          cudaStream_t stream) {
+    const auto count = static_cast<std::size_t>(num_layers);
+    cache_k.reserve(count);
+    cache_v.reserve(count);
+    for (int32_t layer = 0; layer < num_layers; ++layer) {
+        cache_k.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype, stream);
+        if (!cache_k.back().ok())
+            return false;
+        cache_v.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype, stream);
+        if (!cache_v.back().ok())
+            return false;
+    }
+    return true;
+}
+
 } // namespace
 
 Phi4MultimodalKvCache::Phi4MultimodalKvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim,
@@ -60,35 +103,11 @@ Phi4MultimodalKvCache::Phi4MultimodalKvCache(int32_t num_layers, int32_t max_len
     if (num_layers <= 0 || max_length <= 0 || kv_dim <= 0)
         throw std::invalid_argument("Phi4MultimodalKvCache geometry must be positive");
 
-    if (names_.cache_k.empty()) {
-        names_.cache_k.reserve(static_cast<std::size_t>(num_layers));
-        names_.cache_v.reserve(static_cast<std::size_t>(num_layers));
-        names_.present_k.reserve(static_cast<std::size_t>(num_layers));
-        names_.present_v.reserve(static_cast<std::size_t>(num_layers));
-        for (int32_t layer = 0; layer < num_layers; ++layer) {
-            const std::string suffix = "_" + std::to_string(layer);
-            names_.cache_k.push_back("cache_k" + suffix);
-            names_.cache_v.push_back("cache_v" + suffix);
-            names_.present_k.push_back("present_k" + suffix);
-            names_.present_v.push_back("present_v" + suffix);
-        }
-    }
-    const auto expected = static_cast<std::size_t>(num_layers);
-    if (names_.cache_k.size() != expected || names_.cache_v.size() != expected ||
-        names_.present_k.size() != expected || names_.present_v.size() != expected) {
-        throw std::invalid_argument("Phi4MultimodalKvCache per-layer tensor name count mismatch");
-    }
-
-    cache_k_.reserve(expected);
-    cache_v_.reserve(expected);
-    for (int32_t layer = 0; layer < num_layers; ++layer) {
-        cache_k_.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype, stream);
-        if (!cache_k_.back().ok())
-            return;
-        cache_v_.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype, stream);
-        if (!cache_v_.back().ok())
-            return;
-    }
+    populate_default_cache_names(names_, num_layers);
+    validate_cache_name_count(names_, num_layers);
+    if (!allocate_cache_pairs(cache_k_, cache_v_, num_layers, max_length, kv_dim, cache_dtype,
+                              stream))
+        return;
     reset();
 }
 

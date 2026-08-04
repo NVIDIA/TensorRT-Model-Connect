@@ -93,10 +93,21 @@ std::string format_bytes(std::uint64_t bytes) {
     return stream.str();
 }
 
+bool has_native_kv_controls(const TrtModule& module, const Phi4MultimodalKvCacheNames& names) {
+    return module.has_input(names.cache_write_indices) &&
+           module.has_input(names.key_value_lengths) && !module.has_input("attention_mask");
+}
+
+bool valid_native_cache_geometry(const std::vector<int64_t>& shape, const BaseConfig& config) {
+    if (shape.size() != 4)
+        return false;
+    return shape[0] == 1 && shape[2] == static_cast<int64_t>(config.max_cache_length) &&
+           shape[1] > 0 && shape[3] > 0 && shape[1] * shape[3] == compute_kv_dim(config);
+}
+
 void validate_native_module(const TrtModule& module, const Phi4MultimodalKvCacheNames& names,
                             const BaseConfig& config, DType cache_dtype) {
-    if (!module.has_input(names.cache_write_indices) ||
-        !module.has_input(names.key_value_lengths) || module.has_input("attention_mask")) {
+    if (!has_native_kv_controls(module, names)) {
         throw std::runtime_error("Phi-4 Multimodal decoder does not expose the native KV contract");
     }
     if (cache_dtype != DType::kFloat16)
@@ -104,9 +115,7 @@ void validate_native_module(const TrtModule& module, const Phi4MultimodalKvCache
     if (names.cache_k.empty())
         throw std::runtime_error("Phi-4 Multimodal native KV has no cache tensors");
     const auto shape = module.tensor_shape(names.cache_k.front());
-    if (shape.size() != 4 || shape[0] != 1 ||
-        shape[2] != static_cast<int64_t>(config.max_cache_length) || shape[1] <= 0 ||
-        shape[3] <= 0 || shape[1] * shape[3] != compute_kv_dim(config)) {
+    if (!valid_native_cache_geometry(shape, config)) {
         throw std::runtime_error("Phi-4 Multimodal native KV cache must be [1,Hkv,capacity,D]");
     }
 }
