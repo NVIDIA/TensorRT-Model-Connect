@@ -132,7 +132,7 @@ python tools/prepare_refcoco_validation_dataset.py \
   --source-root /mnt/data/RefCOCO_rec/raw/lscpku/RefCOCO_rec \
   --output-dir /mnt/data/RefCOCO_rec/unified \
   --split testA
-python tools/validation/engine.py eval \
+PYTHONPATH=python:. python tools/validation/engine.py eval \
   --suite refcoco_grounding \
   --model locateanything-3b \
   --dataset /mnt/data/RefCOCO_rec/unified/dataset.json \
