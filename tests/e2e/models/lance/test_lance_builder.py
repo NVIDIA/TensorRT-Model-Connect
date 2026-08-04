@@ -14,25 +14,24 @@ import pytest
 pytest.importorskip("tensorrt", reason="TensorRT is required for family builder tests")
 
 
-def test_lance_embed_input_dispatches_to_dual_profile_builder(monkeypatch) -> None:
-    module = importlib.import_module(
-        "tensorrt_model_connect.families.lance.default_decoder")
-    calls: dict[str, object] = {}
+def _native_config(*, role: str = "decode") -> SimpleNamespace:
+    return SimpleNamespace(
+        model_type="lance",
+        max_position_embeddings=128_000,
+        num_attention_heads=16,
+        num_key_value_heads=2,
+        head_dim=128,
+        raw={
+            "_decoder_engine_role": role,
+            "rope_scaling": {
+                "type": "mrope",
+                "mrope_section": [16, 24, 24],
+            },
+        },
+    )
 
-    def fake_build(config, weights, max_cache_length, **kwargs):
-        calls["build"] = (config, weights, max_cache_length, kwargs)
-        return b"lance-dual-profile-plan"
 
-    monkeypatch.setattr(module, "build_dual_profile_decoder_engine", fake_build)
-    config = type("Config", (), {"raw": {"_decoder_engine_role": "decode"}})()
-    result = module.build_standard_decoder_engine(
-        config, {}, 31, precision="fp16", embed_input=True)
-
-    assert result == b"lance-dual-profile-plan"
-    assert calls["build"][3]["embed_input"] is True
-
-
-def test_lance_bf16_build_rounds_rope_inv_freq_like_official_reference(
+def test_lance_native_build_uses_full_context_split_role_and_bf16_rope(
     monkeypatch,
 ) -> None:
     module = importlib.import_module(
@@ -43,12 +42,38 @@ def test_lance_bf16_build_rounds_rope_inv_freq_like_official_reference(
         calls["kwargs"] = kwargs
         return b"lance-bf16-plan"
 
-    monkeypatch.setattr(module, "build_standard_decoder_engine", fake_build)
-    result = module.LancePlugin().build_engine(
-        SimpleNamespace(), {}, 512, precision="bf16")
+    monkeypatch.setattr(module, "build_dual_profile_decoder_engine", fake_build)
+    config = _native_config(role="prefill")
+    result = module.LancePlugin().build_engine(config, {}, 128_000)
 
     assert result == b"lance-bf16-plan"
     assert calls["kwargs"]["round_rope_inv_freq_to_bf16"] is True
+    assert calls["kwargs"]["native_kv_cache"] is True
+    assert calls["kwargs"]["profile_mode"] == "prefill"
+    assert calls["kwargs"]["max_prefill_length"] == 4096
+    assert config.raw["_native_kv_cache_metadata"] == {
+        "native_kv_contract_version": 1,
+        "native_kv_cache": True,
+    }
+
+
+def test_lance_defaults_hide_cache_build_flags() -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.lance.plugin")
+    plugin = module.LancePlugin()
+    config = _native_config()
+
+    assert plugin.default_build_precision(config) == "bf16"
+    assert plugin.default_max_cache_length(config) == 128_000
+    assert plugin.supports_split_decoder_roles(config)
+
+
+def test_lance_native_build_rejects_a_hidden_context_cap() -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.lance.plugin")
+    with pytest.raises(ValueError, match="must equal the model context"):
+        module.LancePlugin().build_engine(
+            _native_config(), {}, 384, precision="bf16")
 
 
 def test_lance_rope_table_can_match_bf16_inv_freq_buffer() -> None:
@@ -108,3 +133,122 @@ def test_lance_vl_config_matches_official_x2t_image_framing() -> None:
         "{prompt}<|im_end|>\n"
         "<|im_start|>assistant\n"
     )
+
+
+def test_lance_native_prefill_slices_cache_to_mask_key_width(
+    monkeypatch,
+) -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.lance.graph_ops")
+    trt = pytest.importorskip("tensorrt")
+
+    class FakeTensor:
+        def __init__(self, name, dtype, shape=(), values=None):
+            self.name = name
+            self.dtype = dtype
+            self.shape = shape
+            self.values = values
+
+    class FakeLayer:
+        def __init__(self, output):
+            self.output = output
+            self.name = ""
+            self.axis = 0
+            self.inputs = {}
+
+        def get_output(self, index):
+            assert index == 0
+            return self.output
+
+        def set_input(self, index, value):
+            self.inputs[index] = value
+
+    class FakeNetwork:
+        def __init__(self):
+            self.mask_shape = None
+            self.gathers = []
+
+        def add_kv_cache_update(self, cache, update, indices, mode):
+            del update, indices, mode
+            return FakeLayer(FakeTensor("updated", cache.dtype, cache.shape))
+
+        def add_attention_v2(self, *args):
+            del args
+            raise AssertionError("masked prefill must use decomposed attention")
+
+        def add_shape(self, tensor):
+            output = FakeTensor("mask_shape", trt.int64, (4,))
+            self.mask_shape = output
+            return FakeLayer(output)
+
+        def add_gather(self, tensor, indices, axis):
+            self.gathers.append((tensor, indices, axis))
+            return FakeLayer(FakeTensor("gather", trt.int64, (1,)))
+
+        def add_concatenation(self, tensors):
+            del tensors
+            return FakeLayer(FakeTensor("active_shape", trt.int64, (4,)))
+
+        def add_slice(self, tensor, start, shape, stride):
+            del start, shape, stride
+            return FakeLayer(FakeTensor("active_cache", tensor.dtype, tensor.shape))
+
+    network = FakeNetwork()
+
+    def fake_constant(_network, shape, values, dtype=np.float32):
+        return FakeTensor(
+            "constant", dtype, shape, np.asarray(values).copy())
+
+    monkeypatch.setattr(module, "add_constant", fake_constant)
+    monkeypatch.setattr(
+        module,
+        "reshape_rows_to_heads_4d",
+        lambda _network, tensor, *_args, **_kwargs: tensor,
+    )
+    monkeypatch.setattr(
+        module,
+        "reshape_heads_4d_to_rows",
+        lambda _network, tensor, *_args, **_kwargs: tensor,
+    )
+    monkeypatch.setattr(
+        module,
+        "_repeat_kv_heads_4d",
+        lambda _network, tensor, **_kwargs: tensor,
+    )
+    monkeypatch.setattr(
+        module,
+        "_add_decomposed_attention_core",
+        lambda _network, q, _k, _v, **_kwargs: q,
+    )
+
+    bf16 = trt.bfloat16
+    q = FakeTensor("q", bf16, (1, 16, -1, 128))
+    update = FakeTensor("update", bf16, (1, 2, -1, 128))
+    cache = FakeTensor("cache", bf16, (1, 2, 128_000, 128))
+    write_indices = FakeTensor("write_indices", trt.int32, (1,))
+    lengths = FakeTensor("lengths", trt.int32, (1,))
+    mask = FakeTensor("mask", bf16, (1, 1, -1, -1))
+
+    module.add_native_kv_cache_attention_from_rows(
+        network,
+        q,
+        update,
+        update,
+        cache,
+        cache,
+        write_indices,
+        lengths,
+        mask,
+        num_heads=16,
+        num_kv_heads=2,
+        head_dim=128,
+        q_seq=None,
+    )
+
+    mask_width_gathers = [
+        gather for gather in network.gathers if gather[0] is network.mask_shape
+    ]
+    assert len(mask_width_gathers) == 1
+    _, width_index, axis = mask_width_gathers[0]
+    assert axis == 0
+    np.testing.assert_array_equal(width_index.values, np.array([3], np.int32))

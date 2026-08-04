@@ -27,17 +27,19 @@ debug outputs, hidden-state outputs, and the VL ``embed_input`` path stay
 on ``standard_decoder_builder`` for now and are dispatched there from
 inside ``build_standard_decoder_engine``.
 
-Tensor contract (matches the C++ runtime KvCache naming):
+Native TensorRT KV contract (matches the C++ runtime KvCache naming):
   Inputs (dynamic shapes — Sq varies by profile)
     token_id        int32   (-1,)
     position_id     int32   (-1,)
-    attention_mask  float32 (-1, -1)                 # (Sq, max_cache + Sq)
-    cache_k_i       fp16/f32 (max_cache, kv_size)    # static
-    cache_v_i       fp16/f32 (max_cache, kv_size)    # static
+    attention_mask  float32 (-1, -1)                 # (Sq, active_kv)
+    cache_write_indices int32 (1,)                   # update start slot
+    key_value_lengths   int32 (1,)                   # active length after update
+    cache_k_i       bf16 (1, Hkv, capacity, D)       # user-owned, static
+    cache_v_i       bf16 (1, Hkv, capacity, D)       # user-owned, static
   Outputs
     logits          float32 (1, vocab)               # last-row sliced inside the engine
-    present_k_i     fp16/f32 (-1, kv_size)           # (Sq, kv_size)
-    present_v_i     fp16/f32 (-1, kv_size)           # (Sq, kv_size)
+    present_k_i     bf16 (1, Hkv, capacity, D)       # aliases cache_k_i
+    present_v_i     bf16 (1, Hkv, capacity, D)       # aliases cache_v_i
 """
 
 from __future__ import annotations
@@ -166,6 +168,7 @@ def build_dual_profile_decoder_engine(
     verbose: bool = False,
     dynamic_kv_profile_rows: list[int] | None = None,
     profile_mode: str = "dual_profile",
+    native_kv_cache: bool = False,
 ) -> bytes:
     """Build a prefill/decode-capable dynamic-Sq decoder engine.
 
@@ -193,10 +196,16 @@ def build_dual_profile_decoder_engine(
     bucket profiles are requested so each profile can constrain their row count.
     """
     _supports_config(config, weights)
-    if profile_mode not in ("dual_profile", "prefill"):
+    if profile_mode not in ("dual_profile", "prefill", "decode"):
         raise ValueError(
-            "profile_mode must be 'dual_profile' or 'prefill', "
+            "profile_mode must be 'dual_profile', 'prefill', or 'decode', "
             f"got {profile_mode!r}")
+
+    if native_kv_cache and dynamic_kv_profile_rows:
+        raise ValueError(
+            "Lance native KV uses one full-capacity user buffer, not bucket profiles")
+    if native_kv_cache and position_type != "rope":
+        raise ValueError("Lance native KV requires RoPE")
 
     if max_prefill_length is None:
         max_prefill_length = max_cache_length
@@ -246,9 +255,18 @@ def build_dual_profile_decoder_engine(
                 "rope_scaling.mrope_section must sum to half the rotary dimension; "
                 f"got {mrope_section} for rotary dimension {rotary_embedding_dim}")
 
+    native_rope_inv_freq: np.ndarray | None = None
+    if native_kv_cache:
+        native_rope_inv_freq = graph_ops.make_native_active_rope_inv_freq(
+            head_dim,
+            config.rope_theta,
+            partial_rotary_factor,
+            round_inv_freq_to_bf16=round_rope_inv_freq_to_bf16,
+        )
+
     builder_context = create_builder_context(
         verbose=verbose,
-        workspace_bytes=1 << 30,
+        workspace_bytes=16 << 30 if native_kv_cache else 1 << 30,
     )
     builder = builder_context.builder
     network = builder_context.network
@@ -267,7 +285,21 @@ def build_dual_profile_decoder_engine(
     mrope_position_ids = (
         network.add_input("mrope_position_ids", trt.int32, (3, -1))
         if mrope_section is not None else None)
-    attention_mask = network.add_input("attention_mask", trt.float32, (-1, -1))
+    # Lance prefill needs an active-width additive mask for its bidirectional
+    # vision span. Decode is purely causal and uses IAttention's fused
+    # LOWER_RIGHT mask, avoiding a per-token host/device mask transfer.
+    attention_mask = (
+        None
+        if native_kv_cache and profile_mode == "decode"
+        else network.add_input("attention_mask", trt.float32, (-1, -1))
+    )
+    cache_write_indices: trt.ITensor | None = None
+    key_value_lengths: trt.ITensor | None = None
+    if native_kv_cache:
+        cache_write_indices = network.add_input(
+            "cache_write_indices", trt.int32, (1,))
+        key_value_lengths = network.add_input(
+            "key_value_lengths", trt.int32, (1,))
     input_embed_tensor = None
     use_input_embed_tensor = None
     if embed_input:
@@ -276,8 +308,10 @@ def build_dual_profile_decoder_engine(
         use_input_embed_tensor = network.add_input(
             "use_input_embed", trt.float32, (-1, 1))
 
-    cache_shape: tuple[int, int]
-    if multi_bucket_decode:
+    cache_shape: tuple[int, ...]
+    if native_kv_cache:
+        cache_shape = (1, num_kv_heads, max_cache_length, head_dim)
+    elif multi_bucket_decode:
         cache_shape = (-1, kv_attention_size)
     else:
         cache_shape = (max_cache_length, kv_attention_size)
@@ -294,7 +328,7 @@ def build_dual_profile_decoder_engine(
         cache_v_inputs.append(cv)
 
     # Cast mask to compute dtype for elementwise broadcast.
-    if work_trt_dtype != trt.float32:
+    if attention_mask is not None and work_trt_dtype != trt.float32:
         attention_mask_work = network.add_cast(
             attention_mask, work_trt_dtype).get_output(0)
     else:
@@ -313,11 +347,23 @@ def build_dual_profile_decoder_engine(
             prof.set_shape(
                 "mrope_position_ids",
                 (3, min_sq), (3, opt_sq), (3, max_sq))
-        prof.set_shape(
-            "attention_mask",
-            (min_sq, max_cache_length + min_sq),
-            (opt_sq, max_cache_length + opt_sq),
-            (max_sq, max_cache_length + max_sq))
+        opt_kv = min(max_cache_length, max(opt_sq, 4096))
+        if native_kv_cache and attention_mask is not None:
+            # Mask width is the runtime-active KV prefix, independent of the
+            # physical cache capacity. Later chunks therefore use wider masks
+            # without ever materializing [Sq, capacity] unless all 128K tokens
+            # are genuinely active.
+            prof.set_shape(
+                "attention_mask",
+                (min_sq, min_sq),
+                (opt_sq, opt_kv),
+                (max_sq, max_cache_length))
+        elif not native_kv_cache:
+            prof.set_shape(
+                "attention_mask",
+                (min_sq, max_cache_length + min_sq),
+                (opt_sq, max_cache_length + opt_sq),
+                (max_sq, max_cache_length + max_sq))
         if embed_input:
             prof.set_shape(
                 "input_embed", (min_sq, hidden), (opt_sq, hidden), (max_sq, hidden))
@@ -342,6 +388,8 @@ def build_dual_profile_decoder_engine(
         _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
                      cache_rows_min=1, cache_rows_opt=max_cache_length,
                      cache_rows_max=max_cache_length)
+    elif profile_mode == "decode":
+        _add_profile(1, 1, fixed=True)
     elif _os_dbg.environ.get("TRTMC_DECODE_ONLY_DEBUG") == "1":
         # Diagnostic: build a one-profile engine with dynamic-shape inputs
         # but Sq pinned to 1. Lets us isolate dynamic-shape enqueueV3
@@ -379,40 +427,58 @@ def build_dual_profile_decoder_engine(
         network, (vocab, hidden), weights["embedding"],
         work_np_dtype, work_trt_dtype)
 
-    # RoPE tables (only when position_type == "rope"). Built for the worst
-    # case key length max_cache_length + max_prefill_length, since RoPE is
-    # gathered by position_id at runtime. The half-dim tables feed TRT's
-    # native IRotaryEmbeddingLayer.
+    # Native KV evaluates RoPE only for this enqueue's positions, so engine
+    # size does not scale with the model's 128K context. Legacy graph roles
+    # retain their indexed tables for backward compatibility outside this
+    # family-owned native route.
     cos_half_table: trt.ITensor | None = None
     sin_half_table: trt.ITensor | None = None
     if position_type == "rope":
-        kmax = max_cache_length + max_prefill_length
         graph_ops.validate_native_rope_dim(rotary_embedding_dim)
-        cos_half_np = graph_ops.make_rope_table_half_dim(
-            kmax, head_dim, config.rope_theta, True,
-            partial_rotary_factor, interleaved=interleaved_rope,
-            round_inv_freq_to_bf16=round_rope_inv_freq_to_bf16)
-        sin_half_np = graph_ops.make_rope_table_half_dim(
-            kmax, head_dim, config.rope_theta, False,
-            partial_rotary_factor, interleaved=interleaved_rope,
-            round_inv_freq_to_bf16=round_rope_inv_freq_to_bf16)
-        if round_rope_inv_freq_to_bf16:
-            cos_half_table = graph_ops.add_constant(
-                network, cos_half_np.shape, cos_half_np, dtype=np.float32)
-            sin_half_table = graph_ops.add_constant(
-                network, sin_half_np.shape, sin_half_np, dtype=np.float32)
-            if work_trt_dtype != trt.float32:
-                cos_half_table = network.add_cast(
-                    cos_half_table, work_trt_dtype).get_output(0)
-                sin_half_table = network.add_cast(
-                    sin_half_table, work_trt_dtype).get_output(0)
+        if native_kv_cache:
+            assert native_rope_inv_freq is not None
+            if mrope_position_ids is not None and mrope_section is not None:
+                cos_half_table, sin_half_table = graph_ops.add_active_mrope_cache(
+                    network,
+                    mrope_position_ids,
+                    native_rope_inv_freq,
+                    mrope_section,
+                    work_trt_dtype,
+                )
+            else:
+                cos_half_table, sin_half_table = graph_ops.add_active_rope_cache(
+                    network,
+                    position_id,
+                    native_rope_inv_freq,
+                    work_trt_dtype,
+                )
         else:
-            cos_half_table = _const_in_work_dtype(
-                network, cos_half_np.shape, cos_half_np,
-                work_np_dtype, work_trt_dtype)
-            sin_half_table = _const_in_work_dtype(
-                network, sin_half_np.shape, sin_half_np,
-                work_np_dtype, work_trt_dtype)
+            kmax = max_cache_length + max_prefill_length
+            cos_half_np = graph_ops.make_rope_table_half_dim(
+                kmax, head_dim, config.rope_theta, True,
+                partial_rotary_factor, interleaved=interleaved_rope,
+                round_inv_freq_to_bf16=round_rope_inv_freq_to_bf16)
+            sin_half_np = graph_ops.make_rope_table_half_dim(
+                kmax, head_dim, config.rope_theta, False,
+                partial_rotary_factor, interleaved=interleaved_rope,
+                round_inv_freq_to_bf16=round_rope_inv_freq_to_bf16)
+            if round_rope_inv_freq_to_bf16:
+                cos_half_table = graph_ops.add_constant(
+                    network, cos_half_np.shape, cos_half_np, dtype=np.float32)
+                sin_half_table = graph_ops.add_constant(
+                    network, sin_half_np.shape, sin_half_np, dtype=np.float32)
+                if work_trt_dtype != trt.float32:
+                    cos_half_table = network.add_cast(
+                        cos_half_table, work_trt_dtype).get_output(0)
+                    sin_half_table = network.add_cast(
+                        sin_half_table, work_trt_dtype).get_output(0)
+            else:
+                cos_half_table = _const_in_work_dtype(
+                    network, cos_half_np.shape, cos_half_np,
+                    work_np_dtype, work_trt_dtype)
+                sin_half_table = _const_in_work_dtype(
+                    network, sin_half_np.shape, sin_half_np,
+                    work_np_dtype, work_trt_dtype)
 
     # Learned position embedding (GPT-2 / OPT / GPT-Neo / XGLM).
     position_embed_table: trt.ITensor | None = None
@@ -505,7 +571,9 @@ def build_dual_profile_decoder_engine(
 
     # Build the 4D additive mask once — shared across layers. ALiBi
     # variants augment the mask with per-head linear bias.
-    if position_type == "alibi":
+    if attention_mask_work is None:
+        mask_4d = None
+    elif position_type == "alibi":
         mask_4d = graph_ops.add_alibi_mask_4d(
             network, attention_mask_work, position_id,
             alibi_slopes_tensor, alibi_cache_positions_fp32,
@@ -565,7 +633,18 @@ def build_dual_profile_decoder_engine(
         # Position embedding (RoPE only; learned was applied above and ALiBi
         # is added into the attention mask).
         if position_type == "rope":
-            if mrope_position_ids is not None and mrope_section is not None:
+            if native_kv_cache:
+                q = graph_ops.add_apply_rope_native_sequence(
+                    network, q, num_heads, head_dim,
+                    cos_half_table, sin_half_table,
+                    rotary_embedding_dim, interleaved_rope,
+                    sequence_length=None)
+                k = graph_ops.add_apply_rope_native_sequence(
+                    network, k, num_kv_heads, head_dim,
+                    cos_half_table, sin_half_table,
+                    rotary_embedding_dim, interleaved_rope,
+                    sequence_length=None)
+            elif mrope_position_ids is not None and mrope_section is not None:
                 q = graph_ops.add_apply_mrope_native_sequence(
                     network, q, num_heads, head_dim,
                     cos_half_table, sin_half_table, mrope_position_ids,
@@ -586,22 +665,44 @@ def build_dual_profile_decoder_engine(
                     rotary_embedding_dim, interleaved_rope,
                     sequence_length=None)
 
-        # Present K / V (this step's raw K / V), shape (Sq, attn_size).
-        present_k_outs.append(k)
-        present_v_outs.append(v)
-
-        # Concatenate cached + current K / V along the sequence dim.
-        all_k_cat = network.add_concatenation([cache_k_inputs[layer_idx], k])
-        all_k_cat.axis = 0
-        all_v_cat = network.add_concatenation([cache_v_inputs[layer_idx], v])
-        all_v_cat.axis = 0
-
-        context = graph_ops.add_attention_from_rows(
-            network, q, all_k_cat.get_output(0), all_v_cat.get_output(0),
-            num_heads=num_heads, head_dim=head_dim,
-            num_kv_heads=num_kv_heads,
-            q_seq=None, kv_seq=None, causal=False, mask=mask_4d,
-            scale=attn_scale, tag=f"{prefix}.attn")
+        if native_kv_cache:
+            assert cache_write_indices is not None
+            assert key_value_lengths is not None
+            native_attention = graph_ops.add_native_kv_cache_attention_from_rows(
+                network,
+                q,
+                k,
+                v,
+                cache_k_inputs[layer_idx],
+                cache_v_inputs[layer_idx],
+                cache_write_indices,
+                key_value_lengths,
+                mask_4d,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                q_seq=None,
+                scale=attn_scale,
+                tag=f"{prefix}.attn",
+            )
+            context = native_attention["context"]
+            present_k_outs.append(native_attention["present_k"])
+            present_v_outs.append(native_attention["present_v"])
+        else:
+            # Legacy path remains callable only for non-Lance internal tests;
+            # LancePlugin always selects native_kv_cache=True and fails closed.
+            present_k_outs.append(k)
+            present_v_outs.append(v)
+            all_k_cat = network.add_concatenation([cache_k_inputs[layer_idx], k])
+            all_k_cat.axis = 0
+            all_v_cat = network.add_concatenation([cache_v_inputs[layer_idx], v])
+            all_v_cat.axis = 0
+            context = graph_ops.add_attention_from_rows(
+                network, q, all_k_cat.get_output(0), all_v_cat.get_output(0),
+                num_heads=num_heads, head_dim=head_dim,
+                num_kv_heads=num_kv_heads,
+                q_seq=None, kv_seq=None, causal=False, mask=mask_4d,
+                scale=attn_scale, tag=f"{prefix}.attn")
 
         attn_out = matmul(context, attention_size, hidden,
                           weights[f"{prefix}.w_o"], f"{prefix}.w_o")
@@ -709,7 +810,10 @@ def build_dual_profile_decoder_engine(
         network.mark_output(pv)
 
     if verbose:
-        mode_label = "prefill-profile" if profile_mode == "prefill" else "dual-profile"
+        mode_label = {
+            "prefill": "prefill-profile",
+            "decode": "decode-profile",
+        }.get(profile_mode, "dual-profile")
         print(f"[trtmc build] Building {mode_label} engine "
               f"(layers={num_layers}, hidden={hidden}, attn={attention_size}, "
               f"kv={kv_attention_size}, "

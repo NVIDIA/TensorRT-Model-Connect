@@ -97,22 +97,6 @@ int32_t infer_feature_dim(const TrtModule& encoder, int32_t configured_dim) {
     return 0;
 }
 
-std::vector<const float*>
-select_deepstack_feature_pointers(const std::vector<std::vector<float>>& deepstack_features,
-                                  int32_t feature_index, int32_t feature_dim) {
-    std::vector<const float*> embeds;
-    embeds.reserve(deepstack_features.size());
-    for (const auto& deepstack : deepstack_features) {
-        const int32_t count =
-            static_cast<int32_t>(deepstack.size() / static_cast<std::size_t>(feature_dim));
-        embeds.push_back(feature_index < count
-                             ? deepstack.data() +
-                                   static_cast<std::size_t>(feature_index) * feature_dim
-                             : nullptr);
-    }
-    return embeds;
-}
-
 struct VlSequenceEmbeddingInputs {
     std::vector<float> input_embed;
     std::vector<float> use_input_embed;
@@ -124,7 +108,8 @@ VlSequenceEmbeddingInputs
 build_vl_sequence_embedding_inputs(const std::vector<int32_t>& input_ids, int32_t image_token_id,
                                    const std::vector<float>& image_features,
                                    const std::vector<std::vector<float>>& deepstack_features,
-                                   int32_t num_features, int32_t feature_dim) {
+                                   int32_t num_features, int32_t feature_dim,
+                                   int32_t feature_start = 0) {
     const auto sq = input_ids.size();
     VlSequenceEmbeddingInputs result;
     result.input_embed.assign(sq * static_cast<std::size_t>(feature_dim), 0.0F);
@@ -134,7 +119,7 @@ build_vl_sequence_embedding_inputs(const std::vector<int32_t>& input_ids, int32_
     for (auto& level : result.deepstack_embed)
         level.assign(sq * static_cast<std::size_t>(feature_dim), 0.0F);
 
-    int32_t feature_index = 0;
+    int32_t feature_index = feature_start;
     for (std::size_t token_index = 0; token_index < sq; ++token_index) {
         if (input_ids[token_index] != image_token_id || feature_index >= num_features)
             continue;
@@ -175,15 +160,12 @@ bool gather_vl_prefill_kv_pointers(TrtModule& prefill, const LanceConfig& config
 }
 
 LanceKvCache* eligible_vl_prefill_cache(TrtModule* prefill, LanceInferenceState* state,
-                                        const LanceConfig& config, int32_t sequence_length,
-                                        int32_t feature_dim) {
+                                        const LanceConfig& config, int32_t feature_dim) {
     if (prefill == nullptr)
         return nullptr;
-    if (sequence_length <= 0 || feature_dim <= 0 || config.num_layers <= 0)
+    if (feature_dim <= 0 || config.num_layers <= 0 || config.prefill_max_length <= 0)
         return nullptr;
     if (!prefill->has_input("input_embed"))
-        return nullptr;
-    if (config.prefill_max_length > 0 && sequence_length > config.prefill_max_length)
         return nullptr;
     return dynamic_cast<LanceKvCache*>(state);
 }
@@ -220,10 +202,6 @@ struct LanceVlMropeContext {
     LanceMropePositions positions;
 
     const LanceMropePositions* prefill_positions() const { return enabled ? &positions : nullptr; }
-
-    const std::array<int32_t, 3>* token_position(std::size_t index) const {
-        return enabled ? &positions.token_positions[index] : nullptr;
-    }
 
     int32_t decode_position() const { return enabled ? positions.next_position : -1; }
 };
@@ -281,16 +259,19 @@ bool add_vl_prefill_deepstack_inputs(TrtModule& prefill, TensorMap& inputs,
 
 bool add_lance_mrope_prefill_input(TrtModule& prefill, const std::vector<int32_t>& input_ids,
                                    const LanceMropePositions* mrope, int32_t sequence_length,
-                                   std::vector<int32_t>& positions, TensorMap& inputs) {
+                                   int32_t token_offset, std::vector<int32_t>& positions,
+                                   TensorMap& inputs) {
     if (!prefill.has_input("mrope_position_ids"))
         return true;
-    if (mrope == nullptr || mrope->token_positions.size() != input_ids.size())
+    (void)input_ids;
+    if (mrope == nullptr || token_offset < 0 ||
+        static_cast<std::size_t>(token_offset + sequence_length) > mrope->token_positions.size())
         return false;
     positions.resize(static_cast<std::size_t>(3 * sequence_length));
     for (int32_t token_index = 0; token_index < sequence_length; ++token_index) {
         for (int32_t axis = 0; axis < 3; ++axis) {
             positions[static_cast<std::size_t>(axis * sequence_length + token_index)] =
-                mrope->token_positions[static_cast<std::size_t>(token_index)]
+                mrope->token_positions[static_cast<std::size_t>(token_offset + token_index)]
                                       [static_cast<std::size_t>(axis)];
         }
     }
@@ -498,6 +479,11 @@ std::vector<int32_t> LancePipeline::generate_from_ids(const std::vector<int32_t>
                                                       const LanceSamplingParams& params) {
     if (max_new_tokens == 0 || input_ids.empty())
         return input_ids;
+    if (max_new_tokens < 0 || input_ids.size() + static_cast<std::size_t>(max_new_tokens) >
+                                  static_cast<std::size_t>(state_->max_length())) {
+        throw std::runtime_error(
+            "LancePipeline: prompt plus requested output exceeds the model context");
+    }
 
     // Create a per-call sampler if none was injected at construction time.
     LanceISampler* active_sampler = sampler_.get();
@@ -511,11 +497,7 @@ std::vector<int32_t> LancePipeline::generate_from_ids(const std::vector<int32_t>
     reset_generation_context(static_cast<int32_t>(input_ids.size()));
 
     std::vector<float> logits;
-
-    for (std::size_t i = 0; i + 1 < input_ids.size(); ++i)
-        run_text_step(input_ids[i], logits);
-
-    run_text_step(input_ids.back(), logits);
+    run_text_prefill_batched(input_ids, logits);
 
     std::vector<int32_t> output = input_ids;
     const int32_t vocab_size = static_cast<int32_t>(logits.size());
@@ -523,7 +505,7 @@ std::vector<int32_t> LancePipeline::generate_from_ids(const std::vector<int32_t>
     for (int32_t step = 0; step < max_new_tokens; ++step) {
         LanceSampleResult result = active_sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
-        if (result.is_eos)
+        if (result.is_eos || step + 1 == max_new_tokens)
             break;
         run_text_step(result.token_id, logits);
     }
@@ -537,6 +519,11 @@ std::vector<int32_t> LancePipeline::generate_vl_from_ids(
     int32_t feature_dim, int32_t max_new_tokens, const LanceSamplingParams& params) {
     if (max_new_tokens == 0 || input_ids.empty())
         return input_ids;
+    if (max_new_tokens < 0 || input_ids.size() + static_cast<std::size_t>(max_new_tokens) >
+                                  static_cast<std::size_t>(state_->max_length())) {
+        throw std::runtime_error(
+            "LancePipeline: prompt plus requested output exceeds the model context");
+    }
 
     // Create a per-call sampler if none was injected at construction time.
     LanceISampler* active_sampler = sampler_.get();
@@ -552,15 +539,8 @@ std::vector<int32_t> LancePipeline::generate_vl_from_ids(
     std::vector<float> logits;
     const auto mrope = make_lance_vl_mrope_context(
         *text_decoder_, input_ids, config_.image_token_id, num_features, vl_preprocess_);
-    if (!run_vl_prefill_batched(input_ids, image_features, deepstack_features, num_features,
-                                feature_dim, mrope.prefill_positions(), logits)) {
-        int32_t feature_index = 0;
-        for (std::size_t index = 0; index < input_ids.size(); ++index) {
-            const auto tid = input_ids[index];
-            run_vl_prefill_token(tid, image_features, deepstack_features, num_features, feature_dim,
-                                 feature_index, mrope.token_position(index), logits);
-        }
-    }
+    run_vl_prefill_batched(input_ids, image_features, deepstack_features, num_features, feature_dim,
+                           mrope.prefill_positions(), logits);
     state_->mark_prefill_complete();
 
     std::vector<int32_t> output = input_ids;
@@ -569,66 +549,121 @@ std::vector<int32_t> LancePipeline::generate_vl_from_ids(
     return output;
 }
 
-bool LancePipeline::run_vl_prefill_batched(
+void LancePipeline::run_text_prefill_batched(const std::vector<int32_t>& input_ids,
+                                             std::vector<float>& logits) {
+    if (prefill_ == nullptr)
+        throw std::runtime_error("LancePipeline: native split text prefill is unavailable");
+    const int32_t feature_dim = resolve_input_embed_dim(*prefill_, config_.vision_output_dim);
+    auto* kv_cache = eligible_vl_prefill_cache(prefill_.get(), state_.get(), config_, feature_dim);
+    if (kv_cache == nullptr)
+        throw std::runtime_error("LancePipeline: native split text prefill is unavailable");
+
+    kv_cache->bind_cache_inputs(*prefill_);
+    const int32_t total = static_cast<int32_t>(input_ids.size());
+    int32_t offset = 0;
+    while (offset < total) {
+        const int32_t chunk_size = std::min(config_.prefill_max_length, total - offset);
+        std::vector<int32_t> chunk_ids(input_ids.begin() + offset,
+                                       input_ids.begin() + offset + chunk_size);
+        auto embedding_inputs = build_vl_sequence_embedding_inputs(
+            chunk_ids, config_.image_token_id, {}, {}, 0, feature_dim);
+
+        TensorMap inputs;
+        add_vl_prefill_base_inputs(inputs, *state_, chunk_ids, embedding_inputs, feature_dim);
+        auto outputs = prefill_->forward(inputs);
+        if (!copy_last_prefill_logits(outputs, config_.vocab_size, logits))
+            throw std::runtime_error("LancePipeline: native text prefill logits are invalid");
+
+        std::vector<const void*> present_k;
+        std::vector<const void*> present_v;
+        if (!gather_vl_prefill_kv_pointers(*prefill_, config_, present_k, present_v))
+            throw std::runtime_error("LancePipeline: native text prefill KV outputs are missing");
+        if (offset == 0)
+            kv_cache->write_prefill_kv(present_k, present_v, chunk_size);
+        else
+            kv_cache->append_prefill_kv(present_k, present_v, chunk_size);
+        offset += chunk_size;
+    }
+    state_->bind_to(*text_decoder_);
+}
+
+void LancePipeline::run_vl_prefill_batched(
     const std::vector<int32_t>& input_ids, const std::vector<float>& image_features,
     const std::vector<std::vector<float>>& deepstack_features, int32_t num_features,
     int32_t feature_dim, const LanceMropePositions* mrope, std::vector<float>& logits) {
     const auto sq = static_cast<int32_t>(input_ids.size());
-    auto* kv_cache =
-        eligible_vl_prefill_cache(prefill_.get(), state_.get(), config_, sq, feature_dim);
+    auto* kv_cache = eligible_vl_prefill_cache(prefill_.get(), state_.get(), config_, feature_dim);
     if (kv_cache == nullptr)
-        return false;
+        throw std::runtime_error("LancePipeline: native split VL prefill is unavailable");
     if (!valid_vl_features(image_features, num_features, feature_dim))
-        return false;
+        throw std::runtime_error("LancePipeline: invalid native VL feature buffer");
 
     kv_cache->bind_cache_inputs(*prefill_);
-    auto embedding_inputs =
-        build_vl_sequence_embedding_inputs(input_ids, config_.image_token_id, image_features,
-                                           deepstack_features, num_features, feature_dim);
-
-    TensorMap inputs;
-    add_vl_prefill_base_inputs(inputs, *state_, input_ids, embedding_inputs, feature_dim);
     const auto [vision_start, vision_end] =
         find_lance_vision_attention_block(input_ids, config_.image_token_id);
-    if (vision_start >= 0)
-        kv_cache->prepare_prefill_with_bidirectional_block(inputs, sq, vision_start, vision_end);
-    std::vector<int32_t> mrope_positions;
-    if (!add_lance_mrope_prefill_input(*prefill_, input_ids, mrope, sq, mrope_positions, inputs))
-        return false;
-    if (!add_vl_prefill_deepstack_inputs(*prefill_, inputs, embedding_inputs, sq, feature_dim))
-        return false;
-
-    auto outputs = prefill_->forward(inputs);
-    if (!copy_last_prefill_logits(outputs, config_.vocab_size, logits))
-        return false;
-
-    std::vector<const void*> present_k;
-    std::vector<const void*> present_v;
-    if (!gather_vl_prefill_kv_pointers(*prefill_, config_, present_k, present_v))
-        return false;
-    kv_cache->write_prefill_kv(present_k, present_v, sq);
-    return true;
-}
-
-void LancePipeline::run_vl_prefill_token(int32_t token_id, const std::vector<float>& image_features,
-                                         const std::vector<std::vector<float>>& deepstack_features,
-                                         int32_t num_features, int32_t feature_dim,
-                                         int32_t& feature_index,
-                                         const std::array<int32_t, 3>* mrope_position,
-                                         std::vector<float>& logits) {
-    const bool use_image_embed = token_id == config_.image_token_id && feature_index < num_features;
-    if (!use_image_embed) {
-        run_text_step_with_embed(token_id, nullptr, 0.0F, {}, 0.0F, mrope_position, logits);
-        return;
+    if (vision_start >= 0 && vision_end - vision_start > config_.prefill_max_length) {
+        throw std::runtime_error(
+            "LancePipeline: vision attention span exceeds the native prefill profile");
     }
 
-    const float* embed =
-        image_features.data() + static_cast<std::size_t>(feature_index) * feature_dim;
-    const auto deepstack_embeds =
-        select_deepstack_feature_pointers(deepstack_features, feature_index, feature_dim);
-    run_text_step_with_embed(token_id, embed, 1.0F, deepstack_embeds,
-                             deepstack_embeds.empty() ? 0.0F : 1.0F, mrope_position, logits);
-    ++feature_index;
+    int32_t offset = 0;
+    int32_t feature_offset = 0;
+    while (offset < sq) {
+        int32_t chunk_end = std::min(sq, offset + config_.prefill_max_length);
+        // Never split the bidirectional vision span. A chunk may include text
+        // on either side as long as the complete span is present.
+        if (vision_start >= 0 && offset < vision_start && chunk_end > vision_start &&
+            chunk_end < vision_end) {
+            chunk_end =
+                (vision_end - offset <= config_.prefill_max_length) ? vision_end : vision_start;
+        } else if (vision_start >= 0 && offset >= vision_start && offset < vision_end) {
+            chunk_end = std::max(chunk_end, vision_end);
+        }
+        if (chunk_end <= offset || chunk_end - offset > config_.prefill_max_length)
+            throw std::runtime_error("LancePipeline: could not form a valid native prefill chunk");
+
+        const int32_t chunk_size = chunk_end - offset;
+        std::vector<int32_t> chunk_ids(input_ids.begin() + offset, input_ids.begin() + chunk_end);
+        auto embedding_inputs = build_vl_sequence_embedding_inputs(
+            chunk_ids, config_.image_token_id, image_features, deepstack_features, num_features,
+            feature_dim, feature_offset);
+
+        TensorMap inputs;
+        add_vl_prefill_base_inputs(inputs, *state_, chunk_ids, embedding_inputs, feature_dim);
+        if (vision_start >= offset && vision_end <= chunk_end) {
+            kv_cache->prepare_prefill_with_bidirectional_block(
+                inputs, chunk_size, vision_start - offset, vision_end - offset);
+        }
+        std::vector<int32_t> mrope_positions;
+        if (!add_lance_mrope_prefill_input(*prefill_, chunk_ids, mrope, chunk_size, offset,
+                                           mrope_positions, inputs)) {
+            throw std::runtime_error("LancePipeline: native mRoPE prefill inputs are incomplete");
+        }
+        if (!add_vl_prefill_deepstack_inputs(*prefill_, inputs, embedding_inputs, chunk_size,
+                                             feature_dim)) {
+            throw std::runtime_error(
+                "LancePipeline: native deepstack prefill inputs are incomplete");
+        }
+
+        auto outputs = prefill_->forward(inputs);
+        if (!copy_last_prefill_logits(outputs, config_.vocab_size, logits))
+            throw std::runtime_error("LancePipeline: native VL prefill logits are invalid");
+        std::vector<const void*> present_k;
+        std::vector<const void*> present_v;
+        if (!gather_vl_prefill_kv_pointers(*prefill_, config_, present_k, present_v))
+            throw std::runtime_error("LancePipeline: native VL prefill KV outputs are missing");
+        if (offset == 0)
+            kv_cache->write_prefill_kv(present_k, present_v, chunk_size);
+        else
+            kv_cache->append_prefill_kv(present_k, present_v, chunk_size);
+
+        for (const auto token : chunk_ids) {
+            if (token == config_.image_token_id && feature_offset < num_features)
+                ++feature_offset;
+        }
+        offset = chunk_end;
+    }
+    state_->bind_to(*text_decoder_);
 }
 
 void LancePipeline::run_vl_decode_loop(LanceISampler* sampler, const LanceSamplingParams& params,
@@ -638,7 +673,7 @@ void LancePipeline::run_vl_decode_loop(LanceISampler* sampler, const LanceSampli
     for (int32_t step = 0; step < max_new_tokens; ++step) {
         LanceSampleResult result = sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
-        if (result.is_eos)
+        if (result.is_eos || step + 1 == max_new_tokens)
             break;
         run_text_step(result.token_id, logits, mrope_position);
         if (mrope_position >= 0)
@@ -675,7 +710,7 @@ void LancePipeline::run_text_step_with_embed(int32_t token_id, const float* inpu
 
     if (mrope_position != nullptr && text_decoder_->has_input("mrope_position_ids")) {
         inputs["mrope_position_ids"] =
-            Tensor{const_cast<int32_t*>(mrope_position->data()), {3}, DType::kInt32};
+            Tensor{const_cast<int32_t*>(mrope_position->data()), {3, 1}, DType::kInt32};
     }
 
     std::vector<float> zero_embed;

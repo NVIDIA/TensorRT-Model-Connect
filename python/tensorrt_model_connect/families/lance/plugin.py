@@ -43,6 +43,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ...parallel_config import normalize_parallel_config
+
 from .config import ModelConfig
 from .checkpoint_mapper import (
     WeightDict,
@@ -52,7 +54,7 @@ from .checkpoint_mapper import (
 )
 # Reuse the Qwen-VL vision encoder shape. The decoder builder is local so the
 # Lance family does not depend on another family's text-builder package.
-from .default_decoder import build_standard_decoder_engine
+from .default_dual_profile_decoder import build_dual_profile_decoder_engine
 from .qwen_vl_vision_builder import build_qwen_vl_vision_engine
 
 # Standard Qwen2.5-VL ViT input size; the runtime resizes images to this.
@@ -66,9 +68,22 @@ _LM_HEAD_KEY = "language_model.lm_head.weight"
 class LancePlugin:
     name = "lance"
     runtime_strategy = "lance_vision_language"
+    runtime_capabilities = {"decoder_kv"}
     # During VL prefill the decoder consumes ViT features as input_embed in
     # place of the image-pad token embeddings.
     embed_input = True
+    supports_split_embed_input = True
+
+    def supports_split_decoder_roles(self, config: ModelConfig) -> bool:
+        return self.matches(config.model_type)
+
+    def default_build_precision(self, config: ModelConfig) -> str:
+        del config
+        return "bf16"
+
+    def default_max_cache_length(self, config: ModelConfig) -> int:
+        """Package the complete context without a user-facing build flag."""
+        return int(config.max_position_embeddings)
 
     def matches(self, model_type: str) -> bool:
         # Lance shares model_type "qwen2_5_vl" with real Qwen2.5-VL, so
@@ -88,17 +103,76 @@ class LancePlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
+        max_cache_length: int, *, precision: str = "bf16",
         quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
-        return build_standard_decoder_engine(
-            config, weights, max_cache_length, precision=precision,
-            verbose=verbose, quant_ctx=quant_ctx, embed_input=True,
-            round_rope_inv_freq_to_bf16=(precision == "bf16"),
-            debug_layer_outputs=debug_layer_outputs,
+        parallel = normalize_parallel_config(parallel_config)
+        reasons: list[str] = []
+        if precision != "bf16":
+            reasons.append("precision must be bf16")
+        if max_cache_length != int(config.max_position_embeddings):
+            reasons.append(
+                "max_cache_length must equal the model context "
+                f"({config.max_position_embeddings})")
+        if parallel.enabled:
+            reasons.append("tensor parallel builds are not supported")
+        if quant_ctx is not None or config.raw.get("quantization_config"):
+            reasons.append("quantized builds are not supported")
+        if debug_layer_outputs:
+            reasons.append("debug layer outputs are not supported")
+        if config.raw.get("_fp32_layers"):
+            reasons.append("FP32 layer overrides are not supported")
+        if config.raw.get("dynamic_kv_cache"):
+            reasons.append("dynamic KV bucket profiles are not supported")
+        role = str(config.raw.get("_decoder_engine_role", ""))
+        if role not in ("prefill", "decode"):
+            reasons.append(
+                "an explicit split decoder role (prefill or decode) is required")
+        if config.num_attention_heads % config.num_key_value_heads:
+            reasons.append(
+                "num_attention_heads must be divisible by num_key_value_heads")
+        if config.head_dim <= 0 or config.head_dim % 2:
+            reasons.append("head_dim must be a positive even value")
+        rope_scaling = config.raw.get("rope_scaling") or {}
+        mrope_section = rope_scaling.get("mrope_section")
+        if not isinstance(mrope_section, list) or len(mrope_section) != 3 or any(
+            int(value) <= 0 for value in mrope_section
+        ) or sum(int(value) for value in mrope_section) != config.head_dim // 2:
+            reasons.append(
+                "rope_scaling.mrope_section must contain three positive "
+                "parts summing to head_dim / 2")
+        if reasons:
+            raise ValueError(
+                "Lance native KV build is unsupported: " + "; ".join(reasons))
+
+        config.raw["_decoder_engine_layout_supported"] = True
+        config.raw["_native_kv_cache_metadata"] = {
+            "native_kv_contract_version": 1,
+            "native_kv_cache": True,
+        }
+        return build_dual_profile_decoder_engine(
+            config,
+            weights,
+            max_cache_length,
+            precision="bf16",
+            verbose=verbose,
+            quant_ctx=None,
+            embed_input=True,
+            round_rope_inv_freq_to_bf16=True,
+            # The additive mask is Lance-specific (bidirectional vision span).
+            # Keep each chunk bounded while its width still tracks active KV.
+            max_prefill_length=min(max_cache_length, 4096),
+            profile_mode=role,
+            native_kv_cache=True,
         )
+
+    def get_bundle_config_overrides(
+        self, config: ModelConfig,
+    ) -> dict | None:
+        metadata = config.raw.get("_native_kv_cache_metadata")
+        return dict(metadata) if isinstance(metadata, dict) else None
 
     def build_vision_engine(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,

@@ -18,9 +18,10 @@ This script writes a staged directory (symlinks, no copies of large weights):
       tokenizer.json, vocab.json, merges.txt, generation_config.json [, tokenizer_config.json]
       vision/model.safetensors  # -> Qwen2.5-VL-ViT/vit.safetensors
 
-Then build it (understanding path):
+Then build it (understanding path). The family selects BF16 and the model's
+complete context automatically:
 
-    ./build/trtmc build <out> -o /tmp/lance.trtfb --max-cache-length 384 --precision bf16
+    ./build/trtmc build <out> -o /tmp/lance.trtfb
 
 Generation/editing tasks (t2i/t2v/edit) are not supported yet; this stages the
 understanding sub-model that the ``lance`` family plugin builds.
@@ -129,8 +130,7 @@ def main() -> int:
     print(f"  LLM : {llm_dir}")
     print(f"  ViT : {vit_path}")
     print("Build with:")
-    print(f"  ./build/trtmc build {out} -o /tmp/lance.trtfb "
-          f"--max-cache-length 384 --precision bf16")
+    print(f"  ./build/trtmc build {out} -o /tmp/lance.trtfb")
     print("  ./build/trtmc run /tmp/lance.trtfb --prompt 'Describe this image.' "
           "--image <img> --max-new-tokens 40 --greedy")
     return 0

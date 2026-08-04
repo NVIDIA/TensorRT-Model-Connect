@@ -14,8 +14,8 @@
 // The interface captures the lifecycle of per-sequence inference state:
 //   1. reset()        — prepare for a new sequence
 //   2. bind_to()      — bind state tensors to TRT engine I/O
-//   3. prepare_step() — write state-related inputs (mask, position) into TensorMap
-//   4. advance()      — update state after each decode step
+//   3. prepare_step() — write active mask, position, write index, and KV length
+//   4. advance()      — advance logical length after TensorRT updates in place
 //   5. position()     — current sequence position
 //
 // Implementations:
@@ -41,7 +41,7 @@ class LanceInferenceState {
     // --- Lifecycle ---
 
     // Reset logical state for a new sequence. Implementations may retain device
-    // storage that remains hidden by logical lengths and attention masks.
+    // storage that remains hidden by logical lengths and the active mask.
     virtual void reset() = 0;
 
     // Bind all state tensors to the given TRT module.
@@ -55,8 +55,8 @@ class LanceInferenceState {
     // Pipelines call this instead of manually constructing mask/position tensors.
     virtual void prepare_step(TensorMap& inputs, int32_t seq_len = 1) = 0;
 
-    // Update state after one decode step. Copies "present" outputs
-    // into "cache" inputs, advances position.
+    // Update state after one decode step. Native TensorRT KV engines already
+    // wrote present K/V into the aliased user buffers; this advances position.
     // n_tokens: number of tokens processed in this step (default 1).
     //           >1 for batched prefill / multi-token steps.
     virtual void advance(int32_t n_tokens = 1) = 0;
@@ -79,9 +79,8 @@ class LanceInferenceState {
     // -1 for unbounded (recurrent models with no cache length limit).
     virtual int32_t max_length() const = 0;
 
-    // Desired number of KV rows to expose to the decoder on the next step.
-    // Dynamic-KV runtimes can use this to choose an execution profile/context
-    // before prepare_step() binds the state tensors.
+    // Physical cache rows exposed to TensorRT. Lance owns one full-context
+    // buffer; key_value_lengths controls the active prefix.
     virtual int32_t preferred_cache_rows() const { return max_length(); }
 
     // Number of transformer/SSM layers.

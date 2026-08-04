@@ -7,8 +7,6 @@
   "runtime_strategy": "lance_vision_language",
   "task_strategy": "vision_language_generation",
   "user_contract": "any-to-any",
-  "precision": "bf16",
-  "max_cache_length": 384,
   "trust_remote_code": false,
   "testcases": [
     {
@@ -26,7 +24,7 @@
           "enable_thinking": false
         }
       },
-      "notes": "The existing BF16 graph is retained. Validation runs the pinned upstream Lance x2t_image implementation against the same image and question used by TRTMC."
+      "notes": "The family default builds BF16 split prefill/decode engines with TensorRT native KV cache at Lance's complete 128000-token context. Validation runs the pinned upstream x2t_image implementation against the same image and question used by TRTMC."
     }
   ]
 }

@@ -674,6 +674,130 @@ def validate_native_rope_dim(
     return rotary_embedding_dim
 
 
+def make_native_active_rope_inv_freq(
+    head_dim: int,
+    rope_theta: float,
+    partial_rotary_factor: float = 1.0,
+    *,
+    round_inv_freq_to_bf16: bool = False,
+) -> np.ndarray:
+    """Return only the RoPE frequencies needed by the runtime graph.
+
+    Lance's advertised context is 128K.  Keeping a context-sized cosine and
+    sine table in both decoder plans would make the bundle grow with that
+    capacity even though the table has no persistent runtime state.  The
+    native graph instead evaluates cosine/sine for the active positions.
+    """
+    rotary_ndims = validate_native_rope_dim(
+        int(head_dim * partial_rotary_factor))
+    rope_theta = float(rope_theta)
+    if not np.isfinite(rope_theta) or rope_theta <= 0.0:
+        raise ValueError(
+            "Lance native RoPE requires rope_theta to be finite and positive")
+    dimensions = np.arange(0, rotary_ndims, 2, dtype=np.float32)
+    inv_freq = np.float32(1.0) / np.power(
+        np.float32(rope_theta), dimensions / np.float32(rotary_ndims),
+        dtype=np.float32)
+    if round_inv_freq_to_bf16:
+        bits = inv_freq.view(np.uint32)
+        rounding_bias = np.uint32(0x7FFF) + ((bits >> 16) & np.uint32(1))
+        inv_freq = ((bits + rounding_bias) & np.uint32(0xFFFF0000)).view(
+            np.float32)
+    return inv_freq
+
+
+def _active_rope_angles(
+    network: trt.INetworkDefinition,
+    position_ids: trt.ITensor,
+    inv_freq: np.ndarray,
+) -> trt.ITensor:
+    positions = network.add_cast(position_ids, trt.float32).get_output(0)
+    position_shape = network.add_shape(positions).get_output(0)
+    one = add_constant(
+        network, (1,), np.array([1], dtype=np.int64), dtype=np.int64)
+    shaped = network.add_concatenation([position_shape, one])
+    shaped.axis = 0
+    position_column = network.add_shuffle(positions)
+    position_column.set_input(1, shaped.get_output(0))
+    frequency_shape = (1,) * len(tuple(position_ids.shape)) + (
+        int(inv_freq.size),)
+    frequencies = add_constant(
+        network, frequency_shape, inv_freq.reshape(frequency_shape),
+        dtype=np.float32)
+    return network.add_elementwise(
+        position_column.get_output(0), frequencies,
+        trt.ElementWiseOperation.PROD).get_output(0)
+
+
+def add_active_rope_cache(
+    network: trt.INetworkDefinition,
+    position_ids: trt.ITensor,
+    inv_freq: np.ndarray,
+    output_dtype: trt.DataType,
+) -> tuple[trt.ITensor, trt.ITensor]:
+    """Create rank-3 RoPE caches for only this enqueue's 1-D positions."""
+    angles = _active_rope_angles(network, position_ids, inv_freq)
+    cos_cache = network.add_unary(
+        angles, trt.UnaryOperation.COS).get_output(0)
+    sin_cache = network.add_unary(
+        angles, trt.UnaryOperation.SIN).get_output(0)
+    # _active_rope_angles returns [Sq, D/2] for 1-D position_ids.
+    cos_shuffle = network.add_shuffle(cos_cache)
+    cos_shuffle.reshape_dims = (1, -1, int(inv_freq.size))
+    sin_shuffle = network.add_shuffle(sin_cache)
+    sin_shuffle.reshape_dims = (1, -1, int(inv_freq.size))
+    cos_cache = cos_shuffle.get_output(0)
+    sin_cache = sin_shuffle.get_output(0)
+    if cos_cache.dtype != output_dtype:
+        cos_cache = network.add_cast(cos_cache, output_dtype).get_output(0)
+        sin_cache = network.add_cast(sin_cache, output_dtype).get_output(0)
+    return cos_cache, sin_cache
+
+
+def add_active_mrope_cache(
+    network: trt.INetworkDefinition,
+    position_ids: trt.ITensor,
+    inv_freq: np.ndarray,
+    mrope_section: tuple[int, int, int],
+    output_dtype: trt.DataType,
+) -> tuple[trt.ITensor, trt.ITensor]:
+    """Create Lance temporal/height/width RoPE rows for active tokens only."""
+    sections = tuple(int(value) for value in mrope_section)
+    if len(sections) != 3 or any(value <= 0 for value in sections):
+        raise ValueError("mrope_section must contain three positive integers")
+    if sum(sections) != int(inv_freq.size):
+        raise ValueError(
+            "mrope_section must sum to the number of inverse frequencies")
+
+    angles = _active_rope_angles(network, position_ids, inv_freq)
+
+    def select(unary_op: trt.UnaryOperation) -> trt.ITensor:
+        values = network.add_unary(angles, unary_op).get_output(0)
+        parts = []
+        offset = 0
+        for axis, width in enumerate(sections):
+            axis_index = add_constant(
+                network, (1,), np.array([axis], dtype=np.int32),
+                dtype=np.int32)
+            axis_values = network.add_gather(
+                values, axis_index, 0).get_output(0)
+            columns = add_constant(
+                network, (width,),
+                np.arange(offset, offset + width, dtype=np.int32),
+                dtype=np.int32)
+            parts.append(network.add_gather(
+                axis_values, columns, 2).get_output(0))
+            offset += width
+        joined = network.add_concatenation(parts)
+        joined.axis = 2
+        result = joined.get_output(0)
+        if result.dtype != output_dtype:
+            result = network.add_cast(result, output_dtype).get_output(0)
+        return result
+
+    return select(trt.UnaryOperation.COS), select(trt.UnaryOperation.SIN)
+
+
 def make_rope_table_half_dim(
     max_cache_length: int,
     head_dim: int,
@@ -1375,6 +1499,153 @@ def add_attention_from_rows(
     return reshape_heads_4d_to_rows(
         network, ctx_4d, attention_size, sequence_length=q_seq,
         tag=None if tag is None else tag + ".ctx")
+
+
+def add_native_kv_cache_attention_from_rows(
+    network: trt.INetworkDefinition,
+    q: trt.ITensor,
+    k_update: trt.ITensor,
+    v_update: trt.ITensor,
+    cache_k: trt.ITensor,
+    cache_v: trt.ITensor,
+    cache_write_indices: trt.ITensor,
+    key_value_lengths: trt.ITensor,
+    mask: trt.ITensor | None,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    q_seq: int | None,
+    scale: float | None = None,
+    tag: str | None = None,
+) -> dict[str, trt.ITensor]:
+    """Update the full cache and attend only the runtime-active prefix.
+
+    Lance needs an additive segmented mask for the bidirectional vision span.
+    In prefill, the mask's already-bound runtime width drives a dynamic cache
+    slice so mask and K/V have the same active length.  Decode has no additive
+    mask and lets ``IAttention.key_value_lengths`` limit work directly.  The
+    physical cache capacity therefore remains only persistent storage.
+    """
+    if not hasattr(network, "add_kv_cache_update") or not hasattr(
+        network, "add_attention_v2"
+    ):
+        raise RuntimeError(
+            "Lance native KV requires TensorRT add_kv_cache_update and "
+            "add_attention_v2 support")
+
+    k_update_4d = reshape_rows_to_heads_4d(
+        network, k_update, num_kv_heads, head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".k_update")
+    v_update_4d = reshape_rows_to_heads_4d(
+        network, v_update, num_kv_heads, head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".v_update")
+    update_k = network.add_kv_cache_update(
+        cache_k, k_update_4d, cache_write_indices, trt.KVCacheMode.LINEAR)
+    update_v = network.add_kv_cache_update(
+        cache_v, v_update_4d, cache_write_indices, trt.KVCacheMode.LINEAR)
+    if update_k is None or update_v is None:
+        raise RuntimeError("TensorRT failed to create Lance KV-cache updates")
+    if tag:
+        update_k.name = tag + ".cache_k_update"
+        update_v.name = tag + ".cache_v_update"
+    updated_k = update_k.get_output(0)
+    updated_v = update_v.get_output(0)
+
+    attention_k = updated_k
+    attention_v = updated_v
+    if mask is not None:
+        # The generic TRT module establishes every dynamic input dimension
+        # before querying output shapes.  Derive the active K/V width from the
+        # mask dimension rather than from a shape-tensor value that is not
+        # available until enqueue; this keeps module creation deterministic.
+        # ``mask`` is [1, 1, Sq, K]; the active KV prefix is its last axis.
+        mask_shape = network.add_shape(mask).get_output(0)
+        width_index = add_constant(
+            network, (1,), np.array([3], dtype=np.int32), dtype=np.int32)
+        active_length = network.add_gather(
+            mask_shape, width_index, 0).get_output(0)
+        one = add_constant(
+            network, (1,), np.array([1], dtype=np.int64), dtype=np.int64)
+        heads = add_constant(
+            network, (1,), np.array([num_kv_heads], dtype=np.int64),
+            dtype=np.int64)
+        dim = add_constant(
+            network, (1,), np.array([head_dim], dtype=np.int64),
+            dtype=np.int64)
+        active_shape = network.add_concatenation(
+            [one, heads, active_length, dim])
+        active_shape.axis = 0
+
+        def active_prefix(cache: trt.ITensor) -> trt.ITensor:
+            sliced = network.add_slice(
+                cache, start=(0, 0, 0, 0),
+                shape=(1, num_kv_heads, 1, head_dim),
+                stride=(1, 1, 1, 1))
+            sliced.set_input(2, active_shape.get_output(0))
+            return sliced.get_output(0)
+
+        attention_k = active_prefix(updated_k)
+        attention_v = active_prefix(updated_v)
+
+    q_4d = reshape_rows_to_heads_4d(
+        network, q, num_heads, head_dim, sequence_length=q_seq,
+        tag=None if tag is None else tag + ".q")
+    if q_4d.dtype not in (trt.float16, trt.bfloat16):
+        raise ValueError("Lance native attention requires FP16 or BF16 queries")
+    if scale is None:
+        scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
+    if mask is not None:
+        # TRT 11.2 has no dedicated custom-mask tactic covering Lance's full
+        # 128K profile, and its automatic IAttention decomposition produces an
+        # invalid dynamic output shape for this GQA geometry.  Express the
+        # same scaled-dot-product attention with native TRT primitives for the
+        # split prefill engine.  K/V has already been narrowed to the active
+        # mask width, so no physical-capacity score tensor is materialized.
+        attention_k = _repeat_kv_heads_4d(
+            network, attention_k, num_heads=num_heads,
+            num_kv_heads=num_kv_heads, head_dim=head_dim)
+        attention_v = _repeat_kv_heads_4d(
+            network, attention_v, num_heads=num_heads,
+            num_kv_heads=num_kv_heads, head_dim=head_dim)
+        context_4d = _add_decomposed_attention_core(
+            network, q_4d, attention_k, attention_v,
+            mask=mask, scale=scale, fp32_accumulation=False)
+    else:
+        # Decode stays on the dedicated native IAttention tactic.  Apply the
+        # FP32 score scale before the BF16 rounding boundary, matching the
+        # native Qwen/Llama contract.
+        query_dtype = q_4d.dtype
+        q_fp32 = network.add_cast(q_4d, trt.float32).get_output(0)
+        scale_tensor = add_constant(
+            network, (1, 1, 1, 1),
+            np.array([[[[scale]]]], dtype=np.float32), dtype=np.float32)
+        q_scaled = network.add_elementwise(
+            q_fp32, scale_tensor, trt.ElementWiseOperation.PROD).get_output(0)
+        q_scaled = network.add_cast(q_scaled, query_dtype).get_output(0)
+        attention = network.add_attention_v2(
+            q_scaled, attention_k, attention_v,
+            trt.AttentionNormalizationOp.SOFTMAX,
+            trt.CausalMaskKind.LOWER_RIGHT)
+        if attention is None:
+            raise RuntimeError("TensorRT failed to create Lance native attention")
+        attention.decomposable = False
+        attention.key_value_lengths = key_value_lengths
+        if tag:
+            attention.name = tag
+        context_4d = attention.get_output(0)
+
+    context = reshape_heads_4d_to_rows(
+        network, context_4d, num_heads * head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".ctx")
+    return {
+        "context": context,
+        "present_k": updated_k,
+        "present_v": updated_v,
+    }
 
 
 # Backward-compatible name used by existing tests and call sites.
