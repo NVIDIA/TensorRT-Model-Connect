@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from .task_contract import (
+from tensorrt_model_connect.families.locateanything.task_contract import (
     box_iou,
     detect_text_prompt,
     detection_prompt,

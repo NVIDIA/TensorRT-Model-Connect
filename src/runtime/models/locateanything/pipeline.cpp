@@ -9,9 +9,9 @@
 #include "runtime/models/locateanything/tensor_names.h"
 
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <chrono>
-#include <cctype>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
