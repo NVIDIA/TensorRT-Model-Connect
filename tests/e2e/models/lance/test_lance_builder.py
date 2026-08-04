@@ -83,6 +83,20 @@ def test_lance_production_builder_has_no_legacy_kv_selector_or_concat_path() -> 
     assert "add_native_kv_cache_attention_from_rows" in source
 
 
+def test_lance_family_has_no_legacy_decoder_module_or_concat_block() -> None:
+    family_dir = (
+        Path(__file__).resolve().parents[4]
+        / "python/tensorrt_model_connect/families/lance"
+    )
+
+    assert not (family_dir / "default_decoder.py").exists()
+    assert (family_dir / "default_dual_profile_decoder.py").is_file()
+
+    graph_source = (family_dir / "graph_blocks.py").read_text(encoding="utf-8")
+    assert "def add_attention_block(" not in graph_source
+    assert "add_concatenation" not in graph_source
+
+
 def test_lance_defaults_hide_cache_build_flags() -> None:
     module = importlib.import_module(
         "tensorrt_model_connect.families.lance.plugin")

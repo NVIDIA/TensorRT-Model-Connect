@@ -406,6 +406,105 @@ void copy_deepstack_outputs(const TensorMap& outputs,
     }
 }
 
+LanceKvCache& require_native_vl_prefill_cache(TrtModule* prefill, LanceInferenceState* state,
+                                              const LanceConfig& config,
+                                              const std::vector<float>& image_features,
+                                              int32_t num_features, int32_t feature_dim) {
+    auto* cache = eligible_vl_prefill_cache(prefill, state, config, feature_dim);
+    if (cache == nullptr)
+        throw std::runtime_error("LancePipeline: native split VL prefill is unavailable");
+    if (!valid_vl_features(image_features, num_features, feature_dim))
+        throw std::runtime_error("LancePipeline: invalid native VL feature buffer");
+    return *cache;
+}
+
+void validate_vision_span_length(int32_t vision_start, int32_t vision_end,
+                                 int32_t max_chunk_length) {
+    if (vision_start >= 0 && vision_end - vision_start > max_chunk_length) {
+        throw std::runtime_error(
+            "LancePipeline: vision attention span exceeds the native prefill profile");
+    }
+}
+
+bool chunk_splits_vision_span(int32_t offset, int32_t chunk_end, int32_t vision_start,
+                              int32_t vision_end) {
+    return vision_start >= 0 && offset < vision_start && chunk_end > vision_start &&
+           chunk_end < vision_end;
+}
+
+bool chunk_starts_in_vision_span(int32_t offset, int32_t vision_start, int32_t vision_end) {
+    return vision_start >= 0 && offset >= vision_start && offset < vision_end;
+}
+
+int32_t choose_vl_prefill_chunk_end(int32_t offset, int32_t sequence_length,
+                                    int32_t max_chunk_length, int32_t vision_start,
+                                    int32_t vision_end) {
+    int32_t chunk_end = std::min(sequence_length, offset + max_chunk_length);
+    if (chunk_splits_vision_span(offset, chunk_end, vision_start, vision_end)) {
+        if (vision_end - offset <= max_chunk_length)
+            chunk_end = vision_end;
+        else
+            chunk_end = vision_start;
+    } else if (chunk_starts_in_vision_span(offset, vision_start, vision_end)) {
+        chunk_end = std::max(chunk_end, vision_end);
+    }
+    if (chunk_end <= offset || chunk_end - offset > max_chunk_length)
+        throw std::runtime_error("LancePipeline: could not form a valid native prefill chunk");
+    return chunk_end;
+}
+
+int32_t advance_feature_offset(const std::vector<int32_t>& chunk_ids, int32_t image_token_id,
+                               int32_t feature_offset, int32_t num_features) {
+    for (const auto token : chunk_ids) {
+        if (token == image_token_id && feature_offset < num_features)
+            ++feature_offset;
+    }
+    return feature_offset;
+}
+
+int32_t run_native_vl_prefill_chunk(
+    TrtModule& prefill, LanceInferenceState& state, LanceKvCache& cache, const LanceConfig& config,
+    const std::vector<int32_t>& input_ids, const std::vector<float>& image_features,
+    const std::vector<std::vector<float>>& deepstack_features, int32_t num_features,
+    int32_t feature_dim, const LanceMropePositions* mrope, int32_t offset, int32_t chunk_end,
+    int32_t feature_offset, int32_t vision_start, int32_t vision_end, std::vector<float>& logits) {
+    const int32_t chunk_size = chunk_end - offset;
+    std::vector<int32_t> chunk_ids(input_ids.begin() + offset, input_ids.begin() + chunk_end);
+    auto embedding_inputs = build_vl_sequence_embedding_inputs(
+        chunk_ids, config.image_token_id, image_features, deepstack_features, num_features,
+        feature_dim, feature_offset);
+
+    TensorMap inputs;
+    add_vl_prefill_base_inputs(inputs, state, chunk_ids, embedding_inputs, feature_dim);
+    if (vision_start >= offset && vision_end <= chunk_end) {
+        cache.prepare_prefill_with_bidirectional_block(inputs, chunk_size, vision_start - offset,
+                                                       vision_end - offset);
+    }
+    std::vector<int32_t> mrope_positions;
+    if (!add_lance_mrope_prefill_input(prefill, chunk_ids, mrope, chunk_size, offset,
+                                       mrope_positions, inputs)) {
+        throw std::runtime_error("LancePipeline: native mRoPE prefill inputs are incomplete");
+    }
+    if (!add_vl_prefill_deepstack_inputs(prefill, inputs, embedding_inputs, chunk_size,
+                                         feature_dim)) {
+        throw std::runtime_error("LancePipeline: native deepstack prefill inputs are incomplete");
+    }
+
+    auto outputs = prefill.forward(inputs);
+    if (!copy_last_prefill_logits(outputs, config.vocab_size, logits))
+        throw std::runtime_error("LancePipeline: native VL prefill logits are invalid");
+    std::vector<const void*> present_k;
+    std::vector<const void*> present_v;
+    if (!gather_vl_prefill_kv_pointers(prefill, config, present_k, present_v))
+        throw std::runtime_error("LancePipeline: native VL prefill KV outputs are missing");
+    if (offset == 0)
+        cache.write_prefill_kv(present_k, present_v, chunk_size);
+    else
+        cache.append_prefill_kv(present_k, present_v, chunk_size);
+
+    return advance_feature_offset(chunk_ids, config.image_token_id, feature_offset, num_features);
+}
+
 } // namespace
 
 std::pair<int32_t, int32_t> LancePipeline::resolve_gen_limits(const GenerateConfig& cfg) const {
@@ -592,75 +691,25 @@ void LancePipeline::run_vl_prefill_batched(
     const std::vector<std::vector<float>>& deepstack_features, int32_t num_features,
     int32_t feature_dim, const LanceMropePositions* mrope, std::vector<float>& logits) {
     const auto sq = static_cast<int32_t>(input_ids.size());
-    auto* kv_cache = eligible_vl_prefill_cache(prefill_.get(), state_.get(), config_, feature_dim);
-    if (kv_cache == nullptr)
-        throw std::runtime_error("LancePipeline: native split VL prefill is unavailable");
-    if (!valid_vl_features(image_features, num_features, feature_dim))
-        throw std::runtime_error("LancePipeline: invalid native VL feature buffer");
+    auto& kv_cache = require_native_vl_prefill_cache(prefill_.get(), state_.get(), config_,
+                                                     image_features, num_features, feature_dim);
 
-    kv_cache->bind_cache_inputs(*prefill_);
+    kv_cache.bind_cache_inputs(*prefill_);
     const auto [vision_start, vision_end] =
         find_lance_vision_attention_block(input_ids, config_.image_token_id);
-    if (vision_start >= 0 && vision_end - vision_start > config_.prefill_max_length) {
-        throw std::runtime_error(
-            "LancePipeline: vision attention span exceeds the native prefill profile");
-    }
+    validate_vision_span_length(vision_start, vision_end, config_.prefill_max_length);
 
     int32_t offset = 0;
     int32_t feature_offset = 0;
     while (offset < sq) {
-        int32_t chunk_end = std::min(sq, offset + config_.prefill_max_length);
         // Never split the bidirectional vision span. A chunk may include text
         // on either side as long as the complete span is present.
-        if (vision_start >= 0 && offset < vision_start && chunk_end > vision_start &&
-            chunk_end < vision_end) {
-            chunk_end =
-                (vision_end - offset <= config_.prefill_max_length) ? vision_end : vision_start;
-        } else if (vision_start >= 0 && offset >= vision_start && offset < vision_end) {
-            chunk_end = std::max(chunk_end, vision_end);
-        }
-        if (chunk_end <= offset || chunk_end - offset > config_.prefill_max_length)
-            throw std::runtime_error("LancePipeline: could not form a valid native prefill chunk");
-
-        const int32_t chunk_size = chunk_end - offset;
-        std::vector<int32_t> chunk_ids(input_ids.begin() + offset, input_ids.begin() + chunk_end);
-        auto embedding_inputs = build_vl_sequence_embedding_inputs(
-            chunk_ids, config_.image_token_id, image_features, deepstack_features, num_features,
-            feature_dim, feature_offset);
-
-        TensorMap inputs;
-        add_vl_prefill_base_inputs(inputs, *state_, chunk_ids, embedding_inputs, feature_dim);
-        if (vision_start >= offset && vision_end <= chunk_end) {
-            kv_cache->prepare_prefill_with_bidirectional_block(
-                inputs, chunk_size, vision_start - offset, vision_end - offset);
-        }
-        std::vector<int32_t> mrope_positions;
-        if (!add_lance_mrope_prefill_input(*prefill_, chunk_ids, mrope, chunk_size, offset,
-                                           mrope_positions, inputs)) {
-            throw std::runtime_error("LancePipeline: native mRoPE prefill inputs are incomplete");
-        }
-        if (!add_vl_prefill_deepstack_inputs(*prefill_, inputs, embedding_inputs, chunk_size,
-                                             feature_dim)) {
-            throw std::runtime_error(
-                "LancePipeline: native deepstack prefill inputs are incomplete");
-        }
-
-        auto outputs = prefill_->forward(inputs);
-        if (!copy_last_prefill_logits(outputs, config_.vocab_size, logits))
-            throw std::runtime_error("LancePipeline: native VL prefill logits are invalid");
-        std::vector<const void*> present_k;
-        std::vector<const void*> present_v;
-        if (!gather_vl_prefill_kv_pointers(*prefill_, config_, present_k, present_v))
-            throw std::runtime_error("LancePipeline: native VL prefill KV outputs are missing");
-        if (offset == 0)
-            kv_cache->write_prefill_kv(present_k, present_v, chunk_size);
-        else
-            kv_cache->append_prefill_kv(present_k, present_v, chunk_size);
-
-        for (const auto token : chunk_ids) {
-            if (token == config_.image_token_id && feature_offset < num_features)
-                ++feature_offset;
-        }
+        const int32_t chunk_end = choose_vl_prefill_chunk_end(
+            offset, sq, config_.prefill_max_length, vision_start, vision_end);
+        feature_offset = run_native_vl_prefill_chunk(
+            *prefill_, *state_, kv_cache, config_, input_ids, image_features, deepstack_features,
+            num_features, feature_dim, mrope, offset, chunk_end, feature_offset, vision_start,
+            vision_end, logits);
         offset = chunk_end;
     }
     state_->bind_to(*text_decoder_);

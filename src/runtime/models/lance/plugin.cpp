@@ -144,22 +144,31 @@ std::string format_bytes(std::uint64_t bytes) {
     return stream.str();
 }
 
-void validate_native_module(const TrtModule& module, const LanceKvCacheNames& names,
-                            const BaseConfig& config, DType cache_dtype,
+void validate_native_inputs(const TrtModule& module, const LanceKvCacheNames& names,
                             bool requires_active_mask) {
     if (!module.has_input(names.cache_write_indices) ||
         !module.has_input(names.key_value_lengths) ||
         module.has_input(names.attention_mask) != requires_active_mask) {
         throw std::runtime_error("Lance decoder does not expose the native KV contract");
     }
+}
+
+bool valid_native_cache_shape(const std::vector<int64_t>& shape, const BaseConfig& config) {
+    return shape.size() == 4 && shape[0] == 1 &&
+           shape[2] == static_cast<int64_t>(config.max_cache_length) && shape[1] > 0 &&
+           shape[3] > 0 && shape[1] * shape[3] == compute_kv_dim(config);
+}
+
+void validate_native_module(const TrtModule& module, const LanceKvCacheNames& names,
+                            const BaseConfig& config, DType cache_dtype,
+                            bool requires_active_mask) {
+    validate_native_inputs(module, names, requires_active_mask);
     if (cache_dtype != DType::kBFloat16)
         throw std::runtime_error("Lance native KV requires BF16");
     if (names.cache_k.empty())
         throw std::runtime_error("Lance native KV has no cache tensors");
     const auto shape = module.tensor_shape(names.cache_k.front());
-    if (shape.size() != 4 || shape[0] != 1 ||
-        shape[2] != static_cast<int64_t>(config.max_cache_length) || shape[1] <= 0 ||
-        shape[3] <= 0 || shape[1] * shape[3] != compute_kv_dim(config)) {
+    if (!valid_native_cache_shape(shape, config)) {
         throw std::runtime_error("Lance native KV cache must be [1,Hkv,capacity,D]");
     }
 }
