@@ -79,12 +79,14 @@ jobs:
           }
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
 
-          actor_permission="$(
+          # The legacy .permission field maps maintain to write. Use
+          # .role_name so maintainers remain distinct from write users.
+          actor_role="$(
             gh api --method GET \
               "/repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" \
-              --jq '.permission'
+              --jq '.role_name'
           )"
-          case "$actor_permission" in
+          case "$actor_role" in
             maintain|admin) ;;
             *)
               echo "::error::Only actors with maintain or admin access may dispatch CI."

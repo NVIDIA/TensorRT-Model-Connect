@@ -207,7 +207,7 @@ def _run_internal_ci_snapshot(
     head_repo: str | None = "NVIDIA/TensorRT-Model-Connect",
     head_ref: str = "refactor/validation-engine",
     event_name: str = "pull_request_target",
-    actor_permission: str = "maintain",
+    actor_role: str = "maintain",
     max_attempts: int = 1,
     branch_available: bool = True,
     system_path: str | None = None,
@@ -228,7 +228,7 @@ endpoint = next(
     "",
 )
 if "/collaborators/" in endpoint:
-    print(os.environ["FAKE_ACTOR_PERMISSION"])
+    print(os.environ["FAKE_ACTOR_ROLE"])
 elif "/pulls/" in endpoint:
     pulls = json.loads(os.environ["FAKE_PULL_JSONS"])
     counter_path = os.environ["FAKE_PULL_COUNTER"]
@@ -289,7 +289,7 @@ else:
             "ACTOR": "trusted-maintainer",
             "EVENT_HEAD_SHA": event_head_sha,
             "EVENT_NAME": event_name,
-            "FAKE_ACTOR_PERMISSION": actor_permission,
+            "FAKE_ACTOR_ROLE": actor_role,
             "FAKE_BRANCH_COUNTER": str(tmp_path / "branch-counter"),
             "FAKE_BRANCH_AVAILABLE": "true" if branch_available else "false",
             "FAKE_BRANCH_HEAD_SHAS": json.dumps(branch_head_shas),
@@ -406,6 +406,8 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert dispatch_permissions.strip() == "statuses: write"
 
     assert "collaborators/$ACTOR/permission" in authorize
+    assert "--jq '.role_name'" in authorize
+    assert "--jq '.permission'" not in authorize
     assert "maintain|admin)" in authorize
     assert "write|maintain|admin)" not in authorize
     assert "Only actors with maintain or admin access" in authorize
@@ -619,7 +621,7 @@ def test_internal_ci_guard_only_allows_maintainers_and_admins(
             event_head_sha=head_sha,
             pr_head_sha=head_sha,
             branch_head_sha=head_sha,
-            actor_permission=permission,
+            actor_role=permission,
         )
         assert result.returncode == 0, result.stdout + result.stderr
 
@@ -630,7 +632,7 @@ def test_internal_ci_guard_only_allows_maintainers_and_admins(
         event_head_sha=head_sha,
         pr_head_sha=head_sha,
         branch_head_sha=head_sha,
-        actor_permission="write",
+        actor_role="write",
     )
     assert result.returncode != 0
     assert "Only actors with maintain or admin access" in result.stdout + result.stderr
