@@ -315,6 +315,76 @@ def add_attention_block(
     }
 
 
+def add_native_kv_attention_block(
+    network: trt.INetworkDefinition,
+    hidden: trt.ITensor,
+    cache_k: trt.ITensor,
+    cache_v: trt.ITensor,
+    cache_write_indices: trt.ITensor,
+    key_value_lengths: trt.ITensor,
+    *,
+    weights: WeightDict,
+    prefix: str,
+    hidden_size: int,
+    attention_size: int,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    eps_tensor: trt.ITensor,
+    cos_half_tensor: trt.ITensor,
+    sin_half_tensor: trt.ITensor,
+    dtype: np.dtype,
+    sequence_length: int | None,
+) -> dict[str, trt.ITensor]:
+    """Qwen3-Omni pre-norm attention with native runtime-owned KV state."""
+    kv_attention_size = infer_kv_attention_size(
+        weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
+    matmul = _make_matmul_fn(network, dtype, None)
+    normed = apply_norm(
+        network, hidden, hidden_size, weights[f"{prefix}.input_norm"], None,
+        eps_tensor, "rmsnorm", dtype=dtype)
+    q = matmul(
+        normed, hidden_size, attention_size, weights[f"{prefix}.w_q"],
+        f"{prefix}.w_q")
+    k = matmul(
+        normed, hidden_size, kv_attention_size, weights[f"{prefix}.w_k"],
+        f"{prefix}.w_k")
+    v = matmul(
+        normed, hidden_size, kv_attention_size, weights[f"{prefix}.w_v"],
+        f"{prefix}.w_v")
+
+    q_norm = weights.get(f"{prefix}.q_norm")
+    if q_norm is not None:
+        q = graph_ops.add_rms_norm_per_head(
+            network, q, num_heads, head_dim, q_norm, eps_tensor, dtype=dtype,
+            sequence_length=sequence_length)
+    k_norm = weights.get(f"{prefix}.k_norm")
+    if k_norm is not None:
+        k = graph_ops.add_rms_norm_per_head(
+            network, k, num_kv_heads, head_dim, k_norm, eps_tensor,
+            dtype=dtype, sequence_length=sequence_length)
+
+    q = graph_ops.add_apply_rope_native_sequence(
+        network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
+        head_dim, sequence_length=sequence_length)
+    k = graph_ops.add_apply_rope_native_sequence(
+        network, k, num_kv_heads, head_dim, cos_half_tensor, sin_half_tensor,
+        head_dim, sequence_length=sequence_length)
+    native_attention = graph_ops.add_native_kv_cache_attention_from_rows(
+        network, q, k, v, cache_k, cache_v, cache_write_indices,
+        key_value_lengths, num_heads=num_heads, num_kv_heads=num_kv_heads,
+        head_dim=head_dim, q_seq=sequence_length, tag=f"{prefix}.attention")
+    attn_out = matmul(
+        native_attention["context"], attention_size, hidden_size,
+        weights[f"{prefix}.w_o"], f"{prefix}.w_o")
+    return {
+        "normed": normed,
+        "attn_out": attn_out,
+        "present_k": native_attention["present_k"],
+        "present_v": native_attention["present_v"],
+    }
+
+
 def add_swiglu_mlp(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,

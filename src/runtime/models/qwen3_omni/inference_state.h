@@ -13,7 +13,7 @@
 // The interface captures the lifecycle of per-sequence inference state:
 //   1. reset()        — prepare for a new sequence
 //   2. bind_to()      — bind state tensors to TRT engine I/O
-//   3. prepare_step() — write state-related inputs (mask, position) into TensorMap
+//   3. prepare_step() — write native KV lengths/indices and positions
 //   4. advance()      — update state after each decode step
 //   5. position()     — current sequence position
 //
@@ -52,8 +52,8 @@ class Qwen3OmniInferenceState {
     // Pipelines call this instead of manually constructing mask/position tensors.
     virtual void prepare_step(TensorMap& inputs, int32_t seq_len = 1) = 0;
 
-    // Update state after one decode step. Copies "present" outputs
-    // into "cache" inputs, advances position.
+    // Update logical state after one decode step. TensorRT updates the bound
+    // user-owned cache in place.
     // n_tokens: number of tokens processed in this step (default 1).
     //           >1 for batched prefill / multi-token steps.
     virtual void advance(int32_t n_tokens = 1) = 0;
@@ -85,7 +85,7 @@ class Qwen3OmniInferenceState {
     virtual int32_t num_layers() const = 0;
 
     // Whether this state type needs an attention mask.
-    // Qwen3OmniKvCache returns true.
+    // Native Qwen3OmniKvCache returns false; IAttention consumes KV lengths.
     virtual bool needs_attention_mask() const = 0;
 
     // Total device memory consumed by this state (bytes).

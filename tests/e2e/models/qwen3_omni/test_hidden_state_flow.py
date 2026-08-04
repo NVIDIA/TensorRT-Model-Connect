@@ -46,7 +46,10 @@ def test_qwen3_omni_runtime_requires_official_code2wav_and_python_talker() -> No
 
     assert "required official Code2Wav engine is missing" in source
     assert "omni_cfg.hf_python = ctx.hf_python" in source
-    assert 'tensor_dtype("cache_k_0")' in source
+    assert "validate_native_module" in source
+    assert "DType::kBFloat16" in source
+    assert "admit_cache_allocation(ctx, cache_bytes)" in source
+    assert "std::make_unique<Qwen3OmniKvCache>" in source
     assert '"omni_talker_model_id"' in source
     assert 'overrides["omni_talker_model_id"] = self._talker_model_id' in builder
     assert 'overrides["omni_talker_model_revision"]' in builder

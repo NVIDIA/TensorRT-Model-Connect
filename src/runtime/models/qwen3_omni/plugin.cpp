@@ -11,9 +11,101 @@
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
+#include <cuda_runtime_api.h>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <sstream>
+#include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace trtmc {
+
+namespace {
+
+std::string format_bytes(std::uint64_t bytes) {
+    std::ostringstream output;
+    constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
+    output << std::fixed << std::setprecision(2) << static_cast<double>(bytes) / kGiB << " GiB";
+    return output.str();
+}
+
+std::uint64_t checked_multiply(std::uint64_t lhs, std::uint64_t rhs) {
+    if (lhs != 0 && rhs > std::numeric_limits<std::uint64_t>::max() / lhs)
+        throw std::overflow_error("Qwen3-Omni native KV byte accounting overflow");
+    return lhs * rhs;
+}
+
+void validate_scalar(const ITrtModule& module, const char* name, const char* role) {
+    if (!module.has_input(name) || module.tensor_dtype(name) != DType::kInt32 ||
+        module.tensor_shape(name) != std::vector<int64_t>{1}) {
+        throw std::runtime_error(std::string("Qwen3-Omni ") + role + " native KV input '" + name +
+                                 "' must be int32 [1]");
+    }
+}
+
+void validate_native_module(const PipelineContext& ctx, const ITrtModule& module,
+                            const char* role) {
+    validate_scalar(module, "cache_write_indices", role);
+    validate_scalar(module, "key_value_lengths", role);
+    if (module.has_input("attention_mask"))
+        throw std::runtime_error(std::string("Qwen3-Omni ") + role +
+                                 " must not expose attention_mask");
+    const int32_t head_dim = ctx.config.head_dim;
+    const std::vector<int64_t> expected{1, ctx.config.num_kv_heads, ctx.config.max_cache_length,
+                                        head_dim};
+    for (int32_t layer = 0; layer < ctx.config.num_layers; ++layer) {
+        const auto suffix = "_" + std::to_string(layer);
+        for (const auto& pair :
+             {std::pair{std::string("cache_k") + suffix, std::string("present_k") + suffix},
+              std::pair{std::string("cache_v") + suffix, std::string("present_v") + suffix}}) {
+            if (!module.has_input(pair.first) || !module.has_output(pair.second) ||
+                module.tensor_shape(pair.first) != expected ||
+                module.tensor_shape(pair.second) != expected ||
+                module.tensor_dtype(pair.first) != DType::kBFloat16 ||
+                module.tensor_dtype(pair.second) != DType::kBFloat16) {
+                throw std::runtime_error(std::string("Qwen3-Omni ") + role +
+                                         " native KV cache/present must be BF16 "
+                                         "[1,num_kv_heads,capacity,head_dim]");
+            }
+        }
+    }
+}
+
+std::uint64_t native_cache_bytes(const PipelineContext& ctx, int32_t kv_dim) {
+    auto bytes = checked_multiply(static_cast<std::uint64_t>(ctx.config.num_layers),
+                                  static_cast<std::uint64_t>(ctx.config.max_cache_length));
+    bytes = checked_multiply(bytes, static_cast<std::uint64_t>(kv_dim));
+    bytes = checked_multiply(bytes, 2); // BF16 bytes.
+    return checked_multiply(bytes, 2);  // K and V.
+}
+
+void admit_cache_allocation(const PipelineContext& ctx, std::uint64_t bytes) {
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    const auto status = cudaMemGetInfo(&free_bytes, &total_bytes);
+    if (status != cudaSuccess) {
+        throw std::runtime_error(std::string("Qwen3-Omni CUDA memory query failed: ") +
+                                 cudaGetErrorString(status));
+    }
+    const auto free = static_cast<std::uint64_t>(free_bytes);
+    const auto total = static_cast<std::uint64_t>(total_bytes);
+    const auto reserve = std::max<std::uint64_t>(2ULL << 30, total / 10);
+    const auto available = free > reserve ? free - reserve : 0;
+    if (bytes > available) {
+        throw std::runtime_error(
+            "Qwen3-Omni native KV admission failed before allocation: capacity=" +
+            std::to_string(ctx.config.max_cache_length) + ", required=" + format_bytes(bytes) +
+            ", free=" + format_bytes(free) + ", reserve=" + format_bytes(reserve));
+    }
+}
+
+} // namespace
 
 class Qwen3OmniPlugin final : public IPipelinePlugin {
   public:
@@ -26,20 +118,27 @@ class Qwen3OmniPlugin final : public IPipelinePlugin {
 
         const auto& json = ctx.config_json;
 
-        // Thinker (MoE decoder) -- main engine plan
-        auto thinker_modules = load_dual_profile_modules(
-            ctx.backend, find_section(ctx.bundle, "engine_plan"), "omni thinker", opts);
-        cudaStream_t stream = thinker_modules.decode->stream();
+        if (!extract_json_bool(json, "native_kv_cache", false) ||
+            extract_json_int(json, "native_kv_contract_version", 0) != 1) {
+            throw std::runtime_error(
+                "Qwen3-Omni bundle does not declare native KV contract version 1");
+        }
+        if (ctx.kv_cache_size_bytes != 0) {
+            throw std::invalid_argument("Qwen3-Omni allocates the complete official context cache; "
+                                        "kv_cache_size_bytes is not supported");
+        }
+
+        auto decode_loaded = load_trt_module_from_plan(
+            ctx.backend, find_section(ctx.bundle, "engine_plan"), "omni thinker decode", opts);
+        cudaStream_t stream = decode_loaded.module->stream();
+        auto prefill_opts = opts;
+        prefill_opts.stream = stream;
+        auto prefill_loaded =
+            load_trt_module_from_plan(ctx.backend, find_section(ctx.bundle, "prefill_engine_plan"),
+                                      "omni thinker prefill", prefill_opts);
+        validate_native_module(ctx, *decode_loaded.module, "decode engine");
+        validate_native_module(ctx, *prefill_loaded.module, "prefill engine");
         int32_t kv_dim = compute_kv_dim(ctx.config);
-        // The cache allocation must follow the engine binding, not the bundle's
-        // requested precision. Legacy Qwen3-Omni builders emitted FP32 cache
-        // bindings even for a bundle labelled BF16; allocating BF16 here
-        // truncated every present K/V row and corrupted subsequent tokens.
-        DType cache_dtype = thinker_modules.decode->tensor_dtype("cache_k_0");
-        std::unique_ptr<Qwen3OmniInferenceState> thinker_state = std::make_unique<Qwen3OmniKvCache>(
-            ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream, cache_dtype);
-        if (!thinker_state->ok())
-            throw std::runtime_error("OmniPipeline: failed to create thinker Qwen3OmniKvCache");
 
         // Code2Wav is required for the audio-capable Qwen3-Omni bundle.
         std::unique_ptr<TrtModule> code2wav_module;
@@ -50,6 +149,17 @@ class Qwen3OmniPlugin final : public IPipelinePlugin {
         if (!code2wav_module)
             throw std::runtime_error(
                 "OmniPipeline: required official Code2Wav engine is missing from bundle");
+
+        // All engine memory is resident before admission. Allocate one complete
+        // model-context buffer only after the remaining free memory is known.
+        const auto cache_bytes = native_cache_bytes(ctx, kv_dim);
+        admit_cache_allocation(ctx, cache_bytes);
+        std::cerr << "[trtmc] Qwen3-Omni native KV cache capacity=" << ctx.config.max_cache_length
+                  << " tokens, allocation=" << format_bytes(cache_bytes) << '\n';
+        std::unique_ptr<Qwen3OmniInferenceState> thinker_state = std::make_unique<Qwen3OmniKvCache>(
+            ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream, DType::kBFloat16);
+        if (!thinker_state->ok())
+            throw std::runtime_error("OmniPipeline: failed to allocate native Thinker KV cache");
 
         // Build OmniConfig
         OmniConfig omni_cfg;
@@ -84,9 +194,9 @@ class Qwen3OmniPlugin final : public IPipelinePlugin {
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
         return std::make_unique<OmniPipeline>(
-            std::move(thinker_modules.decode), std::move(thinker_state), std::move(code2wav_module),
+            std::move(decode_loaded.module), std::move(thinker_state), std::move(code2wav_module),
             std::move(omni_cfg), stream, std::move(tokenizer), ctx.bundle.info.model_id,
-            std::move(thinker_modules.prefill));
+            std::move(prefill_loaded.module));
     }
 };
 

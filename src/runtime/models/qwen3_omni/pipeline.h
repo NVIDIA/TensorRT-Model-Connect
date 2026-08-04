@@ -56,7 +56,7 @@ class OmniPipeline final : public IPipeline {
 
   private:
     int32_t run_thinker_step(int32_t token_id);
-    bool run_thinker_prefill(const std::vector<int32_t>& input_ids, int32_t& next_token);
+    void run_thinker_prefill(const std::vector<int32_t>& input_ids, int32_t& next_token);
     std::vector<int32_t> run_thinker(const std::vector<int32_t>& input_ids, int32_t max_tokens);
     std::vector<float> run_code2wav(const std::vector<int32_t>& codec_tokens, int32_t n_codebooks,
                                     int32_t n_frames, double& code2wav_and_transfer_ms,

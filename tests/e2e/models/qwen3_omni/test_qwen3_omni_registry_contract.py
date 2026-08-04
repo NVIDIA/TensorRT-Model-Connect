@@ -5,17 +5,22 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 pytest.importorskip("tensorrt", reason="registry contract tests import plugin modules")
 
 from tensorrt_model_connect.families import find_plugin
+from tensorrt_model_connect.families.qwen3_omni.config import ModelConfig
 
 
 def _plugin(model_type: str):
     plugin = find_plugin(model_type)
     assert plugin is not None
     return plugin
+
 
 def test_vision_language_runtime_contract() -> None:
     plugin = _plugin("qwen3_omni")
@@ -25,3 +30,28 @@ def test_vision_language_runtime_contract() -> None:
     assert callable(getattr(plugin, "get_vl_config", None))
 
     assert callable(getattr(plugin, "build_extra_engines", None))
+
+
+def test_native_kv_defaults_use_complete_official_context() -> None:
+    plugin = _plugin("qwen3_omni")
+    config = ModelConfig.create_tiny(
+        "qwen3_omni", max_position_embeddings=65536)
+
+    assert plugin.runtime_capabilities == {"decoder_kv"}
+    assert plugin.supports_split_embed_input is True
+    assert plugin.supports_split_decoder_roles(config) is True
+    assert plugin.default_build_precision(config) == "bf16"
+    assert plugin.default_max_cache_length(config) == 65536
+
+
+def test_official_manifest_does_not_inject_build_time_kv_or_precision_flags() -> None:
+    manifest_path = (
+        Path(__file__).parent
+        / "manifests"
+        / "qwen3-omni-30b-a3b-instruct.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert "max_cache_length" not in manifest
+    assert "kv_cache_size_bytes" not in manifest
+    assert "precision" not in manifest

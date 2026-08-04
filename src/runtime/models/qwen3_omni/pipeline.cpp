@@ -83,6 +83,8 @@ OmniPipeline::OmniPipeline(std::unique_ptr<TrtModule> thinker,
       thinker_token_id_({1}, DType::kInt32, stream) {
     if (!thinker_ || !thinker_->ok())
         throw std::runtime_error("OmniPipeline: invalid thinker module");
+    if (!thinker_prefill_ || !thinker_prefill_->ok())
+        throw std::runtime_error("OmniPipeline: native thinker prefill module is required");
     if (!thinker_state_ || !thinker_state_->ok())
         throw std::runtime_error("OmniPipeline: invalid thinker cache");
     talker_runtime_ = std::make_unique<Qwen3OmniTalkerRuntime>(
@@ -107,7 +109,7 @@ int32_t host_argmax(const TensorMap& outputs, int32_t& d2h_count) {
     return static_cast<int32_t>(std::distance(begin, std::max_element(begin, begin + count)));
 }
 
-bool gather_prefill_kv(TrtModule& prefill, int32_t num_layers, std::vector<const void*>& present_k,
+void gather_prefill_kv(TrtModule& prefill, int32_t num_layers, std::vector<const void*>& present_k,
                        std::vector<const void*>& present_v) {
     present_k.resize(static_cast<std::size_t>(num_layers));
     present_v.resize(static_cast<std::size_t>(num_layers));
@@ -116,19 +118,8 @@ bool gather_prefill_kv(TrtModule& prefill, int32_t num_layers, std::vector<const
         present_k[index] = prefill.device_ptr("present_k_" + std::to_string(layer));
         present_v[index] = prefill.device_ptr("present_v_" + std::to_string(layer));
         if (present_k[index] == nullptr || present_v[index] == nullptr)
-            return false;
+            throw std::runtime_error("OmniPipeline: native prefill KV output is missing");
     }
-    return true;
-}
-
-Qwen3OmniKvCache* eligible_prefill_cache(TrtModule* prefill, Qwen3OmniInferenceState* state,
-                                         const OmniConfig& config, int32_t sequence_length) {
-    auto* cache = dynamic_cast<Qwen3OmniKvCache*>(state);
-    if (prefill == nullptr || cache == nullptr || sequence_length <= 0 ||
-        sequence_length > cache->max_length() || config.thinker_hidden_size <= 0 ||
-        config.thinker_vocab_size <= 0 || !prefill->has_input("input_embed"))
-        return nullptr;
-    return cache;
 }
 
 bool can_use_device_argmax(const TrtModule& module, const DeviceTensor& token_id,
@@ -169,51 +160,63 @@ int32_t OmniPipeline::run_thinker_step(int32_t token_id) {
     return thinker_token_host_;
 }
 
-bool OmniPipeline::run_thinker_prefill(const std::vector<int32_t>& input_ids, int32_t& next_token) {
+void OmniPipeline::run_thinker_prefill(const std::vector<int32_t>& input_ids, int32_t& next_token) {
     const auto sequence_length = static_cast<int32_t>(input_ids.size());
-    auto* cache = eligible_prefill_cache(thinker_prefill_.get(), thinker_state_.get(), *config_,
-                                         sequence_length);
-    if (cache == nullptr)
-        return false;
+    auto* cache = dynamic_cast<Qwen3OmniKvCache*>(thinker_state_.get());
+    if (thinker_prefill_ == nullptr || cache == nullptr || sequence_length <= 0 ||
+        sequence_length > cache->max_length() || config_->thinker_hidden_size <= 0 ||
+        config_->thinker_vocab_size <= 0 || !thinker_prefill_->has_input("input_embed")) {
+        throw std::runtime_error(
+            "OmniPipeline: native split prefill contract is unavailable or prompt exceeds "
+            "the official context capacity");
+    }
 
     std::vector<const void*> present_k;
     std::vector<const void*> present_v;
-    if (!gather_prefill_kv(*thinker_prefill_, cache->num_layers(), present_k, present_v))
-        return false;
-
-    std::vector<float> input_embed(
-        static_cast<std::size_t>(sequence_length) * config_->thinker_hidden_size, 0.0F);
-    std::vector<float> use_input_embed(static_cast<std::size_t>(sequence_length), 0.0F);
-    TensorMap inputs;
-    inputs["token_id"] =
-        Tensor{const_cast<int32_t*>(input_ids.data()), {sequence_length}, DType::kInt32};
-    inputs["input_embed"] = Tensor{
-        input_embed.data(), {sequence_length, config_->thinker_hidden_size}, DType::kFloat32};
-    inputs["use_input_embed"] =
-        Tensor{use_input_embed.data(), {sequence_length, 1}, DType::kFloat32};
     cache->bind_cache_inputs(*thinker_prefill_);
-    thinker_state_->prepare_step(inputs, sequence_length);
+    gather_prefill_kv(*thinker_prefill_, cache->num_layers(), present_k, present_v);
 
-    const bool gpu_argmax =
-        can_use_device_argmax(*thinker_prefill_, thinker_token_id_, config_->thinker_vocab_size);
-    ++thinker_stats_.prefill_launches;
-    if (gpu_argmax) {
-        thinker_prefill_->forward_async(inputs);
-        const auto* logits = static_cast<const float*>(thinker_prefill_->device_ptr("logits"));
-        qwen3_omni_gpu_argmax(logits, config_->thinker_vocab_size,
-                              static_cast<int32_t*>(thinker_token_id_.data()), stream_);
-        cache->write_prefill_kv(present_k, present_v, sequence_length);
-        cudaMemcpyAsync(&thinker_token_host_, thinker_token_id_.data(), sizeof(thinker_token_host_),
-                        cudaMemcpyDeviceToHost, stream_);
-        thinker_prefill_->sync();
-        next_token = thinker_token_host_;
-        return true;
+    constexpr int32_t kPrefillChunkTokens = 256;
+    for (int32_t offset = 0; offset < sequence_length;) {
+        const int32_t chunk_length = std::min(kPrefillChunkTokens, sequence_length - offset);
+        const bool final_chunk = offset + chunk_length == sequence_length;
+        std::vector<float> input_embed(
+            static_cast<std::size_t>(chunk_length) * config_->thinker_hidden_size, 0.0F);
+        std::vector<float> use_input_embed(static_cast<std::size_t>(chunk_length), 0.0F);
+        TensorMap inputs;
+        inputs["token_id"] =
+            Tensor{const_cast<int32_t*>(input_ids.data()) + offset, {chunk_length}, DType::kInt32};
+        inputs["input_embed"] = Tensor{
+            input_embed.data(), {chunk_length, config_->thinker_hidden_size}, DType::kFloat32};
+        inputs["use_input_embed"] =
+            Tensor{use_input_embed.data(), {chunk_length, 1}, DType::kFloat32};
+        thinker_state_->prepare_step(inputs, chunk_length);
+        ++thinker_stats_.prefill_launches;
+
+        const bool gpu_argmax =
+            final_chunk && can_use_device_argmax(*thinker_prefill_, thinker_token_id_,
+                                                 config_->thinker_vocab_size);
+        if (gpu_argmax) {
+            thinker_prefill_->forward_async(inputs);
+            const auto* logits = static_cast<const float*>(thinker_prefill_->device_ptr("logits"));
+            qwen3_omni_gpu_argmax(logits, config_->thinker_vocab_size,
+                                  static_cast<int32_t*>(thinker_token_id_.data()), stream_);
+            cache->append_prefill_kv(present_k, present_v, chunk_length);
+            cudaMemcpyAsync(&thinker_token_host_, thinker_token_id_.data(),
+                            sizeof(thinker_token_host_), cudaMemcpyDeviceToHost, stream_);
+            thinker_prefill_->sync();
+            next_token = thinker_token_host_;
+        } else if (final_chunk) {
+            TensorMap outputs = thinker_prefill_->forward(inputs);
+            cache->append_prefill_kv(present_k, present_v, chunk_length);
+            next_token = host_argmax(outputs, thinker_stats_.full_logits_d2h);
+        } else {
+            thinker_prefill_->forward_async(inputs);
+            cache->append_prefill_kv(present_k, present_v, chunk_length);
+            thinker_prefill_->sync();
+        }
+        offset += chunk_length;
     }
-
-    TensorMap outputs = thinker_prefill_->forward(inputs);
-    cache->write_prefill_kv(present_k, present_v, sequence_length);
-    next_token = host_argmax(outputs, thinker_stats_.full_logits_d2h);
-    return true;
 }
 
 std::vector<int32_t> OmniPipeline::run_thinker(const std::vector<int32_t>& input_ids,
@@ -228,10 +231,7 @@ std::vector<int32_t> OmniPipeline::run_thinker(const std::vector<int32_t>& input
     thinker_state_->bind_to(*thinker_);
 
     int32_t next_token = 0;
-    if (!run_thinker_prefill(input_ids, next_token)) {
-        for (int32_t token : input_ids)
-            next_token = run_thinker_step(token);
-    }
+    run_thinker_prefill(input_ids, next_token);
     thinker_state_->mark_prefill_complete();
 
     std::vector<int32_t> output_ids;

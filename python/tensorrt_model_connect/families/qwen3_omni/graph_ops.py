@@ -682,6 +682,53 @@ def validate_native_rope_dim(
     return rotary_embedding_dim
 
 
+def make_native_active_rope_inv_freq(
+    head_dim: int,
+    rope_theta: float,
+) -> np.ndarray:
+    """Return HF-equivalent FP32 inverse frequencies without a context table."""
+    rotary_dim = validate_native_rope_dim(head_dim, field_name="head_dim")
+    rope_theta = float(rope_theta)
+    if not np.isfinite(rope_theta) or rope_theta <= 0.0:
+        raise ValueError("active RoPE requires finite positive rope_theta")
+    dimensions = np.arange(0, rotary_dim, 2, dtype=np.float32)
+    return np.asarray(
+        1.0 / (rope_theta ** (dimensions / rotary_dim)), dtype=np.float32)
+
+
+def add_active_rope_cache(
+    network: trt.INetworkDefinition,
+    position_id: trt.ITensor,
+    inv_freq: np.ndarray,
+    output_dtype: trt.DataType,
+) -> tuple[trt.ITensor, trt.ITensor]:
+    """Build rank-3 cos/sin rows only for the positions active this launch."""
+    frequencies = np.asarray(inv_freq, dtype=np.float32)
+    if frequencies.ndim != 1 or frequencies.size == 0:
+        raise ValueError("active RoPE inverse frequencies must be rank-1")
+    positions = network.add_cast(position_id, trt.float32).get_output(0)
+    position_column = network.add_shuffle(positions)
+    position_column.reshape_dims = (-1, 1)
+    frequency_row = add_constant(
+        network, (1, int(frequencies.size)), frequencies.reshape(1, -1),
+        dtype=np.float32)
+    angles = network.add_elementwise(
+        position_column.get_output(0), frequency_row,
+        trt.ElementWiseOperation.PROD).get_output(0)
+    cos_2d = network.add_unary(angles, trt.UnaryOperation.COS).get_output(0)
+    sin_2d = network.add_unary(angles, trt.UnaryOperation.SIN).get_output(0)
+    cos_3d = network.add_shuffle(cos_2d)
+    cos_3d.reshape_dims = (1, -1, int(frequencies.size))
+    sin_3d = network.add_shuffle(sin_2d)
+    sin_3d.reshape_dims = (1, -1, int(frequencies.size))
+    cos_cache = cos_3d.get_output(0)
+    sin_cache = sin_3d.get_output(0)
+    if cos_cache.dtype != output_dtype:
+        cos_cache = network.add_cast(cos_cache, output_dtype).get_output(0)
+        sin_cache = network.add_cast(sin_cache, output_dtype).get_output(0)
+    return cos_cache, sin_cache
+
+
 def make_rope_table_half_dim(
     max_cache_length: int,
     head_dim: int,
@@ -1221,6 +1268,82 @@ def add_attention_from_rows(
     return reshape_heads_4d_to_rows(
         network, ctx_4d, attention_size, sequence_length=q_seq,
         tag=None if tag is None else tag + ".ctx")
+
+
+def add_native_kv_cache_attention_from_rows(
+    network: trt.INetworkDefinition,
+    q: trt.ITensor,
+    k_update: trt.ITensor,
+    v_update: trt.ITensor,
+    cache_k: trt.ITensor,
+    cache_v: trt.ITensor,
+    cache_write_indices: trt.ITensor,
+    key_value_lengths: trt.ITensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    q_seq: int | None,
+    tag: str | None = None,
+) -> dict[str, trt.ITensor]:
+    """Update user-owned KV buffers and attend only their valid prefix."""
+    if not hasattr(network, "add_kv_cache_update") or not hasattr(
+        network, "add_attention_v2"
+    ):
+        raise RuntimeError(
+            "Qwen3-Omni native KV requires TensorRT add_kv_cache_update "
+            "and add_attention_v2 support")
+
+    k_update_4d = reshape_rows_to_heads_4d(
+        network, k_update, num_kv_heads, head_dim, sequence_length=q_seq,
+        tag=None if tag is None else tag + ".k_update")
+    v_update_4d = reshape_rows_to_heads_4d(
+        network, v_update, num_kv_heads, head_dim, sequence_length=q_seq,
+        tag=None if tag is None else tag + ".v_update")
+    update_k = network.add_kv_cache_update(
+        cache_k, k_update_4d, cache_write_indices, trt.KVCacheMode.LINEAR)
+    update_v = network.add_kv_cache_update(
+        cache_v, v_update_4d, cache_write_indices, trt.KVCacheMode.LINEAR)
+    if update_k is None or update_v is None:
+        raise RuntimeError("TensorRT failed to create Qwen3-Omni KV update layers")
+    updated_k = update_k.get_output(0)
+    updated_v = update_v.get_output(0)
+
+    q_4d = reshape_rows_to_heads_4d(
+        network, q, num_heads, head_dim, sequence_length=q_seq,
+        tag=None if tag is None else tag + ".q")
+    if q_4d.dtype != trt.bfloat16:
+        raise ValueError("Qwen3-Omni native KV attention requires BF16 queries")
+    scale = np.float32(1.0 / np.sqrt(head_dim))
+    q_fp32 = network.add_cast(q_4d, trt.float32).get_output(0)
+    scale_tensor = add_constant(
+        network, (1, 1, 1, 1), np.array([[[[scale]]]], dtype=np.float32),
+        dtype=np.float32)
+    q_scaled = network.add_elementwise(
+        q_fp32, scale_tensor, trt.ElementWiseOperation.PROD).get_output(0)
+    q_scaled = network.add_cast(q_scaled, trt.bfloat16).get_output(0)
+
+    attention = network.add_attention_v2(
+        q_scaled,
+        updated_k,
+        updated_v,
+        trt.AttentionNormalizationOp.SOFTMAX,
+        trt.CausalMaskKind.LOWER_RIGHT,
+    )
+    if attention is None:
+        raise RuntimeError("TensorRT failed to create Qwen3-Omni native attention")
+    attention.decomposable = False
+    attention.key_value_lengths = key_value_lengths
+    if tag:
+        attention.name = tag
+    context = reshape_heads_4d_to_rows(
+        network, attention.get_output(0), num_heads * head_dim,
+        sequence_length=q_seq, tag=None if tag is None else tag + ".ctx")
+    return {
+        "context": context,
+        "present_k": updated_k,
+        "present_v": updated_v,
+    }
 
 
 # Backward-compatible name used by existing tests and call sites.

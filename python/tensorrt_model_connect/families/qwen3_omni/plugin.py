@@ -57,10 +57,11 @@ from .checkpoint_mapper import (
 from ...build_timing import timed_trt_compile
 from . import graph_ops
 from . import graph_blocks
-from .standard_decoder_builder import _mark_debug_output
 
 
 trt = trt_compat.get_trt()
+
+_NATIVE_PREFILL_CHUNK_TOKENS = 256
 
 
 def _talker_model_locator(model_dir: Path) -> tuple[str, str]:
@@ -77,7 +78,9 @@ def _talker_model_locator(model_dir: Path) -> tuple[str, str]:
 class Qwen3OmniPlugin:
     name = "qwen3_omni"
     runtime_strategy = "qwen3_omni_multimodal"
+    runtime_capabilities = {"decoder_kv"}
     embed_input = True
+    supports_split_embed_input = True
 
     def __init__(self):
         self._thinker_cfg: dict = {}
@@ -91,8 +94,17 @@ class Qwen3OmniPlugin:
         mt = model_type.lower()
         return mt in ("qwen3_omni", "qwen3_omni_moe", "qwen3omni")
 
+    def supports_split_decoder_roles(self, config: ModelConfig) -> bool:
+        return self.matches(config.model_type)
+
+    def default_build_precision(self, config: ModelConfig) -> str:
+        return "bf16"
+
+    def default_max_cache_length(self, config: ModelConfig) -> int:
+        return int(config.max_position_embeddings)
+
     def load_weights(
-        self, model_dir: str, config: ModelConfig, *, precision: str = "fp32",
+        self, model_dir: str, config: ModelConfig, *, precision: str = "bf16",
     ) -> WeightDict:
         """Load Qwen3-Omni weights from safetensors.
 
@@ -542,15 +554,32 @@ class Qwen3OmniPlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
+        max_cache_length: int, *, precision: str = "bf16",
         quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
     ) -> bytes:
-        """Build TRT engine for Thinker MoE decoder (primary engine).
+        """Build one split Thinker role with TensorRT-native KV updates."""
+        if precision != "bf16":
+            raise ValueError("native Qwen3-Omni requires BF16")
+        if quant_ctx is not None:
+            raise ValueError("native Qwen3-Omni does not support quantization")
+        if debug_layer_outputs:
+            raise ValueError("native Qwen3-Omni does not support debug outputs")
+        if max_cache_length != int(config.max_position_embeddings):
+            raise ValueError(
+                "native Qwen3-Omni always builds the complete official context "
+                f"({config.max_position_embeddings}), got {max_cache_length}")
+        role = str(config.raw.get("_decoder_engine_role", ""))
+        if role not in ("prefill", "decode"):
+            raise ValueError(
+                "native Qwen3-Omni requires split engine role 'prefill' or "
+                f"'decode', got {role!r}")
 
-        This builds the main text decoder with MoE routing. Vision and audio
-        features are injected via embed_input mode during prefill.
-        """
+        config.raw["_decoder_engine_layout_supported"] = True
+        config.raw["_native_kv_cache_metadata"] = {
+            "native_kv_contract_version": 1,
+            "native_kv_cache": True,
+        }
         attention_size: int = weights.get("_attention_size", config.attention_size)
         num_experts: int = weights.get("_num_experts", 8)
         moe_intermediate: int = weights.get("_moe_intermediate_size",
@@ -564,28 +593,23 @@ class Qwen3OmniPlugin:
         head_dim = attention_size // num_heads
         kv_attention_size = graph_blocks.infer_kv_attention_size(
             weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
-        attention_window = max_cache_length + 1
+        if head_dim != config.head_dim or kv_attention_size != num_kv_heads * head_dim:
+            raise ValueError("native Qwen3-Omni requires compact configured GQA dimensions")
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
-        trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-
-        if precision == "fp16":
-            work_np_dtype = np.float16
-            work_trt_dtype = trt.float16
-        elif precision == "bf16":
-            work_np_dtype = np.float16
-            work_trt_dtype = trt.bfloat16
-        else:
-            work_np_dtype = np.float32
-            work_trt_dtype = trt.float32
+        trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 16 << 30)
+        work_np_dtype = np.float16
+        work_trt_dtype = trt.bfloat16
 
         # Inputs
         token_id = network.add_input("token_id", trt.int32, (-1,))
         position_id = network.add_input("position_id", trt.int32, (-1,))
-        attention_mask = network.add_input(
-            "attention_mask", trt.float32, (-1, -1))
+        cache_write_indices = network.add_input(
+            "cache_write_indices", trt.int32, (1,))
+        key_value_lengths = network.add_input(
+            "key_value_lengths", trt.int32, (1,))
 
         # VL embed_input (for vision/audio feature injection)
         input_embed_tensor = network.add_input(
@@ -599,55 +623,41 @@ class Qwen3OmniPlugin:
         for i in range(num_layers):
             ck = network.add_input(
                 graph_ops.layer_tensor_name("cache_k", i),
-                work_trt_dtype, (max_cache_length, kv_attention_size))
+                work_trt_dtype, (1, num_kv_heads, max_cache_length, head_dim))
             cv = network.add_input(
                 graph_ops.layer_tensor_name("cache_v", i),
-                work_trt_dtype, (max_cache_length, kv_attention_size))
+                work_trt_dtype, (1, num_kv_heads, max_cache_length, head_dim))
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
 
-        def _add_profile(opt_sq: int, max_sq: int, *, fixed: bool = False) -> None:
-            profile = builder.create_optimization_profile()
-            min_sq = opt_sq if fixed else 1
-            profile.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
-            profile.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
-            profile.set_shape(
-                "attention_mask",
-                (min_sq, max_cache_length + min_sq),
-                (opt_sq, max_cache_length + opt_sq),
-                (max_sq, max_cache_length + max_sq))
-            profile.set_shape(
-                "input_embed", (min_sq, hidden), (opt_sq, hidden), (max_sq, hidden))
-            profile.set_shape(
-                "use_input_embed", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
-            trt_config.add_optimization_profile(profile)
-
-        _add_profile(min(64, max_cache_length), max_cache_length)
-        _add_profile(1, 1, fixed=True)
+        profile = builder.create_optimization_profile()
+        # Routed expert weights are gathered per active token. Bound Sq so the
+        # [Sq, top_k, hidden, expert_intermediate] activation stays practical;
+        # the runtime still fills the complete context over multiple chunks.
+        max_sq = min(max_cache_length, _NATIVE_PREFILL_CHUNK_TOKENS) if role == "prefill" else 1
+        opt_sq = min(64, max_sq) if role == "prefill" else 1
+        min_sq = 1
+        profile.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
+        profile.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
+        profile.set_shape(
+            "input_embed", (min_sq, hidden), (opt_sq, hidden), (max_sq, hidden))
+        profile.set_shape(
+            "use_input_embed", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
+        trt_config.add_optimization_profile(profile)
 
         # Shared constants
         embedding_table = graph_ops.add_constant(
             network, (vocab, hidden), weights["embedding"], dtype=work_np_dtype)
 
-        graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
-        cos_half_np = graph_ops.make_rope_table_half_dim(
-            attention_window, head_dim, config.rope_theta, True)
-        sin_half_np = graph_ops.make_rope_table_half_dim(
-            attention_window, head_dim, config.rope_theta, False)
-        cos_half_tensor = graph_ops.add_constant(
-            network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
-        sin_half_tensor = graph_ops.add_constant(
-            network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
-
+        active_inv_freq = graph_ops.make_native_active_rope_inv_freq(
+            head_dim, config.rope_theta)
+        cos_half_tensor, sin_half_tensor = graph_ops.add_active_rope_cache(
+            network, position_id, active_inv_freq, work_trt_dtype)
         eps_tensor = graph_ops.add_constant(
             network, (1, 1),
             np.array([config.rms_norm_eps], dtype=work_np_dtype),
             dtype=work_np_dtype)
-
-        if work_trt_dtype != trt.float32:
-            attention_mask = network.add_cast(attention_mask, work_trt_dtype).get_output(0)
-            cos_half_tensor = network.add_cast(cos_half_tensor, work_trt_dtype).get_output(0)
-            sin_half_tensor = network.add_cast(sin_half_tensor, work_trt_dtype).get_output(0)
+        if eps_tensor.dtype != work_trt_dtype:
             eps_tensor = network.add_cast(eps_tensor, work_trt_dtype).get_output(0)
 
         # Embedding lookup with input_embed override for VL/audio
@@ -684,9 +694,6 @@ class Qwen3OmniPlugin:
             trt.ElementWiseOperation.SUM)
         hidden_state = hidden_sum.get_output(0)
 
-        if debug_layer_outputs:
-            _mark_debug_output(network, hidden_state, "debug_embed")
-
         # Decoder layers with MoE
         present_k_outputs = []
         present_v_outputs = []
@@ -694,23 +701,18 @@ class Qwen3OmniPlugin:
         for layer_idx in range(num_layers):
             prefix = f"layer.{layer_idx}"
 
-            # Attention block via graph_blocks
-            attn = graph_blocks.add_attention_block(
+            attn = graph_blocks.add_native_kv_attention_block(
                 network, hidden_state, cache_k_inputs[layer_idx],
-                cache_v_inputs[layer_idx], attention_mask, position_id,
+                cache_v_inputs[layer_idx], cache_write_indices,
+                key_value_lengths,
                 weights=weights, prefix=prefix,
                 hidden_size=hidden, attention_size=attention_size,
-                kv_attention_size=kv_attention_size,
                 num_heads=num_heads, head_dim=head_dim,
                 num_kv_heads=num_kv_heads,
-                max_cache_length=max_cache_length,
                 eps_tensor=eps_tensor,
-                norm_type="rmsnorm", position_type="rope",
                 cos_half_tensor=cos_half_tensor,
                 sin_half_tensor=sin_half_tensor,
-                rotary_embedding_dim=head_dim,
                 dtype=work_np_dtype,
-                dynamic_kv_cache=True,
                 sequence_length=None,
             )
 
@@ -749,14 +751,6 @@ class Qwen3OmniPlugin:
             residual2 = network.add_elementwise(
                 post_attn, moe_out, trt.ElementWiseOperation.SUM)
             hidden_state = residual2.get_output(0)
-
-            if debug_layer_outputs:
-                _mark_debug_output(
-                    network, residual1.get_output(0),
-                    f"debug_post_attn_{layer_idx}")
-                _mark_debug_output(
-                    network, hidden_state,
-                    f"debug_hidden_{layer_idx}")
 
         # Final norm
         final_norm = weights.get("final_norm")
@@ -808,7 +802,7 @@ class Qwen3OmniPlugin:
             network.mark_output(pv)
 
         if verbose:
-            print(f"[trtmc build] Building dual-profile Qwen3-Omni Thinker MoE engine "
+            print(f"[trtmc build] Building native Qwen3-Omni Thinker {role} engine "
                   f"({num_layers} layers, hidden={hidden}, "
                   f"attn={attention_size}, experts={num_experts}, "
                   f"top_k={top_k}, inter={moe_intermediate}, "
@@ -1001,6 +995,10 @@ class Qwen3OmniPlugin:
         overrides["omni_audio_num_layers"] = self._audio_encoder_cfg.get(
             "num_layers", 0)
         overrides["omni_audio_num_frames"] = 1500
+
+        metadata = config.raw.get("_native_kv_cache_metadata")
+        if isinstance(metadata, dict):
+            overrides.update(metadata)
 
         return overrides
 
