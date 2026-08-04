@@ -5,7 +5,6 @@
   "family": "internvl",
   "runtime_strategy": "internvl_vision_language",
   "task_strategy": "vision_language_generation",
-  "precision": "bf16",
   "user_contract": "image-text-to-text",
   "trust_remote_code": false,
   "testcases": [

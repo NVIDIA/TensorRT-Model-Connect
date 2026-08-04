@@ -5,7 +5,6 @@
   "family": "internvl",
   "runtime_strategy": "internvl_vision_language",
   "task_strategy": "vision_language_generation",
-  "precision": "bf16",
   "user_contract": "image-text-to-text",
   "e2e_parallel_resource": "exclusive_gpu",
   "trust_remote_code": false,
