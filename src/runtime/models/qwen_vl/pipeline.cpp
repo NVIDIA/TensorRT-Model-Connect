@@ -566,6 +566,29 @@ void validate_generation_capacity(const std::vector<int32_t>& input_ids, int32_t
     }
 }
 
+bool valid_prefill_mrope_contract(const TrtModule& prefill, const QwenVlMropePositions* mrope,
+                                  std::size_t sequence_length) {
+    if (!prefill.has_input("mrope_position_ids"))
+        return true;
+    if (mrope == nullptr)
+        return false;
+    return mrope->token_positions.size() == sequence_length;
+}
+
+void validate_vl_prefill_request(const TrtModule& prefill, const QwenVlKvCache& kv_cache,
+                                 const QwenVlConfig& config, const std::vector<int32_t>& input_ids,
+                                 const std::vector<float>& image_features, int32_t num_features,
+                                 int32_t feature_dim, const QwenVlMropePositions* mrope) {
+    if (!valid_vl_features(image_features, num_features, feature_dim))
+        throw std::runtime_error("Qwen-VL native KV prefill has invalid vision features");
+    if (input_ids.size() > static_cast<std::size_t>(kv_cache.max_length()))
+        throw std::runtime_error("Qwen-VL sequence exceeds the model's fixed KV capacity");
+    if (config.prefill_max_length <= 0)
+        throw std::runtime_error("Qwen-VL native KV prefill engine has no valid profile capacity");
+    if (!valid_prefill_mrope_contract(prefill, mrope, input_ids.size()))
+        throw std::runtime_error("Qwen-VL native KV prefill has invalid mRoPE positions");
+}
+
 } // namespace
 
 std::pair<int32_t, int32_t> QwenVlPipeline::resolve_gen_limits(const GenerateConfig& cfg) const {
@@ -721,16 +744,8 @@ void QwenVlPipeline::run_vl_prefill_batched(
     const auto sq = static_cast<int32_t>(input_ids.size());
     auto& kv_cache =
         require_vl_prefill_cache(prefill_.get(), state_.get(), config_, sq, feature_dim);
-    if (!valid_vl_features(image_features, num_features, feature_dim))
-        throw std::runtime_error("Qwen-VL native KV prefill has invalid vision features");
-    if (sq > kv_cache.max_length())
-        throw std::runtime_error("Qwen-VL sequence exceeds the model's fixed KV capacity");
-    if (config_.prefill_max_length <= 0)
-        throw std::runtime_error("Qwen-VL native KV prefill engine has no valid profile capacity");
-    if (prefill_->has_input("mrope_position_ids") &&
-        (mrope == nullptr || mrope->token_positions.size() != input_ids.size())) {
-        throw std::runtime_error("Qwen-VL native KV prefill has invalid mRoPE positions");
-    }
+    validate_vl_prefill_request(*prefill_, kv_cache, config_, input_ids, image_features,
+                                num_features, feature_dim, mrope);
 
     kv_cache.bind_cache_inputs(*prefill_);
     auto embedding_inputs =

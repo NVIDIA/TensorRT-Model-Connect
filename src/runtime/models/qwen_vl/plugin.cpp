@@ -105,6 +105,42 @@ void validate_native_scalar(const ITrtModule& module, const std::string& name,
     }
 }
 
+int32_t local_native_kv_heads(const PipelineContext& ctx,
+                              const TensorParallelRuntimeConfig& tp_config) {
+    const int32_t tp_size = tp_config.enabled ? tp_config.tp_size : 1;
+    if (tp_size <= 0)
+        throw std::runtime_error("Qwen-VL native KV tensor parallel size must be positive");
+    if (ctx.config.num_kv_heads <= 0 || ctx.config.num_kv_heads % tp_size != 0) {
+        throw std::runtime_error(
+            "Qwen-VL native KV requires num_key_value_heads divisible by tensor parallel size");
+    }
+    return ctx.config.num_kv_heads / tp_size;
+}
+
+bool matches_native_cache_input(const ITrtModule& module, const std::string& name,
+                                const std::vector<int64_t>& expected_shape) {
+    return module.has_input(name) && module.tensor_shape(name) == expected_shape &&
+           module.tensor_dtype(name) == DType::kBFloat16;
+}
+
+bool matches_native_cache_output(const ITrtModule& module, const std::string& name,
+                                 const std::vector<int64_t>& expected_shape) {
+    return module.has_output(name) && module.tensor_shape(name) == expected_shape &&
+           module.tensor_dtype(name) == DType::kBFloat16;
+}
+
+void validate_native_cache_pair(const ITrtModule& module, const std::string& cache_name,
+                                const std::string& present_name,
+                                const std::vector<int64_t>& expected_shape,
+                                const char* module_label) {
+    if (!matches_native_cache_input(module, cache_name, expected_shape) ||
+        !matches_native_cache_output(module, present_name, expected_shape)) {
+        throw std::runtime_error(std::string("Qwen-VL ") + module_label +
+                                 " native KV cache/present must be BF16 "
+                                 "[1,local_num_kv_heads,capacity,128]");
+    }
+}
+
 void validate_native_module(const PipelineContext& ctx, const ITrtModule& module,
                             const QwenVlKvCacheNames& names,
                             const TensorParallelRuntimeConfig& tp_config,
@@ -112,29 +148,14 @@ void validate_native_module(const PipelineContext& ctx, const ITrtModule& module
     validate_native_scalar(module, names.cache_write_indices, module_label);
     validate_native_scalar(module, names.key_value_lengths, module_label);
 
-    const int32_t tp_size = tp_config.enabled ? tp_config.tp_size : 1;
-    if (tp_size <= 0 || ctx.config.num_kv_heads <= 0 || ctx.config.num_kv_heads % tp_size != 0) {
-        throw std::runtime_error(
-            "Qwen-VL native KV requires num_key_value_heads divisible by tensor parallel size");
-    }
-    const int32_t local_kv_heads = ctx.config.num_kv_heads / tp_size;
+    const int32_t local_kv_heads = local_native_kv_heads(ctx, tp_config);
     const std::vector<int64_t> expected_shape{1, local_kv_heads, ctx.config.max_cache_length, 128};
     for (int32_t layer = 0; layer < ctx.config.num_layers; ++layer) {
         const auto index = static_cast<std::size_t>(layer);
-        const auto validate_pair = [&](const std::string& cache_name,
-                                       const std::string& present_name) {
-            if (!module.has_input(cache_name) || !module.has_output(present_name) ||
-                module.tensor_shape(cache_name) != expected_shape ||
-                module.tensor_shape(present_name) != expected_shape ||
-                module.tensor_dtype(cache_name) != DType::kBFloat16 ||
-                module.tensor_dtype(present_name) != DType::kBFloat16) {
-                throw std::runtime_error(std::string("Qwen-VL ") + module_label +
-                                         " native KV cache/present must be BF16 "
-                                         "[1,local_num_kv_heads,capacity,128]");
-            }
-        };
-        validate_pair(names.cache_k[index], names.present_k[index]);
-        validate_pair(names.cache_v[index], names.present_v[index]);
+        validate_native_cache_pair(module, names.cache_k[index], names.present_k[index],
+                                   expected_shape, module_label);
+        validate_native_cache_pair(module, names.cache_v[index], names.present_v[index],
+                                   expected_shape, module_label);
     }
 }
 

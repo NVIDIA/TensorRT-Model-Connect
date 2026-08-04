@@ -55,6 +55,48 @@ bool all_tensors_ok(const std::vector<DeviceTensor>& tensors) {
     return true;
 }
 
+void populate_default_cache_names(int32_t num_layers, QwenVlKvCacheNames& names) {
+    if (!names.cache_k.empty())
+        return;
+
+    names.cache_k.reserve(static_cast<std::size_t>(num_layers));
+    names.cache_v.reserve(static_cast<std::size_t>(num_layers));
+    names.present_k.reserve(static_cast<std::size_t>(num_layers));
+    names.present_v.reserve(static_cast<std::size_t>(num_layers));
+    for (int32_t layer = 0; layer < num_layers; ++layer) {
+        const auto suffix = "_" + std::to_string(layer);
+        names.cache_k.push_back("cache_k" + suffix);
+        names.cache_v.push_back("cache_v" + suffix);
+        names.present_k.push_back("present_k" + suffix);
+        names.present_v.push_back("present_v" + suffix);
+    }
+}
+
+void validate_cache_name_counts(int32_t num_layers, const QwenVlKvCacheNames& names) {
+    const auto expected = static_cast<std::size_t>(num_layers);
+    if (names.cache_k.size() != expected || names.cache_v.size() != expected ||
+        names.present_k.size() != expected || names.present_v.size() != expected) {
+        throw std::invalid_argument("QwenVlKvCache per-layer tensor name count mismatch");
+    }
+}
+
+bool allocate_cache_layers(int32_t num_layers, int32_t max_length, int32_t kv_dim,
+                           DType cache_dtype, cudaStream_t stream,
+                           std::vector<DeviceTensor>& cache_k, std::vector<DeviceTensor>& cache_v) {
+    const auto layer_count = static_cast<std::size_t>(num_layers);
+    cache_k.reserve(layer_count);
+    cache_v.reserve(layer_count);
+    for (int32_t layer = 0; layer < num_layers; ++layer) {
+        cache_k.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype, stream);
+        if (!cache_k.back().ok())
+            return false;
+        cache_v.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype, stream);
+        if (!cache_v.back().ok())
+            return false;
+    }
+    return true;
+}
+
 } // namespace
 
 QwenVlKvCache::QwenVlKvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim,
@@ -64,36 +106,11 @@ QwenVlKvCache::QwenVlKvCache(int32_t num_layers, int32_t max_length, int32_t kv_
     if (num_layers <= 0 || max_length <= 0 || kv_dim <= 0)
         throw std::invalid_argument("QwenVlKvCache dimensions must be positive");
 
-    if (names_.cache_k.empty()) {
-        names_.cache_k.reserve(static_cast<std::size_t>(num_layers));
-        names_.cache_v.reserve(static_cast<std::size_t>(num_layers));
-        names_.present_k.reserve(static_cast<std::size_t>(num_layers));
-        names_.present_v.reserve(static_cast<std::size_t>(num_layers));
-        for (int32_t layer = 0; layer < num_layers; ++layer) {
-            const auto suffix = "_" + std::to_string(layer);
-            names_.cache_k.push_back("cache_k" + suffix);
-            names_.cache_v.push_back("cache_v" + suffix);
-            names_.present_k.push_back("present_k" + suffix);
-            names_.present_v.push_back("present_v" + suffix);
-        }
-    }
-
-    const auto expected_names = static_cast<std::size_t>(num_layers);
-    if (names_.cache_k.size() != expected_names || names_.cache_v.size() != expected_names ||
-        names_.present_k.size() != expected_names || names_.present_v.size() != expected_names) {
-        throw std::invalid_argument("QwenVlKvCache per-layer tensor name count mismatch");
-    }
-
-    cache_k_.reserve(expected_names);
-    cache_v_.reserve(expected_names);
-    for (int32_t layer = 0; layer < num_layers; ++layer) {
-        cache_k_.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype, stream);
-        if (!cache_k_.back().ok())
-            return;
-        cache_v_.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype, stream);
-        if (!cache_v_.back().ok())
-            return;
-    }
+    populate_default_cache_names(num_layers, names_);
+    validate_cache_name_counts(num_layers, names_);
+    if (!allocate_cache_layers(num_layers, max_length, kv_dim, cache_dtype, stream, cache_k_,
+                               cache_v_))
+        return;
     reset();
 }
 
