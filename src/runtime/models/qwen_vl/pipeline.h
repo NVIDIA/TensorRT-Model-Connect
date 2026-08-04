@@ -50,14 +50,6 @@ class QwenVlPipeline final : public IPipeline {
                    std::unique_ptr<TrtModule> prefill = nullptr,
                    std::shared_ptr<qwen_vl::LoraAdapterCache> adapter_cache = nullptr);
 
-    QwenVlPipeline(std::unique_ptr<TrtModule> text_decoder,
-                   std::unique_ptr<TrtModule> vision_encoder,
-                   std::unique_ptr<QwenVlInferenceState> state, QwenVlConfig config,
-                   QwenVlPreprocessConfig vl_preprocess, cudaStream_t stream,
-                   std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
-                   std::unique_ptr<QwenVlISampler> sampler,
-                   std::shared_ptr<qwen_vl::LoraAdapterCache> adapter_cache);
-
     TextResult generate(const std::string& prompt, const GenerateConfig& cfg = {}) override;
 
     TextResult generate(const std::string& prompt, const float* image_pixels, int32_t image_height,
@@ -123,13 +115,7 @@ class QwenVlPipeline final : public IPipeline {
     QwenVlISampler* prepare_sampler(const QwenVlSamplingParams& params,
                                     std::unique_ptr<QwenVlISampler>& local_sampler);
 
-    void run_vl_prefill_token(int32_t token_id, const std::vector<float>& image_features,
-                              const std::vector<std::vector<float>>& deepstack_features,
-                              int32_t num_features, int32_t feature_dim, int32_t& feature_index,
-                              const std::array<int32_t, 3>* mrope_position,
-                              std::vector<float>& logits);
-
-    bool run_vl_prefill_batched(const std::vector<int32_t>& input_ids,
+    void run_vl_prefill_batched(const std::vector<int32_t>& input_ids,
                                 const std::vector<float>& image_features,
                                 const std::vector<std::vector<float>>& deepstack_features,
                                 int32_t num_features, int32_t feature_dim,

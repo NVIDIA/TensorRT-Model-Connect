@@ -79,17 +79,8 @@ class QwenVlInferenceState {
     // -1 for unbounded (recurrent models with no cache length limit).
     virtual int32_t max_length() const = 0;
 
-    // Desired number of KV rows to expose to the decoder on the next step.
-    // Dynamic-KV runtimes can use this to choose an execution profile/context
-    // before prepare_step() binds the state tensors.
-    virtual int32_t preferred_cache_rows() const { return max_length(); }
-
     // Number of transformer/SSM layers.
     virtual int32_t num_layers() const = 0;
-
-    // Whether this state type needs an attention mask.
-    // QwenVlKvCache -> true. Family-owned recurrent state -> false.
-    virtual bool needs_attention_mask() const = 0;
 
     // Total device memory consumed by this state (bytes).
     virtual std::size_t device_memory_bytes() const = 0;

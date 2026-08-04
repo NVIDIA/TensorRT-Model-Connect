@@ -18,20 +18,45 @@ except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
-def _config(*, qwen3: bool = False) -> SimpleNamespace:
-    raw = {"vision_config": {"deepstack_visual_indexes": [5, 11, 17]}} if qwen3 else {}
+def _config(
+    *, qwen3: bool = False, context: int = 31, role: str = "decode",
+) -> SimpleNamespace:
+    model_type = "qwen3_vl" if qwen3 else "qwen2_5_vl"
+    architecture = (
+        "Qwen3VLForConditionalGeneration"
+        if qwen3 else "Qwen2_5_VLForConditionalGeneration"
+    )
+    raw = {
+        "_decoder_engine_layout": "split",
+        "_decoder_engine_role": role,
+        "vision_config": {
+            "deepstack_visual_indexes": [5, 11, 17] if qwen3 else [],
+        },
+        "text_config": {
+            "head_dim": 128,
+            "rope_parameters": {
+                "rope_type": "default",
+                "mrope_section": [16, 24, 24],
+                "mrope_interleaved": qwen3,
+            },
+        },
+    }
     return SimpleNamespace(
         raw=raw,
-        hidden_size=16,
+        model_type=model_type,
+        architectures=[architecture],
+        hidden_size=512,
         vocab_size=32,
         num_hidden_layers=4,
         num_attention_heads=4,
         num_key_value_heads=4,
-        head_dim=4,
-        attention_size=16,
-        intermediate_size=32,
+        head_dim=128,
+        attention_size=512,
+        intermediate_size=1024,
         rms_norm_eps=1e-5,
         rope_theta=10000.0,
+        max_position_embeddings=context,
+        hidden_act="silu",
     )
 
 
@@ -54,12 +79,14 @@ def test_qwen_vl_plugin_routes_parallel_builds(
         return b"qwen-vl-tp-plan"
 
     monkeypatch.setattr(module, "build_qwen_vl_tp_decoder_engine", fake_build)
+    monkeypatch.setattr(module, "validate_native_kv_weights", lambda *_: None)
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=tp_size, rank=1)
     result = module.QwenVLPlugin().build_engine(
-        _config(qwen3=qwen3),
+        _config(qwen3=qwen3, context=23),
         {"_attention_size": 16, "_kv_attention_size": 16, "_mlp_size": 32},
         23,
+        precision="bf16",
         verbose=True,
         parallel_config=parallel,
     )
@@ -73,7 +100,7 @@ def test_qwen_vl_plugin_routes_parallel_builds(
     assert kwargs["verbose"] is True
 
 
-def test_qwen25_vl_plugin_forwards_precision_to_standard_builder(monkeypatch) -> None:
+def test_qwen25_vl_plugin_builds_native_split_role(monkeypatch) -> None:
     module = importlib.import_module(
         "tensorrt_model_connect.families.qwen_vl.plugin")
     calls: dict[str, object] = {}
@@ -82,10 +109,11 @@ def test_qwen25_vl_plugin_forwards_precision_to_standard_builder(monkeypatch) ->
         calls["build"] = (config, weights, max_cache_length, kwargs)
         return b"qwen-vl-plan"
 
-    monkeypatch.setattr(module, "build_standard_decoder_engine", fake_build)
+    monkeypatch.setattr(module, "build_dual_profile_decoder_engine", fake_build)
+    monkeypatch.setattr(module, "validate_native_kv_weights", lambda *_: None)
 
     result = module.QwenVLPlugin().build_engine(
-        _config(qwen3=False),
+        _config(qwen3=False, context=31, role="prefill"),
         {"_attention_size": 16, "_kv_attention_size": 16, "_mlp_size": 32},
         31,
         precision="bf16",
@@ -97,96 +125,70 @@ def test_qwen25_vl_plugin_forwards_precision_to_standard_builder(monkeypatch) ->
     assert max_cache_length == 31
     assert kwargs["precision"] == "bf16"
     assert kwargs["embed_input"] is True
+    assert kwargs["profile_mode"] == "prefill"
     assert kwargs["verbose"] is True
 
 
-def test_qwen25_vl_split_decode_uses_decode_profile(monkeypatch) -> None:
+@pytest.mark.parametrize("role", ["prefill", "decode"])
+def test_standard_entrypoint_routes_to_native_split_role(
+    monkeypatch, role: str,
+) -> None:
     module = importlib.import_module(
         "tensorrt_model_connect.families.qwen_vl.default_decoder")
-    plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.qwen_vl.plugin")
-    plugin = plugin_module.QwenVLPlugin()
     calls: dict[str, object] = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
         calls["build"] = (config, weights, max_cache_length, kwargs)
-        return b"qwen-vl-dual-profile-plan"
+        return b"qwen-vl-native-plan"
 
     monkeypatch.setattr(module, "build_dual_profile_decoder_engine", fake_build)
-    config = _config(qwen3=False)
-    config.raw["_decoder_engine_role"] = "decode"
-    config.raw["_active_split_decoder_build"] = True
-    config.raw["_family_build_options"] = {
-        "qwen_vl_decoder": {"decode_attention": "decomposed"},
-    }
-    assert plugin.supports_split_embed_input is True
-    assert plugin.supports_split_decoder_roles(config) is True
+    monkeypatch.setattr(module, "validate_native_kv_weights", lambda *_: None)
+    config = _config(qwen3=False, role=role)
     result = module.build_standard_decoder_engine(
-        config, {}, 31, precision="fp16", embed_input=True)
+        config, {}, 31, precision="bf16", embed_input=True)
 
-    assert result == b"qwen-vl-dual-profile-plan"
+    assert result == b"qwen-vl-native-plan"
     assert calls["build"][3]["embed_input"] is True
-    assert calls["build"][3]["force_decomposed_attention"] is True
-    assert calls["build"][3]["profile_mode"] == "decode"
+    assert calls["build"][3]["profile_mode"] == role
 
 
-def test_qwen25_vl_split_prefill_forwards_build_options(monkeypatch) -> None:
+def test_standard_entrypoint_requires_explicit_split_role() -> None:
     module = importlib.import_module(
         "tensorrt_model_connect.families.qwen_vl.default_decoder")
-    calls: dict[str, object] = {}
-
-    def fake_build(config, weights, max_cache_length, **kwargs):
-        calls["build"] = (config, weights, max_cache_length, kwargs)
-        return b"qwen-vl-prefill-plan"
-
-    monkeypatch.setattr(module, "build_dual_profile_decoder_engine", fake_build)
-    config = _config(qwen3=False)
-    config.raw["_decoder_engine_role"] = "prefill"
-    config.raw["_active_split_decoder_build"] = True
-    config.raw["_family_build_options"] = {
-        "qwen_vl_decoder": {
-            "max_prefill_length": 24,
-            "opt_prefill_length": 12,
-            "builder_workspace_gib": 6,
-        },
-    }
-
-    result = module.build_standard_decoder_engine(
-        config, {}, 31, precision="fp16", embed_input=True)
-
-    assert result == b"qwen-vl-prefill-plan"
-    kwargs = calls["build"][3]
-    assert kwargs["profile_mode"] == "prefill"
-    assert kwargs["max_prefill_length"] == 24
-    assert kwargs["opt_prefill_length"] == 12
-    assert kwargs["builder_workspace_bytes"] == 6 << 30
+    with pytest.raises(ValueError, match="explicit split"):
+        module.build_standard_decoder_engine(
+            _config(qwen3=False, role=""), {}, 31,
+            precision="bf16", embed_input=True)
 
 
-def test_qwen25_vl_lora_keeps_dual_profile_prefill(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("precision", "family_options", "reason"),
+    [
+        ("fp16", {}, "requires BF16"),
+        (
+            "bf16",
+            {
+                "qwen_vl_lora": {
+                    "enabled": True,
+                    "max_rank": 16,
+                    "target_modules": "q_proj,v_proj",
+                },
+            },
+            "dynamic LoRA",
+        ),
+    ],
+)
+def test_standard_entrypoint_has_no_legacy_fallback(
+    precision: str, family_options: dict, reason: str,
+) -> None:
     module = importlib.import_module(
         "tensorrt_model_connect.families.qwen_vl.default_decoder")
-    calls: dict[str, object] = {}
-
-    def fake_build(config, weights, max_cache_length, **kwargs):
-        calls["build"] = (config, weights, max_cache_length, kwargs)
-        return b"qwen-vl-lora-dual-profile-plan"
-
-    monkeypatch.setattr(module, "build_dual_profile_decoder_engine", fake_build)
     config = _config(qwen3=False)
-    config.raw["_decoder_engine_role"] = "decode"
-    config.raw["_family_build_options"] = {
-        "qwen_vl_lora": {
-            "enabled": True,
-            "max_rank": 16,
-            "target_modules": "q_proj,v_proj",
-        }
-    }
+    config.raw["_family_build_options"] = family_options
 
-    result = module.build_standard_decoder_engine(
-        config, {}, 31, precision="fp16", embed_input=True)
-
-    assert result == b"qwen-vl-lora-dual-profile-plan"
-    assert calls["build"][3]["embed_input"] is True
+    with pytest.raises(ValueError, match=reason):
+        module.build_standard_decoder_engine(
+            config, {}, 31, precision=precision, embed_input=True)
 
 
 def test_qwen3_vl_vision_component_can_stay_fp32(monkeypatch) -> None:
@@ -219,25 +221,16 @@ def test_qwen3_vl_vision_component_can_stay_fp32(monkeypatch) -> None:
     assert calls["build"][2]["fp32_layers"] == {5}
 
 
-def test_qwen3_vl_text_decoder_component_can_stay_fp32(monkeypatch) -> None:
+def test_qwen3_vl_text_fp32_override_has_no_legacy_fallback(monkeypatch) -> None:
     module = importlib.import_module(
         "tensorrt_model_connect.families.qwen_vl.plugin")
-    calls: dict[str, object] = {}
-
-    def fake_build(config, weights, max_cache_length, **kwargs):
-        calls["build"] = (config, weights, max_cache_length, kwargs)
-        return b"qwen3-vl-text-plan"
-
-    monkeypatch.setattr(module, "_build_qwen3_vl_decoder", fake_build)
     config = _config(qwen3=True)
-    config.raw["_fp32_layers"] = [module._TEXT_DECODER_COMPONENT]
+    config.raw["_fp32_layers"] = [0]
 
-    result = module.QwenVLPlugin().build_engine(
-        config,
-        {"_attention_size": 16, "_kv_attention_size": 16, "_mlp_size": 32},
-        31,
-        precision="fp16",
-    )
-
-    assert result == b"qwen3-vl-text-plan"
-    assert calls["build"][3]["precision"] == "fp32"
+    with pytest.raises(ValueError, match="FP32 layer"):
+        module.QwenVLPlugin().build_engine(
+            config,
+            {"_attention_size": 16, "_kv_attention_size": 16, "_mlp_size": 32},
+            31,
+            precision="bf16",
+        )

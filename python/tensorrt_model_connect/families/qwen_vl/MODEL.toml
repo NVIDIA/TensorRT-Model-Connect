@@ -5,6 +5,7 @@ id = "qwen_vl"
 plugin = "qwen_vl"
 module = "plugin"
 capabilities = ["debug_layer_outputs"]
+default_build_route = "build_routing.py|prefer_native_default"
 aliases = [
   "qwen2_5_vl",
   "qwen2_vl",

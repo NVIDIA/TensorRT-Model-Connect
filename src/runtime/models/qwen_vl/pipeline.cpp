@@ -55,7 +55,7 @@ void validate_pipeline_components(const TrtModule* text_decoder, const QwenVlInf
         throw std::runtime_error("QwenVlPipeline: invalid text decoder");
     if (state == nullptr || !state->ok())
         throw std::runtime_error("QwenVlPipeline: invalid inference state");
-    if (prefill != nullptr && !prefill->ok())
+    if (prefill == nullptr || !prefill->ok())
         throw std::runtime_error("QwenVlPipeline: invalid prefill decoder");
 }
 
@@ -67,18 +67,6 @@ void sync_vision_config(QwenVlConfig& config, const QwenVlPreprocessConfig& prep
 }
 
 } // namespace
-
-QwenVlPipeline::QwenVlPipeline(std::unique_ptr<TrtModule> text_decoder,
-                               std::unique_ptr<TrtModule> vision_encoder,
-                               std::unique_ptr<QwenVlInferenceState> state, QwenVlConfig config,
-                               QwenVlPreprocessConfig vl_preprocess, cudaStream_t stream,
-                               std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
-                               std::unique_ptr<QwenVlISampler> sampler,
-                               std::shared_ptr<qwen_vl::LoraAdapterCache> adapter_cache)
-    : QwenVlPipeline(std::move(text_decoder), std::move(vision_encoder), std::move(state), config,
-                     std::move(vl_preprocess), stream, std::move(tokenizer),
-                     std::move(model_id_str), std::move(sampler), nullptr,
-                     std::move(adapter_cache)) {}
 
 QwenVlPipeline::QwenVlPipeline(std::unique_ptr<TrtModule> text_decoder,
                                std::unique_ptr<TrtModule> vision_encoder,
@@ -234,22 +222,6 @@ int32_t infer_feature_dim(const TrtModule& encoder, int32_t configured_dim) {
     return 0;
 }
 
-std::vector<const float*>
-select_deepstack_feature_pointers(const std::vector<std::vector<float>>& deepstack_features,
-                                  int32_t feature_index, int32_t feature_dim) {
-    std::vector<const float*> embeds;
-    embeds.reserve(deepstack_features.size());
-    for (const auto& deepstack : deepstack_features) {
-        const int32_t count =
-            static_cast<int32_t>(deepstack.size() / static_cast<std::size_t>(feature_dim));
-        embeds.push_back(feature_index < count
-                             ? deepstack.data() +
-                                   static_cast<std::size_t>(feature_index) * feature_dim
-                             : nullptr);
-    }
-    return embeds;
-}
-
 struct VlSequenceEmbeddingInputs {
     std::vector<float> input_embed;
     std::vector<float> use_input_embed;
@@ -311,18 +283,19 @@ bool gather_vl_prefill_kv_pointers(TrtModule& prefill, const QwenVlConfig& confi
     return true;
 }
 
-QwenVlKvCache* eligible_vl_prefill_cache(TrtModule* prefill, QwenVlInferenceState* state,
-                                         const QwenVlConfig& config, int32_t sequence_length,
-                                         int32_t feature_dim) {
+QwenVlKvCache& require_vl_prefill_cache(TrtModule* prefill, QwenVlInferenceState* state,
+                                        const QwenVlConfig& config, int32_t sequence_length,
+                                        int32_t feature_dim) {
     if (prefill == nullptr)
-        return nullptr;
+        throw std::runtime_error("Qwen-VL native KV bundle is missing the prefill engine");
     if (sequence_length <= 0 || feature_dim <= 0 || config.num_layers <= 0)
-        return nullptr;
+        throw std::runtime_error("Qwen-VL native KV prefill has invalid model dimensions");
     if (!prefill->has_input("input_embed"))
-        return nullptr;
-    if (config.prefill_max_length > 0 && sequence_length > config.prefill_max_length)
-        return nullptr;
-    return dynamic_cast<QwenVlKvCache*>(state);
+        throw std::runtime_error("Qwen-VL native KV prefill is missing input_embed");
+    auto* cache = dynamic_cast<QwenVlKvCache*>(state);
+    if (cache == nullptr)
+        throw std::runtime_error("Qwen-VL native KV runtime requires QwenVlKvCache");
+    return *cache;
 }
 
 bool valid_vl_features(const std::vector<float>& image_features, int32_t num_features,
@@ -335,32 +308,37 @@ bool valid_vl_features(const std::vector<float>& image_features, int32_t num_fea
 }
 
 void add_vl_prefill_base_inputs(TensorMap& inputs, QwenVlInferenceState& state,
-                                const std::vector<int32_t>& input_ids,
-                                VlSequenceEmbeddingInputs& embedding_inputs, int32_t feature_dim) {
-    const auto sequence_length = static_cast<int32_t>(input_ids.size());
-    inputs["token_id"] =
-        Tensor{const_cast<int32_t*>(input_ids.data()), {sequence_length}, DType::kInt32};
+                                const int32_t* input_ids,
+                                VlSequenceEmbeddingInputs& embedding_inputs, int32_t start,
+                                int32_t sequence_length, int32_t feature_dim) {
+    inputs["token_id"] = Tensor{const_cast<int32_t*>(input_ids), {sequence_length}, DType::kInt32};
     state.prepare_step(inputs, sequence_length);
-    inputs["input_embed"] = Tensor{
-        embedding_inputs.input_embed.data(), {sequence_length, feature_dim}, DType::kFloat32};
-    inputs["use_input_embed"] =
-        Tensor{embedding_inputs.use_input_embed.data(), {sequence_length, 1}, DType::kFloat32};
+    const auto embed_offset = static_cast<std::size_t>(start) * feature_dim;
+    inputs["input_embed"] = Tensor{embedding_inputs.input_embed.data() + embed_offset,
+                                   {sequence_length, feature_dim},
+                                   DType::kFloat32};
+    inputs["use_input_embed"] = Tensor{
+        embedding_inputs.use_input_embed.data() + start, {sequence_length, 1}, DType::kFloat32};
 }
 
 bool add_vl_prefill_deepstack_inputs(TrtModule& prefill, TensorMap& inputs,
-                                     VlSequenceEmbeddingInputs& embedding_inputs,
+                                     VlSequenceEmbeddingInputs& embedding_inputs, int32_t start,
                                      int32_t sequence_length, int32_t feature_dim) {
     if (!prefill.has_input("deepstack_active"))
         return true;
-    inputs["deepstack_active"] =
-        Tensor{embedding_inputs.deepstack_active.data(), {sequence_length, 1}, DType::kFloat32};
+    inputs["deepstack_active"] = Tensor{
+        embedding_inputs.deepstack_active.data() + start, {sequence_length, 1}, DType::kFloat32};
     for (std::size_t level = 0;; ++level) {
         const auto name = "deepstack_embed_" + std::to_string(level);
         if (!prefill.has_input(name))
             break;
-        if (level >= embedding_inputs.deepstack_embed.size())
-            return false;
-        inputs[name] = Tensor{embedding_inputs.deepstack_embed[level].data(),
+        if (level >= embedding_inputs.deepstack_embed.size()) {
+            embedding_inputs.deepstack_embed.emplace_back(embedding_inputs.deepstack_active.size() *
+                                                              static_cast<std::size_t>(feature_dim),
+                                                          0.0F);
+        }
+        const auto embed_offset = static_cast<std::size_t>(start) * feature_dim;
+        inputs[name] = Tensor{embedding_inputs.deepstack_embed[level].data() + embed_offset,
                               {sequence_length, feature_dim},
                               DType::kFloat32};
     }
@@ -554,23 +532,38 @@ std::pair<int32_t, int32_t> resolve_merged_grid(const QwenVlPreprocessedImage& p
     };
 }
 
-bool add_mrope_prefill_input(TrtModule& prefill, const std::vector<int32_t>& input_ids,
-                             const QwenVlMropePositions* mrope, int32_t sequence_length,
-                             std::vector<int32_t>& positions, TensorMap& inputs) {
+bool add_mrope_prefill_input(TrtModule& prefill, std::size_t total_sequence_length,
+                             const QwenVlMropePositions* mrope, int32_t start,
+                             int32_t sequence_length, std::vector<int32_t>& positions,
+                             TensorMap& inputs) {
     if (!prefill.has_input("mrope_position_ids"))
         return true;
-    if (mrope == nullptr || mrope->token_positions.size() != input_ids.size())
+    if (mrope == nullptr || mrope->token_positions.size() != total_sequence_length)
         return false;
     positions.resize(static_cast<std::size_t>(3 * sequence_length));
     for (int32_t token_index = 0; token_index < sequence_length; ++token_index) {
         for (int32_t axis = 0; axis < 3; ++axis) {
             positions[static_cast<std::size_t>(axis * sequence_length + token_index)] =
-                mrope->token_positions[static_cast<std::size_t>(token_index)]
+                mrope->token_positions[static_cast<std::size_t>(start + token_index)]
                                       [static_cast<std::size_t>(axis)];
         }
     }
     inputs["mrope_position_ids"] = Tensor{positions.data(), {3, sequence_length}, DType::kInt32};
     return true;
+}
+
+void validate_generation_capacity(const std::vector<int32_t>& input_ids, int32_t max_new_tokens,
+                                  const QwenVlInferenceState& state) {
+    const int32_t capacity = state.max_length();
+    if (capacity < 0)
+        return;
+    const auto prompt_tokens = input_ids.size();
+    const auto generation_tokens = static_cast<std::size_t>(std::max(max_new_tokens, 0));
+    const auto max_capacity = static_cast<std::size_t>(capacity);
+    if (prompt_tokens > max_capacity || generation_tokens > max_capacity - prompt_tokens) {
+        throw std::runtime_error(
+            "Qwen-VL requested prompt and generation exceed the model's fixed KV capacity");
+    }
 }
 
 } // namespace
@@ -665,14 +658,17 @@ std::vector<int32_t> QwenVlPipeline::generate_from_ids(const std::vector<int32_t
     std::unique_ptr<QwenVlISampler> local_sampler;
     QwenVlISampler* active_sampler = prepare_sampler(params, local_sampler);
 
+    validate_generation_capacity(input_ids, max_new_tokens, *state_);
     reset_generation_context(static_cast<int32_t>(input_ids.size()));
 
     std::vector<float> logits;
-
-    for (std::size_t i = 0; i + 1 < input_ids.size(); ++i)
-        run_text_step(input_ids[i], logits);
-
-    run_text_step(input_ids.back(), logits);
+    const int32_t feature_dim = resolve_input_embed_dim(*prefill_, config_.vision_output_dim);
+    const bool use_mrope = prefill_->has_input("mrope_position_ids");
+    const auto mrope =
+        use_mrope ? qwen_vl_build_mrope_positions(input_ids, config_.image_token_id, 0, 0, 0)
+                  : QwenVlMropePositions{};
+    run_vl_prefill_batched(input_ids, {}, {}, 0, feature_dim, use_mrope ? &mrope : nullptr, logits);
+    state_->mark_prefill_complete();
 
     std::vector<int32_t> output = input_ids;
     const int32_t vocab_size = static_cast<int32_t>(logits.size());
@@ -680,7 +676,7 @@ std::vector<int32_t> QwenVlPipeline::generate_from_ids(const std::vector<int32_t
     for (int32_t step = 0; step < max_new_tokens; ++step) {
         QwenVlSampleResult result = active_sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
-        if (result.is_eos)
+        if (result.is_eos || step + 1 == max_new_tokens)
             break;
         run_text_step(result.token_id, logits);
     }
@@ -699,6 +695,7 @@ std::vector<int32_t> QwenVlPipeline::generate_vl_from_ids(
     std::unique_ptr<QwenVlISampler> local_sampler;
     QwenVlISampler* active_sampler = prepare_sampler(params, local_sampler);
 
+    validate_generation_capacity(input_ids, max_new_tokens, *state_);
     reset_generation_context(static_cast<int32_t>(input_ids.size()));
 
     std::vector<float> logits;
@@ -707,16 +704,8 @@ std::vector<int32_t> QwenVlPipeline::generate_vl_from_ids(
         use_mrope ? qwen_vl_build_mrope_positions(input_ids, config_.image_token_id, num_features,
                                                   merged_grid_height, merged_grid_width)
                   : QwenVlMropePositions{};
-    if (!run_vl_prefill_batched(input_ids, image_features, deepstack_features, num_features,
-                                feature_dim, use_mrope ? &mrope : nullptr, logits)) {
-        int32_t feature_index = 0;
-        for (std::size_t index = 0; index < input_ids.size(); ++index) {
-            const auto tid = input_ids[index];
-            const auto* position = use_mrope ? &mrope.token_positions[index] : nullptr;
-            run_vl_prefill_token(tid, image_features, deepstack_features, num_features, feature_dim,
-                                 feature_index, position, logits);
-        }
-    }
+    run_vl_prefill_batched(input_ids, image_features, deepstack_features, num_features, feature_dim,
+                           use_mrope ? &mrope : nullptr, logits);
     state_->mark_prefill_complete();
 
     std::vector<int32_t> output = input_ids;
@@ -725,63 +714,57 @@ std::vector<int32_t> QwenVlPipeline::generate_vl_from_ids(
     return output;
 }
 
-bool QwenVlPipeline::run_vl_prefill_batched(
+void QwenVlPipeline::run_vl_prefill_batched(
     const std::vector<int32_t>& input_ids, const std::vector<float>& image_features,
     const std::vector<std::vector<float>>& deepstack_features, int32_t num_features,
     int32_t feature_dim, const QwenVlMropePositions* mrope, std::vector<float>& logits) {
     const auto sq = static_cast<int32_t>(input_ids.size());
-    auto* kv_cache =
-        eligible_vl_prefill_cache(prefill_.get(), state_.get(), config_, sq, feature_dim);
-    if (kv_cache == nullptr)
-        return false;
+    auto& kv_cache =
+        require_vl_prefill_cache(prefill_.get(), state_.get(), config_, sq, feature_dim);
     if (!valid_vl_features(image_features, num_features, feature_dim))
-        return false;
+        throw std::runtime_error("Qwen-VL native KV prefill has invalid vision features");
+    if (sq > kv_cache.max_length())
+        throw std::runtime_error("Qwen-VL sequence exceeds the model's fixed KV capacity");
+    if (config_.prefill_max_length <= 0)
+        throw std::runtime_error("Qwen-VL native KV prefill engine has no valid profile capacity");
+    if (prefill_->has_input("mrope_position_ids") &&
+        (mrope == nullptr || mrope->token_positions.size() != input_ids.size())) {
+        throw std::runtime_error("Qwen-VL native KV prefill has invalid mRoPE positions");
+    }
 
-    kv_cache->bind_cache_inputs(*prefill_);
+    kv_cache.bind_cache_inputs(*prefill_);
     auto embedding_inputs =
         build_vl_sequence_embedding_inputs(input_ids, config_.image_token_id, image_features,
                                            deepstack_features, num_features, feature_dim);
 
-    TensorMap inputs;
-    add_vl_prefill_base_inputs(inputs, *state_, input_ids, embedding_inputs, feature_dim);
-    std::vector<int32_t> mrope_positions;
-    if (!add_mrope_prefill_input(*prefill_, input_ids, mrope, sq, mrope_positions, inputs))
-        return false;
-    if (!add_vl_prefill_deepstack_inputs(*prefill_, inputs, embedding_inputs, sq, feature_dim))
-        return false;
-
-    auto outputs = prefill_->forward(inputs);
-    if (!copy_last_prefill_logits(outputs, config_.vocab_size, logits))
-        return false;
-
     std::vector<const void*> present_k;
     std::vector<const void*> present_v;
     if (!gather_vl_prefill_kv_pointers(*prefill_, config_, present_k, present_v))
-        return false;
-    kv_cache->write_prefill_kv(present_k, present_v, sq);
-    return true;
-}
+        throw std::runtime_error("Qwen-VL native KV prefill outputs are incomplete");
 
-void QwenVlPipeline::run_vl_prefill_token(int32_t token_id,
-                                          const std::vector<float>& image_features,
-                                          const std::vector<std::vector<float>>& deepstack_features,
-                                          int32_t num_features, int32_t feature_dim,
-                                          int32_t& feature_index,
-                                          const std::array<int32_t, 3>* mrope_position,
-                                          std::vector<float>& logits) {
-    const bool use_image_embed = token_id == config_.image_token_id && feature_index < num_features;
-    if (!use_image_embed) {
-        run_text_step_with_embed(token_id, nullptr, 0.0F, {}, 0.0F, mrope_position, logits);
-        return;
+    const int32_t chunk_limit = std::min(config_.prefill_max_length, kv_cache.max_length());
+    for (int32_t start = 0; start < sq;) {
+        const int32_t chunk_size = std::min(chunk_limit, sq - start);
+        TensorMap inputs;
+        add_vl_prefill_base_inputs(inputs, *state_, input_ids.data() + start, embedding_inputs,
+                                   start, chunk_size, feature_dim);
+        std::vector<int32_t> mrope_positions;
+        if (!add_mrope_prefill_input(*prefill_, input_ids.size(), mrope, start, chunk_size,
+                                     mrope_positions, inputs)) {
+            throw std::runtime_error("Qwen-VL native KV prefill has invalid mRoPE positions");
+        }
+        if (!add_vl_prefill_deepstack_inputs(*prefill_, inputs, embedding_inputs, start, chunk_size,
+                                             feature_dim)) {
+            throw std::runtime_error("Qwen-VL native KV prefill has invalid DeepStack inputs");
+        }
+
+        auto outputs = prefill_->forward(inputs);
+        if (!copy_last_prefill_logits(outputs, config_.vocab_size, logits)) {
+            throw std::runtime_error("Qwen-VL native KV prefill has no valid logits output");
+        }
+        kv_cache.append_prefill_kv(present_k, present_v, chunk_size);
+        start += chunk_size;
     }
-
-    const float* embed =
-        image_features.data() + static_cast<std::size_t>(feature_index) * feature_dim;
-    const auto deepstack_embeds =
-        select_deepstack_feature_pointers(deepstack_features, feature_index, feature_dim);
-    run_text_step_with_embed(token_id, embed, 1.0F, deepstack_embeds,
-                             deepstack_embeds.empty() ? 0.0F : 1.0F, mrope_position, logits);
-    ++feature_index;
 }
 
 void QwenVlPipeline::run_vl_decode_loop(QwenVlISampler* sampler, const QwenVlSamplingParams& params,
@@ -791,7 +774,7 @@ void QwenVlPipeline::run_vl_decode_loop(QwenVlISampler* sampler, const QwenVlSam
     for (int32_t step = 0; step < max_new_tokens; ++step) {
         QwenVlSampleResult result = sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
-        if (result.is_eos)
+        if (result.is_eos || step + 1 == max_new_tokens)
             break;
         run_text_step(result.token_id, logits, mrope_position);
         if (mrope_position >= 0)
@@ -828,7 +811,7 @@ void QwenVlPipeline::run_text_step_with_embed(int32_t token_id, const float* inp
 
     if (mrope_position != nullptr && text_decoder_->has_input("mrope_position_ids")) {
         inputs["mrope_position_ids"] =
-            Tensor{const_cast<int32_t*>(mrope_position->data()), {3}, DType::kInt32};
+            Tensor{const_cast<int32_t*>(mrope_position->data()), {3, 1}, DType::kInt32};
     }
 
     std::vector<float> zero_embed;

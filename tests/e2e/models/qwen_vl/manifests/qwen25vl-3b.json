@@ -5,8 +5,6 @@
   "family": "qwen_vl",
   "runtime_strategy": "qwen_vl_vision_language",
   "task_strategy": "vision_language_generation",
-  "precision": "fp16",
-  "max_cache_length": 384,
   "trust_remote_code": false,
   "testcases": [
     {

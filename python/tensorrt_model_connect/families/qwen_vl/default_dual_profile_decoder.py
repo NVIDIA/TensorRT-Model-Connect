@@ -1,43 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Dual-profile decoder engine builder — single engine, two optimization profiles.
+"""Split Qwen-VL decoder builder using TensorRT's native KV-cache contract.
 
-Produces one TensorRT engine that handles both prefill (multi-token) and
-decode (single-token) phases by switching between two optimization profiles
-at runtime:
-  * Profile 0 (prefill): Sq ranges over [1, opt=opt_prefill_length, max=max_prefill_length].
-    TensorRT picks batched MHA kernels (e.g. ``_gemm_mha_v2``) at opt Sq.
-  * Profile 1 (decode): Sq fixed to 1. TensorRT picks the GEMV fast-path
-    (``_gemv_mha_v1``).
-
-Both profiles use the same graph and weights — only the optimization
-profile differs, so the engine's weights live once in GPU memory and the
-C++ runtime creates two ``IExecutionContext``s (one per profile) that
-share the engine.
-
-Scope: covers the same architectural variants the legacy
-``standard_decoder_builder`` supports — RMSNorm or LayerNorm; SwiGLU or
-GeluFC MLP; RoPE (full / partial / interleaved), learned absolute, or
-ALiBi position; sequential or parallel residual; optional q/k_norm,
-QKV/output/MLP biases, and a Bloom-style embedding LayerNorm. Quantized
-builds (fp8 / int8 ``quant_ctx``) thread Q/DQ insertion through every
-projection matmul via ``QuantContext.maybe_quantized_matmul``. Per-layer
-debug outputs, hidden-state outputs, and the VL ``embed_input`` path stay
-on ``standard_decoder_builder`` for now and are dispatched there from
-inside ``build_standard_decoder_engine``.
+Each invocation builds one role: dynamic-Sq batched prefill or fixed-Sq=1
+decode. Both roles expose full-capacity cache tensors updated in place through
+``IKVCacheUpdateLayer`` and consumed by non-decomposable ``IAttention``.
 
 Tensor contract (matches the C++ runtime KvCache naming):
   Inputs (dynamic shapes — Sq varies by profile)
     token_id        int32   (-1,)
     position_id     int32   (-1,)
-    attention_mask  float32 (-1, -1)                 # (Sq, max_cache + Sq)
-    cache_k_i       fp16/f32 (max_cache, kv_size)    # static
-    cache_v_i       fp16/f32 (max_cache, kv_size)    # static
+    mrope_position_ids int32 (3, -1)
+    cache_write_indices int32 (1,)
+    key_value_lengths int32 (1,)
+    cache_k_i       bf16 (1, Hkv, capacity, 128)     # runtime-owned
+    cache_v_i       bf16 (1, Hkv, capacity, 128)
   Outputs
     logits          float32 (1, vocab)               # last-row sliced inside the engine
-    present_k_i     fp16/f32 (-1, kv_size)           # (Sq, kv_size)
-    present_v_i     fp16/f32 (-1, kv_size)           # (Sq, kv_size)
+    present_k_i     bf16 (1, Hkv, capacity, 128)     # aliases cache_k_i
+    present_v_i     bf16 (1, Hkv, capacity, 128)     # aliases cache_v_i
 """
 
 from __future__ import annotations
@@ -66,6 +48,8 @@ if TYPE_CHECKING:
 
 
 _make_matmul_fn = graph_blocks.make_matmul_fn
+_NATIVE_PREFILL_CHUNK_TOKENS = 32768
+_NATIVE_BUILDER_WORKSPACE_BYTES = 16 << 30
 
 
 # ---------------------------------------------------------------------------
@@ -150,10 +134,10 @@ def build_dual_profile_decoder_engine(
     weights: "WeightDict",
     max_cache_length: int,
     *,
-    precision: str = "fp16",
+    precision: str = "bf16",
     opt_prefill_length: int = 64,
     max_prefill_length: int | None = None,
-    builder_workspace_bytes: int = 1 << 30,
+    builder_workspace_bytes: int = _NATIVE_BUILDER_WORKSPACE_BYTES,
     quant_ctx: "QuantContext | None" = None,
     norm_type: str = "rmsnorm",
     mlp_type: str = "swiglu",
@@ -169,94 +153,61 @@ def build_dual_profile_decoder_engine(
     force_decomposed_attention: bool = False,
     profile_mode: str = "dual_profile",
 ) -> bytes:
-    """Build a prefill/decode-capable dynamic-Sq decoder engine.
+    """Build one half of a split native-KV Qwen-VL decoder.
 
     ``norm_type`` / ``mlp_type`` / ``position_type`` / ``activation`` /
     ``partial_rotary_factor`` / ``interleaved_rope`` / ``parallel_residual`` /
     ``scale_attn_weights`` mirror the same parameters on
     ``build_standard_decoder_engine``.
 
-    ``quant_ctx`` (optional) routes every projection matmul through
-    ``QuantContext.maybe_quantized_matmul`` for fp8 / int8 Q/DQ insertion;
-    when ``None`` the matmuls are plain fp16 / bf16 / fp32.
-
-    ``force_decomposed_attention`` replaces native ``IAttention`` with an
-    explicit FP32-score QK/softmax/V graph.
-
     ``opt_prefill_length`` and ``max_prefill_length`` bound the prefill
     optimization profile independently from the KV cache capacity.
     ``builder_workspace_bytes`` controls TensorRT tactic workspace.
-
-    ``profile_mode`` controls which optimization profiles are emitted:
-
-    * ``"dual_profile"``: one prefill profile followed by one or more decode
-      profiles. When ``dynamic_kv_profile_rows`` is provided, the decode side
-      gets one profile per bucket — letting TriAttention pick the smallest
-      active KV cache bucket at runtime while still benefitting from batched
-      prefill on the prompt.
-    * ``"prefill"``: one prefill profile only. This is used by split-engine
-      bundles, where decode is served by a separate fixed-Sq=1 engine.
-    * ``"decode"``: one fixed-Sq=1 decode profile only. This is the companion
-      engine for split-engine bundles.
-
-    Dynamic-KV cache bucket profiles are only meaningful in ``dual_profile``
-    mode. In either mode, cache_k/cache_v inputs are declared dynamic when
-    bucket profiles are requested so each profile can constrain their row count.
     """
     _supports_config(config, weights)
-    if profile_mode not in ("dual_profile", "prefill", "decode"):
+    if profile_mode not in ("prefill", "decode"):
         raise ValueError(
-            "profile_mode must be 'dual_profile', 'prefill', or 'decode', "
+            "native Qwen-VL profile_mode must be 'prefill' or 'decode', "
             f"got {profile_mode!r}")
+    if precision != "bf16":
+        raise ValueError("native Qwen-VL requires BF16")
+    if quant_ctx is not None:
+        raise ValueError("native Qwen-VL does not support quantization")
+    if dynamic_kv_profile_rows:
+        raise ValueError("native Qwen-VL uses one fixed physical KV capacity")
+    if force_decomposed_attention:
+        raise ValueError("native Qwen-VL attention must remain non-decomposable")
+    if position_type != "rope":
+        raise ValueError("native Qwen-VL requires mRoPE")
 
     if max_prefill_length is None:
-        max_prefill_length = max_cache_length
+        max_prefill_length = min(
+            max_cache_length, _NATIVE_PREFILL_CHUNK_TOKENS)
     max_prefill_length = max(1, min(max_prefill_length, max_cache_length))
     opt_prefill_length = max(1, min(opt_prefill_length, max_prefill_length))
 
-    multi_bucket_decode = bool(dynamic_kv_profile_rows)
-    if multi_bucket_decode:
-        decode_buckets: list[int] = []
-        seen = set()
-        for raw in dynamic_kv_profile_rows or []:
-            clamped = max(1, min(int(raw), max_cache_length))
-            if clamped not in seen:
-                seen.add(clamped)
-                decode_buckets.append(clamped)
-        decode_buckets.sort()
-        if not decode_buckets:
-            decode_buckets = [max_cache_length]
-            multi_bucket_decode = False
+    from .build_routing import (
+        native_mrope_settings,
+        resolved_head_dim,
+    )
 
-    attention_size = weights.get("_attention_size", config.attention_size)
-    mlp_size = weights.get("_mlp_size", config.intermediate_size)
     hidden = config.hidden_size
     vocab = config.vocab_size
     num_layers = config.num_hidden_layers
     num_heads = config.num_attention_heads
     num_kv_heads = config.num_key_value_heads
-    head_dim = attention_size // num_heads
+    head_dim = resolved_head_dim(config)
+    attention_size = num_heads * head_dim
+    mlp_size = config.intermediate_size
     kv_attention_size = graph_blocks.infer_kv_attention_size(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     rotary_embedding_dim = int(head_dim * partial_rotary_factor)
     lora_config = DynamicLoraConfig.from_model_config(config)
-    rope_scaling = config.raw.get("rope_scaling") or {}
-    raw_mrope_section = (
-        rope_scaling.get("mrope_section")
-        if isinstance(rope_scaling, dict) else None)
-    mrope_section = (
-        tuple(int(value) for value in raw_mrope_section)
-        if raw_mrope_section is not None else None)
-    if mrope_section is not None:
-        if position_type != "rope":
-            raise ValueError("mRoPE requires position_type='rope'")
-        if len(mrope_section) != 3 or any(value <= 0 for value in mrope_section):
-            raise ValueError(
-                "rope_scaling.mrope_section must contain three positive integers")
-        if sum(mrope_section) != rotary_embedding_dim // 2:
-            raise ValueError(
-                "rope_scaling.mrope_section must sum to half the rotary dimension; "
-                f"got {mrope_section} for rotary dimension {rotary_embedding_dim}")
+    if lora_config.enabled:
+        raise ValueError("native Qwen-VL does not support dynamic LoRA")
+    mrope_section, mrope_interleaved = native_mrope_settings(config)
+    native_active_rope_inv_freq = graph_ops.make_native_active_rope_inv_freq(
+        head_dim, config.rope_theta, partial_rotary_factor)
 
     builder_context = create_builder_context(
         verbose=verbose,
@@ -275,11 +226,13 @@ def build_dual_profile_decoder_engine(
 
     # ---- Inputs (dynamic Sq) ---------------------------------------------
     token_id = network.add_input("token_id", trt.int32, (-1,))
-    position_id = network.add_input("position_id", trt.int32, (-1,))
-    mrope_position_ids = (
-        network.add_input("mrope_position_ids", trt.int32, (3, -1))
-        if mrope_section is not None else None)
-    attention_mask = network.add_input("attention_mask", trt.float32, (-1, -1))
+    _position_id = network.add_input("position_id", trt.int32, (-1,))
+    mrope_position_ids = network.add_input(
+        "mrope_position_ids", trt.int32, (3, -1))
+    cache_write_indices = network.add_input(
+        "cache_write_indices", trt.int32, (1,))
+    key_value_lengths = network.add_input(
+        "key_value_lengths", trt.int32, (1,))
     input_embed_tensor = None
     use_input_embed_tensor = None
     if embed_input:
@@ -288,11 +241,7 @@ def build_dual_profile_decoder_engine(
         use_input_embed_tensor = network.add_input(
             "use_input_embed", trt.float32, (-1, 1))
 
-    cache_shape: tuple[int, int]
-    if multi_bucket_decode:
-        cache_shape = (-1, kv_attention_size)
-    else:
-        cache_shape = (max_cache_length, kv_attention_size)
+    cache_shape = (1, num_kv_heads, max_cache_length, head_dim)
     cache_k_inputs: list[trt.ITensor] = []
     cache_v_inputs: list[trt.ITensor] = []
     for i in range(num_layers):
@@ -305,142 +254,42 @@ def build_dual_profile_decoder_engine(
         cache_k_inputs.append(ck)
         cache_v_inputs.append(cv)
 
-    # Cast mask to compute dtype for elementwise broadcast.
-    if work_trt_dtype != trt.float32:
-        attention_mask_work = network.add_cast(
-            attention_mask, work_trt_dtype).get_output(0)
-    else:
-        attention_mask_work = attention_mask
-
-    # Two (or 1+N) optimization profiles — same graph, different Sq / cache.
-    def _add_profile(opt_sq: int, max_sq: int, *, fixed: bool = False,
-                     cache_rows_min: int | None = None,
-                     cache_rows_opt: int | None = None,
-                     cache_rows_max: int | None = None):
+    # One optimization profile per split-engine role. Physical KV capacity is
+    # static; only the active query length varies for prefill.
+    def _add_profile(opt_sq: int, max_sq: int, *, fixed: bool = False):
         prof = builder.create_optimization_profile()
         min_sq = opt_sq if fixed else 1
         prof.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
         prof.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
-        if mrope_position_ids is not None:
-            prof.set_shape(
-                "mrope_position_ids",
-                (3, min_sq), (3, opt_sq), (3, max_sq))
         prof.set_shape(
-            "attention_mask",
-            (min_sq, max_cache_length + min_sq),
-            (opt_sq, max_cache_length + opt_sq),
-            (max_sq, max_cache_length + max_sq))
+            "mrope_position_ids",
+            (3, min_sq), (3, opt_sq), (3, max_sq))
         if embed_input:
             prof.set_shape(
                 "input_embed", (min_sq, hidden), (opt_sq, hidden), (max_sq, hidden))
             prof.set_shape(
                 "use_input_embed", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
-        if multi_bucket_decode:
-            cmn = cache_rows_min if cache_rows_min is not None else 1
-            cop = cache_rows_opt if cache_rows_opt is not None else max_cache_length
-            cmx = cache_rows_max if cache_rows_max is not None else max_cache_length
-            for i in range(num_layers):
-                for name in (graph_ops.layer_tensor_name("cache_k", i),
-                             graph_ops.layer_tensor_name("cache_v", i)):
-                    prof.set_shape(
-                        name,
-                        (cmn, kv_attention_size),
-                        (cop, kv_attention_size),
-                        (cmx, kv_attention_size))
         trt_config.add_optimization_profile(prof)
 
-    import os as _os_dbg
     if profile_mode == "prefill":
-        _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
-                     cache_rows_min=1, cache_rows_opt=max_cache_length,
-                     cache_rows_max=max_cache_length)
-    elif profile_mode == "decode":
-        _add_profile(1, 1, fixed=True)
-    elif _os_dbg.environ.get("TRTMC_DECODE_ONLY_DEBUG") == "1":
-        # Diagnostic: build a one-profile engine with dynamic-shape inputs
-        # but Sq pinned to 1. Lets us isolate dynamic-shape enqueueV3
-        # overhead from per-profile kernel specialisation.
-        _add_profile(1, 1, fixed=True)
+        _add_profile(opt_prefill_length, max_prefill_length, fixed=False)
     else:
-        _reverse = _os_dbg.environ.get("TRTMC_REVERSE_PROFILE_ORDER", "0") == "1"
-        if _reverse:
-            # Decode profile registered first so it commits its preferred
-            # weight layout before the prefill profile compiles.
-            if multi_bucket_decode:
-                for bucket in decode_buckets:
-                    _add_profile(1, 1, fixed=True,
-                                 cache_rows_min=1, cache_rows_opt=bucket,
-                                 cache_rows_max=bucket)
-            else:
-                _add_profile(1, 1, fixed=True)
-            _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
-                         cache_rows_min=1, cache_rows_opt=max_cache_length,
-                         cache_rows_max=max_cache_length)
-        else:
-            _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
-                         cache_rows_min=1, cache_rows_opt=max_cache_length,
-                         cache_rows_max=max_cache_length)
-            if multi_bucket_decode:
-                for bucket in decode_buckets:
-                    _add_profile(1, 1, fixed=True,
-                                 cache_rows_min=1, cache_rows_opt=bucket,
-                                 cache_rows_max=bucket)
-            else:
-                _add_profile(1, 1, fixed=True)
+        _add_profile(1, 1, fixed=True)
 
     # ---- Shared constants ------------------------------------------------
     embedding_table = _const_in_work_dtype(
         network, (vocab, hidden), weights["embedding"],
         work_np_dtype, work_trt_dtype)
 
-    # RoPE tables (only when position_type == "rope"). Built for the worst
-    # case key length max_cache_length + max_prefill_length, since RoPE is
-    # gathered by position_id at runtime. The half-dim tables feed TRT's
-    # native IRotaryEmbeddingLayer.
-    cos_half_table: trt.ITensor | None = None
-    sin_half_table: trt.ITensor | None = None
-    if position_type == "rope":
-        kmax = max_cache_length + max_prefill_length
-        graph_ops.validate_native_rope_dim(rotary_embedding_dim)
-        cos_half_np = graph_ops.make_rope_table_half_dim(
-            kmax, head_dim, config.rope_theta, True,
-            partial_rotary_factor, interleaved=interleaved_rope)
-        sin_half_np = graph_ops.make_rope_table_half_dim(
-            kmax, head_dim, config.rope_theta, False,
-            partial_rotary_factor, interleaved=interleaved_rope)
-        cos_half_table = _const_in_work_dtype(
-            network, cos_half_np.shape, cos_half_np,
-            work_np_dtype, work_trt_dtype)
-        sin_half_table = _const_in_work_dtype(
-            network, sin_half_np.shape, sin_half_np,
-            work_np_dtype, work_trt_dtype)
-
-    # Learned position embedding (GPT-2 / OPT / GPT-Neo / XGLM).
-    position_embed_table: trt.ITensor | None = None
-    if position_type == "learned":
-        pos_embed_np = weights["position_embedding"]
-        position_embed_table = _const_in_work_dtype(
-            network, pos_embed_np.shape, pos_embed_np,
-            work_np_dtype, work_trt_dtype)
-
-    # ALiBi slopes + cache-slot positions for multi-row mask augmentation.
-    alibi_slopes_tensor: trt.ITensor | None = None
-    alibi_cache_positions_fp32: trt.ITensor | None = None
-    if position_type == "alibi":
-        alibi_slopes_np = graph_ops.compute_alibi_slopes(num_heads)
-        # Slopes live as fp32 so the (key_pos - q_pos) math stays in fp32;
-        # add_alibi_mask_4d casts the final bias to work_trt_dtype before adding
-        # to the additive mask.
-        alibi_slopes_tensor = graph_ops.add_constant(
-            network, (num_heads, 1, 1),
-            alibi_slopes_np.reshape(num_heads, 1, 1), dtype=np.float32)
-        # Cache slot k (for k in [0, max_cache_length)) holds the K/V at
-        # position k. The current step's K/V live in slots
-        # [max_cache_length, max_cache_length + Sq) and their positions come
-        # from position_id at runtime, so we only pre-build the cache half.
-        alibi_cache_positions_fp32 = graph_ops.add_constant(
-            network, (max_cache_length,),
-            np.arange(max_cache_length, dtype=np.float32), dtype=np.float32)
+    graph_ops.validate_native_rope_dim(rotary_embedding_dim)
+    cos_half_table, sin_half_table = graph_ops.add_active_mrope_cache(
+        network,
+        mrope_position_ids,
+        native_active_rope_inv_freq,
+        mrope_section,
+        work_trt_dtype,
+        mrope_interleaved=mrope_interleaved,
+    )
 
     eps_tensor = graph_ops.add_constant(
         network, (1, 1),
@@ -484,13 +333,6 @@ def build_dual_profile_decoder_engine(
         hidden_state = network.add_elementwise(
             token_part, embed_part, trt.ElementWiseOperation.SUM).get_output(0)
 
-    if position_type == "learned" and position_embed_table is not None:
-        pos_gather = network.add_gather(position_embed_table, position_id, 0)
-        pos_add = network.add_elementwise(
-            hidden_state, pos_gather.get_output(0),
-            trt.ElementWiseOperation.SUM)
-        hidden_state = pos_add.get_output(0)
-
     # Make sure the main hidden stream is in the requested runtime dtype
     # before entering the layer stack (BF16 mode stores fp16 constants).
     if hidden_state.dtype != work_trt_dtype:
@@ -504,16 +346,6 @@ def build_dual_profile_decoder_engine(
         hidden_state = _norm_multi(
             network, hidden_state, hidden, embed_norm, embed_norm_beta,
             eps_tensor, "layernorm", work_np_dtype)
-
-    # Build the 4D additive mask once — shared across layers. ALiBi
-    # variants augment the mask with per-head linear bias.
-    if position_type == "alibi":
-        mask_4d = graph_ops.add_alibi_mask_4d(
-            network, attention_mask_work, position_id,
-            alibi_slopes_tensor, alibi_cache_positions_fp32,
-            num_heads, target_dtype=work_trt_dtype)
-    else:
-        mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask_work)
 
     present_k_outs: list[trt.ITensor] = []
     present_v_outs: list[trt.ITensor] = []
@@ -564,55 +396,38 @@ def build_dual_profile_decoder_engine(
                 eps_tensor_per_head, dtype=work_np_dtype,
                 sequence_length=None)
 
-        # Position embedding (RoPE only; learned was applied above and ALiBi
-        # is added into the attention mask).
-        if position_type == "rope":
-            if mrope_position_ids is not None and mrope_section is not None:
-                q = graph_ops.add_apply_mrope_native_sequence(
-                    network, q, num_heads, head_dim,
-                    cos_half_table, sin_half_table, mrope_position_ids,
-                    mrope_section, rotary_embedding_dim, interleaved_rope)
-                k = graph_ops.add_apply_mrope_native_sequence(
-                    network, k, num_kv_heads, head_dim,
-                    cos_half_table, sin_half_table, mrope_position_ids,
-                    mrope_section, rotary_embedding_dim, interleaved_rope)
-            else:
-                q = graph_ops.add_apply_rope_native(
-                    network, q, num_heads, head_dim,
-                    cos_half_table, sin_half_table, position_id,
-                    rotary_embedding_dim, interleaved_rope,
-                    sequence_length=None)
-                k = graph_ops.add_apply_rope_native(
-                    network, k, num_kv_heads, head_dim,
-                    cos_half_table, sin_half_table, position_id,
-                    rotary_embedding_dim, interleaved_rope,
-                    sequence_length=None)
+        # Active mRoPE rows are already assembled in HF frequency order.
+        q = graph_ops.add_apply_rope_native_sequence(
+            network, q, num_heads, head_dim,
+            cos_half_table, sin_half_table, rotary_embedding_dim,
+            interleaved=False, sequence_length=None)
+        k = graph_ops.add_apply_rope_native_sequence(
+            network, k, num_kv_heads, head_dim,
+            cos_half_table, sin_half_table, rotary_embedding_dim,
+            interleaved=False, sequence_length=None)
 
-        # Present K / V (this step's raw K / V), shape (Sq, attn_size).
-        present_k_outs.append(k)
-        present_v_outs.append(v)
-
-        # Concatenate cached + current K / V along the sequence dim.
-        all_k_cat = network.add_concatenation([cache_k_inputs[layer_idx], k])
-        all_k_cat.axis = 0
-        all_v_cat = network.add_concatenation([cache_v_inputs[layer_idx], v])
-        all_v_cat.axis = 0
-
-        context = graph_ops.add_attention_from_rows(
-            network, q, all_k_cat.get_output(0), all_v_cat.get_output(0),
-            num_heads=num_heads, head_dim=head_dim,
+        native_attention = graph_ops.add_native_kv_cache_attention_from_rows(
+            network,
+            q,
+            k,
+            v,
+            cache_k_inputs[layer_idx],
+            cache_v_inputs[layer_idx],
+            cache_write_indices,
+            key_value_lengths,
+            num_heads=num_heads,
             num_kv_heads=num_kv_heads,
-            q_seq=None, kv_seq=None, causal=False, mask=mask_4d,
+            head_dim=head_dim,
+            q_seq=None,
             scale=attn_scale,
-            # TRT 11.2 FP16 IAttention has large errors with the decoder's
-            # sparse prefix-plus-current-token mask at long context. Keep
-            # prefill and the surrounding graph in FP16, but use the existing
-            # FP32 attention boundary in the fixed-Sq=1 split decode engine.
-            # The dynamic prefill shape does not have a dedicated FP32 fused
-            # tactic and triggers a TRT 11.2 Myelin compiler failure.
-            fp32_accumulation=(profile_mode == "decode"),
-            force_decomposed_attention=force_decomposed_attention,
-            tag=f"{prefix}.attn")
+            tag=f"{prefix}.attn",
+            recipe_instance=(
+                f"decoder.layers.{layer_idx}.decode_attention"
+                if profile_mode == "decode" else None),
+        )
+        context = native_attention["context"]
+        present_k_outs.append(native_attention["present_k"])
+        present_v_outs.append(native_attention["present_v"])
 
         attn_out = matmul(context, attention_size, hidden,
                           weights[f"{prefix}.w_o"], f"{prefix}.w_o")

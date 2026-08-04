@@ -8,6 +8,7 @@ Tensor names and shapes must stay compatible with the C++ bundle runtime.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
@@ -925,6 +926,143 @@ def validate_native_rope_dim(
     return rotary_embedding_dim
 
 
+def make_native_active_rope_inv_freq(
+    head_dim: int,
+    rope_theta: float,
+    partial_rotary_factor: float = 1.0,
+) -> np.ndarray:
+    """Reproduce HF's CPU-FP32 inverse frequencies without a context table."""
+
+    rotary_ndims = validate_native_rope_dim(int(head_dim * partial_rotary_factor))
+    rope_theta = float(rope_theta)
+    if not np.isfinite(rope_theta) or rope_theta <= 0.0:
+        raise ValueError("active RoPE requires finite positive rope_theta")
+    try:
+        import torch
+    except (ImportError, OSError) as exc:
+        raise RuntimeError(
+            "Qwen-VL native active mRoPE requires PyTorch at build time"
+        ) from exc
+    with torch.no_grad():
+        dims = torch.arange(
+            0, rotary_ndims, 2, dtype=torch.int64, device="cpu"
+        ).to(dtype=torch.float32)
+        inv_freq = 1.0 / (rope_theta ** (dims / rotary_ndims))
+    return np.asarray(inv_freq.detach().cpu().numpy(), dtype=np.float32).copy()
+
+
+def add_active_rope_cache(
+    network: trt.INetworkDefinition,
+    position_id: trt.ITensor,
+    inv_freq: np.ndarray,
+    output_dtype: trt.DataType,
+) -> tuple[trt.ITensor, trt.ITensor]:
+    """Build rank-3 cos/sin tensors only for runtime-active positions."""
+
+    inv_freq = np.asarray(inv_freq, dtype=np.float32)
+    if inv_freq.ndim != 1 or inv_freq.size == 0:
+        raise ValueError("active RoPE inverse frequencies must be rank-1")
+    pos_float = network.add_cast(position_id, trt.float32).get_output(0)
+    pos_col = network.add_shuffle(pos_float)
+    pos_col.reshape_dims = (-1, 1)
+    inv_freq_tensor = add_constant(
+        network, (1, int(inv_freq.size)), inv_freq.reshape(1, -1),
+        dtype=np.float32)
+    angles = network.add_elementwise(
+        pos_col.get_output(0), inv_freq_tensor, trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    cos_2d = network.add_unary(angles, trt.UnaryOperation.COS).get_output(0)
+    sin_2d = network.add_unary(angles, trt.UnaryOperation.SIN).get_output(0)
+    cos_3d = network.add_shuffle(cos_2d)
+    cos_3d.reshape_dims = (1, -1, int(inv_freq.size))
+    sin_3d = network.add_shuffle(sin_2d)
+    sin_3d.reshape_dims = (1, -1, int(inv_freq.size))
+    cos_cache = cos_3d.get_output(0)
+    sin_cache = sin_3d.get_output(0)
+    if cos_cache.dtype != output_dtype:
+        cos_cache = network.add_cast(cos_cache, output_dtype).get_output(0)
+        sin_cache = network.add_cast(sin_cache, output_dtype).get_output(0)
+    return cos_cache, sin_cache
+
+
+def add_active_mrope_cache(
+    network: trt.INetworkDefinition,
+    position_ids: trt.ITensor,
+    inv_freq: np.ndarray,
+    mrope_section: tuple[int, int, int],
+    output_dtype: trt.DataType,
+    *,
+    mrope_interleaved: bool = False,
+) -> tuple[trt.ITensor, trt.ITensor]:
+    """Build HF-equivalent Qwen-VL 3-axis cos/sin rows for active tokens."""
+
+    inv_freq = np.asarray(inv_freq, dtype=np.float32)
+    sections = tuple(int(value) for value in mrope_section)
+    if len(sections) != 3 or any(value <= 0 for value in sections):
+        raise ValueError("mrope_section must contain three positive integers")
+    if inv_freq.ndim != 1 or sum(sections) != int(inv_freq.size):
+        raise ValueError("mrope_section must cover every inverse frequency")
+
+    axis_angles: list[trt.ITensor] = []
+    inv_tensor = add_constant(
+        network, (1, int(inv_freq.size)), inv_freq.reshape(1, -1),
+        dtype=np.float32)
+    for axis in range(3):
+        axis_index = add_constant(
+            network, (1,), np.array([axis], dtype=np.int32), dtype=np.int32)
+        axis_positions = network.add_gather(
+            position_ids, axis_index, 0).get_output(0)
+        axis_positions = network.add_cast(
+            axis_positions, trt.float32).get_output(0)
+        axis_column = network.add_shuffle(axis_positions)
+        axis_column.reshape_dims = (-1, 1)
+        axis_angles.append(network.add_elementwise(
+            axis_column.get_output(0), inv_tensor,
+            trt.ElementWiseOperation.PROD).get_output(0))
+
+    parts: list[trt.ITensor] = []
+    if mrope_interleaved:
+        # HF Qwen3-VL starts from temporal frequencies, then overwrites
+        # 1::3 with height and 2::3 with width within each section limit.
+        for column in range(int(inv_freq.size)):
+            axis = 0
+            if column % 3 == 1 and column < sections[1] * 3:
+                axis = 1
+            elif column % 3 == 2 and column < sections[2] * 3:
+                axis = 2
+            column_index = add_constant(
+                network, (1,), np.array([column], dtype=np.int32),
+                dtype=np.int32)
+            parts.append(network.add_gather(
+                axis_angles[axis], column_index, 1).get_output(0))
+    else:
+        offset = 0
+        for axis, width in enumerate(sections):
+            column_indices = add_constant(
+                network, (width,),
+                np.arange(offset, offset + width, dtype=np.int32),
+                dtype=np.int32)
+            parts.append(network.add_gather(
+                axis_angles[axis], column_indices, 1).get_output(0))
+            offset += width
+
+    joined = network.add_concatenation(parts)
+    joined.axis = 1
+    angles = joined.get_output(0)
+    cos_2d = network.add_unary(angles, trt.UnaryOperation.COS).get_output(0)
+    sin_2d = network.add_unary(angles, trt.UnaryOperation.SIN).get_output(0)
+    cos_3d = network.add_shuffle(cos_2d)
+    cos_3d.reshape_dims = (1, -1, int(inv_freq.size))
+    sin_3d = network.add_shuffle(sin_2d)
+    sin_3d.reshape_dims = (1, -1, int(inv_freq.size))
+    cos_cache = cos_3d.get_output(0)
+    sin_cache = sin_3d.get_output(0)
+    if cos_cache.dtype != output_dtype:
+        cos_cache = network.add_cast(cos_cache, output_dtype).get_output(0)
+        sin_cache = network.add_cast(sin_cache, output_dtype).get_output(0)
+    return cos_cache, sin_cache
+
+
 def make_rope_table_half_dim(
     max_cache_length: int,
     head_dim: int,
@@ -1563,6 +1701,98 @@ def add_attention_from_rows(
     return reshape_heads_4d_to_rows(
         network, ctx_4d, attention_size, sequence_length=q_seq,
         tag=None if tag is None else tag + ".ctx")
+
+
+def add_native_kv_cache_attention_from_rows(
+    network: trt.INetworkDefinition,
+    q: trt.ITensor,
+    k_update: trt.ITensor,
+    v_update: trt.ITensor,
+    cache_k: trt.ITensor,
+    cache_v: trt.ITensor,
+    cache_write_indices: trt.ITensor,
+    key_value_lengths: trt.ITensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    q_seq: int | None,
+    scale: float | None = None,
+    tag: str | None = None,
+    recipe_instance: str | None = None,
+) -> dict[str, trt.ITensor]:
+    """Update a full-capacity user buffer and attend only its valid prefix."""
+
+    if not hasattr(network, "add_kv_cache_update") or not hasattr(
+        network, "add_attention_v2"
+    ):
+        raise RuntimeError(
+            "Qwen-VL native KV requires TensorRT add_kv_cache_update and "
+            "add_attention_v2 support"
+        )
+    k_update_4d = reshape_rows_to_heads_4d(
+        network, k_update, num_kv_heads, head_dim, sequence_length=q_seq,
+        tag=None if tag is None else tag + ".k_update")
+    v_update_4d = reshape_rows_to_heads_4d(
+        network, v_update, num_kv_heads, head_dim, sequence_length=q_seq,
+        tag=None if tag is None else tag + ".v_update")
+    update_k = network.add_kv_cache_update(
+        cache_k, k_update_4d, cache_write_indices, trt.KVCacheMode.LINEAR)
+    update_v = network.add_kv_cache_update(
+        cache_v, v_update_4d, cache_write_indices, trt.KVCacheMode.LINEAR)
+    if update_k is None or update_v is None:
+        raise RuntimeError("TensorRT failed to create Qwen-VL KV-cache update layers")
+    if tag:
+        update_k.name = tag + ".cache_k_update"
+        update_v.name = tag + ".cache_v_update"
+    updated_k = update_k.get_output(0)
+    updated_v = update_v.get_output(0)
+
+    q_4d = reshape_rows_to_heads_4d(
+        network, q, num_heads, head_dim, sequence_length=q_seq,
+        tag=None if tag is None else tag + ".q")
+    if q_4d.dtype != trt.bfloat16:
+        raise ValueError("Qwen-VL native KV attention requires BF16 queries")
+    if scale is None:
+        scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
+    q_fp32 = network.add_cast(q_4d, trt.float32).get_output(0)
+    scale_t = add_constant(
+        network, (1, 1, 1, 1), np.array([[[[scale]]]], dtype=np.float32),
+        dtype=np.float32)
+    q_scaled = network.add_elementwise(
+        q_fp32, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
+    q_scaled = network.add_cast(q_scaled, trt.bfloat16).get_output(0)
+
+    recipe = nullcontext()
+    if recipe_instance is not None:
+        from ...tvm_ffi.graph_build import graph_recipe_region
+
+        recipe = graph_recipe_region(
+            network, "qwen.decode_attention_region@2", recipe_instance,
+            output_shape_input=0)
+    with recipe:
+        attention = network.add_attention_v2(
+            q_scaled,
+            updated_k,
+            updated_v,
+            trt.AttentionNormalizationOp.SOFTMAX,
+            trt.CausalMaskKind.LOWER_RIGHT,
+        )
+        if attention is None:
+            raise RuntimeError("TensorRT failed to create Qwen-VL native attention")
+        attention.decomposable = False
+        attention.key_value_lengths = key_value_lengths
+        if tag:
+            attention.name = tag
+
+    context = reshape_heads_4d_to_rows(
+        network, attention.get_output(0), num_heads * head_dim,
+        sequence_length=q_seq, tag=None if tag is None else tag + ".ctx")
+    return {
+        "context": context,
+        "present_k": updated_k,
+        "present_v": updated_v,
+    }
 
 
 # Backward-compatible name used by existing tests and call sites.

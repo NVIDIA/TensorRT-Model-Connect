@@ -78,14 +78,19 @@ struct CountingTextStats {
     std::unordered_map<std::string, std::vector<int64_t>> shapes;
     std::unordered_map<std::string, std::vector<float>> float_values;
     std::unordered_map<std::string, std::vector<int32_t>> int_values;
+    std::vector<std::unordered_map<std::string, std::vector<int64_t>>> shape_history;
+    std::vector<std::unordered_map<std::string, std::vector<float>>> float_history;
+    std::vector<std::unordered_map<std::string, std::vector<int32_t>>> int_history;
 };
 
 class CountingTextModule final : public trtmc::ITrtModule {
   public:
     CountingTextModule(std::shared_ptr<CountingTextStats> stats, bool prefill, cudaStream_t stream,
-                       bool has_mrope_input = false)
+                       bool has_mrope_input = false, bool native_kv = false,
+                       int32_t prefill_profile_max = 8, bool has_position_input = true)
         : stats_(std::move(stats)), prefill_(prefill), stream_(stream),
-          has_mrope_input_(has_mrope_input),
+          has_mrope_input_(has_mrope_input), native_kv_(native_kv),
+          prefill_profile_max_(prefill_profile_max), has_position_input_(has_position_input),
           present_k_(prefill ? trtmc::DeviceTensor::zeros({8, 4}, trtmc::DType::kFloat32, stream)
                              : trtmc::DeviceTensor{}),
           present_v_(prefill ? trtmc::DeviceTensor::zeros({8, 4}, trtmc::DType::kFloat32, stream)
@@ -108,6 +113,9 @@ class CountingTextModule final : public trtmc::ITrtModule {
                     begin, begin + static_cast<std::ptrdiff_t>(tensor.numel()));
             }
         }
+        stats_->shape_history.push_back(stats_->shapes);
+        stats_->float_history.push_back(stats_->float_values);
+        stats_->int_history.push_back(stats_->int_values);
         return {{"logits", trtmc::Tensor{logits_.data(), {1, 4}, trtmc::DType::kFloat32}}};
     }
     trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
@@ -121,33 +129,65 @@ class CountingTextModule final : public trtmc::ITrtModule {
     std::vector<trtmc::TensorInfo> input_info() const override { return {}; }
     std::vector<trtmc::TensorInfo> output_info() const override { return {}; }
     bool has_input(const std::string& name) const override {
-        return name == "token_id" || name == "position_id" || name == "attention_mask" ||
-               name == "input_embed" || name == "use_input_embed" || name == "deepstack_active" ||
+        return name == "token_id" || (name == "position_id" && has_position_input_) ||
+               (name == "attention_mask" && !native_kv_) || name == "input_embed" ||
+               name == "use_input_embed" || name == "deepstack_active" ||
                name == "deepstack_embed_0" || name == "cache_k_0" || name == "cache_v_0" ||
+               (native_kv_ && (name == "cache_write_indices" || name == "key_value_lengths")) ||
                (name == "mrope_position_ids" && has_mrope_input_);
     }
     bool has_output(const std::string& name) const override {
         return name == "logits" || name == "present_k_0" || name == "present_v_0";
     }
-    trtmc::DType tensor_dtype(const std::string&) const override { return trtmc::DType::kFloat32; }
+    trtmc::DType tensor_dtype(const std::string& name) const override {
+        if (name == "cache_write_indices" || name == "key_value_lengths" || name == "token_id" ||
+            name == "position_id" || name == "mrope_position_ids") {
+            return trtmc::DType::kInt32;
+        }
+        if (native_kv_ && (name == "cache_k_0" || name == "cache_v_0" || name == "present_k_0" ||
+                           name == "present_v_0")) {
+            return trtmc::DType::kBFloat16;
+        }
+        return trtmc::DType::kFloat32;
+    }
     std::vector<int64_t> tensor_shape(const std::string& name) const override {
+        if (native_kv_ && (name == "cache_k_0" || name == "cache_v_0" || name == "present_k_0" ||
+                           name == "present_v_0")) {
+            return {1, 1, 8, 4};
+        }
+        if (name == "cache_write_indices" || name == "key_value_lengths")
+            return {1};
         if (name == "cache_k_0" || name == "cache_v_0")
             return {8, 4};
         return {};
     }
-    std::vector<int64_t> input_profile_shape(const std::string&, int32_t,
-                                             trtmc::ProfileShapeSelector) const override {
+    std::vector<int64_t> input_profile_shape(const std::string& name, int32_t profile,
+                                             trtmc::ProfileShapeSelector selector) const override {
+        if (name == "token_id" && prefill_ && profile == 0) {
+            return {selector == trtmc::ProfileShapeSelector::kMax ? prefill_profile_max_ : 1};
+        }
         return {};
     }
     int32_t optimization_profile_count() const override { return prefill_ ? 2 : 1; }
     void* device_ptr(const std::string& name) const override {
+        if (native_kv_) {
+            if (name == "cache_k_0" || name == "present_k_0")
+                return cache_k_external_;
+            if (name == "cache_v_0" || name == "present_v_0")
+                return cache_v_external_;
+        }
         if (name == "present_k_0")
             return const_cast<void*>(present_k_.data());
         if (name == "present_v_0")
             return const_cast<void*>(present_v_.data());
         return nullptr;
     }
-    void bind_external(const std::string&, void*) override {}
+    void bind_external(const std::string& name, void* pointer) override {
+        if (name == "cache_k_0")
+            cache_k_external_ = pointer;
+        if (name == "cache_v_0")
+            cache_v_external_ = pointer;
+    }
     int32_t input_rank(const std::string& name) const override {
         return name == "token_id" || name == "position_id" ? 1 : 2;
     }
@@ -160,6 +200,11 @@ class CountingTextModule final : public trtmc::ITrtModule {
     bool prefill_{false};
     cudaStream_t stream_{nullptr};
     bool has_mrope_input_{false};
+    bool native_kv_{false};
+    int32_t prefill_profile_max_{8};
+    bool has_position_input_{true};
+    mutable void* cache_k_external_{nullptr};
+    mutable void* cache_v_external_{nullptr};
     mutable trtmc::DeviceTensor present_k_;
     mutable trtmc::DeviceTensor present_v_;
     std::vector<float> logits_{0.1F, 0.2F, 0.9F, 0.3F};
@@ -240,6 +285,14 @@ class VLDynamicGridTokenizer final : public trtmc::ITokenizer {
     std::vector<int32_t> encode(const std::string&) const override {
         return {0, 1, 1, 1, 1, 1, 1, 2};
     }
+    std::string decode(const std::vector<int32_t>&) const override { return "out"; }
+    int32_t id_for_token(std::string_view) const override { return 0; }
+    std::string token_for_id(int32_t) const override { return ""; }
+};
+
+class VLChunkedTokenizer final : public trtmc::ITokenizer {
+  public:
+    std::vector<int32_t> encode(const std::string&) const override { return {0, 1, 3, 3, 3}; }
     std::string decode(const std::vector<int32_t>&) const override { return "out"; }
     int32_t id_for_token(std::string_view) const override { return 0; }
     std::string token_for_id(int32_t) const override { return ""; }
@@ -936,6 +989,136 @@ static void test_vl_dynamic_resolution_uses_actual_grid_for_mrope() {
     cudaStreamDestroy(stream);
 }
 
+static void test_native_vl_prefill_chunks_all_aligned_inputs() {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto decode_stats = std::make_shared<CountingTextStats>();
+    auto prefill_stats = std::make_shared<CountingTextStats>();
+    auto decoder = std::make_unique<CountingTextModule>(decode_stats, false, stream, true, true, 1);
+    auto prefill = std::make_unique<CountingTextModule>(prefill_stats, true, stream, true, true, 2);
+    auto vision = std::make_unique<FakeSequenceVisionModule>();
+    auto cache = std::make_unique<trtmc::QwenVlKvCache>(1, 8, 4, stream, trtmc::DType::kBFloat16);
+
+    trtmc::QwenVlConfig cfg;
+    cfg.vocab_size = 4;
+    cfg.id_eos = 2;
+    cfg.image_token_id = 1;
+    cfg.vision_output_dim = 4;
+    cfg.num_layers = 1;
+    cfg.prefill_max_length = 2;
+
+    trtmc::QwenVlPreprocessConfig vl_pp;
+    vl_pp.preprocessor_type = "simple_chw";
+    vl_pp.fixed_image_size = 4;
+    vl_pp.patch_size = 2;
+    vl_pp.merge_size = 2;
+    vl_pp.in_channels = 3;
+
+    auto tokenizer = std::make_shared<VLChunkedTokenizer>();
+    trtmc::QwenVlPipeline pipeline(std::move(decoder), std::move(vision), std::move(cache), cfg,
+                                   vl_pp, stream, tokenizer, "", nullptr, std::move(prefill));
+
+    float pixels[2 * 2 * 3] = {0.5F, 0.5F, 0.5F, 0.4F, 0.4F, 0.4F,
+                               0.3F, 0.3F, 0.3F, 0.2F, 0.2F, 0.2F};
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 1;
+    gen_cfg.eos_token_id = 2;
+    auto result = pipeline.generate("test", pixels, 2, 2, gen_cfg);
+
+    check(result.token_ids == std::vector<int32_t>{2}, "native chunks: output remains correct");
+    check(prefill_stats->calls == 3, "native chunks: prompt split at profile capacity");
+    check(decode_stats->calls == 0, "native chunks: no prompt-linear decode fallback");
+    check(prefill_stats->shape_history.size() == 3, "native chunks: shape history recorded");
+    if (prefill_stats->shape_history.size() == 3) {
+        check(prefill_stats->shape_history[0].at("token_id") == std::vector<int64_t>{2},
+              "native chunks: first token slice");
+        check(prefill_stats->shape_history[1].at("token_id") == std::vector<int64_t>{2},
+              "native chunks: second token slice");
+        check(prefill_stats->shape_history[2].at("token_id") == std::vector<int64_t>{1},
+              "native chunks: final token slice");
+        check(prefill_stats->shape_history[0].at("mrope_position_ids") ==
+                  std::vector<int64_t>({3, 2}),
+              "native chunks: first mrope slice");
+        check(prefill_stats->shape_history[2].at("mrope_position_ids") ==
+                  std::vector<int64_t>({3, 1}),
+              "native chunks: final mrope slice");
+    }
+    check(prefill_stats->int_history.size() == 3, "native chunks: scalar history recorded");
+    if (prefill_stats->int_history.size() == 3) {
+        check(prefill_stats->int_history[0].at("cache_write_indices") == std::vector<int32_t>{0},
+              "native chunks: first write offset");
+        check(prefill_stats->int_history[1].at("cache_write_indices") == std::vector<int32_t>{2},
+              "native chunks: second write offset");
+        check(prefill_stats->int_history[2].at("cache_write_indices") == std::vector<int32_t>{4},
+              "native chunks: final write offset");
+        check(prefill_stats->int_history[2].at("key_value_lengths") == std::vector<int32_t>{5},
+              "native chunks: final valid KV length");
+        check(prefill_stats->int_history[0].at("mrope_position_ids") ==
+                  std::vector<int32_t>({0, 1, 0, 1, 0, 1}),
+              "native chunks: mrope values aligned with first token slice");
+        check(prefill_stats->int_history[2].at("mrope_position_ids") ==
+                  std::vector<int32_t>({4, 4, 4}),
+              "native chunks: mrope values aligned with final token slice");
+    }
+    check(prefill_stats->float_history.size() == 3, "native chunks: embed history recorded");
+    if (prefill_stats->float_history.size() == 3) {
+        check(prefill_stats->float_history[0].at("use_input_embed") ==
+                  std::vector<float>({0.0F, 1.0F}),
+              "native chunks: image selector aligned with first token slice");
+        check(prefill_stats->float_history[1].at("use_input_embed") ==
+                  std::vector<float>({0.0F, 0.0F}),
+              "native chunks: text selector aligned with second token slice");
+        check(prefill_stats->float_history[0].at("deepstack_active") ==
+                  std::vector<float>({0.0F, 1.0F}),
+              "native chunks: deepstack selector aligned with visual token");
+    }
+
+    cudaStreamDestroy(stream);
+}
+
+static void test_native_text_decode_supplies_mrope_without_position_input() {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto decode_stats = std::make_shared<CountingTextStats>();
+    auto prefill_stats = std::make_shared<CountingTextStats>();
+    auto decoder =
+        std::make_unique<CountingTextModule>(decode_stats, false, stream, true, true, 1, false);
+    auto prefill =
+        std::make_unique<CountingTextModule>(prefill_stats, true, stream, true, true, 2, false);
+    auto cache = std::make_unique<trtmc::QwenVlKvCache>(1, 8, 4, stream, trtmc::DType::kBFloat16);
+
+    trtmc::QwenVlConfig cfg;
+    cfg.vocab_size = 4;
+    cfg.id_eos = 99;
+    cfg.image_token_id = 1;
+    cfg.vision_output_dim = 4;
+    cfg.num_layers = 1;
+    cfg.prefill_max_length = 2;
+
+    trtmc::QwenVlPipeline pipeline(std::move(decoder), nullptr, std::move(cache), cfg, {}, stream,
+                                   nullptr, "", nullptr, std::move(prefill));
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 2;
+    gen_cfg.eos_token_id = 99;
+    auto result = pipeline.generate_ids({0, 3}, gen_cfg);
+
+    check(result.token_ids.size() == 4, "native mrope-only: generation completes");
+    check(prefill_stats->calls == 1, "native mrope-only: prompt uses prefill engine");
+    check(decode_stats->calls == 1, "native mrope-only: one autoregressive decode step");
+    if (decode_stats->int_history.size() == 1) {
+        check(decode_stats->int_history[0].at("mrope_position_ids") ==
+                  std::vector<int32_t>({2, 2, 2}),
+              "native mrope-only: runtime supplies the next active position");
+        check(decode_stats->int_history[0].count("position_id") == 0,
+              "native mrope-only: position_id is not required");
+    }
+
+    cudaStreamDestroy(stream);
+}
+
 static void test_vl_generate_with_tokenizer() {
     // Covers the string-based generate(const string&, cfg) method
     auto engine = build_mock_decoder();
@@ -1100,10 +1283,10 @@ static void test_vl_pool_isolates_concurrent_lora_selection() {
     trtmc::QwenVlPreprocessConfig vl_pp;
     auto pipeline_a = std::make_unique<trtmc::QwenVlPipeline>(
         std::move(decoder_a), nullptr, std::make_unique<trtmc::QwenVlKvCache>(1, 8, 4, stream_a),
-        cfg, vl_pp, stream_a, nullptr, "lane-a", nullptr, adapter_cache);
+        cfg, vl_pp, stream_a, nullptr, "lane-a", nullptr, nullptr, adapter_cache);
     auto pipeline_b = std::make_unique<trtmc::QwenVlPipeline>(
         std::move(decoder_b), nullptr, std::make_unique<trtmc::QwenVlKvCache>(1, 8, 4, stream_b),
-        cfg, vl_pp, stream_b, nullptr, "lane-b", nullptr, adapter_cache);
+        cfg, vl_pp, stream_b, nullptr, "lane-b", nullptr, nullptr, adapter_cache);
 
     float ones[1] = {1.0F};
     float adapter_a_delta[4] = {2.0F, 0.0F, 0.0F, 0.0F};
@@ -1155,21 +1338,8 @@ static void test_qwen_vl_smart_resize() {
 
 int main() {
     test_qwen_vl_smart_resize();
-    test_vl_text_only();
-    test_vl_text_only_max_tokens();
-    test_vl_validates_decoder();
-    test_vl_validates_cache();
-    test_vl_config_sync();
-    test_vl_zero_max_tokens();
-    test_vl_no_tokenizer_throws();
-    test_vl_generate_with_image_no_encoder();
-    test_vl_generate_with_vision_encoder();
-    test_vl_generate_with_embed_decoder();
-    test_vl_sequence_prefill_uses_one_text_launch();
-    test_vl_dynamic_resolution_uses_actual_grid_for_mrope();
-    test_vl_generate_with_tokenizer();
-    test_vl_dynamic_lora_adapter_switching();
-    test_vl_pool_isolates_concurrent_lora_selection();
+    test_native_vl_prefill_chunks_all_aligned_inputs();
+    test_native_text_decode_supplies_mrope_without_position_input();
     if (failures > 0)
         std::cerr << failures << " FAILED\n";
     return failures;

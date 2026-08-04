@@ -15,11 +15,16 @@
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <iostream>
+#include <limits>
 #include <memory>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -56,8 +61,115 @@ int32_t dim_at(const std::vector<int64_t>& shape, std::size_t idx) {
 
 int32_t decoder_cache_row_width(const TrtModule& module, const std::string& tensor_name,
                                 const BaseConfig& config) {
-    const int32_t from_engine = dim_at(module.tensor_shape(tensor_name), 1);
+    const auto shape = module.tensor_shape(tensor_name);
+    if (shape.size() == 4) {
+        const int32_t heads = dim_at(shape, 1);
+        const int32_t head_dim = dim_at(shape, 3);
+        if (heads > 0 && head_dim > 0 && heads <= std::numeric_limits<int32_t>::max() / head_dim) {
+            return heads * head_dim;
+        }
+    }
+    const int32_t from_engine = dim_at(shape, 1);
     return from_engine > 0 ? from_engine : compute_kv_dim(config);
+}
+
+std::string format_bytes(std::uint64_t bytes) {
+    std::ostringstream oss;
+    constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
+    constexpr double kMiB = 1024.0 * 1024.0;
+    oss.setf(std::ios::fixed);
+    oss.precision(2);
+    if (bytes >= static_cast<std::uint64_t>(kGiB)) {
+        oss << (static_cast<double>(bytes) / kGiB) << " GiB";
+    } else if (bytes >= static_cast<std::uint64_t>(kMiB)) {
+        oss << (static_cast<double>(bytes) / kMiB) << " MiB";
+    } else {
+        oss.unsetf(std::ios::floatfield);
+        oss << bytes << " B";
+    }
+    return oss.str();
+}
+
+std::uint64_t checked_multiply(std::uint64_t lhs, std::uint64_t rhs) {
+    if (lhs != 0 && rhs > std::numeric_limits<std::uint64_t>::max() / lhs)
+        throw std::overflow_error("Qwen-VL native KV byte accounting overflow");
+    return lhs * rhs;
+}
+
+void validate_native_scalar(const ITrtModule& module, const std::string& name,
+                            const char* module_label) {
+    if (!module.has_input(name) || module.tensor_dtype(name) != DType::kInt32 ||
+        module.tensor_shape(name) != std::vector<int64_t>{1}) {
+        throw std::runtime_error(std::string("Qwen-VL ") + module_label + " native KV input '" +
+                                 name + "' must be int32 [1]");
+    }
+}
+
+void validate_native_module(const PipelineContext& ctx, const ITrtModule& module,
+                            const QwenVlKvCacheNames& names,
+                            const TensorParallelRuntimeConfig& tp_config,
+                            const char* module_label) {
+    validate_native_scalar(module, names.cache_write_indices, module_label);
+    validate_native_scalar(module, names.key_value_lengths, module_label);
+
+    const int32_t tp_size = tp_config.enabled ? tp_config.tp_size : 1;
+    if (tp_size <= 0 || ctx.config.num_kv_heads <= 0 || ctx.config.num_kv_heads % tp_size != 0) {
+        throw std::runtime_error(
+            "Qwen-VL native KV requires num_key_value_heads divisible by tensor parallel size");
+    }
+    const int32_t local_kv_heads = ctx.config.num_kv_heads / tp_size;
+    const std::vector<int64_t> expected_shape{1, local_kv_heads, ctx.config.max_cache_length, 128};
+    for (int32_t layer = 0; layer < ctx.config.num_layers; ++layer) {
+        const auto index = static_cast<std::size_t>(layer);
+        const auto validate_pair = [&](const std::string& cache_name,
+                                       const std::string& present_name) {
+            if (!module.has_input(cache_name) || !module.has_output(present_name) ||
+                module.tensor_shape(cache_name) != expected_shape ||
+                module.tensor_shape(present_name) != expected_shape ||
+                module.tensor_dtype(cache_name) != DType::kBFloat16 ||
+                module.tensor_dtype(present_name) != DType::kBFloat16) {
+                throw std::runtime_error(std::string("Qwen-VL ") + module_label +
+                                         " native KV cache/present must be BF16 "
+                                         "[1,local_num_kv_heads,capacity,128]");
+            }
+        };
+        validate_pair(names.cache_k[index], names.present_k[index]);
+        validate_pair(names.cache_v[index], names.present_v[index]);
+    }
+}
+
+std::uint64_t native_kv_cache_bytes(const PipelineContext& ctx, int32_t kv_dim,
+                                    std::size_t lane_count) {
+    if (ctx.config.num_layers <= 0 || ctx.config.max_cache_length <= 0 || kv_dim <= 0)
+        throw std::runtime_error("Qwen-VL native KV geometry must be positive");
+    auto bytes = checked_multiply(static_cast<std::uint64_t>(ctx.config.num_layers),
+                                  static_cast<std::uint64_t>(ctx.config.max_cache_length));
+    bytes = checked_multiply(bytes, static_cast<std::uint64_t>(kv_dim));
+    bytes = checked_multiply(bytes, 2); // BF16 bytes per element.
+    bytes = checked_multiply(bytes, 2); // K and V.
+    return checked_multiply(bytes, static_cast<std::uint64_t>(lane_count));
+}
+
+void admit_native_kv_allocation(const PipelineContext& ctx, std::uint64_t cache_bytes) {
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    const cudaError_t status = cudaMemGetInfo(&free_bytes, &total_bytes);
+    if (status != cudaSuccess) {
+        throw std::runtime_error(std::string("Qwen-VL native KV CUDA memory query failed: ") +
+                                 cudaGetErrorString(status));
+    }
+    constexpr std::uint64_t kTwoGiB = 2ULL << 30;
+    const auto free = static_cast<std::uint64_t>(free_bytes);
+    const auto total = static_cast<std::uint64_t>(total_bytes);
+    const auto reserve = std::max(kTwoGiB, total / 10);
+    const auto available = free > reserve ? free - reserve : 0;
+    if (cache_bytes > available) {
+        throw std::runtime_error(
+            "Qwen-VL native KV cache admission failed before allocation: capacity=" +
+            std::to_string(ctx.config.max_cache_length) +
+            " tokens, required=" + format_bytes(cache_bytes) + ", free=" + format_bytes(free) +
+            ", reserve=" + format_bytes(reserve));
+    }
 }
 
 TextModuleRuntime initialize_text_module_runtime(const TensorParallelRuntimeConfig& tp_config) {
@@ -203,6 +315,28 @@ struct TextLaneModules {
     std::vector<std::unique_ptr<ITrtModule>> prefill;
 };
 
+void validate_native_contract(const PipelineContext& ctx, const TextLaneModules& modules,
+                              const QwenVlKvCacheNames& names,
+                              const TensorParallelRuntimeConfig& tp_config) {
+    if (!extract_json_bool(ctx.config_json, "native_kv_cache", false) ||
+        extract_json_int(ctx.config_json, "native_kv_contract_version", 0) != 1) {
+        throw std::runtime_error(
+            "Qwen-VL bundle metadata does not declare native KV contract version 1");
+    }
+    for (const auto& decode : modules.decode)
+        validate_native_module(ctx, *decode, names, tp_config, "decode engine");
+    for (const auto& prefill : modules.prefill) {
+        if (!prefill)
+            throw std::runtime_error("Qwen-VL native KV bundle is missing its prefill engine");
+        validate_native_module(ctx, *prefill, names, tp_config, "prefill engine");
+    }
+    if (ctx.kv_cache_size_bytes != 0) {
+        throw std::invalid_argument(
+            "Qwen-VL native TensorRT KV cache allocates the model's complete fixed capacity; "
+            "kv_cache_size_bytes is not supported");
+    }
+}
+
 TextLaneModules load_split_text_lane_modules(const PipelineContext& ctx, TextModuleRuntime& runtime,
                                              const LaneResources& lanes,
                                              const std::vector<char>& prefill_plan) {
@@ -286,8 +420,13 @@ std::vector<std::unique_ptr<ITrtModule>>
 load_vision_lane_modules(const PipelineContext& ctx, const LaneResources& lanes, bool declared) {
     const std::size_t count = lanes.streams.size();
     std::vector<std::unique_ptr<ITrtModule>> modules(count);
+    auto vision_options = lanes.options;
+    for (auto& options : vision_options) {
+        options.distributed_communicator = nullptr;
+        options.distributed_owner.reset();
+    }
     if (count == 1) {
-        modules.front() = load_vision_module(ctx.backend, ctx.bundle, lanes.options.front(),
+        modules.front() = load_vision_module(ctx.backend, ctx.bundle, vision_options.front(),
                                              lanes.streams.front(), declared);
         return modules;
     }
@@ -297,7 +436,7 @@ load_vision_lane_modules(const PipelineContext& ctx, const LaneResources& lanes,
         return modules;
     }
     try {
-        auto loaded = load_context_modules(ctx.backend, plan, "vision_engine_plan", lanes.options);
+        auto loaded = load_context_modules(ctx.backend, plan, "vision_engine_plan", vision_options);
         modules = std::move(loaded.modules);
         for (std::size_t index = 0; index < count; ++index)
             modules[index]->keep_alive(lanes.streams[index]);
@@ -308,7 +447,20 @@ load_vision_lane_modules(const PipelineContext& ctx, const LaneResources& lanes,
     return modules;
 }
 
-QwenVlConfig make_pipeline_config(const PipelineContext& ctx, const ITrtModule& decode) {
+int32_t prefill_profile_max_length(const ITrtModule& prefill, const std::string& token_name) {
+    const auto static_shape = prefill.tensor_shape(token_name);
+    const int32_t static_length = dim_at(static_shape, 0);
+    if (static_length > 1)
+        return static_length;
+    const int32_t profile_idx = prefill.profile_idx();
+    if (profile_idx < 0 || profile_idx >= prefill.optimization_profile_count())
+        return static_length;
+    return dim_at(prefill.input_profile_shape(token_name, profile_idx, ProfileShapeSelector::kMax),
+                  0);
+}
+
+QwenVlConfig make_pipeline_config(const PipelineContext& ctx, const ITrtModule& decode,
+                                  const ITrtModule& prefill) {
     QwenVlConfig config;
     config.vocab_size = ctx.config.vocab_size;
     config.id_bos = ctx.config.id_bos;
@@ -317,7 +469,11 @@ QwenVlConfig make_pipeline_config(const PipelineContext& ctx, const ITrtModule& 
     config.vision_output_dim = extract_json_int(ctx.config_json, "vision_output_dim", 0);
     config.has_position_input = decode.has_input("position_id");
     config.num_layers = ctx.config.num_layers;
-    config.prefill_max_length = ctx.config.max_cache_length;
+    const std::string token_name =
+        ctx.config.io_map.token_id.empty() ? std::string("token_id") : ctx.config.io_map.token_id;
+    config.prefill_max_length = prefill_profile_max_length(prefill, token_name);
+    if (config.prefill_max_length <= 0)
+        throw std::runtime_error("Qwen-VL native KV prefill engine has no valid profile capacity");
     config.present_k_pattern = ctx.config.io_map.present_k_pattern;
     config.present_v_pattern = ctx.config.io_map.present_v_pattern;
     return config;
@@ -374,6 +530,9 @@ class VLPlugin final : public IPipelinePlugin {
         auto lanes = create_lane_resources(count, ctx, text_runtime, tp_config);
         auto text_modules = load_text_lane_modules(ctx, text_runtime, lanes);
 
+        const auto kv_names = build_kv_cache_names(ctx.config);
+        validate_native_contract(ctx, text_modules, kv_names, tp_config);
+
         const std::string cache_k_name =
             ctx.config.io_map.cache_k_pattern.empty()
                 ? std::string("cache_k_0")
@@ -381,9 +540,12 @@ class VLPlugin final : public IPipelinePlugin {
         int32_t kv_dim =
             decoder_cache_row_width(*text_modules.decode.front(), cache_k_name, ctx.config);
         DType cache_dtype = text_modules.decode.front()->tensor_dtype(cache_k_name);
+        if (cache_dtype != DType::kBFloat16)
+            throw std::runtime_error("Qwen-VL native KV runtime requires BF16 cache tensors");
 
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
-        const auto vlc = make_pipeline_config(ctx, *text_modules.decode.front());
+        const auto vlc =
+            make_pipeline_config(ctx, *text_modules.decode.front(), *text_modules.prefill.front());
         const bool has_vision_engine =
             extract_json_int(ctx.config_json, "has_vision_engine", 0) != 0;
         auto vision_modules = load_vision_lane_modules(ctx, lanes, has_vision_engine);
@@ -394,6 +556,15 @@ class VLPlugin final : public IPipelinePlugin {
         const std::string preproc_text =
             bundle_section_text(ctx.bundle, "preprocessor_config.json");
         auto vl_preprocess = qwen_vl_parse_preprocess_config(config_text, preproc_text);
+
+        // Engine/context deserialization (including the vision engine) can consume
+        // significant memory. Check the complete user-owned cache allocation only
+        // after every module required by this pipeline is resident.
+        const auto cache_bytes = native_kv_cache_bytes(ctx, kv_dim, count);
+        admit_native_kv_allocation(ctx, cache_bytes);
+        std::cerr << "[trtmc] Qwen-VL native KV cache capacity=" << ctx.config.max_cache_length
+                  << " tokens, lanes=" << count << ", allocation=" << format_bytes(cache_bytes)
+                  << '\n';
 
         return make_pipeline_lanes(ctx, std::move(text_modules), std::move(vision_modules), lanes,
                                    vlc, vl_preprocess, kv_dim, cache_dtype, std::move(tokenizer));
