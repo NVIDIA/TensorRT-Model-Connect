@@ -395,7 +395,10 @@ entries:
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
-      output_contract: exact-token-ids
+      output_contract: localization
+      min_localization_box_iou: 0.9
+      max_localization_point_distance: 10.0
+      max_normalized_edit_distance: 0.5
   - id: m2m_100.generate
     family: m2m_100
     operation: generate

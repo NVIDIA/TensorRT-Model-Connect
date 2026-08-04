@@ -44,6 +44,11 @@ from tensorrt_model_connect.benchmark.worker import (  # noqa: E402
     find_worker,
     worker_metadata,
 )
+from tensorrt_model_connect.families.locateanything.task_contract import (  # noqa: E402
+    matched_box_iou,
+    matched_point_distance,
+    parse_localizations,
+)
 from tensorrt_model_connect.python_profiles import (  # noqa: E402
     default_execution_profiles,
     resolve_profile_python,
@@ -604,6 +609,7 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
         "exact-token-ids",
         "exact-text",
         "generated-token-count",
+        "localization",
         "media-shape",
         "normalized-text",
         "ocr-text",
@@ -622,6 +628,32 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
                 raise PerfMatrixError(
                     f"case {case['id']} token-agreement contract has invalid {name}"
                 )
+    if output_contract == "localization":
+        bounded = {
+            "min_localization_box_iou": (0.0, 1.0),
+            "max_normalized_edit_distance": (0.0, 1.0),
+        }
+        for name, (minimum, maximum) in bounded.items():
+            value = baseline.get(name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not minimum <= float(value) <= maximum
+            ):
+                raise PerfMatrixError(
+                    f"case {case['id']} localization contract has invalid {name}"
+                )
+        point_limit = baseline.get("max_localization_point_distance")
+        if (
+            isinstance(point_limit, bool)
+            or not isinstance(point_limit, (int, float))
+            or not math.isfinite(float(point_limit))
+            or float(point_limit) < 0.0
+        ):
+            raise PerfMatrixError(
+                f"case {case['id']} localization contract has invalid "
+                "max_localization_point_distance"
+            )
     if output_contract == "ocr-text":
         required = baseline.get("required_substrings")
         if (
@@ -1756,6 +1788,41 @@ def _output_contract(
             limit = float(case["baseline"]["max_normalized_edit_distance"])
             if distance > limit:
                 return False, "normalized text distance exceeds the configured contract"
+            return True, ""
+        if contract == "localization":
+            candidate_localizations = parse_localizations(
+                str(left.get("text", "")), require_reference=True
+            )
+            reference_localizations = parse_localizations(
+                str(right.get("text", "")), require_reference=True
+            )
+            if candidate_localizations is None:
+                return False, "TRTMC localization markup is invalid"
+            if reference_localizations is None:
+                return False, "baseline localization markup is invalid"
+            if candidate_localizations[0].kind != reference_localizations[0].kind:
+                return False, "localization output type differs"
+            if len(candidate_localizations) != len(reference_localizations):
+                return False, "localization output count differs"
+            if reference_localizations[0].kind == "box":
+                minimum_iou = matched_box_iou(
+                    candidate_localizations, reference_localizations
+                )
+                if minimum_iou < float(case["baseline"]["min_localization_box_iou"]):
+                    return False, "localization box IoU is below the configured contract"
+            else:
+                maximum_distance = matched_point_distance(
+                    candidate_localizations, reference_localizations
+                )
+                if maximum_distance > float(
+                    case["baseline"]["max_localization_point_distance"]
+                ):
+                    return False, (
+                        "localization point distance exceeds the configured contract"
+                    )
+            distance = _normalized_text_edit_distance(left.get("text"), right.get("text"))
+            if distance > float(case["baseline"]["max_normalized_edit_distance"]):
+                return False, "normalized localization text distance exceeds the configured contract"
             return True, ""
         if contract == "ocr-text":
             required = list(case["baseline"]["required_substrings"])

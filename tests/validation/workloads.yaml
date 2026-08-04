@@ -553,6 +553,66 @@ suites:
         Controlled fixed-input parity suite for the current fixed-shape VLM
         runtime. This does not replace the native HF-target suite above.
 
+  - id: refcoco_grounding
+    description: >
+      RefCOCO referring-expression grounding accuracy for LocateAnything. HF
+      slow/AR and TRTMC consume the same image and official single-instance
+      prompt; outputs are scored against normalized gold boxes at IoU 0.5 and
+      backend correctness agreement is gated separately.
+    task_type: Image + Text → Localization
+    user_contract: grounded_localization
+    default_model_names:
+      - locateanything-3b
+    dataset:
+      kind: vlm_grounding_json
+      default_path: /mnt/data/RefCOCO_rec/unified/dataset.json
+      answer_field: answer
+      subject_field: subject
+      prompt_source: messages
+      image_source: messages
+      max_images_per_sample: 1
+      bbox_field: metadata.bbox_1000
+      coordinate_format: normalized_0_1000_xyxy
+      source: lscpku/RefCOCO_rec
+      source_revision: 566810e1ad62821ed3c6ab569ea33d80f5bdb874
+      source_license_status: not-declared-by-source-card
+    selectors:
+      task_strategies:
+        - vision_language_generation
+      runtime_strategies:
+        - locateanything_vision_language
+      families:
+        - locateanything
+    generation:
+      max_new_tokens: 64
+      temperature: 1.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      apply_chat_template: false
+      enable_thinking: false
+      do_sample: false
+    model_overrides:
+      by_model:
+        locateanything-3b:
+          reference_precision: bf16
+          allow_reference_precision_mismatch: true
+    scoring:
+      scorer: grounding_iou
+      iou_threshold: 0.5
+    build:
+      min_max_cache_length: 1024
+    gates:
+      max_accuracy_drop_from_hf: 0.05
+      min_prediction_agreement: 0.95
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Dev/QA target-hardware accuracy validation. This workload is not a
+        substitute for the model-owned box and point E2E contract cases.
+
   - id: ocrbench_v2_unified
     description: >
       Local OCRBench v2 evaluation on the unified VLM dataset format. This

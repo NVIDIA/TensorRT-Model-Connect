@@ -80,7 +80,7 @@ optimized-runtime producer.
 | `text_generation_causal` | `qwen_decoder_kv_cache`, `mixtral_decoder_moe`, `mamba_ssm_recurrent`, `bart_seq2seq_encoder_decoder` | Decoder, MoE, recurrent/hybrid, seq2seq, and translation families. |
 | `encoder_only_nlp` | `bert_encoder_only`, `roberta_encoder_only`, `xlnet_encoder_only` | ALBERT/BERT-style encoder families. |
 | `embedding`, `reranking` | `eagle_vlm_embedding`, `eagle_vlm_reranking` | `eagle_vlm`. |
-| `vision_language_generation` | `qwen_vl_vision_language`, `internvl_vision_language`, `deepseek_ocr_vision_language` | Qwen-VL, InternVL, Lance, LocateAnything, Phi4 multimodal, and DeepSeek-OCR. |
+| `vision_language_generation` | `qwen_vl_vision_language`, `internvl_vision_language`, `locateanything_vision_language`, `deepseek_ocr_vision_language` | Qwen-VL, InternVL, Lance, LocateAnything, Phi4 multimodal, and DeepSeek-OCR. |
 | `omni_multimodal` | `qwen3_omni_multimodal` | `qwen3_omni`. |
 | `speech_to_text` | `whisper_speech_to_text`, `canary_speech_to_text`, `nemotron_speech_streaming_speech_to_text_rnnt` | Whisper, Canary, and Nemotron streaming. |
 | `text_to_audio`, `speech_to_speech` | `text_to_audio_bark`, `text_to_audio_magpie`, `personaplex_speech_to_speech` | Bark, Magpie TTS, and PersonaPlex. |

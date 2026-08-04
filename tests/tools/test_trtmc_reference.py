@@ -767,6 +767,117 @@ def test_transformers_vlm_moves_all_model_state_to_requested_dtype(
     }
 
 
+def test_transformers_vlm_dispatches_locateanything_to_manual_runtime(
+    monkeypatch,
+) -> None:
+    arguments = transformers_vlm.build_parser().parse_args(
+        [
+            "--model",
+            "nvidia/LocateAnything-3B",
+            "--prompts",
+            "/tmp/prompts.jsonl",
+            "--answers",
+            "/tmp/answers.json",
+            "--manifest",
+            "/tmp/manifest.json",
+            "--predictions",
+            "/tmp/predictions.json",
+            "--raw-output",
+            "/tmp/raw.jsonl",
+        ]
+    )
+    expected = (object(), object(), "cuda")
+    captured = {}
+
+    def fake_load(args, torch_module, transformers_module):
+        captured.update(
+            args=args,
+            torch_module=torch_module,
+            transformers_module=transformers_module,
+        )
+        return expected
+
+    monkeypatch.setattr(
+        transformers_vlm, "_load_locateanything_runtime", fake_load
+    )
+    result = transformers_vlm._load_runtime(
+        arguments,
+        "torch-module",
+        "transformers-module",
+        object(),
+    )
+
+    assert result == expected
+    assert captured["args"] is arguments
+
+
+def test_locateanything_reference_forces_slow_ar_generation(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class Tensor:
+        ndim = 2
+        shape = (1, 3)
+
+        def to(self, *args, **kwargs):
+            return self
+
+    class Context:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    class Torch:
+        int32 = "int32"
+        cuda = SimpleNamespace(is_available=lambda: False)
+        from_numpy = staticmethod(lambda _value: Tensor())
+        inference_mode = staticmethod(Context)
+
+    class Tokenizer:
+        def __call__(self, _text, return_tensors=None):
+            assert return_tensors == "pt"
+            return {"input_ids": Tensor(), "attention_mask": Tensor()}
+
+        def encode(self, _text, add_special_tokens=False):
+            return [1, 2]
+
+    class Model:
+        def generate(self, **kwargs):
+            captured.update(kwargs)
+            return ["<ref>vehicle</ref><box><300><200><800><700></box>"]
+
+    import numpy as np
+    from tensorrt_model_connect.families.locateanything import vl_debug_runner
+
+    monkeypatch.setattr(
+        vl_debug_runner,
+        "preprocess_image_inputs_for_trt",
+        lambda *_args, **_kwargs: {
+            "pixel_values": np.zeros((1,), dtype=np.float32),
+            "image_grid_hws": np.zeros((1, 2), dtype=np.int32),
+        },
+    )
+
+    result = transformers_vlm._locateanything_response(
+        torch_module=Torch(),
+        tokenizer=Tokenizer(),
+        model=Model(),
+        device="cuda",
+        prompt_row={
+            "sample_id": "one",
+            "prompt": "Point to: white vehicle.",
+            "images": ["/tmp/image.jpg"],
+        },
+        source_index=0,
+        settings={"seed": -1, "max_new_tokens": 64},
+    )
+
+    assert captured["generation_mode"] == "slow"
+    assert captured["do_sample"] is False
+    assert result["output_text"].startswith("<ref>vehicle</ref><box>")
+
+
 def test_transformers_text_reference_accepts_float32_dtype() -> None:
     arguments = transformers_text.build_parser().parse_args(
         [
@@ -974,6 +1085,12 @@ def test_native_reference_runner_uses_prepared_dataset_kind(tmp_path: Path) -> N
     )
 
     manifest["dataset_kind"] = "vlm_chat_json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert trtmc_reference._native_reference_runner(arguments).name == (
+        "transformers_vlm.py"
+    )
+
+    manifest["dataset_kind"] = "vlm_grounding_json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     assert trtmc_reference._native_reference_runner(arguments).name == (
         "transformers_vlm.py"

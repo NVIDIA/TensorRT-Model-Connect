@@ -49,7 +49,11 @@ _NATIVE_PLUGIN_DATASET_KINDS = {
     "semantic_segmentation_json",
     "time_series_csv",
 }
-_NATIVE_VLM_DATASET_KINDS = {"vlm_chat_json", "vlm_unified_json"}
+_NATIVE_VLM_DATASET_KINDS = {
+    "vlm_chat_json",
+    "vlm_grounding_json",
+    "vlm_unified_json",
+}
 _NATIVE_ELF_DATASET_KINDS = {
     "conditional_text_jsonl",
     "unconditional_text_json",

@@ -16,6 +16,11 @@ from typing import Any, Mapping, Sequence
 
 
 SCHEMA_VERSION = "trtmc.native-reference-reproduction/v1"
+REPOSITORY = Path(__file__).resolve().parents[2]
+PYTHON_SOURCE = REPOSITORY / "python"
+for source_root in (REPOSITORY, PYTHON_SOURCE):
+    if str(source_root) not in sys.path:
+        sys.path.insert(0, str(source_root))
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -288,12 +293,260 @@ def _generation_settings(
     }
 
 
+def _is_locateanything(arguments: argparse.Namespace) -> bool:
+    return (
+        str(arguments.reference_family).lower() == "locateanything"
+        or "locateanything" in str(arguments.model).lower()
+    )
+
+
+def _install_locateanything_compat() -> None:
+    from transformers.cache_utils import DynamicCache
+    from transformers.modeling_utils import PreTrainedModel
+
+    if not hasattr(DynamicCache, "to_legacy_cache"):
+
+        def to_legacy_cache(self: Any) -> tuple[Any, ...]:
+            return tuple((layer.keys, layer.values) for layer in self.layers)
+
+        DynamicCache.to_legacy_cache = to_legacy_cache
+    if not hasattr(DynamicCache, "from_legacy_cache"):
+
+        @classmethod
+        def from_legacy_cache(cls: Any, past_key_values: Any = None) -> Any:
+            cache = cls()
+            for layer_index, values in enumerate(past_key_values or ()):
+                cache.update(values[0], values[1], layer_index)
+            return cache
+
+        DynamicCache.from_legacy_cache = from_legacy_cache
+    if not hasattr(PreTrainedModel, "all_tied_weights_keys"):
+        PreTrainedModel.all_tied_weights_keys = {}
+    original = getattr(PreTrainedModel, "get_expanded_tied_weights_keys", None)
+    if original is None or getattr(original, "_trtmc_locateanything_compat", False):
+        return
+
+    def get_expanded_tied_weights_keys(self: Any, all_submodels: bool = False) -> Any:
+        tied = getattr(self, "_tied_weights_keys", None)
+        if not isinstance(tied, list):
+            return original(self, all_submodels=all_submodels)
+        if all_submodels:
+            expanded = {}
+            for prefix, submodule in self.named_modules(remove_duplicate=False):
+                if not isinstance(submodule, PreTrainedModel):
+                    continue
+                values = submodule.get_expanded_tied_weights_keys(all_submodels=False)
+                if prefix:
+                    values = {
+                        f"{prefix}.{key}": f"{prefix}.{value}"
+                        for key, value in values.items()
+                    }
+                expanded.update(values)
+            return expanded
+        if not getattr(self.config, "tie_word_embeddings", False):
+            return {}
+        return (
+            {"lm_head.weight": "model.embed_tokens.weight"}
+            if "lm_head.weight" in tied
+            else {}
+        )
+
+    get_expanded_tied_weights_keys._trtmc_locateanything_compat = True
+    PreTrainedModel.get_expanded_tied_weights_keys = get_expanded_tied_weights_keys
+
+
+def _locateanything_model_ref(arguments: argparse.Namespace) -> str:
+    if Path(arguments.model).is_dir():
+        return str(Path(arguments.model).resolve())
+    from huggingface_hub import snapshot_download
+    from tensorrt_model_connect.hf_snapshot import hf_snapshot_allow_patterns
+
+    return snapshot_download(
+        repo_id=arguments.model,
+        revision=arguments.model_revision or None,
+        local_files_only=arguments.local_files_only,
+        allow_patterns=hf_snapshot_allow_patterns(),
+    )
+
+
+def _locateanything_config(
+    model_ref: str,
+    arguments: argparse.Namespace,
+    transformers_module: Any,
+) -> Any:
+    config = transformers_module.AutoConfig.from_pretrained(
+        model_ref,
+        trust_remote_code=arguments.trust_remote_code,
+        local_files_only=True,
+    )
+    raw = _load_json(Path(model_ref) / "config.json")
+    if hasattr(config, "text_config") and not hasattr(config.text_config, "rope_theta"):
+        text_config = raw.get("text_config", {})
+        rope_theta = text_config.get("rope_theta")
+        for key in ("rope_parameters", "rope_scaling"):
+            nested = text_config.get(key, {})
+            if rope_theta is None and isinstance(nested, Mapping):
+                rope_theta = nested.get("rope_theta")
+        config.text_config.rope_theta = float(rope_theta or raw.get("rope_theta", 10_000.0))
+    return config
+
+
+def _locateanything_tokenizer(
+    model_ref: str,
+    arguments: argparse.Namespace,
+    torch_module: Any,
+    transformers_module: Any,
+) -> Any:
+    try:
+        return transformers_module.AutoTokenizer.from_pretrained(
+            model_ref,
+            trust_remote_code=arguments.trust_remote_code,
+            local_files_only=True,
+        )
+    except (KeyError, TypeError, ValueError, OSError) as auto_error:
+        try:
+            from tokenizers import Tokenizer
+
+            raw_tokenizer = Tokenizer.from_file(str(Path(model_ref) / "tokenizer.json"))
+        except Exception as fallback_error:
+            raise RuntimeError(
+                "LocateAnything tokenizer could not be loaded by AutoTokenizer or tokenizer.json"
+            ) from fallback_error
+        tokenizer_config_path = Path(model_ref) / "tokenizer_config.json"
+        tokenizer_config = (
+            _load_json(tokenizer_config_path) if tokenizer_config_path.is_file() else {}
+        )
+
+        class TokenizersWrapper:
+            model_max_length = int(tokenizer_config.get("model_max_length", 16_384))
+
+            def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+                return raw_tokenizer.encode(
+                    text, add_special_tokens=add_special_tokens
+                ).ids
+
+            def __call__(self, text: str, return_tensors: str | None = None) -> Any:
+                ids = self.encode(text)
+                if return_tensors == "pt":
+                    input_ids = torch_module.tensor([ids], dtype=torch_module.long)
+                    return {
+                        "input_ids": input_ids,
+                        "attention_mask": torch_module.ones_like(input_ids),
+                    }
+                return {"input_ids": ids}
+
+            def decode(self, ids: Any, skip_special_tokens: bool = False) -> str:
+                if torch_module.is_tensor(ids):
+                    ids = ids.detach().cpu().tolist()
+                if isinstance(ids, int):
+                    ids = [ids]
+                return raw_tokenizer.decode(
+                    [int(token) for token in ids],
+                    skip_special_tokens=skip_special_tokens,
+                )
+
+            def batch_decode(
+                self, batch_ids: Any, skip_special_tokens: bool = False
+            ) -> list[str]:
+                return [
+                    self.decode(ids, skip_special_tokens=skip_special_tokens)
+                    for ids in batch_ids
+                ]
+
+        print(
+            f"warning: LocateAnything AutoTokenizer failed ({auto_error}); "
+            "using tokenizer.json",
+            file=sys.stderr,
+        )
+        return TokenizersWrapper()
+
+
+def _repair_locateanything_rotary_buffers(model: Any, torch_module: Any) -> None:
+    repaired = 0
+    model_device = next(model.parameters()).device
+    for module in model.language_model.modules():
+        if not all(
+            hasattr(module, name) for name in ("_set_cos_sin_cache", "base", "dim")
+        ):
+            continue
+        device = getattr(getattr(module, "inv_freq", None), "device", model_device)
+        inv_freq = 1.0 / (
+            float(module.base)
+            ** (
+                torch_module.arange(
+                    0,
+                    int(module.dim),
+                    2,
+                    device=device,
+                    dtype=torch_module.float32,
+                )
+                / float(module.dim)
+            )
+        )
+        module.register_buffer("inv_freq", inv_freq, persistent=False)
+        sequence_length = int(
+            getattr(
+                module,
+                "max_position_embeddings",
+                getattr(model.config.text_config, "max_position_embeddings", 32_768),
+            )
+        )
+        module._set_cos_sin_cache(
+            seq_len=sequence_length,
+            device=inv_freq.device,
+            dtype=torch_module.float32,
+        )
+        repaired += 1
+    if repaired == 0:
+        raise RuntimeError("LocateAnything reference did not find rotary buffers to repair")
+
+
+def _load_locateanything_runtime(
+    arguments: argparse.Namespace,
+    torch_module: Any,
+    transformers_module: Any,
+) -> tuple[Any, Any, Any]:
+    transformers_module.logging.set_verbosity_error()
+    if torch_module.cuda.is_available():
+        torch_module.backends.cudnn.enabled = False
+    _install_locateanything_compat()
+    model_ref = _locateanything_model_ref(arguments)
+    config = _locateanything_config(model_ref, arguments, transformers_module)
+    tokenizer = _locateanything_tokenizer(
+        model_ref, arguments, torch_module, transformers_module
+    )
+    model_dtype = _model_dtype(torch_module, arguments.dtype)
+    model_kwargs: dict[str, Any] = {
+        "config": config,
+        "torch_dtype": model_dtype,
+        "trust_remote_code": arguments.trust_remote_code,
+        "local_files_only": True,
+    }
+    if arguments.device_map:
+        model_kwargs["device_map"] = arguments.device_map
+    model = transformers_module.AutoModel.from_pretrained(
+        model_ref, **model_kwargs
+    ).eval()
+    if arguments.device_map:
+        device = model.device
+    else:
+        device = torch_module.device(arguments.device)
+        if model_dtype == "auto":
+            model.to(device)
+        else:
+            model.to(device=device, dtype=model_dtype)
+    _repair_locateanything_rotary_buffers(model, torch_module)
+    return tokenizer, model, device
+
+
 def _load_runtime(
     arguments: argparse.Namespace,
     torch_module: Any,
     transformers_module: Any,
     processor_class: Any,
 ) -> tuple[Any, Any, Any]:
+    if _is_locateanything(arguments):
+        return _load_locateanything_runtime(arguments, torch_module, transformers_module)
     transformers_module.logging.set_verbosity_error()
     processor = processor_class.from_pretrained(
         arguments.model,
@@ -375,6 +628,87 @@ def _deepseek_response(
         token_ids = []
     return {
         "sample_id": sample_id,
+        "output_text": output_text,
+        "generated_tokens": len(token_ids),
+        "generated_token_ids": token_ids,
+        "wall_ms": wall_ms,
+        "source": "hf",
+    }
+
+
+def _locateanything_response(
+    *,
+    torch_module: Any,
+    tokenizer: Any,
+    model: Any,
+    device: Any,
+    prompt_row: Mapping[str, Any],
+    source_index: int,
+    settings: Mapping[str, Any],
+) -> dict[str, Any]:
+    from tensorrt_model_connect.families.locateanything.vl_debug_runner import (
+        preprocess_image_inputs_for_trt,
+    )
+
+    image_paths = [str(path) for path in prompt_row.get("images", [])]
+    if len(image_paths) != 1:
+        raise ValueError("LocateAnything reference expects exactly one image")
+    image_inputs = preprocess_image_inputs_for_trt(
+        image_paths[0],
+        preprocessor_type="patchify_chw",
+        fixed_image_size=448,
+        image_mean=(0.5, 0.5, 0.5),
+        image_std=(0.5, 0.5, 0.5),
+        patch_size=14,
+        interpolation="bicubic",
+    )
+    pixel_values = torch_module.from_numpy(image_inputs["pixel_values"]).to(device)
+    image_grid_hws = torch_module.from_numpy(image_inputs["image_grid_hws"]).to(
+        device=device, dtype=torch_module.int32
+    )
+    prompt = str(prompt_row.get("prompt", ""))
+    prompt_text = (
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        "<|im_start|>user\n<img>"
+        + "<IMG_CONTEXT>" * 256
+        + f"</img>{prompt}<|im_end|>\n<|im_start|>assistant\n"
+    )
+    inputs = tokenizer(prompt_text, return_tensors="pt")
+    input_ids = inputs["input_ids"].to(device)
+    seed = int(settings["seed"])
+    if seed >= 0:
+        torch_module.manual_seed(seed + source_index)
+        if torch_module.cuda.is_available():
+            torch_module.cuda.manual_seed_all(seed + source_index)
+    generate_kwargs: dict[str, Any] = {
+        "pixel_values": pixel_values,
+        "image_grid_hws": image_grid_hws,
+        "input_ids": input_ids,
+        "tokenizer": tokenizer,
+        "max_new_tokens": int(settings["max_new_tokens"]),
+        "use_cache": True,
+        "generation_mode": "slow",
+        "do_sample": False,
+    }
+    if inputs.get("attention_mask") is not None:
+        generate_kwargs["attention_mask"] = inputs["attention_mask"].to(device)
+    start = time.perf_counter()
+    with torch_module.inference_mode():
+        output = model.generate(**generate_kwargs)
+    wall_ms = (time.perf_counter() - start) * 1000.0
+    if isinstance(output, str):
+        output_text = output
+        token_ids = tokenizer.encode(output_text, add_special_tokens=False)
+    elif isinstance(output, (list, tuple)) and output and isinstance(output[0], str):
+        output_text = output[0]
+        token_ids = tokenizer.encode(output_text, add_special_tokens=False)
+    else:
+        sequence = output[0] if output.ndim > 1 else output
+        generated = sequence[input_ids.shape[-1] :]
+        token_ids = [int(token) for token in generated.detach().cpu().tolist()]
+        output_text = tokenizer.decode(token_ids, skip_special_tokens=False)
+    return {
+        "sample_id": prompt_row.get("sample_id", f"vlm_{source_index:06d}"),
         "output_text": output_text,
         "generated_tokens": len(token_ids),
         "generated_token_ids": token_ids,
@@ -500,7 +834,17 @@ def run(arguments: argparse.Namespace) -> None:
         request = requests[source_index]
         if not isinstance(request, dict):
             raise ValueError(f"request {source_index} must be a JSON object")
-        if _is_deepseek_ocr(arguments.model, model):
+        if _is_locateanything(arguments):
+            response = _locateanything_response(
+                torch_module=torch,
+                tokenizer=processor,
+                model=model,
+                device=device,
+                prompt_row=prompt_row,
+                source_index=source_index,
+                settings=settings,
+            )
+        elif _is_deepseek_ocr(arguments.model, model):
             response = _deepseek_response(
                 model=model,
                 processor=processor,

@@ -2582,7 +2582,7 @@ def prepare_task_dataset(
             sample_seed=sample_seed,
             validation_config=validation_config,
         )
-    if dataset_kind == "vlm_chat_json":
+    if dataset_kind in {"vlm_chat_json", "vlm_grounding_json"}:
         return prepare_vlm_chat_dataset(
             dataset_path=dataset_path,
             work_dir=work_dir,
@@ -2695,6 +2695,69 @@ def load_jsonl(path: Path, *, errors: str = "strict") -> list[dict[str, Any]]:
     return rows
 
 
+def _load_prompt_tokenizer(
+    *,
+    model_id: str,
+    model_revision: str = "",
+    local_files_only: bool = False,
+    trust_remote_code: bool = False,
+) -> Any:
+    try:
+        from transformers import AutoTokenizer
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        raise RuntimeError("Prompt tokenization requires transformers") from exc
+
+    tokenizer_kwargs = {
+        "local_files_only": local_files_only,
+        "trust_remote_code": trust_remote_code,
+    }
+    if model_revision:
+        tokenizer_kwargs["revision"] = model_revision
+    try:
+        return AutoTokenizer.from_pretrained(model_id, **tokenizer_kwargs)
+    except (KeyError, TypeError, ValueError, OSError) as auto_error:
+        try:
+            from huggingface_hub import snapshot_download
+            from tokenizers import Tokenizer
+
+            model_path = Path(model_id)
+            if not model_path.is_dir():
+                snapshot_kwargs: dict[str, Any] = {
+                    "local_files_only": local_files_only,
+                    "allow_patterns": ["tokenizer.json"],
+                }
+                if model_revision:
+                    snapshot_kwargs["revision"] = model_revision
+                model_path = Path(snapshot_download(model_id, **snapshot_kwargs))
+            raw_tokenizer = Tokenizer.from_file(str(model_path / "tokenizer.json"))
+        except Exception as fallback_error:
+            raise RuntimeError(
+                f"Tokenizer for {model_id!r} could not be loaded by AutoTokenizer "
+                "or tokenizer.json"
+            ) from fallback_error
+
+        class RawTokenizerWrapper:
+            def __call__(self, text: str, *, add_special_tokens: bool = False) -> Any:
+                encoding = raw_tokenizer.encode(
+                    text, add_special_tokens=add_special_tokens
+                )
+
+                class Encoded:
+                    input_ids = encoding.ids
+
+                return Encoded()
+
+            def decode(self, token_ids: Sequence[int], **_: Any) -> str:
+                return raw_tokenizer.decode(list(token_ids), skip_special_tokens=False)
+
+        print(
+            f"warning: AutoTokenizer failed for {model_id!r} ({auto_error}); "
+            "using tokenizer.json for prompt accounting",
+            file=sys.stderr,
+        )
+        return RawTokenizerWrapper()
+
+
 def truncate_prompt_rows(
     rows: list[dict[str, Any]],
     *,
@@ -2757,18 +2820,12 @@ def apply_work_prompt_token_limit(
     local_files_only: bool = False,
     trust_remote_code: bool = False,
 ) -> dict[str, Any]:
-    try:
-        from transformers import AutoTokenizer
-    except Exception as exc:  # pragma: no cover - runtime dependency
-        raise RuntimeError("Prompt truncation requires transformers") from exc
-
-    tokenizer_kwargs = {
-        "local_files_only": local_files_only,
-        "trust_remote_code": trust_remote_code,
-    }
-    if model_revision:
-        tokenizer_kwargs["revision"] = model_revision
-    tokenizer = AutoTokenizer.from_pretrained(model_id, **tokenizer_kwargs)
+    tokenizer = _load_prompt_tokenizer(
+        model_id=model_id,
+        model_revision=model_revision,
+        local_files_only=local_files_only,
+        trust_remote_code=trust_remote_code,
+    )
     prompts_path = work_dir / "prompts.jsonl"
     rows = load_jsonl(prompts_path)
     summary = truncate_prompt_rows(
@@ -2799,18 +2856,12 @@ def max_prompt_token_length(
     local_files_only: bool = False,
     trust_remote_code: bool = False,
 ) -> int:
-    try:
-        from transformers import AutoTokenizer
-    except Exception as exc:  # pragma: no cover - runtime dependency
-        raise RuntimeError("Prompt length check requires transformers") from exc
-
-    tokenizer_kwargs = {
-        "local_files_only": local_files_only,
-        "trust_remote_code": trust_remote_code,
-    }
-    if model_revision:
-        tokenizer_kwargs["revision"] = model_revision
-    tokenizer = AutoTokenizer.from_pretrained(model_id, **tokenizer_kwargs)
+    tokenizer = _load_prompt_tokenizer(
+        model_id=model_id,
+        model_revision=model_revision,
+        local_files_only=local_files_only,
+        trust_remote_code=trust_remote_code,
+    )
     max_len = 0
     for row in load_jsonl(prompts_path):
         documents = row.get("documents")
@@ -4888,6 +4939,194 @@ def continuation_task_quality_diagnostics(
     }
 
 
+def _grounding_float_list(value: Any, *, count: int | None = None) -> list[float] | None:
+    if not isinstance(value, list):
+        return None
+    try:
+        output = [float(item) for item in value]
+    except (TypeError, ValueError):
+        return None
+    if count is not None and len(output) != count:
+        return None
+    return output
+
+
+def _normalize_grounding_xyxy_1000(
+    values: list[float],
+    *,
+    image_width: int | None = None,
+    image_height: int | None = None,
+    pixel_coordinates: bool = False,
+) -> list[float] | None:
+    if len(values) != 4:
+        return None
+    x1, y1, x2, y2 = values
+    if pixel_coordinates:
+        if not image_width or not image_height:
+            return None
+        x1, x2 = x1 * 1000.0 / image_width, x2 * 1000.0 / image_width
+        y1, y2 = y1 * 1000.0 / image_height, y2 * 1000.0 / image_height
+    elif max(abs(value) for value in values) <= 1.0:
+        x1, y1, x2, y2 = (value * 1000.0 for value in values)
+    left, right = sorted((x1, x2))
+    top, bottom = sorted((y1, y2))
+    box = [
+        max(0.0, min(1000.0, left)),
+        max(0.0, min(1000.0, top)),
+        max(0.0, min(1000.0, right)),
+        max(0.0, min(1000.0, bottom)),
+    ]
+    return box if box[2] > box[0] and box[3] > box[1] else None
+
+
+def _grounding_request_metadata(request: dict[str, Any]) -> dict[str, Any]:
+    metadata = request.get("metadata", {})
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _grounding_request_image_size(request: dict[str, Any]) -> tuple[int | None, int | None]:
+    metadata = _grounding_request_metadata(request)
+    width = metadata.get("image_width", request.get("image_width"))
+    height = metadata.get("image_height", request.get("image_height"))
+    try:
+        return int(width) if width else None, int(height) if height else None
+    except (TypeError, ValueError):
+        return None, None
+
+
+def parse_grounding_bbox(
+    text: str,
+    *,
+    request: dict[str, Any] | None = None,
+) -> list[float] | None:
+    structured = re.search(
+        r"<box>\s*<([0-9]{1,4})>\s*<([0-9]{1,4})>\s*"
+        r"<([0-9]{1,4})>\s*<([0-9]{1,4})>\s*</box>",
+        str(text),
+    )
+    if structured:
+        return _normalize_grounding_xyxy_1000(
+            [float(value) for value in structured.groups()]
+        )
+    number = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
+    values = [float(match) for match in re.findall(number, clean_text(str(text)))]
+    if len(values) < 4:
+        return None
+    request = request or {}
+    image_width, image_height = _grounding_request_image_size(request)
+    return _normalize_grounding_xyxy_1000(
+        values[:4],
+        image_width=image_width,
+        image_height=image_height,
+        pixel_coordinates=bool(re.search(r"\b(?:px|pixel|pixels)\b", text, re.IGNORECASE)),
+    )
+
+
+def reference_grounding_bbox(request: dict[str, Any]) -> list[float] | None:
+    metadata = _grounding_request_metadata(request)
+    for key in ("bbox_1000", "bbox_1000_xyxy", "target_bbox_1000"):
+        box = _grounding_float_list(metadata.get(key, request.get(key)), count=4)
+        if box is not None:
+            return _normalize_grounding_xyxy_1000(box)
+    for key in ("bbox", "bbox_xyxy", "target_bbox"):
+        box = _grounding_float_list(metadata.get(key, request.get(key)), count=4)
+        if box is not None:
+            return _normalize_grounding_xyxy_1000(box)
+    answer = request.get("answer")
+    if isinstance(answer, list):
+        box = _grounding_float_list(answer, count=4)
+        return _normalize_grounding_xyxy_1000(box) if box is not None else None
+    return parse_grounding_bbox(str(answer), request=request) if answer is not None else None
+
+
+def grounding_bbox_iou(
+    left: list[float] | None,
+    right: list[float] | None,
+) -> float:
+    if left is None or right is None:
+        return 0.0
+    lx1, ly1, lx2, ly2 = left
+    rx1, ry1, rx2, ry2 = right
+    intersection = max(0.0, min(lx2, rx2) - max(lx1, rx1)) * max(
+        0.0, min(ly2, ry2) - max(ly1, ry1)
+    )
+    left_area = max(0.0, lx2 - lx1) * max(0.0, ly2 - ly1)
+    right_area = max(0.0, rx2 - rx1) * max(0.0, ry2 - ry1)
+    union = left_area + right_area - intersection
+    return _clip_score(intersection / union) if union > 0.0 else 0.0
+
+
+def score_grounding_predictions(
+    predictions_data: dict[str, Any],
+    answers_data: dict[str, Any],
+    *,
+    iou_threshold: float = 0.5,
+) -> dict[str, Any]:
+    responses = predictions_data.get("responses", [])
+    requests = answers_data.get("requests", [])
+    if len(responses) != len(requests):
+        raise ValueError(
+            "Predictions and answers must have the same length: "
+            f"{len(responses)} != {len(requests)}"
+        )
+    if not 0.0 <= iou_threshold <= 1.0:
+        raise ValueError("grounding IoU threshold must be between 0 and 1")
+
+    correct = 0
+    skipped = 0
+    subject_stats: dict[str, Counter[str]] = defaultdict(Counter)
+    samples: list[dict[str, Any]] = []
+    for index, (response, request) in enumerate(zip(responses, requests, strict=True)):
+        output_text = str(response.get("output_text", ""))
+        subject = str(request.get("subject", ""))
+        target = reference_grounding_bbox(request)
+        prediction = parse_grounding_bbox(output_text, request=request)
+        is_skipped = output_text == ERROR_OUTPUT_TEXT
+        iou = 0.0 if is_skipped else grounding_bbox_iou(prediction, target)
+        is_correct = not is_skipped and iou >= iou_threshold
+        skipped += int(is_skipped)
+        correct += int(is_correct)
+        if not is_skipped:
+            subject_stats[subject]["total"] += 1
+            subject_stats[subject]["correct"] += int(is_correct)
+        samples.append(
+            {
+                "index": index,
+                "sample_id": response.get("sample_id", f"sample_{index}"),
+                "subject": subject,
+                "answer": str(request.get("answer", "")),
+                "target_bbox": target,
+                "prediction": output_text,
+                "parsed_prediction": prediction,
+                "iou": iou,
+                "iou_threshold": iou_threshold,
+                "score": iou,
+                "skipped": is_skipped,
+                "correct": is_correct,
+            }
+        )
+    valid = len(requests) - skipped
+    subject_accuracy = {
+        subject: {
+            "accuracy": int(stats["correct"]) / int(stats["total"]),
+            "correct": int(stats["correct"]),
+            "total": int(stats["total"]),
+        }
+        for subject, stats in sorted(subject_stats.items())
+        if int(stats["total"])
+    }
+    return {
+        "overall_accuracy": correct / valid if valid else 0.0,
+        "correct": correct,
+        "valid_count": valid,
+        "skipped_count": skipped,
+        "total_count": len(requests),
+        "iou_threshold": iou_threshold,
+        "subject_accuracy": subject_accuracy,
+        "samples": samples,
+    }
+
+
 def score_predictions(
     predictions_data: dict[str, Any],
     answers_data: dict[str, Any],
@@ -4895,6 +5134,7 @@ def score_predictions(
     scorer: str = "exact_or_alias",
     answer_parser: str = "",
     require_valid_prediction: bool = False,
+    scorer_options: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if scorer == "ocrbench_v2":
         return score_ocrbench_v2_predictions(predictions_data, answers_data)
@@ -4908,6 +5148,13 @@ def score_predictions(
         return score_rouge_predictions(predictions_data, answers_data)
     if scorer == "unconditional_text_quality":
         return score_unconditional_text_predictions(predictions_data, answers_data)
+    if scorer == "grounding_iou":
+        scorer_options = scorer_options or {}
+        return score_grounding_predictions(
+            predictions_data,
+            answers_data,
+            iou_threshold=float(scorer_options.get("iou_threshold", 0.5)),
+        )
 
     responses = predictions_data.get("responses", [])
     requests = answers_data.get("requests", [])
@@ -4997,6 +5244,7 @@ def compare_prediction_sets(
     scorer: str = "exact_or_alias",
     answer_parser: str = "",
     require_valid_prediction: bool = False,
+    scorer_options: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     hf_score = score_predictions(
         hf_predictions,
@@ -5004,6 +5252,7 @@ def compare_prediction_sets(
         scorer=scorer,
         answer_parser=answer_parser,
         require_valid_prediction=require_valid_prediction,
+        scorer_options=scorer_options,
     )
     trtfb_score = score_predictions(
         trtfb_predictions,
@@ -5011,6 +5260,7 @@ def compare_prediction_sets(
         scorer=scorer,
         answer_parser=answer_parser,
         require_valid_prediction=require_valid_prediction,
+        scorer_options=scorer_options,
     )
     hf_responses = hf_predictions["responses"]
     trt_responses = trtfb_predictions["responses"]
@@ -5029,7 +5279,10 @@ def compare_prediction_sets(
         zip(hf_responses, trt_responses, requests, strict=True)
     ):
         answer = str(req["answer"])
-        if scorer == "asr_transcript":
+        if scorer == "grounding_iou":
+            hf_pred = hf_score["samples"][idx].get("parsed_prediction")
+            trt_pred = trtfb_score["samples"][idx].get("parsed_prediction")
+        elif scorer == "asr_transcript":
             hf_pred = normalize_asr_transcript(str(hf_row.get("output_text", "")))
             trt_pred = normalize_asr_transcript(str(trt_row.get("output_text", "")))
         elif scorer == "tts_intelligibility":
@@ -5049,7 +5302,7 @@ def compare_prediction_sets(
         correctness_match = hf_ok == trt_ok
         agreement_match = (
             correctness_match
-            if scorer in {"ocrbench_v2", "tts_intelligibility"}
+            if scorer in {"grounding_iou", "ocrbench_v2", "tts_intelligibility"}
             else hf_pred == trt_pred
         )
         if scorer == "mcq" and not agreement_match:
@@ -5741,7 +5994,7 @@ def _work_dataset_kind(work_dir: Path) -> str:
 
 
 def _is_vlm_dataset_kind(kind: str) -> bool:
-    return kind in {"vlm_chat_json", "vlm_unified_json"}
+    return kind in {"vlm_chat_json", "vlm_grounding_json", "vlm_unified_json"}
 
 
 def _is_asr_dataset_kind(kind: str) -> bool:
@@ -8915,6 +9168,7 @@ _NATIVE_PRECISION_DATASET_KINDS = {
     "text_generation_json",
     "sts_pair_jsonl",
     "vlm_chat_json",
+    "vlm_grounding_json",
     "vlm_unified_json",
 }
 
@@ -11079,6 +11333,7 @@ def eval_one_model(
             require_valid_prediction=bool(
                 validation_config.get("require_valid_prediction", False)
             ),
+            scorer_options=suite.get("scoring", {}),
         )
         (work_dir / "summary.json").write_text(
             json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -11100,7 +11355,7 @@ def eval_one_model(
             "hf_valid_prediction_rate": summary["hf"].get("valid_prediction_rate"),
             "trtfb_valid_prediction_rate": summary["trtfb"].get("valid_prediction_rate"),
         }
-        if scorer in {"mcq", "asr_transcript"}:
+        if scorer in {"grounding_iou", "mcq", "asr_transcript"}:
             result.update(
                 prediction_agreement_gate_result(
                     summary,
@@ -12217,6 +12472,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
         "mmlu_five_shot_json",
         "text_generation_json",
         "vlm_chat_json",
+        "vlm_grounding_json",
         "vlm_unified_json",
         "asr_chat_json",
         "diffusion_prompt_tsv",

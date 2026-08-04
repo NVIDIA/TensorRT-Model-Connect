@@ -291,10 +291,11 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
         by_id["sana_wm.generate_image"]["baseline"]["python_profile"]
         == "sana_wm_reference"
     )
-    assert (
-        by_id["locateanything.generate"]["baseline"]["output_contract"]
-        == "exact-token-ids"
-    )
+    locateanything_baseline = by_id["locateanything.generate"]["baseline"]
+    assert locateanything_baseline["output_contract"] == "localization"
+    assert locateanything_baseline["min_localization_box_iou"] == 0.9
+    assert locateanything_baseline["max_localization_point_distance"] == 10.0
+    assert locateanything_baseline["max_normalized_edit_distance"] == 0.5
     assert by_id["mixtral.generate"]["baseline"]["experts_implementation"] == "batched_mm"
     assert by_id["phi_moe.generate"]["baseline"]["experts_implementation"] == "batched_mm"
     assert by_id["qwen_moe.generate"]["model"] == "qwen3-moe-30b-a3b"
@@ -669,6 +670,87 @@ def test_ocr_text_contract_preserves_required_content_and_allows_format_variatio
     matched, reason = perf_matrix._output_contract(case, candidate, reference)
     assert not matched
     assert reason == "TRTMC OCR text misses required content"
+
+
+def test_localization_contract_accepts_structurally_equivalent_boxes() -> None:
+    case = {
+        "operation": "generate",
+        "baseline": {
+            "output_contract": "localization",
+            "min_localization_box_iou": 0.9,
+            "max_localization_point_distance": 10.0,
+            "max_normalized_edit_distance": 0.5,
+        },
+    }
+    candidate = {
+        "output_summary": {
+            "text": "<ref>white vehicle</ref><box><302><266><830><710></box>",
+            "token_ids": [1, 2, 3],
+        }
+    }
+    reference = {
+        "output_summary": {
+            "text": "<ref>white vehicle</ref><box><304><267><828><708></box>",
+            "token_ids": [9, 8, 7, 6],
+        }
+    }
+
+    assert perf_matrix._output_contract(case, candidate, reference) == (True, "")
+
+
+def test_localization_contract_checks_point_type_and_distance() -> None:
+    case = {
+        "operation": "generate",
+        "baseline": {
+            "output_contract": "localization",
+            "min_localization_box_iou": 0.9,
+            "max_localization_point_distance": 10.0,
+            "max_normalized_edit_distance": 0.5,
+        },
+    }
+    candidate = {
+        "output_summary": {"text": "<ref>button</ref><box><504><252></box>"}
+    }
+    reference = {
+        "output_summary": {"text": "<ref>button</ref><box><500><250></box>"}
+    }
+
+    assert perf_matrix._output_contract(case, candidate, reference) == (True, "")
+
+    candidate["output_summary"]["text"] = (
+        "<ref>button</ref><box><450><200><550><300></box>"
+    )
+    assert perf_matrix._output_contract(case, candidate, reference) == (
+        False,
+        "localization output type differs",
+    )
+
+    candidate["output_summary"]["text"] = "<ref>button</ref><box><700><600></box>"
+    assert perf_matrix._output_contract(case, candidate, reference) == (
+        False,
+        "localization point distance exceeds the configured contract",
+    )
+
+
+def test_localization_contract_rejects_invalid_thresholds() -> None:
+    case = next(
+        value
+        for value in perf_matrix._cases(perf_matrix._read_yaml(SUITE))
+        if value["id"] == "locateanything.generate"
+    )
+    drifted = {
+        **case,
+        "baseline": {
+            **case["baseline"],
+            "max_localization_point_distance": -1.0,
+        },
+    }
+
+    with pytest.raises(
+        perf_matrix.PerfMatrixError,
+        match="localization contract has invalid max_localization_point_distance",
+    ):
+        perf_matrix._validate_baseline(drifted)
 
 
 def test_normalized_text_contract_allows_only_case_and_whitespace_variation() -> None:
@@ -1463,6 +1545,7 @@ def test_suite_has_explicit_eager_and_task_reference_rows() -> None:
     assert rows["phi.generate"]["baseline"]["output_contract"] == "exact-text"
     assert rows["phi_moe.generate"]["baseline"]["output_contract"] == "exact-text"
     assert rows["deepseek_ocr.generate"]["baseline"]["output_contract"] == "ocr-text"
+    assert rows["locateanything.generate"]["baseline"]["output_contract"] == "localization"
     assert rows["qwen_vl.generate"]["baseline"]["output_contract"] == "normalized-text"
     assert not any(row["baseline"]["runner"] == "unsupported" for row in rows.values())
     assert {

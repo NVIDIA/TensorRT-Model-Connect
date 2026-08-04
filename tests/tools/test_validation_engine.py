@@ -411,6 +411,23 @@ def test_default_suites_include_ocrbench_v2_unified() -> None:
     assert suite["selectors"]["families"] == ["deepseek_ocr"]
 
 
+def test_default_suites_include_refcoco_grounding() -> None:
+    suites = validation_engine.load_suites()
+    suite = validation_engine.suite_by_id(suites, "refcoco_grounding")
+
+    assert suite["dataset"]["kind"] == "vlm_grounding_json"
+    assert suite["dataset"]["coordinate_format"] == "normalized_0_1000_xyxy"
+    assert suite["dataset"]["source_revision"] == (
+        "566810e1ad62821ed3c6ab569ea33d80f5bdb874"
+    )
+    assert suite["dataset"]["source_license_status"] == "not-declared-by-source-card"
+    assert suite["scoring"] == {"scorer": "grounding_iou", "iou_threshold": 0.5}
+    assert suite["selectors"]["runtime_strategies"] == [
+        "locateanything_vision_language"
+    ]
+    assert suite["selectors"]["families"] == ["locateanything"]
+
+
 def test_default_suites_include_librispeech_clean_asr() -> None:
     suites = validation_engine.load_suites()
     suite = validation_engine.suite_by_id(suites, "librispeech_clean_asr")
@@ -1517,6 +1534,19 @@ def test_plan_selects_ocrbench_v2_unified_models() -> None:
     assert "locateanything-3b" not in selected
 
 
+def test_plan_selects_refcoco_locateanything_model() -> None:
+    suites = validation_engine.load_suites()
+    models = validation_engine.load_manifest_records()
+
+    rows = validation_engine.build_plan(suites, models, suite_id="refcoco_grounding")
+
+    selected = {row["model"]: row for row in rows}
+    assert set(selected) == {"locateanything-3b"}
+    assert selected["locateanything-3b"]["runtime_strategy"] == (
+        "locateanything_vision_language"
+    )
+
+
 def test_plan_selects_librispeech_asr_models() -> None:
     suites = validation_engine.load_suites()
     models = validation_engine.load_manifest_records()
@@ -1620,6 +1650,110 @@ def test_prepare_text_generation_json_preserves_dataset_sample_id(tmp_path: Path
     assert prompts[0]["prompt"] == "def add(a, b):\n"
     assert manifest["dataset_kind"] == "text_generation_json"
     assert manifest["limit"] == 10
+
+
+def test_prepare_refcoco_grounding_preserves_box_metadata_and_official_prompt(
+    tmp_path: Path,
+) -> None:
+    image = tmp_path / "images" / "one.jpg"
+    image.parent.mkdir()
+    image.write_bytes(b"image")
+    dataset = tmp_path / "dataset.json"
+    dataset.write_text(
+        json.dumps(
+            {
+                "name": "RefCOCO_rec",
+                "version": 1,
+                "requests": [
+                    {
+                        "id": "refcoco_testA_1",
+                        "subject": "testA",
+                        "answer": "[100, 200, 700, 800]",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "image", "image": "images/one.jpg"},
+                                    {
+                                        "type": "text",
+                                        "text": (
+                                            "Locate a single instance that matches the "
+                                            "following description: person in red."
+                                        ),
+                                    },
+                                ],
+                            }
+                        ],
+                        "metadata": {"bbox_1000": [100, 200, 700, 800]},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(), "refcoco_grounding"
+    )
+
+    outputs = validation_engine.prepare_task_dataset(
+        dataset_path=dataset,
+        work_dir=tmp_path / "work",
+        suite=suite,
+        limit=1,
+    )
+
+    answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
+    prompts = validation_engine.load_jsonl(outputs["prompts"])
+    manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
+    assert answers["requests"][0]["metadata"]["bbox_1000"] == [100, 200, 700, 800]
+    assert prompts[0]["prompt"] == (
+        "Locate a single instance that matches the following description: person in red."
+    )
+    assert prompts[0]["images"] == [str(image.resolve())]
+    assert manifest["dataset_kind"] == "vlm_grounding_json"
+
+
+def test_grounding_iou_scoring_and_reference_consistency() -> None:
+    answers = {
+        "requests": [
+            {
+                "answer": "[100, 100, 400, 400]",
+                "subject": "testA",
+                "metadata": {"bbox_1000": [100, 100, 400, 400]},
+            },
+            {
+                "answer": "[500, 500, 900, 900]",
+                "subject": "testA",
+                "metadata": {"bbox_1000": [500, 500, 900, 900]},
+            },
+        ]
+    }
+    hf = {
+        "responses": [
+            {"sample_id": "one", "output_text": "<ref>one</ref><box><100><100><400><400></box>"},
+            {"sample_id": "two", "output_text": "<ref>two</ref><box><500><500><900><900></box>"},
+        ]
+    }
+    trtfb = {
+        "responses": [
+            {"sample_id": "one", "output_text": "<ref>one</ref><box><105><105><395><395></box>"},
+            {"sample_id": "two", "output_text": "<ref>two</ref><box><0><0><100><100></box>"},
+        ]
+    }
+
+    summary = validation_engine.compare_prediction_sets(
+        hf,
+        trtfb,
+        answers,
+        scorer="grounding_iou",
+        scorer_options={"iou_threshold": 0.5},
+    )
+
+    assert summary["hf"]["overall_accuracy"] == 1.0
+    assert summary["trtfb"]["overall_accuracy"] == 0.5
+    assert summary["trtfb"]["samples"][0]["iou"] > 0.9
+    assert summary["prediction_agreement_rate"] == 0.5
+    assert summary["buckets"]["hf_correct_trtfb_wrong"] == 1
 
 
 @pytest.mark.parametrize(
@@ -4196,6 +4330,72 @@ def test_max_prompt_token_length_uses_pinned_model_revision(
         "revision": "0123456789abcdef",
         "local_files_only": True,
         "trust_remote_code": False,
+    }
+
+
+def test_max_prompt_token_length_falls_back_to_raw_tokenizer(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prompts = tmp_path / "prompts.jsonl"
+    prompts.write_text(json.dumps({"prompt": "one two three"}) + "\n", encoding="utf-8")
+    captured: dict[str, Any] = {}
+
+    class AutoTokenizer:
+        @staticmethod
+        def from_pretrained(*_args, **_kwargs):
+            raise TypeError("invalid added tokens")
+
+    class RawTokenizer:
+        def encode(self, text, *, add_special_tokens=False):
+            assert add_special_tokens is False
+            return argparse.Namespace(ids=text.split())
+
+        def decode(self, token_ids, *, skip_special_tokens=False):
+            assert skip_special_tokens is False
+            return " ".join(token_ids)
+
+    class Tokenizer:
+        @staticmethod
+        def from_file(path):
+            captured["tokenizer_file"] = path
+            return RawTokenizer()
+
+    def snapshot_download(model_id, **kwargs):
+        captured["model_id"] = model_id
+        captured.update(kwargs)
+        return str(tmp_path / "snapshot")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(AutoTokenizer=AutoTokenizer),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(snapshot_download=snapshot_download),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tokenizers",
+        SimpleNamespace(Tokenizer=Tokenizer),
+    )
+
+    length = validation_engine.max_prompt_token_length(
+        model_id="org/model",
+        model_revision="0123456789abcdef",
+        prompts_path=prompts,
+        local_files_only=True,
+    )
+
+    assert length == 3
+    assert captured == {
+        "model_id": "org/model",
+        "revision": "0123456789abcdef",
+        "local_files_only": True,
+        "allow_patterns": ["tokenizer.json"],
+        "tokenizer_file": str(tmp_path / "snapshot" / "tokenizer.json"),
     }
 
 

@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cctype>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -56,6 +57,18 @@ void sync_vision_config(LocateAnythingConfig& config,
 
 } // namespace
 
+std::string locateanything_resolve_generation_mode(std::string mode) {
+    std::transform(mode.begin(), mode.end(), mode.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    std::replace(mode.begin(), mode.end(), '-', '_');
+    if (mode.empty() || mode == "auto" || mode == "ar" || mode == "slow" ||
+        mode == "autoregressive")
+        return "ar";
+    throw std::runtime_error(
+        "LocateAnythingPipeline supports only slow/AR generation; fast and hybrid "
+        "Parallel Box Decoding are not implemented");
+}
+
 std::string locateanything_decode_generated_text(const ITokenizer& tokenizer,
                                                  const std::vector<int32_t>& token_ids) {
     std::string output;
@@ -95,6 +108,7 @@ LocateAnythingPipeline::LocateAnythingPipeline(
 }
 
 TextResult LocateAnythingPipeline::generate(const std::string& prompt, const GenerateConfig& cfg) {
+    (void)locateanything_resolve_generation_mode(cfg.text_generation_mode);
     if (!tokenizer_)
         throw std::runtime_error("LocateAnythingPipeline: no tokenizer configured");
 
@@ -412,6 +426,7 @@ LocateAnythingPipeline::resolve_gen_limits(const GenerateConfig& cfg) const {
 TextResult LocateAnythingPipeline::generate(const std::string& prompt, const float* image_pixels,
                                             int32_t image_height, int32_t image_width,
                                             const GenerateConfig& cfg) {
+    (void)locateanything_resolve_generation_mode(cfg.text_generation_mode);
     if (!tokenizer_)
         throw std::runtime_error("LocateAnythingPipeline: no tokenizer configured");
 
@@ -453,6 +468,7 @@ TextResult LocateAnythingPipeline::generate(const std::string& prompt, const flo
 LocateAnythingPipeline::GenerationResult
 LocateAnythingPipeline::generate_ids(const std::vector<int32_t>& input_ids,
                                      const GenerateConfig& cfg) {
+    (void)locateanything_resolve_generation_mode(cfg.text_generation_mode);
     int32_t max_new = cfg.max_new_tokens;
     int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
     auto sp = locateanything_sampling_params_from_config(cfg, eos);

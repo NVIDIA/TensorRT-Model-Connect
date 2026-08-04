@@ -122,6 +122,25 @@ read the existing root-level public `VBench` asset directly. Dev/QA machines
 and NAS mirrors should copy the six directories without changing their
 relative layouts and verify the manifest after transfer.
 
+LocateAnything grounding accuracy uses the public `lscpku/RefCOCO_rec`
+dataset pinned at revision
+`566810e1ad62821ed3c6ab569ea33d80f5bdb874`. Stage that exact Hugging Face
+snapshot, then convert its `testA` split:
+
+```bash
+python tools/prepare_refcoco_validation_dataset.py \
+  --source-root /mnt/data/RefCOCO_rec/raw/lscpku/RefCOCO_rec \
+  --output-dir /mnt/data/RefCOCO_rec/unified \
+  --split testA
+python tools/trtmc_validate.py locateanything-3b refcoco_grounding
+```
+
+The source dataset card does not declare a license. The converter records this
+as `source_license_status: not-declared-by-source-card`; operators must verify
+their right to use the staged images and annotations. The generated manifest
+records the source repository, immutable revision, normalized box format, and
+official LocateAnything single-instance prompt.
+
 Every agreement or disagreement therefore means that both backends consumed
 the aligned prepared inputs and produced outputs that were evaluated by the
 declared comparator. A model without that complete contract stays in the

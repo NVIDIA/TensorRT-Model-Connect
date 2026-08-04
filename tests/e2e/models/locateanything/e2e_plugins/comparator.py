@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import re
-
 from .contracts import (
     CompareResult,
     MetricResult,
@@ -16,49 +14,11 @@ from .contracts import (
     ThresholdProfile,
 )
 from .comparators.vision_language import VisionLanguageComparator
-
-
-_REF_RE = re.compile(r"<ref>.+?</ref>", re.DOTALL)
-_BOX_RE = re.compile(r"<box>((?:<[0-9]{1,4}>){4})</box>")
-_COORD_RE = re.compile(r"<([0-9]{1,4})>")
-
-
-def _localization_boxes(text: str) -> list[tuple[float, float, float, float]] | None:
-    """Parse every valid LocateAnything box in the model's 0..1000 space."""
-    matches = list(_BOX_RE.finditer(text))
-    if (
-        _REF_RE.search(text) is None
-        or not matches
-        or text.count("<box>") != len(matches)
-        or text.count("</box>") != len(matches)
-    ):
-        return None
-
-    boxes: list[tuple[float, float, float, float]] = []
-    for match in matches:
-        values = [int(value) for value in _COORD_RE.findall(match.group(1))]
-        if len(values) != 4 or any(value < 0 or value > 1000 for value in values):
-            return None
-        x1, y1, x2, y2 = values
-        if x2 <= x1 or y2 <= y1:
-            return None
-        boxes.append((float(x1), float(y1), float(x2), float(y2)))
-    return boxes
-
-
-def _box_iou(
-    left: tuple[float, float, float, float],
-    right: tuple[float, float, float, float],
-) -> float:
-    x1 = max(left[0], right[0])
-    y1 = max(left[1], right[1])
-    x2 = min(left[2], right[2])
-    y2 = min(left[3], right[3])
-    intersection = max(0.0, x2 - x1) * max(0.0, y2 - y1)
-    left_area = (left[2] - left[0]) * (left[3] - left[1])
-    right_area = (right[2] - right[0]) * (right[3] - right[1])
-    union = left_area + right_area - intersection
-    return intersection / union if union > 0.0 else 0.0
+from tensorrt_model_connect.families.locateanything.task_contract import (
+    matched_box_iou,
+    matched_point_distance,
+    parse_localizations,
+)
 
 
 class LocateanythingVisionLanguageGenerationComparator(VisionLanguageComparator):
@@ -77,47 +37,82 @@ class LocateanythingVisionLanguageGenerationComparator(VisionLanguageComparator)
 
         trt_text = (trt.text or trt.data.get("generated_text") or "").strip()
         ref_text = (ref.text or ref.data.get("generated_text") or "").strip()
-        trt_boxes = _localization_boxes(trt_text)
-        ref_boxes = _localization_boxes(ref_text)
+        trt_localizations = parse_localizations(trt_text, require_reference=True)
+        ref_localizations = parse_localizations(ref_text, require_reference=True)
 
         metrics["localization_markup_present"] = MetricResult(
-            value=1.0 if trt_boxes is not None else 0.0,
+            value=1.0 if trt_localizations is not None else 0.0,
             threshold=1.0,
             operator="==",
-            passed=trt_boxes is not None,
-            note="TRT output must contain <ref> text and only valid <box> groups",
+            passed=trt_localizations is not None,
+            note="TRT output must contain <ref> text and only valid box-or-point groups",
         )
         metrics["reference_localization_markup_present"] = MetricResult(
-            value=1.0 if ref_boxes is not None else 0.0,
+            value=1.0 if ref_localizations is not None else 0.0,
             threshold=1.0,
             operator="==",
-            passed=ref_boxes is not None,
-            note="reference output must contain <ref> text and only valid <box> groups",
+            passed=ref_localizations is not None,
+            note="reference output must contain <ref> text and only valid box-or-point groups",
         )
 
-        box_count_match = (
-            trt_boxes is not None and ref_boxes is not None and len(trt_boxes) == len(ref_boxes)
+        type_match = (
+            trt_localizations is not None
+            and ref_localizations is not None
+            and trt_localizations[0].kind == ref_localizations[0].kind
         )
-        metrics["localization_box_count_match"] = MetricResult(
-            value=1.0 if box_count_match else 0.0,
+        metrics["localization_type_match"] = MetricResult(
+            value=1.0 if type_match else 0.0,
             threshold=1.0,
             operator="==",
-            passed=box_count_match,
-            note="TRT and reference must contain the same number of boxes",
+            passed=type_match,
+            note="TRT and reference localization outputs must both be boxes or both be points",
         )
 
-        iou = (
-            min(_box_iou(trt_box, ref_box) for trt_box, ref_box in zip(trt_boxes, ref_boxes))
-            if box_count_match and trt_boxes and ref_boxes
-            else 0.0
+        count_match = (
+            type_match
+            and trt_localizations is not None
+            and ref_localizations is not None
+            and len(trt_localizations) == len(ref_localizations)
         )
-        iou_threshold = threshold.metrics.get("localization_box_iou", 0.9)
-        metrics["localization_box_iou"] = MetricResult(
-            value=iou,
-            threshold=iou_threshold,
-            operator=">=",
-            passed=iou >= iou_threshold,
+        count_metric = MetricResult(
+            value=1.0 if count_match else 0.0,
+            threshold=1.0,
+            operator="==",
+            passed=count_match,
+            note="TRT and reference must contain the same number of localizations",
         )
+        metrics["localization_count_match"] = count_metric
+        # Keep the original metric name for existing box dashboards and thresholds.
+        metrics["localization_box_count_match"] = count_metric
+
+        geometry_metric = "localization_box_iou"
+        if type_match and ref_localizations is not None and ref_localizations[0].kind == "point":
+            distance = (
+                matched_point_distance(trt_localizations or (), ref_localizations)
+                if count_match
+                else float("inf")
+            )
+            distance_threshold = threshold.metrics.get("localization_point_distance", 10.0)
+            geometry_metric = "localization_point_distance"
+            metrics[geometry_metric] = MetricResult(
+                value=distance,
+                threshold=distance_threshold,
+                operator="<=",
+                passed=distance <= distance_threshold,
+            )
+        else:
+            iou = (
+                matched_box_iou(trt_localizations or (), ref_localizations or ())
+                if count_match
+                else 0.0
+            )
+            iou_threshold = threshold.metrics.get("localization_box_iou", 0.9)
+            metrics[geometry_metric] = MetricResult(
+                value=iou,
+                threshold=iou_threshold,
+                operator=">=",
+                passed=iou >= iou_threshold,
+            )
 
         non_empty_ok = metrics["non_empty_output"].passed
         ned_metric = metrics.get("normalized_text_edit_distance")
@@ -136,8 +131,9 @@ class LocateanythingVisionLanguageGenerationComparator(VisionLanguageComparator)
             for name in (
                 "localization_markup_present",
                 "reference_localization_markup_present",
-                "localization_box_count_match",
-                "localization_box_iou",
+                "localization_type_match",
+                "localization_count_match",
+                geometry_metric,
             )
         )
         passed = non_empty_ok and ned_ok and localization_ok
@@ -147,8 +143,8 @@ class LocateanythingVisionLanguageGenerationComparator(VisionLanguageComparator)
             metrics=metrics,
             composite_rule=(
                 "non_empty_output AND normalized_text_edit_distance AND "
-                "valid TRT/reference localization markup AND matching box count AND "
-                "localization_box_iou"
+                "valid TRT/reference localization markup AND matching output type/count AND "
+                f"{geometry_metric}"
             ),
             message=f"LocateAnything grounded generation compare: {'PASS' if passed else 'FAIL'}",
         )

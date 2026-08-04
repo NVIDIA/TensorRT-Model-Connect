@@ -110,6 +110,14 @@ never selected implicitly. A future benchmark-dataset source can resolve several
 samples inside one entry without adding report rows. Dataset support is not
 implemented by the current script.
 
+Output equivalence is task-specific. LocateAnything uses the `localization`
+contract: both sides must emit valid `<ref>` plus homogeneous box or point
+groups, with the same output type and count. Boxes are compared by minimum IoU,
+points by maximum distance in the normalized 0..1000 coordinate space, and the
+complete answers retain a bounded normalized text distance. Different hidden
+EOS handling or token IDs therefore do not invalidate geometrically equivalent
+structured outputs.
+
 The first profile for a family-operation declares the complete reviewed
 comparison contract. Further catalog profiles name that contract explicitly and
 may override only profile-specific settings:

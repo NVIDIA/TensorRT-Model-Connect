@@ -44,6 +44,22 @@ Common native TensorRT groups:
 - Perception: SegFormer, SAM, SAM3, and timm ViT classification.
 - Time-series/operators: Chronos-Bolt, PatchTSMixer, PatchTST, and TimesFM.
 
+### LocateAnything task contract
+
+The current LocateAnything runtime supports the model's fixed 448×448,
+single-image slow/autoregressive path. It preserves `<ref>`, `<box>`, and
+`<0>` through `<1000>` tokens, including four-coordinate boxes and
+two-coordinate points. Use the task helpers in
+`tensorrt_model_connect.families.locateanything.task_contract` to construct the
+official detection, single/multi grounding, text, GUI, and pointing prompts or
+to parse structured outputs.
+
+`--generation-mode auto`, `ar`, `autoregressive`, and `slow` select this path.
+`fast` and `hybrid` require Parallel Box Decoding and fail explicitly in this
+runtime; they are not silently treated as AR. The model-owned E2E contract
+contains both a box case and a point case, while `refcoco_grounding` supplies
+dataset-backed IoU accuracy validation.
+
 The package-level `plugin` exported by `__init__.py` supplies the Python
 protocol, while `MODEL.toml` indexes discovery. The lookup route depends on
 the input: a full config tries bounded `architecture_patterns` candidates

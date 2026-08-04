@@ -309,6 +309,25 @@ static void test_grounding_decode_preserves_semantic_special_tokens() {
           "grounding decode: rejects negative coordinate syntax");
 }
 
+static void test_generation_mode_contract() {
+    check(trtmc::locateanything_resolve_generation_mode("auto") == "ar",
+          "generation mode: auto resolves to AR");
+    check(trtmc::locateanything_resolve_generation_mode("SLOW") == "ar",
+          "generation mode: slow resolves to AR");
+    check(trtmc::locateanything_resolve_generation_mode("autoregressive") == "ar",
+          "generation mode: autoregressive resolves to AR");
+
+    for (const std::string mode : {"fast", "hybrid", "diffusion"}) {
+        bool threw = false;
+        try {
+            (void)trtmc::locateanything_resolve_generation_mode(mode);
+        } catch (const std::runtime_error& error) {
+            threw = std::string(error.what()).find("supports only slow/AR") != std::string::npos;
+        }
+        check(threw, "generation mode: unsupported mode throws a task-specific error");
+    }
+}
+
 static void test_vl_text_only() {
     auto engine = build_mock_decoder();
     if (!engine) {
@@ -854,6 +873,7 @@ static void test_vl_generate_with_tokenizer() {
 
 int main() {
     test_grounding_decode_preserves_semantic_special_tokens();
+    test_generation_mode_contract();
     test_vl_text_only();
     test_vl_text_only_max_tokens();
     test_vl_validates_decoder();

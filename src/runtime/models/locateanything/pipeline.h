@@ -31,6 +31,11 @@ namespace trtmc {
 std::string locateanything_decode_generated_text(const ITokenizer& tokenizer,
                                                  const std::vector<int32_t>& token_ids);
 
+// LocateAnything currently implements only slow/autoregressive decoding. The
+// model's fast and hybrid modes require the Parallel Box Decoding runtime and
+// must be rejected rather than silently treated as AR.
+std::string locateanything_resolve_generation_mode(std::string mode);
+
 struct LocateAnythingConfig {
     int32_t vocab_size{0};
     int32_t id_bos{0};
