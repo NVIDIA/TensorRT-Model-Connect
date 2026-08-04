@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -251,6 +252,8 @@ def test_architecture_variants_fail_closed(overrides, raw_updates, reason):
         ({"precision": "fp16"}, {}, "BF16"),
         ({"max_cache_length": 127999}, {}, "max_cache_length"),
         ({"dynamic_kv_cache": True}, {}, "fixed physical"),
+        ({}, {"_runtime_dynamic_kv_requested": True}, "fixed physical"),
+        ({}, {"dynamic_kv_cache": True}, "fixed physical"),
         ({"quantized": True}, {}, "quantized"),
         ({"debug_layer_outputs": True}, {}, "debug"),
         ({"lora_enabled": True}, {}, "LoRA"),
@@ -275,6 +278,28 @@ def test_tp_requires_kv_head_divisibility():
     rejected = native_kv_build_capability(config, tp_size=4)
     assert not rejected.eligible
     assert "divisible" in rejected.reason
+
+
+def test_declared_vision_engine_fails_closed_before_kv_admission():
+    source = (
+        Path(__file__).resolve().parents[4]
+        / "src/runtime/models/qwen_vl/plugin.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert 'extract_json_bool(ctx.config_json, "has_vision_engine", false)' in source
+    assert "declared_in_config || plan != nullptr" in source
+    assert "declared || plan != nullptr" in source
+    assert 'throw std::runtime_error("Bundle missing vision_engine_plan")' in source
+    assert "if (required)\n            throw;" in source
+    assert "Bundle declares vision engine but" not in source
+
+    create_lanes = source.index(
+        "std::vector<std::unique_ptr<IPipeline>> create_lanes"
+    )
+    load_vision = source.index("load_vision_lane_modules(", create_lanes)
+    admission = source.index("admit_native_kv_allocation(", create_lanes)
+    allocation = source.index("make_pipeline_lanes(", create_lanes)
+    assert load_vision < admission < allocation
 
 
 @dataclass

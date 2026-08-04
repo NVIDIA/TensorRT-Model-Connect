@@ -262,17 +262,15 @@ std::unique_ptr<TrtModule> load_vision_module(IBackend* backend, const BundleFil
                                               const ModuleCreateOptions& options,
                                               const std::shared_ptr<QwenVlCudaStream>& stream,
                                               bool declared_in_config) {
-    auto loaded = try_load_trt_module_from_plan(backend, find_section(bundle, "vision_engine_plan"),
-                                                "vision_engine_plan", options);
+    const auto* plan = find_section(bundle, "vision_engine_plan");
+    const bool required = declared_in_config || plan != nullptr;
+    auto loaded = required
+                      ? load_trt_module_from_plan(backend, plan, "vision_engine_plan", options)
+                      : try_load_trt_module_from_plan(backend, plan, "vision_engine_plan", options);
     if (loaded.module && loaded.module->ok()) {
         loaded.module->keep_alive(stream);
         std::cerr << "[trtmc] Vision encoder loaded" << std::endl;
         return std::move(loaded.module);
-    }
-    if (declared_in_config) {
-        std::cerr << "[trtmc] WARNING: Bundle declares vision engine but "
-                     "deserialization failed"
-                  << std::endl;
     }
     return nullptr;
 }
@@ -411,11 +409,6 @@ TextLaneModules load_text_lane_modules(const PipelineContext& ctx, TextModuleRun
     return modules;
 }
 
-void warn_missing_vision(bool declared, const char* detail) {
-    if (declared)
-        std::cerr << "[trtmc] WARNING: Bundle declares vision engine but " << detail << std::endl;
-}
-
 std::vector<std::unique_ptr<ITrtModule>>
 load_vision_lane_modules(const PipelineContext& ctx, const LaneResources& lanes, bool declared) {
     const std::size_t count = lanes.streams.size();
@@ -431,8 +424,10 @@ load_vision_lane_modules(const PipelineContext& ctx, const LaneResources& lanes,
         return modules;
     }
     const auto* plan = find_section(ctx.bundle, "vision_engine_plan");
+    const bool required = declared || plan != nullptr;
     if (!plan || plan->empty()) {
-        warn_missing_vision(declared, "the plan is missing");
+        if (required)
+            throw std::runtime_error("Bundle missing vision_engine_plan");
         return modules;
     }
     try {
@@ -442,7 +437,8 @@ load_vision_lane_modules(const PipelineContext& ctx, const LaneResources& lanes,
             modules[index]->keep_alive(lanes.streams[index]);
         std::cerr << "[trtmc] Vision encoder loaded" << std::endl;
     } catch (...) {
-        warn_missing_vision(declared, "deserialization failed");
+        if (required)
+            throw;
     }
     return modules;
 }
@@ -547,7 +543,7 @@ class VLPlugin final : public IPipelinePlugin {
         const auto vlc =
             make_pipeline_config(ctx, *text_modules.decode.front(), *text_modules.prefill.front());
         const bool has_vision_engine =
-            extract_json_int(ctx.config_json, "has_vision_engine", 0) != 0;
+            extract_json_bool(ctx.config_json, "has_vision_engine", false);
         auto vision_modules = load_vision_lane_modules(ctx, lanes, has_vision_engine);
 
         // Build VL preprocessing config from bundle's config.json +

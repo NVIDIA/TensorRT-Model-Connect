@@ -234,3 +234,25 @@ def test_qwen3_vl_text_fp32_override_has_no_legacy_fallback(monkeypatch) -> None
             31,
             precision="bf16",
         )
+
+
+def test_generic_dynamic_kv_request_cannot_bypass_native_split_builder(
+    monkeypatch,
+) -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.qwen_vl.plugin")
+    config = _config(qwen3=False)
+    config.raw["dynamic_kv_cache"] = True
+    monkeypatch.setattr(
+        module,
+        "build_dual_profile_decoder_engine",
+        lambda *_args, **_kwargs: pytest.fail("native builder must not run"),
+    )
+
+    with pytest.raises(ValueError, match="fixed physical KV capacity"):
+        module.QwenVLPlugin().build_engine(
+            config,
+            {"_attention_size": 16, "_kv_attention_size": 16, "_mlp_size": 32},
+            31,
+            precision="bf16",
+        )

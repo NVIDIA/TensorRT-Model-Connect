@@ -279,7 +279,11 @@ def native_kv_build_capability(
         reasons.append("native Qwen-VL requires split prefill/decode engines")
     if raw.get("_rtx_build_requested"):
         reasons.append("native Qwen-VL requires the standard TensorRT backend")
-    if dynamic_kv_cache or raw.get("_runtime_dynamic_kv_requested"):
+    if (
+        dynamic_kv_cache
+        or raw.get("_runtime_dynamic_kv_requested")
+        or raw.get("dynamic_kv_cache")
+    ):
         reasons.append("native Qwen-VL uses one fixed physical KV capacity")
     if quantized or raw.get("quantization_config") or raw.get("_quantized_build_requested"):
         reasons.append("native Qwen-VL does not support quantized builds")
