@@ -102,3 +102,5 @@ effect.
 4. For a model-owned C++ schema, add the source/registrar entry to the runtime
    `MODEL.toml` and build that model DSO.
 5. Verify the effective-config artifact and the user-visible behavior.
+
+{/* Collaborative review anchor. */}

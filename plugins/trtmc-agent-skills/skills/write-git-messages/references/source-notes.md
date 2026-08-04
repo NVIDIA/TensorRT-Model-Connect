@@ -17,3 +17,5 @@ Use these notes when a user asks why the skill recommends a format or when local
 - PR messages optimize review speed, reviewer confidence, and collaboration.
 - A good PR title often becomes the squash merge title, so it should be written with the same care as a commit summary.
 - Local repository convention wins over generic style unless it is unclear, missing, or explicitly being replaced.
+
+<!-- Collaborative review anchor. -->

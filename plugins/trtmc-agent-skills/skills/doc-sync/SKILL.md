@@ -363,3 +363,5 @@ Blockers: <none or details>
 State the baseline and target SHA, corrected facts and source paths, exact
 checks and outcomes, unrun evidence tiers, known baseline gaps, and PR URLs.
 “No change” is valid when the current documentation matches current evidence.
+
+<!-- Collaborative review anchor. -->

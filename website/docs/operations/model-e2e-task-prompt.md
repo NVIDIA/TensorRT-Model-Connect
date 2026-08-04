@@ -10,3 +10,5 @@ import {Redirect} from '@docusaurus/router';
 <Redirect to="/extend/model-validation" />
 
 The current model contribution validation workflow moved to Extend.
+
+{/* Collaborative review anchor. */}

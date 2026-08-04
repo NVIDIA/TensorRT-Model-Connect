@@ -197,3 +197,5 @@ Notes:
 ```
 
 The input is part of the benchmark. A one-token prompt, a 2K-token prompt, a single image, an 81-frame video, and a dataset run are different workloads.
+
+{/* Collaborative review anchor. */}

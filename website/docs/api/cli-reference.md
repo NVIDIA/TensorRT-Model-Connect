@@ -292,3 +292,5 @@ batch and automatically chunks additional inputs:
 
 See [Configurable Canary Decoding](/tutorials/intermediate/canary-decoding)
 for bounds, batch output, and local checkpoint examples.
+
+{/* Collaborative review anchor. */}

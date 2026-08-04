@@ -153,3 +153,5 @@ Both routes call the common bundle serializer, but their payloads differ:
 
 Continue with [Bundle Format](bundle-format.md) for the physical container and
 [Runtime Lifecycle](runtime-lifecycle.md) for load-time behavior.
+
+{/* Collaborative review anchor. */}

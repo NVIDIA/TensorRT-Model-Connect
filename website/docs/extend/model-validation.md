@@ -164,3 +164,5 @@ artifacts when claimed, known baseline failures, and unverified paths.
 For branch, pull-request, and one-shot `run-internal-ci` handling, follow
 [Contributing](contributing.md). CI success does not widen the evidence boundary
 beyond the jobs and models that actually ran.
+
+{/* Collaborative review anchor. */}

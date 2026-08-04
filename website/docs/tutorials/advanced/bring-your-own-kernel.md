@@ -748,3 +748,5 @@ no-regression gates. The success criterion is not “the DSO loaded”; it is
   inference instead of completing during pipeline load.
 - Slot-ready bundles load through the CLI or C++ binding overload. The current
   C-linkage API has no kernel-binding argument.
+
+{/* Collaborative review anchor. */}

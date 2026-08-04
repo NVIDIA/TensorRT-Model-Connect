@@ -138,3 +138,5 @@ The dated implementation investigation is retained in the
 [TriAttention Native C++ Worklog](../context/triattention-native-cpp-worklog.md);
 its temporary paths and benchmark numbers are historical evidence, not a
 current runbook.
+
+{/* Collaborative review anchor. */}

@@ -10,3 +10,5 @@ import {Redirect} from '@docusaurus/router';
 <Redirect to="/reference/testing" />
 
 The maintained commands and evidence model are in the Testing Reference.
+
+{/* Collaborative review anchor. */}

@@ -103,3 +103,5 @@ parity from the existence of a family package alone.
 | Pipeline creation | `src/runtime/registry/pipeline_factory.cpp` |
 | Native plugin loading | `src/runtime/registry/pipeline_plugin_loader.cpp` |
 | Optimized implementation loading | `src/runtime/providers/optimized_runtime_host.cpp` |
+
+{/* Collaborative review anchor. */}

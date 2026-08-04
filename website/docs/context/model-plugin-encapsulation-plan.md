@@ -377,3 +377,5 @@ The migration is done when:
 - CI tests only that model for model-local changes
 - pytestE2E can load only that model plugin through `trtmc` and reproduce the
   saved `origin/main` user-contract result for that model
+
+{/* Collaborative review anchor. */}

@@ -178,3 +178,5 @@ available and maps to the default greedy configuration.
 Unsupported languages, mismatched task/language combinations, invalid beam
 sizes, excessive output lengths, and invalid duration values throw
 `std::invalid_argument` with the failing option named in the message.
+
+{/* Collaborative review anchor. */}

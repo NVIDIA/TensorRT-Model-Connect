@@ -298,3 +298,5 @@ model-name:
 ```
 
 Do not use `e2e` as a validation workload.
+
+<!-- Collaborative review anchor. -->

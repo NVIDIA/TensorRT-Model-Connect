@@ -68,3 +68,5 @@ exception:
 - light cards on a neutral background so the same SVG remains legible in both
   website color modes; and
 - a nearby figure caption in the Markdown page explaining what to notice.
+
+<!-- Collaborative review anchor. -->

@@ -51,3 +51,5 @@ the [Bring Your Own Kernel with TVM-FFI tutorial](../../../../../website/docs/tu
 This is a POC of the integration boundary, not a vendored FlashInfer fork. The
 small optional-length change should live upstream before this becomes a
 supported built-in kernel.
+
+<!-- Collaborative review anchor. -->

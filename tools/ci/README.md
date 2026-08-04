@@ -767,3 +767,5 @@ Workflow YAML retains small host-only snippets for GitHub outputs, registry
 login, cleanup, and artifact safeguards. Some low-level developer test engines
 also remain shell commands behind Python classes. Pipeline decisions, ordering,
 selection, isolation, and certification belong in this package.
+
+<!-- Collaborative review anchor. -->

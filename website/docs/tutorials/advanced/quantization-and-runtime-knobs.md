@@ -215,3 +215,5 @@ When reporting a result, always include:
 | Load | Native backend DSO/search path or optimized implementation path, runtime cache path, CUDA graph policy, and config overrides. |
 | Request | Prompt/input shape, max tokens or steps, sampling settings, image/video dimensions, audio sample rate, forecast horizon. |
 | Hardware | GPU model, driver, CUDA, TensorRT runtime, container or host environment. |
+
+{/* Collaborative review anchor. */}

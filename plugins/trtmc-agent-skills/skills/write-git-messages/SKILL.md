@@ -134,3 +134,5 @@ Before returning a message, verify:
 - The PR title and expected squash/rebase title are aligned and contain no
   repository-banned terms.
 - Future-reader notes capture any review order, limitation, or maintenance warning that is not obvious from the diff.
+
+<!-- Collaborative review anchor. -->

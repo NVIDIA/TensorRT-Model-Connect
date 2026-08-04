@@ -164,3 +164,5 @@ cmake --build build -j
 
 CI and release validation use the wheel path, not the Python-only editable
 install.
+
+{/* Collaborative review anchor. */}

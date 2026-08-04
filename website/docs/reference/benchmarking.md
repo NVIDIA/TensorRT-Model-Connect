@@ -462,3 +462,5 @@ streaming public pipeline calls. Image-conditioned generation resolves and
 hashes `test_image` the same way. Packaged default audio, image, and FP8 scale
 assets are copied from the canonical E2E model directory with the catalog
 snapshot.
+
+{/* Collaborative review anchor. */}

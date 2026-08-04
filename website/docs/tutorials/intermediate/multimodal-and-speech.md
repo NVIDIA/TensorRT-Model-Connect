@@ -200,3 +200,5 @@ Text-to-audio is a good example of why `IPipeline` has task-specific methods. Th
 | Speech-to-text | Audio feature metadata, tokenizer assets, encoder/decoder sections, and `whisper_speech_to_text` or `canary_speech_to_text` for those families. |
 | Streaming ASR | RNNT/streaming config, supported context schedule, and `nemotron_speech_streaming_speech_to_text_rnnt`. |
 | Text-to-audio | Acoustic and codec sections, tokenizer/phoneme assets, audio sample-rate metadata, and `text_to_audio_magpie` for Magpie. |
+
+{/* Collaborative review anchor. */}

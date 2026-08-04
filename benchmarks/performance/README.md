@@ -289,3 +289,5 @@ seq2seq-LM execution. Use the existing `task-reference` runner for Diffusers, AS
 TTS, VLM, embedding, reranking, vision, time-series, Qwen3-Omni, PersonaPlex, ELF,
 Lance, or SANA-WM workloads. Do not silently substitute HF eager for a declared
 torch.compile entry.
+
+<!-- Collaborative review anchor. -->

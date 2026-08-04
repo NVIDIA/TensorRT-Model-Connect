@@ -62,3 +62,5 @@ a total GPU-memory requirement.
 If your machine does not match one of the installation paths, stop at
 [Prerequisites and Environment](environment-and-repro.md). A profile described
 as qualified for another machine is not a general compatibility promise.
+
+{/* Collaborative review anchor. */}

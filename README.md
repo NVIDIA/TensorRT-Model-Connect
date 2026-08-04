@@ -269,3 +269,5 @@ general correctness or compatibility guarantee.
 | `xlm-roberta-base` | 🟢 Green |
 | `xlnet-base` | 🟢 Green |
 | `z-image-turbo` | 🔴 Red |
+
+<!-- Collaborative review anchor. -->

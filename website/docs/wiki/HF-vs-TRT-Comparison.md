@@ -10,3 +10,5 @@ import {Redirect} from '@docusaurus/router';
 <Redirect to="/getting-started/inference-fundamentals" />
 
 The comparison and inference concepts moved to Inference Fundamentals.
+
+{/* Collaborative review anchor. */}

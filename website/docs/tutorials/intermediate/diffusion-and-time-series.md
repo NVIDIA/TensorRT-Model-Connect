@@ -222,3 +222,5 @@ evidence.
 - Iterative inference can mean token decode, diffusion denoising, streaming audio chunks, or another task-specific loop.
 - Time-series models can use `solve()` to map a numeric history to a forecast vector without a text or image interface.
 - E2E manifests are the safest way to find canonical inputs for non-text models.
+
+{/* Collaborative review anchor. */}

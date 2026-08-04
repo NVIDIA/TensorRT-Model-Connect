@@ -111,3 +111,5 @@ would invalidate the selected implementation and its qualification evidence.
 See the
 [optimized-runtime design record](../context/optimized-runtime-family-adapter-plan.md)
 for rationale and historical implementation detail.
+
+{/* Collaborative review anchor. */}

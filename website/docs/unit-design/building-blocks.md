@@ -11,3 +11,5 @@ import {Redirect} from '@docusaurus/router';
 <Redirect to="/architecture/units-and-ownership" />
 
 The source-unit map and public contract table moved to Units and Ownership.
+
+{/* Collaborative review anchor. */}

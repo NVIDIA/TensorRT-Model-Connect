@@ -67,3 +67,5 @@ A new workload is complete only when it has:
 
 Models without that complete contract stay visible as `not_compared`; E2E
 execution is never reported as reference consistency.
+
+<!-- Collaborative review anchor. -->

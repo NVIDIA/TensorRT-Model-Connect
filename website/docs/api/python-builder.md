@@ -174,3 +174,5 @@ Optional methods add split decoder roles, quantization, vision-language,
 diffusion component/bundle ownership, and FP8 calibration behavior. Treat the
 live protocol as the source of truth instead of copying its complete optional
 surface into downstream integrations.
+
+{/* Collaborative review anchor. */}

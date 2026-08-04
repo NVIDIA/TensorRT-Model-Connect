@@ -44,3 +44,5 @@ Do not use a generic task label as a runtime strategy:
 The task strategy lets generic runners and comparators share a user contract.
 The runtime strategy keeps pipeline code, state, samplers, helpers, and
 dependencies owned by the model.
+
+{/* Collaborative review anchor. */}

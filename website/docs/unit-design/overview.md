@@ -11,3 +11,5 @@ import {Redirect} from '@docusaurus/router';
 <Redirect to="/architecture/units-and-ownership" />
 
 Architecture and Unit Design now share one canonical documentation area.
+
+{/* Collaborative review anchor. */}

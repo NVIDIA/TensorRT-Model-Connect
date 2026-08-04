@@ -11,3 +11,5 @@ import {Redirect} from '@docusaurus/router';
 
 The safety disclaimer and traceability gaps moved to the maintained
 Traceability and Safety Status page.
+
+{/* Collaborative review anchor. */}

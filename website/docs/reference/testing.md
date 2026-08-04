@@ -293,3 +293,5 @@ time is used instead, label the metric and measurement boundary explicitly.
 Compilation is not parity. A single-model E2E is not broad regression proof.
 Performance results are not qualification evidence unless the run also records
 the exact commit, hardware, inputs, artifacts, and comparison baseline.
+
+{/* Collaborative review anchor. */}

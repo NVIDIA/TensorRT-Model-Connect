@@ -42,3 +42,5 @@
 - If `$write-git-messages` is not listed in the active runtime skills, load
   `plugins/trtmc-agent-skills/skills/write-git-messages/SKILL.md` directly and
   follow it.
+
+<!-- Collaborative review anchor. -->

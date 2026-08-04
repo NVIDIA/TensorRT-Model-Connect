@@ -330,3 +330,5 @@ For each PR include its URL, base, source repository/branch, exact head SHA,
 current status/check URLs and states, action, validation, mergeability/review
 state, blockers, residual risk, and whether a branch was pushed or merged. An
 unchanged pending state is normal during monitoring.
+
+<!-- Collaborative review anchor. -->

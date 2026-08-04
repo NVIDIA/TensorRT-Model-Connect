@@ -191,3 +191,5 @@ SHAs/hashes, hardware, resolved runtime config, workload and measurement
 contract, raw artifact paths, p50 and other suite-owned statistics, output
 equivalence, observed bottleneck, comparison limitations, and the next
 evidence-backed experiment.
+
+<!-- Collaborative review anchor. -->

@@ -30,3 +30,5 @@ contracts.
 `tests/builder/test_quantization_ownership.py` enforces this boundary. Follow
 the canonical [Quantization](/features/quantization) page for the complete
 workflow and current command examples.
+
+{/* Collaborative review anchor. */}

@@ -54,3 +54,5 @@ This table is a checked snapshot of non-self replacements declared by
 `testcases[*].l0_replacement`. The manifests remain authoritative; run
 `PYTHONPATH=python:. python3 tools/test_impact.py --validate` after changing a
 replacement.
+
+{/* Collaborative review anchor. */}

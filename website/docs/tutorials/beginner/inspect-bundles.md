@@ -216,3 +216,5 @@ Before leaving the tutorial, write short answers to these prompts:
 3. Which metadata would you inspect for TensorRT compatibility?
 4. Which optimized descriptor values are not exposed by the current inspector?
 5. If inspection passes but runtime loading fails, where is the likely boundary?
+
+{/* Collaborative review anchor. */}

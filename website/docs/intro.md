@@ -103,3 +103,5 @@ After Getting Started:
    source-level responsibilities; and
 4. treat [Feature Reference & Context](features/overview.md) as an archive and
    deep-reference section, not as the default reading path.
+
+{/* Collaborative review anchor. */}

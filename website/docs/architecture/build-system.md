@@ -157,3 +157,5 @@ to that build. Run-time success additionally depends on:
 
 Use [Validation Design](validation-design.md) to choose evidence beyond
 successful compilation.
+
+{/* Collaborative review anchor. */}

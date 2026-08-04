@@ -190,3 +190,5 @@ to use the portable BF16 path.
 - [Model Support](model-support.md) explains the current supported model surface from the manifest set.
 - [Inspect Bundles](../tutorials/beginner/inspect-bundles.md) teaches the artifact-debugging workflow.
 - [CLI Reference](../api/cli-reference.md) lists the build and runtime command surfaces.
+
+{/* Collaborative review anchor. */}

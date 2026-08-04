@@ -11,3 +11,5 @@ import {Redirect} from '@docusaurus/router';
 <Redirect to="/architecture/build-pipeline" />
 
 Family discovery and build behavior are documented in Build Pipeline.
+
+{/* Collaborative review anchor. */}

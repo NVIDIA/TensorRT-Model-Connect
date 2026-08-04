@@ -65,3 +65,5 @@ compatible native family/runtime strategy or an exact qualified optimized
 provider profile; otherwise it needs extension work.
 
 It is not fully portable across every GPU, CUDA, and TensorRT version once an engine has been built. The bundle records compatibility metadata, and the runtime checks that metadata before execution.
+
+{/* Collaborative review anchor. */}

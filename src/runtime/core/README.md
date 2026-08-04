@@ -22,3 +22,5 @@ sampling, masks, and KV-cache policy are model-owned under
 `src/runtime/models/<family>/`. Optimized bundles instead use the generic host
 under `src/runtime/providers/` to verify and load their embedded implementation
 DSO.
+
+<!-- Collaborative review anchor. -->

@@ -115,3 +115,5 @@ requesting one new run. Fork contributors must coordinate the label with a
 maintainer who has repository `maintain` or `admin` permission. Private CI
 repository details,
 runner information, logs, artifacts, and URLs are not public documentation.
+
+{/* Collaborative review anchor. */}

@@ -10,3 +10,5 @@ import {Redirect} from '@docusaurus/router';
 <Redirect to="/architecture/runtime-lifecycle" />
 
 Native and optimized runtime dispatch are documented in Runtime Lifecycle.
+
+{/* Collaborative review anchor. */}

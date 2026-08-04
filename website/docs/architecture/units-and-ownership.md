@@ -125,3 +125,5 @@ code elsewhere:
    the same assumption-free contract.
 
 For implementation recipes, continue to [Extend the Project](../extend/overview.md).
+
+{/* Collaborative review anchor. */}

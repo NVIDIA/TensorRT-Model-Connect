@@ -165,3 +165,5 @@ support. Use bundle inspection plus the owning build/profile contract.
 | Plugin context | `include/trtmc/runtime/pipeline_plugin.h` |
 | Backend abstraction | `include/trtmc/runtime/trt_backend.h`, `include/trtmc/runtime/trt_module.h` |
 | Model pipelines | `src/runtime/models/<owner>/` |
+
+{/* Collaborative review anchor. */}

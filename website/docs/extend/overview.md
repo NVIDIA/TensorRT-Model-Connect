@@ -66,3 +66,5 @@ The [Architecture & Design](../architecture/overview.md) section explains the
 units behind these extension points. Historical migration plans belong in
 [Feature Reference & Context](../features/overview.md), not in the current
 contributor runbook.
+
+{/* Collaborative review anchor. */}

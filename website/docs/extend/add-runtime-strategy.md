@@ -134,3 +134,5 @@ pytest 'tests/test_e2e.py::test_e2e[example-model]' -v \
 The final evidence should prove descriptor consistency, model-DSO loading,
 plugin construction, the public task method, and comparison against the
 manifest's declared oracle.
+
+{/* Collaborative review anchor. */}

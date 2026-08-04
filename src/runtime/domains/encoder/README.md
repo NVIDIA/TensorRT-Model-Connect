@@ -13,3 +13,5 @@ Use each model's `MODEL.toml` as the discovery source, then read its
 
 Keep pooling, preprocessing, tensor binding, and output semantics with the
 owning model rather than adding a generic backend here.
+
+<!-- Collaborative review anchor. -->

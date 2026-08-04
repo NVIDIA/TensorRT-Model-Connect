@@ -29,3 +29,5 @@ Hugging Face model or local model directory
   -> trtmc::load() or trtmc run
   -> task-specific output
 ```
+
+{/* Collaborative review anchor. */}

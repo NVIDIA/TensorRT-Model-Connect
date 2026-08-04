@@ -144,3 +144,5 @@ Success means both commands exit with status 0, the named bundle exists, and
 floating-point forecast values. See
 [Diffusion, Vision, and Time-Series Pipelines](../tutorials/intermediate/diffusion-and-time-series.md)
 for the input/output mental model and dependency boundaries.
+
+{/* Collaborative review anchor. */}

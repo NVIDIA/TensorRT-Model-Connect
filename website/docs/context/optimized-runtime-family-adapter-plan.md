@@ -571,3 +571,5 @@ profile declarations retain their exact semantic qualification snapshot.
   implementation; it must not inherit support from these three tuples.
 - Qualification logs, comparison output, benchmark results, and generated
   engines remain external artifacts and must not be committed as proof.
+
+{/* Collaborative review anchor. */}

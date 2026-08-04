@@ -10,3 +10,5 @@ import {Redirect} from '@docusaurus/router';
 <Redirect to="/architecture/runtime-lifecycle" />
 
 Pipeline construction and plugin dispatch are documented in Runtime Lifecycle.
+
+{/* Collaborative review anchor. */}

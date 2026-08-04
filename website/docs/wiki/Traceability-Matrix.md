@@ -11,3 +11,5 @@ import {Redirect} from '@docusaurus/router';
 
 The measured traceability and safety status moved to a single maintained
 context page.
+
+{/* Collaborative review anchor. */}

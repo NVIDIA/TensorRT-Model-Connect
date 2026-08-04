@@ -168,3 +168,5 @@ inspect its family-owned profile TOML. The retained qualified profiles are
 exact product routes; because Source does not publish their former
 target-hardware runner, a Source checkout alone cannot reproduce their
 hardware qualification.
+
+{/* Collaborative review anchor. */}

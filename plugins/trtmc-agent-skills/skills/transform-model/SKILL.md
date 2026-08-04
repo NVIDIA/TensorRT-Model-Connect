@@ -192,3 +192,5 @@ The PR must identify the exact model revision, all three ownership descriptors,
 runtime/bundle path, build and validation commands, artifact hashes/paths,
 comparison metrics, target hardware, performance evidence if claimed, and
 unrun or blocked gates.
+
+<!-- Collaborative review anchor. -->

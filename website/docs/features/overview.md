@@ -91,3 +91,5 @@ declared. A support claim needs the evidence appropriate to its level:
 
 See [Model Support](../getting-started/model-support.md) for the live inventory
 and [Testing Reference](../reference/testing.md) for the validation boundary.
+
+{/* Collaborative review anchor. */}

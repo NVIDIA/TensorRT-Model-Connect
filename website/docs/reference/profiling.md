@@ -144,3 +144,5 @@ no repository-supported conversion command for that trace.
   the unified tool runs a separate uninstrumented TensorRT timing pass.
 - Retain JSON artifacts with the tested commit, GPU, TensorRT version, and
   exact command when using results as qualification evidence.
+
+{/* Collaborative review anchor. */}

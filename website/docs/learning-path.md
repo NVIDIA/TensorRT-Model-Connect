@@ -150,3 +150,5 @@ implementation is the goal.
 **Milestone:** before editing, you can name the model-owned Python descriptor,
 runtime strategy and DSO owner, public API boundary, tests, E2E manifest, and
 documentation that form the vertical slice of your change.
+
+{/* Collaborative review anchor. */}

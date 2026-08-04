@@ -288,3 +288,5 @@ rg -n 'qwen_decoder_kv_cache|REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST' \
 ```
 
 </details>
+
+{/* Collaborative review anchor. */}

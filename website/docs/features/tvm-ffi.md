@@ -159,3 +159,5 @@ with the DSO, so the kernel author must implement the ordered contract exactly.
 
 For a complete worked example, see
 [Bring Your Own Kernel with TVM FFI](../tutorials/advanced/bring-your-own-kernel.md).
+
+{/* Collaborative review anchor. */}

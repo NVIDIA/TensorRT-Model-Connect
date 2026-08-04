@@ -11,3 +11,5 @@ import {Redirect} from '@docusaurus/router';
 
 Current extension boundaries and contributor routes are documented in Extend
 the Project.
+
+{/* Collaborative review anchor. */}
