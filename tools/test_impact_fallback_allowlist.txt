@@ -80,8 +80,6 @@ no_impact scripts/repro_trt_fp8_mha.py # standalone TensorRT FP8 MHA repro helpe
 no_impact scripts/templates/model_family/registration.cpp # developer utility script; no CI test impact is intentional
 no_impact scripts/validate_family.sh # developer utility script; no CI test impact is intentional
 no_impact tools/__init__.py # developer utility script; no CI test impact is intentional
-no_impact tools/ai_agent_system.py # developer utility script; no CI test impact is intentional
-no_impact tools/ai_staging.py # developer utility script; no CI test impact is intentional
 no_impact tools/auto_perf_tune.py # developer utility script; no CI test impact is intentional
 no_impact tools/check_cyclomatic_complexity.py # developer utility script; no CI test impact is intentional
 no_impact tools/check_doc_file_references.py # developer utility script; no CI test impact is intentional

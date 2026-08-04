@@ -54,7 +54,7 @@ that enters the run-owned container and invokes `pipeline` there.
 
 ### 1. Pin and authorize the PR
 
-An actor with `write`, `maintain`, or `admin` permission adds the one-shot
+An actor with `maintain` or `admin` permission adds the one-shot
 `run-internal-ci` label. The Source bridge removes the label even when
 authorization fails, verifies that the open pull request targets `main`, and
 compares three independent views of the requested revision:

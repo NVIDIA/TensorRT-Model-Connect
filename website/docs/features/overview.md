@@ -76,7 +76,6 @@ Use these pages for ADRs, retired development workflows, and documentation
 design research. They are intentionally last in the navigation.
 
 - [Architecture Decision Records](../context/adr/)
-- [Retired AI-staging workflow](../context/ai-staging-history.md)
 - [Documentation research](../reference/documentation-research.md)
 
 ## Support claims require evidence

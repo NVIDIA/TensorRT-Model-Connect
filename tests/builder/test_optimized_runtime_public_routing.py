@@ -265,6 +265,26 @@ def test_cli_delegation_preserves_optimized_precision_default() -> None:
     assert args.precision is None
 
 
+def test_cli_omits_only_the_inert_context_parallel_default() -> None:
+    import tensorrt_model_connect.build_cli as build_cli
+
+    def public_options(context_parallel_size: object) -> dict:
+        return build_cli._optimized_cli_public_options(
+            argparse.Namespace(
+                command="build",
+                model="example/model",
+                output="model.trtfb",
+                precision=None,
+                max_cache_length=None,
+                context_parallel_size=context_parallel_size,
+            )
+        )
+
+    assert "context_parallel_size" not in public_options(1)
+    assert public_options(2)["context_parallel_size"] == 2
+    assert public_options(True)["context_parallel_size"] is True
+
+
 def test_cli_treats_model_revision_as_identity_not_plugin_option(monkeypatch) -> None:
     import tensorrt_model_connect.build_cli as build_cli
     import tensorrt_model_connect.engine_builder as engine_builder

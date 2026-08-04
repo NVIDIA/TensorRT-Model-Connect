@@ -85,6 +85,11 @@ def _optimized_cli_public_options(args: argparse.Namespace) -> dict:
         if not name.startswith("_")
         and name not in _OPTIMIZED_ROUTING_INTERNAL_FIELDS
     }
+    context_parallel_size = public_options.get("context_parallel_size")
+    # One context-parallel rank is the parser's no-op default. Keep requested
+    # non-default values visible to model-owned fail-closed policy.
+    if type(context_parallel_size) is int and context_parallel_size == 1:
+        public_options.pop("context_parallel_size")
     if public_options.get("precision") is None:
         public_options["precision"] = "fp32"
     # Keep the existing optimized-runtime request contract unchanged. Native
