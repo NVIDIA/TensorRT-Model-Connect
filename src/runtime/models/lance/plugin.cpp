@@ -222,11 +222,8 @@ std::unique_ptr<TrtModule> load_vision_module(IBackend* backend, const BundleFil
         std::cerr << "[trtmc] Vision encoder loaded" << std::endl;
         return std::move(loaded.module);
     }
-    if (declared_in_config) {
-        std::cerr << "[trtmc] WARNING: Bundle declares vision engine but "
-                     "deserialization failed"
-                  << std::endl;
-    }
+    if (declared_in_config)
+        throw std::runtime_error("Lance bundle declares an unreadable vision engine");
     return nullptr;
 }
 

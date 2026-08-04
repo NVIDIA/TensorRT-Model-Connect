@@ -124,7 +124,9 @@ class LancePlugin:
             reasons.append("debug layer outputs are not supported")
         if config.raw.get("_fp32_layers"):
             reasons.append("FP32 layer overrides are not supported")
-        if config.raw.get("dynamic_kv_cache"):
+        if config.raw.get("_runtime_dynamic_kv_requested") or config.raw.get(
+            "dynamic_kv_cache"
+        ):
             reasons.append("dynamic KV bucket profiles are not supported")
         role = str(config.raw.get("_decoder_engine_role", ""))
         if role not in ("prefill", "decode"):
@@ -158,14 +160,10 @@ class LancePlugin:
             max_cache_length,
             precision="bf16",
             verbose=verbose,
-            quant_ctx=None,
-            embed_input=True,
-            round_rope_inv_freq_to_bf16=True,
             # The additive mask is Lance-specific (bidirectional vision span).
             # Keep each chunk bounded while its width still tracks active KV.
             max_prefill_length=min(max_cache_length, 4096),
             profile_mode=role,
-            native_kv_cache=True,
         )
 
     def get_bundle_config_overrides(

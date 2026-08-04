@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 from types import SimpleNamespace
 
 import numpy as np
@@ -31,7 +32,7 @@ def _native_config(*, role: str = "decode") -> SimpleNamespace:
     )
 
 
-def test_lance_native_build_uses_full_context_split_role_and_bf16_rope(
+def test_lance_native_build_uses_full_context_split_role(
     monkeypatch,
 ) -> None:
     module = importlib.import_module(
@@ -47,14 +48,38 @@ def test_lance_native_build_uses_full_context_split_role_and_bf16_rope(
     result = module.LancePlugin().build_engine(config, {}, 128_000)
 
     assert result == b"lance-bf16-plan"
-    assert calls["kwargs"]["round_rope_inv_freq_to_bf16"] is True
-    assert calls["kwargs"]["native_kv_cache"] is True
+    assert calls["kwargs"]["precision"] == "bf16"
     assert calls["kwargs"]["profile_mode"] == "prefill"
     assert calls["kwargs"]["max_prefill_length"] == 4096
+    assert "native_kv_cache" not in calls["kwargs"]
     assert config.raw["_native_kv_cache_metadata"] == {
         "native_kv_contract_version": 1,
         "native_kv_cache": True,
     }
+
+
+def test_lance_production_builder_has_no_legacy_kv_selector_or_concat_path() -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.lance.default_dual_profile_decoder")
+    builder = module.build_dual_profile_decoder_engine
+    source = inspect.getsource(builder)
+
+    assert set(inspect.signature(builder).parameters) == {
+        "config",
+        "weights",
+        "max_cache_length",
+        "precision",
+        "opt_prefill_length",
+        "max_prefill_length",
+        "verbose",
+        "profile_mode",
+    }
+    assert "if native_kv_cache" not in source
+    assert "add_concatenation" not in source
+    assert "graph_ops.add_attention_from_rows" not in source
+    assert "all_k_cat" not in source
+    assert "all_v_cat" not in source
+    assert "add_native_kv_cache_attention_from_rows" in source
 
 
 def test_lance_defaults_hide_cache_build_flags() -> None:
@@ -74,6 +99,15 @@ def test_lance_native_build_rejects_a_hidden_context_cap() -> None:
     with pytest.raises(ValueError, match="must equal the model context"):
         module.LancePlugin().build_engine(
             _native_config(), {}, 384, precision="bf16")
+
+
+def test_lance_native_build_rejects_generic_dynamic_kv() -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.lance.plugin")
+    config = _native_config()
+    config.raw["_runtime_dynamic_kv_requested"] = True
+    with pytest.raises(ValueError, match="dynamic KV bucket profiles"):
+        module.LancePlugin().build_engine(config, {}, 128_000, precision="bf16")
 
 
 def test_lance_rope_table_can_match_bf16_inv_freq_buffer() -> None:
