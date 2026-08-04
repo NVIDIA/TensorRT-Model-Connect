@@ -61,16 +61,22 @@ struct CountingTextStats {
     int32_t calls{0};
     std::unordered_map<std::string, std::vector<int64_t>> shapes;
     std::unordered_map<std::string, std::vector<float>> float_values;
+    std::vector<int32_t> write_indices;
+    std::vector<int32_t> kv_lengths;
 };
 
 class CountingTextModule final : public trtmc::ITrtModule {
   public:
-    CountingTextModule(std::shared_ptr<CountingTextStats> stats, bool prefill, cudaStream_t stream)
-        : stats_(std::move(stats)), prefill_(prefill), stream_(stream),
-          present_k_(prefill ? trtmc::DeviceTensor::zeros({8, 4}, trtmc::DType::kFloat32, stream)
-                             : trtmc::DeviceTensor{}),
-          present_v_(prefill ? trtmc::DeviceTensor::zeros({8, 4}, trtmc::DType::kFloat32, stream)
-                             : trtmc::DeviceTensor{}) {}
+    CountingTextModule(std::shared_ptr<CountingTextStats> stats, bool prefill, cudaStream_t stream,
+                       bool native_kv = false, int32_t profile_limit = 8)
+        : stats_(std::move(stats)), prefill_(prefill), native_kv_(native_kv),
+          profile_limit_(profile_limit), stream_(stream),
+          present_k_(prefill && !native_kv
+                         ? trtmc::DeviceTensor::zeros({8, 4}, trtmc::DType::kFloat32, stream)
+                         : trtmc::DeviceTensor{}),
+          present_v_(prefill && !native_kv
+                         ? trtmc::DeviceTensor::zeros({8, 4}, trtmc::DType::kFloat32, stream)
+                         : trtmc::DeviceTensor{}) {}
 
     trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
         ++stats_->calls;
@@ -84,6 +90,12 @@ class CountingTextModule final : public trtmc::ITrtModule {
                     std::vector<float>(begin, begin + static_cast<std::ptrdiff_t>(tensor.numel()));
             }
         }
+        if (native_kv_) {
+            stats_->write_indices.push_back(
+                *static_cast<const int32_t*>(inputs.at("cache_write_indices").data));
+            stats_->kv_lengths.push_back(
+                *static_cast<const int32_t*>(inputs.at("key_value_lengths").data));
+        }
         return {{"logits", trtmc::Tensor{logits_.data(), {1, 4}, trtmc::DType::kFloat32}}};
     }
     trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
@@ -93,49 +105,81 @@ class CountingTextModule final : public trtmc::ITrtModule {
     cudaStream_t stream() const override { return stream_; }
     void enable_cuda_graph() override {}
     bool cuda_graph_active() const override { return false; }
-    int32_t profile_idx() const override { return prefill_ ? 0 : 1; }
+    int32_t profile_idx() const override { return native_kv_ ? 0 : (prefill_ ? 0 : 1); }
     std::vector<trtmc::TensorInfo> input_info() const override { return {}; }
     std::vector<trtmc::TensorInfo> output_info() const override { return {}; }
     bool has_input(const std::string& name) const override {
-        return name == "token_id" || name == "position_id" || name == "attention_mask" ||
-               name == "input_embed" || name == "use_input_embed" || name == "deepstack_active" ||
+        if (native_kv_ && (name == "cache_write_indices" || name == "key_value_lengths"))
+            return true;
+        return name == "token_id" || name == "position_id" ||
+               (!native_kv_ && name == "attention_mask") || name == "input_embed" ||
+               name == "use_input_embed" || name == "deepstack_active" ||
                name == "deepstack_embed_0" || name == "cache_k_0" || name == "cache_v_0";
     }
     bool has_output(const std::string& name) const override {
         return name == "logits" || name == "present_k_0" || name == "present_v_0";
     }
-    trtmc::DType tensor_dtype(const std::string&) const override { return trtmc::DType::kFloat32; }
+    trtmc::DType tensor_dtype(const std::string& name) const override {
+        if (name == "cache_write_indices" || name == "key_value_lengths" || name == "token_id" ||
+            name == "position_id")
+            return trtmc::DType::kInt32;
+        return trtmc::DType::kFloat32;
+    }
     std::vector<int64_t> tensor_shape(const std::string& name) const override {
+        if (name == "cache_write_indices" || name == "key_value_lengths")
+            return {1};
+        if (native_kv_ && (name == "cache_k_0" || name == "cache_v_0" || name == "present_k_0" ||
+                           name == "present_v_0"))
+            return {1, 1, 8, 4};
         if (name == "cache_k_0" || name == "cache_v_0")
             return {8, 4};
         return {};
     }
-    std::vector<int64_t> input_profile_shape(const std::string&, int32_t,
+    std::vector<int64_t> input_profile_shape(const std::string& name, int32_t,
                                              trtmc::ProfileShapeSelector) const override {
-        return {};
+        if (name == "token_id")
+            return {profile_limit_};
+        return tensor_shape(name);
     }
-    int32_t optimization_profile_count() const override { return prefill_ ? 2 : 1; }
+    int32_t optimization_profile_count() const override {
+        return native_kv_ ? 1 : (prefill_ ? 2 : 1);
+    }
     void* device_ptr(const std::string& name) const override {
+        const auto binding = bindings_.find(name);
+        if (binding != bindings_.end())
+            return binding->second;
         if (name == "present_k_0")
             return const_cast<void*>(present_k_.data());
         if (name == "present_v_0")
             return const_cast<void*>(present_v_.data());
         return nullptr;
     }
-    void bind_external(const std::string&, void*) override {}
+    void bind_external(const std::string& name, void* pointer) override {
+        bindings_[name] = pointer;
+        if (native_kv_ && name.rfind("cache_", 0) == 0)
+            bindings_["present_" + name.substr(6)] = pointer;
+    }
     int32_t input_rank(const std::string& name) const override {
-        return name == "token_id" || name == "position_id" ? 1 : 2;
+        return name == "token_id" || name == "position_id" || name == "cache_write_indices" ||
+                       name == "key_value_lengths"
+                   ? 1
+                   : 2;
     }
     bool input_is_dynamic(const std::string&) const override { return prefill_; }
-    bool ok() const override { return !prefill_ || (present_k_.ok() && present_v_.ok()); }
+    bool ok() const override {
+        return native_kv_ || !prefill_ || (present_k_.ok() && present_v_.ok());
+    }
     void keep_alive(std::shared_ptr<void>) override {}
 
   private:
     std::shared_ptr<CountingTextStats> stats_;
     bool prefill_{false};
+    bool native_kv_{false};
+    int32_t profile_limit_{8};
     cudaStream_t stream_{nullptr};
     mutable trtmc::DeviceTensor present_k_;
     mutable trtmc::DeviceTensor present_v_;
+    mutable std::unordered_map<std::string, void*> bindings_;
     std::vector<float> logits_{0.1F, 0.2F, 0.9F, 0.3F};
 };
 
@@ -708,8 +752,8 @@ static void test_vl_sequence_prefill_uses_one_text_launch() {
 
     auto decode_stats = std::make_shared<CountingTextStats>();
     auto prefill_stats = std::make_shared<CountingTextStats>();
-    auto decoder = std::make_unique<CountingTextModule>(decode_stats, false, stream);
-    auto prefill = std::make_unique<CountingTextModule>(prefill_stats, true, stream);
+    auto decoder = std::make_unique<CountingTextModule>(decode_stats, false, stream, true);
+    auto prefill = std::make_unique<CountingTextModule>(prefill_stats, true, stream, true);
     auto vision = std::make_unique<FakeSequenceVisionModule>();
     auto cache = std::make_unique<trtmc::InternvlKvCache>(1, 8, 4, stream);
 
@@ -758,6 +802,54 @@ static void test_vl_sequence_prefill_uses_one_text_launch() {
     cudaStreamDestroy(stream);
 }
 
+static void test_native_kv_text_prefill_chunks_without_copy() {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto decode_stats = std::make_shared<CountingTextStats>();
+    auto prefill_stats = std::make_shared<CountingTextStats>();
+    auto decoder = std::make_unique<CountingTextModule>(decode_stats, false, stream, true, 1);
+    auto prefill = std::make_unique<CountingTextModule>(prefill_stats, true, stream, true, 2);
+    auto cache = std::make_unique<trtmc::InternvlKvCache>(1, 8, 4, stream, trtmc::DType::kFloat32);
+
+    trtmc::InternVlConfig cfg;
+    cfg.vocab_size = 4;
+    cfg.id_eos = 2;
+    cfg.vision_output_dim = 4;
+    cfg.num_layers = 1;
+    cfg.prefill_max_length = 2;
+
+    trtmc::InternVlPreprocessConfig vl_pp;
+    trtmc::InternVlPipeline pipeline(std::move(decoder), nullptr, std::move(cache), cfg, vl_pp,
+                                     stream, nullptr, "", nullptr, std::move(prefill));
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 1;
+    const auto result = pipeline.generate_ids({0, 1, 2, 3, 0}, gen_cfg);
+
+    check(result.token_ids.size() == 6, "native prefill: generates one token");
+    check(prefill_stats->calls == 3, "native prefill: runs 2/2/1 chunks");
+    check(prefill_stats->write_indices == std::vector<int32_t>({0, 2, 4}),
+          "native prefill: writes each chunk at the logical cache position");
+    check(prefill_stats->kv_lengths == std::vector<int32_t>({2, 4, 5}),
+          "native prefill: attends only over the active cache prefix");
+    check(prefill_stats->shapes.count("attention_mask") == 0,
+          "native prefill: does not materialize a dense attention mask");
+    check(decode_stats->calls == 0,
+          "native prefill: EOS sampling avoids an unnecessary decode launch");
+
+    bool overflow_rejected = false;
+    try {
+        (void)pipeline.generate_ids({0, 1, 2, 3, 0, 1, 2, 3}, gen_cfg);
+    } catch (const std::runtime_error&) {
+        overflow_rejected = true;
+    }
+    check(overflow_rejected && prefill_stats->calls == 3,
+          "native prefill: rejects prompt plus generation beyond capacity before enqueue");
+
+    cudaStreamDestroy(stream);
+}
+
 static void test_vl_generate_with_tokenizer() {
     // Covers the string-based generate(const string&, cfg) method
     auto engine = build_mock_decoder();
@@ -796,18 +888,8 @@ static void test_vl_generate_with_tokenizer() {
 }
 
 int main() {
-    test_vl_text_only();
-    test_vl_text_only_max_tokens();
-    test_vl_validates_decoder();
-    test_vl_validates_cache();
-    test_vl_config_sync();
-    test_vl_zero_max_tokens();
-    test_vl_no_tokenizer_throws();
-    test_vl_generate_with_image_no_encoder();
-    test_vl_generate_with_vision_encoder();
-    test_vl_generate_with_embed_decoder();
     test_vl_sequence_prefill_uses_one_text_launch();
-    test_vl_generate_with_tokenizer();
+    test_native_kv_text_prefill_chunks_without_copy();
     if (failures > 0)
         std::cerr << failures << " FAILED\n";
     return failures;

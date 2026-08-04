@@ -32,7 +32,9 @@ from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
-from .standard_decoder_builder import build_standard_decoder_engine
+from .build_routing import validate_native_kv_build
+from .default_dual_profile_decoder import build_dual_profile_decoder_engine
+from .native_kv_contract import validate_native_kv_weights
 
 if TYPE_CHECKING:
     pass
@@ -43,7 +45,18 @@ _DEFAULT_FIXED_IMAGE_SIZE = 448
 class InternVLPlugin:
     name = "internvl"
     runtime_strategy = "internvl_vision_language"
+    runtime_capabilities = {"decoder_kv"}
     embed_input = True
+    supports_split_embed_input = True
+
+    def default_build_precision(self, config: ModelConfig) -> str:
+        return "bf16"
+
+    def default_max_cache_length(self, config: ModelConfig) -> int:
+        return int(config.max_position_embeddings)
+
+    def supports_split_decoder_roles(self, config: ModelConfig) -> bool:
+        return True
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
@@ -51,6 +64,7 @@ class InternVLPlugin:
 
     def load_weights(
         self, model_dir: str, config: ModelConfig,
+        *, precision: str = "bf16",
     ) -> WeightDict:
         """Load text decoder weights (Qwen2 pattern).
 
@@ -61,35 +75,92 @@ class InternVLPlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
+        max_cache_length: int, *, precision: str = "bf16",
         quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
         """Build text decoder engine (Qwen2 architecture with embed_input for VL)."""
         parallel = normalize_parallel_config(parallel_config)
+        validate_native_kv_build(
+            config,
+            precision=precision,
+            max_cache_length=max_cache_length,
+            parallel=parallel,
+            quantized=quant_ctx is not None,
+            debug_layer_outputs=debug_layer_outputs,
+        )
+        validate_native_kv_weights(config, weights)
+        config.raw["_decoder_engine_layout_supported"] = True
+        config.raw["_native_kv_cache_metadata"] = {
+            "native_kv_contract_version": 1,
+            "native_kv_cache": True,
+            "native_kv_tp_rank_local": bool(parallel.enabled),
+        }
+
+        role = str(config.raw.get("_decoder_engine_role", ""))
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
                 parallel, feature="InternVL tensor-parallel builds")
-            if debug_layer_outputs:
-                raise ValueError("InternVL tensor-parallel builds do not support debug layer outputs")
             from .tp_builder import build_dual_profile_tp_decoder_engine
             return build_dual_profile_tp_decoder_engine(
                 config, weights, max_cache_length,
-                precision=precision,
-                quant_ctx=quant_ctx,
+                precision="bf16",
+                quant_ctx=None,
                 norm_type="rmsnorm",
                 mlp_type="swiglu",
                 position_type="rope",
                 activation="silu",
                 embed_input=True,
                 verbose=verbose,
-                parallel_config=parallel)
+                parallel_config=parallel,
+                profile_mode="decode")
 
-        return build_standard_decoder_engine(
-            config, weights, max_cache_length, precision=precision, verbose=verbose,
-            quant_ctx=quant_ctx, embed_input=True,
-            debug_layer_outputs=debug_layer_outputs)
+        if role not in ("prefill", "decode"):
+            raise ValueError(
+                "InternVL native KV requires explicit split engine role "
+                f"'prefill' or 'decode', got {role!r}")
+        return build_dual_profile_decoder_engine(
+            config, weights, max_cache_length,
+            precision="bf16", quant_ctx=None, embed_input=True,
+            verbose=verbose, profile_mode=role)
+
+    def build_extra_engines(
+        self, config: ModelConfig, weights: WeightDict,
+        max_cache_length: int, *, precision: str = "bf16",
+        quant_ctx=None, verbose: bool = False, parallel_config=None,
+    ) -> dict[str, bytes]:
+        """Build rank-local prefill halves for TP bundles."""
+        parallel = normalize_parallel_config(parallel_config)
+        if not parallel.enabled:
+            return {}
+        validate_native_kv_build(
+            config, precision=precision, max_cache_length=max_cache_length,
+            parallel=parallel, quantized=quant_ctx is not None,
+            debug_layer_outputs=False)
+        validate_native_kv_weights(config, weights)
+        from .tp_builder import build_dual_profile_tp_decoder_engine
+
+        plans: dict[str, bytes] = {}
+        for rank in range(parallel.tp_size):
+            plans[f"prefill_engine_tp_rank{rank}_plan"] = (
+                build_dual_profile_tp_decoder_engine(
+                    config, weights, max_cache_length,
+                    precision="bf16", quant_ctx=None,
+                    norm_type="rmsnorm", mlp_type="swiglu",
+                    position_type="rope", activation="silu",
+                    embed_input=True, verbose=verbose,
+                    parallel_config=parallel.for_rank(rank),
+                    profile_mode="prefill"))
+        return plans
+
+    def get_bundle_config_overrides(
+        self, config: ModelConfig,
+    ) -> dict | None:
+        metadata = config.raw.get("_native_kv_cache_metadata")
+        if not isinstance(metadata, dict):
+            return None
+        return {**metadata, "decoder_engine_layout": "split"}
 
     def build_vision_engine(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,

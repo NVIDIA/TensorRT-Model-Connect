@@ -15,10 +15,15 @@
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <iostream>
+#include <limits>
 #include <memory>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -55,7 +60,9 @@ int32_t dim_at(const std::vector<int64_t>& shape, std::size_t idx) {
 
 int32_t decoder_cache_row_width(const TrtModule& module, const std::string& tensor_name,
                                 const BaseConfig& config) {
-    const int32_t from_engine = dim_at(module.tensor_shape(tensor_name), 1);
+    const auto shape = module.tensor_shape(tensor_name);
+    const int32_t from_engine =
+        shape.size() == 4 ? dim_at(shape, 1) * dim_at(shape, 3) : dim_at(shape, 1);
     return from_engine > 0 ? from_engine : compute_kv_dim(config);
 }
 
@@ -92,20 +99,136 @@ InternvlKvCacheNames build_kv_cache_names(const BaseConfig& config) {
     return kv_names;
 }
 
+std::string prefill_engine_section_name(const TensorParallelRuntimeConfig& tp_config,
+                                        int32_t rank) {
+    if (!tp_config.enabled)
+        return "prefill_engine_plan";
+    return "prefill_engine_tp_rank" + std::to_string(rank) + "_plan";
+}
+
 DualProfileModules load_text_modules(const PipelineContext& ctx, TextModuleRuntime& runtime,
+                                     const TensorParallelRuntimeConfig& tp_config,
                                      const std::shared_ptr<InternVlCudaStream>& stream) {
-    auto loaded =
+    auto decode_loaded =
         load_dual_profile_modules(ctx.backend, find_section(ctx.bundle, runtime.engine_section),
                                   runtime.engine_section.c_str(), runtime.options);
+    if (decode_loaded.prefill)
+        throw std::runtime_error("InternVL native KV decode engine must be single-profile");
+
+    const std::string prefill_section =
+        prefill_engine_section_name(tp_config, runtime.tp_group.rank);
+    auto prefill_loaded =
+        load_dual_profile_modules(ctx.backend, find_section(ctx.bundle, prefill_section),
+                                  prefill_section.c_str(), runtime.options);
+    if (prefill_loaded.prefill)
+        throw std::runtime_error("InternVL native KV prefill engine must be single-profile");
+
+    DualProfileModules loaded;
+    loaded.decode = std::move(decode_loaded.decode);
+    loaded.prefill = std::move(prefill_loaded.decode);
     loaded.decode->keep_alive(stream);
-    if (loaded.prefill)
-        loaded.prefill->keep_alive(stream);
+    loaded.prefill->keep_alive(stream);
     if (runtime.tp_group.owner) {
         loaded.decode->keep_alive(runtime.tp_group.owner);
-        if (loaded.prefill)
-            loaded.prefill->keep_alive(runtime.tp_group.owner);
+        loaded.prefill->keep_alive(runtime.tp_group.owner);
     }
     return loaded;
+}
+
+bool engine_uses_native_kv_updates(const TrtModule& module, const InternvlKvCacheNames& names) {
+    const bool has_write = module.has_input(names.cache_write_indices);
+    const bool has_lengths = module.has_input(names.key_value_lengths);
+    if (has_write != has_lengths)
+        throw std::runtime_error("InternVL native KV engine must expose both scalar inputs");
+    return has_write;
+}
+
+void validate_native_engine(const PipelineContext& ctx, const TrtModule& module,
+                            const InternvlKvCacheNames& names,
+                            const TensorParallelRuntimeConfig& tp_config, DType cache_dtype) {
+    if (!engine_uses_native_kv_updates(module, names))
+        throw std::runtime_error("InternVL legacy KV engines are no longer supported");
+    if (cache_dtype != DType::kBFloat16)
+        throw std::runtime_error("InternVL native KV runtime requires BF16");
+    if (names.cache_k.empty())
+        throw std::runtime_error("InternVL native KV engine has no cache inputs");
+
+    const auto shape = module.tensor_shape(names.cache_k.front());
+    const int32_t local_kv_heads =
+        tp_config.enabled ? ctx.config.num_kv_heads / tp_config.tp_size : ctx.config.num_kv_heads;
+    const int32_t head_dim = ctx.config.head_dim > 0
+                                 ? ctx.config.head_dim
+                                 : ctx.config.hidden_size / ctx.config.num_heads;
+    const std::vector<int64_t> expected{1, local_kv_heads, ctx.config.max_cache_length, head_dim};
+    if (shape != expected)
+        throw std::runtime_error(
+            "InternVL native KV cache shape does not match rank-local full capacity");
+}
+
+void validate_native_bundle(const PipelineContext& ctx, const TrtModule& decode,
+                            const TrtModule& prefill, const InternvlKvCacheNames& names,
+                            const TensorParallelRuntimeConfig& tp_config, DType cache_dtype) {
+    if (!extract_json_bool(ctx.config_json, "native_kv_cache", false) ||
+        extract_json_int(ctx.config_json, "native_kv_contract_version", 0) != 1)
+        throw std::runtime_error("InternVL bundle is missing native KV contract metadata");
+    validate_native_engine(ctx, decode, names, tp_config, cache_dtype);
+    validate_native_engine(ctx, prefill, names, tp_config, cache_dtype);
+    if (ctx.kv_cache_size_bytes != 0)
+        throw std::invalid_argument(
+            "InternVL native KV allocates the model's complete fixed capacity; "
+            "kv_cache_size_bytes is not supported");
+}
+
+std::uint64_t checked_multiply(std::uint64_t lhs, std::uint64_t rhs) {
+    if (lhs != 0 && rhs > std::numeric_limits<std::uint64_t>::max() / lhs)
+        throw std::overflow_error("InternVL native KV byte accounting overflow");
+    return lhs * rhs;
+}
+
+std::string format_bytes(std::uint64_t bytes) {
+    std::ostringstream oss;
+    constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
+    oss.setf(std::ios::fixed);
+    oss.precision(2);
+    oss << static_cast<double>(bytes) / kGiB << " GiB";
+    return oss.str();
+}
+
+void admit_native_kv_allocation(const PipelineContext& ctx, int32_t local_kv_dim,
+                                DType cache_dtype) {
+    const auto bytes = checked_multiply(
+        checked_multiply(
+            checked_multiply(
+                checked_multiply(static_cast<std::uint64_t>(ctx.config.num_layers),
+                                 static_cast<std::uint64_t>(ctx.config.max_cache_length)),
+                static_cast<std::uint64_t>(local_kv_dim)),
+            static_cast<std::uint64_t>(dtype_size(cache_dtype))),
+        2);
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    const auto status = cudaMemGetInfo(&free_bytes, &total_bytes);
+    if (status != cudaSuccess)
+        throw std::runtime_error(std::string("InternVL CUDA memory query failed: ") +
+                                 cudaGetErrorString(status));
+    constexpr std::uint64_t kTwoGiB = 2ULL << 30;
+    const auto free = static_cast<std::uint64_t>(free_bytes);
+    const auto total = static_cast<std::uint64_t>(total_bytes);
+    const auto reserve = std::max(kTwoGiB, total / 10);
+    const auto available = free > reserve ? free - reserve : 0;
+    if (bytes > available)
+        throw std::runtime_error(
+            "InternVL native KV admission failed before allocation: required=" +
+            format_bytes(bytes) + ", free=" + format_bytes(free) +
+            ", reserve=" + format_bytes(reserve));
+}
+
+int32_t prefill_profile_capacity(const TrtModule& module) {
+    const auto shape =
+        module.input_profile_shape("token_id", module.profile_idx(), ProfileShapeSelector::kMax);
+    const int32_t value = dim_at(shape, 0);
+    if (value <= 0)
+        throw std::runtime_error("InternVL native prefill engine has invalid profile capacity");
+    return value;
 }
 
 std::unique_ptr<TrtModule> load_vision_module(IBackend* backend, const BundleFile& bundle,
@@ -157,16 +280,28 @@ class VLPlugin final : public IPipelinePlugin {
 
         InternvlKvCacheNames kv_names = build_kv_cache_names(ctx.config);
 
-        auto loaded = load_text_modules(ctx, text_runtime, shared_stream);
+        auto loaded = load_text_modules(ctx, text_runtime, tp_config, shared_stream);
+        const bool has_vision_engine =
+            extract_json_int(ctx.config_json, "has_vision_engine", 0) != 0;
+        auto vision_options = opts;
+        vision_options.distributed_communicator = nullptr;
+        vision_options.distributed_owner.reset();
+        auto vision_module = load_vision_module(ctx.backend, ctx.bundle, vision_options,
+                                                shared_stream, has_vision_engine);
 
         cudaStream_t stream = loaded.decode->stream();
         const std::string cache_k_name =
             kv_names.cache_k.empty() ? std::string("cache_k_0") : kv_names.cache_k.front();
         int32_t kv_dim = decoder_cache_row_width(*loaded.decode, cache_k_name, ctx.config);
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
+        validate_native_bundle(ctx, *loaded.decode, *loaded.prefill, kv_names, tp_config,
+                               cache_dtype);
+        admit_native_kv_allocation(ctx, kv_dim, cache_dtype);
         std::unique_ptr<InternvlInferenceState> state =
             std::make_unique<InternvlKvCache>(ctx.config.num_layers, ctx.config.max_cache_length,
                                               kv_dim, stream, cache_dtype, std::move(kv_names));
+        if (!state->ok())
+            throw std::runtime_error("Failed to allocate InternVL native KV cache");
 
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
@@ -178,15 +313,9 @@ class VLPlugin final : public IPipelinePlugin {
         vlc.vision_output_dim = extract_json_int(ctx.config_json, "vision_output_dim", 0);
         vlc.has_position_input = loaded.decode->has_input("position_id");
         vlc.num_layers = ctx.config.num_layers;
-        vlc.prefill_max_length = ctx.config.max_cache_length;
+        vlc.prefill_max_length = prefill_profile_capacity(*loaded.prefill);
         vlc.present_k_pattern = ctx.config.io_map.present_k_pattern;
         vlc.present_v_pattern = ctx.config.io_map.present_v_pattern;
-
-        bool has_vision_engine = extract_json_int(ctx.config_json, "has_vision_engine", 0) != 0;
-
-        // Try to load the vision encoder engine from the bundle.
-        std::unique_ptr<TrtModule> vision_module =
-            load_vision_module(ctx.backend, ctx.bundle, opts, shared_stream, has_vision_engine);
 
         // Build VL preprocessing config from bundle's config.json +
         // preprocessor_config.json sections.

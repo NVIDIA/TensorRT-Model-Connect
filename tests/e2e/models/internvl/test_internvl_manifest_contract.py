@@ -36,3 +36,20 @@ def test_internvl3_8b_builds_reserve_an_exclusive_gpu(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     assert manifest["e2e_parallel_resource"] == "exclusive_gpu"
+
+
+@pytest.mark.parametrize(
+    "manifest_name",
+    (
+        "internvl3-2b.json", "internvl3-2b-tp2.json",
+        "internvl3-8b.json", "internvl3-8b-tp4.json",
+    ),
+)
+def test_internvl_manifests_use_native_full_context_contract(
+    manifest_name: str,
+) -> None:
+    manifest_path = Path(__file__).with_name("manifests") / manifest_name
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["precision"] == "bf16"
+    assert "max_cache_length" not in manifest

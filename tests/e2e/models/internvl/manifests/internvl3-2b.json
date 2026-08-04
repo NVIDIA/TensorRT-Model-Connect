@@ -5,9 +5,8 @@
   "family": "internvl",
   "runtime_strategy": "internvl_vision_language",
   "task_strategy": "vision_language_generation",
-  "precision": "fp16",
+  "precision": "bf16",
   "user_contract": "image-text-to-text",
-  "max_cache_length": 384,
   "trust_remote_code": false,
   "testcases": [
     {

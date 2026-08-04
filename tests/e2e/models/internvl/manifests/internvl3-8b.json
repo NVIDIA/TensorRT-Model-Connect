@@ -6,8 +6,7 @@
   "runtime_strategy": "internvl_vision_language",
   "task_strategy": "vision_language_generation",
   "e2e_parallel_resource": "exclusive_gpu",
-  "precision": "fp16",
-  "max_cache_length": 384,
+  "precision": "bf16",
   "trust_remote_code": false,
   "testcases": [
     {
