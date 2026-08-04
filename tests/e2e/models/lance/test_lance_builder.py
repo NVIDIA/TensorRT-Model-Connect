@@ -118,6 +118,7 @@ def test_lance_runtime_reads_boolean_vision_contract() -> None:
     ).read_text(encoding="utf-8")
     assert 'extract_json_bool(ctx.config_json, "has_vision_engine", false)' in source
     assert 'extract_json_int(ctx.config_json, "has_vision_engine"' not in source
+    assert "declared_in_config || plan != nullptr" in source
 
 
 def test_lance_rope_table_can_match_bf16_inv_freq_buffer() -> None:
