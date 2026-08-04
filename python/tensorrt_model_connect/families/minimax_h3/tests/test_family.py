@@ -93,6 +93,16 @@ def test_plugin_bundle_config_preserves_exact_provenance() -> None:
     assert result | provenance == result
     assert result["seed"] == 7
     assert result["context_parallel_size"] == 1
+    assert result["bundle_loading"] == {
+        "mode": "staged",
+        "eager_sections": ["tokenizer.json", "config.json"],
+        "lazy_sections": [
+            "text_encoder_plan",
+            "adaln_precompute_plan",
+            "denoiser_plan",
+            "vae_tile_decoder_plan",
+        ],
+    }
     with pytest.raises(ValueError, match="runtime profile"):
         MiniMaxH3Plugin().diffusion_bundle_config(
             SimpleNamespace(raw={"video_width": 1}),

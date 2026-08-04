@@ -12,12 +12,19 @@ from __future__ import annotations
 from collections import Counter
 import math
 
+import ml_dtypes
 import numpy as np
 
 from tensorrt_model_connect import trt_compat
 
 
 trt = trt_compat.get_trt()
+
+
+# TensorRT's explicit BF16 ``Weights`` constructor stores a pointer rather
+# than owning its input.  Retain every backing array until the associated
+# network has finished building, including temporary packed QKV buffers.
+_WEIGHT_BUFFER_KEEPALIVE: dict[int, list[np.ndarray]] = {}
 
 
 def configure_builder(config) -> None:
@@ -56,9 +63,34 @@ def validate_native_network(network, *, expected_attentions: int, label: str) ->
     }
 
 
+def _add_constant(network, array: np.ndarray):
+    array = np.ascontiguousarray(array)
+    _WEIGHT_BUFFER_KEEPALIVE.setdefault(id(network), []).append(array)
+    if array.dtype == np.dtype(ml_dtypes.bfloat16):
+        weights = trt.Weights(trt.bfloat16, array.ctypes.data, array.size)
+    else:
+        weights = array
+    layer = network.add_constant(tuple(array.shape), weights)
+    if layer is None:
+        raise RuntimeError(f"TensorRT rejected a MiniMax-H3 {array.dtype} constant")
+    return layer.get_output(0)
+
+
+def release_weight_buffers(network) -> None:
+    """Release explicit TensorRT weight buffers after engine serialization."""
+
+    _WEIGHT_BUFFER_KEEPALIVE.pop(id(network), None)
+
+
 def constant(network, value, *, dtype=np.float32):
     array = np.ascontiguousarray(value, dtype=dtype)
-    return network.add_constant(tuple(array.shape), array).get_output(0)
+    return _add_constant(network, array)
+
+
+def weight_constant(network, value):
+    """Create a constant without expanding checkpoint-native BF16 to FP32."""
+
+    return _add_constant(network, np.asarray(value))
 
 
 def cast(network, tensor, dtype):
@@ -79,25 +111,26 @@ def linear(
     """PyTorch ``[out, in]`` linear expressed as native TensorRT GEMM."""
 
     tensor_rank = len(tuple(tensor.shape))
-    rhs_value = np.asarray(weight, dtype=np.float32).T
+    rhs_value = np.asarray(weight)
     if tensor_rank > 2:
         # TensorRT MatrixMultiply applies NumPy-style broadcast across the
         # leading dimensions only when both operands expose those dimensions.
         # VAE layers are [batch, rows, width], so make the shared weight
-        # explicitly [1, in, out] instead of relying on implicit rank lift.
+        # explicitly [1, out, in] instead of relying on implicit rank lift.
         rhs_value = rhs_value.reshape((1,) * (tensor_rank - 2) + rhs_value.shape)
-    rhs = constant(network, rhs_value)
+    rhs = weight_constant(network, rhs_value)
     if compute_dtype is None and bf16:
         compute_dtype = trt.bfloat16
-    if compute_dtype is not None:
-        tensor = cast(network, tensor, compute_dtype)
-        rhs = cast(network, rhs, compute_dtype)
+    if compute_dtype is None:
+        compute_dtype = tensor.dtype
+    tensor = cast(network, tensor, compute_dtype)
+    rhs = cast(network, rhs, compute_dtype)
     output = network.add_matrix_multiply(
-        tensor, trt.MatrixOperation.NONE, rhs, trt.MatrixOperation.NONE
+        tensor, trt.MatrixOperation.NONE, rhs, trt.MatrixOperation.TRANSPOSE
     ).get_output(0)
     if bias is not None:
         shape = (1,) * (len(tuple(output.shape)) - 1) + (-1,)
-        bias_tensor = constant(network, np.asarray(bias, dtype=np.float32).reshape(shape))
+        bias_tensor = weight_constant(network, np.asarray(bias).reshape(shape))
         bias_tensor = cast(network, bias_tensor, output.dtype)
         output = network.add_elementwise(
             output, bias_tensor, trt.ElementWiseOperation.SUM
@@ -133,7 +166,8 @@ def rms_norm(network, tensor, weight, width: int, eps: float):
         0
     )
     gamma_shape = (1,) * (len(tuple(value.shape)) - 1) + (width,)
-    gamma = constant(network, np.asarray(weight, dtype=np.float32).reshape(gamma_shape))
+    gamma = weight_constant(network, np.asarray(weight).reshape(gamma_shape))
+    gamma = cast(network, gamma, value.dtype)
     normalized = network.add_elementwise(
         normalized, gamma, trt.ElementWiseOperation.PROD
     ).get_output(0)

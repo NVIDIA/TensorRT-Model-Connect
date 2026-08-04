@@ -13,9 +13,9 @@ import time
 from pathlib import Path
 
 from tensorrt_model_connect.families.minimax_h3.checkpoint import (
-    load_component_state_dict,
     load_selected_component_state_dict,
     numpy_state,
+    validate_component_key_partition,
 )
 from tensorrt_model_connect.families.minimax_h3.config import (
     SOL_ENGINE_1344X768_124F,
@@ -136,7 +136,9 @@ def main() -> int:
         weights = numpy_state(state)
         del state
         started = time.perf_counter()
-        plan = build_text_encoder_engine(weights, sequence_length=profile.text_rows)
+        plan = build_text_encoder_engine(
+            weights, sequence_length=profile.text_rows, consume_weights=True
+        )
         _write(output, "text_encoder.plan", plan, time.perf_counter() - started, receipt)
         checkpoint_receipt()
         del weights, plan
@@ -145,29 +147,39 @@ def main() -> int:
     from tensorrt_model_connect.families.minimax_h3.adaln_builder import (
         build_adaln_precompute_engine,
     )
-    from tensorrt_model_connect.families.minimax_h3.dit_builder import build_dit_engine
+    from tensorrt_model_connect.families.minimax_h3.adaln_builder import (
+        checkpoint_keys as adaln_keys,
+    )
+    from tensorrt_model_connect.families.minimax_h3.dit_builder import (
+        build_dit_engine,
+        checkpoint_keys as dit_keys,
+    )
 
     build_adaln = should_build("adaln_precompute", "adaln_precompute.plan")
     build_denoiser = should_build("denoiser", "denoiser.plan")
     if build_adaln or build_denoiser:
-        state = load_component_state_dict(model / "transformer")
+        validate_component_key_partition(
+            model / "transformer", (adaln_keys(profile), dit_keys(profile))
+        )
+    if build_adaln:
+        state = load_selected_component_state_dict(model / "transformer", adaln_keys(profile))
         weights = numpy_state(state)
         del state
-        if build_adaln:
-            started = time.perf_counter()
-            plan = build_adaln_precompute_engine(weights, profile)
-            _write(output, "adaln_precompute.plan", plan, time.perf_counter() - started, receipt)
-            checkpoint_receipt()
-            del plan
-            gc.collect()
-        if build_denoiser:
-            started = time.perf_counter()
-            plan = build_dit_engine(weights, profile)
-            _write(output, "denoiser.plan", plan, time.perf_counter() - started, receipt)
-            checkpoint_receipt()
-            del plan
-            gc.collect()
-        del weights
+        started = time.perf_counter()
+        plan = build_adaln_precompute_engine(weights, profile, consume_weights=True)
+        _write(output, "adaln_precompute.plan", plan, time.perf_counter() - started, receipt)
+        checkpoint_receipt()
+        del weights, plan
+        gc.collect()
+    if build_denoiser:
+        state = load_selected_component_state_dict(model / "transformer", dit_keys(profile))
+        weights = numpy_state(state)
+        del state
+        started = time.perf_counter()
+        plan = build_dit_engine(weights, profile, consume_weights=True)
+        _write(output, "denoiser.plan", plan, time.perf_counter() - started, receipt)
+        checkpoint_receipt()
+        del weights, plan
         gc.collect()
 
     from tensorrt_model_connect.families.minimax_h3.vae_builder import (
@@ -182,7 +194,7 @@ def main() -> int:
         weights = numpy_state(state)
         del state
         started = time.perf_counter()
-        plan = build_vae_tile_decoder_engine(weights)
+        plan = build_vae_tile_decoder_engine(weights, consume_weights=True)
         _write(output, "vae_tile_decoder.plan", plan, time.perf_counter() - started, receipt)
         checkpoint_receipt()
     checkpoint_receipt()

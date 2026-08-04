@@ -10,6 +10,7 @@ norm, remaining language layers, and vision tower never enter the plan.
 
 from __future__ import annotations
 
+import gc
 import math
 import sys
 
@@ -90,7 +91,11 @@ def _linear(network, hidden, weights, name: str):
 
 
 def build_text_encoder_engine(
-    weights: dict[str, np.ndarray], *, sequence_length: int, verbose: bool = False
+    weights: dict[str, np.ndarray],
+    *,
+    sequence_length: int,
+    verbose: bool = False,
+    consume_weights: bool = False,
 ) -> bytes:
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -99,7 +104,7 @@ def build_text_encoder_engine(
     op.configure_builder(config)
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 96 << 30)
     input_ids = network.add_input("input_ids", trt.int32, (sequence_length,))
-    table = op.constant(network, weights["model.language_model.embed_tokens.weight"])
+    table = op.weight_constant(network, weights["model.language_model.embed_tokens.weight"])
     table = op.cast(network, table, trt.bfloat16)
     hidden = network.add_gather(table, input_ids, 0).get_output(0)
     cos, sin = _rope_cache(network, sequence_length)
@@ -185,7 +190,14 @@ def build_text_encoder_engine(
         f"sequence={sequence_length}",
         file=sys.stderr,
     )
-    plan = builder.build_serialized_network(network, config)
+    try:
+        plan = builder.build_serialized_network(network, config)
+    finally:
+        op.release_weight_buffers(network)
+        if consume_weights:
+            weights.clear()
     if plan is None:
         raise RuntimeError("TensorRT failed to build MiniMax-H3 text encoder")
+    del network, config, builder
+    gc.collect()
     return bytes(plan)

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import gc
 import math
 import sys
 
@@ -13,10 +14,60 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from . import graph_ops as op
-from .config import MiniMaxH3Config
+from .config import MiniMaxH3Config, SOL_ENGINE_1344X768_124F
 
 
 trt = trt_compat.get_trt()
+
+
+def checkpoint_keys(
+    profile: MiniMaxH3Config = SOL_ENGINE_1344X768_124F,
+) -> tuple[str, ...]:
+    """Checkpoint tensors used by the recurrent DiT plan, excluding AdaLN."""
+
+    names = [
+        "proj_in.weight",
+        "proj_in.bias",
+        "audio_proj_in.weight",
+        "audio_proj_in.bias",
+        "context_embedder.weight",
+        "context_embedder.bias",
+        "token_refiner.final_norm.weight",
+        "norm_out.norm.weight",
+        "proj_out.weight",
+        "proj_out.bias",
+        "audio_proj_out.weight",
+        "audio_proj_out.bias",
+    ]
+    for index in range(profile.num_refiner_layers):
+        prefix = f"token_refiner.refiner_blocks.{index}"
+        names.extend(
+            [
+                f"{prefix}.norm1.weight",
+                f"{prefix}.norm2.weight",
+                *(f"{prefix}.attn.to_{name}.weight" for name in ("q", "k", "v")),
+                f"{prefix}.attn.norm_q.weight",
+                f"{prefix}.attn.norm_k.weight",
+                f"{prefix}.attn.to_out.0.weight",
+                f"{prefix}.ff.net.0.proj.weight",
+                f"{prefix}.ff.net.2.weight",
+            ]
+        )
+    for index in range(profile.num_layers):
+        prefix = f"transformer_blocks.{index}"
+        names.extend(
+            [
+                f"{prefix}.norm1.weight",
+                f"{prefix}.norm2.weight",
+                *(f"{prefix}.attn.to_{name}.weight" for name in ("q", "k", "v")),
+                f"{prefix}.attn.norm_q.weight",
+                f"{prefix}.attn.norm_k.weight",
+                f"{prefix}.attn.to_out.0.weight",
+                f"{prefix}.ff.net.0.proj.weight",
+                f"{prefix}.ff.net.2.weight",
+            ]
+        )
+    return tuple(names)
 
 
 def _slice_modulation(network, selected, index: int, rows: int, width: int):
@@ -183,6 +234,7 @@ def build_dit_engine(
     profile: MiniMaxH3Config,
     *,
     verbose: bool = False,
+    consume_weights: bool = False,
 ) -> bytes:
     """Build the full-sequence single-device H3 TensorRT plan."""
 
@@ -318,7 +370,14 @@ def build_dit_engine(
         f"packed={profile.sequence_length}, devices=1",
         file=sys.stderr,
     )
-    plan = builder.build_serialized_network(network, config)
+    try:
+        plan = builder.build_serialized_network(network, config)
+    finally:
+        op.release_weight_buffers(network)
+        if consume_weights:
+            weights.clear()
     if plan is None:
         raise RuntimeError("TensorRT failed to build MiniMax-H3 DiT engine")
+    del network, config, builder
+    gc.collect()
     return bytes(plan)

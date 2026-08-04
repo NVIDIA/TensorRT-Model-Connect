@@ -5,16 +5,16 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import os
 from pathlib import Path
 
 from .checkpoint import (
-    load_component_state_dict,
     load_selected_component_state_dict,
     numpy_state,
-    require_keys,
+    validate_component_key_partition,
 )
 from .config import SOL_ENGINE_1344X768_124F
 from .provenance import (
@@ -127,10 +127,16 @@ class MiniMaxH3Plugin:
         source_revision = _build_source_revision()
         snapshot = checkpoint_snapshot_record(Path(weights["_model_dir"]))
         from .adaln_builder import build_adaln_precompute_engine
-        from .dit_builder import build_dit_engine
+        from .adaln_builder import checkpoint_keys as adaln_checkpoint_keys
+        from .dit_builder import build_dit_engine, checkpoint_keys as dit_checkpoint_keys
         from .text_encoder_builder import (
             build_text_encoder_engine,
             checkpoint_keys as text_encoder_checkpoint_keys,
+        )
+
+        validate_component_key_partition(
+            weights["_transformer_dir"],
+            (adaln_checkpoint_keys(profile), dit_checkpoint_keys(profile)),
         )
 
         text_state = load_selected_component_state_dict(
@@ -139,30 +145,41 @@ class MiniMaxH3Plugin:
         text_weights = numpy_state(text_state)
         del text_state
         text_encoder_plan = build_text_encoder_engine(
-            text_weights, sequence_length=profile.text_rows, verbose=verbose
+            text_weights,
+            sequence_length=profile.text_rows,
+            verbose=verbose,
+            consume_weights=True,
         )
         del text_weights
+        gc.collect()
 
-        state = load_component_state_dict(weights["_transformer_dir"])
-        require_keys(
-            state,
-            (
-                "proj_in.weight",
-                "audio_proj_in.weight",
-                "context_embedder.weight",
-                "time_embedder.linear_1.weight",
-                "transformer_blocks.49.attn.to_q.weight",
-                "transformer_blocks.49.adaln_proj.linear.weight",
-                "norm_out.norm.weight",
-                "proj_out.weight",
-                "audio_proj_out.weight",
-            ),
+        adaln_state = load_selected_component_state_dict(
+            weights["_transformer_dir"], adaln_checkpoint_keys(profile)
         )
-        transformer_weights = numpy_state(state)
-        del state
-        adaln_plan = build_adaln_precompute_engine(transformer_weights, profile, verbose=verbose)
-        denoiser_plan = build_dit_engine(transformer_weights, profile, verbose=verbose)
-        del transformer_weights
+        adaln_weights = numpy_state(adaln_state)
+        del adaln_state
+        adaln_plan = build_adaln_precompute_engine(
+            adaln_weights,
+            profile,
+            verbose=verbose,
+            consume_weights=True,
+        )
+        del adaln_weights
+        gc.collect()
+
+        dit_state = load_selected_component_state_dict(
+            weights["_transformer_dir"], dit_checkpoint_keys(profile)
+        )
+        dit_weights = numpy_state(dit_state)
+        del dit_state
+        denoiser_plan = build_dit_engine(
+            dit_weights,
+            profile,
+            verbose=verbose,
+            consume_weights=True,
+        )
+        del dit_weights
+        gc.collect()
 
         from .vae_builder import (
             build_vae_tile_decoder_engine,
@@ -172,7 +189,9 @@ class MiniMaxH3Plugin:
         vae_state = load_selected_component_state_dict(weights["_vae_dir"], vae_checkpoint_keys())
         vae_weights = numpy_state(vae_state)
         del vae_state
-        vae_decoder_plan = build_vae_tile_decoder_engine(vae_weights, verbose=verbose)
+        vae_decoder_plan = build_vae_tile_decoder_engine(
+            vae_weights, verbose=verbose, consume_weights=True
+        )
         tokenizer_json = (Path(weights["_tokenizer_dir"]) / "tokenizer.json").read_bytes()
 
         plan_sha256 = {
@@ -242,6 +261,16 @@ class MiniMaxH3Plugin:
             "fps": 24,
             "num_inference_steps": 50,
             "seed": int(raw.get("seed", 0)),
+            "bundle_loading": {
+                "mode": "staged",
+                "eager_sections": ["tokenizer.json", "config.json"],
+                "lazy_sections": [
+                    "text_encoder_plan",
+                    "adaln_precompute_plan",
+                    "denoiser_plan",
+                    "vae_tile_decoder_plan",
+                ],
+            },
             "text_rows": profile.text_rows,
             "audio_rows": profile.audio_rows,
             "video_rows": profile.video_rows,

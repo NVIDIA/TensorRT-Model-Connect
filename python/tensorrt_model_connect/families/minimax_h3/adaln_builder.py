@@ -10,15 +10,34 @@ then unload this weight-heavy plan before loading the recurrent DiT plan.
 
 from __future__ import annotations
 
+import gc
 import sys
 
 from tensorrt_model_connect import trt_compat
 
 from . import graph_ops as op
-from .config import MiniMaxH3Config
+from .config import MiniMaxH3Config, SOL_ENGINE_1344X768_124F
 
 
 trt = trt_compat.get_trt()
+
+
+def checkpoint_keys(
+    profile: MiniMaxH3Config = SOL_ENGINE_1344X768_124F,
+) -> tuple[str, ...]:
+    """Checkpoint tensors used exclusively by the AdaLN precompute plan."""
+
+    names = [
+        "time_embedder.linear_1.weight",
+        "time_embedder.linear_1.bias",
+        "time_embedder.linear_2.weight",
+        "time_embedder.linear_2.bias",
+    ]
+    for index in range(profile.num_layers):
+        prefix = f"transformer_blocks.{index}.adaln_proj.linear"
+        names.extend((f"{prefix}.weight", f"{prefix}.bias"))
+    names.extend(("norm_out.linear.weight", "norm_out.linear.bias"))
+    return tuple(names)
 
 
 def build_adaln_precompute_engine(
@@ -26,6 +45,7 @@ def build_adaln_precompute_engine(
     profile: MiniMaxH3Config,
     *,
     verbose: bool = False,
+    consume_weights: bool = False,
 ) -> bytes:
     profile.validate()
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -99,7 +119,14 @@ def build_adaln_precompute_engine(
         f"timesteps={profile.max_timestep_count}",
         file=sys.stderr,
     )
-    plan = builder.build_serialized_network(network, config)
+    try:
+        plan = builder.build_serialized_network(network, config)
+    finally:
+        op.release_weight_buffers(network)
+        if consume_weights:
+            weights.clear()
     if plan is None:
         raise RuntimeError("TensorRT failed to build MiniMax-H3 AdaLN precompute engine")
+    del network, config, builder
+    gc.collect()
     return bytes(plan)

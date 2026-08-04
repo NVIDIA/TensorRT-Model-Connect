@@ -10,6 +10,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tensorrt_model_connect import engine_builder
 from tensorrt_model_connect.bundle_writer import (
     BundleInfo,
     BundleSection,
@@ -29,6 +30,31 @@ PLAN_SECTIONS = {
     "denoiser_plan": "denoiser.plan",
     "vae_tile_decoder_plan": "vae_tile_decoder.plan",
 }
+EAGER_BUNDLE_SECTIONS = ("tokenizer.json", "config.json")
+LAZY_BUNDLE_SECTIONS = tuple(PLAN_SECTIONS)
+
+
+def _target_metadata() -> tuple[str, str, str]:
+    """Bind a bundle to the TensorRT ABI and GPU that built its plans."""
+
+    trt_version = engine_builder._get_trt_version()
+    trt_abi = engine_builder._trt_abi_from_version(trt_version)
+    gpu_name = engine_builder._get_gpu_name()
+    if trt_version == "unknown" or not trt_abi or not gpu_name:
+        raise RuntimeError(
+            "MiniMax-H3 bundle packaging requires a detected TensorRT version and GPU"
+        )
+    return trt_version, trt_abi, gpu_name
+
+
+def _bundle_loading_policy() -> dict[str, object]:
+    """Keep only metadata resident; H3 loads one large plan at a time."""
+
+    return {
+        "mode": "staged",
+        "eager_sections": list(EAGER_BUNDLE_SECTIONS),
+        "lazy_sections": list(LAZY_BUNDLE_SECTIONS),
+    }
 
 
 def main() -> int:
@@ -42,6 +68,7 @@ def main() -> int:
     model = Path(args.model_path)
     output = Path(args.output)
     source_revision = validate_source_revision(args.source_revision)
+    trt_version, trt_abi, gpu_name = _target_metadata()
     receipt_path = plans / "build_receipt.json"
     if not receipt_path.is_file():
         raise FileNotFoundError(f"Missing native build receipt: {receipt_path}")
@@ -78,8 +105,9 @@ def main() -> int:
         "runtime_strategy": "diffusion_minimax_h3",
         "precision": "bf16",
         "engine_backend": "trt",
-        "trt_version": "11.2.0.113",
-        "trt_abi": "11.2",
+        "trt_version": trt_version,
+        "trt_abi": trt_abi,
+        "bundle_loading": _bundle_loading_policy(),
         "tokenizer_add_special_tokens": 0,
         "checkpoint_revision": CHECKPOINT_REVISION,
         "source_revision": source_revision,
@@ -109,9 +137,9 @@ def main() -> int:
         model_id="MiniMaxAI/MiniMax-H3",
         model_type="minimax_h3",
         family="minimax_h3",
-        trt_version="11.2.0.113",
-        trt_abi="11.2",
-        gpu_name="NVIDIA GB300",
+        trt_version=trt_version,
+        trt_abi=trt_abi,
+        gpu_name=gpu_name,
         created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         runtime_strategy="diffusion_minimax_h3",
         precision="bf16",

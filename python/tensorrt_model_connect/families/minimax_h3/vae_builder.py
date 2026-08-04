@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import gc
 import math
 import sys
 
@@ -173,7 +174,9 @@ def _swiglu(network, hidden, weights, prefix: str):
     )
 
 
-def build_vae_tile_decoder_engine(weights: dict, *, verbose: bool = False) -> bytes:
+def build_vae_tile_decoder_engine(
+    weights: dict, *, verbose: bool = False, consume_weights: bool = False
+) -> bytes:
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
@@ -205,7 +208,7 @@ def build_vae_tile_decoder_engine(weights: dict, *, verbose: bool = False) -> by
     registers = np.broadcast_to(
         weights["decoder.register_tokens"], (BATCH, REGISTER_TOKENS, DIM)
     ).copy()
-    registers = op.cast(network, op.constant(network, registers), trt.float16)
+    registers = op.cast(network, op.weight_constant(network, registers), trt.float16)
     cls = op.cast(network, op.constant(network, np.zeros((BATCH, 1, DIM), np.float32)), trt.float16)
     packed = network.add_concatenation([hidden, registers, cls])
     packed.axis = 1
@@ -243,7 +246,8 @@ def build_vae_tile_decoder_engine(weights: dict, *, verbose: bool = False) -> by
             compute_dtype=trt.float16,
         )
         update = op.cast(network, update, trt.float32)
-        scale1 = op.constant(network, weights[f"{prefix}.scale1"].reshape(1, 1, DIM))
+        scale1 = op.weight_constant(network, weights[f"{prefix}.scale1"].reshape(1, 1, DIM))
+        scale1 = op.cast(network, scale1, update.dtype)
         update = network.add_elementwise(update, scale1, trt.ElementWiseOperation.PROD).get_output(
             0
         )
@@ -253,15 +257,18 @@ def build_vae_tile_decoder_engine(weights: dict, *, verbose: bool = False) -> by
         normalized = op.rms_norm(network, hidden, weights[f"{prefix}.norm2.weight"], DIM, NORM_EPS)
         update = _swiglu(network, normalized, weights, f"{prefix}.ff")
         update = op.cast(network, update, trt.float32)
-        scale2 = op.constant(network, weights[f"{prefix}.scale2"].reshape(1, 1, DIM))
+        scale2 = op.weight_constant(network, weights[f"{prefix}.scale2"].reshape(1, 1, DIM))
+        scale2 = op.cast(network, scale2, update.dtype)
         update = network.add_elementwise(update, scale2, trt.ElementWiseOperation.PROD).get_output(
             0
         )
         hidden = network.add_elementwise(hidden, update, trt.ElementWiseOperation.SUM).get_output(0)
 
-    gamma = op.constant(network, weights["decoder.norm_out.weight"].reshape(1, 1, DIM))
-    beta = op.constant(network, weights["decoder.norm_out.bias"].reshape(1, 1, DIM))
+    gamma = op.weight_constant(network, weights["decoder.norm_out.weight"].reshape(1, 1, DIM))
+    beta = op.weight_constant(network, weights["decoder.norm_out.bias"].reshape(1, 1, DIM))
     hidden_fp32 = op.cast(network, hidden, trt.float32)
+    gamma = op.cast(network, gamma, hidden_fp32.dtype)
+    beta = op.cast(network, beta, hidden_fp32.dtype)
     norm = network.add_normalization_v2(hidden_fp32, gamma, beta, 1 << 2)
     norm.epsilon = NORM_EPS
     pixels = op.linear(
@@ -291,7 +298,14 @@ def build_vae_tile_decoder_engine(weights: dict, *, verbose: bool = False) -> by
         f"sequence={SEQUENCE}, layers={LAYERS}",
         file=sys.stderr,
     )
-    plan = builder.build_serialized_network(network, config)
+    try:
+        plan = builder.build_serialized_network(network, config)
+    finally:
+        op.release_weight_buffers(network)
+        if consume_weights:
+            weights.clear()
     if plan is None:
         raise RuntimeError("TensorRT failed to build MiniMax-H3 VAE tile decoder")
+    del network, config, builder
+    gc.collect()
     return bytes(plan)

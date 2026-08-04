@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ml_dtypes
 import numpy as np
 import pytest
 
@@ -119,7 +120,42 @@ def test_native_linear_broadcasts_over_vae_batch() -> None:
     output.name = "output"
     network.mark_output(output)
     assert tuple(output.shape) == (2, 3, 5)
-    assert builder.build_serialized_network(network, config)
+    try:
+        plan = builder.build_serialized_network(network, config)
+    finally:
+        op.release_weight_buffers(network)
+    assert plan
+
+
+@pytest.mark.gpu
+def test_native_linear_serializes_checkpoint_bf16_without_fp32_constant() -> None:
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    config = builder.create_builder_config()
+    value = network.add_input("value", trt.bfloat16, (1, 2))
+    weight = np.array([[1.5, -2.25], [3.125, 4.5]], dtype=ml_dtypes.bfloat16)
+    explicit = trt.Weights(trt.bfloat16, weight.ctypes.data, weight.size)
+
+    output = op.linear(network, value, weight)
+    output.name = "output"
+    network.mark_output(output)
+
+    constants = [
+        network.get_layer(index)
+        for index in range(network.num_layers)
+        if network.get_layer(index).type == trt.LayerType.CONSTANT
+    ]
+    assert len(constants) == 1
+    assert constants[0].get_output(0).dtype == trt.bfloat16
+    assert explicit.dtype == trt.bfloat16
+    assert explicit.nbytes == weight.nbytes == 8
+    assert output.dtype == trt.bfloat16
+    try:
+        plan = builder.build_serialized_network(network, config)
+    finally:
+        op.release_weight_buffers(network)
+    assert plan
 
 
 def test_native_network_contract_counts_iattention_and_fails_closed() -> None:
