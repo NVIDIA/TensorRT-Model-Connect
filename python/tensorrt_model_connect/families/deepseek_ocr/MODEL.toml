@@ -10,7 +10,7 @@ python_profile_specs = [
 default_execution_profiles = [
   "reference|deepseek_ocr",
 ]
-capabilities = ["debug_layer_outputs"]
+capabilities = ["split_decoder_roles"]
 aliases = [
   "deepseek_ocr",
   "deepseek_vl_v2",

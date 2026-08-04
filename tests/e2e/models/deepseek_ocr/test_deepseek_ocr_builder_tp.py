@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -19,7 +20,11 @@ try:
         "tensorrt_model_connect.families.deepseek_ocr.plugin")
     from tensorrt_model_connect.checkpoint_mapper import WeightDict
     from tensorrt_model_connect import trt_compat
-    from tensorrt_model_connect.families.deepseek_ocr import graph_ops, tp_builder
+    from tensorrt_model_connect.families.deepseek_ocr import (
+        graph_ops,
+        standard_decoder_builder,
+        tp_builder,
+    )
     from tensorrt_model_connect.families.deepseek_ocr.prefill_config import (
         sequence_prefill_profile_lengths,
     )
@@ -28,10 +33,24 @@ except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
+def test_native_builders_do_not_import_legacy_decoder_paths() -> None:
+    family_prefix = "tensorrt_model_connect.families.deepseek_ocr."
+    legacy_modules = {
+        family_prefix + "default_decoder",
+        family_prefix + "default_dual_profile_decoder",
+        family_prefix + "graph_blocks",
+    }
+    assert legacy_modules.isdisjoint(sys.modules)
+    assert standard_decoder_builder.__all__ == ["_apply_norm"]
+    assert not hasattr(graph_ops, "add_decoder_attention_ffi")
+    assert not hasattr(graph_ops, "add_tvm_ffi_kernel")
+
+
 def _config(num_heads: int = 4, num_kv_heads: int | None = None) -> SimpleNamespace:
     kv_heads = num_heads if num_kv_heads is None else num_kv_heads
     return SimpleNamespace(
         raw={},
+        model_type="deepseek_vl_v2",
         hidden_size=8,
         vocab_size=32,
         num_hidden_layers=2,
@@ -42,7 +61,17 @@ def _config(num_heads: int = 4, num_kv_heads: int | None = None) -> SimpleNamesp
         intermediate_size=16,
         rms_norm_eps=1e-5,
         rope_theta=10000.0,
+        max_position_embeddings=4096,
     )
+
+
+def _disable_native_contract_validation(monkeypatch) -> None:
+    monkeypatch.setattr(
+        deepseek_ocr_module, "validate_native_kv_build",
+        lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        deepseek_ocr_module, "validate_native_kv_weights",
+        lambda *args, **kwargs: None)
 
 
 def _weights() -> WeightDict:
@@ -145,6 +174,7 @@ def test_deepseek_ocr_tp_validation_rejects_non_divisible_attention_heads() -> N
 
 
 def test_deepseek_ocr_plugin_routes_parallel_builds(monkeypatch) -> None:
+    _disable_native_contract_validation(monkeypatch)
     calls: dict[str, object] = {}
 
     def fake_require(parallel, *, feature):
@@ -176,15 +206,45 @@ def test_deepseek_ocr_plugin_routes_parallel_builds(monkeypatch) -> None:
     assert max_cache_length == 4096
     assert kwargs["parallel_config"] == parallel
     assert kwargs["verbose"] is True
+    assert kwargs["profile_mode"] == "decode"
+    assert "native_kv_cache" not in kwargs
+    assert kwargs["precision"] == "bf16"
+
+
+def test_deepseek_ocr_defaults_to_full_context_bf16_split() -> None:
+    plugin = deepseek_ocr_module.DeepSeekOCRPlugin()
+    config = _config()
+    assert plugin.default_build_precision(config) == "bf16"
+    assert plugin.default_max_cache_length(config) == 4096
+    assert plugin.supports_split_decoder_roles(config) is True
+    assert plugin.runtime_capabilities == {"decoder_kv"}
+
+
+def test_deepseek_ocr_tp_extra_engines_are_rank_local_prefill(
+    monkeypatch,
+) -> None:
+    _disable_native_contract_validation(monkeypatch)
+    calls: list[dict[str, object]] = []
+
+    def fake_build(config, weights, max_cache_length, **kwargs):
+        calls.append(kwargs)
+        return f"prefill-{kwargs['parallel_config'].rank}".encode()
+
+    monkeypatch.setattr(
+        tp_builder, "build_deepseek_ocr_tp_engine", fake_build)
+    plans = deepseek_ocr_module.DeepSeekOCRPlugin().build_extra_engines(
+        _config(), _weights(), 4096, precision="bf16",
+        parallel_config=ParallelConfig(mode="tensor_parallel", tp_size=2))
+
+    assert plans == {
+        "prefill_engine_tp_rank0_plan": b"prefill-0",
+        "prefill_engine_tp_rank1_plan": b"prefill-1",
+    }
+    assert all(call["profile_mode"] == "prefill" for call in calls)
+    assert all("native_kv_cache" not in call for call in calls)
 
 
 def test_deepseek_ocr_parallel_build_rejects_debug_outputs(monkeypatch) -> None:
-    monkeypatch.setattr(
-        deepseek_ocr_module,
-        "require_tensorrt_11_for_tensor_parallel",
-        lambda parallel, *, feature: None,
-    )
-
     with pytest.raises(ValueError, match="debug layer outputs"):
         deepseek_ocr_module.DeepSeekOCRPlugin().build_engine(
             _config(),
@@ -195,7 +255,11 @@ def test_deepseek_ocr_parallel_build_rejects_debug_outputs(monkeypatch) -> None:
         )
 
 
-def test_deepseek_ocr_forwards_fp16_to_vision_engine(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("requested", "expected"), [("fp16", "fp16"), ("bf16", "fp32")])
+def test_deepseek_ocr_forwards_supported_precision_to_vision_engine(
+    monkeypatch, requested: str, expected: str,
+) -> None:
     calls: dict[str, object] = {}
 
     def fake_build(model_dir, config, *, precision, verbose):
@@ -215,13 +279,13 @@ def test_deepseek_ocr_forwards_fp16_to_vision_engine(monkeypatch) -> None:
     config = _config()
 
     plan = deepseek_ocr_module.DeepSeekOCRPlugin().build_vision_engine(
-        "/model", config, _weights(), precision="fp16", verbose=True)
+        "/model", config, _weights(), precision=requested, verbose=True)
 
     assert plan == b"vision-plan"
     assert calls == {
         "model_dir": "/model",
         "config": config,
-        "precision": "fp16",
+        "precision": expected,
         "verbose": True,
     }
 
@@ -275,32 +339,39 @@ def test_deepseek_ocr_bounds_sequence_prefill_profile(
     assert sequence_prefill_profile_lengths(max_cache_length) == expected
 
 
-def test_deepseek_ocr_decomposes_multirow_sequence_attention() -> None:
+def test_deepseek_ocr_native_attention_updates_cache_and_stays_fused() -> None:
     trt = trt_compat.get_trt()
     builder = trt.Builder(trt.Logger(trt.Logger.ERROR))
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     head_dim = 128
     hidden_size = 2 * head_dim
-    q = network.add_input("q", trt.float16, (2, hidden_size))
-    k = network.add_input("k", trt.float16, (5, hidden_size))
-    v = network.add_input("v", trt.float16, (5, hidden_size))
-    mask = network.add_input("mask", trt.float16, (2, 5))
-    mask_4d = graph_ops.add_2d_mask_to_4d(network, mask)
+    q = network.add_input("q", trt.bfloat16, (2, hidden_size))
+    k = network.add_input("k", trt.bfloat16, (2, hidden_size))
+    v = network.add_input("v", trt.bfloat16, (2, hidden_size))
+    cache_k = network.add_input(
+        "cache_k", trt.bfloat16, (1, 2, 16, head_dim))
+    cache_v = network.add_input(
+        "cache_v", trt.bfloat16, (1, 2, 16, head_dim))
+    write_index = network.add_input("write_index", trt.int32, (1,))
+    kv_length = network.add_input("kv_length", trt.int32, (1,))
 
-    output = graph_ops.add_attention_from_rows(
-        network, q, k, v,
-        num_heads=2,
-        num_kv_heads=2,
-        head_dim=head_dim,
-        q_seq=2,
-        kv_seq=5,
-        mask=mask_4d,
-        fp32_accumulation=True,
-    )
+    result = graph_ops.add_native_kv_cache_attention_from_rows(
+        network, q, k, v, cache_k, cache_v, write_index, kv_length,
+        num_heads=2, num_kv_heads=2, head_dim=head_dim, q_seq=2,
+        tag="layer.0.attn")
 
-    assert output.shape == (2, hidden_size)
-    layer_types = [
-        network.get_layer(idx).type for idx in range(network.num_layers)
-    ]
-    assert layer_types.count(trt.LayerType.MATRIX_MULTIPLY) == 2
+    assert result["context"].shape == (2, hidden_size)
+    assert result["present_k"].shape == (1, 2, 16, head_dim)
+    named_layers = {
+        network.get_layer(index).name: network.get_layer(index)
+        for index in range(network.num_layers)
+    }
+    assert "layer.0.attn.cache_k_update" in named_layers
+    assert "layer.0.attn.cache_v_update" in named_layers
+    layer_types = {
+        network.get_layer(index).type for index in range(network.num_layers)
+    }
+    assert trt.LayerType.ATTENTION_INPUT in layer_types
+    assert trt.LayerType.ATTENTION_OUTPUT in layer_types
+    assert trt.LayerType.SOFTMAX not in layer_types

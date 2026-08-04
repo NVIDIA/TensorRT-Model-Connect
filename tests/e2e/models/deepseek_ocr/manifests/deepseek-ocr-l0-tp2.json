@@ -6,7 +6,6 @@
   "runtime_strategy": "deepseek_ocr_vision_language",
   "task_strategy": "vision_language_generation",
   "e2e_parallel_resource": "exclusive_gpu",
-  "max_cache_length": 4096,
   "trust_remote_code": true,
   "build_args": {
     "parallel": {
@@ -72,7 +71,7 @@
           "ocr_mode": true
         }
       },
-      "notes": "DeepSeek-OCR TP2 coverage. The checkpoint has 10 attention/KV heads, so TP4 is not valid. Uses the same checkpoint, 768-pixel single-view input, prompt, cache length, complete OCR golden snapshot, and 220-token budget as deepseek-ocr-l0 while running the language decoder through rank-local TP engines."
+      "notes": "DeepSeek-OCR TP2 coverage. The checkpoint has 10 attention/KV heads, so TP4 is not valid. Each rank owns its sharded full-context native KV cache and its split prefill/decode engines."
     }
   ]
 }

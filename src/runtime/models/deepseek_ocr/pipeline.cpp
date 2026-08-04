@@ -25,7 +25,7 @@ void validate_pipeline_components(const TrtModule* text_decoder,
         throw std::runtime_error("DeepseekOcrPipeline: invalid text decoder");
     if (state == nullptr || !state->ok())
         throw std::runtime_error("DeepseekOcrPipeline: invalid inference state");
-    if (prefill != nullptr && !prefill->ok())
+    if (prefill == nullptr || !prefill->ok())
         throw std::runtime_error("DeepseekOcrPipeline: invalid prefill decoder");
 }
 
@@ -97,22 +97,6 @@ int32_t infer_feature_dim(const TrtModule& encoder, int32_t configured_dim) {
     return 0;
 }
 
-std::vector<const float*>
-select_deepstack_feature_pointers(const std::vector<std::vector<float>>& deepstack_features,
-                                  int32_t feature_index, int32_t feature_dim) {
-    std::vector<const float*> embeds;
-    embeds.reserve(deepstack_features.size());
-    for (const auto& deepstack : deepstack_features) {
-        const int32_t count =
-            static_cast<int32_t>(deepstack.size() / static_cast<std::size_t>(feature_dim));
-        embeds.push_back(feature_index < count
-                             ? deepstack.data() +
-                                   static_cast<std::size_t>(feature_index) * feature_dim
-                             : nullptr);
-    }
-    return embeds;
-}
-
 struct VlSequenceEmbeddingInputs {
     std::vector<float> input_embed;
     std::vector<float> use_input_embed;
@@ -157,35 +141,32 @@ build_vl_sequence_embedding_inputs(const std::vector<int32_t>& input_ids, int32_
     return result;
 }
 
-bool gather_vl_prefill_kv_pointers(TrtModule& prefill, const DeepseekOcrConfig& config,
-                                   std::vector<const void*>& present_k,
-                                   std::vector<const void*>& present_v) {
-    present_k.resize(static_cast<std::size_t>(config.num_layers));
-    present_v.resize(static_cast<std::size_t>(config.num_layers));
-    for (int32_t layer = 0; layer < config.num_layers; ++layer) {
-        const auto index = static_cast<std::size_t>(layer);
-        present_k[index] =
-            prefill.device_ptr(deepseek_ocr_expand_layer_name(config.present_k_pattern, layer));
-        present_v[index] =
-            prefill.device_ptr(deepseek_ocr_expand_layer_name(config.present_v_pattern, layer));
-        if (present_k[index] == nullptr || present_v[index] == nullptr)
-            return false;
-    }
-    return true;
+DeepseekOcrInferenceState& require_vl_prefill_state(TrtModule* prefill,
+                                                    DeepseekOcrInferenceState* state,
+                                                    const DeepseekOcrConfig& config,
+                                                    int32_t sequence_length, int32_t feature_dim) {
+    if (prefill == nullptr)
+        throw std::runtime_error("DeepSeek-OCR native KV bundle is missing the prefill engine");
+    if (sequence_length <= 0 || feature_dim <= 0 || config.num_layers <= 0)
+        throw std::runtime_error("DeepSeek-OCR native prefill has invalid model dimensions");
+    if (!prefill->has_input("input_embed"))
+        throw std::runtime_error("DeepSeek-OCR native prefill is missing input_embed");
+    if (!prefill->has_input("cache_write_indices") || !prefill->has_input("key_value_lengths"))
+        throw std::runtime_error("DeepSeek-OCR prefill is missing the native KV scalar inputs");
+    if (state == nullptr)
+        throw std::runtime_error("DeepSeek-OCR native prefill is missing inference state");
+    return *state;
 }
 
-DeepseekOcrKvCache* eligible_vl_prefill_cache(TrtModule* prefill, DeepseekOcrInferenceState* state,
-                                              const DeepseekOcrConfig& config,
-                                              int32_t sequence_length, int32_t feature_dim) {
-    if (prefill == nullptr)
-        return nullptr;
-    if (sequence_length <= 0 || feature_dim <= 0 || config.num_layers <= 0)
-        return nullptr;
-    if (!prefill->has_input("input_embed"))
-        return nullptr;
-    if (config.prefill_max_length > 0 && sequence_length > config.prefill_max_length)
-        return nullptr;
-    return dynamic_cast<DeepseekOcrKvCache*>(state);
+void validate_generation_capacity(const std::vector<int32_t>& input_ids, int32_t max_new_tokens,
+                                  DeepseekOcrInferenceState* state) {
+    const auto capacity = static_cast<std::size_t>(state->max_length());
+    if (input_ids.size() > capacity ||
+        (max_new_tokens > 0 &&
+         static_cast<std::size_t>(max_new_tokens) > capacity - input_ids.size())) {
+        throw std::runtime_error(
+            "DeepSeek-OCR prompt and generation exceed the fixed KV cache capacity");
+    }
 }
 
 bool valid_vl_features(const std::vector<float>& image_features, int32_t num_features,
@@ -199,31 +180,41 @@ bool valid_vl_features(const std::vector<float>& image_features, int32_t num_fea
 
 void add_vl_prefill_base_inputs(TensorMap& inputs, DeepseekOcrInferenceState& state,
                                 const std::vector<int32_t>& input_ids,
-                                VlSequenceEmbeddingInputs& embedding_inputs, int32_t feature_dim) {
-    const auto sequence_length = static_cast<int32_t>(input_ids.size());
-    inputs["token_id"] =
-        Tensor{const_cast<int32_t*>(input_ids.data()), {sequence_length}, DType::kInt32};
+                                VlSequenceEmbeddingInputs& embedding_inputs, int32_t feature_dim,
+                                int32_t start = 0, int32_t sequence_length = -1) {
+    if (sequence_length < 0)
+        sequence_length = static_cast<int32_t>(input_ids.size());
+    const auto token_offset = static_cast<std::size_t>(start);
+    const auto embed_offset = token_offset * static_cast<std::size_t>(feature_dim);
+    inputs["token_id"] = Tensor{
+        const_cast<int32_t*>(input_ids.data() + token_offset), {sequence_length}, DType::kInt32};
     state.prepare_step(inputs, sequence_length);
-    inputs["input_embed"] = Tensor{
-        embedding_inputs.input_embed.data(), {sequence_length, feature_dim}, DType::kFloat32};
-    inputs["use_input_embed"] =
-        Tensor{embedding_inputs.use_input_embed.data(), {sequence_length, 1}, DType::kFloat32};
+    inputs["input_embed"] = Tensor{embedding_inputs.input_embed.data() + embed_offset,
+                                   {sequence_length, feature_dim},
+                                   DType::kFloat32};
+    inputs["use_input_embed"] = Tensor{embedding_inputs.use_input_embed.data() + token_offset,
+                                       {sequence_length, 1},
+                                       DType::kFloat32};
 }
 
 bool add_vl_prefill_deepstack_inputs(TrtModule& prefill, TensorMap& inputs,
                                      VlSequenceEmbeddingInputs& embedding_inputs,
-                                     int32_t sequence_length, int32_t feature_dim) {
+                                     int32_t sequence_length, int32_t feature_dim,
+                                     int32_t start = 0) {
     if (!prefill.has_input("deepstack_active"))
         return true;
-    inputs["deepstack_active"] =
-        Tensor{embedding_inputs.deepstack_active.data(), {sequence_length, 1}, DType::kFloat32};
+    const auto token_offset = static_cast<std::size_t>(start);
+    const auto embed_offset = token_offset * static_cast<std::size_t>(feature_dim);
+    inputs["deepstack_active"] = Tensor{embedding_inputs.deepstack_active.data() + token_offset,
+                                        {sequence_length, 1},
+                                        DType::kFloat32};
     for (std::size_t level = 0;; ++level) {
         const auto name = "deepstack_embed_" + std::to_string(level);
         if (!prefill.has_input(name))
             break;
         if (level >= embedding_inputs.deepstack_embed.size())
             return false;
-        inputs[name] = Tensor{embedding_inputs.deepstack_embed[level].data(),
+        inputs[name] = Tensor{embedding_inputs.deepstack_embed[level].data() + embed_offset,
                               {sequence_length, feature_dim},
                               DType::kFloat32};
     }
@@ -420,9 +411,9 @@ void DeepseekOcrPipeline::reset_generation_context(int32_t prompt_length) {
     state_->reset();
     state_->set_prompt_length(prompt_length);
     text_decoder_->reset_execution_context();
-    if (prefill_)
-        prefill_->reset_execution_context();
+    prefill_->reset_execution_context();
     state_->bind_to(*text_decoder_);
+    state_->bind_to(*prefill_);
     last_setup_ms_ =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
@@ -433,6 +424,7 @@ DeepseekOcrPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
                                        const DeepseekOcrSamplingParams& params) {
     if (max_new_tokens == 0 || input_ids.empty())
         return input_ids;
+    validate_generation_capacity(input_ids, max_new_tokens, state_.get());
 
     // Create a per-call sampler if none was injected at construction time.
     DeepseekOcrISampler* active_sampler = sampler_.get();
@@ -446,11 +438,11 @@ DeepseekOcrPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
     reset_generation_context(static_cast<int32_t>(input_ids.size()));
 
     std::vector<float> logits;
-
-    for (std::size_t i = 0; i + 1 < input_ids.size(); ++i)
-        run_text_step(input_ids[i], logits);
-
-    run_text_step(input_ids.back(), logits);
+    const std::vector<float> no_image_features;
+    const std::vector<std::vector<float>> no_deepstack_features;
+    run_vl_prefill_batched(input_ids, no_image_features, no_deepstack_features, 0,
+                           config_.vision_output_dim, logits);
+    state_->mark_prefill_complete();
 
     std::vector<int32_t> output = input_ids;
     const int32_t vocab_size = static_cast<int32_t>(logits.size());
@@ -458,7 +450,7 @@ DeepseekOcrPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
     for (int32_t step = 0; step < max_new_tokens; ++step) {
         DeepseekOcrSampleResult result = active_sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
-        if (result.is_eos)
+        if (result.is_eos || step + 1 == max_new_tokens)
             break;
         run_text_step(result.token_id, logits);
     }
@@ -472,6 +464,7 @@ std::vector<int32_t> DeepseekOcrPipeline::generate_vl_from_ids(
     int32_t feature_dim, int32_t max_new_tokens, const DeepseekOcrSamplingParams& params) {
     if (max_new_tokens == 0 || input_ids.empty())
         return input_ids;
+    validate_generation_capacity(input_ids, max_new_tokens, state_.get());
 
     // Create a per-call sampler if none was injected at construction time.
     DeepseekOcrISampler* active_sampler = sampler_.get();
@@ -485,13 +478,8 @@ std::vector<int32_t> DeepseekOcrPipeline::generate_vl_from_ids(
     reset_generation_context(static_cast<int32_t>(input_ids.size()));
 
     std::vector<float> logits;
-    if (!run_vl_prefill_batched(input_ids, image_features, deepstack_features, num_features,
-                                feature_dim, logits)) {
-        int32_t feature_index = 0;
-        for (const auto& tid : input_ids)
-            run_vl_prefill_token(tid, image_features, deepstack_features, num_features, feature_dim,
-                                 feature_index, logits);
-    }
+    run_vl_prefill_batched(input_ids, image_features, deepstack_features, num_features, feature_dim,
+                           logits);
     state_->mark_prefill_complete();
 
     std::vector<int32_t> output = input_ids;
@@ -499,57 +487,37 @@ std::vector<int32_t> DeepseekOcrPipeline::generate_vl_from_ids(
     return output;
 }
 
-bool DeepseekOcrPipeline::run_vl_prefill_batched(
+void DeepseekOcrPipeline::run_vl_prefill_batched(
     const std::vector<int32_t>& input_ids, const std::vector<float>& image_features,
     const std::vector<std::vector<float>>& deepstack_features, int32_t num_features,
     int32_t feature_dim, std::vector<float>& logits) {
     const auto sq = static_cast<int32_t>(input_ids.size());
-    auto* kv_cache =
-        eligible_vl_prefill_cache(prefill_.get(), state_.get(), config_, sq, feature_dim);
-    if (kv_cache == nullptr)
-        return false;
+    auto& prefill_state =
+        require_vl_prefill_state(prefill_.get(), state_.get(), config_, sq, feature_dim);
     if (!valid_vl_features(image_features, num_features, feature_dim))
-        return false;
+        throw std::runtime_error("DeepSeek-OCR native prefill has invalid vision features");
 
-    kv_cache->bind_cache_inputs(*prefill_);
     auto embedding_inputs =
         build_vl_sequence_embedding_inputs(input_ids, config_.image_token_id, image_features,
                                            deepstack_features, num_features, feature_dim);
 
-    TensorMap inputs;
-    add_vl_prefill_base_inputs(inputs, *state_, input_ids, embedding_inputs, feature_dim);
-    if (!add_vl_prefill_deepstack_inputs(*prefill_, inputs, embedding_inputs, sq, feature_dim))
-        return false;
+    if (config_.prefill_max_length <= 0)
+        throw std::runtime_error("DeepSeek-OCR native prefill engine has no profile capacity");
+    const int32_t chunk_limit = config_.prefill_max_length;
+    for (int32_t start = 0; start < sq; start += chunk_limit) {
+        const int32_t chunk_size = std::min(chunk_limit, sq - start);
+        TensorMap inputs;
+        add_vl_prefill_base_inputs(inputs, prefill_state, input_ids, embedding_inputs, feature_dim,
+                                   start, chunk_size);
+        if (!add_vl_prefill_deepstack_inputs(*prefill_, inputs, embedding_inputs, chunk_size,
+                                             feature_dim, start))
+            throw std::runtime_error("DeepSeek-OCR native prefill has invalid DeepStack inputs");
 
-    auto outputs = prefill_->forward(inputs);
-    if (!copy_last_prefill_logits(outputs, config_.vocab_size, logits))
-        return false;
-
-    std::vector<const void*> present_k;
-    std::vector<const void*> present_v;
-    if (!gather_vl_prefill_kv_pointers(*prefill_, config_, present_k, present_v))
-        return false;
-    kv_cache->write_prefill_kv(present_k, present_v, sq);
-    return true;
-}
-
-void DeepseekOcrPipeline::run_vl_prefill_token(
-    int32_t token_id, const std::vector<float>& image_features,
-    const std::vector<std::vector<float>>& deepstack_features, int32_t num_features,
-    int32_t feature_dim, int32_t& feature_index, std::vector<float>& logits) {
-    const bool use_image_embed = token_id == config_.image_token_id && feature_index < num_features;
-    if (!use_image_embed) {
-        run_text_step_with_embed(token_id, nullptr, 0.0F, {}, 0.0F, logits);
-        return;
+        auto outputs = prefill_->forward(inputs);
+        if (!copy_last_prefill_logits(outputs, config_.vocab_size, logits))
+            throw std::runtime_error("DeepSeek-OCR native prefill has no valid logits output");
+        prefill_state.advance(chunk_size);
     }
-
-    const float* embed =
-        image_features.data() + static_cast<std::size_t>(feature_index) * feature_dim;
-    const auto deepstack_embeds =
-        select_deepstack_feature_pointers(deepstack_features, feature_index, feature_dim);
-    run_text_step_with_embed(token_id, embed, 1.0F, deepstack_embeds,
-                             deepstack_embeds.empty() ? 0.0F : 1.0F, logits);
-    ++feature_index;
 }
 
 void DeepseekOcrPipeline::run_vl_decode_loop(DeepseekOcrISampler* sampler,
@@ -560,7 +528,7 @@ void DeepseekOcrPipeline::run_vl_decode_loop(DeepseekOcrISampler* sampler,
     for (int32_t step = 0; step < max_new_tokens; ++step) {
         DeepseekOcrSampleResult result = sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
-        if (result.is_eos)
+        if (result.is_eos || step + 1 == max_new_tokens)
             break;
         run_text_step(result.token_id, logits);
     }

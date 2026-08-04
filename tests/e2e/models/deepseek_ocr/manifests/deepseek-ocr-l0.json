@@ -5,18 +5,7 @@
   "family": "deepseek_ocr",
   "runtime_strategy": "deepseek_ocr_vision_language",
   "task_strategy": "vision_language_generation",
-  "max_cache_length": 4096,
   "trust_remote_code": true,
-  "precision": "fp16",
-  "fp32_layers": [
-    6,
-    7,
-    8,
-    9,
-    10,
-    11,
-    12
-  ],
   "testcases": [
     {
       "name": "deepseek-ocr-l0",
@@ -36,7 +25,7 @@
           "ocr_mode": true
         }
       },
-      "notes": "PR L0 repro for DeepSeek-OCR. Uses the same checkpoint, image input, 768-pixel single-view vision path, deepseek_ocr_vision_language runtime, and full cache budget. The 220-token decode covers the restored introductory text and the complete Architecture contract while nightly retains a larger completion budget."
+      "notes": "PR L0 repro for DeepSeek-OCR. The build uses the checkpoint's complete 8192-token context by default; runtime allocates one BF16 native TensorRT KV cache shared by split prefill/decode engines."
     }
   ]
 }

@@ -7,4 +7,5 @@ runtime_plugins = ["plugin.cpp|register_deepseek_ocr_plugin"]
 runtime_strategies = ["deepseek_ocr_vision_language"]
 runtime_tests = [
   "test_deepseek_ocr_vl_pipeline|test_deepseek_ocr_vl_pipeline.cpp|trtmc_model_deepseek_ocr,trtmc_backend_trt|_|REQUIRES_TRT",
+  "test_deepseek_ocr_native_kv_cache|test_deepseek_ocr_native_kv_cache.cpp|trtmc_model_deepseek_ocr,trtmc_backend_trt|_|REQUIRES_TRT",
 ]

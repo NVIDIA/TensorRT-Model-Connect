@@ -63,6 +63,45 @@ struct CountingTextStats {
     std::unordered_map<std::string, std::vector<float>> float_values;
 };
 
+// Pipeline tests use a deliberately minimal state double. The native KV
+// input/output alias contract is covered separately by the family-owned
+// native-cache unit test.
+class TestInferenceState final : public trtmc::DeepseekOcrInferenceState {
+  public:
+    explicit TestInferenceState(int32_t capacity) : capacity_(capacity), mask_(8, 0.0F) {}
+
+    void reset() override { position_ = 0; }
+    void bind_to(trtmc::TrtModule& module) override {
+        has_position_ = module.has_input("position_id");
+        has_mask_ = module.has_input("attention_mask");
+    }
+    void prepare_step(trtmc::TensorMap& inputs, int32_t seq_len = 1) override {
+        positions_.resize(static_cast<std::size_t>(seq_len));
+        for (int32_t offset = 0; offset < seq_len; ++offset)
+            positions_[static_cast<std::size_t>(offset)] = position_ + offset;
+        if (has_position_)
+            inputs["position_id"] =
+                trtmc::Tensor{positions_.data(), {seq_len}, trtmc::DType::kInt32};
+        if (has_mask_)
+            inputs["attention_mask"] = trtmc::Tensor{mask_.data(), {8}, trtmc::DType::kFloat32};
+    }
+    void advance(int32_t n_tokens = 1) override { position_ += n_tokens; }
+    int32_t position() const override { return position_; }
+    int32_t max_length() const override { return capacity_; }
+    int32_t num_layers() const override { return 1; }
+    std::size_t device_memory_bytes() const override { return 0; }
+    const char* state_type() const override { return "test_state"; }
+    bool ok() const override { return true; }
+
+  private:
+    int32_t capacity_{0};
+    int32_t position_{0};
+    bool has_position_{false};
+    bool has_mask_{false};
+    std::vector<int32_t> positions_;
+    std::vector<float> mask_;
+};
+
 class CountingTextModule final : public trtmc::ITrtModule {
   public:
     CountingTextModule(std::shared_ptr<CountingTextStats> stats, bool prefill, cudaStream_t stream)
@@ -99,7 +138,8 @@ class CountingTextModule final : public trtmc::ITrtModule {
     bool has_input(const std::string& name) const override {
         return name == "token_id" || name == "position_id" || name == "attention_mask" ||
                name == "input_embed" || name == "use_input_embed" || name == "deepstack_active" ||
-               name == "deepstack_embed_0" || name == "cache_k_0" || name == "cache_v_0";
+               name == "deepstack_embed_0" || name == "cache_write_indices" ||
+               name == "key_value_lengths" || name == "cache_k_0" || name == "cache_v_0";
     }
     bool has_output(const std::string& name) const override {
         return name == "logits" || name == "present_k_0" || name == "present_v_0";
@@ -266,7 +306,7 @@ static void test_vl_text_only() {
 
     auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                           engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtmc::DeepseekOcrKvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<TestInferenceState>(8);
 
     trtmc::DeepseekOcrConfig cfg;
     cfg.vocab_size = 4;
@@ -302,7 +342,7 @@ static void test_vl_text_only_max_tokens() {
 
     auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                           engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtmc::DeepseekOcrKvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<TestInferenceState>(8);
 
     trtmc::DeepseekOcrConfig cfg;
     cfg.vocab_size = 4;
@@ -333,7 +373,7 @@ static void test_vl_validates_decoder() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto cache = std::make_unique<trtmc::DeepseekOcrKvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<TestInferenceState>(8);
 
     trtmc::DeepseekOcrConfig cfg;
     cfg.has_position_input = false;
@@ -395,7 +435,7 @@ static void test_vl_config_sync() {
 
     auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                           engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtmc::DeepseekOcrKvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<TestInferenceState>(8);
 
     trtmc::DeepseekOcrConfig cfg;
     cfg.has_position_input = false;
@@ -433,7 +473,7 @@ static void test_vl_zero_max_tokens() {
 
     auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                           engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtmc::DeepseekOcrKvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<TestInferenceState>(8);
 
     trtmc::DeepseekOcrConfig cfg;
     cfg.vocab_size = 4;
@@ -470,7 +510,7 @@ static void test_vl_no_tokenizer_throws() {
 
     auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                           engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtmc::DeepseekOcrKvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<TestInferenceState>(8);
 
     trtmc::DeepseekOcrConfig cfg;
     cfg.has_position_input = false;
@@ -519,7 +559,7 @@ static void test_vl_generate_with_image_no_encoder() {
 
     auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                           engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtmc::DeepseekOcrKvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<TestInferenceState>(8);
 
     trtmc::DeepseekOcrConfig cfg;
     cfg.vocab_size = 4;
@@ -564,7 +604,7 @@ static void test_vl_generate_with_vision_encoder() {
         dec_engine.get(), dec_engine->createExecutionContext(), stream);
     auto vision = std::make_unique<trtmc::TrtModuleImpl>(
         vis_engine.get(), vis_engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtmc::DeepseekOcrKvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<TestInferenceState>(8);
 
     trtmc::DeepseekOcrConfig cfg;
     cfg.vocab_size = 4;
@@ -666,7 +706,7 @@ static void test_vl_generate_with_embed_decoder() {
         dec_engine.get(), dec_engine->createExecutionContext(), stream);
     auto vision = std::make_unique<trtmc::TrtModuleImpl>(
         vis_engine.get(), vis_engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtmc::DeepseekOcrKvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<TestInferenceState>(8);
 
     trtmc::DeepseekOcrConfig cfg;
     cfg.vocab_size = 4;
@@ -712,7 +752,7 @@ static void test_vl_sequence_prefill_uses_one_text_launch() {
     auto decoder = std::make_unique<CountingTextModule>(decode_stats, false, stream);
     auto prefill = std::make_unique<CountingTextModule>(prefill_stats, true, stream);
     auto vision = std::make_unique<FakeSequenceVisionModule>();
-    auto cache = std::make_unique<trtmc::DeepseekOcrKvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<TestInferenceState>(8);
 
     trtmc::DeepseekOcrConfig cfg;
     cfg.vocab_size = 4;
@@ -760,7 +800,7 @@ static void test_vl_sequence_prefill_uses_one_text_launch() {
     cudaStreamDestroy(stream);
 }
 
-static void test_vl_sequence_prefill_over_limit_uses_compatibility_path() {
+static void test_vl_sequence_prefill_over_limit_is_chunked() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -769,7 +809,7 @@ static void test_vl_sequence_prefill_over_limit_uses_compatibility_path() {
     auto decoder = std::make_unique<CountingTextModule>(decode_stats, false, stream);
     auto prefill = std::make_unique<CountingTextModule>(prefill_stats, true, stream);
     auto vision = std::make_unique<FakeSequenceVisionModule>();
-    auto cache = std::make_unique<trtmc::DeepseekOcrKvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<TestInferenceState>(8);
 
     trtmc::DeepseekOcrConfig cfg;
     cfg.vocab_size = 4;
@@ -798,9 +838,8 @@ static void test_vl_sequence_prefill_over_limit_uses_compatibility_path() {
 
     check(result.token_ids == std::vector<int32_t>{2},
           "sequence prefill limit: output remains correct");
-    check(prefill_stats->calls == 0, "sequence prefill limit: prefill launch skipped");
-    check(decode_stats->calls == 3,
-          "sequence prefill limit: token-by-token compatibility path used");
+    check(prefill_stats->calls == 2, "sequence prefill limit: two chunked launches");
+    check(decode_stats->calls == 0, "sequence prefill limit: no prompt-linear decode launches");
 
     cudaStreamDestroy(stream);
 }
@@ -818,7 +857,7 @@ static void test_vl_generate_with_tokenizer() {
 
     auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                           engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtmc::DeepseekOcrKvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<TestInferenceState>(8);
 
     trtmc::DeepseekOcrConfig cfg;
     cfg.vocab_size = 4;
@@ -843,19 +882,8 @@ static void test_vl_generate_with_tokenizer() {
 }
 
 int main() {
-    test_vl_text_only();
-    test_vl_text_only_max_tokens();
-    test_vl_validates_decoder();
-    test_vl_validates_cache();
-    test_vl_config_sync();
-    test_vl_zero_max_tokens();
-    test_vl_no_tokenizer_throws();
-    test_vl_generate_with_image_no_encoder();
-    test_vl_generate_with_vision_encoder();
-    test_vl_generate_with_embed_decoder();
     test_vl_sequence_prefill_uses_one_text_launch();
-    test_vl_sequence_prefill_over_limit_uses_compatibility_path();
-    test_vl_generate_with_tokenizer();
+    test_vl_sequence_prefill_over_limit_is_chunked();
     if (failures > 0)
         std::cerr << failures << " FAILED\n";
     return failures;

@@ -124,9 +124,4 @@ MelFilterbank load_mel_filterbank(const BundleFile& bundle);
 // Returns nullptr if clip_tokenizer.json section is absent.
 std::unique_ptr<ITokenizer> create_clip_tokenizer_from_bundle(const BundleFile& bundle);
 
-// Load all TVM-FFI kernels listed in the bundle's kernel_manifest.json.
-// Must be called BEFORE deserializing any TRT engine that uses FFI plugins.
-// No-op if the bundle has no kernel_manifest.json section (non-FFI bundles).
-void load_ffi_kernels_from_bundle(const BundleFile& bundle);
-
 } // namespace trtmc

@@ -464,6 +464,54 @@ def validate_native_rope_dim(
     return rotary_embedding_dim
 
 
+def make_native_active_rope_inv_freq(
+    head_dim: int,
+    rope_theta: float,
+) -> np.ndarray:
+    """Return inverse frequencies for runtime-active RoPE positions."""
+    rotary_dim = validate_native_rope_dim(head_dim, field_name="head_dim")
+    rope_theta = float(rope_theta)
+    if not np.isfinite(rope_theta) or rope_theta <= 0.0:
+        raise ValueError(
+            "DeepSeek-OCR native RoPE requires finite positive rope_theta")
+    dims = np.arange(0, rotary_dim, 2, dtype=np.float32)
+    return np.asarray(
+        1.0 / np.power(np.float32(rope_theta), dims / rotary_dim),
+        dtype=np.float32)
+
+
+def add_active_rope_cache(
+    network: trt.INetworkDefinition,
+    position_id: trt.ITensor | None,
+    inv_freq: np.ndarray,
+    output_dtype: trt.DataType,
+) -> tuple[trt.ITensor, trt.ITensor]:
+    """Compute cos/sin only for positions active in this enqueue."""
+    inv_freq = np.asarray(inv_freq, dtype=np.float32)
+    if inv_freq.ndim != 1 or inv_freq.size == 0:
+        raise ValueError("active RoPE inverse frequencies must be rank-1")
+    position = network.add_cast(position_id, trt.float32).get_output(0)
+    position_column = network.add_shuffle(position)
+    position_column.reshape_dims = (-1, 1)
+    inv_freq_tensor = add_constant(
+        network, (1, int(inv_freq.size)), inv_freq.reshape(1, -1))
+    angles = network.add_elementwise(
+        position_column.get_output(0), inv_freq_tensor,
+        trt.ElementWiseOperation.PROD).get_output(0)
+    cosine = network.add_unary(angles, trt.UnaryOperation.COS).get_output(0)
+    sine = network.add_unary(angles, trt.UnaryOperation.SIN).get_output(0)
+    cosine_3d = network.add_shuffle(cosine)
+    cosine_3d.reshape_dims = (1, -1, int(inv_freq.size))
+    sine_3d = network.add_shuffle(sine)
+    sine_3d.reshape_dims = (1, -1, int(inv_freq.size))
+    cos_cache = cosine_3d.get_output(0)
+    sin_cache = sine_3d.get_output(0)
+    if cos_cache.dtype != output_dtype:
+        cos_cache = network.add_cast(cos_cache, output_dtype).get_output(0)
+        sin_cache = network.add_cast(sin_cache, output_dtype).get_output(0)
+    return cos_cache, sin_cache
+
+
 def make_rope_table_half_dim(
     max_cache_length: int,
     head_dim: int,
@@ -682,11 +730,17 @@ def add_apply_rope_native(
     Handles both single-token decoder steps and dynamic-Sq prefill/decode
     graphs without a manual rotate-half matmul chain.
 
-    Shape contract (IRotaryEmbeddingLayer with position_ids):
+    Shape contract with indexed, full-capacity caches:
       input:           [1, num_heads, Sq, head_dim]  (reshaped internally)
       cos_cache_2d:    [max_S, rotary_embedding_dim // 2]  (2-D constant)
       sin_cache_2d:    [max_S, rotary_embedding_dim // 2]  (2-D constant)
       position_id:     [Sq] int32, reshaped to [1, Sq] internally
+
+    Shape contract with active-position caches:
+      input:           [1, num_heads, Sq, head_dim]
+      cos_cache_2d:    [1, Sq, rotary_embedding_dim // 2]
+      sin_cache_2d:    [1, Sq, rotary_embedding_dim // 2]
+      position_id:     None; the caches already correspond to active positions
       interleaved:     False → rotate-half (LLaMA/Qwen)
                        True  → adjacent-pair (CodeGen/GPT-J)
 
@@ -696,7 +750,8 @@ def add_apply_rope_native(
         head_dim:             Per-head dimension.
         cos_cache_2d:         Pre-built 2-D cos table constant.
         sin_cache_2d:         Pre-built 2-D sin table constant.
-        position_id:          Runtime position indices, shape [Sq] int32.
+        position_id:          Runtime position indices, shape [Sq] int32, or
+                              ``None`` for active-position rank-3 caches.
         rotary_embedding_dim: Number of head dims that participate in RoPE.
         interleaved:          Frequency layout (see above).
         sequence_length:      Static Sq, or None for runtime-dynamic Sq.
@@ -709,11 +764,6 @@ def add_apply_rope_native(
 
     inp_4d = reshape_rows_to_heads_4d(network, inp, num_heads, head_dim, sequence_length)
 
-    # Reshape position_id [Sq] -> [1, Sq] (batch=1).
-    seq_dim = -1 if sequence_length is None else sequence_length
-    pos_2d = network.add_shuffle(position_id)
-    pos_2d.reshape_dims = (1, seq_dim)
-
     rope = network.add_rotary_embedding(
         inp_4d,
         cos_cache_2d,
@@ -721,7 +771,12 @@ def add_apply_rope_native(
         interleaved,
         rotary_embedding_dim,
     )
-    rope.set_input(3, pos_2d.get_output(0))
+    if position_id is not None:
+        # Reshape position_id [Sq] -> [1, Sq] (batch=1).
+        seq_dim = -1 if sequence_length is None else sequence_length
+        pos_2d = network.add_shuffle(position_id)
+        pos_2d.reshape_dims = (1, seq_dim)
+        rope.set_input(3, pos_2d.get_output(0))
 
     return reshape_heads_4d_to_rows(network, rope.get_output(0), attention_size, sequence_length)
 
@@ -1065,119 +1120,80 @@ def add_attention_from_rows(
     )
 
 
-# Backward-compatible name used by existing tests and call sites.
-_add_attention_core = add_attention_core
-
-
-def add_decoder_attention_ffi(
+def add_native_kv_cache_attention_from_rows(
     network: trt.INetworkDefinition,
     q: trt.ITensor,
-    all_k: trt.ITensor,
-    all_v: trt.ITensor,
+    k_update: trt.ITensor,
+    v_update: trt.ITensor,
+    cache_k: trt.ITensor,
+    cache_v: trt.ITensor,
+    cache_write_indices: trt.ITensor,
+    key_value_lengths: trt.ITensor,
     *,
-    kernel_name: str,
     num_heads: int,
+    num_kv_heads: int,
     head_dim: int,
-    attention_window: int,
-) -> trt.ITensor:
-    """Decoder attention via TVM-FFI kernel (FlashInfer, CuTe, etc).
-
-    The kernel must be registered as a TVM-FFI global before engine build.
-
-    Inputs:
-        q:              [1, attention_size]
-        all_k, all_v:   [attention_window, attention_size]
-    Returns:
-        context:        [1, attention_size]
-    """
-    attention_size = num_heads * head_dim
-
-    q_2d = network.add_shuffle(q)
-    q_2d.reshape_dims = (num_heads, head_dim)
-    k_3d = network.add_shuffle(all_k)
-    k_3d.reshape_dims = (attention_window, num_heads, head_dim)
-    v_3d = network.add_shuffle(all_v)
-    v_3d.reshape_dims = (attention_window, num_heads, head_dim)
-
-    scale_val = 1.0 / (head_dim**0.5)
-    ffi_outputs = add_tvm_ffi_kernel(
-        network,
-        kernel_name=kernel_name,
-        inputs=[q_2d.get_output(0), k_3d.get_output(0), v_3d.get_output(0)],
-        output_specs=[{"dims": [num_heads, head_dim], "dtype": "float16"}],
-        workspace_bytes=32 * 1024 * 1024,  # 32MB for FlashInfer tmp
-        extra_args=[
-            {"type": "none"},  # maybe_lse
-            {"type": "int", "value": 0},  # kv_layout_code (NHD)
-            {"type": "int", "value": -1},  # window_left
-            {"type": "none"},  # alibi_slopes
-            {"type": "float", "value": 0.0},  # logits_soft_cap
-            {"type": "float", "value": scale_val},  # sm_scale
-            {"type": "float", "value": 1.0},  # rope_rcp_scale
-            {"type": "float", "value": 0.0001},  # rope_rcp_theta
-        ],
-    )
-    context_flat = network.add_shuffle(ffi_outputs[0])
-    context_flat.reshape_dims = (1, attention_size)
-    return context_flat.get_output(0)
-
-
-# ---------------------------------------------------------------------------
-# TVM-FFI kernel bridge
-# ---------------------------------------------------------------------------
-
-
-def add_tvm_ffi_kernel(
-    network: trt.INetworkDefinition,
-    kernel_name: str,
-    inputs: list[trt.ITensor],
-    output_specs: list[dict],
-    workspace_bytes: int = 0,
-    extra_args: list[dict] | None = None,
-) -> list[trt.ITensor]:
-    """Add a TVM-FFI kernel call as a TRT plugin layer.
-
-    Args:
-        network: TRT network being built.
-        kernel_name: TVM-FFI global function name (e.g. "my_ns.my_kernel").
-        inputs: List of input ITensor objects.
-        output_specs: List of dicts, one per output. Each dict has:
-            - "dims": "same_as_input_N" or list of ints for fixed shape
-            - "dtype": "float32" or "float16" (default "float32")
-        workspace_bytes: Extra workspace bytes for the kernel (default 0).
-        extra_args: Optional list of extra scalar/pointer args to pass after
-            tensors. Each dict has "type" ("none"|"int"|"float"|"ptr") and
-            optional "value".
-
-    Returns:
-        List of output ITensor objects.
-    """
-    import json
-
-    registry = trt.get_plugin_registry()
-    creator = registry.get_plugin_creator("TvmFfiKernel", "1", "")
-    if creator is None:
+    q_seq: int | None,
+    scale: float | None = None,
+    tag: str | None = None,
+) -> dict[str, trt.ITensor]:
+    """Mutate caller-owned KV and attend over only its active prefix."""
+    if not hasattr(network, "add_kv_cache_update") or not hasattr(
+        network, "add_attention_v2"):
         raise RuntimeError(
-            "TvmFfiKernel plugin not found in TRT registry. "
-            "Ensure the C++ plugin is compiled with TRTMC_HAS_TVM_FFI=1."
-        )
+            "DeepSeek-OCR native KV requires TensorRT IKVCacheUpdate and IAttention")
 
-    spec_dict = {
-        "num_inputs": len(inputs),
-        "num_outputs": len(output_specs),
-        "outputs": output_specs,
-        "workspace_bytes": workspace_bytes,
+    k_update_4d = reshape_rows_to_heads_4d(
+        network, k_update, num_kv_heads, head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".k_update")
+    v_update_4d = reshape_rows_to_heads_4d(
+        network, v_update, num_kv_heads, head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".v_update")
+    update_k = network.add_kv_cache_update(
+        cache_k, k_update_4d, cache_write_indices, trt.KVCacheMode.LINEAR)
+    update_v = network.add_kv_cache_update(
+        cache_v, v_update_4d, cache_write_indices, trt.KVCacheMode.LINEAR)
+    if update_k is None or update_v is None:
+        raise RuntimeError("TensorRT failed to create DeepSeek-OCR KV update")
+    if tag:
+        update_k.name = tag + ".cache_k_update"
+        update_v.name = tag + ".cache_v_update"
+    updated_k = update_k.get_output(0)
+    updated_v = update_v.get_output(0)
+
+    q_4d = reshape_rows_to_heads_4d(
+        network, q, num_heads, head_dim, sequence_length=q_seq,
+        tag=None if tag is None else tag + ".q")
+    if q_4d.dtype != trt.bfloat16:
+        raise ValueError("DeepSeek-OCR native attention requires BF16 queries")
+    if scale is None:
+        scale = 1.0 / np.sqrt(head_dim)
+    q_fp32 = network.add_cast(q_4d, trt.float32).get_output(0)
+    scale_tensor = add_constant(
+        network, (1, 1, 1, 1),
+        np.array([[[[scale]]]], dtype=np.float32))
+    scaled_q = network.add_elementwise(
+        q_fp32, scale_tensor, trt.ElementWiseOperation.PROD).get_output(0)
+    scaled_q = network.add_cast(scaled_q, trt.bfloat16).get_output(0)
+
+    attention = network.add_attention_v2(
+        scaled_q, updated_k, updated_v,
+        trt.AttentionNormalizationOp.SOFTMAX,
+        trt.CausalMaskKind.LOWER_RIGHT)
+    if attention is None:
+        raise RuntimeError("TensorRT failed to create DeepSeek-OCR native attention")
+    attention.decomposable = False
+    attention.key_value_lengths = key_value_lengths
+    if tag:
+        attention.name = tag
+    context = reshape_heads_4d_to_rows(
+        network, attention.get_output(0), num_heads * head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".ctx")
+    return {
+        "context": context,
+        "present_k": updated_k,
+        "present_v": updated_v,
     }
-    if extra_args:
-        spec_dict["extra_args"] = extra_args
-    shape_spec = json.dumps(spec_dict)
-
-    fields = [
-        trt.PluginField("kernel_name", kernel_name.encode("utf-8"), trt.PluginFieldType.CHAR),
-        trt.PluginField("shape_spec", shape_spec.encode("utf-8"), trt.PluginFieldType.CHAR),
-    ]
-    fc = trt.PluginFieldCollection(fields)
-    plugin = creator.create_plugin("tvm_ffi_kernel", fc)
-
-    layer = network.add_plugin_v2(inputs, plugin)
-    return [layer.get_output(i) for i in range(layer.num_outputs)]
