@@ -25,6 +25,23 @@ def _cast_back_to_trt_dtype(
         return tensor
     return network.add_cast(tensor, target_dtype).get_output(0)
 
+
+def _add_matrix_multiply_with_fp32_accumulation(
+    network: trt.INetworkDefinition,
+    lhs: trt.ITensor,
+    lhs_op: trt.MatrixOperation,
+    rhs: trt.ITensor,
+    rhs_op: trt.MatrixOperation,
+) -> trt.ITensor:
+    """Evaluate an FP16-input matrix multiply in FP32, then restore FP16."""
+    output_dtype = lhs.dtype
+    if lhs.dtype == trt.float16 and rhs.dtype == trt.float16:
+        lhs = network.add_cast(lhs, trt.float32).get_output(0)
+        rhs = network.add_cast(rhs, trt.float32).get_output(0)
+    output = network.add_matrix_multiply(lhs, lhs_op, rhs, rhs_op).get_output(0)
+    return _cast_back_to_trt_dtype(network, output, output_dtype)
+
+
 def layer_tensor_name(stem: str, layer: int) -> str:
     return f"{stem}_{layer}"
 
@@ -48,6 +65,7 @@ def add_matmul_rhs_constant(
     rhs_width: int,
     rhs_weights: np.ndarray,
     dtype: np.dtype = np.float32,
+    fp32_accumulation: bool = False,
 ) -> trt.ITensor:
     """Matrix multiply: lhs @ rhs_constant.  rhs is [lhs_width, rhs_width]."""
     rank = len(tuple(lhs.shape))
@@ -63,6 +81,12 @@ def add_matmul_rhs_constant(
         dtype=dtype,
     )
     rhs = _cast_back_to_trt_dtype(network, rhs, lhs.dtype)
+    if fp32_accumulation:
+        return _add_matrix_multiply_with_fp32_accumulation(
+            network,
+            lhs, trt.MatrixOperation.NONE,
+            rhs, trt.MatrixOperation.NONE,
+        )
     mm = network.add_matrix_multiply(
         lhs, trt.MatrixOperation.NONE,
         rhs, trt.MatrixOperation.NONE,
@@ -297,9 +321,14 @@ def add_gelu_erf(
 ) -> trt.ITensor:
     """GELU (exact, erf-based): 0.5 * x * (1 + erf(x / sqrt(2))).
 
-    Constants are cast to ``inp.dtype`` for the same STRONGLY_TYPED reason
-    documented on ``add_gelu_new``.
+    Torch's CUDA GELU evaluates the transcendental path in FP32 for FP16
+    inputs, then rounds the result back to the input dtype. Preserve that
+    boundary instead of evaluating ``erf`` and its surrounding arithmetic in
+    FP16, where small per-layer errors compound through the vision tower.
     """
+    output_dtype = inp.dtype
+    if inp.dtype != trt.float32:
+        inp = network.add_cast(inp, trt.float32).get_output(0)
     target_dtype = inp.dtype
     const_shape = (1,) * max(1, len(tuple(inp.shape)))
 
@@ -321,7 +350,7 @@ def add_gelu_erf(
     result = network.add_elementwise(
         half_x.get_output(0), one_plus_erf.get_output(0),
         trt.ElementWiseOperation.PROD)
-    return result.get_output(0)
+    return _cast_back_to_trt_dtype(network, result.get_output(0), output_dtype)
 
 
 def add_activation(
@@ -395,6 +424,7 @@ def add_layer_norm_native(
     beta: np.ndarray,
     eps: float,
     dtype: np.dtype = np.float32,
+    fp32_compute: bool = False,
 ) -> trt.ITensor:
     """LayerNorm via TRT native INormalizationLayer (add_normalization_v2).
 
@@ -414,7 +444,14 @@ def add_layer_norm_native(
         beta:        Bias weights [hidden_size].
         eps:         Numerical stability epsilon (scalar, not a tensor).
         dtype:       Storage dtype for gamma/beta constants before TRT cast.
+        fp32_compute: Cast input and parameters to FP32 for the normalization,
+                      then restore the input dtype at the output boundary.
     """
+    output_dtype = inp.dtype
+    if fp32_compute and inp.dtype != trt.float32:
+        inp = network.add_cast(inp, trt.float32).get_output(0)
+        dtype = np.float32
+
     inp_shape = getattr(inp, "shape", None)
     rank = len(tuple(inp_shape)) if inp_shape is not None else 2
     param_shape = (
@@ -434,7 +471,7 @@ def add_layer_norm_native(
     # attribute. Keep the TRT 10 hint, and let TRT 11 infer the precision.
     if hasattr(norm, "compute_precision"):
         norm.compute_precision = trt.float32
-    return norm.get_output(0)
+    return _cast_back_to_trt_dtype(network, norm.get_output(0), output_dtype)
 
 
 def validate_native_rope_dim(
@@ -920,6 +957,53 @@ def _add_attention_core_explicit(
     context = network.add_matrix_multiply(
         probs_t, trt.MatrixOperation.NONE,
         v_4d, trt.MatrixOperation.NONE).get_output(0)
+    return _cast_back_to_trt_dtype(network, context, output_dtype)
+
+
+def add_siglip_attention_core(
+    network: trt.INetworkDefinition,
+    q_4d: trt.ITensor,
+    k_4d: trt.ITensor,
+    v_4d: trt.ITensor,
+    *,
+    mask: trt.ITensor | None,
+    scale: float,
+) -> trt.ITensor:
+    """Match the checkpoint's eager SigLIP attention precision boundaries.
+
+    QK and PV are evaluated through FP32 tensors and rounded to FP16 outputs.
+    Scaling and masking remain FP16 operations, and softmax alone is explicitly
+    evaluated in FP32 before its probabilities are rounded back to FP16.
+    """
+    output_dtype = q_4d.dtype
+    scores = _add_matrix_multiply_with_fp32_accumulation(
+        network,
+        q_4d, trt.MatrixOperation.NONE,
+        k_4d, trt.MatrixOperation.TRANSPOSE,
+    )
+    scale_t = _scalar_constant_for_trt_dtype(
+        network, (1, 1, 1, 1), scale, scores.dtype)
+    scores = network.add_elementwise(
+        scores, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
+
+    if mask is not None:
+        if mask.dtype != scores.dtype:
+            mask = network.add_cast(mask, scores.dtype).get_output(0)
+        scores = network.add_elementwise(
+            scores, mask, trt.ElementWiseOperation.SUM).get_output(0)
+
+    if scores.dtype != trt.float32:
+        scores = network.add_cast(scores, trt.float32).get_output(0)
+    probs = network.add_softmax(scores)
+    probs.axes = 1 << 3
+    probs_t = _cast_back_to_trt_dtype(
+        network, probs.get_output(0), output_dtype)
+
+    context = _add_matrix_multiply_with_fp32_accumulation(
+        network,
+        probs_t, trt.MatrixOperation.NONE,
+        v_4d, trt.MatrixOperation.NONE,
+    )
     return _cast_back_to_trt_dtype(network, context, output_dtype)
 
 

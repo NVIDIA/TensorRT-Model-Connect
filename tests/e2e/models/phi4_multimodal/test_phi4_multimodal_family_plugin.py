@@ -59,6 +59,231 @@ def test_phi4_multimodal_embed_input_dispatches_to_dual_profile_builder(monkeypa
     assert kwargs["partial_rotary_factor"] == 0.75
 
 
+def test_phi4_fp16_matmul_can_request_fp32_accumulation(monkeypatch) -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.phi4_multimodal.graph_ops")
+    matrix_inputs: list[tuple[object, object]] = []
+
+    class FakeTensor:
+        def __init__(self, dtype: object) -> None:
+            self.dtype = dtype
+            self.shape = (1, 4)
+
+    class FakeLayer:
+        def __init__(self, output: object) -> None:
+            self.output = output
+
+        def get_output(self, index: int) -> object:
+            assert index == 0
+            return self.output
+
+    class FakeNetwork:
+        def add_cast(self, tensor: FakeTensor, dtype: object) -> FakeLayer:
+            return FakeLayer(FakeTensor(dtype))
+
+        def add_matrix_multiply(
+            self,
+            lhs: FakeTensor,
+            lhs_op: object,
+            rhs: FakeTensor,
+            rhs_op: object,
+        ) -> FakeLayer:
+            del lhs_op, rhs_op
+            matrix_inputs.append((lhs.dtype, rhs.dtype))
+            return FakeLayer(FakeTensor(lhs.dtype))
+
+    monkeypatch.setattr(
+        module,
+        "add_constant",
+        lambda network, shape, values, dtype: FakeTensor(module.trt.float16),
+    )
+    output = module.add_matmul_rhs_constant(
+        FakeNetwork(),
+        FakeTensor(module.trt.float16),
+        4,
+        4,
+        np.ones((4, 4), dtype=np.float16),
+        dtype=np.float16,
+        fp32_accumulation=True,
+    )
+
+    assert matrix_inputs == [(module.trt.float32, module.trt.float32)]
+    assert output.dtype == module.trt.float16
+
+
+def test_phi4_vision_linear_requests_fp32_accumulation(monkeypatch) -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.phi4_multimodal.phi4mm_vision_builder")
+    calls: list[dict[str, object]] = []
+
+    def fake_matmul(*args, **kwargs):
+        del args
+        calls.append(kwargs)
+        return "matmul"
+
+    monkeypatch.setattr(module.graph_ops, "add_matmul_rhs_constant", fake_matmul)
+    monkeypatch.setattr(
+        module.graph_ops, "add_bias_sum",
+        lambda network, result, width, bias, dtype: result,
+    )
+
+    result = module._linear(
+        "network",
+        "input",
+        np.ones((3, 4), dtype=np.float32),
+        np.zeros(3, dtype=np.float32),
+        np.float16,
+    )
+
+    assert result == "matmul"
+    assert calls == [{"dtype": np.float16, "fp32_accumulation": True}]
+
+
+def test_phi4_siglip_attention_preserves_fp16_score_boundaries(monkeypatch) -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.phi4_multimodal.graph_ops")
+    accumulation_calls: list[tuple[object, object]] = []
+    elementwise_dtypes: list[tuple[object, object]] = []
+
+    class FakeTensor:
+        def __init__(self, dtype: object) -> None:
+            self.dtype = dtype
+
+    class FakeLayer:
+        def __init__(self, output: FakeTensor) -> None:
+            self.output = output
+            self.axes = 0
+
+        def get_output(self, index: int) -> FakeTensor:
+            assert index == 0
+            return self.output
+
+    class FakeNetwork:
+        def add_cast(self, tensor: FakeTensor, dtype: object) -> FakeLayer:
+            return FakeLayer(FakeTensor(dtype))
+
+        def add_matrix_multiply(
+            self,
+            lhs: FakeTensor,
+            lhs_op: object,
+            rhs: FakeTensor,
+            rhs_op: object,
+        ) -> FakeLayer:
+            del lhs_op, rhs, rhs_op
+            return FakeLayer(FakeTensor(lhs.dtype))
+
+        def add_elementwise(
+            self, lhs: FakeTensor, rhs: FakeTensor, operation: object,
+        ) -> FakeLayer:
+            del operation
+            elementwise_dtypes.append((lhs.dtype, rhs.dtype))
+            return FakeLayer(FakeTensor(lhs.dtype))
+
+        def add_softmax(self, tensor: FakeTensor) -> FakeLayer:
+            assert tensor.dtype == module.trt.float32
+            return FakeLayer(FakeTensor(tensor.dtype))
+
+    monkeypatch.setattr(
+        module,
+        "_scalar_constant_for_trt_dtype",
+        lambda network, shape, value, dtype: FakeTensor(dtype),
+    )
+
+    def fake_accumulation(network, lhs, lhs_op, rhs, rhs_op):
+        del network, lhs_op, rhs_op
+        accumulation_calls.append((lhs.dtype, rhs.dtype))
+        return FakeTensor(lhs.dtype)
+
+    monkeypatch.setattr(
+        module,
+        "_add_matrix_multiply_with_fp32_accumulation",
+        fake_accumulation,
+    )
+    half = module.trt.float16
+    output = module.add_siglip_attention_core(
+        FakeNetwork(),
+        FakeTensor(half),
+        FakeTensor(half),
+        FakeTensor(half),
+        mask=FakeTensor(half),
+        scale=8 ** -0.5,
+    )
+
+    assert accumulation_calls == [(half, half), (half, half)]
+    assert elementwise_dtypes[0] == (half, half)
+    assert output.dtype == half
+
+
+def test_phi4_vision_norm_and_gelu_compute_in_fp32(monkeypatch) -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.phi4_multimodal.graph_ops")
+    normalization_dtypes: list[tuple[object, object, object]] = []
+    unary_dtypes: list[object] = []
+
+    class FakeTensor:
+        def __init__(self, dtype: object) -> None:
+            self.dtype = dtype
+            self.shape = (1, 4)
+
+    class FakeLayer:
+        def __init__(self, output: FakeTensor) -> None:
+            self.output = output
+            self.epsilon = 0.0
+
+        def get_output(self, index: int) -> FakeTensor:
+            assert index == 0
+            return self.output
+
+    class FakeNetwork:
+        def add_cast(self, tensor: FakeTensor, dtype: object) -> FakeLayer:
+            return FakeLayer(FakeTensor(dtype))
+
+        def add_elementwise(
+            self, lhs: FakeTensor, rhs: FakeTensor, operation: object,
+        ) -> FakeLayer:
+            del rhs, operation
+            return FakeLayer(FakeTensor(lhs.dtype))
+
+        def add_unary(self, tensor: FakeTensor, operation: object) -> FakeLayer:
+            del operation
+            unary_dtypes.append(tensor.dtype)
+            return FakeLayer(FakeTensor(tensor.dtype))
+
+        def add_normalization_v2(
+            self, inp: FakeTensor, gamma: FakeTensor, beta: FakeTensor, axes: int,
+        ) -> FakeLayer:
+            del axes
+            normalization_dtypes.append((inp.dtype, gamma.dtype, beta.dtype))
+            return FakeLayer(FakeTensor(inp.dtype))
+
+    monkeypatch.setattr(
+        module,
+        "add_constant",
+        lambda network, shape, values, dtype: FakeTensor(
+            module.trt.float32 if dtype is np.float32 else module.trt.float16),
+    )
+    half = module.trt.float16
+    network = FakeNetwork()
+    norm = module.add_layer_norm_native(
+        network,
+        FakeTensor(half),
+        4,
+        np.ones(4, dtype=np.float32),
+        np.zeros(4, dtype=np.float32),
+        1.0e-6,
+        dtype=np.float16,
+        fp32_compute=True,
+    )
+    gelu = module.add_gelu_erf(
+        network, FakeTensor(half), dtype=np.float16)
+
+    assert normalization_dtypes == [
+        (module.trt.float32, module.trt.float32, module.trt.float32)]
+    assert unary_dtypes == [module.trt.float32]
+    assert norm.dtype == half
+    assert gelu.dtype == half
+
+
 def _rand(*shape: int) -> np.ndarray:
     return RNG.randn(*shape).astype(np.float32)
 

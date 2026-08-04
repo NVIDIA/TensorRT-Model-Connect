@@ -93,7 +93,8 @@ def _linear(network, inp, weight, bias, work_np_dtype):
     out_features, in_features = weight.shape
     result = graph_ops.add_matmul_rhs_constant(
         network, inp, in_features, out_features, weight.T,
-        dtype=work_np_dtype)
+        dtype=work_np_dtype,
+        fp32_accumulation=work_np_dtype == np.float16)
     if bias is not None:
         result = graph_ops.add_bias_sum(
             network, result, out_features, np.asarray(bias),
@@ -114,7 +115,7 @@ def _build_encoder_layer(
         network, hidden, _EMBED_DIM,
         _require(weights, f"{prefix}.layer_norm1.weight"),
         _require(weights, f"{prefix}.layer_norm1.bias"),
-        1.0e-6, dtype=work_np_dtype)
+        1.0e-6, dtype=work_np_dtype, fp32_compute=True)
 
     q = _linear(
         network, normed,
@@ -139,9 +140,11 @@ def _build_encoder_layer(
         layer.second_transpose = trt.Permutation([0, 2, 1, 3])
         return layer.get_output(0)
 
-    context = graph_ops.add_attention_core(
+    context = graph_ops.add_siglip_attention_core(
         network, as_heads(q), as_heads(k), as_heads(v),
-        mask=attention_mask, scale=_HEAD_DIM ** -0.5)
+        mask=attention_mask,
+        scale=_HEAD_DIM ** -0.5,
+    )
     context_rows = network.add_shuffle(context)
     context_rows.first_transpose = trt.Permutation([0, 2, 1, 3])
     context_rows.reshape_dims = (
@@ -158,7 +161,7 @@ def _build_encoder_layer(
         network, hidden, _EMBED_DIM,
         _require(weights, f"{prefix}.layer_norm2.weight"),
         _require(weights, f"{prefix}.layer_norm2.bias"),
-        1.0e-6, dtype=work_np_dtype)
+        1.0e-6, dtype=work_np_dtype, fp32_compute=True)
     mlp = _linear(
         network, normed,
         _require(weights, f"{prefix}.mlp.fc1.weight"),
@@ -266,14 +269,19 @@ def build_phi4mm_vision_engine(
     batched = network.add_shuffle(work_input)
     batched.reshape_dims = (_NUM_CROPS, 3, _CROP_SIZE, _CROP_SIZE)
 
+    patch_input = batched.get_output(0)
+    patch_np_dtype = work_np_dtype
+    if precision == "fp16":
+        patch_input = _cast(network, patch_input, trt.float32)
+        patch_np_dtype = np.float32
     patch_weight = np.asarray(
         _require(weights, "img_processor.embeddings.patch_embedding.weight"),
-        dtype=work_np_dtype)
+        dtype=patch_np_dtype)
     patch_bias = np.asarray(
         _require(weights, "img_processor.embeddings.patch_embedding.bias"),
-        dtype=work_np_dtype)
+        dtype=patch_np_dtype)
     patch = network.add_convolution_nd(
-        batched.get_output(0), _EMBED_DIM, (_PATCH_SIZE, _PATCH_SIZE),
+        patch_input, _EMBED_DIM, (_PATCH_SIZE, _PATCH_SIZE),
         trt.Weights(np.ascontiguousarray(patch_weight)),
         trt.Weights(np.ascontiguousarray(patch_bias)))
     patch.stride_nd = (_PATCH_SIZE, _PATCH_SIZE)
@@ -281,6 +289,7 @@ def build_phi4mm_vision_engine(
     rows.first_transpose = trt.Permutation([0, 2, 3, 1])
     rows.reshape_dims = (
         _NUM_CROPS, _GRID_SIZE * _GRID_SIZE, _EMBED_DIM)
+    patch_rows = _cast(network, rows.get_output(0), work_trt_dtype)
 
     position = const_in_work_dtype(
         network, (_NUM_CROPS, _GRID_SIZE * _GRID_SIZE, _EMBED_DIM),
@@ -288,7 +297,7 @@ def build_phi4mm_vision_engine(
             weights, "img_processor.embeddings.position_embedding.weight")),
         work_np_dtype, work_trt_dtype)
     hidden = network.add_elementwise(
-        rows.get_output(0), position, trt.ElementWiseOperation.SUM).get_output(0)
+        patch_rows, position, trt.ElementWiseOperation.SUM).get_output(0)
     attention_mask = const_in_work_dtype(
         network,
         (_NUM_CROPS, 1, _GRID_SIZE * _GRID_SIZE, _GRID_SIZE * _GRID_SIZE),
