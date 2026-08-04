@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import math
 import sys
-from dataclasses import replace
 
 import numpy as np
 
@@ -176,12 +175,9 @@ def build_dit_engine(
     *,
     verbose: bool = False,
 ) -> bytes:
-    """Build one rank-independent TensorRT plan for eight-rank H3 Ulysses."""
+    """Build one rank-independent TensorRT plan for four-rank H3 Ulysses."""
 
-    if profile.num_layers == 0:
-        replace(profile, num_layers=1).validate()
-    else:
-        profile.validate()
+    profile.validate()
     cp = profile.context_parallel_size
     local_rows = profile.padded_sequence_length // cp
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -189,6 +185,9 @@ def build_dit_engine(
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 96 << 30)
+    # Hugging Face keeps TF32 disabled for the FP32 input/output projections.
+    # Match that contract while retaining native TensorRT GEMMs.
+    config.clear_flag(trt.BuilderFlag.TF32)
 
     video = network.add_input(
         "video_hidden_states", trt.float32, (profile.video_rows, profile.video_patch_dim)

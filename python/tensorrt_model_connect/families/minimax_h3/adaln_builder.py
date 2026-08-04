@@ -33,6 +33,8 @@ def build_adaln_precompute_engine(
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
+    # Match PyTorch's default FP32 matmul policy used by the reference.
+    config.clear_flag(trt.BuilderFlag.TF32)
 
     features = network.add_input(
         "timestep_features",

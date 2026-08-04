@@ -9,8 +9,8 @@ import argparse
 import gc
 import hashlib
 import json
-from pathlib import Path
 import time
+from pathlib import Path
 
 from tensorrt_model_connect.families.minimax_h3.checkpoint import (
     load_component_state_dict,
@@ -20,14 +20,27 @@ from tensorrt_model_connect.families.minimax_h3.checkpoint import (
 from tensorrt_model_connect.families.minimax_h3.config import (
     SOL_ENGINE_1344X768_124F,
 )
+from tensorrt_model_connect.families.minimax_h3.provenance import (
+    CHECKPOINT_REVISION,
+    atomic_write_bytes,
+    atomic_write_json,
+    builder_source_sha256,
+    checkpoint_snapshot_record,
+    file_record,
+    serialized_profile,
+    sha256_file,
+    validate_record,
+    validate_source_revision,
+)
 
 
 def _write(output: Path, name: str, payload: bytes, elapsed: float, receipt: dict) -> None:
     path = output / name
-    path.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    atomic_write_bytes(path, payload)
     receipt["components"][name] = {
         "bytes": len(payload),
-        "sha256": hashlib.sha256(payload).hexdigest(),
+        "sha256": digest,
         "build_s": elapsed,
     }
 
@@ -36,12 +49,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--cp-size", type=int, default=4, choices=(4, 8))
-    parser.add_argument(
-        "--diagnostic-num-layers",
-        type=int,
-        help="Build a reduced-depth denoiser plan for stage-local parity diagnosis.",
-    )
+    parser.add_argument("--source-revision", required=True)
+    parser.add_argument("--cp-size", type=int, default=4, choices=(4,))
     parser.add_argument(
         "--component",
         action="append",
@@ -57,26 +66,43 @@ def main() -> int:
     model = Path(args.model_path)
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
+    source_revision = validate_source_revision(args.source_revision)
     profile_values = {
         **SOL_ENGINE_1344X768_124F.__dict__,
         "context_parallel_size": args.cp_size,
     }
-    if args.diagnostic_num_layers is not None:
-        if args.diagnostic_num_layers < 0:
-            raise ValueError("--diagnostic-num-layers must be non-negative")
-        profile_values["num_layers"] = args.diagnostic_num_layers
     profile = SOL_ENGINE_1344X768_124F.__class__(**profile_values)
     receipt_path = output / "build_receipt.json"
-    serialized_profile = json.loads(json.dumps(profile.__dict__))
+    tokenizer = model / "tokenizer" / "tokenizer.json"
     receipt = {
-        "checkpoint_revision": "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
-        "profile": serialized_profile,
+        "checkpoint_revision": CHECKPOINT_REVISION,
+        "checkpoint_snapshot": checkpoint_snapshot_record(model),
+        "source_revision": source_revision,
+        "builder_source_sha256": builder_source_sha256(),
+        "build_helper_sha256": sha256_file(Path(__file__).resolve()),
+        "profile": serialized_profile(profile),
+        "assets": {"tokenizer.json": file_record(tokenizer)},
         "components": {},
     }
     if args.resume and receipt_path.is_file():
         previous = json.loads(receipt_path.read_text())
-        if previous.get("profile") != receipt["profile"]:
-            raise ValueError("Cannot resume: existing receipt uses a different build profile")
+        for key in (
+            "checkpoint_revision",
+            "source_revision",
+            "builder_source_sha256",
+            "build_helper_sha256",
+            "checkpoint_snapshot",
+            "profile",
+            "assets",
+        ):
+            if previous.get(key) != receipt[key]:
+                raise ValueError(f"Cannot resume: existing receipt has different {key}")
+        validate_record(
+            tokenizer,
+            previous["assets"]["tokenizer.json"],
+            "tokenizer.json",
+            hash_file=True,
+        )
         receipt["components"].update(previous.get("components", {}))
     selected = set(
         args.component or ("text_encoder", "adaln_precompute", "denoiser", "vae_decoder")
@@ -87,30 +113,22 @@ def main() -> int:
             return False
         path = output / filename
         recorded = receipt["components"].get(filename)
-        if not args.resume or not path.is_file():
+        if not args.resume or not path.is_file() or not recorded:
             return True
-        if not recorded:
-            # A build interrupted after atomically writing a plan but before
-            # writing its receipt is still resumable. The output directory is
-            # profile-specific, and TensorRT will validate the plan again at
-            # deserialize time before parity/performance qualification.
-            receipt["components"][filename] = {
-                "bytes": path.stat().st_size,
-                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                "build_s": None,
-                "adopted_on_resume": True,
-            }
-            checkpoint_receipt()
-            return False
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        return digest != recorded.get("sha256") or path.stat().st_size != recorded.get("bytes")
+        try:
+            validate_record(path, recorded, filename, hash_file=True)
+        except ValueError:
+            return True
+        return False
 
     def checkpoint_receipt() -> None:
-        receipt_path.write_text(json.dumps(receipt, indent=2))
+        atomic_write_json(receipt_path, receipt)
 
     if should_build("text_encoder", "text_encoder.plan"):
         from tensorrt_model_connect.families.minimax_h3.text_encoder_builder import (
             build_text_encoder_engine,
+        )
+        from tensorrt_model_connect.families.minimax_h3.text_encoder_builder import (
             checkpoint_keys as text_keys,
         )
 
@@ -154,6 +172,8 @@ def main() -> int:
 
     from tensorrt_model_connect.families.minimax_h3.vae_builder import (
         build_vae_tile_decoder_engine,
+    )
+    from tensorrt_model_connect.families.minimax_h3.vae_builder import (
         checkpoint_keys as vae_keys,
     )
 

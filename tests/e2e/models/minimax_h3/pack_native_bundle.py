@@ -6,8 +6,8 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from tensorrt_model_connect.bundle_writer import (
@@ -16,7 +16,12 @@ from tensorrt_model_connect.bundle_writer import (
     _bundle_section_from_file,
     write_bundle,
 )
-
+from tensorrt_model_connect.families.minimax_h3.config import SOL_ENGINE_1344X768_124F
+from tensorrt_model_connect.families.minimax_h3.provenance import (
+    CHECKPOINT_REVISION,
+    validate_build_receipt,
+    validate_source_revision,
+)
 
 PLAN_SECTIONS = {
     "text_encoder_plan": "text_encoder.plan",
@@ -31,28 +36,43 @@ def main() -> int:
     parser.add_argument("--plans-dir", required=True)
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--source-revision", required=True)
     args = parser.parse_args()
     plans = Path(args.plans_dir)
     model = Path(args.model_path)
     output = Path(args.output)
+    source_revision = validate_source_revision(args.source_revision)
     receipt_path = plans / "build_receipt.json"
-    receipt = json.loads(receipt_path.read_text()) if receipt_path.is_file() else {}
-    recorded = receipt.get("components", {})
+    if not receipt_path.is_file():
+        raise FileNotFoundError(f"Missing native build receipt: {receipt_path}")
+    receipt = json.loads(receipt_path.read_text())
+    tokenizer = (model / "tokenizer" / "tokenizer.json").resolve(strict=True)
+    expected_source_sha, recorded, tokenizer_record, snapshot_record = validate_build_receipt(
+        receipt,
+        plans_dir=plans,
+        snapshot=model,
+        tokenizer=tokenizer,
+        build_helper=Path(__file__).with_name("build_native_components.py"),
+        source_revision=source_revision,
+        profile=SOL_ENGINE_1344X768_124F,
+        hash_files=False,
+    )
 
     sections: list[BundleSection] = []
     for section_name, filename in PLAN_SECTIONS.items():
         path = plans / filename
-        if not path.is_file() or not path.stat().st_size:
-            raise FileNotFoundError(f"Missing native plan: {path}")
         sections.append(
             _bundle_section_from_file(
                 section_name,
                 path,
-                expected_sha256=recorded.get(filename, {}).get("sha256"),
+                expected_sha256=recorded[filename]["sha256"],
             )
         )
-    tokenizer = (model / "tokenizer" / "tokenizer.json").resolve(strict=True)
-    sections.append(_bundle_section_from_file("tokenizer.json", tokenizer))
+    sections.append(
+        _bundle_section_from_file(
+            "tokenizer.json", tokenizer, expected_sha256=tokenizer_record["sha256"]
+        )
+    )
     config = {
         "model_type": "minimax_h3",
         "runtime_strategy": "diffusion_minimax_h3",
@@ -61,7 +81,14 @@ def main() -> int:
         "trt_version": "11.2.0.113",
         "trt_abi": "11.2",
         "tokenizer_add_special_tokens": 0,
-        "checkpoint_revision": "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
+        "checkpoint_revision": CHECKPOINT_REVISION,
+        "source_revision": source_revision,
+        "builder_source_sha256": expected_source_sha,
+        "build_helper_sha256": receipt["build_helper_sha256"],
+        "checkpoint_inventory_sha256": snapshot_record["inventory_sha256"],
+        "plan_sha256": {
+            filename: recorded[filename]["sha256"] for filename in PLAN_SECTIONS.values()
+        },
         "height": 768,
         "width": 1344,
         "num_frames": 124,

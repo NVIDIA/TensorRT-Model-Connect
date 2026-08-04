@@ -1,18 +1,82 @@
 {
-  "schema_version": 1,
-  "model": "MiniMaxAI/MiniMax-H3",
-  "revision": "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
-  "task": "t2va",
-  "prompt_file": "prompts/t2va-example-1.json",
-  "height": 768,
-  "width": 1344,
-  "video_num_frames": 124,
-  "fps": 24,
-  "num_inference_steps": 50,
-  "seed": 0,
-  "parallel": {"mode": "context_parallel", "cp_size": 4},
-  "accuracy": {
-    "minimum_psnr_db": 40.0,
-    "maximum_mean_absolute_error": 0.00392156862745098
-  }
+  "name": "minimax-h3-768p",
+  "hf_id": "MiniMaxAI/MiniMax-H3",
+  "hf_revision": "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
+  "bundle": "minimax-h3-768p.trtfb",
+  "family": "minimax_h3",
+  "runtime_strategy": "diffusion_minimax_h3",
+  "task_strategy": "diffusion_media_generation",
+  "precision": "bf16",
+  "reference_precision": "bf16",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_timeout_s": 14400,
+  "build_args": {
+    "parallel": {
+      "mode": "context_parallel",
+      "cp_size": 4
+    }
+  },
+  "testcases": [
+    {
+      "name": "minimax-h3-768p",
+      "trace_id": "IT-E2E-MINIMAX-H3-768P-CP4-01",
+      "ci_tier": "multi_device",
+      "runtime_timeout_s": 7200,
+      "reference_family": "diffusers_video_gen",
+      "user_contract": "diffusion_video",
+      "description": "Pinned MiniMax-H3 1344x768 text-to-video-and-audio visual-parity contract on the native four-rank context-parallel runtime",
+      "test_type": "diffusion",
+      "prompt_file": "tests/e2e/models/minimax_h3/prompts/t2va-example-1.json",
+      "video_num_frames": 124,
+      "video_height": 768,
+      "video_width": 1344,
+      "num_inference_steps": 50,
+      "fps": 24,
+      "seed": 0,
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 4
+          },
+          "gating": true
+        },
+        {
+          "kind": "asset_exists",
+          "args": {
+            "path": "tests/e2e/models/minimax_h3/prompts/t2va-example-1.json"
+          },
+          "gating": true
+        },
+        {
+          "kind": "python_module_available",
+          "args": {
+            "module": "diffusers",
+            "phase": "reference"
+          },
+          "gating": true
+        },
+        {
+          "kind": "python_module_available",
+          "args": {
+            "module": "huggingface_hub",
+            "phase": "reference"
+          },
+          "gating": true
+        }
+      ],
+      "stages": [
+        {
+          "name": "end_to_end",
+          "required": true
+        }
+      ],
+      "notes": "The production profile is fixed at CP4. This case intentionally stays in the multi_device tier; it must never be represented by a synthetic single-GPU replacement. The HF backend is the pinned Diffusers modular pipeline and the acceptance gate compares all decoded frames."
+    }
+  ]
 }

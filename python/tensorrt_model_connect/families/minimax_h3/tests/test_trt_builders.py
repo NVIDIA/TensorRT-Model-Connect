@@ -80,7 +80,7 @@ def test_tiny_native_h3_graphs_serialize() -> None:
         hidden_size=8,
         num_layers=1,
         num_refiner_layers=1,
-        num_heads=2,
+        num_heads=4,
         head_dim=8,
         ffn_dim=16,
         video_in_channels=2,
@@ -95,7 +95,7 @@ def test_tiny_native_h3_graphs_serialize() -> None:
         text_rows=2,
         padded_sequence_length=8,
         max_timestep_count=2,
-        context_parallel_size=2,
+        context_parallel_size=4,
     )
     weights = _weights(profile)
     assert build_adaln_precompute_engine(weights, profile)

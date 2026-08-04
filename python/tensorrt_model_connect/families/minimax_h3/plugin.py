@@ -5,8 +5,9 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+import hashlib
 import json
+import os
 from pathlib import Path
 
 from .checkpoint import (
@@ -16,6 +17,39 @@ from .checkpoint import (
     require_keys,
 )
 from .config import SOL_ENGINE_1344X768_124F
+from .provenance import (
+    builder_source_sha256,
+    checkpoint_snapshot_record,
+    validate_source_revision,
+)
+
+
+def _build_source_revision() -> str:
+    for name in ("TRTMC_MINIMAX_H3_SOURCE_REVISION", "GITHUB_SHA"):
+        revision = os.environ.get(name, "").strip().lower()
+        if revision:
+            return validate_source_revision(revision)
+    raise ValueError(
+        "MiniMax-H3 native builds require TRTMC_MINIMAX_H3_SOURCE_REVISION "
+        "(or GITHUB_SHA in GitHub Actions)"
+    )
+
+
+def _fixed_profile(raw: dict):
+    expected = {
+        "text_rows": SOL_ENGINE_1344X768_124F.text_rows,
+        "audio_rows": SOL_ENGINE_1344X768_124F.audio_rows,
+        "video_rows": SOL_ENGINE_1344X768_124F.video_rows,
+        "padded_sequence_length": SOL_ENGINE_1344X768_124F.padded_sequence_length,
+    }
+    mismatches = {
+        name: (raw[name], value)
+        for name, value in expected.items()
+        if name in raw and int(raw[name]) != value
+    }
+    if mismatches:
+        raise ValueError(f"Unsupported MiniMax-H3 packed-row profile: {mismatches}")
+    return SOL_ENGINE_1344X768_124F
 
 
 class MiniMaxH3Plugin:
@@ -84,26 +118,14 @@ class MiniMaxH3Plugin:
             raise ValueError("MiniMax-H3 native builds require BF16 checkpoint weights")
         cp_size = int(getattr(parallel_config, "cp_size", 1))
         mode = str(getattr(parallel_config, "mode", "single"))
-        if mode != "context_parallel" or cp_size not in {4, 8}:
-            raise ValueError(
-                "MiniMax-H3 requires parallel.mode=context_parallel and cp_size=4 or 8"
-            )
+        if mode != "context_parallel" or cp_size != 4:
+            raise ValueError("MiniMax-H3 requires parallel.mode=context_parallel and cp_size=4")
 
         raw = getattr(config, "raw", {})
-        profile = replace(
-            SOL_ENGINE_1344X768_124F,
-            context_parallel_size=cp_size,
-            text_rows=int(raw.get("text_rows", SOL_ENGINE_1344X768_124F.text_rows)),
-            audio_rows=int(raw.get("audio_rows", SOL_ENGINE_1344X768_124F.audio_rows)),
-            video_rows=int(raw.get("video_rows", SOL_ENGINE_1344X768_124F.video_rows)),
-            padded_sequence_length=int(
-                raw.get(
-                    "padded_sequence_length",
-                    SOL_ENGINE_1344X768_124F.padded_sequence_length,
-                )
-            ),
-        )
+        profile = _fixed_profile(raw)
         profile.validate()
+        source_revision = _build_source_revision()
+        snapshot = checkpoint_snapshot_record(Path(weights["_model_dir"]))
         from .adaln_builder import build_adaln_precompute_engine
         from .dit_builder import build_dit_engine
         from .text_encoder_builder import (
@@ -153,6 +175,13 @@ class MiniMaxH3Plugin:
         vae_decoder_plan = build_vae_tile_decoder_engine(vae_weights, verbose=verbose)
         tokenizer_json = (Path(weights["_tokenizer_dir"]) / "tokenizer.json").read_bytes()
 
+        plan_sha256 = {
+            "text_encoder.plan": hashlib.sha256(text_encoder_plan).hexdigest(),
+            "adaln_precompute.plan": hashlib.sha256(adaln_plan).hexdigest(),
+            "denoiser_cp.plan": hashlib.sha256(denoiser_plan).hexdigest(),
+            "vae_tile_decoder.plan": hashlib.sha256(vae_decoder_plan).hexdigest(),
+        }
+
         return {
             "text_encoder": text_encoder_plan,
             "adaln_precompute": adaln_plan,
@@ -165,6 +194,12 @@ class MiniMaxH3Plugin:
             "audio_vae_dir": weights["_audio_vae_dir"],
             "tokenizer_dir": weights["_tokenizer_dir"],
             "tokenizer_json": tokenizer_json,
+            "provenance": {
+                "source_revision": source_revision,
+                "builder_source_sha256": builder_source_sha256(),
+                "checkpoint_inventory_sha256": snapshot["inventory_sha256"],
+                "plan_sha256": plan_sha256,
+            },
         }
 
     def diffusion_bundle_sections(
@@ -182,13 +217,30 @@ class MiniMaxH3Plugin:
     def diffusion_bundle_config(self, config, *, components: dict) -> dict:
         raw = getattr(config, "raw", {})
         profile = components["profile"]
+        fixed_request = {
+            "video_height": 768,
+            "video_width": 1344,
+            "video_num_frames": 124,
+            "num_inference_steps": 50,
+        }
+        mismatches = {
+            name: (raw[name], value)
+            for name, value in fixed_request.items()
+            if name in raw and int(raw[name]) != value
+        }
+        if mismatches:
+            raise ValueError(f"Unsupported MiniMax-H3 runtime profile: {mismatches}")
+        provenance = components.get("provenance")
+        if not isinstance(provenance, dict):
+            raise ValueError("MiniMax-H3 components are missing exact build provenance")
         return {
             "checkpoint_revision": "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
-            "height": int(raw.get("video_height", 768)),
-            "width": int(raw.get("video_width", 1344)),
-            "num_frames": int(raw.get("video_num_frames", 124)),
+            **provenance,
+            "height": 768,
+            "width": 1344,
+            "num_frames": 124,
             "fps": 24,
-            "num_inference_steps": int(raw.get("num_inference_steps", 50)),
+            "num_inference_steps": 50,
             "seed": int(raw.get("seed", 0)),
             "text_rows": profile.text_rows,
             "audio_rows": profile.audio_rows,

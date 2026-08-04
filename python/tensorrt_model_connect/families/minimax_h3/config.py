@@ -35,7 +35,7 @@ class MiniMaxH3Config:
     text_rows: int = 537
     padded_sequence_length: int = 38272
     max_timestep_count: int = 4
-    context_parallel_size: int = 8
+    context_parallel_size: int = 4
 
     @property
     def sequence_length(self) -> int:
@@ -61,6 +61,8 @@ class MiniMaxH3Config:
     def validate(self) -> None:
         if self.hidden_size <= 0 or self.num_layers <= 0:
             raise ValueError("MiniMax-H3 hidden_size and num_layers must be positive")
+        if self.context_parallel_size != 4:
+            raise ValueError("MiniMax-H3 native runtime requires context_parallel_size=4")
         if self.attention_size <= self.hidden_size:
             raise ValueError("MiniMax-H3 attention width must exceed its residual width")
         if self.sequence_length > self.padded_sequence_length:

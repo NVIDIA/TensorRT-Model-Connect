@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 import tomllib
 
 import pytest
@@ -13,7 +14,11 @@ from tensorrt_model_connect.families.minimax_h3.config import (
     MiniMaxH3Config,
     SOL_ENGINE_1344X768_124F,
 )
-from tensorrt_model_connect.families.minimax_h3.plugin import MiniMaxH3Plugin
+from tensorrt_model_connect.families.minimax_h3.plugin import (
+    MiniMaxH3Plugin,
+    _build_source_revision,
+    _fixed_profile,
+)
 
 
 FAMILY_ROOT = Path(__file__).resolve().parents[1]
@@ -23,8 +28,9 @@ def test_sol_engine_profile_matches_public_packed_shape() -> None:
     profile = SOL_ENGINE_1344X768_124F
     profile.validate()
     assert profile.sequence_length == 38247
+    assert profile.context_parallel_size == 4
     assert profile.padding_rows == 25
-    assert profile.padded_sequence_length // profile.context_parallel_size == 4784
+    assert profile.padded_sequence_length // profile.context_parallel_size == 9568
     assert profile.attention_size == 7168
     assert profile.video_patch_dim == 96
 
@@ -34,6 +40,8 @@ def test_invalid_context_parallel_contract_fails_closed() -> None:
         MiniMaxH3Config(padded_sequence_length=38271).validate()
     with pytest.raises(ValueError, match="num_heads"):
         MiniMaxH3Config(context_parallel_size=4, num_heads=55).validate()
+    with pytest.raises(ValueError, match="context_parallel_size=4"):
+        MiniMaxH3Config(context_parallel_size=8).validate()
 
 
 def test_manifest_discovers_both_public_pipeline_names() -> None:
@@ -52,6 +60,45 @@ def test_plugin_aliases_are_exact() -> None:
     for alias in ("minimax-h3", "minimax_h3", "MiniMaxH3Pipeline"):
         assert plugin.matches(alias)
     assert not plugin.matches("minimax-video-01")
+
+
+def test_plugin_fails_closed_on_unqualified_profile_or_source(monkeypatch) -> None:
+    monkeypatch.delenv("TRTMC_MINIMAX_H3_SOURCE_REVISION", raising=False)
+    monkeypatch.delenv("GITHUB_SHA", raising=False)
+    with pytest.raises(ValueError, match="SOURCE_REVISION"):
+        _build_source_revision()
+    monkeypatch.setenv("TRTMC_MINIMAX_H3_SOURCE_REVISION", "A" * 40)
+    assert _build_source_revision() == "a" * 40
+    assert _fixed_profile({}) is SOL_ENGINE_1344X768_124F
+    with pytest.raises(ValueError, match="packed-row profile"):
+        _fixed_profile({"video_rows": 1})
+
+
+def test_plugin_bundle_config_preserves_exact_provenance() -> None:
+    provenance = {
+        "source_revision": "a" * 40,
+        "builder_source_sha256": "b" * 64,
+        "checkpoint_inventory_sha256": "c" * 64,
+        "plan_sha256": {
+            "text_encoder.plan": "d" * 64,
+            "adaln_precompute.plan": "e" * 64,
+            "denoiser_cp.plan": "f" * 64,
+            "vae_tile_decoder.plan": "0" * 64,
+        },
+    }
+    config = SimpleNamespace(raw={"seed": 7})
+    result = MiniMaxH3Plugin().diffusion_bundle_config(
+        config,
+        components={"profile": SOL_ENGINE_1344X768_124F, "provenance": provenance},
+    )
+    assert result | provenance == result
+    assert result["seed"] == 7
+    assert result["context_parallel_size"] == 4
+    with pytest.raises(ValueError, match="runtime profile"):
+        MiniMaxH3Plugin().diffusion_bundle_config(
+            SimpleNamespace(raw={"video_width": 1}),
+            components={"profile": SOL_ENGINE_1344X768_124F, "provenance": provenance},
+        )
 
 
 def test_production_graph_is_native_trt_only() -> None:
@@ -77,7 +124,7 @@ def test_sol_lossless_optimizations_are_structural() -> None:
     ops = (FAMILY_ROOT / "graph_ops.py").read_text()
     assert "block_modulation_" in adaln
     assert "fused_qkv" in dit
-    assert "add_rotary_embedding" in ops
+    assert "UnaryOperation.NEG" in ops
     assert "add_attention" in ops
     assert "CollectiveOperation.ALL_TO_ALL" in ops
     assert "SolAttn" not in "\n".join((adaln, dit, ops))

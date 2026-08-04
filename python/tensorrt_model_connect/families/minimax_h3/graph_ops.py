@@ -69,8 +69,14 @@ def linear(
 
 
 def silu(network, tensor):
-    sigmoid = network.add_activation(tensor, trt.ActivationType.SIGMOID).get_output(0)
-    return network.add_elementwise(tensor, sigmoid, trt.ElementWiseOperation.PROD).get_output(0)
+    source_dtype = tensor.dtype
+    if source_dtype != trt.bfloat16:
+        sigmoid = network.add_activation(tensor, trt.ActivationType.SIGMOID).get_output(0)
+        return network.add_elementwise(tensor, sigmoid, trt.ElementWiseOperation.PROD).get_output(0)
+    value = cast(network, tensor, trt.float32)
+    sigmoid = network.add_activation(value, trt.ActivationType.SIGMOID).get_output(0)
+    activated = network.add_elementwise(value, sigmoid, trt.ElementWiseOperation.PROD).get_output(0)
+    return cast(network, activated, source_dtype)
 
 
 def rms_norm(network, tensor, weight, width: int, eps: float):
@@ -111,12 +117,23 @@ def modulate(network, normalized, shift, scale):
     shift = cast(network, shift, normalized.dtype)
     scale = network.add_elementwise(scale, one, trt.ElementWiseOperation.SUM).get_output(0)
     value = network.add_elementwise(normalized, scale, trt.ElementWiseOperation.PROD).get_output(0)
+    # Match PyTorch's BF16 rounding between the product and shift addition
+    # without breaking TensorRT's native elementwise fusion.
+    zero = constant(network, np.zeros((1,) * len(tuple(value.shape)), dtype=np.float32))
+    zero = cast(network, zero, value.dtype)
+    value = network.add_elementwise(value, zero, trt.ElementWiseOperation.SUM).get_output(0)
     return network.add_elementwise(value, shift, trt.ElementWiseOperation.SUM).get_output(0)
 
 
 def gated_residual(network, residual, update, gate):
     gate = cast(network, gate, update.dtype)
     update = network.add_elementwise(update, gate, trt.ElementWiseOperation.PROD).get_output(0)
+    # Preserve PyTorch's BF16 product rounding before the residual sum. The
+    # zero-add remains in TensorRT's native fused kernel but prevents it from
+    # contracting this sequence into a single-rounding multiply-add.
+    zero = constant(network, np.zeros((1,) * len(tuple(update.shape)), dtype=np.float32))
+    zero = cast(network, zero, update.dtype)
+    update = network.add_elementwise(update, zero, trt.ElementWiseOperation.SUM).get_output(0)
     update = cast(network, update, residual.dtype)
     return network.add_elementwise(residual, update, trt.ElementWiseOperation.SUM).get_output(0)
 
@@ -174,15 +191,48 @@ def partial_rope(
     rotary_dim: int,
     interleaved: bool = False,
 ):
-    """Apply H3's 96-channel MM-RoPE with native ``IRotaryLayer``."""
+    """Apply H3's 96-channel rotate-half MM-RoPE with native layers."""
 
     value = rows_to_heads(network, tensor, rows, heads, head_dim)
-    cos_half = cast(network, cos_half, value.dtype)
-    sin_half = cast(network, sin_half, value.dtype)
-    layer = network.add_rotary_embedding(value, cos_half, sin_half, interleaved, rotary_dim)
-    if layer is None:
-        raise RuntimeError("TensorRT failed to add MiniMax-H3 partial rotary embedding")
-    return heads_to_rows(network, layer.get_output(0), rows, heads * head_dim)
+    if interleaved:
+        raise ValueError("MiniMax-H3 uses rotate-half, non-interleaved RoPE")
+    stride = (1, 1, 1, 1)
+    rotary = network.add_slice(
+        value, (0, 0, 0, 0), (1, heads, rows, rotary_dim), stride
+    ).get_output(0)
+    passthrough = network.add_slice(
+        value,
+        (0, 0, 0, rotary_dim),
+        (1, heads, rows, head_dim - rotary_dim),
+        stride,
+    ).get_output(0)
+    half = rotary_dim // 2
+    first = network.add_slice(rotary, (0, 0, 0, 0), (1, heads, rows, half), stride).get_output(0)
+    second = network.add_slice(rotary, (0, 0, 0, half), (1, heads, rows, half), stride).get_output(
+        0
+    )
+    negative_second = network.add_unary(second, trt.UnaryOperation.NEG).get_output(0)
+    rotated_layer = network.add_concatenation((negative_second, first))
+    rotated_layer.axis = 3
+
+    def duplicate_table(table):
+        table = cast(network, table, value.dtype)
+        reshape = network.add_shuffle(table)
+        reshape.reshape_dims = (1, 1, rows, half)
+        duplicate = network.add_concatenation((reshape.get_output(0), reshape.get_output(0)))
+        duplicate.axis = 3
+        return duplicate.get_output(0)
+
+    cos = duplicate_table(cos_half)
+    sin = duplicate_table(sin_half)
+    left = network.add_elementwise(rotary, cos, trt.ElementWiseOperation.PROD).get_output(0)
+    right = network.add_elementwise(
+        rotated_layer.get_output(0), sin, trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    rotated = network.add_elementwise(left, right, trt.ElementWiseOperation.SUM).get_output(0)
+    result = network.add_concatenation((rotated, passthrough))
+    result.axis = 3
+    return heads_to_rows(network, result.get_output(0), rows, heads * head_dim)
 
 
 def add_collective(network, tensor, operation, world_size: int):
@@ -208,10 +258,6 @@ def slice_replicated_for_rank(network, tensor, rank, local_rows: int):
     flattened = network.add_shuffle(selected.get_output(0))
     flattened.reshape_dims = (local_rows, width)
     return flattened.get_output(0)
-
-
-def all_gather(network, tensor, world_size: int):
-    return add_collective(network, tensor, trt.CollectiveOperation.ALL_GATHER, world_size)
 
 
 def ulysses_seq_to_head(network, tensor, *, local_rows: int, heads: int, head_dim: int, cp: int):
@@ -274,7 +320,7 @@ def ulysses_attention(
         raise RuntimeError("TensorRT failed to add MiniMax-H3 native attention")
     layer.decomposable = False
     if key_mask is not None:
-        layer.mask = cast(network, key_mask, trt.float16)
+        layer.mask = cast(network, key_mask, q.dtype)
     context = cast(network, layer.get_output(0), trt.bfloat16)
     return ulysses_head_to_seq(
         network, context, local_rows=local_rows, heads=heads, head_dim=head_dim, cp=cp

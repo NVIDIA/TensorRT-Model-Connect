@@ -6,14 +6,24 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
-from pathlib import Path
 import platform
+from pathlib import Path
 
 import numpy as np
 import tensorrt as trt
 import torch
-
+from tensorrt_model_connect.families.minimax_h3.config import SOL_ENGINE_1344X768_124F
+from tensorrt_model_connect.families.minimax_h3.provenance import (
+    CHECKPOINT_REVISION,
+    atomic_write_json,
+    file_identity,
+    stable_file_record,
+    validate_component_build_receipt,
+    validate_file_identity,
+    validate_source_revision,
+)
 
 INPUT_SHAPE = (7, 24, 7, 16, 16)
 OUTPUT_SHAPE = (7, 3, 28, 256, 256)
@@ -22,16 +32,46 @@ OUTPUT_SHAPE = (7, 3, 28, 256, 256)
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--plan", required=True)
+    parser.add_argument("--build-receipt", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--source-revision", required=True)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=20)
     args = parser.parse_args()
+    source_revision = validate_source_revision(args.source_revision)
     if args.warmup < 0 or args.iterations < 1:
         raise ValueError("warmup must be non-negative and iterations must be positive")
 
+    plan_path = Path(args.plan).resolve(strict=True)
+    receipt_path = Path(args.build_receipt).resolve(strict=True)
+    receipt_identity = file_identity(receipt_path)
+    build_receipt = json.loads(receipt_path.read_text())
+    build_receipt_record, receipt_hashed_identity = stable_file_record(
+        receipt_path, "native build receipt"
+    )
+    if receipt_hashed_identity != receipt_identity:
+        raise ValueError("MiniMax-H3 build receipt changed while it was being read")
+
     logger = trt.Logger(trt.Logger.WARNING)
     runtime = trt.Runtime(logger)
-    engine = runtime.deserialize_cuda_engine(Path(args.plan).read_bytes())
+    plan_identity = file_identity(plan_path)
+    plan = plan_path.read_bytes()
+    plan_bytes = len(plan)
+    plan_sha256 = hashlib.sha256(plan).hexdigest()
+    validate_file_identity(plan_path, plan_identity, "VAE plan")
+    build_source_sha, plan_record, snapshot_record = validate_component_build_receipt(
+        build_receipt,
+        component="vae_tile_decoder.plan",
+        artifact=plan_path,
+        build_helper=Path(__file__).with_name("build_native_components.py"),
+        source_revision=source_revision,
+        profile=SOL_ENGINE_1344X768_124F,
+        hash_file=False,
+    )
+    if plan_record["bytes"] != plan_bytes or plan_record["sha256"] != plan_sha256:
+        raise ValueError("MiniMax-H3 VAE plan does not match its native build receipt")
+    engine = runtime.deserialize_cuda_engine(plan)
+    del plan
     if engine is None:
         raise RuntimeError("TensorRT failed to deserialize the MiniMax-H3 VAE plan")
     context = engine.create_execution_context()
@@ -63,7 +103,13 @@ def main() -> int:
 
     receipt = {
         "component": "minimax_h3_vae_tile_decoder",
-        "checkpoint_revision": "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
+        "checkpoint_revision": CHECKPOINT_REVISION,
+        "source_revision": source_revision,
+        "builder_source_sha256": build_source_sha,
+        "checkpoint_inventory_sha256": snapshot_record["inventory_sha256"],
+        "build_receipt": build_receipt_record,
+        "plan_bytes": plan_bytes,
+        "plan_sha256": plan_sha256,
         "input_shape": list(INPUT_SHAPE),
         "output_shape": list(OUTPUT_SHAPE),
         "warmup": args.warmup,
@@ -77,7 +123,9 @@ def main() -> int:
         "gpu": torch.cuda.get_device_name(),
         "host": platform.node(),
     }
-    Path(args.output).write_text(json.dumps(receipt, indent=2))
+    validate_file_identity(plan_path, plan_identity, "VAE plan")
+    validate_file_identity(receipt_path, receipt_hashed_identity, "native build receipt")
+    atomic_write_json(Path(args.output), receipt)
     print(json.dumps(receipt, indent=2))
     return 0
 
