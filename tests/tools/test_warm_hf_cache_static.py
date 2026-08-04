@@ -275,6 +275,19 @@ def test_family_file_assets_are_metadata_driven() -> None:
             assert filename not in text
 
 
+def test_family_file_assets_are_scoped_to_selected_manifests() -> None:
+    text = WARM_HF_CACHE.read_text(encoding="utf-8")
+    selection_guard = (
+        "if filter_names is not None and name not in filter_names:\n"
+        "        continue"
+    )
+    family_assets = (
+        'file_assets.extend(_family_hf_warm_files(d.get("family", "")))'
+    )
+
+    assert text.index(selection_guard) < text.index(family_assets)
+
+
 def test_family_file_asset_guard_allows_global_filename_collisions() -> None:
     """A generic weight name is not itself family-specific hard-coding."""
     assert "pytorch_model.bin" in _literal_string_list("_HF_ALLOW_PATTERNS")

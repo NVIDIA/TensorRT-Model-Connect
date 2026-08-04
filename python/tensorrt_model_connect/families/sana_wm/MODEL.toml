@@ -22,6 +22,9 @@ prefixes = [
 hf_warm_dependencies = [
   "stage-1-text-encoder|Efficient-Large-Model/gemma-2-2b-it",
 ]
+hf_warm_files = [
+  "official-reference-license|Efficient-Large-Model/SANA-WM_bidirectional|LICENSE",
+]
 hf_allow_patterns = [
   "README.md",
   "config.yaml",

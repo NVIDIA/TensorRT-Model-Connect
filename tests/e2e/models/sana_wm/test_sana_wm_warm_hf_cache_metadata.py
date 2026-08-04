@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
-from tensorrt_model_connect.families import family_hf_warm_dependencies
+from tensorrt_model_connect.families import (
+    family_hf_warm_dependencies,
+    family_hf_warm_files,
+)
 
 
 def test_sana_wm_stage1_text_encoder_dependency_is_family_owned() -> None:
@@ -15,3 +18,13 @@ def test_sana_wm_stage1_text_encoder_dependency_is_family_owned() -> None:
         dependencies["stage-1-text-encoder"]
         == "Efficient-Large-Model/gemma-2-2b-it"
     )
+
+
+def test_sana_wm_official_reference_license_is_warmed() -> None:
+    files = family_hf_warm_files("sana_wm")
+
+    assert (
+        "official-reference-license",
+        "Efficient-Large-Model/SANA-WM_bidirectional",
+        "LICENSE",
+    ) in files
