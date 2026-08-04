@@ -235,15 +235,16 @@ std::unique_ptr<TrtModule> load_vision_module(IBackend* backend, const BundleFil
                                               const ModuleCreateOptions& options,
                                               const std::shared_ptr<InternVlCudaStream>& stream,
                                               bool declared_in_config) {
-    auto loaded = try_load_trt_module_from_plan(backend, find_section(bundle, "vision_engine_plan"),
-                                                "vision_engine_plan", options);
+    const auto* plan = find_section(bundle, "vision_engine_plan");
+    const bool required = declared_in_config || plan != nullptr;
+    auto loaded = required
+                      ? load_trt_module_from_plan(backend, plan, "vision_engine_plan", options)
+                      : try_load_trt_module_from_plan(backend, plan, "vision_engine_plan", options);
     if (loaded.module && loaded.module->ok()) {
         loaded.module->keep_alive(stream);
         std::cerr << "[trtmc] Vision encoder loaded" << std::endl;
         return std::move(loaded.module);
     }
-    if (declared_in_config)
-        throw std::runtime_error("InternVL bundle declares an unreadable vision engine");
     return nullptr;
 }
 
