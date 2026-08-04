@@ -96,6 +96,33 @@ def test_personaplex_audio_compat_reads_supported_24khz_wav(
     assert environment["PYTHONPATH"].endswith(":/existing/python/path")
 
 
+def test_nightly_reference_audio_is_native_24khz_mono() -> None:
+    """The gated manifest must provide the official codec's native WAV contract."""
+    case = get_case_by_name("personaplex-7b", MODEL_DIR)
+    assert case is not None
+    input_wav = Path(case.inputs["audio"])
+    environment = official_personaplex._reference_environment(os.environ)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sphn, sys\n"
+                "audio, rate = sphn.read(sys.argv[1])\n"
+                "assert rate == 24000\n"
+                "assert audio.shape == (1, 99840)\n"
+                "assert audio.dtype.name == 'float32'\n"
+            ),
+            str(input_wav),
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_personaplex_audio_compat_reads_float32_wav(tmp_path: Path) -> None:
     input_wav = tmp_path / "input-float.wav"
     _write_float_wav(input_wav)
