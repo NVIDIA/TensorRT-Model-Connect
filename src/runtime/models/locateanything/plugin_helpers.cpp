@@ -259,6 +259,24 @@ LoadedModule try_load_trt_module_from_plan(IBackend* backend, const std::vector<
     }
 }
 
+std::unique_ptr<ITrtModule> load_locateanything_vision_module(IBackend* backend,
+                                                              const BundleFile& bundle,
+                                                              const ModuleCreateOptions& options,
+                                                              std::shared_ptr<void> lifetime,
+                                                              const std::string& config_json) {
+    const auto* plan = find_section(bundle, "vision_engine_plan");
+    const bool required =
+        extract_json_bool(config_json, "has_vision_engine", false) || plan != nullptr;
+    auto loaded = required
+                      ? load_trt_module_from_plan(backend, plan, "vision_engine_plan", options)
+                      : try_load_trt_module_from_plan(backend, plan, "vision_engine_plan", options);
+    if (!loaded.module)
+        return nullptr;
+    loaded.module->keep_alive(std::move(lifetime));
+    std::cerr << "[trtmc] Vision encoder loaded" << std::endl;
+    return std::move(loaded.module);
+}
+
 std::unique_ptr<ITrtModule> extract_optional_module(IBackend* backend,
                                                     const std::vector<char>* plan,
                                                     const char* label,

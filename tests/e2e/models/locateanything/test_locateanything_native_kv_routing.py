@@ -101,9 +101,13 @@ def test_unsupported_build_modes_fail_closed(kwargs, message: str) -> None:
         validate_native_kv_build(_config(), **options)
 
 
-def test_legacy_dynamic_kv_flag_fails_before_building_an_incomplete_bundle() -> None:
+@pytest.mark.parametrize(
+    "request_flag", ["dynamic_kv_cache", "_runtime_dynamic_kv_requested"])
+def test_generic_dynamic_kv_request_fails_before_building_an_incomplete_bundle(
+    request_flag: str,
+) -> None:
     config = _config()
-    config.raw["dynamic_kv_cache"] = True
+    config.raw[request_flag] = True
     with pytest.raises(ValueError, match="--dynamic-kv-cache"):
         validate_native_kv_build(
             config, precision="bf16", max_cache_length=32768,

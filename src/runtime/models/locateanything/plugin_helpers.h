@@ -39,6 +39,15 @@ LoadedModule load_trt_module_from_plan(IBackend* backend, const std::vector<char
 // Emit a parseable runtime load/deserialization timing line.
 void log_trt_load_timing(const char* label, double load_deserialize_ms, std::size_t plan_bytes);
 
+// Load the LocateAnything vision encoder. A bundle that declares the encoder
+// owns a strict VL contract: a missing or invalid plan is an error, never a
+// silent text-only fallback.
+std::unique_ptr<ITrtModule> load_locateanything_vision_module(IBackend* backend,
+                                                              const BundleFile& bundle,
+                                                              const ModuleCreateOptions& options,
+                                                              std::shared_ptr<void> lifetime,
+                                                              const std::string& config_json);
+
 // Like load_trt_module_from_plan but returns empty LoadedModule on failure
 // instead of throwing (for optional engines).
 LoadedModule try_load_trt_module_from_plan(IBackend* backend, const std::vector<char>* plan,

@@ -23,6 +23,7 @@
 
 #include "runtime/models/locateanything/kv_cache.h"
 #include "runtime/models/locateanything/pipeline.h"
+#include "runtime/models/locateanything/plugin_helpers.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
 
@@ -188,6 +189,36 @@ class FakeSequenceVisionModule final : public trtmc::ITrtModule {
     std::vector<float> deepstack_{20.0F, 21.0F, 22.0F, 23.0F};
 };
 
+class RejectingVisionBackend final : public trtmc::IBackend {
+  public:
+    std::unique_ptr<trtmc::ITrtModule> create_module(const void*, size_t,
+                                                     const trtmc::ModuleCreateOptions&) override {
+        ++create_calls;
+        return nullptr;
+    }
+
+    trtmc::BackendDualProfileModules
+    create_dual_profile_modules(const void*, size_t, const trtmc::ModuleCreateOptions&) override {
+        return {};
+    }
+
+    trtmc::BackendProfileModules create_profile_modules(const void*, size_t,
+                                                        const trtmc::ModuleCreateOptions&,
+                                                        const std::vector<int32_t>&) override {
+        return {};
+    }
+
+    trtmc::BackendContextModules
+    create_context_modules(const void*, size_t,
+                           const std::vector<trtmc::ModuleCreateOptions>&) override {
+        return {};
+    }
+
+    const char* name() const override { return "rejecting-test-backend"; }
+
+    int32_t create_calls{0};
+};
+
 // ---------------------------------------------------------------------------
 // Inline FixedTokenizer for string-based generate() tests
 // ---------------------------------------------------------------------------
@@ -247,6 +278,45 @@ class GroundingTokenizer : public trtmc::ITokenizer {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+static void test_declared_vision_engine_fails_closed() {
+    RejectingVisionBackend backend;
+    trtmc::ModuleCreateOptions options;
+    trtmc::BundleFile bundle;
+    const std::string declared_config{R"({"has_vision_engine":true})"};
+
+    bool missing_rejected = false;
+    try {
+        (void)trtmc::load_locateanything_vision_module(&backend, bundle, options, nullptr,
+                                                       declared_config);
+    } catch (const std::runtime_error& error) {
+        missing_rejected = std::string(error.what()).find("Bundle missing vision_engine_plan") !=
+                           std::string::npos;
+    }
+    check(missing_rejected && backend.create_calls == 0,
+          "declared vision engine: missing section fails before deserialization");
+
+    bundle.sections.push_back({"vision_engine_plan", {'p', 'l', 'a', 'n'}});
+    bool deserialize_rejected = false;
+    try {
+        (void)trtmc::load_locateanything_vision_module(&backend, bundle, options, nullptr,
+                                                       declared_config);
+    } catch (const std::runtime_error& error) {
+        deserialize_rejected =
+            std::string(error.what()).find("Failed to create ITrtModule") != std::string::npos;
+    }
+    check(deserialize_rejected && backend.create_calls == 1,
+          "declared vision engine: deserialization failure is fatal");
+
+    bool present_rejected = false;
+    try {
+        (void)trtmc::load_locateanything_vision_module(&backend, bundle, options, nullptr, "{}");
+    } catch (const std::runtime_error&) {
+        present_rejected = true;
+    }
+    check(present_rejected && backend.create_calls == 2,
+          "present vision section is required even when metadata is stale");
+}
 
 static void test_grounding_decode_preserves_semantic_special_tokens() {
     GroundingTokenizer tokenizer;
@@ -361,6 +431,7 @@ static void test_native_kv_text_prefill_chunks_without_copy() {
 }
 
 int main() {
+    test_declared_vision_engine_fails_closed();
     test_grounding_decode_preserves_semantic_special_tokens();
     test_vl_sequence_prefill_uses_one_text_launch();
     test_native_kv_text_prefill_chunks_without_copy();

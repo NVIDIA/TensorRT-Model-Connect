@@ -75,7 +75,10 @@ def validate_native_kv_build(
     raw = getattr(config, "raw", {})
     if isinstance(raw, dict) and str(raw.get("_decoder_engine_layout", "split")) != "split":
         raise ValueError("LocateAnything native KV requires split prefill/decode engines")
-    if isinstance(raw, dict) and bool(raw.get("dynamic_kv_cache", False)):
+    if isinstance(raw, dict) and (
+        bool(raw.get("dynamic_kv_cache", False))
+        or bool(raw.get("_runtime_dynamic_kv_requested", False))
+    ):
         raise ValueError(
             "LocateAnything uses its native full-capacity KV path by default; "
             "--dynamic-kv-cache is not supported")

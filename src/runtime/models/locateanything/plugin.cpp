@@ -232,25 +232,6 @@ int32_t prefill_profile_capacity(const TrtModule& module) {
     return value;
 }
 
-std::unique_ptr<TrtModule>
-load_vision_module(IBackend* backend, const BundleFile& bundle, const ModuleCreateOptions& options,
-                   const std::shared_ptr<LocateAnythingCudaStream>& stream,
-                   bool declared_in_config) {
-    auto loaded = try_load_trt_module_from_plan(backend, find_section(bundle, "vision_engine_plan"),
-                                                "vision_engine_plan", options);
-    if (loaded.module && loaded.module->ok()) {
-        loaded.module->keep_alive(stream);
-        std::cerr << "[trtmc] Vision encoder loaded" << std::endl;
-        return std::move(loaded.module);
-    }
-    if (declared_in_config) {
-        std::cerr << "[trtmc] WARNING: Bundle declares vision engine but "
-                     "deserialization failed"
-                  << std::endl;
-    }
-    return nullptr;
-}
-
 std::string bundle_section_text(const BundleFile& bundle, const std::string& section_name) {
     const auto* section = find_section(bundle, section_name);
     if (section && !section->empty())
@@ -282,13 +263,11 @@ class VLPlugin final : public IPipelinePlugin {
         LocateanythingKvCacheNames kv_names = build_kv_cache_names(ctx.config);
 
         auto loaded = load_text_modules(ctx, text_runtime, tp_config, shared_stream);
-        const bool has_vision_engine =
-            extract_json_int(ctx.config_json, "has_vision_engine", 0) != 0;
         auto vision_options = opts;
         vision_options.distributed_communicator = nullptr;
         vision_options.distributed_owner.reset();
-        auto vision_module = load_vision_module(ctx.backend, ctx.bundle, vision_options,
-                                                shared_stream, has_vision_engine);
+        auto vision_module = load_locateanything_vision_module(
+            ctx.backend, ctx.bundle, vision_options, shared_stream, ctx.config_json);
 
         cudaStream_t stream = loaded.decode->stream();
         const std::string cache_k_name =
