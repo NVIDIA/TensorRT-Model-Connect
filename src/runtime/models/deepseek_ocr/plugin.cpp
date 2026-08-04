@@ -271,7 +271,7 @@ class VLPlugin final : public IPipelinePlugin {
         auto kv_names = build_kv_cache_names(ctx.config);
         auto loaded = load_text_modules(ctx, text_runtime, tp_config, shared_stream);
         const bool has_vision_engine =
-            extract_json_int(ctx.config_json, "has_vision_engine", 0) != 0;
+            extract_json_bool(ctx.config_json, "has_vision_engine", false);
         auto vision_options = options;
         vision_options.distributed_communicator = nullptr;
         vision_options.distributed_owner.reset();

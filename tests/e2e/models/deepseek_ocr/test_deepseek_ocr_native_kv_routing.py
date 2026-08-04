@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -81,3 +82,12 @@ def test_runtime_sized_and_legacy_layout_requests_fail_closed() -> None:
         _validate(_config(_runtime_dynamic_kv_requested=True))
     with pytest.raises(ValueError, match="split prefill/decode"):
         _validate(_config(_decoder_engine_layout="single"))
+
+
+def test_deepseek_ocr_runtime_reads_boolean_vision_contract() -> None:
+    source = (
+        Path(__file__).resolve().parents[4]
+        / "src/runtime/models/deepseek_ocr/plugin.cpp"
+    ).read_text(encoding="utf-8")
+    assert 'extract_json_bool(ctx.config_json, "has_vision_engine", false)' in source
+    assert 'extract_json_int(ctx.config_json, "has_vision_engine"' not in source
