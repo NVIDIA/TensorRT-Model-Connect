@@ -6,5 +6,6 @@ runtime_library = "libtrtmc_model_locateanything.so"
 runtime_plugins = ["plugin.cpp|register_locateanything_plugin"]
 runtime_strategies = ["locateanything_vision_language"]
 runtime_tests = [
+  "test_locateanything_native_kv_cache|test_locateanything_native_kv_cache.cpp|trtmc_model_locateanything,trtmc_backend_trt|_|REQUIRES_TRT,REQUIRES_GPU",
   "test_locateanything_vl_pipeline|test_locateanything_vl_pipeline.cpp|trtmc_model_locateanything,trtmc_backend_trt|_|REQUIRES_TRT",
 ]

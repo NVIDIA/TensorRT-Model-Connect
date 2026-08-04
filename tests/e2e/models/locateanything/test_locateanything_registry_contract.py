@@ -21,5 +21,7 @@ def test_vision_language_runtime_contract() -> None:
     plugin = _plugin("locateanything")
     assert getattr(plugin, "runtime_strategy", None) == "locateanything_vision_language"
     assert getattr(plugin, "embed_input", False) is True
+    assert getattr(plugin, "supports_split_embed_input", False) is True
+    assert getattr(plugin, "runtime_capabilities", set()) == {"decoder_kv"}
     assert callable(getattr(plugin, "build_vision_engine", None))
     assert callable(getattr(plugin, "get_vl_config", None))

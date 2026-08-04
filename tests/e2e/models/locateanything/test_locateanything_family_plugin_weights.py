@@ -19,7 +19,9 @@ from tests.builder.family_plugin_test_support import (
 )
 
 
-def test_locateanything_embed_input_dispatches_to_dual_profile_builder(monkeypatch) -> None:
+def test_locateanything_legacy_entrypoint_routes_to_native_split_builder(
+    monkeypatch,
+) -> None:
     module = importlib.import_module(
         "tensorrt_model_connect.families.locateanything.default_decoder")
     calls: dict[str, object] = {}
@@ -29,12 +31,16 @@ def test_locateanything_embed_input_dispatches_to_dual_profile_builder(monkeypat
         return b"locateanything-dual-profile-plan"
 
     monkeypatch.setattr(module, "build_dual_profile_decoder_engine", fake_build)
+    monkeypatch.setattr(module, "validate_native_kv_build", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "validate_native_kv_weights", lambda *args, **kwargs: None)
     config = type("Config", (), {"raw": {"_decoder_engine_role": "decode"}})()
     result = module.build_standard_decoder_engine(
-        config, {}, 31, precision="fp16", embed_input=True)
+        config, {}, 31, precision="bf16", embed_input=True)
 
     assert result == b"locateanything-dual-profile-plan"
     assert calls["build"][3]["embed_input"] is True
+    assert calls["build"][3]["profile_mode"] == "decode"
+    assert "native_kv_cache" not in calls["build"][3]
 
 
 class TestLocateAnythingPlugin:
