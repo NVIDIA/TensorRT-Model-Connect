@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "model": "MiniMaxAI/MiniMax-H3",
+  "revision": "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
+  "task": "t2va",
+  "prompt_file": "prompts/t2va-example-1.json",
+  "height": 768,
+  "width": 1344,
+  "video_num_frames": 124,
+  "fps": 24,
+  "num_inference_steps": 50,
+  "seed": 0,
+  "parallel": {"mode": "context_parallel", "cp_size": 4},
+  "accuracy": {
+    "minimum_psnr_db": 40.0,
+    "maximum_mean_absolute_error": 0.00392156862745098
+  }
+}

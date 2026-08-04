@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "minimax_h3"
+runtime_library = "libtrtmc_model_minimax_h3.so"
+runtime_plugins = ["plugin.cpp|register_minimax_h3_plugin"]
+runtime_strategies = ["diffusion_minimax_h3"]
+runtime_tests = [
+  "test_minimax_h3_math|test_minimax_h3_math.cpp|trtmc_model_minimax_h3|_|_",
+  "test_minimax_h3_cuda_rng|test_minimax_h3_cuda_rng.cpp|trtmc_model_minimax_h3|_|REQUIRES_GPU",
+]

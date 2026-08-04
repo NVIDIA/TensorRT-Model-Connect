@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "minimax_h3"
+plugin = "minimax_h3"
+test_manifests = ["manifests/minimax-h3-768p.json"]
+
+[e2e_defaults.diffusion_media_generation]
+reference_backend = "hf_diffusers"
+oracle_level = "L1_external_reference"
+stages = [{ name = "end_to_end", required = true }]

@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "minimax_h3"
+plugin = "minimax_h3"
+module = "plugin"
+aliases = [
+  "minimax-h3",
+  "minimax_h3",
+  "minimaxh3",
+]
+diffusion_pipeline_classes = [
+  "MiniMaxH3ModularPipeline",
+  "MiniMaxH3Pipeline",
+]
+hf_allow_patterns = [
+  "model_index.json",
+  "modular_model_index.json",
+  "processor/**",
+  "scheduler/**",
+  "audio_scheduler/**",
+  "text_encoder/**",
+  "tokenizer/**",
+  "transformer/**",
+  "vae/**",
+  "audio_vae/**",
+]
