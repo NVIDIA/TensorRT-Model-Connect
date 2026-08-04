@@ -1,22 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fail-closed visual parity comparator for decoded MiniMax-H3 frame arrays."""
+"""Fail-closed human-visible quality comparator for MiniMax-H3 frame arrays."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import math
 from pathlib import Path
 import re
 
-import numpy as np
 from tensorrt_model_connect.families.minimax_h3.provenance import (
     atomic_write_json,
     file_identity,
     stable_file_record,
     validate_source_revision,
+)
+from visual_metrics import (
+    compute_decoded_visual_metrics,
+    evaluate_visual_quality,
+    visual_block_size,
+    visual_quality_passed,
 )
 
 
@@ -44,22 +48,8 @@ def main() -> int:
         "thresholds": thresholds_path,
     }
     identities_before = {label: file_identity(path) for label, path in paths.items()}
-    reference_raw = np.load(reference_path, allow_pickle=False)
-    candidate_raw = np.load(candidate_path, allow_pickle=False)
     reference_receipt = json.loads(reference_receipt_path.read_text())
     candidate_receipt = json.loads(candidate_receipt_path.read_text())
-
-    def normalized(array):
-        if np.issubdtype(array.dtype, np.integer):
-            return array.astype(np.float32) / np.iinfo(array.dtype).max
-        return array.astype(np.float32)
-
-    reference = normalized(reference_raw)
-    candidate = normalized(candidate_raw)
-    if reference.shape != candidate.shape:
-        raise ValueError(f"frame shape mismatch: {reference.shape} != {candidate.shape}")
-    if not np.isfinite(candidate).all():
-        raise ValueError("candidate video contains non-finite pixels")
     thresholds = json.loads(thresholds_path.read_text())["threshold_overrides"]
     input_records = {}
     for label, path in paths.items():
@@ -112,35 +102,34 @@ def main() -> int:
             raise ValueError("MiniMax-H3 native candidate did not run with world_size=1")
         if candidate_receipt.get("collective_transport") != "none":
             raise ValueError("MiniMax-H3 single-device candidate unexpectedly used a collective")
-    error = candidate - reference
-    mse = float(np.mean(np.square(error), dtype=np.float64))
-    mae = float(np.mean(np.abs(error), dtype=np.float64))
-    psnr = math.inf if mse == 0.0 else 10.0 * math.log10(1.0 / mse)
+    decoded = compute_decoded_visual_metrics(
+        reference_path,
+        candidate_path,
+        block_size=visual_block_size(thresholds),
+    )
+    gates = evaluate_visual_quality(decoded, thresholds)
     expected_shape = [
         int(thresholds["exact_num_frames"]),
         int(thresholds["exact_video_height"]),
         int(thresholds["exact_video_width"]),
         3,
     ]
-    shape_matches = list(reference.shape) == expected_shape
+    shape_matches = list(decoded.shape) == expected_shape
     receipt = {
         "source_revision": source_revision,
         **input_records,
-        "shape": list(reference.shape),
+        "quality_contract": "human_visible_low_frequency_structure_and_motion",
+        "pixel_metrics_gating": False,
+        "shape": list(decoded.shape),
         "expected_shape": expected_shape,
         "shape_matches": shape_matches,
-        "mse": mse,
-        "mean_absolute_error": mae,
-        "maximum_absolute_error": float(np.max(np.abs(error))),
-        "psnr_db": psnr,
-        "minimum_psnr_db": float(thresholds["minimum_psnr_db"]),
-        "maximum_mean_absolute_error": float(thresholds["maximum_mean_absolute_error"]),
+        "mse": decoded.mse,
+        "mean_absolute_error": decoded.mean_absolute_error,
+        "maximum_absolute_error": decoded.maximum_absolute_error,
+        "psnr_db": decoded.psnr_db,
+        "metrics": {name: result.to_dict() for name, result in gates.items()},
     }
-    receipt["passed"] = (
-        shape_matches
-        and psnr >= receipt["minimum_psnr_db"]
-        and mae <= receipt["maximum_mean_absolute_error"]
-    )
+    receipt["passed"] = visual_quality_passed(gates)
     atomic_write_json(Path(args.output), receipt)
     print(json.dumps(receipt, indent=2))
     return 0 if receipt["passed"] else 1

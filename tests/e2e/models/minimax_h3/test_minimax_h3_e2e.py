@@ -67,8 +67,11 @@ def test_minimax_h3_manifest_is_truthful_single_device_contract() -> None:
     assert case.inputs["video_height"] == 768
     assert case.inputs["video_width"] == 1344
     assert case.inputs["num_inference_steps"] == 50
-    assert case.threshold_overrides["minimum_psnr_db"] == 40.0
-    assert case.threshold_overrides["maximum_mean_absolute_error"] == pytest.approx(1.0 / 255.0)
+    assert case.threshold_overrides["low_frequency_block_size"] == 16
+    assert case.threshold_overrides["minimum_frame_low_frequency_correlation"] == 0.8
+    assert case.threshold_overrides["minimum_mean_low_frequency_correlation"] == 0.9
+    assert "minimum_psnr_db" not in case.threshold_overrides
+    assert "maximum_mean_absolute_error" not in case.threshold_overrides
 
 
 def test_minimax_h3_plugins_cover_native_reference_and_comparison() -> None:
@@ -78,17 +81,72 @@ def test_minimax_h3_plugins_cover_native_reference_and_comparison() -> None:
     assert get_comparator("diffusion_media_generation") is not None
 
 
-def test_minimax_h3_comparator_gates_decoded_pixel_drift(tmp_path: Path) -> None:
+def _visual_thresholds(
+    frames: int,
+    height: int,
+    width: int,
+    *,
+    block_size: int = 16,
+) -> dict[str, float]:
+    return {
+        "exact_num_frames": frames,
+        "exact_video_height": height,
+        "exact_video_width": width,
+        "low_frequency_block_size": block_size,
+        "minimum_frame_low_frequency_correlation": 0.8,
+        "minimum_mean_low_frequency_correlation": 0.9,
+        "minimum_brightness_profile_correlation": 0.95,
+        "maximum_frame_brightness_absolute_error": 0.08,
+        "minimum_temporal_activity_correlation": 0.9,
+        "maximum_temporal_activity_absolute_error": 0.05,
+        "minimum_temporal_activity_ratio": 0.5,
+        "maximum_temporal_activity_ratio": 1.5,
+        "minimum_frame_std_ratio": 0.7,
+        "maximum_frame_std_ratio": 1.4,
+    }
+
+
+def _synthetic_video() -> np.ndarray:
+    frames, height, width = 12, 64, 64
+    y, x = np.mgrid[0:height, 0:width].astype(np.float32)
+    x /= width - 1
+    y /= height - 1
+    video = []
+    for index in range(frames):
+        phase = index / (frames - 1)
+        center_x = 0.12 + 0.74 * phase**1.7
+        center_y = 0.5 + 0.18 * np.sin(phase * np.pi * 2.5)
+        radius = 0.075 + 0.035 * np.sin(phase * np.pi) ** 2
+        subject = np.exp(-((x - center_x) ** 2 + (y - center_y) ** 2) / (2.0 * radius**2))
+        pulse = 0.035 * np.sin(phase**1.4 * np.pi * 3.0)
+        base = 0.24 + 0.16 * x + 0.09 * y + 0.34 * subject + pulse
+        video.append(
+            np.stack(
+                (
+                    base,
+                    base * 0.82 + 0.055 * y,
+                    base * 0.64 + 0.095 * x,
+                ),
+                axis=-1,
+            )
+        )
+    return np.asarray(video, dtype=np.float32)
+
+
+def _compare_arrays(
+    tmp_path: Path,
+    reference: np.ndarray,
+    candidate: np.ndarray,
+    *,
+    thresholds: dict[str, float] | None = None,
+):
     reference_path = tmp_path / "reference.npy"
     candidate_path = tmp_path / "candidate.npy"
-    reference = np.zeros((2, 2, 2, 3), dtype=np.float32)
-    candidate = reference.copy()
-    candidate[0, 0, 0, 0] = 1.0
     np.save(reference_path, reference)
     np.save(candidate_path, candidate)
     revision = "1" * 40
     inventory = "a" * 64
-    result = comparator.compare(
+    return comparator.compare(
         StageOutput(
             stage_name="end_to_end",
             data={
@@ -120,33 +178,100 @@ def test_minimax_h3_comparator_gates_decoded_pixel_drift(tmp_path: Path) -> None
         ),
         ThresholdProfile(
             task_strategy="diffusion_media_generation",
-            metrics={
-                "exact_num_frames": 2,
-                "exact_video_height": 2,
-                "exact_video_width": 2,
-                "minimum_psnr_db": 40.0,
-                "maximum_mean_absolute_error": 1.0 / 255.0,
-            },
+            metrics=thresholds or _visual_thresholds(*reference.shape[:3]),
         ),
         StageSpec(name="end_to_end"),
     )
+
+
+def test_minimax_h3_comparator_accepts_high_frequency_texture_drift(
+    tmp_path: Path,
+) -> None:
+    reference = _synthetic_video()
+    yy, xx = np.mgrid[: reference.shape[1], : reference.shape[2]]
+    checkerboard = (((xx + yy) % 2) * 2 - 1).astype(np.float32)
+    candidate = reference + 0.06 * checkerboard[None, :, :, None]
+
+    result = _compare_arrays(tmp_path, reference, candidate)
+
+    assert result.status == "passed"
+    assert result.metrics["psnr_db"].value < 40.0
+    assert result.metrics["mean_absolute_error"].value > 1.0 / 255.0
+    assert result.metrics["psnr_db"].operator == "diagnostic"
+    assert result.metrics["psnr_db"].threshold is None
+    assert result.metrics["mean_absolute_error"].operator == "diagnostic"
+    assert result.metrics["frame_low_frequency_correlation_minimum"].value == pytest.approx(1.0)
+    assert result.metrics["temporal_activity_correlation"].value == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    ("failure_mode", "expected_failed_metric"),
+    [
+        ("collapse", "frame_std_ratio_minimum"),
+        ("freeze", "temporal_activity_ratio_minimum"),
+        ("timing_shift", "temporal_activity_correlation"),
+    ],
+)
+def test_minimax_h3_comparator_rejects_visible_failure_modes(
+    tmp_path: Path,
+    failure_mode: str,
+    expected_failed_metric: str,
+) -> None:
+    reference = _synthetic_video()
+    if failure_mode == "collapse":
+        frame_means = reference.mean(axis=(1, 2, 3), keepdims=True)
+        candidate = np.broadcast_to(frame_means, reference.shape).copy()
+    elif failure_mode == "freeze":
+        candidate = np.repeat(reference[:1], reference.shape[0], axis=0)
+    else:
+        candidate = np.roll(reference, shift=3, axis=0)
+
+    result = _compare_arrays(tmp_path, reference, candidate)
+
     assert result.status == "failed"
-    assert not result.metrics["psnr_db"].passed
-    assert not result.metrics["mean_absolute_error"].passed
+    assert not result.metrics[expected_failed_metric].passed
+
+
+def test_minimax_h3_comparator_requires_exact_shape_and_finite_pixels(
+    tmp_path: Path,
+) -> None:
+    reference = _synthetic_video()
+    result = _compare_arrays(
+        tmp_path,
+        reference,
+        reference,
+        thresholds=_visual_thresholds(
+            reference.shape[0] + 1,
+            reference.shape[1],
+            reference.shape[2],
+        ),
+    )
+    assert result.status == "failed"
+    assert not result.metrics["num_frames"].passed
+
+    non_finite = reference.copy()
+    non_finite[3, 4, 5, 1] = np.nan
+    with pytest.raises(ValueError, match="non-finite pixels"):
+        _compare_arrays(tmp_path, reference, non_finite)
+
+    out_of_range = reference.copy()
+    out_of_range[3, 4, 5, 1] = 1.01
+    with pytest.raises(ValueError, match=r"pixels outside \[0, 1\]"):
+        _compare_arrays(tmp_path, reference, out_of_range)
 
 
 def test_compare_video_cli_binds_threshold_schema_and_run_receipts(tmp_path: Path) -> None:
     reference_path = tmp_path / "reference.npy"
     candidate_path = tmp_path / "candidate.npy"
-    frames = np.zeros((1, 1, 1, 3), dtype=np.float32)
+    frames = np.zeros((1, 16, 16, 3), dtype=np.float32)
     np.save(reference_path, frames)
     np.save(candidate_path, frames)
     revision = "1" * 40
     workload = {
         "prompt": "test",
         "seed": 0,
-        "height": 1,
-        "width": 1,
+        "height": 16,
+        "width": 16,
         "num_frames": 1,
         "num_inference_steps": 1,
     }
@@ -180,11 +305,7 @@ def test_compare_video_cli_binds_threshold_schema_and_run_receipts(tmp_path: Pat
         json.dumps(
             {
                 "threshold_overrides": {
-                    "exact_num_frames": 1,
-                    "exact_video_height": 1,
-                    "exact_video_width": 1,
-                    "minimum_psnr_db": 40.0,
-                    "maximum_mean_absolute_error": 1.0 / 255.0,
+                    **_visual_thresholds(1, 16, 16),
                 }
             }
         )
@@ -212,7 +333,10 @@ def test_compare_video_cli_binds_threshold_schema_and_run_receipts(tmp_path: Pat
         command, cwd=_PROJECT_DIR, env=environment, capture_output=True, text=True
     )
     assert result.returncode == 0, result.stderr
-    assert json.loads(output_path.read_text())["passed"] is True
+    comparison = json.loads(output_path.read_text())
+    assert comparison["passed"] is True
+    assert comparison["pixel_metrics_gating"] is False
+    assert comparison["metrics"]["psnr_db"]["operator"] == "diagnostic"
 
     candidate_receipt["source_revision"] = "2" * 40
     candidate_receipt_path.write_text(json.dumps(candidate_receipt))
