@@ -488,6 +488,106 @@ def validate_native_rope_dim(
     return rotary_embedding_dim
 
 
+def make_native_active_rope_inv_freq(
+    head_dim: int,
+    rope_theta: float,
+    partial_rotary_factor: float = 1.0,
+    *,
+    frequency_factors: np.ndarray | list[float] | None = None,
+) -> np.ndarray:
+    """Return inverse frequencies for runtime-active LongRoPE positions.
+
+    Keeping only the ``D/2`` frequencies in the engine avoids serializing a
+    context-sized RoPE table.  ``frequency_factors`` carries Phi-4's selected
+    LongRoPE schedule; the caller resolves short-vs-long once from the model's
+    complete physical context, matching the existing builder contract.
+    """
+    rotary_ndims = validate_native_rope_dim(
+        int(head_dim * partial_rotary_factor)
+    )
+    rope_theta = float(rope_theta)
+    if not np.isfinite(rope_theta) or rope_theta <= 0.0:
+        raise ValueError(
+            "TRT native RoPE requires rope_theta to be finite and positive; "
+            f"got {rope_theta}"
+        )
+    half = rotary_ndims // 2
+    if frequency_factors is None:
+        factors = np.ones(half, dtype=np.float64)
+    else:
+        factors = np.asarray(frequency_factors, dtype=np.float64)
+        if factors.shape != (half,) or not np.all(np.isfinite(factors)) or np.any(factors <= 0):
+            raise ValueError(
+                "RoPE frequency_factors must contain one finite positive "
+                f"value per rotary pair: expected {(half,)}, got {factors.shape}"
+            )
+    dimensions = np.arange(0, rotary_ndims, 2, dtype=np.float64)
+    return np.asarray(
+        np.power(rope_theta, -(dimensions / rotary_ndims)) / factors,
+        dtype=np.float32,
+    )
+
+
+def add_active_rope_cache(
+    network: trt.INetworkDefinition,
+    position_id: trt.ITensor | None,
+    inv_freq: np.ndarray,
+    output_dtype: trt.DataType,
+    *,
+    attention_factor: float = 1.0,
+) -> tuple[trt.ITensor, trt.ITensor]:
+    """Build cos/sin cache rows only for the positions active this enqueue."""
+    inv_freq = np.asarray(inv_freq, dtype=np.float32)
+    if inv_freq.ndim != 1 or inv_freq.size == 0:
+        raise ValueError(
+            "active RoPE inverse frequencies must be a non-empty rank-1 array"
+        )
+    attention_factor = float(attention_factor)
+    if not np.isfinite(attention_factor) or attention_factor <= 0.0:
+        raise ValueError("LongRoPE attention_factor must be finite and positive")
+
+    pos_float = network.add_cast(position_id, trt.float32).get_output(0)
+    pos_col = network.add_shuffle(pos_float)
+    pos_col.reshape_dims = (-1, 1)
+    inv_freq_tensor = add_constant(
+        network,
+        (1, int(inv_freq.size)),
+        inv_freq.reshape(1, -1),
+        dtype=np.float32,
+    )
+    angles = network.add_elementwise(
+        pos_col.get_output(0),
+        inv_freq_tensor,
+        trt.ElementWiseOperation.PROD,
+    ).get_output(0)
+    cos_2d = network.add_unary(angles, trt.UnaryOperation.COS).get_output(0)
+    sin_2d = network.add_unary(angles, trt.UnaryOperation.SIN).get_output(0)
+    if attention_factor != 1.0:
+        factor = add_constant(
+            network,
+            (1, 1),
+            np.array([[attention_factor]], dtype=np.float32),
+            dtype=np.float32,
+        )
+        cos_2d = network.add_elementwise(
+            cos_2d, factor, trt.ElementWiseOperation.PROD
+        ).get_output(0)
+        sin_2d = network.add_elementwise(
+            sin_2d, factor, trt.ElementWiseOperation.PROD
+        ).get_output(0)
+
+    cos_3d = network.add_shuffle(cos_2d)
+    cos_3d.reshape_dims = (1, -1, int(inv_freq.size))
+    sin_3d = network.add_shuffle(sin_2d)
+    sin_3d.reshape_dims = (1, -1, int(inv_freq.size))
+    cos_cache = cos_3d.get_output(0)
+    sin_cache = sin_3d.get_output(0)
+    if cos_cache.dtype != output_dtype:
+        cos_cache = network.add_cast(cos_cache, output_dtype).get_output(0)
+        sin_cache = network.add_cast(sin_cache, output_dtype).get_output(0)
+    return cos_cache, sin_cache
+
+
 def make_rope_table_half_dim(
     max_cache_length: int,
     head_dim: int,
@@ -703,6 +803,9 @@ def add_apply_rope_native(
     Handles both single-token decoder steps and dynamic-Sq prefill/decode
     graphs without a manual rotate-half matmul chain.
 
+    Indexed tables pass ``position_id``. Active-position rank-3 caches pass
+    ``None`` because their rows already correspond to this enqueue's tokens.
+
     Shape contract (IRotaryEmbeddingLayer with position_ids):
       input:           [1, num_heads, Sq, head_dim]  (reshaped internally)
       cos_cache_2d:    [max_S, rotary_embedding_dim // 2]  (2-D constant)
@@ -717,7 +820,8 @@ def add_apply_rope_native(
         head_dim:             Per-head dimension.
         cos_cache_2d:         Pre-built 2-D cos table constant.
         sin_cache_2d:         Pre-built 2-D sin table constant.
-        position_id:          Runtime position indices, shape [Sq] int32.
+        position_id:          Runtime position indices, shape [Sq] int32, or
+                              None for active-position caches.
         rotary_embedding_dim: Number of head dims that participate in RoPE.
         interleaved:          Frequency layout (see above).
         sequence_length:      Static Sq, or None for runtime-dynamic Sq.
@@ -731,11 +835,6 @@ def add_apply_rope_native(
     inp_4d = reshape_rows_to_heads_4d(
         network, inp, num_heads, head_dim, sequence_length)
 
-    # Reshape position_id [Sq] -> [1, Sq] (batch=1).
-    seq_dim = -1 if sequence_length is None else sequence_length
-    pos_2d = network.add_shuffle(position_id)
-    pos_2d.reshape_dims = (1, seq_dim)
-
     rope = network.add_rotary_embedding(
         inp_4d,
         cos_cache_2d,
@@ -743,7 +842,11 @@ def add_apply_rope_native(
         interleaved,
         rotary_embedding_dim,
     )
-    rope.set_input(3, pos_2d.get_output(0))
+    if position_id is not None:
+        seq_dim = -1 if sequence_length is None else sequence_length
+        pos_2d = network.add_shuffle(position_id)
+        pos_2d.reshape_dims = (1, seq_dim)
+        rope.set_input(3, pos_2d.get_output(0))
 
     return reshape_heads_4d_to_rows(
         network, rope.get_output(0), attention_size, sequence_length)
@@ -1068,6 +1171,99 @@ def add_attention_from_rows(
     return reshape_heads_4d_to_rows(
         network, ctx_4d, attention_size, sequence_length=q_seq,
         tag=None if tag is None else tag + ".ctx")
+
+
+def add_native_kv_cache_attention_from_rows(
+    network: trt.INetworkDefinition,
+    q: trt.ITensor,
+    k_update: trt.ITensor,
+    v_update: trt.ITensor,
+    cache_k: trt.ITensor,
+    cache_v: trt.ITensor,
+    cache_write_indices: trt.ITensor,
+    key_value_lengths: trt.ITensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    q_seq: int | None,
+    scale: float | None = None,
+    tag: str | None = None,
+) -> dict[str, trt.ITensor]:
+    """Update the user-owned full-capacity cache and attend its live prefix."""
+    if not hasattr(network, "add_kv_cache_update") or not hasattr(
+        network, "add_attention_v2"
+    ):
+        raise RuntimeError(
+            "Phi-4 Multimodal native KV cache requires TensorRT "
+            "add_kv_cache_update and add_attention_v2 support"
+        )
+
+    k_update_4d = reshape_rows_to_heads_4d(
+        network, k_update, num_kv_heads, head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".k_update")
+    v_update_4d = reshape_rows_to_heads_4d(
+        network, v_update, num_kv_heads, head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".v_update")
+
+    update_k = network.add_kv_cache_update(
+        cache_k, k_update_4d, cache_write_indices, trt.KVCacheMode.LINEAR)
+    update_v = network.add_kv_cache_update(
+        cache_v, v_update_4d, cache_write_indices, trt.KVCacheMode.LINEAR)
+    if update_k is None or update_v is None:
+        raise RuntimeError(
+            "TensorRT failed to create Phi-4 Multimodal KV-cache update layers")
+    if tag:
+        update_k.name = tag + ".cache_k_update"
+        update_v.name = tag + ".cache_v_update"
+    updated_k = update_k.get_output(0)
+    updated_v = update_v.get_output(0)
+
+    q_4d = reshape_rows_to_heads_4d(
+        network, q, num_heads, head_dim, sequence_length=q_seq,
+        tag=None if tag is None else tag + ".q")
+    if q_4d.dtype not in (trt.float16, trt.bfloat16):
+        raise ValueError(
+            "Phi-4 Multimodal native KV attention requires FP16 or BF16 queries")
+    if scale is None:
+        scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
+
+    # Preserve the family parity path's FP32 score scaling, then round back to
+    # the model dtype before fused attention consumes the query.
+    query_dtype = q_4d.dtype
+    q_fp32 = network.add_cast(q_4d, trt.float32).get_output(0)
+    scale_tensor = add_constant(
+        network, (1, 1, 1, 1),
+        np.array([[[[scale]]]], dtype=np.float32), dtype=np.float32)
+    q_scaled = network.add_elementwise(
+        q_fp32, scale_tensor, trt.ElementWiseOperation.PROD).get_output(0)
+    q_scaled = network.add_cast(q_scaled, query_dtype).get_output(0)
+
+    attention = network.add_attention_v2(
+        q_scaled, updated_k, updated_v,
+        trt.AttentionNormalizationOp.SOFTMAX,
+        trt.CausalMaskKind.LOWER_RIGHT)
+    if attention is None:
+        raise RuntimeError(
+            "TensorRT failed to create Phi-4 Multimodal native attention")
+    # Native KV is the only supported graph for this family. Fail closed when
+    # the target TensorRT version/GPU lacks a fused tactic.
+    attention.decomposable = False
+    attention.key_value_lengths = key_value_lengths
+    if tag:
+        attention.name = tag
+
+    context = reshape_heads_4d_to_rows(
+        network, attention.get_output(0), num_heads * head_dim,
+        sequence_length=q_seq,
+        tag=None if tag is None else tag + ".ctx")
+    return {
+        "context": context,
+        "present_k": updated_k,
+        "present_v": updated_v,
+    }
 
 
 # Backward-compatible name used by existing tests and call sites.

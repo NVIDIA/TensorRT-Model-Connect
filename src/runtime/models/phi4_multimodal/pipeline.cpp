@@ -25,7 +25,7 @@ void validate_pipeline_components(const TrtModule* text_decoder,
         throw std::runtime_error("Phi4MultimodalPipeline: invalid text decoder");
     if (state == nullptr || !state->ok())
         throw std::runtime_error("Phi4MultimodalPipeline: invalid inference state");
-    if (prefill != nullptr && !prefill->ok())
+    if (prefill == nullptr || !prefill->ok())
         throw std::runtime_error("Phi4MultimodalPipeline: invalid prefill decoder");
 }
 
@@ -98,22 +98,6 @@ int32_t infer_feature_dim(const TrtModule& encoder, int32_t configured_dim) {
     return 0;
 }
 
-std::vector<const float*>
-select_deepstack_feature_pointers(const std::vector<std::vector<float>>& deepstack_features,
-                                  int32_t feature_index, int32_t feature_dim) {
-    std::vector<const float*> embeds;
-    embeds.reserve(deepstack_features.size());
-    for (const auto& deepstack : deepstack_features) {
-        const int32_t count =
-            static_cast<int32_t>(deepstack.size() / static_cast<std::size_t>(feature_dim));
-        embeds.push_back(feature_index < count
-                             ? deepstack.data() +
-                                   static_cast<std::size_t>(feature_index) * feature_dim
-                             : nullptr);
-    }
-    return embeds;
-}
-
 struct VlSequenceEmbeddingInputs {
     std::vector<float> input_embed;
     std::vector<float> use_input_embed;
@@ -125,7 +109,8 @@ VlSequenceEmbeddingInputs
 build_vl_sequence_embedding_inputs(const std::vector<int32_t>& input_ids, int32_t image_token_id,
                                    const std::vector<float>& image_features,
                                    const std::vector<std::vector<float>>& deepstack_features,
-                                   int32_t num_features, int32_t feature_dim) {
+                                   int32_t num_features, int32_t feature_dim,
+                                   int32_t feature_start = 0) {
     const auto sq = input_ids.size();
     VlSequenceEmbeddingInputs result;
     result.input_embed.assign(sq * static_cast<std::size_t>(feature_dim), 0.0F);
@@ -135,7 +120,7 @@ build_vl_sequence_embedding_inputs(const std::vector<int32_t>& input_ids, int32_
     for (auto& level : result.deepstack_embed)
         level.assign(sq * static_cast<std::size_t>(feature_dim), 0.0F);
 
-    int32_t feature_index = 0;
+    int32_t feature_index = feature_start;
     for (std::size_t token_index = 0; token_index < sq; ++token_index) {
         if (input_ids[token_index] != image_token_id || feature_index >= num_features)
             continue;
@@ -175,19 +160,20 @@ bool gather_vl_prefill_kv_pointers(TrtModule& prefill, const Phi4MultimodalConfi
     return true;
 }
 
-Phi4MultimodalKvCache* eligible_vl_prefill_cache(TrtModule* prefill,
-                                                 Phi4MultimodalInferenceState* state,
-                                                 const Phi4MultimodalConfig& config,
-                                                 int32_t sequence_length, int32_t feature_dim) {
+Phi4MultimodalKvCache& require_vl_prefill_cache(TrtModule* prefill,
+                                                Phi4MultimodalInferenceState* state,
+                                                const Phi4MultimodalConfig& config,
+                                                int32_t feature_dim) {
     if (prefill == nullptr)
-        return nullptr;
-    if (sequence_length <= 0 || feature_dim <= 0 || config.num_layers <= 0)
-        return nullptr;
+        throw std::runtime_error("Phi-4 Multimodal native bundle is missing the prefill engine");
+    if (feature_dim <= 0 || config.num_layers <= 0 || config.prefill_max_length <= 0)
+        throw std::runtime_error("Phi-4 Multimodal native prefill has invalid dimensions");
     if (!prefill->has_input("input_embed"))
-        return nullptr;
-    if (config.prefill_max_length > 0 && sequence_length > config.prefill_max_length)
-        return nullptr;
-    return dynamic_cast<Phi4MultimodalKvCache*>(state);
+        throw std::runtime_error("Phi-4 Multimodal native prefill is missing input_embed");
+    auto* cache = dynamic_cast<Phi4MultimodalKvCache*>(state);
+    if (cache == nullptr)
+        throw std::runtime_error("Phi-4 Multimodal native prefill requires its native KV cache");
+    return *cache;
 }
 
 bool valid_vl_features(const std::vector<float>& image_features, int32_t num_features,
@@ -422,8 +408,7 @@ void Phi4MultimodalPipeline::reset_generation_context(int32_t prompt_length) {
     state_->reset();
     state_->set_prompt_length(prompt_length);
     text_decoder_->reset_execution_context();
-    if (prefill_)
-        prefill_->reset_execution_context();
+    prefill_->reset_execution_context();
     state_->bind_to(*text_decoder_);
     last_setup_ms_ =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
@@ -435,6 +420,11 @@ Phi4MultimodalPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
                                           const Phi4MultimodalSamplingParams& params) {
     if (max_new_tokens == 0 || input_ids.empty())
         return input_ids;
+    if (max_new_tokens < 0 || input_ids.size() + static_cast<std::size_t>(max_new_tokens) >
+                                  static_cast<std::size_t>(state_->max_length())) {
+        throw std::runtime_error(
+            "Phi4MultimodalPipeline: prompt plus requested output exceeds the model context");
+    }
 
     // Create a per-call sampler if none was injected at construction time.
     Phi4MultimodalISampler* active_sampler = sampler_.get();
@@ -448,24 +438,11 @@ Phi4MultimodalPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
     reset_generation_context(static_cast<int32_t>(input_ids.size()));
 
     std::vector<float> logits;
-
-    for (std::size_t i = 0; i + 1 < input_ids.size(); ++i)
-        run_text_step(input_ids[i], logits);
-
-    run_text_step(input_ids.back(), logits);
+    run_native_prefill_batched(input_ids, {}, {}, 0, config_.vision_output_dim, logits);
+    state_->mark_prefill_complete();
 
     std::vector<int32_t> output = input_ids;
-    const int32_t vocab_size = static_cast<int32_t>(logits.size());
-
-    for (int32_t step = 0; step < max_new_tokens; ++step) {
-        Phi4MultimodalSampleResult result =
-            active_sampler->sample(logits.data(), vocab_size, params);
-        output.push_back(result.token_id);
-        if (result.is_eos)
-            break;
-        run_text_step(result.token_id, logits);
-    }
-
+    run_decode_loop(active_sampler, params, output, logits, max_new_tokens);
     return output;
 }
 
@@ -475,6 +452,11 @@ std::vector<int32_t> Phi4MultimodalPipeline::generate_vl_from_ids(
     int32_t feature_dim, int32_t max_new_tokens, const Phi4MultimodalSamplingParams& params) {
     if (max_new_tokens == 0 || input_ids.empty())
         return input_ids;
+    if (max_new_tokens < 0 || input_ids.size() + static_cast<std::size_t>(max_new_tokens) >
+                                  static_cast<std::size_t>(state_->max_length())) {
+        throw std::runtime_error(
+            "Phi4MultimodalPipeline: prompt plus requested output exceeds the model context");
+    }
 
     // Create a per-call sampler if none was injected at construction time.
     Phi4MultimodalISampler* active_sampler = sampler_.get();
@@ -488,83 +470,76 @@ std::vector<int32_t> Phi4MultimodalPipeline::generate_vl_from_ids(
     reset_generation_context(static_cast<int32_t>(input_ids.size()));
 
     std::vector<float> logits;
-    if (!run_vl_prefill_batched(input_ids, image_features, deepstack_features, num_features,
-                                feature_dim, logits)) {
-        int32_t feature_index = 0;
-        for (const auto& tid : input_ids)
-            run_vl_prefill_token(tid, image_features, deepstack_features, num_features, feature_dim,
-                                 feature_index, logits);
-    }
+    run_native_prefill_batched(input_ids, image_features, deepstack_features, num_features,
+                               feature_dim, logits);
     state_->mark_prefill_complete();
 
     std::vector<int32_t> output = input_ids;
-    run_vl_decode_loop(active_sampler, params, output, logits, max_new_tokens);
+    run_decode_loop(active_sampler, params, output, logits, max_new_tokens);
     return output;
 }
 
-bool Phi4MultimodalPipeline::run_vl_prefill_batched(
+void Phi4MultimodalPipeline::run_native_prefill_batched(
     const std::vector<int32_t>& input_ids, const std::vector<float>& image_features,
     const std::vector<std::vector<float>>& deepstack_features, int32_t num_features,
     int32_t feature_dim, std::vector<float>& logits) {
     const auto sq = static_cast<int32_t>(input_ids.size());
-    auto* kv_cache =
-        eligible_vl_prefill_cache(prefill_.get(), state_.get(), config_, sq, feature_dim);
-    if (kv_cache == nullptr)
-        return false;
+    if (prefill_ != nullptr && feature_dim <= 0)
+        feature_dim = resolve_input_embed_dim(*prefill_, feature_dim);
+    auto& kv_cache = require_vl_prefill_cache(prefill_.get(), state_.get(), config_, feature_dim);
     if (!valid_vl_features(image_features, num_features, feature_dim))
-        return false;
+        throw std::runtime_error("Phi4MultimodalPipeline: invalid native VL feature buffer");
 
-    kv_cache->bind_cache_inputs(*prefill_);
-    auto embedding_inputs =
-        build_vl_sequence_embedding_inputs(input_ids, config_.image_token_id, image_features,
-                                           deepstack_features, num_features, feature_dim);
+    kv_cache.bind_cache_inputs(*prefill_);
+    const int32_t chunk_limit = config_.prefill_max_length;
+    int32_t offset = 0;
+    int32_t feature_offset = 0;
+    while (offset < sq) {
+        const int32_t chunk_size = std::min(chunk_limit, sq - offset);
+        std::vector<int32_t> chunk_ids(input_ids.begin() + offset,
+                                       input_ids.begin() + offset + chunk_size);
+        auto embedding_inputs = build_vl_sequence_embedding_inputs(
+            chunk_ids, config_.image_token_id, image_features, deepstack_features, num_features,
+            feature_dim, feature_offset);
 
-    TensorMap inputs;
-    add_vl_prefill_base_inputs(inputs, *state_, input_ids, embedding_inputs, feature_dim);
-    if (!add_vl_prefill_deepstack_inputs(*prefill_, inputs, embedding_inputs, sq, feature_dim))
-        return false;
+        TensorMap inputs;
+        add_vl_prefill_base_inputs(inputs, *state_, chunk_ids, embedding_inputs, feature_dim);
+        if (!add_vl_prefill_deepstack_inputs(*prefill_, inputs, embedding_inputs, chunk_size,
+                                             feature_dim)) {
+            throw std::runtime_error(
+                "Phi4MultimodalPipeline: native deepstack prefill inputs are incomplete");
+        }
 
-    auto outputs = prefill_->forward(inputs);
-    if (!copy_last_prefill_logits(outputs, config_.vocab_size, logits))
-        return false;
+        auto outputs = prefill_->forward(inputs);
+        if (!copy_last_prefill_logits(outputs, config_.vocab_size, logits))
+            throw std::runtime_error("Phi4MultimodalPipeline: native prefill logits are invalid");
 
-    std::vector<const void*> present_k;
-    std::vector<const void*> present_v;
-    if (!gather_vl_prefill_kv_pointers(*prefill_, config_, present_k, present_v))
-        return false;
-    kv_cache->write_prefill_kv(present_k, present_v, sq);
-    return true;
-}
+        std::vector<const void*> present_k;
+        std::vector<const void*> present_v;
+        if (!gather_vl_prefill_kv_pointers(*prefill_, config_, present_k, present_v)) {
+            throw std::runtime_error(
+                "Phi4MultimodalPipeline: native prefill KV outputs are missing");
+        }
+        kv_cache.commit_prefill(present_k, present_v, chunk_size);
 
-void Phi4MultimodalPipeline::run_vl_prefill_token(
-    int32_t token_id, const std::vector<float>& image_features,
-    const std::vector<std::vector<float>>& deepstack_features, int32_t num_features,
-    int32_t feature_dim, int32_t& feature_index, std::vector<float>& logits) {
-    const bool use_image_embed = token_id == config_.image_token_id && feature_index < num_features;
-    if (!use_image_embed) {
-        run_text_step_with_embed(token_id, nullptr, 0.0F, {}, 0.0F, logits);
-        return;
+        for (const auto token : chunk_ids) {
+            if (token == config_.image_token_id && feature_offset < num_features)
+                ++feature_offset;
+        }
+        offset += chunk_size;
     }
-
-    const float* embed =
-        image_features.data() + static_cast<std::size_t>(feature_index) * feature_dim;
-    const auto deepstack_embeds =
-        select_deepstack_feature_pointers(deepstack_features, feature_index, feature_dim);
-    run_text_step_with_embed(token_id, embed, 1.0F, deepstack_embeds,
-                             deepstack_embeds.empty() ? 0.0F : 1.0F, logits);
-    ++feature_index;
+    state_->bind_to(*text_decoder_);
 }
 
-void Phi4MultimodalPipeline::run_vl_decode_loop(Phi4MultimodalISampler* sampler,
-                                                const Phi4MultimodalSamplingParams& params,
-                                                std::vector<int32_t>& output,
-                                                std::vector<float>& logits,
-                                                int32_t max_new_tokens) {
+void Phi4MultimodalPipeline::run_decode_loop(Phi4MultimodalISampler* sampler,
+                                             const Phi4MultimodalSamplingParams& params,
+                                             std::vector<int32_t>& output,
+                                             std::vector<float>& logits, int32_t max_new_tokens) {
     const int32_t vocab_size = static_cast<int32_t>(logits.size());
     for (int32_t step = 0; step < max_new_tokens; ++step) {
         Phi4MultimodalSampleResult result = sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
-        if (result.is_eos)
+        if (result.is_eos || step + 1 == max_new_tokens)
             break;
         run_text_step(result.token_id, logits);
     }

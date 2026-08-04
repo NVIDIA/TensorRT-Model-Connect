@@ -11,14 +11,19 @@
 #include "runtime/models/phi4_multimodal/image_preprocessor.h"
 #include "runtime/models/phi4_multimodal/pipeline.h"
 #include "runtime/models/phi4_multimodal/tensor_names.h"
-#include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cuda_runtime_api.h>
+#include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -26,58 +31,17 @@ namespace trtmc {
 
 namespace {
 
-struct TensorParallelRuntimeConfig {
-    bool enabled{false};
-    int32_t tp_size{1};
-};
-
-struct TextModuleRuntime {
-    ModuleCreateOptions options;
-    DistributedRuntimeGroup tp_group;
-    std::string engine_section{"engine_plan"};
-};
-
-TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::string& config_json) {
-    TensorParallelRuntimeConfig cfg;
-    cfg.tp_size = extract_json_int(config_json, "tensor_parallel_size", 1);
-    const auto mode = extract_json_string(config_json, "tensor_parallel_mode", "single");
-    cfg.enabled = (mode == "tensor_parallel" && cfg.tp_size > 1);
-    return cfg;
-}
-
-std::string tp_engine_section_name(int32_t rank) {
-    return "engine_plan_tp_rank" + std::to_string(rank);
-}
-
 int32_t dim_at(const std::vector<int64_t>& shape, std::size_t idx) {
     return shape.size() > idx ? static_cast<int32_t>(shape[idx]) : 0;
 }
 
 int32_t decoder_cache_row_width(const TrtModule& module, const std::string& tensor_name,
                                 const BaseConfig& config) {
-    const int32_t from_engine = dim_at(module.tensor_shape(tensor_name), 1);
+    const auto shape = module.tensor_shape(tensor_name);
+    if (shape.size() == 4 && shape[1] > 0 && shape[3] > 0)
+        return static_cast<int32_t>(shape[1] * shape[3]);
+    const int32_t from_engine = dim_at(shape, 1);
     return from_engine > 0 ? from_engine : compute_kv_dim(config);
-}
-
-TextModuleRuntime initialize_text_module_runtime(const TensorParallelRuntimeConfig& tp_config) {
-    TextModuleRuntime runtime;
-    if (!tp_config.enabled)
-        return runtime;
-
-    runtime.tp_group = initialize_tensor_parallel_group(tp_config.tp_size);
-    runtime.engine_section = tp_engine_section_name(runtime.tp_group.rank);
-    return runtime;
-}
-
-void configure_text_module_options(TextModuleRuntime& runtime,
-                                   const ModuleCreateOptions& base_options,
-                                   const TensorParallelRuntimeConfig& tp_config) {
-    runtime.options = base_options;
-    if (!tp_config.enabled)
-        return;
-
-    runtime.options.distributed_communicator = runtime.tp_group.communicator;
-    runtime.options.distributed_owner = runtime.tp_group.owner;
 }
 
 Phi4MultimodalKvCacheNames build_kv_cache_names(const BaseConfig& config) {
@@ -92,20 +56,106 @@ Phi4MultimodalKvCacheNames build_kv_cache_names(const BaseConfig& config) {
     return kv_names;
 }
 
-DualProfileModules load_text_modules(const PipelineContext& ctx, TextModuleRuntime& runtime,
+DualProfileModules load_text_modules(const PipelineContext& ctx, const ModuleCreateOptions& options,
                                      const std::shared_ptr<Phi4MultimodalCudaStream>& stream) {
-    auto loaded =
-        load_dual_profile_modules(ctx.backend, find_section(ctx.bundle, runtime.engine_section),
-                                  runtime.engine_section.c_str(), runtime.options);
+    auto loaded = load_dual_profile_modules(ctx.backend, find_section(ctx.bundle, "engine_plan"),
+                                            "engine_plan", options);
     loaded.decode->keep_alive(stream);
     if (loaded.prefill)
         loaded.prefill->keep_alive(stream);
-    if (runtime.tp_group.owner) {
-        loaded.decode->keep_alive(runtime.tp_group.owner);
-        if (loaded.prefill)
-            loaded.prefill->keep_alive(runtime.tp_group.owner);
+    if (find_section(ctx.bundle, "prefill_engine_plan") != nullptr) {
+        auto split =
+            load_trt_module_from_plan(ctx.backend, find_section(ctx.bundle, "prefill_engine_plan"),
+                                      "prefill_engine_plan", options);
+        split.module->keep_alive(stream);
+        loaded.prefill = std::move(split.module);
     }
     return loaded;
+}
+
+std::uint64_t checked_multiply(std::uint64_t lhs, std::uint64_t rhs) {
+    if (lhs != 0 && rhs > std::numeric_limits<std::uint64_t>::max() / lhs)
+        throw std::overflow_error("Phi-4 Multimodal native KV byte accounting overflow");
+    return lhs * rhs;
+}
+
+std::string format_bytes(std::uint64_t bytes) {
+    constexpr std::uint64_t kGiB = 1ULL << 30;
+    constexpr std::uint64_t kMiB = 1ULL << 20;
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(2);
+    if (bytes >= kGiB)
+        stream << static_cast<double>(bytes) / kGiB << " GiB";
+    else if (bytes >= kMiB)
+        stream << static_cast<double>(bytes) / kMiB << " MiB";
+    else
+        stream << bytes << " B";
+    return stream.str();
+}
+
+void validate_native_module(const TrtModule& module, const Phi4MultimodalKvCacheNames& names,
+                            const BaseConfig& config, DType cache_dtype) {
+    if (!module.has_input(names.cache_write_indices) ||
+        !module.has_input(names.key_value_lengths) || module.has_input("attention_mask")) {
+        throw std::runtime_error("Phi-4 Multimodal decoder does not expose the native KV contract");
+    }
+    if (cache_dtype != DType::kFloat16)
+        throw std::runtime_error("Phi-4 Multimodal native KV requires FP16");
+    if (names.cache_k.empty())
+        throw std::runtime_error("Phi-4 Multimodal native KV has no cache tensors");
+    const auto shape = module.tensor_shape(names.cache_k.front());
+    if (shape.size() != 4 || shape[0] != 1 ||
+        shape[2] != static_cast<int64_t>(config.max_cache_length) || shape[1] <= 0 ||
+        shape[3] <= 0 || shape[1] * shape[3] != compute_kv_dim(config)) {
+        throw std::runtime_error("Phi-4 Multimodal native KV cache must be [1,Hkv,capacity,D]");
+    }
+}
+
+void validate_native_bundle(const PipelineContext& ctx, const DualProfileModules& modules,
+                            const Phi4MultimodalKvCacheNames& names, DType cache_dtype) {
+    if (!extract_json_bool(ctx.config_json, "native_kv_cache", false) ||
+        extract_json_int(ctx.config_json, "native_kv_contract_version", 0) != 1) {
+        throw std::runtime_error("Phi-4 Multimodal bundle is missing native KV contract metadata");
+    }
+    if (ctx.kv_cache_size_bytes != 0) {
+        throw std::invalid_argument(
+            "Phi-4 Multimodal native KV allocates the model's complete context; "
+            "--kv-cache-size is not supported");
+    }
+    if (modules.prefill == nullptr)
+        throw std::runtime_error(
+            "Phi-4 Multimodal native KV bundle requires split prefill/decode engines");
+    validate_native_module(*modules.decode, names, ctx.config, cache_dtype);
+    validate_native_module(*modules.prefill, names, ctx.config, cache_dtype);
+}
+
+std::uint64_t native_cache_bytes(const BaseConfig& config, int32_t kv_dim, DType dtype) {
+    auto bytes = checked_multiply(static_cast<std::uint64_t>(config.max_cache_length),
+                                  static_cast<std::uint64_t>(config.num_layers));
+    bytes = checked_multiply(bytes, static_cast<std::uint64_t>(kv_dim));
+    bytes = checked_multiply(bytes, static_cast<std::uint64_t>(dtype_size(dtype)));
+    return checked_multiply(bytes, 2);
+}
+
+void admit_native_cache_allocation(const BaseConfig& config, std::uint64_t required) {
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    const auto status = cudaMemGetInfo(&free_bytes, &total_bytes);
+    if (status != cudaSuccess) {
+        throw std::runtime_error(std::string("Phi-4 Multimodal CUDA memory query failed: ") +
+                                 cudaGetErrorString(status));
+    }
+    constexpr std::uint64_t kTwoGiB = 2ULL << 30;
+    const auto free = static_cast<std::uint64_t>(free_bytes);
+    const auto reserve = std::max(kTwoGiB, static_cast<std::uint64_t>(total_bytes) / 10);
+    const auto available = free > reserve ? free - reserve : 0;
+    if (required > available) {
+        throw std::runtime_error(
+            "Phi-4 Multimodal native KV admission failed before allocation: capacity=" +
+            std::to_string(config.max_cache_length) +
+            " tokens, required=" + format_bytes(required) + ", free=" + format_bytes(free) +
+            ", reserve=" + format_bytes(reserve));
+    }
 }
 
 std::unique_ptr<TrtModule>
@@ -140,9 +190,11 @@ class VLPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         load_ffi_kernels_from_bundle(ctx.bundle);
-
-        const auto tp_config = parse_tensor_parallel_runtime_config(ctx.config_json);
-        auto text_runtime = initialize_text_module_runtime(tp_config);
+        if (extract_json_string(ctx.config_json, "tensor_parallel_mode", "single") != "single" ||
+            extract_json_int(ctx.config_json, "tensor_parallel_size", 1) != 1) {
+            throw std::runtime_error(
+                "Phi-4 Multimodal native KV does not support tensor parallel runtime");
+        }
 
         auto shared_stream = std::make_shared<Phi4MultimodalCudaStream>();
         if (!shared_stream->ok())
@@ -153,21 +205,16 @@ class VLPlugin final : public IPipelinePlugin {
         opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
         opts.cuda_graphs = ctx.cuda_graphs;
 
-        configure_text_module_options(text_runtime, opts, tp_config);
-
         Phi4MultimodalKvCacheNames kv_names = build_kv_cache_names(ctx.config);
 
-        auto loaded = load_text_modules(ctx, text_runtime, shared_stream);
+        auto loaded = load_text_modules(ctx, opts, shared_stream);
 
         cudaStream_t stream = loaded.decode->stream();
         const std::string cache_k_name =
             kv_names.cache_k.empty() ? std::string("cache_k_0") : kv_names.cache_k.front();
         int32_t kv_dim = decoder_cache_row_width(*loaded.decode, cache_k_name, ctx.config);
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
-        std::unique_ptr<Phi4MultimodalInferenceState> state =
-            std::make_unique<Phi4MultimodalKvCache>(ctx.config.num_layers,
-                                                    ctx.config.max_cache_length, kv_dim, stream,
-                                                    cache_dtype, std::move(kv_names));
+        validate_native_bundle(ctx, loaded, kv_names, cache_dtype);
 
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
@@ -179,7 +226,12 @@ class VLPlugin final : public IPipelinePlugin {
         vlc.vision_output_dim = extract_json_int(ctx.config_json, "vision_output_dim", 0);
         vlc.has_position_input = loaded.decode->has_input("position_id");
         vlc.num_layers = ctx.config.num_layers;
-        vlc.prefill_max_length = ctx.config.max_cache_length;
+        const auto prefill_max_shape = loaded.prefill->input_profile_shape(
+            "token_id", loaded.prefill->profile_idx(), ProfileShapeSelector::kMax);
+        vlc.prefill_max_length = dim_at(prefill_max_shape, 0);
+        if (vlc.prefill_max_length <= 0)
+            throw std::runtime_error(
+                "Phi-4 Multimodal native prefill profile has no valid token capacity");
         vlc.present_k_pattern = ctx.config.io_map.present_k_pattern;
         vlc.present_v_pattern = ctx.config.io_map.present_v_pattern;
 
@@ -188,6 +240,19 @@ class VLPlugin final : public IPipelinePlugin {
         // Try to load the vision encoder engine from the bundle.
         std::unique_ptr<TrtModule> vision_module =
             load_vision_module(ctx.backend, ctx.bundle, opts, shared_stream, has_vision_engine);
+
+        // All engine contexts are resident now. Preserve a safety reserve and
+        // fail before any partial full-context cache allocation can occur.
+        const auto cache_bytes = native_cache_bytes(ctx.config, kv_dim, cache_dtype);
+        admit_native_cache_allocation(ctx.config, cache_bytes);
+        std::unique_ptr<Phi4MultimodalInferenceState> state =
+            std::make_unique<Phi4MultimodalKvCache>(ctx.config.num_layers,
+                                                    ctx.config.max_cache_length, kv_dim, stream,
+                                                    cache_dtype, std::move(kv_names));
+        if (!state->ok())
+            throw std::runtime_error("Phi-4 Multimodal native KV full-context allocation failed");
+        std::cerr << "[trtmc] Phi-4 Multimodal native KV capacity=" << ctx.config.max_cache_length
+                  << " tokens, cache=" << format_bytes(cache_bytes) << '\n';
 
         // Build VL preprocessing config from bundle's config.json +
         // preprocessor_config.json sections.

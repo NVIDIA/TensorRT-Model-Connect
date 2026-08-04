@@ -5,8 +5,6 @@
   "family": "phi4_multimodal",
   "runtime_strategy": "phi4_multimodal_vision_language",
   "task_strategy": "vision_language_generation",
-  "precision": "fp16",
-  "max_cache_length": 768,
   "trust_remote_code": true,
   "testcases": [
     {
@@ -19,7 +17,7 @@
       "max_new_tokens": 30,
       "test_image": "data/test_img.jpeg",
       "metadata": {
-        "precision_notes": "Pure FP16 passes after applying the checkpoint's LongRoPE frequency and attention scaling. Explicit attention retains FP32 score accumulation; no decoder block remains FP32.",
+        "precision_notes": "The family default builds FP16 split prefill/decode engines with TensorRT native KV cache at the model's complete 131072-token context.",
         "contract_config": {
           "use_processor": true,
           "use_chat_template": true

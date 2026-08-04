@@ -18,6 +18,7 @@ Postconditions: Plugin correctly splits fused weights and produces expected per-
 from __future__ import annotations
 
 import importlib
+import inspect
 import json
 from pathlib import Path
 
@@ -38,9 +39,11 @@ except (ImportError, ModuleNotFoundError):
 RNG = np.random.RandomState(42)
 
 
-def test_phi4_multimodal_embed_input_dispatches_to_dual_profile_builder(monkeypatch) -> None:
+def test_phi4_multimodal_dispatches_native_split_builder(monkeypatch) -> None:
     module = importlib.import_module(
-        "tensorrt_model_connect.families.phi4_multimodal.default_decoder")
+        "tensorrt_model_connect.families.phi4_multimodal.default_dual_profile_decoder")
+    family = importlib.import_module(
+        "tensorrt_model_connect.families.phi4_multimodal.plugin")
     calls: dict[str, object] = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
@@ -48,15 +51,26 @@ def test_phi4_multimodal_embed_input_dispatches_to_dual_profile_builder(monkeypa
         return b"phi4-multimodal-dual-profile-plan"
 
     monkeypatch.setattr(module, "build_dual_profile_decoder_engine", fake_build)
-    config = type("Config", (), {"raw": {"_decoder_engine_role": "decode"}})()
-    result = module.build_standard_decoder_engine(
-        config, {}, 31, precision="fp16", embed_input=True,
-        partial_rotary_factor=0.75)
+    config = type("Config", (), {
+        "model_type": "phi4mm",
+        "max_position_embeddings": 32,
+        "head_dim": 8,
+        "raw": {
+            "_decoder_engine_role": "decode",
+            "partial_rotary_factor": 0.75,
+        },
+    })()
+    result = family.plugin.build_engine(
+        config, {}, 32, precision="fp16")
 
     assert result == b"phi4-multimodal-dual-profile-plan"
     kwargs = calls["build"][3]
-    assert kwargs["embed_input"] is True
     assert kwargs["partial_rotary_factor"] == 0.75
+    assert kwargs["profile_mode"] == "decode"
+    assert config.raw["_native_kv_cache_metadata"] == {
+        "native_kv_contract_version": 1,
+        "native_kv_cache": True,
+    }
 
 
 def test_phi4_fp16_matmul_can_request_fp32_accumulation(monkeypatch) -> None:
@@ -316,6 +330,120 @@ def test_longrope_table_applies_frequency_and_attention_factors() -> None:
         table[1], 1.5 * np.cos(np.array([0.5, 0.25])), rtol=1e-6)
 
 
+def test_native_defaults_use_complete_model_context() -> None:
+    from tensorrt_model_connect.families.phi4_multimodal import plugin
+
+    config = type("Config", (), {
+        "model_type": "phi4mm",
+        "max_position_embeddings": 131072,
+    })()
+    assert plugin.default_build_precision(config) == "fp16"
+    assert inspect.signature(plugin.build_engine).parameters[
+        "precision"].default == "fp16"
+    assert plugin.default_max_cache_length(config) == 131072
+    assert plugin.supports_split_decoder_roles(config)
+    assert plugin.supports_split_embed_input is True
+
+
+def test_native_split_builder_has_no_legacy_kv_switch() -> None:
+    from tensorrt_model_connect.families.phi4_multimodal.default_dual_profile_decoder import (
+        build_dual_profile_decoder_engine,
+    )
+
+    signature = inspect.signature(build_dual_profile_decoder_engine)
+    assert "native_kv_cache" not in signature.parameters
+    assert "dynamic_kv_profile_rows" not in signature.parameters
+
+    config = type("Config", (), {"model_type": "phi4mm"})()
+    weights = {"embedding": object(), "final_norm": object()}
+    with pytest.raises(ValueError, match="prefill.*decode"):
+        build_dual_profile_decoder_engine(
+            config, weights, 128, profile_mode="dual_profile")
+
+
+def test_native_build_rejects_hidden_capacity_override() -> None:
+    from tensorrt_model_connect.families.phi4_multimodal import plugin
+
+    config = type("Config", (), {
+        "model_type": "phi4mm",
+        "max_position_embeddings": 131072,
+        "head_dim": 128,
+        "raw": {
+            "_decoder_engine_role": "decode",
+            "partial_rotary_factor": 0.75,
+        },
+    })()
+    with pytest.raises(ValueError, match="must equal the model context"):
+        plugin.build_engine(config, {}, 768, precision="fp16")
+
+
+def test_native_build_requires_split_role() -> None:
+    from tensorrt_model_connect.families.phi4_multimodal import plugin
+
+    config = type("Config", (), {
+        "model_type": "phi4mm",
+        "max_position_embeddings": 128,
+        "head_dim": 8,
+        "raw": {"partial_rotary_factor": 0.75},
+    })()
+    with pytest.raises(ValueError, match="explicit split decoder role"):
+        plugin.build_engine(config, {}, 128, precision="fp16")
+
+
+@pytest.mark.parametrize("role", ["prefill", "decode"])
+def test_native_builder_engine_contract(role: str) -> None:
+    import tensorrt as trt
+
+    from tensorrt_model_connect.families.phi4_multimodal import plugin
+
+    config = ModelConfig.from_json(json.dumps({
+        "model_type": "phi4mm",
+        "vocab_size": 32,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 1,
+        "num_key_value_heads": 1,
+        "max_position_embeddings": 128,
+        "rms_norm_eps": 1e-5,
+        "rope_theta": 10000.0,
+        "partial_rotary_factor": 0.75,
+    }))
+    config.raw["_decoder_engine_role"] = role
+    rng = np.random.RandomState(7)
+    weights = {
+        "embedding": rng.randn(32, 128).astype(np.float32),
+        "final_norm": np.ones(128, dtype=np.float32),
+        "w_out": rng.randn(128, 32).astype(np.float32),
+        "_attention_size": 128,
+        "_mlp_size": 256,
+        "layer.0.input_norm": np.ones(128, dtype=np.float32),
+        "layer.0.post_attn_norm": np.ones(128, dtype=np.float32),
+        "layer.0.w_q": rng.randn(128, 128).astype(np.float32),
+        "layer.0.w_k": rng.randn(128, 128).astype(np.float32),
+        "layer.0.w_v": rng.randn(128, 128).astype(np.float32),
+        "layer.0.w_o": rng.randn(128, 128).astype(np.float32),
+        "layer.0.w_gate": rng.randn(128, 256).astype(np.float32),
+        "layer.0.w_up": rng.randn(128, 256).astype(np.float32),
+        "layer.0.w_down": rng.randn(256, 128).astype(np.float32),
+    }
+
+    plan = plugin.build_engine(
+        config, weights, max_cache_length=128, precision="fp16")
+    logger = trt.Logger(trt.Logger.ERROR)
+    engine = trt.Runtime(logger).deserialize_cuda_engine(plan)
+    assert engine is not None
+    assert engine.get_tensor_shape("cache_k_0") == (1, 1, 128, 128)
+    assert engine.get_tensor_shape("present_k_0") == (1, 1, 128, 128)
+    assert engine.get_aliased_input_tensor("present_k_0") == "cache_k_0"
+    assert engine.get_aliased_input_tensor("present_v_0") == "cache_v_0"
+    assert engine.get_tensor_shape("cache_write_indices") == (1,)
+    assert engine.get_tensor_shape("key_value_lengths") == (1,)
+    assert "attention_mask" not in {
+        engine.get_tensor_name(index) for index in range(engine.num_io_tensors)
+    }
+
+
 # =========================================================================
 # Phi-4-multimodal text decoder weights
 # =========================================================================
@@ -404,7 +532,7 @@ class TestPhi4MultimodalPlugin:
 
         # Check that all expected keys exist
         expected_keys = {"embedding", "final_norm", "w_out",
-                         "_attention_size", "_mlp_size", "_explicit_attention"}
+                         "_attention_size", "_mlp_size"}
         for i in range(self.LAYERS):
             expected_keys.update({
                 f"layer.{i}.input_norm",
@@ -420,7 +548,7 @@ class TestPhi4MultimodalPlugin:
 
         for key in expected_keys:
             assert key in weights, f"Missing weight key: {key}"
-        assert weights["_explicit_attention"] is True
+        assert "_explicit_attention" not in weights
 
     def test_fused_qkv_split(self, tmp_path):
         """Verify fused QKV is correctly split into Q, K, V."""
@@ -519,7 +647,7 @@ class TestPhi4MultimodalPlugin:
         w_out = weights["w_out"]
         np.testing.assert_allclose(w_out, embedding.T, atol=1e-6)
 
-    def test_selected_fp32_decoder_layer_builds_in_fp16_engine(self, tmp_path):
+    def test_selected_fp32_decoder_layer_is_rejected(self, tmp_path):
         from tensorrt_model_connect.families.phi4_multimodal import plugin
 
         config = self._make_config()
@@ -528,12 +656,14 @@ class TestPhi4MultimodalPlugin:
 
         mc = ModelConfig.from_dir(tmp_path)
         mc.raw["_fp32_layers"] = [1]
+        mc.raw["_decoder_engine_role"] = "decode"
         weights = plugin.load_weights(str(tmp_path), mc)
 
-        plan = plugin.build_engine(
-            mc, weights, max_cache_length=4, precision="fp16")
-
-        assert len(plan) > 0
+        with pytest.raises(ValueError, match="FP32 layer overrides"):
+            plugin.build_engine(
+                mc, weights,
+                max_cache_length=mc.max_position_embeddings,
+                precision="fp16")
 
     def test_vl_config_matches_dynamic_hd_contract(self, tmp_path):
         from tensorrt_model_connect.families.phi4_multimodal import plugin

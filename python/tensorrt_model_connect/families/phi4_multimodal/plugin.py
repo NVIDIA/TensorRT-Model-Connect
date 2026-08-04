@@ -15,6 +15,8 @@ from pathlib import Path
 
 import numpy as np
 
+from ...parallel_config import normalize_parallel_config
+
 from .config import ModelConfig
 from .checkpoint_mapper import (
     WeightDict,
@@ -54,11 +56,24 @@ def _load_vision_adapted_weight(
 class Phi4MultimodalPlugin:
     name = "phi4_multimodal"
     runtime_strategy = "phi4_multimodal_vision_language"
+    runtime_capabilities = {"decoder_kv"}
     embed_input = True
+    supports_split_embed_input = True
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
         return mt in ("phi4mm", "phi4_multimodal")
+
+    def supports_split_decoder_roles(self, config: ModelConfig) -> bool:
+        return self.matches(config.model_type)
+
+    def default_build_precision(self, config: ModelConfig) -> str:
+        del config
+        return "fp16"
+
+    def default_max_cache_length(self, config: ModelConfig) -> int:
+        """Build one bundle for the model's complete advertised context."""
+        return int(config.max_position_embeddings)
 
     def load_weights(
         self, model_dir: str, config: ModelConfig,
@@ -182,29 +197,63 @@ class Phi4MultimodalPlugin:
 
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
         weights["_mlp_size"] = mlp_size  # type: ignore[assignment]
-        # TensorRT 11's fused IAttention compiler rejects the 768+ cache shape
-        # required by the canonical Dynamic-HD prompt. Keep the same equation
-        # using explicit attention primitives with FP32 score accumulation.
-        weights["_explicit_attention"] = True
-
         return weights
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
+        max_cache_length: int, *, precision: str = "fp16",
         quant_ctx=None, verbose: bool = False,
+        parallel_config=None,
         debug_layer_outputs: bool = False,
     ) -> bytes:
-        from .standard_decoder_builder import build_standard_decoder_engine
+        from .default_dual_profile_decoder import build_dual_profile_decoder_engine
 
-        partial_rotary = config.raw.get("partial_rotary_factor", 1.0)
-        return build_standard_decoder_engine(
+        parallel = normalize_parallel_config(parallel_config)
+        reasons: list[str] = []
+        if precision != "fp16":
+            reasons.append("precision must be fp16")
+        if max_cache_length != int(config.max_position_embeddings):
+            reasons.append(
+                "max_cache_length must equal the model context "
+                f"({config.max_position_embeddings})")
+        if parallel.enabled:
+            reasons.append("tensor parallel builds are not yet supported")
+        if quant_ctx is not None or config.raw.get("quantization_config"):
+            reasons.append("quantized builds are not supported")
+        if debug_layer_outputs:
+            reasons.append("debug layer outputs are not supported")
+        if config.raw.get("_fp32_layers"):
+            reasons.append("FP32 layer overrides are not supported")
+        if config.raw.get("dynamic_kv_cache"):
+            reasons.append("dynamic KV bucket profiles are not supported")
+        role = str(config.raw.get("_decoder_engine_role", ""))
+        if role not in ("prefill", "decode"):
+            reasons.append(
+                "an explicit split decoder role (prefill or decode) is required")
+        partial_rotary = float(config.raw.get("partial_rotary_factor", 1.0))
+        if int(config.head_dim * partial_rotary) % 2:
+            reasons.append("partial rotary dimension must be even")
+        if reasons:
+            raise ValueError(
+                "Phi-4 Multimodal native KV build is unsupported: "
+                + "; ".join(reasons))
+
+        config.raw["_decoder_engine_layout_supported"] = True
+        config.raw["_native_kv_cache_metadata"] = {
+            "native_kv_contract_version": 1,
+            "native_kv_cache": True,
+        }
+        return build_dual_profile_decoder_engine(
             config, weights, max_cache_length,
-            precision=precision,
-            quant_ctx=quant_ctx, partial_rotary_factor=partial_rotary,
-            embed_input=True,
+            partial_rotary_factor=partial_rotary,
             verbose=verbose,
-            debug_layer_outputs=debug_layer_outputs)
+            profile_mode=role)
+
+    def get_bundle_config_overrides(
+        self, config: ModelConfig,
+    ) -> dict | None:
+        metadata = config.raw.get("_native_kv_cache_metadata")
+        return dict(metadata) if isinstance(metadata, dict) else None
 
     def build_vision_engine(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,

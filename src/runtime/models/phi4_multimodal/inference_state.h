@@ -14,12 +14,12 @@
 // The interface captures the lifecycle of per-sequence inference state:
 //   1. reset()        — prepare for a new sequence
 //   2. bind_to()      — bind state tensors to TRT engine I/O
-//   3. prepare_step() — write state-related inputs (mask, position) into TensorMap
+//   3. prepare_step() — write state-related scalar/position inputs into TensorMap
 //   4. advance()      — update state after each decode step
 //   5. position()     — current sequence position
 //
 // Implementations:
-//   Phi4MultimodalKvCache          — dense append-only (current default)
+//   Phi4MultimodalKvCache          — native, fixed-capacity append-only KV cache
 //   Family-owned recurrent state — recurrent tensor state
 //   Family-owned hybrid state — Phi4MultimodalKvCache + family-owned recurrent state composed
 //   (future: RingKvCache, PagedKvCache, MlaCache, SlidingWindowCache)
@@ -41,7 +41,7 @@ class Phi4MultimodalInferenceState {
     // --- Lifecycle ---
 
     // Reset logical state for a new sequence. Implementations may retain device
-    // storage that remains hidden by logical lengths and attention masks.
+    // storage that remains hidden by logical lengths.
     virtual void reset() = 0;
 
     // Bind all state tensors to the given TRT module.
@@ -55,8 +55,8 @@ class Phi4MultimodalInferenceState {
     // Pipelines call this instead of manually constructing mask/position tensors.
     virtual void prepare_step(TensorMap& inputs, int32_t seq_len = 1) = 0;
 
-    // Update state after one decode step. Copies "present" outputs
-    // into "cache" inputs, advances position.
+    // Update state after one decode step. Native KV outputs alias their cache
+    // inputs, so implementations only need to validate and advance position.
     // n_tokens: number of tokens processed in this step (default 1).
     //           >1 for batched prefill / multi-token steps.
     virtual void advance(int32_t n_tokens = 1) = 0;
@@ -79,17 +79,8 @@ class Phi4MultimodalInferenceState {
     // -1 for unbounded (recurrent models with no cache length limit).
     virtual int32_t max_length() const = 0;
 
-    // Desired number of KV rows to expose to the decoder on the next step.
-    // Dynamic-KV runtimes can use this to choose an execution profile/context
-    // before prepare_step() binds the state tensors.
-    virtual int32_t preferred_cache_rows() const { return max_length(); }
-
     // Number of transformer/SSM layers.
     virtual int32_t num_layers() const = 0;
-
-    // Whether this state type needs an attention mask.
-    // Phi4MultimodalKvCache -> true. Family-owned recurrent state -> false.
-    virtual bool needs_attention_mask() const = 0;
 
     // Total device memory consumed by this state (bytes).
     virtual std::size_t device_memory_bytes() const = 0;

@@ -96,21 +96,15 @@ class Phi4MultimodalPipeline final : public IPipeline {
 
     void reset_generation_context(int32_t prompt_length);
 
-    void run_vl_prefill_token(int32_t token_id, const std::vector<float>& image_features,
-                              const std::vector<std::vector<float>>& deepstack_features,
-                              int32_t num_features, int32_t feature_dim, int32_t& feature_index,
-                              std::vector<float>& logits);
+    void run_native_prefill_batched(const std::vector<int32_t>& input_ids,
+                                    const std::vector<float>& image_features,
+                                    const std::vector<std::vector<float>>& deepstack_features,
+                                    int32_t num_features, int32_t feature_dim,
+                                    std::vector<float>& logits);
 
-    bool run_vl_prefill_batched(const std::vector<int32_t>& input_ids,
-                                const std::vector<float>& image_features,
-                                const std::vector<std::vector<float>>& deepstack_features,
-                                int32_t num_features, int32_t feature_dim,
-                                std::vector<float>& logits);
-
-    void run_vl_decode_loop(Phi4MultimodalISampler* sampler,
-                            const Phi4MultimodalSamplingParams& params,
-                            std::vector<int32_t>& output, std::vector<float>& logits,
-                            int32_t max_new_tokens);
+    void run_decode_loop(Phi4MultimodalISampler* sampler,
+                         const Phi4MultimodalSamplingParams& params, std::vector<int32_t>& output,
+                         std::vector<float>& logits, int32_t max_new_tokens);
 
     void run_text_step(int32_t token_id, std::vector<float>& logits);
 
