@@ -40,7 +40,10 @@ class OmniPipeline final : public IPipeline {
                  std::unique_ptr<Qwen3OmniInferenceState> thinker_state,
                  std::unique_ptr<TrtModule> code2wav, OmniConfig config, cudaStream_t stream,
                  std::shared_ptr<ITokenizer> tokenizer = nullptr, std::string model_id_str = "",
-                 std::unique_ptr<TrtModule> thinker_prefill = nullptr);
+                 std::unique_ptr<TrtModule> thinker_prefill = nullptr,
+                 std::unique_ptr<Qwen3OmniTalkerRuntime> talker_runtime = nullptr,
+                 std::unique_ptr<TrtModule> resident_vision = nullptr,
+                 std::unique_ptr<TrtModule> resident_audio_encoder = nullptr);
 
     ~OmniPipeline() override;
 
@@ -64,6 +67,8 @@ class OmniPipeline final : public IPipeline {
 
     std::unique_ptr<TrtModule> thinker_;
     std::unique_ptr<TrtModule> thinker_prefill_;
+    std::unique_ptr<TrtModule> resident_vision_;
+    std::unique_ptr<TrtModule> resident_audio_encoder_;
     std::unique_ptr<Qwen3OmniInferenceState> thinker_state_;
     std::unique_ptr<TrtModule> code2wav_;
     std::unique_ptr<OmniConfig> config_;

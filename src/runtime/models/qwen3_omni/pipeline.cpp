@@ -75,21 +75,25 @@ OmniPipeline::OmniPipeline(std::unique_ptr<TrtModule> thinker,
                            std::unique_ptr<Qwen3OmniInferenceState> thinker_state,
                            std::unique_ptr<TrtModule> code2wav, OmniConfig config,
                            cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
-                           std::string model_id_str, std::unique_ptr<TrtModule> thinker_prefill)
+                           std::string model_id_str, std::unique_ptr<TrtModule> thinker_prefill,
+                           std::unique_ptr<Qwen3OmniTalkerRuntime> talker_runtime,
+                           std::unique_ptr<TrtModule> resident_vision,
+                           std::unique_ptr<TrtModule> resident_audio_encoder)
     : thinker_(std::move(thinker)), thinker_prefill_(std::move(thinker_prefill)),
+      resident_vision_(std::move(resident_vision)),
+      resident_audio_encoder_(std::move(resident_audio_encoder)),
       thinker_state_(std::move(thinker_state)), code2wav_(std::move(code2wav)),
-      config_(std::make_unique<OmniConfig>(std::move(config))), stream_(stream),
-      tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
-      thinker_token_id_({1}, DType::kInt32, stream) {
+      config_(std::make_unique<OmniConfig>(std::move(config))),
+      talker_runtime_(std::move(talker_runtime)), stream_(stream), tokenizer_(std::move(tokenizer)),
+      model_id_(std::move(model_id_str)), thinker_token_id_({1}, DType::kInt32, stream) {
     if (!thinker_ || !thinker_->ok())
         throw std::runtime_error("OmniPipeline: invalid thinker module");
     if (!thinker_prefill_ || !thinker_prefill_->ok())
         throw std::runtime_error("OmniPipeline: native thinker prefill module is required");
     if (!thinker_state_ || !thinker_state_->ok())
         throw std::runtime_error("OmniPipeline: invalid thinker cache");
-    talker_runtime_ = std::make_unique<Qwen3OmniTalkerRuntime>(
-        config_->hf_python, config_->talker_model_id, config_->talker_model_revision,
-        config_->talker_n_codebooks, config_->code2wav_max_frames);
+    if (!talker_runtime_)
+        throw std::runtime_error("OmniPipeline: official Talker runtime is required");
 }
 
 OmniPipeline::~OmniPipeline() = default;

@@ -40,6 +40,9 @@ class Qwen3OmniTalkerRuntime {
     Qwen3OmniTalkerRuntime(const Qwen3OmniTalkerRuntime&) = delete;
     Qwen3OmniTalkerRuntime& operator=(const Qwen3OmniTalkerRuntime&) = delete;
 
+    // Load the official Talker worker and wait until its CUDA model is resident.
+    // Idempotent: run() reuses the ready worker without another model load.
+    void start();
     Qwen3OmniTalkerRuntimeResult run(const std::string& prompt, const std::string& assistant_text);
     void shutdown();
     Qwen3OmniTalkerRuntimeStats stats() const;

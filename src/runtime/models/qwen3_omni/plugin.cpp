@@ -8,6 +8,7 @@
 
 #include "plugin_helpers.h"
 #include "runtime/models/qwen3_omni/pipeline.h"
+#include "runtime/models/qwen3_omni/talker_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
@@ -143,23 +144,23 @@ class Qwen3OmniPlugin final : public IPipelinePlugin {
         // Code2Wav is required for the audio-capable Qwen3-Omni bundle.
         std::unique_ptr<TrtModule> code2wav_module;
         auto code2wav_loaded = try_load_trt_module_from_plan(
-            ctx.backend, find_section(ctx.bundle, "code2wav_engine_plan"), "code2wav", opts);
+            ctx.backend, find_section(ctx.bundle, "code2wav_engine_plan"), "code2wav",
+            prefill_opts);
         if (code2wav_loaded.module && code2wav_loaded.module->ok())
             code2wav_module = std::move(code2wav_loaded.module);
         if (!code2wav_module)
             throw std::runtime_error(
                 "OmniPipeline: required official Code2Wav engine is missing from bundle");
 
-        // All engine memory is resident before admission. Allocate one complete
-        // model-context buffer only after the remaining free memory is known.
-        const auto cache_bytes = native_cache_bytes(ctx, kv_dim);
-        admit_cache_allocation(ctx, cache_bytes);
-        std::cerr << "[trtmc] Qwen3-Omni native KV cache capacity=" << ctx.config.max_cache_length
-                  << " tokens, allocation=" << format_bytes(cache_bytes) << '\n';
-        std::unique_ptr<Qwen3OmniInferenceState> thinker_state = std::make_unique<Qwen3OmniKvCache>(
-            ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream, DType::kBFloat16);
-        if (!thinker_state->ok())
-            throw std::runtime_error("OmniPipeline: failed to allocate native Thinker KV cache");
+        const auto load_resident_component = [&](const char* section_name, const char* label) {
+            const auto* plan = find_section(ctx.bundle, section_name);
+            if (plan == nullptr || plan->empty())
+                return std::unique_ptr<TrtModule>{};
+            return load_trt_module_from_plan(ctx.backend, plan, label, prefill_opts).module;
+        };
+        auto vision_module = load_resident_component("vision_engine_plan", "omni vision encoder");
+        auto audio_encoder_module =
+            load_resident_component("audio_encoder_plan", "omni audio encoder");
 
         // Build OmniConfig
         OmniConfig omni_cfg;
@@ -191,12 +192,31 @@ class Qwen3OmniPlugin final : public IPipelinePlugin {
             omni_cfg.talker_model_revision.clear();
         }
 
+        auto talker_runtime = std::make_unique<Qwen3OmniTalkerRuntime>(
+            omni_cfg.hf_python, omni_cfg.talker_model_id, omni_cfg.talker_model_revision,
+            omni_cfg.talker_n_codebooks, omni_cfg.code2wav_max_frames);
+        talker_runtime->start();
+
+        // Thinker, Code2Wav, optional vision/audio engines, and the official
+        // Talker CUDA model are all resident now. Size the complete native KV
+        // cache against the actual remaining device memory, never a stale
+        // pre-component estimate.
+        const auto cache_bytes = native_cache_bytes(ctx, kv_dim);
+        admit_cache_allocation(ctx, cache_bytes);
+        std::cerr << "[trtmc] Qwen3-Omni native KV cache capacity=" << ctx.config.max_cache_length
+                  << " tokens, allocation=" << format_bytes(cache_bytes) << '\n';
+        std::unique_ptr<Qwen3OmniInferenceState> thinker_state = std::make_unique<Qwen3OmniKvCache>(
+            ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream, DType::kBFloat16);
+        if (!thinker_state->ok())
+            throw std::runtime_error("OmniPipeline: failed to allocate native Thinker KV cache");
+
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
         return std::make_unique<OmniPipeline>(
             std::move(decode_loaded.module), std::move(thinker_state), std::move(code2wav_module),
             std::move(omni_cfg), stream, std::move(tokenizer), ctx.bundle.info.model_id,
-            std::move(prefill_loaded.module));
+            std::move(prefill_loaded.module), std::move(talker_runtime), std::move(vision_module),
+            std::move(audio_encoder_module));
     }
 };
 

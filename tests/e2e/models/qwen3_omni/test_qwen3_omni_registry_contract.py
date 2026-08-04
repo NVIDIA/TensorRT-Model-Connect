@@ -44,6 +44,20 @@ def test_native_kv_defaults_use_complete_official_context() -> None:
     assert plugin.default_max_cache_length(config) == 65536
 
 
+@pytest.mark.parametrize(
+    "flag", ("_runtime_dynamic_kv_requested", "dynamic_kv_cache")
+)
+def test_legacy_dynamic_kv_build_flag_is_rejected_before_weight_loading(
+    flag: str, tmp_path: Path
+) -> None:
+    plugin = _plugin("qwen3_omni")
+    config = ModelConfig.create_tiny("qwen3_omni")
+    config.raw[flag] = True
+
+    with pytest.raises(ValueError, match="remove --dynamic-kv-cache"):
+        plugin.load_weights(str(tmp_path), config)
+
+
 def test_official_manifest_does_not_inject_build_time_kv_or_precision_flags() -> None:
     manifest_path = (
         Path(__file__).parent

@@ -146,6 +146,9 @@ class _OfficialTalker:
         ]
         self._expected_codebooks = int(self._config.talker_config.num_code_groups)
         self._codebook_size = int(self._config.talker_config.code_predictor_config.vocab_size)
+        # READY means all Talker weights and initialization work are complete on
+        # the GPU, so the parent can safely size the native Thinker KV cache.
+        torch.cuda.synchronize(self._device)
 
     def generate_codes(self, request: TalkerRequest) -> np.ndarray:
         torch = self._torch

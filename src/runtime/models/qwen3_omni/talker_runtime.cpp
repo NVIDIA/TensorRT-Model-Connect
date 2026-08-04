@@ -252,6 +252,14 @@ class Qwen3OmniTalkerRuntime::Impl {
 
     ~Impl() { shutdown(); }
 
+    void start() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::string error;
+        double worker_start_ms = 0.0;
+        if (!validate(error) || !ensure_started(worker_start_ms, error))
+            throw std::runtime_error("Qwen3-Omni official Talker startup failed: " + error);
+    }
+
     Qwen3OmniTalkerRuntimeResult run(const std::string& prompt, const std::string& assistant_text) {
         std::lock_guard<std::mutex> lock(mutex_);
         Qwen3OmniTalkerRuntimeResult result;
@@ -577,6 +585,10 @@ Qwen3OmniTalkerRuntime::~Qwen3OmniTalkerRuntime() = default;
 Qwen3OmniTalkerRuntime::Qwen3OmniTalkerRuntime(Qwen3OmniTalkerRuntime&&) noexcept = default;
 Qwen3OmniTalkerRuntime&
 Qwen3OmniTalkerRuntime::operator=(Qwen3OmniTalkerRuntime&&) noexcept = default;
+
+void Qwen3OmniTalkerRuntime::start() {
+    impl_->start();
+}
 
 Qwen3OmniTalkerRuntimeResult Qwen3OmniTalkerRuntime::run(const std::string& prompt,
                                                          const std::string& assistant_text) {

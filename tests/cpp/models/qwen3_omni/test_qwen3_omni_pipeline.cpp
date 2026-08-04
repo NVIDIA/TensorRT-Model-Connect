@@ -6,6 +6,7 @@
 #include "runtime/models/qwen3_omni/kv_cache.h"
 #include "runtime/models/qwen3_omni/omni_config.h"
 #include "runtime/models/qwen3_omni/pipeline.h"
+#include "runtime/models/qwen3_omni/talker_runtime.h"
 
 #include <cstdint>
 #include <cuda_runtime_api.h>
@@ -143,9 +144,10 @@ make_pipeline(cudaStream_t stream, int32_t capacity,
     config.thinker_vocab_size = 4;
     config.thinker_num_layers = 1;
     config.thinker_eos_token_id = 99;
+    auto talker = std::make_unique<trtmc::Qwen3OmniTalkerRuntime>("unused", "unused", "", 1, 1);
     return std::make_unique<trtmc::OmniPipeline>(std::move(decode), std::move(cache), nullptr,
                                                  config, stream, nullptr, "test-omni",
-                                                 std::move(prefill));
+                                                 std::move(prefill), std::move(talker));
 }
 
 void test_native_prefill_and_decode_scalars() {

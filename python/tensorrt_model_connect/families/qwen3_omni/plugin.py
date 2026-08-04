@@ -64,6 +64,14 @@ trt = trt_compat.get_trt()
 _NATIVE_PREFILL_CHUNK_TOKENS = 256
 
 
+def _reject_legacy_dynamic_kv_request(config: ModelConfig) -> None:
+    if config.raw.get("_runtime_dynamic_kv_requested") or config.raw.get("dynamic_kv_cache"):
+        raise ValueError(
+            "Qwen3-Omni native full-context KV is automatic; remove "
+            "--dynamic-kv-cache (the generic path cannot build the required split prefill plan)"
+        )
+
+
 def _talker_model_locator(model_dir: Path) -> tuple[str, str]:
     """Return a portable HF repo/revision pair, or the resolved local path."""
     resolved = model_dir.resolve()
@@ -114,6 +122,7 @@ class Qwen3OmniPlugin:
           - Talker decoder weights (model.talker.*)
           - Code2Wav weights (model.code2wav.*)
         """
+        _reject_legacy_dynamic_kv_request(config)
         model_dir_path = Path(model_dir)
         self._talker_model_id, self._talker_model_revision = _talker_model_locator(model_dir_path)
         readers = _open_safetensors(model_dir_path)
@@ -559,6 +568,7 @@ class Qwen3OmniPlugin:
         debug_layer_outputs: bool = False,
     ) -> bytes:
         """Build one split Thinker role with TensorRT-native KV updates."""
+        _reject_legacy_dynamic_kv_request(config)
         if precision != "bf16":
             raise ValueError("native Qwen3-Omni requires BF16")
         if quant_ctx is not None:

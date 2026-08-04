@@ -152,6 +152,11 @@ std::string self_executable() {
 void test_worker_is_reused_and_recovers_after_failure() {
     trtmc::Qwen3OmniTalkerRuntime runtime("", "fixture", "", 2, 4,
                                           {self_executable(), "--fake-worker"});
+    runtime.start();
+    auto stats = runtime.stats();
+    check(stats.worker_starts == 1, "eager start initializes one worker");
+    check(stats.requests == 0, "eager start sends no generation request");
+    check(stats.worker_running, "eager start waits for worker readiness");
 
     const auto first = runtime.run("first", "assistant");
     if (first.exit_code != 0)
@@ -163,12 +168,13 @@ void test_worker_is_reused_and_recovers_after_failure() {
     check(first.ipc_ms >= 0.0, "first request reports IPC timing");
     check(first.output_materialization_ms >= 0.0,
           "first request reports output materialization timing");
+    check(first.worker_start_ms == 0.0, "first request reuses the eagerly started worker");
 
     const auto second = runtime.run("second", "assistant");
     check(second.exit_code == 0, "second request succeeds");
     check(second.frame_major_codes == std::vector<int32_t>({2, 12}),
           "second request uses the same worker state");
-    auto stats = runtime.stats();
+    stats = runtime.stats();
     check(stats.worker_starts == 1, "two requests initialize one worker");
     check(stats.requests == 2, "two requests are counted");
     check(stats.worker_running, "worker remains running after two requests");

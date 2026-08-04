@@ -56,6 +56,25 @@ def test_qwen3_omni_runtime_requires_official_code2wav_and_python_talker() -> No
     assert 'find_section(ctx.bundle, "talker_engine_plan")' not in source
 
 
+def test_qwen3_omni_resides_every_gpu_component_before_kv_admission() -> None:
+    source = (ROOT / "src/runtime/models/qwen3_omni/plugin.cpp").read_text()
+
+    admission = source.index("admit_cache_allocation(ctx, cache_bytes)")
+    for component in (
+        'find_section(ctx.bundle, "engine_plan")',
+        'find_section(ctx.bundle, "prefill_engine_plan")',
+        'find_section(ctx.bundle, "code2wav_engine_plan")',
+        'load_resident_component("vision_engine_plan"',
+        'load_resident_component("audio_encoder_plan"',
+        "talker_runtime->start()",
+    ):
+        assert source.index(component) < admission
+
+    assert "std::move(talker_runtime)" in source
+    assert "std::move(vision_module)" in source
+    assert "std::move(audio_encoder_module)" in source
+
+
 def test_qwen3_omni_runtime_has_no_retired_talker_recurrent_state() -> None:
     runtime = ROOT / "src/runtime/models/qwen3_omni"
     plugin = (runtime / "plugin.cpp").read_text()
