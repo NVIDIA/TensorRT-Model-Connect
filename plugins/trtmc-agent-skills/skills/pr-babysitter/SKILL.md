@@ -80,7 +80,7 @@ differ after six 10-second retries, do not add the label:
   consume it and report `TRIGGER_SUPERSEDED`; add a new label only after the
   current PR and branch SHAs agree.
 
-Only an actor whose repository permission is `write`, `maintain`, or `admin`
+Only an actor whose repository permission is `maintain` or `admin`
 may add the one-shot trigger.
 
 Never use the legacy `run-ci` label. The bridge consumes `run-internal-ci`,

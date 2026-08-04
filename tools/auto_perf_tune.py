@@ -32,6 +32,7 @@ import shlex
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -100,17 +101,21 @@ class TuneResult:
     error: str = ""
 
 
-def run_cmd(cmd: str, timeout: int = 600, dry_run: bool = False) -> tuple[int, str]:
-    """Run a shell command, return (exit_code, stdout+stderr)."""
+def run_cmd(cmd: Sequence[str], timeout: int = 600,
+            dry_run: bool = False) -> tuple[int, str]:
+    """Run an argv command without a shell, return (exit_code, stdout+stderr)."""
+    argv = [str(arg) for arg in cmd]
     if dry_run:
-        print(f"  [dry-run] {cmd[:120]}")
+        print(f"  [dry-run] {shlex.join(argv)[:120]}")
         return 0, ""
     try:
         result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+            argv, shell=False, capture_output=True, text=True, timeout=timeout)
         return result.returncode, result.stdout + result.stderr
     except subprocess.TimeoutExpired:
         return -1, "TIMEOUT"
+    except OSError as exc:
+        return -1, str(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -120,8 +125,17 @@ def run_cmd(cmd: str, timeout: int = 600, dry_run: bool = False) -> tuple[int, s
 def step_build(model: str, output: str, precision: str = "fp32",
                max_cache: int = 256, dry_run: bool = False) -> bool:
     """Build a .trtfb bundle."""
-    cmd = (f"./build/trtmc build {model} -o {output} "
-           f"--max-cache-length {max_cache} --precision {precision}")
+    cmd = [
+        "./build/trtmc",
+        "build",
+        model,
+        "-o",
+        output,
+        "--max-cache-length",
+        str(max_cache),
+        "--precision",
+        precision,
+    ]
     print(f"\n[build] {precision.upper()} bundle: {model}")
     rc, out = run_cmd(cmd, timeout=600, dry_run=dry_run)
     if rc != 0 and not dry_run:
@@ -192,10 +206,10 @@ def _build_bench_cmd(
     max_tokens: int,
     gpu_argmax: bool,
     benchmark: dict | None = None,
-) -> tuple[str, str, str]:
+) -> tuple[list[str], str, str]:
     """Build a benchmark command from a model-owned template.
 
-    Returns (shell_command, metric_name, label).
+    Returns (argv, metric_name, label).
     """
     spec = benchmark or DEFAULT_BENCHMARK
     command = spec.get("command", DEFAULT_BENCHMARK["command"])
@@ -204,11 +218,10 @@ def _build_bench_cmd(
 
     context = _benchmark_context(bundle, prompt, max_tokens, gpu_argmax)
     argv = _expand_command_template(command, context)
-    cmd = " ".join(shlex.quote(arg) for arg in argv) + " 2>&1"
     metric = str(spec.get("metric", DEFAULT_BENCHMARK["metric"]))
     label_key = "gpu_argmax_label" if gpu_argmax else "label"
     label = str(spec.get(label_key, spec.get("label", DEFAULT_BENCHMARK["label"])))
-    return cmd, metric, label
+    return argv, metric, label
 
 
 def _parse_metric(out: str, metric_name: str) -> float:
@@ -317,23 +330,20 @@ def step_nsys_profile(bundle: str, prompt: str, output_prefix: str,
     # Build the trtmc command for profiling (same logic as benchmark)
     trtmc_cmd, _, _ = _build_bench_cmd(
         bundle, prompt, max_tokens, gpu_argmax=False, benchmark=benchmark)
-    # Strip the "2>&1" from the end and env prefix — nsys wraps the command
-    # Extract just the trtmc binary + args part
-    trtmc_part = trtmc_cmd
-    # Remove env vars prefix (everything before /tmp/build/trtmc)
-    if "/tmp/build/trtmc" in trtmc_part:
-        idx = trtmc_part.index("/tmp/build/trtmc")
-        env_part = trtmc_part[:idx].strip()
-        trtmc_part = trtmc_part[idx:]
-    else:
-        env_part = ""
-    # Remove trailing 2>&1
-    trtmc_part = trtmc_part.replace("2>&1", "").strip()
 
     rep = f"{output_prefix}.nsys-rep"
-    cmd = (f"{env_part} {nsys} profile -t cuda,nvtx --cuda-graph-trace=node "
-           f"-o {output_prefix} --force-overwrite true "
-           f"{trtmc_part} 2>&1")
+    cmd = [
+        nsys,
+        "profile",
+        "-t",
+        "cuda,nvtx",
+        "--cuda-graph-trace=node",
+        "-o",
+        output_prefix,
+        "--force-overwrite",
+        "true",
+        *trtmc_cmd,
+    ]
     print("[nsys] Profiling...")
     rc, out = run_cmd(cmd, timeout=300, dry_run=dry_run)
     if dry_run:
@@ -344,7 +354,7 @@ def step_nsys_profile(bundle: str, prompt: str, output_prefix: str,
         return None
 
     # Export to SQLite
-    cmd2 = f"{nsys} stats {rep} --force-export true 2>&1"
+    cmd2 = [nsys, "stats", rep, "--force-export", "true"]
     run_cmd(cmd2, timeout=60)
     sqlite = f"{output_prefix}.sqlite"
     if os.path.exists(sqlite):

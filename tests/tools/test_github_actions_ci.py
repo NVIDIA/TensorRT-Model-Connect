@@ -207,6 +207,7 @@ def _run_internal_ci_snapshot(
     head_repo: str | None = "NVIDIA/TensorRT-Model-Connect",
     head_ref: str = "refactor/validation-engine",
     event_name: str = "pull_request_target",
+    actor_permission: str = "maintain",
     max_attempts: int = 1,
     branch_available: bool = True,
     system_path: str | None = None,
@@ -227,7 +228,7 @@ endpoint = next(
     "",
 )
 if "/collaborators/" in endpoint:
-    print("write")
+    print(os.environ["FAKE_ACTOR_PERMISSION"])
 elif "/pulls/" in endpoint:
     pulls = json.loads(os.environ["FAKE_PULL_JSONS"])
     counter_path = os.environ["FAKE_PULL_COUNTER"]
@@ -288,6 +289,7 @@ else:
             "ACTOR": "trusted-maintainer",
             "EVENT_HEAD_SHA": event_head_sha,
             "EVENT_NAME": event_name,
+            "FAKE_ACTOR_PERMISSION": actor_permission,
             "FAKE_BRANCH_COUNTER": str(tmp_path / "branch-counter"),
             "FAKE_BRANCH_AVAILABLE": "true" if branch_available else "false",
             "FAKE_BRANCH_HEAD_SHAS": json.dumps(branch_head_shas),
@@ -404,8 +406,9 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert dispatch_permissions.strip() == "statuses: write"
 
     assert "collaborators/$ACTOR/permission" in authorize
-    assert "write|maintain|admin)" in authorize
-    assert "Only actors with write, maintain, or admin access" in authorize
+    assert "maintain|admin)" in authorize
+    assert "write|maintain|admin)" not in authorize
+    assert "Only actors with maintain or admin access" in authorize
     assert "environment:" not in authorize
     assert "secrets." not in authorize
     assert "statuses: write" not in authorize
@@ -601,6 +604,36 @@ def test_internal_ci_guard_accepts_an_accessible_fork_branch(
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_internal_ci_guard_only_allows_maintainers_and_admins(
+    tmp_path: Path,
+) -> None:
+    head_sha = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
+
+    for permission in ("maintain", "admin"):
+        run_dir = tmp_path / permission
+        run_dir.mkdir()
+        result = _run_internal_ci_snapshot(
+            run_dir,
+            event_head_sha=head_sha,
+            pr_head_sha=head_sha,
+            branch_head_sha=head_sha,
+            actor_permission=permission,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    write_dir = tmp_path / "write"
+    write_dir.mkdir()
+    result = _run_internal_ci_snapshot(
+        write_dir,
+        event_head_sha=head_sha,
+        pr_head_sha=head_sha,
+        branch_head_sha=head_sha,
+        actor_permission="write",
+    )
+    assert result.returncode != 0
+    assert "Only actors with maintain or admin access" in result.stdout + result.stderr
 
 
 def test_internal_ci_guard_reports_an_inaccessible_fork_branch(

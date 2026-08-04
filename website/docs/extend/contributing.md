@@ -112,5 +112,6 @@ branch or creating a PR alone does not start the gate.
 Wait for the `trtmc/premerge/required` status on the same head SHA to complete
 successfully. If the head changes intentionally, verify the new SHA before
 requesting one new run. Fork contributors must coordinate the label with a
-maintainer who has repository write permission. Private CI repository details,
+maintainer who has repository `maintain` or `admin` permission. Private CI
+repository details,
 runner information, logs, artifacts, and URLs are not public documentation.

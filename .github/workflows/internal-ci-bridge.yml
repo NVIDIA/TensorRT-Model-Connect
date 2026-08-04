@@ -85,9 +85,9 @@ jobs:
               --jq '.permission'
           )"
           case "$actor_permission" in
-            write|maintain|admin) ;;
+            maintain|admin) ;;
             *)
-              echo "::error::Only actors with write, maintain, or admin access may dispatch CI."
+              echo "::error::Only actors with maintain or admin access may dispatch CI."
               exit 1
               ;;
           esac

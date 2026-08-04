@@ -8,7 +8,7 @@ Source contains the test implementation and three GitHub workflows: the
 Internal CI Bridge, reusable/manual Legal Compliance, and the path-scoped Pages
 deployment. Premerge and nightly orchestration run in private Internal CI.
 
-An authorized collaborator with write, maintain, or admin access applies
+An authorized collaborator with maintain or admin access applies
 `run-internal-ci` to dispatch the exact current PR head. Source receives only
 the sanitized
 `trtmc/premerge/required` status for that head. Raw logs, artifacts, runner

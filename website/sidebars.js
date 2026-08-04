@@ -171,7 +171,6 @@ const sidebars = {
           label: 'Design & Project History',
           items: [
             'context/adr/README',
-            'context/ai-staging-history',
             'reference/documentation-research'
           ]
         }

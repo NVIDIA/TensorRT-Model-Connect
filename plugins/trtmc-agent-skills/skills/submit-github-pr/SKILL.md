@@ -158,7 +158,7 @@ gh pr checks --repo NVIDIA/TensorRT-Model-Connect "$PR_NUMBER"
 
 Creating or pushing the PR does not start premerge. After verifying that
 `headRefOid` equals the pushed SHA, and when CI execution is authorized, have an
-actor with `write`, `maintain`, or `admin` permission add
+actor with `maintain` or `admin` permission add
 `run-internal-ci`.
 
 Check the current head's `trtmc/premerge/required` status first. Do not add the
