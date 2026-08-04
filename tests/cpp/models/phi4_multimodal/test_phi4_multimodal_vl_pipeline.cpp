@@ -31,10 +31,13 @@
 // =============================================================================
 
 #include "../../native_kv_cache_contract_test.h"
+#include "bundle/bundle_format.h"
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/trt_common.h"
 #include "runtime/models/phi4_multimodal/kv_cache.h"
 #include "runtime/models/phi4_multimodal/pipeline.h"
+#include "trtmc/runtime/pipeline_registry.h"
+#include "trtmc/runtime/trt_backend.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
 
@@ -57,6 +60,107 @@ static void check(bool c, const char* n) {
 }
 
 static trtmc::TrtLogger g_logger;
+
+namespace trtmc {
+void register_phi4_multimodal_plugin(PipelineRegistry& registry);
+}
+
+class RejectingVisionBackend final : public trtmc::IBackend {
+  public:
+    std::unique_ptr<trtmc::ITrtModule> create_module(const void*, size_t,
+                                                     const trtmc::ModuleCreateOptions&) override {
+        ++vision_create_calls;
+        return nullptr;
+    }
+
+    trtmc::BackendDualProfileModules
+    create_dual_profile_modules(const void*, size_t,
+                                const trtmc::ModuleCreateOptions& options) override {
+        trtmc::BackendDualProfileModules modules;
+        auto trace = std::make_shared<trtmc::test::NativeKvTrace>();
+        modules.prefill = std::make_unique<trtmc::test::NativeKvModuleStub>(
+            options.stream, 1, 11, 1, 2, trtmc::DType::kFloat16, true, trace);
+        modules.decode = std::make_unique<trtmc::test::NativeKvModuleStub>(
+            options.stream, 1, 11, 1, 2, trtmc::DType::kFloat16, true, trace);
+        return modules;
+    }
+
+    trtmc::BackendProfileModules create_profile_modules(const void*, size_t,
+                                                        const trtmc::ModuleCreateOptions&,
+                                                        const std::vector<int32_t>&) override {
+        return {};
+    }
+
+    trtmc::BackendContextModules
+    create_context_modules(const void*, size_t,
+                           const std::vector<trtmc::ModuleCreateOptions>&) override {
+        return {};
+    }
+
+    const char* name() const override { return "rejecting-vision-test"; }
+
+    int32_t vision_create_calls{0};
+};
+
+static trtmc::BaseConfig make_native_plugin_config() {
+    trtmc::BaseConfig config;
+    config.vocab_size = 16;
+    config.hidden_size = 2;
+    config.num_layers = 1;
+    config.num_heads = 1;
+    config.num_kv_heads = 1;
+    config.head_dim = 2;
+    config.max_cache_length = 11;
+    config.precision = "fp16";
+    config.runtime_strategy = "phi4_multimodal_vision_language";
+    return config;
+}
+
+static bool plugin_create_rejects_vision(const trtmc::BundleFile& bundle,
+                                         const std::string& config_json,
+                                         RejectingVisionBackend& backend,
+                                         const std::string& expected_error) {
+    auto config = make_native_plugin_config();
+    std::string empty;
+    trtmc::PipelineContext context{bundle,   config, config_json, empty, empty,
+                                   &backend, empty,  false,       0,     nullptr};
+    auto& registry = trtmc::PipelineRegistry::instance();
+    trtmc::register_phi4_multimodal_plugin(registry);
+    auto* plugin = registry.lookup(config.runtime_strategy);
+    if (plugin == nullptr)
+        return false;
+    try {
+        (void)plugin->create(context);
+    } catch (const std::runtime_error& error) {
+        return std::string(error.what()).find(expected_error) != std::string::npos;
+    }
+    return false;
+}
+
+static void test_declared_vision_engine_fails_closed_before_kv_admission() {
+    trtmc::BundleFile missing_vision;
+    missing_vision.sections.push_back({"engine_plan", {'x'}});
+    RejectingVisionBackend missing_backend;
+    const std::string declared_config =
+        R"({"native_kv_cache":true,"native_kv_contract_version":1,"has_vision_engine":true})";
+    check(plugin_create_rejects_vision(missing_vision, declared_config, missing_backend,
+                                       "Bundle missing vision_engine_plan"),
+          "plugin: config-declared missing vision engine fails closed");
+    check(missing_backend.vision_create_calls == 0,
+          "plugin: missing vision section fails before deserialization");
+
+    trtmc::BundleFile corrupt_vision;
+    corrupt_vision.sections.push_back({"engine_plan", {'x'}});
+    corrupt_vision.sections.push_back({"vision_engine_plan", {'x'}});
+    RejectingVisionBackend corrupt_backend;
+    const std::string section_declared_config =
+        R"({"native_kv_cache":true,"native_kv_contract_version":1,"has_vision_engine":false})";
+    check(plugin_create_rejects_vision(corrupt_vision, section_declared_config, corrupt_backend,
+                                       "Failed to create ITrtModule for vision_engine_plan"),
+          "plugin: bundle-declared corrupt vision engine fails closed");
+    check(corrupt_backend.vision_create_calls == 1,
+          "plugin: present vision section is deserialized exactly once");
+}
 
 static void test_native_kv_contract() {
     cudaStream_t stream = nullptr;
@@ -1006,6 +1110,7 @@ static void test_vl_generate_with_tokenizer() {
 }
 
 int main() {
+    test_declared_vision_engine_fails_closed_before_kv_admission();
     test_native_kv_contract();
     test_phi4_hd_canonicalizes_square_image();
     test_vl_sequence_prefill_chunks_native_kv();

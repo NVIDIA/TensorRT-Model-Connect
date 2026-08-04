@@ -162,19 +162,15 @@ std::unique_ptr<TrtModule>
 load_vision_module(IBackend* backend, const BundleFile& bundle, const ModuleCreateOptions& options,
                    const std::shared_ptr<Phi4MultimodalCudaStream>& stream,
                    bool declared_in_config) {
-    auto loaded = try_load_trt_module_from_plan(backend, find_section(bundle, "vision_engine_plan"),
-                                                "vision_engine_plan", options);
-    if (loaded.module && loaded.module->ok()) {
-        loaded.module->keep_alive(stream);
-        std::cerr << "[trtmc] Vision encoder loaded" << std::endl;
-        return std::move(loaded.module);
-    }
-    if (declared_in_config) {
-        std::cerr << "[trtmc] WARNING: Bundle declares vision engine but "
-                     "deserialization failed"
-                  << std::endl;
-    }
-    return nullptr;
+    const auto* plan = find_section(bundle, "vision_engine_plan");
+    const bool required = declared_in_config || plan != nullptr;
+    if (!required)
+        return nullptr;
+
+    auto loaded = load_trt_module_from_plan(backend, plan, "vision_engine_plan", options);
+    loaded.module->keep_alive(stream);
+    std::cerr << "[trtmc] Vision encoder loaded" << std::endl;
+    return std::move(loaded.module);
 }
 
 std::string bundle_section_text(const BundleFile& bundle, const std::string& section_name) {
@@ -235,9 +231,10 @@ class VLPlugin final : public IPipelinePlugin {
         vlc.present_k_pattern = ctx.config.io_map.present_k_pattern;
         vlc.present_v_pattern = ctx.config.io_map.present_v_pattern;
 
-        bool has_vision_engine = extract_json_int(ctx.config_json, "has_vision_engine", 0) != 0;
+        const bool has_vision_engine =
+            extract_json_bool(ctx.config_json, "has_vision_engine", false);
 
-        // Try to load the vision encoder engine from the bundle.
+        // A declared vision engine is part of this pipeline's memory footprint.
         std::unique_ptr<TrtModule> vision_module =
             load_vision_module(ctx.backend, ctx.bundle, opts, shared_stream, has_vision_engine);
 

@@ -390,6 +390,23 @@ def test_native_build_requires_split_role() -> None:
         plugin.build_engine(config, {}, 128, precision="fp16")
 
 
+def test_native_build_rejects_generic_dynamic_kv_request() -> None:
+    from tensorrt_model_connect.families.phi4_multimodal import plugin
+
+    config = type("Config", (), {
+        "model_type": "phi4mm",
+        "max_position_embeddings": 128,
+        "head_dim": 8,
+        "raw": {
+            "_decoder_engine_role": "decode",
+            "dynamic_kv_cache": True,
+            "partial_rotary_factor": 0.75,
+        },
+    })()
+    with pytest.raises(ValueError, match="dynamic KV bucket profiles"):
+        plugin.build_engine(config, {}, 128, precision="fp16")
+
+
 @pytest.mark.parametrize("role", ["prefill", "decode"])
 def test_native_builder_engine_contract(role: str) -> None:
     import tensorrt as trt
