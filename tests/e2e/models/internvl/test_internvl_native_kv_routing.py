@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -113,6 +114,15 @@ def test_generic_dynamic_kv_request_fails_closed() -> None:
             precision="bf16", max_cache_length=32768,
             parallel=ParallelConfig(),
             quantized=False, debug_layer_outputs=False)
+
+
+def test_internvl_runtime_reads_boolean_vision_contract() -> None:
+    source = (
+        Path(__file__).resolve().parents[4]
+        / "src/runtime/models/internvl/plugin.cpp"
+    ).read_text(encoding="utf-8")
+    assert 'extract_json_bool(ctx.config_json, "has_vision_engine", false)' in source
+    assert 'extract_json_int(ctx.config_json, "has_vision_engine"' not in source
 
 
 def test_non_qwen2_text_backbone_fails_closed() -> None:
