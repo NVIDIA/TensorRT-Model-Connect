@@ -2271,6 +2271,7 @@ def test_explicit_runner_gpu_id_still_acquires_a_slot_lease(tmp_path: Path) -> N
     assert (tmp_path / "gpu-locks" / "gpu-7-slot-0.lock").is_file()
 
 
+@pytest.mark.model_proof_allocator
 def test_capacity_gated_exclusive_lease_skips_a_memory_busy_gpu(
     tmp_path: Path,
 ) -> None:
@@ -2278,6 +2279,7 @@ def test_capacity_gated_exclusive_lease_skips_a_memory_busy_gpu(
         tmp_path,
         "2, 284208, 184208, 100000\n3, 284208, 34208, 250000",
     )
+    context.env["FAKE_NVIDIA_SMI_DELAY_SECONDS"] = "0.25"
     artifacts = tmp_path / "artifacts"
     lease = GpuLease(
         context,

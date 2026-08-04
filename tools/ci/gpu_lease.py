@@ -48,6 +48,8 @@ class FileLock:
 class GpuLease:
     """Hold one shared slot or every slot of one GPU until explicitly released."""
 
+    CAPACITY_REQUEUE_DELAY_SECONDS = 1.0
+
     LOCK_FILE_PATTERNS = (
         "allocator.lock",
         "admission-{scope}.enqueue.lock",
@@ -483,7 +485,13 @@ class GpuLease:
             return True
         assert self.gpu_id is not None
         now = time.monotonic()
-        settle_deadline = now + max(0.0, deadline - now) / max(1, candidates_remaining)
+        requeue_budget = (
+            max(0, candidates_remaining - 1) * self.CAPACITY_REQUEUE_DELAY_SECONDS
+        )
+        settle_budget = max(0.0, deadline - now - requeue_budget) / max(
+            1, candidates_remaining
+        )
+        settle_deadline = now + settle_budget
         settle_poll_interval = max(0.25, min(5.0, self.poll_interval))
         while time.monotonic() < settle_deadline:
             try:
@@ -865,7 +873,12 @@ class GpuLease:
     def _requeue_after_capacity_rejection(self, deadline: float) -> bool:
         self._release_ticket()
         print("Yielding the GPU admission queue after a memory-capacity rejection")
-        time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+        time.sleep(
+            min(
+                self.CAPACITY_REQUEUE_DELAY_SECONDS,
+                max(0.0, deadline - time.monotonic()),
+            )
+        )
         if time.monotonic() >= deadline:
             return False
         try:
