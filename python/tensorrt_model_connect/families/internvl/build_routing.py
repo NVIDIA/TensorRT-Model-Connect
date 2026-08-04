@@ -73,6 +73,11 @@ def validate_native_kv_build(
             "InternVL native KV requires max_cache_length equal to the model "
             f"context ({context})")
     raw = getattr(config, "raw", {})
+    if isinstance(raw, dict) and (
+        raw.get("_runtime_dynamic_kv_requested") or raw.get("dynamic_kv_cache")
+    ):
+        raise ValueError(
+            "InternVL native KV uses one fixed full-context capacity")
     if isinstance(raw, dict) and str(raw.get("_decoder_engine_layout", "split")) != "split":
         raise ValueError("InternVL native KV requires split prefill/decode engines")
     if quantized:

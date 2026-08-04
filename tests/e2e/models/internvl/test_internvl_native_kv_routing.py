@@ -102,6 +102,19 @@ def test_tp_requires_rank_local_head_divisibility() -> None:
             quantized=False, debug_layer_outputs=False)
 
 
+def test_generic_dynamic_kv_request_fails_closed() -> None:
+    with pytest.raises(ValueError, match="fixed full-context capacity"):
+        validate_native_kv_build(
+            _config(raw={
+                "text_config": {"model_type": "qwen2"},
+                "_decoder_engine_layout": "split",
+                "_runtime_dynamic_kv_requested": True,
+            }),
+            precision="bf16", max_cache_length=32768,
+            parallel=ParallelConfig(),
+            quantized=False, debug_layer_outputs=False)
+
+
 def test_non_qwen2_text_backbone_fails_closed() -> None:
     config = _config()
     config.raw["text_config"]["model_type"] = "llama"
