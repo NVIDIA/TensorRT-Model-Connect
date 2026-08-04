@@ -463,8 +463,9 @@ inline bool try_whitespace_run(char32_t cp, const char*& p, const char* end, con
     if (!is_whitespace(cp))
         return false;
 
-    // CLIP's Split pre-tokenizer retains regex matches and removes the gaps,
-    // so whitespace never reaches its ByteLevel pre-tokenizer.
+    // kClip is selected only for CLIP's Removed + inverted Split contract,
+    // which retains regex matches and removes the gaps. Whitespace therefore
+    // never reaches ByteLevel.
     if (variant == Variant::kClip) {
         scan_all_whitespace(p, end);
         return true;
@@ -1176,13 +1177,21 @@ class BpeTokenizer final : public ITokenizer {
         return std::stoi(regex.substr(comma + 1, close - comma - 1));
     }
 
-    // Classify a single Split regex string into a pre-tokenizer variant.
-    static pretok::Variant classify_split_regex(const std::string& regex, int& digit_group_out) {
+    // Classify one Split pre-tokenizer from both its pattern and contract.
+    static pretok::Variant classify_split(const nlohmann::json& split, int& digit_group_out) {
+        const auto regex = split["pattern"]["Regex"].get<std::string>();
         if ((regex.find("startoftext") != std::string::npos ||
              regex.find("endoftext") != std::string::npos) &&
             regex.find("\\p{L}") != std::string::npos &&
             regex.find("\\p{N}") != std::string::npos) {
-            return pretok::Variant::kClip;
+            const auto behavior = split.value("behavior", "");
+            const bool invert = split.value("invert", false);
+            if (behavior == "Removed" && invert)
+                return pretok::Variant::kClip;
+            if (behavior == "Isolated" && invert)
+                return pretok::Variant::kGpt2;
+            throw std::runtime_error("Unsupported CLIP Split contract: behavior=" + behavior +
+                                     ", invert=" + (invert ? "true" : "false"));
         }
         if (regex.find("[^\r\n") != std::string::npos ||
             regex.find("[^\\r\\n") != std::string::npos) {
@@ -1199,7 +1208,7 @@ class BpeTokenizer final : public ITokenizer {
         return pretok::Variant::kGpt2;
     }
 
-    // Detect variant from the Split regex inside a Sequence pre_tokenizer.
+    // Detect variant from the Split inside a Sequence pre_tokenizer.
     static pretok::Variant detect_split_variant(const nlohmann::json& pt, int& digit_group_out) {
         digit_group_out = 0;
         if (!pt.contains("pretokenizers"))
@@ -1209,8 +1218,7 @@ class BpeTokenizer final : public ITokenizer {
                 continue;
             if (!sub.contains("pattern") || !sub["pattern"].contains("Regex"))
                 continue;
-            return classify_split_regex(sub["pattern"]["Regex"].get<std::string>(),
-                                        digit_group_out);
+            return classify_split(sub, digit_group_out);
         }
         return pretok::Variant::kGpt2;
     }

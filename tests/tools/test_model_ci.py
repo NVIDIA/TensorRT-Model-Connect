@@ -653,6 +653,37 @@ def test_impact_treats_platform_change_as_fixed_fallback(tmp_path: Path) -> None
     assert result["unit_scope"] == "all"
 
 
+def test_tokenizer_platform_change_always_selects_known_consumers(tmp_path: Path) -> None:
+    repo, base = _make_repo(tmp_path, model_ids=("flux", "model_a", "sam3"))
+    _write(repo, "src/tokenizer/bpe_tokenizer.cpp", "// changed shared tokenizer\n")
+    head = _commit(repo, "change shared tokenizer")
+
+    result = _impact(repo, base, head, fallback_models=("model_a",))
+
+    assert result["mode"] == "fallback"
+    assert result["affected_models"] == ["flux", "model_a", "sam3"]
+    assert result["direct_models"] == ["flux", "sam3"]
+    assert result["fallback_models"] == ["model_a"]
+    assert result["matrix"] == {
+        "include": [
+            {"model": "flux", "selection_kind": "direct"},
+            {"model": "model_a", "selection_kind": "fallback"},
+            {"model": "sam3", "selection_kind": "direct"},
+        ]
+    }
+    tokenizer_classification = next(
+        classification
+        for change in result["changes"]
+        for classification in change["classifications"]
+        if classification["path"] == "src/tokenizer/bpe_tokenizer.cpp"
+    )
+    assert tokenizer_classification == {
+        "path": "src/tokenizer/bpe_tokenizer.cpp",
+        "kind": "platform",
+        "consumer_models": ["flux", "sam3"],
+    }
+
+
 def test_impact_treats_shared_family_registry_as_platform(tmp_path: Path) -> None:
     repo, base = _make_repo(tmp_path)
     _write(repo, "python/tensorrt_model_connect/families/__init__.py", "# changed registry\n")

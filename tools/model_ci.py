@@ -234,6 +234,13 @@ PLATFORM_PREFIXES = (
     "tests/",
     "third_party/",
 )
+
+# Broad platform changes still use a representative fallback matrix, but some
+# shared surfaces have known model consumers whose owned contracts must always
+# run. Keep this list narrow and evidence-based so a tokenizer change cannot be
+# certified only by unrelated fallback models.
+PLATFORM_CONSUMERS_BY_PREFIX = (("src/tokenizer/", frozenset({"flux", "sam3"})),)
+
 CI_OR_TOOLING_PREFIXES = (
     ".agents/",
     ".ci/",
@@ -641,6 +648,15 @@ def _merge_unit_scope(current: str, requested: str) -> str:
     return "all"
 
 
+def _platform_consumers(path: str, catalog: OwnershipCatalog) -> tuple[str, ...]:
+    known_models = set(catalog.models)
+    consumers: set[str] = set()
+    for prefix, models in PLATFORM_CONSUMERS_BY_PREFIX:
+        if path.startswith(prefix):
+            consumers.update(models & known_models)
+    return tuple(sorted(consumers))
+
+
 def _classify_path(path: str, catalog: OwnershipCatalog) -> tuple[str, str | None]:
     if path in MODEL_ROOT_PLATFORM_FILES:
         return "platform", None
@@ -973,7 +989,7 @@ def calculate_impact(
     )
     serialized_changes: list[dict[str, object]] = []
     for change in _diff_entries(repo_root, comparison_base, head_sha):
-        classifications: list[dict[str, str]] = []
+        classifications: list[dict[str, object]] = []
         path_catalogs = (
             (change.old_path, base_catalog),
             (change.new_path, head_catalog),
@@ -1000,6 +1016,10 @@ def calculate_impact(
             elif kind in {"platform", "ci_tooling", "unknown"}:
                 broad_change = True
                 unit_scope = _merge_unit_scope(unit_scope, "all")
+                consumers = _platform_consumers(path, head_catalog)
+                if consumers:
+                    affected.update(consumers)
+                    item["consumer_models"] = list(consumers)
             classifications.append(item)
         serialized_changes.append(
             {

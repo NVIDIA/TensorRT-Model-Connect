@@ -159,7 +159,7 @@ static const char* kClipNormalizedJson = R"({
     "end_of_word_suffix": "</w>",
     "vocab": {
       "e": 0, "a": 1, "r": 2,
-      "ea": 3, "r</w>": 4, "ear</w>": 5,
+      "ea": 3, "r</w>": 4, "ear</w>": 5, "\u0120": 6,
       "<|startoftext|>": 10, "<|endoftext|>": 11
     },
     "merges": ["e a", "ea r</w>"]
@@ -502,14 +502,24 @@ int main() {
         check(!ids.empty(), "null_end_of_word_suffix_encode");
     }
 
-    // === 7d. CLIP normalizer and whitespace-removing split ===
+    // === 7d. CLIP normalizer and Split behavior contract ===
     {
         std::cerr << "\n=== CLIP Normalization and Split ===\n";
 
         std::string clip_json(kClipNormalizedJson);
         auto tok = trtmc::CreateBpeTokenizer(clip_json.data(), clip_json.size(), true);
         auto ids = tok->encode("EAR   ear");
-        check(ids == std::vector<int32_t>({10, 5, 5, 11}), "clip_normalizer_and_split_encode");
+        check(ids == std::vector<int32_t>({10, 5, 5, 11}),
+              "clip_removed_split_discards_unmatched_whitespace");
+
+        const std::string removed = "\"behavior\": \"Removed\"";
+        const auto behavior = clip_json.find(removed);
+        check(behavior != std::string::npos, "clip_split_fixture_has_removed_behavior");
+        clip_json.replace(behavior, removed.size(), "\"behavior\": \"Isolated\"");
+        auto isolated = trtmc::CreateBpeTokenizer(clip_json.data(), clip_json.size(), true);
+        auto isolated_ids = isolated->encode("EAR   ear");
+        check(isolated_ids == std::vector<int32_t>({10, 5, 6, 5, 11}),
+              "clip_isolated_split_preserves_unmatched_whitespace");
     }
 
     // === 8. STRING merge format (StringMerge / SentencePiece style) ===
