@@ -1177,29 +1177,44 @@ class BpeTokenizer final : public ITokenizer {
         return std::stoi(regex.substr(comma + 1, close - comma - 1));
     }
 
+    static bool is_clip_split_regex(const std::string& regex) {
+        const bool has_boundary_token = regex.find("startoftext") != std::string::npos ||
+                                        regex.find("endoftext") != std::string::npos;
+        return has_boundary_token && regex.find("\\p{L}") != std::string::npos &&
+               regex.find("\\p{N}") != std::string::npos;
+    }
+
+    static pretok::Variant classify_clip_split(const nlohmann::json& split) {
+        const auto behavior = split.value("behavior", "");
+        const bool invert = split.value("invert", false);
+        if (behavior == "Removed" && invert)
+            return pretok::Variant::kClip;
+        if (behavior == "Isolated" && invert)
+            return pretok::Variant::kGpt2;
+        throw std::runtime_error("Unsupported CLIP Split contract: behavior=" + behavior +
+                                 ", invert=" + (invert ? "true" : "false"));
+    }
+
+    static bool is_qwen3_split_regex(const std::string& regex) {
+        return regex.find("[^\r\n") != std::string::npos ||
+               regex.find("[^\\r\\n") != std::string::npos;
+    }
+
+    static bool is_bloom_split_regex(const std::string& regex) {
+        return regex.find("[^(\\s") != std::string::npos ||
+               regex.find("[^(\\\\s") != std::string::npos;
+    }
+
     // Classify one Split pre-tokenizer from both its pattern and contract.
     static pretok::Variant classify_split(const nlohmann::json& split, int& digit_group_out) {
         const auto regex = split["pattern"]["Regex"].get<std::string>();
-        if ((regex.find("startoftext") != std::string::npos ||
-             regex.find("endoftext") != std::string::npos) &&
-            regex.find("\\p{L}") != std::string::npos &&
-            regex.find("\\p{N}") != std::string::npos) {
-            const auto behavior = split.value("behavior", "");
-            const bool invert = split.value("invert", false);
-            if (behavior == "Removed" && invert)
-                return pretok::Variant::kClip;
-            if (behavior == "Isolated" && invert)
-                return pretok::Variant::kGpt2;
-            throw std::runtime_error("Unsupported CLIP Split contract: behavior=" + behavior +
-                                     ", invert=" + (invert ? "true" : "false"));
-        }
-        if (regex.find("[^\r\n") != std::string::npos ||
-            regex.find("[^\\r\\n") != std::string::npos) {
+        if (is_clip_split_regex(regex))
+            return classify_clip_split(split);
+        if (is_qwen3_split_regex(regex)) {
             digit_group_out = parse_digit_group(regex);
             return pretok::Variant::kQwen3;
         }
-        if (regex.find("[^(\\s") != std::string::npos ||
-            regex.find("[^(\\\\s") != std::string::npos) {
+        if (is_bloom_split_regex(regex)) {
             return pretok::Variant::kBloom;
         }
         if (regex.find("\\s?[A-Za-z") != std::string::npos) {
