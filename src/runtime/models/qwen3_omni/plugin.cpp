@@ -106,6 +106,81 @@ void admit_cache_allocation(const PipelineContext& ctx, std::uint64_t bytes) {
     }
 }
 
+void validate_native_bundle_contract(const PipelineContext& ctx) {
+    if (!extract_json_bool(ctx.config_json, "native_kv_cache", false) ||
+        extract_json_int(ctx.config_json, "native_kv_contract_version", 0) != 1) {
+        throw std::runtime_error("Qwen3-Omni bundle does not declare native KV contract version 1");
+    }
+    if (ctx.kv_cache_size_bytes != 0) {
+        throw std::invalid_argument("Qwen3-Omni allocates the complete official context cache; "
+                                    "kv_cache_size_bytes is not supported");
+    }
+}
+
+std::unique_ptr<TrtModule> load_required_code2wav(const PipelineContext& ctx,
+                                                  const ModuleCreateOptions& options) {
+    auto loaded = try_load_trt_module_from_plan(
+        ctx.backend, find_section(ctx.bundle, "code2wav_engine_plan"), "code2wav", options);
+    if (!loaded.module || !loaded.module->ok()) {
+        throw std::runtime_error(
+            "OmniPipeline: required official Code2Wav engine is missing from bundle");
+    }
+    return std::move(loaded.module);
+}
+
+std::unique_ptr<TrtModule> load_resident_component(const PipelineContext& ctx,
+                                                   const ModuleCreateOptions& options,
+                                                   const char* section_name, const char* label) {
+    const auto* plan = find_section(ctx.bundle, section_name);
+    if (plan == nullptr || plan->empty())
+        return {};
+    return load_trt_module_from_plan(ctx.backend, plan, label, options).module;
+}
+
+OmniConfig build_omni_config(const PipelineContext& ctx) {
+    const auto& json = ctx.config_json;
+    OmniConfig config;
+    config.sample_rate = extract_json_int(json, "audio_sample_rate", 24000);
+    config.thinker_hidden_size = ctx.config.hidden_size;
+    config.thinker_vocab_size = ctx.config.vocab_size;
+    config.thinker_num_layers = ctx.config.num_layers;
+    config.thinker_num_heads = ctx.config.num_heads;
+    config.thinker_eos_token_id = extract_json_int(json, "im_end_token_id", 151645);
+    config.num_experts = extract_json_int(json, "num_local_experts", 8);
+    config.num_experts_per_tok = extract_json_int(json, "num_experts_per_tok", 2);
+    config.talker_hidden_size = extract_json_int(json, "omni_talker_hidden_size", 0);
+    config.talker_num_layers = extract_json_int(json, "omni_talker_num_layers", 0);
+    config.talker_n_codebooks = extract_json_int(json, "omni_n_codebooks", 16);
+    config.talker_codebook_size = extract_json_int(json, "omni_codebook_size", 2048);
+    config.code2wav_max_frames = extract_json_int(json, "omni_code2wav_max_frames", 32);
+    config.code2wav_upsample_factor = extract_json_int(json, "omni_code2wav_upsample_factor", 1920);
+    config.code2wav_output_delay = extract_json_int(json, "omni_code2wav_output_delay", 555);
+    config.hf_python = ctx.hf_python;
+    config.talker_model_id = extract_json_string(
+        json, "omni_talker_model_id",
+        extract_json_string(json, "omni_talker_model_path", ctx.bundle.info.model_id));
+    config.talker_model_revision = extract_json_string(json, "omni_talker_model_revision", "");
+    if (const char* override_path = std::getenv("TRTMC_QWEN3_OMNI_MODEL_PATH");
+        override_path != nullptr && override_path[0] != '\0') {
+        config.talker_model_id = override_path;
+        config.talker_model_revision.clear();
+    }
+    return config;
+}
+
+std::unique_ptr<Qwen3OmniInferenceState>
+allocate_thinker_state(const PipelineContext& ctx, int32_t kv_dim, cudaStream_t stream) {
+    const auto cache_bytes = native_cache_bytes(ctx, kv_dim);
+    admit_cache_allocation(ctx, cache_bytes);
+    std::cerr << "[trtmc] Qwen3-Omni native KV cache capacity=" << ctx.config.max_cache_length
+              << " tokens, allocation=" << format_bytes(cache_bytes) << '\n';
+    std::unique_ptr<Qwen3OmniInferenceState> state = std::make_unique<Qwen3OmniKvCache>(
+        ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream, DType::kBFloat16);
+    if (!state->ok())
+        throw std::runtime_error("OmniPipeline: failed to allocate native Thinker KV cache");
+    return state;
+}
+
 } // namespace
 
 class Qwen3OmniPlugin final : public IPipelinePlugin {
@@ -116,18 +191,7 @@ class Qwen3OmniPlugin final : public IPipelinePlugin {
         ModuleCreateOptions opts;
         opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
         opts.cuda_graphs = ctx.cuda_graphs;
-
-        const auto& json = ctx.config_json;
-
-        if (!extract_json_bool(json, "native_kv_cache", false) ||
-            extract_json_int(json, "native_kv_contract_version", 0) != 1) {
-            throw std::runtime_error(
-                "Qwen3-Omni bundle does not declare native KV contract version 1");
-        }
-        if (ctx.kv_cache_size_bytes != 0) {
-            throw std::invalid_argument("Qwen3-Omni allocates the complete official context cache; "
-                                        "kv_cache_size_bytes is not supported");
-        }
+        validate_native_bundle_contract(ctx);
 
         auto decode_loaded = load_trt_module_from_plan(
             ctx.backend, find_section(ctx.bundle, "engine_plan"), "omni thinker decode", opts);
@@ -141,56 +205,13 @@ class Qwen3OmniPlugin final : public IPipelinePlugin {
         validate_native_module(ctx, *prefill_loaded.module, "prefill engine");
         int32_t kv_dim = compute_kv_dim(ctx.config);
 
-        // Code2Wav is required for the audio-capable Qwen3-Omni bundle.
-        std::unique_ptr<TrtModule> code2wav_module;
-        auto code2wav_loaded = try_load_trt_module_from_plan(
-            ctx.backend, find_section(ctx.bundle, "code2wav_engine_plan"), "code2wav",
-            prefill_opts);
-        if (code2wav_loaded.module && code2wav_loaded.module->ok())
-            code2wav_module = std::move(code2wav_loaded.module);
-        if (!code2wav_module)
-            throw std::runtime_error(
-                "OmniPipeline: required official Code2Wav engine is missing from bundle");
-
-        const auto load_resident_component = [&](const char* section_name, const char* label) {
-            const auto* plan = find_section(ctx.bundle, section_name);
-            if (plan == nullptr || plan->empty())
-                return std::unique_ptr<TrtModule>{};
-            return load_trt_module_from_plan(ctx.backend, plan, label, prefill_opts).module;
-        };
-        auto vision_module = load_resident_component("vision_engine_plan", "omni vision encoder");
+        auto code2wav_module = load_required_code2wav(ctx, prefill_opts);
+        auto vision_module =
+            load_resident_component(ctx, prefill_opts, "vision_engine_plan", "omni vision encoder");
         auto audio_encoder_module =
-            load_resident_component("audio_encoder_plan", "omni audio encoder");
+            load_resident_component(ctx, prefill_opts, "audio_encoder_plan", "omni audio encoder");
 
-        // Build OmniConfig
-        OmniConfig omni_cfg;
-        omni_cfg.sample_rate = extract_json_int(json, "audio_sample_rate", 24000);
-        omni_cfg.thinker_hidden_size = ctx.config.hidden_size;
-        omni_cfg.thinker_vocab_size = ctx.config.vocab_size;
-        omni_cfg.thinker_num_layers = ctx.config.num_layers;
-        omni_cfg.thinker_num_heads = ctx.config.num_heads;
-        omni_cfg.thinker_eos_token_id = extract_json_int(json, "im_end_token_id", 151645);
-        omni_cfg.num_experts = extract_json_int(json, "num_local_experts", 8);
-        omni_cfg.num_experts_per_tok = extract_json_int(json, "num_experts_per_tok", 2);
-        omni_cfg.talker_hidden_size = extract_json_int(json, "omni_talker_hidden_size", 0);
-        omni_cfg.talker_num_layers = extract_json_int(json, "omni_talker_num_layers", 0);
-        omni_cfg.talker_n_codebooks = extract_json_int(json, "omni_n_codebooks", 16);
-        omni_cfg.talker_codebook_size = extract_json_int(json, "omni_codebook_size", 2048);
-        omni_cfg.code2wav_max_frames = extract_json_int(json, "omni_code2wav_max_frames", 32);
-        omni_cfg.code2wav_upsample_factor =
-            extract_json_int(json, "omni_code2wav_upsample_factor", 1920);
-        omni_cfg.code2wav_output_delay = extract_json_int(json, "omni_code2wav_output_delay", 555);
-        omni_cfg.hf_python = ctx.hf_python;
-        omni_cfg.talker_model_id = extract_json_string(
-            json, "omni_talker_model_id",
-            extract_json_string(json, "omni_talker_model_path", ctx.bundle.info.model_id));
-        omni_cfg.talker_model_revision =
-            extract_json_string(json, "omni_talker_model_revision", "");
-        if (const char* override_path = std::getenv("TRTMC_QWEN3_OMNI_MODEL_PATH");
-            override_path != nullptr && override_path[0] != '\0') {
-            omni_cfg.talker_model_id = override_path;
-            omni_cfg.talker_model_revision.clear();
-        }
+        auto omni_cfg = build_omni_config(ctx);
 
         auto talker_runtime = std::make_unique<Qwen3OmniTalkerRuntime>(
             omni_cfg.hf_python, omni_cfg.talker_model_id, omni_cfg.talker_model_revision,
@@ -201,14 +222,7 @@ class Qwen3OmniPlugin final : public IPipelinePlugin {
         // Talker CUDA model are all resident now. Size the complete native KV
         // cache against the actual remaining device memory, never a stale
         // pre-component estimate.
-        const auto cache_bytes = native_cache_bytes(ctx, kv_dim);
-        admit_cache_allocation(ctx, cache_bytes);
-        std::cerr << "[trtmc] Qwen3-Omni native KV cache capacity=" << ctx.config.max_cache_length
-                  << " tokens, allocation=" << format_bytes(cache_bytes) << '\n';
-        std::unique_ptr<Qwen3OmniInferenceState> thinker_state = std::make_unique<Qwen3OmniKvCache>(
-            ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream, DType::kBFloat16);
-        if (!thinker_state->ok())
-            throw std::runtime_error("OmniPipeline: failed to allocate native Thinker KV cache");
+        auto thinker_state = allocate_thinker_state(ctx, kv_dim, stream);
 
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 

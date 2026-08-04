@@ -45,7 +45,7 @@ def test_qwen3_omni_runtime_requires_official_code2wav_and_python_talker() -> No
     builder = (ROOT / "python/tensorrt_model_connect/families/qwen3_omni/plugin.py").read_text()
 
     assert "required official Code2Wav engine is missing" in source
-    assert "omni_cfg.hf_python = ctx.hf_python" in source
+    assert ".hf_python = ctx.hf_python" in source
     assert "validate_native_module" in source
     assert "DType::kBFloat16" in source
     assert "admit_cache_allocation(ctx, cache_bytes)" in source
@@ -59,16 +59,26 @@ def test_qwen3_omni_runtime_requires_official_code2wav_and_python_talker() -> No
 def test_qwen3_omni_resides_every_gpu_component_before_kv_admission() -> None:
     source = (ROOT / "src/runtime/models/qwen3_omni/plugin.cpp").read_text()
 
-    admission = source.index("admit_cache_allocation(ctx, cache_bytes)")
+    create_start = source.index("std::unique_ptr<IPipeline> create")
+    create_end = source.index("\n    }\n};", create_start)
+    create_source = source[create_start:create_end]
+    allocation = create_source.index("allocate_thinker_state(ctx, kv_dim, stream)")
     for component in (
         'find_section(ctx.bundle, "engine_plan")',
         'find_section(ctx.bundle, "prefill_engine_plan")',
-        'find_section(ctx.bundle, "code2wav_engine_plan")',
-        'load_resident_component("vision_engine_plan"',
-        'load_resident_component("audio_encoder_plan"',
+        "load_required_code2wav(ctx, prefill_opts)",
+        '"vision_engine_plan"',
+        '"audio_encoder_plan"',
         "talker_runtime->start()",
     ):
-        assert source.index(component) < admission
+        assert create_source.index(component) < allocation
+
+    allocation_helper_start = source.index("allocate_thinker_state(")
+    allocation_helper_end = source.index("\n}\n\n} // namespace", allocation_helper_start)
+    allocation_helper = source[allocation_helper_start:allocation_helper_end]
+    assert allocation_helper.index("native_cache_bytes(ctx, kv_dim)") < allocation_helper.index(
+        "admit_cache_allocation(ctx, cache_bytes)"
+    ) < allocation_helper.index("std::make_unique<Qwen3OmniKvCache>")
 
     assert "std::move(talker_runtime)" in source
     assert "std::move(vision_module)" in source

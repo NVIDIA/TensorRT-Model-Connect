@@ -35,6 +35,47 @@ bool tensors_ok(const std::vector<DeviceTensor>& tensors) {
     return true;
 }
 
+void validate_cache_geometry(int32_t num_layers, int32_t max_length, int32_t kv_dim) {
+    if (num_layers <= 0 || max_length <= 0 || kv_dim <= 0)
+        throw std::invalid_argument("Qwen3-Omni native KV dimensions must be positive");
+}
+
+void populate_default_names(Qwen3OmniKvCacheNames& names, int32_t num_layers) {
+    if (!names.cache_k.empty())
+        return;
+    for (int32_t layer = 0; layer < num_layers; ++layer) {
+        const auto suffix = "_" + std::to_string(layer);
+        names.cache_k.push_back("cache_k" + suffix);
+        names.cache_v.push_back("cache_v" + suffix);
+        names.present_k.push_back("present_k" + suffix);
+        names.present_v.push_back("present_v" + suffix);
+    }
+}
+
+void validate_name_counts(const Qwen3OmniKvCacheNames& names, std::size_t expected) {
+    if (names.cache_k.size() != expected || names.cache_v.size() != expected ||
+        names.present_k.size() != expected || names.present_v.size() != expected) {
+        throw std::invalid_argument("Qwen3-Omni native KV tensor name count mismatch");
+    }
+}
+
+bool allocate_cache_layers(std::vector<DeviceTensor>& cache_k, std::vector<DeviceTensor>& cache_v,
+                           int32_t num_layers, int32_t max_length, int32_t kv_dim,
+                           DType cache_dtype, cudaStream_t stream) {
+    const auto expected = static_cast<std::size_t>(num_layers);
+    cache_k.reserve(expected);
+    cache_v.reserve(expected);
+    for (int32_t layer = 0; layer < num_layers; ++layer) {
+        cache_k.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype, stream);
+        if (!cache_k.back().ok())
+            return false;
+        cache_v.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype, stream);
+        if (!cache_v.back().ok())
+            return false;
+    }
+    return true;
+}
+
 } // namespace
 
 Qwen3OmniKvCache::Qwen3OmniKvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim,
@@ -42,34 +83,13 @@ Qwen3OmniKvCache::Qwen3OmniKvCache(int32_t num_layers, int32_t max_length, int32
                                    Qwen3OmniKvCacheNames names)
     : num_layers_(num_layers), max_length_(max_length), kv_dim_(kv_dim), cache_dtype_(cache_dtype),
       names_(std::move(names)) {
-    if (num_layers <= 0 || max_length <= 0 || kv_dim <= 0)
-        throw std::invalid_argument("Qwen3-Omni native KV dimensions must be positive");
-
-    if (names_.cache_k.empty()) {
-        for (int32_t layer = 0; layer < num_layers; ++layer) {
-            const auto suffix = "_" + std::to_string(layer);
-            names_.cache_k.push_back("cache_k" + suffix);
-            names_.cache_v.push_back("cache_v" + suffix);
-            names_.present_k.push_back("present_k" + suffix);
-            names_.present_v.push_back("present_v" + suffix);
-        }
-    }
+    validate_cache_geometry(num_layers, max_length, kv_dim);
+    populate_default_names(names_, num_layers);
     const auto expected = static_cast<std::size_t>(num_layers);
-    if (names_.cache_k.size() != expected || names_.cache_v.size() != expected ||
-        names_.present_k.size() != expected || names_.present_v.size() != expected) {
-        throw std::invalid_argument("Qwen3-Omni native KV tensor name count mismatch");
-    }
-
-    cache_k_.reserve(expected);
-    cache_v_.reserve(expected);
-    for (int32_t layer = 0; layer < num_layers; ++layer) {
-        cache_k_.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype, stream);
-        if (!cache_k_.back().ok())
-            return;
-        cache_v_.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype, stream);
-        if (!cache_v_.back().ok())
-            return;
-    }
+    validate_name_counts(names_, expected);
+    if (!allocate_cache_layers(cache_k_, cache_v_, num_layers, max_length, kv_dim, cache_dtype,
+                               stream))
+        return;
     reset();
 }
 

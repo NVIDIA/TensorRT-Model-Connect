@@ -44,6 +44,26 @@ def test_native_kv_defaults_use_complete_official_context() -> None:
     assert plugin.default_max_cache_length(config) == 65536
 
 
+def test_native_kv_builder_has_no_legacy_modules_or_concat_path() -> None:
+    family_dir = (
+        Path(__file__).resolve().parents[4]
+        / "python/tensorrt_model_connect/families/qwen3_omni"
+    )
+
+    for module_name in (
+        "default_decoder.py",
+        "default_dual_profile_decoder.py",
+        "standard_decoder_builder.py",
+    ):
+        assert not (family_dir / module_name).exists()
+
+    graph_source = (family_dir / "graph_blocks.py").read_text(encoding="utf-8")
+    assert "def add_attention_block(" not in graph_source
+    assert "add_concatenation" not in graph_source
+    assert "def add_native_kv_attention_block(" in graph_source
+    assert "add_native_kv_cache_attention_from_rows" in graph_source
+
+
 @pytest.mark.parametrize(
     "flag", ("_runtime_dynamic_kv_requested", "dynamic_kv_cache")
 )

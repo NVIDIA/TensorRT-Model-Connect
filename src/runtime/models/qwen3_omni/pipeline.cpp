@@ -132,6 +132,61 @@ bool can_use_device_argmax(const TrtModule& module, const DeviceTensor& token_id
            module.tensor_dtype("logits") == DType::kFloat32 && vocab_size > 0 && token_id.ok();
 }
 
+Qwen3OmniKvCache& require_native_prefill_cache(TrtModule* prefill, Qwen3OmniInferenceState* state,
+                                               const OmniConfig& config, int32_t sequence_length) {
+    auto* cache = dynamic_cast<Qwen3OmniKvCache*>(state);
+    if (prefill == nullptr || cache == nullptr || sequence_length <= 0 ||
+        sequence_length > cache->max_length() || config.thinker_hidden_size <= 0 ||
+        config.thinker_vocab_size <= 0 || !prefill->has_input("input_embed")) {
+        throw std::runtime_error(
+            "OmniPipeline: native split prefill contract is unavailable or prompt exceeds "
+            "the official context capacity");
+    }
+    return *cache;
+}
+
+void run_native_prefill_chunk(TrtModule& prefill, Qwen3OmniKvCache& cache, const OmniConfig& config,
+                              const std::vector<int32_t>& input_ids, int32_t offset,
+                              int32_t chunk_length, bool final_chunk,
+                              const std::vector<const void*>& present_k,
+                              const std::vector<const void*>& present_v, DeviceTensor& token_id,
+                              int32_t& token_host, cudaStream_t stream, int32_t& next_token,
+                              OmniThinkerRunStats& stats) {
+    std::vector<float> input_embed(
+        static_cast<std::size_t>(chunk_length) * config.thinker_hidden_size, 0.0F);
+    std::vector<float> use_input_embed(static_cast<std::size_t>(chunk_length), 0.0F);
+    TensorMap inputs;
+    inputs["token_id"] =
+        Tensor{const_cast<int32_t*>(input_ids.data()) + offset, {chunk_length}, DType::kInt32};
+    inputs["input_embed"] =
+        Tensor{input_embed.data(), {chunk_length, config.thinker_hidden_size}, DType::kFloat32};
+    inputs["use_input_embed"] = Tensor{use_input_embed.data(), {chunk_length, 1}, DType::kFloat32};
+    cache.prepare_step(inputs, chunk_length);
+    ++stats.prefill_launches;
+
+    const bool gpu_argmax =
+        final_chunk && can_use_device_argmax(prefill, token_id, config.thinker_vocab_size);
+    if (gpu_argmax) {
+        prefill.forward_async(inputs);
+        const auto* logits = static_cast<const float*>(prefill.device_ptr("logits"));
+        qwen3_omni_gpu_argmax(logits, config.thinker_vocab_size,
+                              static_cast<int32_t*>(token_id.data()), stream);
+        cache.append_prefill_kv(present_k, present_v, chunk_length);
+        cudaMemcpyAsync(&token_host, token_id.data(), sizeof(token_host), cudaMemcpyDeviceToHost,
+                        stream);
+        prefill.sync();
+        next_token = token_host;
+    } else if (final_chunk) {
+        TensorMap outputs = prefill.forward(inputs);
+        cache.append_prefill_kv(present_k, present_v, chunk_length);
+        next_token = host_argmax(outputs, stats.full_logits_d2h);
+    } else {
+        prefill.forward_async(inputs);
+        cache.append_prefill_kv(present_k, present_v, chunk_length);
+        prefill.sync();
+    }
+}
+
 } // namespace
 
 int32_t OmniPipeline::run_thinker_step(int32_t token_id) {
@@ -166,59 +221,21 @@ int32_t OmniPipeline::run_thinker_step(int32_t token_id) {
 
 void OmniPipeline::run_thinker_prefill(const std::vector<int32_t>& input_ids, int32_t& next_token) {
     const auto sequence_length = static_cast<int32_t>(input_ids.size());
-    auto* cache = dynamic_cast<Qwen3OmniKvCache*>(thinker_state_.get());
-    if (thinker_prefill_ == nullptr || cache == nullptr || sequence_length <= 0 ||
-        sequence_length > cache->max_length() || config_->thinker_hidden_size <= 0 ||
-        config_->thinker_vocab_size <= 0 || !thinker_prefill_->has_input("input_embed")) {
-        throw std::runtime_error(
-            "OmniPipeline: native split prefill contract is unavailable or prompt exceeds "
-            "the official context capacity");
-    }
+    auto& cache = require_native_prefill_cache(thinker_prefill_.get(), thinker_state_.get(),
+                                               *config_, sequence_length);
 
     std::vector<const void*> present_k;
     std::vector<const void*> present_v;
-    cache->bind_cache_inputs(*thinker_prefill_);
-    gather_prefill_kv(*thinker_prefill_, cache->num_layers(), present_k, present_v);
+    cache.bind_cache_inputs(*thinker_prefill_);
+    gather_prefill_kv(*thinker_prefill_, cache.num_layers(), present_k, present_v);
 
     constexpr int32_t kPrefillChunkTokens = 256;
     for (int32_t offset = 0; offset < sequence_length;) {
         const int32_t chunk_length = std::min(kPrefillChunkTokens, sequence_length - offset);
         const bool final_chunk = offset + chunk_length == sequence_length;
-        std::vector<float> input_embed(
-            static_cast<std::size_t>(chunk_length) * config_->thinker_hidden_size, 0.0F);
-        std::vector<float> use_input_embed(static_cast<std::size_t>(chunk_length), 0.0F);
-        TensorMap inputs;
-        inputs["token_id"] =
-            Tensor{const_cast<int32_t*>(input_ids.data()) + offset, {chunk_length}, DType::kInt32};
-        inputs["input_embed"] = Tensor{
-            input_embed.data(), {chunk_length, config_->thinker_hidden_size}, DType::kFloat32};
-        inputs["use_input_embed"] =
-            Tensor{use_input_embed.data(), {chunk_length, 1}, DType::kFloat32};
-        thinker_state_->prepare_step(inputs, chunk_length);
-        ++thinker_stats_.prefill_launches;
-
-        const bool gpu_argmax =
-            final_chunk && can_use_device_argmax(*thinker_prefill_, thinker_token_id_,
-                                                 config_->thinker_vocab_size);
-        if (gpu_argmax) {
-            thinker_prefill_->forward_async(inputs);
-            const auto* logits = static_cast<const float*>(thinker_prefill_->device_ptr("logits"));
-            qwen3_omni_gpu_argmax(logits, config_->thinker_vocab_size,
-                                  static_cast<int32_t*>(thinker_token_id_.data()), stream_);
-            cache->append_prefill_kv(present_k, present_v, chunk_length);
-            cudaMemcpyAsync(&thinker_token_host_, thinker_token_id_.data(),
-                            sizeof(thinker_token_host_), cudaMemcpyDeviceToHost, stream_);
-            thinker_prefill_->sync();
-            next_token = thinker_token_host_;
-        } else if (final_chunk) {
-            TensorMap outputs = thinker_prefill_->forward(inputs);
-            cache->append_prefill_kv(present_k, present_v, chunk_length);
-            next_token = host_argmax(outputs, thinker_stats_.full_logits_d2h);
-        } else {
-            thinker_prefill_->forward_async(inputs);
-            cache->append_prefill_kv(present_k, present_v, chunk_length);
-            thinker_prefill_->sync();
-        }
+        run_native_prefill_chunk(*thinker_prefill_, cache, *config_, input_ids, offset,
+                                 chunk_length, final_chunk, present_k, present_v, thinker_token_id_,
+                                 thinker_token_host_, stream_, next_token, thinker_stats_);
         offset += chunk_length;
     }
 }
