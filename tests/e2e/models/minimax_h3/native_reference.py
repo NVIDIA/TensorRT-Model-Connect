@@ -163,6 +163,7 @@ def main() -> int:
         "source_revision": source_revision,
         "checkpoint_inventory_sha256": bundle_config["checkpoint_inventory_sha256"],
         "builder_source_sha256": bundle_config["builder_source_sha256"],
+        "workspace_limit_bytes": bundle_config["workspace_limit_bytes"],
         "plan_sha256": bundle_config["plan_sha256"],
         "inputs": inputs,
         "workload": workload,

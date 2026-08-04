@@ -5,6 +5,11 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+import sys
+
+from tensorrt_model_connect.families.minimax_h3.provenance import PLAN_FILENAMES
 from tests.e2e.models.minimax_h3 import pack_native_bundle
 
 
@@ -66,3 +71,63 @@ def test_staged_loading_partitions_every_bundle_section() -> None:
         "config.json",
     }
     assert not set(policy["eager_sections"]) & set(policy["lazy_sections"])
+
+
+def test_packer_preserves_validated_workspace_mapping(tmp_path: Path, monkeypatch, capsys) -> None:
+    plans = tmp_path / "plans"
+    plans.mkdir()
+    recorded = {}
+    for filename in PLAN_FILENAMES:
+        (plans / filename).write_bytes(filename.encode())
+        recorded[filename] = {"bytes": len(filename), "sha256": "a" * 64}
+    workspace_limits = {filename: 8 << 30 for filename in PLAN_FILENAMES}
+    (plans / "build_receipt.json").write_text(
+        json.dumps(
+            {
+                "build_helper_sha256": "b" * 64,
+                "workspace_limit_bytes": workspace_limits,
+            }
+        )
+    )
+    model = tmp_path / "model"
+    tokenizer = model / "tokenizer" / "tokenizer.json"
+    tokenizer.parent.mkdir(parents=True)
+    tokenizer.write_text("{}")
+    captured = {}
+
+    monkeypatch.setattr(pack_native_bundle, "_target_metadata", lambda: ("11.1", "11.1", "Thor"))
+    monkeypatch.setattr(
+        pack_native_bundle,
+        "validate_build_receipt",
+        lambda *_args, **_kwargs: (
+            "c" * 64,
+            recorded,
+            {"sha256": "d" * 64},
+            {"inventory_sha256": "e" * 64},
+        ),
+    )
+
+    def capture_bundle(_output, _info, sections) -> None:
+        config_section = next(section for section in sections if section.name == "config.json")
+        captured.update(json.loads(config_section.data))
+
+    monkeypatch.setattr(pack_native_bundle, "write_bundle", capture_bundle)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "pack_native_bundle.py",
+            "--plans-dir",
+            str(plans),
+            "--model-path",
+            str(model),
+            "--output",
+            str(tmp_path / "model.trtfb"),
+            "--source-revision",
+            "1" * 40,
+        ],
+    )
+
+    assert pack_native_bundle.main() == 0
+    assert captured["workspace_limit_bytes"] == workspace_limits
+    capsys.readouterr()

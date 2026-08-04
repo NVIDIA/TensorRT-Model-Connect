@@ -107,6 +107,7 @@ def main() -> int:
         "source_revision": source_revision,
         "builder_source_sha256": build_source_sha,
         "checkpoint_inventory_sha256": snapshot_record["inventory_sha256"],
+        "workspace_limit_bytes": build_receipt["workspace_limit_bytes"],
         "build_receipt": build_receipt_record,
         "plan_bytes": plan_bytes,
         "plan_sha256": plan_sha256,

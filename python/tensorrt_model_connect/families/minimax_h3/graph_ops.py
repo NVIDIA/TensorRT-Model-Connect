@@ -17,6 +17,8 @@ import numpy as np
 
 from tensorrt_model_connect import trt_compat
 
+from .config import resolve_workspace_bytes
+
 
 trt = trt_compat.get_trt()
 
@@ -31,6 +33,21 @@ def configure_builder(config) -> None:
     """Retain enough engine metadata to audit native TensorRT lowering."""
 
     config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+
+
+def configure_workspace(config, workspace_bytes: int | None, *, default_bytes: int) -> int:
+    """Apply and return the exact TensorRT tactic-workspace limit."""
+
+    resolved = resolve_workspace_bytes(workspace_bytes, default_bytes=default_bytes)
+    pool = trt.MemoryPoolType.WORKSPACE
+    config.set_memory_pool_limit(pool, resolved)
+    applied = int(config.get_memory_pool_limit(pool))
+    if applied != resolved:
+        raise RuntimeError(
+            "TensorRT did not apply the requested MiniMax-H3 workspace limit: "
+            f"requested={resolved}, applied={applied}"
+        )
+    return applied
 
 
 def validate_native_network(network, *, expected_attentions: int, label: str) -> dict[str, int]:

@@ -14,7 +14,11 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from . import graph_ops as op
-from .config import MiniMaxH3Config, SOL_ENGINE_1344X768_124F
+from .config import (
+    DENOISER_DEFAULT_WORKSPACE_BYTES,
+    MiniMaxH3Config,
+    SOL_ENGINE_1344X768_124F,
+)
 
 
 trt = trt_compat.get_trt()
@@ -235,6 +239,7 @@ def build_dit_engine(
     *,
     verbose: bool = False,
     consume_weights: bool = False,
+    workspace_bytes: int | None = None,
 ) -> bytes:
     """Build the full-sequence single-device H3 TensorRT plan."""
 
@@ -245,7 +250,11 @@ def build_dit_engine(
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     op.configure_builder(config)
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 96 << 30)
+    op.configure_workspace(
+        config,
+        workspace_bytes,
+        default_bytes=DENOISER_DEFAULT_WORKSPACE_BYTES,
+    )
     # Hugging Face keeps TF32 disabled for the FP32 input/output projections.
     # Match that contract while retaining native TensorRT GEMMs.
     config.clear_flag(trt.BuilderFlag.TF32)

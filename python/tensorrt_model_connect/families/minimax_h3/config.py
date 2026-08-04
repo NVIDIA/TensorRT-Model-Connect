@@ -13,6 +13,28 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES = 96 << 30
+ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES = 64 << 30
+DENOISER_DEFAULT_WORKSPACE_BYTES = 96 << 30
+VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES = 96 << 30
+
+DEFAULT_WORKSPACE_LIMIT_BYTES = {
+    "text_encoder.plan": TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES,
+    "adaln_precompute.plan": ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
+    "denoiser.plan": DENOISER_DEFAULT_WORKSPACE_BYTES,
+    "vae_tile_decoder.plan": VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES,
+}
+
+
+def resolve_workspace_bytes(workspace_bytes: int | None, *, default_bytes: int) -> int:
+    """Resolve a positive tactic-workspace limit without silently coercing values."""
+
+    resolved = default_bytes if workspace_bytes is None else workspace_bytes
+    if not isinstance(resolved, int) or isinstance(resolved, bool) or resolved <= 0:
+        raise ValueError("MiniMax-H3 TensorRT workspace_bytes must be a positive integer")
+    return resolved
+
+
 @dataclass(frozen=True)
 class MiniMaxH3Config:
     hidden_size: int = 5376

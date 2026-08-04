@@ -19,6 +19,7 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from . import graph_ops as op
+from .config import TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES
 
 
 trt = trt_compat.get_trt()
@@ -96,13 +97,18 @@ def build_text_encoder_engine(
     sequence_length: int,
     verbose: bool = False,
     consume_weights: bool = False,
+    workspace_bytes: int | None = None,
 ) -> bytes:
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     op.configure_builder(config)
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 96 << 30)
+    op.configure_workspace(
+        config,
+        workspace_bytes,
+        default_bytes=TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES,
+    )
     input_ids = network.add_input("input_ids", trt.int32, (sequence_length,))
     table = op.weight_constant(network, weights["model.language_model.embed_tokens.weight"])
     table = op.cast(network, table, trt.bfloat16)

@@ -92,6 +92,21 @@ def _validate_record_object(record: object, label: str) -> tuple[int, str]:
     return expected_size, expected_sha
 
 
+def validate_workspace_limit_bytes(record: object) -> dict[str, int]:
+    """Validate the exact per-plan TensorRT tactic-workspace provenance."""
+
+    if not isinstance(record, dict) or set(record) != set(PLAN_FILENAMES):
+        raise ValueError(
+            "MiniMax-H3 workspace_limit_bytes must cover exactly all four native plans"
+        )
+    for filename, value in record.items():
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(
+                f"MiniMax-H3 workspace_limit_bytes has an invalid value for {filename}"
+            )
+    return dict(record)
+
+
 def validate_record(path: Path, record: object, label: str, *, hash_file: bool) -> None:
     expected_size, expected_sha = _validate_record_object(record, label)
     if not path.is_file() or path.stat().st_size != expected_size:
@@ -352,6 +367,7 @@ def _validate_build_receipt_metadata(
     for key, value in expected.items():
         if receipt.get(key) != value:
             raise ValueError(f"MiniMax-H3 build receipt does not match current {key}")
+    validate_workspace_limit_bytes(receipt.get("workspace_limit_bytes"))
     snapshot_record = validate_checkpoint_snapshot_record(receipt.get("checkpoint_snapshot"))
     components = receipt.get("components")
     if not isinstance(components, dict) or set(components) != set(PLAN_FILENAMES):
@@ -488,4 +504,5 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
         for value in plan_sha.values()
     ):
         raise ValueError("MiniMax-H3 bundle config has an invalid native plan SHA256")
+    validate_workspace_limit_bytes(config.get("workspace_limit_bytes"))
     return config

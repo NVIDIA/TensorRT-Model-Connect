@@ -13,9 +13,23 @@ trt = pytest.importorskip("tensorrt")
 from tensorrt_model_connect.families.minimax_h3.adaln_builder import (  # noqa: E402
     build_adaln_precompute_engine,
 )
-from tensorrt_model_connect.families.minimax_h3.config import MiniMaxH3Config  # noqa: E402
+from tensorrt_model_connect.families.minimax_h3.config import (  # noqa: E402
+    ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
+    DENOISER_DEFAULT_WORKSPACE_BYTES,
+    MiniMaxH3Config,
+    SOL_ENGINE_1344X768_124F,
+    TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES,
+    VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES,
+    resolve_workspace_bytes,
+)
 from tensorrt_model_connect.families.minimax_h3.dit_builder import build_dit_engine  # noqa: E402
 from tensorrt_model_connect.families.minimax_h3 import graph_ops as op  # noqa: E402
+from tensorrt_model_connect.families.minimax_h3.text_encoder_builder import (  # noqa: E402
+    build_text_encoder_engine,
+)
+from tensorrt_model_connect.families.minimax_h3.vae_builder import (  # noqa: E402
+    build_vae_tile_decoder_engine,
+)
 
 
 def _weights(profile: MiniMaxH3Config) -> dict[str, np.ndarray]:
@@ -75,6 +89,79 @@ def _weights(profile: MiniMaxH3Config) -> dict[str, np.ndarray]:
     return state
 
 
+@pytest.mark.parametrize(
+    ("builder", "args", "default_bytes"),
+    [
+        (build_text_encoder_engine, ({},), TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES),
+        (
+            build_adaln_precompute_engine,
+            ({}, SOL_ENGINE_1344X768_124F),
+            ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
+        ),
+        (
+            build_dit_engine,
+            ({}, SOL_ENGINE_1344X768_124F),
+            DENOISER_DEFAULT_WORKSPACE_BYTES,
+        ),
+        (build_vae_tile_decoder_engine, ({},), VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES),
+    ],
+)
+@pytest.mark.parametrize("workspace_bytes", [None, 8 << 30])
+def test_builders_apply_default_or_overridden_workspace(
+    monkeypatch, builder, args, default_bytes: int, workspace_bytes: int | None
+) -> None:
+    observed = {}
+
+    class WorkspaceConfigured(Exception):
+        pass
+
+    def capture(_config, supplied, *, default_bytes):
+        observed.update(supplied=supplied, default_bytes=default_bytes)
+        raise WorkspaceConfigured
+
+    monkeypatch.setattr(op, "configure_workspace", capture)
+    kwargs = {"workspace_bytes": workspace_bytes}
+    if builder is build_text_encoder_engine:
+        kwargs["sequence_length"] = 1
+    with pytest.raises(WorkspaceConfigured):
+        builder(*args, **kwargs)
+    assert observed == {"supplied": workspace_bytes, "default_bytes": default_bytes}
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "8589934592"])
+def test_workspace_limit_rejects_non_positive_or_non_integer_values(value) -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        resolve_workspace_bytes(value, default_bytes=64 << 30)
+
+
+def test_workspace_limit_uses_default_or_exact_override() -> None:
+    assert resolve_workspace_bytes(None, default_bytes=64 << 30) == 64 << 30
+    assert resolve_workspace_bytes(8 << 30, default_bytes=64 << 30) == 8 << 30
+
+    calls = []
+
+    class FakeConfig:
+        workspace_bytes = 0
+
+        def set_memory_pool_limit(self, pool, workspace_bytes) -> None:
+            calls.append((pool, workspace_bytes))
+            self.workspace_bytes = workspace_bytes
+
+        def get_memory_pool_limit(self, pool) -> int:
+            assert pool == trt.MemoryPoolType.WORKSPACE
+            return self.workspace_bytes
+
+    assert op.configure_workspace(FakeConfig(), 8 << 30, default_bytes=64 << 30) == 8 << 30
+    assert calls == [(trt.MemoryPoolType.WORKSPACE, 8 << 30)]
+
+    class RejectingConfig(FakeConfig):
+        def set_memory_pool_limit(self, pool, workspace_bytes) -> None:
+            del pool, workspace_bytes
+
+    with pytest.raises(RuntimeError, match="did not apply"):
+        op.configure_workspace(RejectingConfig(), 8 << 30, default_bytes=64 << 30)
+
+
 @pytest.mark.gpu
 def test_tiny_native_h3_graphs_serialize() -> None:
     profile = MiniMaxH3Config(
@@ -99,8 +186,8 @@ def test_tiny_native_h3_graphs_serialize() -> None:
         context_parallel_size=1,
     )
     weights = _weights(profile)
-    assert build_adaln_precompute_engine(weights, profile)
-    assert build_dit_engine(weights, profile)
+    assert build_adaln_precompute_engine(weights, profile, workspace_bytes=1 << 30)
+    assert build_dit_engine(weights, profile, workspace_bytes=1 << 30)
 
 
 @pytest.mark.gpu

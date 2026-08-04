@@ -12,7 +12,10 @@ from pathlib import Path
 import pytest
 from tensorrt_model_connect.bundle_writer import BundleInfo, BundleSection, write_bundle
 from tensorrt_model_connect.families.minimax_h3 import provenance
-from tensorrt_model_connect.families.minimax_h3.config import SOL_ENGINE_1344X768_124F
+from tensorrt_model_connect.families.minimax_h3.config import (
+    DEFAULT_WORKSPACE_LIMIT_BYTES,
+    SOL_ENGINE_1344X768_124F,
+)
 from tensorrt_model_connect.families.minimax_h3.provenance import (
     CHECKPOINT_REVISION,
     PLAN_FILENAMES,
@@ -97,6 +100,7 @@ def _receipt(tmp_path: Path) -> tuple[dict, Path, Path, Path]:
         "build_helper_sha256": sha256_file(BUILD_HELPER),
         "profile": serialized_profile(SOL_ENGINE_1344X768_124F),
         "assets": {"tokenizer.json": file_record(tokenizer)},
+        "workspace_limit_bytes": dict(DEFAULT_WORKSPACE_LIMIT_BYTES),
         "components": components,
     }
     return receipt, plans, snapshot, tokenizer
@@ -160,6 +164,32 @@ def test_native_build_receipt_rejects_incomplete_or_invalid_artifacts(tmp_path: 
     plan.write_bytes(b"x" * plan.stat().st_size)
     with pytest.raises(ValueError, match="artifact SHA256"):
         _validate(receipt, plans, snapshot, tokenizer)
+
+
+def test_native_build_receipt_requires_exact_positive_workspace_limits(tmp_path: Path) -> None:
+    receipt, plans, snapshot, tokenizer = _receipt(tmp_path)
+    override = {filename: 8 << 30 for filename in PLAN_FILENAMES}
+    receipt["workspace_limit_bytes"] = override
+    _validate(receipt, plans, snapshot, tokenizer)
+
+    malformed_receipts = []
+    missing = copy.deepcopy(receipt)
+    missing.pop("workspace_limit_bytes")
+    malformed_receipts.append(missing)
+    wrong_keys = copy.deepcopy(receipt)
+    wrong_keys["workspace_limit_bytes"].pop(PLAN_FILENAMES[0])
+    malformed_receipts.append(wrong_keys)
+    extra_key = copy.deepcopy(receipt)
+    extra_key["workspace_limit_bytes"]["extra.plan"] = 1
+    malformed_receipts.append(extra_key)
+    for value in (0, -1, True, 1.5, "8589934592"):
+        invalid_value = copy.deepcopy(receipt)
+        invalid_value["workspace_limit_bytes"][PLAN_FILENAMES[0]] = value
+        malformed_receipts.append(invalid_value)
+
+    for malformed in malformed_receipts:
+        with pytest.raises(ValueError, match="workspace_limit_bytes"):
+            _validate(malformed, plans, snapshot, tokenizer)
 
 
 def test_snapshot_inventory_rejects_noncanonical_inputs(tmp_path: Path) -> None:
@@ -237,6 +267,7 @@ def test_native_bundle_config_is_bound_to_current_family_source(tmp_path: Path) 
         "source_revision": SOURCE_REVISION,
         "builder_source_sha256": builder_source_sha256(),
         "checkpoint_inventory_sha256": receipt["checkpoint_snapshot"]["inventory_sha256"],
+        "workspace_limit_bytes": dict(DEFAULT_WORKSPACE_LIMIT_BYTES),
         "context_parallel_size": 1,
         "padded_sequence_length": 38247,
         "vae_tile_batch": 28,
@@ -252,6 +283,25 @@ def test_native_bundle_config_is_bound_to_current_family_source(tmp_path: Path) 
     )
     validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
 
+    config["workspace_limit_bytes"] = {filename: 8 << 30 for filename in PLAN_FILENAMES}
+    write_bundle(
+        bundle,
+        BundleInfo(model_id="MiniMaxAI/MiniMax-H3"),
+        [BundleSection("config.json", json.dumps(config).encode())],
+    )
+    validated = validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
+    assert validated["workspace_limit_bytes"] == config["workspace_limit_bytes"]
+
+    config["workspace_limit_bytes"][PLAN_FILENAMES[0]] = True
+    write_bundle(
+        bundle,
+        BundleInfo(model_id="MiniMaxAI/MiniMax-H3"),
+        [BundleSection("config.json", json.dumps(config).encode())],
+    )
+    with pytest.raises(ValueError, match="workspace_limit_bytes"):
+        validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
+
+    config["workspace_limit_bytes"] = {filename: 8 << 30 for filename in PLAN_FILENAMES}
     config["builder_source_sha256"] = "0" * 64
     write_bundle(
         bundle,

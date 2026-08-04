@@ -11,6 +11,7 @@ import tomllib
 import pytest
 
 from tensorrt_model_connect.families.minimax_h3.config import (
+    DEFAULT_WORKSPACE_LIMIT_BYTES,
     MiniMaxH3Config,
     SOL_ENGINE_1344X768_124F,
 )
@@ -78,6 +79,7 @@ def test_plugin_bundle_config_preserves_exact_provenance() -> None:
         "source_revision": "a" * 40,
         "builder_source_sha256": "b" * 64,
         "checkpoint_inventory_sha256": "c" * 64,
+        "workspace_limit_bytes": dict(DEFAULT_WORKSPACE_LIMIT_BYTES),
         "plan_sha256": {
             "text_encoder.plan": "d" * 64,
             "adaln_precompute.plan": "e" * 64,
@@ -93,6 +95,7 @@ def test_plugin_bundle_config_preserves_exact_provenance() -> None:
     assert result | provenance == result
     assert result["seed"] == 7
     assert result["context_parallel_size"] == 1
+    assert result["workspace_limit_bytes"] == DEFAULT_WORKSPACE_LIMIT_BYTES
     assert result["bundle_loading"] == {
         "mode": "staged",
         "eager_sections": ["tokenizer.json", "config.json"],
@@ -107,6 +110,17 @@ def test_plugin_bundle_config_preserves_exact_provenance() -> None:
         MiniMaxH3Plugin().diffusion_bundle_config(
             SimpleNamespace(raw={"video_width": 1}),
             components={"profile": SOL_ENGINE_1344X768_124F, "provenance": provenance},
+        )
+
+    malformed_provenance = dict(provenance)
+    malformed_provenance["workspace_limit_bytes"] = {"text_encoder.plan": True}
+    with pytest.raises(ValueError, match="workspace_limit_bytes"):
+        MiniMaxH3Plugin().diffusion_bundle_config(
+            config,
+            components={
+                "profile": SOL_ENGINE_1344X768_124F,
+                "provenance": malformed_provenance,
+            },
         )
 
 

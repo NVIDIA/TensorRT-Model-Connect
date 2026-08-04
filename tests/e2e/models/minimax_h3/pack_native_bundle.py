@@ -114,6 +114,7 @@ def main() -> int:
         "builder_source_sha256": expected_source_sha,
         "build_helper_sha256": receipt["build_helper_sha256"],
         "checkpoint_inventory_sha256": snapshot_record["inventory_sha256"],
+        "workspace_limit_bytes": dict(receipt["workspace_limit_bytes"]),
         "plan_sha256": {
             filename: recorded[filename]["sha256"] for filename in PLAN_SECTIONS.values()
         },

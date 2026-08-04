@@ -18,6 +18,7 @@ from tensorrt_model_connect.families.minimax_h3.checkpoint import (
     validate_component_key_partition,
 )
 from tensorrt_model_connect.families.minimax_h3.config import (
+    DEFAULT_WORKSPACE_LIMIT_BYTES,
     SOL_ENGINE_1344X768_124F,
 )
 from tensorrt_model_connect.families.minimax_h3.provenance import (
@@ -32,6 +33,45 @@ from tensorrt_model_connect.families.minimax_h3.provenance import (
     validate_record,
     validate_source_revision,
 )
+
+
+_RESUME_IDENTITY_FIELDS = (
+    "checkpoint_revision",
+    "source_revision",
+    "builder_source_sha256",
+    "build_helper_sha256",
+    "checkpoint_snapshot",
+    "profile",
+    "assets",
+    "workspace_limit_bytes",
+)
+
+
+def _positive_workspace_gib(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("workspace-gib must be a positive integer") from error
+    if value <= 0:
+        raise argparse.ArgumentTypeError("workspace-gib must be a positive integer")
+    return value
+
+
+def _workspace_limits(workspace_gib: int | None) -> dict[str, int]:
+    if workspace_gib is None:
+        return dict(DEFAULT_WORKSPACE_LIMIT_BYTES)
+    if not isinstance(workspace_gib, int) or isinstance(workspace_gib, bool) or workspace_gib <= 0:
+        raise ValueError("workspace_gib must be a positive integer")
+    workspace_bytes = workspace_gib << 30
+    return {filename: workspace_bytes for filename in DEFAULT_WORKSPACE_LIMIT_BYTES}
+
+
+def _validate_resume_identity(previous: object, current: dict) -> None:
+    if not isinstance(previous, dict):
+        raise ValueError("Cannot resume: existing receipt is not a JSON object")
+    for key in _RESUME_IDENTITY_FIELDS:
+        if previous.get(key) != current[key]:
+            raise ValueError(f"Cannot resume: existing receipt has different {key}")
 
 
 def _write(output: Path, name: str, payload: bytes, elapsed: float, receipt: dict) -> None:
@@ -51,6 +91,11 @@ def main() -> int:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--source-revision", required=True)
     parser.add_argument("--cp-size", type=int, default=1, choices=(1,))
+    parser.add_argument(
+        "--workspace-gib",
+        type=_positive_workspace_gib,
+        help="Override the TensorRT tactic workspace for every component (GiB).",
+    )
     parser.add_argument(
         "--component",
         action="append",
@@ -74,6 +119,7 @@ def main() -> int:
     profile = SOL_ENGINE_1344X768_124F.__class__(**profile_values)
     receipt_path = output / "build_receipt.json"
     tokenizer = model / "tokenizer" / "tokenizer.json"
+    workspace_limit_bytes = _workspace_limits(args.workspace_gib)
     receipt = {
         "checkpoint_revision": CHECKPOINT_REVISION,
         "checkpoint_snapshot": checkpoint_snapshot_record(model),
@@ -82,21 +128,12 @@ def main() -> int:
         "build_helper_sha256": sha256_file(Path(__file__).resolve()),
         "profile": serialized_profile(profile),
         "assets": {"tokenizer.json": file_record(tokenizer)},
+        "workspace_limit_bytes": workspace_limit_bytes,
         "components": {},
     }
     if args.resume and receipt_path.is_file():
         previous = json.loads(receipt_path.read_text())
-        for key in (
-            "checkpoint_revision",
-            "source_revision",
-            "builder_source_sha256",
-            "build_helper_sha256",
-            "checkpoint_snapshot",
-            "profile",
-            "assets",
-        ):
-            if previous.get(key) != receipt[key]:
-                raise ValueError(f"Cannot resume: existing receipt has different {key}")
+        _validate_resume_identity(previous, receipt)
         validate_record(
             tokenizer,
             previous["assets"]["tokenizer.json"],
@@ -137,7 +174,10 @@ def main() -> int:
         del state
         started = time.perf_counter()
         plan = build_text_encoder_engine(
-            weights, sequence_length=profile.text_rows, consume_weights=True
+            weights,
+            sequence_length=profile.text_rows,
+            consume_weights=True,
+            workspace_bytes=workspace_limit_bytes["text_encoder.plan"],
         )
         _write(output, "text_encoder.plan", plan, time.perf_counter() - started, receipt)
         checkpoint_receipt()
@@ -166,7 +206,12 @@ def main() -> int:
         weights = numpy_state(state)
         del state
         started = time.perf_counter()
-        plan = build_adaln_precompute_engine(weights, profile, consume_weights=True)
+        plan = build_adaln_precompute_engine(
+            weights,
+            profile,
+            consume_weights=True,
+            workspace_bytes=workspace_limit_bytes["adaln_precompute.plan"],
+        )
         _write(output, "adaln_precompute.plan", plan, time.perf_counter() - started, receipt)
         checkpoint_receipt()
         del weights, plan
@@ -176,7 +221,12 @@ def main() -> int:
         weights = numpy_state(state)
         del state
         started = time.perf_counter()
-        plan = build_dit_engine(weights, profile, consume_weights=True)
+        plan = build_dit_engine(
+            weights,
+            profile,
+            consume_weights=True,
+            workspace_bytes=workspace_limit_bytes["denoiser.plan"],
+        )
         _write(output, "denoiser.plan", plan, time.perf_counter() - started, receipt)
         checkpoint_receipt()
         del weights, plan
@@ -194,7 +244,11 @@ def main() -> int:
         weights = numpy_state(state)
         del state
         started = time.perf_counter()
-        plan = build_vae_tile_decoder_engine(weights, consume_weights=True)
+        plan = build_vae_tile_decoder_engine(
+            weights,
+            consume_weights=True,
+            workspace_bytes=workspace_limit_bytes["vae_tile_decoder.plan"],
+        )
         _write(output, "vae_tile_decoder.plan", plan, time.perf_counter() - started, receipt)
         checkpoint_receipt()
     checkpoint_receipt()

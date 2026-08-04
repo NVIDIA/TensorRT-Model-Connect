@@ -16,7 +16,11 @@ import sys
 from tensorrt_model_connect import trt_compat
 
 from . import graph_ops as op
-from .config import MiniMaxH3Config, SOL_ENGINE_1344X768_124F
+from .config import (
+    ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
+    MiniMaxH3Config,
+    SOL_ENGINE_1344X768_124F,
+)
 
 
 trt = trt_compat.get_trt()
@@ -46,6 +50,7 @@ def build_adaln_precompute_engine(
     *,
     verbose: bool = False,
     consume_weights: bool = False,
+    workspace_bytes: int | None = None,
 ) -> bytes:
     profile.validate()
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -53,7 +58,11 @@ def build_adaln_precompute_engine(
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     op.configure_builder(config)
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
+    op.configure_workspace(
+        config,
+        workspace_bytes,
+        default_bytes=ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
+    )
     # Match PyTorch's default FP32 matmul policy used by the reference.
     config.clear_flag(trt.BuilderFlag.TF32)
 

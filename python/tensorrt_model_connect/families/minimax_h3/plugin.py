@@ -16,11 +16,12 @@ from .checkpoint import (
     numpy_state,
     validate_component_key_partition,
 )
-from .config import SOL_ENGINE_1344X768_124F
+from .config import DEFAULT_WORKSPACE_LIMIT_BYTES, SOL_ENGINE_1344X768_124F
 from .provenance import (
     builder_source_sha256,
     checkpoint_snapshot_record,
     validate_source_revision,
+    validate_workspace_limit_bytes,
 )
 
 
@@ -149,6 +150,7 @@ class MiniMaxH3Plugin:
             sequence_length=profile.text_rows,
             verbose=verbose,
             consume_weights=True,
+            workspace_bytes=DEFAULT_WORKSPACE_LIMIT_BYTES["text_encoder.plan"],
         )
         del text_weights
         gc.collect()
@@ -163,6 +165,7 @@ class MiniMaxH3Plugin:
             profile,
             verbose=verbose,
             consume_weights=True,
+            workspace_bytes=DEFAULT_WORKSPACE_LIMIT_BYTES["adaln_precompute.plan"],
         )
         del adaln_weights
         gc.collect()
@@ -177,6 +180,7 @@ class MiniMaxH3Plugin:
             profile,
             verbose=verbose,
             consume_weights=True,
+            workspace_bytes=DEFAULT_WORKSPACE_LIMIT_BYTES["denoiser.plan"],
         )
         del dit_weights
         gc.collect()
@@ -190,7 +194,10 @@ class MiniMaxH3Plugin:
         vae_weights = numpy_state(vae_state)
         del vae_state
         vae_decoder_plan = build_vae_tile_decoder_engine(
-            vae_weights, verbose=verbose, consume_weights=True
+            vae_weights,
+            verbose=verbose,
+            consume_weights=True,
+            workspace_bytes=DEFAULT_WORKSPACE_LIMIT_BYTES["vae_tile_decoder.plan"],
         )
         tokenizer_json = (Path(weights["_tokenizer_dir"]) / "tokenizer.json").read_bytes()
 
@@ -217,6 +224,7 @@ class MiniMaxH3Plugin:
                 "source_revision": source_revision,
                 "builder_source_sha256": builder_source_sha256(),
                 "checkpoint_inventory_sha256": snapshot["inventory_sha256"],
+                "workspace_limit_bytes": dict(DEFAULT_WORKSPACE_LIMIT_BYTES),
                 "plan_sha256": plan_sha256,
             },
         }
@@ -252,6 +260,7 @@ class MiniMaxH3Plugin:
         provenance = components.get("provenance")
         if not isinstance(provenance, dict):
             raise ValueError("MiniMax-H3 components are missing exact build provenance")
+        validate_workspace_limit_bytes(provenance.get("workspace_limit_bytes"))
         return {
             "checkpoint_revision": "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
             **provenance,
