@@ -9,6 +9,7 @@ per-step logits + generated text for comparison against TRT outputs.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -28,6 +29,61 @@ logger = logging.getLogger(__name__)
 
 PROJECT_DIR = Path(__file__).resolve().parents[6]
 E2E_DIR = PROJECT_DIR / "tests" / "e2e"
+
+_REFERENCE_TOKENIZER_REPO_ID = "internlm/internlm2-step-prover"
+_REFERENCE_TOKENIZER_REVISION = "6c727046190546168bf3aba9a1d78d5fb325ff14"
+_REFERENCE_TOKENIZER_FILENAME = "tokenizer.json"
+_REFERENCE_TOKENIZER_SHA256 = (
+    "1193d3a1aa3d9f74866287ca3c1f7bf64fe54dd6ecf015e751f13ebce509e411"
+)
+_REFERENCE_SOURCE_MODEL_SHA256 = (
+    "f868398fc4e05ee1e8aeba95ddf18ddcc45b8bce55d5093bead5bbf80429b48b"
+)
+
+
+def _reference_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _resolve_reference_tokenizer_json(model_dir: str | Path) -> Path | None:
+    """Resolve the target checkpoint's official tokenizer independently."""
+    model_path = Path(model_dir) / "tokenizer.model"
+    if (
+        not model_path.is_file()
+        or _reference_sha256(model_path) != _REFERENCE_SOURCE_MODEL_SHA256
+    ):
+        return None
+
+    try:
+        from huggingface_hub import hf_hub_download
+
+        tokenizer_path = Path(
+            hf_hub_download(
+                repo_id=_REFERENCE_TOKENIZER_REPO_ID,
+                filename=_REFERENCE_TOKENIZER_FILENAME,
+                revision=_REFERENCE_TOKENIZER_REVISION,
+                local_files_only=True,
+            )
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "pinned official InternLM reference tokenizer is unavailable in "
+            f"the local Hugging Face cache: {_REFERENCE_TOKENIZER_REPO_ID}@"
+            f"{_REFERENCE_TOKENIZER_REVISION}"
+        ) from exc
+
+    actual_sha256 = _reference_sha256(tokenizer_path)
+    if actual_sha256 != _REFERENCE_TOKENIZER_SHA256:
+        raise RuntimeError(
+            "pinned official InternLM reference tokenizer SHA256 mismatch: "
+            f"expected {_REFERENCE_TOKENIZER_SHA256}, got {actual_sha256}: "
+            f"{tokenizer_path}"
+        )
+    return tokenizer_path
 
 
 _PRECISION_TO_TORCH_DTYPE = {
@@ -328,6 +384,12 @@ class HfTransformersReference:
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
         model_ref = _resolve_cached_model_ref(hf_id)
+        resolved_tokenizer_path = _resolve_reference_tokenizer_json(model_ref)
+        tokenizer_path = (
+            str(resolved_tokenizer_path)
+            if resolved_tokenizer_path is not None
+            else None
+        )
         torch_dtype_expr = _torch_dtype_for_case(case)
 
         contract_config = case.metadata.get("contract_config", {})
@@ -335,12 +397,14 @@ class HfTransformersReference:
         enable_thinking = contract_config.get("enable_thinking", True)
 
         script = textwrap.dedent(f"""\
-            import sys, numpy as np, torch
+            import json, sys, numpy as np, torch
+            from pathlib import Path
             from transformers import (
                 AutoModelForCausalLM,
                 AutoModelForSeq2SeqLM,
                 AutoTokenizer,
                 DynamicCache,
+                PreTrainedTokenizerFast,
             )
 
             if not hasattr(DynamicCache, "from_legacy_cache"):
@@ -352,6 +416,7 @@ class HfTransformersReference:
 
             hf_id = {hf_id!r}
             model_ref = {model_ref!r}
+            tokenizer_path = {tokenizer_path!r}
             prompt = {prompt!r}
             max_new_tokens = {max_new_tokens}
             trust_remote_code = {trust_remote_code!r}
@@ -363,8 +428,23 @@ class HfTransformersReference:
             def _np(t):
                 return t.detach().float().cpu().numpy()
 
-            tokenizer = AutoTokenizer.from_pretrained(
-                model_ref, trust_remote_code=trust_remote_code)
+            if tokenizer_path is None:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    model_ref, trust_remote_code=trust_remote_code)
+            else:
+                tokenizer_dir = Path(model_ref)
+                tokenizer_config = json.loads(
+                    (tokenizer_dir / "tokenizer_config.json").read_text())
+                tokenizer = PreTrainedTokenizerFast(
+                    tokenizer_file=tokenizer_path,
+                    bos_token=tokenizer_config.get("bos_token"),
+                    eos_token=tokenizer_config.get("eos_token"),
+                    unk_token=tokenizer_config.get("unk_token"),
+                    pad_token=tokenizer_config.get("pad_token"),
+                    chat_template=tokenizer_config.get("chat_template"),
+                    clean_up_tokenization_spaces=tokenizer_config.get(
+                        "clean_up_tokenization_spaces", False),
+                )
             if use_chat_template:
                 messages = [{{"role": "user", "content": prompt}}]
                 try:

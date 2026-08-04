@@ -782,7 +782,16 @@ def _ensure_tokenizer_json(model_dir: Path, *, plugin=None) -> None:
     """
     tokenizer_path = model_dir / "tokenizer.json"
     rebuild_wordpiece = _wordpiece_tokenizer_needs_rebuild(model_dir)
+    family_ensure = getattr(plugin, "ensure_tokenizer_json", None)
     if tokenizer_path.exists() and not rebuild_wordpiece:
+        if callable(family_ensure):
+            kwargs = {}
+            if _call_supports_kwarg(family_ensure, "previous_error"):
+                kwargs["previous_error"] = None
+            if not bool(family_ensure(model_dir, **kwargs)):
+                raise RuntimeError(
+                    "family tokenizer validation rejected existing tokenizer.json"
+                )
         return
     if rebuild_wordpiece:
         print(
@@ -826,7 +835,6 @@ def _ensure_tokenizer_json(model_dir: Path, *, plugin=None) -> None:
     except Exception as e:
         slow_tokenizer_error = f"slow tokenizer conversion failed: {e}"
 
-    family_ensure = getattr(plugin, "ensure_tokenizer_json", None)
     if callable(family_ensure):
         kwargs = {}
         if _call_supports_kwarg(family_ensure, "previous_error"):

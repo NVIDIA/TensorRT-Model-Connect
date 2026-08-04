@@ -446,6 +446,24 @@ def _metadata_triple(spec: str, field_name: str) -> tuple[str, str, str]:
     return first, second, third
 
 
+def _metadata_warm_file_spec(
+    spec: str,
+) -> tuple[str, str, str, str]:
+    parts = [part.strip() for part in spec.split("|")]
+    if len(parts) not in {3, 4} or any(not part for part in parts[:3]):
+        raise ValueError(
+            f"Invalid hf_warm_files entry {spec!r}; expected "
+            "'name|hf_id|filename[|revision]'"
+        )
+    if len(parts) == 3:
+        parts.append("")
+    elif not parts[3]:
+        raise ValueError(
+            f"Invalid hf_warm_files entry {spec!r}; revision must be non-empty"
+        )
+    return parts[0], parts[1], parts[2], parts[3]
+
+
 def _metadata_bool(value: str, field_name: str) -> bool:
     normalized = value.strip().lower()
     if normalized in {"1", "true", "yes", "on"}:
@@ -527,11 +545,22 @@ def family_hf_warm_dependencies(family: object) -> list[tuple[str, str]]:
 
 def family_hf_warm_files(family: object) -> list[tuple[str, str, str]]:
     """Return extra HF files for a matched family as ``(name, hf_id, filename)``."""
+    return [spec[:3] for spec in family_hf_warm_file_specs(family)]
+
+
+def family_hf_warm_file_specs(
+    family: object,
+) -> list[tuple[str, str, str, str]]:
+    """Return warm files as ``(name, hf_id, filename, revision)``.
+
+    Three-field metadata remains valid and produces an empty revision so
+    existing ``family_hf_warm_files`` consumers retain their original shape.
+    """
     metadata = _matching_family_metadata(family)
     if not metadata:
         return []
     return [
-        _metadata_triple(spec, "hf_warm_files")
+        _metadata_warm_file_spec(spec)
         for spec in metadata[0].hf_warm_files
     ]
 

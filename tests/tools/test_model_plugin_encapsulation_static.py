@@ -4642,6 +4642,7 @@ def test_cache_warm_uses_family_metadata() -> None:
         "family_hf_required_files_by_id",
         "family_hf_warm_dependencies",
         "family_hf_warm_files",
+        "family_hf_warm_file_specs",
     ):
         if helper not in warm_text:
             violations.append((WARM_HF_CACHE, 0, f"warm cache missing {helper}"))

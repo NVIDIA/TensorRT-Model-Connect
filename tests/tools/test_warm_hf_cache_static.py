@@ -29,6 +29,7 @@ DOWNLOAD_WORKER = REPO_ROOT / "scripts" / "hf_cache_download_worker.py"
 FAMILIES = REPO_ROOT / "python" / "tensorrt_model_connect" / "families"
 HELPER_FUNCTIONS = {
     "_component_has_weight",
+    "_dedupe_file_assets",
     "_cache_repository_manifest",
     "_diffusers_missing_weight_components",
     "_is_hf_file_cached",
@@ -257,10 +258,14 @@ def test_family_file_assets_are_metadata_driven() -> None:
     text = WARM_HF_CACHE.read_text()
     assert "_family_hf_warm_files" in text
     assert "family_hf_warm_files" in text
+    assert "_family_hf_warm_file_specs" in text
+    assert "family_hf_warm_file_specs" in text
     assert "Warming family file assets" in text
     global_allow_patterns = _literal_string_list("_HF_ALLOW_PATTERNS")
     for spec in _family_metadata_specs("hf_warm_files"):
-        asset_name, hf_id, filename = spec.split("|", 2)
+        parts = spec.split("|")
+        assert len(parts) in {3, 4}
+        asset_name, hf_id, filename = parts[:3]
         assert spec not in text
         assert asset_name not in text
         assert hf_id not in text
@@ -437,6 +442,14 @@ def test_cache_skip_and_worker_forward_pinned_revision(tmp_path: Path) -> None:
     )
     assert command[command.index("--revision") + 1] == revision
 
+    file_command = helpers["_worker_command"](
+        "file",
+        "org/model",
+        revision=revision,
+        filename="tokenizer.json",
+    )
+    assert file_command[file_command.index("--revision") + 1] == revision
+
 
 def test_cache_skip_rejects_unresolvable_local_revision() -> None:
     helpers = _load_cache_helpers()
@@ -530,16 +543,21 @@ def test_file_cache_and_local_only_paths_never_launch_worker() -> None:
     helpers["_run_download_attempts"] = (
         lambda _operation, hf_id, **_kwargs: downloads.append(hf_id)
     )
-    helpers["_is_hf_file_cached"] = lambda _hf_id, _filename: True
+    helpers["_is_hf_file_cached"] = (
+        lambda _hf_id, _filename, revision="": bool(revision)
+    )
 
     assert helpers["_warm_file"](
         "org/model",
         "weights.bin",
+        revision="0123456789abcdef",
         selective=True,
         local_only=False,
     ) == ("cached", "")
 
-    helpers["_is_hf_file_cached"] = lambda _hf_id, _filename: False
+    helpers["_is_hf_file_cached"] = (
+        lambda _hf_id, _filename, revision="": False
+    )
     status, detail = helpers["_warm_file"](
         "org/model",
         "weights.bin",
@@ -549,6 +567,51 @@ def test_file_cache_and_local_only_paths_never_launch_worker() -> None:
     assert status == "failed"
     assert "local cache" in detail
     assert downloads == []
+
+
+def test_file_warm_forwards_revision_to_local_lookup_and_worker() -> None:
+    helpers = _load_cache_helpers()
+    local_calls: list[tuple[str, str, str]] = []
+    worker_calls: list[dict] = []
+    revision = "0123456789abcdef0123456789abcdef01234567"
+
+    def fake_local(hf_id, filename, revision=""):
+        local_calls.append((hf_id, filename, revision))
+        return False
+
+    def fake_attempts(operation, hf_id, **kwargs):
+        worker_calls.append({"operation": operation, "hf_id": hf_id, **kwargs})
+        return "/tmp/tokenizer.json", ""
+
+    helpers["_is_hf_file_cached"] = fake_local
+    helpers["_run_download_attempts"] = fake_attempts
+
+    assert helpers["_warm_file"](
+        "org/model",
+        "tokenizer.json",
+        revision=revision,
+        selective=True,
+        local_only=False,
+    ) == ("downloaded", "")
+    assert local_calls == [("org/model", "tokenizer.json", revision)]
+    assert worker_calls == [
+        {
+            "operation": "file",
+            "hf_id": "org/model",
+            "timeout_seconds": 600.0,
+            "revision": revision,
+            "filename": "tokenizer.json",
+        }
+    ]
+
+
+def test_file_asset_dedup_includes_revision() -> None:
+    dedupe = _load_cache_helpers()["_dedupe_file_assets"]
+    first = ("first", "org/model", "tokenizer.json", "rev-a")
+    duplicate = ("duplicate", "org/model", "tokenizer.json", "rev-a")
+    other_revision = ("second", "org/model", "tokenizer.json", "rev-b")
+
+    assert dedupe([first, duplicate, other_revision]) == [first, other_revision]
 
 
 def test_download_attempts_retry_once_with_xet_disabled(tmp_path: Path) -> None:
@@ -719,6 +782,53 @@ def hf_hub_download(repo_id, *, filename):
     assert json.loads(completed.stdout) == {"path": environment[expected_path_env]}
 
 
+def test_download_worker_forwards_file_revision(tmp_path: Path) -> None:
+    revision = "0123456789abcdef0123456789abcdef01234567"
+    _write_fake_hub_package(
+        tmp_path,
+        f"""
+import os
+
+def snapshot_download(*_args, **_kwargs):
+    raise RuntimeError("unexpected snapshot download")
+
+def hf_hub_download(repo_id, *, filename, revision):
+    assert repo_id == "org/model"
+    assert filename == "tokenizer.json"
+    assert revision == {revision!r}
+    return os.environ["FAKE_FILE_PATH"]
+""",
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(tmp_path)
+    environment["FAKE_FILE_PATH"] = str(tmp_path / "tokenizer.json")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(DOWNLOAD_WORKER),
+            "--operation",
+            "file",
+            "--repo-id",
+            "org/model",
+            "--filename",
+            "tokenizer.json",
+            "--revision",
+            revision,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=5,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "path": environment["FAKE_FILE_PATH"]
+    }
+
+
 def test_fail_fast_requires_fail_closed_mode_and_stops_after_two_attempts(
     tmp_path: Path,
 ) -> None:
@@ -875,12 +985,18 @@ def test_hf_file_cache_skip_uses_hf_local_resolution() -> None:
 
     helpers["hf_hub_download"] = fake_hf_hub_download
 
-    assert helpers["_is_hf_file_cached"]("org/model", "weights.bin")
+    revision = "0123456789abcdef0123456789abcdef01234567"
+    assert helpers["_is_hf_file_cached"](
+        "org/model",
+        "weights.bin",
+        revision=revision,
+    )
     assert calls == [{
         "args": ("org/model",),
         "kwargs": {
             "filename": "weights.bin",
             "local_files_only": True,
+            "revision": revision,
         },
     }]
 

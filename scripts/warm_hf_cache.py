@@ -151,6 +151,14 @@ def _family_hf_warm_files(family: object) -> list[tuple[str, str, str]]:
     return family_hf_warm_files(family)
 
 
+def _family_hf_warm_file_specs(
+    family: object,
+) -> list[tuple[str, str, str, str]]:
+    from tensorrt_model_connect.families import family_hf_warm_file_specs
+
+    return family_hf_warm_file_specs(family)
+
+
 _REQUIRED_FILES_BY_HF_ID = _load_family_hf_required_files_by_id()
 _HF_FAMILY_ALLOW_PATTERNS = _load_family_hf_allow_patterns()
 _HF_DOWNLOAD_PATTERNS = (
@@ -172,12 +180,18 @@ _DOWNLOAD_ATTEMPTS = 2
 _DEFAULT_ATTEMPT_TIMEOUT_SECONDS = 600.0
 
 
-def _is_hf_file_cached(hf_id: str, filename: str) -> bool:
+def _is_hf_file_cached(
+    hf_id: str,
+    filename: str,
+    revision: str = "",
+) -> bool:
     try:
+        revision_kwargs = {"revision": revision} if revision else {}
         hf_hub_download(
             hf_id,
             filename=filename,
             local_files_only=True,
+            **revision_kwargs,
         )
     except Exception:
         return False
@@ -281,7 +295,7 @@ if args.strict and filter_names is not None:
         sys.exit(1)
 
 entries: list[tuple[str, str, str, bool, bool]] = []
-file_assets: list[tuple[str, str, str]] = []
+file_assets: list[tuple[str, str, str, str]] = []
 for m in manifests:
     d = json.loads(m.read_text())
     name = d.get("name", m.stem)
@@ -314,7 +328,7 @@ for m in manifests:
             d.get("family", "")
         )
     )
-    file_assets.extend(_family_hf_warm_files(d.get("family", "")))
+    file_assets.extend(_family_hf_warm_file_specs(d.get("family", "")))
 deduped_entries: list[tuple[str, str, str, bool, bool]] = []
 entry_indexes: dict[tuple[str, str], int] = {}
 for name, hf_id, revision, gated, require_weights in entries:
@@ -333,15 +347,22 @@ for name, hf_id, revision, gated, require_weights in entries:
         old_require_weights or require_weights,
     )
 entries = deduped_entries
-deduped_file_assets: list[tuple[str, str, str]] = []
-seen_file_assets: set[tuple[str, str]] = set()
-for asset_name, asset_hf_id, filename in file_assets:
-    asset_key = (asset_hf_id, filename)
-    if asset_key in seen_file_assets:
-        continue
-    seen_file_assets.add(asset_key)
-    deduped_file_assets.append((asset_name, asset_hf_id, filename))
-file_assets = deduped_file_assets
+def _dedupe_file_assets(
+    assets: list[tuple[str, str, str, str]],
+) -> list[tuple[str, str, str, str]]:
+    deduped: list[tuple[str, str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for asset in assets:
+        asset_name, asset_hf_id, filename, revision = asset
+        asset_key = (asset_hf_id, filename, revision)
+        if asset_key in seen:
+            continue
+        seen.add(asset_key)
+        deduped.append((asset_name, asset_hf_id, filename, revision))
+    return deduped
+
+
+file_assets = _dedupe_file_assets(file_assets)
 
 
 def _is_cached(
@@ -654,11 +675,16 @@ def _warm_file(
     hf_id: str,
     filename: str,
     *,
+    revision: str = "",
     selective: bool,
     local_only: bool,
     timeout_seconds: float = _DEFAULT_ATTEMPT_TIMEOUT_SECONDS,
 ) -> tuple[str, str]:
-    if (selective or local_only) and _is_hf_file_cached(hf_id, filename):
+    if (selective or local_only) and _is_hf_file_cached(
+        hf_id,
+        filename,
+        revision=revision,
+    ):
         return "cached", ""
     if local_only:
         return "failed", "required file is not available in the local cache"
@@ -666,6 +692,7 @@ def _warm_file(
         "file",
         hf_id,
         timeout_seconds=timeout_seconds,
+        revision=revision,
         filename=filename,
     )
     return ("downloaded", detail) if local_path else ("failed", detail)
@@ -810,10 +837,14 @@ for i, (name, hf_id, revision, gated, require_weights) in enumerate(entries, 1):
 if file_assets and not stopped_early:
     print()
     print("Warming family file assets...")
-for i, (name, hf_id, filename) in enumerate(file_assets if not stopped_early else [], 1):
+for i, (name, hf_id, filename, revision) in enumerate(
+    file_assets if not stopped_early else [],
+    1,
+):
     status, detail = _warm_file(
         hf_id,
         filename,
+        revision=revision,
         selective=selective,
         local_only=args.local_only,
         timeout_seconds=args.attempt_timeout_seconds,
@@ -857,7 +888,7 @@ else:
 
 if args.emit_cache_repos and not warned:
     selected_repo_ids = [hf_id for _, hf_id, _, _, _ in entries]
-    selected_repo_ids.extend(hf_id for _, hf_id, _ in file_assets)
+    selected_repo_ids.extend(hf_id for _, hf_id, _, _ in file_assets)
     try:
         _write_cache_repository_manifest(
             pathlib.Path(args.emit_cache_repos),

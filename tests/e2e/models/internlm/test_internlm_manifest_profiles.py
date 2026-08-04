@@ -85,4 +85,8 @@ def test_reference_profile_supports_current_internlm_dynamic_cache_api() -> None
     assert "huggingface-hub==0.26.5" in lock
     assert "tokenizers==0.20.3" in lock
     assert "transformers==4.46.3" in lock
+    assert "protobuf==" not in lock
+    assert "sentencepiece==" not in lock
+    assert "import google.protobuf" not in verify
+    assert "import sentencepiece" not in verify
     assert 'hasattr(DynamicCache, "get_max_cache_shape")' in verify
