@@ -13,7 +13,7 @@
     {
       "name": "locateanything-3b",
       "trace_id": "IT-E2E-LA3B-01",
-      "ci_tier": "default",
+      "ci_tier": "l0_only",
       "reference_precision": "fp32",
       "prompt": "Locate a single instance that matches the following description: white vehicle.",
       "max_new_tokens": 32,
@@ -23,7 +23,7 @@
     {
       "name": "locateanything-3b-point",
       "trace_id": "IT-E2E-LA3B-02",
-      "ci_tier": "default",
+      "ci_tier": "l0_only",
       "reference_precision": "fp32",
       "prompt": "Point to: white vehicle.",
       "max_new_tokens": 32,

@@ -45,7 +45,7 @@ def test_model_workload_catalog_covers_every_ready_model():
         task_models=task_models,
     )
 
-    assert len(catalog["models"]) == len(ready_models) == 106
+    assert len(catalog["models"]) == len(ready_models) == 105
     assert sum(
         "not_compared_reason" in spec for spec in catalog["models"].values()
     ) == 0
@@ -150,7 +150,7 @@ def test_every_dataset_backed_validation_binding_has_native_reference_runner():
             missing.append((model_name, workload, dataset_kind))
 
     assert not missing
-    assert len({model for model, _workload in bindings}) == 106
+    assert len({model for model, _workload in bindings}) == 105
 
 
 def test_resolve_binding_defaults_and_rejects_undeclared_workload():
@@ -2282,25 +2282,6 @@ def test_comparison_command_uses_validation_entrypoint(tmp_path):
     assert "--force-hf" in command
     assert "--require-prebuilt-bundles" in command
     assert "--local-files-only" in command
-
-
-def test_worker_command_forwards_explicit_dataset(tmp_path):
-    arguments = trtmc_validate.build_parser().parse_args(
-        [
-            "model-a",
-            "workload-a",
-            "--dataset",
-            str(tmp_path / "dataset.json"),
-        ]
-    )
-
-    command = trtmc_validate._worker_command(
-        trtmc_validate.Binding("model-a", "workload-a"), arguments
-    )
-
-    assert command[command.index("--dataset") + 1] == str(
-        tmp_path / "dataset.json"
-    )
 
 
 def test_comparison_command_passes_elf_reference_checkout(tmp_path):

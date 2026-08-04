@@ -28,7 +28,6 @@ sample_limits:
   mmmu_pro_vision_square_plugin_parity: 5
   newstest2019_en_ru_marian_translation_parity: 10
   ocrbench_v2_unified: 5
-  refcoco_grounding: 20
   openwebtext_elf_diffusion_text: 5
   seedtts_en_omni_audio_parity: 1
   sana_wm_benchmark_diffusion_video: 2
@@ -171,9 +170,6 @@ models:
   lance-3b-x2t-image:
     default: mmmu_pro_vision_square_plugin_parity
     workloads: [mmmu_pro_vision_square_plugin_parity]
-  locateanything-3b:
-    default: refcoco_grounding
-    workloads: [refcoco_grounding]
   magpie-tts-357m:
     default: seedtts_en_tts_intelligibility
     workloads: [seedtts_en_tts_intelligibility]

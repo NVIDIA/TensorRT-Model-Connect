@@ -132,7 +132,11 @@ python tools/prepare_refcoco_validation_dataset.py \
   --source-root /mnt/data/RefCOCO_rec/raw/lscpku/RefCOCO_rec \
   --output-dir /mnt/data/RefCOCO_rec/unified \
   --split testA
-python tools/trtmc_validate.py locateanything-3b refcoco_grounding
+python tools/validation/engine.py eval \
+  --suite refcoco_grounding \
+  --model locateanything-3b \
+  --dataset /mnt/data/RefCOCO_rec/unified/dataset.json \
+  --limit 20
 ```
 
 The source dataset card does not declare a license. The converter records this

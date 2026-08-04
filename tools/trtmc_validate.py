@@ -2567,7 +2567,6 @@ def _worker_command(
     ):
         command.extend([option, str(value)])
     for option, value in (
-        ("--dataset", arguments.dataset),
         ("--dataset-root", arguments.dataset_root),
         ("--backend-dir", arguments.backend_dir),
         ("--model-plugin-dir", arguments.model_plugin_dir),
