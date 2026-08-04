@@ -151,8 +151,7 @@ class QwenVLPlugin:
         return "bf16" if capability.eligible else "fp32"
 
     def default_max_cache_length(self, config: ModelConfig) -> int:
-        capability = native_kv_architecture_capability(config)
-        return int(config.max_position_embeddings) if capability.eligible else 256
+        return int(config.max_position_embeddings)
 
     def load_weights(
         self, model_dir: str, config: ModelConfig,
