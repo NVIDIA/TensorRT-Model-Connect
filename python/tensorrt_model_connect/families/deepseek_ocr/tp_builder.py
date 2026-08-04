@@ -14,7 +14,7 @@ from tensorrt_model_connect import trt_compat
 from . import graph_ops
 from .prefill_config import sequence_prefill_profile_lengths
 from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
-from .standard_decoder_builder import _apply_norm
+from .norm_utils import _apply_norm
 
 trt = trt_compat.get_trt()
 

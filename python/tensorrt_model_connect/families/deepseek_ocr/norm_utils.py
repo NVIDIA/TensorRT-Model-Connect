@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Minimal normalization helper for the native DeepSeek-OCR builders."""
+"""RMSNorm helper shared by the native DeepSeek-OCR builders."""
 
 from __future__ import annotations
 

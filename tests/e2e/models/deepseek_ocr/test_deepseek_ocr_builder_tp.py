@@ -22,7 +22,7 @@ try:
     from tensorrt_model_connect import trt_compat
     from tensorrt_model_connect.families.deepseek_ocr import (
         graph_ops,
-        standard_decoder_builder,
+        norm_utils,
         tp_builder,
     )
     from tensorrt_model_connect.families.deepseek_ocr.prefill_config import (
@@ -39,9 +39,10 @@ def test_native_builders_do_not_import_legacy_decoder_paths() -> None:
         family_prefix + "default_decoder",
         family_prefix + "default_dual_profile_decoder",
         family_prefix + "graph_blocks",
+        family_prefix + "standard_decoder_builder",
     }
     assert legacy_modules.isdisjoint(sys.modules)
-    assert standard_decoder_builder.__all__ == ["_apply_norm"]
+    assert norm_utils.__all__ == ["_apply_norm"]
     assert not hasattr(graph_ops, "add_decoder_attention_ffi")
     assert not hasattr(graph_ops, "add_tvm_ffi_kernel")
 

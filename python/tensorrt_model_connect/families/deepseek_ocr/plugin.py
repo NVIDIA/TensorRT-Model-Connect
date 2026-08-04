@@ -58,7 +58,7 @@ from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
-from .standard_decoder_builder import _apply_norm
+from .norm_utils import _apply_norm
 
 
 trt = trt_compat.get_trt()

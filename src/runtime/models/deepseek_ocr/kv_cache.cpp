@@ -47,6 +47,44 @@ void validate_cache_pair(TrtModule& module, const std::string& cache_name,
     }
 }
 
+void populate_default_cache_names(DeepseekOcrKvCacheNames& names, int32_t num_layers) {
+    if (!names.cache_k.empty())
+        return;
+
+    for (int32_t layer = 0; layer < num_layers; ++layer) {
+        const auto suffix = "_" + std::to_string(layer);
+        names.cache_k.push_back("cache_k" + suffix);
+        names.cache_v.push_back("cache_v" + suffix);
+        names.present_k.push_back("present_k" + suffix);
+        names.present_v.push_back("present_v" + suffix);
+    }
+}
+
+void validate_cache_name_count(const DeepseekOcrKvCacheNames& names, int32_t num_layers) {
+    const auto expected = static_cast<std::size_t>(num_layers);
+    if (names.cache_k.size() != expected || names.cache_v.size() != expected ||
+        names.present_k.size() != expected || names.present_v.size() != expected) {
+        throw std::invalid_argument("DeepseekOcrKvCache per-layer tensor name count mismatch");
+    }
+}
+
+bool allocate_cache_pairs(std::vector<DeviceTensor>& cache_k, std::vector<DeviceTensor>& cache_v,
+                          int32_t num_layers, int32_t max_length, int32_t kv_dim, DType cache_dtype,
+                          cudaStream_t stream) {
+    const auto count = static_cast<std::size_t>(num_layers);
+    cache_k.reserve(count);
+    cache_v.reserve(count);
+    for (int32_t layer = 0; layer < num_layers; ++layer) {
+        cache_k.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype, stream);
+        if (!cache_k.back().ok())
+            return false;
+        cache_v.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype, stream);
+        if (!cache_v.back().ok())
+            return false;
+    }
+    return true;
+}
+
 } // namespace
 
 DeepseekOcrKvCache::DeepseekOcrKvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim,
@@ -59,31 +97,11 @@ DeepseekOcrKvCache::DeepseekOcrKvCache(int32_t num_layers, int32_t max_length, i
     if (cache_dtype_ != DType::kBFloat16)
         throw std::invalid_argument("DeepseekOcrKvCache requires BF16 storage");
 
-    if (names_.cache_k.empty()) {
-        for (int32_t layer = 0; layer < num_layers_; ++layer) {
-            const auto suffix = "_" + std::to_string(layer);
-            names_.cache_k.push_back("cache_k" + suffix);
-            names_.cache_v.push_back("cache_v" + suffix);
-            names_.present_k.push_back("present_k" + suffix);
-            names_.present_v.push_back("present_v" + suffix);
-        }
-    }
-    const auto count = static_cast<std::size_t>(num_layers_);
-    if (names_.cache_k.size() != count || names_.cache_v.size() != count ||
-        names_.present_k.size() != count || names_.present_v.size() != count) {
-        throw std::invalid_argument("DeepseekOcrKvCache per-layer tensor name count mismatch");
-    }
-
-    cache_k_.reserve(count);
-    cache_v_.reserve(count);
-    for (int32_t layer = 0; layer < num_layers_; ++layer) {
-        cache_k_.emplace_back(std::vector<int64_t>{max_length_, kv_dim_}, cache_dtype_, stream);
-        if (!cache_k_.back().ok())
-            return;
-        cache_v_.emplace_back(std::vector<int64_t>{max_length_, kv_dim_}, cache_dtype_, stream);
-        if (!cache_v_.back().ok())
-            return;
-    }
+    populate_default_cache_names(names_, num_layers_);
+    validate_cache_name_count(names_, num_layers_);
+    if (!allocate_cache_pairs(cache_k_, cache_v_, num_layers_, max_length_, kv_dim_, cache_dtype_,
+                              stream))
+        return;
     reset();
 }
 
